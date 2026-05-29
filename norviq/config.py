@@ -1,0 +1,37 @@
+"""Runtime configuration for Norviq."""
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class NorviqSettings(BaseSettings):
+    """Norviq configuration from NRVQ_ environment variables."""
+
+    model_config = SettingsConfigDict(env_prefix="NRVQ_")
+
+    policy_engine_url: str = "http://localhost:8181"
+    enforcement_mode: str = "audit"
+    sdk_timeout_ms: int = 5000
+    sdk_fallback_mode: str = "audit"
+    spiffe_socket: str = "/tmp/spiffe-mock.sock"
+    redis_url: str = "redis://localhost:6379"
+    redis_ttl_policy_s: int = 60
+    redis_ttl_trust_s: int = 30
+    trust_threshold: float = 0.7
+    trust_violation_penalty: float = 0.05
+    pg_url: str = "postgresql://norviq:norviq_dev@localhost:5432/norviq"
+    pg_pool_size: int = 10
+    audit_retention_days: int = 365
+    otel_endpoint: str = "http://localhost:4317"
+    log_level: str = "INFO"
+    log_format: str = "json"
+    socket_path: str = "/tmp/norviq-proxy.sock"
+    http_fallback_port: int = 8282
+    api_port: int = 8080
+    api_secret_key: str = "change-me-in-production"  # Replace in non-dev deployments.
+    webhook_port: int = 8443
+    webhook_cert_dir: str = "/etc/norviq/certs"
+    sidecar_image: str = "ghcr.io/norviq/sidecar:v0.1.0"
+    session_ttl_s: int = 3600
+
+
+settings = NorviqSettings()
