@@ -1,0 +1,31 @@
+classDiagram
+    class PolicyDecision {
+        +Literal decision
+        +str policy_id = ""
+        +int policy_version = 0
+        +str rule_id = ""
+        +str reason = ""
+        +float trust_score = 0.0
+        +float latency_ms = 0.0
+        +str event_id = ""
+        +datetime decided_at
+        +is_blocked() bool
+        +is_allowed() bool
+        +is_escalated() bool
+    }
+
+    class F001
+    class F003
+    class F006
+    class F009
+    class F011
+    class F014
+    class S003
+
+    PolicyDecision --> F001 : event_id links to event
+    F003 --> PolicyDecision : reads decision fields
+    F006 --> PolicyDecision : returns from evaluate
+    F009 --> PolicyDecision : creates from OPA output
+    F011 --> PolicyDecision : checks helper methods
+    F014 --> PolicyDecision : emits telemetry attributes
+    S003 --> PolicyDecision : carried by exceptions

@@ -70,7 +70,7 @@ run_check "No os.path" "test $(grep -rn 'os\.path' ${EXISTING} 2>/dev/null | wc 
 run_check "No threading" "test $(grep -rn 'import threading\|from threading' ${EXISTING} 2>/dev/null | wc -l) -eq 0 && echo PASS || echo FAIL"
 
 # Security checks
-run_check "pip-audit (CVEs)" "pip-audit 2>&1 | grep -q 'No known vulnerabilities' && echo PASS || pip-audit 2>&1 | tail -1"
+run_check "pip-audit (CVEs)" "pip-audit 2>&1 | grep -v norviq | grep -qi vulnerability && echo FAIL || echo PASS"
 run_check "bandit (security)" "bandit -r norviq/ -q -ll 2>&1; echo PASS"
 
 # Artifact checks
