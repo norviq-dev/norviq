@@ -1,0 +1,104 @@
+classDiagram
+    class PolicyVersion:::blue {
+        +int version
+        +str rego_source
+        +str saved_by
+        +datetime saved_at
+    }
+
+    class PolicyLoader:::blue {
+        -RedisCache _cache
+        -OPAEvaluator _evaluator
+        -dict[str, str] _policies
+        -dict[str, list[PolicyVersion]] _versions
+        +__init__(cache: RedisCache, evaluator: OPAEvaluator) None
+        +_key(namespace: str, agent_class: str) str
+        +load(namespace: str, agent_class: str) str|None
+        +create(namespace: str, agent_class: str, rego_source: str, saved_by: str) int
+        +rollback(namespace: str, agent_class: str, target_version: int) str
+        +get_versions(namespace: str, agent_class: str) list[PolicyVersion]
+        +get_current(namespace: str, agent_class: str) str|None
+        +reload_all() int
+        +_update_memory(key: str, rego_source: str) None
+        +policy_count() int
+    }
+
+    class RedisCache {
+        +get_policy(namespace: str, agent_class: str) str|None
+        +set_policy(namespace: str, agent_class: str, rego: str) None
+    }
+
+    class OPAEvaluator {
+        +load_policy(namespace: str, agent_class: str, rego_source: str) None
+    }
+
+    class NorviqError {
+        +message: str
+        +code: str
+    }
+
+    class NorviqSettings {
+        +redis_ttl_policy_s: int
+    }
+
+    class F011
+    class F015
+    class F016
+    class F017
+    class F022
+
+    PolicyLoader --> PolicyVersion : stores history
+    PolicyLoader --> RedisCache : reads/writes policy cache
+    PolicyLoader --> OPAEvaluator : loads active policy
+    PolicyLoader --> NorviqError : raises on rollback miss
+    PolicyLoader --> NorviqSettings : settings import
+    F011 --> PolicyLoader : startup load()
+    F015 --> PolicyLoader : startup/reload
+    F016 --> PolicyLoader : webhook reload()
+    F017 --> PolicyLoader : create()/rollback()
+    F022 --> PolicyLoader : CRD event source
+
+    classDef blue fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a;
+
+sequenceDiagram
+    participant Caller as API/Webhook/Sidecar
+    participant Loader as PolicyLoader
+    participant Mem as In-Memory Map
+    participant Redis as RedisCache
+    participant Eval as OPAEvaluator
+
+    Caller->>Loader: load(ns, cls)
+    Loader->>Mem: lookup ns:cls
+    alt memory hit
+        Mem-->>Loader: rego
+        Loader-->>Caller: rego
+    else memory miss
+        Loader->>Redis: get_policy(ns, cls)
+        alt redis hit
+            Redis-->>Loader: rego
+            Loader->>Mem: copy-on-write update
+            Loader-->>Caller: rego
+        else not found
+            Loader-->>Caller: None
+        end
+    end
+
+    Caller->>Loader: create(ns, cls, rego, saved_by)
+    Loader->>Loader: append version (cap 10, copy-on-write)
+    Loader->>Mem: copy-on-write update
+    Loader->>Redis: set_policy(ns, cls, rego)
+    Loader->>Eval: load_policy(ns, cls, rego)
+    Loader-->>Caller: version int
+
+graph LR
+    S002[S002 Config] --> F010[F010 Policy Loader]
+    S003[S003 Exceptions] --> F010
+    F008[F008 Redis Cache] --> F010
+    F009[F009 OPA Evaluator] --> F010
+    F010 --> F011[F011 LangChain Wrapper]
+    F010 --> F015[F015 Sidecar]
+    F010 --> F016[F016 Webhook]
+    F010 --> F017[F017 API]
+    F010 --> F022[F022 NrvqPolicy CRD]
+
+    style F010 fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#1e3a8a

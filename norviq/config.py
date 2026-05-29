@@ -28,6 +28,19 @@ class NorviqSettings(BaseSettings):
     redis_ttl_trust_s: int = 30
     trust_threshold: float = 0.7
     trust_violation_penalty: float = 0.05
+    evaluator_max_concurrency: int = 10
+    evaluator_rate_limit_per_window: int = 60
+    evaluator_rate_limit_window_s: int = 60
+    evaluator_delete_prefix: str = "delete"
+    evaluator_wildcard_value: str = "*"
+    evaluator_sql_deny_keywords: tuple[str, ...] = (
+        "drop table",
+        "delete from",
+        "truncate",
+        "alter table",
+        "; --",
+    )
+    evaluator_non_cacheable_rules: tuple[str, ...] = ("rate_limit_exceeded", "escalate_low_trust")
     pg_url: str = "postgresql://norviq:norviq_dev@localhost:5432/norviq"
     pg_pool_size: int = 10
     audit_retention_days: int = 365
