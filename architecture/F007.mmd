@@ -1,0 +1,38 @@
+classDiagram
+    class SPIFFEResolver {
+        -str _socket_path
+        -dict _cache
+        -Lock _lock
+        +__init__(socket_path: str|None) None
+        +resolve() AgentIdentity
+        +_get_cached() AgentIdentity|None
+        +_resolve_from_socket() AgentIdentity
+        +_mock_resolve() AgentIdentity
+        +_fallback_identity() AgentIdentity
+        +clear_cache() None
+    }
+
+    class AgentIdentity {
+        +str spiffe_id
+        +str namespace
+        +str service_account
+        +str agent_class
+        +str pod_name
+    }
+
+    class Settings {
+        +str spiffe_socket
+        +int spiffe_cache_ttl_s
+    }
+
+    class F009
+    class F011
+    class F015
+    class F026
+
+    SPIFFEResolver --> Settings : reads socket/cache TTL
+    SPIFFEResolver --> AgentIdentity : outputs identity
+    F009 --> SPIFFEResolver : resolve()
+    F011 --> SPIFFEResolver : resolve()
+    F015 --> SPIFFEResolver : resolve()
+    F026 --> SPIFFEResolver : replace mock with SPIRE API
