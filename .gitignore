@@ -24,3 +24,5 @@ CLAUDE.md
 .venv/
 *.log
 __pycache__/
+
+create_agents.sh
