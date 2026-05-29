@@ -10,4 +10,16 @@ bin/
 *.log
 node_modules/
 ui/dist/
+
+# AI workflow (keep private)
+specs/
 .cursor/
+registry/
+.reviews/
+download_specs.sh
+
+# Local dev
+.env.dev
+.venv/
+*.log
+__pycache__/
