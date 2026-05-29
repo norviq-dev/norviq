@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+
 """Tests for Norviq exceptions."""
 
 from norviq.exceptions import (

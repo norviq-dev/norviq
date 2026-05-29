@@ -1,4 +1,7 @@
-﻿"""Tests for TrustScore schema."""
+﻿# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+
+"""Tests for TrustScore schema."""
 
 from __future__ import annotations
 

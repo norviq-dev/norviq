@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+
 """Runtime configuration for Norviq."""
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -12,6 +15,12 @@ class NorviqSettings(BaseSettings):
     enforcement_mode: str = "audit"
     sdk_timeout_ms: int = 5000
     sdk_fallback_mode: str = "audit"
+    sdk_retry_max_attempts: int = 2
+    sdk_retry_backoff_base_ms: int = 100
+    sdk_circuit_fail_threshold: int = 3
+    sdk_circuit_reset_after_ms: int = 2000
+    sdk_http_max_connections: int = 20
+    sdk_http_max_keepalive_connections: int = 10
     spiffe_socket: str = "/tmp/spiffe-mock.sock"
     redis_url: str = "redis://localhost:6379"
     redis_ttl_policy_s: int = 60

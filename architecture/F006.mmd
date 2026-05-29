@@ -1,0 +1,140 @@
+%% Class Diagram
+classDiagram
+    class PolicyEngineClient {
+        -str _base_url
+        -int _timeout_ms
+        -int _max_retries
+        -int _backoff_base_ms
+        -int _fail_threshold
+        -int _reset_after_ms
+        -AsyncClient|None _client
+        -int _failure_count
+        -float _circuit_open_until
+        +__init__(base_url: str|None, timeout_ms: int|None) None
+        +_get_client() AsyncClient
+        +_is_circuit_open() bool
+        +_record_failure() None
+        +_record_success() None
+        +_post(event: ToolCallEvent) dict
+        +_log_success(event_id: str, decision: str) None
+        +_handle_timeout(event: ToolCallEvent, exc: NorviqTimeoutError) PolicyDecision
+        +_handle_http_error(event: ToolCallEvent, exc: HTTPStatusError) PolicyDecision
+        +_handle_unknown_error(event: ToolCallEvent, exc: Exception) PolicyDecision
+        +evaluate(event: ToolCallEvent) PolicyDecision
+        +_fallback_decision(event: ToolCallEvent) PolicyDecision
+        +close() None
+    }
+
+    class AgentIdentity {
+        +str spiffe_id
+        +str namespace
+        +str service_account
+        +str agent_class
+        +str framework
+        +str pod_name
+        +str cluster_id
+    }
+
+    class ToolCallEvent {
+        +str event_id
+        +str tool_name
+        +dict tool_params
+        +AgentIdentity agent_identity
+        +str session_id
+        +datetime timestamp_utc
+        +str framework
+        +int call_depth
+        +str|None raw_llm_output
+        +model_dump(mode: str) dict
+    }
+
+    class PolicyDecision {
+        +Literal decision
+        +str policy_id
+        +int policy_version
+        +str rule_id
+        +str reason
+        +float trust_score
+        +float latency_ms
+        +str event_id
+        +datetime decided_at
+        +is_blocked() bool
+        +is_allowed() bool
+        +is_escalated() bool
+    }
+
+    class Settings {
+        +str policy_engine_url
+        +int sdk_timeout_ms
+        +str sdk_fallback_mode
+        +int sdk_retry_max_attempts
+        +int sdk_retry_backoff_base_ms
+        +int sdk_circuit_fail_threshold
+        +int sdk_circuit_reset_after_ms
+        +int sdk_http_max_connections
+        +int sdk_http_max_keepalive_connections
+    }
+
+    PolicyEngineClient --> Settings : S002 config
+    PolicyEngineClient --> ToolCallEvent : F001 request body
+    ToolCallEvent --> AgentIdentity : nested identity
+    PolicyEngineClient --> PolicyDecision : F002 return type
+
+%% Sequence Diagram (kept as comments because Mermaid supports one top-level diagram per block/file)
+%% sequenceDiagram
+%%     autonumber
+%%     participant C as "Caller F011 F012 F015"
+%%     participant P as PolicyEngineClient
+%%     participant H as httpx.AsyncClient
+%%     participant E as "Policy Engine"
+%%
+%%     C->>P: evaluate(event)
+%%     P->>P: _is_circuit_open()
+%%     alt circuit open
+%%         P->>P: _fallback_decision(event)
+%%         P-->>C: PolicyDecision(fallback)
+%%     else circuit closed
+%%         loop attempts 0..max_retries
+%%             P->>P: _get_client()
+%%             P->>H: POST /v1/evaluate
+%%             H->>E: JSON ToolCallEvent
+%%             alt 200 OK
+%%                 E-->>H: JSON PolicyDecision
+%%                 H-->>P: response
+%%                 P->>P: _record_success()
+%%                 P->>P: _log_success(code=NRVQ-SDK-1010)
+%%                 P-->>C: PolicyDecision
+%%             else timeout
+%%                 H-->>P: TimeoutException
+%%                 P->>P: _record_failure()
+%%                 alt retries remaining
+%%                     P->>P: sleep(backoff^attempt)
+%%                 else retries exhausted
+%%                     P->>P: _handle_timeout(code=NRVQ-SDK-1011)
+%%                     P->>P: _fallback_decision(code=NRVQ-SDK-1013)
+%%                     P-->>C: PolicyDecision(fallback)
+%%                 end
+%%             else HTTP 4xx/5xx
+%%                 H-->>P: HTTPStatusError
+%%                 P->>P: _record_failure()
+%%                 P->>P: _handle_http_error(code=NRVQ-SDK-1012)
+%%                 P->>P: _fallback_decision(code=NRVQ-SDK-1013)
+%%                 P-->>C: PolicyDecision(fallback)
+%%             else request/parse/unknown error
+%%                 H-->>P: RequestError/Exception
+%%                 P->>P: _handle_unknown_error(code=NRVQ-SDK-1000)
+%%                 P->>P: _fallback_decision(code=NRVQ-SDK-1013)
+%%                 P-->>C: PolicyDecision(fallback)
+%%             end
+%%         end
+%%     end
+%%
+%% Dependency Graph
+%% flowchart TD
+%%     S002[S002 settings] --> F006[PolicyEngineClient]
+%%     S003[S003 NorviqError/NorviqTimeoutError] --> F006
+%%     F001[F001 ToolCallEvent] --> F006
+%%     F002[F002 PolicyDecision] --> F006
+%%     F006 --> F011[F011 LangChain Wrapper]
+%%     F006 --> F012[F012 LangGraph Checkpoint]
+%%     F006 --> F015[F015 Sidecar Proxy]

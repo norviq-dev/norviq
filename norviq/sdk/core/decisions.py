@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+
 """Policy decision schema for tool-call evaluation."""
 
 from datetime import datetime, timezone

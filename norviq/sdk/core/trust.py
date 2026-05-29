@@ -1,4 +1,7 @@
-﻿"""Trust score schema for policy enforcement."""
+﻿# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+
+"""Trust score schema for policy enforcement."""
 
 from datetime import datetime, timezone
 from typing import Any

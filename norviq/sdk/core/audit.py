@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+
 """Audit schema combining tool event and policy decision."""
 
 from datetime import datetime, timezone
