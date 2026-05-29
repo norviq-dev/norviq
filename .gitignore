@@ -17,6 +17,7 @@ specs/
 registry/
 .reviews/
 download_specs.sh
+CLAUDE.md
 
 # Local dev
 .env.dev
