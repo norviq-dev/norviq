@@ -1,8 +1,9 @@
 """Custom exception hierarchy for Norviq."""
 
 from __future__ import annotations
+from typing import Any
 
-def _reason_or_default(decision: "PolicyDecision", default: str) -> str:
+def _reason_or_default(decision: Any, default: str) -> str:
     """Return decision reason when available."""
     reason = getattr(decision, "reason", None)
     return str(reason) if reason else default
@@ -20,7 +21,7 @@ class NorviqError(Exception):
 class NorviqBlockError(NorviqError):
     """Raised when a tool call is blocked by policy."""
 
-    def __init__(self, decision: "PolicyDecision", code: str = "NRVQ-ENG-2010") -> None:
+    def __init__(self, decision: Any, code: str = "NRVQ-ENG-2010") -> None:
         self.decision = decision
         super().__init__(
             message=f"Blocked: {_reason_or_default(decision, 'Blocked by policy')}",
@@ -31,7 +32,7 @@ class NorviqBlockError(NorviqError):
 class NorviqEscalateError(NorviqError):
     """Raised when a tool call requires human approval."""
 
-    def __init__(self, decision: "PolicyDecision", code: str = "NRVQ-ENG-2015") -> None:
+    def __init__(self, decision: Any, code: str = "NRVQ-ENG-2015") -> None:
         self.decision = decision
         super().__init__(
             message=f"Escalate: {_reason_or_default(decision, 'Requires escalation')}",

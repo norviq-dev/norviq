@@ -1,0 +1,53 @@
+classDiagram
+    class AgentIdentity {
+        +str spiffe_id
+        +str namespace
+        +str service_account = ""
+        +str agent_class = ""
+        +str framework = ""
+        +str pod_name = ""
+        +str cluster_id = ""
+    }
+
+    class ToolCallEvent {
+        +str event_id
+        +str tool_name
+        +dict tool_params
+        +AgentIdentity agent_identity
+        +str session_id = ""
+        +datetime timestamp_utc
+        +str framework = ""
+        +int call_depth = 0
+        +str|None raw_llm_output = None
+        +tool_name_not_empty(value: str) str
+    }
+
+    class F002
+    class F003
+    class F006
+    class F009
+    class F011
+    class F014
+
+    ToolCallEvent --> AgentIdentity : contains
+    F002 --> ToolCallEvent : uses event_id
+    F003 --> ToolCallEvent : uses tool_name/agent_identity/session_id
+    F006 --> ToolCallEvent : POST payload
+    F009 --> ToolCallEvent : policy input
+    F011 --> ToolCallEvent : constructs
+    F014 --> ToolCallEvent : span attributes
+
+sequenceDiagram
+    participant Caller as F011 Wrapper
+    participant Event as ToolCallEvent
+    participant Validator as tool_name_not_empty
+    Caller->>Event: ToolCallEvent(tool_name, agent_identity, ...)
+    Event->>Validator: validate(tool_name)
+    alt empty or whitespace
+        Validator-->>Caller: raise ValidationError
+    else valid
+        Validator-->>Event: stripped tool_name
+        Event->>Event: generate event_id (uuid4)
+        Event->>Event: generate timestamp_utc (utc now)
+        Event-->>Caller: frozen ToolCallEvent
+    end

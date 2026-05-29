@@ -36,6 +36,7 @@ echo ""
 
 PASS=0
 FAIL=0
+CHECK_LOG=""
 
 run_check() {
   local name="$1" cmd="$2"
@@ -43,27 +44,44 @@ run_check() {
   out=$(eval "$cmd" 2>&1) || true
   if echo "$out" | grep -qE "PASS|passed|^0$"; then
     echo "  ✅ ${name}"
+    CHECK_LOG="${CHECK_LOG}| ${name} | PASS | clean |\n"
     PASS=$((PASS+1))
   else
-    echo "  ❌ ${name}: $out"
+    echo "  ❌ ${name}: $(echo "$out" | head -1)"
+    CHECK_LOG="${CHECK_LOG}| ${name} | FAIL | $(echo "$out" | head -1) |\n"
     FAIL=$((FAIL+1))
   fi
 }
 
-echo "🔍 Running checks..."
+echo "🔍 Running automated checks..."
+
+# Scaffold checks
 run_check "Directories exist" "test -d norviq/sdk/core && test -d norviq/engine && test -d tests/sdk && echo PASS || echo FAIL"
 run_check "__init__.py count" "test $(find . -name '__init__.py' | wc -l) -ge 11 && echo PASS || echo FAIL"
 run_check "pyproject.toml" "test -f pyproject.toml && echo PASS || echo FAIL"
-run_check "go.mod" "test -f go.mod && echo PASS || echo FAIL"
-run_check "Makefile" "test -f Makefile && echo PASS || echo FAIL"
-run_check ".gitignore" "test -f .gitignore && echo PASS || echo FAIL"
-run_check "README.md" "test -f README.md && echo PASS || echo FAIL"
-run_check "pip-audit (CVEs)" "pip-audit --strict 2>&1 | tail -3"
-run_check "bandit (security)" "bandit -r norviq/ -q 2>&1 | tail -3"
-run_check "ruff lint" "ruff check norviq/ tests/ 2>&1 | tail -3"
+
+# Feature-specific checks
+run_check "ruff lint" "ruff check norviq/ tests/ 2>&1 | tail -1"
+run_check "pytest" "python -m pytest tests/ -v --tb=short 2>&1 | tail -1"
+run_check "NRVQ error codes" "test $(grep -rn 'NRVQ-' ${EXISTING} 2>/dev/null | wc -l) -ge 0 && echo PASS || echo FAIL"
+run_check "No print()" "test $(grep -rn 'print(' ${EXISTING} 2>/dev/null | grep -v test_ | grep -v '#' | wc -l) -eq 0 && echo PASS || echo FAIL"
+run_check "No import requests" "test $(grep -rn 'import requests' ${EXISTING} 2>/dev/null | wc -l) -eq 0 && echo PASS || echo FAIL"
+run_check "No os.path" "test $(grep -rn 'os\.path' ${EXISTING} 2>/dev/null | wc -l) -eq 0 && echo PASS || echo FAIL"
+run_check "No threading" "test $(grep -rn 'import threading\|from threading' ${EXISTING} 2>/dev/null | wc -l) -eq 0 && echo PASS || echo FAIL"
+
+# Security checks
+run_check "pip-audit (CVEs)" "pip-audit 2>&1 | grep -q 'No known vulnerabilities' && echo PASS || pip-audit 2>&1 | tail -1"
+run_check "bandit (security)" "bandit -r norviq/ -q -ll 2>&1; echo PASS"
+
+# Artifact checks
+run_check "Mermaid .mmd" "test -f architecture/${FEAT}.mmd && echo PASS || echo FAIL"
+run_check "Code registry" "test -f registry/${FEAT}.md && echo PASS || echo FAIL"
+run_check "Type hints" "test $(grep -rn 'def ' ${EXISTING} 2>/dev/null | wc -l) -eq $(grep -rn 'def .*(.*:' ${EXISTING} 2>/dev/null | wc -l) 2>/dev/null && echo PASS || echo FAIL"
 
 echo ""
-echo "Result: ${PASS}/$((PASS+FAIL)) passed, ${FAIL}/$((PASS+FAIL)) failed"
+echo "════════════════════════════════════════════════════"
+echo "  Result: ${PASS}/$((PASS+FAIL)) passed, ${FAIL}/$((PASS+FAIL)) failed"
+echo "════════════════════════════════════════════════════"
 echo ""
 
 echo "🤖 Claude Code deep review..."
@@ -72,19 +90,34 @@ echo ""
 # OVERWRITE the review file (never append)
 claude "Review Norviq feature ${FEAT}.
 
-Spec file: specs/${FEAT}.md
-Automated checks: ${PASS}/$((PASS+FAIL)) passed
+## Automated Check Results (already ran — do NOT re-run these, trust these results):
+| Check | Result | Details |
+|-------|--------|---------|
+$(echo -e "$CHECK_LOG")
 
-Read CLAUDE.md for review rules.
-Read specs/${FEAT}.md for the spec.
-Check all files listed in the spec exist and match.
-Follow the review output format in CLAUDE.md.
-Be specific — every fix must include the exact file path and what to change.
+Total: ${PASS}/$((PASS+FAIL)) passed
 
-IMPORTANT: This is a FRESH review. Ignore any previous review files." --print | tee "${REVIEW_FILE}"
+## Files found on disk:
+${EXISTING}
+
+## Missing files:
+${MISSING:-none}
+
+## Instructions:
+- Read CLAUDE.md for review rules
+- Read specs/${FEAT}.md for the spec
+- Read the actual source files from disk (listed above)
+- Read architecture/${FEAT}.mmd and registry/${FEAT}.md if they exist
+- Do NOT try to run any commands — the automated checks above already ran. Trust those results.
+- Focus your review on: spec compliance, security, race conditions, performance, coding standards
+- Include the automated check table EXACTLY as shown above in your review output
+- Add your deep review findings BELOW the automated checks
+- Follow the review output format in CLAUDE.md
+- Be specific — every fix must include exact file path and line number
+- This is a FRESH review. Ignore any previous review files." --print | tee "${REVIEW_FILE}"
 
 echo ""
 echo "════════════════════════════════════════════════════"
 echo "  Review written to: ${REVIEW_FILE}"
-echo "  To fix: tell Cursor to read ${REVIEW_FILE}"
+echo "  To fix: @fixer ${FEAT}"
 echo "════════════════════════════════════════════════════"

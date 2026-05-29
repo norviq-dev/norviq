@@ -49,14 +49,3 @@ classDiagram
     F012 --> NorviqBlockError : catch
     F012 --> NorviqEscalateError : catch
     F015 --> NorviqError : catch all
-
----
-sequenceDiagram
-    participant OPA as Policy evaluator
-    participant EX as norviq.exceptions
-    participant WR as SDK wrapper
-
-    OPA->>EX: create NorviqBlockError(decision)
-    EX->>EX: format "[NRVQ-ENG-2010] Blocked: <reason>"
-    EX-->>WR: raise exception with decision payload
-    WR->>WR: inspect code/message/decision
