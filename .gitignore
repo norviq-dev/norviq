@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+dist/
+build/
+bin/
+.env
+.env.dev
+*.log
+node_modules/
+ui/dist/
+.cursor/
