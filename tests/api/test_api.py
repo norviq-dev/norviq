@@ -70,7 +70,7 @@ class FakeSession:
         """Return canned scalar and grouped results."""
         sql = str(stmt)
         if "GROUP BY" in sql:
-            return SimpleNamespace(all=lambda: [("tool.alpha", 2)])
+            return SimpleNamespace(all=lambda: [SimpleNamespace(tool_name="tool.alpha", count=2)])
         if "count(audit_log.id)" in sql and "decision" in sql:
             return SimpleNamespace(scalar=lambda: 1)
         if "count(audit_log.id)" in sql:
@@ -198,6 +198,186 @@ def test_audit_list_filter_and_stats() -> None:
         assert len(records) == 1 and records[0]["decision"] == "block"
         stats = client.get("/api/v1/audit/stats").json()
         assert stats["total"] == 1 and stats["blocked"] == 1 and stats["top_tools"][0]["tool_name"] == "tool.alpha"
+    finally:
+        client.close()
+
+
+def test_audit_records_with_range() -> None:
+    """List audit records with range filter param."""
+    row = SimpleNamespace(
+        id=uuid4(),
+        event_id=uuid4(),
+        tool_name="tool.alpha",
+        decision="block",
+        agent_id="spiffe://example/ns/default/sa/a",
+        namespace="default",
+        rule_id="deny",
+        reason="test",
+        trust_score=0.5,
+        latency_ms=12.3,
+        timestamp_utc=datetime.now(timezone.utc),
+        payload={"ok": True},
+    )
+
+    async def fake_session():
+        return FakeSession([row])
+
+    audit_router.get_session = fake_session
+    client = _client()
+    try:
+        records = client.get("/api/v1/audit/records?range=1h").json()
+        assert len(records) == 1
+    finally:
+        client.close()
+
+
+def test_audit_records_invalid_range_returns_422() -> None:
+    """Reject invalid range token for records endpoint."""
+    client = _client()
+    try:
+        response = client.get("/api/v1/audit/records?range=99h")
+        assert response.status_code == 422
+    finally:
+        client.close()
+
+
+def test_audit_stats_with_range() -> None:
+    """Return stats with range filter param."""
+    row = SimpleNamespace(
+        id=uuid4(),
+        event_id=uuid4(),
+        tool_name="tool.alpha",
+        decision="block",
+        agent_id="spiffe://example/ns/default/sa/a",
+        namespace="default",
+        rule_id="deny",
+        reason="test",
+        trust_score=0.5,
+        latency_ms=12.3,
+        timestamp_utc=datetime.now(timezone.utc),
+        payload={"ok": True},
+    )
+
+    async def fake_session():
+        return FakeSession([row])
+
+    audit_router.get_session = fake_session
+    client = _client()
+    try:
+        stats = client.get("/api/v1/audit/stats?range=7d").json()
+        assert stats["total"] == 1 and stats["blocked"] == 1
+    finally:
+        client.close()
+
+
+def test_top_blocked() -> None:
+    """Return top blocked tools."""
+    row = SimpleNamespace(
+        id=uuid4(),
+        event_id=uuid4(),
+        tool_name="tool.alpha",
+        decision="block",
+        agent_id="spiffe://example/ns/default/sa/a",
+        namespace="default",
+        rule_id="deny",
+        reason="test",
+        trust_score=0.5,
+        latency_ms=12.3,
+        timestamp_utc=datetime.now(timezone.utc),
+        payload={"ok": True},
+    )
+
+    async def fake_session():
+        return FakeSession([row])
+
+    audit_router.get_session = fake_session
+    client = _client()
+    try:
+        top = client.get("/api/v1/audit/top-blocked").json()
+        assert top and top[0]["tool_name"] == "tool.alpha"
+    finally:
+        client.close()
+
+
+def test_volume() -> None:
+    """Return hourly audit volume buckets."""
+    row = SimpleNamespace(
+        id=uuid4(),
+        event_id=uuid4(),
+        tool_name="tool.alpha",
+        decision="block",
+        agent_id="spiffe://example/ns/default/sa/a",
+        namespace="default",
+        rule_id="deny",
+        reason="test",
+        trust_score=0.5,
+        latency_ms=12.3,
+        timestamp_utc=datetime.now(timezone.utc),
+        payload={"ok": True},
+    )
+
+    async def fake_session():
+        return FakeSession([row])
+
+    audit_router.get_session = fake_session
+    client = _client()
+    try:
+        volume = client.get("/api/v1/audit/volume").json()
+        assert len(volume) == 1 and volume[0]["block"] == 1
+    finally:
+        client.close()
+
+
+def test_dry_run() -> None:
+    """Preview policy impact in dry-run endpoint."""
+    row = SimpleNamespace(
+        id=uuid4(),
+        event_id=uuid4(),
+        tool_name="tool.alpha",
+        decision="block",
+        agent_id="spiffe://example/ns/default/sa/a",
+        namespace="default",
+        rule_id="deny",
+        reason="test",
+        trust_score=0.5,
+        latency_ms=12.3,
+        timestamp_utc=datetime.now(timezone.utc),
+        payload={"ok": True},
+    )
+
+    async def fake_session():
+        return FakeSession([row])
+
+    audit_router.get_session = fake_session
+    from norviq.api.routers import policies as policy_router
+
+    policy_router.get_session = fake_session
+    client = _client()
+    try:
+        body = {"namespace": "payments", "agent_class": "planner", "rego_source": "package norviq.allow"}
+        response = client.post("/api/v1/policies/dry-run", json=body)
+        assert response.status_code == 200
+        assert response.json()["total_records_checked"] == 1
+    finally:
+        client.close()
+
+
+def test_apply_policy() -> None:
+    """Apply a saved policy to target scope."""
+    client = _client()
+    try:
+        create_body = {"namespace": "payments", "agent_class": "planner", "rego_source": "package norviq.allow"}
+        assert client.post("/api/v1/policies", json=create_body, headers=_auth_headers()).status_code == 200
+        apply_body = {
+            "target_type": "namespace",
+            "target_namespace": "payments",
+            "target_name": "",
+            "target_kind": "",
+            "enforcement_mode": "block",
+        }
+        response = client.post("/api/v1/policies/payments/planner/apply", json=apply_body, headers=_auth_headers())
+        assert response.status_code == 200
+        assert response.json()["applied"] is True
     finally:
         client.close()
 

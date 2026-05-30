@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<link rel="stylesheet" href="../colors_and_type.css" />
+<style>
+  body { margin: 0; background: var(--bg-void); padding: 22px; font-family: var(--font-sans); }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .cell { border-radius: var(--radius-md); border: 1px solid var(--border); background: var(--bg-surface); overflow: hidden; }
+  .pill-wrap { height: 78px; display: flex; align-items: center; justify-content: center; }
+  .meta { padding: 8px 10px; border-top: 1px solid var(--border); }
+  .name { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+  .hex { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+</style>
+</head>
+<body>
+  <div class="grid">
+    <div class="cell"><div class="pill-wrap"><span class="norviq-decision" style="background:#00e5a015;color:#00e5a0;border-color:#00e5a030">allow</span></div><div class="meta"><div class="name">ALLOW</div><div class="hex">#00e5a0</div></div></div>
+    <div class="cell"><div class="pill-wrap"><span class="norviq-decision" style="background:#ff3b5c15;color:#ff3b5c;border-color:#ff3b5c30">block</span></div><div class="meta"><div class="name">BLOCK</div><div class="hex">#ff3b5c</div></div></div>
+    <div class="cell"><div class="pill-wrap"><span class="norviq-decision" style="background:#ffb02015;color:#ffb020;border-color:#ffb02030">escalate</span></div><div class="meta"><div class="name">ESCALATE</div><div class="hex">#ffb020</div></div></div>
+    <div class="cell"><div class="pill-wrap"><span class="norviq-decision" style="background:#7c5cfc15;color:#7c5cfc;border-color:#7c5cfc30">audit</span></div><div class="meta"><div class="name">AUDIT</div><div class="hex">#7c5cfc</div></div></div>
+  </div>
+</body>
+</html>

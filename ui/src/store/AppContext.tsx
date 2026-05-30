@@ -1,0 +1,70 @@
+import { createContext, ReactNode, useContext, useMemo, useState } from "react";
+
+export const CLUSTERS = ["production-aks", "staging-aks", "dev-aks"];
+export const NS_BY_CLUSTER: Record<string, string[]> = {
+  "production-aks": ["default", "chatbot-prod", "payments", "analytics", "platform"],
+  "staging-aks": ["staging-default", "qa"],
+  "dev-aks": ["dev-default"]
+};
+
+export type Section = "security" | "intelligence" | "settings";
+export type TimeRange = "1h" | "6h" | "24h" | "7d" | "30d";
+
+export function sectionFromPath(pathname: string): Section {
+  if (pathname === "/" || pathname.startsWith("/threats")) return "intelligence";
+  if (pathname.startsWith("/settings")) return "settings";
+  return "security";
+}
+
+type AppContextValue = {
+  activeSection: Section;
+  timeRange: TimeRange;
+  selectedCluster: string;
+  selectedNamespace: string;
+  cluster: string;
+  namespace: string;
+  setActiveSection: (value: Section) => void;
+  setTimeRange: (value: TimeRange) => void;
+  setCluster: (value: string) => void;
+  setNamespace: (value: string) => void;
+};
+
+const AppContext = createContext<AppContextValue | null>(null);
+
+export function AppProvider({ children }: { children: ReactNode }) {
+  const [activeSection, setActiveSection] = useState<Section>("intelligence");
+  const [timeRange, setTimeRange] = useState<TimeRange>("24h");
+  const [selectedCluster, setClusterState] = useState("production-aks");
+  const [selectedNamespace, setNamespaceState] = useState("default");
+
+  const setCluster = (value: string) => {
+    setClusterState(value);
+    setNamespaceState((NS_BY_CLUSTER[value] ?? ["default"])[0]);
+  };
+
+  const setNamespace = (value: string) => setNamespaceState(value);
+
+  const value = useMemo(
+    () => ({
+      activeSection,
+      timeRange,
+      selectedCluster,
+      selectedNamespace,
+      // Backward-compatible aliases for existing pages/components.
+      cluster: selectedCluster,
+      namespace: selectedNamespace,
+      setActiveSection,
+      setTimeRange,
+      setCluster,
+      setNamespace
+    }),
+    [activeSection, timeRange, selectedCluster, selectedNamespace]
+  );
+  return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
+}
+
+export function useApp() {
+  const ctx = useContext(AppContext);
+  if (!ctx) throw new Error("useApp must be used within AppProvider");
+  return ctx;
+}

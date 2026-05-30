@@ -1,0 +1,62 @@
+classDiagram
+  class App {
+    +render routes
+    +health status poll
+  }
+  class Shell {
+    +Header
+    +Sidebar
+    +content slot
+  }
+  class Dashboard {
+    +load audit stats
+    +render KPI + charts
+  }
+  class PolicyCatalog {
+    +catalog/editor/versions tabs
+    +rollback action
+  }
+  class AuditLog {
+    +filters
+    +live websocket feed
+    +detail panel
+  }
+  class AgentMonitor {
+    +trust distribution
+    +agent actions
+  }
+  class Settings {
+    +connection test
+    +sticky save CTA
+  }
+  class ThreatGraph {
+    +phase2 placeholder
+  }
+  class APIClient {
+    +apiGet()
+    +apiSend()
+  }
+  class useApi {
+    +loader state machine
+  }
+  class useWebSocket {
+    +connect/close stream
+  }
+
+  App --> Shell
+  App --> Dashboard
+  App --> PolicyCatalog
+  App --> AuditLog
+  App --> AgentMonitor
+  App --> Settings
+  App --> ThreatGraph
+  Dashboard --> APIClient
+  PolicyCatalog --> APIClient
+  AuditLog --> useWebSocket
+  AuditLog --> APIClient
+  AgentMonitor --> APIClient
+  Settings --> APIClient
+  Dashboard --> useApi
+  PolicyCatalog --> useApi
+  AuditLog --> useApi
+  AgentMonitor --> useApi

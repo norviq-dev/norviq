@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<link rel="stylesheet" href="../colors_and_type.css" />
+<style>
+  body { margin: 0; background: radial-gradient(circle at top right,#122041 0%,var(--bg-void) 45%); padding: 22px; font-family: var(--font-sans); }
+  .wrap { padding: 4px; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 11px; font-weight: 500; color: var(--text-secondary); padding: 10px 14px; }
+  td { font-size: 13px; color: var(--text-primary); padding: 11px 14px; border-top: 1px solid var(--border); }
+  tr.hover td { background: var(--bg-surface-hover); }
+  .mono { font-family: var(--font-mono); font-size: 12px; }
+  .dec { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; padding: 3px 8px; border-radius: 4px; border: 1px solid; }
+</style>
+</head>
+<body>
+  <div class="panel norviq-panel wrap">
+    <table>
+      <thead><tr><th>Time</th><th>Tool</th><th>Decision</th><th>Namespace</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">14:22:07</td><td>read_file</td><td><span class="dec" style="background:#00e5a015;color:#00e5a0;border-color:#00e5a030">allow</span></td><td class="mono">prod</td></tr>
+        <tr class="hover"><td class="mono">14:21:55</td><td>exec_shell</td><td><span class="dec" style="background:#ff3b5c15;color:#ff3b5c;border-color:#ff3b5c30">block</span></td><td class="mono">payments</td></tr>
+        <tr><td class="mono">14:21:40</td><td>send_email</td><td><span class="dec" style="background:#ffb02015;color:#ffb020;border-color:#ffb02030">escalate</span></td><td class="mono">support</td></tr>
+        <tr><td class="mono">14:21:12</td><td>db_query</td><td><span class="dec" style="background:#7c5cfc15;color:#7c5cfc;border-color:#7c5cfc30">audit</span></td><td class="mono">analytics</td></tr>
+      </tbody>
+    </table>
+  </div>
+</body>
+</html>

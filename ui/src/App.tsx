@@ -1,0 +1,53 @@
+import { Suspense, lazy } from "react";
+import { Navigate, Route, Routes } from "react-router-dom";
+import { Shell } from "./components/layout/Shell";
+import { AppProvider } from "./store/AppContext";
+
+const Dashboard = lazy(() => import("./pages/Dashboard").then((m) => ({ default: m.Dashboard })));
+const PolicyCatalog = lazy(() => import("./pages/PolicyCatalog").then((m) => ({ default: m.PolicyCatalog })));
+const TargetSettings = lazy(() => import("./pages/TargetSettings").then((m) => ({ default: m.TargetSettings })));
+const AuditLog = lazy(() => import("./pages/AuditLog").then((m) => ({ default: m.AuditLog })));
+const AgentMonitor = lazy(() => import("./pages/AgentMonitor").then((m) => ({ default: m.AgentMonitor })));
+const AttackGraph = lazy(() => import("./pages/AttackGraph").then((m) => ({ default: m.AttackGraph })));
+const MITRECoverage = lazy(() => import("./pages/MITRECoverage").then((m) => ({ default: m.MITRECoverage })));
+const AccountSettings = lazy(() =>
+  import("./pages/AccountSettings").then((m) => ({ default: m.AccountSettings }))
+);
+const APIKeys = lazy(() => import("./pages/APIKeys").then((m) => ({ default: m.APIKeys })));
+const GeneralSettings = lazy(() =>
+  import("./pages/GeneralSettings").then((m) => ({ default: m.GeneralSettings }))
+);
+const ConnectionSettings = lazy(() =>
+  import("./pages/ConnectionSettings").then((m) => ({ default: m.ConnectionSettings }))
+);
+const AboutPage = lazy(() => import("./pages/AboutPage").then((m) => ({ default: m.AboutPage })));
+
+function App() {
+  return (
+    <AppProvider>
+      <Shell>
+        <Suspense fallback={<div style={{ padding: 24, color: "var(--text-secondary)" }}>Loading...</div>}>
+          <Routes>
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/policies" element={<Navigate to="/policies/catalog" replace />} />
+            <Route path="/policies/catalog" element={<PolicyCatalog />} />
+            <Route path="/policies/targets" element={<TargetSettings />} />
+            <Route path="/audit" element={<AuditLog />} />
+            <Route path="/agents" element={<AgentMonitor />} />
+            <Route path="/threats" element={<Navigate to="/threats/graph" replace />} />
+            <Route path="/threats/graph" element={<AttackGraph />} />
+            <Route path="/threats/mitre" element={<MITRECoverage />} />
+            <Route path="/settings" element={<Navigate to="/settings/general" replace />} />
+            <Route path="/settings/account" element={<AccountSettings />} />
+            <Route path="/settings/api-keys" element={<APIKeys />} />
+            <Route path="/settings/general" element={<GeneralSettings />} />
+            <Route path="/settings/connections" element={<ConnectionSettings />} />
+            <Route path="/settings/about" element={<AboutPage />} />
+          </Routes>
+        </Suspense>
+      </Shell>
+    </AppProvider>
+  );
+}
+
+export default App;

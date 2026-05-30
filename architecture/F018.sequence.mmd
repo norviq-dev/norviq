@@ -1,0 +1,25 @@
+sequenceDiagram
+  autonumber
+  participant U as SOC Analyst
+  participant UI as React UI
+  participant API as FastAPI :8080
+  participant WS as /ws/audit
+
+  U->>UI: Open dashboard
+  UI->>API: GET /healthz
+  UI->>API: GET /api/v1/audit/stats
+  UI->>API: GET /api/v1/audit/records?decision=block&limit=10
+  UI->>API: GET /api/v1/agents
+  API-->>UI: KPI + blocked rows + trust data
+  UI-->>U: Render score, charts, recent blocks
+
+  U->>UI: Navigate to Audit Log and enable Live
+  UI->>API: GET /api/v1/audit/records?limit=50
+  UI->>WS: Connect ws://localhost:8080/ws/audit
+  WS-->>UI: New audit record events
+  UI-->>U: Prepend animated rows + details
+
+  U->>UI: Open policy versions and click Restore
+  UI->>API: POST /api/v1/policies/{ns}/{class}/rollback
+  API-->>UI: rollback confirmation
+  UI-->>U: Updated version table state

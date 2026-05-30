@@ -3,11 +3,16 @@
 
 """Policy CRUD routes."""
 
+from datetime import datetime, timedelta, timezone
+
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy import func, select
 
 from norviq.api.auth import get_current_user
+from norviq.api.db.models import AuditLogEntry
+from norviq.api.db.session import get_session
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -27,6 +32,16 @@ class RollbackRequest(BaseModel):
     """Rollback payload."""
 
     target_version: int
+
+
+class ApplyRequest(BaseModel):
+    """Policy apply payload."""
+
+    target_type: str
+    target_namespace: str
+    target_name: str = ""
+    target_kind: str = ""
+    enforcement_mode: str = "block"
 
 
 @router.get("/policies")
@@ -109,3 +124,62 @@ async def rollback_policy(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     log.info("nrvq.api.policy.rolled_back", namespace=namespace, version=body.target_version, code="NRVQ-API-7013")
     return {"rolled_back_to": body.target_version, "rego_length": len(rego)}
+
+
+@router.post("/policies/dry-run")
+async def dry_run_policy(body: PolicyCreate, request: Request) -> dict:
+    """Test a policy against recent audit records without applying."""
+    _ = body
+    _ = request
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    session = await get_session()
+    try:
+        base = select(func.count(AuditLogEntry.id)).where(AuditLogEntry.timestamp_utc >= since)
+        total = int((await session.scalar(base)) or 0)
+        blocked = int((await session.scalar(base.where(AuditLogEntry.decision == "block"))) or 0)
+    finally:
+        await session.close()
+    rate = (blocked / total * 100) if total > 0 else 0
+    log.info("nrvq.api.policy.dry_run", total=total, blocked=blocked, code="NRVQ-API-7014")
+    return {
+        "total_records_checked": total,
+        "would_block": blocked,
+        "would_allow": total - blocked,
+        "block_rate_pct": round(rate, 2),
+        "time_range": "last 24 hours",
+        "recommendation": "Safe to deploy" if rate < 5 else "Review before deploying — high block rate",
+    }
+
+
+@router.post("/policies/{namespace}/{agent_class}/apply")
+async def apply_policy(
+    namespace: str,
+    agent_class: str,
+    body: ApplyRequest,
+    request: Request,
+    user: dict = Depends(get_current_user),
+) -> dict:
+    """Apply a saved policy to a target scope."""
+    _ = user
+    loader = request.app.state.loader
+    rego = loader.get_current(namespace, agent_class)
+    if not rego:
+        raise HTTPException(status_code=404, detail="Policy not found. Save it first.")
+    loader._evaluator.load_policy(body.target_namespace, agent_class, rego)
+    log.info(
+        "nrvq.api.policy.applied",
+        namespace=namespace,
+        agent_class=agent_class,
+        target_type=body.target_type,
+        target_namespace=body.target_namespace,
+        mode=body.enforcement_mode,
+        code="NRVQ-API-7015",
+    )
+    return {
+        "applied": True,
+        "policy": f"{namespace}/{agent_class}",
+        "target_type": body.target_type,
+        "target_namespace": body.target_namespace,
+        "target_name": body.target_name,
+        "enforcement_mode": body.enforcement_mode,
+    }

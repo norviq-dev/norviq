@@ -1,0 +1,32 @@
+flowchart LR
+  A[App.tsx] --> B[Shell.tsx]
+  A --> C[Dashboard.tsx]
+  A --> D[PolicyCatalog.tsx]
+  A --> E[AuditLog.tsx]
+  A --> F[AgentMonitor.tsx]
+  A --> G[Settings.tsx]
+  A --> H[ThreatGraph.tsx]
+  A --> I[api/client.ts]
+  A --> J[hooks/useApi.ts]
+
+  C --> K[KPICard.tsx]
+  C --> L[ScoreGauge.tsx]
+  C --> M[CategoryBars.tsx]
+  C --> N[DataTable.tsx]
+  C --> O[VolumeChart.tsx]
+  C --> P[DonutChart.tsx]
+
+  D --> P
+  E --> N
+  E --> O
+  E --> Q[DecisionBadge.tsx]
+  E --> R[TrustBadge.tsx]
+  E --> S[hooks/useWebSocket.ts]
+  F --> N
+  F --> O
+  F --> P
+  F --> R
+
+  T[vite.config.ts] --> U[/api proxy]
+  T --> V[/healthz proxy]
+  T --> W[/ws proxy]

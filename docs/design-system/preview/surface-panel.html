@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<link rel="stylesheet" href="../colors_and_type.css" />
+<style>
+  body { margin: 0; padding: 0; }
+  .stage { background: radial-gradient(circle at top right, #122041 0%, var(--bg-void) 45%); padding: 28px; min-height: 200px; display: flex; gap: 18px; align-items: center; }
+  .panel-demo { flex: 1; padding: 20px; }
+  .lbl { font-family: var(--font-mono); font-size: 10px; color: var(--text-muted); letter-spacing: .05em; }
+  .title { font-size: 16px; font-weight: 600; color: var(--text-primary); margin-top: 6px; }
+  .sub { font-size: 13px; color: var(--text-secondary); margin-top: 6px; line-height: 1.5; }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <div class="panel norviq-panel panel-demo">
+      <div class="lbl">.norviq-panel</div>
+      <div class="title">Gradient navy · 1px border · blur(8px)</div>
+      <div class="sub">The signature container. Everything substantial lives in a panel over the radial-glow body background.</div>
+    </div>
+    <div class="panel norviq-panel panel-demo" style="background:var(--bg-elevated)">
+      <div class="lbl">--bg-elevated</div>
+      <div class="title">Inset well · popovers · inputs</div>
+      <div class="sub">Lighter, bluer surface used for nested controls and overlays.</div>
+    </div>
+  </div>
+</body>
+</html>

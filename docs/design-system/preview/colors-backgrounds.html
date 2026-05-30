@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<link rel="stylesheet" href="../colors_and_type.css" />
+<style>
+  body { margin: 0; background: var(--bg-void); padding: 22px; font-family: var(--font-sans); }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .sw { border-radius: var(--radius-md); border: 1px solid var(--border); overflow: hidden; }
+  .chip { height: 70px; }
+  .meta { padding: 8px 10px; background: var(--bg-surface); }
+  .name { font-size: 12px; font-weight: 600; color: var(--text-primary); }
+  .hex { font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+</style>
+</head>
+<body>
+  <div class="grid">
+    <div class="sw"><div class="chip" style="background:#060b18"></div><div class="meta"><div class="name">Void</div><div class="hex">#060b18</div></div></div>
+    <div class="sw"><div class="chip" style="background:#0c1425"></div><div class="meta"><div class="name">Surface</div><div class="hex">#0c1425</div></div></div>
+    <div class="sw"><div class="chip" style="background:#111d35"></div><div class="meta"><div class="name">Surface Hover</div><div class="hex">#111d35</div></div></div>
+    <div class="sw"><div class="chip" style="background:#152040"></div><div class="meta"><div class="name">Elevated</div><div class="hex">#152040</div></div></div>
+  </div>
+</body>
+</html>
