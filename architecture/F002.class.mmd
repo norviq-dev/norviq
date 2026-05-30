@@ -1,0 +1,15 @@
+classDiagram
+    class PolicyDecision {
+        +Literal decision
+        +str policy_id
+        +int policy_version
+        +str rule_id
+        +str reason
+        +float trust_score
+        +float latency_ms
+        +str event_id
+        +datetime decided_at
+        +is_blocked() bool
+        +is_allowed() bool
+        +is_escalated() bool
+    }

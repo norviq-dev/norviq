@@ -1,0 +1,33 @@
+classDiagram
+    class OPAEvaluator {
+        -RedisCache _cache
+        -asyncio.Semaphore _semaphore
+        -set[asyncio.Task[None]] _audit_tasks
+        -dict[str, str] _policies
+        +__init__(cache: RedisCache) None
+        +evaluate(event: ToolCallEvent) PolicyDecision
+        +_handle_cache_hit(event: ToolCallEvent, cached: PolicyDecision, start: float) PolicyDecision
+        +_trust(spiffe_id: str) TrustScore
+        +_build_input(event: ToolCallEvent, trust: TrustScore) dict
+        +_cache_tool_key(tool_name: str, tool_params: dict) str
+        +_evaluate_opa(namespace: str, agent_class: str, opa_input: dict) dict
+        +_build_decision(result: dict, event: ToolCallEvent, trust: TrustScore, elapsed_ms: float) PolicyDecision
+        +_fallback_decision(event: ToolCallEvent, elapsed_ms: float) PolicyDecision
+        +load_policy(namespace: str, agent_class: str, rego_source: str) None
+        +_post_decision(event: ToolCallEvent, decision: PolicyDecision) None
+        +_emit_audit(decision: PolicyDecision) None
+        +_queue_audit(decision: PolicyDecision) None
+        +close() None
+        +_is_rate_limited(spiffe_id: str) bool
+        +_rate_limit_decision(event: ToolCallEvent, start: float) PolicyDecision
+        +_validate_spiffe(spiffe_id: str) None
+    }
+    class RedisCache
+    class ToolCallEvent
+    class TrustScore
+    class PolicyDecision
+
+    OPAEvaluator --> RedisCache : reads/writes cache
+    OPAEvaluator --> ToolCallEvent : evaluates
+    OPAEvaluator --> TrustScore : trust state
+    OPAEvaluator --> PolicyDecision : outputs

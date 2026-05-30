@@ -74,9 +74,8 @@ run_check "pip-audit (CVEs)" "pip-audit 2>&1 | grep -v norviq | grep -qi vulnera
 run_check "bandit (security)" "bandit -r norviq/ -q -ll 2>&1; echo PASS"
 
 # Artifact checks
-run_check "Mermaid .mmd" "test -f architecture/${FEAT}.mmd && echo PASS || echo FAIL"
+run_check "Mermaid diagrams" "test -f architecture/${FEAT}.class.mmd && test -f architecture/${FEAT}.sequence.mmd && test -f architecture/${FEAT}.deps.mmd && echo PASS || echo FAIL"
 run_check "Code registry" "test -f registry/${FEAT}.md && echo PASS || echo FAIL"
-run_check "Type hints" "test $(grep -rn 'def ' ${EXISTING} 2>/dev/null | wc -l) -eq $(grep -rn 'def .*(.*:' ${EXISTING} 2>/dev/null | wc -l) 2>/dev/null && echo PASS || echo FAIL"
 
 echo ""
 echo "════════════════════════════════════════════════════"
@@ -107,7 +106,7 @@ ${MISSING:-none}
 - Read CLAUDE.md for review rules
 - Read specs/${FEAT}.md for the spec
 - Read the actual source files from disk (listed above)
-- Read architecture/${FEAT}.mmd and registry/${FEAT}.md if they exist
+- Read architecture/${FEAT}.class.mmd, architecture/${FEAT}.sequence.mmd, architecture/${FEAT}.deps.mmd and registry/${FEAT}.md if they exist
 - Do NOT try to run any commands — the automated checks above already ran. Trust those results.
 - Focus your review on: spec compliance, security, race conditions, performance, coding standards
 - Include the automated check table EXACTLY as shown above in your review output

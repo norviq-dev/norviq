@@ -43,7 +43,11 @@ class RedisCache:
 
     async def connect(self) -> None:
         """Initialize the Redis client and Lua scripts."""
-        self._redis = aioredis.from_url(self._url, max_connections=20, decode_responses=True)
+        self._redis = aioredis.from_url(
+            self._url,
+            max_connections=settings.redis_max_connections,
+            decode_responses=True,
+        )
         self._trust_decr_sha = await self._redis.script_load(TRUST_DECREMENT_LUA)
         log.info("nrvq.cache.connected", url=self._url, code="NRVQ-DB-9010")
 

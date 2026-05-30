@@ -1,0 +1,20 @@
+sequenceDiagram
+    participant Caller
+    participant Client as PolicyEngineClient
+    participant HTTP as httpx.AsyncClient
+    participant Engine as /v1/evaluate
+
+    Caller->>Client: evaluate(event)
+    Client->>Client: _is_circuit_open()
+    alt circuit open
+        Client->>Client: _fallback_decision(event)
+        Client-->>Caller: PolicyDecision(fallback)
+    else circuit closed
+        Client->>Client: _post(event)
+        Client->>HTTP: POST /v1/evaluate
+        HTTP->>Engine: JSON ToolCallEvent
+        Engine-->>HTTP: JSON decision
+        HTTP-->>Client: response
+        Client->>Client: _record_success()
+        Client-->>Caller: PolicyDecision
+    end

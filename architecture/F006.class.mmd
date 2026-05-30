@@ -1,0 +1,35 @@
+classDiagram
+    class PolicyEngineClient {
+        -str _base_url
+        -int _timeout_ms
+        -int _max_retries
+        -int _backoff_base_ms
+        -int _fail_threshold
+        -int _reset_after_ms
+        -httpx.AsyncClient|None _client
+        -int _failure_count
+        -float _circuit_open_until
+        +__init__(base_url: str|None, timeout_ms: int|None) None
+        +_get_client() httpx.AsyncClient
+        +_is_circuit_open() bool
+        +_record_failure() None
+        +_record_success() None
+        +_post(event: ToolCallEvent) dict
+        +_log_success(event_id: str, decision: str) None
+        +_handle_timeout(event: ToolCallEvent, exc: NorviqTimeoutError) PolicyDecision
+        +_handle_http_error(event: ToolCallEvent, exc: httpx.HTTPStatusError) PolicyDecision
+        +_handle_unknown_error(event: ToolCallEvent, exc: Exception) PolicyDecision
+        +evaluate(event: ToolCallEvent) PolicyDecision
+        +_fallback_decision(event: ToolCallEvent) PolicyDecision
+        +close() None
+    }
+
+    class ToolCallEvent
+    class PolicyDecision
+    class NorviqTimeoutError
+    class NorviqError
+
+    PolicyEngineClient --> ToolCallEvent : request model
+    PolicyEngineClient --> PolicyDecision : response model
+    PolicyEngineClient --> NorviqTimeoutError : timeout handling
+    PolicyEngineClient --> NorviqError : terminal request failure

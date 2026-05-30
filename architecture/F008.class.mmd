@@ -1,0 +1,28 @@
+classDiagram
+    class RedisCache {
+        -str _url
+        -aioredis.Redis|None _redis
+        -str|None _trust_decr_sha
+        +__init__(url: str|None) None
+        +connect() None
+        +close() None
+        +_client() aioredis.Redis
+        +_jitter_ttl(base_ttl: int) int
+        +get_policy(namespace: str, agent_class: str) str|None
+        +set_policy(namespace: str, agent_class: str, rego: str) None
+        +warm_policy(namespace: str, agent_class: str, rego: str) bool
+        +get_trust(spiffe_id: str) TrustScore|None
+        +set_trust(spiffe_id: str, score: TrustScore) None
+        +decrement_trust(spiffe_id: str) TrustScore|None
+        +get_eval(namespace: str, agent_class: str, tool_name: str) PolicyDecision|None
+        +set_eval(namespace: str, agent_class: str, tool_name: str, decision: PolicyDecision) None
+        +incr_call_count(spiffe_id: str, window_s: int) int
+        +get_session(session_id: str) dict|None
+        +set_session(session_id: str, data: dict) None
+    }
+
+    class TrustScore
+    class PolicyDecision
+
+    RedisCache --> TrustScore : cache trust
+    RedisCache --> PolicyDecision : cache decisions

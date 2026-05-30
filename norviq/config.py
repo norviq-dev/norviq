@@ -24,6 +24,7 @@ class NorviqSettings(BaseSettings):
     spiffe_socket: str = "/tmp/spiffe-mock.sock"
     spiffe_cache_ttl_s: int = 300
     redis_url: str = "redis://localhost:6379"
+    redis_max_connections: int = 20
     redis_ttl_policy_s: int = 60
     redis_ttl_trust_s: int = 30
     trust_threshold: float = 0.7

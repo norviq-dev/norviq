@@ -1,0 +1,12 @@
+sequenceDiagram
+    participant Caller
+    participant Cache as RedisCache
+    participant Redis
+
+    Caller->>Cache: connect()
+    Cache->>Redis: script_load(TRUST_DECREMENT_LUA)
+    Redis-->>Cache: sha
+    Caller->>Cache: get_eval(ns, class, tool)
+    Cache->>Redis: GET eval:key
+    Redis-->>Cache: value|nil
+    Cache-->>Caller: PolicyDecision|None

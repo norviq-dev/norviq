@@ -1,0 +1,17 @@
+graph LR
+    F001[F001 Events]
+    F002[F002 PolicyDecision]
+    F003[F003 AuditRecord]
+    F014[F014 OTel Emitter]
+    F017[F017 API]
+    F019[F019 UI Feed]
+    F030[F030 ClickHouse Sink]
+
+    F001 --> F003
+    F002 --> F003
+    F003 --> F014
+    F003 --> F017
+    F003 --> F019
+    F003 --> F030
+
+    style F003 fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#1e3a8a

@@ -1,0 +1,8 @@
+sequenceDiagram
+    participant Caller
+    participant Decision as PolicyDecision
+    participant E as NorviqBlockError
+
+    Caller->>E: raise NorviqBlockError(decision)
+    E->>Decision: read reason/rule
+    E-->>Caller: [code] Blocked: reason

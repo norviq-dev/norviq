@@ -1,0 +1,16 @@
+classDiagram
+    class SPIFFEResolver {
+        -str _socket_path
+        -dict[str, tuple[AgentIdentity, float]] _cache
+        -asyncio.Lock _lock
+        +__init__(socket_path: str|None) None
+        +resolve() AgentIdentity
+        +_get_cached() AgentIdentity|None
+        +_resolve_from_socket() AgentIdentity
+        +_mock_resolve() AgentIdentity
+        +_fallback_identity() AgentIdentity
+        +clear_cache() None
+    }
+    class AgentIdentity
+
+    SPIFFEResolver --> AgentIdentity : builds identity

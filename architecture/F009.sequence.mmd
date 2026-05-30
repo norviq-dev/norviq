@@ -1,0 +1,19 @@
+sequenceDiagram
+    participant Caller
+    participant Eval as OPAEvaluator
+    participant Cache as RedisCache
+
+    Caller->>Eval: evaluate(event)
+    Eval->>Eval: _validate_spiffe(spiffe_id)
+    Eval->>Cache: get_eval(namespace, class, cache_tool)
+    alt cache hit
+        Cache-->>Eval: PolicyDecision
+        Eval-->>Caller: cached decision
+    else cache miss
+        Eval->>Cache: get_trust(spiffe_id)
+        Eval->>Eval: _evaluate_opa(...)
+        Eval->>Eval: _build_decision(...)
+        Eval->>Cache: set_eval(...)
+        Eval->>Eval: _post_decision(...)
+        Eval-->>Caller: PolicyDecision
+    end

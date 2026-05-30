@@ -1,0 +1,7 @@
+sequenceDiagram
+    participant Eval as Evaluator
+    participant Decision as PolicyDecision
+    participant Caller
+
+    Eval->>Decision: PolicyDecision(decision, rule_id, reason)
+    Decision-->>Caller: is_allowed()/is_blocked()/is_escalated()

@@ -1,0 +1,9 @@
+sequenceDiagram
+    participant Caller
+    participant Event as ToolCallEvent
+    participant Validator as tool_name_not_empty
+
+    Caller->>Event: ToolCallEvent(tool_name, params, identity)
+    Event->>Validator: validate tool_name
+    Validator-->>Event: stripped value
+    Event-->>Caller: immutable event
