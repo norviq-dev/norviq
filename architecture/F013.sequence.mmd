@@ -1,0 +1,24 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+
+sequenceDiagram
+    participant App as API Startup
+    participant DB as session.py
+    participant PG as PostgreSQL
+    participant T as tests/api/test_db.py
+
+    App->>DB: init_db()
+    DB->>PG: create_async_engine(pool_size=10,timeout=5)
+    DB-->>App: session factory ready (NRVQ-DB-9000)
+    App->>DB: create_tables()
+    DB->>PG: Base.metadata.create_all()
+    DB->>PG: CREATE TABLE IF NOT EXISTS audit_log_YYYY_MM PARTITION...
+    DB-->>App: schema ready (NRVQ-DB-9001)
+    T->>DB: get_session()
+    DB-->>T: AsyncSession
+    T->>PG: INSERT Policy / AuditLogEntry / AgentRegistryEntry
+    T->>PG: SELECT policy + audit queries
+    T->>PG: duplicate INSERT raises IntegrityError
+    App->>DB: close_db()
+    DB->>PG: dispose pool
+    DB-->>App: closed (NRVQ-DB-9002)

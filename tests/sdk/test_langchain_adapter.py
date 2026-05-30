@@ -70,7 +70,7 @@ async def test_protect_blocked_tool_raises(interceptor: ToolInterceptor) -> None
     tool = _TestTool(name="execute_sql")
     wrapped = protect([tool], interceptor, session_id=_session())
     with pytest.raises(NorviqBlockError):
-        wrapped[0]._run(query="DROP TABLE users")
+        await wrapped[0]._arun(query="DROP TABLE users")
 
 
 async def test_protect_allowed_tool_executes(interceptor: ToolInterceptor) -> None:

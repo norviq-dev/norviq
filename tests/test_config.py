@@ -3,11 +3,16 @@
 
 """Tests for Norviq settings."""
 
+import os
+
 from norviq.config import NorviqSettings, settings
 
 
-def test_settings_defaults() -> None:
+def test_settings_defaults(monkeypatch) -> None:
     """Load defaults when no NRVQ vars are set."""
+    for key in list(os.environ):
+        if key.startswith("NRVQ_"):
+            monkeypatch.delenv(key, raising=False)
     loaded = NorviqSettings()
     assert loaded.policy_engine_url == "http://localhost:8181"
     assert loaded.redis_url == "redis://localhost:6379"

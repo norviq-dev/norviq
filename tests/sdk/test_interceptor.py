@@ -97,5 +97,5 @@ async def test_intercept_returns_policy_decision_on_evaluator_error(
         raise RuntimeError("forced-error")
 
     monkeypatch.setattr(interceptor._evaluator, "_evaluate_opa", _raise)
-    decision = await interceptor.intercept("search_kb", {"query": "hello"}, identity=_identity(_suffix()))
+    decision = await interceptor.intercept("search_kb", {"query": f"hello-{_suffix()}"}, identity=_identity(_suffix()))
     assert decision.decision in {"audit", "block"}

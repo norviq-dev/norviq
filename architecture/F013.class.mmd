@@ -1,0 +1,97 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+
+classDiagram
+    class Base
+    class Policy {
+        +UUID id
+        +str name
+        +str namespace
+        +str agent_class
+        +str rego_source
+        +int version
+        +str enforcement_mode
+        +datetime created_at
+    }
+    class PolicyVersion {
+        +UUID id
+        +UUID policy_id
+        +int version
+        +str rego_source
+        +datetime saved_at
+        +str saved_by
+    }
+    class AgentRegistryEntry {
+        +UUID id
+        +str spiffe_id
+        +str namespace
+        +str agent_class
+        +float trust_score
+        +str trust_category
+        +int violation_count
+        +datetime last_seen
+        +datetime created_at
+    }
+    class AuditLogEntry {
+        +UUID id
+        +UUID event_id
+        +str tool_name
+        +str decision
+        +str agent_id
+        +str agent_class
+        +str namespace
+        +str policy_id
+        +str rule_id
+        +str reason
+        +str session_id
+        +float trust_score
+        +float latency_ms
+        +datetime timestamp_utc
+        +dict payload
+    }
+    class User {
+        +UUID id
+        +str username
+        +str password_hash
+        +str role
+        +datetime created_at
+    }
+    class AssetGraph {
+        +UUID id
+        +datetime built_at
+        +int node_count
+        +int edge_count
+        +dict graph_json
+        +dict hot_spots
+        +str namespace
+    }
+    class AttackPath {
+        +UUID id
+        +UUID graph_id
+        +str source_node
+        +str target_node
+        +dict path_json
+        +float risk_score
+        +datetime computed_at
+    }
+    class SessionModule {
+        +init_db()
+        +create_tables()
+        +get_session()
+        +close_db()
+        +upsert_policy()
+        +lock_policy_for_update()
+        +bump_policy_version()
+    }
+    class NorviqSettings
+
+    Base <|-- Policy
+    Base <|-- PolicyVersion
+    Base <|-- AgentRegistryEntry
+    Base <|-- AuditLogEntry
+    Base <|-- User
+    Base <|-- AssetGraph
+    Base <|-- AttackPath
+    SessionModule --> NorviqSettings : reads pg_url/pool
+    PolicyVersion --> Policy : policy_id FK
+    AttackPath --> AssetGraph : graph_id FK
