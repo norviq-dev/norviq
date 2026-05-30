@@ -82,6 +82,12 @@ class RedisCache:
         await self._client().setex(key, ttl, rego)
         log.debug("nrvq.cache.policy.set", key=key, ttl=ttl, code="NRVQ-DB-9012")
 
+    async def delete_policy(self, namespace: str, agent_class: str) -> None:
+        """Delete cached policy source."""
+        key = f"policy:{namespace}:{agent_class}"
+        await self._client().delete(key)
+        log.debug("nrvq.cache.policy.deleted", key=key, code="NRVQ-DB-9020")
+
     async def warm_policy(self, namespace: str, agent_class: str, rego: str) -> bool:
         """Warm policy cache using first-writer-wins semantics."""
         key = f"policy:{namespace}:{agent_class}"

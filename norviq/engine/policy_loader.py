@@ -102,6 +102,17 @@ class PolicyLoader:
         """Return current policy source from memory."""
         return self._policies.get(self._key(namespace, agent_class))
 
+    async def delete(self, namespace: str, agent_class: str) -> bool:
+        """Delete policy from memory, versions, and cache."""
+        key = self._key(namespace, agent_class)
+        if key not in self._policies:
+            return False
+        self._policies = {k: v for k, v in self._policies.items() if k != key}
+        self._versions = {k: v for k, v in self._versions.items() if k != key}
+        await self._cache.delete_policy(namespace, agent_class)
+        log.info("nrvq.policy.deleted", key=key, code="NRVQ-REG-5007")
+        return True
+
     async def reload_all(self) -> int:
         """Reload current in-memory policies into evaluator."""
         count = 0

@@ -1,0 +1,31 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+
+classDiagram
+    class FastAPIApp {
+        +create_app() FastAPI
+        +lifespan(app) AsyncContextManager
+    }
+    class RedisCache
+    class OPAEvaluator
+    class AuditEmitter
+    class PolicyLoader
+    class HealthRouter
+    class PoliciesRouter
+    class AuditRouter
+    class AgentsRouter
+    class AuditLogEntry
+    class TrustScore
+
+    FastAPIApp --> RedisCache : startup connect
+    FastAPIApp --> OPAEvaluator : creates
+    FastAPIApp --> AuditEmitter : creates
+    FastAPIApp --> PolicyLoader : creates
+    FastAPIApp --> HealthRouter : include_router
+    FastAPIApp --> PoliciesRouter : include_router
+    FastAPIApp --> AuditRouter : include_router
+    FastAPIApp --> AgentsRouter : include_router
+    PoliciesRouter --> PolicyLoader : CRUD
+    AuditRouter --> AuditLogEntry : query
+    AgentsRouter --> RedisCache : trust read/write
+    AgentsRouter --> TrustScore : update model
