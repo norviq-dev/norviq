@@ -1,0 +1,21 @@
+sequenceDiagram
+    participant G as GuardedToolNode
+    participant I as ToolInterceptor
+    participant T as LangGraph ToolNode
+
+    G->>G: read state.messages[-1].tool_calls
+    alt no tool calls
+        G->>T: ainvoke(state)
+        T-->>G: result state
+    else tool calls exist
+        loop for each tool call
+            G->>I: intercept_or_raise(tool_name, tool_params, framework="langgraph")
+            alt blocked/escalated
+                I-->>G: raise NorviqBlockError/NorviqEscalateError
+            else allowed
+                I-->>G: PolicyDecision
+            end
+        end
+        G->>T: ainvoke(state)
+        T-->>G: result state
+    end
