@@ -1,0 +1,24 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+
+sequenceDiagram
+    participant C as Caller (F015/F017)
+    participant E as AuditEmitter
+    participant DB as PostgreSQL
+    participant OT as OTel Exporter
+
+    C->>E: emit(event, decision, payload)
+    E-->>C: returns immediately
+    E->>E: create_task(_do_emit)
+    E->>E: create_task(_write_db)
+    E->>E: create_task(_emit_span)
+    E->>DB: INSERT audit_log entry
+    E->>OT: export span attributes
+    alt DB fails
+        E-->>E: log NRVQ-AUD-6004
+    end
+    alt span fails
+        E-->>E: log NRVQ-AUD-6006
+    end
+    C->>E: close()
+    E->>E: gather pending tasks

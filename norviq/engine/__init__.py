@@ -6,5 +6,6 @@
 from norviq.engine.identity import SPIFFEResolver
 from norviq.engine.evaluator import OPAEvaluator
 from norviq.engine.policy_loader import PolicyLoader, PolicyVersion
+from norviq.engine.audit_emitter import AuditEmitter
 
-__all__ = ["SPIFFEResolver", "OPAEvaluator", "PolicyLoader", "PolicyVersion"]
+__all__ = ["SPIFFEResolver", "OPAEvaluator", "PolicyLoader", "PolicyVersion", "AuditEmitter"]

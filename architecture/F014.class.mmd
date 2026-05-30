@@ -1,0 +1,25 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+
+classDiagram
+    class AuditEmitter {
+        -set~Task~ _tasks
+        -Tracer _tracer
+        +init() None
+        +emit(event, decision, payload) None
+        +close() None
+        -_do_emit(event, decision, payload) None
+        -_write_db(record) None
+        -_emit_span(event, decision) None
+    }
+    class ToolCallEvent
+    class PolicyDecision
+    class AuditRecord
+    class AuditLogEntry
+    class Settings
+
+    AuditEmitter --> ToolCallEvent : consumes
+    AuditEmitter --> PolicyDecision : consumes
+    AuditEmitter --> AuditRecord : builds
+    AuditEmitter --> AuditLogEntry : persists
+    AuditEmitter --> Settings : reads otel_endpoint
