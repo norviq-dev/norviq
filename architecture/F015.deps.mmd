@@ -1,0 +1,30 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+
+graph LR
+    S002[S002 Config]
+    S003[S003 Exceptions]
+    F001[F001 ToolCallEvent]
+    F002[F002 PolicyDecision]
+    F007[F007 SPIFFEResolver]
+    F008[F008 RedisCache]
+    F009[F009 OPAEvaluator]
+    F011[F011 ToolInterceptor]
+    F014[F014 AuditEmitter]
+    F015[F015 Sidecar Proxy]
+    F016[F016 Mutating Webhook]
+    F032[F032 Go Sidecar]
+
+    S002 --> F015
+    S003 --> F011
+    F001 --> F015
+    F002 --> F015
+    F007 --> F015
+    F008 --> F015
+    F009 --> F015
+    F011 --> F015
+    F014 --> F015
+    F015 --> F016
+    F015 --> F032
+
+    style F015 fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#1e3a8a

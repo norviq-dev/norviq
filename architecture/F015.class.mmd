@@ -1,0 +1,26 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+
+classDiagram
+    class SidecarProxy {
+        -str _socket_path
+        -RedisCache _cache
+        -OPAEvaluator _evaluator
+        -SPIFFEResolver _resolver
+        -ToolInterceptor _interceptor
+        -AuditEmitter _emitter
+        -AbstractServer _server
+        +start() None
+        +stop() None
+        -_handle_connection(reader, writer) None
+        -_process_request(raw) str
+        -_emit_audit(tool_name, tool_params, session_id, decision) None
+    }
+    class FastAPI
+    class ToolInterceptor
+    class AuditEmitter
+
+    SidecarProxy --> ToolInterceptor : evaluates calls
+    SidecarProxy --> AuditEmitter : emits audit
+    FastAPI --> ToolInterceptor : http fallback uses
+    FastAPI --> AuditEmitter : fire-and-forget audit
