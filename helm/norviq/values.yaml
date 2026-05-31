@@ -5,15 +5,15 @@ images:
   engine:
     repository: sanman97/norviq-engine
     tag: engine-latest
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
   api:
     repository: sanman97/norviq-engine
     tag: api-latest
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
   ui:
     repository: sanman97/norviq-engine
     tag: ui-latest
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
   redis:
     repository: redis
     tag: "7-alpine"

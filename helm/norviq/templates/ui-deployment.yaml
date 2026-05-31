@@ -21,7 +21,7 @@ spec:
       containers:
         - name: ui
           image: "{{ .Values.images.ui.repository }}:{{ .Values.images.ui.tag }}"
-          imagePullPolicy: {{ .Values.images.ui.pullPolicy }}
+          imagePullPolicy: Always
           ports:
             - containerPort: {{ .Values.ui.port }}
               name: http
