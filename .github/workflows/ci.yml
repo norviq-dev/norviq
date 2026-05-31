@@ -1,21 +1,44 @@
-name: ci
+# SPDX-License-Identifier: Apache-2.0
+name: CI
 
 on:
-  push:
   pull_request:
+    branches: [main]
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        options: --health-cmd "redis-cli ping" --health-interval 10s
+        ports: [6379:6379]
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: norviq
+          POSTGRES_PASSWORD: norviq_dev
+          POSTGRES_DB: norviq
+        options: --health-cmd pg_isready --health-interval 10s
+        ports: [5432:5432]
+    env:
+      NRVQ_REDIS_URL: redis://localhost:6379
+      NRVQ_PG_URL: postgresql://norviq:norviq_dev@localhost:5432/norviq
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.22"
-      - run: pip install -e ".[dev]"
-      - run: make lint
-      - run: make test
-      - run: go mod tidy
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -e ".[dev]" pip-audit bandit ruff
+      - name: Lint
+        run: ruff check norviq/ tests/
+      - name: Test
+        run: pytest tests/ -v --tb=short
+      - name: Security scan
+        run: |
+          pip-audit --skip-editable
+          bandit -r norviq/ -q -ll
+      - name: Build UI
+        run: |
+          cd ui && npm ci && npm run build

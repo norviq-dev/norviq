@@ -1,0 +1,19 @@
+Norviq has been deployed.
+
+To access the UI:
+  kubectl port-forward svc/norviq-ui 3000:80 -n {{ .Values.namespace }}
+  Then open: http://localhost:3000
+
+To access the API:
+  kubectl port-forward svc/norviq-api 8080:{{ .Values.api.port }} -n {{ .Values.namespace }}
+  Then: curl http://localhost:8080/healthz
+
+To check status:
+  kubectl get pods -n {{ .Values.namespace }}
+
+To view logs:
+  kubectl logs -f deployment/norviq-api -n {{ .Values.namespace }}
+  kubectl logs -f deployment/norviq-engine -n {{ .Values.namespace }}
+
+Production reminder:
+  Override api.secretKey, redis.password, and postgresql.password before production deployment.

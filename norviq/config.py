@@ -54,7 +54,7 @@ class NorviqSettings(BaseSettings):
     api_secret_key: str = "change-me-in-production"  # Replace in non-dev deployments.
     webhook_port: int = 8443
     webhook_cert_dir: str = "/etc/norviq/certs"
-    sidecar_image: str = "ghcr.io/norviq/sidecar:v0.1.0"
+    sidecar_image: str = "sanman97/norviq-engine:engine-latest"
     session_ttl_s: int = 3600
 
 

@@ -1,0 +1,45 @@
+{{- if .Values.postgresql.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: norviq-postgresql
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: norviq-postgresql
+    {{- include "norviq.labels" . | nindent 4 }}
+spec:
+  serviceName: norviq-postgresql
+  replicas: {{ .Values.postgresql.replicas }}
+  selector:
+    matchLabels:
+      app: norviq-postgresql
+  template:
+    metadata:
+      labels:
+        app: norviq-postgresql
+    spec:
+      containers:
+        - name: postgresql
+          image: "{{ .Values.images.postgresql.repository }}:{{ .Values.images.postgresql.tag }}"
+          ports:
+            - containerPort: {{ .Values.postgresql.port }}
+              name: postgres
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.database }}
+            - name: POSTGRES_USER
+              value: {{ .Values.postgresql.username }}
+            - name: POSTGRES_PASSWORD
+              value: {{ .Values.postgresql.password }}
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          resources:
+            {{- toYaml .Values.postgresql.resources | nindent 12 }}
+          volumeMounts:
+            - name: pg-data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: pg-data
+          persistentVolumeClaim:
+            claimName: norviq-postgresql-pvc
+{{- end }}

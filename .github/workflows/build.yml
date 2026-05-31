@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Build & Push
+
+on:
+  push:
+    branches: [main]
+
+env:
+  REPOSITORY: sanman97/norviq-engine
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - component: engine
+            dockerfile: Dockerfile.engine
+          - component: api
+            dockerfile: Dockerfile.api
+          - component: ui
+            dockerfile: Dockerfile.ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            ${{ env.REPOSITORY }}:${{ matrix.component }}-${{ github.sha }}
+            ${{ env.REPOSITORY }}:${{ matrix.component }}-latest

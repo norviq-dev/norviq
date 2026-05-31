@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+# Multi-stage build for minimal image
+
+FROM python:3.12-slim AS builder
+WORKDIR /build
+COPY pyproject.toml .
+COPY norviq/ norviq/
+RUN pip install --no-cache-dir --target=/deps .
+
+FROM python:3.12-slim
+WORKDIR /app
+COPY --from=builder /deps /usr/local/lib/python3.12/site-packages
+COPY norviq/ norviq/
+COPY policies/ policies/
+
+RUN useradd -r -s /usr/sbin/nologin norviq
+USER norviq
+
+EXPOSE 8282
+ENV NRVQ_SOCKET_PATH=/tmp/norviq-proxy.sock
+ENV NRVQ_HTTP_FALLBACK_PORT=8282
+
+CMD ["python", "-m", "norviq.sidecar.proxy"]

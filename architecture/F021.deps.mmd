@@ -1,0 +1,16 @@
+graph TD
+    F015[F015 Policy Engine]
+    F017[F017 Sidecar + Transport]
+    F018[F018 API + Auth]
+    F020[F020 UI + Monitoring]
+    F021[F021 Docker + Helm + CI/CD]
+
+    F015 --> F021
+    F017 --> F021
+    F018 --> F021
+    F020 --> F021
+    F021 --> F016[F016 Runtime Integrations]
+    F021 --> F022[F022 Hardening]
+    F021 --> F023[F023 SLOs]
+    F021 --> F024[F024 Multi-env]
+    F021 --> F025[F025 Release Automation]

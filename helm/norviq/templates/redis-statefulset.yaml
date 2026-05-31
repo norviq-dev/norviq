@@ -1,0 +1,37 @@
+{{- if .Values.redis.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: norviq-redis
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: norviq-redis
+    {{- include "norviq.labels" . | nindent 4 }}
+spec:
+  serviceName: norviq-redis
+  replicas: {{ .Values.redis.replicas }}
+  selector:
+    matchLabels:
+      app: norviq-redis
+  template:
+    metadata:
+      labels:
+        app: norviq-redis
+    spec:
+      containers:
+        - name: redis
+          image: "{{ .Values.images.redis.repository }}:{{ .Values.images.redis.tag }}"
+          ports:
+            - containerPort: {{ .Values.redis.port }}
+              name: redis
+          command: ["redis-server", "--requirepass", "{{ .Values.redis.password }}"]
+          resources:
+            {{- toYaml .Values.redis.resources | nindent 12 }}
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+      volumes:
+        - name: redis-data
+          persistentVolumeClaim:
+            claimName: norviq-redis-pvc
+{{- end }}

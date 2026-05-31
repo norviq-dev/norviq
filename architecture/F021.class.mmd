@@ -1,0 +1,30 @@
+classDiagram
+    class API {
+      +/healthz
+      +/readyz
+      +/api/*
+    }
+    class Engine {
+      +sidecar proxy
+      +policy loader
+      +evaluator
+      +cache
+    }
+    class UI {
+      +React SPA
+      +nginx reverse proxy
+    }
+    class Redis {
+      +decision cache
+      +session/state
+    }
+    class PostgreSQL {
+      +audit records
+      +policy metadata
+    }
+
+    UI --> API : /api/*
+    API --> Engine : policy evaluations
+    API --> Redis : cache lookups
+    API --> PostgreSQL : persistence
+    Engine --> Redis : cache reads/writes

@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+# Multi-stage build for minimal image
+
+FROM python:3.12-slim AS builder
+WORKDIR /build
+COPY pyproject.toml .
+COPY norviq/ norviq/
+RUN pip install --no-cache-dir --target=/deps . uvicorn
+
+FROM python:3.12-slim
+WORKDIR /app
+COPY --from=builder /deps /usr/local/lib/python3.12/site-packages
+COPY norviq/ norviq/
+COPY policies/ policies/
+
+RUN useradd -r -s /usr/sbin/nologin norviq
+USER norviq
+
+EXPOSE 8080
+CMD ["python", "-m", "uvicorn", "norviq.api.main:app", "--host", "0.0.0.0", "--port", "8080"]

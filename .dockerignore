@@ -1,0 +1,12 @@
+.git
+.github
+**/node_modules
+.venv
+**/__pycache__
+.env
+.env.*
+*.md
+tests/
+architecture/
+registry/
+ui/dist

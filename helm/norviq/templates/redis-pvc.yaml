@@ -1,0 +1,16 @@
+{{- if .Values.redis.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: norviq-redis-pvc
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: norviq-redis
+    {{- include "norviq.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.redis.storage }}
+{{- end }}

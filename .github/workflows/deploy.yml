@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Deploy to AKS
+
+on:
+  workflow_run:
+    workflows: ["Build & Push"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Get AKS credentials
+        run: az aks get-credentials --resource-group rg-opsai-dev-eastus-001 --name norviq
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+      - name: Deploy
+        run: |
+          helm upgrade --install norviq helm/norviq/ \
+            --namespace norviq \
+            --create-namespace \
+            --set images.engine.tag=engine-${{ github.sha }} \
+            --set images.api.tag=api-${{ github.sha }} \
+            --set images.ui.tag=ui-${{ github.sha }}

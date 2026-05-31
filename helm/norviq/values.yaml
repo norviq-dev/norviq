@@ -1,0 +1,103 @@
+# SPDX-License-Identifier: Apache-2.0
+namespace: norviq
+
+images:
+  engine:
+    repository: sanman97/norviq-engine
+    tag: engine-latest
+    pullPolicy: IfNotPresent
+  api:
+    repository: sanman97/norviq-engine
+    tag: api-latest
+    pullPolicy: IfNotPresent
+  ui:
+    repository: sanman97/norviq-engine
+    tag: ui-latest
+    pullPolicy: IfNotPresent
+  redis:
+    repository: redis
+    tag: "7-alpine"
+  postgresql:
+    repository: postgres
+    tag: "16-alpine"
+
+engine:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  port: 8282
+
+api:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  port: 8080
+  secretKey: "change-me-in-production"
+
+ui:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+  port: 80
+
+redis:
+  enabled: true
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+  port: 6379
+  password: "norviq-redis-password"
+  storage: 1Gi
+
+postgresql:
+  enabled: true
+  replicas: 1
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  port: 5432
+  database: norviq
+  username: norviq
+  password: "norviq-pg-password"
+  storage: 5Gi
+
+otel:
+  enabled: false
+  endpoint: "http://otel-collector:4317"
+
+ingress:
+  enabled: false
+  className: nginx
+  host: norviq.example.com
+  tls: false
+
+config:
+  logLevel: INFO
+  enforcementMode: block
+  trustThreshold: 0.7
+  violationPenalty: 0.05
+  rateLimit: 60

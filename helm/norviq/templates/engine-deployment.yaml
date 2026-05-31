@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: norviq-engine
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: norviq-engine
+    {{- include "norviq.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.engine.replicas }}
+  selector:
+    matchLabels:
+      app: norviq-engine
+  template:
+    metadata:
+      labels:
+        app: norviq-engine
+    spec:
+      containers:
+        - name: engine
+          image: "{{ .Values.images.engine.repository }}:{{ .Values.images.engine.tag }}"
+          imagePullPolicy: {{ .Values.images.engine.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.engine.port }}
+              name: http
+          envFrom:
+            - secretRef:
+                name: norviq-secrets
+            - configMapRef:
+                name: norviq-config
+          resources:
+            {{- toYaml .Values.engine.resources | nindent 12 }}

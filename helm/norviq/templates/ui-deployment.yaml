@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: norviq-ui
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: norviq-ui
+    {{- include "norviq.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.ui.replicas }}
+  selector:
+    matchLabels:
+      app: norviq-ui
+  template:
+    metadata:
+      labels:
+        app: norviq-ui
+    spec:
+      containers:
+        - name: ui
+          image: "{{ .Values.images.ui.repository }}:{{ .Values.images.ui.tag }}"
+          imagePullPolicy: {{ .Values.images.ui.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.ui.port }}
+              name: http
+          resources:
+            {{- toYaml .Values.ui.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 30

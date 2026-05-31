@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+images:
+  engine:
+    tag: engine-dev
+    pullPolicy: Always
+  api:
+    tag: api-dev
+    pullPolicy: Always
+  ui:
+    tag: ui-dev
+    pullPolicy: Always
+
+api:
+  secretKey: "dev-secret-key"
+
+redis:
+  password: "dev-redis-password"
+
+postgresql:
+  password: "dev-pg-password"
+  storage: 1Gi
+
+config:
+  logLevel: DEBUG
+  enforcementMode: audit
