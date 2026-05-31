@@ -1,0 +1,18 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+
+graph TD
+    F020[F020 CLI]
+    F017[F017 FastAPI Backend]
+    S003[S003 Runtime Security Core]
+    S002[S002 Control Plane]
+    HTTPX[httpx]
+    CLICK[click]
+    STRUCTLOG[structlog]
+
+    F020 --> F017
+    F020 --> S003
+    F020 --> S002
+    F020 --> HTTPX
+    F020 --> CLICK
+    F020 --> STRUCTLOG

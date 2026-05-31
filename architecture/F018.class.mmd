@@ -1,62 +1,76 @@
 classDiagram
-  class App {
-    +render routes
-    +health status poll
-  }
-  class Shell {
-    +Header
-    +Sidebar
-    +content slot
-  }
-  class Dashboard {
-    +load audit stats
-    +render KPI + charts
-  }
-  class PolicyCatalog {
-    +catalog/editor/versions tabs
-    +rollback action
-  }
-  class AuditLog {
-    +filters
-    +live websocket feed
-    +detail panel
-  }
-  class AgentMonitor {
-    +trust distribution
-    +agent actions
-  }
-  class Settings {
-    +connection test
-    +sticky save CTA
-  }
-  class ThreatGraph {
-    +phase2 placeholder
-  }
+  class App
+  class AppContext
   class APIClient {
     +apiGet()
     +apiSend()
-  }
-  class useApi {
-    +loader state machine
-  }
-  class useWebSocket {
-    +connect/close stream
+    +fetchAuditStats()
+    +fetchAuditRecords()
+    +fetchTopBlocked()
+    +fetchVolume()
+    +fetchAgents()
+    +dryRunPolicy()
+    +applyPolicy()
   }
 
+  class Shell
+  class Sidebar
+  class IconRail
+  class ExpandedPanel
+  class Header
+
+  class Dashboard
+  class PolicyCatalog
+  class AuditLog
+  class AgentMonitor
+  class AttackGraph
+  class MITRECoverage
+  class GeneralSettings
+  class AccountSettings
+  class APIKeys
+  class ConnectionSettings
+  class AboutPage
+
+  class KPICard
+  class DecisionBadge
+  class TrustBadge
+  class ScoreGauge
+  class DonutChart
+  class DataTable
+
   App --> Shell
+  App --> AppContext
   App --> Dashboard
   App --> PolicyCatalog
   App --> AuditLog
   App --> AgentMonitor
-  App --> Settings
-  App --> ThreatGraph
+  App --> AttackGraph
+  App --> MITRECoverage
+  App --> GeneralSettings
+  App --> AccountSettings
+  App --> APIKeys
+  App --> ConnectionSettings
+  App --> AboutPage
+
+  Shell --> Sidebar
+  Shell --> Header
+  Sidebar --> IconRail
+  Sidebar --> ExpandedPanel
+  Header --> AppContext
+
   Dashboard --> APIClient
+  Dashboard --> KPICard
+  Dashboard --> ScoreGauge
+  Dashboard --> DonutChart
+  Dashboard --> DecisionBadge
+
   PolicyCatalog --> APIClient
-  AuditLog --> useWebSocket
+
   AuditLog --> APIClient
+  AuditLog --> DataTable
+  AuditLog --> DecisionBadge
+  AuditLog --> TrustBadge
+
   AgentMonitor --> APIClient
-  Settings --> APIClient
-  Dashboard --> useApi
-  PolicyCatalog --> useApi
-  AuditLog --> useApi
-  AgentMonitor --> useApi
+  AgentMonitor --> DataTable
+  AgentMonitor --> TrustBadge

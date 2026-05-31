@@ -1,32 +1,13 @@
-flowchart LR
-  A[App.tsx] --> B[Shell.tsx]
-  A --> C[Dashboard.tsx]
-  A --> D[PolicyCatalog.tsx]
-  A --> E[AuditLog.tsx]
-  A --> F[AgentMonitor.tsx]
-  A --> G[Settings.tsx]
-  A --> H[ThreatGraph.tsx]
-  A --> I[api/client.ts]
-  A --> J[hooks/useApi.ts]
+flowchart TD
+  F018[F018: Norviq Web Console]
+  F017[F017: FastAPI API]
+  F013[F013: DB Models]
+  F017U[F017-update: New Endpoints]
+  BLOCKS[F018 blocks]
+  NONE[None (standalone)]
 
-  C --> K[KPICard.tsx]
-  C --> L[ScoreGauge.tsx]
-  C --> M[CategoryBars.tsx]
-  C --> N[DataTable.tsx]
-  C --> O[VolumeChart.tsx]
-  C --> P[DonutChart.tsx]
+  F018 --> F017
+  F018 --> F013
+  F018 --> F017U
 
-  D --> P
-  E --> N
-  E --> O
-  E --> Q[DecisionBadge.tsx]
-  E --> R[TrustBadge.tsx]
-  E --> S[hooks/useWebSocket.ts]
-  F --> N
-  F --> O
-  F --> P
-  F --> R
-
-  T[vite.config.ts] --> U[/api proxy]
-  T --> V[/healthz proxy]
-  T --> W[/ws proxy]
+  BLOCKS --> NONE

@@ -1,25 +1,39 @@
 sequenceDiagram
   autonumber
-  participant U as SOC Analyst
-  participant UI as React UI
-  participant API as FastAPI :8080
-  participant WS as /ws/audit
+  participant User
+  participant Browser as Browser (React UI)
+  participant Proxy as Vite Proxy
+  participant API as FastAPI
+  participant PG as PostgreSQL
+  participant Redis as Redis
 
-  U->>UI: Open dashboard
-  UI->>API: GET /healthz
-  UI->>API: GET /api/v1/audit/stats
-  UI->>API: GET /api/v1/audit/records?decision=block&limit=10
-  UI->>API: GET /api/v1/agents
-  API-->>UI: KPI + blocked rows + trust data
-  UI-->>U: Render score, charts, recent blocks
+  User->>Browser: Open / (Dashboard)
+  Browser->>Proxy: GET /api/v1/audit/stats?range=24h
+  Proxy->>API: Forward request
+  API->>PG: Query aggregated audit stats
+  API-->>Proxy: Stats JSON
+  Proxy-->>Browser: Stats JSON
 
-  U->>UI: Navigate to Audit Log and enable Live
-  UI->>API: GET /api/v1/audit/records?limit=50
-  UI->>WS: Connect ws://localhost:8080/ws/audit
-  WS-->>UI: New audit record events
-  UI-->>U: Prepend animated rows + details
+  Browser->>Proxy: GET /api/v1/audit/records?limit=10&decision=block
+  Proxy->>API: Forward request
+  API->>PG: Query latest audit rows
+  API-->>Proxy: Records JSON
+  Proxy-->>Browser: Records JSON
+  Browser-->>User: Render KPI cards + charts + table
 
-  U->>UI: Open policy versions and click Restore
-  UI->>API: POST /api/v1/policies/{ns}/{class}/rollback
-  API-->>UI: rollback confirmation
-  UI-->>U: Updated version table state
+  User->>Browser: Change namespace/time-range filter
+  Browser->>Proxy: Re-fetch /api/v1/* with new query params
+  Proxy->>API: Forward filtered requests
+  API->>PG: Recompute filtered datasets
+  API->>Redis: Read/write trust cache where needed
+  API-->>Proxy: Filtered payloads
+  Proxy-->>Browser: Updated data
+  Browser-->>User: Re-render filtered dashboard/audit views
+
+  User->>Browser: Open Policy Catalog and click Apply
+  Browser->>Proxy: POST /api/v1/policies/{ns}/{class}/apply
+  Proxy->>API: Forward mutation
+  API->>PG: Persist policy/enforcement changes
+  API-->>Proxy: Apply result
+  Proxy-->>Browser: Apply result JSON
+  Browser-->>User: Show updated policy state

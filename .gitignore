@@ -1,4 +1,4 @@
-__pycache__/
+﻿__pycache__/
 *.pyc
 .venv/
 *.egg-info/
@@ -16,6 +16,7 @@ specs/
 .cursor/
 registry/
 .reviews/
+docs/design-system/
 download_specs.sh
 CLAUDE.md
 
