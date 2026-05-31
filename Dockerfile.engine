@@ -20,4 +20,4 @@ EXPOSE 8282
 ENV NRVQ_SOCKET_PATH=/tmp/norviq-proxy.sock
 ENV NRVQ_HTTP_FALLBACK_PORT=8282
 
-CMD ["python", "-m", "norviq.sidecar.proxy"]
+CMD ["python", "-m", "norviq.sidecar"]
