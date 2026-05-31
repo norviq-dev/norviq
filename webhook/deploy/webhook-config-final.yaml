@@ -1,0 +1,30 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: norviq-sidecar-injector
+webhooks:
+  - name: sidecar-injector.norviq.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    clientConfig:
+      service:
+        name: norviq-webhook
+        namespace: norviq
+        path: /mutate
+      caBundle: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURLVENDQWhHZ0F3SUJBZ0lVSVRPdmEraTIzSUlaVHFUaW4xRVBYYmhlKy9Jd0RRWUpLb1pJaHZjTkFRRUwKQlFBd0pERWlNQ0FHQTFVRUF3d1pibTl5ZG1seExYZGxZbWh2YjJzdWJtOXlkbWx4TG5OMll6QWVGdzB5TmpBMQpNekV4TmpReU1EbGFGdzB5TnpBMU16RXhOalF5TURsYU1DUXhJakFnQmdOVkJBTU1HVzV2Y25acGNTMTNaV0pvCmIyOXJMbTV2Y25acGNTNXpkbU13Z2dFaU1BMEdDU3FHU0liM0RRRUJBUVVBQTRJQkR3QXdnZ0VLQW9JQkFRRGkKSDJLZU1pQlR5MzZCZmlSTnJYRE5QbFpQY1BzOUF0Y204TjJXTUtpOUZxbFRRTWludmJ5YmhZM2xydTZlNkt0cQptYnEveGJzYTVyS3QrNDRpY0pvOE1sSkRzOSswUGZaRG5WQVlqWHQ0NVdaTlJ6Z1dweC83Qzg2ZHVVUENlK1hnCjlRdGcvYXo5bjVYRFpCelpPSkpNZFBJVDdsZ01IbGxTZ0o0ejdTaVhabDVkK3F1bnlWNlNhSGU4aUpvcFF5cXcKanMyc1A5RGFscFMvL08zczdwSUw5d0pNMW1CZTZZeTBlbjNjdEhKMnY5WFVDVnBBdDc3VDBIbUNhY1puYTYzegpOaWFpNi8vTzZibXI4anptTWk3Q2x5dGU3QWJHL3BRQW4xaHhMRG4xc0tJYUZQdnJJakNhOFlmSlgyK3Z1ajhZCmFRc2xKSkhCa1lPRjBaQnBLcUN0QWdNQkFBR2pVekJSTUIwR0ExVWREZ1FXQkJTeXNZc253TXAyQVlBU2I1SEwKL0o5QkphZWtuVEFmQmdOVkhTTUVHREFXZ0JTeXNZc253TXAyQVlBU2I1SEwvSjlCSmFla25UQVBCZ05WSFJNQgpBZjhFQlRBREFRSC9NQTBHQ1NxR1NJYjNEUUVCQ3dVQUE0SUJBUURLWDltT3IvaThFSmxQdDgzV1ZmNGJQNEt3CmsyQTE0VTJIaXdWazdZN2s3eFdsaXJQU1J1TERvdWZMV3ZMbmRoUUYrcVN2SkFLc2thcXhYcDBZQlBMclpjQ0cKZ1lHVjNKZEg4QVhzL2RocGV3T0ZyQUswM3JDVlFIamVqeExaT3J1bHU3SmhpV0FYTFdqYWJ1N3RINzhLVmx2RApBNWxvQm1weWVXQ0V3b3Fsc25VMVNOZTRvU3RtMnY3em9xQk5ienhLbkFxbjdKZmZTaVROeEJiYVdIWEtmVmI4CkpUZkdQRkFISEwwVTRTRHlYVEtlMFpXVDF1MFpiZVVtUEVqQjk3OWtqcURJZzc5V2dWS3J2cWRXN3lMOFVsdFkKY0s1OTdtdEM3WjFpUXNaTGIyK1VycjRseXVxUHpOQjducGM4VkZWSUQrV2hUdFlEbXhieFRDc0lMbktJCi0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K
+    rules:
+      - operations: ["CREATE"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+    namespaceSelector:
+      matchExpressions:
+        - key: norviq-injection
+          operator: In
+          values: ["enabled"]
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values: ["kube-system", "kube-public", "kube-node-lease", "norviq"]
+    failurePolicy: Ignore
+    reinvocationPolicy: Never
+    timeoutSeconds: 5
