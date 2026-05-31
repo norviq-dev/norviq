@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 images:
   engine:
-    tag: engine-dev
+    tag: engine-latest
     pullPolicy: Always
   api:
-    tag: api-dev
+    tag: api-latest
     pullPolicy: Always
   ui:
-    tag: ui-dev
+    tag: ui-latest
     pullPolicy: Always
 
 api:

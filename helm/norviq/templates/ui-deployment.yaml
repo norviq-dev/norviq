@@ -16,6 +16,8 @@ spec:
       labels:
         app: norviq-ui
     spec:
+      imagePullSecrets:
+        - name: dockerhub-secret
       containers:
         - name: ui
           image: "{{ .Values.images.ui.repository }}:{{ .Values.images.ui.tag }}"

@@ -16,6 +16,8 @@ spec:
       labels:
         app: norviq-engine
     spec:
+      imagePullSecrets:
+        - name: dockerhub-secret
       containers:
         - name: engine
           image: "{{ .Values.images.engine.repository }}:{{ .Values.images.engine.tag }}"
