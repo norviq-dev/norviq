@@ -20,6 +20,7 @@ from norviq.engine.cache import RedisCache
 from norviq.engine.evaluator import OPAEvaluator
 from norviq.engine.identity import SPIFFEResolver
 from norviq.sdk.core.interceptor import ToolInterceptor
+from norviq.sidecar import __main__ as sidecar_main
 from norviq.sidecar.http_fallback import create_http_fallback
 from norviq.sidecar.proxy import SidecarProxy
 
@@ -199,3 +200,95 @@ async def test_graceful_shutdown_closes_server(socket_path: str, monkeypatch: py
     await proxy.stop()
     with pytest.raises((ConnectionRefusedError, FileNotFoundError)):
         await asyncio.open_unix_connection(socket_path)
+
+
+async def test_sidecar_main_starts_proxy_and_http_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Main entrypoint should start Unix proxy and HTTP fallback server."""
+
+    class StubProxy:
+        def __init__(self) -> None:
+            self._interceptor = object()
+            self._emitter = object()
+            self._resolver = object()
+            self.started = False
+            self.stopped = False
+
+        async def start(self) -> None:
+            self.started = True
+
+        async def stop(self) -> None:
+            self.stopped = True
+
+    class StubServer:
+        def __init__(self, _: object) -> None:
+            self.served = False
+
+        async def serve(self) -> None:
+            self.served = True
+            return None
+
+    created: dict[str, object] = {}
+
+    def _proxy_factory() -> StubProxy:
+        proxy = StubProxy()
+        created["proxy"] = proxy
+        return proxy
+
+    def _create_http_fallback(interceptor: object, emitter: object, resolver: object) -> object:
+        created["interceptor"] = interceptor
+        created["emitter"] = emitter
+        created["resolver"] = resolver
+        created["app"] = object()
+        return created["app"]
+
+    monkeypatch.setattr(sidecar_main, "SidecarProxy", _proxy_factory)
+    monkeypatch.setattr(sidecar_main, "create_http_fallback", _create_http_fallback)
+    monkeypatch.setattr(sidecar_main.uvicorn, "Config", lambda app, **kwargs: {"app": app, **kwargs})
+    monkeypatch.setattr(sidecar_main.uvicorn, "Server", lambda config: StubServer(config))
+
+    await sidecar_main.main()
+
+    proxy = created["proxy"]
+    assert isinstance(proxy, StubProxy)
+    assert proxy.started is True
+    assert proxy.stopped is True
+    assert created["app"] is not None
+    assert created["interceptor"] is proxy._interceptor
+    assert created["emitter"] is proxy._emitter
+    assert created["resolver"] is proxy._resolver
+
+
+async def test_http_fallback_malformed_json_fails_open() -> None:
+    """Malformed HTTP body should fail open with forward action."""
+
+    class StubDecision:
+        def is_allowed(self) -> bool:
+            return True
+
+        def model_dump(self, mode: str = "json") -> dict[str, str]:
+            return {"decision": "allow"}
+
+    class StubInterceptor:
+        async def intercept(self, *_: object, **__: object) -> StubDecision:
+            return StubDecision()
+
+    class StubResolver:
+        async def resolve(self) -> object:
+            class _Identity:
+                trust_domain = "example.org"
+                namespace = "default"
+                service_account = "sa"
+
+            return _Identity()
+
+    class StubEmitter:
+        def emit(self, *_: object, **__: object) -> None:
+            return None
+
+    app = create_http_fallback(StubInterceptor(), StubEmitter(), StubResolver())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/evaluate", content="not-json", headers={"content-type": "application/json"})
+    assert response.status_code == 200
+    assert response.json()["action"] == "forward"
+    assert response.json()["error"] == "invalid_json_body"

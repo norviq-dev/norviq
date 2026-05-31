@@ -26,9 +26,20 @@ jobs:
       NRVQ_PG_URL: postgresql://norviq:norviq_dev@localhost:5432/norviq
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Webhook go vet
+        run: |
+          cd webhook
+          go vet ./...
+      - name: Webhook race tests
+        run: |
+          cd webhook
+          go test -race ./...
       - name: Install dependencies
         run: pip install -e ".[dev]" pip-audit bandit ruff
       - name: Lint

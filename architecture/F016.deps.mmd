@@ -1,0 +1,9 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+graph LR
+    S002[S002 Runtime Config] --> F016[F016 Mutating Webhook]
+    F015[F015 Sidecar Runtime] --> F016[F016 Mutating Webhook]
+    F021[F021 Platform Wiring] --> F016
+    F016 --> F022[F022 Agent Admission Policy]
+    F016 --> F023[F023 Runtime Identity Controls]
+    F016 --> F024[F024 Enforcement Rollout]

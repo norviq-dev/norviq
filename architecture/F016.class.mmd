@@ -1,0 +1,53 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+classDiagram
+    class Main {
+      +main()
+      +setLogger(cfg)
+      +newServer(cfg)
+      +shutdownOnSignal(server)
+    }
+    class Config {
+      +int Port
+      +string CertFile
+      +string KeyFile
+      +string SidecarImage
+      +int SidecarPort
+      +string EnableLabel
+      +string EnableValue
+      +string AgentClassLabel
+      +slog.Level LogLevel
+    }
+    class Handler {
+      -Config cfg
+      -Injector injector
+      +Healthz()
+      +Readyz()
+      +Mutate()
+      -handleAdmission()
+      -patchResponse()
+    }
+    class Injector {
+      -Config cfg
+      +CreatePatch(pod, agentClass)
+      +buildSidecar(agentClass)
+    }
+    class SidecarMain {
+      +main()
+    }
+    class SidecarProxy {
+      +start()
+      +stop()
+    }
+    class HttpFallback {
+      +create_http_fallback()
+      +GET /healthz
+      +POST /v1/evaluate
+    }
+    Main --> Handler : wires routes
+    Main --> Config : loads
+    Handler --> Injector : uses
+    Handler --> Config : configured by
+    Injector --> Config : uses sidecar settings
+    SidecarMain --> SidecarProxy : starts socket proxy
+    SidecarMain --> HttpFallback : starts HTTP fallback

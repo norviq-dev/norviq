@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: norviq-webhook
+  namespace: norviq
+  labels:
+    app: norviq-webhook
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: norviq-webhook
+  template:
+    metadata:
+      labels:
+        app: norviq-webhook
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        - name: dockerhub-secret
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - norviq-webhook
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: webhook
+          image: sanman97/norviq-engine:webhook-latest
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - containerPort: 8443
+              name: https
+          env:
+            - name: NRVQ_SIDECAR_IMAGE
+              value: sanman97/norviq-engine:engine-latest
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /etc/webhook/certs
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 3
+            periodSeconds: 10
+      volumes:
+        - name: webhook-certs
+          secret:
+            secretName: norviq-webhook-tls
