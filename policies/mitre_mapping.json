@@ -1,0 +1,57 @@
+{
+  "AML.T0048": {
+    "name": "Prompt Injection to Tool Misuse",
+    "policies": [
+      "llm01_prompt_injection"
+    ]
+  },
+  "AML.T0049": {
+    "name": "Agent Chain Manipulation",
+    "policies": [
+      "cross_tenant_access",
+      "namespace_isolation"
+    ]
+  },
+  "AML.T0051": {
+    "name": "Excessive Agency",
+    "policies": [
+      "llm06_excessive_agency",
+      "deny_write_operations",
+      "deny_delete_operations"
+    ]
+  },
+  "AML.T0053": {
+    "name": "LLM Plugin Compromise",
+    "policies": [
+      "llm05_supply_chain"
+    ]
+  },
+  "AML.T0054": {
+    "name": "LLM Jailbreak",
+    "policies": [
+      "deny_shell_execution",
+      "llm01_prompt_injection"
+    ]
+  },
+  "AML.T0057": {
+    "name": "Data Exfiltration via Tool",
+    "policies": [
+      "llm02_data_leakage",
+      "data_exfiltration",
+      "pii_detection"
+    ]
+  },
+  "AML.T0024": {
+    "name": "Exfiltration via ML Inference",
+    "policies": [
+      "llm02_data_leakage"
+    ]
+  },
+  "AML.T0061": {
+    "name": "Unsafe Tool Output Handling",
+    "policies": [
+      "deny_shell_execution",
+      "deny_sql_injection"
+    ]
+  }
+}
