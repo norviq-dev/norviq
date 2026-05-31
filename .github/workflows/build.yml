@@ -27,7 +27,7 @@ jobs:
             dockerfile: Dockerfile.ui
             context: .
           - component: webhook
-            dockerfile: webhook/Dockerfile
+            dockerfile: Dockerfile
             context: webhook
     steps:
       - uses: actions/checkout@v4
