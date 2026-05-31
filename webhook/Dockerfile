@@ -9,6 +9,6 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o webhook .
 
 FROM gcr.io/distroless/static-debian12
 COPY --from=builder /build/webhook /webhook
-USER nonroot:nonroot
+USER 65534:65534
 EXPOSE 8443
 ENTRYPOINT ["/webhook"]
