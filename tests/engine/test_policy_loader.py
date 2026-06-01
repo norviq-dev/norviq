@@ -74,7 +74,7 @@ async def test_create_updates_cache_and_evaluator(loader: PolicyLoader) -> None:
     rego = f"package p.{suffix}.allow"
     await loader.create(ns, cls, rego, saved_by="dev")
     assert await loader._cache.get_policy(ns, cls) == rego
-    assert loader._evaluator._policies[f"{ns}:{cls}"] == rego
+    assert loader._evaluator._policies[f"{ns}:{cls}"]["rego"] == rego
 
 
 async def test_rollback_restores_previous_policy(loader: PolicyLoader) -> None:
@@ -121,7 +121,7 @@ async def test_reload_all_loads_every_policy(loader: PolicyLoader, monkeypatch: 
     suffix = _suffix()
     seen: list[tuple[str, str, str]] = []
 
-    def _record(namespace: str, agent_class: str, rego_source: str) -> None:
+    def _record(namespace: str, agent_class: str, rego_source: str, priority: int = 100) -> None:
         seen.append((namespace, agent_class, rego_source))
 
     monkeypatch.setattr(loader._evaluator, "load_policy", _record)

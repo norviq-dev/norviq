@@ -44,6 +44,25 @@ func main() {
 		shutdownOnSignal(server)
 		close(done)
 	}()
+
+	if os.Getenv("NRVQ_CONTROLLER_ENABLED") == "true" {
+		apiURL := envStr("NRVQ_API_URL", "http://norviq-api:8080")
+		apiToken := envStr("NRVQ_API_TOKEN", "")
+		ctrl, err := NewController(apiURL, apiToken)
+		if err != nil {
+			slog.Error("NRVQ-WHK-4020: controller init failed", "error", err)
+		} else {
+			ctrl.runtime = cfg.Runtime
+			ctrl.defaultSidecarImage = cfg.SidecarImage
+			ctrl.adminPolicyNamespace = cfg.AdminPolicyNamespace
+			go func() {
+				if err := ctrl.Start(stopCtx); err != nil {
+					slog.Error("NRVQ-WHK-4021: controller failed", "error", err)
+				}
+			}()
+		}
+	}
+
 	slog.Info("NRVQ-WHK-4000: webhook server starting", "port", cfg.Port)
 	if err = server.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 		slog.Error("NRVQ-WHK-4002: server failed to start", "error", err)
@@ -60,6 +79,7 @@ func newServer(cfg Config) (*http.Server, error) {
 	handler := NewHandler(cfg)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/mutate", handler.Mutate)
+	mux.HandleFunc("/validate-policy", handler.ValidatePolicy)
 	mux.HandleFunc("/healthz", handler.Healthz)
 	mux.HandleFunc("/readyz", handler.Readyz)
 	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
@@ -98,7 +118,7 @@ func recoveryMiddleware(next http.Handler) http.Handler {
 			if recovered := recover(); recovered != nil {
 				slog.Error("NRVQ-WHK-4010: panic recovered", "error", recovered, "stack", string(debug.Stack()))
 				uid, _ := r.Context().Value(admissionUIDKey).(string)
-				allowResponse(w, uid)
+				denyResponse(w, uid, "admission webhook internal error")
 			}
 		}()
 		next.ServeHTTP(w, r)
@@ -112,6 +132,23 @@ func allowResponse(w http.ResponseWriter, uid string) {
 		"response": map[string]interface{}{
 			"allowed": true,
 			"uid":     uid,
+		},
+	})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(payload)
+}
+
+func denyResponse(w http.ResponseWriter, uid, message string) {
+	payload, _ := json.Marshal(map[string]interface{}{
+		"apiVersion": "admission.k8s.io/v1",
+		"kind":       "AdmissionReview",
+		"response": map[string]interface{}{
+			"allowed": false,
+			"uid":     uid,
+			"status": map[string]interface{}{
+				"message": message,
+			},
 		},
 	})
 	w.Header().Set("Content-Type", "application/json")

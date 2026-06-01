@@ -16,6 +16,7 @@ from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.trust import TrustScore
 
 log = structlog.get_logger()
+POLICY_EVENTS_CHANNEL = "norviq:policy_events"
 
 TRUST_DECREMENT_LUA = """
 local current = redis.call('GET', KEYS[1])
@@ -69,17 +70,33 @@ class RedisCache:
 
     async def get_policy(self, namespace: str, agent_class: str) -> str | None:
         """Get cached policy source."""
+        entry = await self.get_policy_entry(namespace, agent_class)
+        if entry is None:
+            return None
+        return str(entry.get("rego", ""))
+
+    async def get_policy_entry(self, namespace: str, agent_class: str) -> dict | None:
+        """Get cached policy entry including metadata."""
         key = f"policy:{namespace}:{agent_class}"
         value = await self._client().get(key)
-        if value is not None:
-            log.debug("nrvq.cache.policy.hit", key=key, code="NRVQ-DB-9011")
-        return value
+        if value is None:
+            return None
+        log.debug("nrvq.cache.policy.hit", key=key, code="NRVQ-DB-9011")
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            # Backward compatibility for older raw-string cache values.
+            return {"rego": value, "priority": 100, "version": 0}
+        return {"rego": value, "priority": 100, "version": 0}
 
-    async def set_policy(self, namespace: str, agent_class: str, rego: str) -> None:
+    async def set_policy(self, namespace: str, agent_class: str, rego: str, priority: int = 100, version: int = 0) -> None:
         """Cache policy source with TTL jitter."""
         key = f"policy:{namespace}:{agent_class}"
         ttl = self._jitter_ttl(settings.redis_ttl_policy_s)
-        await self._client().setex(key, ttl, rego)
+        payload = json.dumps({"rego": rego, "priority": int(priority), "version": int(version)})
+        await self._client().setex(key, ttl, payload)
         log.debug("nrvq.cache.policy.set", key=key, ttl=ttl, code="NRVQ-DB-9012")
 
     async def delete_policy(self, namespace: str, agent_class: str) -> None:
@@ -88,11 +105,36 @@ class RedisCache:
         await self._client().delete(key)
         log.debug("nrvq.cache.policy.deleted", key=key, code="NRVQ-DB-9020")
 
-    async def warm_policy(self, namespace: str, agent_class: str, rego: str) -> bool:
+    async def warm_policy(
+        self,
+        namespace: str,
+        agent_class: str,
+        rego: str,
+        priority: int = 100,
+        version: int = 0,
+    ) -> bool:
         """Warm policy cache using first-writer-wins semantics."""
         key = f"policy:{namespace}:{agent_class}"
         ttl = self._jitter_ttl(settings.redis_ttl_policy_s)
-        return bool(await self._client().set(key, rego, ex=ttl, nx=True))
+        payload = json.dumps({"rego": rego, "priority": int(priority), "version": int(version)})
+        return bool(await self._client().set(key, payload, ex=ttl, nx=True))
+
+    async def list_policy_entries(self) -> dict[str, dict]:
+        """List all cached policy entries for runtime hydration."""
+        entries: dict[str, dict] = {}
+        client = self._client()
+        async for key in client.scan_iter(match="policy:*"):
+            value = await client.get(key)
+            if value is None:
+                continue
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                parsed = {"rego": value, "priority": 100, "version": 0}
+            if not isinstance(parsed, dict):
+                continue
+            entries[str(key)] = parsed
+        return entries
 
     async def get_trust(self, spiffe_id: str) -> TrustScore | None:
         """Get cached trust score."""
@@ -139,9 +181,74 @@ class RedisCache:
     async def set_eval(self, namespace: str, agent_class: str, tool_name: str, decision: PolicyDecision) -> None:
         """Cache policy decision with TTL jitter."""
         key = f"eval:{namespace}:{agent_class}:{tool_name}"
-        ttl = self._jitter_ttl(settings.redis_ttl_policy_s)
+        # ttl = 5 by default via settings.redis_ttl_eval_s.
+        ttl = self._jitter_ttl(settings.redis_ttl_eval_s)
         await self._client().setex(key, ttl, decision.model_dump_json())
         log.debug("nrvq.cache.eval.set", key=key, ttl=ttl, code="NRVQ-DB-9018")
+
+    async def invalidate_eval_scope(self, namespace: str, agent_class: str | None = None) -> int:
+        """Invalidate cached eval decisions for a namespace/class scope."""
+        if agent_class:
+            pattern = f"eval:{namespace}:{agent_class}:*"
+        else:
+            pattern = f"eval:{namespace}:*"
+        client = self._client()
+        keys = []
+        async for key in client.scan_iter(match=pattern):
+            keys.append(key)
+        if not keys:
+            return 0
+        deleted = int(await client.delete(*keys))
+        log.info("nrvq.cache.eval.invalidated", namespace=namespace, agent_class=agent_class, count=deleted, code="NRVQ-DB-9021")
+        return deleted
+
+    async def invalidate_all_eval(self) -> int:
+        """Invalidate all cached eval decisions across namespaces."""
+        client = self._client()
+        keys = []
+        async for key in client.scan_iter(match="eval:*"):
+            keys.append(key)
+        if not keys:
+            return 0
+        deleted = int(await client.delete(*keys))
+        log.info("nrvq.cache.eval.invalidated_all", count=deleted, code="NRVQ-DB-9022")
+        return deleted
+
+    async def publish_policy_event(self, operation: str, namespace: str, agent_class: str, version: int = 0) -> None:
+        """Publish policy update event for multi-replica synchronization."""
+        payload = json.dumps(
+            {
+                "operation": operation,
+                "namespace": namespace,
+                "agent_class": agent_class,
+                "version": int(version),
+            }
+        )
+        await self._client().publish(POLICY_EVENTS_CHANNEL, payload)
+
+    async def listen_policy_events(self, handler) -> None:
+        """Listen for policy update events and invoke async handler."""
+        client = self._client()
+        pubsub = client.pubsub()
+        await pubsub.subscribe(POLICY_EVENTS_CHANNEL)
+        try:
+            while True:
+                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if not message:
+                    continue
+                data = message.get("data")
+                if isinstance(data, bytes):
+                    data = data.decode("utf-8")
+                if not isinstance(data, str):
+                    continue
+                try:
+                    event = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                await handler(event)
+        finally:
+            await pubsub.unsubscribe(POLICY_EVENTS_CHANNEL)
+            await pubsub.aclose()
 
     async def incr_call_count(self, spiffe_id: str, window_s: int = 60) -> int:
         """Increment call count atomically for rate windows."""

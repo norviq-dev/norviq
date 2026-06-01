@@ -1,0 +1,18 @@
+{{- if .Values.baselineClusterPolicy.enabled }}
+{{- range $ns := .Values.policyQuotaNamespaces }}
+apiVersion: norviq.io/v1alpha1
+kind: NrvqPolicy
+metadata:
+  name: {{ $.Values.baselineClusterPolicy.name }}-{{ $ns }}
+  namespace: {{ $.Values.namespace }}
+  labels:
+    {{- include "norviq.labels" $ | nindent 4 }}
+spec:
+  target:
+    namespace: {{ $ns }}
+  enforcementMode: block
+  preset: {{ $.Values.baselineClusterPolicy.preset }}
+  clusterPriority: {{ $.Values.baselineClusterPolicy.clusterPriority }}
+---
+{{- end }}
+{{- end }}

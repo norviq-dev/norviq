@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"sync"
 )
 
 type Config struct {
@@ -17,11 +18,19 @@ type Config struct {
 	EnableLabel     string
 	EnableValue     string
 	AgentClassLabel string
+	AdminPolicyNamespace string
 	LogLevel        slog.Level
+	Runtime         *RuntimeConfig
+}
+
+type RuntimeConfig struct {
+	mu           sync.RWMutex
+	sidecarImage string
 }
 
 func LoadConfig() Config {
-	return Config{
+	runtime := &RuntimeConfig{}
+	cfg := Config{
 		Port:            envInt("NRVQ_WEBHOOK_PORT", 8443),
 		CertFile:        envStr("NRVQ_TLS_CERT", "/etc/webhook/certs/tls.crt"),
 		KeyFile:         envStr("NRVQ_TLS_KEY", "/etc/webhook/certs/tls.key"),
@@ -30,8 +39,27 @@ func LoadConfig() Config {
 		EnableLabel:     envStr("NRVQ_ENABLE_LABEL", "norviq"),
 		EnableValue:     envStr("NRVQ_ENABLE_VALUE", "enabled"),
 		AgentClassLabel: envStr("NRVQ_AGENT_CLASS_LABEL", "norviq.io/agent-class"),
+		AdminPolicyNamespace: envStr("NRVQ_ADMIN_POLICY_NAMESPACE", "norviq"),
 		LogLevel:        slog.LevelInfo,
+		Runtime:         runtime,
 	}
+	runtime.SetSidecarImage(cfg.SidecarImage)
+	return cfg
+}
+
+func (r *RuntimeConfig) SetSidecarImage(image string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sidecarImage = image
+}
+
+func (r *RuntimeConfig) SidecarImage(defaultImage string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.sidecarImage == "" {
+		return defaultImage
+	}
+	return r.sidecarImage
 }
 
 func envStr(key, fallback string) string {

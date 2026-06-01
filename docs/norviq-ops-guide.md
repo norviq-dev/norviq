@@ -315,6 +315,15 @@ helm template norviq helm/norviq/ -f helm/norviq/values-dev.yaml
 helm lint helm/norviq/
 ```
 
+### Required onboarding step: quota coverage for tenant namespaces
+
+`policyQuotaNamespaces` in Helm values must include **every** tenant namespace that can create `NrvqPolicy`.
+If a namespace is missing from this list, no `ResourceQuota` is rendered there and policy-flood protection is absent.
+
+Operational rule:
+- On every tenant onboarding, add namespace to `policyQuotaNamespaces` and run `helm upgrade`.
+- Label every tenant namespace with `norviq.io/policy-quota=enabled`; the ValidatingAdmissionPolicy denies `NrvqPolicy` creates/updates in unlabeled namespaces.
+
 ## 11. Troubleshooting Checklist
 
 ### Pod won't start

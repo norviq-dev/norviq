@@ -25,7 +25,7 @@ class FakeCache:
 
     def __init__(self) -> None:
         self.trust: dict[str, TrustScore] = {}
-        self.policy: dict[str, str] = {}
+        self.policy: dict[str, dict] = {}
 
     def _client(self) -> "FakeCache":
         """Return self for scan_iter compatibility."""
@@ -44,20 +44,46 @@ class FakeCache:
         """Set trust by id."""
         self.trust[spiffe_id] = score
 
-    async def set_policy(self, namespace: str, agent_class: str, rego: str) -> None:
+    async def set_policy(
+        self,
+        namespace: str,
+        agent_class: str,
+        rego: str,
+        priority: int = 100,
+        version: int = 0,
+    ) -> None:
         """Set policy source."""
-        self.policy[f"{namespace}:{agent_class}"] = rego
+        self.policy[f"{namespace}:{agent_class}"] = {"rego": rego, "priority": int(priority), "version": int(version)}
 
     async def delete_policy(self, namespace: str, agent_class: str) -> None:
         """Delete policy source."""
         self.policy.pop(f"{namespace}:{agent_class}", None)
 
+    async def invalidate_eval_scope(self, namespace: str, agent_class: str | None = None) -> int:
+        """No-op invalidation for API unit tests."""
+        return 0
+
+    async def invalidate_all_eval(self) -> int:
+        """No-op global invalidation for API unit tests."""
+        return 0
+
+    async def publish_policy_event(self, operation: str, namespace: str, agent_class: str, version: int = 0) -> None:
+        """No-op policy event publish for API unit tests."""
+        return None
+
+    async def list_policy_entries(self) -> dict[str, dict]:
+        """Return fake policy entries keyed like Redis policy:* keys."""
+        return {f"policy:{key}": value for key, value in self.policy.items()}
+
 
 class FakeEvaluator:
     """Policy evaluator stub."""
 
-    def load_policy(self, namespace: str, agent_class: str, rego_source: str) -> None:
+    def load_policy(self, namespace: str, agent_class: str, rego_source: str, priority: int = 100) -> None:
         """Accept loaded policy."""
+
+    def bind_loader(self, loader: object) -> None:
+        """Accept loader binding."""
 
 
 class FakeSession:
@@ -147,7 +173,8 @@ def test_policy_crud_flow() -> None:
     """Create, list, get, delete policy."""
     client = _client()
     try:
-        body = {"namespace": "payments", "agent_class": "planner", "rego_source": "package norviq.allow"}
+        rego = 'package norviq\ndecision = "block" { input.tool_name == "danger" }\nrule_id = "r"\nreason = "x"'
+        body = {"namespace": "payments", "agent_class": "planner", "rego_source": rego}
         created = client.post("/api/v1/policies", json=body, headers=_auth_headers())
         assert created.status_code == 200
         assert created.json()["version"] == 1
@@ -155,8 +182,96 @@ def test_policy_crud_flow() -> None:
         assert listed and listed[0]["namespace"] == "payments"
         fetched = client.get("/api/v1/policies/payments/planner")
         assert fetched.status_code == 200
-        assert fetched.json()["rego_source"] == "package norviq.allow"
+        assert fetched.json()["rego_source"] == rego
         assert client.delete("/api/v1/policies/payments/planner", headers=_auth_headers()).json() == {"deleted": True}
+    finally:
+        client.close()
+
+
+def test_policy_create_allows_default_allow_with_enforcement() -> None:
+    """Allow default-allow rego when explicit enforcement rules exist."""
+    client = _client()
+    try:
+        body = {
+            "namespace": "payments",
+            "agent_class": "planner",
+            "rego_source": 'package norviq\ndefault decision = "allow"\ndecision = "block" { true }\nrule_id = "r"\nreason = "x"',
+        }
+        response = client.post("/api/v1/policies", json=body, headers=_auth_headers())
+        assert response.status_code == 200
+    finally:
+        client.close()
+
+
+def test_policy_create_allows_spaced_default_allow_with_enforcement() -> None:
+    """Allow spaced default-allow assignment when enforcement rules exist."""
+    client = _client()
+    try:
+        body = {
+            "namespace": "payments",
+            "agent_class": "planner",
+            "rego_source": 'package norviq\ndefault   decision= "allow"\ndecision = "block" { true }\nrule_id = "r"\nreason = "x"',
+        }
+        response = client.post("/api/v1/policies", json=body, headers=_auth_headers())
+        assert response.status_code == 200
+    finally:
+        client.close()
+
+
+def test_policy_create_rejects_regex_flood() -> None:
+    """Reject direct API policy with too many regex operations."""
+    client = _client()
+    try:
+        body = {
+            "namespace": "payments",
+            "agent_class": "planner",
+            "rego_source": (
+                'package norviq\n'
+                'decision = "block" { regex.match("a", input.tool_name) }\n'
+                'decision = "block" { regex.match("b", input.tool_name) }\n'
+                'decision = "block" { regex.match("c", input.tool_name) }\n'
+                'decision = "block" { regex.match("d", input.tool_name) }\n'
+                'decision = "block" { regex.match("e", input.tool_name) }\n'
+                'decision = "block" { regex.match("f", input.tool_name) }\n'
+                'rule_id = "r"\n'
+                'reason = "x"'
+            ),
+        }
+        response = client.post("/api/v1/policies", json=body, headers=_auth_headers())
+        assert response.status_code == 422
+    finally:
+        client.close()
+
+
+def test_policy_create_regex_text_literal_allowed() -> None:
+    """Allow regex words in string literals when no regex builtins are called."""
+    client = _client()
+    try:
+        body = {
+            "namespace": "payments",
+            "agent_class": "planner",
+            "rego_source": 'package norviq\ndecision = "block" { input.tool_name == "regex.match literal" }\nrule_id = "r"\nreason = "x"',
+        }
+        response = client.post("/api/v1/policies", json=body, headers=_auth_headers())
+        assert response.status_code == 200
+    finally:
+        client.close()
+
+
+def test_policy_create_uses_policy_name_when_agent_class_empty() -> None:
+    """Use policy_name as storage key for non-agentClass policy payloads."""
+    client = _client()
+    try:
+        body = {
+            "namespace": "payments",
+            "agent_class": "",
+            "policy_name": "payments-baseline",
+            "target": {"namespace": "payments"},
+            "rego_source": 'package norviq\ndefault decision = "allow"\ndecision = "block" { input.tool_name == "danger" }\nrule_id = "r"\nreason = "x"',
+        }
+        response = client.post("/api/v1/policies", json=body, headers=_auth_headers())
+        assert response.status_code == 200
+        assert response.json()["agent_class"] == "payments-baseline"
     finally:
         client.close()
 
@@ -354,7 +469,7 @@ def test_dry_run() -> None:
     policy_router.get_session = fake_session
     client = _client()
     try:
-        body = {"namespace": "payments", "agent_class": "planner", "rego_source": "package norviq.allow"}
+        body = {"namespace": "payments", "agent_class": "planner", "rego_source": 'package norviq\ndecision = "block" { input.tool_name == "danger" }\nrule_id = "r"\nreason = "x"'}
         response = client.post("/api/v1/policies/dry-run", json=body)
         assert response.status_code == 200
         assert response.json()["total_records_checked"] == 1
@@ -366,7 +481,7 @@ def test_apply_policy() -> None:
     """Apply a saved policy to target scope."""
     client = _client()
     try:
-        create_body = {"namespace": "payments", "agent_class": "planner", "rego_source": "package norviq.allow"}
+        create_body = {"namespace": "payments", "agent_class": "planner", "rego_source": 'package norviq\ndecision = "block" { input.tool_name == "danger" }\nrule_id = "r"\nreason = "x"'}
         assert client.post("/api/v1/policies", json=create_body, headers=_auth_headers()).status_code == 200
         apply_body = {
             "target_type": "namespace",

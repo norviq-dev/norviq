@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+apiVersion: norviq.io/v1alpha1
+kind: NrvqConfig
+metadata:
+  name: default
+spec:
+  global:
+    enforcementMode: block
+    logLevel: INFO
+  trust:
+    defaultScore: 0.8
+    threshold: 0.4
+    violationPenalty: 0.05
+    decayHours: 24
+  rateLimit:
+    defaultMaxPerMinute: 60
+    burstThreshold: 20
+  sidecar:
+    image: sanman97/norviq-engine:engine-latest
+    port: 8282
+    resources:
+      cpuRequest: "50m"
+      memoryRequest: "64Mi"
+      cpuLimit: "200m"
+      memoryLimit: "128Mi"
+  telemetry:
+    enabled: true
+    endpoint: http://otel-collector:4317

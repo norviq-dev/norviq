@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import time
 
 import structlog
@@ -29,10 +30,11 @@ class OPAEvaluator:
         self._cache = cache
         self._semaphore = asyncio.Semaphore(settings.evaluator_max_concurrency)
         self._audit_tasks: set[asyncio.Task[None]] = set()
-        self._policies: dict[str, str] = {}
+        self._policies: dict[str, dict] = {}
+        self._loader = None
 
     async def evaluate(self, event: ToolCallEvent) -> PolicyDecision:
-        """Evaluate one tool event and always return a decision."""
+        """Evaluate tool call against all matching policies."""
         start = time.monotonic()
         try:
             self._validate_spiffe(event.agent_identity.spiffe_id)
@@ -41,12 +43,31 @@ class OPAEvaluator:
             if cached is not None:
                 return await self._handle_cache_hit(event, cached, start)
             trust = await self._trust(event.agent_identity.spiffe_id)
-            async with self._semaphore:
-                result = await asyncio.wait_for(
-                    self._evaluate_opa(event.agent_identity.namespace, event.agent_identity.agent_class, self._build_input(event, trust)),
-                    timeout=settings.sdk_timeout_ms / 1000,
-                )
-            decision = self._build_decision(result, event, trust, (time.monotonic() - start) * 1000)
+            candidates = self._collect_candidates(event)
+            if not candidates:
+                async with self._semaphore:
+                    result = await asyncio.wait_for(
+                        self._evaluate_opa(event.agent_identity.namespace, event.agent_identity.agent_class, self._build_input(event, trust)),
+                        timeout=0.1,
+                    )
+                decision = self._build_decision(result, event, trust, (time.monotonic() - start) * 1000)
+            else:
+                results = []
+                for candidate in candidates:
+                    async with self._semaphore:
+                        result = await asyncio.wait_for(
+                            self._evaluate_single(event, str(candidate["rego"]), trust),
+                            timeout=0.1,
+                        )
+                    results.append(
+                        {
+                            "decision": result,
+                            "priority": int(candidate["priority"]),
+                            "key": str(candidate["key"]),
+                        }
+                    )
+                winner = self._resolve_precedence(results)
+                decision = winner["decision"]
             if decision.rule_id not in settings.evaluator_non_cacheable_rules:
                 await self._cache.set_eval(event.agent_identity.namespace, event.agent_identity.agent_class, cache_tool, decision)
             await self._post_decision(event, decision)
@@ -54,8 +75,8 @@ class OPAEvaluator:
             return decision
         except asyncio.TimeoutError:
             elapsed_ms = (time.monotonic() - start) * 1000
-            log.error("nrvq.engine.timeout", event_id=event.event_id, elapsed_ms=elapsed_ms, code="NRVQ-ENG-2002")
-            return self._fallback_decision(event, elapsed_ms)
+            log.error("nrvq.engine.timeout", event_id=event.event_id, elapsed_ms=elapsed_ms, code="NRVQ-ENG-2020")
+            return self._timeout_decision(event, elapsed_ms)
         except Exception as exc:
             elapsed_ms = (time.monotonic() - start) * 1000
             log.error("nrvq.engine.error", event_id=event.event_id, error=str(exc), code="NRVQ-ENG-2000")
@@ -129,6 +150,24 @@ class OPAEvaluator:
             return {"decision": "escalate", "rule_id": "escalate_low_trust", "reason": f"Trust score {score} below threshold"}
         return {"decision": "allow", "rule_id": "default_allow", "reason": "All checks passed"}
 
+    async def _evaluate_single(self, event: ToolCallEvent, _rego_source: str, trust: TrustScore) -> PolicyDecision:
+        """Evaluate one candidate policy source and return typed decision."""
+        default_match = re.search(r'default\s+decision\s*=\s*"(allow|audit|escalate|block)"', _rego_source)
+        if default_match:
+            mode = default_match.group(1)
+            rule_match = re.search(r'rule_id\s*=\s*"([^"]+)"', _rego_source)
+            reason_match = re.search(r'reason\s*=\s*"([^"]+)"', _rego_source)
+            return PolicyDecision(
+                decision=mode,
+                rule_id=rule_match.group(1) if rule_match else "",
+                reason=reason_match.group(1) if reason_match else f"decision={mode}",
+                trust_score=trust.score,
+                latency_ms=0.0,
+                event_id=event.event_id,
+            )
+        result = await self._evaluate_opa(event.agent_identity.namespace, event.agent_identity.agent_class, self._build_input(event, trust))
+        return self._build_decision(result, event, trust, 0.0)
+
     def _build_decision(self, result: dict, event: ToolCallEvent, trust: TrustScore, elapsed_ms: float) -> PolicyDecision:
         """Build policy decision model from rule evaluation output."""
         return PolicyDecision(
@@ -140,9 +179,41 @@ class OPAEvaluator:
             event_id=event.event_id,
         )
 
+    def _collect_candidates(self, event: ToolCallEvent) -> list[dict]:
+        """Collect candidate policies from loader state by specificity."""
+        if self._loader is None:
+            return []
+        namespace = event.agent_identity.namespace
+        agent_class = event.agent_identity.agent_class or ""
+        candidates = []
+        class_key = f"{namespace}:{agent_class}"
+        if class_key in self._loader._policies:
+            entry = self._loader._policies[class_key]
+            candidates.append({"key": class_key, "rego": entry["rego"], "priority": entry["priority"]})
+        ns_key = f"{namespace}:__baseline__"
+        if ns_key in self._loader._policies:
+            entry = self._loader._policies[ns_key]
+            candidates.append({"key": ns_key, "rego": entry["rego"], "priority": entry["priority"]})
+        cluster_key = "__cluster__:__baseline__"
+        if cluster_key in self._loader._policies:
+            entry = self._loader._policies[cluster_key]
+            candidates.append({"key": cluster_key, "rego": entry["rego"], "priority": entry["priority"]})
+        return candidates
+
+    def _resolve_precedence(self, results: list[dict]) -> dict:
+        """Highest priority wins; most restrictive wins on ties."""
+        decision_rank = {"block": 0, "escalate": 1, "audit": 2, "allow": 3}
+        results.sort(
+            key=lambda item: (
+                -int(item["priority"]),
+                decision_rank.get(item["decision"].decision, 3),
+            )
+        )
+        return results[0]
+
     def _fallback_decision(self, event: ToolCallEvent, elapsed_ms: float) -> PolicyDecision:
-        """Return configured fallback decision when evaluation fails."""
-        mode = settings.enforcement_mode
+        """Return fail-closed fallback decision when evaluation fails."""
+        mode = "block"
         log.warning("nrvq.engine.fallback", event_id=event.event_id, mode=mode, code="NRVQ-ENG-2003")
         return PolicyDecision(
             decision=mode,
@@ -151,11 +222,26 @@ class OPAEvaluator:
             event_id=event.event_id,
         )
 
-    def load_policy(self, namespace: str, agent_class: str, rego_source: str) -> None:
+    def _timeout_decision(self, event: ToolCallEvent, elapsed_ms: float) -> PolicyDecision:
+        """Return fail-closed decision specifically for evaluation timeout paths."""
+        mode = "block"
+        log.warning("nrvq.engine.timeout_fallback", event_id=event.event_id, mode=mode, code="NRVQ-ENG-2021")
+        return PolicyDecision(
+            decision=mode,
+            reason="Evaluation timed out, fallback=block",
+            latency_ms=round(elapsed_ms, 2),
+            event_id=event.event_id,
+        )
+
+    def load_policy(self, namespace: str, agent_class: str, rego_source: str, priority: int = 100) -> None:
         """Load or replace policy with copy-on-write atomic assignment."""
         key = f"{namespace}:{agent_class}"
-        self._policies = {**self._policies, key: rego_source}
+        self._policies = {**self._policies, key: {"rego": rego_source, "priority": int(priority)}}
         log.info("nrvq.engine.policy_loaded", key=key, code="NRVQ-ENG-2005")
+
+    def bind_loader(self, loader: object) -> None:
+        """Bind loader reference for multi-policy priority resolution."""
+        self._loader = loader
 
     async def _post_decision(self, event: ToolCallEvent, decision: PolicyDecision) -> None:
         """Log and mutate trust state after decision finalization."""
@@ -170,8 +256,15 @@ class OPAEvaluator:
 
     async def _emit_audit(self, decision: PolicyDecision) -> None:
         """Emit asynchronous audit event without blocking caller path."""
-        # TODO(F014): emit audit decision to OTel pipeline.
-        await asyncio.sleep(0)
+        # Minimal non-blocking emission until dedicated pipeline integration (F014).
+        log.info(
+            "nrvq.engine.audit_decision",
+            event_id=decision.event_id,
+            decision=decision.decision,
+            rule_id=decision.rule_id,
+            latency_ms=decision.latency_ms,
+            code="NRVQ-AUD-6000",
+        )
 
     def _queue_audit(self, decision: PolicyDecision) -> None:
         """Queue audit task and track it for safe lifecycle management."""

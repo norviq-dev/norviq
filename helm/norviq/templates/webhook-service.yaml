@@ -1,17 +1,17 @@
-# SPDX-License-Identifier: Apache-2.0
-# Copyright 2026 Norviq Contributors
+{{- if .Values.webhook.enabled }}
 apiVersion: v1
 kind: Service
 metadata:
   name: norviq-webhook
-  namespace: norviq
+  namespace: {{ .Values.namespace }}
   labels:
     app: norviq-webhook
+    {{- include "norviq.labels" . | nindent 4 }}
 spec:
   selector:
     app: norviq-webhook
   ports:
-    - port: 443
+    - name: https
+      port: 443
       targetPort: https
-      protocol: TCP
-      name: https
+{{- end }}

@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 
 	corev1 "k8s.io/api/core/v1"
 )
@@ -30,6 +31,11 @@ type containerPatchState struct {
 }
 
 func NewInjector(cfg Config) *Injector {
+	if cfg.Runtime == nil {
+		runtime := &RuntimeConfig{}
+		runtime.SetSidecarImage(cfg.SidecarImage)
+		cfg.Runtime = runtime
+	}
 	return &Injector{
 		cfg:             cfg,
 		sidecarTemplate: newSidecarTemplate(cfg),
@@ -38,6 +44,11 @@ func NewInjector(cfg Config) *Injector {
 }
 
 func (inj *Injector) CreatePatch(pod *corev1.Pod, agentClass string) ([]byte, error) {
+	image := inj.cfg.Runtime.SidecarImage(inj.cfg.SidecarImage)
+	if !inj.validateImage(image) {
+		slog.Error("NRVQ-WHK-4033: blocked unauthorized sidecar image", "image", image)
+		return nil, fmt.Errorf("unauthorized sidecar image")
+	}
 	mountStates := mountState(pod.Spec.Containers)
 	envStates := envState(pod.Spec.Containers)
 	containerCount := len(pod.Spec.Containers)
@@ -47,6 +58,10 @@ func (inj *Injector) CreatePatch(pod *corev1.Pod, agentClass string) ([]byte, er
 	patches = append(patches, mountPatches(containerCount, mountStates)...)
 	patches = append(patches, envPatches(containerCount, envStates)...)
 	return json.Marshal(patches)
+}
+
+func (inj *Injector) validateImage(image string) bool {
+	return isAllowedSidecarImage(image)
 }
 
 func volumePatch(hasVolumes bool, volume map[string]interface{}) patchOp {
@@ -132,6 +147,7 @@ func envState(containers []corev1.Container) []containerPatchState {
 
 func (inj *Injector) buildSidecar(agentClass string) map[string]interface{} {
 	sidecar := cloneMap(inj.sidecarTemplate)
+	sidecar["image"] = inj.cfg.Runtime.SidecarImage(inj.cfg.SidecarImage)
 	sidecar["env"] = sidecarEnv(agentClass, inj.cfg.SidecarPort)
 	return sidecar
 }

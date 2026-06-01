@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+apiVersion: norviq.io/v1alpha1
+kind: NrvqPolicy
+metadata:
+  name: chatbot-strict
+  namespace: chatbot-prod
+spec:
+  target:
+    agentClass: customer-support
+  enforcementMode: block
+  preset: strict
+  priority: 200

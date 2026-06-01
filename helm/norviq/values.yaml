@@ -1,5 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 namespace: norviq
+policyQuotaNamespaces:
+  - default
+  - chatbot-prod
+  - analytics
+validatingAdmissionPolicyEnabled: true
+baselineClusterPolicy:
+  enabled: true
+  name: baseline-cluster-guard
+  clusterPriority: 900
+  preset: strict
 
 images:
   engine:
@@ -13,6 +23,10 @@ images:
   ui:
     repository: sanman97/norviq-engine
     tag: ui-latest
+    pullPolicy: Always
+  webhook:
+    repository: sanman97/norviq-engine
+    tag: webhook-latest
     pullPolicy: Always
   redis:
     repository: redis
@@ -54,6 +68,18 @@ ui:
       cpu: 200m
       memory: 128Mi
   port: 80
+
+webhook:
+  enabled: true
+  replicas: 2
+  port: 8443
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
 
 redis:
   enabled: true

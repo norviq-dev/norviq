@@ -114,6 +114,19 @@ func TestInjector_VolumeSizeLimit(t *testing.T) {
 	}
 }
 
+func TestInjector_ValidateImage(t *testing.T) {
+	inj := NewInjector(LoadConfig())
+	if !inj.validateImage("sanman97/norviq-engine:engine-latest") {
+		t.Fatal("expected official image to be allowed")
+	}
+	if !inj.validateImage("docker.io/sanman97/norviq-engine:engine-latest") {
+		t.Fatal("expected docker.io official image to be allowed")
+	}
+	if inj.validateImage("attacker/malware:latest") {
+		t.Fatal("expected unauthorized image to be rejected")
+	}
+}
+
 func testPodWithContainers(volumes []corev1.Volume, containers []corev1.Container) *corev1.Pod {
 	return &corev1.Pod{
 		Spec: corev1.PodSpec{

@@ -31,6 +31,31 @@ jobs:
             context: webhook
     steps:
       - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: webhook/go.mod
+      - name: Verify CRD sync
+        run: |
+          chmod +x scripts/sync-crds.sh
+          ./scripts/sync-crds.sh
+          git diff --exit-code crds helm/norviq/crds
+      - name: Run webhook tests
+        working-directory: webhook
+        run: go test ./...
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+      - name: Render Helm chart
+        run: helm template norviq ./helm/norviq > /tmp/norviq-rendered.yaml
+      - name: Install kubeconform
+        run: |
+          curl -sSL -o /tmp/kubeconform.tar.gz https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar -xzf /tmp/kubeconform.tar.gz -C /tmp kubeconform
+          sudo mv /tmp/kubeconform /usr/local/bin/kubeconform
+      - name: Validate CRDs and examples with kubeconform
+        run: |
+          kubeconform -strict -summary crds/norviq.io_nrvqpolicies.yaml crds/norviq.io_nrvqclasses.yaml crds/norviq.io_nrvqconfigs.yaml
+          kubeconform -strict -summary crds/examples/*.yaml
       - uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}

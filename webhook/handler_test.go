@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	authv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -53,7 +54,7 @@ func TestMutate_EmptyBody(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	h.Mutate(w, req)
-	assertFailOpenDecodeResponse(t, w)
+	assertFailClosedDecodeResponse(t, w)
 }
 
 func TestMutateWithLabel(t *testing.T) {
@@ -89,7 +90,7 @@ func TestMutate_InvalidJSON(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	h.Mutate(w, req)
-	assertFailOpenDecodeResponse(t, w)
+	assertFailClosedDecodeResponse(t, w)
 }
 
 func TestMutate_WrongContentType(t *testing.T) {
@@ -98,7 +99,7 @@ func TestMutate_WrongContentType(t *testing.T) {
 	req.Header.Set("Content-Type", "text/plain")
 	w := httptest.NewRecorder()
 	h.Mutate(w, req)
-	assertFailOpenDecodeResponse(t, w)
+	assertFailClosedDecodeResponse(t, w)
 }
 
 func TestMutateWithCustomEnableValue(t *testing.T) {
@@ -188,7 +189,7 @@ func TestMutateMalformedBody(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	h.Mutate(w, req)
-	assertFailOpenDecodeResponse(t, w)
+	assertFailClosedDecodeResponse(t, w)
 }
 
 func TestMutateBodyTooLarge(t *testing.T) {
@@ -197,7 +198,7 @@ func TestMutateBodyTooLarge(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	h.Mutate(w, req)
-	assertFailOpenDecodeResponse(t, w)
+	assertFailClosedDecodeResponse(t, w)
 }
 
 func TestMutate_LargeBody(t *testing.T) {
@@ -272,7 +273,7 @@ func TestMutate_DisabledWithCustomEnableLabel(t *testing.T) {
 	}
 }
 
-func TestMutate_MalformedPodFailOpen(t *testing.T) {
+func TestMutate_MalformedPodFailClosed(t *testing.T) {
 	h := NewHandler(LoadConfig())
 	review := admissionv1.AdmissionReview{
 		TypeMeta: metav1.TypeMeta{APIVersion: "admission.k8s.io/v1", Kind: "AdmissionReview"},
@@ -284,8 +285,8 @@ func TestMutate_MalformedPodFailOpen(t *testing.T) {
 		},
 	}
 	resp := sendReview(t, h, review)
-	if !resp.Response.Allowed {
-		t.Fatal("expected malformed pod parse failure to fail open")
+	if resp.Response.Allowed {
+		t.Fatal("expected malformed pod parse failure to be denied")
 	}
 	if resp.Response.Patch != nil {
 		t.Fatal("expected no patch when pod object cannot be parsed")
@@ -329,7 +330,7 @@ func sendReview(t *testing.T, h *Handler, review admissionv1.AdmissionReview) ad
 	return response
 }
 
-func assertFailOpenDecodeResponse(t *testing.T, w *httptest.ResponseRecorder) {
+func assertFailClosedDecodeResponse(t *testing.T, w *httptest.ResponseRecorder) {
 	t.Helper()
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
@@ -338,10 +339,115 @@ func assertFailOpenDecodeResponse(t *testing.T, w *httptest.ResponseRecorder) {
 	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
 		t.Fatalf("expected admission review response, got unmarshal error: %v", err)
 	}
-	if out.Response == nil || !out.Response.Allowed {
-		t.Fatal("expected fail-open allowed response")
+	if out.Response == nil || out.Response.Allowed {
+		t.Fatal("expected fail-closed denied response")
 	}
 	if out.Response.Patch != nil {
 		t.Fatal("expected no patch on decode failure")
+	}
+}
+
+func TestValidatePolicyRejectsCrossNamespaceTarget(t *testing.T) {
+	h := NewHandler(LoadConfig())
+	review := admissionv1.AdmissionReview{
+		TypeMeta: metav1.TypeMeta{APIVersion: "admission.k8s.io/v1", Kind: "AdmissionReview"},
+		Request: &admissionv1.AdmissionRequest{
+			UID:       "uid-validate",
+			Kind:      metav1.GroupVersionKind{Group: "norviq.io", Version: "v1alpha1", Kind: "NrvqPolicy"},
+			Namespace: "default",
+			Object: runtime.RawExtension{Raw: []byte(`{"apiVersion":"norviq.io/v1alpha1","kind":"NrvqPolicy","metadata":{"name":"bad","namespace":"default"},"spec":{"target":{"namespace":"other"},"enforcementMode":"block","rego":"package p\ndecision = \"block\" { true }\nrule_id = \"r\"\nreason = \"x\""}}`)},
+		},
+	}
+	body, _ := json.Marshal(review)
+	req := httptest.NewRequest(http.MethodPost, "/validate-policy", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ValidatePolicy(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var out admissionv1.AdmissionReview
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if out.Response == nil || out.Response.Allowed {
+		t.Fatal("expected cross-namespace policy to be denied")
+	}
+}
+
+func TestValidatePolicyAllowsValidPolicy(t *testing.T) {
+	h := NewHandler(LoadConfig())
+	review := admissionv1.AdmissionReview{
+		TypeMeta: metav1.TypeMeta{APIVersion: "admission.k8s.io/v1", Kind: "AdmissionReview"},
+		Request: &admissionv1.AdmissionRequest{
+			UID:       "uid-validate-ok",
+			Kind:      metav1.GroupVersionKind{Group: "norviq.io", Version: "v1alpha1", Kind: "NrvqPolicy"},
+			Namespace: "default",
+			Object: runtime.RawExtension{Raw: []byte(`{"apiVersion":"norviq.io/v1alpha1","kind":"NrvqPolicy","metadata":{"name":"ok","namespace":"default"},"spec":{"target":{"agentClass":"customer-support"},"enforcementMode":"block","rego":"package p\ndecision = \"block\" { true }\nrule_id = \"r\"\nreason = \"x\""}}`)},
+		},
+	}
+	body, _ := json.Marshal(review)
+	req := httptest.NewRequest(http.MethodPost, "/validate-policy", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ValidatePolicy(w, req)
+	var out admissionv1.AdmissionReview
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if out.Response == nil || !out.Response.Allowed {
+		t.Fatal("expected valid policy to be allowed")
+	}
+}
+
+func TestValidatePolicyRejectsClusterPriorityWithoutAdminGroup(t *testing.T) {
+	h := NewHandler(LoadConfig())
+	review := admissionv1.AdmissionReview{
+		TypeMeta: metav1.TypeMeta{APIVersion: "admission.k8s.io/v1", Kind: "AdmissionReview"},
+		Request: &admissionv1.AdmissionRequest{
+			UID:       "uid-cluster-priority-deny",
+			Kind:      metav1.GroupVersionKind{Group: "norviq.io", Version: "v1alpha1", Kind: "NrvqPolicy"},
+			Namespace: "norviq",
+			UserInfo:  authv1.UserInfo{Groups: []string{"devs"}},
+			Object: runtime.RawExtension{Raw: []byte(`{"apiVersion":"norviq.io/v1alpha1","kind":"NrvqPolicy","metadata":{"name":"cp-no-admin","namespace":"norviq"},"spec":{"target":{"agentClass":"customer-support"},"enforcementMode":"block","clusterPriority":700,"rego":"package p\ndecision = \"block\" { true }\nrule_id = \"r\"\nreason = \"x\""}}`)},
+		},
+	}
+	body, _ := json.Marshal(review)
+	req := httptest.NewRequest(http.MethodPost, "/validate-policy", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ValidatePolicy(w, req)
+	var out admissionv1.AdmissionReview
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if out.Response == nil || out.Response.Allowed {
+		t.Fatal("expected non-admin clusterPriority policy to be denied")
+	}
+}
+
+func TestValidatePolicyAllowsClusterPriorityForAdminGroup(t *testing.T) {
+	h := NewHandler(LoadConfig())
+	review := admissionv1.AdmissionReview{
+		TypeMeta: metav1.TypeMeta{APIVersion: "admission.k8s.io/v1", Kind: "AdmissionReview"},
+		Request: &admissionv1.AdmissionRequest{
+			UID:       "uid-cluster-priority-allow",
+			Kind:      metav1.GroupVersionKind{Group: "norviq.io", Version: "v1alpha1", Kind: "NrvqPolicy"},
+			Namespace: "norviq",
+			UserInfo:  authv1.UserInfo{Groups: []string{"system:masters"}},
+			Object: runtime.RawExtension{Raw: []byte(`{"apiVersion":"norviq.io/v1alpha1","kind":"NrvqPolicy","metadata":{"name":"cp-admin","namespace":"norviq"},"spec":{"target":{"agentClass":"customer-support"},"enforcementMode":"block","clusterPriority":700,"rego":"package p\ndecision = \"block\" { true }\nrule_id = \"r\"\nreason = \"x\""}}`)},
+		},
+	}
+	body, _ := json.Marshal(review)
+	req := httptest.NewRequest(http.MethodPost, "/validate-policy", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.ValidatePolicy(w, req)
+	var out admissionv1.AdmissionReview
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if out.Response == nil || !out.Response.Allowed {
+		t.Fatal("expected admin clusterPriority policy to be allowed")
 	}
 }

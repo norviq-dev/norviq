@@ -1,0 +1,14 @@
+sequenceDiagram
+    participant Operator as kubectl
+    participant APIServer as K8s API Server
+    participant CRD as NrvqPolicy CRD
+    participant Controller as webhook/controller.go
+    participant NorviqAPI as Norviq API
+
+    Operator->>APIServer: apply -f crds/examples/policy-*.yaml
+    APIServer->>CRD: persist NrvqPolicy object
+    CRD-->>Controller: Add/Update informer event
+    Controller->>Controller: buildPolicySyncPayload()
+    Controller->>NorviqAPI: POST /api/v1/policies
+    NorviqAPI-->>Controller: 2xx created/updated
+    Controller-->>APIServer: status/log update

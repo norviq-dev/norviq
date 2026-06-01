@@ -17,6 +17,7 @@ from norviq.engine.audit_emitter import AuditEmitter
 from norviq.engine.cache import RedisCache
 from norviq.engine.evaluator import OPAEvaluator
 from norviq.engine.identity import SPIFFEResolver
+from norviq.engine.policy_loader import PolicyLoader
 from norviq.sdk.core.events import ToolCallEvent
 from norviq.sdk.core.interceptor import ToolInterceptor
 
@@ -31,23 +32,52 @@ class SidecarProxy:
         self._socket_path = socket_path or settings.socket_path
         self._cache: RedisCache | None = None
         self._evaluator: OPAEvaluator | None = None
+        self._loader: PolicyLoader | None = None
         self._resolver: SPIFFEResolver | None = None
         self._interceptor: ToolInterceptor | None = None
         self._emitter: AuditEmitter | None = None
         self._server: asyncio.AbstractServer | None = None
+        self._policy_event_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         """Initialize dependencies and start Unix socket listener."""
         self._cache = RedisCache()
         await self._cache.connect()
         self._evaluator = OPAEvaluator(self._cache)
+        self._loader = PolicyLoader(self._cache, self._evaluator)
+        await self._loader.load_all_from_redis()
         self._resolver = SPIFFEResolver()
         self._interceptor = ToolInterceptor(self._evaluator, self._resolver)
         self._emitter = AuditEmitter()
         await self._emitter.init()
+        self._policy_event_task = asyncio.create_task(self._watch_policy_events())
         await self._unlink_existing_socket()
         self._server = await asyncio.start_unix_server(self._handle_connection, path=self._socket_path)
         log.info("nrvq.sidecar.started", socket=self._socket_path, code="NRVQ-SDC-3000")
+
+    async def _watch_policy_events(self) -> None:
+        """Refresh local policy state on policy update events."""
+        if self._cache is None or self._loader is None:
+            return
+        try:
+            await self._cache.listen_policy_events(self._on_policy_event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.error("nrvq.sidecar.policy_watch_failed", error=str(exc), code="NRVQ-SDC-3006")
+
+    async def _on_policy_event(self, event: dict) -> None:
+        """Handle one policy invalidation event from Redis pub/sub."""
+        if self._loader is None:
+            return
+        await self._loader.load_all_from_redis()
+        log.info(
+            "nrvq.sidecar.policy_refreshed",
+            operation=event.get("operation", "unknown"),
+            namespace=event.get("namespace", ""),
+            agent_class=event.get("agent_class", ""),
+            code="NRVQ-SDC-3007",
+        )
 
     async def _unlink_existing_socket(self) -> None:
         """Delete stale Unix socket file before binding."""
@@ -108,6 +138,10 @@ class SidecarProxy:
 
     async def stop(self) -> None:
         """Close server and downstream resources gracefully."""
+        if self._policy_event_task is not None:
+            self._policy_event_task.cancel()
+            await asyncio.gather(self._policy_event_task, return_exceptions=True)
+            self._policy_event_task = None
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()

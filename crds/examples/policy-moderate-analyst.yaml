@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+apiVersion: norviq.io/v1alpha1
+kind: NrvqPolicy
+metadata:
+  name: analyst-moderate
+  namespace: analytics
+spec:
+  target:
+    agentClass: data-analyst
+  enforcementMode: audit
+  preset: moderate
+  rules:
+    - norviq/owasp/llm01-prompt-injection
+    - norviq/owasp/llm06-excessive-agency
+    - norviq/tool-safety/deny-sql-injection
+  priority: 150

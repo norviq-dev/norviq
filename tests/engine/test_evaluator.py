@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 
@@ -12,6 +13,7 @@ import pytest
 
 from norviq.engine.cache import RedisCache
 from norviq.engine.evaluator import OPAEvaluator
+from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
 from norviq.sdk.core.trust import TrustScore
 
@@ -141,6 +143,19 @@ async def test_fallback_on_error(evaluator: OPAEvaluator, monkeypatch) -> None:
     assert decision.reason.startswith("Evaluation failed")
 
 
+async def test_timeout_returns_fail_closed_block(evaluator: OPAEvaluator, monkeypatch) -> None:
+    """Evaluation timeout must return explicit fail-closed block decision."""
+
+    async def _slow(*_: object, **__: object) -> dict:
+        await asyncio.sleep(0.2)
+        return {"decision": "allow", "rule_id": "unexpected", "reason": "should timeout first"}
+
+    monkeypatch.setattr(evaluator, "_evaluate_opa", _slow)
+    decision = await evaluator.evaluate(_event(_suffix(), "safe_tool", {"ok": True}))
+    assert decision.decision == "block"
+    assert decision.reason == "Evaluation timed out, fallback=block"
+
+
 async def test_cached_block_still_applies_post_decision(evaluator: OPAEvaluator) -> None:
     """Cached block responses should still decrement trust for repeat attempts."""
     suffix = _suffix()
@@ -160,4 +175,25 @@ async def test_cached_block_still_applies_post_decision(evaluator: OPAEvaluator)
 async def test_load_policy_updates_policy_map(evaluator: OPAEvaluator) -> None:
     """load_policy should atomically replace mapping with new key/value."""
     evaluator.load_policy("tenant-a", "support", "package norviq.allow")
-    assert evaluator._policies["tenant-a:support"] == "package norviq.allow"
+    assert evaluator._policies["tenant-a:support"]["rego"] == "package norviq.allow"
+
+
+def test_cluster_priority_block_overrides_lower_allow() -> None:
+    """Higher-priority cluster block must beat lower-priority tenant allow."""
+    evaluator = OPAEvaluator(cache=None)  # type: ignore[arg-type]
+    winner = evaluator._resolve_precedence(
+        [
+            {
+                "priority": 200,
+                "decision": PolicyDecision(decision="allow", rule_id="tenant_allow", reason="tenant allows"),
+                "key": "default:tenant",
+            },
+            {
+                "priority": 900,
+                "decision": PolicyDecision(decision="block", rule_id="cluster_floor_block", reason="cluster baseline block"),
+                "key": "__cluster__:__baseline__",
+            },
+        ]
+    )
+    assert winner["decision"].decision == "block"
+    assert winner["decision"].rule_id == "cluster_floor_block"

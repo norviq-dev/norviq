@@ -5,6 +5,7 @@
 
 from datetime import datetime, timedelta, timezone
 
+import re
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -26,6 +27,10 @@ class PolicyCreate(BaseModel):
     rego_source: str
     enforcement_mode: str = "block"
     saved_by: str = ""
+    priority: int = 100
+    policy_name: str | None = None
+    target: dict | None = None
+    rules: list[str] | None = None
 
 
 class RollbackRequest(BaseModel):
@@ -49,14 +54,15 @@ async def list_policies(request: Request) -> list[dict]:
     """List all policies loaded in memory."""
     rows = []
     loader = request.app.state.loader
-    for key, rego in loader._policies.items():
+    for key, entry in loader._policies.items():
         namespace, agent_class = key.split(":", 1)
         rows.append(
             {
                 "namespace": namespace,
                 "agent_class": agent_class,
                 "current_version": len(loader.get_versions(namespace, agent_class)),
-                "rego_length": len(rego),
+                "rego_length": len(str(entry["rego"])),
+                "priority": int(entry.get("priority", 100)),
             }
         )
     log.info("nrvq.api.policies.listed", count=len(rows), code="NRVQ-API-7010")
@@ -77,15 +83,83 @@ async def get_policy(namespace: str, agent_class: str, request: Request) -> dict
 async def create_policy(body: PolicyCreate, request: Request, user: dict = Depends(get_current_user)) -> dict:
     """Create or update a policy."""
     _ = user
-    version = await request.app.state.loader.create(body.namespace, body.agent_class, body.rego_source, saved_by=body.saved_by)
+    validate_policy_create(body)
+    agent_class = resolve_policy_key(body)
+    version = await request.app.state.loader.create(
+        body.namespace,
+        agent_class,
+        body.rego_source,
+        saved_by=body.saved_by,
+        priority=body.priority,
+    )
     log.info(
         "nrvq.api.policy.created",
         namespace=body.namespace,
-        agent_class=body.agent_class,
+        agent_class=agent_class,
         version=version,
+        priority=body.priority,
+        policy_name=body.policy_name,
         code="NRVQ-API-7011",
     )
-    return {"namespace": body.namespace, "agent_class": body.agent_class, "version": version}
+    return {"namespace": body.namespace, "agent_class": agent_class, "version": version, "policy_name": body.policy_name, "priority": body.priority}
+
+
+def validate_policy_create(body: PolicyCreate) -> None:
+    """Validate policy payload for direct API writes."""
+    if body.enforcement_mode not in {"block", "audit", "escalate"}:
+        raise HTTPException(status_code=422, detail="invalid enforcement_mode")
+    rego = body.rego_source or ""
+    cleaned = _strip_rego_comments(rego)
+    dequoted = _strip_string_literals(cleaned)
+    if len(rego) > 65536:
+        raise HTTPException(status_code=422, detail="rego_source exceeds max length")
+    lines = [line for line in cleaned.splitlines() if line.strip()]
+    if len(lines) > 500:
+        raise HTTPException(status_code=422, detail="rego_source exceeds line limit")
+    regex_ops = len(re.findall(r"\bregex\.[a-zA-Z0-9_]+\b", dequoted)) + len(re.findall(r"\bre_match\s*\(", dequoted))
+    if regex_ops > 5:
+        raise HTTPException(status_code=422, detail="too many regex operations")
+    if not re.search(r'decision\s*=\s*"(block|escalate)"\s*\{', cleaned):
+        raise HTTPException(status_code=422, detail="rego_source must include block or escalate decision")
+    enforcement_bodies = re.findall(r'decision\s*=\s*"(?:block|escalate)"\s*\{([^}]*)\}', cleaned, flags=re.DOTALL)
+    if enforcement_bodies and all(body.strip() == "false" for body in enforcement_bodies):
+        raise HTTPException(status_code=422, detail="rego_source enforcement rule must be reachable")
+    lowered = cleaned.lower()
+    for required in ("decision", "rule_id", "reason"):
+        if not re.search(rf"\b{required}\b", lowered):
+            raise HTTPException(status_code=422, detail=f"rego_source must include {required}")
+
+
+def _strip_rego_comments(rego: str) -> str:
+    lines = []
+    for line in rego.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _strip_string_literals(rego: str) -> str:
+    # Remove quoted strings so keyword scans do not match inside literals.
+    return re.sub(r'"(?:\\.|[^"\\])*"', '""', rego)
+
+
+def resolve_policy_key(body: PolicyCreate) -> str:
+    """Resolve a stable loader key for namespace/workload policies."""
+    if body.agent_class:
+        return body.agent_class
+    if body.policy_name:
+        return body.policy_name
+    target = body.target or {}
+    target_kind = str(target.get("kind", "")).strip().lower()
+    target_name = str(target.get("name", "")).strip()
+    if target_kind and target_name:
+        return f"{target_kind}:{target_name}"
+    target_namespace = str(target.get("namespace", "")).strip()
+    if target_namespace:
+        return f"namespace:{target_namespace}"
+    raise HTTPException(status_code=422, detail="agent_class or policy_name/target is required")
 
 
 @router.delete("/policies/{namespace}/{agent_class}")
@@ -165,7 +239,13 @@ async def apply_policy(
     rego = loader.get_current(namespace, agent_class)
     if not rego:
         raise HTTPException(status_code=404, detail="Policy not found. Save it first.")
-    loader._evaluator.load_policy(body.target_namespace, agent_class, rego)
+    entry = loader.get_entry(namespace, agent_class) or {}
+    loader._evaluator.load_policy(
+        body.target_namespace,
+        agent_class,
+        rego,
+        priority=int(entry.get("priority", 100)),
+    )
     log.info(
         "nrvq.api.policy.applied",
         namespace=namespace,

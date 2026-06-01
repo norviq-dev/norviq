@@ -12,9 +12,9 @@ class NorviqSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="NRVQ_")
 
     policy_engine_url: str = "http://localhost:8181"
-    enforcement_mode: str = "audit"
+    enforcement_mode: str = "block"
     sdk_timeout_ms: int = 5000
-    sdk_fallback_mode: str = "audit"
+    sdk_fallback_mode: str = "block"
     sdk_retry_max_attempts: int = 2
     sdk_retry_backoff_base_ms: int = 100
     sdk_circuit_fail_threshold: int = 3
@@ -26,6 +26,7 @@ class NorviqSettings(BaseSettings):
     redis_url: str = "redis://localhost:6379"
     redis_max_connections: int = 20
     redis_ttl_policy_s: int = 60
+    redis_ttl_eval_s: int = 5
     redis_ttl_trust_s: int = 30
     trust_threshold: float = 0.7
     trust_violation_penalty: float = 0.05

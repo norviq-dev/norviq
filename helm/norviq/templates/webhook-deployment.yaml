@@ -1,0 +1,74 @@
+{{- if .Values.webhook.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: norviq-webhook
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: norviq-webhook
+    {{- include "norviq.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.webhook.replicas }}
+  selector:
+    matchLabels:
+      app: norviq-webhook
+  template:
+    metadata:
+      labels:
+        app: norviq-webhook
+    spec:
+      serviceAccountName: norviq-controller
+      imagePullSecrets:
+        - name: dockerhub-secret
+      containers:
+        - name: webhook
+          image: "{{ .Values.images.webhook.repository }}:{{ .Values.images.webhook.tag }}"
+          imagePullPolicy: {{ .Values.images.webhook.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.webhook.port }}
+              name: https
+          env:
+            - name: NRVQ_WEBHOOK_PORT
+              value: "{{ .Values.webhook.port }}"
+            - name: NRVQ_SIDECAR_IMAGE
+              value: "{{ .Values.images.engine.repository }}:{{ .Values.images.engine.tag }}"
+            - name: NRVQ_CONTROLLER_ENABLED
+              value: "true"
+            - name: NRVQ_API_URL
+              value: "http://norviq-api:{{ .Values.api.port }}"
+            - name: NRVQ_ADMIN_POLICY_NAMESPACE
+              value: "{{ .Values.namespace }}"
+            - name: NRVQ_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: norviq-secrets
+                  key: NRVQ_API_SECRET_KEY
+            - name: NRVQ_TLS_CERT
+              value: /etc/webhook/certs/tls.crt
+            - name: NRVQ_TLS_KEY
+              value: /etc/webhook/certs/tls.key
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /etc/webhook/certs
+              readOnly: true
+          resources:
+            {{- toYaml .Values.webhook.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 3
+            periodSeconds: 10
+      volumes:
+        - name: webhook-certs
+          secret:
+            secretName: norviq-webhook-tls
+{{- end }}

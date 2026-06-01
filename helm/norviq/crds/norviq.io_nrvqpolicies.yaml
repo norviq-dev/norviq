@@ -1,0 +1,134 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: nrvqpolicies.norviq.io
+  labels:
+    app.kubernetes.io/name: norviq
+spec:
+  group: norviq.io
+  names:
+    kind: NrvqPolicy
+    listKind: NrvqPolicyList
+    plural: nrvqpolicies
+    singular: nrvqpolicy
+    shortNames:
+      - np
+      - nrvqp
+    categories:
+      - norviq
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - target
+                - enforcementMode
+              properties:
+                target:
+                  type: object
+                  description: Where this policy applies
+                  x-kubernetes-validations:
+                    - rule: "has(self.agentClass) || has(self.namespace) || (has(self.kind) && has(self.name))"
+                      message: "target must set agentClass, namespace, or both kind and name"
+                  properties:
+                    agentClass:
+                      type: string
+                      minLength: 1
+                      maxLength: 63
+                      pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                      description: Apply to agents with this class label
+                    namespace:
+                      type: string
+                      maxLength: 63
+                      pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                      description: Apply to all agents in this namespace
+                    kind:
+                      type: string
+                      enum: ["Deployment", "StatefulSet", "DaemonSet", "ReplicaSet"]
+                    name:
+                      type: string
+                      maxLength: 63
+                      pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                enforcementMode:
+                  type: string
+                  enum: ["block", "audit", "escalate"]
+                  default: block
+                preset:
+                  type: string
+                  enum: ["strict", "moderate", "permissive"]
+                rules:
+                  type: array
+                  maxItems: 256
+                  items:
+                    type: string
+                    maxLength: 128
+                    pattern: ^[a-zA-Z0-9_.\/-]+$
+                rego:
+                  type: string
+                  maxLength: 65536
+                  description: Custom Rego policy source (overrides preset and rules)
+                priority:
+                  type: integer
+                  description: Policy priority. Namespace users limited to 0-499.
+                  default: 100
+                  minimum: 0
+                  maximum: 499
+                clusterPriority:
+                  type: integer
+                  description: Admin-only priority override for control-plane policies.
+                  minimum: 500
+                  maximum: 1000
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: ["Pending", "Active", "Error"]
+                message:
+                  type: string
+                lastApplied:
+                  type: string
+                  format: date-time
+                matchingWorkloads:
+                  type: integer
+                blockCount24h:
+                  type: integer
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Target
+          type: string
+          jsonPath: .spec.target.agentClass
+          description: Agent class this policy targets
+        - name: Mode
+          type: string
+          jsonPath: .spec.enforcementMode
+          description: Enforcement mode
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+          description: Policy status
+        - name: Blocks-24h
+          type: integer
+          jsonPath: .status.blockCount24h
+          description: Blocks in last 24h
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

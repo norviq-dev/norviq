@@ -30,6 +30,7 @@ async def lifespan(app: FastAPI):
     app.state.emitter = AuditEmitter()
     await app.state.emitter.init()
     app.state.loader = PolicyLoader(app.state.cache, app.state.evaluator)
+    app.state.evaluator.bind_loader(app.state.loader)
     log.info("nrvq.api.started", port=settings.api_port, code="NRVQ-API-7000")
     yield
     await app.state.emitter.close()

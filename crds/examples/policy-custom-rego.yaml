@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+apiVersion: norviq.io/v1alpha1
+kind: NrvqPolicy
+metadata:
+  name: custom-sql-guard
+  namespace: chatbot-prod
+spec:
+  target:
+    kind: Deployment
+    name: smartsales-agent
+  enforcementMode: block
+  rego: |
+    package norviq.custom.sql_guard
+    violation {
+      input.tool_name == "execute_sql"
+      contains(lower(input.tool_params.query), "drop")
+    }
+    decision = "block" {
+      violation
+    }
+    decision = "allow" { not violation }
+    rule_id = "custom_sql_guard" { decision == "block" }
+    reason = "DROP statement blocked by custom policy" { decision == "block" }
+    rule_id = "default_allow" { decision == "allow" }
+    reason = "Allowed" { decision == "allow" }
+  priority: 300

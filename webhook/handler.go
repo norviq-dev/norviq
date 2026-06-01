@@ -11,6 +11,8 @@ import (
 	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -47,7 +49,7 @@ func (h *Handler) Mutate(w http.ResponseWriter, r *http.Request) {
 	review, ok := decodeReview(w, r)
 	if !ok {
 		uid, _ := r.Context().Value(admissionUIDKey).(string)
-		writeFailOpenResponse(w, uid)
+		writeFailClosedResponse(w, uid, "invalid admission review request")
 		return
 	}
 	if review.Request == nil {
@@ -58,6 +60,76 @@ func (h *Handler) Mutate(w http.ResponseWriter, r *http.Request) {
 	response := h.handleAdmission(review.Request)
 	response.UID = review.Request.UID
 	review.Response = response
+	writeReview(w, review)
+}
+
+func (h *Handler) ValidatePolicy(w http.ResponseWriter, r *http.Request) {
+	review, ok := decodeReview(w, r)
+	if !ok || review.Request == nil {
+		writeReview(w, admissionv1.AdmissionReview{
+			TypeMeta: metav1.TypeMeta{APIVersion: "admission.k8s.io/v1", Kind: "AdmissionReview"},
+			Response: &admissionv1.AdmissionResponse{
+				Allowed: false,
+				Result:  &metav1.Status{Message: "invalid admission review request"},
+			},
+		})
+		return
+	}
+	req := review.Request
+	resp := &admissionv1.AdmissionResponse{UID: req.UID, Allowed: true}
+	if req.Kind.Kind != "NrvqPolicy" {
+		review.Response = resp
+		writeReview(w, review)
+		return
+	}
+
+	var u unstructured.Unstructured
+	if err := json.Unmarshal(req.Object.Raw, &u.Object); err != nil {
+		resp.Allowed = false
+		resp.Result = &metav1.Status{Message: "invalid NrvqPolicy object"}
+		review.Response = resp
+		writeReview(w, review)
+		return
+	}
+	spec, _, _ := unstructured.NestedMap(u.Object, "spec")
+	namespace := u.GetNamespace()
+	if namespace == "" {
+		namespace = req.Namespace
+	}
+	if err := validateClusterPriority(namespace, spec, h.cfg.AdminPolicyNamespace); err != nil {
+		resp.Allowed = false
+		resp.Result = &metav1.Status{Message: err.Error()}
+		review.Response = resp
+		writeReview(w, review)
+		return
+	}
+	if _, found := spec["clusterPriority"]; found && !isClusterPriorityAdmin(req.UserInfo.Groups) {
+		resp.Allowed = false
+		resp.Result = &metav1.Status{Message: "clusterPriority requires cluster-admin privileges"}
+		review.Response = resp
+		writeReview(w, review)
+		return
+	}
+	target, _ := spec["target"].(map[string]interface{})
+	_, hasClusterPriority := spec["clusterPriority"]
+	if err := validateTarget(req.Namespace, h.cfg.AdminPolicyNamespace, target, hasClusterPriority); err != nil {
+		resp.Allowed = false
+		resp.Result = &metav1.Status{Message: err.Error()}
+		review.Response = resp
+		writeReview(w, review)
+		return
+	}
+	if rego, found, _ := unstructured.NestedString(u.Object, "spec", "rego"); found && rego != "" {
+		if err := validateRego(rego); err != nil {
+			resp.Allowed = false
+			resp.Result = &metav1.Status{Message: err.Error()}
+			review.Response = resp
+			writeReview(w, review)
+			return
+		}
+	}
+
+	review.Response = resp
 	writeReview(w, review)
 }
 
@@ -89,9 +161,12 @@ func writeReview(w http.ResponseWriter, review admissionv1.AdmissionReview) {
 	}
 }
 
-func writeFailOpenResponse(w http.ResponseWriter, uid string) {
+func writeFailClosedResponse(w http.ResponseWriter, uid, message string) {
 	review := admissionv1.AdmissionReview{
-		Response: &admissionv1.AdmissionResponse{Allowed: true},
+		Response: &admissionv1.AdmissionResponse{
+			Allowed: false,
+			Result:  &metav1.Status{Message: message},
+		},
 	}
 	review.APIVersion = "admission.k8s.io/v1"
 	review.Kind = "AdmissionReview"
@@ -110,7 +185,10 @@ func (h *Handler) handleAdmission(req *admissionv1.AdmissionRequest) *admissionv
 	}
 	pod, ok := parsePod(req)
 	if !ok {
-		return &admissionv1.AdmissionResponse{Allowed: true}
+		return &admissionv1.AdmissionResponse{
+			Allowed: false,
+			Result:  &metav1.Status{Message: "invalid pod object"},
+		}
 	}
 	if shouldSkipInjection(h.cfg, pod, req.Namespace) {
 		return &admissionv1.AdmissionResponse{Allowed: true}
@@ -143,7 +221,10 @@ func (h *Handler) patchResponse(req *admissionv1.AdmissionRequest, pod *corev1.P
 	patch, err := h.injector.CreatePatch(pod, agentClass)
 	if err != nil {
 		slog.Error("NRVQ-WHK-4009: patch creation failed", "error", err)
-		return &admissionv1.AdmissionResponse{Allowed: true}
+		return &admissionv1.AdmissionResponse{
+			Allowed: false,
+			Result:  &metav1.Status{Message: "sidecar patch creation failed"},
+		}
 	}
 	if req.DryRun != nil && *req.DryRun {
 		slog.Info("NRVQ-WHK-4012: dry-run injection", "pod", pod.Name, "namespace", req.Namespace)
@@ -193,4 +274,13 @@ func isValidLabel(s string) bool {
 		}
 	}
 	return true
+}
+
+func isClusterPriorityAdmin(groups []string) bool {
+	for _, group := range groups {
+		if group == "system:masters" {
+			return true
+		}
+	}
+	return false
 }
