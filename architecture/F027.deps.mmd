@@ -1,0 +1,16 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+flowchart LR
+    F005[F005 Trust Cache]
+    F008[F008 Policy Engine]
+    F009[F009 Redis Cache]
+    F014[F014 Audit Pipeline]
+    F027[F027 Behavioral Trust]
+    API[API /agents]
+    UI[UI Agent Monitor]
+    F027 --> API
+    F027 --> UI
+    F027 --> F014
+    F027 --> F009
+    F027 --> F008
+    F027 --> F005

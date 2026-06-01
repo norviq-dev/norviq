@@ -42,14 +42,6 @@ class TrustScore(BaseModel):
                 data["category"] = "Low"
         super().__init__(**data)
 
-    def after_violation(self) -> "TrustScore":
-        """Return a new trust score after applying violation penalty."""
-        return TrustScore(
-            score=max(0.0, self.score - settings.trust_violation_penalty),
-            violation_count=self.violation_count + 1,
-            factors={**self.factors, "last_violation": "penalty_applied"},
-        )
-
     def is_trusted(self) -> bool:
         """Check whether trust score passes configured threshold."""
         return self.score >= settings.trust_threshold

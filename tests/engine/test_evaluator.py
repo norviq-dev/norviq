@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import os
 import uuid
 
@@ -13,6 +14,7 @@ import pytest
 
 from norviq.engine.cache import RedisCache
 from norviq.engine.evaluator import OPAEvaluator
+from norviq.engine.trust.models import TrustResult
 from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
 from norviq.sdk.core.trust import TrustScore
@@ -197,3 +199,90 @@ def test_cluster_priority_block_overrides_lower_allow() -> None:
     )
     assert winner["decision"].decision == "block"
     assert winner["decision"].rule_id == "cluster_floor_block"
+
+
+def test_low_trust_allow_is_overridden_to_escalate() -> None:
+    """Low trust must override allow decisions to escalate."""
+    evaluator = OPAEvaluator(cache=None)  # type: ignore[arg-type]
+    decision = PolicyDecision(
+        decision="allow",
+        rule_id="default_allow",
+        reason="ok",
+        trust_score=0.9,
+        trust_category="high",
+        decided_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+    )
+    trust = TrustResult(
+        score=0.2,
+        category="low",
+        signals={"violation_rate": 0.2},
+        weights={"violation_rate": 0.25},
+        dominant_signal="violation_rate",
+        recommendation="escalate",
+    )
+    updated = evaluator._apply_trust_overrides(decision, trust, "evt-low")
+    assert updated.decision == "escalate"
+    assert updated.trust_score == 0.2
+    assert updated.trust_category == "low"
+    assert updated.trust_dominant_signal == "violation_rate"
+    assert updated.decided_at > decision.decided_at
+
+
+def test_frozen_trust_overrides_allow_to_block() -> None:
+    """Frozen trust must force a block decision."""
+    evaluator = OPAEvaluator(cache=None)  # type: ignore[arg-type]
+    decision = PolicyDecision(
+        decision="allow",
+        rule_id="default_allow",
+        reason="ok",
+        trust_score=0.9,
+        trust_category="high",
+        decided_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+    )
+    trust = TrustResult(
+        score=0.0,
+        category="frozen",
+        signals={"violation_rate": 0.0},
+        weights={"violation_rate": 0.25},
+        dominant_signal="violation_rate",
+        recommendation="freeze",
+    )
+    updated = evaluator._apply_trust_overrides(decision, trust, "evt-frozen")
+    assert updated.decision == "block"
+    assert updated.trust_score == 0.0
+    assert updated.trust_category == "frozen"
+    assert updated.trust_recommendation == "freeze"
+    assert updated.decided_at > decision.decided_at
+
+
+def test_cache_hit_decision_refreshes_trust_fields_without_enforcement_change() -> None:
+    """Cache-hit decisions must refresh trust metadata even when action is unchanged."""
+    evaluator = OPAEvaluator(cache=None)  # type: ignore[arg-type]
+    decision = PolicyDecision(
+        decision="block",
+        rule_id="deny_sql_injection",
+        reason="cached block",
+        trust_score=0.95,
+        trust_category="high",
+        trust_signals={"violation_rate": 1.0},
+        trust_dominant_signal="violation_rate",
+        trust_recommendation="allow",
+        decided_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+    )
+    trust = TrustResult(
+        score=0.33,
+        category="low",
+        signals={"violation_rate": 0.2},
+        weights={"violation_rate": 0.25},
+        dominant_signal="violation_rate",
+        recommendation="escalate",
+    )
+    updated = evaluator._apply_trust_overrides(decision, trust, "evt-cache")
+    assert updated.decision == "block"
+    assert updated.rule_id == "deny_sql_injection"
+    assert updated.trust_score == 0.33
+    assert updated.trust_category == "low"
+    assert updated.trust_signals == {"violation_rate": 0.2}
+    assert updated.trust_dominant_signal == "violation_rate"
+    assert updated.trust_recommendation == "escalate"
+    assert updated.decided_at > decision.decided_at

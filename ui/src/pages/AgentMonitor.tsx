@@ -22,6 +22,9 @@ type AgentRow = {
   behavior?: "normal" | "anomalous";
   violation_count?: number;
   last_seen?: string;
+  signals?: Record<string, number>;
+  dominant_signal?: string;
+  recommendation?: string;
 };
 
 export function AgentMonitor() {
@@ -206,6 +209,21 @@ export function AgentMonitor() {
               <div className="kv">
                 <span className="k">Violations</span>
                 <span>{selected.violation_count ?? 0}</span>
+              </div>
+              <div className="kv">
+                <span className="k">Recommendation</span>
+                <span className="mono">{selected.recommendation ?? "allow"}</span>
+              </div>
+              <div style={{ marginTop: 14 }}>
+                <div className="k" style={{ marginBottom: 8 }}>
+                  Signal Breakdown {selected.dominant_signal ? `(dominant: ${selected.dominant_signal})` : ""}
+                </div>
+                {Object.entries(selected.signals ?? {}).map(([name, value]) => (
+                  <div className="kv" key={name}>
+                    <span className="mono">{name}</span>
+                    <span className="mono">{Number(value).toFixed(2)}</span>
+                  </div>
+                ))}
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
                 <KitButton

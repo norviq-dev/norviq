@@ -10,11 +10,15 @@ import hashlib
 import json
 import re
 import time
+from datetime import datetime, timezone
+from typing import Awaitable
 
 import structlog
 
 from norviq.config import settings
 from norviq.engine.cache import RedisCache
+from norviq.engine.trust import AgentHistoryStore, AgentProfileStore, TrustCalculator, TrustInput, TrustResult
+from norviq.engine.trust.signals.param_entropy import ParamEntropySignal
 from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.events import ToolCallEvent
 from norviq.sdk.core.trust import TrustScore
@@ -28,6 +32,9 @@ class OPAEvaluator:
     def __init__(self, cache: RedisCache) -> None:
         """Store shared cache and initialize concurrency controls."""
         self._cache = cache
+        self._history = AgentHistoryStore(cache)
+        self._profile = AgentProfileStore(cache)
+        self._trust_calculator = TrustCalculator(cache, self._history, self._profile)
         self._semaphore = asyncio.Semaphore(settings.evaluator_max_concurrency)
         self._audit_tasks: set[asyncio.Task[None]] = set()
         self._policies: dict[str, dict] = {}
@@ -38,25 +45,32 @@ class OPAEvaluator:
         start = time.monotonic()
         try:
             self._validate_spiffe(event.agent_identity.spiffe_id)
+            trust = await self._trust(event.agent_identity.spiffe_id)
+            trust_result = await self._compute_trust(event, trust)
             cache_tool = self._cache_tool_key(event.tool_name, event.tool_params)
             cached = await self._cache.get_eval(event.agent_identity.namespace, event.agent_identity.agent_class, cache_tool)
             if cached is not None:
-                return await self._handle_cache_hit(event, cached, start)
-            trust = await self._trust(event.agent_identity.spiffe_id)
+                decision = await self._handle_cache_hit(event, cached, start, trust_result)
+                await self._persist_behavior(event, decision, trust_result)
+                return decision
             candidates = self._collect_candidates(event)
             if not candidates:
                 async with self._semaphore:
                     result = await asyncio.wait_for(
-                        self._evaluate_opa(event.agent_identity.namespace, event.agent_identity.agent_class, self._build_input(event, trust)),
+                        self._evaluate_opa(
+                            event.agent_identity.namespace,
+                            event.agent_identity.agent_class,
+                            self._build_input(event, trust_result),
+                        ),
                         timeout=0.1,
                     )
-                decision = self._build_decision(result, event, trust, (time.monotonic() - start) * 1000)
+                base_decision = self._build_decision(result, event, trust_result, (time.monotonic() - start) * 1000)
             else:
                 results = []
                 for candidate in candidates:
                     async with self._semaphore:
                         result = await asyncio.wait_for(
-                            self._evaluate_single(event, str(candidate["rego"]), trust),
+                            self._evaluate_single(event, str(candidate["rego"]), trust_result),
                             timeout=0.1,
                         )
                     results.append(
@@ -67,11 +81,11 @@ class OPAEvaluator:
                         }
                     )
                 winner = self._resolve_precedence(results)
-                decision = winner["decision"]
-            if decision.rule_id not in settings.evaluator_non_cacheable_rules:
-                await self._cache.set_eval(event.agent_identity.namespace, event.agent_identity.agent_class, cache_tool, decision)
-            await self._post_decision(event, decision)
-            self._queue_audit(decision)
+                base_decision = winner["decision"]
+            if base_decision.rule_id not in settings.evaluator_non_cacheable_rules:
+                await self._cache.set_eval(event.agent_identity.namespace, event.agent_identity.agent_class, cache_tool, base_decision)
+            decision = self._apply_trust_overrides(base_decision, trust_result, event.event_id)
+            await self._persist_behavior(event, decision, trust_result)
             return decision
         except asyncio.TimeoutError:
             elapsed_ms = (time.monotonic() - start) * 1000
@@ -82,15 +96,19 @@ class OPAEvaluator:
             log.error("nrvq.engine.error", event_id=event.event_id, error=str(exc), code="NRVQ-ENG-2000")
             return self._fallback_decision(event, elapsed_ms)
 
-    async def _handle_cache_hit(self, event: ToolCallEvent, cached: PolicyDecision, start: float) -> PolicyDecision:
+    async def _handle_cache_hit(
+        self,
+        event: ToolCallEvent,
+        cached: PolicyDecision,
+        start: float,
+        trust_result: TrustResult,
+    ) -> PolicyDecision:
         """Apply cache-hit controls before returning a cached decision."""
         if cached.rule_id == "default_allow" and await self._is_rate_limited(event.agent_identity.spiffe_id):
             return await self._rate_limit_decision(event, start)
-        if cached.decision == "block":
-            await self._post_decision(event, cached)
-            self._queue_audit(cached)
+        decision = self._apply_trust_overrides(cached, trust_result, event.event_id)
         log.debug("nrvq.engine.cache_hit", event_id=event.event_id, code="NRVQ-ENG-2004")
-        return cached
+        return decision
 
     async def _trust(self, spiffe_id: str) -> TrustScore:
         """Return trust score from cache, initializing when absent."""
@@ -101,7 +119,42 @@ class OPAEvaluator:
         await self._cache.set_trust(spiffe_id, trust)
         return trust
 
-    def _build_input(self, event: ToolCallEvent, trust: TrustScore) -> dict:
+    async def _compute_trust(self, event: ToolCallEvent, trust: TrustScore) -> TrustResult:
+        """Compute trust from seven behavioral signals."""
+        trust_input = TrustInput(
+            spiffe_id=event.agent_identity.spiffe_id,
+            namespace=event.agent_identity.namespace,
+            agent_class=event.agent_identity.agent_class,
+            tool_name=event.tool_name,
+            tool_params=event.tool_params,
+            session_id=event.session_id,
+            chain_depth=event.call_depth,
+            timestamp=datetime.now(timezone.utc),
+        )
+        return await self._trust_calculator.calculate(trust_input)
+
+    def _apply_trust_overrides(self, decision: PolicyDecision, trust_result: TrustResult, event_id: str) -> PolicyDecision:
+        """Apply low/frozen trust overrides to policy decision."""
+        decision = decision.model_copy(
+            update={
+                "trust_score": trust_result.score,
+                "trust_category": trust_result.category,
+                "trust_signals": trust_result.signals,
+                "trust_dominant_signal": trust_result.dominant_signal,
+                "trust_recommendation": trust_result.recommendation,
+                "decided_at": datetime.now(timezone.utc),
+            }
+        )
+        if trust_result.category == "frozen":
+            log.warning("nrvq.engine.trust.override_block", event_id=event_id, code="NRVQ-ENG-2046")
+            return decision.model_copy(update={"decision": "block", "reason": "Agent trust frozen — all tool calls blocked"})
+        if trust_result.category == "low" and decision.decision == "allow":
+            reason = f"Low trust ({trust_result.score:.2f}): {trust_result.dominant_signal}"
+            log.warning("nrvq.engine.trust.override_escalate", event_id=event_id, code="NRVQ-ENG-2045")
+            return decision.model_copy(update={"decision": "escalate", "reason": reason})
+        return decision
+
+    def _build_input(self, event: ToolCallEvent, trust_result: TrustResult) -> dict:
         """Build OPA input payload from tool event and trust state."""
         return {
             "tool_name": event.tool_name,
@@ -111,11 +164,80 @@ class OPAEvaluator:
                 "namespace": event.agent_identity.namespace,
                 "agent_class": event.agent_identity.agent_class,
             },
-            "trust_score": trust.score,
-            "trust_category": trust.category,
+            "trust_score": trust_result.score,
+            "trust_category": trust_result.category,
             "session_id": event.session_id,
             "call_depth": event.call_depth,
         }
+
+    async def _persist_behavior(self, event: ToolCallEvent, decision: PolicyDecision, trust_result: TrustResult) -> None:
+        """Persist trust state, enforced outcome history, and profile evolution."""
+        self._queue_background(self._safe_set_trust(event.agent_identity.spiffe_id, trust_result))
+        await self._post_decision(event, decision)
+        self._queue_background(self._safe_record_history(event, decision))
+        self._queue_background(self._safe_update_profile(event, decision))
+        self._queue_audit(decision)
+
+    async def _safe_set_trust(self, spiffe_id: str, trust_result: TrustResult) -> None:
+        """Persist trust score/factors while tolerating Redis failures."""
+        try:
+            await self._cache.set_trust(
+                spiffe_id,
+                TrustScore(
+                    score=trust_result.score,
+                    category=trust_result.category.title(),
+                    factors={
+                        "signals": trust_result.signals,
+                        "weights": trust_result.weights,
+                        "dominant_signal": trust_result.dominant_signal,
+                        "recommendation": trust_result.recommendation,
+                    },
+                ),
+            )
+        except Exception as exc:  # pragma: no cover
+            log.error("nrvq.engine.trust.cache_set_failed", error=str(exc), code="NRVQ-ENG-2049")
+
+    async def _safe_record_history(self, event: ToolCallEvent, decision: PolicyDecision) -> None:
+        """Persist enforced decision for rolling trust-history features."""
+        try:
+            cache_tool = self._cache_tool_key(event.tool_name, event.tool_params)
+            await self._history.record(
+                event.agent_identity.spiffe_id,
+                {
+                    "tool_name": event.tool_name,
+                    "decision": decision.decision,
+                    "param_hash": cache_tool.split(":")[-1],
+                    "chain_depth": event.call_depth,
+                    "timestamp": decision.decided_at.isoformat(),
+                    "timestamp_unix": decision.decided_at.timestamp(),
+                },
+            )
+        except Exception as exc:  # pragma: no cover
+            log.error("nrvq.engine.trust.history_failed", error=str(exc), code="NRVQ-ENG-2043")
+
+    async def _safe_update_profile(self, event: ToolCallEvent, decision: PolicyDecision) -> None:
+        """Update profile only for trusted outcomes using raw entropy baseline."""
+        if decision.decision not in {"allow", "audit"}:
+            return
+        try:
+            entropy = ParamEntropySignal.entropy_of_params(event.tool_params)
+            rpm = await self._observed_rpm(event)
+            await self._profile.update_profile(event.agent_identity.spiffe_id, event.tool_name, entropy, rpm, decision.decision)
+        except Exception as exc:  # pragma: no cover
+            log.error("nrvq.engine.trust.profile_failed", error=str(exc), code="NRVQ-ENG-2044")
+
+    async def _observed_rpm(self, event: ToolCallEvent) -> float:
+        """Estimate current calls-per-minute from recent history window."""
+        history = await self._history.get_history(event.agent_identity.spiffe_id)
+        now = datetime.now(timezone.utc).timestamp()
+        recent = sum(1 for row in history if float(row.get("timestamp_unix", 0.0)) >= now - 60)
+        return float(recent + 1)
+
+    def _queue_background(self, work: Awaitable[None]) -> None:
+        """Run non-critical persistence without blocking decision path."""
+        task = asyncio.create_task(work)
+        self._audit_tasks.add(task)
+        task.add_done_callback(self._audit_tasks.discard)
 
     def _cache_tool_key(self, tool_name: str, tool_params: dict) -> str:
         """Build cache key suffix from tool name plus stable params hash."""
@@ -150,7 +272,7 @@ class OPAEvaluator:
             return {"decision": "escalate", "rule_id": "escalate_low_trust", "reason": f"Trust score {score} below threshold"}
         return {"decision": "allow", "rule_id": "default_allow", "reason": "All checks passed"}
 
-    async def _evaluate_single(self, event: ToolCallEvent, _rego_source: str, trust: TrustScore) -> PolicyDecision:
+    async def _evaluate_single(self, event: ToolCallEvent, _rego_source: str, trust_result: TrustResult) -> PolicyDecision:
         """Evaluate one candidate policy source and return typed decision."""
         default_match = re.search(r'default\s+decision\s*=\s*"(allow|audit|escalate|block)"', _rego_source)
         if default_match:
@@ -161,20 +283,32 @@ class OPAEvaluator:
                 decision=mode,
                 rule_id=rule_match.group(1) if rule_match else "",
                 reason=reason_match.group(1) if reason_match else f"decision={mode}",
-                trust_score=trust.score,
+                trust_score=trust_result.score,
+                trust_category=trust_result.category,
+                trust_signals=trust_result.signals,
+                trust_dominant_signal=trust_result.dominant_signal,
+                trust_recommendation=trust_result.recommendation,
                 latency_ms=0.0,
                 event_id=event.event_id,
             )
-        result = await self._evaluate_opa(event.agent_identity.namespace, event.agent_identity.agent_class, self._build_input(event, trust))
-        return self._build_decision(result, event, trust, 0.0)
+        result = await self._evaluate_opa(
+            event.agent_identity.namespace, event.agent_identity.agent_class, self._build_input(event, trust_result)
+        )
+        return self._build_decision(result, event, trust_result, 0.0)
 
-    def _build_decision(self, result: dict, event: ToolCallEvent, trust: TrustScore, elapsed_ms: float) -> PolicyDecision:
+    def _build_decision(
+        self, result: dict, event: ToolCallEvent, trust_result: TrustResult, elapsed_ms: float
+    ) -> PolicyDecision:
         """Build policy decision model from rule evaluation output."""
         return PolicyDecision(
             decision=result.get("decision", settings.enforcement_mode),
             rule_id=result.get("rule_id", ""),
             reason=result.get("reason", ""),
-            trust_score=trust.score,
+            trust_score=trust_result.score,
+            trust_category=trust_result.category,
+            trust_signals=trust_result.signals,
+            trust_dominant_signal=trust_result.dominant_signal,
+            trust_recommendation=trust_result.recommendation,
             latency_ms=round(elapsed_ms, 2),
             event_id=event.event_id,
         )
@@ -253,7 +387,6 @@ class OPAEvaluator:
     async def _post_decision(self, event: ToolCallEvent, decision: PolicyDecision) -> None:
         """Log and mutate trust state after decision finalization."""
         if decision.decision == "block":
-            await self._cache.decrement_trust(event.agent_identity.spiffe_id)
             log.warning("nrvq.engine.blocked", event_id=event.event_id, rule=decision.rule_id, code="NRVQ-ENG-2010")
             return
         if decision.decision == "escalate":
@@ -269,6 +402,9 @@ class OPAEvaluator:
             event_id=decision.event_id,
             decision=decision.decision,
             rule_id=decision.rule_id,
+            trust_score=decision.trust_score,
+            trust_category=decision.trust_category,
+            trust_signals=decision.trust_signals,
             latency_ms=decision.latency_ms,
             code="NRVQ-AUD-6000",
         )
@@ -292,15 +428,13 @@ class OPAEvaluator:
     async def _rate_limit_decision(self, event: ToolCallEvent, start: float) -> PolicyDecision:
         """Build and apply block decision when cached allow exceeds rate limit."""
         elapsed_ms = (time.monotonic() - start) * 1000
-        decision = PolicyDecision(
+        return PolicyDecision(
             decision="block",
             rule_id="rate_limit_exceeded",
             reason=f"Rate limit exceeded: >{settings.evaluator_rate_limit_per_window} per {settings.evaluator_rate_limit_window_s}s",
             latency_ms=round(elapsed_ms, 2),
             event_id=event.event_id,
         )
-        await self._post_decision(event, decision)
-        return decision
 
     def _validate_spiffe(self, spiffe_id: str) -> None:
         """Validate SPIFFE identifier format before trust operations."""

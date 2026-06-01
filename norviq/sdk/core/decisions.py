@@ -18,6 +18,10 @@ class PolicyDecision(BaseModel):
     rule_id: str = ""
     reason: str = ""
     trust_score: float = 0.0
+    trust_category: str = ""
+    trust_signals: dict[str, float] = Field(default_factory=dict)
+    trust_dominant_signal: str = ""
+    trust_recommendation: str = ""
     latency_ms: float = 0.0
     event_id: str = ""
     decided_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

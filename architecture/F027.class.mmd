@@ -1,0 +1,79 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+classDiagram
+    class TrustCalculator {
+      +WEIGHTS: dict~str,float~
+      +calculate(input_data) TrustResult
+      -_compute_signals(input_data, history, profile) dict~str,float~
+      -_safe_history(spiffe_id) list~dict~
+      -_safe_profile(input_data) dict
+      -_persist(spiffe_id, result) None
+      -_is_manually_frozen(spiffe_id) bool
+      -_weighted_sum(signals) float
+      -_categorize(score, is_manually_frozen) str
+      -_find_dominant_signal(signals) str
+      -_recommend(score, category) str
+    }
+    class TrustInput {
+      +spiffe_id: str
+      +namespace: str
+      +agent_class: str
+      +tool_name: str
+      +tool_params: dict~str,Any~
+      +session_id: str
+      +chain_depth: int
+      +timestamp: datetime
+    }
+    class TrustResult {
+      +score: float
+      +category: str
+      +signals: dict~str,float~
+      +weights: dict~str,float~
+      +dominant_signal: str
+      +recommendation: str
+    }
+    class AgentHistoryStore {
+      +WINDOW_SECONDS: int
+      +MAX_ENTRIES: int
+      +get_history(spiffe_id) list
+      +record(spiffe_id, entry) None
+      +clear(spiffe_id) None
+      -_key(spiffe_id) str
+    }
+    class AgentProfileStore {
+      +WINDOW_SECONDS: int
+      +get_profile(spiffe_id, agent_class) dict
+      +update_profile(spiffe_id, tool_name, param_entropy, observed_rpm, decision) None
+      -_ensure_script() None
+      -_decode_class_constraints(row) dict
+      -_decode_profile(fields) dict
+      -_key(spiffe_id) str
+    }
+    class BaseSignal {
+      <<abstract>>
+      +compute(input_data, history, profile) float
+    }
+    class ParamEntropySignal {
+      +compute(input_data, history, profile) float
+      +entropy_of_params(params) float
+      -_entropy(payload) float
+    }
+    class TimeDecaySignal {
+      +compute(input_data, history, profile) float
+      -_to_dt(value) datetime
+    }
+    class SessionVelocitySignal {
+      +compute(input_data, history, profile) float
+      -_in_window(entry, window_start) bool
+    }
+    BaseSignal <|-- ViolationRateSignal
+    BaseSignal <|-- ToolNoveltySignal
+    BaseSignal <|-- ScopeDriftSignal
+    BaseSignal <|-- ParamEntropySignal
+    BaseSignal <|-- TimeDecaySignal
+    BaseSignal <|-- ChainDepthSignal
+    BaseSignal <|-- SessionVelocitySignal
+    TrustCalculator --> AgentHistoryStore
+    TrustCalculator --> AgentProfileStore
+    TrustCalculator --> TrustInput
+    TrustCalculator --> TrustResult

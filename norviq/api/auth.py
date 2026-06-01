@@ -20,3 +20,10 @@ async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(securit
         return dict(jwt.decode(creds.credentials, settings.api_secret_key, algorithms=["HS256"]))
     except JWTError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from exc
+
+
+def require_admin(user: dict) -> None:
+    """Require admin role in token claims."""
+    role = str(user.get("role", "")).lower()
+    if role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")

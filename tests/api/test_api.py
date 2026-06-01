@@ -26,6 +26,7 @@ class FakeCache:
     def __init__(self) -> None:
         self.trust: dict[str, TrustScore] = {}
         self.policy: dict[str, dict] = {}
+        self.values: dict[str, str] = {}
 
     def _client(self) -> "FakeCache":
         """Return self for scan_iter compatibility."""
@@ -33,8 +34,9 @@ class FakeCache:
 
     async def scan_iter(self, pattern: str):
         """Yield trust keys."""
-        for spiffe_id in self.trust:
-            yield f"trust:{spiffe_id}"
+        if pattern == "trust:*":
+            for spiffe_id in self.trust:
+                yield f"trust:{spiffe_id}"
 
     async def get_trust(self, spiffe_id: str) -> TrustScore | None:
         """Get trust by id."""
@@ -43,6 +45,18 @@ class FakeCache:
     async def set_trust(self, spiffe_id: str, score: TrustScore) -> None:
         """Set trust by id."""
         self.trust[spiffe_id] = score
+
+    async def set(self, key: str, value: str) -> None:
+        """Set generic key/value for route tests."""
+        self.values[key] = value
+
+    async def get(self, key: str) -> str | None:
+        """Get generic key/value for route tests."""
+        return self.values.get(key)
+
+    async def delete(self, key: str) -> None:
+        """Delete generic key/value for route tests."""
+        self.values.pop(key, None)
 
     async def set_policy(
         self,
@@ -128,9 +142,9 @@ def _client() -> TestClient:
     return TestClient(app)
 
 
-def _auth_headers() -> dict[str, str]:
+def _auth_headers(role: str = "admin") -> dict[str, str]:
     """Build valid auth header for protected endpoints."""
-    token = jwt.encode({"sub": "test-user"}, settings.api_secret_key, algorithm="HS256")
+    token = jwt.encode({"sub": "test-user", "role": role}, settings.api_secret_key, algorithm="HS256")
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -504,7 +518,7 @@ def test_agents_list_and_update_trust() -> None:
         spiffe = "spiffe://example/ns/default/sa/agent-one"
         updated = client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.61}, headers=_auth_headers())
         assert updated.status_code == 200
-        listed = client.get("/api/v1/agents").json()
+        listed = client.get("/api/v1/agents", headers=_auth_headers()).json()
         assert len(listed) == 1 and listed[0]["spiffe_id"] == spiffe
     finally:
         client.close()
@@ -517,5 +531,16 @@ def test_invalid_trust_score_returns_422() -> None:
         spiffe = "spiffe://example/ns/default/sa/agent-one"
         response = client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 2.5}, headers=_auth_headers())
         assert response.status_code == 422
+    finally:
+        client.close()
+
+
+def test_update_trust_requires_admin_role() -> None:
+    """Reject trust updates for non-admin users."""
+    client = _client()
+    try:
+        spiffe = "spiffe://example/ns/default/sa/agent-one"
+        response = client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.4}, headers=_auth_headers(role="viewer"))
+        assert response.status_code == 403
     finally:
         client.close()

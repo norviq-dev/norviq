@@ -1,0 +1,58 @@
+
+## F027 — deferred 2026-06-01
+
+
+## F027 — deferred 2026-06-01
+
+- ⚠️ **`_categorize()` does NOT map computed `score==0.0` → `"frozen"`** (`:126-130`). `frozen` is reachable **only** via the admin `agent_frozen:` flag; a computed all-zero score maps to `"low"`. This is a **deliberate, documented** design choice (test `test_no_auto_freeze_when_signals_are_zero`, registry §12) and is arguably safer than auto-freezing, but it **contradicts the `TrustResult` docstring** (`"frozen" (0.0)`) and the review checklist's "frozen = 0" expectation. See HIGH-2.
+
+### 4. INTEGRATION WITH EVALUATOR — PASS
+--
+- ⚠️ **HIGH-3: profile TTL is `WINDOW_SECONDS = 86400` (1 day), not the spec's "7-day rolling baseline"** (`profile.py:70`). Inactive agents lose their profile after 24h vs. 7 days. Also the entropy "baseline" is a cumulative Welford mean/variance over *all* calls (not a 7-day window) and rpm is an EWMA — neither is actually a "rolling 7-day" computation.
+
+### 6. PERFORMANCE — PASS with notes
+--
+| Redis down → graceful | PARTIAL — `_safe_*` swallow errors and return `[]`/`{}` → signals default **HIGH** (fail-open for trust). `_is_manually_frozen` returns `False` on error (frozen agent un-frozen). Net evaluate still fails closed, but trust itself fails open. See HIGH-4. |
+| Malformed history entry | PASS — `get_history` skips bad JSON (`history.py:36-40`); signals use `.get()` |
+
+--
+- ⚠️ **HIGH-1 (baseline poisoning / "boiling-frog"):** entropy mean/std and `baseline_rpm` are learned **from the agent's own allowed calls** (`evaluator._safe_update_profile:208-217`). A patient compromised agent can slowly inflate its entropy baseline and rpm via benign-looking allowed calls, desensitizing `param_entropy` and `session_velocity` before an attack. `known_tools` also grows monotonically, defeating `tool_novelty` for tools introduced while trust was high. Inherent to behavioral baselining, but should be acknowledged/mitigated (e.g., cap baseline growth rate, class-level rather than agent-level baselines).
+- ⚠️ **MEDIUM (no RBAC on freeze/reset):** `PUT /agents/{id}/trust` (`agents.py:70-83`) only requires `get_current_user`, no admin-role check. Review explicitly asks "low-trust agent reset-trust on itself → should be admin-only." There is no role gate.
+
+--
+- **HIGH-1 — Baseline self-poisoning:** entropy/rpm/known-tools baselines are learned from the agent's own allowed calls; a patient compromised agent can desensitize `param_entropy`, `session_velocity`, and `tool_novelty`. *Fix:* cap per-update baseline growth and/or compute baselines at the agent-class level rather than per-agent (`evaluator.py:208-217`, `profile.py:51`).
+- **HIGH-2 — Spec deviation, `score==0.0` → `"low"` not `"frozen"`:** deliberate & documented, but contradicts the `TrustResult` docstring and review spec. *Fix:* either update the spec/docstring to state "frozen is admin-only," or add `if score == 0.0 and not frozen: category="low"` explicitly with a code comment (currently only conveyed by a test).
+- **HIGH-3 — Profile window is 1 day, not 7:** `WINDOW_SECONDS = 86400` (`profile.py:70`). *Fix:* `WINDOW_SECONDS = 604800` to match the "7-day baseline," or correct the spec/registry which claim 7 days.
+- **HIGH-4 — Trust fails open on Redis error:** `_safe_history/_safe_profile` return empty → signals default HIGH; `_is_manually_frozen` returns `False` (un-freezes). *Fix:* on Redis failure return a conservative low/neutral default and log `NRVQ-ENG-2043/2044` (not generic 2000); consider failing the freeze check closed.
+
+**4. MEDIUM**
+--
+**Verdict:** The feature is functionally correct and well-engineered (atomic Redis ops, clean signal abstraction, graceful per-signal fallback, override wiring). It does **not** warrant rejection on calculation/security-bypass grounds. However, per CLAUDE.md's strict gates, **two REJECT-class artifact issues must be fixed before sign-off**: the `F027.class.mmd` content mismatch and the inaccurate registry file:line references. I recommend addressing HIGH-1 through HIGH-4 and the missing override/profile tests in the same pass.
+- ⚠️ **LOW:** semantic drift — spec defines 2043 = "history *fetch* failed" and 2044 = "profile *fetch* failed," but the code reuses 2043 for a history **write** failure and 2044 for a **trust-set** failure (`_safe_set_trust:188`). Also `_persist`/`_is_manually_frozen` log cache failures under generic **`NRVQ-ENG-2000`** (not an F027 code).
+
+### 11. TESTING — PARTIAL (MEDIUM)
+
+## F027 — deferred 2026-06-01
+
+- Trust signals in audit (`_emit_audit` 387-400). ✓ — *but carries stale fields on cache hits (HIGH-1).*
+
+### 5. Redis Data Stores — PASS
+--
+- **No test covers the cache-hit trust-field path** — which is exactly where HIGH-1 hides.
+
+### 12. Stale Code — mostly PASS
+--
+4. **Test gap:** add a cache-hit test asserting `decision.trust_score`/`signals` reflect the *current* agent (would have caught HIGH-1).
+
+### LOW
+--
+**Verdict: REJECT** — gated solely on HIGH-1 (cache-hit trust-field correctness) and HIGH-2 (architecture/registry accuracy, which CLAUDE.md treats as hard rejects). The signal math, store atomicity, override enforcement, and anti-poisoning design are all correct and genuinely strong; the blockers are a metadata-propagation bug and doc/registry drift, all mechanically fixable.
+
+Note: I could not execute `ruff`/`pytest` this session — please run both before merge to confirm the green bar, since several findings (line numbers, function length) are easy to regress.
+- **Redis down → does NOT "return graceful default ~0.8."** `_safe_frozen_only` **fails closed → frozen → block** (calculator.py:168-174, `test_freeze_check_failure_fails_closed`). Defensible security posture, but it **contradicts spec edge-case #7**. Decide and document (MEDIUM-1).
+
+### 8. Security — PASS (strong)
+--
+1. **Cache-hit trust-field leakage** — `evaluator.py:99-111` & `136-145`. The eval cache key is `namespace:agent_class:tool:param_hash` (not per-SPIFFE). On a cache hit, `_apply_trust_overrides` updates only `decision`/`reason` via `model_copy`, so the returned `trust_score`, `trust_category`, `trust_signals`, `trust_dominant_signal`, `trust_recommendation` remain those of **whichever agent populated the cache**. Audit records (`_emit_audit`) and any decision consumer then report the wrong agent's trust. (`decided_at` is also stale, skewing the recorded history timestamp — MEDIUM-3.)
+   **Fix** — refresh trust fields whenever overrides run on a cached decision:
+   ```python
