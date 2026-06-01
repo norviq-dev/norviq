@@ -9,7 +9,7 @@ import structlog
 from fastapi import FastAPI
 
 from norviq.api.db.session import close_db, create_tables, get_session, init_db
-from norviq.api.routers import agents, audit, graph, health, policies
+from norviq.api.routers import agents, audit, evaluate, graph, health, policies, redteam
 from norviq.config import settings
 from norviq.engine.audit_emitter import AuditEmitter
 from norviq.engine.cache import RedisCache
@@ -56,10 +56,12 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.include_router(health.router)
+    app.include_router(evaluate.router, prefix="/api/v1", tags=["evaluate"])
     app.include_router(policies.router, prefix="/api/v1", tags=["policies"])
     app.include_router(audit.router, prefix="/api/v1", tags=["audit"])
     app.include_router(agents.router, prefix="/api/v1", tags=["agents"])
     app.include_router(graph.router, prefix="/api/v1")
+    app.include_router(redteam.router, prefix="/api/v1", tags=["redteam"])
     app.add_middleware(TelemetryMiddleware)
     mount_metrics_endpoint(app)
     return app

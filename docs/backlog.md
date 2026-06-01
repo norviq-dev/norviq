@@ -74,3 +74,20 @@ Note: I could not execute `ruff`/`pytest` this session — please run both befor
 ## F040 — deferred 2026-06-01
 
 **Verdict:** REJECT — fix HIGH-1..3 and the empty-ConfigMap bug, verify HIGH-4 against a live `/metrics`, then re-review. The 4 telemetry tests look correct but exercise only happy paths; add coverage for the evaluator timeout/error telemetry and the middleware-vs-evaluator metric separation once fixed.
+
+## F041 — deferred 2026-06-01
+
+| Mermaid .mmd | PARTIAL | 3 files exist but content non-compliant (HIGH-6) |
+| Code registry | FAIL | strict table sections missing (HIGH-5) |
+| Type hints | PASS | signatures typed |
+| Attack count | PASS | 26 attacks (≥25) |
+--
+- Compares actual vs expected decision: **PARTIAL** — also requires rule match, stricter than spec (HIGH-4) `simulator.py:120`
+- `passed=True` when correctly blocked: **PASS (logic)** but depends on broken contract
+- `run_suite()` runs all + aggregates: **PASS** `simulator.py:78-90`
+- **MEDIUM-11:** `--category` invalid value → uncaught `ValueError` from `AttackCategory(category)` crashes CLI `runner.py:40`
+
+### 5. SECURITY OF THE RED-TEAM TOOL ITSELF
+
+## F041 — deferred 2026-06-01
+

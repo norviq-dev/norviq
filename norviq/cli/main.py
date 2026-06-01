@@ -15,6 +15,7 @@ import structlog
 
 from norviq.cli.api_client import APIClient
 from norviq.cli.formatters import fmt_json, fmt_policy, fmt_table
+from norviq.redteam.runner import redteam
 
 log = structlog.get_logger()
 DEFAULT_API_URL = "http://127.0.0.1:8080"
@@ -274,6 +275,11 @@ def config_set(ctx: click.Context, key: str, value: str) -> None:
     ctx.obj[key] = value
     click.echo(f"Set {key}={value}")
     _ok("config.set")
+
+
+cli.add_command(redteam)
+
+
 def main() -> None:
     """Run CLI entry point."""
     cli()

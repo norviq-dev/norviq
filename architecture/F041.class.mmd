@@ -1,0 +1,72 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+classDiagram
+    class AttackDefinition {
+        +id: str
+        +name: str
+        +category: AttackCategory
+        +description: str
+        +mitre_technique: str
+        +tool_name: str
+        +tool_params: dict[str, Any]
+        +expected_decision: str
+        +expected_rule: str
+        +severity: str
+        +tags: list[str]
+    }
+    class AttackResult {
+        +attack_id: str
+        +attack_name: str
+        +category: str
+        +tool_name: str
+        +expected_decision: str
+        +actual_decision: str
+        +expected_rule: str
+        +actual_rule: str
+        +passed: bool
+        +latency_ms: float
+        +trust_score: float
+        +error: str | None
+    }
+    class SuiteReport {
+        +total: int
+        +passed: int
+        +failed: int
+        +errors: int
+        +pass_rate: float
+        +results: list[AttackResult]
+        +by_category: dict[str, dict[str, int]]
+        +duration_seconds: float
+    }
+    class AttackSimulator {
+        -_api_url: str
+        -_client: AsyncClient
+        +__init__(api_url: str, token: str) None
+        +close() None
+        +run(attack: AttackDefinition, target_agent: str, target_namespace: str) AttackResult
+        +run_suite(target_agent: str, target_namespace: str, categories: list[AttackCategory] | None) SuiteReport
+        +run_by_id(attack_id: str, target_agent: str, target_namespace: str) AttackResult
+    }
+    class RedTeamReporter {
+        +to_json(report: SuiteReport) str
+        +to_markdown(report: SuiteReport) str
+        +failed_only(report: SuiteReport) list[dict]
+    }
+    class EvaluateRequest {
+        +tool_name: str
+        +tool_params: dict
+        +agent_identity: dict
+        +session_id: str
+        +trust_score: float
+        +call_depth: int
+        +framework: str
+    }
+    class EvaluateResponse {
+        +decision: str
+        +rule_id: str
+        +trust_score: float
+    }
+    AttackSimulator --> AttackDefinition
+    AttackSimulator --> AttackResult
+    AttackSimulator --> SuiteReport
+    RedTeamReporter --> SuiteReport
