@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Norviq Contributors
+
 import { Suspense, lazy } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { Shell } from "./components/layout/Shell";
@@ -8,6 +11,8 @@ const PolicyCatalog = lazy(() => import("./pages/PolicyCatalog").then((m) => ({ 
 const TargetSettings = lazy(() => import("./pages/TargetSettings").then((m) => ({ default: m.TargetSettings })));
 const AuditLog = lazy(() => import("./pages/AuditLog").then((m) => ({ default: m.AuditLog })));
 const AgentMonitor = lazy(() => import("./pages/AgentMonitor").then((m) => ({ default: m.AgentMonitor })));
+const PolicyTester = lazy(() => import("./pages/PolicyTester").then((m) => ({ default: m.PolicyTester })));
+const RedTeam = lazy(() => import("./pages/RedTeam"));
 const AttackGraph = lazy(() => import("./pages/AttackGraph").then((m) => ({ default: m.AttackGraph })));
 const MITRECoverage = lazy(() => import("./pages/MITRECoverage").then((m) => ({ default: m.MITRECoverage })));
 const AccountSettings = lazy(() =>
@@ -34,6 +39,8 @@ function App() {
             <Route path="/policies/targets" element={<TargetSettings />} />
             <Route path="/audit" element={<AuditLog />} />
             <Route path="/agents" element={<AgentMonitor />} />
+            <Route path="/test" element={<PolicyTester />} />
+            <Route path="/redteam" element={<RedTeam />} />
             <Route path="/threats" element={<Navigate to="/threats/graph" replace />} />
             <Route path="/threats/graph" element={<AttackGraph />} />
             <Route path="/threats/mitre" element={<MITRECoverage />} />

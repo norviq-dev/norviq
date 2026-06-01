@@ -1,6 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Norviq Contributors
+
 import {
   Award,
   BarChart3,
+  Beaker,
   Info,
   Key,
   LayoutDashboard,
@@ -38,6 +42,14 @@ const PANEL_CONFIG: Record<Section, { title: string; groups: Group[] }> = {
         items: [
           { to: "/audit", label: "Audit Log", icon: BarChart3 },
           { to: "/agents", label: "Agents", icon: Users }
+        ]
+      },
+      {
+        id: "testing",
+        label: "TESTING",
+        items: [
+          { to: "/test", label: "Policy Tester", icon: Beaker },
+          { to: "/redteam", label: "Red Team", icon: Beaker }
         ]
       }
     ]

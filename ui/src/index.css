@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Norviq Contributors */
+
 @import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap");
 @import "tailwindcss";
 @import "tw-animate-css";
@@ -255,6 +258,7 @@ body {
 .g2 { grid-template-columns: repeat(2, 1fr); }
 .stack { display: flex; flex-direction: column; gap: 16px; }
 @media (max-width: 1100px) { .g4 { grid-template-columns: repeat(2,1fr); } .g3, .g2 { grid-template-columns: 1fr; } }
+@media (max-width: 1200px) { .policy-tester-grid { grid-template-columns: 1fr; } }
 
 /* ---- KPI card ---------------------------------------------------------- */
 .kpi { padding: 16px 18px; transition: var(--transition); }
@@ -309,6 +313,66 @@ body {
 .input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
 .select-trigger { display: flex; align-items: center; justify-content: space-between; cursor: pointer; }
 .select-trigger svg { width: 15px; height: 15px; color: var(--text-secondary); }
+.policy-tester-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) minmax(320px, 1fr);
+  gap: 16px;
+}
+.policy-json-input {
+  width: 100%;
+  min-height: 180px;
+  resize: vertical;
+  background: #141414;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 12px;
+  outline: none;
+}
+.policy-json-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+.policy-quick-tests {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.policy-quick-tests .btn-outline {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: transparent;
+}
+.policy-quick-tests .btn-outline:hover {
+  background: #2ddab818;
+}
+.policy-error {
+  color: var(--block);
+  font-size: 12px;
+  border: 1px solid #ff3b5c3d;
+  background: #ff3b5c14;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+}
+.signal-row {
+  display: grid;
+  grid-template-columns: 150px 44px 1fr 44px;
+  align-items: center;
+  gap: 8px;
+}
+.signal-bar-wrap {
+  height: 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: #0f0f0f;
+  overflow: hidden;
+}
+.signal-bar-fill {
+  height: 100%;
+}
 
 /* ---- Table ------------------------------------------------------------- */
 .tbl { width: 100%; border-collapse: collapse; }

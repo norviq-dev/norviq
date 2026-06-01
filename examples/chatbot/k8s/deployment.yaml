@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-chatbot
+  namespace: chatbot-demo
+  labels:
+    app: demo-chatbot
+    norviq: enabled
+    norviq.io/agent-class: customer-support
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-chatbot
+  template:
+    metadata:
+      labels:
+        app: demo-chatbot
+        norviq: enabled
+        norviq.io/agent-class: customer-support
+    spec:
+      imagePullSecrets:
+        - name: dockerhub-secret
+      containers:
+        - name: chatbot
+          image: sanman97/norviq-engine:chatbot-latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: GROQ_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: chatbot-secrets
+                  key: GROQ_API_KEY
+            - name: NRVQ_API_URL
+              value: "http://norviq-api.norviq:8080"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
