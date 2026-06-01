@@ -13,7 +13,19 @@ env:
   REPOSITORY: sanman97/norviq-engine
 
 jobs:
+  go-cache:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+          cache-dependency-path: webhook/go.sum
+      - run: cd webhook && go mod download
+
   build:
+    needs: go-cache
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
