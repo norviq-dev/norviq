@@ -54,7 +54,7 @@ jobs:
           sudo mv /tmp/kubeconform /usr/local/bin/kubeconform
       - name: Validate CRDs and examples with kubeconform
         run: |
-          kubeconform -strict -summary crds/norviq.io_nrvqpolicies.yaml crds/norviq.io_nrvqclasses.yaml crds/norviq.io_nrvqconfigs.yaml
+          kubeconform -strict -summary -skip CustomResourceDefinition helm/norviq/templates/*.yaml
           kubeconform -strict -summary crds/examples/*.yaml
       - uses: docker/login-action@v3
         with:

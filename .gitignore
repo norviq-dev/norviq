@@ -16,6 +16,7 @@ specs/
 .cursor/
 registry/
 .reviews/
+prompts/reviews/
 docs/design-system/
 download_specs.sh
 CLAUDE.md
