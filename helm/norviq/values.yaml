@@ -116,6 +116,7 @@ postgresql:
 otel:
   enabled: false
   endpoint: "http://otel-collector:4317"
+  prometheusPort: 9090
 
 ingress:
   enabled: false

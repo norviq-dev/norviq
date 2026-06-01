@@ -14,6 +14,7 @@ import structlog
 from norviq.config import settings
 from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.trust import TrustScore
+from norviq.telemetry.metrics import record_cache_hit, record_cache_miss
 
 log = structlog.get_logger()
 POLICY_EVENTS_CHANNEL = "norviq:policy_events"
@@ -179,7 +180,9 @@ class RedisCache:
         key = f"eval:{namespace}:{agent_class}:{tool_name}"
         value = await self._client().get(key)
         if value is None:
+            record_cache_miss("eval")
             return None
+        record_cache_hit("eval")
         log.debug("nrvq.cache.eval.hit", key=key, code="NRVQ-DB-9017")
         return PolicyDecision.model_validate_json(value)
 

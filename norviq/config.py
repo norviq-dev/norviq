@@ -47,6 +47,8 @@ class NorviqSettings(BaseSettings):
     pg_pool_size: int = 10
     audit_retention_days: int = 365
     otel_endpoint: str = "http://localhost:4317"
+    otel_enabled: bool = True
+    prometheus_port: int = 9090
     log_level: str = "INFO"
     log_format: str = "json"
     socket_path: str = "/tmp/norviq-proxy.sock"

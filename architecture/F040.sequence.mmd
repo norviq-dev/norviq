@@ -1,0 +1,18 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+sequenceDiagram
+    participant API as FastAPI
+    participant MW as TelemetryMiddleware
+    participant Eval as OPAEvaluator
+    participant Metrics as TelemetryMetrics
+    participant Span as SpanHelpers
+    participant Cache as RedisCache
+    API->>MW: incoming request
+    MW->>Metrics: record_api_latency()
+    API->>Eval: evaluate(event)
+    Eval->>Span: create_tool_call_span()
+    Eval->>Cache: get_eval()
+    Cache->>Metrics: record_cache_hit/miss()
+    Eval->>Metrics: record_tool_call()
+    Eval->>Span: enrich_span()
+    Eval-->>API: PolicyDecision

@@ -1,0 +1,105 @@
+{
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "10.0.0"
+    }
+  ],
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Total Tool Calls",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "sum({__name__=~\"norviq_tool_calls_total(_total)?\"})"
+        }
+      ]
+    },
+    {
+      "type": "gauge",
+      "title": "Block Rate %",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "targets": [
+        {
+          "expr": "(sum(rate({__name__=~\"norviq_tool_calls_blocked_total(_total)?\"}[5m])) / clamp_min(sum(rate({__name__=~\"norviq_tool_calls_total(_total)?\"}[5m])),1)) * 100"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Evaluation Latency p50/p95/p99",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate({__name__=~\"norviq_evaluation_latency_ms_bucket|norviq_evaluation_latency_milliseconds_bucket\"}[5m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate({__name__=~\"norviq_evaluation_latency_ms_bucket|norviq_evaluation_latency_milliseconds_bucket\"}[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate({__name__=~\"norviq_evaluation_latency_ms_bucket|norviq_evaluation_latency_milliseconds_bucket\"}[5m])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Tool Calls by Decision",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "targets": [
+        {
+          "expr": "sum by (decision) (rate({__name__=~\"norviq_tool_calls_total(_total)?\"}[5m]))",
+          "legendFormat": "{{decision}}"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": [
+    "norviq",
+    "telemetry"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "Norviq Telemetry Overview",
+  "uid": "norviq-telemetry",
+  "version": 1
+}

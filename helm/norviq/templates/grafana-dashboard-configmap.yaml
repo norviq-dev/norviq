@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: norviq-grafana-dashboard
+  namespace: {{ .Values.namespace }}
+  labels:
+    grafana_dashboard: "1"
+    {{- include "norviq.labels" . | nindent 4 }}
+data:
+  norviq-dashboard.json: |
+{{ .Files.Get "dashboards/grafana-dashboard.json" | indent 4 }}

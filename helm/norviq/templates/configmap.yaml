@@ -12,3 +12,5 @@ data:
   NRVQ_VIOLATION_PENALTY: {{ .Values.config.violationPenalty | quote }}
   NRVQ_RATE_LIMIT: {{ .Values.config.rateLimit | quote }}
   NRVQ_OTEL_ENDPOINT: {{ .Values.otel.endpoint | quote }}
+  NRVQ_OTEL_ENABLED: {{ .Values.otel.enabled | quote }}
+  NRVQ_PROMETHEUS_PORT: {{ .Values.otel.prometheusPort | quote }}

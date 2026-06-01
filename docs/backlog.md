@@ -70,3 +70,7 @@ Note: I could not execute `ruff`/`pytest` this session — please run both befor
 **Registry note (CLAUDE.md strict standards):** F036/F037 registries exist with 12 sections but **do not meet** the strict format — §3 lacks `file:line` and method signatures, §10 error map lacks the `What To Check` column, and there is **no Debug Guide table (Symptom/Cause/File:Line/Fix)** with the required error/timeout/fallback rows. Per CLAUDE.md §7 this is a reject-level registry-quality gap; flagging rather than blocking since the feature's larger issues (HIGH-1/2/3) dominate.
 
 **Bottom line:** algorithms are sound and tests are present, but the feature is **not production-ready** as integrated: persistence is dead code, the graph leaks across tenants, the update blocks the hot path, and in-memory growth is unbounded. Address HIGH-1/2/3 before merge.
+
+## F040 — deferred 2026-06-01
+
+**Verdict:** REJECT — fix HIGH-1..3 and the empty-ConfigMap bug, verify HIGH-4 against a live `/metrics`, then re-review. The 4 telemetry tests look correct but exercise only happy paths; add coverage for the evaluator timeout/error telemetry and the middleware-vs-evaluator metric separation once fixed.

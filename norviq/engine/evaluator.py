@@ -19,6 +19,8 @@ from norviq.config import settings
 from norviq.engine.cache import RedisCache
 from norviq.engine.graph.asset_graph import AssetGraphBuilder
 from norviq.engine.graph.store import GraphStore
+from norviq.telemetry.metrics import record_tool_call
+from norviq.telemetry.spans import create_tool_call_span, enrich_span
 from norviq.engine.trust import AgentHistoryStore, AgentProfileStore, TrustCalculator, TrustInput, TrustResult
 from norviq.engine.trust.signals.param_entropy import ParamEntropySignal
 from norviq.sdk.core.decisions import PolicyDecision
@@ -62,6 +64,12 @@ class OPAEvaluator:
     async def evaluate(self, event: ToolCallEvent) -> PolicyDecision:
         """Evaluate tool call against all matching policies."""
         start = time.monotonic()
+        cache_hit = False
+        span = create_tool_call_span(
+            event.tool_name,
+            event.agent_identity.namespace,
+            event.agent_identity.agent_class,
+        )
         try:
             self._validate_spiffe(event.agent_identity.spiffe_id)
             trust = await self._trust(event.agent_identity.spiffe_id)
@@ -69,8 +77,10 @@ class OPAEvaluator:
             cache_tool = self._cache_tool_key(event.tool_name, event.tool_params)
             cached = await self._cache.get_eval(event.agent_identity.namespace, event.agent_identity.agent_class, cache_tool)
             if cached is not None:
+                cache_hit = True
                 decision = await self._handle_cache_hit(event, cached, start, trust_result)
                 await self._persist_behavior(event, decision, trust_result)
+                self._record_telemetry(event, decision, start, cache_hit, span)
                 return decision
             candidates = self._collect_candidates(event)
             if not candidates:
@@ -105,15 +115,49 @@ class OPAEvaluator:
                 await self._cache.set_eval(event.agent_identity.namespace, event.agent_identity.agent_class, cache_tool, base_decision)
             decision = self._apply_trust_overrides(base_decision, trust_result, event.event_id)
             await self._persist_behavior(event, decision, trust_result)
+            self._record_telemetry(event, decision, start, cache_hit, span)
             return decision
         except asyncio.TimeoutError:
             elapsed_ms = (time.monotonic() - start) * 1000
             log.error("nrvq.engine.timeout", event_id=event.event_id, elapsed_ms=elapsed_ms, code="NRVQ-ENG-2020")
-            return self._timeout_decision(event, elapsed_ms)
+            decision = self._timeout_decision(event, elapsed_ms)
+            self._record_telemetry(event, decision, start, cache_hit, span)
+            return decision
         except Exception as exc:
             elapsed_ms = (time.monotonic() - start) * 1000
             log.error("nrvq.engine.error", event_id=event.event_id, error=str(exc), code="NRVQ-ENG-2000")
-            return self._fallback_decision(event, elapsed_ms)
+            decision = self._fallback_decision(event, elapsed_ms)
+            self._record_telemetry(event, decision, start, cache_hit, span)
+            return decision
+        finally:
+            span.end()
+
+    def _record_telemetry(
+        self,
+        event: ToolCallEvent,
+        decision: PolicyDecision,
+        start: float,
+        cache_hit: bool,
+        span,
+    ) -> None:
+        """Record metrics and enrich traces for one evaluated tool call."""
+        latency_ms = (time.monotonic() - start) * 1000
+        labels = {
+            "namespace": event.agent_identity.namespace,
+            "agent_class": event.agent_identity.agent_class,
+            "tool_name": event.tool_name,
+            "decision": decision.decision,
+        }
+        record_tool_call(labels, latency_ms, decision.trust_score, cache_hit)
+        enrich_span(
+            span,
+            decision.decision,
+            decision.trust_score,
+            decision.rule_id,
+            latency_ms,
+            cache_hit,
+            getattr(decision, "trust_signals", None),
+        )
 
     async def _handle_cache_hit(
         self,

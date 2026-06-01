@@ -16,6 +16,9 @@ from norviq.engine.cache import RedisCache
 from norviq.engine.evaluator import OPAEvaluator
 from norviq.engine.graph.store import GraphStore
 from norviq.engine.policy_loader import PolicyLoader
+from norviq.telemetry.exporter import mount_metrics_endpoint
+from norviq.telemetry.middleware import TelemetryMiddleware
+from norviq.telemetry.provider import setup_telemetry, shutdown_telemetry
 
 log = structlog.get_logger()
 
@@ -23,6 +26,7 @@ log = structlog.get_logger()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Run API startup and shutdown lifecycle."""
+    setup_telemetry()
     await init_db()
     await create_tables()
     app.state.cache = RedisCache()
@@ -39,6 +43,7 @@ async def lifespan(app: FastAPI):
     await app.state.emitter.close()
     await app.state.cache.close()
     await close_db()
+    shutdown_telemetry()
     log.info("nrvq.api.stopped", code="NRVQ-API-7001")
 
 
@@ -55,6 +60,8 @@ def create_app() -> FastAPI:
     app.include_router(audit.router, prefix="/api/v1", tags=["audit"])
     app.include_router(agents.router, prefix="/api/v1", tags=["agents"])
     app.include_router(graph.router, prefix="/api/v1")
+    app.add_middleware(TelemetryMiddleware)
+    mount_metrics_endpoint(app)
     return app
 
 
