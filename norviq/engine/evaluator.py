@@ -239,6 +239,13 @@ class OPAEvaluator:
         self._policies = {**self._policies, key: {"rego": rego_source, "priority": int(priority)}}
         log.info("nrvq.engine.policy_loaded", key=key, code="NRVQ-ENG-2005")
 
+    def reload_policy(self, namespace: str, agent_class: str, rego_source: str) -> None:
+        """Hot-reload a single policy without restarting."""
+        key = f"{namespace}:{agent_class}"
+        if key in self._policies:
+            self._policies[key]["rego"] = rego_source
+        log.info("nrvq.engine.policy_hot_reloaded", key=key, code="NRVQ-ENG-2030")
+
     def bind_loader(self, loader: object) -> None:
         """Bind loader reference for multi-policy priority resolution."""
         self._loader = loader

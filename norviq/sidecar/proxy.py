@@ -57,27 +57,26 @@ class SidecarProxy:
 
     async def _watch_policy_events(self) -> None:
         """Refresh local policy state on policy update events."""
-        if self._cache is None or self._loader is None:
+        if self._cache is None:
             return
         try:
-            await self._cache.listen_policy_events(self._on_policy_event)
+            await self._cache.listen_policy_events(self._on_policy_invalidated)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            log.error("nrvq.sidecar.policy_watch_failed", error=str(exc), code="NRVQ-SDC-3006")
+            log.error("nrvq.sidecar.pubsub_failed", error=str(exc), code="NRVQ-SDC-3020")
 
-    async def _on_policy_event(self, event: dict) -> None:
-        """Handle one policy invalidation event from Redis pub/sub."""
-        if self._loader is None:
-            return
-        await self._loader.load_all_from_redis()
-        log.info(
-            "nrvq.sidecar.policy_refreshed",
-            operation=event.get("operation", "unknown"),
-            namespace=event.get("namespace", ""),
-            agent_class=event.get("agent_class", ""),
-            code="NRVQ-SDC-3007",
-        )
+    async def _on_policy_invalidated(self, key: str) -> None:
+        """Handle policy invalidation event."""
+        try:
+            parts = key.split(":", 1)
+            if len(parts) == 2:
+                namespace, agent_class = parts
+                if self._evaluator and hasattr(self._evaluator, "_loader") and self._evaluator._loader:
+                    await self._evaluator._loader._reload_policy(namespace, agent_class)
+                log.info("nrvq.sidecar.policy_reloaded", key=key, code="NRVQ-SDC-3021")
+        except Exception as exc:
+            log.error("nrvq.sidecar.reload_failed", key=key, error=str(exc), code="NRVQ-SDC-3022")
 
     async def _unlink_existing_socket(self) -> None:
         """Delete stale Unix socket file before binding."""

@@ -64,6 +64,11 @@ class RedisCache:
             raise RuntimeError("RedisCache.connect() must be called before use")
         return self._redis
 
+    @property
+    def _pool(self) -> aioredis.Redis:
+        """Compatibility alias for internal Redis client."""
+        return self._client()
+
     def _jitter_ttl(self, base_ttl: int) -> int:
         """Add 0-10 percent jitter to base TTL."""
         return base_ttl + random.randint(0, int(base_ttl * 0.1))
@@ -181,10 +186,8 @@ class RedisCache:
     async def set_eval(self, namespace: str, agent_class: str, tool_name: str, decision: PolicyDecision) -> None:
         """Cache policy decision with TTL jitter."""
         key = f"eval:{namespace}:{agent_class}:{tool_name}"
-        # ttl = 5 by default via settings.redis_ttl_eval_s.
-        ttl = self._jitter_ttl(settings.redis_ttl_eval_s)
-        await self._client().setex(key, ttl, decision.model_dump_json())
-        log.debug("nrvq.cache.eval.set", key=key, ttl=ttl, code="NRVQ-DB-9018")
+        await self._pool.set(key, decision.model_dump_json(), ex=settings.redis_ttl_eval_s)
+        log.debug("nrvq.cache.eval.set", key=key, ttl=settings.redis_ttl_eval_s, code="NRVQ-DB-9018")
 
     async def invalidate_eval_scope(self, namespace: str, agent_class: str | None = None) -> int:
         """Invalidate cached eval decisions for a namespace/class scope."""
@@ -226,29 +229,18 @@ class RedisCache:
         )
         await self._client().publish(POLICY_EVENTS_CHANNEL, payload)
 
-    async def listen_policy_events(self, handler) -> None:
-        """Listen for policy update events and invoke async handler."""
-        client = self._client()
-        pubsub = client.pubsub()
-        await pubsub.subscribe(POLICY_EVENTS_CHANNEL)
-        try:
-            while True:
-                message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-                if not message:
-                    continue
-                data = message.get("data")
-                if isinstance(data, bytes):
-                    data = data.decode("utf-8")
-                if not isinstance(data, str):
-                    continue
-                try:
-                    event = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                await handler(event)
-        finally:
-            await pubsub.unsubscribe(POLICY_EVENTS_CHANNEL)
-            await pubsub.aclose()
+    async def listen_policy_events(self, callback) -> None:
+        """Listen for policy invalidation events from other replicas."""
+        pubsub = self._pool.pubsub()
+        await pubsub.subscribe("norviq:policy:invalidated")
+        log.info("nrvq.cache.pubsub_listening", code="NRVQ-DB-9030")
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                key = message["data"]
+                if isinstance(key, bytes):
+                    key = key.decode()
+                log.debug("nrvq.cache.pubsub_received", key=key, code="NRVQ-DB-9031")
+                await callback(key)
 
     async def incr_call_count(self, spiffe_id: str, window_s: int = 60) -> int:
         """Increment call count atomically for rate windows."""

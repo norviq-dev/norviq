@@ -81,8 +81,14 @@ class PolicyLoader:
         # delete policy: clear prior policy cache value so updates are atomic for readers.
         await self._cache.delete_policy(namespace, agent_class)
         await self._cache.set_policy(namespace, agent_class, rego_source, priority=priority, version=new_version)
-        # eval: invalidate stale decisions for this policy scope.
+        # NEW: Invalidate Redis caches for this policy scope.
+        pool = getattr(self._cache, "_pool", None)
+        if pool is not None:
+            await pool.delete(f"policy:{key}")
         await self._invalidate_eval_for_policy_scope(namespace, agent_class)
+        if pool is not None:
+            await pool.publish("norviq:policy:invalidated", key)
+        log.info("nrvq.policy.cache_invalidated", key=key, code="NRVQ-REG-5010")
         await self._cache.publish_policy_event("upsert", namespace, agent_class, version=new_version)
         self._evaluator.load_policy(namespace, agent_class, rego_source, priority=priority)
         log.info("nrvq.policy.created", key=key, version=new_version, priority=priority, code="NRVQ-REG-5003")
@@ -173,14 +179,42 @@ class PolicyLoader:
         self._policies = {**self._policies, key: {"rego": rego_source, "priority": int(priority)}}
 
     async def _invalidate_eval_for_policy_scope(self, namespace: str, agent_class: str) -> None:
-        """Invalidate cached decisions for the effective policy scope."""
-        if namespace == "__cluster__" and agent_class == "__baseline__":
-            await self._cache.invalidate_all_eval()
+        """Delete all cached evaluation results for a policy scope."""
+        pattern = f"eval:{namespace}:{agent_class}:*"
+        pool = getattr(self._cache, "_pool", None)
+        if pool is None:
+            await self._cache.invalidate_eval_scope(namespace, agent_class)
+            log.debug("nrvq.policy.eval_cache_cleared", namespace=namespace, agent_class=agent_class, code="NRVQ-REG-5011")
             return
-        if agent_class == "__baseline__":
-            await self._cache.invalidate_eval_scope(namespace)
+        cursor = 0
+        while True:
+            cursor, keys = await pool.scan(cursor, match=pattern, count=100)
+            if keys:
+                await pool.delete(*keys)
+            if cursor == 0:
+                break
+        log.debug("nrvq.policy.eval_cache_cleared", namespace=namespace, agent_class=agent_class, code="NRVQ-REG-5011")
+
+    async def _reload_policy(self, namespace: str, agent_class: str) -> None:
+        """Reload a single policy from cache or DB into memory."""
+        key = f"{namespace}:{agent_class}"
+
+        cached = await self._cache.get_policy_entry(namespace, agent_class)
+        if cached:
+            rego = cached if isinstance(cached, str) else cached.get("rego", "")
+            priority = cached.get("priority", 100) if isinstance(cached, dict) else 100
+        else:
+            log.debug("nrvq.policy.reload_cache_miss", key=key, code="NRVQ-REG-5012")
             return
-        await self._cache.invalidate_eval_scope(namespace, agent_class)
+
+        new_policies = dict(self._policies)
+        new_policies[key] = {"rego": rego, "priority": priority}
+        self._policies = new_policies
+
+        if hasattr(self, "_evaluator") and self._evaluator:
+            self._evaluator.reload_policy(namespace, agent_class, rego)
+
+        log.info("nrvq.policy.reloaded", key=key, code="NRVQ-REG-5013")
 
     @property
     def policy_count(self) -> int:
