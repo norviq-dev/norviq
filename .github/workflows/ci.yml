@@ -53,3 +53,8 @@ jobs:
       - name: Build UI
         run: |
           cd ui && npm ci && npm run build
+      - name: Validate Helm chart
+        run: |
+          helm lint helm/norviq/
+          helm template norviq helm/norviq/ -f helm/norviq/values-dev.yaml > /tmp/rendered.yaml
+          kubeconform -strict -summary -skip CustomResourceDefinition /tmp/rendered.yaml
