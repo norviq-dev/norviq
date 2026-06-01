@@ -71,6 +71,8 @@ ui:
 
 webhook:
   enabled: true
+  validating:
+    enabled: false
   replicas: 2
   port: 8443
   resources:
