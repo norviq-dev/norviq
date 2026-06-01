@@ -25,6 +25,8 @@ jobs:
         run: az aks get-credentials --resource-group rg-opsai-dev-eastus-001 --name norviq
       - name: Install Helm
         uses: azure/setup-helm@v3
+      - name: Install CRDs
+        run: kubectl apply -f crds/
       - name: Deploy
         run: |
           helm upgrade --install norviq helm/norviq/ \
