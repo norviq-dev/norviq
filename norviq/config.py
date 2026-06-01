@@ -57,6 +57,7 @@ class NorviqSettings(BaseSettings):
     webhook_cert_dir: str = "/etc/norviq/certs"
     sidecar_image: str = "sanman97/norviq-engine:engine-latest"
     session_ttl_s: int = 3600
+    graph_max_nodes: int = 5000
 
 
 settings = NorviqSettings()

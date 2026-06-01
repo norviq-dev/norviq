@@ -17,6 +17,8 @@ import structlog
 
 from norviq.config import settings
 from norviq.engine.cache import RedisCache
+from norviq.engine.graph.asset_graph import AssetGraphBuilder
+from norviq.engine.graph.store import GraphStore
 from norviq.engine.trust import AgentHistoryStore, AgentProfileStore, TrustCalculator, TrustInput, TrustResult
 from norviq.engine.trust.signals.param_entropy import ParamEntropySignal
 from norviq.sdk.core.decisions import PolicyDecision
@@ -39,6 +41,23 @@ class OPAEvaluator:
         self._audit_tasks: set[asyncio.Task[None]] = set()
         self._policies: dict[str, dict] = {}
         self._loader = None
+        self._graph_store: GraphStore | None = None
+        self._graphs: dict[str, AssetGraphBuilder] = {}
+
+    @property
+    def graph_builder(self) -> AssetGraphBuilder:
+        """Expose shared runtime asset graph builder."""
+        return self.get_graph("default")
+
+    def get_graph(self, namespace: str) -> AssetGraphBuilder:
+        """Return graph builder scoped by namespace."""
+        if namespace not in self._graphs:
+            self._graphs[namespace] = AssetGraphBuilder(max_nodes=settings.graph_max_nodes)
+        return self._graphs[namespace]
+
+    def bind_graph_store(self, graph_store: GraphStore) -> None:
+        """Bind graph store for async persistence."""
+        self._graph_store = graph_store
 
     async def evaluate(self, event: ToolCallEvent) -> PolicyDecision:
         """Evaluate tool call against all matching policies."""
@@ -174,9 +193,27 @@ class OPAEvaluator:
         """Persist trust state, enforced outcome history, and profile evolution."""
         self._queue_background(self._safe_set_trust(event.agent_identity.spiffe_id, trust_result))
         await self._post_decision(event, decision)
+        self._queue_background(self._safe_record_graph(event, decision))
         self._queue_background(self._safe_record_history(event, decision))
         self._queue_background(self._safe_update_profile(event, decision))
         self._queue_audit(decision)
+
+    async def _safe_record_graph(self, event: ToolCallEvent, decision: PolicyDecision) -> None:
+        """Record graph updates and persist snapshots without blocking decisions."""
+        try:
+            namespace = event.agent_identity.namespace or "default"
+            graph = self.get_graph(namespace)
+            graph.record_tool_call(
+                spiffe_id=event.agent_identity.spiffe_id,
+                tool_name=event.tool_name,
+                decision=decision.decision,
+                namespace=namespace,
+                agent_class=event.agent_identity.agent_class,
+            )
+            if self._graph_store is not None:
+                await self._graph_store.save(namespace, graph)
+        except Exception as exc:  # pragma: no cover
+            log.error("nrvq.engine.graph.record_failed", error=str(exc), code="NRVQ-GRP-11001")
 
     async def _safe_set_trust(self, spiffe_id: str, trust_result: TrustResult) -> None:
         """Persist trust score/factors while tolerating Redis failures."""

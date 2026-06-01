@@ -56,3 +56,17 @@ Note: I could not execute `ruff`/`pytest` this session — please run both befor
 1. **Cache-hit trust-field leakage** — `evaluator.py:99-111` & `136-145`. The eval cache key is `namespace:agent_class:tool:param_hash` (not per-SPIFFE). On a cache hit, `_apply_trust_overrides` updates only `decision`/`reason` via `model_copy`, so the returned `trust_score`, `trust_category`, `trust_signals`, `trust_dominant_signal`, `trust_recommendation` remain those of **whichever agent populated the cache**. Audit records (`_emit_audit`) and any decision consumer then report the wrong agent's trust. (`decided_at` is also stale, skewing the recorded history timestamp — MEDIUM-3.)
    **Fix** — refresh trust fields whenever overrides run on a cached decision:
    ```python
+
+## F036-F037 — deferred 2026-06-01
+
+| Analysis-endpoint cost | **FAIL (MEDIUM)** | `find_critical_paths`, `compute_risk_matrix`, and `full_analysis` are O(agents × data) × `all_simple_paths`; `full_analysis` additionally runs `compute_blast_radius` per agent (each enumerates all data). No result caching. See HIGH-5. |
+
+### 4. SECURITY
+--
+7. Latent concurrency: the shared `_graph_builder` is mutated (`record_tool_call`) and read (router traversals) across coroutines. Safe **only** because every mutate/read is fully synchronous (no `await` mid-operation). If any `await` is later added inside `record_tool_call` or a traversal, an in-flight `all_simple_paths` could see a half-mutated graph. → Add a comment/`asyncio.Lock` guard if persistence (HIGH-3) introduces awaits into these methods.
+8. Tool-node poisoning via arbitrary `tool_name` (`record_tool_call:96`) — low impact, but consider validating tool names against a known registry.
+9. `store.py:36,68` reach into `cache._pool` (private). Matches spec but is a coupling smell; prefer a public cache method.
+--
+**Registry note (CLAUDE.md strict standards):** F036/F037 registries exist with 12 sections but **do not meet** the strict format — §3 lacks `file:line` and method signatures, §10 error map lacks the `What To Check` column, and there is **no Debug Guide table (Symptom/Cause/File:Line/Fix)** with the required error/timeout/fallback rows. Per CLAUDE.md §7 this is a reject-level registry-quality gap; flagging rather than blocking since the feature's larger issues (HIGH-1/2/3) dominate.
+
+**Bottom line:** algorithms are sound and tests are present, but the feature is **not production-ready** as integrated: persistence is dead code, the graph leaks across tenants, the update blocks the hot path, and in-memory growth is unbounded. Address HIGH-1/2/3 before merge.
