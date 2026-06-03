@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import uuid
 
 import structlog
 from sqlalchemy import text
@@ -89,11 +90,64 @@ class PolicyLoader:
         rego_source: str,
         saved_by: str = "",
         priority: int = 100,
+        enforcement_mode: str = "block",
+        policy_name: str | None = None,
     ) -> int:
         """Create or update a policy and return new version."""
         key = self._key(namespace, agent_class)
+        policy_id = str(uuid.uuid4())
+        version_row_id = str(uuid.uuid4())
+        upsert_policy = text(
+            """
+            INSERT INTO policies (
+                id, name, namespace, agent_class, rego_source, version, enforcement_mode, priority, created_at
+            )
+            VALUES (
+                :id, :name, :namespace, :agent_class, :rego_source, 1, :enforcement_mode, :priority, NOW()
+            )
+            ON CONFLICT (namespace, agent_class) DO UPDATE SET
+                rego_source = EXCLUDED.rego_source,
+                version = policies.version + 1,
+                priority = EXCLUDED.priority,
+                enforcement_mode = EXCLUDED.enforcement_mode,
+                created_at = NOW()
+            RETURNING id, version
+            """
+        )
+        insert_version = text(
+            """
+            INSERT INTO policy_versions (id, policy_id, version, rego_source, saved_at, saved_by)
+            VALUES (:id, :policy_id, :version, :rego_source, NOW(), :saved_by)
+            """
+        )
+        async with self._db_engine().begin() as conn:
+            row = (
+                await conn.execute(
+                    upsert_policy,
+                    {
+                        "id": policy_id,
+                        "name": policy_name or agent_class,
+                        "namespace": namespace,
+                        "agent_class": agent_class,
+                        "rego_source": rego_source,
+                        "enforcement_mode": enforcement_mode,
+                        "priority": int(priority),
+                    },
+                )
+            ).mappings().one()
+            new_version = int(row["version"])
+            await conn.execute(
+                insert_version,
+                {
+                    "id": version_row_id,
+                    "policy_id": row["id"],
+                    "version": new_version,
+                    "rego_source": rego_source,
+                    "saved_by": saved_by,
+                },
+            )
+
         history = self._versions.get(key, [])
-        new_version = (history[-1].version + 1) if history else 1
         snapshot = PolicyVersion(version=new_version, rego_source=rego_source, priority=priority, saved_by=saved_by)
         self._versions = {**self._versions, key: [*history, snapshot][-_MAX_VERSIONS:]}
         self._update_memory(key, rego_source, priority)

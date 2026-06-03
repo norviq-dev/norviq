@@ -91,6 +91,8 @@ async def create_policy(body: PolicyCreate, request: Request, user: dict = Depen
         body.rego_source,
         saved_by=body.saved_by,
         priority=body.priority,
+        enforcement_mode=body.enforcement_mode,
+        policy_name=body.policy_name,
     )
     log.info(
         "nrvq.api.policy.created",
