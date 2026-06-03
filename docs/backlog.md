@@ -122,3 +122,26 @@ Test to reproduce:
 Impact: Day 8 attack tests at 25/66 pass — most policies not actually enforced
 Blocks: Day 8 sign-off, Day 13 pentest readiness
 Priority: P0 — fix before Day 9
+
+## Day 8 — P0 — Policy evaluator broken ($(date +%Y-%m-%d))
+
+Symptoms:
+- Policy stored in PostgreSQL (verified: SELECT COUNT(*) FROM policies = 1)
+- warm_cache loads policy on API startup (NRVQ-REG-5015 count=1)
+- POST /api/v1/evaluate returns "decision":"allow", "rule_id":"default_allow"
+- Even simple tool_name == "delete_record" rule doesn't fire
+- No NRVQ-ENG logs visible
+
+Likely causes (investigate tomorrow):
+1. _collect_candidates returns empty list (key format mismatch)
+2. OPA Python evaluator silently fails
+3. Rego stored corrupted (verify with SELECT LEFT(rego_source, 200))
+4. evaluate() catches exception and falls through to default
+
+Files to check:
+- norviq/engine/evaluator.py _collect_candidates and evaluate methods
+- norviq/engine/policy_loader.py _policies dict key format
+- norviq/api/main.py lifespan startup
+
+Day 8 result: 21/66 passing — most failures because policies not enforced
+Blocker for: Day 9 onwards
