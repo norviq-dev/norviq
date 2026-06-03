@@ -82,7 +82,7 @@ class OPAEvaluator:
                 await self._persist_behavior(event, decision, trust_result)
                 self._record_telemetry(event, decision, start, cache_hit, span)
                 return decision
-            candidates = self._collect_candidates(event)
+            candidates = await self._collect_candidates(event)
             if not candidates:
                 async with self._semaphore:
                     result = await asyncio.wait_for(
@@ -394,25 +394,27 @@ class OPAEvaluator:
             event_id=event.event_id,
         )
 
-    def _collect_candidates(self, event: ToolCallEvent) -> list[dict]:
+    async def _collect_candidates(self, event: ToolCallEvent) -> list[dict]:
         """Collect candidate policies from loader state by specificity."""
         if self._loader is None:
             return []
         namespace = event.agent_identity.namespace
         agent_class = event.agent_identity.agent_class or ""
         candidates = []
-        class_key = f"{namespace}:{agent_class}"
-        if class_key in self._loader._policies:
-            entry = self._loader._policies[class_key]
-            candidates.append({"key": class_key, "rego": entry["rego"], "priority": entry["priority"]})
-        ns_key = f"{namespace}:__baseline__"
-        if ns_key in self._loader._policies:
-            entry = self._loader._policies[ns_key]
-            candidates.append({"key": ns_key, "rego": entry["rego"], "priority": entry["priority"]})
-        cluster_key = "__cluster__:__baseline__"
-        if cluster_key in self._loader._policies:
-            entry = self._loader._policies[cluster_key]
-            candidates.append({"key": cluster_key, "rego": entry["rego"], "priority": entry["priority"]})
+
+        async def _append_policy(target_namespace: str, target_agent_class: str) -> None:
+            key = f"{target_namespace}:{target_agent_class}"
+            if key in self._loader._policies:
+                entry = self._loader._policies[key]
+                candidates.append({"key": key, "rego": entry["rego"], "priority": entry["priority"]})
+                return
+            loaded = await self._loader.load_from_db(target_namespace, target_agent_class)
+            if loaded:
+                candidates.append({"key": key, "rego": loaded["rego"], "priority": loaded["priority"]})
+
+        await _append_policy(namespace, agent_class)
+        await _append_policy(namespace, "__baseline__")
+        await _append_policy("__cluster__", "__baseline__")
         return candidates
 
     def _resolve_precedence(self, results: list[dict]) -> dict:

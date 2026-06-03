@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import structlog
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from norviq.config import settings
 from norviq.engine.cache import RedisCache
@@ -41,12 +43,29 @@ class PolicyLoader:
         self._evaluator = evaluator
         self._policies: dict[str, dict] = {}
         self._versions: dict[str, list[PolicyVersion]] = {}
+        self._db: AsyncEngine | None = None
         if hasattr(self._evaluator, "bind_loader"):
             self._evaluator.bind_loader(self)
 
     def _key(self, namespace: str, agent_class: str) -> str:
         """Build namespace and class compound key."""
         return f"{namespace}:{agent_class}"
+
+    def _db_url(self) -> str:
+        """Return SQLAlchemy-compatible asyncpg URL."""
+        return settings.pg_url.strip().strip("\"'").replace("postgresql://", "postgresql+asyncpg://")
+
+    def _db_engine(self) -> AsyncEngine:
+        """Lazily initialize DB engine for policy hydration."""
+        if self._db is None:
+            self._db = create_async_engine(
+                self._db_url(),
+                pool_size=settings.pg_pool_size,
+                max_overflow=5,
+                pool_timeout=5,
+                connect_args={"command_timeout": 5},
+            )
+        return self._db
 
     async def load(self, namespace: str, agent_class: str) -> str | None:
         """Load policy from memory first, then Redis."""
@@ -174,6 +193,52 @@ class PolicyLoader:
         log.info("nrvq.policy.hydrated", count=count, code="NRVQ-REG-5008")
         return count
 
+    async def load_from_db(self, namespace: str, agent_class: str) -> dict | None:
+        """Load a policy from PostgreSQL into in-memory cache."""
+        key = self._key(namespace, agent_class)
+        query = text(
+            """
+            SELECT rego_source, priority
+            FROM policies
+            WHERE namespace = :namespace AND agent_class = :agent_class
+            ORDER BY version DESC
+            LIMIT 1
+            """
+        )
+        async with self._db_engine().begin() as conn:
+            row = (await conn.execute(query, {"namespace": namespace, "agent_class": agent_class})).mappings().first()
+        if not row:
+            return None
+        entry = {"rego": str(row["rego_source"]), "priority": int(row["priority"] or 100)}
+        self._policies = {**self._policies, key: entry}
+        if hasattr(self._evaluator, "reload_policy"):
+            self._evaluator.reload_policy(namespace, agent_class, entry["rego"])
+        log.info("nrvq.policy.lazy_loaded", key=key, code="NRVQ-REG-5014")
+        return entry
+
+    async def warm_cache(self) -> None:
+        """Load latest policies from DB into memory on startup."""
+        query = text(
+            """
+            SELECT namespace, agent_class, rego_source, priority
+            FROM policies
+            ORDER BY namespace, agent_class, version DESC
+            """
+        )
+        async with self._db_engine().begin() as conn:
+            rows = (await conn.execute(query)).mappings().all()
+        policies: dict[str, dict] = {}
+        for row in rows:
+            key = self._key(str(row["namespace"]), str(row["agent_class"]))
+            if key in policies:
+                continue
+            entry = {"rego": str(row["rego_source"]), "priority": int(row["priority"] or 100)}
+            policies[key] = entry
+            if hasattr(self._evaluator, "reload_policy"):
+                self._evaluator.reload_policy(str(row["namespace"]), str(row["agent_class"]), entry["rego"])
+        self._policies = {**self._policies, **policies}
+        log.info("nrvq.policy.cache_warmed", count=len(policies), code="NRVQ-REG-5015")
+
     def _update_memory(self, key: str, rego_source: str, priority: int) -> None:
         """Update memory map via copy-on-write swap."""
         self._policies = {**self._policies, key: {"rego": rego_source, "priority": int(priority)}}
@@ -220,3 +285,9 @@ class PolicyLoader:
     def policy_count(self) -> int:
         """Return count of in-memory policies."""
         return len(self._policies)
+
+    async def close(self) -> None:
+        """Dispose database resources."""
+        if self._db is not None:
+            await self._db.dispose()
+            self._db = None

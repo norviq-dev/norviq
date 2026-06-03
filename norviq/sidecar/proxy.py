@@ -45,12 +45,13 @@ class SidecarProxy:
         await self._cache.connect()
         self._evaluator = OPAEvaluator(self._cache)
         self._loader = PolicyLoader(self._cache, self._evaluator)
-        await self._loader.load_all_from_redis()
+        await self._loader.warm_cache()
         self._resolver = SPIFFEResolver()
         self._interceptor = ToolInterceptor(self._evaluator, self._resolver)
         self._emitter = AuditEmitter()
         await self._emitter.init()
         self._policy_event_task = asyncio.create_task(self._watch_policy_events())
+        log.info("nrvq.sidecar.pubsub_watcher_started", code="NRVQ-SDC-3023")
         await self._unlink_existing_socket()
         self._server = await asyncio.start_unix_server(self._handle_connection, path=self._socket_path)
         log.info("nrvq.sidecar.started", socket=self._socket_path, code="NRVQ-SDC-3000")
@@ -148,6 +149,8 @@ class SidecarProxy:
             log.info("nrvq.sidecar.socket_closed", code="NRVQ-SDC-3004")
         if self._emitter is not None:
             await self._emitter.close()
+        if self._loader is not None:
+            await self._loader.close()
         if self._evaluator is not None:
             await self._evaluator.close()
         if self._cache is not None:
