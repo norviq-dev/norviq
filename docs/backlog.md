@@ -91,3 +91,34 @@ Note: I could not execute `ruff`/`pytest` this session — please run both befor
 
 ## F041 — deferred 2026-06-01
 
+
+## CRITICAL: Day 8 — Policy not enforced at runtime ($(date +%Y-%m-%d))
+
+Symptoms:
+- POST /api/v1/policies returns 200
+- GET /api/v1/policies shows the policy with correct rego_length
+- POST /api/v1/evaluate returns "decision":"allow", "rule_id":"default_allow"
+- Even simple rules (tool_name == "delete_record" → block) don't fire
+- Pod restart does not fix
+- Only the earliest simple test policy ever worked, briefly
+
+Likely cause:
+- norviq-api stores policy in DB and own in-memory copy
+- norviq-engine (evaluator) has separate in-memory _policies dict
+- Cache pub/sub invalidation between pods is failing
+- OR: evaluator uses key format different from what API writes
+
+Files to investigate:
+- norviq/engine/policy_loader.py (where _policies is populated)
+- norviq/engine/evaluator.py (where _policies is read in evaluate())
+- norviq/sidecar/proxy.py (_watch_policy_events listener)
+- norviq/engine/cache.py (listen_policy_events)
+
+Test to reproduce:
+1. POST policy via API → 200 OK
+2. GET policies → shows policy
+3. POST evaluate with matching attack → returns default_allow
+
+Impact: Day 8 attack tests at 25/66 pass — most policies not actually enforced
+Blocks: Day 8 sign-off, Day 13 pentest readiness
+Priority: P0 — fix before Day 9
