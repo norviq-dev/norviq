@@ -372,6 +372,13 @@ class OPAEvaluator:
             with open(input_path, "w", encoding="utf-8") as input_file:
                 json.dump(opa_input, input_file)
 
+            log.info(
+                "nrvq.opa.input",
+                rego_preview=rego[:200],
+                input_doc=str(opa_input)[:500],
+                code="NRVQ-ENG-DEBUG-OPA-IN",
+            )
+
             proc = await asyncio.create_subprocess_exec(
                 "opa",
                 "eval",
@@ -386,6 +393,14 @@ class OPAEvaluator:
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await proc.communicate()
+            log.info(
+                "nrvq.opa.subprocess_done",
+                returncode=proc.returncode,
+                stdout_len=len(stdout),
+                stdout_preview=stdout.decode("utf-8", errors="replace")[:500],
+                stderr_preview=stderr.decode("utf-8", errors="replace")[:500],
+                code="NRVQ-ENG-DEBUG-OPA",
+            )
 
         if proc.returncode != 0:
             raise RuntimeError(f"opa eval failed: {stderr.decode('utf-8', errors='replace').strip()}")
