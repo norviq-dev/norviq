@@ -9,7 +9,6 @@ import asyncio
 import hashlib
 import json
 import os
-import re
 import tempfile
 import time
 import traceback
@@ -426,30 +425,13 @@ class OPAEvaluator:
         except (KeyError, IndexError, TypeError):
             return None
 
-    async def _evaluate_single(self, event: ToolCallEvent, _rego_source: str, trust_result: TrustResult) -> PolicyDecision:
+    async def _evaluate_single(self, event: ToolCallEvent, rego_source: str, trust_result: TrustResult) -> PolicyDecision:
         """Evaluate one candidate policy source and return typed decision."""
-        default_match = re.search(r'default\s+decision\s*=\s*"(allow|audit|escalate|block)"', _rego_source)
-        if default_match:
-            mode = default_match.group(1)
-            rule_match = re.search(r'rule_id\s*=\s*"([^"]+)"', _rego_source)
-            reason_match = re.search(r'reason\s*=\s*"([^"]+)"', _rego_source)
-            return PolicyDecision(
-                decision=mode,
-                rule_id=rule_match.group(1) if rule_match else "",
-                reason=reason_match.group(1) if reason_match else f"decision={mode}",
-                trust_score=trust_result.score,
-                trust_category=trust_result.category,
-                trust_signals=trust_result.signals,
-                trust_dominant_signal=trust_result.dominant_signal,
-                trust_recommendation=trust_result.recommendation,
-                latency_ms=0.0,
-                event_id=event.event_id,
-            )
         try:
             input_doc = self._build_input(event, trust_result)
             log.info("nrvq.eval.opa_input", input_doc=str(input_doc)[:500], code="NRVQ-ENG-DEBUG-INPUT")
             result = await self._evaluate_opa(
-                event.agent_identity.namespace, event.agent_identity.agent_class, input_doc, _rego_source
+                event.agent_identity.namespace, event.agent_identity.agent_class, input_doc, rego_source
             )
         except Exception as exc:
             log.error(
