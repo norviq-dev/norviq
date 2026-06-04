@@ -400,8 +400,10 @@ class OPAEvaluator:
                 event_id=event.event_id,
             )
         try:
+            input_doc = self._build_input(event, trust_result)
+            log.info("nrvq.eval.opa_input", input_doc=str(input_doc)[:500], code="NRVQ-ENG-DEBUG-INPUT")
             result = await self._evaluate_opa(
-                event.agent_identity.namespace, event.agent_identity.agent_class, self._build_input(event, trust_result)
+                event.agent_identity.namespace, event.agent_identity.agent_class, input_doc
             )
         except Exception as exc:
             log.error(
