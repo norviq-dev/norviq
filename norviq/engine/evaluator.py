@@ -107,7 +107,7 @@ class OPAEvaluator:
                             event.agent_identity.agent_class,
                             self._build_input(event, trust_result),
                         ),
-                        timeout=0.1,
+                        timeout=2.0,
                     )
                 base_decision = self._build_decision(result, event, trust_result, (time.monotonic() - start) * 1000)
             else:
@@ -122,7 +122,7 @@ class OPAEvaluator:
                     async with self._semaphore:
                         result = await asyncio.wait_for(
                             self._evaluate_single(event, str(candidate["rego"]), trust_result),
-                            timeout=0.1,
+                            timeout=2.0,
                         )
                     log.info(
                         "nrvq.eval.opa_result",
@@ -529,6 +529,7 @@ class OPAEvaluator:
         log.warning("nrvq.engine.timeout_fallback", event_id=event.event_id, mode=mode, code="NRVQ-ENG-2021")
         return PolicyDecision(
             decision=mode,
+            rule_id="evaluator_timeout",
             reason="Evaluation timed out, fallback=block",
             latency_ms=round(elapsed_ms, 2),
             event_id=event.event_id,
