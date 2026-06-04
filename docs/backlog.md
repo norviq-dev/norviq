@@ -145,3 +145,49 @@ Files to check:
 
 Day 8 result: 21/66 passing — most failures because policies not enforced
 Blocker for: Day 9 onwards
+
+## Day 8 — Post-MVP fixes (P1)
+
+### 1. Policy deployment workflow (P1)
+Current: comprehensive.rego uploaded via curl. Wiped on Postgres rebuild.
+Real fix:
+  - Move comprehensive.rego → policies/presets/strict.rego (new canonical version)
+  - Add NrvqPolicy YAML in helm/charts/norviq/templates/baseline-policy.yaml
+  - Apply via Helm install/upgrade
+  - Engine startup detects no policies → auto-load defaults
+
+### 2. OPA subprocess per-call (P0 for prod)
+Current: spawn OPA subprocess every evaluation (~150ms cold start, 2s timeout)
+Real fix:
+  - Run OPA as long-lived process inside API container (or as sidecar)
+  - HTTP API at localhost:8181/v1/data/norviq/strict
+  - Evaluation drops to ~2ms (under <5ms p99 target)
+  - Push Rego policies to OPA via /v1/policies API on startup + invalidation
+
+### 3. Unicode normalization for injection detection (P1)
+Current: hardcoded fullwidth patterns for "ignore", "dan", "bypass"
+Real fix:
+  - Add Python preprocessing to normalize input.tool_params strings via unicodedata.normalize('NFKC', s).lower()
+  - Pass normalized version to OPA as input.tool_params_normalized
+  - Rego matches against normalized version
+  - Catches ANY Unicode obfuscation, not just the 3 hardcoded variants
+
+## Day 8 — Remaining 6 attack failures (P1)
+
+### Cross-tenant (2 tests)
+Tests still failing after Rego fix:
+- test_different_tenant_id_blocked
+- test_different_namespace_blocked
+Likely: input doc structure doesn't expose agent_identity.namespace the way Rego expects.
+Debug: dump OPA input via NRVQ-ENG-DEBUG-OPA-IN log for these specific test cases.
+
+### Trust calculator (3 tests)
+- test_burst_with_low_trust — trust 0.3 should escalate, currently allows
+- test_frozen_agent_blocked — trust 0.0 should block ALL calls, currently allows
+- test_trust_with_dangerous_tool — medium trust + risky tool should escalate
+Root cause: trust_score input from caller is ignored or overridden by computed signals.
+Fix: respect caller-provided trust_score when present, OR enforce frozen=true regardless of policy decision.
+
+### Base64 obfuscation (1 test)
+- test_base64_encoded_payload
+Known limitation. Phase 2: add base64 decoding pre-processor in API before OPA call.
