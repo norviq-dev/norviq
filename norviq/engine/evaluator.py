@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 import time
+import traceback
 from datetime import datetime, timezone
 from typing import Awaitable
 
@@ -65,6 +66,13 @@ class OPAEvaluator:
         """Evaluate tool call against all matching policies."""
         start = time.monotonic()
         cache_hit = False
+        log.info(
+            "nrvq.eval.start",
+            tool_name=event.tool_name,
+            namespace=event.agent_identity.namespace,
+            agent_class=event.agent_identity.agent_class,
+            code="NRVQ-ENG-DEBUG-1",
+        )
         span = create_tool_call_span(
             event.tool_name,
             event.agent_identity.namespace,
@@ -83,6 +91,12 @@ class OPAEvaluator:
                 self._record_telemetry(event, decision, start, cache_hit, span)
                 return decision
             candidates = await self._collect_candidates(event)
+            log.info(
+                "nrvq.eval.candidates",
+                count=len(candidates),
+                keys=[str(c["key"]) for c in candidates],
+                code="NRVQ-ENG-DEBUG-2",
+            )
             if not candidates:
                 async with self._semaphore:
                     result = await asyncio.wait_for(
@@ -97,11 +111,23 @@ class OPAEvaluator:
             else:
                 results = []
                 for candidate in candidates:
+                    log.info(
+                        "nrvq.eval.opa_call",
+                        key=str(candidate["key"]),
+                        rego_len=len(str(candidate["rego"])),
+                        code="NRVQ-ENG-DEBUG-3",
+                    )
                     async with self._semaphore:
                         result = await asyncio.wait_for(
                             self._evaluate_single(event, str(candidate["rego"]), trust_result),
                             timeout=0.1,
                         )
+                    log.info(
+                        "nrvq.eval.opa_result",
+                        key=str(candidate["key"]),
+                        result=str(result)[:200],
+                        code="NRVQ-ENG-DEBUG-4",
+                    )
                     results.append(
                         {
                             "decision": result,
@@ -110,6 +136,7 @@ class OPAEvaluator:
                         }
                     )
                 winner = self._resolve_precedence(results)
+                log.info("nrvq.eval.winner", winner=str(winner)[:200], code="NRVQ-ENG-DEBUG-5")
                 base_decision = winner["decision"]
             if base_decision.rule_id not in settings.evaluator_non_cacheable_rules:
                 await self._cache.set_eval(event.agent_identity.namespace, event.agent_identity.agent_class, cache_tool, base_decision)
@@ -372,9 +399,18 @@ class OPAEvaluator:
                 latency_ms=0.0,
                 event_id=event.event_id,
             )
-        result = await self._evaluate_opa(
-            event.agent_identity.namespace, event.agent_identity.agent_class, self._build_input(event, trust_result)
-        )
+        try:
+            result = await self._evaluate_opa(
+                event.agent_identity.namespace, event.agent_identity.agent_class, self._build_input(event, trust_result)
+            )
+        except Exception as exc:
+            log.error(
+                "nrvq.eval.opa_failed",
+                error=str(exc),
+                traceback=traceback.format_exc(),
+                code="NRVQ-ENG-DEBUG-ERR",
+            )
+            result = {}
         return self._build_decision(result, event, trust_result, 0.0)
 
     def _build_decision(
