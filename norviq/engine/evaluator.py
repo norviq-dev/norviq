@@ -8,7 +8,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
+import tempfile
 import time
 import traceback
 from datetime import datetime, timezone
@@ -353,32 +355,90 @@ class OPAEvaluator:
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
         return f"{tool_name}:{digest}"
 
-    async def _evaluate_opa(self, namespace: str, agent_class: str, opa_input: dict) -> dict:
-        """Evaluate inline MVP policy rules and return first-match result."""
-        # MVP placeholder: substring checks are intentionally simple until OPA/Rego integration.
-        _ = self._policies.get(f"{namespace}:{agent_class}", "")
-        params = str(opa_input.get("tool_params", {})).lower()
-        for keyword in settings.evaluator_sql_deny_keywords:
-            if keyword in params:
-                return {"decision": "block", "rule_id": "deny_sql_injection", "reason": "SQL injection pattern detected"}
-        tenant = str(opa_input.get("tool_params", {}).get("tenant_id", ""))
-        agent_ns = opa_input["agent"]["namespace"]
-        if tenant and tenant != agent_ns:
-            return {"decision": "block", "rule_id": "deny_cross_tenant", "reason": f"Cross-tenant access: {tenant} != {agent_ns}"}
-        if opa_input.get("tool_name", "").startswith(settings.evaluator_delete_prefix):
-            if opa_input.get("tool_params", {}).get("record_id") == settings.evaluator_wildcard_value:
-                return {"decision": "block", "rule_id": "deny_wildcard_delete", "reason": "Wildcard delete not allowed"}
-        count = await self._cache.incr_call_count(opa_input["agent"]["spiffe_id"], settings.evaluator_rate_limit_window_s)
-        if count > settings.evaluator_rate_limit_per_window:
+    async def _evaluate_opa(self, namespace: str, agent_class: str, opa_input: dict, rego_source: str = "") -> dict:
+        """Evaluate Rego source via local OPA CLI and return decision payload."""
+        rego = rego_source
+        if not rego.strip():
+            entry = self._policies.get(f"{namespace}:{agent_class}")
+            rego = str(entry.get("rego", "")) if isinstance(entry, dict) else ""
+        if not rego.strip():
+            return {"decision": "allow", "rule_id": "default_allow", "reason": "No policy matched"}
+
+        with tempfile.TemporaryDirectory(prefix="norviq-opa-") as tmpdir:
+            policy_path = os.path.join(tmpdir, "policy.rego")
+            input_path = os.path.join(tmpdir, "input.json")
+            with open(policy_path, "w", encoding="utf-8") as policy_file:
+                policy_file.write(rego)
+            with open(input_path, "w", encoding="utf-8") as input_file:
+                json.dump(opa_input, input_file)
+
+            proc = await asyncio.create_subprocess_exec(
+                "opa",
+                "eval",
+                "--format=json",
+                "--v0-compatible",
+                "--data",
+                policy_path,
+                "--input",
+                input_path,
+                "data",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"opa eval failed: {stderr.decode('utf-8', errors='replace').strip()}")
+
+        parsed = json.loads(stdout.decode("utf-8"))
+        value = self._extract_opa_value(parsed)
+        if value is None:
+            return {"decision": "allow", "rule_id": "default_allow", "reason": "No policy decision produced"}
+        if isinstance(value, dict):
             return {
-                "decision": "block",
-                "rule_id": "rate_limit_exceeded",
-                "reason": f"Rate limit exceeded: {count}/{settings.evaluator_rate_limit_per_window} per {settings.evaluator_rate_limit_window_s}s",
+                "decision": str(value.get("decision", "allow")),
+                "rule_id": str(value.get("rule_id", "")),
+                "reason": str(value.get("reason", "")),
             }
-        if opa_input["trust_score"] < settings.trust_threshold:
-            score = opa_input["trust_score"]
-            return {"decision": "escalate", "rule_id": "escalate_low_trust", "reason": f"Trust score {score} below threshold"}
-        return {"decision": "allow", "rule_id": "default_allow", "reason": "All checks passed"}
+        return {"decision": "allow", "rule_id": "default_allow", "reason": "Invalid policy decision payload"}
+
+    def _extract_opa_value(self, payload: object) -> object | None:
+        """Extract first meaningful value from OPA eval JSON response."""
+        if not isinstance(payload, dict):
+            return None
+        results = payload.get("result")
+        if not isinstance(results, list):
+            return None
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            expressions = item.get("expressions")
+            if not isinstance(expressions, list):
+                continue
+            for expression in expressions:
+                if not isinstance(expression, dict):
+                    continue
+                value = expression.get("value")
+                extracted = self._extract_decision_payload(value)
+                if extracted is not None:
+                    return extracted
+        return None
+
+    def _extract_decision_payload(self, value: object) -> dict | None:
+        """Recursively find a dict containing decision metadata."""
+        if isinstance(value, dict):
+            if "decision" in value:
+                return value
+            for nested in value.values():
+                found = self._extract_decision_payload(nested)
+                if found is not None:
+                    return found
+        elif isinstance(value, list):
+            for nested in value:
+                found = self._extract_decision_payload(nested)
+                if found is not None:
+                    return found
+        return None
 
     async def _evaluate_single(self, event: ToolCallEvent, _rego_source: str, trust_result: TrustResult) -> PolicyDecision:
         """Evaluate one candidate policy source and return typed decision."""
@@ -403,7 +463,7 @@ class OPAEvaluator:
             input_doc = self._build_input(event, trust_result)
             log.info("nrvq.eval.opa_input", input_doc=str(input_doc)[:500], code="NRVQ-ENG-DEBUG-INPUT")
             result = await self._evaluate_opa(
-                event.agent_identity.namespace, event.agent_identity.agent_class, input_doc
+                event.agent_identity.namespace, event.agent_identity.agent_class, input_doc, _rego_source
             )
         except Exception as exc:
             log.error(
