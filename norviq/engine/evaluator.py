@@ -381,7 +381,7 @@ class OPAEvaluator:
                 policy_path,
                 "--input",
                 input_path,
-                "data",
+                "data.norviq.strict",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -403,42 +403,13 @@ class OPAEvaluator:
         return {"decision": "allow", "rule_id": "default_allow", "reason": "Invalid policy decision payload"}
 
     def _extract_opa_value(self, payload: object) -> object | None:
-        """Extract first meaningful value from OPA eval JSON response."""
+        """Extract first expression value from OPA eval JSON response."""
         if not isinstance(payload, dict):
             return None
-        results = payload.get("result")
-        if not isinstance(results, list):
+        try:
+            return payload["result"][0]["expressions"][0]["value"]
+        except (KeyError, IndexError, TypeError):
             return None
-        for item in results:
-            if not isinstance(item, dict):
-                continue
-            expressions = item.get("expressions")
-            if not isinstance(expressions, list):
-                continue
-            for expression in expressions:
-                if not isinstance(expression, dict):
-                    continue
-                value = expression.get("value")
-                extracted = self._extract_decision_payload(value)
-                if extracted is not None:
-                    return extracted
-        return None
-
-    def _extract_decision_payload(self, value: object) -> dict | None:
-        """Recursively find a dict containing decision metadata."""
-        if isinstance(value, dict):
-            if "decision" in value:
-                return value
-            for nested in value.values():
-                found = self._extract_decision_payload(nested)
-                if found is not None:
-                    return found
-        elif isinstance(value, list):
-            for nested in value:
-                found = self._extract_decision_payload(nested)
-                if found is not None:
-                    return found
-        return None
 
     async def _evaluate_single(self, event: ToolCallEvent, _rego_source: str, trust_result: TrustResult) -> PolicyDecision:
         """Evaluate one candidate policy source and return typed decision."""
