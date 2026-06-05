@@ -1,0 +1,39 @@
+---
+description: When to delegate to Norviq's specialized subagents
+globs: norviq/**/*.py, ui/**/*.tsx, ui/**/*.ts
+---
+
+# Subagent Delegation Rules
+
+Norviq has 4 specialized subagents in .cursor/agents/. Delegate to them in these situations:
+
+## Use parallel review (3 subagents at once)
+
+After any change >50 lines under norviq/, before committing:
+- Spawn norviq-correctness-auditor (Task subagent)
+- Spawn norviq-security-auditor (Task subagent)
+- Spawn norviq-performance-auditor (Task subagent)
+
+Run all THREE in parallel. Wait for all to complete. Merge findings into .reviews/parallel-{sha}.md.
+
+## Use verifier when work is claimed done
+
+When user says "this should work now" or "I'm done with X":
+- Spawn norviq-verifier (Task subagent)
+- Do not trust the claim - verify.
+
+## Use security auditor alone for security-sensitive changes
+
+Any change to:
+- norviq/api/routers/auth.py
+- norviq/api/middleware/
+- Anything touching JWT verification
+
+## Do NOT use subagents for
+
+- Single-line fixes
+- Documentation-only changes
+- Test additions
+- Config tweaks
+
+Subagents are for analysis. Use them when isolation + parallel execution add value.
