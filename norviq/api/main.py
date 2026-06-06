@@ -3,12 +3,17 @@
 
 """FastAPI application entrypoint for Norviq."""
 
+import asyncio
 from contextlib import asynccontextmanager
+import sys
 
 import structlog
 from fastapi import FastAPI
 
-from norviq.api.db.session import close_db, create_tables, get_session, init_db
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+from norviq.api.db.session import close_db, create_tables, ensure_schema_compatibility, get_session, init_db
 from norviq.api.routers import agents, audit, evaluate, graph, health, policies, redteam
 from norviq.config import settings
 from norviq.engine.audit_emitter import AuditEmitter
@@ -19,15 +24,39 @@ from norviq.engine.policy_loader import PolicyLoader
 from norviq.telemetry.exporter import mount_metrics_endpoint
 from norviq.telemetry.middleware import TelemetryMiddleware
 from norviq.telemetry.provider import setup_telemetry, shutdown_telemetry
+from norviq.api.db.models import Base
 
 log = structlog.get_logger()
+log.info(
+    "nrvq.startup.tables_in_metadata",
+    tables=list(Base.metadata.tables.keys()),
+    count=len(Base.metadata.tables),
+    code="NRVQ-DB-DEBUG-METADATA",
+)
+
+
+async def run_migrations() -> None:
+    """Apply pending Alembic migrations before cache warm-up."""
+    try:
+        from alembic import command
+        from alembic.config import Config
+
+        cfg = Config("alembic.ini")
+        db_url = settings.pg_url.strip().strip("\"'")
+        cfg.set_main_option("sqlalchemy.url", db_url.replace("+asyncpg", ""))
+        command.upgrade(cfg, "head")
+        log.info("nrvq.db.migrations_applied", code="NRVQ-DB-9032")
+    except Exception as exc:  # pragma: no cover - startup best-effort
+        log.error("nrvq.db.migration_failed", error=str(exc), code="NRVQ-DB-9033")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Run API startup and shutdown lifecycle."""
     setup_telemetry()
+    log.info("nrvq.startup.db_engine_creating", code="NRVQ-DB-DEBUG-1")
     await init_db()
+    log.info("nrvq.startup.db_engine_created", code="NRVQ-DB-DEBUG-2")
     await create_tables()
     app.state.cache = RedisCache()
     await app.state.cache.connect()
@@ -38,8 +67,14 @@ async def lifespan(app: FastAPI):
     await app.state.emitter.init()
     app.state.loader = PolicyLoader(app.state.cache, app.state.evaluator)
     app.state.evaluator.bind_loader(app.state.loader)
+    log.info("nrvq.startup.migrations_starting", code="NRVQ-DB-DEBUG-3")
+    await run_migrations()
+    log.info("nrvq.startup.migrations_done", code="NRVQ-DB-DEBUG-4")
+    await ensure_schema_compatibility()
     if hasattr(app.state, "loader") and app.state.loader:
+        log.info("nrvq.startup.warm_cache_starting", code="NRVQ-DB-DEBUG-5")
         await app.state.loader.warm_cache()
+        log.info("nrvq.startup.warm_cache_done", code="NRVQ-DB-DEBUG-6")
     log.info("nrvq.api.started", port=settings.api_port, code="NRVQ-API-7000")
     yield
     await app.state.emitter.close()

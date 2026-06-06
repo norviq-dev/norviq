@@ -135,6 +135,11 @@ check "No print() in trust" "! grep -rq 'print(' norviq/engine/trust/"
 check "SPDX headers" "head -1 norviq/engine/trust/calculator.py | grep -q 'SPDX'"
 
 echo ""
+echo "── Regression check ──"
+check "history file exists" "test -f tests/.history/F027.md"
+check "no @pytest.mark.xfail without reason" "! grep -rn 'pytest.mark.xfail(' tests/.history/ 2>/dev/null | grep -v reason"
+
+echo ""
 echo "═══════════════════════════════════════"
 echo "  Result: $PASS passed, $FAIL failed"
 echo "═══════════════════════════════════════"

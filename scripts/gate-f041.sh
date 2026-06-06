@@ -107,6 +107,11 @@ check "No print() in redteam" "! grep -rq 'print(' norviq/redteam/"
 check "SPDX headers" "head -1 norviq/redteam/simulator.py | grep -q 'SPDX'"
 
 echo ""
+echo "── Regression check ──"
+check "history file exists" "test -f tests/.history/F041.md"
+check "no @pytest.mark.xfail without reason" "! grep -rn 'pytest.mark.xfail(' tests/.history/ 2>/dev/null | grep -v reason"
+
+echo ""
 echo "═══════════════════════════════════════"
 echo "  Result: $PASS passed, $FAIL failed"
 echo "═══════════════════════════════════════"

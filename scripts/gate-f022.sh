@@ -97,6 +97,11 @@ echo "── Python Priority Tests ──"
 check "Priority tests pass" "powershell.exe -NoProfile -Command \"python -m pytest tests/engine/test_priority_enforcement.py -q\" 2>&1 | grep -q 'passed'"
 
 echo ""
+echo "── Regression check ──"
+check "history file exists" "test -f tests/.history/F022.md"
+check "no @pytest.mark.xfail without reason" "! grep -rn 'pytest.mark.xfail(' tests/.history/ 2>/dev/null | grep -v reason"
+
+echo ""
 echo "═══════════════════════════════════════"
 echo "  Result: $PASS passed, $FAIL failed"
 echo "═══════════════════════════════════════"

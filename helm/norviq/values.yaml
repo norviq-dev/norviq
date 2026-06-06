@@ -57,6 +57,15 @@ api:
       memory: 256Mi
   port: 8080
   secretKey: "change-me-in-production"
+  env:
+    - name: NRVQ_DB_SSL_MODE
+      value: "require"
+    - name: NRVQ_DB_POOL_MAX_OVERFLOW
+      value: "10"
+    - name: NRVQ_DB_POOL_TIMEOUT
+      value: "10"
+    - name: NRVQ_DB_COMMAND_TIMEOUT
+      value: "10"
 
 ui:
   replicas: 1
@@ -130,3 +139,7 @@ config:
   trustThreshold: 0.7
   violationPenalty: 0.05
   rateLimit: 60
+  dbSslMode: require
+  dbPoolMaxOverflow: 10
+  dbPoolTimeout: 10
+  dbCommandTimeout: 10

@@ -371,12 +371,13 @@ class OPAEvaluator:
             with open(input_path, "w", encoding="utf-8") as input_file:
                 json.dump(opa_input, input_file)
 
-            log.info(
-                "nrvq.opa.input",
-                rego_preview=rego[:200],
-                input_doc=str(opa_input)[:500],
-                code="NRVQ-ENG-DEBUG-OPA-IN",
-            )
+            if settings.debug_opa_logging:
+                log.info(
+                    "nrvq.opa.input",
+                    rego_preview=rego[:200],
+                    input_doc=str(opa_input)[:500],
+                    code="NRVQ-ENG-DEBUG-OPA-IN",
+                )
 
             proc = await asyncio.create_subprocess_exec(
                 "opa",
@@ -392,14 +393,15 @@ class OPAEvaluator:
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await proc.communicate()
-            log.info(
-                "nrvq.opa.subprocess_done",
-                returncode=proc.returncode,
-                stdout_len=len(stdout),
-                stdout_preview=stdout.decode("utf-8", errors="replace")[:500],
-                stderr_preview=stderr.decode("utf-8", errors="replace")[:500],
-                code="NRVQ-ENG-DEBUG-OPA",
-            )
+            if settings.debug_opa_logging:
+                log.info(
+                    "nrvq.opa.subprocess_done",
+                    returncode=proc.returncode,
+                    stdout_len=len(stdout),
+                    stdout_preview=stdout.decode("utf-8", errors="replace")[:500],
+                    stderr_preview=stderr.decode("utf-8", errors="replace")[:500],
+                    code="NRVQ-ENG-DEBUG-OPA",
+                )
 
         if proc.returncode != 0:
             raise RuntimeError(f"opa eval failed: {stderr.decode('utf-8', errors='replace').strip()}")
@@ -407,14 +409,14 @@ class OPAEvaluator:
         parsed = json.loads(stdout.decode("utf-8"))
         value = self._extract_opa_value(parsed)
         if value is None:
-            return {"decision": "allow", "rule_id": "default_allow", "reason": "No policy decision produced"}
+            return {"decision": "block", "rule_id": "evaluator_invalid_payload", "reason": "No policy decision produced"}
         if isinstance(value, dict):
             return {
                 "decision": str(value.get("decision", "allow")),
                 "rule_id": str(value.get("rule_id", "")),
                 "reason": str(value.get("reason", "")),
             }
-        return {"decision": "allow", "rule_id": "default_allow", "reason": "Invalid policy decision payload"}
+        return {"decision": "block", "rule_id": "evaluator_invalid_payload", "reason": "Invalid policy decision payload"}
 
     def _extract_opa_value(self, payload: object) -> object | None:
         """Extract first expression value from OPA eval JSON response."""
@@ -440,7 +442,11 @@ class OPAEvaluator:
                 traceback=traceback.format_exc(),
                 code="NRVQ-ENG-DEBUG-ERR",
             )
-            result = {}
+            result = {
+                "decision": "block",
+                "rule_id": "evaluator_error",
+                "reason": "OPA evaluation failed",
+            }
         return self._build_decision(result, event, trust_result, 0.0)
 
     def _build_decision(

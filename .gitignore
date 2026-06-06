@@ -26,6 +26,10 @@ CLAUDE.md
 .venv/
 *.log
 __pycache__/
+.env.local
+.env.local.*
+*.local
+!.env.local.example
 
 create_agents.sh
 opa.exe

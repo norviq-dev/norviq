@@ -11,6 +11,10 @@ data:
   NRVQ_TRUST_THRESHOLD: {{ .Values.config.trustThreshold | quote }}
   NRVQ_VIOLATION_PENALTY: {{ .Values.config.violationPenalty | quote }}
   NRVQ_RATE_LIMIT: {{ .Values.config.rateLimit | quote }}
+  NRVQ_DB_SSL_MODE: {{ .Values.config.dbSslMode | quote }}
+  NRVQ_DB_POOL_MAX_OVERFLOW: {{ .Values.config.dbPoolMaxOverflow | quote }}
+  NRVQ_DB_POOL_TIMEOUT: {{ .Values.config.dbPoolTimeout | quote }}
+  NRVQ_DB_COMMAND_TIMEOUT: {{ .Values.config.dbCommandTimeout | quote }}
   NRVQ_OTEL_ENDPOINT: {{ .Values.otel.endpoint | quote }}
   NRVQ_OTEL_ENABLED: {{ .Values.otel.enabled | quote }}
   NRVQ_PROMETHEUS_PORT: {{ .Values.otel.prometheusPort | quote }}

@@ -32,7 +32,8 @@ class Policy(Base):
     agent_class: Mapped[str] = mapped_column(String(255))
     rego_source: Mapped[str] = mapped_column(Text)
     version: Mapped[int] = mapped_column(Integer, default=1)
-    enforcement_mode: Mapped[str] = mapped_column(String(20), default="block")
+    priority: Mapped[int] = mapped_column(Integer, default=100, server_default="100")
+    enforcement_mode: Mapped[str] = mapped_column(String(20), default="block", server_default="block")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     __table_args__ = (
         UniqueConstraint("namespace", "agent_class", name="uq_policy_ns_class"),

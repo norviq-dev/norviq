@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import uuid
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import structlog
 from sqlalchemy import text
@@ -54,7 +55,26 @@ class PolicyLoader:
 
     def _db_url(self) -> str:
         """Return SQLAlchemy-compatible asyncpg URL."""
-        return settings.pg_url.strip().strip("\"'").replace("postgresql://", "postgresql+asyncpg://")
+        raw = settings.pg_url.strip().strip("\"'").replace("postgresql://", "postgresql+asyncpg://")
+        split = urlsplit(raw)
+        filtered = [(k, v) for k, v in parse_qsl(split.query, keep_blank_values=True) if k.lower() not in {"ssl", "sslmode"}]
+        return urlunsplit((split.scheme, split.netloc, split.path, urlencode(filtered), split.fragment))
+
+    def _build_connect_args(self) -> dict:
+        """Build asyncpg connect args from settings."""
+        pg_query = dict(parse_qsl(urlsplit(settings.pg_url).query, keep_blank_values=True))
+        ssl_mode = str(
+            pg_query.get("sslmode")
+            or pg_query.get("ssl")
+            or getattr(settings, "db_ssl_mode", "prefer")
+        ).lower()
+        if ssl_mode in {"disable", "false", "0"}:
+            ssl = False
+        elif ssl_mode in {"require", "verify-ca", "verify-full"}:
+            ssl = ssl_mode
+        else:
+            ssl = "prefer"
+        return {"command_timeout": settings.db_command_timeout, "ssl": ssl}
 
     def _db_engine(self) -> AsyncEngine:
         """Lazily initialize DB engine for policy hydration."""
@@ -62,9 +82,9 @@ class PolicyLoader:
             self._db = create_async_engine(
                 self._db_url(),
                 pool_size=settings.pg_pool_size,
-                max_overflow=5,
-                pool_timeout=5,
-                connect_args={"command_timeout": 5},
+                max_overflow=settings.db_pool_max_overflow,
+                pool_timeout=settings.db_pool_timeout,
+                connect_args=self._build_connect_args(),
             )
         return self._db
 

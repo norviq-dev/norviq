@@ -47,3 +47,10 @@ When invoked:
 5. Return verdict: PASS | FAIL | PASS_WITH_CAVEATS
 
 If verdict is FAIL, list the specific assertion that failed and the file:line where the fix is needed.
+
+For destructive SQL safety checks, avoid broad repository scans that include attack payload fixtures.
+Use scoped checks only:
+- `norviq/api/db/`
+- `norviq/engine/policy_loader.py`
+- `alembic/`
+Do not treat matches in `norviq/redteam/`, `norviq/sdk/attacks/`, or `tests/` as deployment migration failures.

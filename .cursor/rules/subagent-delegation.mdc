@@ -1,8 +1,7 @@
 ---
 description: When to delegate to Norviq's specialized subagents
-globs: norviq/**/*.py, ui/**/*.tsx, ui/**/*.ts
+alwaysApply: false
 ---
-
 # Subagent Delegation Rules
 
 Norviq has 4 specialized subagents in .cursor/agents/. Delegate to them in these situations:

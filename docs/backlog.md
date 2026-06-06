@@ -191,3 +191,15 @@ Fix: respect caller-provided trust_score when present, OR enforce frozen=true re
 ### Base64 obfuscation (1 test)
 - test_base64_encoded_payload
 Known limitation. Phase 2: add base64 decoding pre-processor in API before OPA call.
+
+## Parallel review follow-ups — deferred 2026-06-05
+
+From `.reviews/parallel-7991bb8.md`, the 3 quick wins were applied directly to evaluator behavior/log gating. The remaining 7 architectural findings are deferred:
+
+1. **P1 security:** Policy integrity/tampering hardening - add policy signing/verification and stronger mutation controls for loaded Rego.
+2. **P2 security:** Enforce JWT namespace/tenant claim binding in evaluate path (do not trust client-provided namespace blindly).
+3. **P0 performance:** Replace per-request OPA subprocess spawn with long-lived OPA process/API path.
+4. **P0 performance:** Remove synchronous temp-file I/O from async evaluation hot path.
+5. **P1 performance:** Reduce sequential per-candidate OPA evaluations (bundle/compile/optimize candidate execution).
+6. **P1 correctness/security:** Strengthen fail-closed guarantees for all candidate-evaluation error paths under all config combinations.
+7. **P2 architecture:** Reduce hot-path logging payload overhead and leakage risk further (structured redaction strategy + minimal default telemetry).

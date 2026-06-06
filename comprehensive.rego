@@ -6,6 +6,7 @@ default reason = "Allowed"
 
 # Prompt injection
 injection_patterns = ["ignore previous", "ignore above", "ignore prior", "enable dan", "repeat your system", "bypass all safety", "pretend you are", "forget your instructions", "you are now"]
+injection_patterns_fullwidth = ["ｉｇｎｏｒｅ", "ｄａｎ", "ｂｙｐａｓｓ"]
 
 decision = "block" {
     injection_detected
@@ -20,6 +21,14 @@ injection_detected {
     is_string(val)
     pattern := injection_patterns[_]
     contains(lower(val), pattern)
+}
+
+injection_detected {
+    some k
+    val := input.tool_params[k]
+    is_string(val)
+    pattern := injection_patterns_fullwidth[_]
+    contains(val, pattern)
 }
 
 # SQL injection
@@ -40,7 +49,7 @@ sql_injection_detected {
 }
 
 # Shell injection
-shell_patterns = ["|", ";", "$(", "rm -rf", "/etc/passwd", "/etc/shadow"]
+shell_patterns = ["|", ";", "$(", "`", "rm -rf", "/etc/passwd", "/etc/shadow"]
 
 decision = "block" {
     shell_injection_detected
@@ -158,7 +167,6 @@ rule_id = "cross_tenant_access" {
 cross_tenant_detected {
     input.tool_params.tenant_id
     input.tool_params.tenant_id != input.agent_identity.namespace
-    input.tool_params.tenant_id != "default"
 }
 
 cross_tenant_detected {

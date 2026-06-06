@@ -122,6 +122,11 @@ check "No print() in graph" "! grep -rq 'print(' norviq/engine/graph/"
 check "SPDX header" "head -1 norviq/engine/graph/asset_graph.py | grep -q 'SPDX'"
 
 echo ""
+echo "── Regression check ──"
+check "history file exists" "test -f tests/.history/F036.md"
+check "no @pytest.mark.xfail without reason" "! grep -rn 'pytest.mark.xfail(' tests/.history/ 2>/dev/null | grep -v reason"
+
+echo ""
 echo "═══════════════════════════════════════"
 echo "  Result: $PASS passed, $FAIL failed"
 echo "═══════════════════════════════════════"
