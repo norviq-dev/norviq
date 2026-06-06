@@ -2,10 +2,9 @@
 name: Build & Push
 
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
-    branches: [main, 'day*-*']
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: build-${{ github.ref }}
@@ -16,7 +15,6 @@ env:
 
 jobs:
   build:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
