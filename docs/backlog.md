@@ -203,3 +203,8 @@ From `.reviews/parallel-7991bb8.md`, the 3 quick wins were applied directly to e
 5. **P1 performance:** Reduce sequential per-candidate OPA evaluations (bundle/compile/optimize candidate execution).
 6. **P1 correctness/security:** Strengthen fail-closed guarantees for all candidate-evaluation error paths under all config combinations.
 7. **P2 architecture:** Reduce hot-path logging payload overhead and leakage risk further (structured redaction strategy + minimal default telemetry).
+
+## Day 9 — OTel Collector Missing (Non-blocking)
+otel-collector:4317 unavailable. Traces fail to export but PostgreSQL audit writes succeed.
+Fix: deploy OTel collector via Helm subchart in Day 13 (TLS + admission controllers).
+Alternative: set NRVQ_OTEL_DISABLED=true on AKS to silence the warning.
