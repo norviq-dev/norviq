@@ -1,4 +1,4 @@
-import { createContext, ReactNode, useContext, useMemo, useState } from "react";
+import { createContext, ReactNode, useContext, useEffect, useMemo, useState } from "react";
 
 export const CLUSTERS = ["production-aks", "staging-aks", "dev-aks"];
 export const NS_BY_CLUSTER: Record<string, string[]> = {
@@ -11,7 +11,7 @@ export type Section = "security" | "intelligence" | "settings";
 export type TimeRange = "1h" | "6h" | "24h" | "7d" | "30d";
 
 export function sectionFromPath(pathname: string): Section {
-  if (pathname === "/" || pathname.startsWith("/threats")) return "intelligence";
+  if (pathname === "/" || pathname.startsWith("/threats") || pathname.startsWith("/asset-graph")) return "intelligence";
   if (pathname.startsWith("/settings")) return "settings";
   return "security";
 }
@@ -36,6 +36,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [timeRange, setTimeRange] = useState<TimeRange>("24h");
   const [selectedCluster, setClusterState] = useState("production-aks");
   const [selectedNamespace, setNamespaceState] = useState("default");
+
+  useEffect(() => {
+    if (import.meta.env.DEV) {
+      const KEY = "nrvq_token";
+      const existing = localStorage.getItem(KEY);
+
+      if (!existing) {
+        const devToken = import.meta.env.VITE_DEV_TOKEN;
+        if (devToken) {
+          localStorage.setItem(KEY, devToken);
+          console.log("[dev] Auto-injected JWT token for local API");
+          window.location.reload();
+        } else {
+          console.warn("[dev] VITE_DEV_TOKEN not set in ui/.env.local - UI requests will be unauthenticated");
+        }
+      }
+    }
+  }, []);
 
   const setCluster = (value: string) => {
     setClusterState(value);

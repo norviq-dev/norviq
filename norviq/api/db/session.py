@@ -126,10 +126,11 @@ async def ensure_schema_compatibility() -> None:
 
 
 async def get_session() -> AsyncSession:
-    """Return async session from initialized factory."""
+    """Yield async session and always close it after request."""
     if _session_factory is None:
         raise RuntimeError("Database not initialized. Call init_db() first.")
-    return _session_factory()
+    async with _session_factory() as session:
+        yield session
 
 
 async def close_db() -> None:

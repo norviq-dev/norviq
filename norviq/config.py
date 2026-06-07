@@ -88,7 +88,7 @@ class NorviqSettings(BaseSettings):
         default="prefer",
         validation_alias=AliasChoices("DB_SSL_MODE", "PG_SSL_MODE", "PG_SSLMODE"),
     )
-    pg_pool_size: int = 10
+    pg_pool_size: int = Field(default=10, validation_alias=AliasChoices("PG_POOL_SIZE", "DB_POOL_SIZE"))
     db_pool_max_overflow: int = 5
     db_pool_timeout: int = 5
     db_command_timeout: int = 5

@@ -66,6 +66,7 @@ const PANEL_CONFIG: Record<Section, { title: string; groups: Group[] }> = {
         id: "threat-intel",
         label: "THREAT INTEL",
         items: [
+          { to: "/asset-graph", label: "Asset Graph", icon: Network },
           { to: "/threats/graph", label: "Attack Graph", icon: Network },
           { to: "/threats/mitre", label: "MITRE Coverage", icon: Award }
         ]

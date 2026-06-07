@@ -5,35 +5,12 @@
 
 from __future__ import annotations
 
-import os
 import uuid
 
 import httpx
 import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
-
-
-@pytest.fixture
-def api_url() -> str:
-    value = (os.getenv("NRVQ_API_URL") or "").strip().strip("\"'")
-    if not value:
-        pytest.skip("NRVQ_API_URL is required for integration tests")
-    return value.rstrip("/")
-
-
-@pytest.fixture
-def pg_url() -> str:
-    value = (os.getenv("NRVQ_PG_URL") or "").strip().strip("\"'")
-    if not value:
-        pytest.skip("NRVQ_PG_URL is required for integration tests")
-    return value
-
-
-@pytest.fixture
-async def api_client(api_url: str):
-    async with httpx.AsyncClient(base_url=api_url, timeout=15.0) as client:
-        yield client
 
 
 @pytest.fixture

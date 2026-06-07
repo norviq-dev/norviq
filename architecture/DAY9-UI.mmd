@@ -1,0 +1,22 @@
+flowchart LR
+    Browser[UI Browser<br/>:5173] -->|GET /asset-graph| Vite[Vite Proxy]
+    Browser -->|GET /threats/graph| Vite
+    Vite --> API[FastAPI<br/>:8080]
+    API --> Auth[JWT require_auth]
+    Auth --> AssetEP[GET /api/v1/asset-graph]
+    Auth --> AttackEP[GET /api/v1/attack-paths]
+    AssetEP --> Session[AsyncSession via get_session]
+    AttackEP --> Session
+    Session --> AG[(asset_graph)]
+    Session --> AP[(attack_paths)]
+    Session --> AL[(audit_log)]
+    AG --> AssetResp[AssetGraphResponse]
+    AP --> AttackResp[AttackPathsResponse]
+    AL --> AssetResp
+    AssetResp --> Browser
+    AttackResp --> Browser
+    Browser --> D3A[D3 force graph]
+    Browser --> D3B[D3 layered graph]
+    D3A --> RenderA[SVG render]
+    D3B --> RenderB[SVG render]
+    Session -->|pool/session error| ApiErr[NRVQ-API-7050-ERR / 7051-ERR]

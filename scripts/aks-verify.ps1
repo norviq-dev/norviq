@@ -281,3 +281,4 @@ TOTAL TIME ESTIMATE
 - Phase 5 (attacks): 2-3 min
 - Phase 6-8 (verify): 1 min
 - Total: ~10 min before merge decision
+

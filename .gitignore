@@ -33,3 +33,4 @@ __pycache__/
 
 create_agents.sh
 opa.exe
+.tmp/

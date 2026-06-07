@@ -1,0 +1,12 @@
+flowchart LR
+    Admin[Admin/API user] --> PolicyAPI[/POST /api/v1/policies/]
+    PolicyAPI --> Loader[PolicyLoader]
+    Loader --> DB[(policies + policy_versions)]
+    Loader --> Cache[(Redis policy cache)]
+    Loader --> Evaluator[OPAEvaluator hot-reload]
+    Evaluator --> OPA[OPA policy data]
+    Loader --> Event[Policy event publish]
+    Event --> Sidecar[Sidecar policy watcher]
+    PolicyAPI --> Response[Policy CRUD response]
+    DB -->|error| Error[NRVQ-REG/NRVQ-API error path]
+    Error --> Response

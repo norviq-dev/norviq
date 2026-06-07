@@ -111,3 +111,4 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "`nDone. Start the API with:" -ForegroundColor Cyan
 Write-Host "  python -m uvicorn norviq.api.main:app --host 127.0.0.1 --port 8080" -ForegroundColor White
+

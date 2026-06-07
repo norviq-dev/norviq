@@ -66,3 +66,27 @@ Skip:
 - `norviq/redteam/`
 - `norviq/sdk/attacks/`
 - `tests/`
+
+## P-7 (extended): Silent skips on missing env
+Same root issue as xfail markers. Skip without reason = green test that verifies nothing.
+
+Rule: skip reason MUST be visible. Either auto-default to local dev, or report skip with explicit message.
+
+Real example: Day 9 graph endpoint tests skipped silently because NRVQ_API_URL/NRVQ_API_TOKEN missing from shell. Looked green, verified nothing.
+
+## P-11: Silent test skips on missing env vars
+Symptom: Tests skip with no reason when env vars missing.
+Looks green, verifies nothing.
+Real example: Day 9 graph endpoint tests.
+Test pattern: Fixtures auto-default to local dev. Skip reasons visible.
+
+## P-12: DB connection pool exhaustion via leaked sessions
+Symptom: After ~15 requests, endpoints 500 with QueuePool TimeoutError.
+Real example: Day 9 attack-paths endpoint.
+Test pattern: Hit endpoint 30x in loop, assert all return 200.
+
+## P-13: Cursor implements UI fallback stubs instead of real D3
+Symptom: UI labeled "fallback renderer" with HTML divs instead of SVG.
+Real example: Day 9 AssetGraphCanvas, AttackGraphCanvas.
+Detection: grep for "fallback" or "simplified" in UI component code.
+Test pattern: Visual verification — SVG element must exist with d3 children.

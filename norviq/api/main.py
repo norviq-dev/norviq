@@ -14,7 +14,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from norviq.api.db.session import close_db, create_tables, ensure_schema_compatibility, get_session, init_db
-from norviq.api.routers import agents, audit, evaluate, graph, health, policies, redteam
+from norviq.api.routers import agents, audit, evaluate, graph, graphs, health, policies, redteam
 from norviq.config import settings
 from norviq.engine.audit_emitter import AuditEmitter
 from norviq.engine.cache import RedisCache
@@ -98,6 +98,7 @@ def create_app() -> FastAPI:
     app.include_router(audit.router, prefix="/api/v1", tags=["audit"])
     app.include_router(agents.router, prefix="/api/v1", tags=["agents"])
     app.include_router(graph.router, prefix="/api/v1")
+    app.include_router(graphs.router)
     app.include_router(redteam.router, prefix="/api/v1", tags=["redteam"])
     app.add_middleware(TelemetryMiddleware)
     mount_metrics_endpoint(app)

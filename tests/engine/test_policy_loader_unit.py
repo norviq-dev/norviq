@@ -48,9 +48,7 @@ class _CacheStub:
 
 @pytest.fixture
 async def db_engine() -> AsyncEngine:
-    pg_url = (os.getenv("NRVQ_PG_URL") or "").strip().strip("\"'")
-    if not pg_url:
-        pytest.skip("NRVQ_PG_URL is required for policy_loader persistence tests")
+    pg_url = (os.getenv("NRVQ_PG_URL") or "postgresql://norviq:norviq_local_dev@127.0.0.1:5433/norviq?sslmode=disable").strip().strip("\"'")
     old_url = settings.pg_url
     settings.pg_url = pg_url
     await init_db()

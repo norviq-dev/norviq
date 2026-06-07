@@ -1,0 +1,10 @@
+flowchart LR
+    Graph[(asset_graph snapshot)] --> Engine[AttackGraphEngine]
+    Engine --> Paths[Attack path discovery]
+    Paths --> Risk[Risk scoring + severity]
+    Risk --> Persist[(attack_paths table)]
+    API[/GET /api/v1/attack-paths/] --> Persist
+    Persist --> APIResp[AttackPathsResponse]
+    APIResp --> UI[Threats Graph UI]
+    Engine -->|missing node| Warn[NRVQ-GRP-11010 warning]
+    Persist -->|db/session error| Err[NRVQ-API-7051-ERR]

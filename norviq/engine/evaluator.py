@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import tempfile
 import time
 import traceback
@@ -34,6 +35,8 @@ log = structlog.get_logger()
 
 class OPAEvaluator:
     """Core evaluator for policy decisions with cache-first execution."""
+
+    _PACKAGE_RE = re.compile(r"(?m)^\s*package\s+([A-Za-z0-9_\.]+)\s*$")
 
     def __init__(self, cache: RedisCache) -> None:
         """Store shared cache and initialize concurrency controls."""
@@ -354,14 +357,43 @@ class OPAEvaluator:
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
         return f"{tool_name}:{digest}"
 
+    def _extract_package_name(self, rego_source: str) -> str | None:
+        """Extract package name from Rego source header."""
+        if not rego_source:
+            return None
+        match = self._PACKAGE_RE.search(rego_source)
+        if not match:
+            return None
+        return match.group(1).strip()
+
+    def _opa_query_for_package(self, package_name: str | None) -> str:
+        """Build OPA query path for a package root object."""
+        if package_name:
+            return f"data.{package_name}"
+        return "data.norviq.strict"
+
     async def _evaluate_opa(self, namespace: str, agent_class: str, opa_input: dict, rego_source: str = "") -> dict:
         """Evaluate Rego source via local OPA CLI and return decision payload."""
         rego = rego_source
+        package_name: str | None = None
         if not rego.strip():
             entry = self._policies.get(f"{namespace}:{agent_class}")
-            rego = str(entry.get("rego", "")) if isinstance(entry, dict) else ""
+            if isinstance(entry, dict):
+                rego = str(entry.get("rego", ""))
+                package_name = str(entry.get("package_name", "")).strip() or None
         if not rego.strip():
             return {"decision": "allow", "rule_id": "default_allow", "reason": "No policy matched"}
+        if package_name is None:
+            package_name = self._extract_package_name(rego)
+        query = self._opa_query_for_package(package_name)
+        log.info(
+            "nrvq.opa.query.resolved",
+            package_name=package_name or "(none)",
+            query=query,
+            namespace=namespace,
+            agent_class=agent_class,
+            code="NRVQ-ENG-DEBUG-QUERY",
+        )
 
         with tempfile.TemporaryDirectory(prefix="norviq-opa-") as tmpdir:
             policy_path = os.path.join(tmpdir, "policy.rego")
@@ -376,6 +408,8 @@ class OPAEvaluator:
                     "nrvq.opa.input",
                     rego_preview=rego[:200],
                     input_doc=str(opa_input)[:500],
+                    package_name=package_name or "",
+                    query=query,
                     code="NRVQ-ENG-DEBUG-OPA-IN",
                 )
 
@@ -388,7 +422,7 @@ class OPAEvaluator:
                 policy_path,
                 "--input",
                 input_path,
-                "data.norviq.strict",
+                query,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -526,14 +560,22 @@ class OPAEvaluator:
     def load_policy(self, namespace: str, agent_class: str, rego_source: str, priority: int = 100) -> None:
         """Load or replace policy with copy-on-write atomic assignment."""
         key = f"{namespace}:{agent_class}"
-        self._policies = {**self._policies, key: {"rego": rego_source, "priority": int(priority)}}
+        package_name = self._extract_package_name(rego_source)
+        self._policies = {
+            **self._policies,
+            key: {"rego": rego_source, "priority": int(priority), "package_name": package_name},
+        }
         log.info("nrvq.engine.policy_loaded", key=key, code="NRVQ-ENG-2005")
 
     def reload_policy(self, namespace: str, agent_class: str, rego_source: str) -> None:
         """Hot-reload a single policy without restarting."""
         key = f"{namespace}:{agent_class}"
+        package_name = self._extract_package_name(rego_source)
         if key in self._policies:
             self._policies[key]["rego"] = rego_source
+            self._policies[key]["package_name"] = package_name
+        else:
+            self._policies[key] = {"rego": rego_source, "priority": 100, "package_name": package_name}
         log.info("nrvq.engine.policy_hot_reloaded", key=key, code="NRVQ-ENG-2030")
 
     def bind_loader(self, loader: object) -> None:

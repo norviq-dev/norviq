@@ -13,6 +13,7 @@ const AuditLog = lazy(() => import("./pages/AuditLog").then((m) => ({ default: m
 const AgentMonitor = lazy(() => import("./pages/AgentMonitor").then((m) => ({ default: m.AgentMonitor })));
 const PolicyTester = lazy(() => import("./pages/PolicyTester").then((m) => ({ default: m.PolicyTester })));
 const RedTeam = lazy(() => import("./pages/RedTeam"));
+const AssetGraph = lazy(() => import("./pages/AssetGraph"));
 const AttackGraph = lazy(() => import("./pages/AttackGraph").then((m) => ({ default: m.AttackGraph })));
 const MITRECoverage = lazy(() => import("./pages/MITRECoverage").then((m) => ({ default: m.MITRECoverage })));
 const AccountSettings = lazy(() =>
@@ -42,6 +43,7 @@ function App() {
             <Route path="/test" element={<PolicyTester />} />
             <Route path="/redteam" element={<RedTeam />} />
             <Route path="/threats" element={<Navigate to="/threats/graph" replace />} />
+            <Route path="/asset-graph" element={<AssetGraph />} />
             <Route path="/threats/graph" element={<AttackGraph />} />
             <Route path="/threats/mitre" element={<MITRECoverage />} />
             <Route path="/settings" element={<Navigate to="/settings/general" replace />} />
