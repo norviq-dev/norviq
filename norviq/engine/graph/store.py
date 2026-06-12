@@ -38,7 +38,7 @@ class GraphStore:
 
     async def _save_db(self, namespace: str, payload: dict[str, object]) -> None:
         """Insert graph snapshot row in PostgreSQL JSONB table."""
-        session = await self._session_factory()
+        session, agen = await self._acquire_session()
         try:
             row = AssetGraph(
                 namespace=namespace,
@@ -49,7 +49,10 @@ class GraphStore:
             session.add(row)
             await session.commit()
         finally:
-            await session.close()
+            if agen is not None:
+                await agen.aclose()
+            else:
+                await session.close()
 
     async def load(self, namespace: str) -> AssetGraphBuilder | None:
         """Load graph from Redis and fallback to latest DB snapshot."""
@@ -75,15 +78,28 @@ class GraphStore:
 
     async def _load_db(self, namespace: str) -> AssetGraphBuilder | None:
         """Load latest graph snapshot for namespace from PostgreSQL."""
-        session = await self._session_factory()
+        session, agen = await self._acquire_session()
         try:
             row = await session.scalar(
                 select(AssetGraph).where(AssetGraph.namespace == namespace).order_by(AssetGraph.built_at.desc()).limit(1)
             )
         finally:
-            await session.close()
+            if agen is not None:
+                await agen.aclose()
+            else:
+                await session.close()
         if row is None or not row.graph_json:
             return None
         graph = AssetGraphBuilder()
         graph.from_dict(dict(row.graph_json))
         return graph
+
+    async def _acquire_session(self):
+        """Acquire session from async generator dependency or awaitable factory."""
+        provider_result = self._session_factory()
+        if hasattr(provider_result, "__anext__"):
+            agen = provider_result
+            session = await agen.__anext__()
+            return session, agen
+        session = await provider_result
+        return session, None

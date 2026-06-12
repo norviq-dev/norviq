@@ -90,3 +90,10 @@ Symptom: UI labeled "fallback renderer" with HTML divs instead of SVG.
 Real example: Day 9 AssetGraphCanvas, AttackGraphCanvas.
 Detection: grep for "fallback" or "simplified" in UI component code.
 Test pattern: Visual verification — SVG element must exist with d3 children.
+
+## P-15: GraphStore session lifecycle mismatch (silent persistence failure)
+Symptom: asset_graph table stuck at first snapshot, never grows despite many tool calls.
+Root cause: GraphStore expected awaitable session factory, app passed async generator dependency.
+Detection: NRVQ-GRP-11001 "async_generator object can't be awaited" in API logs.
+Test pattern: After distinct evaluate call, asset_graph node count must increase.
+Class: same family as P-12 (DB pool leak) — async session handling.

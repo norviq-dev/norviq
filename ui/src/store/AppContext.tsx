@@ -1,11 +1,13 @@
 import { createContext, ReactNode, useContext, useEffect, useMemo, useState } from "react";
 
-export const CLUSTERS = ["production-aks", "staging-aks", "dev-aks"];
+export const CLUSTERS = ["local", "production-aks", "staging-aks", "dev-aks"];
 export const NS_BY_CLUSTER: Record<string, string[]> = {
+  local: ["default"],
   "production-aks": ["default", "chatbot-prod", "payments", "analytics", "platform"],
   "staging-aks": ["staging-default", "qa"],
   "dev-aks": ["dev-default"]
 };
+const DEFAULT_CLUSTER = import.meta.env.VITE_ENV_LABEL || (import.meta.env.DEV ? "local" : "production-aks");
 
 export type Section = "security" | "intelligence" | "settings";
 export type TimeRange = "1h" | "6h" | "24h" | "7d" | "30d";
@@ -34,7 +36,7 @@ const AppContext = createContext<AppContextValue | null>(null);
 export function AppProvider({ children }: { children: ReactNode }) {
   const [activeSection, setActiveSection] = useState<Section>("intelligence");
   const [timeRange, setTimeRange] = useState<TimeRange>("24h");
-  const [selectedCluster, setClusterState] = useState("production-aks");
+  const [selectedCluster, setClusterState] = useState(DEFAULT_CLUSTER);
   const [selectedNamespace, setNamespaceState] = useState("default");
 
   useEffect(() => {
