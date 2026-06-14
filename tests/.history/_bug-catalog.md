@@ -97,3 +97,29 @@ Root cause: GraphStore expected awaitable session factory, app passed async gene
 Detection: NRVQ-GRP-11001 "async_generator object can't be awaited" in API logs.
 Test pattern: After distinct evaluate call, asset_graph node count must increase.
 Class: same family as P-12 (DB pool leak) — async session handling.
+
+## P-16: P-15 fixed by INSTANCE, not by CLASS — same bug recurred
+Symptom: Dashboard + Audit Log return 500 on AKS; /readyz always reports db=false.
+Root cause: the P-15 async-generator bug (`session = await get_session()`) was fixed only in
+dry_run_policy + GraphStore, but the SAME pattern remained in audit.py (5 endpoints),
+health.py (/readyz), and audit_emitter.py (the audit DB-write path — every audit write
+silently failed). A commit literally claimed "Closes the P-15-family async-session debt"
+while 7 instances survived.
+Why it recurred / shipped:
+  1. We fixed instances, not the class — never grepped the whole codebase for the pattern.
+  2. Unit tests MONKEYPATCHED get_session into a plain async function, so `await get_session()`
+     "worked" in tests and masked the real ASGI lifecycle (P-7 family — tests that hide bugs).
+  3. CI doesn't run pytest ("tests run locally"), so even the already-RED test_db.py /
+     test_audit_emitter.py (which used the same bad pattern) never gated anything.
+Lessons:
+  - When fixing a bug CLASS, SWEEP every instance: `grep -rn "await get_session()" norviq/`.
+    The complete fix list was audit.py x5, health.py, audit_emitter.py — not the 2 "known" ones.
+  - NEVER monkeypatch get_session in tests. Use FastAPI `app.dependency_overrides[get_session]`
+    so the real async-generator lifecycle is exercised. For non-route code use the
+    `_acquire_session()` generator-drive pattern.
+  - Add an INTEGRATION test that hits the real ASGI app (httpx against the live API), not a
+    monkeypatched session — it must fail-before / pass-after. See
+    tests/integration/test_audit_endpoints.py.
+Detection: NRVQ logs "TypeError: object async_generator can't be used in 'await' expression".
+Related finding (separate gap): the API /evaluate path never calls emitter.emit (only the
+sidecar does), so the API deployment writes no audit rows even with the 500 fixed.

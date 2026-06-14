@@ -254,3 +254,21 @@ Current single ~1-vCPU node at 97% CPU requests forces replace-in-place
 (values-aks-dev.yaml overlay). For true zero-downtime: add a node OR larger VM
 OR lower resource requests, then drop the overlay (defaults give maxSurge:1).
 Gate the switch on `kubectl top nodes` showing headroom.
+
+## P0: API /evaluate path does not call emitter.emit — only sidecar does
+Audit endpoints now return 200 (P-16 fix), but the API deployment writes NO audit data
+(only the sidecar's http_fallback/proxy call emitter.emit; the API /evaluate handler never
+does). So Dashboard/Audit Log endpoints work but show nothing on the API deployment.
+Wire fire-and-forget audit emission into the /evaluate handler (must NOT block the hot path —
+async task, per the <5ms perf rule). This completes the "see enforcement" pillar.
+Priority: next P0 after the attack-path namespace leak.
+
+## P1: loader.delete does not remove the policies row (DELETE endpoint no-op?)
+loader.delete clears in-memory/cache only, never DELETEs the Postgres row — so
+DELETE /policies/{ns}/{class} returns {deleted: true} but the row persists, and re-creates
+accumulate version via ON CONFLICT. Two issues:
+  a) Real correctness bug: DELETE endpoint doesn't actually delete (a customer would hit this).
+  b) Test fragility: test_policy_crud_flow / test_apply_policy assert version==1 and only pass
+     on a clean DB.
+Fix: make DELETE actually remove the policies (+ policy_versions) rows; make the tests robust
+to existing version state.

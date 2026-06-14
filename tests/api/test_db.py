@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import os
 import uuid
+from contextlib import asynccontextmanager
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
 from norviq.api.db.models import AgentRegistryEntry, AuditLogEntry, Policy
@@ -25,6 +26,21 @@ from norviq.api.db.session import (
 from norviq.config import settings
 
 
+@asynccontextmanager
+async def _session():
+    """Drive the get_session async-generator dependency for direct DB tests.
+
+    get_session is an async generator — `await get_session()` raises TypeError (the P-15
+    bug). See docs/engineering/bug-patterns.md (async session lifecycle).
+    """
+    gen = get_session()
+    session = await gen.__anext__()
+    try:
+        yield session
+    finally:
+        await gen.aclose()
+
+
 @pytest.fixture
 async def db_ready() -> None:
     """Initialize database and ensure schema exists."""
@@ -35,14 +51,26 @@ async def db_ready() -> None:
     settings.pg_url = pg_url
     await init_db()
     await create_tables()
-    yield
-    await close_db()
-    settings.pg_url = old_url
+    try:
+        yield
+    finally:
+        # Clean up the ns-*/planner rows these tests insert so they don't pollute the shared
+        # dev DB (test-hygiene, P-16). FK order: policy_versions before policies.
+        async with _session() as session:
+            await session.execute(
+                text("DELETE FROM policy_versions WHERE policy_id IN (SELECT id FROM policies WHERE namespace LIKE 'ns-%')")
+            )
+            await session.execute(text("DELETE FROM policies WHERE namespace LIKE 'ns-%'"))
+            await session.execute(text("DELETE FROM audit_log WHERE namespace LIKE 'ns-%'"))
+            await session.execute(text("DELETE FROM agent_registry WHERE agent_class = 'planner'"))
+            await session.commit()
+        await close_db()
+        settings.pg_url = old_url
 
 
 async def test_create_insert_and_query_policy(db_ready: None) -> None:
     """Insert and query policy rows with async session."""
-    async with await get_session() as session:
+    async with _session() as session:
         policy = Policy(
             name=f"policy-{uuid.uuid4().hex}",
             namespace=f"ns-{uuid.uuid4().hex}",
@@ -59,7 +87,7 @@ async def test_create_insert_and_query_policy(db_ready: None) -> None:
 async def test_insert_and_query_audit_entry(db_ready: None) -> None:
     """Insert and query audit records by namespace."""
     namespace = f"ns-{uuid.uuid4().hex}"
-    async with await get_session() as session:
+    async with _session() as session:
         entry = AuditLogEntry(
             event_id=uuid.uuid4(),
             tool_name="kubectl.get",
@@ -79,7 +107,7 @@ async def test_policy_constraint_rejects_duplicate_namespace_agent(db_ready: Non
     """Reject duplicate policies for namespace and agent class."""
     namespace = f"ns-{uuid.uuid4().hex}"
     payload = {"name": "p1", "namespace": namespace, "agent_class": "planner", "rego_source": "package p"}
-    async with await get_session() as session:
+    async with _session() as session:
         session.add(Policy(**payload))
         await session.commit()
         session.add(Policy(**payload))
@@ -91,7 +119,7 @@ async def test_policy_constraint_rejects_duplicate_namespace_agent(db_ready: Non
 async def test_agent_registry_spiffe_id_unique(db_ready: None) -> None:
     """Reject duplicate SPIFFE IDs in agent registry."""
     spiffe = f"spiffe://norviq/ns/default/sa/{uuid.uuid4().hex}"
-    async with await get_session() as session:
+    async with _session() as session:
         session.add(AgentRegistryEntry(spiffe_id=spiffe, namespace="default", agent_class="planner"))
         await session.commit()
         session.add(AgentRegistryEntry(spiffe_id=spiffe, namespace="default", agent_class="planner"))
@@ -103,7 +131,7 @@ async def test_agent_registry_spiffe_id_unique(db_ready: None) -> None:
 async def test_upsert_lock_and_returning_version(db_ready: None) -> None:
     """Use conflict-safe and lock-safe policy write helpers."""
     namespace = f"ns-{uuid.uuid4().hex}"
-    async with await get_session() as session:
+    async with _session() as session:
         await upsert_policy(
             session,
             name="first",
@@ -113,7 +141,7 @@ async def test_upsert_lock_and_returning_version(db_ready: None) -> None:
             enforcement_mode="block",
         )
         await session.commit()
-    async with await get_session() as session:
+    async with _session() as session:
         await upsert_policy(
             session,
             name="second",
@@ -139,5 +167,5 @@ async def test_close_db_releases_engine() -> None:
     await init_db()
     await close_db()
     with pytest.raises(RuntimeError):
-        await get_session()
+        await get_session().__anext__()
     settings.pg_url = old_url

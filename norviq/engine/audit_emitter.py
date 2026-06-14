@@ -59,11 +59,23 @@ class AuditEmitter:
         await asyncio.gather(db_task, span_task, return_exceptions=True)
         log.debug("nrvq.audit.emitted", event_id=event.event_id, decision=decision.decision, code="NRVQ-AUD-6002")
 
+    async def _acquire_session(self):
+        """Acquire a session from the async-generator dependency or awaitable factory.
+
+        get_session is a FastAPI async-generator dependency — `await get_session()` raises
+        TypeError. See docs/engineering/bug-patterns.md (async session lifecycle / P-15/P-16).
+        """
+        provider = get_session()
+        if hasattr(provider, "__anext__"):
+            return await provider.__anext__(), provider
+        return await provider, None
+
     async def _write_db(self, record: AuditRecord) -> None:
         """Persist an audit record into PostgreSQL."""
         session = None
+        agen = None
         try:
-            session = await get_session()
+            session, agen = await self._acquire_session()
             session.add(
                 AuditLogEntry(
                     event_id=UUID(record.event_id),
@@ -88,7 +100,9 @@ class AuditEmitter:
             if session is not None:
                 await session.rollback()
         finally:
-            if session is not None:
+            if agen is not None:
+                await agen.aclose()
+            elif session is not None:
                 await session.close()
 
     async def _emit_span(self, event: ToolCallEvent, decision: PolicyDecision) -> None:

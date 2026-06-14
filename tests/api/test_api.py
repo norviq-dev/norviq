@@ -12,12 +12,26 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 from jose import jwt
 
+from norviq.api.db.session import get_session
 from norviq.api.main import create_app
-from norviq.api.routers import audit as audit_router
-from norviq.api.routers import health as health_router
 from norviq.config import settings
 from norviq.engine.policy_loader import PolicyLoader
 from norviq.sdk.core.trust import TrustScore
+
+
+def _override_session(client: "TestClient", session_obj: object) -> None:
+    """Override the get_session async-generator dependency the FastAPI-correct way.
+
+    Do NOT monkeypatch get_session: `Depends(get_session)` captures the original at
+    route-definition time, so monkeypatching the module attribute is a no-op AND masks
+    the P-15 async-generator bug (see docs/engineering/bug-patterns.md). Use
+    dependency_overrides so the real session lifecycle is exercised.
+    """
+
+    async def _gen():
+        yield session_obj
+
+    client.app.dependency_overrides[get_session] = _gen
 
 
 class FakeCache:
@@ -156,11 +170,8 @@ def _auth_headers(role: str = "admin") -> dict[str, str]:
 
 def test_health_and_readyz() -> None:
     """Serve healthz and readyz payloads."""
-    async def fake_session():
-        return FakeSession([])
-
-    health_router.get_session = fake_session
     client = _client()
+    _override_session(client, FakeSession([]))
     try:
         assert client.get("/healthz").json() == {"status": "ok"}
         assert client.get("/readyz").json() == {"status": "ready", "redis": True, "db": True}
@@ -178,11 +189,8 @@ def test_readyz_db_failure_returns_false() -> None:
         async def close(self) -> None:
             return None
 
-    async def fake_session():
-        return FailingSession()
-
-    health_router.get_session = fake_session
     client = _client()
+    _override_session(client, FailingSession())
     try:
         assert client.get("/readyz").json() == {"status": "ready", "redis": True, "db": False}
     finally:
@@ -323,11 +331,8 @@ def test_audit_list_filter_and_stats() -> None:
         payload={"ok": True},
     )
 
-    async def fake_session():
-        return FakeSession([row])
-
-    audit_router.get_session = fake_session
     client = _client()
+    _override_session(client, FakeSession([row]))
     try:
         records = client.get("/api/v1/audit/records?decision=block").json()
         assert len(records) == 1 and records[0]["decision"] == "block"
@@ -354,11 +359,8 @@ def test_audit_records_with_range() -> None:
         payload={"ok": True},
     )
 
-    async def fake_session():
-        return FakeSession([row])
-
-    audit_router.get_session = fake_session
     client = _client()
+    _override_session(client, FakeSession([row]))
     try:
         records = client.get("/api/v1/audit/records?range=1h").json()
         assert len(records) == 1
@@ -369,6 +371,7 @@ def test_audit_records_with_range() -> None:
 def test_audit_records_invalid_range_returns_422() -> None:
     """Reject invalid range token for records endpoint."""
     client = _client()
+    _override_session(client, FakeSession([]))
     try:
         response = client.get("/api/v1/audit/records?range=99h")
         assert response.status_code == 422
@@ -393,11 +396,8 @@ def test_audit_stats_with_range() -> None:
         payload={"ok": True},
     )
 
-    async def fake_session():
-        return FakeSession([row])
-
-    audit_router.get_session = fake_session
     client = _client()
+    _override_session(client, FakeSession([row]))
     try:
         stats = client.get("/api/v1/audit/stats?range=7d").json()
         assert stats["total"] == 1 and stats["blocked"] == 1
@@ -422,11 +422,8 @@ def test_top_blocked() -> None:
         payload={"ok": True},
     )
 
-    async def fake_session():
-        return FakeSession([row])
-
-    audit_router.get_session = fake_session
     client = _client()
+    _override_session(client, FakeSession([row]))
     try:
         top = client.get("/api/v1/audit/top-blocked").json()
         assert top and top[0]["tool_name"] == "tool.alpha"
@@ -451,11 +448,8 @@ def test_volume() -> None:
         payload={"ok": True},
     )
 
-    async def fake_session():
-        return FakeSession([row])
-
-    audit_router.get_session = fake_session
     client = _client()
+    _override_session(client, FakeSession([row]))
     try:
         volume = client.get("/api/v1/audit/volume").json()
         assert len(volume) == 1 and volume[0]["block"] == 1

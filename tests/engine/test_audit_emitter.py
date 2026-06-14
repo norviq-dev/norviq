@@ -9,6 +9,7 @@ import os
 import time
 import uuid
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,17 @@ def _load_dotenv_if_present() -> None:
             continue
         key, value = item.split("=", 1)
         os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+
+
+@asynccontextmanager
+async def _session():
+    """Drive the get_session async-generator dependency (`await get_session()` is the P-15 bug)."""
+    gen = get_session()
+    session = await gen.__anext__()
+    try:
+        yield session
+    finally:
+        await gen.aclose()
 
 
 def _build_event(event_id: str, namespace: str) -> ToolCallEvent:
@@ -105,7 +117,7 @@ async def test_emit_writes_to_postgresql(postgres_ready: None) -> None:
     event_id = str(uuid.uuid4())
     emitter.emit(_build_event(event_id, namespace), _build_decision(event_id), payload={"scope": "read"})
     await emitter.close()
-    async with await get_session() as session:
+    async with _session() as session:
         found = await session.scalar(select(AuditLogEntry).where(AuditLogEntry.event_id == uuid.UUID(event_id)))
         assert found is not None
         assert found.namespace == namespace

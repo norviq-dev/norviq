@@ -11,9 +11,20 @@ Each pattern: what it looks like, the real case, and the guard that catches it.
 
 ---
 
-## Async / session lifecycle (P-12, P-15) — the highest-cost family
+## Async / session lifecycle (P-12, P-15, P-16) — the highest-cost family
 
 These are silent: nothing errors loudly, state just stops moving or the pool dies.
+
+> **This bug recurred (P-15 → P-16) because we fixed instances, not the class.**
+> The async-generator session bug was patched in `dry_run` + `GraphStore`, but the *same*
+> `await get_session()` survived in `audit.py` (×5), `health.py`, and `audit_emitter.py` — breaking
+> Dashboard/Audit Log (500) and silently dropping every audit write on AKS. **Two rules, always:**
+> 1. **Fix the CLASS, not the instance** — `grep -rn "await get_session()" norviq/` and fix *every*
+>    hit in one pass. Re-grep before claiming "closed."
+> 2. **NEVER monkeypatch `get_session` in tests** — `Depends(get_session)` captures the original at
+>    route-definition time, so the monkeypatch is a no-op that *masks* the real lifecycle. Use
+>    `app.dependency_overrides[get_session]` (routes) or the `_acquire_session` drive (non-route).
+>    Back it with an **integration test against the real ASGI app** (fail-before / pass-after).
 
 - **P-12 — DB pool exhaustion via leaked sessions.** After ~15 requests, endpoints 500 with
   `QueuePool TimeoutError`. Cause: a session opened per request but never returned to the pool.
@@ -21,6 +32,11 @@ These are silent: nothing errors loudly, state just stops moving or the pool die
   but the app passed an *async-generator* dependency, so every persist silently failed
   (`NRVQ-GRP-11001: async_generator object can't be awaited`). The `asset_graph` table froze at
   the first snapshot while tool calls kept flowing.
+- **P-16 — `await get_session()` in route handlers + engine code.** `get_session` is a FastAPI
+  async-generator dependency; `await get_session()` raises
+  `TypeError: object async_generator can't be used in 'await' expression`. In a **route**, fix with
+  `session: AsyncSession = Depends(get_session)` (FastAPI manages the generator). In **non-route
+  code**, drive the generator via `_acquire_session` and `aclose()` in `finally`.
 
 **The `_acquire_session` pattern — use everywhere a background/non-request path needs a DB session:**
 
@@ -47,6 +63,9 @@ async def _acquire_session(self):
 **Guards:**
 - Hit any persisting endpoint 30× in a loop; assert all return 200 (catches P-12).
 - After a *distinct* `evaluate` call, assert the persisted row count **increased** (catches P-15).
+- Integration test against the **real ASGI app** (httpx → live API) for every DB-backed endpoint —
+  `tests/integration/test_audit_endpoints.py` asserts `/audit/*` + `/readyz` return 200, and would
+  have caught P-16 (it fails-before / passes-after). Monkeypatched unit tests cannot catch this.
 - Never `await` a factory whose type you haven't pinned. Reproduce the prod wiring in the test —
   do not hand the store a bare `async with session()` when the app injects a generator.
 
