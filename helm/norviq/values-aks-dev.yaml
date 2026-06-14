@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+# Single-node AKS dev cluster — ~1 vCPU, CPU-saturated (~97% requests).
+# Surge pods cannot schedule, so override ALL components to replace-in-place.
+# Remove this overlay once the cluster has node headroom (then the values.yaml
+# defaults give zero-downtime maxSurge:1/maxUnavailable:0). See docs/backlog.md
+# "Node capacity — right-size AKS agentpool for zero-downtime".
+api:
+  rollout:
+    maxSurge: 0
+    maxUnavailable: 1
+engine:
+  rollout:
+    maxSurge: 0
+    maxUnavailable: 1
+ui:
+  rollout:
+    maxSurge: 0
+    maxUnavailable: 1
+webhook:
+  rollout:
+    maxSurge: 0
+    maxUnavailable: 1

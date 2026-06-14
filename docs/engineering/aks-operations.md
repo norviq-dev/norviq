@@ -20,17 +20,27 @@ sequence below is now a **fallback**, not routine. Applied to `api-deployment.ya
 - **livenessProbe** less aggressive once started (`periodSeconds: 30`, `timeoutSeconds: 10`,
   `failureThreshold: 5`); engine gained liveness/readiness it never had (both on `/healthz` — the
   sidecar exposes no `/readyz`).
-- **strategy `maxSurge: 0 / maxUnavailable: 1`** (replace-in-place) — **required** on the current
-  single ~1-vCPU node: it sits at ~97% CPU *requests*, so a surge pod can never schedule. The old
-  default (`maxSurge:1/maxUnavailable:0`) deadlocked — surge pod stuck `Pending (Insufficient cpu)`,
-  old pod unable to drain. Replace-in-place terminates the old pod first (frees its request), then
-  schedules the new one. Verified: one `helm upgrade` rolled api+engine cleanly in ~30s, 0 restarts,
-  no Pending, no manual intervention; baseline held at 66/66.
+- **strategy is values-driven** (`.Values.<component>.rollout.{maxSurge,maxUnavailable}`) across
+  **all four** components (api, engine, ui, webhook). The **production default in `values.yaml` is
+  zero-downtime** (`maxSurge:1/maxUnavailable:0`). The **`values-aks-dev.yaml` overlay** forces
+  **replace-in-place** (`maxSurge:0/maxUnavailable:1`) for this single ~1-vCPU node at ~97% CPU
+  *requests*, where a surge pod can never schedule (the old hardcoded default deadlocked — surge pod
+  stuck `Pending (Insufficient cpu)`, old pod unable to drain). Replace-in-place terminates the old
+  pod first, then schedules the new one. Verified: clean rollouts, 0 restarts, no Pending, no manual
+  intervention; baseline held at 66/66.
+- **`.github/workflows/deploy.yml` passes `-f helm/norviq/values-aks-dev.yaml`** — without it, every
+  CI deploy re-applies the zero-downtime default on the saturated node and re-triggers the deadlock
+  (this is exactly how ui/webhook got stuck before the overlay existed).
 - **terminationGracePeriodSeconds: 30** for clean shutdown.
+- **ui** is static nginx → **no initContainer** (browser calls the API at runtime); it gained
+  startup/readiness probes on `/`. **webhook** waits on the API (`wait-for-api` initContainer) — safe
+  because the sidecar-injector webhook is `failurePolicy=Ignore` and excludes the control-plane
+  namespace, so a not-yet-ready webhook never blocks pod creation.
 
-**Zero-downtime rollout** (`maxSurge:1/maxUnavailable:0`) requires **more node capacity** (bigger VM
-or a 2-node pool) or lower CPU requests. Only switch after `kubectl top nodes` shows real headroom
-for a second app pod — otherwise the deadlock returns.
+**Switching to zero-downtime:** add node capacity (bigger VM or a 2-node pool) or lower CPU requests,
+confirm headroom with `kubectl top nodes`, then **drop the `-f values-aks-dev.yaml` overlay** — the
+`values.yaml` defaults give `maxSurge:1/maxUnavailable:0` automatically. Tracked in
+[backlog](../backlog.md) ("Node capacity — right-size AKS agentpool").
 
 **Still tracked separately (backlog):** app-level DB/Redis connect backoff in the lifespan
 (`main.py` has none today); initContainers cover ordering, but backoff is defense-in-depth for a

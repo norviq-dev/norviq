@@ -32,6 +32,7 @@ jobs:
           helm upgrade --install norviq helm/norviq/ \
             --namespace norviq \
             --create-namespace \
+            -f helm/norviq/values-aks-dev.yaml \
             --set images.engine.tag=engine-${{ github.sha }} \
             --set images.api.tag=api-${{ github.sha }} \
             --set images.ui.tag=ui-${{ github.sha }}

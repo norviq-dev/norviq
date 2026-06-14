@@ -8,6 +8,11 @@ metadata:
     {{- include "norviq.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.ui.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: {{ .Values.ui.rollout.maxSurge }}
+      maxUnavailable: {{ .Values.ui.rollout.maxUnavailable }}
   selector:
     matchLabels:
       app: norviq-ui
@@ -18,6 +23,9 @@ spec:
     spec:
       imagePullSecrets:
         - name: dockerhub-secret
+      terminationGracePeriodSeconds: 30
+      # Static nginx SPA — no backend dependency at startup (the browser calls the API
+      # at runtime), so no initContainer is needed.
       containers:
         - name: ui
           image: "{{ .Values.images.ui.repository }}:{{ .Values.images.ui.tag }}"
@@ -27,9 +35,24 @@ spec:
               name: http
           resources:
             {{- toYaml .Values.ui.resources | nindent 12 }}
-          livenessProbe:
+          startupProbe:
             httpGet:
               path: /
               port: http
             initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12          # up to 60s for nginx to come up
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
             periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3

@@ -11,8 +11,8 @@ spec:
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 0            # node is at ~97% CPU requests — a surge pod cannot schedule
-      maxUnavailable: 1      # terminate old first, then create new (replace-in-place)
+      maxSurge: {{ .Values.api.rollout.maxSurge }}
+      maxUnavailable: {{ .Values.api.rollout.maxUnavailable }}
   selector:
     matchLabels:
       app: norviq-api

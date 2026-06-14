@@ -242,3 +242,15 @@ policies.py:211 dry_run_policy has the async-generator bug (await get_session())
 Also ignores submitted rego body (_ = body) — never validates rego, only reports
 audit block-rates. Fix restores a real pre-apply safety gate.
 Same root cause as P-15 GraphStore fix — apply _acquire_session pattern.
+
+## Node capacity — right-size AKS agentpool for zero-downtime
+Current single ~1-vCPU node at 97% CPU requests forces replace-in-place
+(values-aks-dev.yaml overlay). For true zero-downtime: add a node OR larger VM
+OR lower resource requests, then drop the overlay (defaults give maxSurge:1).
+Gate the switch on `kubectl top nodes` showing headroom.
+
+## App-level DB/Redis connect backoff (defense-in-depth for P-14)
+main.py lifespan calls init_db()/cache.connect()/run_migrations() with no retry.
+initContainers cover ordering, but a backend that accepts TCP before it is
+query-ready can still fail startup. Add exponential backoff (~5 attempts, 1→16s)
+around the connect calls. Separate from the Helm P-14 fix.

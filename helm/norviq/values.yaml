@@ -37,6 +37,9 @@ images:
 
 engine:
   replicas: 1
+  rollout:
+    maxSurge: 1        # production default: zero-downtime (needs node headroom for a surge pod)
+    maxUnavailable: 0
   resources:
     requests:
       cpu: 100m
@@ -48,6 +51,9 @@ engine:
 
 api:
   replicas: 1
+  rollout:
+    maxSurge: 1        # production default: zero-downtime (needs node headroom for a surge pod)
+    maxUnavailable: 0
   resources:
     requests:
       cpu: 100m
@@ -69,6 +75,9 @@ api:
 
 ui:
   replicas: 1
+  rollout:
+    maxSurge: 1        # production default: zero-downtime (needs node headroom for a surge pod)
+    maxUnavailable: 0
   resources:
     requests:
       cpu: 50m
@@ -83,6 +92,9 @@ webhook:
   validating:
     enabled: false
   replicas: 2
+  rollout:
+    maxSurge: 1        # production default: zero-downtime (needs node headroom for a surge pod)
+    maxUnavailable: 0
   port: 8443
   resources:
     requests:

@@ -9,6 +9,11 @@ metadata:
     {{- include "norviq.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.webhook.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: {{ .Values.webhook.rollout.maxSurge }}
+      maxUnavailable: {{ .Values.webhook.rollout.maxUnavailable }}
   selector:
     matchLabels:
       app: norviq-webhook
@@ -20,6 +25,26 @@ spec:
       serviceAccountName: norviq-controller
       imagePullSecrets:
         - name: dockerhub-secret
+      terminationGracePeriodSeconds: 30
+      initContainers:
+        # Controller reconciles NrvqPolicy CRs by POSTing to the API — wait for it.
+        # Safe: the sidecar-injector webhook is failurePolicy=Ignore and excludes the
+        # control-plane namespace, so a not-yet-ready webhook never blocks pod creation.
+        - name: wait-for-api
+          image: busybox:1.36
+          command: ['sh','-c','until nc -z norviq-api {{ .Values.api.port }}; do echo waiting for api; sleep 2; done']
+          securityContext:
+            # Webhook pods carry a restricted securityContext (runAsNonRoot) injected by
+            # cluster policy; busybox defaults to root, so pin a non-root user. `nc -z`
+            # needs no root, caps, or filesystem writes.
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
       containers:
         - name: webhook
           image: "{{ .Values.images.webhook.repository }}:{{ .Values.images.webhook.tag }}"
@@ -53,13 +78,22 @@ spec:
               readOnly: true
           resources:
             {{- toYaml .Values.webhook.resources | nindent 12 }}
-          livenessProbe:
+          startupProbe:
             httpGet:
               path: /healthz
               port: https
               scheme: HTTPS
             initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
             periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
           readinessProbe:
             httpGet:
               path: /readyz
@@ -67,6 +101,7 @@ spec:
               scheme: HTTPS
             initialDelaySeconds: 3
             periodSeconds: 10
+            failureThreshold: 3
       volumes:
         - name: webhook-certs
           secret:
