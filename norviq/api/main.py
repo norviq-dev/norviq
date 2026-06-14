@@ -35,6 +35,26 @@ log.info(
 )
 
 
+async def _connect_with_backoff(coro_factory, name: str, retry_code: str, fail_code: str, attempts: int = 5):
+    """Retry a startup connection with exponential backoff (1,2,4,8,16s).
+
+    Defense-in-depth atop the initContainers: a backend may accept TCP before it is
+    query-ready, so retry rather than crash. Raises after the final attempt so the pod
+    restarts (initContainers should normally prevent reaching that).
+    """
+    delay = 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return await coro_factory()
+        except Exception as exc:
+            if attempt == attempts:
+                log.error(f"nrvq.startup.{name}_failed", attempts=attempt, error=str(exc), code=fail_code)
+                raise
+            log.warning(f"nrvq.startup.{name}_retry", attempt=attempt, delay=delay, error=str(exc), code=retry_code)
+            await asyncio.sleep(delay)
+            delay *= 2
+
+
 async def run_migrations() -> None:
     """Apply pending Alembic migrations before cache warm-up."""
     try:
@@ -55,11 +75,13 @@ async def lifespan(app: FastAPI):
     """Run API startup and shutdown lifecycle."""
     setup_telemetry()
     log.info("nrvq.startup.db_engine_creating", code="NRVQ-DB-DEBUG-1")
-    await init_db()
+    await _connect_with_backoff(init_db, "init_db", retry_code="NRVQ-DB-9035", fail_code="NRVQ-DB-9034")
     log.info("nrvq.startup.db_engine_created", code="NRVQ-DB-DEBUG-2")
     await create_tables()
     app.state.cache = RedisCache()
-    await app.state.cache.connect()
+    await _connect_with_backoff(
+        app.state.cache.connect, "cache_connect", retry_code="NRVQ-REG-9035", fail_code="NRVQ-REG-9034"
+    )
     app.state.evaluator = OPAEvaluator(app.state.cache)
     app.state.graph_store = GraphStore(app.state.cache, session_factory=get_session)
     app.state.evaluator.bind_graph_store(app.state.graph_store)

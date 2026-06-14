@@ -228,29 +228,29 @@ Day 10 focus:
   - F037 implementation (so demo shows full feature)
 
 
-## Test hygiene
-- **test_priority_enforcement.py leaves `__cluster__:__baseline__` policy in DB after run (no teardown).**
+## Test hygiene — RESOLVED
+- **test_priority_enforcement.py leaves `__cluster__:__baseline__` policy in DB after run.**
   Pollutes subsequent attack baseline runs: the leftover priority-900 default-block cluster policy
-  wins precedence over `default:customer-support` and blocks every safe operation, cascading into a
-  block-history feedback loop (observed: 16 false failures locally until the row was removed).
-  Fix: add fixture teardown to delete the policy/policies it creates (and clear any seeded
-  agent_history / eval cache). Same hygiene gap likely applies to other tests creating `ns-*`
-  policies that linger in the shared dev DB.
+  wins precedence over `default:customer-support` and blocks every safe operation (observed: 16
+  false failures locally until the row was removed).
+  RESOLVED: both tests now wrap in try/finally with `_cleanup_polluted_policies(loader)` that
+  deletes the policies/policy_versions rows they insert. (Other tests creating `ns-*` policies may
+  still linger — separate sweep if it recurs.)
 
-## P-15-class: dry_run_policy endpoint broken
-policies.py:211 dry_run_policy has the async-generator bug (await get_session()).
-Also ignores submitted rego body (_ = body) — never validates rego, only reports
-audit block-rates. Fix restores a real pre-apply safety gate.
-Same root cause as P-15 GraphStore fix — apply _acquire_session pattern.
+## P-15-class: dry_run_policy endpoint broken — RESOLVED
+policies.py dry_run_policy had the async-generator bug (await get_session()) and ignored the
+submitted rego body (_ = body) — never validated rego, only reported audit block-rates.
+RESOLVED: now uses Depends(get_session) (P-15 pattern) and actually validates the rego by
+OPA-evaluating it against a sample input (returns valid/errors/sample_decision). Restores the
+pre-apply safety gate.
+
+## App-level DB/Redis connect backoff (defense-in-depth for P-14) — RESOLVED
+main.py lifespan called init_db()/cache.connect() with no retry.
+RESOLVED: `_connect_with_backoff` wraps init_db + cache.connect (5 attempts, 1→16s, logged with
+NRVQ-DB-9034/9035 + NRVQ-REG-9034/9035; raises after the last attempt so the pod restarts).
 
 ## Node capacity — right-size AKS agentpool for zero-downtime
 Current single ~1-vCPU node at 97% CPU requests forces replace-in-place
 (values-aks-dev.yaml overlay). For true zero-downtime: add a node OR larger VM
 OR lower resource requests, then drop the overlay (defaults give maxSurge:1).
 Gate the switch on `kubectl top nodes` showing headroom.
-
-## App-level DB/Redis connect backoff (defense-in-depth for P-14)
-main.py lifespan calls init_db()/cache.connect()/run_migrations() with no retry.
-initContainers cover ordering, but a backend that accepts TCP before it is
-query-ready can still fail startup. Add exponential backoff (~5 attempts, 1→16s)
-around the connect calls. Separate from the Helm P-14 fix.

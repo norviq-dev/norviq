@@ -10,6 +10,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from norviq.api.auth import get_current_user
 from norviq.api.db.models import AuditLogEntry
@@ -202,28 +203,66 @@ async def rollback_policy(
     return {"rolled_back_to": body.target_version, "rego_length": len(rego)}
 
 
-@router.post("/policies/dry-run")
-async def dry_run_policy(body: PolicyCreate, request: Request) -> dict:
-    """Test a policy against recent audit records without applying."""
-    _ = body
-    _ = request
-    since = datetime.now(timezone.utc) - timedelta(hours=24)
-    session = await get_session()
+async def _validate_rego(evaluator, body: PolicyCreate) -> tuple[bool, list[str], dict | None]:
+    """Compile + sample-evaluate the submitted rego via OPA; return (valid, errors, decision)."""
+    errors: list[str] = []
+    namespace = body.namespace or "default"
+    agent_class = body.agent_class or "customer-support"
+    sample_input = {
+        "tool_name": "search_kb",
+        "tool_params": {"query": "dry-run probe"},
+        "agent": {
+            "spiffe_id": f"spiffe://norviq/ns/{namespace}/sa/{agent_class}",
+            "namespace": namespace,
+            "agent_class": agent_class,
+        },
+        "trust_score": 0.8,
+        "trust_category": "high",
+        "session_id": "dry-run",
+        "call_depth": 0,
+    }
+    decision: dict | None = None
     try:
-        base = select(func.count(AuditLogEntry.id)).where(AuditLogEntry.timestamp_utc >= since)
-        total = int((await session.scalar(base)) or 0)
-        blocked = int((await session.scalar(base.where(AuditLogEntry.decision == "block"))) or 0)
-    finally:
-        await session.close()
+        # Reuse the same OPA path real evaluation uses: this both compiles the rego and
+        # confirms it yields a decision object (a syntax error makes opa exit non-zero → raises).
+        decision = await evaluator._evaluate_opa(namespace, agent_class, sample_input, body.rego_source)
+        if decision.get("rule_id") == "evaluator_invalid_payload":
+            errors.append("policy compiled but produced no valid decision object")
+    except Exception as exc:
+        errors.append(f"opa evaluation failed: {exc}")
+    return (not errors), errors, decision
+
+
+@router.post("/policies/dry-run")
+async def dry_run_policy(
+    body: PolicyCreate,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Validate the submitted rego (compile + sample decision) and report recent block-rate."""
+    valid, errors, sample_decision = await _validate_rego(request.app.state.evaluator, body)
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    base = select(func.count(AuditLogEntry.id)).where(AuditLogEntry.timestamp_utc >= since)
+    total = int((await session.scalar(base)) or 0)
+    blocked = int((await session.scalar(base.where(AuditLogEntry.decision == "block"))) or 0)
     rate = (blocked / total * 100) if total > 0 else 0
-    log.info("nrvq.api.policy.dry_run", total=total, blocked=blocked, code="NRVQ-API-7014")
+    log.info("nrvq.api.policy.dry_run", valid=valid, total=total, blocked=blocked, code="NRVQ-API-7014")
     return {
+        "valid": valid,
+        "errors": errors,
+        "sample_decision": sample_decision,
         "total_records_checked": total,
         "would_block": blocked,
         "would_allow": total - blocked,
         "block_rate_pct": round(rate, 2),
         "time_range": "last 24 hours",
-        "recommendation": "Safe to deploy" if rate < 5 else "Review before deploying — high block rate",
+        "recommendation": (
+            "Invalid rego — fix errors before deploying"
+            if not valid
+            else "Safe to deploy"
+            if rate < 5
+            else "Review before deploying — high block rate"
+        ),
     }
 
 

@@ -99,6 +99,12 @@ class FakeEvaluator:
     def bind_loader(self, loader: object) -> None:
         """Accept loader binding."""
 
+    async def _evaluate_opa(self, namespace: str, agent_class: str, opa_input: dict, rego_source: str = "") -> dict:
+        """Stub OPA eval: raise for a broken rego, else return a valid decision shape."""
+        if "decision" not in rego_source:
+            raise RuntimeError("opa eval failed: rego did not produce a decision")
+        return {"decision": "allow", "rule_id": "default_allow", "reason": ""}
+
 
 class FakeSession:
     """Minimal async session for audit queries."""
@@ -474,20 +480,24 @@ def test_dry_run() -> None:
         payload={"ok": True},
     )
 
-    async def fake_session():
-        return FakeSession([row])
+    from norviq.api.db.session import get_session
 
-    audit_router.get_session = fake_session
-    from norviq.api.routers import policies as policy_router
+    async def _override_session():
+        yield FakeSession([row])
 
-    policy_router.get_session = fake_session
     client = _client()
+    client.app.dependency_overrides[get_session] = _override_session
+    client.app.state.evaluator = FakeEvaluator()
     try:
         body = {"namespace": "payments", "agent_class": "planner", "rego_source": 'package norviq\ndecision = "block" { input.tool_name == "danger" }\nrule_id = "r"\nreason = "x"'}
         response = client.post("/api/v1/policies/dry-run", json=body)
         assert response.status_code == 200
-        assert response.json()["total_records_checked"] == 1
+        data = response.json()
+        assert data["valid"] is True  # dry-run now actually validates the submitted rego
+        assert data["errors"] == []
+        assert data["total_records_checked"] == 1
     finally:
+        client.app.dependency_overrides.clear()
         client.close()
 
 
