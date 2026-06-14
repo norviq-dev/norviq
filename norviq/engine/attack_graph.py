@@ -111,14 +111,15 @@ class AttackGraphEngine:
                 text(
                     """
                 INSERT INTO attack_paths
-                    (id, graph_id, source_node, target_node, path_json, risk_score, computed_at)
+                    (id, graph_id, namespace, source_node, target_node, path_json, risk_score, computed_at)
                 VALUES
-                    (:id, :graph_id, :source_node, :target_node, CAST(:path_json AS jsonb), :risk_score, :computed_at)
+                    (:id, :graph_id, :namespace, :source_node, :target_node, CAST(:path_json AS jsonb), :risk_score, :computed_at)
             """
                 ),
                 {
                     "id": path.path_id,
                     "graph_id": graph_id,
+                    "namespace": namespace,
                     "source_node": path.source_id,
                     "target_node": path.target_id,
                     "path_json": json.dumps(

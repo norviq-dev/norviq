@@ -149,8 +149,11 @@ async def get_attack_paths(
     """Return precomputed attack paths sorted by risk score plus referenced nodes."""
     try:
         _ = _user
-        sql = "SELECT path_json, risk_score FROM attack_paths ORDER BY computed_at DESC LIMIT 200"
-        rows = (await session.execute(text(sql))).mappings().all()
+        sql = (
+            "SELECT path_json, risk_score FROM attack_paths "
+            "WHERE namespace = :ns ORDER BY computed_at DESC LIMIT 200"
+        )
+        rows = (await session.execute(text(sql), {"ns": namespace})).mappings().all()
         paths: list[AttackPath] = []
         referenced_nodes: set[str] = set()
         for row in rows:

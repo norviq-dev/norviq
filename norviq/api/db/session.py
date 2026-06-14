@@ -118,6 +118,14 @@ async def ensure_schema_compatibility() -> None:
     statements = (
         "ALTER TABLE policies ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 100",
         "ALTER TABLE policies ADD COLUMN IF NOT EXISTS enforcement_mode VARCHAR(20) NOT NULL DEFAULT 'block'",
+        # attack_paths tenant scoping: namespace column + backfill from the linked asset_graph.
+        "ALTER TABLE attack_paths ADD COLUMN IF NOT EXISTS namespace VARCHAR(255)",
+        (
+            "UPDATE attack_paths SET namespace = ("
+            "SELECT namespace FROM asset_graph WHERE asset_graph.id = attack_paths.graph_id"
+            ") WHERE namespace IS NULL"
+        ),
+        "CREATE INDEX IF NOT EXISTS ix_attack_paths_namespace ON attack_paths (namespace)",
     )
     async with _engine.begin() as conn:
         for statement in statements:

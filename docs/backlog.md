@@ -263,6 +263,13 @@ Wire fire-and-forget audit emission into the /evaluate handler (must NOT block t
 async task, per the <5ms perf rule). This completes the "see enforcement" pillar.
 Priority: next P0 after the attack-path namespace leak.
 
+## P0 (auth batch): namespace authz not enforced — caller can request any namespace
+attack-paths/audit/policies filter by the namespace PARAM but don't ENFORCE that the
+caller may access that namespace. Any valid token can query any namespace's data. The
+attack-path data-scoping fix (namespace column + WHERE) is done; ENFORCEMENT (bind the
+allowed namespace(s) to JWT claims / tenant identity) belongs with the P0 auth-flow work,
+not the data fix. Until then, isolation is by correct scoping only, not authorization.
+
 ## P1: loader.delete does not remove the policies row (DELETE endpoint no-op?)
 loader.delete clears in-memory/cache only, never DELETEs the Postgres row — so
 DELETE /policies/{ns}/{class} returns {deleted: true} but the row persists, and re-creates

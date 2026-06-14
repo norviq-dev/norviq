@@ -131,6 +131,7 @@ class AttackPath(Base):
     __tablename__ = "attack_paths"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     graph_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("asset_graph.id"))
+    namespace: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     source_node: Mapped[str] = mapped_column(String(512))
     target_node: Mapped[str] = mapped_column(String(512))
     path_json: Mapped[dict[str, object]] = mapped_column(JSONB)
