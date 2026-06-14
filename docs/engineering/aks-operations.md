@@ -6,11 +6,42 @@
 Operating and recovering the Norviq stack on AKS. The cluster is the source of truth for the test
 baseline (see [test-baseline-discipline.md](test-baseline-discipline.md)).
 
-## Recovery sequence (ordered bring-up)
+## P-14 permanent fix (applied)
+
+The AKS startup race and the rollout deadlock are fixed in the chart — the manual recovery
+sequence below is now a **fallback**, not routine. Applied to `api-deployment.yaml` and
+`engine-deployment.yaml`:
+
+- **initContainers** `wait-for-postgres` (`norviq-postgresql:5432`) + `wait-for-redis`
+  (`norviq-redis:6379`) — the app container does not start until its backends accept TCP, so no
+  more cold-start crashloop (was 3 restarts; now 0).
+- **startupProbe** (`/healthz`, `failureThreshold: 30 × 5s = 150s`) — gives migrations + warm_cache
+  time to finish without the liveness probe killing a slow-but-healthy start.
+- **livenessProbe** less aggressive once started (`periodSeconds: 30`, `timeoutSeconds: 10`,
+  `failureThreshold: 5`); engine gained liveness/readiness it never had (both on `/healthz` — the
+  sidecar exposes no `/readyz`).
+- **strategy `maxSurge: 0 / maxUnavailable: 1`** (replace-in-place) — **required** on the current
+  single ~1-vCPU node: it sits at ~97% CPU *requests*, so a surge pod can never schedule. The old
+  default (`maxSurge:1/maxUnavailable:0`) deadlocked — surge pod stuck `Pending (Insufficient cpu)`,
+  old pod unable to drain. Replace-in-place terminates the old pod first (frees its request), then
+  schedules the new one. Verified: one `helm upgrade` rolled api+engine cleanly in ~30s, 0 restarts,
+  no Pending, no manual intervention; baseline held at 66/66.
+- **terminationGracePeriodSeconds: 30** for clean shutdown.
+
+**Zero-downtime rollout** (`maxSurge:1/maxUnavailable:0`) requires **more node capacity** (bigger VM
+or a 2-node pool) or lower CPU requests. Only switch after `kubectl top nodes` shows real headroom
+for a second app pod — otherwise the deadlock returns.
+
+**Still tracked separately (backlog):** app-level DB/Redis connect backoff in the lifespan
+(`main.py` has none today); initContainers cover ordering, but backoff is defense-in-depth for a
+backend that accepts TCP before it is query-ready.
+
+## Recovery sequence (ordered bring-up) — fallback
 
 Dependencies must be serving before dependents start, or pods race their backends (P-14, the AKS
-startup race — see [bug-patterns.md](bug-patterns.md)). To recover from a bad/partial roll, scale
-everything down, then bring services up **in dependency order**:
+startup race — see [bug-patterns.md](bug-patterns.md)). The chart fix above normally prevents this;
+use this only to recover from a bad/partial roll — scale everything down, then bring services up
+**in dependency order**:
 
 1. **Scale all app deployments to 0** — stop the churn first.
 2. **postgres** — wait until it accepts connections and migrations are at head.
@@ -35,15 +66,12 @@ kubectl scale deploy/norviq-ui      --replicas=1 -n norviq
 .\scripts\aks-verify.ps1
 ```
 
-## Startup race fix plan (Day 14)
+## Startup race fix — status
 
-Pods currently report Ready on process-up, before backends serve. Planned fix:
-
-- Readiness probe gates on a **real dependency check** — migration head applied + Redis `PING`,
-  not just the port being open.
-- API/engine use init-containers (or a startup probe) that block until postgres + redis are
-  reachable, so Kubernetes won't send traffic into an unmigrated schema.
-- Until shipped, rely on the ordered recovery sequence above and verify health before measuring.
+**Shipped** (see "P-14 permanent fix" above): initContainers gate the app on postgres + redis being
+reachable, and a startupProbe absorbs slow migration/warm_cache starts. Remaining hardening, tracked
+in backlog: readiness gating on a deeper dependency check (migration head applied) and app-level
+connect backoff for the TCP-up-but-not-query-ready window.
 
 ## Verify the deploy actually applied
 

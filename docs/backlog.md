@@ -236,3 +236,9 @@ Day 10 focus:
   Fix: add fixture teardown to delete the policy/policies it creates (and clear any seeded
   agent_history / eval cache). Same hygiene gap likely applies to other tests creating `ns-*`
   policies that linger in the shared dev DB.
+
+## P-15-class: dry_run_policy endpoint broken
+policies.py:211 dry_run_policy has the async-generator bug (await get_session()).
+Also ignores submitted rego body (_ = body) — never validates rego, only reports
+audit block-rates. Fix restores a real pre-apply safety gate.
+Same root cause as P-15 GraphStore fix — apply _acquire_session pattern.
