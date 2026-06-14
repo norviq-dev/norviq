@@ -18,7 +18,7 @@ class TestTrustBehavior:
         assert result.decision in {"escalate", "allow"}
         assert 0.0 <= result.trust_score <= 1.0
 
-    def test_frozen_agent_blocked(self, api):
+    def test_frozen_agent_blocked(self, api, frozen_agent):
         """Frozen trust profile should block requests."""
         result = evaluate(api, "search_kb", {"query": "shipping"}, trust_score=0.0)
         assert result.decision == "block"

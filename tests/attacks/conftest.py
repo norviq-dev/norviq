@@ -1,18 +1,41 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
+import json
 import os
+import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+import redis
 
 API_URL = os.getenv("NRVQ_API_URL", "http://127.0.0.1:8080")
 API_TOKEN = os.getenv("NRVQ_API_TOKEN", "")
+REDIS_URL = os.getenv("NRVQ_REDIS_URL", "redis://127.0.0.1:6379/0")
 REVIEWS_DIR = Path(".reviews")
 RESULTS_FILE = REVIEWS_DIR / "DAY8-attacks.md"
+
+# Default identity derived by evaluate() for namespace=default, class=customer-support.
+DEFAULT_SPIFFE = "spiffe://norviq/ns/default/sa/customer-support"
+
+
+@pytest.fixture(scope="session")
+def redis_client():
+    """Shared sync Redis client for seeding agent state; None if unreachable."""
+    try:
+        client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
+        client.ping()
+    except Exception:
+        yield None
+        return
+    try:
+        yield client
+    finally:
+        client.close()
 
 
 @dataclass
@@ -26,13 +49,19 @@ class EvalResult:
     raw: dict[str, Any]
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def api() -> httpx.Client:
-    """HTTP client for Norviq API."""
+    """Shared keep-alive HTTP client for Norviq API.
+
+    Session-scoped with a bounded keep-alive pool so the whole suite reuses a few
+    TCP connections instead of opening one per test — avoids Windows ephemeral-port
+    exhaustion (WinError 10048/10055) under rapid sequential evaluation calls.
+    """
     headers = {"Content-Type": "application/json"}
     if API_TOKEN:
         headers["Authorization"] = f"Bearer {API_TOKEN}"
-    client = httpx.Client(base_url=API_URL, headers=headers, timeout=10)
+    limits = httpx.Limits(max_keepalive_connections=8, max_connections=8)
+    client = httpx.Client(base_url=API_URL, headers=headers, timeout=10, limits=limits)
     try:
         yield client
     finally:
@@ -75,6 +104,73 @@ def evaluate(
         latency_ms=float(data.get("latency_ms", 0.0)),
         raw=data,
     )
+
+
+@pytest.fixture
+def frozen_agent(redis_client):
+    """Admin-freeze the default agent in Redis for one test, then clean up.
+
+    The engine reads ``agent_frozen:{spiffe_id}`` (calculator.py): any truthy value
+    forces score=0.0, category=frozen, and a Python-side block override.
+    """
+    client = redis_client
+    if client is None:
+        pytest.xfail(f"Redis unavailable at {REDIS_URL}; cannot seed frozen state")
+    key = f"agent_frozen:{DEFAULT_SPIFFE}"
+    client.set(key, "1", ex=120)
+    try:
+        yield DEFAULT_SPIFFE
+    finally:
+        client.delete(key)
+
+
+@pytest.fixture
+def low_trust_agent(redis_client):
+    """Seed history + profile so the default agent recomputes to low trust (<0.4).
+
+    Drives violation_rate=0.0, scope_drift=0.0, tool_novelty=0.2, param_entropy=0.2,
+    time_decay=0.1, session_velocity=0.3 → weighted score ~0.20 → category 'low' →
+    'allow' decisions are overridden to 'escalate'.
+    """
+    client = redis_client
+    if client is None:
+        pytest.xfail(f"Redis unavailable at {REDIS_URL}; cannot seed low-trust state")
+    hist_key = f"agent_history:{DEFAULT_SPIFFE}"
+    prof_key = f"agent_profile:{DEFAULT_SPIFFE}"
+    class_key = "agent_class:customer-support"
+    client.delete(hist_key, prof_key, class_key)
+
+    now = time.time()
+    members: dict[str, float] = {}
+    for i in range(30):  # 30 recent blocks within the last minute
+        ts = now - i
+        members[
+            json.dumps(
+                {
+                    "i": i,
+                    "tool_name": "noop_attack",
+                    "decision": "block",
+                    "timestamp": datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(),
+                    "timestamp_unix": ts,
+                }
+            )
+        ] = ts
+    client.zadd(hist_key, members)
+    client.hset(
+        prof_key,
+        mapping={
+            "known_tools": json.dumps(["noop_tool"]),
+            "param_entropy_baseline": json.dumps({"search_kb": {"mean": 1.0, "std": 0.2}}),
+            "baseline_rpm": "10.0",
+        },
+    )
+    client.hset(class_key, mapping={"blocked_tools": json.dumps(["search_kb"])})
+    for key in (hist_key, prof_key, class_key):
+        client.expire(key, 120)
+    try:
+        yield DEFAULT_SPIFFE
+    finally:
+        client.delete(hist_key, prof_key, class_key)
 
 
 ALL_RESULTS: list[dict[str, Any]] = []

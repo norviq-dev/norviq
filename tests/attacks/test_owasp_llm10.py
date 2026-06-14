@@ -18,7 +18,7 @@ class TestUnboundedConsumption:
         assert result.decision in {"allow", "block", "escalate", "audit"}
         assert 0.0 <= result.trust_score <= 1.0
 
-    def test_burst_with_low_trust(self, api):
+    def test_burst_with_low_trust(self, api, low_trust_agent):
         """Low-trust burst behavior should be escalated or blocked."""
         result = evaluate(api, "search_kb", {"query": "burst"}, trust_score=0.3)
         assert result.decision in {"escalate", "block"}

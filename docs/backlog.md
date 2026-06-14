@@ -208,3 +208,31 @@ From `.reviews/parallel-7991bb8.md`, the 3 quick wins were applied directly to e
 otel-collector:4317 unavailable. Traces fail to export but PostgreSQL audit writes succeed.
 Fix: deploy OTel collector via Helm subchart in Day 13 (TLS + admission controllers).
 Alternative: set NRVQ_OTEL_DISABLED=true on AKS to silence the warning.
+
+
+Day 10 backlog:
+  1. F037 implementation (attack graph engine)
+     - Walks asset_graph table
+     - Computes paths agent → tool → data
+     - Marks each step with policy_check (would_block/would_allow/no_policy)
+     - Writes to attack_paths table
+     - Trigger: cron, on-demand endpoint, or on every audit_log insert
+  
+  2. F037 trigger mechanism
+     - Endpoint: POST /api/v1/attack-paths/compute
+     - Or CronJob: kubectl cronjob every 5 min
+     - Or background task in api worker
+
+Day 10 focus:
+  - Performance benchmarks (more important for NIW/CNCF)
+  - F037 implementation (so demo shows full feature)
+
+
+## Test hygiene
+- **test_priority_enforcement.py leaves `__cluster__:__baseline__` policy in DB after run (no teardown).**
+  Pollutes subsequent attack baseline runs: the leftover priority-900 default-block cluster policy
+  wins precedence over `default:customer-support` and blocks every safe operation, cascading into a
+  block-history feedback loop (observed: 16 false failures locally until the row was removed).
+  Fix: add fixture teardown to delete the policy/policies it creates (and clear any seeded
+  agent_history / eval cache). Same hygiene gap likely applies to other tests creating `ns-*`
+  policies that linger in the shared dev DB.
