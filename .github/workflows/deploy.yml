@@ -35,4 +35,5 @@ jobs:
             -f helm/norviq/values-aks-dev.yaml \
             --set images.engine.tag=engine-${{ github.sha }} \
             --set images.api.tag=api-${{ github.sha }} \
-            --set images.ui.tag=ui-${{ github.sha }}
+            --set images.ui.tag=ui-${{ github.sha }} \
+            --set images.webhook.tag=webhook-${{ github.sha }}
