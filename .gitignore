@@ -35,3 +35,6 @@ __pycache__/
 create_agents.sh
 opa.exe
 .tmp/
+
+# TypeScript incremental build cache (artifact)
+ui/tsconfig.tsbuildinfo

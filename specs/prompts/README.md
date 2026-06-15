@@ -10,6 +10,7 @@ Each prompt file contains: prompt text, outcome (commit SHA, result), date.
 | Date | File | Work item | Commit | Result |
 |------|------|-----------|--------|--------|
 | 2026-06-15 | [P0-D-namespace-scoping.md](P0-D-namespace-scoping.md) | P0-D namespace scoping (agents + policies-list) | `96d060e` | Done — agents+policies ns-scoped; verified local + AKS (policies 1/0/0, agents 1/1/0); 66/66 held |
+| 2026-06-15 | [P0-B-prod-config.md](P0-B-prod-config.md) | P0-B UI production configuration | _pending_ | _pending_ |
 
 ## Convention
 - One file per significant work item (P0/P1 fix, feature, major diagnosis)

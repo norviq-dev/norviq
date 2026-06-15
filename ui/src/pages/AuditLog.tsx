@@ -1,7 +1,7 @@
 import { X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { fetchAuditRecords } from "../api/client";
+import { fetchAuditRecords, wsUrl as buildWsUrl } from "../api/client";
 import { DataTable, type Column } from "../components/common/DataTable";
 import { DecisionBadge } from "../components/common/DecisionBadge";
 import { KitButton } from "../components/common/KitButton";
@@ -69,7 +69,7 @@ export function AuditLog() {
     [timeRange, selectedNamespace, decision, tool]
   );
 
-  const wsUrl = `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws/audit`;
+  const wsUrl = buildWsUrl("/ws/audit");
   const ws = useWebSocket<AuditRecord>(wsUrl, live);
 
   const streamed = useMemo(

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { PageHead } from "../components/common/PageHead";
 import { Panel } from "../components/common/Panel";
 import { useApp } from "../store/AppContext";
+import { apiUrl } from "../api/client";
 import { AssetGraphCanvas } from "../components/asset-graph/AssetGraphCanvas";
 import { AssetGraphFilters, type AssetGraphFiltersState } from "../components/asset-graph/AssetGraphFilters";
 import { AssetGraphLegend } from "../components/asset-graph/AssetGraphLegend";
@@ -27,7 +28,7 @@ export default function AssetGraph() {
     const token = localStorage.getItem("nrvq_token");
     setLoading(true);
     setError("");
-    fetch(`/api/v1/asset-graph?namespace=${encodeURIComponent(namespace)}&range=${encodeURIComponent(timeRange)}`, {
+    fetch(apiUrl(`/api/v1/asset-graph?namespace=${encodeURIComponent(namespace)}&range=${encodeURIComponent(timeRange)}`), {
       headers: token ? { Authorization: `Bearer ${token}` } : {}
     })
       .then(async (res) => {

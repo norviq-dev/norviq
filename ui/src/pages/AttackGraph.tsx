@@ -7,6 +7,7 @@ import type { AttackPath, AttackPathsResponse } from "../components/attack-graph
 import { PageHead } from "../components/common/PageHead";
 import { Panel } from "../components/common/Panel";
 import { useApp } from "../store/AppContext";
+import { apiUrl } from "../api/client";
 
 export function AttackGraph() {
   const { namespace } = useApp();
@@ -22,7 +23,7 @@ export function AttackGraph() {
     const query = severity === "all" ? "" : `&severity=${encodeURIComponent(severity)}`;
     setLoading(true);
     setError("");
-    fetch(`/api/v1/attack-paths?namespace=${encodeURIComponent(namespace)}${query}`, {
+    fetch(apiUrl(`/api/v1/attack-paths?namespace=${encodeURIComponent(namespace)}${query}`), {
       headers: token ? { Authorization: `Bearer ${token}` } : {}
     })
       .then(async (res) => {

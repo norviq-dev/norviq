@@ -1,5 +1,26 @@
+// Base URL for the API. Default "" = relative paths (same-origin): the vite proxy in dev and the
+// UI's nginx (`location /api/`) in prod both forward to the API — so the browser only ever talks to
+// its own origin (always browser-reachable). Set VITE_API_BASE_URL to an absolute origin only for a
+// split-origin deploy where the API has its own ingress (requires CORS on the API).
+const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
+
+/** Resolve an API path against the configured base (relative by default). */
+export function apiUrl(path: string): string {
+  return `${API_BASE}${path}`;
+}
+
+/** Resolve a WebSocket URL: derive ws/wss + host from API_BASE when set, else same-origin. */
+export function wsUrl(path: string): string {
+  if (API_BASE) {
+    const u = new URL(API_BASE);
+    return `${u.protocol === "https:" ? "wss:" : "ws:"}//${u.host}${path}`;
+  }
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${proto}//${window.location.host}${path}`;
+}
+
 export async function apiGet<T>(path: string): Promise<T> {
-  const response = await fetch(path);
+  const response = await fetch(apiUrl(path));
   if (!response.ok) {
     throw new Error(`Request failed: ${response.status}`);
   }
@@ -8,7 +29,7 @@ export async function apiGet<T>(path: string): Promise<T> {
 
 export async function apiSend<T>(path: string, method: "POST" | "PUT" | "DELETE", body?: unknown): Promise<T> {
   const token = localStorage.getItem("nrvq_token");
-  const response = await fetch(path, {
+  const response = await fetch(apiUrl(path), {
     method,
     headers: {
       "Content-Type": "application/json",
@@ -113,7 +134,7 @@ export type SearchAgent = {
 export type SearchPolicy = { namespace?: string; agent_class?: string; mode?: string };
 
 async function apiGetWithSignal<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const response = await fetch(path, { signal });
+  const response = await fetch(apiUrl(path), { signal });
   if (!response.ok) throw new Error(`Request failed: ${response.status}`);
   return (await response.json()) as T;
 }

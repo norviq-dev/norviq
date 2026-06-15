@@ -7,7 +7,9 @@ export const NS_BY_CLUSTER: Record<string, string[]> = {
   "staging-aks": ["staging-default", "qa"],
   "dev-aks": ["dev-default"]
 };
-const DEFAULT_CLUSTER = import.meta.env.VITE_ENV_LABEL || (import.meta.env.DEV ? "local" : "production-aks");
+// Env-driven: set VITE_ENV_LABEL per environment (.env.production sets it). Falls back to "local"
+// so nothing presumes a specific cluster name when the env var is unset.
+const DEFAULT_CLUSTER = import.meta.env.VITE_ENV_LABEL || "local";
 
 export type Section = "security" | "intelligence" | "settings";
 export type TimeRange = "1h" | "6h" | "24h" | "7d" | "30d";
