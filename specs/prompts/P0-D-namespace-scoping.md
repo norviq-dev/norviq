@@ -56,4 +56,28 @@ RULES:
 
 ## Outcome
 
-(fill in after execution: commit SHA, before/after counts, test result, 66/66 baseline)
+**Commit:** `96d060e20b6bc020b9f489030ee7171c8a872341` — `fix(P0-D): namespace-scope agents + policies-list endpoints`
+**CI:** Build & Push ✅, Deploy to AKS ✅
+**Date completed:** 2026-06-15
+
+**Fix:** `agents.py` parses the namespace from the spiffe_id (`.../ns/{ns}/sa/...`) and filters;
+`policies.py` filters on the `{namespace}:{agent_class}` loader-key prefix. Both use
+`Query("default")` — the project-wide **default-to-'default' fail-safe** convention (a forgotten
+param yields incomplete data, never a cross-tenant leak). `namespace=all` admin opt-in deferred to
+the auth/RBAC batch. Convention documented in `docs/engineering/namespace-scoping.md`; the audit
+`Query(None)` inconsistency flagged in `docs/backlog.md`.
+
+**Before → after:**
+| | policies | agents |
+|---|---|---|
+| Local before | 15 / 15 / 15 (default/payments/nonexistent) | unfiltered |
+| Local after | 1 / 2 / 0 | 1 / 1 / 0 |
+| AKS after | 1 / 0 / 0 | 1 / 1 / 0 |
+
+**Tests:** new `tests/integration/test_namespace_list_scoping.py` (agents + policies scoping,
+fail-before/pass-after) passes; full attack baseline **66/66** held.
+
+**Header decision:** inbox/global-search now default-namespace-scoped (was global) — tenant-safe;
+cross-namespace admin search deferred to the auth batch.
+
+**Notes:** started the committed prompt archive (`specs/prompts/`, un-ignored in `.gitignore`).
