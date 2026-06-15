@@ -45,4 +45,11 @@ async def evaluate_tool_call(
     _ = user
     event = ToolCallEvent.model_validate(payload.model_dump(exclude={"trust_score"}))
     decision: PolicyDecision = await request.app.state.evaluator.evaluate(event)
+    # Fire-and-forget audit emission (DB write + OTel span). emit() schedules its own
+    # background task, holds the reference, and swallows write errors — so this never
+    # blocks the response or fails the tool call (hot-path safe). The audit record carries
+    # event.agent_identity.namespace, so audit data is tenant-scoped like everything else.
+    emitter = getattr(request.app.state, "emitter", None)
+    if emitter is not None:
+        emitter.emit(event, decision)
     return EvaluateResponse(decision=decision.decision, rule_id=decision.rule_id, trust_score=decision.trust_score)
