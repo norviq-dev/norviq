@@ -277,6 +277,15 @@ Works today only because the UI always passes namespace; a missing param would l
 cross-tenant audit data. Align audit to default-to-'default', and add an explicit
 `namespace=all` admin opt-in gated by RBAC. See docs/engineering/namespace-scoping.md.
 
+## P1: Audit Log live WebSocket has no backend (/ws/audit → 404)
+The UI (AuditLog) connects to `ws(s)://{origin}/ws/audit` for the live feed, but the API has
+**zero WebSocket routes** (`grep websocket norviq/` → nothing) — so the connection 404s in BOTH
+dev (vite proxy) and prod (nginx /ws proxy). The live feature never worked; the audit table itself
+is fine (REST `/api/v1/audit/records`). Found during P0-B prod verification. The nginx `/ws`
+upgrade proxy is already in place (returns a clean 404 now instead of SPA fallback). Fix: implement
+an `/ws/audit` WebSocket on the API that broadcasts audit events (the emitter already produces them),
+OR remove the live toggle until then.
+
 ## P1: loader.delete does not remove the policies row (DELETE endpoint no-op?)
 loader.delete clears in-memory/cache only, never DELETEs the Postgres row — so
 DELETE /policies/{ns}/{class} returns {deleted: true} but the row persists, and re-creates
