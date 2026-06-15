@@ -270,6 +270,13 @@ attack-path data-scoping fix (namespace column + WHERE) is done; ENFORCEMENT (bi
 allowed namespace(s) to JWT claims / tenant identity) belongs with the P0 auth-flow work,
 not the data fix. Until then, isolation is by correct scoping only, not authorization.
 
+## P1 (auth batch): audit/* namespace convention inconsistency
+audit/* endpoints use `Query(None)` → returns ALL namespaces when the param is omitted —
+inconsistent with attack-paths/agents/policies which default-to-'default' (fail-safe).
+Works today only because the UI always passes namespace; a missing param would leak
+cross-tenant audit data. Align audit to default-to-'default', and add an explicit
+`namespace=all` admin opt-in gated by RBAC. See docs/engineering/namespace-scoping.md.
+
 ## P1: loader.delete does not remove the policies row (DELETE endpoint no-op?)
 loader.delete clears in-memory/cache only, never DELETEs the Postgres row — so
 DELETE /policies/{ns}/{class} returns {deleted: true} but the row persists, and re-creates

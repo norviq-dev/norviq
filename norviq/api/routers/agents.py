@@ -6,7 +6,7 @@
 import json
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from norviq.api.auth import get_current_user, require_admin
@@ -16,6 +16,16 @@ log = structlog.get_logger()
 router = APIRouter()
 
 
+def _namespace_from_spiffe(spiffe_id: str) -> str | None:
+    """Extract the namespace from spiffe://.../ns/{namespace}/sa/... ."""
+    parts = spiffe_id.split("/")
+    if "ns" in parts:
+        idx = parts.index("ns")
+        if idx + 1 < len(parts):
+            return parts[idx + 1]
+    return None
+
+
 class TrustUpdate(BaseModel):
     """Manual trust update payload."""
 
@@ -23,13 +33,19 @@ class TrustUpdate(BaseModel):
 
 
 @router.get("/agents")
-async def list_agents(request: Request, user: dict = Depends(get_current_user)) -> list[dict]:
-    """List all agents with trust scores in cache."""
+async def list_agents(
+    request: Request,
+    namespace: str = Query("default"),
+    user: dict = Depends(get_current_user),
+) -> list[dict]:
+    """List agents with trust scores in cache, scoped to one namespace."""
     _ = user
     cache = request.app.state.cache
     rows = []
     async for key in cache._client().scan_iter("trust:*"):
         spiffe_id = str(key).replace("trust:", "", 1)
+        if _namespace_from_spiffe(spiffe_id) != namespace:
+            continue
         trust = await cache.get_trust(spiffe_id)
         if trust:
             details = await _trust_details(request, spiffe_id, trust.factors)

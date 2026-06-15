@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import re
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,12 +51,14 @@ class ApplyRequest(BaseModel):
 
 
 @router.get("/policies")
-async def list_policies(request: Request) -> list[dict]:
-    """List all policies loaded in memory."""
+async def list_policies(request: Request, namespace: str = Query("default")) -> list[dict]:
+    """List policies loaded in memory, scoped to one namespace."""
     rows = []
     loader = request.app.state.loader
     for key, entry in loader._policies.items():
-        namespace, agent_class = key.split(":", 1)
+        ns, agent_class = key.split(":", 1)
+        if ns != namespace:
+            continue
         rows.append(
             {
                 "namespace": namespace,

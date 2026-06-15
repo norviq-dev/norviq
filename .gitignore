@@ -11,8 +11,9 @@ bin/
 node_modules/
 ui/dist/
 
-# AI workflow (keep private)
-specs/
+# AI workflow (keep private), except the committed prompt archive (process evidence)
+specs/*
+!specs/prompts/
 .cursor/
 registry/
 .reviews/
