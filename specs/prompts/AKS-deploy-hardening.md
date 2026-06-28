@@ -5,7 +5,36 @@
 and make the chart prod-ready for a future multi-node cluster while still running on the current
 1-node dev cluster. Plan mode (substantial; helm + webhook + config). FEAT F021 + F016 + config/api.
 **Depends on:** COMMIT-and-aks-validate (deploy green; gaps surfaced).
-**Commit:** (pending) · **Result:** (to fill)
+**Commit:** 4 commits `3be8154`→`a663b28` on main (CI build+deploy green) · **Result:** see below.
+
+**Outcome (done, deployed + live-validated on AKS).**
+- **Webhook controller→API auth (was 401) — FIXED + LIVE:** the controller mints a short-lived HS256
+  **service-role JWT** from the API secret (stdlib, no dep); the API accepts `service` on policy
+  create/delete only (`require_admin_or_service`). Live: applying a `NrvqPolicy` CR logs
+  `NRVQ-WHK-4026 service token minted` → `Policy synced to API successfully`, and the policy appears in
+  `GET /api/v1/policies` (the baseline-cluster-guard policies that were 401 now sync).
+- **Injected sidecar pull + `-sha` pin — FIXED + LIVE:** image made public on Docker Hub +
+  parameterized `images.registry`/`imagePullSecrets`; the controller refuses a mutable-tag CRD
+  override (`NRVQ-WHK-4036`). Live: a labeled pod got the sidecar injected at the pinned
+  `engine-a663b28` image, pulled, and reached **2/2 Running** (proxy healthy = enforcing-ready) —
+  closes the v2/AKS runtime gap.
+- **Dependency-restart resilience — FIXED + LIVE:** `/readyz` returns **503** when Postgres/Redis/OPA
+  is unreachable (`NRVQ-API-7002`) so the pod drains; liveness stays process-up; `pool_pre_ping` +
+  redis reconnect + OPA self-heal recover it. Live: `kubectl delete pod norviq-postgresql-0` → api
+  logged `not_ready db=False` → readyz 503/NotReady → PG back → **Ready, restarts=0**; same for redis
+  (`redis=False`). OPA path uses the identical readyz mechanism (live `opa:true`) + unit-tested
+  self-heal (a sidecar-only kill isn't cleanly triggerable on distroless).
+- **Startup ordering / graceful rollout:** initContainers (datastores→api→webhook) kept; `preStop`
+  drain added (api/engine/webhook).
+- **Multi-node prod posture (parameterized · template-validated · NOT live on 1 node):** new
+  `values-prod.yaml` + gated `templates/hpa.yaml`, engine/webhook PDBs, `norviq.spread` (podAntiAffinity
+  + topologySpread), CloudNativePG `Cluster` + Redis `RedisFailover` (single StatefulSets auto-disable;
+  URLs retarget). `helm template -f values-prod.yaml` renders HPA×2 + CNPG + RedisFailover + 0
+  StatefulSets; `-f values-aks-dev.yaml` renders 0 prod resources + 2 StatefulSets (dev unaffected).
+- **Gates:** P-10 deployed SHA == HEAD; `make lint` clean; `make test` 397 pass / 6 pre-existing / 1
+  skip; **attacks 75/75**; webhook `go build/vet/test` green; `helm lint` clean both overlays. New
+  codes `NRVQ-API-7002`, `NRVQ-WHK-4026/4027/4036`. Runbook `docs/engineering/prod-deploy-runbook.md`.
+- **Rollback:** all prod behavior values-gated → dev unaffected; `helm rollback` / prior image tag.
 
 Locked decisions: registry → make image PUBLIC + parameterized (GHCR recommended for no Docker-Hub
 pull-rate limit; SHA-pinned in injector); datastore → in-cluster HA via operators (CloudNativePG +
