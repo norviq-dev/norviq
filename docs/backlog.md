@@ -295,3 +295,21 @@ accumulate version via ON CONFLICT. Two issues:
      on a clean DB.
 Fix: make DELETE actually remove the policies (+ policy_versions) rows; make the tests robust
 to existing version state.
+
+## BEFORE PUBLIC RELEASE: migrate container images Docker Hub → GHCR (2026-06-28)
+Images are currently published to Docker Hub `sanman97/norviq-engine`, and the repo was made
+**public** to unblock injected-sidecar pulls on AKS (zero cost, fast path). Before the public
+release, move the canonical image home to **GHCR (`ghcr.io/norviq-dev/...`)**.
+Why: GHCR is free for public images, has **no Docker Hub anonymous pull-rate limit** (~100/6h per
+IP — bites a multi-node autoscaling cluster), and is native to the GitHub Actions pipeline.
+Scope:
+  - `.github/workflows/build.yml`: log in to GHCR (`GITHUB_TOKEN` + `packages: write`), push
+    `ghcr.io/norviq-dev/norviq-engine:<component>-<sha>` (+ `-latest`); mark the GHCR package public.
+  - Update the chart's parameterized registry default (`images.*.repository`) + `values-aks-dev.yaml`
+    / `values-prod.yaml` + the webhook injector's sidecar image to GHCR; keep registry overridable.
+  - `deploy.yml`: pull from GHCR (no imagePullSecret needed for public). Verify a clean `helm
+    install` pulls from GHCR on kind + AKS.
+  - Optionally keep Docker Hub as a mirror during the transition.
+Later (private/commercial): switch the prod pull path to **ACR + AKS managed identity** (no
+imagePullSecret, same-region, image scanning) — registry is already parameterized for this in the
+AKS-deploy-hardening pass.

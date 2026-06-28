@@ -23,6 +23,8 @@ Each prompt file contains: prompt text, outcome (commit SHA, result), date.
 
 | 2026-06-28 | [COMMIT-and-aks-validate.md](COMMIT-and-aks-validate.md) | Commit remediation + validate AKS deploy | done | 7 commits `3d60dcb`→`9aad5fe` pushed; CI build+deploy green; P-10 SHA==HEAD. AKS: health/opa-server, unauth 401, forged-default 401, viewer 403, attacks **75/75**, 155 norviq_ metrics. Fixed live: stale MWC + dbSslMode (A2 exposed). Injection fires (NRVQ-WHK-4003) but sidecar ErrImagePull (private image, no pull-secret in target ns) — backlog |
 
+| 2026-06-28 | [AKS-deploy-hardening.md](AKS-deploy-hardening.md) | AKS deploy-hardening + prod-readiness (single+multi-node) | pending | Plan-mode; controller token + injected-image fix live on dev; HPA/HA/anti-affinity/ordering parameterized for multi-node prod |
+
 ## Convention
 - One file per significant work item (P0/P1 fix, feature, major diagnosis)
 - Filename: {item-id}-{short-name}.md
