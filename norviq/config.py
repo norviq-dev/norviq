@@ -64,6 +64,8 @@ class NorviqSettings(BaseSettings):
     spiffe_cache_ttl_s: int = 300
     redis_url: str = "redis://localhost:6379"
     redis_max_connections: int = 20
+    # Proactively re-validate idle Redis connections (resilience after a Redis restart).
+    redis_health_check_interval_s: int = 15
     redis_ttl_policy_s: int = 60
     redis_ttl_eval_s: int = 5
     redis_ttl_trust_s: int = 30
@@ -102,6 +104,8 @@ class NorviqSettings(BaseSettings):
     db_pool_max_overflow: int = 5
     db_pool_timeout: int = 5
     db_command_timeout: int = 5
+    # Recycle pooled DB connections older than this (bounds staleness; pairs with pool_pre_ping).
+    db_pool_recycle_s: int = 300
     audit_retention_days: int = 365
     otel_endpoint: str = "http://localhost:4317"
     otel_enabled: bool = True

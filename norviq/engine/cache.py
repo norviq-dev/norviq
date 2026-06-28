@@ -49,6 +49,11 @@ class RedisCache:
             self._url,
             max_connections=settings.redis_max_connections,
             decode_responses=True,
+            # Resilience: proactively validate idle connections and keep TCP alive so a Redis restart
+            # is recovered transparently on the next command (paired with the /readyz drain).
+            health_check_interval=settings.redis_health_check_interval_s,
+            socket_keepalive=True,
+            retry_on_timeout=True,
         )
         self._trust_decr_sha = await self._redis.script_load(TRUST_DECREMENT_LUA)
         log.info("nrvq.cache.connected", url=self._url, code="NRVQ-DB-9010")

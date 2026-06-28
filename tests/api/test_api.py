@@ -47,6 +47,10 @@ class FakeCache:
         """Return self for scan_iter compatibility."""
         return self
 
+    async def ping(self) -> bool:
+        """Readiness probe hook — a healthy fake Redis answers PING."""
+        return True
+
     async def scan_iter(self, pattern: str):
         """Yield trust keys."""
         if pattern == "trust:*":
@@ -183,8 +187,8 @@ def test_health_and_readyz(monkeypatch: pytest.MonkeyPatch) -> None:
         client.close()
 
 
-def test_readyz_db_failure_returns_false(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Return db=false when readiness DB probe fails."""
+def test_readyz_db_failure_returns_503(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A DB outage makes /readyz return 503 (NotReady) so the pod drains traffic, not a false 200."""
     monkeypatch.setattr(settings, "opa_mode", "subprocess")
 
     class FailingSession:
@@ -197,7 +201,21 @@ def test_readyz_db_failure_returns_false(monkeypatch: pytest.MonkeyPatch) -> Non
     client = _client()
     _override_session(client, FailingSession())
     try:
-        assert client.get("/readyz").json() == {"status": "ready", "redis": True, "db": False}
+        resp = client.get("/readyz")
+        assert resp.status_code == 503
+        assert resp.json() == {"status": "not-ready", "redis": True, "db": False}
+    finally:
+        client.close()
+
+
+def test_policy_write_accepts_service_role_rejects_viewer() -> None:
+    """The webhook controller's 'service' role may write policies; a viewer may not (403)."""
+    client = _client()
+    try:
+        # viewer is rejected at the auth gate
+        assert client.delete("/api/v1/policies/x/y", headers=_auth_headers(role="viewer")).status_code == 403
+        # service passes the auth gate (404 = not found, NOT 403)
+        assert client.delete("/api/v1/policies/x/y", headers=_auth_headers(role="service")).status_code == 404
     finally:
         client.close()
 

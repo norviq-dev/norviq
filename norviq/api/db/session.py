@@ -73,6 +73,10 @@ async def init_db() -> None:
         pool_size=settings.pg_pool_size,
         max_overflow=settings.db_pool_max_overflow,
         pool_timeout=settings.db_pool_timeout,
+        # pre_ping recycles a dead pooled connection on checkout, so the API auto-reconnects after a
+        # Postgres restart (no manual pod restart); pool_recycle bounds stale-connection age.
+        pool_pre_ping=True,
+        pool_recycle=settings.db_pool_recycle_s,
         connect_args=_build_connect_args(),
     )
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)

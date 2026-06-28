@@ -29,6 +29,18 @@ def require_admin(user: dict) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
 
 
+def require_admin_or_service(user: dict) -> None:
+    """Allow a human admin OR a machine 'service' identity (e.g. the webhook CRD controller).
+
+    The webhook controller mints a short-lived service-role JWT to sync NrvqPolicy CRDs to the API;
+    least-privilege — only the controller's create/delete policy endpoints accept the service role,
+    everything else (rollback/apply/manual writes) stays admin-only via require_admin.
+    """
+    role = str(user.get("role", "")).lower()
+    if role not in {"admin", "service"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin or service role required")
+
+
 def scoped_namespace(user: dict, requested: str | None) -> str | None:
     """Restrict a non-admin caller to its own namespace claim.
 

@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from norviq.api.auth import get_current_user, require_admin, scoped_namespace
+from norviq.api.auth import get_current_user, require_admin, require_admin_or_service, scoped_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
 
@@ -100,8 +100,8 @@ async def get_policy(
 
 @router.post("/policies")
 async def create_policy(body: PolicyCreate, request: Request, user: dict = Depends(get_current_user)) -> dict:
-    """Create or update a policy."""
-    require_admin(user)
+    """Create or update a policy (admin, or the webhook controller's service identity)."""
+    require_admin_or_service(user)
     validate_policy_create(body)
     agent_class = resolve_policy_key(body)
     version = await request.app.state.loader.create(
@@ -190,8 +190,8 @@ def resolve_policy_key(body: PolicyCreate) -> str:
 async def delete_policy(
     namespace: str, agent_class: str, request: Request, user: dict = Depends(get_current_user)
 ) -> dict:
-    """Delete a policy from in-memory index."""
-    require_admin(user)
+    """Delete a policy from in-memory index (admin, or the webhook controller's service identity)."""
+    require_admin_or_service(user)
     deleted = await request.app.state.loader.delete(namespace, agent_class)
     if not deleted:
         raise HTTPException(status_code=404, detail="Policy not found")
