@@ -47,8 +47,10 @@ func main() {
 
 	if os.Getenv("NRVQ_CONTROLLER_ENABLED") == "true" {
 		apiURL := envStr("NRVQ_API_URL", "http://norviq-api:8080")
-		apiToken := envStr("NRVQ_API_TOKEN", "")
-		ctrl, err := NewController(apiURL, apiToken)
+		// HS256 signing key for the controller's service JWT. Prefer NRVQ_API_SECRET_KEY; fall back to
+		// the legacy NRVQ_API_TOKEN env (also the raw secret) for backward compatibility.
+		apiSecret := envStr("NRVQ_API_SECRET_KEY", envStr("NRVQ_API_TOKEN", ""))
+		ctrl, err := NewController(apiURL, apiSecret)
 		if err != nil {
 			slog.Error("NRVQ-WHK-4020: controller init failed", "error", err)
 		} else {

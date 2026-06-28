@@ -64,3 +64,4 @@ scripts/ui-validate.mjs
 docs/IMPLEMENTATION-STATUS.md
 docs/mcp-workflow.md
 ui/tsconfig.node.tsbuildinfo
+webhook/webhook

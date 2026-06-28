@@ -4,12 +4,16 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"os"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -26,11 +30,11 @@ func newTestController() *Controller {
 	runtime := &RuntimeConfig{}
 	runtime.SetSidecarImage("sanman97/norviq-engine:engine-latest")
 	return &Controller{
-		syncSemaphore:         make(chan struct{}, 10),
-		presetBasePath:        "/app/presets",
-		adminPolicyNamespace:  "norviq",
-		runtime:               runtime,
-		defaultSidecarImage:   "sanman97/norviq-engine:engine-latest",
+		syncSemaphore:        make(chan struct{}, 10),
+		presetBasePath:       "/app/presets",
+		adminPolicyNamespace: "norviq",
+		runtime:              runtime,
+		defaultSidecarImage:  "sanman97/norviq-engine:engine-latest",
 	}
 }
 
@@ -43,7 +47,7 @@ func TestBuildPolicySyncPayload_UsesRegoWhenProvided(t *testing.T) {
 				"target": map[string]interface{}{
 					"agentClass": "customer-support",
 				},
-				"rego": "package norviq.custom",
+				"rego":   "package norviq.custom",
 				"preset": "strict",
 			},
 		},
@@ -175,8 +179,16 @@ func TestSyncPolicy_PostsJSONPayload(t *testing.T) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("expected POST, got %s", r.Method)
 		}
-		if got := r.Header.Get("Authorization"); got != "Bearer secret" {
-			t.Fatalf("unexpected authorization header %q", got)
+		got := r.Header.Get("Authorization")
+		if !strings.HasPrefix(got, "Bearer ") {
+			t.Fatalf("missing bearer authorization header %q", got)
+		}
+		role, sub, err := verifyServiceJWT(strings.TrimPrefix(got, "Bearer "), "secret")
+		if err != nil {
+			t.Fatalf("controller token is not a valid HS256 JWT: %v", err)
+		}
+		if role != "service" || sub != "norviq-webhook" {
+			t.Fatalf("unexpected token claims role=%q sub=%q", role, sub)
 		}
 		defer r.Body.Close()
 		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
@@ -188,7 +200,7 @@ func TestSyncPolicy_PostsJSONPayload(t *testing.T) {
 
 	controller := newTestController()
 	controller.apiURL = server.URL
-	controller.apiToken = "secret"
+	controller.apiSecret = "secret"
 	controller.httpClient = server.Client()
 
 	payload := policySyncRequest{
@@ -216,7 +228,7 @@ func TestSyncPolicy_ReturnsErrorOnServerFailure(t *testing.T) {
 
 	controller := newTestController()
 	controller.apiURL = server.URL
-	controller.apiToken = "secret"
+	controller.apiSecret = "secret"
 	controller.httpClient = server.Client()
 	payload := policySyncRequest{
 		Namespace:       "default",
@@ -241,7 +253,7 @@ func TestSyncDelete_ReturnsErrorOnServerFailure(t *testing.T) {
 
 	controller := newTestController()
 	controller.apiURL = server.URL
-	controller.apiToken = "secret"
+	controller.apiSecret = "secret"
 	controller.httpClient = server.Client()
 	if err := controller.syncDelete(context.Background(), "/api/v1/policies/default/chatbot-strict"); err == nil {
 		t.Fatal("expected syncDelete error on 500 response")
@@ -259,7 +271,7 @@ func TestSyncDelete_TreatsNotFoundAsSuccess(t *testing.T) {
 
 	controller := newTestController()
 	controller.apiURL = server.URL
-	controller.apiToken = "secret"
+	controller.apiSecret = "secret"
 	controller.httpClient = server.Client()
 	if err := controller.syncDelete(context.Background(), "/api/v1/policies/default/missing"); err != nil {
 		t.Fatalf("expected 404 delete to be treated as success, got %v", err)
@@ -280,7 +292,7 @@ func TestHandlePolicy_TriggersSync(t *testing.T) {
 
 	controller := newTestController()
 	controller.apiURL = server.URL
-	controller.apiToken = "secret"
+	controller.apiSecret = "secret"
 	controller.httpClient = server.Client()
 	obj := &unstructured.Unstructured{
 		Object: map[string]interface{}{
@@ -322,7 +334,7 @@ func TestHandlePolicyDelete_TriggersDeleteSync(t *testing.T) {
 
 	controller := newTestController()
 	controller.apiURL = server.URL
-	controller.apiToken = "secret"
+	controller.apiSecret = "secret"
 	controller.httpClient = server.Client()
 	obj := &unstructured.Unstructured{
 		Object: map[string]interface{}{
@@ -356,7 +368,7 @@ func TestHandlePolicyDelete_SkipsWhenDeleteAlreadySynced(t *testing.T) {
 
 	controller := newTestController()
 	controller.apiURL = server.URL
-	controller.apiToken = "secret"
+	controller.apiSecret = "secret"
 	controller.httpClient = server.Client()
 	obj := &unstructured.Unstructured{Object: map[string]interface{}{}}
 	obj.SetName("chatbot-strict")
@@ -519,7 +531,7 @@ func TestHandlePolicy_WithFinalizerStillSyncsUpdates(t *testing.T) {
 
 	controller := newTestController()
 	controller.apiURL = server.URL
-	controller.apiToken = "secret"
+	controller.apiSecret = "secret"
 	controller.httpClient = server.Client()
 	obj := &unstructured.Unstructured{
 		Object: map[string]interface{}{
@@ -557,7 +569,7 @@ func TestHandlePolicy_DeletingWithFinalizerReconcilesDelete(t *testing.T) {
 
 	controller := newTestController()
 	controller.apiURL = server.URL
-	controller.apiToken = "secret"
+	controller.apiSecret = "secret"
 	controller.httpClient = server.Client()
 	now := metav1.Now()
 	obj := &unstructured.Unstructured{
@@ -658,3 +670,27 @@ func TestAddFinalizerWithRetry_RetriesOnConflict(t *testing.T) {
 	}
 }
 
+// verifyServiceJWT validates an HS256 JWT against secret and returns (role, sub). Test-only helper.
+func verifyServiceJWT(token, secret string) (string, string, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return "", "", fmt.Errorf("not a 3-part JWT")
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(parts[0] + "." + parts[1]))
+	want := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(want), []byte(parts[2])) {
+		return "", "", fmt.Errorf("bad signature")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", "", err
+	}
+	var claims map[string]interface{}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "", "", err
+	}
+	role, _ := claims["role"].(string)
+	sub, _ := claims["sub"].(string)
+	return role, sub, nil
+}

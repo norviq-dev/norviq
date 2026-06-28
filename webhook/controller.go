@@ -5,6 +5,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -43,6 +46,7 @@ var configGVR = schema.GroupVersionResource{
 }
 
 const deleteSyncedAnnotation = "norviq.io/delete-synced"
+
 var finalizerMaxAge = 15 * time.Minute
 var allowedSidecarImagePattern = regexp.MustCompile(`^(sanman97/norviq-engine|docker\.io/sanman97/norviq-engine):[a-zA-Z0-9._-]+$`)
 
@@ -59,19 +63,22 @@ type policySyncRequest struct {
 }
 
 type Controller struct {
-	client     dynamic.Interface
-	apiURL     string
-	apiToken   string
-	httpClient *http.Client
-	syncSemaphore chan struct{}
-	presetBasePath string
+	client               dynamic.Interface
+	apiURL               string
+	apiSecret            string // HS256 signing key; the controller mints short-lived service JWTs from it
+	tokenMu              sync.Mutex
+	cachedJWT            string
+	cachedJWTExp         time.Time
+	httpClient           *http.Client
+	syncSemaphore        chan struct{}
+	presetBasePath       string
 	adminPolicyNamespace string
-	runtime *RuntimeConfig
-	defaultSidecarImage string
-	policyStore cache.Store
-	classQueue chan *unstructured.Unstructured
-	configQueue chan *unstructured.Unstructured
-	wg         sync.WaitGroup
+	runtime              *RuntimeConfig
+	defaultSidecarImage  string
+	policyStore          cache.Store
+	classQueue           chan *unstructured.Unstructured
+	configQueue          chan *unstructured.Unstructured
+	wg                   sync.WaitGroup
 }
 
 func NewController(apiURL, apiToken string) (*Controller, error) {
@@ -87,24 +94,24 @@ func NewController(apiURL, apiToken string) (*Controller, error) {
 	return NewControllerWithClient(client, apiURL, apiToken), nil
 }
 
-func NewControllerWithClient(client dynamic.Interface, apiURL, apiToken string) *Controller {
+func NewControllerWithClient(client dynamic.Interface, apiURL, apiSecret string) *Controller {
 	defaultSidecar := envStr("NRVQ_SIDECAR_IMAGE", "sanman97/norviq-engine:engine-latest")
 	runtime := &RuntimeConfig{}
 	runtime.SetSidecarImage(defaultSidecar)
 	return &Controller{
-		client:   client,
-		apiURL:   apiURL,
-		apiToken: apiToken,
+		client:    client,
+		apiURL:    apiURL,
+		apiSecret: apiSecret,
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
-		syncSemaphore: make(chan struct{}, 10),
-		presetBasePath: "/app/presets",
+		syncSemaphore:        make(chan struct{}, 10),
+		presetBasePath:       "/app/presets",
 		adminPolicyNamespace: envStr("NRVQ_ADMIN_POLICY_NAMESPACE", "norviq"),
-		runtime: runtime,
-		defaultSidecarImage: defaultSidecar,
-		classQueue:  make(chan *unstructured.Unstructured, 64),
-		configQueue: make(chan *unstructured.Unstructured, 64),
+		runtime:              runtime,
+		defaultSidecarImage:  defaultSidecar,
+		classQueue:           make(chan *unstructured.Unstructured, 64),
+		configQueue:          make(chan *unstructured.Unstructured, 64),
 	}
 }
 
@@ -272,9 +279,9 @@ func (c *Controller) processClass(u *unstructured.Unstructured) {
 		}
 	}
 	status := map[string]interface{}{
-		"agentCount":         int64(0),
-		"averageTrustScore":  float64(0),
-		"policyCount":        policyCount,
+		"agentCount":        int64(0),
+		"averageTrustScore": float64(0),
+		"policyCount":       policyCount,
 	}
 	if err := c.updateStatusWithRetry(context.Background(), classGVR, "", u.GetName(), status); err != nil {
 		slog.Warn("NRVQ-WHK-4038: class status update failed", "class", u.GetName(), "error", err)
@@ -304,10 +311,15 @@ func (c *Controller) processConfig(u *unstructured.Unstructured) {
 		if c.runtime == nil {
 			c.runtime = &RuntimeConfig{}
 		}
-		if validateImage(image) {
-			c.runtime.SetSidecarImage(image)
-		} else {
+		if !validateImage(image) {
 			slog.Warn("NRVQ-WHK-4033: config attempted unauthorized sidecar image", "image", image)
+		} else if isMutableTag(image) {
+			// Refuse to downgrade the pinned (-sha) sidecar image to a mutable tag — injected pods
+			// must reference an immutable digest/sha so they can't silently drift. Keep the default.
+			slog.Warn("NRVQ-WHK-4036: ignoring mutable sidecar tag override; keeping pinned image",
+				"rejected", image, "pinned", c.defaultSidecarImage)
+		} else {
+			c.runtime.SetSidecarImage(image)
 		}
 	}
 	policies := c.listCachedPolicies()
@@ -316,10 +328,10 @@ func (c *Controller) processConfig(u *unstructured.Unstructured) {
 		namespaceSet[item.GetNamespace()] = struct{}{}
 	}
 	status := map[string]interface{}{
-		"appliedAt":         time.Now().UTC().Format(time.RFC3339),
-		"activeNamespaces":  int64(len(namespaceSet)),
-		"totalPolicies":     int64(len(policies)),
-		"totalAgents":       int64(0),
+		"appliedAt":        time.Now().UTC().Format(time.RFC3339),
+		"activeNamespaces": int64(len(namespaceSet)),
+		"totalPolicies":    int64(len(policies)),
+		"totalAgents":      int64(0),
 	}
 	if err := c.updateStatusWithRetry(context.Background(), configGVR, "", u.GetName(), status); err != nil {
 		slog.Warn("NRVQ-WHK-4039: config status update failed", "config", u.GetName(), "error", err)
@@ -895,6 +907,18 @@ func isAllowedSidecarImage(image string) bool {
 	return allowedSidecarImagePattern.MatchString(image)
 }
 
+// isMutableTag reports whether the image reference uses a mutable tag (":latest" or "...-latest")
+// rather than an immutable digest/-sha. Injected sidecars must be pinned, so mutable overrides are
+// refused (the deployed -sha image is kept instead).
+func isMutableTag(image string) bool {
+	idx := strings.LastIndex(image, ":")
+	if idx < 0 {
+		return true // no tag at all -> would default to :latest
+	}
+	tag := image[idx+1:]
+	return tag == "latest" || strings.HasSuffix(tag, "-latest")
+}
+
 func validateImage(image string) bool {
 	return isAllowedSidecarImage(image)
 }
@@ -915,6 +939,55 @@ func (c *Controller) listCachedPolicies() []*unstructured.Unstructured {
 	return policies
 }
 
+// bearerToken returns a short-lived service-role HS256 JWT signed with the API secret, minted+cached
+// here so the controller authenticates to the API (which validates JWTs, not the raw secret). Returns
+// "" when no secret is configured (the request then goes unauthenticated, as before).
+func (c *Controller) bearerToken() string {
+	if c.apiSecret == "" {
+		return ""
+	}
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	if c.cachedJWT != "" && time.Now().Before(c.cachedJWTExp.Add(-60*time.Second)) {
+		return c.cachedJWT
+	}
+	now := time.Now()
+	exp := now.Add(time.Hour)
+	claims := map[string]interface{}{
+		"sub":       "norviq-webhook",
+		"role":      "service",
+		"namespace": c.adminPolicyNamespace,
+		"iat":       now.Unix(),
+		"exp":       exp.Unix(),
+	}
+	tok, err := signHS256JWT(c.apiSecret, claims)
+	if err != nil {
+		slog.Error("NRVQ-WHK-4027: service token mint failed", "error", err)
+		return ""
+	}
+	c.cachedJWT = tok
+	c.cachedJWTExp = exp
+	slog.Info("NRVQ-WHK-4026: service token minted", "sub", "norviq-webhook", "role", "service")
+	return tok
+}
+
+// signHS256JWT mints a compact HS256 JWT with stdlib only (no external dependency).
+func signHS256JWT(secret string, claims map[string]interface{}) (string, error) {
+	b64 := func(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
+	header, err := json.Marshal(map[string]string{"alg": "HS256", "typ": "JWT"})
+	if err != nil {
+		return "", err
+	}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		return "", err
+	}
+	signingInput := b64(header) + "." + b64(payload)
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(signingInput))
+	return signingInput + "." + b64(mac.Sum(nil)), nil
+}
+
 func (c *Controller) syncPolicy(ctx context.Context, payload policySyncRequest) error {
 	if c.httpClient == nil {
 		c.httpClient = &http.Client{Timeout: 5 * time.Second}
@@ -929,8 +1002,8 @@ func (c *Controller) syncPolicy(ctx context.Context, payload policySyncRequest) 
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if c.apiToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiToken)
+	if tok := c.bearerToken(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 
 	resp, err := c.httpClient.Do(req)
@@ -955,8 +1028,8 @@ func (c *Controller) syncDelete(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	if c.apiToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiToken)
+	if tok := c.bearerToken(); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
