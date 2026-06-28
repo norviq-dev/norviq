@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: Apache-2.0
+# Local (kind) overlay for the customer-eval simulation.
+# Goal: get the Norviq CORE (api + engine + ui + postgres + redis) up reliably on a laptop
+# kind cluster, without the bits that need external cert bootstrap on a real cluster.
+#
+# Sidecar injection is now ON (C2 made TLS turnkey via the pre/post-install hook) so the sim
+# validates R1 end-to-end. Still OFF for the laptop:
+#   - validating admission policy   -> needs k8s >=1.30 CEL admission
+#   - baseline cluster policy CR    -> needs the controller to process it
+#   - otel collector                -> not deployed locally; dashboards come from audit data
+# OPA runs in server mode (chart default: per-pod opa sidecar, config.opaMode=server) — the eval
+# exercises the new R7 path. Enforcement is also driven via the API (/api/v1/evaluate) + seeded policy.
+
+validatingAdmissionPolicyEnabled: false
+
+baselineClusterPolicy:
+  enabled: false
+
+# Webhook + turnkey sidecar injection ON (validates C2/R1 end-to-end on cluster A).
+# certJobImage defaults to bitnami/kubectl:1.30 (public, pullable on kind).
+webhook:
+  enabled: true
+  replicas: 1            # 1 is plenty for the laptop sim
+  validating:
+    enabled: false
+  injection:
+    enabled: true
+
+otel:
+  enabled: false
+
+# Engine pod is unused in the API-driven eval (the API evaluates in-process). Setting 0 replicas
+# skips an image build and frees RAM on the Mac mini.
+engine:
+  replicas: 0
+
+# Only quota namespaces that actually exist on a fresh cluster (avoids apply errors).
+policyQuotaNamespaces:
+  - default
+
+# api.secretKey is injected at deploy time via `--set api.secretKey=$EVAL_SECRET` (a rotated,
+# non-default value; single source of truth = lib.sh EVAL_SECRET). Post-remediation this proves the
+# secret is now rotatable (NRVQ_API_SECRET_KEY alias fix) and the old default is dead.
+
+# In-cluster postgres has no TLS -> must disable sslmode locally.
+config:
+  enforcementMode: block
+  logLevel: INFO
+  dbSslMode: disable
