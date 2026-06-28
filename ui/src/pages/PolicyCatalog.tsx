@@ -97,6 +97,18 @@ const FALLBACK_DEPLOYMENTS: Deployment[] = [
   { name: "triage-bot", namespace: "support", agent_class: "support-bot" }
 ];
 
+/**
+ * Defense-in-depth: the API now returns target_type, but default it to "class" when an
+ * agent_class is set and the field is absent — so the catalog never drops a class policy
+ * (the seeded default:customer-support) into "no policies configured".
+ */
+function withTargetType(list: Policy[]): Policy[] {
+  return list.map((p) => ({
+    ...p,
+    target_type: p.target_type ?? (p.agent_class ? "class" : p.target_type)
+  }));
+}
+
 function PriorityBars({ tier }: { tier: TargetType }) {
   const p = PRIORITY[tier];
   return (
@@ -489,7 +501,9 @@ export function PolicyCatalog() {
     border: "1px solid #2DDAB8",
     color: "#2DDAB8"
   } as const;
-  const [tab, setTab] = useState<"catalog" | "editor" | "versions">("catalog");
+  // Land on the editor so the seeded class policy opens with Monaco + Dry-Run immediately
+  // (the Catalog tab remains a click away for the grouped tier view).
+  const [tab, setTab] = useState<"catalog" | "editor" | "versions">("editor");
   const [selected, setSelected] = useState<Policy | null>(null);
   const [restoreV, setRestoreV] = useState<number | null>(null);
   const [activeFile, setActiveFile] = useState<string | null>(null);
@@ -499,7 +513,7 @@ export function PolicyCatalog() {
   const [dryRunLoading, setDryRunLoading] = useState(false);
 
   const policies = useApi<Policy[]>(
-    () => apiGet(`/api/v1/policies?namespace=${encodeURIComponent(namespace)}`),
+    () => apiGet<Policy[]>(`/api/v1/policies?namespace=${encodeURIComponent(namespace)}`).then(withTargetType),
     [namespace],
     {
       cacheKey: `policy-catalog:${namespace}`,
@@ -546,7 +560,7 @@ export function PolicyCatalog() {
 
   const refreshPolicies = async () => {
     try {
-      const next = await apiGet<Policy[]>(`/api/v1/policies?namespace=${encodeURIComponent(namespace)}`);
+      const next = withTargetType(await apiGet<Policy[]>(`/api/v1/policies?namespace=${encodeURIComponent(namespace)}`));
       policies.setData(next);
     } catch {
       // ignore
@@ -744,6 +758,7 @@ export function PolicyCatalog() {
                   return (
                     <button
                       key={p.id ?? name}
+                      role="row"
                       className={`sb-link${isActive ? " active" : ""}`}
                       onClick={() => setActiveFile(name)}
                       style={{ fontSize: 12.5 }}

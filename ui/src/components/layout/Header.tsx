@@ -13,7 +13,8 @@ import {
   fetchAllAgents,
   fetchAuditRecordsByTool,
   fetchAuditStats,
-  fetchPolicies
+  fetchPolicies,
+  logout
 } from "../../api/client";
 import { CLUSTERS, NS_BY_CLUSTER, TimeRange, useApp } from "@/store/AppContext";
 
@@ -550,6 +551,7 @@ export function Header({
             <button
               className="dd-item"
               style={{ padding: 12, borderRadius: 0 }}
+              onClick={logout}
               onMouseEnter={(e) => {
                 e.currentTarget.style.color = "#FF3B5C";
               }}

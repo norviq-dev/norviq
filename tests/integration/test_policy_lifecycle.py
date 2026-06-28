@@ -15,7 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 @pytest.fixture
 async def db_engine(pg_url: str) -> AsyncEngine:
-    engine = create_async_engine(pg_url.replace("postgresql://", "postgresql+asyncpg://"))
+    # Strip sslmode (asyncpg takes ssl=, not sslmode=) — mirrors session.py.
+    engine = create_async_engine(
+        pg_url.replace("postgresql://", "postgresql+asyncpg://").split("?")[0],
+        connect_args={"ssl": False},
+    )
     try:
         yield engine
     finally:
@@ -23,17 +27,26 @@ async def db_engine(pg_url: str) -> AsyncEngine:
 
 
 @pytest.mark.asyncio
-async def test_post_policy_appears_in_db(api_client: httpx.AsyncClient, db_engine: AsyncEngine) -> None:
+async def test_post_policy_appears_in_db(
+    api_client: httpx.AsyncClient, db_engine: AsyncEngine, auth_headers: dict[str, str]
+) -> None:
     namespace = f"integration-{uuid.uuid4().hex}"
     payload = {
         "namespace": namespace,
         "agent_class": "test-class",
-        "rego_source": 'package norviq.strict\ndefault decision = "allow"',
+        # The API requires an enforcement (block/escalate) rule plus decision/rule_id/reason.
+        "rego_source": (
+            "package norviq.strict\n"
+            'default decision = "allow"\n'
+            'decision = "block" { input.tool_name == "blocked_tool" }\n'
+            'rule_id = "lifecycle_block" { input.tool_name == "blocked_tool" }\n'
+            'reason = "blocked" { input.tool_name == "blocked_tool" }\n'
+        ),
         "enforcement_mode": "block",
         "saved_by": "test",
         "priority": 100,
     }
-    response = await api_client.post("/api/v1/policies", json=payload)
+    response = await api_client.post("/api/v1/policies", json=payload, headers=auth_headers)
     assert response.status_code == 200, response.text
 
     async with db_engine.begin() as conn:
@@ -48,13 +61,16 @@ async def test_post_policy_appears_in_db(api_client: httpx.AsyncClient, db_engin
 
 
 @pytest.mark.asyncio
-async def test_policy_roundtrip_post_db_evaluate(api_client: httpx.AsyncClient, db_engine: AsyncEngine) -> None:
+async def test_policy_roundtrip_post_db_evaluate(
+    api_client: httpx.AsyncClient, db_engine: AsyncEngine, auth_headers: dict[str, str]
+) -> None:
     namespace = f"integration-{uuid.uuid4().hex}"
     rego = (
         "package norviq.strict\n"
         'default decision = "allow"\n'
         'decision = "block" { input.tool_name == "integration_test_tool" }\n'
         'rule_id = "integration_rule" { input.tool_name == "integration_test_tool" }\n'
+        'reason = "integration block" { input.tool_name == "integration_test_tool" }\n'
     )
     create_response = await api_client.post(
         "/api/v1/policies",
@@ -66,6 +82,7 @@ async def test_policy_roundtrip_post_db_evaluate(api_client: httpx.AsyncClient, 
             "saved_by": "test",
             "priority": 100,
         },
+        headers=auth_headers,
     )
     assert create_response.status_code == 200, create_response.text
 
@@ -88,6 +105,7 @@ async def test_policy_roundtrip_post_db_evaluate(api_client: httpx.AsyncClient, 
             "session_id": "integration-test",
             "trust_score": 0.9,
         },
+        headers=auth_headers,
     )
     assert evaluate_response.status_code == 200, evaluate_response.text
     data = evaluate_response.json()

@@ -53,7 +53,11 @@ async def db_engine() -> AsyncEngine:
     settings.pg_url = pg_url
     await init_db()
     await create_tables()
-    engine = create_async_engine(pg_url.replace("postgresql://", "postgresql+asyncpg://"))
+    # Strip the sslmode query param (asyncpg takes `ssl=`, not `sslmode=`) — mirrors session.py.
+    engine = create_async_engine(
+        pg_url.replace("postgresql://", "postgresql+asyncpg://").split("?")[0],
+        connect_args={"ssl": False},
+    )
     try:
         yield engine
     finally:

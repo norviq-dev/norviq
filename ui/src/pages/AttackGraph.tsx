@@ -7,7 +7,15 @@ import type { AttackPath, AttackPathsResponse } from "../components/attack-graph
 import { PageHead } from "../components/common/PageHead";
 import { Panel } from "../components/common/Panel";
 import { useApp } from "../store/AppContext";
-import { apiUrl } from "../api/client";
+import { apiSend, apiUrl } from "../api/client";
+
+/** Derive the agent_class from a path's source node id (spiffe ".../sa/<class>" or "agent:<class>"). */
+function agentClassFromSource(sourceId: string): string {
+  const sa = sourceId.match(/\/sa\/([^/]+)/);
+  if (sa) return sa[1];
+  const parts = sourceId.split(":");
+  return parts[parts.length - 1] || "customer-support";
+}
 
 export function AttackGraph() {
   const { namespace } = useApp();
@@ -46,6 +54,39 @@ export function AttackGraph() {
   const criticalCount = paths.filter((p) => p.severity === "critical").length;
   const highCount = paths.filter((p) => p.severity === "high").length;
 
+  // Make Simulate discoverable: auto-select the highest-risk path (API returns paths sorted desc).
+  useEffect(() => {
+    if (!selected && paths.length > 0) setSelected(paths[0]);
+  }, [paths, selected]);
+
+  // Run a REAL evaluation of the selected path: evaluate each actionable step as a tool call by
+  // the source agent and report blocked from the live decision — an attacker is stopped if ANY
+  // step blocks. (Not the precomputed blocked_by_policy flag.)
+  const simulatePath = async (path: AttackPath): Promise<{ blocked: boolean }> => {
+    const agentClass = agentClassFromSource(path.source_id);
+    const agent_identity = {
+      spiffe_id: `spiffe://norviq/ns/${namespace}/sa/${agentClass}`,
+      namespace,
+      agent_class: agentClass
+    };
+    const tools = path.steps.map((s) => s.action).filter((a) => a && a !== "traverse");
+    const probes = tools.length > 0 ? tools : [path.target_id];
+    let blocked = false;
+    for (const tool of probes) {
+      const res = await apiSend<{ decision: string }>("/api/v1/evaluate", "POST", {
+        tool_name: tool,
+        tool_params: {},
+        agent_identity,
+        session_id: `simulate-${path.path_id}`
+      });
+      if (res.decision === "block") {
+        blocked = true;
+        break;
+      }
+    }
+    return { blocked };
+  };
+
   if (loading) return <div>Loading attack graph...</div>;
   if (error) return <div>Failed to load attack graph: {error}</div>;
   if (!data || paths.length === 0) return <div>No attack paths found for this namespace.</div>;
@@ -77,7 +118,7 @@ export function AttackGraph() {
         />
         <AttackPathList paths={paths} selectedPathId={selected?.path_id} onSelect={setSelected} />
         <AttackPathDetail path={selected} />
-        <SimulateAttackButton path={selected} onSimulate={async (path) => ({ blocked: path.blocked_by_policy })} />
+        <SimulateAttackButton path={selected} onSimulate={simulatePath} />
       </Panel>
     </div>
   );

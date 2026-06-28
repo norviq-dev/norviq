@@ -8,6 +8,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
+from norviq.api.audit_hub import audit_record
 from norviq.api.auth import get_current_user
 from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.events import ToolCallEvent
@@ -52,4 +53,8 @@ async def evaluate_tool_call(
     emitter = getattr(request.app.state, "emitter", None)
     if emitter is not None:
         emitter.emit(event, decision)
+    # Fan the decision out to live /ws/audit subscribers (in-process, non-blocking).
+    hub = getattr(request.app.state, "audit_hub", None)
+    if hub is not None:
+        hub.publish(audit_record(event, decision))
     return EvaluateResponse(decision=decision.decision, rule_id=decision.rule_id, trust_score=decision.trust_score)

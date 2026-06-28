@@ -4,8 +4,8 @@
 
 import pytest
 
-from norviq.engine.attack_graph import AttackGraphEngine, DANGEROUS_TOOLS
-from norviq.engine.attack_graph_models import AttackPath, AttackStep
+from norviq.engine.attack_graph import AttackGraphEngine
+from norviq.engine.attack_graph_models import AttackStep
 
 
 class TestRiskScoring:

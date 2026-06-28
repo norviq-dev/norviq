@@ -9,6 +9,25 @@ export function apiUrl(path: string): string {
   return `${API_BASE}${path}`;
 }
 
+/**
+ * Build request headers with the bearer token (when present). Shared by every fetch helper so
+ * GETs authenticate exactly like POST/PUT/DELETE — without it, /api/v1/agents and other
+ * auth-required GETs 401. Extra headers (e.g. Content-Type) are merged in.
+ */
+/** Clear the stored JWT and redirect home, forcing re-auth via the AppContext bootstrap. */
+export function logout(): void {
+  localStorage.removeItem("nrvq_token");
+  window.location.href = "/";
+}
+
+export function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const token = localStorage.getItem("nrvq_token");
+  return {
+    ...(extra ?? {}),
+    ...(token ? { Authorization: `Bearer ${token}` } : {})
+  };
+}
+
 /** Resolve a WebSocket URL: derive ws/wss + host from API_BASE when set, else same-origin. */
 export function wsUrl(path: string): string {
   if (API_BASE) {
@@ -20,7 +39,7 @@ export function wsUrl(path: string): string {
 }
 
 export async function apiGet<T>(path: string): Promise<T> {
-  const response = await fetch(apiUrl(path));
+  const response = await fetch(apiUrl(path), { headers: authHeaders() });
   if (!response.ok) {
     throw new Error(`Request failed: ${response.status}`);
   }
@@ -28,13 +47,9 @@ export async function apiGet<T>(path: string): Promise<T> {
 }
 
 export async function apiSend<T>(path: string, method: "POST" | "PUT" | "DELETE", body?: unknown): Promise<T> {
-  const token = localStorage.getItem("nrvq_token");
   const response = await fetch(apiUrl(path), {
     method,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {})
-    },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: body ? JSON.stringify(body) : undefined
   });
   if (!response.ok) {
@@ -116,6 +131,27 @@ export async function fetchVolume(
   return apiGet<Array<{ time: string; allow: number; block: number }>>(`/api/v1/audit/volume?${params.toString()}`);
 }
 
+export type MitreTechnique = {
+  technique_id: string;
+  name: string;
+  policies: string[];
+  covered_policies: string[];
+  covered: boolean;
+};
+export type MitreCoverage = {
+  namespace: string;
+  covered: number;
+  total: number;
+  techniques: MitreTechnique[];
+};
+
+export async function fetchMitreCoverage(namespace?: string): Promise<MitreCoverage> {
+  const params = new URLSearchParams();
+  if (namespace && namespace !== "all") params.set("namespace", namespace);
+  const query = params.toString();
+  return apiGet<MitreCoverage>(query ? `/api/v1/mitre/coverage?${query}` : "/api/v1/mitre/coverage");
+}
+
 export async function fetchAgents(namespace?: string): Promise<Array<{ category?: string }>> {
   const params = new URLSearchParams();
   if (namespace && namespace !== "all") params.set("namespace", namespace);
@@ -134,7 +170,7 @@ export type SearchAgent = {
 export type SearchPolicy = { namespace?: string; agent_class?: string; mode?: string };
 
 async function apiGetWithSignal<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const response = await fetch(apiUrl(path), { signal });
+  const response = await fetch(apiUrl(path), { signal, headers: authHeaders() });
   if (!response.ok) throw new Error(`Request failed: ${response.status}`);
   return (await response.json()) as T;
 }
