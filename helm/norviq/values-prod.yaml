@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: Apache-2.0
+# Multi-node PROD overlay. Turns on the HA/autoscaling/spread posture that is gated-off in the
+# single-node dev defaults. NOT live-validated on the 1-node dev cluster — template-validated via
+# `helm template -f values-prod.yaml`. See docs/engineering/prod-deploy-runbook.md.
+#
+# Prereqs on the target cluster: >=3 nodes; metrics-server (HPA); CloudNativePG operator (PG HA);
+# a Redis HA operator (RedisFailover CRD) — or swap redis-ha.yaml for your stack.
+
+# Public/managed registry recommended for prod (GHCR has no Docker Hub anonymous pull-rate limit at
+# scale). Drop-in: set registry + repository, or point at your ACR. Empty imagePullSecrets = public.
+images:
+  registry: ""              # e.g. "ghcr.io/" (then repository: norviq-dev/norviq-engine) or "<acct>.azurecr.io/"
+  api: { pullPolicy: IfNotPresent }
+  engine: { pullPolicy: IfNotPresent }
+  ui: { pullPolicy: IfNotPresent }
+  webhook: { pullPolicy: IfNotPresent }
+imagePullSecrets: []        # public registry -> no pull secret (or set your GHCR/ACR secret)
+
+api:
+  replicas: 3
+  pdb:
+    enabled: true
+    minAvailable: 2
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+  spread:
+    enabled: true           # podAntiAffinity + topologySpread across nodes
+  rollout:
+    maxSurge: 1             # surge for zero-downtime (multi-node has headroom)
+    maxUnavailable: 0
+  resources:
+    requests: { cpu: 250m, memory: 256Mi }
+    limits: { cpu: "1", memory: 512Mi }
+
+engine:
+  replicas: 2               # restore the standalone engine in prod
+  pdb:
+    enabled: true
+    minAvailable: 1
+  spread:
+    enabled: true
+
+webhook:
+  replicas: 2
+  injection:
+    enabled: true
+  pdb:
+    enabled: true
+    minAvailable: 1
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 70
+  spread:
+    enabled: true
+
+opa:
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+
+# HA datastores via operators (operators must be pre-installed). The single StatefulSets are
+# auto-disabled when ha.enabled, and the API connection URLs retarget the HA services.
+postgresql:
+  ha:
+    enabled: true
+    instances: 3
+  storage: 20Gi
+redis:
+  ha:
+    enabled: true
+    replicas: 3
+
+config:
+  requireStrongSecret: true
+  dbSslMode: require        # managed/HA Postgres should enforce TLS
+
+gracefulShutdown:
+  preStopSleepSeconds: 5

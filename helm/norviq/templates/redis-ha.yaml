@@ -1,0 +1,34 @@
+{{- if and .Values.redis.enabled .Values.redis.ha.enabled }}
+{{- /* HA Redis via the Spotahome redis-operator (Sentinel-managed failover) — multi-node prod.
+       GATED, default off, NOT live-validated on the single-node dev cluster. REQUIRES the
+       redis-operator (RedisFailover CRD) installed first. Sentinel promotes a replica on master
+       loss; the API connects through the failover service (redis.ha.serviceName). If you use a
+       different Redis HA stack (Bitnami chart, AWS MemoryDB, etc.) swap this template + serviceName. */ -}}
+apiVersion: databases.spotahome.com/v1
+kind: RedisFailover
+metadata:
+  name: norviq-redis-ha
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+spec:
+  sentinel:
+    replicas: {{ .Values.redis.ha.replicas }}
+  redis:
+    replicas: {{ .Values.redis.ha.replicas }}
+    image: "{{ .Values.images.redis.repository }}:{{ .Values.images.redis.tag }}"
+    customConfig:
+      - "requirepass {{ .Values.redis.password }}"
+      - "masterauth {{ .Values.redis.password }}"
+    storage:
+      persistentVolumeClaim:
+        metadata:
+          name: norviq-redis-ha-data
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: {{ .Values.redis.storage }}
+    resources:
+      {{- toYaml .Values.redis.resources | nindent 6 }}
+{{- end }}

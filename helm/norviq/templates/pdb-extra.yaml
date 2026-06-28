@@ -1,0 +1,31 @@
+{{- /* PDBs for engine + webhook (multi-node prod). The API PDB is in api-pdb.yaml. Gated off by
+       default — a PDB with minAvailable:1 on a single-replica/single-node cluster blocks node drains. */ -}}
+{{- if and .Values.webhook.enabled .Values.engine.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: norviq-engine-pdb
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.engine.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      app: norviq-engine
+{{- end }}
+{{- if and .Values.webhook.enabled .Values.webhook.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: norviq-webhook-pdb
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.webhook.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      app: norviq-webhook
+{{- end }}

@@ -23,8 +23,10 @@ spec:
         app: norviq-webhook
     spec:
       serviceAccountName: norviq-controller
-      imagePullSecrets:
-        - name: dockerhub-secret
+      {{- include "norviq.imagePullSecrets" . | nindent 6 }}
+      {{- if .Values.webhook.spread.enabled }}
+      {{- include "norviq.spread" (dict "app" "norviq-webhook") | nindent 6 }}
+      {{- end }}
       terminationGracePeriodSeconds: 30
       initContainers:
         # Controller reconciles NrvqPolicy CRs by POSTing to the API — wait for it.
@@ -47,23 +49,26 @@ spec:
               type: RuntimeDefault
       containers:
         - name: webhook
-          image: "{{ .Values.images.webhook.repository }}:{{ .Values.images.webhook.tag }}"
+          image: "{{ .Values.images.registry }}{{ .Values.images.webhook.repository }}:{{ .Values.images.webhook.tag }}"
           imagePullPolicy: {{ .Values.images.webhook.pullPolicy }}
+          {{- include "norviq.preStop" . | nindent 10 }}
           ports:
             - containerPort: {{ .Values.webhook.port }}
               name: https
           env:
             - name: NRVQ_WEBHOOK_PORT
               value: "{{ .Values.webhook.port }}"
+            # Pinned (-sha on CI) sidecar image. The controller refuses a mutable-tag CRD override.
             - name: NRVQ_SIDECAR_IMAGE
-              value: "{{ .Values.images.engine.repository }}:{{ .Values.images.engine.tag }}"
+              value: "{{ .Values.images.registry }}{{ .Values.images.engine.repository }}:{{ .Values.images.engine.tag }}"
             - name: NRVQ_CONTROLLER_ENABLED
               value: "true"
             - name: NRVQ_API_URL
               value: "http://norviq-api:{{ .Values.api.port }}"
             - name: NRVQ_ADMIN_POLICY_NAMESPACE
               value: "{{ .Values.namespace }}"
-            - name: NRVQ_API_TOKEN
+            # HS256 signing key for the controller's short-lived service JWT (API auth).
+            - name: NRVQ_API_SECRET_KEY
               valueFrom:
                 secretKeyRef:
                   name: norviq-secrets

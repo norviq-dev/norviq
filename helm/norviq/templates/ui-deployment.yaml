@@ -21,15 +21,14 @@ spec:
       labels:
         app: norviq-ui
     spec:
-      imagePullSecrets:
-        - name: dockerhub-secret
+      {{- include "norviq.imagePullSecrets" . | nindent 6 }}
       terminationGracePeriodSeconds: 30
       # Static nginx SPA — no backend dependency at startup (the browser calls the API
       # at runtime), so no initContainer is needed.
       containers:
         - name: ui
-          image: "{{ .Values.images.ui.repository }}:{{ .Values.images.ui.tag }}"
-          imagePullPolicy: Always
+          image: "{{ .Values.images.registry }}{{ .Values.images.ui.repository }}:{{ .Values.images.ui.tag }}"
+          imagePullPolicy: {{ .Values.images.ui.pullPolicy }}
           ports:
             - containerPort: {{ .Values.ui.port }}
               name: http
