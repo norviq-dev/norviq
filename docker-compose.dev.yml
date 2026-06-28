@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: Apache-2.0
+# Local dev dependencies for Norviq (new machine, Docker-based).
+# Brings up Postgres + Redis matching .env.local (DB on host port 5433, Redis 6379).
+# API (uvicorn) and UI (vite) are run natively for hot-reload — see NEW-MACHINE-SETUP.md.
+#
+#   docker compose -f docker-compose.dev.yml up -d
+#   docker compose -f docker-compose.dev.yml ps
+#   docker compose -f docker-compose.dev.yml down        # add -v to wipe data
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: norviq-postgres
+    environment:
+      POSTGRES_USER: norviq
+      POSTGRES_PASSWORD: norviq_local_dev
+      POSTGRES_DB: norviq
+    ports:
+      - "5433:5432"        # matches NRVQ_DB_PORT=5433 in .env.local
+    volumes:
+      - norviq_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U norviq -d norviq"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: norviq-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  norviq_pgdata:

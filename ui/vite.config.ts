@@ -10,6 +10,11 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src")
     }
   },
+  // Pre-bundle Monaco so the Policy Catalog route doesn't hang the dev server compiling it on
+  // first hit (its heavy deps would otherwise be discovered + optimized lazily mid-request).
+  optimizeDeps: {
+    include: ["@monaco-editor/react", "monaco-editor"]
+  },
   build: {
     rollupOptions: {
       output: {
