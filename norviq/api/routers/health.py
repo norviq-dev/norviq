@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from norviq.api.db.session import get_session
+from norviq.config import settings
 
 router = APIRouter()
 
@@ -27,4 +28,9 @@ async def ready(request: Request, session: AsyncSession = Depends(get_session)) 
         await session.execute(text("SELECT 1"))
     except Exception:
         db_ok = False
-    return {"status": "ready", "redis": redis_ok, "db": db_ok}
+    payload = {"status": "ready", "redis": redis_ok, "db": db_ok}
+    if settings.opa_mode == "server":
+        # In server mode the evaluator depends on a reachable OPA; surface it in readiness.
+        evaluator = getattr(request.app.state, "evaluator", None)
+        payload["opa"] = bool(evaluator and await evaluator.opa.health())
+    return payload

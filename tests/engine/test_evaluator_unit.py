@@ -96,7 +96,7 @@ async def test_evaluate_actually_calls_opa(evaluator: OPAEvaluator, monkeypatch:
     evaluator._loader._policies["default:test"] = {"rego": rego, "priority": 100}  # type: ignore[attr-defined]
     called = False
 
-    async def _fake_opa(namespace: str, agent_class: str, opa_input: dict, rego_source: str = "") -> dict:
+    async def _fake_opa(key: str, namespace: str, agent_class: str, opa_input: dict, rego_source: str = "") -> dict:
         nonlocal called
         called = True
         assert opa_input["tool_name"] == "delete_record"
@@ -118,7 +118,7 @@ async def test_evaluator_no_regex_default_shortcut(evaluator: OPAEvaluator, monk
     )
     evaluator._loader._policies["default:test"] = {"rego": rego, "priority": 100}  # type: ignore[attr-defined]
 
-    async def _fake_opa(namespace: str, agent_class: str, opa_input: dict, rego_source: str = "") -> dict:
+    async def _fake_opa(key: str, namespace: str, agent_class: str, opa_input: dict, rego_source: str = "") -> dict:
         return {"decision": "block", "rule_id": "regex_guard", "reason": "opa"}
 
     monkeypatch.setattr(evaluator, "_evaluate_opa", _fake_opa)
@@ -128,7 +128,7 @@ async def test_evaluator_no_regex_default_shortcut(evaluator: OPAEvaluator, monk
 
 @pytest.mark.asyncio
 async def test_provenance_in_rule_id(evaluator: OPAEvaluator, monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fake_opa(namespace: str, agent_class: str, opa_input: dict, rego_source: str = "") -> dict:
+    async def _fake_opa(key: str, namespace: str, agent_class: str, opa_input: dict, rego_source: str = "") -> dict:
         return {"decision": "allow", "rule_id": "default_allow", "reason": "no policy"}
 
     monkeypatch.setattr(evaluator, "_evaluate_opa", _fake_opa)
@@ -141,7 +141,7 @@ async def test_timeout_fails_closed_not_open(evaluator: OPAEvaluator, monkeypatc
     rego = 'package norviq.strict\ndefault decision = "allow"\ndecision = "allow" { true }\n'
     evaluator._loader._policies["default:test"] = {"rego": rego, "priority": 100}  # type: ignore[attr-defined]
 
-    async def _slow_single(event: ToolCallEvent, rego_source: str, trust_result: TrustResult):
+    async def _slow_single(event: ToolCallEvent, key: str, rego_source: str, trust_result: TrustResult):
         await asyncio.sleep(2.1)
         return None
 
@@ -153,7 +153,7 @@ async def test_timeout_fails_closed_not_open(evaluator: OPAEvaluator, monkeypatc
 
 @pytest.mark.asyncio
 async def test_cache_hit_vs_miss_have_same_decision(evaluator: OPAEvaluator, monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fake_opa(namespace: str, agent_class: str, opa_input: dict, rego_source: str = "") -> dict:
+    async def _fake_opa(key: str, namespace: str, agent_class: str, opa_input: dict, rego_source: str = "") -> dict:
         return {"decision": "block", "rule_id": "deny_sql_injection", "reason": "unit"}
 
     evaluator._loader._policies["default:test"] = {"rego": "package norviq.strict", "priority": 100}  # type: ignore[attr-defined]
@@ -167,7 +167,7 @@ async def test_cache_hit_vs_miss_have_same_decision(evaluator: OPAEvaluator, mon
 
 @pytest.mark.asyncio
 async def test_cache_invalidated_on_policy_change(evaluator: OPAEvaluator, monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fake_opa(namespace: str, agent_class: str, opa_input: dict, rego_source: str = "") -> dict:
+    async def _fake_opa(key: str, namespace: str, agent_class: str, opa_input: dict, rego_source: str = "") -> dict:
         if "block" in rego_source:
             return {"decision": "block", "rule_id": "new_rule", "reason": "updated"}
         return {"decision": "allow", "rule_id": "old_rule", "reason": "old"}
@@ -191,7 +191,7 @@ async def test_evaluator_uses_specific_policy_over_cluster_baseline(
     evaluator._loader._policies["default:__baseline__"] = {"rego": "allow", "priority": 50}  # type: ignore[attr-defined]
     evaluator._loader._policies["__cluster__:__baseline__"] = {"rego": "allow", "priority": 10}  # type: ignore[attr-defined]
 
-    async def _fake_opa(namespace: str, agent_class: str, opa_input: dict, rego_source: str = "") -> dict:
+    async def _fake_opa(key: str, namespace: str, agent_class: str, opa_input: dict, rego_source: str = "") -> dict:
         if rego_source == "block":
             return {"decision": "block", "rule_id": "specific", "reason": "specific"}
         return {"decision": "allow", "rule_id": "baseline", "reason": "baseline"}
@@ -206,7 +206,7 @@ async def test_evaluator_uses_specific_policy_over_cluster_baseline(
 async def test_no_policy_path_still_calls_opa_entrypoint(evaluator: OPAEvaluator, monkeypatch: pytest.MonkeyPatch) -> None:
     called = False
 
-    async def _fake_opa(namespace: str, agent_class: str, opa_input: dict, rego_source: str = "") -> dict:
+    async def _fake_opa(key: str, namespace: str, agent_class: str, opa_input: dict, rego_source: str = "") -> dict:
         nonlocal called
         called = True
         return {"decision": "allow", "rule_id": "default_allow", "reason": "none"}

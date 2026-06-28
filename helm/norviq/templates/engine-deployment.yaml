@@ -66,3 +66,39 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
+{{- if .Values.opa.enabled }}
+        # Long-lived OPA policy engine (per-replica sidecar). The engine queries it at localhost:8181.
+        - name: opa
+          image: "{{ .Values.opa.image }}"
+          args:
+            - "run"
+            - "--server"
+            - "--v0-compatible"
+            - "--addr=0.0.0.0:{{ .Values.opa.port }}"
+            - "--log-level=error"
+          ports:
+            - containerPort: {{ .Values.opa.port }}
+              name: opa
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: opa
+            periodSeconds: 30
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: opa
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.opa.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+{{- end }}

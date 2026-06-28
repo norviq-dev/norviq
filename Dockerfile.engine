@@ -13,6 +13,16 @@ COPY --from=builder /deps /usr/local/lib/python3.12/site-packages
 COPY norviq/ norviq/
 COPY policies/ policies/
 
+# Install the OPA binary so the `subprocess` rollback mode works in-cluster (server mode uses the
+# OPA sidecar and does not need this; kept for parity with Dockerfile.api).
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
+    curl -L -o /usr/local/bin/opa https://openpolicyagent.org/downloads/latest/opa_linux_amd64_static && \
+    chmod +x /usr/local/bin/opa && \
+    opa version && \
+    apt-get remove -y curl && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+
 RUN useradd -r -s /usr/sbin/nologin norviq
 USER norviq
 

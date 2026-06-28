@@ -8,12 +8,16 @@ graph LR
     F010[F010 Policy Loader]
     F011[F011 Interceptor]
     F015[F015 Sidecar]
+    OPACLIENT[OpaClient]
+    OPA[OPA server sidecar / managed]
 
     S002 --> F009
     F001 --> F009
     F002 --> F009
     F005 --> F009
     F008 --> F009
+    F009 --> OPACLIENT
+    OPACLIENT --> OPA
     F009 --> F010
     F009 --> F011
     F009 --> F015

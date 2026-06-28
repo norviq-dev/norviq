@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -22,6 +23,7 @@ from norviq.config import settings
 from norviq.engine.cache import RedisCache
 from norviq.engine.graph.asset_graph import AssetGraphBuilder
 from norviq.engine.graph.store import GraphStore
+from norviq.engine.opa_client import OpaClient, managed_package, rewrite_package, sanitize_key
 from norviq.telemetry.metrics import record_tool_call
 from norviq.telemetry.spans import create_tool_call_span, enrich_span
 from norviq.engine.trust import AgentHistoryStore, AgentProfileStore, TrustCalculator, TrustInput, TrustResult
@@ -45,6 +47,9 @@ class OPAEvaluator:
         self._profile = AgentProfileStore(cache)
         self._trust_calculator = TrustCalculator(cache, self._history, self._profile)
         self._semaphore = asyncio.Semaphore(settings.evaluator_max_concurrency)
+        # OPA-server client + per-key pushed-rego digests (server mode); unused in subprocess mode.
+        self.opa = OpaClient()
+        self._pushed: dict[str, str] = {}
         self._audit_tasks: set[asyncio.Task[None]] = set()
         self._policies: dict[str, dict] = {}
         self._loader = None
@@ -102,12 +107,12 @@ class OPAEvaluator:
                 code="NRVQ-ENG-DEBUG-2",
             )
             if not candidates:
-                async with self._semaphore:
+                ns = event.agent_identity.namespace
+                agent_class = event.agent_identity.agent_class
+                async with self._eval_slot():
                     result = await asyncio.wait_for(
                         self._evaluate_opa(
-                            event.agent_identity.namespace,
-                            event.agent_identity.agent_class,
-                            self._build_input(event, trust_result),
+                            f"{ns}:{agent_class}", ns, agent_class, self._build_input(event, trust_result)
                         ),
                         timeout=2.0,
                     )
@@ -121,9 +126,9 @@ class OPAEvaluator:
                         rego_len=len(str(candidate["rego"])),
                         code="NRVQ-ENG-DEBUG-3",
                     )
-                    async with self._semaphore:
+                    async with self._eval_slot():
                         result = await asyncio.wait_for(
-                            self._evaluate_single(event, str(candidate["rego"]), trust_result),
+                            self._evaluate_single(event, str(candidate["key"]), str(candidate["rego"]), trust_result),
                             timeout=2.0,
                         )
                     log.info(
@@ -245,7 +250,10 @@ class OPAEvaluator:
         if trust_result.category == "low" and decision.decision == "allow":
             reason = f"Low trust ({trust_result.score:.2f}): {trust_result.dominant_signal}"
             log.warning("nrvq.engine.trust.override_escalate", event_id=event_id, code="NRVQ-ENG-2045")
-            return decision.model_copy(update={"decision": "escalate", "reason": reason})
+            # rule_id carries the override provenance (escalate_low_trust is non-cacheable).
+            return decision.model_copy(
+                update={"decision": "escalate", "rule_id": "escalate_low_trust", "reason": reason}
+            )
         return decision
 
     def _build_input(self, event: ToolCallEvent, trust_result: TrustResult) -> dict:
@@ -267,6 +275,7 @@ class OPAEvaluator:
     async def _persist_behavior(self, event: ToolCallEvent, decision: PolicyDecision, trust_result: TrustResult) -> None:
         """Persist trust state, enforced outcome history, and profile evolution."""
         self._queue_background(self._safe_set_trust(event.agent_identity.spiffe_id, trust_result))
+        self._queue_background(self._safe_register_agent(event, trust_result))
         await self._post_decision(event, decision)
         self._queue_background(self._safe_record_graph(event, decision))
         self._queue_background(self._safe_record_history(event, decision))
@@ -308,6 +317,32 @@ class OPAEvaluator:
             )
         except Exception as exc:  # pragma: no cover
             log.error("nrvq.engine.trust.cache_set_failed", error=str(exc), code="NRVQ-ENG-2049")
+
+    async def _safe_register_agent(self, event: ToolCallEvent, trust_result: TrustResult) -> None:
+        """Write-through the agent's latest trust to the persistent registry (best-effort).
+
+        Keeps the Agents view populated after the short-lived ``trust:*`` cache TTL expires.
+        Fire-and-forget: a missing/unreachable DB (tests, cold start) must never fail a decision.
+        """
+        try:
+            from norviq.api.db.session import get_session, upsert_agent_registry
+
+            provider = get_session()
+            session = await provider.__anext__()
+            try:
+                await upsert_agent_registry(
+                    session,
+                    spiffe_id=event.agent_identity.spiffe_id,
+                    namespace=event.agent_identity.namespace or "default",
+                    agent_class=event.agent_identity.agent_class,
+                    trust_score=trust_result.score,
+                    trust_category=trust_result.category.title(),
+                )
+                await session.commit()
+            finally:
+                await provider.aclose()
+        except Exception as exc:  # pragma: no cover
+            log.error("nrvq.engine.agent_registry.write_failed", error=str(exc), code="NRVQ-ENG-2051")
 
     async def _safe_record_history(self, event: ToolCallEvent, decision: PolicyDecision) -> None:
         """Persist enforced decision for rolling trust-history features."""
@@ -372,17 +407,50 @@ class OPAEvaluator:
             return f"data.{package_name}"
         return "data.norviq.strict"
 
-    async def _evaluate_opa(self, namespace: str, agent_class: str, opa_input: dict, rego_source: str = "") -> dict:
-        """Evaluate Rego source via local OPA CLI and return decision payload."""
+    async def _evaluate_opa(
+        self, key: str, namespace: str, agent_class: str, opa_input: dict, rego_source: str = ""
+    ) -> dict:
+        """Resolve the policy source for `key` and evaluate it (server HTTP or subprocess fork)."""
         rego = rego_source
         package_name: str | None = None
         if not rego.strip():
-            entry = self._policies.get(f"{namespace}:{agent_class}")
+            entry = self._policies.get(key)
             if isinstance(entry, dict):
                 rego = str(entry.get("rego", ""))
                 package_name = str(entry.get("package_name", "")).strip() or None
         if not rego.strip():
             return {"decision": "allow", "rule_id": "default_allow", "reason": "No policy matched"}
+        if settings.opa_mode == "server":
+            return await self._evaluate_opa_server(key, rego, opa_input)
+        return await self._evaluate_opa_subprocess(namespace, agent_class, opa_input, rego, package_name)
+
+    async def _evaluate_opa_server(self, key: str, rego: str, opa_input: dict) -> dict:
+        """Evaluate against the long-lived OPA server; push (or re-push) the module as needed."""
+        package = managed_package(key)
+        module_id = sanitize_key(key)
+        digest = hashlib.sha256(rego.encode("utf-8")).hexdigest()
+        if self._pushed.get(key) != digest:
+            await self.opa.push_policy(module_id, rewrite_package(rego, package))
+            self._pushed[key] = digest
+        result = await self.opa.query(package, opa_input)
+        if result is None:
+            # OPA lost in-memory state (sidecar restart) — re-push this module once and retry.
+            log.warning("nrvq.opa.module_missing", key=key, code="NRVQ-ENG-2057")
+            await self.opa.push_policy(module_id, rewrite_package(rego, package))
+            self._pushed[key] = digest
+            result = await self.opa.query(package, opa_input)
+        if not isinstance(result, dict):
+            return {"decision": "block", "rule_id": "evaluator_invalid_payload", "reason": "No policy decision produced"}
+        return {
+            "decision": str(result.get("decision", "allow")),
+            "rule_id": str(result.get("rule_id", "")),
+            "reason": str(result.get("reason", "")),
+        }
+
+    async def _evaluate_opa_subprocess(
+        self, namespace: str, agent_class: str, opa_input: dict, rego: str, package_name: str | None
+    ) -> dict:
+        """Evaluate Rego source via a per-call `opa eval` fork (rollback path)."""
         if package_name is None:
             package_name = self._extract_package_name(rego)
         query = self._opa_query_for_package(package_name)
@@ -461,13 +529,22 @@ class OPAEvaluator:
         except (KeyError, IndexError, TypeError):
             return None
 
-    async def _evaluate_single(self, event: ToolCallEvent, rego_source: str, trust_result: TrustResult) -> PolicyDecision:
+    def _eval_slot(self):
+        """Concurrency gate: serialize subprocess `opa eval` forks; no gate in server mode (OPA + the
+        httpx pool absorb concurrency, which is what flattens the tail under load)."""
+        if settings.opa_mode == "server":
+            return contextlib.nullcontext()
+        return self._semaphore
+
+    async def _evaluate_single(
+        self, event: ToolCallEvent, key: str, rego_source: str, trust_result: TrustResult
+    ) -> PolicyDecision:
         """Evaluate one candidate policy source and return typed decision."""
         try:
             input_doc = self._build_input(event, trust_result)
             log.info("nrvq.eval.opa_input", input_doc=str(input_doc)[:500], code="NRVQ-ENG-DEBUG-INPUT")
             result = await self._evaluate_opa(
-                event.agent_identity.namespace, event.agent_identity.agent_class, input_doc, rego_source
+                key, event.agent_identity.namespace, event.agent_identity.agent_class, input_doc, rego_source
             )
         except Exception as exc:
             log.error(

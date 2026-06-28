@@ -12,12 +12,25 @@ import uuid
 
 import pytest
 
+from norviq.config import settings
 from norviq.engine.cache import RedisCache
 from norviq.engine.evaluator import OPAEvaluator
 from norviq.engine.trust.models import TrustResult
 from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
 from norviq.sdk.core.trust import TrustScore
+from tests.conftest import seed_low_trust
+
+_ISOLATE_PATTERNS = ("eval:*", "trust:*", "agent_history:*", "agent_profile:*", "agent_class:*", "agent_frozen:*", "trustcalc:*")
+
+
+async def _flush(cache: RedisCache) -> None:
+    """Clear per-agent runtime keys so evaluator tests don't see each other's cached state."""
+    client = cache._client()
+    for pattern in _ISOLATE_PATTERNS:
+        keys = [key async for key in client.scan_iter(pattern)]
+        if keys:
+            await client.delete(*keys)
 
 
 @pytest.fixture
@@ -30,11 +43,13 @@ def redis_url() -> str:
 
 
 @pytest.fixture
-async def evaluator(redis_url: str) -> OPAEvaluator:
-    """Create evaluator with connected Redis cache."""
+async def evaluator(redis_url: str, seeded_loader) -> OPAEvaluator:
+    """Create evaluator with connected Redis cache + comprehensive.rego as cluster baseline."""
     cache = RedisCache(url=redis_url)
     await cache.connect()
+    await _flush(cache)  # isolate from other tests' cached decisions / trust history
     engine = OPAEvaluator(cache)
+    engine.bind_loader(seeded_loader)
     yield engine
     await engine.close()
     await cache.close()
@@ -68,37 +83,42 @@ async def test_sql_injection_blocks(evaluator: OPAEvaluator) -> None:
 
 
 async def test_cross_tenant_blocks(evaluator: OPAEvaluator) -> None:
-    """Mismatched tenant should return deny_cross_tenant block."""
+    """Mismatched tenant must be blocked (comprehensive.rego rule cross_tenant_access)."""
     decision = await evaluator.evaluate(_event(_suffix(), "get_customer", {"tenant_id": "tenant-b"}))
     assert decision.decision == "block"
-    assert decision.rule_id == "deny_cross_tenant"
+    assert decision.rule_id == "cross_tenant_access"
 
 
 async def test_wildcard_delete_blocks(evaluator: OPAEvaluator) -> None:
-    """Wildcard delete should return deny_wildcard_delete block."""
+    """Wildcard delete must be blocked (comprehensive.rego flags it as excessive agency)."""
     decision = await evaluator.evaluate(_event(_suffix(), "delete_record", {"record_id": "*"}))
     assert decision.decision == "block"
-    assert decision.rule_id == "deny_wildcard_delete"
+    assert decision.rule_id == "llm06_excessive_agency"
 
 
 async def test_rate_limit_blocks(evaluator: OPAEvaluator) -> None:
-    """More than configured calls in window should block."""
+    """More than configured calls in window should block.
+
+    The per-agent rate counter is incremented on cache hits, so the call must repeat the SAME
+    tool+params: the first call populates the eval cache (allow), each subsequent identical call
+    cache-hits and increments the counter until it exceeds the window limit.
+    """
     suffix = _suffix()
     event = _event(suffix, f"search_{suffix}", {"query": "status"})
-    for index in range(60):
-        next_event = event.model_copy(update={"event_id": f"{event.event_id}-{index}", "tool_name": f"search_{suffix}_{index}"})
-        assert (await evaluator.evaluate(next_event)).decision in {"allow", "escalate"}
-    over = event.model_copy(update={"event_id": f"{event.event_id}-limit", "tool_name": f"search_{suffix}_limit"})
-    decision = await evaluator.evaluate(over)
-    assert decision.decision == "block"
-    assert decision.rule_id == "rate_limit_exceeded"
+    last = None
+    for index in range(settings.evaluator_rate_limit_per_window + 5):
+        next_event = event.model_copy(update={"event_id": f"{event.event_id}-{index}"})
+        last = await evaluator.evaluate(next_event)
+    assert last is not None
+    assert last.decision == "block"
+    assert last.rule_id == "rate_limit_exceeded"
 
 
 async def test_low_trust_escalates(evaluator: OPAEvaluator) -> None:
     """Low trust score should escalate if no deny rules match."""
     suffix = _suffix()
     spiffe_id = f"spiffe://norviq/ns/tenant-a/sa/agent-{suffix}"
-    await evaluator._cache.set_trust(spiffe_id, TrustScore(score=0.3))
+    await seed_low_trust(evaluator._cache, spiffe_id)  # recomputed trust < 0.4 → escalate
     decision = await evaluator.evaluate(
         ToolCallEvent(
             event_id=f"evt-{suffix}-low-trust",
@@ -139,7 +159,9 @@ async def test_fallback_on_error(evaluator: OPAEvaluator, monkeypatch) -> None:
     async def _raise(*_: object, **__: object) -> dict:
         raise RuntimeError("forced-error")
 
-    monkeypatch.setattr(evaluator, "_evaluate_opa", _raise)
+    # Patch _evaluate_single (the method the candidates path invokes) so the error reaches the
+    # evaluate() fallback handler rather than _evaluate_single's internal evaluator_error catch.
+    monkeypatch.setattr(evaluator, "_evaluate_single", _raise)
     decision = await evaluator.evaluate(_event(_suffix(), "safe_tool", {"ok": True}))
     assert decision.decision in {"audit", "block"}
     assert decision.reason.startswith("Evaluation failed")
@@ -149,10 +171,10 @@ async def test_timeout_returns_fail_closed_block(evaluator: OPAEvaluator, monkey
     """Evaluation timeout must return explicit fail-closed block decision."""
 
     async def _slow(*_: object, **__: object) -> dict:
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(2.5)  # exceed the evaluate() wait_for timeout (2.0s)
         return {"decision": "allow", "rule_id": "unexpected", "reason": "should timeout first"}
 
-    monkeypatch.setattr(evaluator, "_evaluate_opa", _slow)
+    monkeypatch.setattr(evaluator, "_evaluate_single", _slow)
     decision = await evaluator.evaluate(_event(_suffix(), "safe_tool", {"ok": True}))
     assert decision.decision == "block"
     assert decision.reason == "Evaluation timed out, fallback=block"
@@ -161,7 +183,8 @@ async def test_timeout_returns_fail_closed_block(evaluator: OPAEvaluator, monkey
 async def test_cached_block_still_applies_post_decision(evaluator: OPAEvaluator) -> None:
     """Cached block responses should still decrement trust for repeat attempts."""
     suffix = _suffix()
-    event = _event(suffix, f"execute_sql_{suffix}", {"query": "DROP TABLE users"})
+    # tool_name must be exactly "execute_sql" so the deny_sql_injection rule matches.
+    event = _event(suffix, "execute_sql", {"query": "DROP TABLE users"})
     spiffe_id = event.agent_identity.spiffe_id
     await evaluator._cache.set_trust(spiffe_id, TrustScore(score=0.8))
     first = await evaluator.evaluate(event)
