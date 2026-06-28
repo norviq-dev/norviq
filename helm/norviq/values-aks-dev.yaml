@@ -38,3 +38,9 @@ opa:
     limits:
       cpu: 200m
       memory: 128Mi
+
+config:
+  # In-cluster Postgres has no TLS. The A2 alias fix means NRVQ_DB_SSL_MODE is now actually read
+  # (it was silently ignored before, falling back to "prefer"), so the chart default "require" would
+  # make asyncpg demand SSL and the API would CrashLoop on "rejected SSL upgrade". Disable it here.
+  dbSslMode: disable
