@@ -1,0 +1,16 @@
+{{- if .Values.api.pdb.enabled }}
+# Keep at least minAvailable API pods during voluntary disruptions (node drain, rolling upgrade)
+# so policy enforcement does not gap. Pairs with api.replicas >= 2.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: norviq-api-pdb
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.api.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      app: norviq-api
+{{- end }}

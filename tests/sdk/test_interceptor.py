@@ -17,7 +17,7 @@ from norviq.engine.identity import SPIFFEResolver
 from norviq.exceptions import NorviqBlockError, NorviqEscalateError
 from norviq.sdk.core.events import AgentIdentity
 from norviq.sdk.core.interceptor import ToolInterceptor
-from norviq.sdk.core.trust import TrustScore
+from tests.conftest import seed_low_trust
 
 
 @pytest.fixture
@@ -30,11 +30,12 @@ def redis_url() -> str:
 
 
 @pytest.fixture
-async def interceptor(redis_url: str) -> AsyncIterator[ToolInterceptor]:
-    """Create interceptor backed by Redis evaluator."""
+async def interceptor(redis_url: str, seeded_loader) -> AsyncIterator[ToolInterceptor]:
+    """Create interceptor backed by Redis evaluator + comprehensive.rego cluster baseline."""
     cache = RedisCache(url=redis_url)
     await cache.connect()
     evaluator = OPAEvaluator(cache)
+    evaluator.bind_loader(seeded_loader)
     resolver = SPIFFEResolver()
     yield ToolInterceptor(evaluator=evaluator, resolver=resolver)
     await evaluator.close()
@@ -77,7 +78,7 @@ async def test_intercept_or_raise_raises_escalate(interceptor: ToolInterceptor) 
     """Low trust identities should raise NorviqEscalateError."""
     suffix = _suffix()
     identity = _identity(suffix)
-    await interceptor._evaluator._cache.set_trust(identity.spiffe_id, TrustScore(score=0.3))
+    await seed_low_trust(interceptor._evaluator._cache, identity.spiffe_id)  # recomputed trust < 0.4
     with pytest.raises(NorviqEscalateError):
         await interceptor.intercept_or_raise("sensitive_tool", {"action": "approve"}, identity=identity)
 

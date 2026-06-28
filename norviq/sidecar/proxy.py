@@ -116,8 +116,10 @@ class SidecarProxy:
             log.info("nrvq.sidecar.processed", tool=tool_name, action=action, code="NRVQ-SDC-3002")
             return response
         except Exception as exc:
+            # Fail CLOSED: a malformed request / interceptor error must DROP the tool call, never
+            # forward it (forwarding here would bypass enforcement on the error path).
             log.error("nrvq.sidecar.process_error", error=str(exc), code="NRVQ-SDC-3003")
-            return json.dumps({"action": "forward", "error": "request_processing_failed"})
+            return json.dumps({"action": "drop", "error": "request_processing_failed"})
 
     def _tool_params(self, data: dict[str, Any]) -> dict[str, Any]:
         """Normalize tool params from request payload."""

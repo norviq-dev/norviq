@@ -173,8 +173,8 @@ async def test_health_endpoint(redis_url: str) -> None:
     await cache.close()
 
 
-async def test_malformed_socket_request_fails_open(proxy: SidecarProxy, socket_path: str) -> None:
-    """Malformed JSON should fail open with error payload."""
+async def test_malformed_socket_request_fails_closed(proxy: SidecarProxy, socket_path: str) -> None:
+    """Malformed JSON must fail CLOSED (drop), not forward — no enforcement bypass on errors."""
     reader, writer = await asyncio.open_unix_connection(socket_path)
     writer.write(b"not-json\n")
     await writer.drain()
@@ -182,7 +182,7 @@ async def test_malformed_socket_request_fails_open(proxy: SidecarProxy, socket_p
     writer.close()
     await writer.wait_closed()
     body = json.loads(response.decode("utf-8"))
-    assert body["action"] == "forward"
+    assert body["action"] == "drop"
     assert "error" in body
 
 
@@ -258,8 +258,8 @@ async def test_sidecar_main_starts_proxy_and_http_fallback(monkeypatch: pytest.M
     assert created["resolver"] is proxy._resolver
 
 
-async def test_http_fallback_malformed_json_fails_open() -> None:
-    """Malformed HTTP body should fail open with forward action."""
+async def test_http_fallback_malformed_json_fails_closed() -> None:
+    """Malformed HTTP body must fail CLOSED (drop), not forward."""
 
     class StubDecision:
         def is_allowed(self) -> bool:
@@ -290,5 +290,5 @@ async def test_http_fallback_malformed_json_fails_open() -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post("/v1/evaluate", content="not-json", headers={"content-type": "application/json"})
     assert response.status_code == 200
-    assert response.json()["action"] == "forward"
+    assert response.json()["action"] == "drop"
     assert response.json()["error"] == "invalid_json_body"

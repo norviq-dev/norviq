@@ -9,14 +9,15 @@ from norviq.config import NorviqSettings, settings
 
 
 def test_settings_defaults(monkeypatch) -> None:
-    """Load defaults when no NRVQ vars are set."""
+    """Load code defaults when no NRVQ vars / env files are present."""
     for key in list(os.environ):
         if key.startswith("NRVQ_"):
             monkeypatch.delenv(key, raising=False)
-    loaded = NorviqSettings()
+    # _env_file=None ignores the dev .env/.env.local so we assert true code defaults.
+    loaded = NorviqSettings(_env_file=None)
     assert loaded.policy_engine_url == "http://localhost:8181"
     assert loaded.redis_url == "redis://localhost:6379"
-    assert loaded.enforcement_mode == "audit"
+    assert loaded.enforcement_mode == "block"  # secure default (see CLAUDE.md / config.py)
     assert loaded.trust_threshold == 0.7
     assert loaded.log_level == "INFO"
 
@@ -37,9 +38,10 @@ def test_settings_reads_env_vars(monkeypatch) -> None:
 def test_settings_validates_types(monkeypatch) -> None:
     """Parse scalar values into typed fields."""
     monkeypatch.setenv("NRVQ_SDK_TIMEOUT_MS", "9000")
-    monkeypatch.setenv("NRVQ_PG_POOL_SIZE", "25")
+    # pg_pool_size's validation_alias is PG_POOL_SIZE/DB_POOL_SIZE (no NRVQ_ prefix) — config.py.
+    monkeypatch.setenv("PG_POOL_SIZE", "25")
     monkeypatch.setenv("NRVQ_TRUST_VIOLATION_PENALTY", "0.15")
-    loaded = NorviqSettings()
+    loaded = NorviqSettings(_env_file=None)
     assert isinstance(loaded.sdk_timeout_ms, int)
     assert isinstance(loaded.pg_pool_size, int)
     assert isinstance(loaded.trust_violation_penalty, float)
@@ -51,3 +53,26 @@ def test_settings_validates_types(monkeypatch) -> None:
 def test_settings_singleton_import() -> None:
     """Expose importable settings singleton."""
     assert isinstance(settings, NorviqSettings)
+
+
+def test_api_secret_key_reads_nrvq_prefixed_env(monkeypatch) -> None:
+    """A2: the chart sets NRVQ_API_SECRET_KEY — it must actually populate api_secret_key."""
+    monkeypatch.setenv("NRVQ_API_SECRET_KEY", "rotated-prod-secret-123")
+    loaded = NorviqSettings(_env_file=None)
+    assert loaded.api_secret_key == "rotated-prod-secret-123"
+
+
+def test_db_ssl_mode_reads_nrvq_prefixed_env(monkeypatch) -> None:
+    """A2: NRVQ_DB_SSL_MODE from the chart configmap must populate db_ssl_mode."""
+    monkeypatch.setenv("NRVQ_DB_SSL_MODE", "verify-full")
+    loaded = NorviqSettings(_env_file=None)
+    assert loaded.db_ssl_mode == "verify-full"
+
+
+def test_require_strong_secret_defaults_false(monkeypatch) -> None:
+    """A2: the strong-secret guard is opt-in so dev/tests/attacks keep working by default."""
+    for key in list(os.environ):
+        if key.startswith("NRVQ_"):
+            monkeypatch.delenv(key, raising=False)
+    loaded = NorviqSettings(_env_file=None)
+    assert loaded.require_strong_secret is False

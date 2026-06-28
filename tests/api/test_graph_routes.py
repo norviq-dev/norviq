@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from norviq.api.auth import get_current_user
 from norviq.api.main import create_app
 from norviq.engine.graph.asset_graph import AssetGraphBuilder
 
@@ -25,9 +26,10 @@ class _FakeEvaluator:
 
 
 def _client() -> TestClient:
-    """Build test client with graph-enabled evaluator state."""
+    """Build test client with graph-enabled evaluator state (auth overridden to an admin)."""
     app = create_app()
     app.state.evaluator = _FakeEvaluator()
+    app.dependency_overrides[get_current_user] = lambda: {"role": "admin", "namespace": "default"}
     return TestClient(app)
 
 

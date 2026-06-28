@@ -28,8 +28,9 @@ def create_http_fallback(interceptor: ToolInterceptor, emitter: AuditEmitter, re
         try:
             data = await request.json()
         except Exception as exc:
+            # Fail CLOSED: an undecodable body must DROP, not forward (no bypass on the error path).
             log.error("nrvq.sidecar.http.decode_error", error=str(exc), code="NRVQ-SDC-3011")
-            return {"action": "forward", "error": "invalid_json_body"}
+            return {"action": "drop", "error": "invalid_json_body"}
         tool_name = str(data.get("tool_name", ""))
         tool_params = data.get("tool_params", {})
         session_id = str(data.get("session_id", ""))

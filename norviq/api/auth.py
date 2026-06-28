@@ -27,3 +27,24 @@ def require_admin(user: dict) -> None:
     role = str(user.get("role", "")).lower()
     if role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
+
+
+def scoped_namespace(user: dict, requested: str | None) -> str | None:
+    """Restrict a non-admin caller to its own namespace claim.
+
+    Admins may read any namespace (or all, when requested is None). Non-admin tokens may only read
+    the namespace in their claim — a request for a different namespace is 403. This stops a token
+    scoped to one tenant from reading another tenant's audit/agent/policy data via the query param.
+    """
+    role = str(user.get("role", "")).lower()
+    if role == "admin":
+        return requested
+    claim_ns = str(user.get("namespace", "") or "")
+    if requested and claim_ns and requested != claim_ns:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized for this namespace")
+    return claim_ns or requested
+
+
+def decode_token(token: str) -> dict:
+    """Decode an HS256 token outside the HTTP dependency (e.g. websocket query param). Raises JWTError."""
+    return dict(jwt.decode(token, settings.api_secret_key, algorithms=["HS256"]))

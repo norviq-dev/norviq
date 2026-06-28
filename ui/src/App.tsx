@@ -12,7 +12,7 @@ const TargetSettings = lazy(() => import("./pages/TargetSettings").then((m) => (
 const AuditLog = lazy(() => import("./pages/AuditLog").then((m) => ({ default: m.AuditLog })));
 const AgentMonitor = lazy(() => import("./pages/AgentMonitor").then((m) => ({ default: m.AgentMonitor })));
 const PolicyTester = lazy(() => import("./pages/PolicyTester").then((m) => ({ default: m.PolicyTester })));
-const RedTeam = lazy(() => import("./pages/RedTeam"));
+// RedTeam page is retained but unrouted (Day-8 stub) until the feature ships.
 const AssetGraph = lazy(() => import("./pages/AssetGraph"));
 const AttackGraph = lazy(() => import("./pages/AttackGraph").then((m) => ({ default: m.AttackGraph })));
 const MITRECoverage = lazy(() => import("./pages/MITRECoverage").then((m) => ({ default: m.MITRECoverage })));
@@ -41,7 +41,6 @@ function App() {
             <Route path="/audit" element={<AuditLog />} />
             <Route path="/agents" element={<AgentMonitor />} />
             <Route path="/test" element={<PolicyTester />} />
-            <Route path="/redteam" element={<RedTeam />} />
             <Route path="/threats" element={<Navigate to="/threats/graph" replace />} />
             <Route path="/asset-graph" element={<AssetGraph />} />
             <Route path="/threats/graph" element={<AttackGraph />} />

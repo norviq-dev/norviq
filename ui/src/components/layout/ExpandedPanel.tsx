@@ -19,6 +19,7 @@ import {
   type LucideIcon
 } from "lucide-react";
 import { NavLink } from "react-router-dom";
+import { logout } from "../../api/client";
 import { Section, useApp } from "../../store/AppContext";
 
 type NavItem = { to: string; label: string; icon: LucideIcon };
@@ -48,8 +49,8 @@ const PANEL_CONFIG: Record<Section, { title: string; groups: Group[] }> = {
         id: "testing",
         label: "TESTING",
         items: [
-          { to: "/test", label: "Policy Tester", icon: Beaker },
-          { to: "/redteam", label: "Red Team", icon: Beaker }
+          { to: "/test", label: "Policy Tester", icon: Beaker }
+          // Red Team is a Day-8 stub; hidden from nav until the feature ships.
         ]
       }
     ]
@@ -134,7 +135,7 @@ export default function ExpandedPanel({
         ))}
         {activeSection === "settings" && (
           <div className="nav-group" style={{ marginTop: "auto" }}>
-            <button className="sb-link logout-link" type="button">
+            <button className="sb-link logout-link" type="button" onClick={logout}>
               <LogOut size={16} />
               <span>Logout</span>
             </button>

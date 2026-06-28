@@ -39,6 +39,15 @@ type HistoryItem = {
   chainDepth: number;
 };
 
+// evaluator_error is real provenance (the engine hit an OPA cold-path/timeout and
+// failed closed) — show a human label + tooltip instead of the raw internal token.
+function ruleLabel(ruleId: string): { text: string; title?: string } {
+  if (ruleId === "evaluator_error") {
+    return { text: "evaluation error — retry", title: "The policy engine could not complete this evaluation (transient). Retry the call." };
+  }
+  return { text: ruleId || "default_allow" };
+}
+
 const TOOL_OPTIONS = [
   "search_kb",
   "get_customer",
@@ -404,7 +413,7 @@ export function PolicyTester() {
               </div>
               <div className="kv">
                 <span className="k">Rule</span>
-                <span className="mono">{result.ruleId || "default_allow"}</span>
+                <span className="mono" title={ruleLabel(result.ruleId).title}>{ruleLabel(result.ruleId).text}</span>
               </div>
               <div className="kv">
                 <span className="k">Trust</span>
@@ -489,7 +498,7 @@ export function PolicyTester() {
                     </td>
                     <td className="mono">{item.toolName}</td>
                     <td className="mono muted">{truncateParams(item.toolParams)}</td>
-                    <td className="mono muted">{item.ruleId || "default_allow"}</td>
+                    <td className="mono muted" title={ruleLabel(item.ruleId).title}>{ruleLabel(item.ruleId).text}</td>
                     <td className="mono">{item.latencyMs.toFixed(1)}ms</td>
                   </tr>
                 ))

@@ -12,6 +12,42 @@ from opentelemetry.metrics import Meter
 log = structlog.get_logger()
 _meter: Meter = metrics.get_meter("norviq")
 
+# Prometheus mirror: the OTel meters above only surface on /metrics when OTel is
+# enabled (provider.py wires a PrometheusMetricReader). OTel is off by default, so
+# we also record into prometheus_client instruments on a dedicated registry that
+# exporter.py always mounts — guaranteeing norviq_* lines on /metrics either way.
+try:
+    from prometheus_client import CollectorRegistry, Counter, Histogram
+
+    NRVQ_REGISTRY: CollectorRegistry | None = CollectorRegistry()
+    _LATENCY_BUCKETS = (1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000)
+    _p_tool_calls = Counter(
+        "norviq_tool_calls_total", "Total tool calls processed",
+        ["namespace", "agent_class", "tool_name", "decision"], registry=NRVQ_REGISTRY,
+    )
+    _p_tool_blocked = Counter(
+        "norviq_tool_calls_blocked_total", "Total tool calls blocked",
+        ["namespace", "agent_class", "tool_name"], registry=NRVQ_REGISTRY,
+    )
+    _p_cache_hits = Counter("norviq_cache_hits_total", "Cache hits", ["cache_type"], registry=NRVQ_REGISTRY)
+    _p_cache_misses = Counter("norviq_cache_misses_total", "Cache misses", ["cache_type"], registry=NRVQ_REGISTRY)
+    _p_eval_latency = Histogram(
+        "norviq_evaluation_latency_ms", "Policy evaluation latency in milliseconds",
+        ["namespace", "cache_hit"], buckets=_LATENCY_BUCKETS, registry=NRVQ_REGISTRY,
+    )
+    _p_trust = Histogram(
+        "norviq_trust_score", "Trust score distribution", ["namespace"],
+        buckets=(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0), registry=NRVQ_REGISTRY,
+    )
+    _p_api_latency = Histogram(
+        "norviq_api_request_latency_ms", "API request latency in milliseconds",
+        ["endpoint"], buckets=_LATENCY_BUCKETS, registry=NRVQ_REGISTRY,
+    )
+except ModuleNotFoundError:  # pragma: no cover
+    NRVQ_REGISTRY = None
+    _p_tool_calls = _p_tool_blocked = _p_cache_hits = _p_cache_misses = None
+    _p_eval_latency = _p_trust = _p_api_latency = None
+
 tool_call_total = None
 tool_call_blocked = None
 cache_hits = None
@@ -58,15 +94,28 @@ def init_metrics(meter: Meter | None = None) -> None:
 
 def record_tool_call(labels: dict[str, str], latency_ms: float, trust_score: float, cache_hit_value: bool) -> None:
     """Record tool call counters and latency histograms."""
+    namespace = labels.get("namespace", "default")
     try:
         tool_call_total.add(1, labels)
-        latency_labels = {"namespace": labels.get("namespace", "default"), "cache_hit": str(cache_hit_value).lower()}
+        latency_labels = {"namespace": namespace, "cache_hit": str(cache_hit_value).lower()}
         evaluation_latency.record(latency_ms, latency_labels)
-        trust_score_distribution.record(trust_score, {"namespace": labels.get("namespace", "default")})
+        trust_score_distribution.record(trust_score, {"namespace": namespace})
         if labels.get("decision") == "block":
             tool_call_blocked.add(1, labels)
     except Exception as exc:  # pragma: no cover
         log.error("nrvq.telemetry.metric_failed", error=str(exc), code="NRVQ-TEL-12005")
+    if _p_tool_calls is not None:
+        try:
+            agent_class = labels.get("agent_class", "")
+            tool_name = labels.get("tool_name", "")
+            decision = labels.get("decision", "")
+            _p_tool_calls.labels(namespace, agent_class, tool_name, decision).inc()
+            _p_eval_latency.labels(namespace, str(cache_hit_value).lower()).observe(latency_ms)
+            _p_trust.labels(namespace).observe(trust_score)
+            if decision == "block":
+                _p_tool_blocked.labels(namespace, agent_class, tool_name).inc()
+        except Exception as exc:  # pragma: no cover
+            log.error("nrvq.telemetry.metric_failed", error=str(exc), code="NRVQ-TEL-12005")
 
 
 def record_cache_hit(cache_type: str) -> None:
@@ -85,6 +134,12 @@ def _record_cache(counter, cache_type: str) -> None:
         counter.add(1, {"cache_type": cache_type})
     except Exception as exc:  # pragma: no cover
         log.error("nrvq.telemetry.metric_failed", error=str(exc), code="NRVQ-TEL-12005")
+    mirror = _p_cache_hits if counter is cache_hits else _p_cache_misses
+    if mirror is not None:
+        try:
+            mirror.labels(cache_type).inc()
+        except Exception as exc:  # pragma: no cover
+            log.error("nrvq.telemetry.metric_failed", error=str(exc), code="NRVQ-TEL-12005")
 
 
 def record_api_latency(endpoint: str, latency_ms: float) -> None:
@@ -93,6 +148,11 @@ def record_api_latency(endpoint: str, latency_ms: float) -> None:
         api_request_latency.record(latency_ms, {"endpoint": endpoint})
     except Exception as exc:  # pragma: no cover
         log.error("nrvq.telemetry.metric_failed", error=str(exc), code="NRVQ-TEL-12005")
+    if _p_api_latency is not None:
+        try:
+            _p_api_latency.labels(endpoint).observe(latency_ms)
+        except Exception as exc:  # pragma: no cover
+            log.error("nrvq.telemetry.metric_failed", error=str(exc), code="NRVQ-TEL-12005")
 
 
 init_metrics()

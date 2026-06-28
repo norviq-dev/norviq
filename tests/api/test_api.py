@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from jose import jwt
 
@@ -113,7 +114,9 @@ class FakeEvaluator:
     def bind_loader(self, loader: object) -> None:
         """Accept loader binding."""
 
-    async def _evaluate_opa(self, namespace: str, agent_class: str, opa_input: dict, rego_source: str = "") -> dict:
+    async def _evaluate_opa(
+        self, key: str, namespace: str, agent_class: str, opa_input: dict, rego_source: str = ""
+    ) -> dict:
         """Stub OPA eval: raise for a broken rego, else return a valid decision shape."""
         if "decision" not in rego_source:
             raise RuntimeError("opa eval failed: rego did not produce a decision")
@@ -168,8 +171,9 @@ def _auth_headers(role: str = "admin") -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def test_health_and_readyz() -> None:
-    """Serve healthz and readyz payloads."""
+def test_health_and_readyz(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serve healthz and readyz payloads. (subprocess mode: readyz omits the server-only opa key)."""
+    monkeypatch.setattr(settings, "opa_mode", "subprocess")
     client = _client()
     _override_session(client, FakeSession([]))
     try:
@@ -179,8 +183,9 @@ def test_health_and_readyz() -> None:
         client.close()
 
 
-def test_readyz_db_failure_returns_false() -> None:
+def test_readyz_db_failure_returns_false(monkeypatch: pytest.MonkeyPatch) -> None:
     """Return db=false when readiness DB probe fails."""
+    monkeypatch.setattr(settings, "opa_mode", "subprocess")
 
     class FailingSession:
         async def execute(self, stmt) -> None:
@@ -206,9 +211,9 @@ def test_policy_crud_flow() -> None:
         created = client.post("/api/v1/policies", json=body, headers=_auth_headers())
         assert created.status_code == 200
         assert created.json()["version"] == 1
-        listed = client.get("/api/v1/policies").json()
+        listed = client.get("/api/v1/policies?namespace=payments", headers=_auth_headers()).json()
         assert listed and listed[0]["namespace"] == "payments"
-        fetched = client.get("/api/v1/policies/payments/planner")
+        fetched = client.get("/api/v1/policies/payments/planner", headers=_auth_headers())
         assert fetched.status_code == 200
         assert fetched.json()["rego_source"] == rego
         assert client.delete("/api/v1/policies/payments/planner", headers=_auth_headers()).json() == {"deleted": True}
@@ -247,23 +252,17 @@ def test_policy_create_allows_spaced_default_allow_with_enforcement() -> None:
 
 
 def test_policy_create_rejects_regex_flood() -> None:
-    """Reject direct API policy with too many regex operations."""
+    """Reject direct API policy with too many regex operations (cap admits the ~11 the shipped
+    comprehensive policy uses; a flood well above the cap is still rejected)."""
     client = _client()
     try:
+        flood = "".join(
+            f'decision = "block" {{ regex.match("p{i}", input.tool_name) }}\n' for i in range(30)
+        )
         body = {
             "namespace": "payments",
             "agent_class": "planner",
-            "rego_source": (
-                'package norviq\n'
-                'decision = "block" { regex.match("a", input.tool_name) }\n'
-                'decision = "block" { regex.match("b", input.tool_name) }\n'
-                'decision = "block" { regex.match("c", input.tool_name) }\n'
-                'decision = "block" { regex.match("d", input.tool_name) }\n'
-                'decision = "block" { regex.match("e", input.tool_name) }\n'
-                'decision = "block" { regex.match("f", input.tool_name) }\n'
-                'rule_id = "r"\n'
-                'reason = "x"'
-            ),
+            "rego_source": f"package norviq\n{flood}rule_id = \"r\"\nreason = \"x\"",
         }
         response = client.post("/api/v1/policies", json=body, headers=_auth_headers())
         assert response.status_code == 422
@@ -308,7 +307,7 @@ def test_policy_get_missing_returns_404() -> None:
     """Return 404 for missing policy lookup."""
     client = _client()
     try:
-        response = client.get("/api/v1/policies/missing/missing")
+        response = client.get("/api/v1/policies/missing/missing", headers=_auth_headers())
         assert response.status_code == 404
     finally:
         client.close()
@@ -334,9 +333,9 @@ def test_audit_list_filter_and_stats() -> None:
     client = _client()
     _override_session(client, FakeSession([row]))
     try:
-        records = client.get("/api/v1/audit/records?decision=block").json()
+        records = client.get("/api/v1/audit/records?decision=block", headers=_auth_headers()).json()
         assert len(records) == 1 and records[0]["decision"] == "block"
-        stats = client.get("/api/v1/audit/stats").json()
+        stats = client.get("/api/v1/audit/stats", headers=_auth_headers()).json()
         assert stats["total"] == 1 and stats["blocked"] == 1 and stats["top_tools"][0]["tool_name"] == "tool.alpha"
     finally:
         client.close()
@@ -362,7 +361,7 @@ def test_audit_records_with_range() -> None:
     client = _client()
     _override_session(client, FakeSession([row]))
     try:
-        records = client.get("/api/v1/audit/records?range=1h").json()
+        records = client.get("/api/v1/audit/records?range=1h", headers=_auth_headers()).json()
         assert len(records) == 1
     finally:
         client.close()
@@ -373,7 +372,7 @@ def test_audit_records_invalid_range_returns_422() -> None:
     client = _client()
     _override_session(client, FakeSession([]))
     try:
-        response = client.get("/api/v1/audit/records?range=99h")
+        response = client.get("/api/v1/audit/records?range=99h", headers=_auth_headers())
         assert response.status_code == 422
     finally:
         client.close()
@@ -399,7 +398,7 @@ def test_audit_stats_with_range() -> None:
     client = _client()
     _override_session(client, FakeSession([row]))
     try:
-        stats = client.get("/api/v1/audit/stats?range=7d").json()
+        stats = client.get("/api/v1/audit/stats?range=7d", headers=_auth_headers()).json()
         assert stats["total"] == 1 and stats["blocked"] == 1
     finally:
         client.close()
@@ -425,7 +424,7 @@ def test_top_blocked() -> None:
     client = _client()
     _override_session(client, FakeSession([row]))
     try:
-        top = client.get("/api/v1/audit/top-blocked").json()
+        top = client.get("/api/v1/audit/top-blocked", headers=_auth_headers()).json()
         assert top and top[0]["tool_name"] == "tool.alpha"
     finally:
         client.close()
@@ -451,7 +450,7 @@ def test_volume() -> None:
     client = _client()
     _override_session(client, FakeSession([row]))
     try:
-        volume = client.get("/api/v1/audit/volume").json()
+        volume = client.get("/api/v1/audit/volume", headers=_auth_headers()).json()
         assert len(volume) == 1 and volume[0]["block"] == 1
     finally:
         client.close()
@@ -484,7 +483,7 @@ def test_dry_run() -> None:
     client.app.state.evaluator = FakeEvaluator()
     try:
         body = {"namespace": "payments", "agent_class": "planner", "rego_source": 'package norviq\ndecision = "block" { input.tool_name == "danger" }\nrule_id = "r"\nreason = "x"'}
-        response = client.post("/api/v1/policies/dry-run", json=body)
+        response = client.post("/api/v1/policies/dry-run", json=body, headers=_auth_headers())
         assert response.status_code == 200
         data = response.json()
         assert data["valid"] is True  # dry-run now actually validates the submitted rego

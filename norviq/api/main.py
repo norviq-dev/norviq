@@ -8,18 +8,21 @@ from contextlib import asynccontextmanager
 import sys
 
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
+from norviq.api.audit_hub import AuditHub
 from norviq.api.db.session import close_db, create_tables, ensure_schema_compatibility, get_session, init_db
-from norviq.api.routers import attack_graph_compute, agents, audit, evaluate, graph, graphs, health, policies, redteam
+from norviq.api.siem import AuditForwarder
+from norviq.api.routers import attack_graph_compute, agents, audit, deployments, evaluate, graph, graphs, health, mitre, policies, redteam
 from norviq.config import settings
 from norviq.engine.audit_emitter import AuditEmitter
 from norviq.engine.cache import RedisCache
 from norviq.engine.evaluator import OPAEvaluator
 from norviq.engine.graph.store import GraphStore
+from norviq.engine.opa_client import shutdown_managed_opa
 from norviq.engine.policy_loader import PolicyLoader
 from norviq.telemetry.exporter import mount_metrics_endpoint
 from norviq.telemetry.middleware import TelemetryMiddleware
@@ -74,6 +77,22 @@ async def run_migrations() -> None:
 async def lifespan(app: FastAPI):
     """Run API startup and shutdown lifecycle."""
     setup_telemetry()
+    # A weak JWT secret means forgeable admin tokens. "Weak" = the shipped default, empty, or too
+    # short — checking all three so an unset/blank NRVQ_API_SECRET_KEY can't silently ship a forgeable
+    # key when require_strong_secret is on (fail-safe: refuse to start rather than run insecure).
+    secret = settings.api_secret_key or ""
+    if secret == "change-me-in-production" or len(secret) < 16:
+        log.warning(
+            "nrvq.api.insecure_default_secret",
+            detail="JWT secret is the shipped default, empty, or too short — tokens are forgeable. "
+            "Set NRVQ_API_SECRET_KEY to a strong value.",
+            code="NRVQ-API-7099",
+        )
+        if settings.require_strong_secret:
+            raise RuntimeError(
+                "Refusing to start: api_secret_key is weak (default/empty/<16 chars). "
+                "Set NRVQ_API_SECRET_KEY to a strong secret (NRVQ_REQUIRE_STRONG_SECRET is enabled)."
+            )
     log.info("nrvq.startup.db_engine_creating", code="NRVQ-DB-DEBUG-1")
     await _connect_with_backoff(init_db, "init_db", retry_code="NRVQ-DB-9035", fail_code="NRVQ-DB-9034")
     log.info("nrvq.startup.db_engine_created", code="NRVQ-DB-DEBUG-2")
@@ -83,6 +102,8 @@ async def lifespan(app: FastAPI):
         app.state.cache.connect, "cache_connect", retry_code="NRVQ-REG-9035", fail_code="NRVQ-REG-9034"
     )
     app.state.evaluator = OPAEvaluator(app.state.cache)
+    if settings.opa_mode == "server":
+        await app.state.evaluator.opa.start()
     app.state.graph_store = GraphStore(app.state.cache, session_factory=get_session)
     app.state.evaluator.bind_graph_store(app.state.graph_store)
     app.state.emitter = AuditEmitter()
@@ -97,8 +118,14 @@ async def lifespan(app: FastAPI):
         log.info("nrvq.startup.warm_cache_starting", code="NRVQ-DB-DEBUG-5")
         await app.state.loader.warm_cache()
         log.info("nrvq.startup.warm_cache_done", code="NRVQ-DB-DEBUG-6")
+    app.state.siem_forwarder = AuditForwarder()
+    await app.state.siem_forwarder.start()  # no-op unless settings.siem_enabled
     log.info("nrvq.api.started", port=settings.api_port, code="NRVQ-API-7000")
     yield
+    await app.state.siem_forwarder.stop()
+    if settings.opa_mode == "server":
+        await app.state.evaluator.opa.stop()
+        shutdown_managed_opa()
     await app.state.emitter.close()
     await app.state.cache.close()
     await close_db()
@@ -119,10 +146,53 @@ def create_app() -> FastAPI:
     app.include_router(policies.router, prefix="/api/v1", tags=["policies"])
     app.include_router(audit.router, prefix="/api/v1", tags=["audit"])
     app.include_router(agents.router, prefix="/api/v1", tags=["agents"])
+    app.include_router(deployments.router, prefix="/api/v1", tags=["deployments"])
+    app.include_router(mitre.router, prefix="/api/v1", tags=["mitre"])
     app.include_router(graph.router, prefix="/api/v1")
     app.include_router(graphs.router)
     app.include_router(attack_graph_compute.router)
     app.include_router(redteam.router, prefix="/api/v1", tags=["redteam"])
+    app.state.audit_hub = AuditHub()
+
+    @app.websocket("/ws/audit")
+    async def ws_audit(websocket: WebSocket) -> None:
+        """Stream live decisions to the Audit Log feed, scoped by the token's namespace claim."""
+        # Authenticate BEFORE accepting the socket (token via ?token= or Authorization header).
+        from jose import JWTError
+
+        from norviq.api.auth import decode_token, scoped_namespace
+
+        raw = websocket.query_params.get("token") or ""
+        if not raw:
+            header = websocket.headers.get("authorization", "")
+            raw = header[7:] if header.lower().startswith("bearer ") else ""
+        try:
+            user = decode_token(raw)
+        except JWTError:
+            await websocket.close(code=1008)  # policy violation: invalid/missing token
+            return
+        requested_ns = websocket.query_params.get("namespace", "")
+        try:
+            namespace = scoped_namespace(user, requested_ns) or ""
+        except Exception:
+            await websocket.close(code=1008)
+            return
+        await websocket.accept()
+        hub: AuditHub = websocket.app.state.audit_hub
+        queue = hub.subscribe()
+        log.info("nrvq.api.ws_audit.open", namespace=namespace, code="NRVQ-API-7040")
+        try:
+            while True:
+                record = await queue.get()
+                if namespace and namespace != "all" and record.get("namespace") not in (namespace, "", None):
+                    continue
+                await websocket.send_json(record)
+        except WebSocketDisconnect:
+            pass
+        finally:
+            hub.unsubscribe(queue)
+            log.info("nrvq.api.ws_audit.close", code="NRVQ-API-7041")
+
     app.add_middleware(TelemetryMiddleware)
     mount_metrics_endpoint(app)
     return app

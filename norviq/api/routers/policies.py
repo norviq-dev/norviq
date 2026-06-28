@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from norviq.api.auth import get_current_user
+from norviq.api.auth import get_current_user, require_admin, scoped_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
 
@@ -50,9 +50,21 @@ class ApplyRequest(BaseModel):
     enforcement_mode: str = "block"
 
 
+def _infer_target_type(ns: str, agent_class: str) -> str:
+    """Classify a loader policy key into the UI's catalog tiers (class | namespace | workload)."""
+    if ns == "__cluster__" or agent_class == "__baseline__" or agent_class.startswith("namespace:"):
+        return "namespace"
+    if ":" in agent_class:  # kind:name workload target, e.g. "deployment:checkout"
+        return "workload"
+    return "class"
+
+
 @router.get("/policies")
-async def list_policies(request: Request, namespace: str = Query("default")) -> list[dict]:
+async def list_policies(
+    request: Request, namespace: str = Query("default"), user: dict = Depends(get_current_user)
+) -> list[dict]:
     """List policies loaded in memory, scoped to one namespace."""
+    namespace = scoped_namespace(user, namespace) or "default"
     rows = []
     loader = request.app.state.loader
     for key, entry in loader._policies.items():
@@ -63,6 +75,7 @@ async def list_policies(request: Request, namespace: str = Query("default")) -> 
             {
                 "namespace": namespace,
                 "agent_class": agent_class,
+                "target_type": _infer_target_type(ns, agent_class),
                 "current_version": len(loader.get_versions(namespace, agent_class)),
                 "rego_length": len(str(entry["rego"])),
                 "priority": int(entry.get("priority", 100)),
@@ -73,8 +86,11 @@ async def list_policies(request: Request, namespace: str = Query("default")) -> 
 
 
 @router.get("/policies/{namespace}/{agent_class}")
-async def get_policy(namespace: str, agent_class: str, request: Request) -> dict:
+async def get_policy(
+    namespace: str, agent_class: str, request: Request, user: dict = Depends(get_current_user)
+) -> dict:
     """Get one policy."""
+    scoped_namespace(user, namespace)  # 403 if a non-admin reads another namespace's policy
     loader = request.app.state.loader
     rego = loader.get_current(namespace, agent_class)
     if rego is None:
@@ -85,7 +101,7 @@ async def get_policy(namespace: str, agent_class: str, request: Request) -> dict
 @router.post("/policies")
 async def create_policy(body: PolicyCreate, request: Request, user: dict = Depends(get_current_user)) -> dict:
     """Create or update a policy."""
-    _ = user
+    require_admin(user)
     validate_policy_create(body)
     agent_class = resolve_policy_key(body)
     version = await request.app.state.loader.create(
@@ -121,8 +137,11 @@ def validate_policy_create(body: PolicyCreate) -> None:
     lines = [line for line in cleaned.splitlines() if line.strip()]
     if len(lines) > 500:
         raise HTTPException(status_code=422, detail="rego_source exceeds line limit")
+    # Soft abuse heuristic (OPA uses linear-time RE2, so this is not a ReDoS guard). The shipped
+    # comprehensive policy legitimately uses ~11 regex ops after the base64/PII/PCI detection rules,
+    # so the cap must admit it with headroom.
     regex_ops = len(re.findall(r"\bregex\.[a-zA-Z0-9_]+\b", dequoted)) + len(re.findall(r"\bre_match\s*\(", dequoted))
-    if regex_ops > 5:
+    if regex_ops > 25:
         raise HTTPException(status_code=422, detail="too many regex operations")
     if not re.search(r'decision\s*=\s*"(block|escalate)"\s*\{', cleaned):
         raise HTTPException(status_code=422, detail="rego_source must include block or escalate decision")
@@ -172,7 +191,7 @@ async def delete_policy(
     namespace: str, agent_class: str, request: Request, user: dict = Depends(get_current_user)
 ) -> dict:
     """Delete a policy from in-memory index."""
-    _ = user
+    require_admin(user)
     deleted = await request.app.state.loader.delete(namespace, agent_class)
     if not deleted:
         raise HTTPException(status_code=404, detail="Policy not found")
@@ -181,8 +200,11 @@ async def delete_policy(
 
 
 @router.get("/policies/{namespace}/{agent_class}/versions")
-async def get_versions(namespace: str, agent_class: str, request: Request) -> list[dict]:
+async def get_versions(
+    namespace: str, agent_class: str, request: Request, user: dict = Depends(get_current_user)
+) -> list[dict]:
     """Return policy version history."""
+    scoped_namespace(user, namespace)  # 403 if a non-admin reads another namespace's versions
     versions = request.app.state.loader.get_versions(namespace, agent_class)
     return [{"version": v.version, "saved_by": v.saved_by, "saved_at": v.saved_at.isoformat()} for v in versions]
 
@@ -196,7 +218,7 @@ async def rollback_policy(
     user: dict = Depends(get_current_user),
 ) -> dict:
     """Rollback policy to a previous version."""
-    _ = user
+    require_admin(user)
     try:
         rego = await request.app.state.loader.rollback(namespace, agent_class, body.target_version)
     except Exception as exc:
@@ -227,7 +249,10 @@ async def _validate_rego(evaluator, body: PolicyCreate) -> tuple[bool, list[str]
     try:
         # Reuse the same OPA path real evaluation uses: this both compiles the rego and
         # confirms it yields a decision object (a syntax error makes opa exit non-zero → raises).
-        decision = await evaluator._evaluate_opa(namespace, agent_class, sample_input, body.rego_source)
+        # A distinct "dryrun:" key isolates the probe module so it never clobbers the live policy's
+        # module in the shared OPA server (server mode).
+        dry_key = f"dryrun:{namespace}:{agent_class}"
+        decision = await evaluator._evaluate_opa(dry_key, namespace, agent_class, sample_input, body.rego_source)
         if decision.get("rule_id") == "evaluator_invalid_payload":
             errors.append("policy compiled but produced no valid decision object")
     except Exception as exc:
@@ -240,8 +265,10 @@ async def dry_run_policy(
     body: PolicyCreate,
     request: Request,
     session: AsyncSession = Depends(get_session),
+    user: dict = Depends(get_current_user),
 ) -> dict:
     """Validate the submitted rego (compile + sample decision) and report recent block-rate."""
+    _ = user  # authenticated; any role may dry-run (read-only simulation)
     valid, errors, sample_decision = await _validate_rego(request.app.state.evaluator, body)
     since = datetime.now(timezone.utc) - timedelta(hours=24)
     base = select(func.count(AuditLogEntry.id)).where(AuditLogEntry.timestamp_utc >= since)
@@ -277,7 +304,7 @@ async def apply_policy(
     user: dict = Depends(get_current_user),
 ) -> dict:
     """Apply a saved policy to a target scope."""
-    _ = user
+    require_admin(user)
     loader = request.app.state.loader
     rego = loader.get_current(namespace, agent_class)
     if not rego:

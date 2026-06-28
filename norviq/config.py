@@ -70,6 +70,16 @@ class NorviqSettings(BaseSettings):
     trust_threshold: float = 0.7
     trust_violation_penalty: float = 0.05
     evaluator_max_concurrency: int = 10
+    # OPA evaluation runtime. "server" = long-lived OPA queried over HTTP (default, low latency + HA);
+    # "subprocess" = legacy per-call `opa eval` fork (rollback gate, no redeploy needed to revert).
+    opa_mode: str = "server"
+    # Base URL of the OPA server (the in-pod sidecar). Empty -> spawn a managed `opa run --server`
+    # on startup (local/dev/tests). NRVQ_OPA_URL.
+    opa_url: str = ""
+    # Bind address for the managed OPA server when opa_url is unset.
+    opa_addr: str = "127.0.0.1:8181"
+    # Tight per-query HTTP timeout; on timeout/error the evaluator fails CLOSED (block).
+    opa_timeout_ms: int = 250
     debug_opa_logging: bool = Field(default=False, validation_alias=AliasChoices("DEBUG_OPA_LOGGING", "DEBUG_OPA"))
     evaluator_rate_limit_per_window: int = 60
     evaluator_rate_limit_window_s: int = 60
@@ -86,7 +96,7 @@ class NorviqSettings(BaseSettings):
     pg_url: str = "postgresql://norviq:norviq_dev@localhost:5432/norviq"
     db_ssl_mode: str = Field(
         default="prefer",
-        validation_alias=AliasChoices("DB_SSL_MODE", "PG_SSL_MODE", "PG_SSLMODE"),
+        validation_alias=AliasChoices("DB_SSL_MODE", "PG_SSL_MODE", "PG_SSLMODE", "NRVQ_DB_SSL_MODE"),
     )
     pg_pool_size: int = Field(default=10, validation_alias=AliasChoices("PG_POOL_SIZE", "DB_POOL_SIZE"))
     db_pool_max_overflow: int = 5
@@ -104,13 +114,22 @@ class NorviqSettings(BaseSettings):
     api_port: int = 8080
     api_secret_key: str = Field(
         default="change-me-in-production",  # Replace in non-dev deployments.
-        validation_alias=AliasChoices("API_SECRET_KEY", "JWT_SECRET"),
+        # NRVQ_API_SECRET_KEY is what the Helm chart sets — include it so the key is rotatable.
+        validation_alias=AliasChoices("API_SECRET_KEY", "JWT_SECRET", "NRVQ_API_SECRET_KEY"),
     )
+    # When true (set in prod via NRVQ_REQUIRE_STRONG_SECRET), the API refuses to start on the
+    # default JWT secret. Defaults False so local dev / tests / the attack suite keep working.
+    require_strong_secret: bool = False
     webhook_port: int = 8443
     webhook_cert_dir: str = "/etc/norviq/certs"
     sidecar_image: str = "sanman97/norviq-engine:engine-latest"
     session_ttl_s: int = 3600
     graph_max_nodes: int = 5000
+    # SIEM forwarder (outbound audit push). Off by default; the pull export endpoint is always on.
+    siem_enabled: bool = False
+    siem_webhook_url: str = ""
+    siem_format: str = "ndjson"  # ndjson | syslog
+    siem_poll_interval_s: int = 30
 
 
 settings = NorviqSettings()

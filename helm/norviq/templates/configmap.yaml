@@ -8,6 +8,13 @@ metadata:
 data:
   NRVQ_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
   NRVQ_ENFORCEMENT_MODE: {{ .Values.config.enforcementMode | quote }}
+  NRVQ_REQUIRE_STRONG_SECRET: {{ .Values.config.requireStrongSecret | default false | quote }}
+  NRVQ_OPA_MODE: {{ .Values.config.opaMode | default "server" | quote }}
+  NRVQ_OPA_URL: {{ printf "http://localhost:%v" .Values.opa.port | quote }}
+  NRVQ_SIEM_ENABLED: {{ .Values.siem.enabled | default false | quote }}
+  NRVQ_SIEM_WEBHOOK_URL: {{ .Values.siem.webhookUrl | default "" | quote }}
+  NRVQ_SIEM_FORMAT: {{ .Values.siem.format | default "ndjson" | quote }}
+  NRVQ_SIEM_POLL_INTERVAL_S: {{ .Values.siem.pollIntervalSeconds | default 30 | quote }}
   NRVQ_TRUST_THRESHOLD: {{ .Values.config.trustThreshold | quote }}
   NRVQ_VIOLATION_PENALTY: {{ .Values.config.violationPenalty | quote }}
   NRVQ_RATE_LIMIT: {{ .Values.config.rateLimit | quote }}

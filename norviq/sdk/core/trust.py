@@ -45,3 +45,12 @@ class TrustScore(BaseModel):
     def is_trusted(self) -> bool:
         """Check whether trust score passes configured threshold."""
         return self.score >= settings.trust_threshold
+
+    def after_violation(self) -> "TrustScore":
+        """Return a new score with the violation penalty applied and the count incremented."""
+        new_score = max(0.0, round(self.score - settings.trust_violation_penalty, 4))
+        return TrustScore(
+            score=new_score,
+            violation_count=self.violation_count + 1,
+            factors={**self.factors, "last_violation": "penalty_applied"},
+        )

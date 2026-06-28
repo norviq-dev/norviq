@@ -3,20 +3,33 @@
 
 """Audit query routes."""
 
+import csv
+import io
+import json
+from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import desc, func, select
+from fastapi.responses import StreamingResponse
+from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from norviq.api.auth import get_current_user, scoped_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
 
 log = structlog.get_logger()
 router = APIRouter()
+
+# Bounded page size for streamed export so a large audit_log is never loaded into memory at once.
+_EXPORT_PAGE = 500
+_EXPORT_FIELDS = (
+    "id", "event_id", "tool_name", "decision", "agent_id", "agent_class",
+    "namespace", "rule_id", "reason", "session_id", "trust_score", "latency_ms", "timestamp",
+)
 
 
 def _since_for_range(range_value: Literal["1h", "6h", "24h", "7d", "30d"]) -> datetime:
@@ -36,6 +49,8 @@ def _to_dict(row: AuditLogEntry) -> dict:
         "namespace": row.namespace,
         "rule_id": row.rule_id,
         "reason": row.reason,
+        "agent_class": getattr(row, "agent_class", ""),
+        "session_id": getattr(row, "session_id", ""),
         "trust_score": row.trust_score,
         "latency_ms": row.latency_ms,
         "timestamp": row.timestamp_utc.isoformat(),
@@ -51,8 +66,10 @@ async def list_audit_records(
     limit: int = Query(default=50, le=500),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
+    user: dict = Depends(get_current_user),
 ) -> list[dict]:
     """List audit records with pagination and filters."""
+    namespace = scoped_namespace(user, namespace)
     since = _since_for_range(range)
     query = (
         select(AuditLogEntry)
@@ -73,7 +90,11 @@ async def list_audit_records(
 
 
 @router.get("/audit/records/{record_id}")
-async def get_audit_record(record_id: str, session: AsyncSession = Depends(get_session)) -> dict:
+async def get_audit_record(
+    record_id: str,
+    session: AsyncSession = Depends(get_session),
+    user: dict = Depends(get_current_user),
+) -> dict:
     """Get a single audit record by id."""
     try:
         parsed_id = UUID(record_id)
@@ -82,6 +103,7 @@ async def get_audit_record(record_id: str, session: AsyncSession = Depends(get_s
     row = await session.scalar(select(AuditLogEntry).where(AuditLogEntry.id == parsed_id))
     if row is None:
         raise HTTPException(status_code=404, detail="Record not found")
+    scoped_namespace(user, row.namespace)  # 403 if a non-admin reads another namespace's record
     payload = _to_dict(row)
     payload["payload"] = row.payload
     return payload
@@ -92,8 +114,10 @@ async def audit_stats(
     namespace: str | None = Query(default=None),
     range: Literal["1h", "6h", "24h", "7d", "30d"] = Query(default="24h"),
     session: AsyncSession = Depends(get_session),
+    user: dict = Depends(get_current_user),
 ) -> dict:
     """Return aggregate audit stats."""
+    namespace = scoped_namespace(user, namespace)
     since = _since_for_range(range)
     base = select(func.count(AuditLogEntry.id)).where(AuditLogEntry.timestamp_utc >= since)
     if namespace:
@@ -125,8 +149,10 @@ async def top_blocked_tools(
     range: Literal["1h", "6h", "24h", "7d", "30d"] = Query(default="24h"),
     limit: int = Query(default=5, ge=1, le=100),
     session: AsyncSession = Depends(get_session),
+    user: dict = Depends(get_current_user),
 ) -> list[dict]:
     """Top blocked tool names by count."""
+    namespace = scoped_namespace(user, namespace)
     since = _since_for_range(range)
     query = (
         select(AuditLogEntry.tool_name, func.count(AuditLogEntry.id).label("count"))
@@ -148,8 +174,10 @@ async def audit_volume(
     namespace: str | None = Query(default=None),
     range: Literal["1h", "6h", "24h", "7d", "30d"] = Query(default="24h"),
     session: AsyncSession = Depends(get_session),
+    user: dict = Depends(get_current_user),
 ) -> list[dict]:
     """Tool call volume bucketed by hour."""
+    namespace = scoped_namespace(user, namespace)
     since = _since_for_range(range)
     query = select(AuditLogEntry).where(AuditLogEntry.timestamp_utc >= since).order_by(AuditLogEntry.timestamp_utc)
     if namespace:
@@ -163,3 +191,76 @@ async def audit_volume(
         buckets[hour_key][record.decision] = int(buckets[hour_key].get(record.decision, 0)) + 1
     log.debug("nrvq.api.audit.volume", buckets=len(buckets), code="NRVQ-API-7023")
     return list(buckets.values())
+
+
+async def _stream_audit_rows(
+    session: AsyncSession, namespace: str | None, decision: str | None, since: datetime
+) -> AsyncIterator[AuditLogEntry]:
+    """Yield audit rows in keyset-paged chunks (never loads the whole table into memory)."""
+    last_ts: datetime | None = None
+    last_id = None
+    while True:
+        query = (
+            select(AuditLogEntry)
+            .where(AuditLogEntry.timestamp_utc >= since)
+            .order_by(desc(AuditLogEntry.timestamp_utc), desc(AuditLogEntry.id))
+            .limit(_EXPORT_PAGE)
+        )
+        if namespace:
+            query = query.where(AuditLogEntry.namespace == namespace)
+        if decision:
+            query = query.where(AuditLogEntry.decision == decision)
+        if last_ts is not None:
+            query = query.where(
+                or_(
+                    AuditLogEntry.timestamp_utc < last_ts,
+                    and_(AuditLogEntry.timestamp_utc == last_ts, AuditLogEntry.id < last_id),
+                )
+            )
+        rows = (await session.execute(query)).scalars().all()
+        if not rows:
+            return
+        for row in rows:
+            yield row
+        if len(rows) < _EXPORT_PAGE:
+            return
+        last_ts, last_id = rows[-1].timestamp_utc, rows[-1].id
+
+
+@router.get("/audit/export")
+async def export_audit_records(
+    format: Literal["ndjson", "csv"] = Query(default="ndjson"),
+    namespace: str | None = Query(default=None),
+    decision: str | None = Query(default=None),
+    range: Literal["1h", "6h", "24h", "7d", "30d"] = Query(default="24h"),
+    session: AsyncSession = Depends(get_session),
+    user: dict = Depends(get_current_user),
+) -> StreamingResponse:
+    """Stream audit records for SIEM ingest as NDJSON or CSV, namespace-scoped to the caller."""
+    namespace = scoped_namespace(user, namespace)
+    since = _since_for_range(range)
+    log.info("nrvq.api.audit.export", format=format, namespace=namespace, code="NRVQ-API-7024")
+
+    async def _ndjson() -> AsyncIterator[str]:
+        async for row in _stream_audit_rows(session, namespace, decision, since):
+            yield json.dumps(_to_dict(row), separators=(",", ":")) + "\n"
+
+    async def _csv() -> AsyncIterator[str]:
+        header = io.StringIO()
+        csv.writer(header).writerow(_EXPORT_FIELDS)
+        yield header.getvalue()
+        async for row in _stream_audit_rows(session, namespace, decision, since):
+            record = _to_dict(row)
+            buf = io.StringIO()
+            csv.writer(buf).writerow([record.get(field, "") for field in _EXPORT_FIELDS])
+            yield buf.getvalue()
+
+    if format == "csv":
+        return StreamingResponse(
+            _csv(), media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=norviq-audit-export.csv"},
+        )
+    return StreamingResponse(
+        _ndjson(), media_type="application/x-ndjson",
+        headers={"Content-Disposition": "attachment; filename=norviq-audit-export.ndjson"},
+    )

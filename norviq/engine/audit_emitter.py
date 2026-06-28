@@ -33,7 +33,13 @@ class AuditEmitter:
         self._tracer: trace.Tracer | None = None
 
     async def init(self) -> None:
-        """Initialize OTel tracer with OTLP exporter."""
+        """Initialize OTel tracer with OTLP exporter (skipped when OTel is disabled)."""
+        if not settings.otel_enabled:
+            # Don't build the OTLP exporter / batch processor when OTel is off — otherwise the
+            # background batcher spams the (absent) collector even with otel.enabled=false.
+            self._tracer = None
+            log.info("nrvq.audit.init_skipped", reason="otel_disabled", code="NRVQ-AUD-6008")
+            return
         try:
             provider = TracerProvider()
             exporter = OTLPSpanExporter(endpoint=settings.otel_endpoint, insecure=True)

@@ -17,6 +17,7 @@ from norviq.engine.identity import SPIFFEResolver
 from norviq.exceptions import NorviqBlockError
 from norviq.sdk.core.interceptor import ToolInterceptor
 from norviq.sdk.langchain.adapter import protect
+from tests.conftest import flush_runtime
 
 try:
     from langchain_core.tools import BaseTool
@@ -49,11 +50,13 @@ def redis_url() -> str:
 
 
 @pytest.fixture
-async def interceptor(redis_url: str) -> AsyncIterator[ToolInterceptor]:
-    """Create ToolInterceptor for adapter tests."""
+async def interceptor(redis_url: str, seeded_loader) -> AsyncIterator[ToolInterceptor]:
+    """Create ToolInterceptor for adapter tests (comprehensive.rego cluster baseline)."""
     cache = RedisCache(url=redis_url)
     await cache.connect()
+    await flush_runtime(cache)  # isolate trust/cache from the prior block test in this file
     evaluator = OPAEvaluator(cache)
+    evaluator.bind_loader(seeded_loader)
     resolver = SPIFFEResolver()
     yield ToolInterceptor(evaluator=evaluator, resolver=resolver)
     await evaluator.close()

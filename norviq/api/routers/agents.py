@@ -9,7 +9,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from norviq.api.auth import get_current_user, require_admin
+from norviq.api.auth import get_current_user, require_admin, scoped_namespace
 from norviq.sdk.core.trust import TrustScore
 
 log = structlog.get_logger()
@@ -38,8 +38,12 @@ async def list_agents(
     namespace: str = Query("default"),
     user: dict = Depends(get_current_user),
 ) -> list[dict]:
-    """List agents with trust scores in cache, scoped to one namespace."""
-    _ = user
+    """List agents with trust scores, scoped to the caller's namespace.
+
+    Reads the live ``trust:*`` cache first; when it is cold (entries past their TTL)
+    it falls back to the persistent ``agent_registry`` so the Agents view stays populated.
+    """
+    namespace = scoped_namespace(user, namespace)
     cache = request.app.state.cache
     rows = []
     async for key in cache._client().scan_iter("trust:*"):
@@ -60,8 +64,44 @@ async def list_agents(
                     "recommendation": details["recommendation"],
                 }
             )
+    if not rows:
+        rows = await _agents_from_registry(namespace)
     log.debug("nrvq.api.agents.listed", count=len(rows), code="NRVQ-API-7030")
     return rows
+
+
+async def _agents_from_registry(namespace: str) -> list[dict]:
+    """Read agents from the persistent registry when the trust cache is cold."""
+    try:
+        from sqlalchemy import select
+
+        from norviq.api.db.models import AgentRegistryEntry
+        from norviq.api.db.session import get_session
+
+        provider = get_session()
+        session = await provider.__anext__()
+        try:
+            result = await session.execute(
+                select(AgentRegistryEntry).where(AgentRegistryEntry.namespace == namespace)
+            )
+            entries = result.scalars().all()
+        finally:
+            await provider.aclose()
+    except Exception as exc:  # pragma: no cover
+        log.error("nrvq.api.agents.registry_read_failed", error=str(exc), code="NRVQ-API-7032")
+        return []
+    return [
+        {
+            "spiffe_id": entry.spiffe_id,
+            "score": entry.trust_score,
+            "category": entry.trust_category.lower(),
+            "violation_count": entry.violation_count,
+            "signals": {},
+            "dominant_signal": "",
+            "recommendation": "",
+        }
+        for entry in entries
+    ]
 
 
 @router.get("/agents/{spiffe_id:path}")

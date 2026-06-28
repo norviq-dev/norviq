@@ -50,7 +50,10 @@ engine:
   port: 8282
 
 api:
-  replicas: 1
+  replicas: 2          # HA default: survive a single pod restart/drain without an enforcement gap
+  pdb:
+    enabled: true      # keep >=1 API pod available during voluntary disruptions (node drain/upgrade)
+    minAvailable: 1
   rollout:
     maxSurge: 1        # production default: zero-downtime (needs node headroom for a surge pod)
     maxUnavailable: 0
@@ -91,6 +94,16 @@ webhook:
   enabled: true
   validating:
     enabled: false
+  # Turnkey sidecar injection: render the MutatingWebhookConfiguration from the chart and
+  # auto-bootstrap TLS via a pre/post-install hook Job (self-signs a cert, writes the
+  # norviq-webhook-tls secret, patches the webhook caBundle). No cert-manager required.
+  # Enable with --set webhook.injection.enabled=true, then label target namespaces:
+  #   kubectl label ns <ns> norviq-injection=enabled
+  injection:
+    enabled: false
+    # Image with kubectl + openssl for the cert-bootstrap hook Job. alpine/k8s ships both and is
+    # publicly pullable (bitnami/kubectl tags were removed from Docker Hub in the 2025 Bitnami change).
+    certJobImage: "alpine/k8s:1.30.0"
   replicas: 2
   rollout:
     maxSurge: 1        # production default: zero-downtime (needs node headroom for a surge pod)
@@ -139,6 +152,21 @@ otel:
   endpoint: "http://otel-collector:4317"
   prometheusPort: 9090
 
+# Long-lived OPA policy engine, run as a sidecar in the api and engine pods (localhost:8181).
+# Each replica gets its own OPA -> no shared single point of failure. config.opaMode=server (default)
+# queries it over HTTP; set config.opaMode=subprocess to roll back to the per-call `opa eval` fork.
+opa:
+  enabled: true
+  image: "openpolicyagent/opa:latest-static"
+  port: 8181
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+
 ingress:
   enabled: false
   className: nginx
@@ -148,6 +176,10 @@ ingress:
 config:
   logLevel: INFO
   enforcementMode: block
+  # OPA evaluation runtime: "server" (HTTP to the sidecar) or "subprocess" (per-call fork, rollback).
+  opaMode: server
+  # Refuse to start on the default JWT secret. Set true in production (and set api.secretKey).
+  requireStrongSecret: false
   trustThreshold: 0.7
   violationPenalty: 0.05
   rateLimit: 60
@@ -155,3 +187,29 @@ config:
   dbPoolMaxOverflow: 10
   dbPoolTimeout: 10
   dbCommandTimeout: 10
+
+rbac:
+  # The chart ships the norviq-admin / norviq-policy-editor / norviq-viewer ClusterRoles but no
+  # subject bindings. Map them to your IdP groups or ServiceAccounts here. Gated off by default —
+  # set enabled: true and fill `bindings`. See docs/engineering/production-config.md.
+  exampleBindings:
+    enabled: false
+  bindings: []
+    # - role: norviq-admin          # one of: norviq-admin | norviq-policy-editor | norviq-viewer
+    #   kind: Group                 # Group | User | ServiceAccount
+    #   name: norviq-platform-admins
+    # - role: norviq-viewer
+    #   kind: Group
+    #   name: norviq-readonly
+    # - role: norviq-policy-editor
+    #   kind: ServiceAccount
+    #   name: ci-policy-bot
+    #   namespace: norviq
+
+siem:
+  # Outbound audit forwarder (SIEM). Off by default. When enabled the API streams new audit rows
+  # to webhookUrl as NDJSON. The authenticated GET /api/v1/audit/export endpoint is always available.
+  enabled: false
+  webhookUrl: ""
+  format: ndjson           # ndjson | syslog
+  pollIntervalSeconds: 30

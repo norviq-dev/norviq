@@ -172,6 +172,42 @@ async def upsert_policy(
     await session.execute(stmt)
 
 
+async def upsert_agent_registry(
+    session: AsyncSession,
+    *,
+    spiffe_id: str,
+    namespace: str,
+    agent_class: str,
+    trust_score: float,
+    trust_category: str,
+    violation_count: int = 0,
+) -> None:
+    """Write-through an agent's latest trust into the persistent registry (upsert by spiffe_id)."""
+    from norviq.api.db.models import AgentRegistryEntry
+
+    stmt = insert(AgentRegistryEntry).values(
+        spiffe_id=spiffe_id,
+        namespace=namespace,
+        agent_class=agent_class,
+        trust_score=trust_score,
+        trust_category=trust_category,
+        violation_count=violation_count,
+        last_seen=datetime.now(timezone.utc),
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["spiffe_id"],
+        set_={
+            "namespace": namespace,
+            "agent_class": agent_class,
+            "trust_score": trust_score,
+            "trust_category": trust_category,
+            "violation_count": violation_count,
+            "last_seen": datetime.now(timezone.utc),
+        },
+    )
+    await session.execute(stmt)
+
+
 async def lock_policy_for_update(session: AsyncSession, *, namespace: str, agent_class: str) -> object | None:
     """Lock one policy row before mutation."""
     from norviq.api.db.models import Policy

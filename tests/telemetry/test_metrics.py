@@ -40,3 +40,23 @@ def test_records_tool_call_and_cache_metrics() -> None:
     assert "norviq_api_request_latency_ms" in names
     assert "norviq_cache_hits_total" in names
     assert "norviq_cache_misses_total" in names
+
+
+def test_prometheus_mirror_exposes_norviq_metrics() -> None:
+    """The /metrics mirror registry surfaces norviq_* series even with OTel disabled."""
+    from prometheus_client import generate_latest
+
+    assert tel_metrics.NRVQ_REGISTRY is not None
+    labels = {"namespace": "tenant-b", "agent_class": "support", "tool_name": "search", "decision": "block"}
+    tel_metrics.record_tool_call(labels, latency_ms=8.0, trust_score=0.6, cache_hit_value=False)
+    tel_metrics.record_cache_hit("eval")
+    tel_metrics.record_cache_miss("policy")
+    tel_metrics.record_api_latency("/api/v1/evaluate", latency_ms=4.2)
+    out = generate_latest(tel_metrics.NRVQ_REGISTRY).decode()
+    assert "norviq_tool_calls_total" in out
+    assert "norviq_tool_calls_blocked_total" in out
+    assert "norviq_cache_hits_total" in out
+    assert "norviq_cache_misses_total" in out
+    assert "norviq_evaluation_latency_ms_bucket" in out
+    assert "norviq_trust_score_bucket" in out
+    assert "norviq_api_request_latency_ms_bucket" in out

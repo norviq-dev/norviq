@@ -69,17 +69,68 @@ export function AuditLog() {
     [timeRange, selectedNamespace, decision, tool]
   );
 
-  const wsUrl = buildWsUrl("/ws/audit");
+  // The /ws/audit socket authenticates before accepting — pass the bearer token as a query param
+  // (browsers can't set Authorization headers on WebSocket handshakes).
+  const wsToken = typeof localStorage !== "undefined" ? localStorage.getItem("nrvq_token") ?? "" : "";
+  const wsUrl = buildWsUrl(
+    `/ws/audit?namespace=${encodeURIComponent(selectedNamespace)}&token=${encodeURIComponent(wsToken)}`
+  );
   const ws = useWebSocket<AuditRecord>(wsUrl, live);
 
-  const streamed = useMemo(
-    () =>
-      ws.messages.slice(0, 6).map((m) => ({ ...m, _live: true })) as AuditRecord[],
-    [ws.messages]
-  );
+  // Fallback: when the socket isn't connected but Live is on, poll recent records on an
+  // interval and merge them in (deduped by id) so the Live feed still updates.
+  const [polled, setPolled] = useState<AuditRecord[]>([]);
+  useEffect(() => {
+    if (live && ws.connected) return; // socket is streaming; no need to poll
+    if (!live) {
+      setPolled([]);
+      return;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const recent = await fetchAuditRecords({
+          range: timeRange,
+          namespace: selectedNamespace,
+          decision: decision === "all" ? undefined : decision,
+          tool_name: tool || undefined,
+          limit: 10,
+          offset: 0
+        });
+        if (cancelled) return;
+        setPolled((prev) => {
+          const seen = new Set(prev.map((r) => r.id));
+          const fresh = recent.filter((r) => r.id && !seen.has(r.id));
+          return fresh.length ? [...fresh, ...prev].slice(0, 50) : prev;
+        });
+      } catch {
+        // ignore poll errors
+      }
+    };
+    poll();
+    const interval = setInterval(poll, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [live, ws.connected, timeRange, selectedNamespace, decision, tool]);
+
+  const streamed = useMemo(() => {
+    const merged = [...ws.messages, ...polled];
+    const seen = new Set<string>();
+    const out: AuditRecord[] = [];
+    for (const m of merged) {
+      const id = m.id ?? `${m.timestamp}-${m.tool_name}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push({ ...m, _live: true });
+    }
+    return out.slice(0, 6);
+  }, [ws.messages, polled]);
 
   const rows = useMemo(() => {
-    const all = [...(page === 0 ? streamed : []), ...(base.data ?? [])];
+    const liveIds = new Set(streamed.map((r) => r.id).filter(Boolean));
+    const all = [...(page === 0 ? streamed : []), ...(base.data ?? []).filter((r) => !liveIds.has(r.id))];
     return all.filter((r) =>
       agentFilter ? (r.agent_id ?? "").toLowerCase().includes(agentFilter.toLowerCase()) : true
     );
