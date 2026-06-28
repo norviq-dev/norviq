@@ -28,6 +28,11 @@ jobs:
       - name: Install CRDs
         run: kubectl apply -f crds/
       - name: Deploy
+        env:
+          # Rotated JWT secret from repo secrets — the chart no longer deploys the forgeable default
+          # (the A2 alias fix means api.secretKey is now actually read). requireStrongSecret=true makes
+          # the API refuse to start on a weak/empty/default key.
+          NRVQ_API_SECRET_KEY: ${{ secrets.NRVQ_API_SECRET_KEY }}
         run: |
           helm upgrade --install norviq helm/norviq/ \
             --namespace norviq \
@@ -36,4 +41,6 @@ jobs:
             --set images.engine.tag=engine-${{ github.sha }} \
             --set images.api.tag=api-${{ github.sha }} \
             --set images.ui.tag=ui-${{ github.sha }} \
-            --set images.webhook.tag=webhook-${{ github.sha }}
+            --set images.webhook.tag=webhook-${{ github.sha }} \
+            --set api.secretKey="$NRVQ_API_SECRET_KEY" \
+            --set config.requireStrongSecret=true

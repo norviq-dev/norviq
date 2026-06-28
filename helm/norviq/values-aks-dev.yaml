@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-# Single-node AKS dev cluster — ~1 vCPU, CPU-saturated (~97% requests).
-# Surge pods cannot schedule, so override ALL components to replace-in-place.
-# Remove this overlay once the cluster has node headroom (then the values.yaml
-# defaults give zero-downtime maxSurge:1/maxUnavailable:0). See docs/backlog.md
-# "Node capacity — right-size AKS agentpool for zero-downtime".
+# Single-node AKS dev cluster — ~1.9 vCPU allocatable, CPU-saturated (~97% requests, ~48m free).
+# Two jobs here: (1) replace-in-place rollout (no surge pods can schedule); (2) right-size the new
+# OPA sidecars / HA replicas so they fit the tight node instead of going Pending. Remove this overlay
+# once the agentpool is scaled (then values.yaml defaults give HA + zero-downtime).
+# See docs/backlog.md "Node capacity — right-size AKS agentpool for zero-downtime".
 api:
+  replicas: 1            # single node can't provide real HA; one replica + its OPA sidecar
+  pdb:
+    enabled: false       # PDB minAvailable:1 + replicas:1 → disruptionsAllowed:0 → blocks node drains
   rollout:
     maxSurge: 0
     maxUnavailable: 1
 engine:
+  replicas: 0            # standalone engine not needed for API-driven eval; frees ~150m (engine + its
+                         # OPA sidecar). Sidecar INJECTION uses the engine IMAGE, not this deployment.
   rollout:
     maxSurge: 0
     maxUnavailable: 1
@@ -17,6 +22,19 @@ ui:
     maxSurge: 0
     maxUnavailable: 1
 webhook:
+  replicas: 1            # 1 is enough on the single node
+  injection:
+    enabled: true        # turnkey TLS + injection ON — validates R1 end-to-end with the real engine image
   rollout:
     maxSurge: 0
     maxUnavailable: 1
+
+# Trim the OPA sidecar request so the api pod's extra container fits the saturated node.
+opa:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 48Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
