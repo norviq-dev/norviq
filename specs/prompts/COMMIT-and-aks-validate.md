@@ -4,7 +4,36 @@
 **Work item:** Commit the accumulated remediation (Tier A + close-out C1–C4 + R7 + eval harness/
 reports + v2 install fixes), push to main (auto-triggers CI build+push → AKS deploy), and validate
 the AKS cluster. Plan + PAUSE before pushing (push = auto prod deploy).
-**Commit:** (this prompt drives the commits) · **Result:** (to fill — commit SHAs + AKS validation)
+**Commit:** 7 commits `3d60dcb`→`9aad5fe` on main (6 thematic + 1 deploy hotfix) · **Result:** see below.
+
+**Outcome (done, deployed + validated):** Committed the accumulated remediation in 6 thematic
+commits + pushed to main; CI built 4 images and deployed to AKS. Two deploy issues surfaced and were
+fixed live: (1) a pre-existing **unmanaged `norviq-sidecar-injector` MWC** blocked Helm adoption →
+deleted the stale resource so Helm now owns it; (2) the **A2 alias fix exposed `dbSslMode=require`**
+against the no-TLS in-cluster Postgres → API CrashLooped on "rejected SSL upgrade" → added
+`config.dbSslMode: disable` to `values-aks-dev.yaml` (commit `9aad5fe`), redeployed green.
+
+**Prod-secret + capacity (as planned):** `deploy.yml` now sets `api.secretKey` from the
+`NRVQ_API_SECRET_KEY` repo secret + `config.requireStrongSecret=true`; the startup guard was hardened
+to also reject empty/short keys. `values-aks-dev.yaml` right-sized for the saturated node
+(api.replicas=1, PDB off, engine.replicas=0, webhook.replicas=1 + injection ON, trimmed OPA sidecar).
+
+**AKS validation (live, source of truth):** deploy success (rev 60), **P-10 image SHA == HEAD**
+(`api-9aad5fe…`); api **2/2** + OPA sidecar ready; `/healthz` 200, `/readyz` `{redis,db,opa:true}`,
+`opaMode=server`. Security: unauth `/audit|/policies|/graph` → **401**; **token forged with the
+default secret → 401** (deployed secret is 64-char rotated); rotated admin → 200; viewer DELETE/
+cross-ns → **403**. Policy seeded via API (regex-cap fix), SQL-injection → block; **attack suite
+75/75** against AKS; `/metrics` **155 `norviq_*`** lines.
+
+**Injection on AKS — PARTIAL (honest):** the webhook **injects** the sidecar end-to-end
+(`NRVQ-WHK-4003`, `norviq-sidecar` container + `norviq-socket` volume added), and the Helm-managed
+MWC caBundle is populated by the (now-fixed) cert hook — BUT the injected sidecar **can't reach
+Running**: `ErrImagePull` because `sanman97/norviq-engine` is **private** and **no imagePullSecret is
+injected into the target namespace** (and the webhook injects `engine-latest`, not the `-sha`).
+Separately, the webhook CRD controller's **policy-sync to the API now returns 401** (R8 side-effect —
+it needs a service token). **Backlog:** inject `imagePullSecrets` + pin the `-sha` into injected pods
+(or publish the image); give the webhook controller an API token; restore `engine.replicas`/HA once
+the agentpool is scaled.
 
 Two traps to handle in PHASE 1: (1) do NOT deploy the default JWT secret to AKS — A2's alias fix
 means the chart secret is now read, so wire a real secret from GH Actions + requireStrongSecret=true;

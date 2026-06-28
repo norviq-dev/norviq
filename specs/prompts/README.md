@@ -21,7 +21,7 @@ Each prompt file contains: prompt text, outcome (commit SHA, result), date.
 | 2026-06-28 | [EVAL-opa-server.md](EVAL-opa-server.md) | OPA-as-server (latency + HA, R7/R01) | done (uncommitted) | Long-lived OPA over HTTP (per-policy package isolation, fail-closed, NRVQ_OPA_MODE rollback, per-replica sidecar). Parity identical; attacks 75/75 both modes; cache-miss p99 ~25–31ms→~9–12ms (~3×), 0 timeouts @50/100-conc; <5ms not met (trust/Redis floor). make test 396 pass/6 pre-existing |
 
 
-| 2026-06-28 | [COMMIT-and-aks-validate.md](COMMIT-and-aks-validate.md) | Commit remediation + validate AKS deploy | pending | Plan-then-push (auto-deploys to AKS); prod-secret + node-capacity guardrails |
+| 2026-06-28 | [COMMIT-and-aks-validate.md](COMMIT-and-aks-validate.md) | Commit remediation + validate AKS deploy | done | 7 commits `3d60dcb`→`9aad5fe` pushed; CI build+deploy green; P-10 SHA==HEAD. AKS: health/opa-server, unauth 401, forged-default 401, viewer 403, attacks **75/75**, 155 norviq_ metrics. Fixed live: stale MWC + dbSslMode (A2 exposed). Injection fires (NRVQ-WHK-4003) but sidecar ErrImagePull (private image, no pull-secret in target ns) — backlog |
 
 ## Convention
 - One file per significant work item (P0/P1 fix, feature, major diagnosis)
