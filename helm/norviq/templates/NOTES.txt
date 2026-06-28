@@ -8,6 +8,19 @@ To access the API:
   kubectl port-forward svc/norviq-api 8080:{{ .Values.api.port }} -n {{ .Values.namespace }}
   Then: curl http://localhost:8080/healthz
 
+{{- if .Values.webhook.injection.enabled }}
+
+Sidecar injection is ENABLED. TLS was auto-bootstrapped by the norviq-webhook-cert hook Job
+(self-signed cert -> norviq-webhook-tls secret -> patched webhook caBundle).
+  Opt a namespace in:  kubectl label ns <ns> norviq-injection=enabled
+  New pods in labeled namespaces get the Norviq sidecar injected automatically.
+{{- else }}
+
+Sidecar injection is DISABLED. Turn it on (turnkey, auto-TLS, no cert-manager needed):
+  helm upgrade --install norviq ./helm/norviq --set webhook.injection.enabled=true
+  kubectl label ns <ns> norviq-injection=enabled
+{{- end }}
+
 To check status:
   kubectl get pods -n {{ .Values.namespace }}
 

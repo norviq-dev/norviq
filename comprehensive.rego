@@ -127,6 +127,16 @@ pii_detected {
     regex.match(`^(\d{3}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2}|[A-Z]{2}\d{7})$`, val)
 }
 
+# Free-text SSN: a dashed 9-digit SSN embedded anywhere in a string value
+# ("Your SSN is 123-45-6789"). The dashed XXX-XX-XXXX shape is distinctive and
+# low false-positive, so we substring-scan rather than only whole-field match.
+pii_detected {
+    some k
+    val := input.tool_params[k]
+    is_string(val)
+    regex.match(`\b\d{3}-\d{2}-\d{4}\b`, val)
+}
+
 # PCI by field name
 pci_keys = {"cc_number", "card_number", "credit_card"}
 
@@ -154,6 +164,44 @@ pci_value_detected {
     val := input.tool_params[k]
     is_string(val)
     regex.match(`^\d{13,19}$`, val)
+    luhn_valid(val)
+}
+
+# Free-text card number: a grouped/contiguous 16-digit sequence embedded in a
+# string (separators allowed: "4111 1111 1111 1111"), gated by Luhn so plain
+# 16-digit order/invoice ids that are not Luhn-valid are NOT blocked (low FP).
+pci_value_detected {
+    some k
+    val := input.tool_params[k]
+    is_string(val)
+    candidate := regex.find_n(`\d{4}[ -]?\d{4}[ -]?\d{4}[ -]?\d{4}`, val, -1)[_]
+    digits_only := regex.replace(candidate, `[ -]`, "")
+    count(digits_only) == 16
+    luhn_valid(digits_only)
+}
+
+# Luhn (mod-10) check over the digits of a numeric string. Doubles every second
+# digit from the right; subtracts 9 when the doubled value exceeds 9.
+luhn_valid(s) {
+    digits := [to_number(c) | c := regex.find_n(`[0-9]`, s, -1)[_]]
+    n := count(digits)
+    total := sum([x | some i; v := digits[i]; x := luhn_digit(v, (n - 1 - i) % 2)])
+    total % 10 == 0
+}
+
+luhn_digit(d, parity) = d {
+    parity == 0
+}
+luhn_digit(d, parity) = doubled {
+    parity == 1
+    doubled := d * 2
+    doubled <= 9
+}
+luhn_digit(d, parity) = sub {
+    parity == 1
+    doubled := d * 2
+    doubled > 9
+    sub := doubled - 9
 }
 
 # Cross-tenant
@@ -211,6 +259,9 @@ non_allow_triggered {
 non_allow_triggered {
     cross_tenant_detected
 }
+non_allow_triggered {
+    base64_decoded_threat
+}
 
 # Base64-encoded payload (evasion via encoding) — audit for visibility.
 decision = "audit" {
@@ -230,6 +281,51 @@ base64_payload_detected {
     count(val) % 4 == 0
     regex.match(`^[A-Za-z0-9+/]+={0,2}$`, val)
     not regex.match(`^\d+$`, val)
+}
+
+# Base64 evasion that DECODES to a known-malicious payload — block (not merely audit). The decode is
+# guarded by the same charset/length checks as base64_payload_detected, and the decoded text is
+# re-scanned ONLY against high-confidence multi-character patterns, so a benign base64 token/ID/UUID
+# (which decodes to bytes that don't contain these phrases) is never false-positively blocked.
+decision = "block" {
+    base64_decoded_threat
+}
+rule_id = "base64_decoded_threat" {
+    base64_decoded_threat
+}
+
+# Decoded (lowercased) text of every base64-looking tool_param value.
+b64_decoded[decoded] {
+    some k
+    val := input.tool_params[k]
+    is_string(val)
+    count(val) >= 16
+    count(val) % 4 == 0
+    regex.match(`^[A-Za-z0-9+/]+={0,2}$`, val)
+    not regex.match(`^\d+$`, val)
+    decoded := lower(base64.decode(val))
+}
+
+# Shell payloads for the decoded scan: distinctive multi-char strings only. Single metacharacters
+# like "|" or ";" are intentionally excluded — random decoded bytes commonly contain them, which
+# would false-positive on legitimate base64.
+decoded_shell_patterns = ["rm -rf", "/etc/passwd", "/etc/shadow", "wget ", "curl ", "nc -e"]
+
+base64_decoded_threat {
+    decoded := b64_decoded[_]
+    contains(decoded, injection_patterns[_])
+}
+base64_decoded_threat {
+    decoded := b64_decoded[_]
+    contains(decoded, sql_patterns[_])
+}
+base64_decoded_threat {
+    decoded := b64_decoded[_]
+    contains(decoded, decoded_shell_patterns[_])
+}
+base64_decoded_threat {
+    decoded := b64_decoded[_]
+    regex.match(`\b\d{3}-\d{2}-\d{4}\b`, decoded)
 }
 
 # Scope violation: customer-support agents have no business calling execute_sql.

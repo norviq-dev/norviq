@@ -25,8 +25,35 @@ class TestPIIPCI:
         assert 0.0 <= result.trust_score <= 1.0
         assert isinstance(result.rule_id, str)
 
-    def test_safe_data_allowed(self, api):
-        """Allow non-sensitive preference updates."""
-        result = evaluate(api, "update_record", {"field": "email_preference", "value": "weekly"})
+    @pytest.mark.parametrize(
+        ("tool_name", "tool_params", "rule_id"),
+        [
+            # SSN embedded in a free-text body (not a dedicated ssn field) must still block.
+            ("send_note", {"note": "Customer says their SSN is 123-45-6789, please update."}, "pii_detection"),
+            # 16-digit card number in free text, separators present, Luhn-valid -> block.
+            ("send_note", {"note": "Charge card 4111 1111 1111 1111 for the order."}, "pci_card_numbers"),
+            # Contiguous Luhn-valid card embedded in prose -> block.
+            ("send_note", {"note": "His card 4111111111111111 was declined."}, "pci_card_numbers"),
+        ],
+    )
+    def test_free_text_pii_pci_blocked(self, api, tool_name, tool_params, rule_id):
+        """Block PII/PCI that appears inside free-text fields, not just dedicated columns."""
+        result = evaluate(api, tool_name, tool_params)
+        assert result.decision == "block"
+        assert result.rule_id == rule_id
+
+    @pytest.mark.parametrize(
+        ("tool_name", "tool_params"),
+        [
+            ("update_record", {"field": "email_preference", "value": "weekly"}),
+            # Long numeric ids in free text that are NOT card numbers must NOT false-positive:
+            ("send_note", {"note": "Invoice 123456789012345 is due next week."}),  # 15 digits
+            ("send_note", {"note": "Order 1234567812345678 has shipped."}),  # 16 digits, fails Luhn
+            ("send_note", {"note": "Please call us back on 555-123-4567 anytime."}),  # phone, not SSN
+        ],
+    )
+    def test_safe_data_allowed(self, api, tool_name, tool_params):
+        """Allow non-sensitive values and numeric ids that are not real PII/PCI (no false positives)."""
+        result = evaluate(api, tool_name, tool_params)
         assert result.decision == "allow"
         assert 0.0 <= result.trust_score <= 1.0

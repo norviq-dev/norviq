@@ -2,6 +2,9 @@
 
 Critical operational knowledge for deployment, testing, and Lenovo/Zscaler pentest.
 
+> **Going to production?** Start with the [Production Configuration Checklist](engineering/production-config.md)
+> (secret rotation, DB TLS, HA, turnkey sidecar injection, RBAC bindings, SIEM export).
+
 ## 1. Webhook Safety Rules
 
 | Rule | Why | How to Verify |

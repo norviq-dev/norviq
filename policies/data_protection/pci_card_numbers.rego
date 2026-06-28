@@ -19,7 +19,27 @@ has_card_data if {
 has_card_value if {
     val := input.tool_params[_]
     is_string(val)
-    regex.match(`\d{13,19}`, val)
+    candidate := regex.find_n(`\d{13,19}`, val, -1)[_]
+    luhn_valid(candidate)
+}
+
+# Luhn (mod-10) gate so non-card 13-19 digit ids (invoice/order numbers) are not
+# flagged as card data — keeps the PCI rule's false-positive rate near zero.
+luhn_valid(s) if {
+    digits := [to_number(c) | c := regex.find_n(`[0-9]`, s, -1)[_]]
+    n := count(digits)
+    total := sum([x | some i; v := digits[i]; x := luhn_digit(v, (n - 1 - i) % 2)])
+    total % 10 == 0
+}
+
+luhn_digit(d, parity) := d if parity == 0
+luhn_digit(d, parity) := d * 2 if {
+    parity == 1
+    d * 2 <= 9
+}
+luhn_digit(d, parity) := (d * 2) - 9 if {
+    parity == 1
+    d * 2 > 9
 }
 
 decision := "block" if has_card_data
