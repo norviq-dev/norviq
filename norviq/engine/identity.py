@@ -91,19 +91,29 @@ class SPIFFEResolver:
         """Return a SPIFFE Workload API client (the unit-test seam — monkeypatch to inject a fake)."""
         if not _PYSPIFFE_AVAILABLE:
             raise SpiffeResolutionError("pyspiffe not installed; install the 'spiffe' extra for workload-api mode")
-        return WorkloadApiClient(spiffe_socket_path=self._socket_path)
+        # pyspiffe requires the `unix://` scheme; accept a bare path in config and normalize here.
+        sock = self._socket_path if "://" in self._socket_path else f"unix://{self._socket_path}"
+        return WorkloadApiClient(socket_path=sock)
 
     def _resolve_workload_api(self) -> AgentIdentity:
         """Fetch + validate the X509-SVID. SVID wins over env (spoof-resistant); fail-closed on error."""
+        source = None
         try:
             source = self._svid_source()
-            svid = source.get_x509_svid()
-            spiffe_id = str(svid.spiffe_id())
+            svid = source.fetch_x509_svid()
+            spiffe_id = str(svid.spiffe_id)  # X509Svid.spiffe_id is a property returning a SpiffeId
         except SpiffeResolutionError:
             raise
         except Exception as exc:
             log.error("nrvq.identity.socket_unreachable", error=str(exc), code="NRVQ-IDT-10006")
             raise SpiffeResolutionError(f"Workload API unreachable: {exc}") from exc
+        finally:
+            close = getattr(source, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # pragma: no cover - best-effort channel cleanup
+                    pass
         parsed = _parse_norviq_spiffe_id(spiffe_id)
         if parsed is None:
             log.error("nrvq.identity.svid_invalid", spiffe_id=spiffe_id, code="NRVQ-IDT-10005")

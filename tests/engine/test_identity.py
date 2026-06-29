@@ -97,7 +97,8 @@ class _FakeSvid:
     def __init__(self, spiffe_id: str) -> None:
         self._id = spiffe_id
 
-    def spiffe_id(self) -> str:
+    @property
+    def spiffe_id(self):  # X509Svid.spiffe_id is a property (str() gives the spiffe:// id)
         return self._id
 
 
@@ -107,11 +108,15 @@ class _FakeSource:
     def __init__(self, spiffe_id: str | None = None, exc: Exception | None = None) -> None:
         self._id = spiffe_id
         self._exc = exc
+        self.closed = False
 
-    def get_x509_svid(self) -> _FakeSvid:
+    def fetch_x509_svid(self) -> _FakeSvid:
         if self._exc is not None:
             raise self._exc
         return _FakeSvid(self._id)
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def test_parse_norviq_spiffe_id() -> None:
