@@ -35,3 +35,41 @@ test_benign_balance_read_allowed {
     d := finance.decision with input as {"tool_name": "get_account_balance", "tool_params": {"account": "123"}}
     d == "allow"
 }
+
+# === F-10 regression: SoD bypass by case, empty approver, homoglyph ===
+
+# case variance (AD vs app casing) must still block
+test_sod_case_variance_blocked {
+    d := finance.decision with input as {"tool_name": "approve_transfer", "tool_params": {"initiator": "Alice", "approver": "alice"}}
+    d == "block"
+    finance.rule_id == "sod_violation" with input as {"tool_name": "approve_transfer", "tool_params": {"initiator": "Alice", "approver": "alice"}}
+}
+
+# empty approver = violation (no distinct second party)
+test_sod_empty_approver_blocked {
+    d := finance.decision with input as {"tool_name": "approve_transfer", "tool_params": {"initiator": "alice", "approver": ""}}
+    d == "block"
+}
+# whitespace-only approver = violation
+test_sod_whitespace_approver_blocked {
+    d := finance.decision with input as {"tool_name": "approve_transfer", "tool_params": {"initiator": "alice", "approver": "   "}}
+    d == "block"
+}
+# missing approver field = violation
+test_sod_missing_approver_blocked {
+    d := finance.decision with input as {"tool_name": "approve_transfer", "tool_params": {"initiator": "alice"}}
+    d == "block"
+}
+
+# homoglyph: Cyrillic 'а' approver folds to ASCII 'a' via tool_params_normalized -> block
+test_sod_homoglyph_blocked {
+    inp := {"tool_name": "approve_transfer", "tool_params": {"initiator": "alice", "approver": "аlice"}, "tool_params_normalized": {"initiator": "alice", "approver": "alice"}}
+    d := finance.decision with input as inp
+    d == "block"
+}
+
+# legit distinct approver still allows (not over-blocked)
+test_sod_distinct_case_insensitive_allowed {
+    d := finance.decision with input as {"tool_name": "approve_transfer", "tool_params": {"initiator": "Alice", "approver": "Bob"}}
+    d == "allow"
+}

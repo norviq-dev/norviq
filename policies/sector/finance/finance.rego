@@ -36,11 +36,43 @@ escalates["new_beneficiary_escalate"] {
 }
 reasons["new_beneficiary_escalate"] = "Finance: transfer to a new/unverified beneficiary — hold for review"
 
-blocks["sod_violation"] {
+# F-10: SoD must not be bypassable by case (Alice/alice), homoglyph (Cyrillic аlice), or an empty/missing
+# approver. Compare the engine's confusable-skeleton fold (tool_params_normalized — homoglyph + case folded)
+# AND a plain lower() of the raw values (fallback when normalized is absent). Empty/missing approver = violation
+# (can't demonstrate a second, distinct approving party).
+fin_is_approval {
     contains(fin_tool, "approve")
-    input.tool_params.initiator == input.tool_params.approver
 }
-reasons["sod_violation"] = "Finance: segregation-of-duties — the same identity must not initiate AND approve"
+
+# same identity initiates AND approves — homoglyph/case-insensitive (normalized) ...
+fin_sod_same {
+    fin_is_approval
+    lower(input.tool_params_normalized.initiator) == lower(input.tool_params_normalized.approver)
+}
+# ... and a raw lower() fallback so the rule holds even without the engine fold
+fin_sod_same {
+    fin_is_approval
+    lower(input.tool_params.initiator) == lower(input.tool_params.approver)
+}
+
+# a present, non-empty approver distinct from the initiator is required; empty/whitespace/missing = violation
+fin_has_real_approver {
+    a := input.tool_params.approver
+    is_string(a)
+    trim_space(a) != ""
+}
+fin_sod_missing_approver {
+    fin_is_approval
+    not fin_has_real_approver
+}
+
+blocks["sod_violation"] {
+    fin_sod_same
+}
+blocks["sod_violation"] {
+    fin_sod_missing_approver
+}
+reasons["sod_violation"] = "Finance: segregation-of-duties — the same identity must not initiate AND approve (case/homoglyph-insensitive; a distinct, non-empty approver is required)"
 # >>> PACK-CONTRIB-END finance
 
 # >>> RESOLVER-BEGIN

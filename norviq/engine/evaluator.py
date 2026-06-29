@@ -36,6 +36,10 @@ from norviq.sdk.core.trust import TrustScore
 log = structlog.get_logger()
 
 
+class InvalidSpiffeIdentity(ValueError):
+    """Raised when an agent's SPIFFE id fails format validation (F-11: named fallback attribution)."""
+
+
 class OPAEvaluator:
     """Core evaluator for policy decisions with cache-first execution."""
 
@@ -97,6 +101,8 @@ class OPAEvaluator:
             if cached is not None:
                 cache_hit = True
                 decision = await self._handle_cache_hit(event, cached, start, trust_result)
+                # F-13: stamp the real measured end-to-end latency so the audit record reflects it (not 0.0).
+                decision = decision.model_copy(update={"latency_ms": round((time.monotonic() - start) * 1000, 2)})
                 await self._persist_behavior(event, decision, trust_result)
                 self._record_telemetry(event, decision, start, cache_hit, span)
                 return decision
@@ -151,6 +157,9 @@ class OPAEvaluator:
             if base_decision.rule_id not in settings.evaluator_non_cacheable_rules:
                 await self._cache.set_eval(event.agent_identity.namespace, event.agent_identity.agent_class, cache_tool, base_decision)
             decision = self._apply_trust_overrides(base_decision, trust_result, event.event_id)
+            # F-13: the multi-candidate path builds per-candidate decisions with latency_ms=0.0; stamp the real
+            # measured end-to-end latency on the winning decision so every audit record carries it (AU-12/SLA).
+            decision = decision.model_copy(update={"latency_ms": round((time.monotonic() - start) * 1000, 2)})
             await self._persist_behavior(event, decision, trust_result)
             self._record_telemetry(event, decision, start, cache_hit, span)
             return decision
@@ -158,6 +167,12 @@ class OPAEvaluator:
             elapsed_ms = (time.monotonic() - start) * 1000
             log.error("nrvq.engine.timeout", event_id=event.event_id, elapsed_ms=elapsed_ms, code="NRVQ-ENG-2020")
             decision = self._timeout_decision(event, elapsed_ms)
+            self._record_telemetry(event, decision, start, cache_hit, span)
+            return decision
+        except InvalidSpiffeIdentity:
+            elapsed_ms = (time.monotonic() - start) * 1000
+            log.warning("nrvq.engine.invalid_identity", event_id=event.event_id, code="NRVQ-ENG-2006")
+            decision = self._invalid_identity_decision(event, elapsed_ms)
             self._record_telemetry(event, decision, start, cache_hit, span)
             return decision
         except Exception as exc:
@@ -274,6 +289,9 @@ class OPAEvaluator:
         """Build OPA input payload from tool event and trust state."""
         return {
             "tool_name": event.tool_name,
+            # F-09: confusable-skeleton of the tool NAME (homoglyph/zero-width evasion on the name itself,
+            # e.g. Cyrillic "open_bгeaker"); rego matches control verbs/surface against this for parity.
+            "tool_name_normalized": skeleton(event.tool_name),
             "tool_params": event.tool_params,
             # F-02: matching-only confusable skeleton (homoglyph/zero-width evasion); rego scans this for injection.
             "tool_params_normalized": self._normalize_for_match(event.tool_params),
@@ -640,26 +658,44 @@ class OPAEvaluator:
         if pack_key in self._loader._policies:
             entry = self._loader._policies[pack_key]
             candidates.append({"key": pack_key, "rego": entry["rego"], "priority": entry["priority"]})
+        # F-14: opt-in per-namespace tool allowlist guardrail. Same additive/in-memory-only discipline as
+        # __pack__: absent by default (zero hot-path cost, single-cluster/attacks unchanged) and tighten-only.
+        guardrail_key = f"{namespace}:__guardrail__"
+        if guardrail_key in self._loader._policies:
+            entry = self._loader._policies[guardrail_key]
+            candidates.append({"key": guardrail_key, "rego": entry["rego"], "priority": entry["priority"]})
         return candidates
 
     def _resolve_with_packs(self, results: list[dict]) -> dict:
-        """F047: sector packs are an ADDITIVE-ONLY overlay — a (ns,__pack__) candidate can only TIGHTEN
-        the decision (block < escalate < audit < allow), never loosen it, regardless of priority. So we
-        resolve the non-pack candidates normally, then let the pack win only if it is more restrictive.
-        This makes a pack's block enforce over a permissive baseline AND prevents a pack escalate/allow
-        from ever weakening a stricter policy (the F-07 trap)."""
+        """F047/F-14: sector packs (:__pack__) and the opt-in tool-allowlist guardrail (:__guardrail__) are
+        ADDITIVE-ONLY overlays — they can only TIGHTEN the decision (block < escalate < audit < allow), never
+        loosen it, regardless of priority. We resolve the non-overlay candidates normally, then let the most
+        restrictive overlay win only if it is stricter than the base. This makes an overlay's block/escalate
+        enforce over a permissive baseline AND prevents an overlay escalate/allow from ever weakening a
+        stricter policy (the F-07 trap)."""
         rank = {"block": 0, "escalate": 1, "audit": 2, "allow": 3}
-        pack = [r for r in results if str(r["key"]).endswith(":__pack__")]
-        base = [r for r in results if not str(r["key"]).endswith(":__pack__")]
+        overlay = [r for r in results if self._is_overlay(str(r["key"]))]
+        base = [r for r in results if not self._is_overlay(str(r["key"]))]
         base_winner = self._resolve_precedence(base) if base else None
-        pack_winner = self._resolve_precedence(pack) if pack else None
+        overlay_winner = self._resolve_overlay(overlay) if overlay else None
         if base_winner is None:
-            return pack_winner
-        if pack_winner is None:
+            return overlay_winner
+        if overlay_winner is None:
             return base_winner
-        pack_rank = rank.get(pack_winner["decision"].decision, 3)
+        overlay_rank = rank.get(overlay_winner["decision"].decision, 3)
         base_rank = rank.get(base_winner["decision"].decision, 3)
-        return pack_winner if pack_rank < base_rank else base_winner
+        return overlay_winner if overlay_rank < base_rank else base_winner
+
+    @staticmethod
+    def _is_overlay(key: str) -> bool:
+        """Additive-only overlay candidates (tighten-only): sector packs and the F-14 allowlist guardrail."""
+        return key.endswith(":__pack__") or key.endswith(":__guardrail__")
+
+    def _resolve_overlay(self, results: list[dict]) -> dict:
+        """Most restrictive overlay wins (tighten-only); ties broken by highest priority."""
+        rank = {"block": 0, "escalate": 1, "audit": 2, "allow": 3}
+        results.sort(key=lambda item: (rank.get(item["decision"].decision, 3), -int(item["priority"])))
+        return results[0]
 
     def _resolve_precedence(self, results: list[dict]) -> dict:
         """Highest priority wins; most restrictive wins on ties."""
@@ -679,6 +715,16 @@ class OPAEvaluator:
         return PolicyDecision(
             decision=mode,
             reason=f"Evaluation failed, fallback={mode}",
+            latency_ms=round(elapsed_ms, 2),
+            event_id=event.event_id,
+        )
+
+    def _invalid_identity_decision(self, event: ToolCallEvent, elapsed_ms: float) -> PolicyDecision:
+        """F-11: named fail-closed decision for an invalid SPIFFE identity (SIEM can alert on the spoof class)."""
+        return PolicyDecision(
+            decision="block",
+            rule_id="invalid_spiffe_identity",
+            reason="Agent SPIFFE identity failed validation — fail-closed block",
             latency_ms=round(elapsed_ms, 2),
             event_id=event.event_id,
         )
@@ -775,4 +821,4 @@ class OPAEvaluator:
     def _validate_spiffe(self, spiffe_id: str) -> None:
         """Validate SPIFFE identifier format before trust operations."""
         if not spiffe_id.startswith("spiffe://"):
-            raise ValueError("invalid spiffe_id")
+            raise InvalidSpiffeIdentity("invalid spiffe_id")

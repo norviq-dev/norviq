@@ -115,6 +115,12 @@ class NorviqSettings(BaseSettings):
     # Recycle pooled DB connections older than this (bounds staleness; pairs with pool_pre_ping).
     db_pool_recycle_s: int = 300
     audit_retention_days: int = 365
+    # F-19 (opt-in, default OFF): capture MASKED tool_params on the audit record (PAN->****1111,
+    # SSN->***-**-6789, secrets->****) for event reconstruction (PCI 10.3) without storing raw PII/PAN.
+    audit_capture_masked_params: bool = False
+    # F-19 (opt-in): HMAC-SHA256 key for the tamper-evident /audit/export?signed=true manifest. Empty =
+    # the signed export still hash-chains (integrity) but the manifest signature is null (no shared-key auth).
+    audit_export_signing_key: str = ""
     otel_endpoint: str = "http://localhost:4317"
     otel_enabled: bool = True
     otel_disabled: bool = False

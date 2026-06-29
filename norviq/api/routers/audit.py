@@ -4,6 +4,8 @@
 """Audit query routes."""
 
 import csv
+import hashlib
+import hmac
 import io
 import json
 from collections.abc import AsyncIterator
@@ -20,6 +22,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from norviq.api.auth import get_current_user, scoped_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
+from norviq.config import settings
+
+
+def _canonical(record: dict) -> str:
+    """Deterministic JSON for hashing (sorted keys, tight separators)."""
+    return json.dumps(record, sort_keys=True, separators=(",", ":"))
+
+
+def _chain_hash(prev_hash: str, record: dict) -> str:
+    """SHA-256 hash-chain link over the previous hash + this record's canonical form."""
+    return hashlib.sha256((prev_hash + _canonical(record)).encode("utf-8")).hexdigest()
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -227,23 +240,65 @@ async def _stream_audit_rows(
         last_ts, last_id = rows[-1].timestamp_utc, rows[-1].id
 
 
+def _export_dict(row: AuditLogEntry) -> dict:
+    """Audit row as an export record, including masked_params when captured (F-19)."""
+    record = _to_dict(row)
+    payload = row.payload if isinstance(row.payload, dict) else {}
+    if "masked_params" in payload:
+        record["masked_params"] = payload["masked_params"]
+    return record
+
+
 @router.get("/audit/export")
 async def export_audit_records(
     format: Literal["ndjson", "csv"] = Query(default="ndjson"),
     namespace: str | None = Query(default=None),
     decision: str | None = Query(default=None),
     range: Literal["1h", "6h", "24h", "7d", "30d"] = Query(default="24h"),
+    signed: bool = Query(default=False),
     session: AsyncSession = Depends(get_session),
     user: dict = Depends(get_current_user),
 ) -> StreamingResponse:
-    """Stream audit records for SIEM ingest as NDJSON or CSV, namespace-scoped to the caller."""
+    """Stream audit records for SIEM ingest as NDJSON or CSV, namespace-scoped to the caller.
+
+    F-19: signed=true (NDJSON only) emits a tamper-evident, hash-chained stream — each record carries a
+    `_chain` link (seq, prev_hash, record_hash) and the stream ends with a `_manifest` line whose
+    chain_tip is HMAC-SHA256-signed when an export signing key is configured.
+    """
     namespace = scoped_namespace(user, namespace)
     since = _since_for_range(range)
-    log.info("nrvq.api.audit.export", format=format, namespace=namespace, code="NRVQ-API-7024")
+    log.info("nrvq.api.audit.export", format=format, namespace=namespace, signed=signed, code="NRVQ-API-7024")
 
     async def _ndjson() -> AsyncIterator[str]:
         async for row in _stream_audit_rows(session, namespace, decision, since):
-            yield json.dumps(_to_dict(row), separators=(",", ":")) + "\n"
+            yield json.dumps(_export_dict(row), separators=(",", ":")) + "\n"
+
+    async def _ndjson_signed() -> AsyncIterator[str]:
+        prev = ""
+        count = 0
+        async for row in _stream_audit_rows(session, namespace, decision, since):
+            record = _export_dict(row)
+            record_hash = _chain_hash(prev, record)
+            record["_chain"] = {"seq": count, "prev_hash": prev, "record_hash": record_hash}
+            prev = record_hash
+            count += 1
+            yield json.dumps(record, separators=(",", ":")) + "\n"
+        manifest = {
+            "_manifest": {
+                "alg": "sha256-chain",
+                "count": count,
+                "chain_tip": prev,
+                "namespace": namespace or "*",
+                "range": range,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "signature": None,
+            }
+        }
+        if settings.audit_export_signing_key:
+            sig = hmac.new(settings.audit_export_signing_key.encode("utf-8"), prev.encode("utf-8"), hashlib.sha256)
+            manifest["_manifest"]["alg"] = "sha256-chain+HMAC-SHA256"
+            manifest["_manifest"]["signature"] = sig.hexdigest()
+        yield json.dumps(manifest, separators=(",", ":")) + "\n"
 
     async def _csv() -> AsyncIterator[str]:
         header = io.StringIO()
@@ -259,6 +314,11 @@ async def export_audit_records(
         return StreamingResponse(
             _csv(), media_type="text/csv",
             headers={"Content-Disposition": "attachment; filename=norviq-audit-export.csv"},
+        )
+    if signed:
+        return StreamingResponse(
+            _ndjson_signed(), media_type="application/x-ndjson",
+            headers={"Content-Disposition": "attachment; filename=norviq-audit-export.signed.ndjson"},
         )
     return StreamingResponse(
         _ndjson(), media_type="application/x-ndjson",
