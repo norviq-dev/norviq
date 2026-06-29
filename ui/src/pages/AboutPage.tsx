@@ -1,9 +1,12 @@
+import { fetchVersion } from "../api/client";
+import { useApi } from "../hooks/useApi";
 import { PageHead } from "../components/common/PageHead";
 import { Panel } from "../components/common/Panel";
 import { useApp } from "../store/AppContext";
 
 export function AboutPage() {
   const { namespace } = useApp();
+  const info = useApi(() => fetchVersion(), [], { cacheKey: "version", staleTimeMs: 600_000 });
 
   return (
     <div className="page-enter">
@@ -11,11 +14,11 @@ export function AboutPage() {
       <Panel title="Version and Links" sub="Product and licensing details">
         <div className="kv">
           <span className="k">Version</span>
-          <span className="mono">0.1.0</span>
+          <span className="mono">{info.loading ? "…" : info.data?.version ?? "—"}</span>
         </div>
         <div className="kv">
           <span className="k">License</span>
-          <span>Apache 2.0</span>
+          <span>{info.data?.license ?? "Apache-2.0"}</span>
         </div>
         <div className="kv">
           <span className="k">GitHub</span>

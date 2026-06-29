@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: Apache-2.0
+# Defect-hunt campaign overlay — right-sized for an ~11.67 GiB host (staggered phases).
+# Phase A (single rich cluster): API-driven enforcement + trust + graph + audit + console + api-keys.
+# Memory: api.replicas=1, engine=0, webhook off (Phase A evaluates in-process via /api/v1/evaluate),
+# HA off, trimmed requests. OPA runs in server mode (chart default) so the R7 hot path is exercised.
+validatingAdmissionPolicyEnabled: false
+baselineClusterPolicy:
+  enabled: false
+otel:
+  enabled: false
+engine:
+  replicas: 0
+webhook:
+  enabled: false          # Phase A is API-driven; webhook/injection is exercised in Phase C/infra checks
+# Tenant namespaces (team-a/payments/analytics/platform) are LOGICAL tenant strings on policy/audit/
+# agent rows — not real k8s namespaces — so only the real `default` ns gets a ResourceQuota here.
+policyQuotaNamespaces:
+  - default
+
+api:
+  replicas: 1
+  resources:
+    requests: { cpu: 100m, memory: 112Mi }
+    limits: { cpu: 600m, memory: 256Mi }
+
+opa:
+  resources:
+    requests: { cpu: 50m, memory: 40Mi }
+    limits: { cpu: 300m, memory: 128Mi }
+
+redis:
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 300m, memory: 160Mi }
+
+postgresql:
+  resources:
+    requests: { cpu: 100m, memory: 160Mi }
+    limits: { cpu: 600m, memory: 384Mi }
+
+ui:
+  resources:
+    requests: { cpu: 25m, memory: 32Mi }
+    limits: { cpu: 200m, memory: 96Mi }
+
+config:
+  enforcementMode: block
+  logLevel: INFO
+  dbSslMode: disable
+  opaMode: server

@@ -46,9 +46,9 @@ export function Fleet() {
 
   // policy authoring form
   const [rego, setRego] = useState(DEFAULT_REGO);
-  const [name, setName] = useState("fleet-sql-guard");
+  const [name, setName] = useState("");
   const [ns, setNs] = useState("default");
-  const [agentClass, setAgentClass] = useState("customer-support");
+  const [agentClass, setAgentClass] = useState("");
   const [selector, setSelector] = useState("");
   const [pushMsg, setPushMsg] = useState<string | null>(null);
 

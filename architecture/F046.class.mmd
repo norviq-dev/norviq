@@ -1,0 +1,68 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+%% F046 console live-data endpoints — replace fabricated display data with real API computations.
+classDiagram
+    class ClusterInfoRouter {
+        +cluster_info(user, session) dict  %% {cluster_id, cluster_name, namespaces[]}
+    }
+    class CoverageRouter {
+        +coverage_by_category(request, namespace, user) dict
+        -_load_mapping() dict  %% category -> rule_ids (policies/category_mapping.json)
+    }
+    class AgentsRouter {
+        +agent_tool_usage(spiffe_id, namespace, range, session) list
+        +agent_trust_history(spiffe_id, namespace, range, session) list
+        -_since_for_range(range) datetime
+    }
+    class SettingsRouter {
+        +get_settings(namespace, user, session) dict
+        +put_settings(body, namespace, user, session) dict  %% admin
+        -_effective(row) dict
+    }
+    class VersionRouter {
+        +version(user) dict
+        -_version() str  %% importlib.metadata
+    }
+    class KeysRouter {
+        +list_keys(user, session) list  %% admin
+        +create_key(body, user, session) dict  %% admin, secret once
+        +revoke_key(key_id, user, session) dict  %% admin
+        -_public(row) dict
+    }
+    class ApiKeysHelper {
+        +hash_key(raw) str
+        +generate_key() tuple
+        +authenticate_api_key(raw, session_factory) dict
+    }
+    class NamespaceSettings {
+        +str namespace
+        +str enforcement_mode
+        +float trust_threshold
+        +float violation_penalty
+        +int rate_limit
+    }
+    class ApiKey {
+        +str id
+        +str prefix
+        +str key_hash
+        +str name
+        +str namespace
+        +str role
+        +datetime last_used_at
+        +bool revoked
+    }
+    class Auth {
+        +get_current_user(creds) dict  %% JWT, then nrvq_ api-key fallback
+        +require_admin(user)
+        +scoped_namespace(user, requested)
+    }
+
+    KeysRouter --> ApiKeysHelper : generate_key
+    KeysRouter --> ApiKey : add/select
+    Auth ..> ApiKeysHelper : authenticate_api_key (fallback)
+    ApiKeysHelper --> ApiKey : lookup by hash
+    SettingsRouter --> NamespaceSettings : select/merge
+    CoverageRouter ..> AgentsRouter : (sibling routers)
+    KeysRouter --> Auth : require_admin
+    SettingsRouter --> Auth : require_admin + scoped_namespace
+    ClusterInfoRouter --> Auth : scoped namespaces

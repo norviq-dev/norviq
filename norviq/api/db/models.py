@@ -85,6 +85,36 @@ class FleetBundleState(Base):
     last_bundle_sha256: Mapped[str] = mapped_column(String(64), default="")
 
 
+class NamespaceSettings(Base):
+    """Persisted per-namespace runtime preferences (F046) — overrides for the config defaults shown in
+    the Settings page. One row per namespace; null columns fall back to the effective config value."""
+
+    __tablename__ = "namespace_settings"
+    namespace: Mapped[str] = mapped_column(String(255), primary_key=True)
+    enforcement_mode: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    trust_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    violation_penalty: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rate_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class ApiKey(Base):
+    """Issued API key (F046). Only the salted hash is stored — the secret is shown once at creation.
+    Carries a role + namespace so a presented key authenticates as a scoped principal."""
+
+    __tablename__ = "api_keys"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    prefix: Mapped[str] = mapped_column(String(20))
+    key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(255), default="")
+    namespace: Mapped[str] = mapped_column(String(255), default="default")
+    role: Mapped[str] = mapped_column(String(20), default="viewer")
+    created_by: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked: Mapped[bool] = mapped_column(default=False)
+
+
 class AuditLogEntry(Base):
     """Append-only audit log partitioned by month."""
 

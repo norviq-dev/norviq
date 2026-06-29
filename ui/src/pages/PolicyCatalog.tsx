@@ -86,17 +86,6 @@ const MODE_DECISION: Record<NonNullable<Policy["mode"]>, Decision> = {
   escalate: "escalate"
 };
 
-const FALLBACK_DEPLOYMENTS: Deployment[] = [
-  { name: "smartsales-agent", namespace: "chatbot-prod", agent_class: "customer-support" },
-  { name: "navigator-chatbot", namespace: "chatbot-prod", agent_class: "customer-support" },
-  { name: "ledger-summarizer", namespace: "payments", agent_class: "summarizer" },
-  { name: "copilot-reviewer", namespace: "platform", agent_class: "code-assistant" },
-  { name: "etl-loader", namespace: "analytics", agent_class: "data-loader" },
-  { name: "shift-scheduler", namespace: "platform", agent_class: "scheduler" },
-  { name: "weekly-report-gen", namespace: "analytics", agent_class: "report-gen" },
-  { name: "triage-bot", namespace: "support", agent_class: "support-bot" }
-];
-
 /**
  * Defense-in-depth: the API now returns target_type, but default it to "class" when an
  * agent_class is set and the field is absent — so the catalog never drops a class policy
@@ -197,7 +186,7 @@ function PolicyTarget({
 }) {
   const initial = policy.target_type ?? "class";
   const [mode, setMode] = useState<TargetType>(initial);
-  const [agentClass, setAgentClass] = useState(policy.agent_class ?? "customer-support");
+  const [agentClass, setAgentClass] = useState(policy.agent_class ?? "");
 
   useEffect(() => {
     setMode(policy.target_type ?? "class");
@@ -299,12 +288,12 @@ function PolicyTarget({
           </div>
           <div className="field-row">
             <label className="field-label">Name</label>
-            <input className="input" defaultValue={policy.target ?? "smartsales-agent"} />
+            <input className="input" defaultValue={policy.target ?? ""} placeholder="workload name" />
           </div>
           <div className="field-row">
             <label className="field-label">Namespace</label>
             <div className="input select-trigger">
-              <span>{policy.namespace ?? "chatbot-prod"}</span>
+              <span>{policy.namespace ?? "—"}</span>
               <ChevronDown />
             </div>
           </div>
@@ -330,7 +319,7 @@ function PolicyTarget({
           <div className="field-row">
             <label className="field-label">Namespace</label>
             <div className="input select-trigger">
-              <span>{policy.namespace ?? "chatbot-prod"}</span>
+              <span>{policy.namespace ?? "—"}</span>
               <ChevronDown />
             </div>
           </div>
@@ -520,11 +509,9 @@ export function PolicyCatalog() {
       staleTimeMs: Number.MAX_SAFE_INTEGER
     }
   );
+  // Live workloads observed for this namespace. Empty is a valid response (renders empty) — never a fake list.
   const deployments = useApi<Deployment[]>(
-    () =>
-      apiGet<Deployment[]>(`/api/v1/deployments?namespace=${encodeURIComponent(namespace)}`).catch(
-        () => FALLBACK_DEPLOYMENTS
-      ),
+    () => apiGet<Deployment[]>(`/api/v1/deployments?namespace=${encodeURIComponent(namespace)}`),
     [namespace]
   );
 
@@ -643,8 +630,8 @@ export function PolicyCatalog() {
             onClick={() =>
               setSelected({
                 target_type: "class",
-                target: "customer-support",
-                agent_class: "customer-support",
+                target: "",
+                agent_class: "",
                 current_version: 1,
                 mode: "block"
               })
@@ -960,7 +947,7 @@ export function PolicyCatalog() {
       {selected && (
         <PolicySheet
           policy={selected}
-          deployments={deployments.data ?? FALLBACK_DEPLOYMENTS}
+          deployments={deployments.data ?? []}
           onClose={() => setSelected(null)}
           onApply={onApply}
         />

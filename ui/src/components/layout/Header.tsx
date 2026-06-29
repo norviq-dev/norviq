@@ -13,10 +13,12 @@ import {
   fetchAllAgents,
   fetchAuditRecordsByTool,
   fetchAuditStats,
+  fetchMe,
   fetchPolicies,
-  logout
+  logout,
+  Me
 } from "../../api/client";
-import { CLUSTERS, NS_BY_CLUSTER, TimeRange, useApp } from "@/store/AppContext";
+import { TimeRange, useApp } from "@/store/AppContext";
 
 type Dropdown = "cluster" | "inbox" | null;
 type InboxPayload = { blockedCount: number; lowTrustCount: number; checkedAt: Date };
@@ -43,7 +45,8 @@ export function Header({
   tabletMenuOpen: boolean;
   showMenuButton?: boolean;
 }) {
-  const { selectedCluster, selectedNamespace, timeRange, setCluster, setNamespace, setTimeRange } = useApp();
+  const { selectedCluster, selectedNamespace, clusters, namespaces, timeRange, setCluster, setNamespace, setTimeRange } =
+    useApp();
   const navigate = useNavigate();
   const [open, setOpen] = useState<Dropdown | "user">(null);
   const [searchText, setSearchText] = useState("");
@@ -55,6 +58,7 @@ export function Header({
   const [searchOpen, setSearchOpen] = useState(false);
   const [inboxLoading, setInboxLoading] = useState(false);
   const [inboxData, setInboxData] = useState<InboxPayload | null>(null);
+  const [me, setMe] = useState<Me | null>(null);
   const inboxCacheRef = useRef<{ timestamp: number; payload: InboxPayload } | null>(null);
   const searchAbortRef = useRef<AbortController | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -68,6 +72,32 @@ export function Header({
     if (selectedCluster.startsWith("dev")) return "dev";
     return selectedCluster;
   }, [isTablet, selectedCluster]);
+
+  // The signed-in user, resolved by the server (/me). Replaces the previously hardcoded name/role.
+  useEffect(() => {
+    let active = true;
+    fetchMe()
+      .then((m) => {
+        if (active) setMe(m);
+      })
+      .catch(() => {
+        /* unauthenticated -> leave null; the avatar shows a neutral placeholder */
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const displayName = me?.name || me?.sub || "—";
+  const displayRole = me?.role || "—";
+  const initials =
+    (me?.name || me?.sub || "")
+      .split(/[\s@._-]+/)
+      .filter(Boolean)
+      .map((w) => w[0])
+      .join("")
+      .slice(0, 2)
+      .toUpperCase() || "?";
 
   const loadInbox = useCallback(async () => {
     const now = Date.now();
@@ -226,7 +256,7 @@ export function Header({
           <div className="dropdown cluster-dd">
             <div className="cluster-col">
               <div className="dd-head">CLUSTERS</div>
-              {CLUSTERS.map((c) => (
+              {clusters.map((c) => (
                 <button
                   key={c}
                   className={`dd-item${c === selectedCluster ? " sel" : ""}`}
@@ -239,7 +269,7 @@ export function Header({
             </div>
             <div className="cluster-col" style={{ borderLeft: "1px solid var(--border)" }}>
               <div className="dd-head">NAMESPACES</div>
-              {["all", ...(NS_BY_CLUSTER[selectedCluster] ?? [])].map((ns) => (
+              {["all", ...namespaces].map((ns) => (
                 <button
                   key={ns}
                   className={`dd-item${ns === selectedNamespace ? " sel" : ""}`}
@@ -429,7 +459,7 @@ export function Header({
           title="Account"
           onClick={() => setOpen(open === "user" ? null : "user")}
         >
-          SP
+          {initials}
         </button>
         {open === "inbox" && (
           <div
@@ -516,8 +546,8 @@ export function Header({
             }}
           >
             <div style={{ padding: "12px 14px" }}>
-              <div style={{ fontSize: 14, fontWeight: 500, color: "#FFFFFF" }}>Santosh Puppala</div>
-              <div style={{ fontSize: 12, color: "#A0A0A0", marginTop: 2 }}>admin</div>
+              <div style={{ fontSize: 14, fontWeight: 500, color: "#FFFFFF" }}>{displayName}</div>
+              <div style={{ fontSize: 12, color: "#A0A0A0", marginTop: 2 }}>{displayRole}</div>
             </div>
             <div className="dd-divider" />
             <button

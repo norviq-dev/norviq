@@ -1,8 +1,10 @@
 import { Check } from "lucide-react";
-import { ReactNode, useState } from "react";
+import { ReactNode, useEffect, useState } from "react";
+import { fetchSettings, saveSettings } from "../api/client";
 import { KitButton } from "../components/common/KitButton";
 import { PageHead } from "../components/common/PageHead";
 import { Panel } from "../components/common/Panel";
+import { useApp } from "../store/AppContext";
 
 function SettingsSection({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -53,43 +55,55 @@ function Field({
   );
 }
 
-const SETTINGS_KEY = "nrvq_settings";
-
-type StoredSettings = {
-  mode: "block" | "audit";
-  trustThreshold: string;
-  violationPenalty: string;
-  rateLimit: string;
-};
-
-function loadSettings(): StoredSettings {
-  const fallback: StoredSettings = { mode: "block", trustThreshold: "0.7", violationPenalty: "0.05", rateLimit: "60" };
-  try {
-    const raw = localStorage.getItem(SETTINGS_KEY);
-    return raw ? { ...fallback, ...(JSON.parse(raw) as Partial<StoredSettings>) } : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
 export function Settings() {
-  const initial = loadSettings();
-  const [mode, setMode] = useState<"block" | "audit">(initial.mode);
-  const [trustThreshold, setTrustThreshold] = useState(initial.trustThreshold);
-  const [violationPenalty, setViolationPenalty] = useState(initial.violationPenalty);
-  const [rateLimit, setRateLimit] = useState(initial.rateLimit);
+  const { namespace } = useApp();
+  const [mode, setMode] = useState<"block" | "audit">("block");
+  const [trustThreshold, setTrustThreshold] = useState("");
+  const [violationPenalty, setViolationPenalty] = useState("");
+  const [rateLimit, setRateLimit] = useState("");
+  const [loading, setLoading] = useState(true);
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const outlineTealButtonStyle = {
     background: "transparent",
     border: "1px solid #2DDAB8",
     color: "#2DDAB8"
   } as const;
 
-  // No settings API yet — persist locally so the form round-trips and the action confirms (MVP).
-  const onSave = () => {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ mode, trustThreshold, violationPenalty, rateLimit }));
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2500);
+  // Load the REAL effective settings (config defaults + persisted overrides) for the namespace.
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    fetchSettings(namespace)
+      .then((s) => {
+        if (!active) return;
+        setMode(s.enforcement_mode);
+        setTrustThreshold(String(s.trust_threshold));
+        setViolationPenalty(String(s.violation_penalty));
+        setRateLimit(String(s.rate_limit));
+        setError(null);
+      })
+      .catch(() => active && setError("Could not load settings"))
+      .finally(() => active && setLoading(false));
+    return () => {
+      active = false;
+    };
+  }, [namespace]);
+
+  const onSave = async () => {
+    setError(null);
+    try {
+      await saveSettings(namespace, {
+        enforcement_mode: mode,
+        trust_threshold: Number(trustThreshold),
+        violation_penalty: Number(violationPenalty),
+        rate_limit: Number(rateLimit)
+      });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Save failed");
+    }
   };
 
   return (
@@ -155,11 +169,9 @@ export function Settings() {
             <Check size={14} /> Settings saved
           </span>
         )}
-        <span
-          title="Saved in this browser only — there is no server-side settings store yet."
-          style={{ fontSize: 12, color: "var(--text-secondary)" }}
-        >
-          Saved locally (no server settings store yet)
+        {error && <span style={{ fontSize: 13, color: "var(--block)" }}>{error}</span>}
+        <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+          {loading ? "Loading…" : `Persisted server-side for namespace "${namespace}"`}
         </span>
         <KitButton
           variant="ghost"

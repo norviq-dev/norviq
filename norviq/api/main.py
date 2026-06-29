@@ -18,7 +18,7 @@ from norviq.api.db.session import close_db, create_tables, ensure_schema_compati
 from norviq.api.siem import AuditForwarder
 from norviq.fleet_relay import FleetRelayForwarder
 from norviq.fleet_puller import FleetPolicyPuller
-from norviq.api.routers import attack_graph_compute, agents, audit, deployments, evaluate, graph, graphs, health, me, mitre, policies, redteam
+from norviq.api.routers import attack_graph_compute, agents, audit, cluster_info, coverage, deployments, evaluate, graph, graphs, health, keys, me, mitre, policies, redteam, settings_router, version
 from norviq.config import settings
 from norviq.engine.audit_emitter import AuditEmitter
 from norviq.engine.cache import RedisCache
@@ -155,12 +155,17 @@ def create_app() -> FastAPI:
     app.include_router(audit.router, prefix="/api/v1", tags=["audit"])
     app.include_router(agents.router, prefix="/api/v1", tags=["agents"])
     app.include_router(me.router, prefix="/api/v1", tags=["me"])
+    app.include_router(cluster_info.router, prefix="/api/v1", tags=["cluster-info"])
     app.include_router(deployments.router, prefix="/api/v1", tags=["deployments"])
     app.include_router(mitre.router, prefix="/api/v1", tags=["mitre"])
+    app.include_router(coverage.router, prefix="/api/v1", tags=["coverage"])
     app.include_router(graph.router, prefix="/api/v1")
     app.include_router(graphs.router)
     app.include_router(attack_graph_compute.router)
     app.include_router(redteam.router, prefix="/api/v1", tags=["redteam"])
+    app.include_router(settings_router.router, prefix="/api/v1", tags=["settings"])
+    app.include_router(version.router, prefix="/api/v1", tags=["version"])
+    app.include_router(keys.router, prefix="/api/v1", tags=["keys"])
     app.state.audit_hub = AuditHub()
 
     @app.websocket("/ws/audit")

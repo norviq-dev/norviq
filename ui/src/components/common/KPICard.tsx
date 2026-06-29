@@ -24,7 +24,7 @@ export const KPICard = memo(function KPICard({
 }: {
   label: string;
   value: number;
-  trend: string;
+  trend?: string;
   color?: string;
 }) {
   const display = useCountUp(value);
@@ -38,9 +38,11 @@ export const KPICard = memo(function KPICard({
     >
       <div className="kpi-label">{label}</div>
       <div className="kpi-value">{display.toLocaleString()}</div>
-      <div className="kpi-trend" style={{ color }}>
-        {trend}
-      </div>
+      {trend && (
+        <div className="kpi-trend" style={{ color }}>
+          {trend}
+        </div>
+      )}
     </div>
   );
 });

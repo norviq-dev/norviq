@@ -1,16 +1,7 @@
 import { createContext, ReactNode, useContext, useEffect, useMemo, useState } from "react";
 import { oidcEnabled, login } from "../auth/oidc";
-
-export const CLUSTERS = ["local", "production-aks", "staging-aks", "dev-aks"];
-export const NS_BY_CLUSTER: Record<string, string[]> = {
-  local: ["default"],
-  "production-aks": ["default", "chatbot-prod", "payments", "analytics", "platform"],
-  "staging-aks": ["staging-default", "qa"],
-  "dev-aks": ["dev-default"]
-};
-// Env-driven: set VITE_ENV_LABEL per environment (.env.production sets it). Falls back to "local"
-// so nothing presumes a specific cluster name when the env var is unset.
-const DEFAULT_CLUSTER = import.meta.env.VITE_ENV_LABEL || "local";
+import { fetchClusterInfo } from "../api/client";
+import { fleetEnabled, fetchFleetClusters } from "../api/fleet";
 
 export type Section = "security" | "intelligence" | "settings";
 export type TimeRange = "1h" | "6h" | "24h" | "7d" | "30d";
@@ -28,6 +19,9 @@ type AppContextValue = {
   selectedNamespace: string;
   cluster: string;
   namespace: string;
+  // Live, fleet-aware selector source (F046): replaces the old hardcoded CLUSTERS/NS_BY_CLUSTER.
+  clusters: string[];
+  namespaces: string[];
   setActiveSection: (value: Section) => void;
   setTimeRange: (value: TimeRange) => void;
   setCluster: (value: string) => void;
@@ -39,8 +33,10 @@ const AppContext = createContext<AppContextValue | null>(null);
 export function AppProvider({ children }: { children: ReactNode }) {
   const [activeSection, setActiveSection] = useState<Section>("intelligence");
   const [timeRange, setTimeRange] = useState<TimeRange>("24h");
-  const [selectedCluster, setClusterState] = useState(DEFAULT_CLUSTER);
+  const [selectedCluster, setClusterState] = useState("");
   const [selectedNamespace, setNamespaceState] = useState("default");
+  const [clusters, setClusters] = useState<string[]>([]);
+  const [namespaces, setNamespaces] = useState<string[]>([]);
 
   useEffect(() => {
     const KEY = "nrvq_token";
@@ -65,9 +61,42 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // Load the live cluster + namespace lists once a token is present. Fleet ON -> clusters from the hub
+  // (/fleet/clusters); fleet OFF -> the single real deployment (/cluster-info). Namespaces always come
+  // from /cluster-info (this deployment's real, observed namespaces) — never a hardcoded map.
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      if (!localStorage.getItem("nrvq_token")) return;
+      try {
+        const info = await fetchClusterInfo();
+        let clusterIds = [info.cluster_id];
+        if (fleetEnabled) {
+          try {
+            const fc = await fetchFleetClusters();
+            if (fc.length) clusterIds = fc.map((c) => c.id);
+          } catch {
+            /* hub unreachable -> fall back to the local single cluster (still real) */
+          }
+        }
+        if (cancelled) return;
+        setClusters(clusterIds);
+        setNamespaces(info.namespaces);
+        setClusterState((prev) => (prev && clusterIds.includes(prev) ? prev : clusterIds[0] ?? ""));
+        setNamespaceState((prev) => (info.namespaces.includes(prev) ? prev : info.namespaces[0] ?? "default"));
+      } catch {
+        /* unauthenticated or API down -> leave lists empty (honest empty selector) */
+      }
+    }
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const setCluster = (value: string) => {
     setClusterState(value);
-    setNamespaceState((NS_BY_CLUSTER[value] ?? ["default"])[0]);
+    if (!namespaces.includes(selectedNamespace)) setNamespaceState(namespaces[0] ?? "default");
   };
 
   const setNamespace = (value: string) => setNamespaceState(value);
@@ -81,12 +110,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
       // Backward-compatible aliases for existing pages/components.
       cluster: selectedCluster,
       namespace: selectedNamespace,
+      clusters,
+      namespaces,
       setActiveSection,
       setTimeRange,
       setCluster,
       setNamespace
     }),
-    [activeSection, timeRange, selectedCluster, selectedNamespace]
+    [activeSection, timeRange, selectedCluster, selectedNamespace, clusters, namespaces]
   );
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }

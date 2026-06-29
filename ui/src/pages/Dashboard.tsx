@@ -1,7 +1,14 @@
 import { Download, FileText } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { fetchAgents, fetchAuditRecords, fetchAuditStats, fetchTopBlocked, fetchVolume } from "../api/client";
+import {
+  fetchAgents,
+  fetchAuditRecords,
+  fetchAuditStats,
+  fetchCoverageByCategory,
+  fetchTopBlocked,
+  fetchVolume
+} from "../api/client";
 import { CategoryBars } from "../components/charts/CategoryBars";
 import { VolumeChart } from "../components/charts/VolumeChart";
 import { DecisionBadge } from "../components/common/DecisionBadge";
@@ -113,6 +120,11 @@ export function Dashboard() {
     staleTimeMs: 60_000,
     refetchIntervalMs: 60_000
   });
+  // Real policy coverage per risk category (F046) — drives both the posture gauge and the category bars.
+  const coverage = useApi(() => fetchCoverageByCategory(selectedNamespace), [selectedNamespace], {
+    cacheKey: `dashboard-coverage:${selectedNamespace}`,
+    staleTimeMs: 60_000
+  });
 
   const totalCalls = stats.data?.total ?? 0;
   const blockedToday = stats.data?.blocked ?? 0;
@@ -136,21 +148,13 @@ export function Dashboard() {
     [agents.data]
   );
 
-  const score = useMemo(() => {
-    const br = stats.data?.block_rate_pct ?? 0;
-    return Math.max(0, Math.min(100, Math.round(95 - br * 1.6)));
-  }, [stats.data?.block_rate_pct]);
+  // Posture = overall real policy coverage %; category bars = real per-category coverage scores.
+  const score = coverage.data?.coverage_pct ?? 0;
 
-  const categoryScores = useMemo(() => {
-    const br = stats.data?.block_rate_pct ?? 0;
-    return [
-      { category: "OWASP LLM", score: Math.max(40, 100 - Math.round(br * 0.7)) },
-      { category: "Data Protection", score: Math.max(40, 100 - Math.round(br * 0.6)) },
-      { category: "Tool Safety", score: Math.max(40, 100 - Math.round(br * 0.9)) },
-      { category: "Rate Limiting", score: Math.max(40, 100 - Math.round(br * 1.1)) },
-      { category: "Trust", score: Math.max(40, 100 - Math.round(br * 0.5)) }
-    ];
-  }, [stats.data?.block_rate_pct]);
+  const categoryScores = useMemo(
+    () => (coverage.data?.categories ?? []).map((c) => ({ category: c.category, score: c.score })),
+    [coverage.data]
+  );
 
   const topBlockedData = useMemo(
     () =>
@@ -229,10 +233,10 @@ export function Dashboard() {
       />
       <div className="stack" style={{ gap: 20 }}>
         <div className="grid grid-cols-4 lg:grid-cols-4 md:grid-cols-2 gap-5 dashboard-kpi-grid">
-          <KPICard label={`Total Calls ${timeRange}`} value={totalCalls} trend="↑12% vs yesterday" color="#2ddab8" />
-          <KPICard label={`Blocked (${timeRange})`} value={blockedToday} trend="↓8% false positives" color="#ff3b5c" />
-          <KPICard label={`Block Rate % (${timeRange})`} value={blockRate} trend="↓ healthier traffic" color="#ffb020" />
-          <KPICard label={`Avg Latency ms (${timeRange})`} value={avgLatency} trend="↑ fast path stable" color="#00e5a0" />
+          <KPICard label={`Total Calls ${timeRange}`} value={totalCalls} color="#2ddab8" />
+          <KPICard label={`Blocked (${timeRange})`} value={blockedToday} color="#ff3b5c" />
+          <KPICard label={`Block Rate % (${timeRange})`} value={blockRate} color="#ffb020" />
+          <KPICard label={`Avg Latency ms (${timeRange})`} value={avgLatency} color="#00e5a0" />
         </div>
 
         <div className="grid grid-cols-3 lg:grid-cols-3 md:grid-cols-1 gap-5 dashboard-row-two">

@@ -4,16 +4,30 @@
 """Agent trust score routes."""
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from norviq.api.auth import get_current_user, require_admin, scoped_namespace
+from norviq.api.db.models import AuditLogEntry
+from norviq.api.db.session import get_session
 from norviq.sdk.core.trust import TrustScore
 
 log = structlog.get_logger()
 router = APIRouter()
+
+# A bound so one agent's history query never loads an unbounded slice of audit_log into memory.
+_AGENT_AUDIT_LIMIT = 5000
+
+
+def _since_for_range(range_value: str) -> datetime:
+    """Convert an API range token to a UTC lower bound (matches the audit route's tokens)."""
+    range_map = {"1h": 1, "6h": 6, "24h": 24, "7d": 168, "30d": 720}
+    return datetime.now(timezone.utc) - timedelta(hours=range_map.get(range_value, 168))
 
 
 def _namespace_from_spiffe(spiffe_id: str) -> str | None:
@@ -102,6 +116,82 @@ async def _agents_from_registry(namespace: str) -> list[dict]:
         }
         for entry in entries
     ]
+
+
+# NOTE: these specific routes MUST be declared before the greedy /agents/{spiffe_id:path} GET below,
+# otherwise the path converter swallows the "/tool-usage" / "/trust-history" suffix.
+@router.get("/agents/{spiffe_id:path}/tool-usage")
+async def agent_tool_usage(
+    spiffe_id: str,
+    namespace: str | None = Query(None),
+    range_: str = Query("7d", alias="range"),
+    user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[dict]:
+    """Real per-tool call counts for one agent, aggregated from audit_log over the range."""
+    namespace = scoped_namespace(user, namespace)
+    stmt = select(AuditLogEntry.tool_name, AuditLogEntry.decision).where(
+        AuditLogEntry.agent_id == spiffe_id,
+        AuditLogEntry.timestamp_utc >= _since_for_range(range_),
+    )
+    if namespace and namespace != "all":
+        stmt = stmt.where(AuditLogEntry.namespace == namespace)
+    rows = (await session.execute(stmt.limit(_AGENT_AUDIT_LIMIT))).all()
+
+    usage: dict[str, dict] = {}
+    for tool_name, decision in rows:
+        entry = usage.setdefault(str(tool_name), {"tool": str(tool_name), "count": 0, "blocked": 0})
+        entry["count"] += 1
+        if decision == "block":
+            entry["blocked"] += 1
+    result = sorted(usage.values(), key=lambda item: item["count"], reverse=True)
+    log.debug("nrvq.api.agent.tool_usage", spiffe_id=spiffe_id, tools=len(result), code="NRVQ-API-7082")
+    return result
+
+
+@router.get("/agents/{spiffe_id:path}/trust-history")
+async def agent_trust_history(
+    spiffe_id: str,
+    namespace: str | None = Query(None),
+    range_: str = Query("7d", alias="range"),
+    user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[dict]:
+    """Real per-day allow/block counts + average trust for one agent, aggregated from audit_log."""
+    namespace = scoped_namespace(user, namespace)
+    stmt = select(
+        AuditLogEntry.timestamp_utc, AuditLogEntry.decision, AuditLogEntry.trust_score
+    ).where(
+        AuditLogEntry.agent_id == spiffe_id,
+        AuditLogEntry.timestamp_utc >= _since_for_range(range_),
+    )
+    if namespace and namespace != "all":
+        stmt = stmt.where(AuditLogEntry.namespace == namespace)
+    rows = (await session.execute(stmt.limit(_AGENT_AUDIT_LIMIT))).all()
+
+    buckets: dict[str, dict] = {}
+    for ts, decision, trust in rows:
+        day = ts.date().isoformat()
+        bucket = buckets.setdefault(day, {"time": day, "allow": 0, "block": 0, "_tsum": 0.0, "_n": 0})
+        if decision == "block":
+            bucket["block"] += 1
+        else:
+            bucket["allow"] += 1
+        if trust is not None:
+            bucket["_tsum"] += float(trust)
+            bucket["_n"] += 1
+
+    history = [
+        {
+            "time": b["time"],
+            "allow": b["allow"],
+            "block": b["block"],
+            "trust_score": round(b["_tsum"] / b["_n"], 3) if b["_n"] else None,
+        }
+        for _, b in sorted(buckets.items())
+    ]
+    log.debug("nrvq.api.agent.trust_history", spiffe_id=spiffe_id, days=len(history), code="NRVQ-API-7083")
+    return history
 
 
 @router.get("/agents/{spiffe_id:path}")

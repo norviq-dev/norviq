@@ -15,13 +15,6 @@ interface Props {
 
 export function AssetGraphCanvas({ nodes, edges, selectedNodeId, onSelectNode }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
-  const fallbackHistory = (id: string) => {
-    // Deterministic pseudo-random fallback for local MVP visuals when API history is empty.
-    const hash = Array.from(id).reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
-    const allow = 3 + (hash % 8);
-    const block = hash % 4;
-    return { allow, block, escalate: 0 };
-  };
 
   useEffect(() => {
     if (!svgRef.current) return;
@@ -49,9 +42,9 @@ export function AssetGraphCanvas({ nodes, edges, selectedNodeId, onSelectNode }:
       .data(simEdges)
       .join("line")
       .attr("stroke", (d: any) => {
-        const raw = d.properties?.decision_history;
-        const empty = !raw || (raw.allow ?? 0) === 0 && (raw.block ?? 0) === 0 && (raw.escalate ?? 0) === 0;
-        const dh = empty ? fallbackHistory(`${d.source}-${d.target}-${d.type ?? "edge"}`) : raw;
+        // Real per-edge decision counts from the API (audit_log-derived). No fabricated fallback:
+        // an edge with no recorded decisions renders with the neutral/zero edgeColor.
+        const dh = d.properties?.decision_history ?? { allow: 0, block: 0, escalate: 0 };
         return edgeColor(dh);
       })
       .attr("stroke-width", (d: any) => Math.max(1, Math.log((d.weight || 1) + 1) * 1.5))

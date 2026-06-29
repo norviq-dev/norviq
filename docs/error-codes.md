@@ -22,7 +22,7 @@ Generated from `norviq/**/*.py` log/error code literals (`NRVQ-*`).
 | SIEM | 3 | `norviq/api/siem.py` |
 | TEL | 8 | `norviq/telemetry/*` |
 
-Total documented unique codes: **198**
+Total documented unique codes: **211**
 
 ## API
 
@@ -47,6 +47,18 @@ Total documented unique codes: **198**
 | NRVQ-API-7050-ERR | `nrvq.api.asset_graph.error` | `norviq/api/routers/graphs.py` |
 | NRVQ-API-7051 | `nrvq.api.attack_paths.served` | `norviq/api/routers/graphs.py` |
 | NRVQ-API-7051-ERR | `nrvq.api.attack_paths.error` | `norviq/api/routers/graphs.py` |
+| NRVQ-API-7080 | `nrvq.api.cluster_info.served` (F046 live cluster+namespaces) | `norviq/api/routers/cluster_info.py` |
+| NRVQ-API-7081 | `nrvq.api.coverage.served` (F046 coverage-by-category) | `norviq/api/routers/coverage.py` |
+| NRVQ-API-7081-ERR | `nrvq.api.coverage.mapping_missing` | `norviq/api/routers/coverage.py` |
+| NRVQ-API-7082 | `nrvq.api.agent.tool_usage` (F046 audit-derived) | `norviq/api/routers/agents.py` |
+| NRVQ-API-7083 | `nrvq.api.agent.trust_history` (F046 audit-derived) | `norviq/api/routers/agents.py` |
+| NRVQ-API-7084 | `nrvq.api.settings.served` (F046 effective settings) | `norviq/api/routers/settings_router.py` |
+| NRVQ-API-7085 | `nrvq.api.settings.saved` (F046 override persisted) | `norviq/api/routers/settings_router.py` |
+| NRVQ-API-7086 | `nrvq.api.version.served` (F046 single-source version) | `norviq/api/routers/version.py` |
+| NRVQ-API-7090 | `nrvq.api.apikey.authenticated` (F046 key auth) | `norviq/api/api_keys.py` |
+| NRVQ-API-7091 | `nrvq.api.keys.listed` (F046) | `norviq/api/routers/keys.py` |
+| NRVQ-API-7092 | `nrvq.api.keys.created` (F046) | `norviq/api/routers/keys.py` |
+| NRVQ-API-7093 | `nrvq.api.keys.revoked` (F046) | `norviq/api/routers/keys.py` |
 
 ## AUTH
 
@@ -141,7 +153,7 @@ Multi-cluster fleet (F045). Spoke relay + hub fleet-api. Distinct prefix from `N
 ## Full Code Index
 
 ```text
-NRVQ-API-7000, NRVQ-API-7001, NRVQ-API-7002, NRVQ-API-7010, NRVQ-API-7011, NRVQ-API-7012, NRVQ-API-7013, NRVQ-API-7014, NRVQ-API-7015, NRVQ-API-7020, NRVQ-API-7021, NRVQ-API-7022, NRVQ-API-7023, NRVQ-API-7024, NRVQ-API-7030, NRVQ-API-7031, NRVQ-API-7032, NRVQ-API-7050, NRVQ-API-7050-ERR, NRVQ-API-7051, NRVQ-API-7051-ERR, NRVQ-API-7061, NRVQ-API-7099
+NRVQ-API-7000, NRVQ-API-7001, NRVQ-API-7002, NRVQ-API-7010, NRVQ-API-7011, NRVQ-API-7012, NRVQ-API-7013, NRVQ-API-7014, NRVQ-API-7015, NRVQ-API-7020, NRVQ-API-7021, NRVQ-API-7022, NRVQ-API-7023, NRVQ-API-7024, NRVQ-API-7030, NRVQ-API-7031, NRVQ-API-7032, NRVQ-API-7050, NRVQ-API-7050-ERR, NRVQ-API-7051, NRVQ-API-7051-ERR, NRVQ-API-7061, NRVQ-API-7080, NRVQ-API-7081, NRVQ-API-7081-ERR, NRVQ-API-7082, NRVQ-API-7083, NRVQ-API-7084, NRVQ-API-7085, NRVQ-API-7086, NRVQ-API-7090, NRVQ-API-7091, NRVQ-API-7092, NRVQ-API-7093, NRVQ-API-7099
 NRVQ-AUD-6000, NRVQ-AUD-6001, NRVQ-AUD-6002, NRVQ-AUD-6003, NRVQ-AUD-6004, NRVQ-AUD-6005, NRVQ-AUD-6006, NRVQ-AUD-6007, NRVQ-AUD-6008
 NRVQ-CLI-8000, NRVQ-CLI-8001, NRVQ-CLI-8002, NRVQ-CLI-8003, NRVQ-CLI-8004
 NRVQ-DB-9000, NRVQ-DB-9001, NRVQ-DB-9002, NRVQ-DB-9003, NRVQ-DB-9010, NRVQ-DB-9011, NRVQ-DB-9012, NRVQ-DB-9013, NRVQ-DB-9014, NRVQ-DB-9015, NRVQ-DB-9016, NRVQ-DB-9017, NRVQ-DB-9018, NRVQ-DB-9019, NRVQ-DB-9020, NRVQ-DB-9021, NRVQ-DB-9022, NRVQ-DB-9030, NRVQ-DB-9031, NRVQ-DB-9032, NRVQ-DB-9033, NRVQ-DB-DEBUG-1, NRVQ-DB-DEBUG-2, NRVQ-DB-DEBUG-2-ERR, NRVQ-DB-DEBUG-2A, NRVQ-DB-DEBUG-2B, NRVQ-DB-DEBUG-2C, NRVQ-DB-DEBUG-2D, NRVQ-DB-DEBUG-3, NRVQ-DB-DEBUG-4, NRVQ-DB-DEBUG-5, NRVQ-DB-DEBUG-6, NRVQ-DB-DEBUG-CONNECT-ARGS, NRVQ-DB-DEBUG-METADATA

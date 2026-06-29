@@ -19,8 +19,9 @@ import {
   type LucideIcon
 } from "lucide-react";
 import { NavLink } from "react-router-dom";
-import { logout } from "../../api/client";
+import { fetchVersion, logout } from "../../api/client";
 import { fleetEnabled } from "../../api/fleet";
+import { useApi } from "../../hooks/useApi";
 import { Section, useApp } from "../../store/AppContext";
 
 type NavItem = { to: string; label: string; icon: LucideIcon };
@@ -116,6 +117,7 @@ export default function ExpandedPanel({
 }) {
   const { activeSection } = useApp();
   const config = PANEL_CONFIG[activeSection];
+  const version = useApi(() => fetchVersion(), [], { cacheKey: "version", staleTimeMs: 600_000 });
 
   return (
     <div className={`sb-panel${overlay ? " sb-panel-overlay" : ""}`}>
@@ -150,7 +152,7 @@ export default function ExpandedPanel({
       <div className="sb-foot">
         © 2026 Norviq Contributors
         <br />
-        All rights reserved. · Version 0.1.0
+        All rights reserved.{version.data?.version ? ` · Version ${version.data.version}` : ""}
       </div>
     </div>
   );
