@@ -101,6 +101,79 @@ func TestBuildPolicySyncPayload_DefaultsNamespaceForWorkloadTarget(t *testing.T)
 	}
 }
 
+func TestBuildPolicySyncPayload_NamespaceBaselineKeyedToTargetNamespace(t *testing.T) {
+	controller := newTestController()
+	// Mirrors the helm baseline CR: authored in the admin namespace with clusterPriority,
+	// targeting a tenant namespace with no agentClass. Must be stored at <targetNs>:__baseline__
+	// so the engine's baseline fallback can resolve it (otherwise unseeded agent classes deny).
+	obj := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"spec": map[string]interface{}{
+				"enforcementMode": "block",
+				"clusterPriority": int64(900),
+				"rego":            "package norviq.presets.strict",
+				"target": map[string]interface{}{
+					"namespace": "default",
+				},
+			},
+		},
+	}
+	obj.SetName("baseline-cluster-guard-default")
+	obj.SetNamespace("norviq")
+
+	payload, err := controller.buildPolicySyncPayload(obj)
+	if err != nil {
+		t.Fatalf("buildPolicySyncPayload returned error: %v", err)
+	}
+	if payload.Namespace != "default" {
+		t.Fatalf("expected baseline keyed to target namespace default, got %q", payload.Namespace)
+	}
+	if payload.AgentClass != "__baseline__" {
+		t.Fatalf("expected baseline agent class __baseline__, got %q", payload.AgentClass)
+	}
+	// clusterPriority (900) authorizes the cross-namespace target but must NOT become the evaluation
+	// priority — the baseline is a fallback and must lose to any real policy.
+	if payload.Priority != baselineFallbackPriority {
+		t.Fatalf("expected baseline stored at fallback priority %d, got %d", baselineFallbackPriority, payload.Priority)
+	}
+}
+
+func TestNamespaceBaselineKey_OnlyMatchesWholeNamespaceClusterBaseline(t *testing.T) {
+	mk := func(spec map[string]interface{}) *unstructured.Unstructured {
+		u := &unstructured.Unstructured{Object: map[string]interface{}{"spec": spec}}
+		u.SetName("p")
+		u.SetNamespace("norviq")
+		return u
+	}
+	// Positive: cluster-priority whole-namespace target.
+	if ns, class, ok := namespaceBaselineKey(mk(map[string]interface{}{
+		"clusterPriority": int64(900),
+		"target":          map[string]interface{}{"namespace": "default"},
+	})); !ok || ns != "default" || class != "__baseline__" {
+		t.Fatalf("expected (default, __baseline__, true), got (%q, %q, %v)", ns, class, ok)
+	}
+	// Negative: agentClass target (a normal namespace/workload policy) is untouched.
+	if _, _, ok := namespaceBaselineKey(mk(map[string]interface{}{
+		"clusterPriority": int64(900),
+		"target":          map[string]interface{}{"namespace": "default", "agentClass": "customer-support"},
+	})); ok {
+		t.Fatalf("agentClass target must not be treated as a namespace baseline")
+	}
+	// Negative: no clusterPriority (an ordinary tenant policy) is untouched.
+	if _, _, ok := namespaceBaselineKey(mk(map[string]interface{}{
+		"target": map[string]interface{}{"namespace": "default"},
+	})); ok {
+		t.Fatalf("non-cluster-priority namespace target must not be treated as a baseline")
+	}
+	// Negative: workload kind+name target is untouched.
+	if _, _, ok := namespaceBaselineKey(mk(map[string]interface{}{
+		"clusterPriority": int64(900),
+		"target":          map[string]interface{}{"namespace": "default", "kind": "Deployment", "name": "x"},
+	})); ok {
+		t.Fatalf("workload target must not be treated as a namespace baseline")
+	}
+}
+
 func TestBuildPolicySyncPayload_UsesPresetFallback(t *testing.T) {
 	controller := newTestController()
 	tmp := t.TempDir()
