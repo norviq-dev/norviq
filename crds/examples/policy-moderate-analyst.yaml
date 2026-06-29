@@ -10,8 +10,9 @@ spec:
     agentClass: data-analyst
   enforcementMode: audit
   preset: moderate
+  # Canonical rule_ids enforced by the bundled comprehensive policy (informational).
   rules:
-    - norviq/owasp/llm01-prompt-injection
-    - norviq/owasp/llm06-excessive-agency
-    - norviq/tool-safety/deny-sql-injection
+    - llm01_prompt_injection
+    - llm06_excessive_agency
+    - deny_sql_injection
   priority: 150

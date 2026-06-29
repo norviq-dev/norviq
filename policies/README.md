@@ -1,54 +1,48 @@
-# Norviq Policy Library
+# Norviq Policies
 
-Pre-built security policies for LLM agent tool calls.
+This directory holds the rego that Norviq actually ships and loads.
 
-## Categories
+## What's here (and what loads it)
 
-| Category | Policies | Description |
+| Artifact | Path | Loaded by |
 |---|---|---|
-| OWASP LLM | 5 | Covers LLM01, LLM02, LLM05, LLM06, LLM10 |
-| Data Protection | 5 | PII, PCI, HIPAA, cross-tenant, exfiltration |
-| Access Control | 4 | Write/delete/admin blocks, namespace isolation |
-| Tool Safety | 5 | SQL injection, shell execution, file access, network, wildcards |
-| Rate Limiting | 4 | Per-minute, burst, session, daily limits |
-| Trust-Based | 4 | Low trust escalation, frozen blocks, new agent audit |
-| Industry | 6 | Finance, healthcare, e-commerce specific rules |
-| Presets | 3 | Strict, moderate, permissive bundles |
+| **Default bundled policy** | `../comprehensive.rego` | seeded as a namespace policy (`scripts/seed-local-policies.py`, `scripts/test-campaign/seed_campaign.py`, `scripts/eval/00-bootstrap-local.sh`). This is the canonical horizontal ruleset that runs by default. |
+| **Cluster/namespace baselines** | `../webhook/presets/{strict,moderate,permissive}.rego` | the webhook controller (read from `/app/presets`); materialized as `<ns>:__baseline__`. |
+| **Sector starter packs (F047)** | `sector/<sector>/*.rego` + `sector/packs.json` | enabled per-namespace via `POST /api/v1/policy-packs/{id}/enable` → materialized as `<ns>:__pack__`. |
+| **Shared horizontal rules** | `sector/_shared/horizontal.rego` | composed into a pack's materialized module when its `requires` lists them (e.g. finance→pci, healthcare→pii). One canonical definition, mirrored against `comprehensive.rego`. |
+| **Taxonomies** | `category_mapping.json`, `mitre_mapping.json` | the console coverage/MITRE endpoints (cross-reference rule_ids against the loaded rego). |
 
-## Quick Start
+> The previous à-la-carte modular tree (`owasp/`, `data_protection/`, `access_control/`, `rate_limiting/`,
+> `tool_safety/`, `trust/`, `industry/`, `presets/`) was **removed** in the policy-dedup pass: it was never loaded at
+> runtime and had drifted from the canonical `comprehensive.rego` (duplicate / divergent rule_ids). The canonical
+> definition of each rule_id now lives in exactly one place — `comprehensive.rego` (horizontal) or `sector/` (sector packs).
 
-Apply a preset:
+## Rule dialect
+
+Loaded rego is **v0** (`--v0-compatible`) — `decision = "block" { … }` — matching the engine's OPA and
+`validate_policy_create`. Test everything with:
+
 ```bash
-norviq policy create -f policies/presets/strict.rego -n default -c customer-support --mode block
+opa test --v0-compatible policies/
 ```
 
-Apply individual policy:
-```bash
-norviq policy create -f policies/owasp/llm01_prompt_injection.rego -n default -c customer-support
-```
+## comprehensive.rego — what it enforces (canonical horizontal rule_ids)
 
-Dry-run before applying:
-```bash
-norviq policy dry-run -f policies/presets/moderate.rego -n default -c customer-support
-```
-
-## OWASP LLM -> Policy Mapping
-
-| OWASP | Policy | What It Detects |
+| rule_id | Detects | OWASP / MITRE |
 |---|---|---|
-| LLM01 | llm01_prompt_injection | "ignore instructions", "act as", jailbreak patterns |
-| LLM02 | llm02_data_leakage | Sensitive data in external tool calls |
-| LLM05 | llm05_supply_chain | Untrusted code loading, risky URLs |
-| LLM06 | llm06_excessive_agency | Destructive operations, wildcard params |
-| LLM10 | llm10_unbounded_consumption | Rate limiting, session quotas |
+| `llm01_prompt_injection` | "ignore previous instructions", jailbreak patterns (+ homoglyph/zero-width skeleton) | LLM01 · AML.T0048 |
+| `deny_sql_injection` | SQL-injection shapes in tool params | Tool safety |
+| `deny_shell_execution` | shell/command execution | AML.T0054 |
+| `llm06_excessive_agency` | destructive / high-impact / wildcard tool use | LLM06 · AML.T0051 |
+| `llm02_data_leakage` | sensitive data to external tools | LLM02 · AML.T0057 |
+| `llm05_supply_chain` | untrusted code / risky URLs | LLM05 · AML.T0053 |
+| `pii_detection` | SSN / PII shapes in params | Data protection |
+| `pci_card_numbers` | PAN by field name or Luhn-valid value | Data protection (PCI) |
+| `cross_tenant_access` | cross-namespace / cross-tenant access | AML.T0049 |
+| `base64_payload_detected`, `base64_decoded_threat` | base64-encoded evasion (audit / block on decoded threat) | Evasion |
+| `scope_violation_dangerous_tool` | out-of-scope dangerous tool | Least privilege |
 
-## MITRE ATLAS -> Policy Mapping
+## Sector packs (F047)
 
-| Technique | Policy | Coverage |
-|---|---|---|
-| AML.T0048 | llm01_prompt_injection | Prompt injection to tool misuse |
-| AML.T0049 | cross_tenant_access | Agent chain privilege escalation |
-| AML.T0051 | llm06_excessive_agency | Excessive agency exploitation |
-| AML.T0053 | llm05_supply_chain | Plugin/tool compromise |
-| AML.T0054 | deny_shell_execution | LLM jailbreak to shell access |
-| AML.T0057 | llm02_data_leakage | Data exfiltration via tool calls |
+`sector/packs.json` is the catalog; each pack adds its sector's flagship rules as an additive overlay and may
+`require` shared horizontal rules (composed in at enable-time). See `registry/F047.md`.

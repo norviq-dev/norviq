@@ -20,7 +20,8 @@
       "enforces": "Escalates money movement over a threshold and transfers to new/unverified beneficiaries; blocks same-identity initiate+approve (SoD). Pair with the PCI cardholder-data rules.",
       "rego": "policies/sector/finance/finance.rego",
       "rule_ids": ["wire_over_threshold_escalate", "new_beneficiary_escalate", "sod_violation"],
-      "categories": ["Financial Controls"],
+      "requires": ["pci"],
+      "categories": ["Financial Controls", "Data Protection"],
       "compliance": ["SOX §404", "PCI DSS Req.7/8/10", "GLBA", "SR 11-7"],
       "tunables": ["fin_money_verbs", "fin_threshold"]
     },
@@ -31,7 +32,8 @@
       "enforces": "Escalates clinical-action tools (order/prescribe/modify chart) for human sign-off; blocks bulk-PHI reads over a threshold and PHI identifiers on egress tools. Builds on hipaa_phi.",
       "rego": "policies/sector/healthcare/healthcare.rego",
       "rule_ids": ["clinical_action_escalate", "phi_min_necessary", "phi_identifier_egress"],
-      "categories": ["Clinical Safety / PHI"],
+      "requires": ["pii"],
+      "categories": ["Clinical Safety / PHI", "Data Protection"],
       "compliance": ["HIPAA §164.312", "HIPAA §164.514(d)", "FDA HITL"],
       "tunables": ["hc_clinical_verbs", "hc_phi_fields", "hc_bulk_threshold"]
     },
@@ -42,7 +44,8 @@
       "enforces": "Escalates rights-impacting decisions (benefit deny/approve, adjudication) for human review; blocks CUI/FTI markings (SSN/tax) on egress tools.",
       "rego": "policies/sector/government/government.rego",
       "rule_ids": ["rights_impacting_escalate", "cui_fti_egress_blocked"],
-      "categories": ["Government / CUI"],
+      "requires": ["pii"],
+      "categories": ["Government / CUI", "Data Protection"],
       "compliance": ["OMB M-25-21", "NIST 800-53 AC-3/AU-12/SI-4", "IRS Pub 1075"],
       "tunables": ["gov_rights_verbs", "gov_cui_fields"]
     },

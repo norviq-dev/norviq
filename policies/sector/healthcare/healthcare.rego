@@ -19,7 +19,9 @@ hc_clinical_verbs = [
 ]
 hc_phi_read_verbs = ["get_patient", "query_patients", "list_patients", "fetch_records", "search_charts", "export_phi"]
 hc_egress_verbs = ["export", "send", "email", "upload", "share", "transmit"]
-hc_phi_fields = ["mrn", "medical_record", "patient_id", "ssn", "date_of_birth", "diagnosis", "icd", "health_plan", "patient_name"]
+# Clinical-specific PHI field names only — generic PII (SSN values, dates) is composed in from the
+# canonical shared pii rule via the pack's `requires: ["pii"]`, not re-listed here.
+hc_phi_fields = ["mrn", "medical_record", "patient_id", "diagnosis", "icd", "health_plan", "patient_name"]
 hc_bulk_threshold = 50
 
 escalates["clinical_action_escalate"] {

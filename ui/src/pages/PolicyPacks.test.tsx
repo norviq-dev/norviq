@@ -23,6 +23,7 @@ function pack(id: string, sector: string, title: string, enabled: boolean) {
     title,
     enforces: `${title} enforcement`,
     rule_ids: ["rule_a", "rule_b"],
+    composes: sector === "Finance" ? ["pci_card_numbers"] : [],
     categories: [`${sector} Cat`],
     compliance: ["REG-1"],
     tunables: ["verbs"],

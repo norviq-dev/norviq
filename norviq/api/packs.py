@@ -51,6 +51,10 @@ def load_manifest() -> dict:
     return {"pack_priority": int(raw.get("pack_priority", 800)), "packs": packs}
 
 
+# canonical horizontal rule_id contributed by each shared `requires` entry (for catalog display)
+_SHARED_RULE_IDS = {"pci": "pci_card_numbers", "pii": "pii_detection"}
+
+
 def catalog() -> list[dict]:
     """Public catalog rows (no rego) for GET /policy-packs, sorted by sector then id."""
     packs = load_manifest()["packs"]
@@ -61,6 +65,8 @@ def catalog() -> list[dict]:
             "title": p.get("title", ""),
             "enforces": p.get("enforces", ""),
             "rule_ids": p.get("rule_ids", []),
+            # canonical horizontal rules composed in at enable-time (e.g. pci_card_numbers, pii_detection)
+            "composes": [_SHARED_RULE_IDS[r] for r in p.get("requires", []) if r in _SHARED_RULE_IDS],
             "categories": p.get("categories", []),
             "compliance": p.get("compliance", []),
             "tunables": p.get("tunables", []),
@@ -96,16 +102,40 @@ def _between(text: str, begin: str, end: str) -> str:
     return text[bi:ei].strip("\n")
 
 
+def _shared_rego() -> str:
+    """The canonical shared horizontal rules module (policies/sector/_shared/horizontal.rego)."""
+    d = _sector_dir()
+    return (d / "_shared" / "horizontal.rego").read_text(encoding="utf-8") if d else ""
+
+
 def combine(pack_ids: list[str]) -> str:
-    """Build the combined (ns,__pack__) rego for the given enabled packs (order-stable, deduped)."""
+    """Build the combined (ns,__pack__) rego for the given enabled packs (order-stable, deduped).
+
+    A pack's manifest `requires` (e.g. finance->pci, healthcare->pii) composes the canonical SHARED-RULE
+    section from horizontal.rego into the module — so the namespace gets the SAME PCI/PII coverage as the
+    default policy, sourced from one definition, not re-implemented per pack.
+    """
+    manifest = load_manifest()["packs"]
     ordered = sorted(set(pid for pid in pack_ids if is_known(pid)))
     if not ordered:
         return ""
     contribs: list[str] = []
     resolver = ""
+    requires: list[str] = []
     for pid in ordered:
         rego = _read_rego(pid)
         contribs.append(f"# pack: {pid}\n{_between(rego, _CONTRIB_BEGIN, _CONTRIB_END)}")
         if not resolver:
             resolver = _between(rego, _RESOLVER_BEGIN, _RESOLVER_END)
-    return "package norviq.pack\n\n" + "\n\n".join(contribs) + "\n\n" + resolver + "\n"
+        for req in manifest[pid].get("requires", []):
+            if req not in requires:
+                requires.append(req)
+    shared_secs: list[str] = []
+    if requires:
+        shared = _shared_rego()
+        for req in sorted(requires):
+            begin, end = f"# >>> SHARED-RULE {req}", f"# >>> END SHARED-RULE {req}"
+            if begin in shared:
+                shared_secs.append(f"# shared: {req}\n{_between(shared, begin, end)}")
+    parts = ["package norviq.pack", *contribs, *shared_secs, resolver]
+    return "\n\n".join(parts) + "\n"

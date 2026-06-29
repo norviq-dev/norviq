@@ -106,6 +106,7 @@ export type PolicyPack = {
   title: string;
   enforces: string;
   rule_ids: string[];
+  composes: string[]; // canonical horizontal rules composed in at enable-time (e.g. pci_card_numbers)
   categories: string[];
   compliance: string[];
   tunables: string[];

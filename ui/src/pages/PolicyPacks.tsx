@@ -127,6 +127,11 @@ export function PolicyPacks() {
                         </span>
                       ))}
                     </div>
+                    {pack.composes.length > 0 && (
+                      <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-muted)" }}>
+                        + composes canonical: <span className="mono">{pack.composes.join(", ")}</span>
+                      </div>
+                    )}
                     <div style={{ marginTop: 12, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                       <span className="mono" style={{ fontSize: 11, color: "var(--text-muted)" }}>
                         {pack.rule_ids.length} rule{pack.rule_ids.length === 1 ? "" : "s"}
