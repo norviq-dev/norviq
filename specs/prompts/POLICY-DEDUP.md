@@ -6,7 +6,14 @@ REFERENCE the canonical horizontal rules instead of re-implementing. No change t
 75/75. Plan mode (read-only audit → report → approval → consolidate). **Commit:** do NOT auto-commit.
 **Audit report:** `.reviews/policy-dedup/REPORT.md`.
 
-## Result (DONE — branch `feat/policy-dedup`, not committed)
+## SHIPPED — merged to main `12fe936` (PR #6, the sector-packs stack: F047 5 packs `1f52da8` + this dedup `7999236` + 3 extension packs `4b4415e`)
+**Stage C AKS verify GREEN:** P-10 (api+webhook == `12fe936`), `/readyz` ok, **default-OFF** (catalog 8 packs all
+`enabled=false`, 0 `namespace_packs` rows, 0 `(ns,__pack__)` policies — new table + sector ALTER applied dormant),
+default enforcement unchanged (benign→allow, injection→block `llm01_prompt_injection`), attacks 74 passed + 2 xfailed +
+2 homoglyph/zero-width failures (KNOWN issue #4 gap — F-02 rego not re-seeded on AKS; unchanged by this stack). Packs
+are DB-seeded content → live-AKS pack ENFORCEMENT still rides issue #4; done-bar = kind-validated + default-off.
+
+## Result (DONE)
 
 **Stage 1 audit (read-only):** Source of truth = `comprehensive.rego` (seeded as the default tenant policy) +
 `webhook/presets/*` (baselines) + `policies/sector/*` (F047 packs). The entire modular tree
