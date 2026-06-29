@@ -22,6 +22,26 @@ live-verified on kind `nv-a` (rebuilt working-tree image per engine stage):
 Gates: ruff + tsc + vitest 37/37; **attacks 78/78** (corpus +3 homoglyph/zero-width/benign); error-codes 211→217;
 513 tests collect. AKS untouched; F-01 committed as the P1 checkpoint then the rest.
 
+**SHIP (PR #1, merged → AKS):** `feat/console-f046-and-defect-remediation` merged via merge commit → main HEAD
+**`e4a8158`**; build+deploy green; deployed api == `api-e4a81582…` (P-10 ✓). Follow-up issue **#2** (F-01 service-role
+SVID residual). Post-deploy verification PASSED on P-10, safe-default config (`NRVQ_NO_POLICY_DECISION=deny`,
+baselineClusterPolicy enabled), `/readyz`, F-01 live (viewer cross-ns→403, same/admin→200), unauth/forged→401 — **except**
+one RED row: **a deny-storm signal**.
+
+**DENY-STORM (found in post-deploy, fixed forward — PR #3):** with F-04 deny-default live, any agent class WITHOUT an
+explicit policy hard-denied (`block/no_policy_loaded`) on AKS. Root cause: the helm `baselineClusterPolicy` catch-all is
+synced under `norviq:baseline-cluster-guard-<ns>` (admin ns + policy-name), but the engine baseline fallback
+(`evaluator._collect_candidates`) only resolves `<ns>:__baseline__` / `__cluster__:__baseline__` → the catch-all was
+inert (masked by the old fail-open; unmasked by deny-default). The two live agent classes (customer-support, payments-bot)
+have policies and were unaffected. **Fix (controller-only, PR #3 `feat/fix-baseline-wiring`, head `3645d07`):**
+`buildPolicySyncPayload` keys a whole-namespace cluster baseline at `<targetNs>:__baseline__` at a **low fallback priority
+(1)**, not its clusterPriority (900) — clusterPriority authorizes the cross-ns target but must not be the eval priority, or
+a permissive strict-preset baseline @900 outranks+weakens a stricter specific policy (verified: at 900 prompt-injection
+passed a policied class, attacks 42-failed). Delete path keys symmetrically. New code `NRVQ-WHK-4042`. No engine/precedence
+change (cluster block-floor override preserved). Verified on kind: brand-new class→allow, injection vs policied class→block,
+**attacks 78/78**, `go test ./webhook` + ruff + engine precedence (vs real DB) green. **PR #3 open — awaiting merge gate;
+merge SHA + AKS re-verify TBD.**
+
 ---
 
 ## Prompt
