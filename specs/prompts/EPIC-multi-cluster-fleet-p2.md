@@ -6,7 +6,7 @@ rollout/override + SPIFFE-mTLS relay + HA fleet plane), P3 live drill-down feder
 controls, and the AKS live rollout of the fleet plane. Prod-ready, proven on an intensive local
 multi-cluster POC first, AKS last (gated behind a green local POC). Plan mode (staged); security auditor REQUIRED.
 **Design source:** `specs/EPIC-multi-cluster-fleet.md` (Option A; phasing P1→P4). **Builds on:** P1 (F045) + identity epic.
-**FEAT:** F045 + F018 (console). **Commit:** (commit P2 before AKS; AKS rollout in its own commit) · **Result:** (to fill)
+**FEAT:** F045 + F018 (console). **Commits:** `f0caa8d` (P2 milestone S1–S6) · `de5e1b0` (S7 AKS rollout) · **Result:** DONE — signed policy-push + drill-down + residency shipped, gated OFF by default; live single-spoke AKS rollout green (P-10 SHA==HEAD, signed push applies+enforces, hub-down fail-safe, attacks 75/75). Residual: full rotating-cert mTLS termination + the live 2-cluster cross-AKS demo (see `.reviews/fleet-p2/REPORT.md`).
 
 One prompt, but plan-mode staged. Crux = signed bundles + fail-safe (tampered/unsigned/replayed →
 rejected; hub-down → spoke keeps last good, never opens up). Everything gated OFF by default → single-
