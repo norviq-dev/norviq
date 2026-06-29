@@ -10,5 +10,8 @@
   "Financial Controls": ["wire_over_threshold_escalate", "new_beneficiary_escalate", "sod_violation"],
   "Clinical Safety / PHI": ["clinical_action_escalate", "phi_min_necessary", "phi_identifier_egress"],
   "Government / CUI": ["rights_impacting_escalate", "cui_fti_egress_blocked"],
-  "Telecom / CPNI": ["sim_swap_escalate", "cpni_bulk_blocked"]
+  "Telecom / CPNI": ["sim_swap_escalate", "cpni_bulk_blocked"],
+  "ERP Controls": ["erp_financial_posting_escalate", "erp_master_data_change_escalate", "erp_bank_detail_change_blocked", "erp_privileged_txn_blocked", "erp_sod_violation", "erp_mass_export_blocked"],
+  "Media Protection": ["media_prerelease_blocked", "media_drm_key_access_blocked", "media_distribute_escalate", "media_royalty_action_escalate", "media_bulk_pii_export_blocked"],
+  "E-commerce Controls": ["ecom_refund_over_threshold_escalate", "ecom_mass_refund_blocked", "ecom_price_manipulation_blocked", "ecom_bulk_pii_export_blocked", "ecom_account_takeover_escalate"]
 }

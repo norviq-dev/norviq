@@ -161,7 +161,7 @@ export function Settings() {
                 style={{ width: 160 }}
               >
                 <option value="">None</option>
-                {["Energy", "Finance", "Healthcare", "Government", "Telecom"].map((s) => (
+                {["Energy", "Finance", "Healthcare", "Government", "Telecom", "ERP/CRM", "Media/Entertainment", "E-commerce"].map((s) => (
                   <option key={s} value={s}>
                     {s}
                   </option>

@@ -46,8 +46,15 @@ classDiagram
     OPAEvaluator --> PolicyLoader : reads _policies[(ns:__pack__)]
     class SectorPacks {
         +energy.rego  %% ot_control_command_blocked / ot_adjacent_write_escalate / ot_surface_review_escalate
-        +finance.rego  %% wire_over_threshold_escalate / new_beneficiary_escalate / sod_violation
-        +healthcare.rego  %% clinical_action_escalate / phi_min_necessary / phi_identifier_egress
-        +government.rego  %% rights_impacting_escalate / cui_fti_egress_blocked
+        +finance.rego  %% wire_over_threshold_escalate / new_beneficiary_escalate / sod_violation (requires pci)
+        +healthcare.rego  %% clinical_action_escalate / phi_min_necessary / phi_identifier_egress (requires pii)
+        +government.rego  %% rights_impacting_escalate / cui_fti_egress_blocked (requires pii)
         +telecom.rego  %% sim_swap_escalate / cpni_bulk_blocked
+        +erp-crm.rego  %% erp_financial_posting_escalate / erp_bank_detail_change_blocked / erp_sod_violation (requires pii)
+        +media-entertainment.rego  %% media_prerelease_blocked / media_drm_key_access_blocked / media_distribute_escalate (requires pii)
+        +ecommerce.rego  %% ecom_refund_over_threshold_escalate / ecom_price_manipulation_blocked (requires pci,pii)
     }
+    class SharedHorizontal {
+        +horizontal.rego  %% canonical pci_card_numbers / pii_detection composed via packs.json requires
+    }
+    PackLib ..> SharedHorizontal : composes by `requires`

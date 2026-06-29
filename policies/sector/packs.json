@@ -59,6 +59,42 @@
       "categories": ["Telecom / CPNI"],
       "compliance": ["CPNI 47 CFR §64.2010(h)", "47 USC §222", "§64.2011"],
       "tunables": ["tel_simswap_verbs", "tel_cpni_read_verbs", "tel_bulk_threshold"]
+    },
+    {
+      "id": "erp-crm",
+      "sector": "ERP/CRM",
+      "title": "ERP/CRM Financial Controls & SoD",
+      "enforces": "Escalates financial postings / payment runs / PO approvals and vendor master-data changes; blocks vendor bank-account changes, privileged transactions, segregation-of-duties violations, and mass exports over a threshold. Composes canonical PII.",
+      "rego": "policies/sector/erp-crm/erp-crm.rego",
+      "rule_ids": ["erp_financial_posting_escalate", "erp_master_data_change_escalate", "erp_bank_detail_change_blocked", "erp_privileged_txn_blocked", "erp_sod_violation", "erp_mass_export_blocked"],
+      "requires": ["pii"],
+      "categories": ["ERP Controls", "Data Protection"],
+      "compliance": ["SOX §404 ITGC", "GDPR", "least privilege"],
+      "tunables": ["erp_posting_verbs", "erp_bank_verbs", "erp_export_threshold"]
+    },
+    {
+      "id": "media-entertainment",
+      "sector": "Media/Entertainment",
+      "title": "Media Pre-release, DRM & Distribution",
+      "enforces": "Blocks pre-release/embargoed content access/export and DRM/content-key access; escalates publish/distribute/takedown changes and royalty/licensing actions; blocks bulk subscriber PII / viewing-history export over a threshold. Composes canonical PII.",
+      "rego": "policies/sector/media-entertainment/media-entertainment.rego",
+      "rule_ids": ["media_prerelease_blocked", "media_drm_key_access_blocked", "media_distribute_escalate", "media_royalty_action_escalate", "media_bulk_pii_export_blocked"],
+      "requires": ["pii"],
+      "categories": ["Media Protection", "Data Protection"],
+      "compliance": ["content licensing", "DMCA", "GDPR/CCPA"],
+      "tunables": ["media_prerelease_terms", "media_drm_terms", "media_bulk_threshold"]
+    },
+    {
+      "id": "ecommerce",
+      "sector": "E-commerce",
+      "title": "E-commerce Refunds, Pricing & PII",
+      "enforces": "Escalates over-threshold refunds and account-takeover actions; blocks mass refunds, price/discount manipulation (price→0 / 100%+ / unlimited coupon), and bulk customer PII/order-history export. Composes canonical PCI + PII.",
+      "rego": "policies/sector/ecommerce/ecommerce.rego",
+      "rule_ids": ["ecom_refund_over_threshold_escalate", "ecom_mass_refund_blocked", "ecom_price_manipulation_blocked", "ecom_bulk_pii_export_blocked", "ecom_account_takeover_escalate"],
+      "requires": ["pci", "pii"],
+      "categories": ["E-commerce Controls", "Data Protection"],
+      "compliance": ["PCI DSS", "GDPR/CCPA", "SOX"],
+      "tunables": ["ecom_refund_threshold", "ecom_mass_threshold", "ecom_export_threshold"]
     }
   ]
 }
