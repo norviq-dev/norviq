@@ -62,6 +62,16 @@ spec:
                 name: norviq-secrets        # NRVQ_API_SECRET_KEY for token validation
             - configMapRef:
                 name: norviq-fleet-config   # NRVQ_FLEET_PG_URL + OIDC validation settings
+          {{- if .Values.fleet.hub.signingKeySecretName }}
+          # P2: read the bundle signing PRIVATE key from a pre-created in-cluster Secret (never in values/
+          # git/CI). An explicit env overrides the empty envFrom default. Empty -> hub cannot sign (fail-closed).
+          env:
+            - name: NRVQ_FLEET_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.fleet.hub.signingKeySecretName }}
+                  key: NRVQ_FLEET_SIGNING_KEY
+          {{- end }}
           resources:
             {{- toYaml .Values.fleet.hub.resources | nindent 12 }}
           startupProbe:
