@@ -238,6 +238,21 @@ config:
   dbPoolMaxOverflow: 10
   dbPoolTimeout: 10
   dbCommandTimeout: 10
+  # Workload-identity resolution: "mock" (env-var identity; default) or "workload-api" (real SPIFFE
+  # SVID, fail-closed). workload-api requires SPIRE on the cluster (deferred B1) + pyspiffe installed.
+  spiffeMode: mock
+
+# OIDC / SSO (IDENTITY epic A1/A2). Default-off: the API keeps validating legacy HS256 tokens until
+# an IdP is wired. Enabling adds RS256/ES256 validation ALONGSIDE HS256 (set legacyHs256Enabled:false
+# at cutover). Map IdP groups -> Norviq (role, namespace) via groupMappings (GitOps).
+oidc:
+  enabled: false
+  issuer: ""              # https://<tenant>/  (the token `iss`)
+  audience: ""            # the API's client/audience id (the token `aud`)
+  jwksUrl: ""             # the IdP JWKS endpoint
+  groupClaim: groups      # claim holding the user's group list
+  legacyHs256Enabled: true
+  groupMappings: {}       # e.g. {"norviq-admins":{"role":"admin"},"team-a":{"role":"viewer","namespace":"team-a"}}
 
 rbac:
   # The chart ships the norviq-admin / norviq-policy-editor / norviq-viewer ClusterRoles but no

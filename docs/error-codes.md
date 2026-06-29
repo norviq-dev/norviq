@@ -8,11 +8,12 @@ Generated from `norviq/**/*.py` log/error code literals (`NRVQ-*`).
 |---|---:|---|
 | API | 22 | `norviq/api/main.py`, `norviq/api/routers/*` |
 | AUD | 9 | `norviq/engine/audit_emitter.py` |
+| AUTH | 6 | `norviq/api/auth.py`, `norviq/api/jwks.py` |
 | CLI | 5 | `norviq/cli/main.py`, `norviq/cli/api_client.py` |
 | DB | 34 | `norviq/api/db/session.py`, `norviq/engine/cache.py`, `norviq/api/main.py` |
 | ENG | 36 | `norviq/engine/evaluator.py`, `norviq/engine/trust/*`, `norviq/engine/opa_client.py` |
 | GRP | 9 | `norviq/engine/graph/*` |
-| IDT | 4 | `norviq/engine/identity.py` |
+| IDT | 7 | `norviq/engine/identity.py` |
 | RED | 6 | `norviq/redteam/*`, `norviq/api/routers/redteam.py` |
 | REG | 15 | `norviq/engine/policy_loader.py` |
 | SDC | 12 | `norviq/sidecar/*` |
@@ -20,7 +21,7 @@ Generated from `norviq/**/*.py` log/error code literals (`NRVQ-*`).
 | SIEM | 3 | `norviq/api/siem.py` |
 | TEL | 8 | `norviq/telemetry/*` |
 
-Total documented unique codes: **165**
+Total documented unique codes: **174**
 
 ## API
 
@@ -44,6 +45,19 @@ Total documented unique codes: **165**
 | NRVQ-API-7050-ERR | `nrvq.api.asset_graph.error` | `norviq/api/routers/graphs.py` |
 | NRVQ-API-7051 | `nrvq.api.attack_paths.served` | `norviq/api/routers/graphs.py` |
 | NRVQ-API-7051-ERR | `nrvq.api.attack_paths.error` | `norviq/api/routers/graphs.py` |
+
+## AUTH
+
+OIDC / JWKS token validation (IDENTITY epic A1/A2). Distinct prefix from `NRVQ-SIEM-14xxx`.
+
+| Code | Message (event key) | Source |
+|---|---|---|
+| NRVQ-AUTH-14000 | `nrvq.auth.oidc_validated` | `norviq/api/auth.py` |
+| NRVQ-AUTH-14001 | `nrvq.auth.oidc_rejected` (bad iss/aud/exp/sig/alg or conflicting ns) | `norviq/api/auth.py` |
+| NRVQ-AUTH-14002 | `nrvq.auth.jwks_refreshed` | `norviq/api/jwks.py` |
+| NRVQ-AUTH-14003 | `nrvq.auth.jwks_unknown_kid` (after bounded refresh) | `norviq/api/jwks.py` |
+| NRVQ-AUTH-14004 | `nrvq.auth.jwks_fetch_failed` (fail-closed) | `norviq/api/jwks.py` |
+| NRVQ-AUTH-14005 | `nrvq.auth.legacy_hs256` (migration telemetry) | `norviq/api/auth.py` |
 
 ## DB
 
@@ -88,7 +102,8 @@ Total documented unique codes: **165**
 | TEL | NRVQ-TEL-12000..12007 | `norviq/telemetry/*` |
 | CLI | NRVQ-CLI-8000..8004 | `norviq/cli/*` |
 | SDK | NRVQ-SDK-1000,1002,1010..1013,1020..1022,1030..1032,1040..1042 | `norviq/sdk/*` |
-| IDT | NRVQ-IDT-10000..10003 | `norviq/engine/identity.py` |
+| IDT | NRVQ-IDT-10000..10006 | `norviq/engine/identity.py` |
+| AUTH | NRVQ-AUTH-14000..14005 | `norviq/api/auth.py`, `norviq/api/jwks.py` |
 
 ## Full Code Index
 
@@ -99,7 +114,8 @@ NRVQ-CLI-8000, NRVQ-CLI-8001, NRVQ-CLI-8002, NRVQ-CLI-8003, NRVQ-CLI-8004
 NRVQ-DB-9000, NRVQ-DB-9001, NRVQ-DB-9002, NRVQ-DB-9003, NRVQ-DB-9010, NRVQ-DB-9011, NRVQ-DB-9012, NRVQ-DB-9013, NRVQ-DB-9014, NRVQ-DB-9015, NRVQ-DB-9016, NRVQ-DB-9017, NRVQ-DB-9018, NRVQ-DB-9019, NRVQ-DB-9020, NRVQ-DB-9021, NRVQ-DB-9022, NRVQ-DB-9030, NRVQ-DB-9031, NRVQ-DB-9032, NRVQ-DB-9033, NRVQ-DB-DEBUG-1, NRVQ-DB-DEBUG-2, NRVQ-DB-DEBUG-2-ERR, NRVQ-DB-DEBUG-2A, NRVQ-DB-DEBUG-2B, NRVQ-DB-DEBUG-2C, NRVQ-DB-DEBUG-2D, NRVQ-DB-DEBUG-3, NRVQ-DB-DEBUG-4, NRVQ-DB-DEBUG-5, NRVQ-DB-DEBUG-6, NRVQ-DB-DEBUG-CONNECT-ARGS, NRVQ-DB-DEBUG-METADATA
 NRVQ-ENG-2000, NRVQ-ENG-2001, NRVQ-ENG-2002, NRVQ-ENG-2003, NRVQ-ENG-2004, NRVQ-ENG-2005, NRVQ-ENG-2010, NRVQ-ENG-2015, NRVQ-ENG-2020, NRVQ-ENG-2021, NRVQ-ENG-2030, NRVQ-ENG-2040, NRVQ-ENG-2041, NRVQ-ENG-2042, NRVQ-ENG-2043, NRVQ-ENG-2044, NRVQ-ENG-2045, NRVQ-ENG-2046, NRVQ-ENG-2047, NRVQ-ENG-2048, NRVQ-ENG-2049, NRVQ-ENG-2050, NRVQ-ENG-2051, NRVQ-ENG-2052, NRVQ-ENG-2053, NRVQ-ENG-2054, NRVQ-ENG-2057, NRVQ-ENG-DEBUG-1, NRVQ-ENG-DEBUG-2, NRVQ-ENG-DEBUG-3, NRVQ-ENG-DEBUG-4, NRVQ-ENG-DEBUG-5, NRVQ-ENG-DEBUG-ERR, NRVQ-ENG-DEBUG-INPUT, NRVQ-ENG-DEBUG-OPA, NRVQ-ENG-DEBUG-OPA-IN
 NRVQ-GRP-11000, NRVQ-GRP-11001, NRVQ-GRP-11010, NRVQ-GRP-11011, NRVQ-GRP-11012, NRVQ-GRP-11013, NRVQ-GRP-11014, NRVQ-GRP-11015, NRVQ-GRP-11016
-NRVQ-IDT-10000, NRVQ-IDT-10001, NRVQ-IDT-10002, NRVQ-IDT-10003
+NRVQ-AUTH-14000, NRVQ-AUTH-14001, NRVQ-AUTH-14002, NRVQ-AUTH-14003, NRVQ-AUTH-14004, NRVQ-AUTH-14005
+NRVQ-IDT-10000, NRVQ-IDT-10001, NRVQ-IDT-10002, NRVQ-IDT-10003, NRVQ-IDT-10004, NRVQ-IDT-10005, NRVQ-IDT-10006
 NRVQ-RED-13000, NRVQ-RED-13001, NRVQ-RED-13002, NRVQ-RED-13003, NRVQ-RED-13004, NRVQ-RED-13005
 NRVQ-REG-5000, NRVQ-REG-5001, NRVQ-REG-5002, NRVQ-REG-5003, NRVQ-REG-5004, NRVQ-REG-5005, NRVQ-REG-5006, NRVQ-REG-5007, NRVQ-REG-5008, NRVQ-REG-5010, NRVQ-REG-5011, NRVQ-REG-5012, NRVQ-REG-5013, NRVQ-REG-5014, NRVQ-REG-5015
 NRVQ-SDC-3000, NRVQ-SDC-3001, NRVQ-SDC-3002, NRVQ-SDC-3003, NRVQ-SDC-3004, NRVQ-SDC-3005, NRVQ-SDC-3010, NRVQ-SDC-3011, NRVQ-SDC-3020, NRVQ-SDC-3021, NRVQ-SDC-3022, NRVQ-SDC-3023

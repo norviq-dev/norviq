@@ -25,6 +25,8 @@ Each prompt file contains: prompt text, outcome (commit SHA, result), date.
 
 | 2026-06-28 | [AKS-deploy-hardening.md](AKS-deploy-hardening.md) | AKS deploy-hardening + prod-readiness (single+multi-node) | done | 4 commits `3be8154`→`a663b28`; CI green; P-10 SHA==HEAD. LIVE on AKS: controller CRD sync 200 (service JWT), injected sidecar pinned-`-sha` **2/2 Running**, pg+redis restart → NotReady→Ready **restarts=0**. Prod posture (HPA/PDB/anti-affinity/CNPG/RedisFailover/values-prod) gated + template-validated (not live on 1 node). attacks 75/75; make test 397/6-preexisting |
 
+| 2026-06-28 | [EPIC-identity-sso-spire.md](EPIC-identity-sso-spire.md) | Identity epic — SSO/OIDC (R4/F033) + SPIRE/SPIFFE workload identity (F026) | done (uncommitted) | Software core A1+A2+B2, gated default-off. A1 OIDC RS256/ES256 dual-mode + JWKS (alg-confusion-safe, fail-closed); A2 group→role/ns mapping + per-user audit actor; B2 real pyspiffe resolver (mock default, fail-closed, SVID-wins spoof test). 22 new tests; **zero regressions** (stash A/B); **attacks 75/75**; tsc+vitest 37/37; helm lint+template both overlays. A3/A4/B1/B3/B4 deferred+documented. Codes AUTH-14000..14005, IDT-10004..10006 |
+
 ## Convention
 - One file per significant work item (P0/P1 fix, feature, major diagnosis)
 - Filename: {item-id}-{short-name}.md

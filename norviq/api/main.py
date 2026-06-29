@@ -167,7 +167,7 @@ def create_app() -> FastAPI:
             header = websocket.headers.get("authorization", "")
             raw = header[7:] if header.lower().startswith("bearer ") else ""
         try:
-            user = decode_token(raw)
+            user = await decode_token(raw)
         except JWTError:
             await websocket.close(code=1008)  # policy violation: invalid/missing token
             return

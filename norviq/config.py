@@ -62,6 +62,10 @@ class NorviqSettings(BaseSettings):
     sdk_http_max_keepalive_connections: int = 10
     spiffe_socket: str = "/tmp/spiffe-mock.sock"
     spiffe_cache_ttl_s: int = 300
+    # Workload-identity resolution mode (IDENTITY epic B2). "mock" = env-var identity (default;
+    # local/tests/attack-suite). "workload-api" = real SPIFFE Workload API SVID, FAIL-CLOSED on
+    # socket/SVID error (no env-var fallback). NRVQ_SPIFFE_MODE; revert to mock with no redeploy.
+    spiffe_mode: str = "mock"
     redis_url: str = "redis://localhost:6379"
     redis_max_connections: int = 20
     # Proactively re-validate idle Redis connections (resilience after a Redis restart).
@@ -124,6 +128,22 @@ class NorviqSettings(BaseSettings):
     # When true (set in prod via NRVQ_REQUIRE_STRONG_SECRET), the API refuses to start on the
     # default JWT secret. Defaults False so local dev / tests / the attack suite keep working.
     require_strong_secret: bool = False
+    # --- OIDC (SSO) — IDENTITY epic stage A1/A2. All default-off so legacy HS256 stays the only
+    # path until an IdP is wired; flipping oidc_enabled adds RS256/ES256 validation ALONGSIDE HS256.
+    oidc_enabled: bool = False
+    oidc_issuer: str = ""
+    oidc_audience: str = ""
+    oidc_jwks_url: str = ""
+    oidc_jwks_cache_ttl_s: int = 300
+    # Anti-DoS floor: minimum seconds between forced JWKS refetches on an unknown kid.
+    oidc_jwks_min_refresh_s: int = 30
+    oidc_group_claim: str = "groups"
+    # group -> {"role": "...", "namespace": "..."}; parses from a JSON env string. e.g.
+    # NRVQ_OIDC_GROUP_MAPPINGS='{"norviq-admins":{"role":"admin"},"team-a":{"role":"viewer","namespace":"team-a"}}'
+    oidc_group_mappings: dict[str, dict[str, str]] = {}
+    # Keep validating legacy HS256 tokens during migration; flip false at cutover (A4) once all
+    # clients use OIDC (a short-TTL break-glass service token path is retained).
+    legacy_hs256_enabled: bool = True
     webhook_port: int = 8443
     webhook_cert_dir: str = "/etc/norviq/certs"
     sidecar_image: str = "sanman97/norviq-engine:engine-latest"

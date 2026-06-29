@@ -120,6 +120,8 @@ async def create_policy(body: PolicyCreate, request: Request, user: dict = Depen
         version=version,
         priority=body.priority,
         policy_name=body.policy_name,
+        actor=user.get("sub"),
+        actor_role=user.get("role"),
         code="NRVQ-API-7011",
     )
     return {"namespace": body.namespace, "agent_class": agent_class, "version": version, "policy_name": body.policy_name, "priority": body.priority}
@@ -195,7 +197,8 @@ async def delete_policy(
     deleted = await request.app.state.loader.delete(namespace, agent_class)
     if not deleted:
         raise HTTPException(status_code=404, detail="Policy not found")
-    log.info("nrvq.api.policy.deleted", namespace=namespace, agent_class=agent_class, code="NRVQ-API-7012")
+    log.info("nrvq.api.policy.deleted", namespace=namespace, agent_class=agent_class,
+             actor=user.get("sub"), actor_role=user.get("role"), code="NRVQ-API-7012")
     return {"deleted": True}
 
 
@@ -223,7 +226,8 @@ async def rollback_policy(
         rego = await request.app.state.loader.rollback(namespace, agent_class, body.target_version)
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    log.info("nrvq.api.policy.rolled_back", namespace=namespace, version=body.target_version, code="NRVQ-API-7013")
+    log.info("nrvq.api.policy.rolled_back", namespace=namespace, version=body.target_version,
+             actor=user.get("sub"), actor_role=user.get("role"), code="NRVQ-API-7013")
     return {"rolled_back_to": body.target_version, "rego_length": len(rego)}
 
 
@@ -323,6 +327,8 @@ async def apply_policy(
         target_type=body.target_type,
         target_namespace=body.target_namespace,
         mode=body.enforcement_mode,
+        actor=user.get("sub"),
+        actor_role=user.get("role"),
         code="NRVQ-API-7015",
     )
     return {

@@ -30,6 +30,9 @@ norviq = "norviq.cli.main:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "httpx", "ruff>=0.2"]
+# Real SPIFFE workload identity (NRVQ_SPIFFE_MODE=workload-api). Optional + import-guarded so mock
+# mode (default) and CI/attack venvs install lean; only real SPIRE deployments need it.
+spiffe = ["spiffe>=0.2"]
 
 [build-system]
 requires = ["setuptools>=68.0"]

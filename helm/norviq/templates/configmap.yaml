@@ -22,6 +22,15 @@ data:
   NRVQ_DB_POOL_MAX_OVERFLOW: {{ .Values.config.dbPoolMaxOverflow | quote }}
   NRVQ_DB_POOL_TIMEOUT: {{ .Values.config.dbPoolTimeout | quote }}
   NRVQ_DB_COMMAND_TIMEOUT: {{ .Values.config.dbCommandTimeout | quote }}
+  # --- Identity epic: OIDC (A1/A2) + workload-identity mode (B2). Default-off; legacy HS256 stays on. ---
+  NRVQ_OIDC_ENABLED: {{ .Values.oidc.enabled | default false | quote }}
+  NRVQ_OIDC_ISSUER: {{ .Values.oidc.issuer | default "" | quote }}
+  NRVQ_OIDC_AUDIENCE: {{ .Values.oidc.audience | default "" | quote }}
+  NRVQ_OIDC_JWKS_URL: {{ .Values.oidc.jwksUrl | default "" | quote }}
+  NRVQ_OIDC_GROUP_CLAIM: {{ .Values.oidc.groupClaim | default "groups" | quote }}
+  NRVQ_OIDC_GROUP_MAPPINGS: {{ .Values.oidc.groupMappings | default dict | toJson | quote }}
+  NRVQ_LEGACY_HS256_ENABLED: {{ .Values.oidc.legacyHs256Enabled | default true | quote }}
+  NRVQ_SPIFFE_MODE: {{ .Values.config.spiffeMode | default "mock" | quote }}
   NRVQ_OTEL_ENDPOINT: {{ .Values.otel.endpoint | quote }}
   NRVQ_OTEL_ENABLED: {{ .Values.otel.enabled | quote }}
   NRVQ_PROMETHEUS_PORT: {{ .Values.otel.prometheusPort | quote }}

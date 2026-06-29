@@ -14,8 +14,34 @@ import structlog
 from norviq.config import settings
 from norviq.sdk.core.events import AgentIdentity
 
+# pyspiffe is an optional extra (`pip install '.[spiffe]'`); only the workload-api mode needs it.
+# Import-guarded so mock mode (default) imports cleanly without it installed (CI/dev/attack venvs).
+try:  # pragma: no cover - exercised only where pyspiffe is installed
+    from spiffe import WorkloadApiClient  # type: ignore
+
+    _PYSPIFFE_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    WorkloadApiClient = None  # type: ignore
+    _PYSPIFFE_AVAILABLE = False
+
 log = structlog.get_logger()
 _CACHE_TTL = settings.spiffe_cache_ttl_s
+_TRUST_DOMAIN = "norviq"
+
+
+class SpiffeResolutionError(RuntimeError):
+    """Raised in workload-api mode when an SVID cannot be fetched/validated (fail-closed)."""
+
+
+def _parse_norviq_spiffe_id(spiffe_id: str) -> tuple[str, str] | None:
+    """Parse spiffe://norviq/ns/<ns>/sa/<sa> -> (namespace, service_account); None if not ours."""
+    prefix = f"spiffe://{_TRUST_DOMAIN}/"
+    if not spiffe_id.startswith(prefix):
+        return None
+    parts = spiffe_id[len(prefix):].split("/")
+    if len(parts) == 4 and parts[0] == "ns" and parts[2] == "sa" and parts[1] and parts[3]:
+        return parts[1], parts[3]
+    return None
 
 
 class SPIFFEResolver:
@@ -52,12 +78,45 @@ class SPIFFEResolver:
         return None
 
     async def _resolve_from_socket(self) -> AgentIdentity:
-        """Connect to SPIFFE Workload API Unix socket and get SVID."""
+        """Resolve identity by mode: real Workload API SVID (fail-closed) or env-var mock."""
+        if settings.spiffe_mode == "workload-api":
+            return self._resolve_workload_api()  # FAIL-CLOSED: raises on any error, no fallback
         try:
             return self._mock_resolve()
         except Exception as exc:
             log.error("nrvq.identity.resolve_failed", error=str(exc), code="NRVQ-IDT-10002")
             return self._fallback_identity()
+
+    def _svid_source(self):
+        """Return a SPIFFE Workload API client (the unit-test seam — monkeypatch to inject a fake)."""
+        if not _PYSPIFFE_AVAILABLE:
+            raise SpiffeResolutionError("pyspiffe not installed; install the 'spiffe' extra for workload-api mode")
+        return WorkloadApiClient(spiffe_socket_path=self._socket_path)
+
+    def _resolve_workload_api(self) -> AgentIdentity:
+        """Fetch + validate the X509-SVID. SVID wins over env (spoof-resistant); fail-closed on error."""
+        try:
+            source = self._svid_source()
+            svid = source.get_x509_svid()
+            spiffe_id = str(svid.spiffe_id())
+        except SpiffeResolutionError:
+            raise
+        except Exception as exc:
+            log.error("nrvq.identity.socket_unreachable", error=str(exc), code="NRVQ-IDT-10006")
+            raise SpiffeResolutionError(f"Workload API unreachable: {exc}") from exc
+        parsed = _parse_norviq_spiffe_id(spiffe_id)
+        if parsed is None:
+            log.error("nrvq.identity.svid_invalid", spiffe_id=spiffe_id, code="NRVQ-IDT-10005")
+            raise SpiffeResolutionError(f"SVID not in trust domain '{_TRUST_DOMAIN}': {spiffe_id}")
+        namespace, service_account = parsed  # from the attested SVID ONLY — env is never read here
+        log.info("nrvq.identity.workload_resolved", spiffe_id=spiffe_id, code="NRVQ-IDT-10004")
+        return AgentIdentity(
+            spiffe_id=spiffe_id,
+            namespace=namespace,
+            service_account=service_account,
+            agent_class=os.environ.get("NRVQ_AGENT_CLASS", "default"),
+            pod_name=os.environ.get("HOSTNAME", "unknown-pod"),
+        )
 
     def _mock_resolve(self) -> AgentIdentity:
         """MVP mock: generate identity from environment/config."""
