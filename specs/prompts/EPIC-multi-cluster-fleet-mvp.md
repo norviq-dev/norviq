@@ -6,7 +6,7 @@ agent/audit rollups + aggregated console), Option A hub-and-spoke. Plan mode (st
 security auditor. Validated on TWO local kind clusters; AKS deferred.
 **Design source:** `specs/EPIC-multi-cluster-fleet.md` (Option A; phasing P1→P4).
 **Depends on:** Identity epic (OIDC cross-cluster RBAC; relay identity). **Docker:** 12 GB.
-**FEAT:** F045 (fleet) + F018 (console). **Commit:** not committed (gate: do NOT auto-commit) · **Result:** see Outcome.
+**FEAT:** F045 (fleet) + F018 (console). **Commit:** `0835c02` on main (ships dormant — all fleet gates off; AKS unchanged) · **Result:** see Outcome.
 
 ## Outcome (done — built + LIVE-validated on two local kind clusters; nothing committed; AKS untouched)
 **FEAT F045.** Everything gated **off by default** → single-cluster dev/AKS render + behave exactly as today.
