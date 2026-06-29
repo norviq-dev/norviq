@@ -10,6 +10,7 @@ import {
   LayoutDashboard,
   LogOut,
   Network,
+  Package,
   Plug,
   ShieldCheck,
   SlidersHorizontal,
@@ -36,6 +37,7 @@ const PANEL_CONFIG: Record<Section, { title: string; groups: Group[] }> = {
         label: "ENFORCEMENT",
         items: [
           { to: "/policies/catalog", label: "Policy Catalog", icon: ShieldCheck },
+          { to: "/policies/packs", label: "Policy Packs", icon: Package },
           { to: "/policies/targets", label: "Target Settings", icon: Target }
         ]
       },

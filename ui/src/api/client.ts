@@ -78,6 +78,7 @@ export type RuntimeSettings = {
   trust_threshold: number;
   violation_penalty: number;
   rate_limit: number;
+  sector?: string | null;
 };
 
 /** Effective runtime settings (config defaults + persisted overrides) for a namespace (F046). */
@@ -91,11 +92,45 @@ export async function fetchSettings(namespace?: string): Promise<RuntimeSettings
 /** Persist a per-namespace settings override (admin-only). */
 export async function saveSettings(
   namespace: string,
-  body: Partial<Pick<RuntimeSettings, "enforcement_mode" | "trust_threshold" | "violation_penalty" | "rate_limit">>
+  body: Partial<Pick<RuntimeSettings, "enforcement_mode" | "trust_threshold" | "violation_penalty" | "rate_limit" | "sector">>
 ): Promise<RuntimeSettings> {
   const params = new URLSearchParams();
   if (namespace && namespace !== "all") params.set("namespace", namespace);
   return apiSend<RuntimeSettings>(`/api/v1/settings?${params.toString()}`, "PUT", body);
+}
+
+// --- F047 sector policy packs ---
+export type PolicyPack = {
+  id: string;
+  sector: string;
+  title: string;
+  enforces: string;
+  rule_ids: string[];
+  categories: string[];
+  compliance: string[];
+  tunables: string[];
+  enabled: boolean;
+  namespace: string;
+};
+
+/** The sector-pack catalog with enabled-per-namespace state. */
+export async function fetchPolicyPacks(namespace?: string): Promise<PolicyPack[]> {
+  const params = new URLSearchParams();
+  if (namespace && namespace !== "all") params.set("namespace", namespace);
+  const query = params.toString();
+  return apiGet<PolicyPack[]>(query ? `/api/v1/policy-packs?${query}` : "/api/v1/policy-packs");
+}
+
+export type PackActionResult = { namespace: string; pack_id: string; enabled: boolean; enabled_packs: string[] };
+
+/** Enable a sector pack for a namespace (admin-only). */
+export async function enablePolicyPack(packId: string, namespace: string): Promise<PackActionResult> {
+  return apiSend<PackActionResult>(`/api/v1/policy-packs/${encodeURIComponent(packId)}/enable`, "POST", { namespace });
+}
+
+/** Disable a sector pack for a namespace (admin-only). */
+export async function disablePolicyPack(packId: string, namespace: string): Promise<PackActionResult> {
+  return apiSend<PackActionResult>(`/api/v1/policy-packs/${encodeURIComponent(packId)}/disable`, "POST", { namespace });
 }
 
 export type VersionInfo = { version: string; license: string };

@@ -5,5 +5,10 @@
   "Tool Safety": ["deny_sql_injection", "deny_shell_execution", "scope_violation_dangerous_tool"],
   "Excessive Agency": ["llm06_excessive_agency"],
   "Supply Chain": ["llm05_supply_chain"],
-  "Tenant Isolation": ["cross_tenant_access"]
+  "Tenant Isolation": ["cross_tenant_access"],
+  "OT Safety": ["ot_control_command_blocked", "ot_adjacent_write_escalate", "ot_surface_review_escalate"],
+  "Financial Controls": ["wire_over_threshold_escalate", "new_beneficiary_escalate", "sod_violation"],
+  "Clinical Safety / PHI": ["clinical_action_escalate", "phi_min_necessary", "phi_identifier_egress"],
+  "Government / CUI": ["rights_impacting_escalate", "cui_fti_egress_blocked"],
+  "Telecom / CPNI": ["sim_swap_escalate", "cpni_bulk_blocked"]
 }

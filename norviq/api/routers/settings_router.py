@@ -29,6 +29,7 @@ class SettingsUpdate(BaseModel):
     trust_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
     violation_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
     rate_limit: int | None = Field(default=None, ge=1, le=100000)
+    sector: str | None = Field(default=None, max_length=64)  # F047: org sector hint (pack suggestions)
 
 
 def _effective(row: NamespaceSettings | None) -> dict:
@@ -46,6 +47,7 @@ def _effective(row: NamespaceSettings | None) -> dict:
         "rate_limit": (
             row.rate_limit if row and row.rate_limit is not None else app_settings.evaluator_rate_limit_per_window
         ),
+        "sector": (getattr(row, "sector", None) if row else None),
     }
 
 

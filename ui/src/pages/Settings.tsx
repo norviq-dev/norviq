@@ -61,6 +61,7 @@ export function Settings() {
   const [trustThreshold, setTrustThreshold] = useState("");
   const [violationPenalty, setViolationPenalty] = useState("");
   const [rateLimit, setRateLimit] = useState("");
+  const [sector, setSector] = useState("");
   const [loading, setLoading] = useState(true);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -81,6 +82,7 @@ export function Settings() {
         setTrustThreshold(String(s.trust_threshold));
         setViolationPenalty(String(s.violation_penalty));
         setRateLimit(String(s.rate_limit));
+        setSector(s.sector ?? "");
         setError(null);
       })
       .catch(() => active && setError("Could not load settings"))
@@ -97,7 +99,8 @@ export function Settings() {
         enforcement_mode: mode,
         trust_threshold: Number(trustThreshold),
         violation_penalty: Number(violationPenalty),
-        rate_limit: Number(rateLimit)
+        rate_limit: Number(rateLimit),
+        sector
       });
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
@@ -149,6 +152,21 @@ export function Settings() {
                 onChange={(e) => setRateLimit(e.target.value)}
                 style={{ width: 90, textAlign: "right" }}
               />
+            </Field>
+            <Field label="Sector" hint="Suggests matching starter Policy Packs">
+              <select
+                className="input"
+                value={sector}
+                onChange={(e) => setSector(e.target.value)}
+                style={{ width: 160 }}
+              >
+                <option value="">None</option>
+                {["Energy", "Finance", "Healthcare", "Government", "Telecom"].map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
             </Field>
           </SettingsSection>
         </Panel>

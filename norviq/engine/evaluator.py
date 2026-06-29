@@ -145,7 +145,7 @@ class OPAEvaluator:
                             "key": str(candidate["key"]),
                         }
                     )
-                winner = self._resolve_precedence(results)
+                winner = self._resolve_with_packs(results)
                 log.info("nrvq.eval.winner", winner=str(winner)[:200], code="NRVQ-ENG-DEBUG-5")
                 base_decision = winner["decision"]
             if base_decision.rule_id not in settings.evaluator_non_cacheable_rules:
@@ -633,7 +633,33 @@ class OPAEvaluator:
         await _append_policy(namespace, agent_class)
         await _append_policy(namespace, "__baseline__")
         await _append_policy("__cluster__", "__baseline__")
+        # F047: additive sector-pack candidate. In-memory ONLY (no load_from_db) so it costs nothing
+        # on the hot path for namespaces with no pack enabled — and is simply absent by default, so the
+        # single-cluster path / attack namespaces are unchanged unless a pack is materialized here.
+        pack_key = f"{namespace}:__pack__"
+        if pack_key in self._loader._policies:
+            entry = self._loader._policies[pack_key]
+            candidates.append({"key": pack_key, "rego": entry["rego"], "priority": entry["priority"]})
         return candidates
+
+    def _resolve_with_packs(self, results: list[dict]) -> dict:
+        """F047: sector packs are an ADDITIVE-ONLY overlay — a (ns,__pack__) candidate can only TIGHTEN
+        the decision (block < escalate < audit < allow), never loosen it, regardless of priority. So we
+        resolve the non-pack candidates normally, then let the pack win only if it is more restrictive.
+        This makes a pack's block enforce over a permissive baseline AND prevents a pack escalate/allow
+        from ever weakening a stricter policy (the F-07 trap)."""
+        rank = {"block": 0, "escalate": 1, "audit": 2, "allow": 3}
+        pack = [r for r in results if str(r["key"]).endswith(":__pack__")]
+        base = [r for r in results if not str(r["key"]).endswith(":__pack__")]
+        base_winner = self._resolve_precedence(base) if base else None
+        pack_winner = self._resolve_precedence(pack) if pack else None
+        if base_winner is None:
+            return pack_winner
+        if pack_winner is None:
+            return base_winner
+        pack_rank = rank.get(pack_winner["decision"].decision, 3)
+        base_rank = rank.get(base_winner["decision"].decision, 3)
+        return pack_winner if pack_rank < base_rank else base_winner
 
     def _resolve_precedence(self, results: list[dict]) -> dict:
         """Highest priority wins; most restrictive wins on ties."""

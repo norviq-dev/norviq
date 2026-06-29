@@ -95,6 +95,11 @@ async def create_tables() -> None:
             log.info("nrvq.startup.create_tables.connection_acquired", code="NRVQ-DB-DEBUG-2B")
             await conn.run_sync(Base.metadata.create_all)
             log.info("nrvq.startup.create_tables.create_all_done", code="NRVQ-DB-DEBUG-2C")
+            # F047: create_all never ALTERs an existing table, so add new columns idempotently for
+            # databases provisioned before the column existed (e.g. the running AKS namespace_settings).
+            await conn.execute(
+                text("ALTER TABLE namespace_settings ADD COLUMN IF NOT EXISTS sector VARCHAR(64)")
+            )
             part, start, end = _partition_bounds()
             await conn.execute(
                 text(
