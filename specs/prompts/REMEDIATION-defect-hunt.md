@@ -7,6 +7,20 @@ no-policy fail-open (product decision: default-deny), F-03 P3 API-key throttle +
 graph-analysis caching. Each with a regression test. Plan mode (staged); security auditor on F-01/F-02/F-04.
 **Source:** `.reviews/test-campaign/FINDINGS.md` + `COVERAGE.md`. **FEAT:** F017/F007/F046/F036/F037 as touched.
 **Commit:** do NOT auto-commit (summarize per finding) · keep **attacks 75/75**.
+**Result (DONE; branch `feat/console-f046-and-defect-remediation`):** Commits `b465b13` (Stage 1: F-01 + the
+sibling **F-06**) + `c0bf6d8` (F-02/F-03/F-04/F-05). All 6 findings remediated, each with a regression test +
+live-verified on kind `nv-a` (rebuilt working-tree image per engine stage):
+- **F-01 P1** — `/evaluate` binds the namespace to the caller: `role!=service` → `scoped_namespace(user, body_ns)`
+  (admin/service any, human viewer→403). Live: viewer cross-ns 200→**403**. Residual: service/SVID-derived ns (follow-up).
+- **F-06 (sibling)** — `scoped_namespace` 403s the empty-claim non-admin/non-service floor user (was: reached any ns).
+- **F-04 P2** — no-policy → **deny** (NRVQ_NO_POLICY_DECISION default deny); `no_policy_loaded` (ENG-2055) vs
+  `policy_load_pending` (ENG-2056, loader `_warmed`) vs DB-fail (ENG-2000); audit mode allows. Live: ghost-ns→block.
+- **F-02 P2** — `norviq/engine/confusables.py` skeleton (NFKD + strip combining/zero-width + casefold + cross-script
+  fold) → `tool_params_normalized` (match-only); rego additive normalized clauses. Live: Cyrillic/zero-width→block; benign JP→allow.
+- **F-03 P3** — `hmac.compare_digest` + per-prefix throttle (NRVQ-AUTH-14006). **F-05 P3** — graph analysis cache
+  (NRVQ-DB-9023/24/25, content-hash version + invalidate-on-save).
+Gates: ruff + tsc + vitest 37/37; **attacks 78/78** (corpus +3 homoglyph/zero-width/benign); error-codes 211→217;
+513 tests collect. AKS untouched; F-01 committed as the P1 checkpoint then the rest.
 
 ---
 
