@@ -16,6 +16,54 @@ classDiagram
         +str region
         +datetime last_heartbeat
         +str status
+        +dict labels
+        +int bundle_version
+        +bool residency
+        +str spiffe_id
+    }
+    class FleetPolicy {
+        +str name
+        +str namespace
+        +str agent_class
+        +str rego_source
+        +int priority
+        +str enforcement_mode
+        +int version
+        +dict target_selector
+        +datetime not_before
+        +datetime expires_at
+    }
+    class PolicyRollout {
+        +str cluster_id
+        +int policy_bundle_version
+        +str state
+        +int applied_version
+        +str detail
+    }
+    class FleetBundleState {
+        +str cluster_id
+        +int last_applied_version
+        +str last_bundle_sha256
+        %% spoke-side Base (not FleetBase)
+    }
+    class Bundle {
+        +canonical_bytes(payload) bytes
+        +sign_bundle(payload, key) dict
+        +verify_bundle(body, pubkey) dict
+    }
+    class FleetPolicyRouter {
+        +author_policy(body)  %% require_admin
+        +get_bundle(cluster_id)  %% resolve+sign
+        +report_rollout(cluster_id, body)
+        +list_rollout()
+        +drilldown_audit(cluster_id)  %% residency-aware
+    }
+    class FleetPolicyPuller {
+        +start()  %% no-op unless fleet_enabled + pubkey
+        +pull_once() dict
+        -_bearer() str
+        -_last_applied() int
+        +stop()
     }
     class AgentRollup {
         +str cluster_id
@@ -67,4 +115,15 @@ classDiagram
     IngestRouter --> Auth : require_admin_or_service + scoped_cluster
     FleetRouter --> Auth : scoped_cluster (read filter)
     FleetRelayForwarder --> ClientCredentialsToken : hub auth
-    FleetRelayForwarder ..> IngestRouter : POST heartbeat + rollup
+    FleetRelayForwarder ..> IngestRouter : POST heartbeat + rollu
+    FleetApp --> FleetPolicyRouter : include_router
+    FleetBase <|-- FleetPolicy
+    FleetBase <|-- PolicyRollout
+    FleetPolicyRouter --> FleetPolicy : resolve selector+override
+    FleetPolicyRouter --> Bundle : sign_bundle
+    FleetPolicyRouter --> PolicyRollout : state machine
+    FleetPolicyRouter --> Auth : require_admin / scoped_cluster
+    FleetPolicyPuller --> Bundle : verify_bundle (trust root)
+    FleetPolicyPuller --> FleetBundleState : persist last_applied_version
+    FleetPolicyPuller ..> FleetPolicyRouter : GET bundle + POST rollout
+end

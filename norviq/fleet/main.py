@@ -21,7 +21,7 @@ if sys.platform == "win32":  # pragma: no cover
 
 from norviq.config import settings
 from norviq.fleet.db import fleet_close_db, fleet_create_tables, fleet_init_db
-from norviq.fleet.routers import fleet, health, ingest
+from norviq.fleet.routers import fleet, fleet_policy, health, ingest
 
 log = structlog.get_logger()
 
@@ -50,6 +50,7 @@ def create_fleet_app() -> FastAPI:
     app.include_router(health.router)
     app.include_router(ingest.router, prefix="/api/v1", tags=["fleet-ingest"])
     app.include_router(fleet.router, prefix="/api/v1", tags=["fleet"])
+    app.include_router(fleet_policy.router, prefix="/api/v1", tags=["fleet-policy"])
     return app
 
 

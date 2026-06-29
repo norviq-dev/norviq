@@ -37,6 +37,9 @@ class _Result:
     def all(self):
         return self._rows
 
+    def scalar_one_or_none(self):
+        return self._rows[0] if self._rows else None
+
 
 class FakeFleetSession:
     """Records upserts; returns a queue of programmed row-lists for SELECTs."""
@@ -82,7 +85,7 @@ def test_heartbeat_upserts_and_returns_status() -> None:
                    json={"name": "prod-west", "endpoint": "https://a", "region": "us-west"},
                    headers=_headers(role="service", cluster="cluster-a"))
         assert r.status_code == 200 and r.json()["status"] == "healthy"
-        assert s.committed and len(s.executed) == 1
+        assert s.committed and len(s.executed) == 2  # S3: select-existing (SPIFFE bind) + upsert
     finally:
         c.close()
 

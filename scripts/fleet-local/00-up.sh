@@ -42,12 +42,19 @@ common_set() {
 }
 
 install_hub() {
-  log "fleet-a: install norviq HUB+spoke (fleet-api + fleet-postgresql + relay)"
+  bash "$HERE/gen-keys.sh"
+  local nodeip; nodeip="$(docker inspect fleet-a-control-plane -f '{{.NetworkSettings.Networks.kind.IPAddress}}')"
+  log "fleet-a: install norviq HUB+spoke (fleet-api + fleet-postgresql + relay + signing key)"
+  # fleet-a's own relay reaches the hub via the NodePort too (so the bound endpoint is reachable for drill-down).
   # shellcheck disable=SC2046
   hb fleet-a upgrade --install norviq "$REPO_ROOT/helm/norviq" -n "$NS" \
     -f "$HERE/values-fleet.yaml" $(common_set) \
     --set fleet.clusterId=fleet-a --set fleet.clusterName=fleet-a --set fleet.region=local \
     --set fleet.apiUrl=http://norviq-fleet-api.norviq.svc:8080 \
+    --set fleet.clusterEndpoint=http://norviq-api.norviq.svc:8080 \
+    --set fleet.labels.env=prod \
+    --set-file fleet.hub.signingKey="$HERE/fleet-signing-priv.pem" \
+    --set-file fleet.bundlePubkey="$HERE/fleet-signing-pub.pem" \
     --set fleet.hub.enabled=true --timeout 600s
   kb fleet-a -n "$NS" rollout status statefulset/fleet-postgresql --timeout=300s
   kb fleet-a -n "$NS" rollout status deploy/norviq-fleet-api --timeout=300s
@@ -56,12 +63,16 @@ install_hub() {
 
 install_spoke_b() {
   local nodeip; nodeip="$(docker inspect fleet-a-control-plane -f '{{.NetworkSettings.Networks.kind.IPAddress}}')"
-  log "fleet-b: install norviq SPOKE -> hub at http://$nodeip:31090 (shared kind network)"
+  local bnodeip; bnodeip="$(docker inspect fleet-b-control-plane -f '{{.NetworkSettings.Networks.kind.IPAddress}}')"
+  log "fleet-b: install norviq SPOKE -> hub at http://$nodeip:31090 (shared kind network), pubkey trust root"
+  # fleet-b advertises env=staging (so an env=prod-selected policy targets only fleet-a) + residency on.
   # shellcheck disable=SC2046
   hb fleet-b upgrade --install norviq "$REPO_ROOT/helm/norviq" -n "$NS" \
     -f "$HERE/values-fleet.yaml" $(common_set) \
     --set fleet.clusterId=fleet-b --set fleet.clusterName=fleet-b --set fleet.region=local \
     --set fleet.apiUrl="http://$nodeip:31090" \
+    --set fleet.labels.env=staging --set fleet.residency=true \
+    --set-file fleet.bundlePubkey="$HERE/fleet-signing-pub.pem" \
     --set fleet.hub.enabled=false --timeout 600s
   kb fleet-b -n "$NS" rollout status deploy/norviq-api --timeout=300s
 }

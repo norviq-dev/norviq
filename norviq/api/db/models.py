@@ -74,6 +74,17 @@ class AgentRegistryEntry(Base):
     )
 
 
+class FleetBundleState(Base):
+    """Spoke-side record of the last fleet policy bundle applied (F045 P2). Drives replay/rollback
+    defense: the spoke rejects any bundle whose version <= last_applied_version. One row per cluster id."""
+
+    __tablename__ = "fleet_bundle_state"
+    cluster_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    last_applied_version: Mapped[int] = mapped_column(Integer, default=0)
+    applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    last_bundle_sha256: Mapped[str] = mapped_column(String(64), default="")
+
+
 class AuditLogEntry(Base):
     """Append-only audit log partitioned by month."""
 

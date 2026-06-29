@@ -310,7 +310,10 @@ fleet:
   region: ""
   apiUrl: ""                  # hub base URL the relay posts to (e.g. http://fleet-api.norviq.svc:8080)
   relayIntervalSeconds: 60
+  pullIntervalSeconds: 60     # P2: how often the spoke pulls + verifies + applies the signed bundle
   staleAfterSeconds: 180      # hub: heartbeat older than this -> cluster status "stale"
+  residency: false            # P4: this spoke keeps raw audit in-cluster (rollups still leave; drill-down blocked)
+  bundlePubkey: ""            # P2: the fleet signing PUBLIC key (trust root). Empty -> spoke applies NO bundle.
   oidc:                       # relay->hub auth (OIDC client-credentials; HS256 break-glass fallback)
     tokenUrl: ""
     clientId: ""
@@ -318,17 +321,33 @@ fleet:
   hub:
     enabled: false            # render the fleet-api control plane + dedicated fleet-postgresql
     pgUrl: "postgresql://norviq:norviq_dev@fleet-postgresql:5432/norviq_fleet"
+    signingKey: ""            # P2: the fleet signing PRIVATE key PEM (hub only; distinct from api.secretKey)
+    bundleTtlSeconds: 900
     replicas: 1
     storage: 5Gi
     resources:
       requests: { cpu: 50m, memory: 128Mi }
       limits: { cpu: 500m, memory: 512Mi }
+    pdb:
+      enabled: false          # prod HA: keep N-1 fleet-api pods during disruptions
+      minAvailable: 1
+    autoscaling:
+      enabled: false          # prod HA: CPU HPA (needs metrics-server)
+      minReplicas: 2
+      maxReplicas: 6
+      targetCPUUtilizationPercentage: 70
+    spread:
+      enabled: false          # prod HA: podAntiAffinity + topologySpread across nodes
     postgresql:
       database: norviq_fleet
       username: norviq
       password: norviq_dev
       port: 5432
       storage: 5Gi
+      ha:
+        enabled: false        # prod HA: CloudNativePG Cluster instead of the single StatefulSet
+        instances: 3
+        serviceName: fleet-postgresql-ha-rw
       resources:
         requests: { cpu: 50m, memory: 128Mi }
         limits: { cpu: 500m, memory: 512Mi }

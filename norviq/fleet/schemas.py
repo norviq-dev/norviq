@@ -16,6 +16,30 @@ class HeartbeatBody(BaseModel):
     name: str = ""
     endpoint: str = ""
     region: str = ""
+    labels: dict[str, str] = {}     # P2: target_selector matching
+    residency: bool = False         # P4: this spoke keeps raw audit in-cluster
+    spiffe_id: str = ""             # S3: the spoke's attested SPIFFE identity (workload-api mode)
+
+
+class PolicyAuthorBody(BaseModel):
+    """Author/update a fleet policy (admin only)."""
+
+    name: str = Field(min_length=1)
+    namespace: str
+    agent_class: str
+    rego_source: str
+    priority: int = 100
+    enforcement_mode: str = "block"
+    target_selector: dict[str, str] = {}   # {"env":"prod"} or {"cluster_id":"cluster-a"} (override)
+
+
+class RolloutReportBody(BaseModel):
+    """A spoke reports the outcome of applying a bundle."""
+
+    bundle_version: int
+    state: str                              # applied | failed
+    applied_version: int = 0
+    detail: str = ""
 
 
 class AgentRollupIn(BaseModel):

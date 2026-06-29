@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -29,6 +30,10 @@ class Cluster(FleetBase):
     endpoint: Mapped[str] = mapped_column(String(512), default="")
     region: Mapped[str] = mapped_column(String(128), default="")
     status: Mapped[str] = mapped_column(String(20), default="healthy")  # advisory; recomputed on read
+    labels: Mapped[dict] = mapped_column(JSONB, default=dict)        # P2: policy target_selector matching
+    bundle_version: Mapped[int] = mapped_column(Integer, default=0)  # P2: monotonic, bump-on-change per cluster
+    residency: Mapped[bool] = mapped_column(Boolean, default=False)  # P4: raw logs stay in-cluster
+    spiffe_id: Mapped[str] = mapped_column(String(512), default="")  # S3: the spoke's attested SPIFFE identity
     last_heartbeat: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
@@ -63,3 +68,35 @@ class AuditRollup(FleetBase):
     count: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     __table_args__ = (Index("idx_fleet_audit_cluster_bucket", "cluster_id", "bucket_ts"),)
+
+
+class FleetPolicy(FleetBase):
+    """A hub-authored policy distributed to clusters (P2). target_selector matches Cluster.labels; a
+    {"cluster_id": X} selector is a per-cluster override. Upsert by name; re-authoring bumps version."""
+
+    __tablename__ = "fleet_policy"
+    name: Mapped[str] = mapped_column(String(255), primary_key=True)
+    namespace: Mapped[str] = mapped_column(String(255))
+    agent_class: Mapped[str] = mapped_column(String(255))
+    rego_source: Mapped[str] = mapped_column(Text)
+    priority: Mapped[int] = mapped_column(Integer, default=100)
+    enforcement_mode: Mapped[str] = mapped_column(String(20), default="block")
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    target_selector: Mapped[dict] = mapped_column(JSONB, default=dict)
+    not_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    __table_args__ = (Index("idx_fleet_policy_target", "namespace", "agent_class"),)
+
+
+class PolicyRollout(FleetBase):
+    """Per-cluster rollout state for the signed bundle (P2): pending|applied|failed|diverged."""
+
+    __tablename__ = "policy_rollout"
+    cluster_id: Mapped[str] = mapped_column(String(255), ForeignKey("cluster.id", ondelete="CASCADE"), primary_key=True)
+    policy_bundle_version: Mapped[int] = mapped_column(Integer, default=0)  # version the hub last BUILT for this cluster
+    state: Mapped[str] = mapped_column(String(20), default="pending")
+    applied_version: Mapped[int] = mapped_column(Integer, default=0)        # version the spoke last reported applying
+    detail: Mapped[str] = mapped_column(String(512), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

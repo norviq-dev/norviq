@@ -22,9 +22,15 @@ data:
   NRVQ_FLEET_CLUSTER_ID: {{ .Values.fleet.clusterId | quote }}
   NRVQ_FLEET_CLUSTER_NAME: {{ .Values.fleet.clusterName | default .Values.fleet.clusterId | quote }}
   NRVQ_FLEET_CLUSTER_REGION: {{ .Values.fleet.region | default "" | quote }}
+  NRVQ_FLEET_CLUSTER_ENDPOINT: {{ .Values.fleet.clusterEndpoint | default "" | quote }}
   NRVQ_FLEET_RELAY_INTERVAL_S: {{ .Values.fleet.relayIntervalSeconds | default 60 | quote }}
+  NRVQ_FLEET_PULL_INTERVAL_S: {{ .Values.fleet.pullIntervalSeconds | default 60 | quote }}
+  NRVQ_FLEET_RESIDENCY: {{ .Values.fleet.residency | default false | quote }}
+  NRVQ_FLEET_CLUSTER_LABELS: {{ .Values.fleet.labels | default dict | toJson | quote }}
   NRVQ_FLEET_OIDC_TOKEN_URL: {{ .Values.fleet.oidc.tokenUrl | default "" | quote }}
   NRVQ_FLEET_OIDC_CLIENT_ID: {{ .Values.fleet.oidc.clientId | default "" | quote }}
+  # P2: the signing PUBLIC key (trust root). Empty -> the spoke applies NO bundle (fail-closed).
+  NRVQ_FLEET_BUNDLE_PUBKEY: {{ .Values.fleet.bundlePubkey | default "" | quote }}
   {{- end }}
   NRVQ_TRUST_THRESHOLD: {{ .Values.config.trustThreshold | quote }}
   NRVQ_VIOLATION_PENALTY: {{ .Values.config.violationPenalty | quote }}

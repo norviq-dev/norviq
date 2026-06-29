@@ -23,6 +23,7 @@ config:
 fleet:
   enabled: true
   relayIntervalSeconds: 15
+  pullIntervalSeconds: 15
   staleAfterSeconds: 60
   hub:
     enabled: false        # overridden to true on the hub cluster (fleet-a)

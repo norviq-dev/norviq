@@ -1,0 +1,40 @@
+{{- if and .Values.fleet.hub.enabled .Values.fleet.hub.pdb.enabled }}
+# PodDisruptionBudget for the fleet-api (prod HA). Gated off by default.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: norviq-fleet-api-pdb
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.fleet.hub.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      app: norviq-fleet-api
+{{- end }}
+{{- if and .Values.fleet.hub.enabled .Values.fleet.hub.autoscaling.enabled }}
+---
+# HorizontalPodAutoscaler for the fleet-api (prod HA; needs metrics-server). Gated off by default.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: norviq-fleet-api-hpa
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: norviq-fleet-api
+  minReplicas: {{ .Values.fleet.hub.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.fleet.hub.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.fleet.hub.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}

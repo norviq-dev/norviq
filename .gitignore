@@ -65,3 +65,4 @@ docs/IMPLEMENTATION-STATUS.md
 docs/mcp-workflow.md
 ui/tsconfig.node.tsbuildinfo
 webhook/webhook
+scripts/fleet-local/fleet-signing-*.pem

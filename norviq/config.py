@@ -172,6 +172,17 @@ class NorviqSettings(BaseSettings):
     fleet_oidc_client_secret: str = ""
     # HUB ONLY: the fleet-api's own dedicated Postgres (separate store from any spoke DB).
     fleet_pg_url: str = "postgresql://norviq:norviq_dev@fleet-postgresql:5432/norviq_fleet"
+    # --- F045 P2 signed policy-push. The signing keypair is a DEDICATED fleet trust root, DISTINCT from
+    # api_secret_key (so compromising the token secret can't forge bundles). HUB holds the private key;
+    # spokes hold ONLY the public key. A spoke with an empty pubkey FAILS CLOSED (applies no bundle).
+    fleet_signing_key: str = ""         # hub: RS256 private key PEM
+    fleet_bundle_pubkey: str = ""       # spoke: RS256 public key PEM (the trust root)
+    fleet_bundle_ttl_s: int = 900       # hub: signed bundle validity window (expires_at = issued_at + ttl)
+    fleet_pull_interval_s: int = 60     # spoke: how often to pull + verify + apply the bundle
+    # P4 residency: this spoke keeps raw audit in-cluster (rollups still leave; drill-down is blocked).
+    fleet_residency: bool = False
+    # P2: labels this cluster advertises to the hub for policy target_selector matching (e.g. {"env":"prod"}).
+    fleet_cluster_labels: dict[str, str] = {}
 
 
 settings = NorviqSettings()

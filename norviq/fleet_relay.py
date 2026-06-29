@@ -81,13 +81,24 @@ class FleetRelayForwarder:
     def _base(self) -> str:
         return settings.fleet_api_url.rstrip("/") + f"/api/v1/fleet/clusters/{settings.fleet_cluster_id}"
 
+    async def _spiffe_id(self) -> str:
+        """S3: this spoke's attested SPIFFE id (workload-api mode only; mock id is not bindable)."""
+        if settings.spiffe_mode != "workload-api":
+            return ""
+        try:
+            from norviq.engine.identity import SPIFFEResolver
+            return (await SPIFFEResolver().resolve()).spiffe_id
+        except Exception:  # pragma: no cover - SVID unavailable -> just skip the binding (bearer still auths)
+            return ""
+
     async def relay_once(self) -> dict:
         """Heartbeat + push agent/audit rollups. Returns the rollup counts."""
         headers = {"Authorization": f"Bearer {await self._bearer()}"}
-        # (a) heartbeat
+        # (a) heartbeat (advertise labels for policy targeting, residency, and the attested SPIFFE identity)
         hb = await self._client.post(f"{self._base()}/heartbeat", headers=headers, json={
             "name": settings.fleet_cluster_name, "endpoint": settings.fleet_cluster_endpoint,
-            "region": settings.fleet_cluster_region,
+            "region": settings.fleet_cluster_region, "labels": settings.fleet_cluster_labels,
+            "residency": settings.fleet_residency, "spiffe_id": await self._spiffe_id(),
         })
         hb.raise_for_status()
         log.debug("nrvq.fleet.heartbeat_sent", code="NRVQ-FLT-15002")

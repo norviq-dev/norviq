@@ -31,7 +31,7 @@ Each prompt file contains: prompt text, outcome (commit SHA, result), date.
 
 | 2026-06-28 | [EPIC-multi-cluster-fleet-mvp.md](EPIC-multi-cluster-fleet-mvp.md) | Multi-cluster fleet (R3) MVP — Phase-1 read-only, local 2-cluster | done | Commit `0835c02`; ships dormant (fleet gates off, AKS unchanged). FEAT **F045**, fleet OFF by default (single-cluster + AKS unchanged). LIVE on 2 kind clusters: both heartbeat/register; hub **aggregates BOTH clusters' agents + audit summaries**; **cluster-scope RBAC 403** cross-cluster; **hub-down fail-safe** (spoke still blocks SQL injection). fleet-api (own FleetBase + dedicated postgres) + in-process relay (fire-and-forget, OIDC-CC/HS256) + gated console Fleet page. 13 new tests; zero regressions; tsc/vitest 37/37; helm both overlays render 0 fleet; attacks 75/75 warm. Codes FLT-15000..15014. P2 policy-push still open. AKS deferred |
 
-| 2026-06-28 | [EPIC-multi-cluster-fleet-p2.md](EPIC-multi-cluster-fleet-p2.md) | Fleet (R3) P2 — signed policy-push, prod-ready, intensive local POC | pending | Plan-mode; signed bundles + fail-safe + SPIFFE-mTLS + HA fleet plane; validation report; AKS deferred |
+| 2026-06-28 | [EPIC-multi-cluster-fleet-p2.md](EPIC-multi-cluster-fleet-p2.md) | Fleet (R3) REMAINING — P2 policy-push + P3 drill-down + P4 residency + AKS rollout | pending | Plan-mode, staged; signed bundles + fail-safe + SPIFFE-mTLS + HA fleet plane + drill-down + residency; intensive local POC then AKS last (gated); validation report |
 
 ## Convention
 - One file per significant work item (P0/P1 fix, feature, major diagnosis)
