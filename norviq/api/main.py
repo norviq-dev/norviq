@@ -16,6 +16,7 @@ if sys.platform == "win32":
 from norviq.api.audit_hub import AuditHub
 from norviq.api.db.session import close_db, create_tables, ensure_schema_compatibility, get_session, init_db
 from norviq.api.siem import AuditForwarder
+from norviq.fleet_relay import FleetRelayForwarder
 from norviq.api.routers import attack_graph_compute, agents, audit, deployments, evaluate, graph, graphs, health, me, mitre, policies, redteam
 from norviq.config import settings
 from norviq.engine.audit_emitter import AuditEmitter
@@ -120,8 +121,11 @@ async def lifespan(app: FastAPI):
         log.info("nrvq.startup.warm_cache_done", code="NRVQ-DB-DEBUG-6")
     app.state.siem_forwarder = AuditForwarder()
     await app.state.siem_forwarder.start()  # no-op unless settings.siem_enabled
+    app.state.fleet_relay = FleetRelayForwarder()
+    await app.state.fleet_relay.start()  # no-op unless settings.fleet_enabled (F045; fire-and-forget)
     log.info("nrvq.api.started", port=settings.api_port, code="NRVQ-API-7000")
     yield
+    await app.state.fleet_relay.stop()
     await app.state.siem_forwarder.stop()
     if settings.opa_mode == "server":
         await app.state.evaluator.opa.stop()

@@ -1,0 +1,24 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+%% F045 fleet P1: spoke relay push + console aggregated read. The enforce path NEVER touches the hub.
+sequenceDiagram
+    participant Spoke as Spoke API (relay)
+    participant Hub as fleet-api
+    participant FDB as fleet-postgresql
+    participant Console
+
+    loop every fleet_relay_interval_s (fire-and-forget)
+        Spoke->>Spoke: read agent_registry + aggregate audit_log (trailing window)
+        Spoke->>Hub: POST /clusters/{id}/heartbeat (Bearer: OIDC-CC | HS256)
+        Hub->>FDB: upsert cluster, last_heartbeat=now
+        Spoke->>Hub: POST /clusters/{id}/rollup {agents, audit}
+        Hub->>Hub: require_admin_or_service + scoped_cluster(path id)
+        Hub->>FDB: upsert agent_rollup + audit_rollup (SET-absolute -> idempotent)
+        Note over Spoke,Hub: hub down -> POST fails, logged NRVQ-FLT-15001, local enforcement UNAFFECTED
+    end
+
+    Console->>Hub: GET /fleet/clusters | /fleet/agents | /fleet/audit/summary (Bearer)
+    Hub->>Hub: scoped_cluster(user, ?cluster=) -> filter to allowed cluster(s)
+    Hub->>FDB: select (cluster-scoped)
+    FDB-->>Hub: rows
+    Hub-->>Console: aggregated, RBAC-scoped view (per-cluster status: healthy/stale)

@@ -65,26 +65,36 @@ async def _validate_oidc(token: str, header: dict) -> dict:
 
 
 def _apply_group_mapping(claims: dict) -> dict:
-    """Map IdP groups -> Norviq (role, namespace). Admin wins; conflicting non-admin ns fails closed."""
+    """Map IdP groups -> Norviq (role, namespace, cluster). Admin wins; conflicting non-admin fails closed.
+
+    `cluster` is the multi-cluster fleet dimension (F045): "*" = all clusters (admins), a cluster id,
+    or "" (single-cluster — the default, which existing single-cluster endpoints simply ignore).
+    """
     groups = claims.get(settings.oidc_group_claim, []) or []
     if isinstance(groups, str):
         groups = [groups]
     matched = [settings.oidc_group_mappings[g] for g in groups if g in settings.oidc_group_mappings]
     if not matched:
-        # Least-privilege floor: authenticated but unmapped -> viewer, no namespace.
-        claims["role"], claims["namespace"] = "viewer", ""
+        # Least-privilege floor: authenticated but unmapped -> viewer, no namespace, no cluster.
+        claims["role"], claims["namespace"], claims["cluster"] = "viewer", "", ""
         return claims
     role = max((m.get("role", "viewer") for m in matched), key=lambda r: _ROLE_RANK.get(r, 0))
     if role == "admin":
-        claims["role"], claims["namespace"] = "admin", ""
+        claims["role"], claims["namespace"], claims["cluster"] = "admin", "", "*"
         return claims
     namespaces = {m["namespace"] for m in matched if m.get("namespace")}
     if len(namespaces) > 1:
         log.warning("nrvq.auth.oidc_rejected", reason="conflicting_namespaces",
                     namespaces=sorted(namespaces), code="NRVQ-AUTH-14001")
         raise JWTError("conflicting namespace mappings")
+    clusters = {m["cluster"] for m in matched if m.get("cluster")}
+    if len(clusters) > 1:
+        log.warning("nrvq.auth.oidc_rejected", reason="conflicting_clusters",
+                    clusters=sorted(clusters), code="NRVQ-AUTH-14001")
+        raise JWTError("conflicting cluster mappings")
     claims["role"] = role
     claims["namespace"] = next(iter(namespaces), "")
+    claims["cluster"] = next(iter(clusters), "")
     return claims
 
 
@@ -131,6 +141,23 @@ def scoped_namespace(user: dict, requested: str | None) -> str | None:
     if requested and claim_ns and requested != claim_ns:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized for this namespace")
     return claim_ns or requested
+
+
+def scoped_cluster(user: dict, requested: str | None) -> str | None:
+    """Restrict a non-admin caller to its own cluster claim (multi-cluster fleet, F045).
+
+    Admin (or cluster claim "*") may read any cluster (or all, when requested is None). Other tokens may
+    only read the cluster in their claim — a request for a different cluster is 403. This stops one
+    cluster's service/viewer token from reading or writing another cluster's fleet rollups.
+    """
+    role = str(user.get("role", "")).lower()
+    claim = str(user.get("cluster", "") or "")
+    if role == "admin" or claim == "*":
+        return requested
+    if requested and claim and requested != claim:
+        log.warning("nrvq.fleet.cluster_scope_denied", requested=requested, claim=claim, code="NRVQ-FLT-15009")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized for this cluster")
+    return claim or requested
 
 
 async def decode_token(token: str) -> dict:

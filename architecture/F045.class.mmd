@@ -1,0 +1,70 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+%% F045 multi-cluster fleet (P1 read-only). Hub fleet-api over a SEPARATE FleetBase store; each spoke
+%% runs an in-process relay that pushes agent+audit rollups. Fleet OFF by default -> single-cluster unaffected.
+classDiagram
+    class FleetApp {
+        +create_fleet_app() FastAPI
+        +lifespan(app)  %% own DB only (no OPA/cache/SIEM)
+    }
+    class FleetBase {
+        <<DeclarativeBase>>
+    }
+    class Cluster {
+        +str id
+        +str name
+        +str region
+        +datetime last_heartbeat
+        +str status
+    }
+    class AgentRollup {
+        +str cluster_id
+        +str spiffe_id
+        +float trust_score
+        +str trust_category
+    }
+    class AuditRollup {
+        +str cluster_id
+        +str namespace
+        +datetime bucket_ts
+        +str decision
+        +int count
+    }
+    class IngestRouter {
+        +heartbeat(cluster_id, body)
+        +rollup(cluster_id, body)  %% SET-absolute upsert; scoped_cluster(path)
+    }
+    class FleetRouter {
+        +list_clusters()
+        +list_agents(cluster)
+        +audit_summary(cluster, range)
+        +trust_distribution(cluster)
+    }
+    class FleetRelayForwarder {
+        +start()  %% no-op unless fleet_enabled
+        +relay_once() dict
+        -_aggregate() tuple
+        -_bearer() str  %% OIDC-CC or HS256 fallback
+        +stop()
+    }
+    class ClientCredentialsToken {
+        +bearer() str
+    }
+    class Auth {
+        +get_current_user(creds)
+        +scoped_cluster(user, requested)
+        +_apply_group_mapping(claims)  %% +cluster dimension
+    }
+
+    FleetApp --> IngestRouter : include_router
+    FleetApp --> FleetRouter : include_router
+    FleetBase <|-- Cluster
+    FleetBase <|-- AgentRollup
+    FleetBase <|-- AuditRollup
+    IngestRouter --> Cluster : upsert
+    IngestRouter --> AgentRollup : upsert
+    IngestRouter --> AuditRollup : upsert
+    IngestRouter --> Auth : require_admin_or_service + scoped_cluster
+    FleetRouter --> Auth : scoped_cluster (read filter)
+    FleetRelayForwarder --> ClientCredentialsToken : hub auth
+    FleetRelayForwarder ..> IngestRouter : POST heartbeat + rollup

@@ -154,6 +154,24 @@ class NorviqSettings(BaseSettings):
     siem_webhook_url: str = ""
     siem_format: str = "ndjson"  # ndjson | syslog
     siem_poll_interval_s: int = 30
+    # --- Multi-cluster fleet (F045), MVP P1 read-only. OFF by default -> single-cluster behaves as today.
+    # Spoke relay: pushes agent + audit ROLLUPS to the hub fleet-api. Fire-and-forget, never on the
+    # enforce hot path (hub down -> local enforcement unaffected; fleet views degrade, never open).
+    fleet_enabled: bool = False
+    fleet_api_url: str = ""             # hub base URL the relay pushes to
+    fleet_cluster_id: str = ""          # this cluster's id in the fleet
+    fleet_cluster_name: str = ""
+    fleet_cluster_region: str = ""
+    fleet_cluster_endpoint: str = ""
+    fleet_relay_interval_s: int = 60
+    fleet_stale_after_s: int = 180      # hub: heartbeat older than this -> cluster status "stale"
+    # Relay->hub auth: OIDC client-credentials (preferred); falls back to a self-minted HS256 service
+    # token (with the cluster claim) when the token URL is unset and legacy HS256 is enabled.
+    fleet_oidc_token_url: str = ""
+    fleet_oidc_client_id: str = ""
+    fleet_oidc_client_secret: str = ""
+    # HUB ONLY: the fleet-api's own dedicated Postgres (separate store from any spoke DB).
+    fleet_pg_url: str = "postgresql://norviq:norviq_dev@fleet-postgresql:5432/norviq_fleet"
 
 
 settings = NorviqSettings()

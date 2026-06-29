@@ -29,6 +29,10 @@ Each prompt file contains: prompt text, outcome (commit SHA, result), date.
 
 | 2026-06-28 | [EPIC-identity-live-local.md](EPIC-identity-live-local.md) | Identity live e2e — Keycloak + SPIRE on local kind (A3/A4/B1/B3/B4) | done | Commits `a25c2c9`(fix pyspiffe)+`1779c37`(feat); CI green; **P-10 SHA==HEAD**; ships **dormant** (oidc=false/spiffe=mock/csi=off, AKS unchanged + attacks 75/75 live-verified). LIVE on kind `norviq-identity`: B1 SPIRE entries minted; **B2 resolver attests real SVID — spoof-proof + fail-closed**; A1/A2 real Keycloak RS256 validated → alice=admin/bob=viewer-team-a + per-user audit actor; **B4 controller syncs via OIDC client-credentials**; A4 dual-mode break-glass; **attacks 75/75**. Caught+fixed a real B2 bug (wrong pyspiffe API). B3 injector + A3 console built+unit-validated. tsc/vitest 37/37; unit 417/9-preexisting; helm both overlays gated-off. AKS untouched (deferred). Codes WHK-4042/4043, API-7061 |
 
+| 2026-06-28 | [EPIC-multi-cluster-fleet-mvp.md](EPIC-multi-cluster-fleet-mvp.md) | Multi-cluster fleet (R3) MVP — Phase-1 read-only, local 2-cluster | done (uncommitted) | FEAT **F045**, fleet OFF by default (single-cluster + AKS unchanged). LIVE on 2 kind clusters: both heartbeat/register; hub **aggregates BOTH clusters' agents + audit summaries**; **cluster-scope RBAC 403** cross-cluster; **hub-down fail-safe** (spoke still blocks SQL injection). fleet-api (own FleetBase + dedicated postgres) + in-process relay (fire-and-forget, OIDC-CC/HS256) + gated console Fleet page. 13 new tests; zero regressions; tsc/vitest 37/37; helm both overlays render 0 fleet; attacks 75/75 warm. Codes FLT-15000..15014. P2 policy-push still open. AKS deferred |
+
+| 2026-06-28 | [EPIC-multi-cluster-fleet-p2.md](EPIC-multi-cluster-fleet-p2.md) | Fleet (R3) P2 — signed policy-push, prod-ready, intensive local POC | pending | Plan-mode; signed bundles + fail-safe + SPIFFE-mTLS + HA fleet plane; validation report; AKS deferred |
+
 ## Convention
 - One file per significant work item (P0/P1 fix, feature, major diagnosis)
 - Filename: {item-id}-{short-name}.md

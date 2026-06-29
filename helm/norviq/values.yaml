@@ -297,3 +297,38 @@ siem:
   webhookUrl: ""
   format: ndjson           # ndjson | syslog
   pollIntervalSeconds: 30
+
+# Multi-cluster fleet (F045), MVP P1 read-only. EVERYTHING off by default -> a single-cluster install
+# renders ZERO fleet resources and behaves exactly as today. `enabled` turns on the SPOKE relay env
+# (the api pushes rollups to the hub); `hub.enabled` renders the fleet-api + its dedicated postgres
+# (only on the cluster that hosts the control plane). Fire-and-forget: a hub outage never affects
+# local enforcement.
+fleet:
+  enabled: false              # spoke: run the in-process relay (pushes agent+audit rollups to the hub)
+  clusterId: ""               # this cluster's id in the fleet
+  clusterName: ""
+  region: ""
+  apiUrl: ""                  # hub base URL the relay posts to (e.g. http://fleet-api.norviq.svc:8080)
+  relayIntervalSeconds: 60
+  staleAfterSeconds: 180      # hub: heartbeat older than this -> cluster status "stale"
+  oidc:                       # relay->hub auth (OIDC client-credentials; HS256 break-glass fallback)
+    tokenUrl: ""
+    clientId: ""
+    clientSecret: ""
+  hub:
+    enabled: false            # render the fleet-api control plane + dedicated fleet-postgresql
+    pgUrl: "postgresql://norviq:norviq_dev@fleet-postgresql:5432/norviq_fleet"
+    replicas: 1
+    storage: 5Gi
+    resources:
+      requests: { cpu: 50m, memory: 128Mi }
+      limits: { cpu: 500m, memory: 512Mi }
+    postgresql:
+      database: norviq_fleet
+      username: norviq
+      password: norviq_dev
+      port: 5432
+      storage: 5Gi
+      resources:
+        requests: { cpu: 50m, memory: 128Mi }
+        limits: { cpu: 500m, memory: 512Mi }

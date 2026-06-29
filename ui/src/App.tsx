@@ -28,6 +28,7 @@ const ConnectionSettings = lazy(() =>
   import("./pages/ConnectionSettings").then((m) => ({ default: m.ConnectionSettings }))
 );
 const AboutPage = lazy(() => import("./pages/AboutPage").then((m) => ({ default: m.AboutPage })));
+const Fleet = lazy(() => import("./pages/Fleet").then((m) => ({ default: m.Fleet })));
 
 function App() {
   // Handle the OIDC redirect outside the authenticated Shell (no token exists yet at this point).
@@ -56,6 +57,7 @@ function App() {
             <Route path="/settings/general" element={<GeneralSettings />} />
             <Route path="/settings/connections" element={<ConnectionSettings />} />
             <Route path="/settings/about" element={<AboutPage />} />
+            <Route path="/fleet" element={<Fleet />} />
           </Routes>
         </Suspense>
       </Shell>

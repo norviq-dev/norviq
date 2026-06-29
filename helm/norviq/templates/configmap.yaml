@@ -15,6 +15,17 @@ data:
   NRVQ_SIEM_WEBHOOK_URL: {{ .Values.siem.webhookUrl | default "" | quote }}
   NRVQ_SIEM_FORMAT: {{ .Values.siem.format | default "ndjson" | quote }}
   NRVQ_SIEM_POLL_INTERVAL_S: {{ .Values.siem.pollIntervalSeconds | default 30 | quote }}
+  {{- if .Values.fleet.enabled }}
+  # Fleet spoke relay (F045): the api pushes agent+audit rollups to the hub. Fire-and-forget; off the enforce path.
+  NRVQ_FLEET_ENABLED: "true"
+  NRVQ_FLEET_API_URL: {{ .Values.fleet.apiUrl | quote }}
+  NRVQ_FLEET_CLUSTER_ID: {{ .Values.fleet.clusterId | quote }}
+  NRVQ_FLEET_CLUSTER_NAME: {{ .Values.fleet.clusterName | default .Values.fleet.clusterId | quote }}
+  NRVQ_FLEET_CLUSTER_REGION: {{ .Values.fleet.region | default "" | quote }}
+  NRVQ_FLEET_RELAY_INTERVAL_S: {{ .Values.fleet.relayIntervalSeconds | default 60 | quote }}
+  NRVQ_FLEET_OIDC_TOKEN_URL: {{ .Values.fleet.oidc.tokenUrl | default "" | quote }}
+  NRVQ_FLEET_OIDC_CLIENT_ID: {{ .Values.fleet.oidc.clientId | default "" | quote }}
+  {{- end }}
   NRVQ_TRUST_THRESHOLD: {{ .Values.config.trustThreshold | quote }}
   NRVQ_VIOLATION_PENALTY: {{ .Values.config.violationPenalty | quote }}
   NRVQ_RATE_LIMIT: {{ .Values.config.rateLimit | quote }}

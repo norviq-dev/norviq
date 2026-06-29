@@ -137,6 +137,43 @@ async def test_admin_group_wins_over_viewer(oidc_on) -> None:
     assert user["role"] == "admin" and user["namespace"] == ""
 
 
+# --- F045 fleet: cluster dimension in the group mapping + scoped_cluster ---
+
+
+@pytest.mark.asyncio
+async def test_group_mapping_sets_cluster_dimension(oidc_on, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "oidc_group_mappings", {
+        "fleet-admins": {"role": "admin", "cluster": "*"},
+        "cluster-a-viewer": {"role": "viewer", "cluster": "cluster-a"},
+    })
+    admin = await auth_mod.get_current_user(_creds(_mint(oidc_on["priv_pem"], {"groups": ["fleet-admins"]})))
+    assert admin["role"] == "admin" and admin["cluster"] == "*"
+    viewer = await auth_mod.get_current_user(_creds(_mint(oidc_on["priv_pem"], {"groups": ["cluster-a-viewer"]})))
+    assert viewer["role"] == "viewer" and viewer["cluster"] == "cluster-a"
+
+
+@pytest.mark.asyncio
+async def test_conflicting_clusters_fail_closed(oidc_on, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "oidc_group_mappings", {
+        "a": {"role": "viewer", "cluster": "cluster-a"},
+        "b": {"role": "viewer", "cluster": "cluster-b"},
+    })
+    with pytest.raises(Exception) as exc:
+        await auth_mod.get_current_user(_creds(_mint(oidc_on["priv_pem"], {"groups": ["a", "b"]})))
+    assert getattr(exc.value, "status_code", None) == 401
+
+
+def test_scoped_cluster_enforces() -> None:
+    # admin / "*" see any cluster; a scoped viewer is pinned to its own, 403 otherwise.
+    assert auth_mod.scoped_cluster({"role": "admin", "cluster": "*"}, "cluster-b") == "cluster-b"
+    assert auth_mod.scoped_cluster({"role": "viewer", "cluster": "*"}, "cluster-b") == "cluster-b"
+    assert auth_mod.scoped_cluster({"role": "viewer", "cluster": "cluster-a"}, None) == "cluster-a"
+    assert auth_mod.scoped_cluster({"role": "viewer", "cluster": "cluster-a"}, "cluster-a") == "cluster-a"
+    with pytest.raises(Exception) as exc:
+        auth_mod.scoped_cluster({"role": "viewer", "cluster": "cluster-a"}, "cluster-b")
+    assert getattr(exc.value, "status_code", None) == 403
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "bad",

@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { NavLink } from "react-router-dom";
 import { logout } from "../../api/client";
+import { fleetEnabled } from "../../api/fleet";
 import { Section, useApp } from "../../store/AppContext";
 
 type NavItem = { to: string; label: string; icon: LucideIcon };
@@ -71,7 +72,11 @@ const PANEL_CONFIG: Record<Section, { title: string; groups: Group[] }> = {
           { to: "/threats/graph", label: "Attack Graph", icon: Network },
           { to: "/threats/mitre", label: "MITRE Coverage", icon: Award }
         ]
-      }
+      },
+      // F045: cross-cluster fleet view — only shown when a fleet-api hub is configured (VITE_FLEET_API_URL).
+      ...(fleetEnabled
+        ? [{ id: "fleet", label: "FLEET", items: [{ to: "/fleet", label: "Fleet", icon: Network }] }]
+        : [])
     ]
   },
   settings: {
