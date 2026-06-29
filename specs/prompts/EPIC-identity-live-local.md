@@ -6,14 +6,20 @@ a REAL OIDC IdP (Keycloak) + REAL SPIRE on a LOCAL kind cluster. Builds on the u
 core. Plan mode (staged); security auditor. Platform-agnostic (Keycloak; no Azure/vendor SDKs).
 **Depends on:** EPIC-identity-sso-spire (A1/A2/B2 software core). **Design:** specs/EPIC-sso-oidc.md.
 **FEAT:** F033 + F026 + F007 + F016 + F017 + F018. **Docker:** 12 GB. **AKS:** deferred to a later session.
-**Commit:** not committed (gate: do NOT auto-commit) · **Result:** see Outcome below.
+**Commit:** `a25c2c9` fix(identity pyspiffe) + `1779c37` feat(identity live stages) on main (CI build+deploy
+green; P-10 SHA==HEAD; ships DORMANT — AKS unchanged) · **Result:** see Outcome below.
 
 Local-first decision: deploy Keycloak + SPIRE on kind and validate OIDC + workload-api end-to-end
 locally; AKS later. Keep attacks 75/75 + unit suite green (mock). Platform-agnostic — cloud IdPs are
 config swaps, not code. Locked (AskUserQuestion): B4 = OIDC client-credentials; A3 = oidc-client-ts;
 Keycloak realm = declarative realm.json import.
 
-## Outcome (done — built + LIVE-validated on a local kind cluster `norviq-identity`; nothing committed)
+## Outcome (done — built + LIVE on kind, committed `a25c2c9`+`1779c37`, deployed DORMANT to AKS)
+
+**AKS post-deploy verification (dormant/unchanged):** deploy green; P-10 `api-1779c37` == HEAD; configmap +
+live pod env show `oidc=false / spiffe=mock / inject=unset / no CSI volume`; `/readyz {redis,db,opa:true}`;
+unauth → 401, forged-default-secret → 401, `/api/v1/me` deployed but auth-gated (401 unauth); **attacks
+75/75** on AKS. Nothing flipped on — the new socket configmap key is an unused default string in mock mode.
 
 **A real bug the live run caught:** the committed B2 core called the WRONG pyspiffe API — real
 `spiffe 0.3.0` uses ctor `socket_path` (not `spiffe_socket_path`), `fetch_x509_svid()` (not

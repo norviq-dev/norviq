@@ -7,6 +7,9 @@ real workload identity (replacing the env-var mock). Plan mode (staged); securit
 **Depends on:** Tier A (rotatable secret + guard), AKS deploy-hardening (controller service token).
 **FEAT:** F033 + F026 + F007 (resolver) + F016 (injector) + F017 (API auth) + F018 (console).
 **Commit:** `292c51d` on main (CI build+deploy green; P-10 SHA==HEAD; ships dormant — AKS unchanged) · **Result:** see Outcome below.
+**Follow-up fix:** `a25c2c9` corrected the B2 resolver's pyspiffe usage (the 292c51d code called a pyspiffe
+API that didn't match the real `spiffe` 0.3.0 lib — latent until live-tested against real SPIRE; see
+[EPIC-identity-live-local.md](EPIC-identity-live-local.md)).
 
 Two axes, one epic: (A) OIDC at the API/console edge (replace shared HS256, JWKS/RS256, group→role/
 namespace, per-user audit, dual-mode migration, break-glass service token); (B) SPIRE/SPIFFE at the
