@@ -441,7 +441,11 @@ func (c *Controller) updatePolicyStatus(ctx context.Context, u *unstructured.Uns
 func (c *Controller) reconcileDeletingPolicy(ctx context.Context, u *unstructured.Unstructured) {
 	name := u.GetName()
 	namespace := u.GetNamespace()
-	deletePath := fmt.Sprintf("/api/v1/policies/%s/%s", namespace, name)
+	delNs, delClass := namespace, name
+	if bns, bclass, ok := namespaceBaselineKey(u); ok {
+		delNs, delClass = bns, bclass
+	}
+	deletePath := fmt.Sprintf("/api/v1/policies/%s/%s", delNs, delClass)
 	if err := c.syncDelete(ctx, deletePath); err != nil {
 		if c.forceFinalizeAfterTimeout(ctx, u, err) {
 			return
@@ -524,7 +528,11 @@ func (c *Controller) handlePolicyDelete(obj interface{}) {
 		go func() {
 			defer c.wg.Done()
 			defer func() { <-c.syncSemaphore }()
-			deletePath := fmt.Sprintf("/api/v1/policies/%s/%s", namespace, name)
+			delNs, delClass := namespace, name
+			if bns, bclass, ok := namespaceBaselineKey(u); ok {
+				delNs, delClass = bns, bclass
+			}
+			deletePath := fmt.Sprintf("/api/v1/policies/%s/%s", delNs, delClass)
 			if err := c.syncDelete(context.Background(), deletePath); err != nil {
 				slog.Error("NRVQ-WHK-4031: API delete failed", "policy", name, "error", err)
 				return
@@ -567,6 +575,19 @@ func (c *Controller) buildPolicySyncPayload(u *unstructured.Unstructured) (polic
 		}
 	}
 
+	// A whole-namespace cluster baseline (cluster-priority, target.namespace set, no agentClass or
+	// workload) is the catch-all for its target namespace. Store it at <targetNs>:__baseline__ so the
+	// engine's no-policy baseline fallback (evaluator._collect_candidates) resolves it; otherwise it
+	// lands under the admin namespace + policy-name key and is unreachable, leaving unseeded agent
+	// classes to deny-by-default once NRVQ_NO_POLICY_DECISION=deny is in effect.
+	baselineNs, baselineClass, isNamespaceBaseline := namespaceBaselineKey(u)
+	if isNamespaceBaseline {
+		payload.Namespace = baselineNs
+		payload.AgentClass = baselineClass
+		slog.Info("NRVQ-WHK-4042: namespace baseline keyed to target namespace",
+			"policy", name, "namespace", baselineNs, "agentClass", baselineClass)
+	}
+
 	rules, _, _ := unstructured.NestedStringSlice(u.Object, "spec", "rules")
 	payload.Rules = rules
 	priority, found, _ := unstructured.NestedInt64(u.Object, "spec", "priority")
@@ -577,6 +598,14 @@ func (c *Controller) buildPolicySyncPayload(u *unstructured.Unstructured) (polic
 		payload.Priority = priority
 	} else {
 		payload.Priority = 100
+	}
+	// The namespace baseline is a FALLBACK, not an override: it must apply only when no more-specific
+	// policy matches. clusterPriority authorizes the cross-namespace target but must NOT become the
+	// evaluation priority, or a permissive baseline (e.g. the strict preset, which allows anything but
+	// destructive tool names) would outrank and weaken a stricter namespace/agent-class policy via the
+	// engine's highest-priority-wins precedence. Store it below any real policy so specifics always win.
+	if isNamespaceBaseline {
+		payload.Priority = baselineFallbackPriority
 	}
 	if rego, found, _ := unstructured.NestedString(u.Object, "spec", "rego"); found && rego != "" {
 		payload.RegoSource = rego
@@ -591,6 +620,38 @@ func (c *Controller) buildPolicySyncPayload(u *unstructured.Unstructured) (polic
 	}
 
 	return payload, nil
+}
+
+// baselineFallbackPriority is the evaluation priority a whole-namespace baseline is stored under.
+// It sits below any real policy (API/controller default is 100) so the baseline only decides when
+// no more-specific policy matches, never overriding one via highest-priority-wins precedence.
+const baselineFallbackPriority = 1
+
+// namespaceBaselineKey reports the registry key (namespace, agentClass) for a whole-namespace
+// cluster baseline CR: a cluster-priority policy whose target names a namespace but no agentClass
+// or workload kind+name. Such a policy is that namespace's catch-all and must be stored at
+// <targetNs>:__baseline__ to match the engine's baseline fallback (evaluator._collect_candidates).
+// ok is false for every other policy shape, leaving its keying unchanged.
+func namespaceBaselineKey(u *unstructured.Unstructured) (ns, class string, ok bool) {
+	spec, _, _ := unstructured.NestedMap(u.Object, "spec")
+	if spec == nil {
+		return "", "", false
+	}
+	if _, has := spec["clusterPriority"]; !has {
+		return "", "", false
+	}
+	target, _ := spec["target"].(map[string]interface{})
+	if target == nil {
+		return "", "", false
+	}
+	targetNs, _ := target["namespace"].(string)
+	agentClass, _ := target["agentClass"].(string)
+	kind, _ := target["kind"].(string)
+	name, _ := target["name"].(string)
+	if targetNs == "" || agentClass != "" || kind != "" || name != "" {
+		return "", "", false
+	}
+	return targetNs, "__baseline__", true
 }
 
 func validateRego(rego string) error {
