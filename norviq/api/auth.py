@@ -12,7 +12,7 @@ normalized ``role``/``namespace``/``sub`` shape.
 """
 
 import structlog
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 
@@ -98,13 +98,29 @@ def _apply_group_mapping(claims: dict) -> dict:
     return claims
 
 
-async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(security)) -> dict:
-    """Validate the bearer token (OIDC or HS256) and return claims."""
+async def get_current_user(
+    creds: HTTPAuthorizationCredentials = Depends(security), request: Request = None  # type: ignore[assignment]
+) -> dict:
+    """Validate the bearer token (OIDC or HS256) and return claims.
+
+    Additive (F046): a credential that is not a valid JWT but is a Norviq API key (``nrvq_`` prefix)
+    is resolved against the issued-key store as a scoped principal. JWT validation is tried first, so
+    nothing about existing token auth changes. (`request` is FastAPI-injected when used as a dependency;
+    direct callers may omit it — it only supplies the Redis cache for F-03 api-key auth throttling.)
+    """
     if not creds:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
     try:
         return await _validate_token(creds.credentials)
     except JWTError as exc:
+        if creds.credentials.startswith("nrvq_"):
+            from norviq.api.api_keys import authenticate_api_key
+
+            cache = getattr(getattr(request, "app", None), "state", None)
+            cache = getattr(cache, "cache", None) if cache is not None else None
+            principal = await authenticate_api_key(creds.credentials, cache=cache)
+            if principal is not None:
+                return principal
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from exc
 
 
@@ -138,6 +154,12 @@ def scoped_namespace(user: dict, requested: str | None) -> str | None:
     if role == "admin":
         return requested
     claim_ns = str(user.get("namespace", "") or "")
+    # F-06: a non-admin HUMAN with NO namespace claim (the viewer/unmapped least-privilege floor) previously
+    # fell through to `claim_ns or requested` and reached ANY requested namespace — a cross-tenant read hole on
+    # every scoped route. A floor user has no namespace scope, so it gets no tenant data. Machine principals
+    # (role=service: the webhook controller, fleet relay) stay trusted with an empty claim.
+    if role != "service" and not claim_ns:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No namespace scope")
     if requested and claim_ns and requested != claim_ns:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized for this namespace")
     return claim_ns or requested

@@ -1,6 +1,6 @@
 import { RotateCcw, Snowflake } from "lucide-react";
 import { useMemo, useState } from "react";
-import { apiGet, apiSend } from "../api/client";
+import { apiGet, apiSend, fetchAgentToolUsage, fetchAgentTrustHistory } from "../api/client";
 import { CategoryBars } from "../components/charts/CategoryBars";
 import { VolumeChart } from "../components/charts/VolumeChart";
 import { DataTable, type Column } from "../components/common/DataTable";
@@ -68,24 +68,27 @@ export function AgentMonitor() {
     }
   };
 
-  const trustHistory = useMemo(() => {
-    const cur = selected?.score ?? 0.8;
-    return Array.from({ length: 7 }, (_, i) => {
-      const t = Math.max(0, Math.min(1, cur - (6 - i) * 0.04 + (i % 2 ? 0.02 : -0.01)));
-      return { time: `D${i + 1}`, allow: Math.round(t * 100), block: Math.round((1 - t) * 100) };
-    });
-  }, [selected]);
-
-  const toolUsage = useMemo(
-    () => [
-      { category: "read_file", score: 88 },
-      { category: "db_query", score: 72 },
-      { category: "http_request", score: 54 },
-      { category: "exec_shell", score: 22 },
-      { category: "send_email", score: 41 }
-    ],
-    []
+  // Real per-agent insights from audit_log (F046), fetched when an agent is selected.
+  const trustHistoryApi = useApi(
+    () => (selected ? fetchAgentTrustHistory(selected.spiffe_id, namespace) : Promise.resolve([])),
+    [selected?.spiffe_id, namespace]
   );
+  const toolUsageApi = useApi(
+    () => (selected ? fetchAgentToolUsage(selected.spiffe_id, namespace) : Promise.resolve([])),
+    [selected?.spiffe_id, namespace]
+  );
+
+  const trustHistory = useMemo(
+    () => (trustHistoryApi.data ?? []).map((p) => ({ time: p.time, allow: p.allow, block: p.block })),
+    [trustHistoryApi.data]
+  );
+
+  // Tool-call counts, shown as relative usage (busiest tool = 100%) so the shared bar chart stays 0–100.
+  const toolUsage = useMemo(() => {
+    const rows = toolUsageApi.data ?? [];
+    const max = Math.max(1, ...rows.map((r) => r.count));
+    return rows.map((r) => ({ category: r.tool, score: Math.round((r.count / max) * 100) }));
+  }, [toolUsageApi.data]);
 
   const columns: Array<Column<AgentRow>> = [
     {

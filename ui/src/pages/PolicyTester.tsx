@@ -146,8 +146,12 @@ function normalizeTool(toolName: string): string {
 }
 
 export function PolicyTester() {
-  const { selectedNamespace } = useApp();
-  const namespaceOptions = useMemo(() => ["default", "chatbot-prod", "analytics", selectedNamespace], [selectedNamespace]);
+  const { selectedNamespace, namespaces } = useApp();
+  // Live namespaces (from /cluster-info via AppContext); fall back to the current selection only.
+  const namespaceOptions = useMemo(
+    () => Array.from(new Set([...(namespaces ?? []), selectedNamespace].filter(Boolean))),
+    [namespaces, selectedNamespace]
+  );
   const [toolSelection, setToolSelection] = useState<string>("execute_sql");
   const [customToolName, setCustomToolName] = useState<string>("");
   const [toolParams, setToolParams] = useState<string>(TOOL_DEFAULTS.execute_sql);

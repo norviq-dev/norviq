@@ -52,6 +52,10 @@ class NorviqSettings(BaseSettings):
 
     policy_engine_url: str = "http://localhost:8181"
     enforcement_mode: str = "block"
+    # F-04: decision when an enforcing namespace has NO policy loaded (deny-by-default for a PEP).
+    # "deny" (default) blocks unconfigured namespaces in block mode; "allow" restores the old fail-open.
+    # Only applies in enforcement_mode="block"; audit/monitor mode always allows (visibility only).
+    no_policy_decision: str = "deny"
     sdk_timeout_ms: int = 5000
     sdk_fallback_mode: str = "block"
     sdk_retry_max_attempts: int = 2

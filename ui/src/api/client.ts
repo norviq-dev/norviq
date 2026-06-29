@@ -65,6 +65,122 @@ export async function apiSend<T>(path: string, method: "POST" | "PUT" | "DELETE"
   return (await response.json()) as T;
 }
 
+export type ClusterInfo = { cluster_id: string; cluster_name: string; namespaces: string[] };
+
+/** This deployment's live identity + the real namespaces observed in its data (F046). */
+export async function fetchClusterInfo(): Promise<ClusterInfo> {
+  return apiGet<ClusterInfo>("/api/v1/cluster-info");
+}
+
+export type RuntimeSettings = {
+  namespace: string;
+  enforcement_mode: "block" | "audit";
+  trust_threshold: number;
+  violation_penalty: number;
+  rate_limit: number;
+};
+
+/** Effective runtime settings (config defaults + persisted overrides) for a namespace (F046). */
+export async function fetchSettings(namespace?: string): Promise<RuntimeSettings> {
+  const params = new URLSearchParams();
+  if (namespace && namespace !== "all") params.set("namespace", namespace);
+  const query = params.toString();
+  return apiGet<RuntimeSettings>(query ? `/api/v1/settings?${query}` : "/api/v1/settings");
+}
+
+/** Persist a per-namespace settings override (admin-only). */
+export async function saveSettings(
+  namespace: string,
+  body: Partial<Pick<RuntimeSettings, "enforcement_mode" | "trust_threshold" | "violation_penalty" | "rate_limit">>
+): Promise<RuntimeSettings> {
+  const params = new URLSearchParams();
+  if (namespace && namespace !== "all") params.set("namespace", namespace);
+  return apiSend<RuntimeSettings>(`/api/v1/settings?${params.toString()}`, "PUT", body);
+}
+
+export type VersionInfo = { version: string; license: string };
+
+/** The single-source product version + license (F046). */
+export async function fetchVersion(): Promise<VersionInfo> {
+  return apiGet<VersionInfo>("/api/v1/version");
+}
+
+export type ApiKey = {
+  id: string;
+  prefix: string;
+  name: string;
+  namespace: string;
+  role: string;
+  created_at: string | null;
+  last_used_at: string | null;
+  revoked: boolean;
+};
+
+/** List issued API keys (no secrets); admin-only (F046). */
+export async function fetchApiKeys(): Promise<ApiKey[]> {
+  return apiGet<ApiKey[]>("/api/v1/keys");
+}
+
+/** Issue a new API key — the returned `key` secret is shown ONCE. */
+export async function createApiKey(body: { name: string; namespace?: string; role?: string }): Promise<ApiKey & { key: string }> {
+  return apiSend<ApiKey & { key: string }>("/api/v1/keys", "POST", body);
+}
+
+/** Revoke (disable) an API key. */
+export async function revokeApiKey(id: string): Promise<ApiKey> {
+  return apiSend<ApiKey>(`/api/v1/keys/${encodeURIComponent(id)}`, "DELETE");
+}
+
+export type RedteamAttack = { id: string; name: string; category: string; description?: string; expected_decision?: string };
+export type RedteamResult = {
+  attack_id: string;
+  attack_name: string;
+  category: string;
+  expected: string;
+  actual: string;
+  rule_id: string;
+  passed: boolean;
+  latency_ms?: number;
+  error?: string;
+};
+export type RedteamReport = {
+  run_id?: string;
+  total: number;
+  passed: number;
+  failed: number;
+  pass_rate: number;
+  results: RedteamResult[];
+};
+
+/** The red-team attack catalog (F017). */
+export async function fetchRedteamCatalog(): Promise<RedteamAttack[]> {
+  return apiGet<RedteamAttack[]>("/api/v1/redteam/catalog");
+}
+
+/** Run the full red-team suite against the live evaluator and return the real report. */
+export async function runRedteamSuite(targetAgent?: string, targetNamespace?: string): Promise<RedteamReport> {
+  const params = new URLSearchParams();
+  if (targetAgent) params.set("target_agent", targetAgent);
+  if (targetNamespace && targetNamespace !== "all") params.set("target_namespace", targetNamespace);
+  const query = params.toString();
+  return apiSend<RedteamReport>(`/api/v1/redteam/suite${query ? `?${query}` : ""}`, "POST");
+}
+
+export type Me = { sub: string; role: string; namespace: string; email?: string | null; name?: string | null };
+
+/** The server's normalized view of the authenticated caller (group mapping applied). */
+export async function fetchMe(): Promise<Me> {
+  return apiGet<Me>("/api/v1/me");
+}
+
+export type Readiness = { status: string; redis?: boolean; db?: boolean; opa?: boolean };
+
+/** Live readiness probe: real redis/db/opa status (200 ready, 503 not-ready). Returns the JSON either way. */
+export async function fetchReadiness(): Promise<Readiness> {
+  const response = await fetch(apiUrl("/readyz"), { headers: authHeaders() });
+  return (await response.json()) as Readiness; // 503 still carries the per-dependency body
+}
+
 export async function fetchAuditStats(
   range: string = "24h",
   namespace?: string
@@ -156,6 +272,38 @@ export async function fetchMitreCoverage(namespace?: string): Promise<MitreCover
   if (namespace && namespace !== "all") params.set("namespace", namespace);
   const query = params.toString();
   return apiGet<MitreCoverage>(query ? `/api/v1/mitre/coverage?${query}` : "/api/v1/mitre/coverage");
+}
+
+export type CategoryCoverageItem = { category: string; covered: number; total: number; score: number };
+export type CoverageByCategory = { namespace: string; coverage_pct: number; categories: CategoryCoverageItem[] };
+
+/** Real policy coverage per risk category (F046): covered = mapped rules present in the loaded rego. */
+export async function fetchCoverageByCategory(namespace?: string): Promise<CoverageByCategory> {
+  const params = new URLSearchParams();
+  if (namespace && namespace !== "all") params.set("namespace", namespace);
+  const query = params.toString();
+  return apiGet<CoverageByCategory>(query ? `/api/v1/coverage-by-category?${query}` : "/api/v1/coverage-by-category");
+}
+
+export type ToolUsage = { tool: string; count: number; blocked: number };
+export type TrustHistoryPoint = { time: string; allow: number; block: number; trust_score: number | null };
+
+/** Real per-tool call counts for one agent, aggregated from audit_log (F046). */
+export async function fetchAgentToolUsage(spiffeId: string, namespace?: string, range = "7d"): Promise<ToolUsage[]> {
+  const params = new URLSearchParams({ range });
+  if (namespace && namespace !== "all") params.set("namespace", namespace);
+  return apiGet<ToolUsage[]>(`/api/v1/agents/${encodeURIComponent(spiffeId)}/tool-usage?${params.toString()}`);
+}
+
+/** Real per-day allow/block + average trust for one agent, aggregated from audit_log (F046). */
+export async function fetchAgentTrustHistory(
+  spiffeId: string,
+  namespace?: string,
+  range = "7d"
+): Promise<TrustHistoryPoint[]> {
+  const params = new URLSearchParams({ range });
+  if (namespace && namespace !== "all") params.set("namespace", namespace);
+  return apiGet<TrustHistoryPoint[]>(`/api/v1/agents/${encodeURIComponent(spiffeId)}/trust-history?${params.toString()}`);
 }
 
 export async function fetchAgents(namespace?: string): Promise<Array<{ category?: string }>> {

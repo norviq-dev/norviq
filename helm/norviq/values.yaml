@@ -238,6 +238,7 @@ ingress:
 config:
   logLevel: INFO
   enforcementMode: block
+  noPolicyDecision: deny   # F-04: no-policy namespace -> deny in block mode ("allow" restores fail-open)
   # OPA evaluation runtime: "server" (HTTP to the sidecar) or "subprocess" (per-call fork, rollback).
   opaMode: server
   # Refuse to start on the default JWT secret. Set true in production (and set api.secretKey).

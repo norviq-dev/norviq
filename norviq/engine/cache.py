@@ -259,6 +259,38 @@ class RedisCache:
         log.debug("nrvq.cache.callcount.incr", key=key, count=count, code="NRVQ-DB-9019")
         return int(count)
 
+    # F-05: graph ANALYSIS result cache, keyed by (namespace, content-hash version, type, params) so a
+    # repeated analysis call is served from cache and invalidated automatically when the graph changes.
+    @staticmethod
+    def _analysis_key(namespace: str, version: str, analysis_type: str, params: str = "") -> str:
+        return f"graph:analysis:{analysis_type}:{namespace}:{version}:{params}"
+
+    async def get_analysis(self, namespace: str, version: str, analysis_type: str, params: str = "") -> object | None:
+        """Return a cached graph-analysis result, or None on miss."""
+        raw = await self._client().get(self._analysis_key(namespace, version, analysis_type, params))
+        if raw is None:
+            return None
+        log.debug("nrvq.cache.analysis.hit", type=analysis_type, namespace=namespace, code="NRVQ-DB-9023")
+        return json.loads(raw)
+
+    async def set_analysis(
+        self, namespace: str, version: str, analysis_type: str, result: object, params: str = "", ttl: int = 600
+    ) -> None:
+        """Cache a graph-analysis result (default 10-minute TTL)."""
+        await self._client().set(
+            self._analysis_key(namespace, version, analysis_type, params), json.dumps(result), ex=ttl
+        )
+        log.debug("nrvq.cache.analysis.set", type=analysis_type, namespace=namespace, code="NRVQ-DB-9024")
+
+    async def delete_analysis_scope(self, namespace: str) -> int:
+        """Invalidate ALL cached analysis results for a namespace (called when its graph snapshot changes)."""
+        deleted = 0
+        async for key in self._client().scan_iter(match=f"graph:analysis:*:{namespace}:*"):
+            deleted += int(await self._client().delete(key))
+        if deleted:
+            log.info("nrvq.cache.analysis.invalidated", namespace=namespace, count=deleted, code="NRVQ-DB-9025")
+        return deleted
+
     async def get_session(self, session_id: str) -> dict | None:
         """Get cached session payload."""
         key = f"session:{session_id}"

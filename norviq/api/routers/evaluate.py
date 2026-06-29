@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from norviq.api.audit_hub import audit_record
-from norviq.api.auth import get_current_user
+from norviq.api.auth import get_current_user, scoped_namespace
 from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.events import ToolCallEvent
 
@@ -43,7 +43,12 @@ async def evaluate_tool_call(
     user: dict = Depends(get_current_user),
 ) -> EvaluateResponse:
     """Evaluate one tool call against active policies."""
-    _ = user
+    # F-01: bind the evaluated namespace to the CALLER, not the client-supplied body. The agent's own
+    # workload/service credential (sidecar/SDK/break-glass, role=service) evaluates within its scope and is
+    # trusted here (the workload path); a HUMAN token (admin/viewer) must be authorized for the namespace it
+    # asks to evaluate — admin = any, non-admin → 403 on mismatch (matches every other tenant-scoped route).
+    if str(user.get("role", "")).lower() != "service":
+        scoped_namespace(user, (payload.agent_identity or {}).get("namespace"))
     event = ToolCallEvent.model_validate(payload.model_dump(exclude={"trust_score"}))
     decision: PolicyDecision = await request.app.state.evaluator.evaluate(event)
     # Fire-and-forget audit emission (DB write + OTel span). emit() schedules its own

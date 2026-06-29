@@ -14,7 +14,7 @@ function agentClassFromSource(sourceId: string): string {
   const sa = sourceId.match(/\/sa\/([^/]+)/);
   if (sa) return sa[1];
   const parts = sourceId.split(":");
-  return parts[parts.length - 1] || "customer-support";
+  return parts[parts.length - 1] || "unknown";
 }
 
 export function AttackGraph() {

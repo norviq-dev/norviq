@@ -1,49 +1,72 @@
 // SPDX-License-Identifier: Apache-2.0
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { http, HttpResponse } from "msw";
+import { setupServer } from "msw/node";
 import { MemoryRouter } from "react-router-dom";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { Settings } from "./Settings";
+import { AppProvider } from "../store/AppContext";
+
+const server = setupServer();
+let putBody: Record<string, unknown> | null = null;
+
+beforeAll(() => server.listen({ onUnhandledRequest: "bypass" }));
+beforeEach(() => {
+  putBody = null;
+  server.use(
+    http.get("/api/v1/settings", () =>
+      HttpResponse.json({
+        namespace: "default",
+        enforcement_mode: "block",
+        trust_threshold: 0.7,
+        violation_penalty: 0.05,
+        rate_limit: 60
+      })
+    ),
+    http.put("/api/v1/settings", async ({ request }) => {
+      putBody = (await request.json()) as Record<string, unknown>;
+      return HttpResponse.json({
+        namespace: "default",
+        enforcement_mode: "block",
+        trust_threshold: 0.55,
+        violation_penalty: 0.05,
+        rate_limit: 60
+      });
+    })
+  );
+});
+afterEach(() => server.resetHandlers());
+afterAll(() => server.close());
 
 function renderPage() {
   return render(
     <MemoryRouter>
-      <Settings />
+      <AppProvider>
+        <Settings />
+      </AppProvider>
     </MemoryRouter>
   );
 }
 
-describe("Settings Save (#8)", () => {
-  beforeEach(() => localStorage.clear());
-  afterEach(() => localStorage.clear());
-
-  it("persists settings to localStorage and shows a confirmation", async () => {
+describe("Settings (#8) — server-backed", () => {
+  it("loads the effective settings from the API", async () => {
     renderPage();
-    const trust = screen.getByDisplayValue("0.7");
-    fireEvent.change(trust, { target: { value: "0.55" } });
+    await waitFor(() => expect(screen.getByDisplayValue("0.7")).toBeInTheDocument());
+    expect(screen.getByDisplayValue("60")).toBeInTheDocument();
+  });
 
+  it("saves via PUT /settings and shows a confirmation", async () => {
+    renderPage();
+    const trust = await screen.findByDisplayValue("0.7");
+    fireEvent.change(trust, { target: { value: "0.55" } });
     fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
 
-    // visible confirmation
     await waitFor(() => expect(screen.getByText(/settings saved/i)).toBeInTheDocument());
-
-    // actually persisted
-    const stored = JSON.parse(localStorage.getItem("nrvq_settings") ?? "{}");
-    expect(stored.trustThreshold).toBe("0.55");
-    expect(stored.mode).toBe("block");
+    expect(putBody).toMatchObject({ enforcement_mode: "block", trust_threshold: 0.55 });
   });
 
-  it("notes that settings are saved locally only (no server store yet)", () => {
+  it("notes that settings are persisted server-side", async () => {
     renderPage();
-    expect(screen.getByText(/saved locally \(no server settings store yet\)/i)).toBeInTheDocument();
-  });
-
-  it("re-hydrates persisted settings on mount", () => {
-    localStorage.setItem(
-      "nrvq_settings",
-      JSON.stringify({ mode: "audit", trustThreshold: "0.42", violationPenalty: "0.05", rateLimit: "120" })
-    );
-    renderPage();
-    expect(screen.getByDisplayValue("0.42")).toBeInTheDocument();
-    expect(screen.getByDisplayValue("120")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(/persisted server-side/i)).toBeInTheDocument());
   });
 });
