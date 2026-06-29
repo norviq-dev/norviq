@@ -2,6 +2,8 @@
 // UI's nginx (`location /api/`) in prod both forward to the API — so the browser only ever talks to
 // its own origin (always browser-reachable). Set VITE_API_BASE_URL to an absolute origin only for a
 // split-origin deploy where the API has its own ingress (requires CORS on the API).
+import { oidcEnabled, oidcLogout } from "../auth/oidc";
+
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
 
 /** Resolve an API path against the configured base (relative by default). */
@@ -16,6 +18,10 @@ export function apiUrl(path: string): string {
  */
 /** Clear the stored JWT and redirect home, forcing re-auth via the AppContext bootstrap. */
 export function logout(): void {
+  if (oidcEnabled) {
+    void oidcLogout();
+    return;
+  }
   localStorage.removeItem("nrvq_token");
   window.location.href = "/";
 }

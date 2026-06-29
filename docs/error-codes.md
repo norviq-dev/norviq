@@ -6,7 +6,7 @@ Generated from `norviq/**/*.py` log/error code literals (`NRVQ-*`).
 
 | Component | Unique Codes | Primary Sources |
 |---|---:|---|
-| API | 22 | `norviq/api/main.py`, `norviq/api/routers/*` |
+| API | 23 | `norviq/api/main.py`, `norviq/api/routers/*` |
 | AUD | 9 | `norviq/engine/audit_emitter.py` |
 | AUTH | 6 | `norviq/api/auth.py`, `norviq/api/jwks.py` |
 | CLI | 5 | `norviq/cli/main.py`, `norviq/cli/api_client.py` |
@@ -21,7 +21,7 @@ Generated from `norviq/**/*.py` log/error code literals (`NRVQ-*`).
 | SIEM | 3 | `norviq/api/siem.py` |
 | TEL | 8 | `norviq/telemetry/*` |
 
-Total documented unique codes: **174**
+Total documented unique codes: **175**
 
 ## API
 
@@ -41,6 +41,7 @@ Total documented unique codes: **174**
 | NRVQ-API-7023 | `nrvq.api.audit.volume` | `norviq/api/routers/audit.py` |
 | NRVQ-API-7030 | `nrvq.api.agents.listed` | `norviq/api/routers/agents.py` |
 | NRVQ-API-7031 | `nrvq.api.agent.trust_updated` | `norviq/api/routers/agents.py` |
+| NRVQ-API-7061 | `nrvq.api.me.served` (A3: current-user claims) | `norviq/api/routers/me.py` |
 | NRVQ-API-7050 | `nrvq.api.asset_graph.served` | `norviq/api/routers/graphs.py` |
 | NRVQ-API-7050-ERR | `nrvq.api.asset_graph.error` | `norviq/api/routers/graphs.py` |
 | NRVQ-API-7051 | `nrvq.api.attack_paths.served` | `norviq/api/routers/graphs.py` |
@@ -108,7 +109,7 @@ OIDC / JWKS token validation (IDENTITY epic A1/A2). Distinct prefix from `NRVQ-S
 ## Full Code Index
 
 ```text
-NRVQ-API-7000, NRVQ-API-7001, NRVQ-API-7002, NRVQ-API-7010, NRVQ-API-7011, NRVQ-API-7012, NRVQ-API-7013, NRVQ-API-7014, NRVQ-API-7015, NRVQ-API-7020, NRVQ-API-7021, NRVQ-API-7022, NRVQ-API-7023, NRVQ-API-7024, NRVQ-API-7030, NRVQ-API-7031, NRVQ-API-7032, NRVQ-API-7050, NRVQ-API-7050-ERR, NRVQ-API-7051, NRVQ-API-7051-ERR, NRVQ-API-7099
+NRVQ-API-7000, NRVQ-API-7001, NRVQ-API-7002, NRVQ-API-7010, NRVQ-API-7011, NRVQ-API-7012, NRVQ-API-7013, NRVQ-API-7014, NRVQ-API-7015, NRVQ-API-7020, NRVQ-API-7021, NRVQ-API-7022, NRVQ-API-7023, NRVQ-API-7024, NRVQ-API-7030, NRVQ-API-7031, NRVQ-API-7032, NRVQ-API-7050, NRVQ-API-7050-ERR, NRVQ-API-7051, NRVQ-API-7051-ERR, NRVQ-API-7061, NRVQ-API-7099
 NRVQ-AUD-6000, NRVQ-AUD-6001, NRVQ-AUD-6002, NRVQ-AUD-6003, NRVQ-AUD-6004, NRVQ-AUD-6005, NRVQ-AUD-6006, NRVQ-AUD-6007, NRVQ-AUD-6008
 NRVQ-CLI-8000, NRVQ-CLI-8001, NRVQ-CLI-8002, NRVQ-CLI-8003, NRVQ-CLI-8004
 NRVQ-DB-9000, NRVQ-DB-9001, NRVQ-DB-9002, NRVQ-DB-9003, NRVQ-DB-9010, NRVQ-DB-9011, NRVQ-DB-9012, NRVQ-DB-9013, NRVQ-DB-9014, NRVQ-DB-9015, NRVQ-DB-9016, NRVQ-DB-9017, NRVQ-DB-9018, NRVQ-DB-9019, NRVQ-DB-9020, NRVQ-DB-9021, NRVQ-DB-9022, NRVQ-DB-9030, NRVQ-DB-9031, NRVQ-DB-9032, NRVQ-DB-9033, NRVQ-DB-DEBUG-1, NRVQ-DB-DEBUG-2, NRVQ-DB-DEBUG-2-ERR, NRVQ-DB-DEBUG-2A, NRVQ-DB-DEBUG-2B, NRVQ-DB-DEBUG-2C, NRVQ-DB-DEBUG-2D, NRVQ-DB-DEBUG-3, NRVQ-DB-DEBUG-4, NRVQ-DB-DEBUG-5, NRVQ-DB-DEBUG-6, NRVQ-DB-DEBUG-CONNECT-ARGS, NRVQ-DB-DEBUG-METADATA

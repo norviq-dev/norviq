@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+
+	"golang.org/x/oauth2"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -667,6 +669,24 @@ func TestAddFinalizerWithRetry_RetriesOnConflict(t *testing.T) {
 	}
 	if !containsFinalizer(updated, "norviq.io/policy-protection") {
 		t.Fatal("expected norviq finalizer to be present after retry")
+	}
+}
+
+func TestBearerToken_PrefersOIDCThenFallsBackToHS256(t *testing.T) {
+	// B4: with an OIDC token source set, bearerToken returns the access token (not the HS256 JWT).
+	c := newTestController()
+	c.apiSecret = "secret"
+	c.oidcTokenSource = oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "oidc-access-token"})
+	if got := c.bearerToken(); got != "oidc-access-token" {
+		t.Fatalf("expected OIDC access token, got %q", got)
+	}
+	// Without an OIDC source, it mints the HS256 service JWT (role=service).
+	c.oidcTokenSource = nil
+	c.cachedJWT = ""
+	tok := c.bearerToken()
+	role, sub, err := verifyServiceJWT(tok, "secret")
+	if err != nil || role != "service" || sub != "norviq-webhook" {
+		t.Fatalf("expected HS256 service JWT fallback, got role=%q sub=%q err=%v", role, sub, err)
 	}
 }
 

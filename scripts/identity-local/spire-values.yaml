@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# Values for the upstream spiffe/spire umbrella chart (server + agent + controller-manager + SPIFFE CSI).
+# Trust domain MUST be `norviq` to match _TRUST_DOMAIN in norviq/engine/identity.py and the existing
+# spiffe://norviq/ns/<ns>/sa/<sa> id shape. We ship our own ClusterSPIFFEID (spire-clusterspiffeid.yaml)
+# instead of the chart's catch-all.
+global:
+  spire:
+    clusterName: norviq-identity
+    trustDomain: norviq
+
+spire-server:
+  controllerManager:
+    enabled: true
+    # Disable the chart's default catch-all ClusterSPIFFEID; we register workloads explicitly (opt-in label).
+    identities:
+      clusterSPIFFEIDs:
+        default:
+          enabled: false
+
+spiffe-csi-driver:
+  enabled: true

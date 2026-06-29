@@ -1,0 +1,20 @@
+{{- if .Values.config.spiffeCsi.enabled }}
+# Dedicated ServiceAccounts so each workload's SPIRE SVID is self-describing
+# (spiffe://<trustDomain>/ns/<ns>/sa/norviq-api|norviq-engine). Gated with the CSI volume so default
+# (no-SPIRE) deploys keep using the namespace default SA.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: norviq-api
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: norviq-engine
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+{{- end }}

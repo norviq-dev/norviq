@@ -77,6 +77,27 @@ spec:
               value: /etc/webhook/certs/tls.crt
             - name: NRVQ_TLS_KEY
               value: /etc/webhook/certs/tls.key
+            {{- if .Values.webhook.spiffe.inject }}
+            # B3: injected workloads also get the SPIFFE Workload API socket + workload-api mode.
+            - name: NRVQ_SPIFFE_INJECT
+              value: "true"
+            - name: NRVQ_SPIFFE_MODE
+              value: {{ .Values.config.spiffeMode | default "mock" | quote }}
+            - name: NRVQ_SPIFFE_SOCKET
+              value: {{ .Values.config.spiffeSocket | default "/spiffe-workload-api/spire-agent.sock" | quote }}
+            {{- end }}
+            {{- if .Values.webhook.oidc.enabled }}
+            # B4: mint the controller's API bearer via OIDC client-credentials (Keycloak); HS256 fallback kept.
+            - name: NRVQ_OIDC_TOKEN_URL
+              value: {{ .Values.webhook.oidc.tokenUrl | quote }}
+            - name: NRVQ_OIDC_CLIENT_ID
+              value: {{ .Values.webhook.oidc.clientId | quote }}
+            - name: NRVQ_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: norviq-secrets
+                  key: NRVQ_OIDC_CLIENT_SECRET
+            {{- end }}
           volumeMounts:
             - name: webhook-certs
               mountPath: /etc/webhook/certs

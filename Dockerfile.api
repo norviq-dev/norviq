@@ -5,15 +5,18 @@ FROM python:3.12-slim AS builder
 WORKDIR /build
 COPY pyproject.toml .
 COPY norviq/ norviq/
-RUN pip install --no-cache-dir --target=/deps . uvicorn
+# [spiffe] extra installs pyspiffe so NRVQ_SPIFFE_MODE=workload-api works (import-guarded; mock unaffected).
+RUN pip install --no-cache-dir --target=/deps '.[spiffe]' uvicorn
 
 FROM python:3.12-slim
 WORKDIR /app
 COPY --from=builder /deps /usr/local/lib/python3.12/site-packages
 
+# OPA arch matches the build target (TARGETARCH = amd64|arm64; AKS=amd64, local kind on Apple Silicon=arm64).
+ARG TARGETARCH=amd64
 # Install OPA binary
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
-    curl -L -o /usr/local/bin/opa https://openpolicyagent.org/downloads/latest/opa_linux_amd64_static && \
+    curl -L -o /usr/local/bin/opa "https://openpolicyagent.org/downloads/latest/opa_linux_${TARGETARCH}_static" && \
     chmod +x /usr/local/bin/opa && \
     opa version && \
     apt-get remove -y curl && \

@@ -18,6 +18,7 @@ type Injector struct {
 
 const socketMountPath = "/var/run/norviq"
 const socketFilePath = "/var/run/norviq/norviq-proxy.sock"
+const spiffeMountPath = "/spiffe-workload-api"
 
 type patchOp struct {
 	Op    string      `json:"op"`
@@ -52,11 +53,15 @@ func (inj *Injector) CreatePatch(pod *corev1.Pod, agentClass string) ([]byte, er
 	mountStates := mountState(pod.Spec.Containers)
 	envStates := envState(pod.Spec.Containers)
 	containerCount := len(pod.Spec.Containers)
-	patches := make([]patchOp, 0, 4)
+	patches := make([]patchOp, 0, 6)
 	patches = append(patches, patchOp{Op: "add", Path: "/spec/containers/-", Value: inj.buildSidecar(agentClass)})
 	patches = append(patches, volumePatch(len(pod.Spec.Volumes) > 0, inj.sharedVolume))
-	patches = append(patches, mountPatches(containerCount, mountStates)...)
-	patches = append(patches, envPatches(containerCount, envStates)...)
+	if inj.cfg.SpiffeInject {
+		// After the first volume add, /spec/volumes always exists -> append the SPIFFE CSI volume.
+		patches = append(patches, volumePatch(true, spiffeVolumeTemplate()))
+	}
+	patches = append(patches, mountPatches(containerCount, mountStates, inj.cfg.SpiffeInject)...)
+	patches = append(patches, envPatches(containerCount, envStates, inj.cfg)...)
 	return json.Marshal(patches)
 }
 
@@ -71,7 +76,11 @@ func volumePatch(hasVolumes bool, volume map[string]interface{}) patchOp {
 	return patchOp{Op: "add", Path: "/spec/volumes", Value: []map[string]interface{}{volume}}
 }
 
-func mountPatches(containerCount int, states []containerPatchState) []patchOp {
+func mountPatches(containerCount int, states []containerPatchState, spiffeInject bool) []patchOp {
+	mounts := []map[string]interface{}{{"name": "norviq-socket", "mountPath": socketMountPath}}
+	if spiffeInject {
+		mounts = append(mounts, map[string]interface{}{"name": "spiffe-workload-api", "mountPath": spiffeMountPath, "readOnly": true})
+	}
 	patches := make([]patchOp, 0, containerCount)
 	for idx := 0; idx < containerCount; idx++ {
 		state := states[idx]
@@ -80,24 +89,31 @@ func mountPatches(containerCount int, states []containerPatchState) []patchOp {
 		}
 		if !state.HasList {
 			patches = append(patches, patchOp{
-				Op:   "add",
-				Path: fmt.Sprintf("/spec/containers/%d/volumeMounts", idx),
-				Value: []map[string]interface{}{
-					{"name": "norviq-socket", "mountPath": socketMountPath},
-				},
+				Op:    "add",
+				Path:  fmt.Sprintf("/spec/containers/%d/volumeMounts", idx),
+				Value: mounts,
 			})
 			continue
 		}
-		patches = append(patches, patchOp{
-			Op:    "add",
-			Path:  fmt.Sprintf("/spec/containers/%d/volumeMounts/-", idx),
-			Value: map[string]interface{}{"name": "norviq-socket", "mountPath": socketMountPath},
-		})
+		for _, m := range mounts {
+			patches = append(patches, patchOp{
+				Op:    "add",
+				Path:  fmt.Sprintf("/spec/containers/%d/volumeMounts/-", idx),
+				Value: m,
+			})
+		}
 	}
 	return patches
 }
 
-func envPatches(containerCount int, states []containerPatchState) []patchOp {
+func envPatches(containerCount int, states []containerPatchState, cfg Config) []patchOp {
+	envs := []map[string]interface{}{{"name": "NRVQ_SOCKET_PATH", "value": socketFilePath}}
+	if cfg.SpiffeInject {
+		envs = append(envs,
+			map[string]interface{}{"name": "NRVQ_SPIFFE_MODE", "value": cfg.SpiffeMode},
+			map[string]interface{}{"name": "NRVQ_SPIFFE_SOCKET", "value": cfg.SpiffeSocket},
+		)
+	}
 	patches := make([]patchOp, 0, containerCount)
 	for idx := 0; idx < containerCount; idx++ {
 		state := states[idx]
@@ -106,19 +122,19 @@ func envPatches(containerCount int, states []containerPatchState) []patchOp {
 		}
 		if !state.HasList {
 			patches = append(patches, patchOp{
-				Op:   "add",
-				Path: fmt.Sprintf("/spec/containers/%d/env", idx),
-				Value: []map[string]interface{}{
-					{"name": "NRVQ_SOCKET_PATH", "value": socketFilePath},
-				},
+				Op:    "add",
+				Path:  fmt.Sprintf("/spec/containers/%d/env", idx),
+				Value: envs,
 			})
 			continue
 		}
-		patches = append(patches, patchOp{
-			Op:    "add",
-			Path:  fmt.Sprintf("/spec/containers/%d/env/-", idx),
-			Value: map[string]interface{}{"name": "NRVQ_SOCKET_PATH", "value": socketFilePath},
-		})
+		for _, e := range envs {
+			patches = append(patches, patchOp{
+				Op:    "add",
+				Path:  fmt.Sprintf("/spec/containers/%d/env/-", idx),
+				Value: e,
+			})
+		}
 	}
 	return patches
 }
@@ -148,11 +164,15 @@ func envState(containers []corev1.Container) []containerPatchState {
 func (inj *Injector) buildSidecar(agentClass string) map[string]interface{} {
 	sidecar := cloneMap(inj.sidecarTemplate)
 	sidecar["image"] = inj.cfg.Runtime.SidecarImage(inj.cfg.SidecarImage)
-	sidecar["env"] = sidecarEnv(agentClass, inj.cfg.SidecarPort)
+	sidecar["env"] = sidecarEnv(agentClass, inj.cfg)
 	return sidecar
 }
 
 func newSidecarTemplate(cfg Config) map[string]interface{} {
+	mounts := []map[string]interface{}{{"name": "norviq-socket", "mountPath": socketMountPath}}
+	if cfg.SpiffeInject {
+		mounts = append(mounts, map[string]interface{}{"name": "spiffe-workload-api", "mountPath": spiffeMountPath, "readOnly": true})
+	}
 	return map[string]interface{}{
 		"name":  "norviq-sidecar",
 		"image": cfg.SidecarImage,
@@ -162,18 +182,23 @@ func newSidecarTemplate(cfg Config) map[string]interface{} {
 		"resources":       sidecarResources(),
 		"securityContext": sidecarSecurityContext(),
 		"livenessProbe":   sidecarLivenessProbe(cfg.SidecarPort),
-		"volumeMounts": []map[string]interface{}{
-			{"name": "norviq-socket", "mountPath": socketMountPath},
-		},
+		"volumeMounts":    mounts,
 	}
 }
 
-func sidecarEnv(agentClass string, sidecarPort int) []map[string]interface{} {
-	return []map[string]interface{}{
+func sidecarEnv(agentClass string, cfg Config) []map[string]interface{} {
+	env := []map[string]interface{}{
 		{"name": "NRVQ_AGENT_CLASS", "value": agentClass},
-		{"name": "NRVQ_HTTP_FALLBACK_PORT", "value": fmt.Sprintf("%d", sidecarPort)},
+		{"name": "NRVQ_HTTP_FALLBACK_PORT", "value": fmt.Sprintf("%d", cfg.SidecarPort)},
 		{"name": "NRVQ_SOCKET_PATH", "value": socketFilePath},
 	}
+	if cfg.SpiffeInject {
+		env = append(env,
+			map[string]interface{}{"name": "NRVQ_SPIFFE_MODE", "value": cfg.SpiffeMode},
+			map[string]interface{}{"name": "NRVQ_SPIFFE_SOCKET", "value": cfg.SpiffeSocket},
+		)
+	}
+	return env
 }
 
 func sidecarResources() map[string]interface{} {
@@ -205,6 +230,14 @@ func sidecarLivenessProbe(sidecarPort int) map[string]interface{} {
 
 func volumeTemplate() map[string]interface{} {
 	return map[string]interface{}{"name": "norviq-socket", "emptyDir": map[string]interface{}{"sizeLimit": "10Mi"}}
+}
+
+// spiffeVolumeTemplate is the SPIFFE Workload API socket, published by the SPIFFE CSI driver (B3).
+func spiffeVolumeTemplate() map[string]interface{} {
+	return map[string]interface{}{
+		"name": "spiffe-workload-api",
+		"csi":  map[string]interface{}{"driver": "csi.spiffe.io", "readOnly": true},
+	}
 }
 
 func cloneMap(src map[string]interface{}) map[string]interface{} {

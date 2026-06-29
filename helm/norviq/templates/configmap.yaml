@@ -31,6 +31,7 @@ data:
   NRVQ_OIDC_GROUP_MAPPINGS: {{ .Values.oidc.groupMappings | default dict | toJson | quote }}
   NRVQ_LEGACY_HS256_ENABLED: {{ .Values.oidc.legacyHs256Enabled | default true | quote }}
   NRVQ_SPIFFE_MODE: {{ .Values.config.spiffeMode | default "mock" | quote }}
+  NRVQ_SPIFFE_SOCKET: {{ .Values.config.spiffeSocket | default "/spiffe-workload-api/spire-agent.sock" | quote }}
   NRVQ_OTEL_ENDPOINT: {{ .Values.otel.endpoint | quote }}
   NRVQ_OTEL_ENABLED: {{ .Values.otel.enabled | quote }}
   NRVQ_PROMETHEUS_PORT: {{ .Values.otel.prometheusPort | quote }}

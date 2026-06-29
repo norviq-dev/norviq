@@ -20,8 +20,14 @@ spec:
     metadata:
       labels:
         app: norviq-api
+        {{- if .Values.config.spiffeCsi.enabled }}
+        norviq.io/svid: "true"        # opt-in to a SPIRE SVID (ClusterSPIFFEID podSelector)
+        {{- end }}
     spec:
       {{- include "norviq.imagePullSecrets" . | nindent 6 }}
+      {{- if .Values.config.spiffeCsi.enabled }}
+      serviceAccountName: norviq-api  # self-describing SVID: spiffe://norviq/ns/<ns>/sa/norviq-api
+      {{- end }}
       {{- if .Values.api.spread.enabled }}
       {{- include "norviq.spread" (dict "app" "norviq-api") | nindent 6 }}
       {{- end }}
@@ -69,6 +75,12 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
+          {{- if .Values.config.spiffeCsi.enabled }}
+          volumeMounts:
+            - name: spiffe-workload-api
+              mountPath: /spiffe-workload-api
+              readOnly: true
+          {{- end }}
 {{- if .Values.opa.enabled }}
         # Long-lived OPA policy engine (per-replica sidecar). The API queries it at localhost:8181.
         - name: opa
@@ -105,3 +117,10 @@ spec:
             seccompProfile:
               type: RuntimeDefault
 {{- end }}
+      {{- if .Values.config.spiffeCsi.enabled }}
+      volumes:
+        - name: spiffe-workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+      {{- end }}

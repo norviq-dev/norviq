@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: Apache-2.0
+# Helm overlay for the IDENTITY local e2e (kind cluster norviq-identity, ns norviq).
+# Turns ON the deferred identity stages against the in-cluster Keycloak + SPIRE:
+#   - OIDC validate (oidc.enabled) -> issuer/jwksUrl point at Keycloak; legacy HS256 stays on (break-glass)
+#   - workload-api SPIFFE resolution + CSI socket on api/engine (config.spiffeMode + config.spiffeCsi)
+#   - injector mounts the SPIFFE socket into injected workloads (webhook.spiffe.inject)
+#   - controller->API auth via OIDC client-credentials (webhook.oidc) with HS256 fallback
+# Everything else mirrors the laptop overlay (single replicas, no admission policy, in-cluster PG no TLS).
+
+validatingAdmissionPolicyEnabled: false
+baselineClusterPolicy:
+  enabled: false
+otel:
+  enabled: false
+
+engine:
+  replicas: 0          # API evaluates in-process; engine pod disabled to save RAM
+policyQuotaNamespaces:
+  - default
+  - norviq
+
+config:
+  enforcementMode: block
+  logLevel: INFO
+  dbSslMode: disable
+  # B2: real workload identity. CSI volume mounted on api/engine; resolver fails closed.
+  spiffeMode: workload-api
+  spiffeSocket: /spiffe-workload-api/spire-agent.sock
+  spiffeCsi:
+    enabled: true
+
+# A1/A2/A4: OIDC ON (validate real RS256 from Keycloak alongside legacy HS256). The issuer host must be
+# byte-identical for the browser and the in-cluster API (CoreDNS rewrite makes keycloak.localtest.me
+# resolve to the in-cluster Keycloak). groupMappings: IdP groups -> Norviq (role, namespace).
+oidc:
+  enabled: true
+  issuer: "http://keycloak.localtest.me:8080/realms/norviq"
+  audience: "norviq-api"
+  jwksUrl: "http://keycloak.localtest.me:8080/realms/norviq/protocol/openid-connect/certs"
+  groupClaim: groups
+  legacyHs256Enabled: true     # keep the HS256 break-glass for the attack suite + controller fallback
+  groupMappings:
+    norviq-admins: { role: admin }
+    team-a: { role: viewer, namespace: team-a }
+    norviq-service: { role: service }
+
+webhook:
+  enabled: true
+  replicas: 1
+  validating:
+    enabled: false
+  injection:
+    enabled: true
+  # B3: inject the SPIFFE Workload API socket + workload-api mode into injected workloads.
+  spiffe:
+    inject: true
+  # B4: controller mints its API bearer via OIDC client-credentials (Keycloak norviq-webhook client).
+  oidc:
+    enabled: true
+    tokenUrl: "http://keycloak.localtest.me:8080/realms/norviq/protocol/openid-connect/token"
+    clientId: norviq-webhook
+    clientSecret: "norviq-webhook-secret"   # matches realm-norviq.json

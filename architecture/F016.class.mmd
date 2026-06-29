@@ -17,7 +17,12 @@ classDiagram
       +string EnableValue
       +string AgentClassLabel
       +slog.Level LogLevel
+      +bool SpiffeInject
+      +string SpiffeMode
+      +string SpiffeSocket
     }
+    %% B3: when SpiffeInject, CreatePatch also adds a 2nd csi.spiffe.io volume + mount + NRVQ_SPIFFE_*
+    %% env into the sidecar and app containers so they resolve a real attested SVID.
     class Handler {
       -Config cfg
       -Injector injector

@@ -5,6 +5,7 @@ import { Suspense, lazy } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { Shell } from "./components/layout/Shell";
 import { AppProvider } from "./store/AppContext";
+import { OidcCallback } from "./auth/OidcCallback";
 
 const Dashboard = lazy(() => import("./pages/Dashboard").then((m) => ({ default: m.Dashboard })));
 const PolicyCatalog = lazy(() => import("./pages/PolicyCatalog").then((m) => ({ default: m.PolicyCatalog })));
@@ -29,6 +30,10 @@ const ConnectionSettings = lazy(() =>
 const AboutPage = lazy(() => import("./pages/AboutPage").then((m) => ({ default: m.AboutPage })));
 
 function App() {
+  // Handle the OIDC redirect outside the authenticated Shell (no token exists yet at this point).
+  if (window.location.pathname === "/auth/callback") {
+    return <OidcCallback />;
+  }
   return (
     <AppProvider>
       <Shell>

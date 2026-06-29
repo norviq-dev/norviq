@@ -1,4 +1,5 @@
 import { createContext, ReactNode, useContext, useEffect, useMemo, useState } from "react";
+import { oidcEnabled, login } from "../auth/oidc";
 
 export const CLUSTERS = ["local", "production-aks", "staging-aks", "dev-aks"];
 export const NS_BY_CLUSTER: Record<string, string[]> = {
@@ -42,19 +43,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [selectedNamespace, setNamespaceState] = useState("default");
 
   useEffect(() => {
+    const KEY = "nrvq_token";
+    if (localStorage.getItem(KEY)) return;
+    // A3: when an IdP is configured, log in via OIDC (Auth Code + PKCE). The callback stores the token.
+    if (oidcEnabled) {
+      if (window.location.pathname !== "/auth/callback") {
+        login().catch((e) => console.error("[oidc] login redirect failed", e));
+      }
+      return;
+    }
+    // No IdP configured: keep the dev-token bootstrap for local development.
     if (import.meta.env.DEV) {
-      const KEY = "nrvq_token";
-      const existing = localStorage.getItem(KEY);
-
-      if (!existing) {
-        const devToken = import.meta.env.VITE_DEV_TOKEN;
-        if (devToken) {
-          localStorage.setItem(KEY, devToken);
-          console.log("[dev] Auto-injected JWT token for local API");
-          window.location.reload();
-        } else {
-          console.warn("[dev] VITE_DEV_TOKEN not set in ui/.env.local - UI requests will be unauthenticated");
-        }
+      const devToken = import.meta.env.VITE_DEV_TOKEN;
+      if (devToken) {
+        localStorage.setItem(KEY, devToken);
+        console.log("[dev] Auto-injected JWT token for local API");
+        window.location.reload();
+      } else {
+        console.warn("[dev] VITE_DEV_TOKEN not set in ui/.env.local - UI requests will be unauthenticated");
       }
     }
   }, []);

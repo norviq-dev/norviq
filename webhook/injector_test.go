@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -124,6 +125,42 @@ func TestInjector_ValidateImage(t *testing.T) {
 	}
 	if inj.validateImage("attacker/malware:latest") {
 		t.Fatal("expected unauthorized image to be rejected")
+	}
+}
+
+func TestCreatePatchSpiffeInject(t *testing.T) {
+	// B3: with SpiffeInject on, injected pods also get the SPIFFE CSI volume + mount + env.
+	cfg := LoadConfig()
+	cfg.SpiffeInject = true
+	cfg.SpiffeMode = "workload-api"
+	cfg.SpiffeSocket = "/spiffe-workload-api/spire-agent.sock"
+	inj := NewInjector(cfg)
+	pod := testPodWithContainers(nil, []corev1.Container{{Name: "app"}})
+	patch, err := inj.CreatePatch(pod, "sales")
+	if err != nil {
+		t.Fatalf("create patch failed: %v", err)
+	}
+	s := string(patch)
+	for _, want := range []string{"csi.spiffe.io", "spiffe-workload-api", "NRVQ_SPIFFE_MODE", "workload-api", "NRVQ_SPIFFE_SOCKET"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("expected injected patch to contain %q; got %s", want, s)
+		}
+	}
+	// Sidecar (first container patch) must mount the spiffe volume too.
+	var ops []patchOp
+	_ = json.Unmarshal(patch, &ops)
+	sidecar, _ := json.Marshal(ops[0].Value)
+	if !strings.Contains(string(sidecar), "spiffe-workload-api") {
+		t.Fatalf("expected sidecar to mount spiffe-workload-api; got %s", sidecar)
+	}
+}
+
+func TestCreatePatchSpiffeInjectOffByDefault(t *testing.T) {
+	// Default config (SpiffeInject=false) must NOT add any SPIFFE volume/env -> injection unchanged.
+	inj := NewInjector(LoadConfig())
+	patch, _ := inj.CreatePatch(testPodWithContainers(nil, []corev1.Container{{Name: "app"}}), "sales")
+	if strings.Contains(string(patch), "spiffe") {
+		t.Fatalf("default injection must not reference spiffe; got %s", patch)
 	}
 }
 

@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+# Registers Norviq workloads with SPIRE by k8s attestor selectors (namespace + service account).
+# The template reproduces the exact id shape the resolver parses: spiffe://norviq/ns/<ns>/sa/<sa>.
+# Opt-in: only pods labelled norviq.io/svid=true in ns norviq get an SVID (api/engine/webhook/test).
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: norviq-workloads
+spec:
+  # Must match the spire-controller-manager watchClassName (chart default: <ns>-<release>).
+  className: "spire-system-spire"
+  spiffeIDTemplate: "spiffe://norviq/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
+  podSelector:
+    matchLabels:
+      norviq.io/svid: "true"
+  namespaceSelector:
+    matchExpressions:
+      - key: kubernetes.io/metadata.name
+        operator: In
+        values: ["norviq"]

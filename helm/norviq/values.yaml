@@ -154,6 +154,17 @@ webhook:
     limits:
       cpu: 200m
       memory: 128Mi
+  # B3: inject the SPIFFE Workload API socket + workload-api mode into injected workloads. OFF by default
+  # (needs SPIRE + the SPIFFE CSI driver). Uses config.spiffeMode/spiffeSocket for the injected env.
+  spiffe:
+    inject: false
+  # B4: the controller mints its API bearer via OIDC client-credentials (Keycloak service client) instead
+  # of the HS256 service token. OFF by default (HS256 fallback). Set the client secret in api.oidcClientSecret.
+  oidc:
+    enabled: false
+    tokenUrl: ""        # e.g. http://keycloak.localtest.me:8080/realms/norviq/protocol/openid-connect/token
+    clientId: norviq-webhook
+    clientSecret: ""    # the Keycloak confidential client secret (rendered into norviq-secrets when enabled)
 
 redis:
   enabled: true
@@ -239,8 +250,15 @@ config:
   dbPoolTimeout: 10
   dbCommandTimeout: 10
   # Workload-identity resolution: "mock" (env-var identity; default) or "workload-api" (real SPIFFE
-  # SVID, fail-closed). workload-api requires SPIRE on the cluster (deferred B1) + pyspiffe installed.
+  # SVID, fail-closed). workload-api requires SPIRE on the cluster + pyspiffe installed.
   spiffeMode: mock
+  # SPIFFE Workload API socket path (where the SPIFFE CSI driver publishes the agent socket).
+  spiffeSocket: /spiffe-workload-api/spire-agent.sock
+  # Gate the csi.spiffe.io volume on api/engine pods. OFF by default so deploys WITHOUT SPIRE are
+  # unaffected (a csi.spiffe.io volume with no driver/registration wedges pod creation). Turn on
+  # ONLY where SPIRE + the SPIFFE CSI driver are installed (e.g. the identity-local kind stack).
+  spiffeCsi:
+    enabled: false
 
 # OIDC / SSO (IDENTITY epic A1/A2). Default-off: the API keeps validating legacy HS256 tokens until
 # an IdP is wired. Enabling adds RS256/ES256 validation ALONGSIDE HS256 (set legacyHs256Enabled:false

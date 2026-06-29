@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/open-policy-agent/opa/ast"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/clientcredentials"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -63,12 +65,16 @@ type policySyncRequest struct {
 }
 
 type Controller struct {
-	client               dynamic.Interface
-	apiURL               string
-	apiSecret            string // HS256 signing key; the controller mints short-lived service JWTs from it
-	tokenMu              sync.Mutex
-	cachedJWT            string
-	cachedJWTExp         time.Time
+	client       dynamic.Interface
+	apiURL       string
+	apiSecret    string // HS256 signing key; the controller mints short-lived service JWTs from it
+	tokenMu      sync.Mutex
+	cachedJWT    string
+	cachedJWTExp time.Time
+	// B4: when configured, the controller authenticates to the API with an OIDC client-credentials
+	// access token (validated by the API's existing OIDC path) instead of the HS256 service JWT.
+	// nil -> HS256 path. The TokenSource caches + auto-refreshes.
+	oidcTokenSource      oauth2.TokenSource
 	httpClient           *http.Client
 	syncSemaphore        chan struct{}
 	presetBasePath       string
@@ -98,10 +104,20 @@ func NewControllerWithClient(client dynamic.Interface, apiURL, apiSecret string)
 	defaultSidecar := envStr("NRVQ_SIDECAR_IMAGE", "sanman97/norviq-engine:engine-latest")
 	runtime := &RuntimeConfig{}
 	runtime.SetSidecarImage(defaultSidecar)
+	var oidcTS oauth2.TokenSource
+	tokenURL := envStr("NRVQ_OIDC_TOKEN_URL", "")
+	clientID := envStr("NRVQ_OIDC_CLIENT_ID", "")
+	clientSecret := envStr("NRVQ_OIDC_CLIENT_SECRET", "")
+	if tokenURL != "" && clientID != "" && clientSecret != "" {
+		ccfg := &clientcredentials.Config{ClientID: clientID, ClientSecret: clientSecret, TokenURL: tokenURL}
+		oidcTS = ccfg.TokenSource(context.Background())
+		slog.Info("NRVQ-WHK-4042: controller using OIDC client-credentials identity", "clientID", clientID, "tokenURL", tokenURL)
+	}
 	return &Controller{
-		client:    client,
-		apiURL:    apiURL,
-		apiSecret: apiSecret,
+		client:          client,
+		apiURL:          apiURL,
+		apiSecret:       apiSecret,
+		oidcTokenSource: oidcTS,
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
@@ -943,6 +959,15 @@ func (c *Controller) listCachedPolicies() []*unstructured.Unstructured {
 // here so the controller authenticates to the API (which validates JWTs, not the raw secret). Returns
 // "" when no secret is configured (the request then goes unauthenticated, as before).
 func (c *Controller) bearerToken() string {
+	// B4: prefer the OIDC client-credentials access token (the TokenSource caches + auto-refreshes).
+	// Fall back to the HS256 service JWT on any error so policy sync never breaks mid-migration.
+	if c.oidcTokenSource != nil {
+		if tok, err := c.oidcTokenSource.Token(); err == nil && tok.AccessToken != "" {
+			return tok.AccessToken
+		} else {
+			slog.Warn("NRVQ-WHK-4043: OIDC client-credentials token failed; falling back to HS256", "error", err)
+		}
+	}
 	if c.apiSecret == "" {
 		return ""
 	}

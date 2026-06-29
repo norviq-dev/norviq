@@ -16,7 +16,7 @@ if sys.platform == "win32":
 from norviq.api.audit_hub import AuditHub
 from norviq.api.db.session import close_db, create_tables, ensure_schema_compatibility, get_session, init_db
 from norviq.api.siem import AuditForwarder
-from norviq.api.routers import attack_graph_compute, agents, audit, deployments, evaluate, graph, graphs, health, mitre, policies, redteam
+from norviq.api.routers import attack_graph_compute, agents, audit, deployments, evaluate, graph, graphs, health, me, mitre, policies, redteam
 from norviq.config import settings
 from norviq.engine.audit_emitter import AuditEmitter
 from norviq.engine.cache import RedisCache
@@ -146,6 +146,7 @@ def create_app() -> FastAPI:
     app.include_router(policies.router, prefix="/api/v1", tags=["policies"])
     app.include_router(audit.router, prefix="/api/v1", tags=["audit"])
     app.include_router(agents.router, prefix="/api/v1", tags=["agents"])
+    app.include_router(me.router, prefix="/api/v1", tags=["me"])
     app.include_router(deployments.router, prefix="/api/v1", tags=["deployments"])
     app.include_router(mitre.router, prefix="/api/v1", tags=["mitre"])
     app.include_router(graph.router, prefix="/api/v1")

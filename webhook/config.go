@@ -21,6 +21,12 @@ type Config struct {
 	AdminPolicyNamespace string
 	LogLevel             slog.Level
 	Runtime              *RuntimeConfig
+	// SPIFFE workload-identity injection (B3). When SpiffeInject is true, injected pods also get the
+	// SPIFFE Workload API socket (csi.spiffe.io) mounted + NRVQ_SPIFFE_MODE/SOCKET env, so the sidecar
+	// and app resolve a real attested SVID. Default off so injection is unchanged where SPIRE is absent.
+	SpiffeInject bool
+	SpiffeMode   string
+	SpiffeSocket string
 }
 
 type RuntimeConfig struct {
@@ -42,6 +48,9 @@ func LoadConfig() Config {
 		AdminPolicyNamespace: envStr("NRVQ_ADMIN_POLICY_NAMESPACE", "norviq"),
 		LogLevel:             slog.LevelInfo,
 		Runtime:              runtime,
+		SpiffeInject:         envBool("NRVQ_SPIFFE_INJECT", false),
+		SpiffeMode:           envStr("NRVQ_SPIFFE_MODE", "mock"),
+		SpiffeSocket:         envStr("NRVQ_SPIFFE_SOCKET", "/spiffe-workload-api/spire-agent.sock"),
 	}
 	runtime.SetSidecarImage(cfg.SidecarImage)
 	return cfg
@@ -72,6 +81,15 @@ func envStr(key, fallback string) string {
 func envInt(key string, fallback int) int {
 	if value := os.Getenv(key); value != "" {
 		if parsed, err := strconv.Atoi(value); err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+func envBool(key string, fallback bool) bool {
+	if value := os.Getenv(key); value != "" {
+		if parsed, err := strconv.ParseBool(value); err == nil {
 			return parsed
 		}
 	}

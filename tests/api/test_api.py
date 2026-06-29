@@ -175,6 +175,19 @@ def _auth_headers(role: str = "admin") -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def test_me_returns_normalized_claims() -> None:
+    """A3: /api/v1/me returns the server's view of the caller (sub/role/namespace); unauth -> 401."""
+    client = _client()
+    try:
+        resp = client.get("/api/v1/me", headers=_auth_headers(role="admin"))
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["sub"] == "test-user" and body["role"] == "admin"
+        assert client.get("/api/v1/me").status_code == 401
+    finally:
+        client.close()
+
+
 def test_health_and_readyz(monkeypatch: pytest.MonkeyPatch) -> None:
     """Serve healthz and readyz payloads. (subprocess mode: readyz omits the server-only opa key)."""
     monkeypatch.setattr(settings, "opa_mode", "subprocess")
