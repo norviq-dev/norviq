@@ -6,7 +6,7 @@ real workload identity (replacing the env-var mock). Plan mode (staged); securit
 **Design source:** `specs/EPIC-sso-oidc.md` (full claims model, migration phases, SPIRE scope).
 **Depends on:** Tier A (rotatable secret + guard), AKS deploy-hardening (controller service token).
 **FEAT:** F033 + F026 + F007 (resolver) + F016 (injector) + F017 (API auth) + F018 (console).
-**Commit:** not committed (gate: do NOT auto-commit) · **Result:** see Outcome below.
+**Commit:** `292c51d` on main (CI build+deploy green; P-10 SHA==HEAD; ships dormant — AKS unchanged) · **Result:** see Outcome below.
 
 Two axes, one epic: (A) OIDC at the API/console edge (replace shared HS256, JWKS/RS256, group→role/
 namespace, per-user audit, dual-mode migration, break-glass service token); (B) SPIRE/SPIFFE at the
@@ -20,7 +20,13 @@ attacks 75/75; SPIRE validated on AKS (local eval stays mock).
 **Deferred (designed + documented):** A3 console PKCE, A4 HS256 cutover + break-glass, B1 SPIRE-on-AKS,
 B3 injector socket mount, B4 controller→SVID bridge.
 
-## Outcome (done — implemented + locally validated; nothing committed)
+## Outcome (done — committed `292c51d`, deployed dormant to AKS, live-verified unchanged)
+
+**AKS post-deploy verification (all dormant/unchanged):** deploy green; P-10 `api-292c51d` == HEAD;
+`/readyz` `{redis,db,opa:true}`; configmap + live pod env show `oidc=false, legacy=true, spiffe=mock`,
+empty group mappings (nothing flipped on); unauth → 401, forged default-secret → 401, valid real-secret
+admin → 200 (legacy HS256 dual-mode path live); **attacks 75/75** against the cluster (0 xfail/skip).
+
 - **A1 OIDC dual-mode (FIXED):** `norviq/api/auth.py` shared `_validate_token` dispatches HS256 (legacy,
   default-on) vs RS256/ES256 OIDC (gated `oidc_enabled`) on header `alg` with single-alg allowlists
   (alg-confusion-safe). New `norviq/api/jwks.py` `JwksClient` — kid-keyed cache, TTL + bounded unknown-kid
