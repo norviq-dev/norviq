@@ -115,3 +115,40 @@ def test_authenticate_api_key_rejects_bogus_and_non_prefixed() -> None:
 
     assert asyncio.run(ak.authenticate_api_key("nrvq_bogus", session_factory=_empty)) is None
     assert asyncio.run(ak.authenticate_api_key("not-an-api-key", session_factory=_empty)) is None
+
+
+class _FakeCache:
+    """F-03: minimal Redis-counter stub (per-key INCR with a window)."""
+
+    def __init__(self) -> None:
+        self.counts: dict[str, int] = {}
+
+    async def incr_call_count(self, key: str, window_s: int = 60) -> int:
+        self.counts[key] = self.counts.get(key, 0) + 1
+        return self.counts[key]
+
+
+def test_authfail_throttle_counts_per_prefix() -> None:
+    """F-03: each failed nrvq_ auth increments a per-prefix counter (keyed on the display prefix)."""
+    cache = _FakeCache()
+
+    async def _empty():
+        yield _FakeSession([])
+
+    for _ in range(3):
+        asyncio.run(ak.authenticate_api_key("nrvq_abcd1234xyz", session_factory=_empty, cache=cache))
+    # one display-prefix accumulated all 3 failures
+    assert list(cache.counts.values()) == [3]
+    assert next(iter(cache.counts)).startswith("apikey-authfail:nrvq_")
+
+
+def test_constant_time_compare_rejects_hash_mismatch() -> None:
+    """F-03: defense-in-depth — a row whose stored hash != the computed digest is rejected (compare_digest)."""
+    full, prefix, _ = ak.generate_key()
+    row = SimpleNamespace(id="1", prefix=prefix, key_hash="deadbeef" * 8, name="k",
+                          namespace="default", role="viewer", revoked=False, last_used_at=None)
+
+    async def _factory():
+        yield _FakeSession([row])
+
+    assert asyncio.run(ak.authenticate_api_key(full, session_factory=_factory)) is None

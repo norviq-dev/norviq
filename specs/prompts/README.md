@@ -39,6 +39,10 @@ Each prompt file contains: prompt text, outcome (commit SHA, result), date.
 
 | 2026-06-29 | [REMEDIATION-defect-hunt.md](REMEDIATION-defect-hunt.md) | Fix defect-hunt findings F-01…F-05 (+ F-04 default-deny decision) | pending | Plan-mode; F-01 dual-caller-aware namespace binding, F-02 NFKC/homoglyph, F-04 no-policy→deny, F-03 const-time+throttle, F-05 graph cache; regression test per fix; attacks 75/75 |
 
+| 2026-06-29 | [COMPANY-SIM-5-sectors.md](COMPANY-SIM-5-sectors.md) | Role-based scored company simulation × 5 critical-infra sectors (+ EB2-NIW appendix) | pending | Plan-mode; 5 fictional companies (health/finance/gov/energy/telecom) seeded as tenants; sector + universal pilot scenarios; 6-dim scorecards → verdicts; cross-sector COMMONALITIES (priority fixes) + GA call; NIW evidence appendix; fixed post-remediation build; AKS untouched |
+
+| 2026-06-29 | [SECTOR-POLICY-PACKS.md](SECTOR-POLICY-PACKS.md) | Sector starter policy packs (health/finance/gov/energy/telecom) + pack catalog & sector profile (F047) | pending | Plan-mode; 5 real rego packs covering each sector's flagship action scenario (energy OT-deny priority) + opt-in pack catalog UI + sector profile field; default-OFF; attacks 75/75; mirrors hipaa_phi/pci_card_numbers |
+
 ## Convention
 - One file per significant work item (P0/P1 fix, feature, major diagnosis)
 - Filename: {item-id}-{short-name}.md

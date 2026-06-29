@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 import structlog
@@ -12,6 +13,11 @@ from sqlalchemy import select
 
 from norviq.api.db.models import AssetGraph
 from norviq.engine.graph.asset_graph import AssetGraphBuilder
+
+
+def compute_graph_version(graph: AssetGraphBuilder) -> str:
+    """F-05: short content hash of the graph structure — the cache-version key for analysis results."""
+    return hashlib.sha256(json.dumps(graph.to_dict(), sort_keys=True).encode("utf-8")).hexdigest()[:16]
 
 log = structlog.get_logger()
 
@@ -30,6 +36,10 @@ class GraphStore:
         await self._save_cache(namespace, payload)
         if self._session_factory is not None:
             await self._save_db(namespace, payload)
+        # F-05: the graph changed -> invalidate any cached analysis results for this namespace.
+        invalidate = getattr(self._cache, "delete_analysis_scope", None)
+        if invalidate is not None:
+            await invalidate(namespace)
         log.info("nrvq.graph.saved", namespace=namespace, code="NRVQ-GRP-11015")
 
     async def _save_cache(self, namespace: str, payload: dict[str, object]) -> None:

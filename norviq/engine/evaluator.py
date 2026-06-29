@@ -21,6 +21,7 @@ import structlog
 
 from norviq.config import settings
 from norviq.engine.cache import RedisCache
+from norviq.engine.confusables import skeleton
 from norviq.engine.graph.asset_graph import AssetGraphBuilder
 from norviq.engine.graph.store import GraphStore
 from norviq.engine.opa_client import OpaClient, managed_package, rewrite_package, sanitize_key
@@ -256,11 +257,26 @@ class OPAEvaluator:
             )
         return decision
 
+    @staticmethod
+    def _normalize_for_match(params: dict) -> dict:
+        """F-02: confusable-skeleton string values for injection MATCHING only (original preserved for audit)."""
+        out: dict = {}
+        for key, value in params.items():
+            if isinstance(value, str):
+                out[key] = skeleton(value)
+            elif isinstance(value, list):
+                out[key] = [skeleton(v) if isinstance(v, str) else v for v in value]
+            else:
+                out[key] = value
+        return out
+
     def _build_input(self, event: ToolCallEvent, trust_result: TrustResult) -> dict:
         """Build OPA input payload from tool event and trust state."""
         return {
             "tool_name": event.tool_name,
             "tool_params": event.tool_params,
+            # F-02: matching-only confusable skeleton (homoglyph/zero-width evasion); rego scans this for injection.
+            "tool_params_normalized": self._normalize_for_match(event.tool_params),
             "agent": {
                 "spiffe_id": event.agent_identity.spiffe_id,
                 "namespace": event.agent_identity.namespace,
@@ -407,6 +423,25 @@ class OPAEvaluator:
             return f"data.{package_name}"
         return "data.norviq.strict"
 
+    def _no_policy_decision(self, key: str, namespace: str) -> dict:
+        """F-04: decide when NO policy is loaded for `key`. Deny-by-default for a PEP (enforcement_mode=block),
+        with three distinct, loudly-logged cases so a startup/load anomaly is never mistaken for genuine no-policy.
+
+        - load FAILURE never reaches here: load_from_db raises -> evaluate() fail-closes (NRVQ-ENG-2000).
+        - not-yet-warmed (loader bound but warm load incomplete) -> deny `policy_load_pending` (distinct alarm).
+        - genuine no-policy for an enforcing namespace -> deny `no_policy_loaded` (block mode) or allow (audit mode).
+        """
+        loader = getattr(self, "_loader", None)
+        warmed = getattr(loader, "_warmed", True) if loader is not None else True
+        if not warmed:
+            log.warning("nrvq.engine.policy_load_pending", key=key, namespace=namespace, code="NRVQ-ENG-2056")
+            return {"decision": "block", "rule_id": "policy_load_pending", "reason": "Policy subsystem not ready"}
+        if settings.enforcement_mode == "block" and str(settings.no_policy_decision).lower() == "deny":
+            log.warning("nrvq.engine.no_policy_loaded", key=key, namespace=namespace, code="NRVQ-ENG-2055")
+            return {"decision": "block", "rule_id": "no_policy_loaded",
+                    "reason": "No policy loaded for namespace (default-deny)"}
+        return {"decision": "allow", "rule_id": "default_allow", "reason": "No policy matched"}
+
     async def _evaluate_opa(
         self, key: str, namespace: str, agent_class: str, opa_input: dict, rego_source: str = ""
     ) -> dict:
@@ -419,7 +454,7 @@ class OPAEvaluator:
                 rego = str(entry.get("rego", ""))
                 package_name = str(entry.get("package_name", "")).strip() or None
         if not rego.strip():
-            return {"decision": "allow", "rule_id": "default_allow", "reason": "No policy matched"}
+            return self._no_policy_decision(key, namespace)
         if settings.opa_mode == "server":
             return await self._evaluate_opa_server(key, rego, opa_input)
         return await self._evaluate_opa_subprocess(namespace, agent_class, opa_input, rego, package_name)

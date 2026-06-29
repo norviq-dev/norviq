@@ -8,6 +8,8 @@ metadata:
 data:
   NRVQ_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
   NRVQ_ENFORCEMENT_MODE: {{ .Values.config.enforcementMode | quote }}
+  # F-04: decision when an enforcing namespace has no policy loaded (deny-by-default). "deny" | "allow".
+  NRVQ_NO_POLICY_DECISION: {{ .Values.config.noPolicyDecision | default "deny" | quote }}
   NRVQ_REQUIRE_STRONG_SECRET: {{ .Values.config.requireStrongSecret | default false | quote }}
   NRVQ_OPA_MODE: {{ .Values.config.opaMode | default "server" | quote }}
   NRVQ_OPA_URL: {{ printf "http://localhost:%v" .Values.opa.port | quote }}

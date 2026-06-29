@@ -46,6 +46,9 @@ class PolicyLoader:
         self._policies: dict[str, dict] = {}
         self._versions: dict[str, list[PolicyVersion]] = {}
         self._db: AsyncEngine | None = None
+        # F-04: True once the startup warm load completes. Lets the evaluator distinguish a genuine
+        # "no policy for this namespace" (deny) from "policies not yet loaded" (distinctly-alarmed deny).
+        self._warmed: bool = False
         if hasattr(self._evaluator, "bind_loader"):
             self._evaluator.bind_loader(self)
 
@@ -311,6 +314,7 @@ class PolicyLoader:
             if hasattr(self._evaluator, "reload_policy"):
                 self._evaluator.reload_policy(str(row["namespace"]), str(row["agent_class"]), entry["rego"])
         self._policies = {**self._policies, **policies}
+        self._warmed = True  # F-04: warm load done -> the no-policy path is now "genuine", not "not-ready".
         log.info("nrvq.policy.cache_warmed", count=len(policies), code="NRVQ-REG-5015")
 
     def _update_memory(self, key: str, rego_source: str, priority: int) -> None:

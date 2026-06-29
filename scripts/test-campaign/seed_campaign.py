@@ -66,6 +66,10 @@ def main() -> int:
 
     # ---- POLICIES: comprehensive rego across tenants/classes (the attack baseline + multi-ns enforcement) ----
     policy_targets = [
+        # The cluster baseline catch-all == baselineClusterPolicy ON (the documented production posture).
+        # With F-04 deny-by-default, a deployment relies on this (or per-class policies) so new agent classes
+        # are evaluated (benign allowed / bad blocked) rather than denied outright.
+        ("__cluster__", "__baseline__"),
         ("default", "customer-support"), ("default", "payments-bot"),
         ("team-a", "team-a-bot"), ("payments", "summarizer"),
         ("analytics", "report-gen"), ("platform", "code-assistant"),

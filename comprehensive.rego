@@ -31,6 +31,17 @@ injection_detected {
     contains(val, pattern)
 }
 
+# F-02: also scan the confusable skeleton (homoglyph / zero-width evasion). The engine folds tool_params to
+# ASCII in input.tool_params_normalized for matching ONLY (the original is preserved for audit). The normalized
+# value is already casefolded. These clauses are additive (OR) — ASCII inputs still match the rules above.
+injection_detected {
+    some k
+    val := input.tool_params_normalized[k]
+    is_string(val)
+    pattern := injection_patterns[_]
+    contains(val, pattern)
+}
+
 # SQL injection
 sql_patterns = ["drop table", "union select", "or '1'='1'", "or 1=1", "delete from", "xp_cmdshell", "exec ("]
 
@@ -48,6 +59,14 @@ sql_injection_detected {
     contains(query, pattern)
 }
 
+# F-02: confusable-skeleton variant of the SQL query (homoglyph/zero-width).
+sql_injection_detected {
+    input.tool_name == "execute_sql"
+    query := input.tool_params_normalized.query
+    pattern := sql_patterns[_]
+    contains(query, pattern)
+}
+
 # Shell injection
 shell_patterns = ["|", ";", "$(", "`", "rm -rf", "/etc/passwd", "/etc/shadow"]
 
@@ -61,6 +80,15 @@ rule_id = "deny_shell_execution" {
 shell_injection_detected {
     some k
     val := input.tool_params[k]
+    is_string(val)
+    pattern := shell_patterns[_]
+    contains(val, pattern)
+}
+
+# F-02: confusable-skeleton variant (homoglyph/zero-width).
+shell_injection_detected {
+    some k
+    val := input.tool_params_normalized[k]
     is_string(val)
     pattern := shell_patterns[_]
     contains(val, pattern)
