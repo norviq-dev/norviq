@@ -39,8 +39,18 @@ have policies and were unaffected. **Fix (controller-only, PR #3 `feat/fix-basel
 a permissive strict-preset baseline @900 outranks+weakens a stricter specific policy (verified: at 900 prompt-injection
 passed a policied class, attacks 42-failed). Delete path keys symmetrically. New code `NRVQ-WHK-4042`. No engine/precedence
 change (cluster block-floor override preserved). Verified on kind: brand-new class→allow, injection vs policied class→block,
-**attacks 78/78**, `go test ./webhook` + ruff + engine precedence (vs real DB) green. **PR #3 open — awaiting merge gate;
-merge SHA + AKS re-verify TBD.**
+**attacks 78/78**, `go test ./webhook` + ruff + engine precedence (vs real DB) green. **PR #3 MERGED → main `32874ee`**
+(build+deploy green; api+webhook images == `…-32874ee…`, P-10 ✓).
+
+**AKS RE-VERIFY (PR #3, all green / no RED):** (1) P-10 api+webhook == 32874ee ✓; (2) deny-storm CLOSED — brand-new agent
+class in `default` → **allow `strict_default_allow`** (was `block/no_policy_loaded`); controller re-synced all 3 baselines
+(NRVQ-WHK-4042) to `<ns>:__baseline__` @prio1; (3) injection vs `customer-support` → **block `llm01_prompt_injection`**
+(specific @700 beats baseline @1); (4) block-floor override INTACT — `test_cluster_baseline_beats_tenant_policy` passes vs
+**live AKS DB**, engine unchanged, no functioning floor demoted (pre-fix baselines were inert orphans); (5) orphan cleanup
+**PENDING** — old `norviq:baseline-cluster-guard-*` @900 rows persist (re-sync doesn't auto-delete); harmless (unreachable
+key) but manual prod-delete blocked by safety classifier → awaiting operator authorization; (6) attacks **76/76 live + 2
+known-gap** (homoglyph/zero-width = F-02 rego DB-seeded, not deployed → **issue #4**); (7) `/readyz` ok, unauth/forged→401.
+**Residual F-01 service-role SVID stays OPEN (issue #2).** New follow-up **issue #4** (policy/rego propagation + AKS re-seed).
 
 ---
 
