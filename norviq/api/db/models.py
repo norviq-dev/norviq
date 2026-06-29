@@ -95,7 +95,21 @@ class NamespaceSettings(Base):
     trust_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
     violation_penalty: Mapped[float | None] = mapped_column(Float, nullable=True)
     rate_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # F047: org sector hint (advisory) — drives sector-pack suggestions in the console.
+    sector: Mapped[str | None] = mapped_column(String(64), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class NamespacePack(Base):
+    """F047: a sector starter pack enabled for a namespace. The combined rego of a namespace's enabled
+    packs is materialized as its (namespace, '__pack__') policy; this table is the source of truth for
+    which packs are on. Default-OFF — no rows unless an admin enables a pack."""
+
+    __tablename__ = "namespace_packs"
+    namespace: Mapped[str] = mapped_column(String(255), primary_key=True)
+    pack_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    enabled_by: Mapped[str] = mapped_column(String(255), default="")
+    enabled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class ApiKey(Base):

@@ -149,12 +149,12 @@ Blocker for: Day 9 onwards
 ## Day 8 — Post-MVP fixes (P1)
 
 ### 1. Policy deployment workflow (P1)
-Current: comprehensive.rego uploaded via curl. Wiped on Postgres rebuild.
+Current: comprehensive.rego (the canonical default policy) seeded via the API; baselines render from
+`helm/norviq/templates/baseline-cluster-policy.yaml` (F-07). Remaining gap: rego is DB-seeded content, not
+shipped by the image deploy, so live-cluster enforcement lags the repo until a re-seed (tracked as issue #4).
 Real fix:
-  - Move comprehensive.rego → policies/presets/strict.rego (new canonical version)
-  - Add NrvqPolicy YAML in helm/charts/norviq/templates/baseline-policy.yaml
-  - Apply via Helm install/upgrade
-  - Engine startup detects no policies → auto-load defaults
+  - A re-seed path (job/bundle) wired into deploy so comprehensive.rego + sector packs propagate on upgrade
+  - Engine startup detects no policies → auto-load the bundled comprehensive.rego default
 
 ### 2. OPA subprocess per-call (P0 for prod)
 Current: spawn OPA subprocess every evaluation (~150ms cold start, 2s timeout)

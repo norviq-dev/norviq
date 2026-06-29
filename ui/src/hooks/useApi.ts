@@ -8,6 +8,11 @@ type UseApiOptions = {
 
 const CACHE = new Map<string, { timestamp: number; value: unknown }>();
 
+/** Clear the in-memory response cache (test utility — avoids cross-test state leakage). */
+export function clearApiCache(): void {
+  CACHE.clear();
+}
+
 export function useApi<T>(loader: () => Promise<T>, deps: unknown[] = [], options: UseApiOptions = {}) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);

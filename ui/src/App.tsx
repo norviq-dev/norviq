@@ -9,6 +9,7 @@ import { OidcCallback } from "./auth/OidcCallback";
 
 const Dashboard = lazy(() => import("./pages/Dashboard").then((m) => ({ default: m.Dashboard })));
 const PolicyCatalog = lazy(() => import("./pages/PolicyCatalog").then((m) => ({ default: m.PolicyCatalog })));
+const PolicyPacks = lazy(() => import("./pages/PolicyPacks").then((m) => ({ default: m.PolicyPacks })));
 const TargetSettings = lazy(() => import("./pages/TargetSettings").then((m) => ({ default: m.TargetSettings })));
 const AuditLog = lazy(() => import("./pages/AuditLog").then((m) => ({ default: m.AuditLog })));
 const AgentMonitor = lazy(() => import("./pages/AgentMonitor").then((m) => ({ default: m.AgentMonitor })));
@@ -43,6 +44,7 @@ function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/policies" element={<Navigate to="/policies/catalog" replace />} />
             <Route path="/policies/catalog" element={<PolicyCatalog />} />
+            <Route path="/policies/packs" element={<PolicyPacks />} />
             <Route path="/policies/targets" element={<TargetSettings />} />
             <Route path="/audit" element={<AuditLog />} />
             <Route path="/agents" element={<AgentMonitor />} />

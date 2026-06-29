@@ -1,0 +1,31 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+%% F047 — enable a sector pack, then a tool call evaluated against the materialized pack.
+sequenceDiagram
+    actor Admin
+    participant UI as Console (Policy Packs)
+    participant API as PacksRouter
+    participant Lib as PackLib
+    participant DB as namespace_packs
+    participant Loader as PolicyLoader
+    participant Eng as OPAEvaluator
+    participant OPA as OPA (--v0-compatible)
+
+    Admin->>UI: Enable "Energy" for namespace
+    UI->>API: POST /policy-packs/energy-ot/enable {namespace}
+    API->>API: require_admin + scoped_namespace
+    API->>Lib: is_known(energy-ot)?
+    API->>DB: upsert (namespace, energy-ot)
+    API->>API: _enabled_ids(namespace)
+    API->>Lib: combine([energy-ot, ...])  %% package norviq.pack
+    API->>Loader: create(ns, "__pack__", combined, priority=800)
+    Loader-->>Eng: _policies[ns:__pack__] updated
+    API-->>UI: {enabled:true, enabled_packs:[...]}  %% NRVQ-API-7095
+
+    Note over Eng,OPA: later — agent tool call
+    Eng->>Eng: _collect_candidates -> [ns:class, ns:__baseline__, ns:__pack__]
+    Eng->>OPA: evaluate each candidate
+    OPA-->>Eng: ns:__pack__ -> {decision: block, rule_id: ot_control_command_blocked}
+    Eng->>Eng: _resolve_with_packs(results)  %% pack can only tighten, never loosen
+    Eng->>Eng: _resolve_precedence -> block (pack @800)
+    Eng-->>API: decision=block

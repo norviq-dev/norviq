@@ -18,7 +18,7 @@ from norviq.api.db.session import close_db, create_tables, ensure_schema_compati
 from norviq.api.siem import AuditForwarder
 from norviq.fleet_relay import FleetRelayForwarder
 from norviq.fleet_puller import FleetPolicyPuller
-from norviq.api.routers import attack_graph_compute, agents, audit, cluster_info, coverage, deployments, evaluate, graph, graphs, health, keys, me, mitre, policies, redteam, settings_router, version
+from norviq.api.routers import attack_graph_compute, agents, audit, cluster_info, coverage, deployments, evaluate, graph, graphs, health, keys, me, mitre, packs, policies, redteam, settings_router, version
 from norviq.config import settings
 from norviq.engine.audit_emitter import AuditEmitter
 from norviq.engine.cache import RedisCache
@@ -166,6 +166,7 @@ def create_app() -> FastAPI:
     app.include_router(settings_router.router, prefix="/api/v1", tags=["settings"])
     app.include_router(version.router, prefix="/api/v1", tags=["version"])
     app.include_router(keys.router, prefix="/api/v1", tags=["keys"])
+    app.include_router(packs.router, prefix="/api/v1", tags=["packs"])
     app.state.audit_hub = AuditHub()
 
     @app.websocket("/ws/audit")
