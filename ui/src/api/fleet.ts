@@ -99,6 +99,7 @@ export type FleetPolicyAuthor = {
   priority?: number;
   enforcement_mode?: string;
   target_selector?: Record<string, string>;
+  confirm_fleet_wide?: boolean; // F-40: required for a fleet-wide (no cluster_id) target
 };
 
 export const fetchFleetRollout = () => fleetGet<FleetRollout[]>("/api/v1/fleet/rollout");

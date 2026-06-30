@@ -50,6 +50,7 @@ export function Fleet() {
   const [ns, setNs] = useState("default");
   const [agentClass, setAgentClass] = useState("");
   const [selector, setSelector] = useState('{"env":"prod"}');  // F-33: sane default target (was empty -> 422)
+  const [confirmFleetWide, setConfirmFleetWide] = useState(false);  // F-40: explicit confirm for a fleet-wide push
   const [pushMsg, setPushMsg] = useState<string | null>(null);
 
   const reload = () => {
@@ -74,14 +75,22 @@ export function Fleet() {
     setPushMsg(null);
     // F-33: client-side validation — no request fires on an empty/invalid form; surface the server's detail otherwise.
     if (!name.trim()) { setPushMsg("policy name required"); return; }
-    if (!agentClass.trim()) { setPushMsg("agent_class required (e.g. __baseline__ or a specific class)"); return; }
+    if (!agentClass.trim()) { setPushMsg("agent_class required (a specific class, not a managed scope)"); return; }
+    // F-40: baseline/pack scopes are managed per-cluster — never fleet-pushed (fail fast; the server also 422s).
+    if (agentClass === "__baseline__" || agentClass === "__pack__") {
+      setPushMsg(`'${agentClass}' is managed per-cluster — change a baseline via its seed and packs via the packs API, not fleet push.`);
+      return;
+    }
     let target: Record<string, string> = {};
     if (selector.trim()) {
       try { target = JSON.parse(selector); } catch { setPushMsg("target must be JSON, e.g. {\"env\":\"prod\"}"); return; }
     }
     if (Object.keys(target).length === 0) { setPushMsg("target required, e.g. {\"env\":\"prod\"} or {\"cluster_id\":\"fleet-a\"}"); return; }
+    // F-40: a fleet-wide target (no cluster_id) requires explicit confirmation.
+    const fleetWide = !target.cluster_id;
+    if (fleetWide && !confirmFleetWide) { setPushMsg("this target matches more than one cluster — tick “Confirm fleet-wide push”."); return; }
     try {
-      const res = await authorFleetPolicy({ name, namespace: ns, agent_class: agentClass, rego_source: rego, target_selector: target });
+      const res = await authorFleetPolicy({ name, namespace: ns, agent_class: agentClass, rego_source: rego, target_selector: target, confirm_fleet_wide: confirmFleetWide });
       setPushMsg(`Signed policy "${res.name}" v${res.version} published — clusters will pull + verify + apply.`);
       reload();
     } catch (e) {
@@ -147,6 +156,11 @@ export function Fleet() {
         <input value={agentClass} onChange={(e) => setAgentClass(e.target.value)} placeholder="agent_class" style={{ width: 140 }} />
         <input value={selector} onChange={(e) => setSelector(e.target.value)} placeholder='target {"env":"prod"} or {"cluster_id":"fleet-a"}' style={{ flex: 1, minWidth: 200 }} />
       </div>
+      {/* F-40: confirm a fleet-wide push (a target with no cluster_id matches more than one cluster). */}
+      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-secondary)", marginBottom: 8 }}>
+        <input type="checkbox" checked={confirmFleetWide} onChange={(e) => setConfirmFleetWide(e.target.checked)} />
+        Confirm fleet-wide push (target matches more than one cluster). Not needed for a single <code>cluster_id</code> target.
+      </label>
       <Editor height="280px" defaultLanguage="rego" theme="vs-dark" value={rego}
         onChange={(v) => setRego(v ?? "")} options={{ minimap: { enabled: false }, fontSize: 12.5 }} />
       <div style={{ marginTop: 8 }}>

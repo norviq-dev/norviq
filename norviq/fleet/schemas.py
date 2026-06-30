@@ -31,6 +31,8 @@ class PolicyAuthorBody(BaseModel):
     priority: int = 100
     enforcement_mode: str = "block"
     target_selector: dict[str, str] = {}   # {"env":"prod"} or {"cluster_id":"cluster-a"} (override)
+    # F-40: a fleet-wide push (no cluster_id in the selector -> matches >1 cluster) must set this explicitly.
+    confirm_fleet_wide: bool = False
 
 
 class RolloutReportBody(BaseModel):

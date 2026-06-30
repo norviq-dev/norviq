@@ -28,6 +28,11 @@ from norviq.fleet.schemas import PolicyAuthorBody, RolloutReportBody
 log = structlog.get_logger()
 router = APIRouter()
 
+# F-40: scopes a fleet push must NEVER replace — a cluster's baseline (comprehensive) and its materialized sector
+# pack are managed PER-CLUSTER (the seed / packs-enable path), not by fleet distribution. A push that targeted
+# __baseline__ once wiped comprehensive across all three prod clusters.
+_RESERVED_SCOPES = {"__baseline__", "__pack__"}
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -41,6 +46,24 @@ async def author_policy(
 ) -> dict:
     """Create/update a fleet policy (admin only). Re-authoring the same name bumps its version."""
     require_admin(user)  # authoring allow/deny rules is admin-only (service/viewer -> 403)
+    # F-40 (1): a fleet push must not replace a managed per-cluster scope (baseline/pack) fleet-wide.
+    if body.agent_class in _RESERVED_SCOPES:
+        log.warning("nrvq.fleet.policy.reserved_scope", name=body.name, agent_class=body.agent_class,
+                    actor=user.get("sub"), code="NRVQ-FLT-15023")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"'{body.agent_class}' is a managed per-cluster scope and cannot be fleet-pushed — change a "
+                   "cluster's baseline via its seed and sector packs via the packs API (POST /policy-packs/{id}/enable).",
+        )
+    # F-40 (2): a fleet-WIDE push (no cluster_id -> matches >1 cluster) needs an explicit confirm.
+    if not body.target_selector.get("cluster_id") and not body.confirm_fleet_wide:
+        log.warning("nrvq.fleet.policy.confirm_required", name=body.name, selector=body.target_selector,
+                    actor=user.get("sub"), code="NRVQ-FLT-15027")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="fleet-wide push (no cluster_id in target_selector — matches more than one cluster) requires "
+                   "confirm_fleet_wide=true.",
+        )
     # If the policy targets a specific cluster (override), enforce cluster scope on that target.
     if body.target_selector.get("cluster_id"):
         scoped_cluster(user, body.target_selector["cluster_id"])
@@ -69,6 +92,10 @@ def _resolve_for_cluster(policies: list[FleetPolicy], cluster: Cluster) -> list[
     labels = cluster.labels or {}
     chosen: dict[tuple[str, str], tuple[bool, FleetPolicy]] = {}  # (ns,class) -> (is_override, policy)
     for p in policies:
+        # F-40 defense-in-depth: a reserved-scope policy already in the DB (e.g. a pre-guard or neutralized row)
+        # must never be distributed in a bundle — baseline/pack are per-cluster managed, never fleet-pushed.
+        if p.agent_class in _RESERVED_SCOPES:
+            continue
         sel = p.target_selector or {}
         is_override = sel.get("cluster_id") == cluster.id
         if is_override:
