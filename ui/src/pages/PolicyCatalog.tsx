@@ -16,7 +16,7 @@ import {
   X
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { apiGet, apiSend, applyPolicy, dryRunPolicy } from "../api/client";
+import { apiGet, apiSend, applyPolicy, dryRunPolicy, fetchSettings } from "../api/client";
 import { CategoryCoverage } from "../components/common/CategoryCoverage";
 import { DecisionBadge, type Decision } from "../components/common/DecisionBadge";
 import { KitButton } from "../components/common/KitButton";
@@ -348,29 +348,44 @@ function PolicyTarget({
   );
 }
 
-function PolicySheet({
+export function PolicySheet({
   policy,
   deployments,
+  applyMode = "enforce",
   onClose,
   onApply
 }: {
   policy: Policy;
   deployments: Deployment[];
+  applyMode?: "enforce" | "dry_run_only";
   onClose: () => void;
   onApply: (mode: Policy["mode"]) => void;
 }) {
   const [enforcement, setEnforcement] = useState<NonNullable<Policy["mode"]>>(policy.mode ?? "block");
   const [paramsOpen, setParamsOpen] = useState(false);
   const [dryRun, setDryRun] = useState(false);
+  const [reviewing, setReviewing] = useState(false); // F-50: confirm + diff step before the write
+  const dryRunOnly = applyMode === "dry_run_only";
+  // F-50: a brand-new policy has no prior version to overwrite; an existing one shows a diff of what changes.
+  const isNew = policy.current_version == null;
+  const currentMode = policy.mode ?? "block";
+  const enforcementChanged = !isNew && currentMode !== enforcement;
+  // F-49: the custom-params inputs used to be uncontrolled defaultValues that the YAML preview + Apply both
+  // dropped (a silent no-op). Bind them to state and generate the YAML from them so the preview is honest.
+  const [rateLimit, setRateLimit] = useState("10");
+  const [keywords, setKeywords] = useState("secret,token,password");
+  const [trustThreshold, setTrustThreshold] = useState("0.7");
 
+  const keywordList = keywords.split(",").map((k) => k.trim()).filter(Boolean);
   const yamlPreview = `apiVersion: norviq.io/v1
 kind: NrvqPolicy
 spec:
   targetType: ${policy.target_type ?? "class"}
   target: ${policy.target ?? policy.agent_class ?? ""}
   enforcement: ${enforcement}
-  rateLimit: 10
-  keywords: [secret, token, password]`;
+  rateLimit: ${rateLimit || "0"}
+  trustThreshold: ${trustThreshold || "0"}
+  keywords: [${keywordList.join(", ")}]`;
 
   return (
     <>
@@ -416,15 +431,19 @@ spec:
           <div style={{ marginTop: 8 }}>
             <div className="field-row">
               <label className="field-label">Rate limit (calls/min)</label>
-              <input className="input mono" defaultValue="10" />
+              <input className="input mono" value={rateLimit} onChange={(e) => setRateLimit(e.target.value)} />
             </div>
             <div className="field-row">
               <label className="field-label">Block keywords</label>
-              <input className="input mono" defaultValue="secret,token,password" />
+              <input className="input mono" value={keywords} onChange={(e) => setKeywords(e.target.value)} />
             </div>
             <div className="field-row">
               <label className="field-label">Trust threshold override</label>
-              <input className="input mono" defaultValue="0.7" />
+              <input className="input mono" value={trustThreshold} onChange={(e) => setTrustThreshold(e.target.value)} />
+            </div>
+            {/* F-49: be honest — these shape the generated YAML preview but the Apply path does not yet enforce them. */}
+            <div className="panel-sub" style={{ marginTop: 6, color: "var(--text-muted)" }}>
+              Preview only — these tune the generated YAML below but are not yet enforced on Apply.
             </div>
           </div>
         )}
@@ -459,15 +478,75 @@ spec:
               marginBottom: 10
             }}
           >
-            <Info size={14} /> Would have blocked{" "}
-            <strong style={{ color: "#ffcf7a" }}>23 calls</strong> in the last 24h.
+            <Info size={14} /> Run a real dry-run from the editor’s <strong style={{ color: "#ffcf7a" }}>Dry-Run</strong>{" "}
+            to evaluate this policy against recent traffic (this sheet shows the generated YAML only).
+          </div>
+        )}
+
+        {/* F-51: a dry-run-only namespace disables Apply (the API also rejects it). */}
+        {dryRunOnly && (
+          <div
+            style={{
+              fontSize: 12.5, color: "#ffb020", background: "#ffb02010", border: "1px solid #ffb02030",
+              borderRadius: "var(--radius-md)", padding: "9px 12px", marginBottom: 10
+            }}
+          >
+            This namespace is <strong>dry-run-only</strong> — policy applies are disabled (server-enforced). Dry-Run is
+            still available. An admin can re-enable enforcement in Settings → Apply Governance.
+          </div>
+        )}
+
+        {/* F-50: review + confirm the change before the write — no silent one-click overwrite of a live policy. */}
+        {reviewing && !dryRunOnly && (
+          <div
+            data-testid="apply-review"
+            style={{
+              fontSize: 12.5, border: "1px solid var(--border, #2a2a2a)", borderRadius: "var(--radius-md)",
+              padding: "10px 12px", marginBottom: 10, background: "var(--bg-elevated, #161616)"
+            }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>
+              {isNew ? "Apply new policy" : "Review changes before applying"}
+            </div>
+            {isNew ? (
+              <div className="panel-sub">
+                New policy for <code>{policy.target ?? policy.agent_class}</code> — no existing version to overwrite.
+              </div>
+            ) : (
+              <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px" }}>
+                <span className="panel-sub">Target</span>
+                <span className="mono">{policy.target ?? policy.agent_class} (v{policy.current_version})</span>
+                <span className="panel-sub">Enforcement</span>
+                <span className="mono">
+                  {enforcementChanged ? (
+                    <>
+                      <span style={{ color: "#ff3b5c", textDecoration: "line-through" }}>{currentMode}</span>{" → "}
+                      <span style={{ color: "#00e5a0" }}>{enforcement}</span>
+                    </>
+                  ) : (
+                    <span>{enforcement} (unchanged)</span>
+                  )}
+                </span>
+              </div>
+            )}
           </div>
         )}
 
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-          <KitButton variant="primary" icon={Check} onClick={() => onApply(enforcement)}>
-            Apply
-          </KitButton>
+          {reviewing && !dryRunOnly ? (
+            <>
+              <KitButton variant="primary" icon={Check} onClick={() => onApply(enforcement)}>
+                Confirm Apply
+              </KitButton>
+              <KitButton variant="ghost" onClick={() => setReviewing(false)}>
+                Back
+              </KitButton>
+            </>
+          ) : (
+            <KitButton variant="primary" icon={Check} disabled={dryRunOnly} onClick={() => setReviewing(true)}>
+              Apply
+            </KitButton>
+          )}
           <KitButton variant="outline" icon={Play} onClick={() => setDryRun(true)}>
             Dry-Run
           </KitButton>
@@ -514,6 +593,9 @@ export function PolicyCatalog() {
     () => apiGet<Deployment[]>(`/api/v1/deployments?namespace=${encodeURIComponent(namespace)}`),
     [namespace]
   );
+  // F-51: a dry-run-only namespace disables Apply in the sheet (the API also rejects it — defence in depth).
+  const settings = useApi(() => fetchSettings(namespace), [namespace], { cacheKey: `policy-settings:${namespace}`, staleTimeMs: 30_000 });
+  const applyMode = settings.data?.apply_mode === "dry_run_only" ? "dry_run_only" : "enforce";
 
   const editorPolicy = useMemo(() => {
     const list = policies.data ?? [];
@@ -948,6 +1030,7 @@ export function PolicyCatalog() {
         <PolicySheet
           policy={selected}
           deployments={deployments.data ?? []}
+          applyMode={applyMode}
           onClose={() => setSelected(null)}
           onApply={onApply}
         />

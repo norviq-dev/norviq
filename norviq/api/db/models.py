@@ -97,6 +97,9 @@ class NamespaceSettings(Base):
     rate_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # F047: org sector hint (advisory) — drives sector-pack suggestions in the console.
     sector: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # F-51: apply governance — "enforce" (default) or "dry_run_only" (high-assurance: the API rejects policy applies
+    # for this namespace; dry-run + drafts still allowed). null falls back to "enforce".
+    apply_mode: Mapped[str | None] = mapped_column(String(20), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
 

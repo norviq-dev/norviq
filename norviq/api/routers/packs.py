@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from norviq.api import packs as pack_lib
 from norviq.api.auth import get_current_user, require_admin, scoped_namespace
+from norviq.api.routers.settings_router import assert_apply_allowed  # F-51: shared dry-run-only gate
 from norviq.api.db.models import NamespacePack
 from norviq.api.db.session import get_session
 
@@ -99,6 +100,7 @@ async def enable_pack(
         log.warning("nrvq.api.pack.error", pack_id=pack_id, reason="unknown", code="NRVQ-API-7097")
         raise HTTPException(status_code=404, detail="Unknown pack id")
     namespace = scoped_namespace(user, body.namespace) or "default"
+    await assert_apply_allowed(session, namespace)  # F-51: a dry-run-only namespace rejects pack applies too
     existing = (
         await session.execute(
             select(NamespacePack).where(NamespacePack.namespace == namespace, NamespacePack.pack_id == pack_id)

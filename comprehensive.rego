@@ -108,6 +108,41 @@ data_leakage_detected {
     sensitive_keys[lower(k)]
 }
 
+# F-45 (DL-001): a secret embedded in a param VALUE sent to an external tool (e.g. send_email body
+# "api_key=sk-123") — the key-name check above misses it because the key is `body`, not `api_key`.
+secret_value_patterns = [
+    `api[_-]?key\s*[:=]`,
+    `secret[_-]?key\s*[:=]`,
+    `password\s*[:=]`,
+    `aws_secret_access_key`,
+    `bearer\s+[a-z0-9._-]{12,}`,
+    `sk-[a-z0-9]{8,}`,
+    `-----begin [a-z ]*private key-----`,
+]
+
+data_leakage_detected {
+    external_tools[input.tool_name]
+    some k
+    val := input.tool_params[k]
+    is_string(val)
+    some i
+    regex.match(secret_value_patterns[i], lower(val))
+}
+
+# F-45 (DL-003): reading an environment secret / credential is data egress (OWASP LLM02). The baseline had
+# no env/secret-read rule at all, so read_env{key:"AWS_SECRET_ACCESS_KEY"} was allowed.
+secret_read_tools = {"read_env", "getenv", "get_secret", "read_secret", "fetch_secret"}
+secret_name_patterns = [`secret`, `password`, `api[_-]?key`, `token`, `private[_-]?key`, `access[_-]?key`, `credential`]
+
+secret_egress_detected {
+    secret_read_tools[input.tool_name]
+    some k
+    val := input.tool_params[k]
+    is_string(val)
+    some i
+    regex.match(secret_name_patterns[i], lower(val))
+}
+
 # Supply chain
 supply_chain_tools = {"load_plugin", "download_script", "eval", "install_package"}
 
@@ -181,6 +216,28 @@ cross_tenant_detected {
     input.tool_params.namespace != input.agent.namespace
 }
 
+# F-45 (CT-002): a SQL query reaching into a schema that is not the agent's own namespace
+# (e.g. "SELECT * FROM payments.users" from ns=default). The boundary is in the schema qualifier, which the
+# param-based checks above never inspect. Common non-tenant schemas are allow-listed.
+safe_schemas = {"public", "information_schema", "pg_catalog", "sys", "dbo"}
+
+cross_tenant_detected {
+    input.tool_name == "execute_sql"
+    is_string(input.tool_params.query)
+    m := regex.find_all_string_submatch_n(`(?:from|join)\s+([a-z_][a-z0-9_]*)\.`, lower(input.tool_params.query), -1)[_]
+    schema := m[1]
+    schema != lower(input.agent.namespace)
+    not safe_schemas[schema]
+}
+
+# F-45 (CE-001): a chained/recursive tool call past a safe depth. The engine sets input.call_depth from the
+# event's call_depth; the baseline had no depth limit, so deep agent chaining/recursion was unbounded.
+max_safe_call_depth = 8
+
+chain_depth_exceeded {
+    input.call_depth >= max_safe_call_depth
+}
+
 # Base64 payload (audit) + decoded-threat (block)
 base64_payload_detected {
     some k
@@ -234,11 +291,13 @@ blocks["deny_sql_injection"] { sql_injection_detected }
 blocks["deny_shell_execution"] { shell_injection_detected }
 blocks["llm06_excessive_agency"] { destructive_tools[input.tool_name] }
 blocks["llm02_data_leakage"] { data_leakage_detected }
+blocks["llm02_data_leakage"] { secret_egress_detected }
 blocks["llm05_supply_chain"] { supply_chain_tools[input.tool_name] }
 blocks["pii_detection"] { pii_detected }
 blocks["pci_card_numbers"] { pci_field_detected }
 blocks["pci_card_numbers"] { pci_value_detected }
 blocks["cross_tenant_access"] { cross_tenant_detected }
+blocks["chain_depth_limit"] { chain_depth_exceeded }
 blocks["base64_decoded_threat"] { base64_decoded_threat }
 
 escalates["llm06_excessive_agency"] { elevated_tools[input.tool_name] }
@@ -257,6 +316,7 @@ reasons = {
     "pii_detection": "PII (SSN) detected in tool parameters",
     "pci_card_numbers": "Payment card data (PAN) detected — PCI DSS",
     "cross_tenant_access": "Cross-tenant / cross-namespace access denied",
+    "chain_depth_limit": "Chained tool-call depth exceeds the safe limit (agent chaining / recursion) — OWASP LLM08",
     "base64_decoded_threat": "Base64-encoded payload decodes to a known-malicious pattern",
     "base64_payload_detected": "Base64-encoded payload — audited for visibility",
     "scope_violation_dangerous_tool": "Out-of-scope dangerous tool for this agent class",

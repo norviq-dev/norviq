@@ -6,9 +6,12 @@ owned by the packs router and silently wiped by _materialize), pointing the call
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from fastapi.testclient import TestClient
 
 from norviq.api.auth import get_current_user
+from norviq.api.db.session import get_session
 from norviq.api.main import create_app
 
 _VALID_REGO = 'package norviq.x\ndefault decision = "allow"\nrule_id = "r"\nreason = "x"\ndecision = "block" { input.tool_name == "drop_table" }\n'
@@ -26,11 +29,27 @@ class _StubLoader:
         return []
 
 
+class _NoSettingsSession:
+    """No persisted settings row -> apply_mode falls back to enforce (F-51 gate is a no-op for this test)."""
+
+    async def execute(self, stmt):
+        _ = stmt
+        return SimpleNamespace(scalar_one_or_none=lambda: None)
+
+    async def close(self) -> None:
+        return None
+
+
 def _client() -> tuple[TestClient, _StubLoader]:
     app = create_app()
     loader = _StubLoader()
     app.state.loader = loader
     app.dependency_overrides[get_current_user] = lambda: {"role": "admin", "namespace": "default", "sub": "admin"}
+
+    async def _session():
+        yield _NoSettingsSession()
+
+    app.dependency_overrides[get_session] = _session
     return TestClient(app), loader
 
 
@@ -57,3 +76,13 @@ def test_normal_class_policy_is_allowed():
                                                  "rego_source": _VALID_REGO, "priority": 100})
     assert resp.status_code == 200
     assert ("default", "finance-agent") in loader.created
+
+
+def test_apply_to_reserved_scope_is_rejected():
+    # F-42: the apply path (sibling of create) must also reject __pack__/__baseline__ — it returned 200 before.
+    client, _ = _client()
+    body = {"target_type": "agent_class", "target_namespace": "default"}
+    for scope in ("__pack__", "__baseline__"):
+        resp = client.post(f"/api/v1/policies/default/{scope}/apply", json=body)
+        assert resp.status_code == 422, scope
+        assert "managed scope" in resp.json()["detail"]

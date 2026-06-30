@@ -79,6 +79,7 @@ export type RuntimeSettings = {
   violation_penalty: number;
   rate_limit: number;
   sector?: string | null;
+  apply_mode?: "enforce" | "dry_run_only"; // F-51: when dry_run_only the API rejects policy applies for this ns
 };
 
 /** Effective runtime settings (config defaults + persisted overrides) for a namespace (F046). */
@@ -92,7 +93,7 @@ export async function fetchSettings(namespace?: string): Promise<RuntimeSettings
 /** Persist a per-namespace settings override (admin-only). */
 export async function saveSettings(
   namespace: string,
-  body: Partial<Pick<RuntimeSettings, "enforcement_mode" | "trust_threshold" | "violation_penalty" | "rate_limit" | "sector">>
+  body: Partial<Pick<RuntimeSettings, "enforcement_mode" | "trust_threshold" | "violation_penalty" | "rate_limit" | "sector" | "apply_mode">>
 ): Promise<RuntimeSettings> {
   const params = new URLSearchParams();
   if (namespace && namespace !== "all") params.set("namespace", namespace);
@@ -172,6 +173,8 @@ export type RedteamResult = {
   attack_id: string;
   attack_name: string;
   category: string;
+  agent_class?: string; // F-44: the identity this scenario was evaluated against
+  namespace?: string;
   expected: string;
   actual: string;
   rule_id: string;
@@ -181,6 +184,8 @@ export type RedteamResult = {
 };
 export type RedteamReport = {
   run_id?: string;
+  namespace?: string;
+  targets?: string[]; // F-44: the seeded agent classes the suite was run against
   total: number;
   passed: number;
   failed: number;
@@ -191,6 +196,12 @@ export type RedteamReport = {
 /** The red-team attack catalog (F017). */
 export async function fetchRedteamCatalog(): Promise<RedteamAttack[]> {
   return apiGet<RedteamAttack[]>("/api/v1/redteam/catalog");
+}
+
+/** F-44: the real agent classes seeded in a namespace, for the target selector. */
+export async function fetchRedteamTargets(namespace?: string): Promise<{ namespace: string; targets: string[] }> {
+  const q = namespace && namespace !== "all" ? `?namespace=${encodeURIComponent(namespace)}` : "";
+  return apiGet<{ namespace: string; targets: string[] }>(`/api/v1/redteam/targets${q}`);
 }
 
 /** Run the full red-team suite against the live evaluator and return the real report. */
@@ -315,10 +326,24 @@ export async function fetchMitreCoverage(namespace?: string): Promise<MitreCover
   return apiGet<MitreCoverage>(query ? `/api/v1/mitre/coverage?${query}` : "/api/v1/mitre/coverage");
 }
 
-export type CategoryCoverageItem = { category: string; covered: number; total: number; score: number };
-export type CoverageByCategory = { namespace: string; coverage_pct: number; categories: CategoryCoverageItem[] };
+export type CategoryCoverageItem = {
+  category: string;
+  covered: number;
+  total: number;
+  score: number; // F-44/F-45: rules PRESENT (loaded), not efficacy
+  observed?: number; // audit attempts touching this category's rules
+  blocked?: number; // of those, how many were blocked/escalated
+  effective?: boolean; // at least one rule in the category has actually blocked traffic
+};
+export type CoverageByCategory = {
+  namespace: string;
+  coverage_pct: number;
+  basis?: string; // "rules_present" — score is presence, not a protection guarantee
+  categories: CategoryCoverageItem[];
+};
 
-/** Real policy coverage per risk category (F046): covered = mapped rules present in the loaded rego. */
+/** Policy coverage per risk category (F046): score = mapped rules PRESENT in the loaded rego (not efficacy;
+ * F-44/F-45). observed/blocked/effective overlay real audit activity. */
 export async function fetchCoverageByCategory(namespace?: string): Promise<CoverageByCategory> {
   const params = new URLSearchParams();
   if (namespace && namespace !== "all") params.set("namespace", namespace);

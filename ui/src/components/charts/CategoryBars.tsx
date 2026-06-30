@@ -18,10 +18,12 @@ const baseTooltip = {
 
 export const CategoryBars = memo(function CategoryBars({
   data,
-  title = "Category Scores"
+  title = "Category Scores",
+  sub
 }: {
   data: Array<{ category: string; score: number }>;
   title?: string;
+  sub?: string;
 }) {
   const option = {
     tooltip: { trigger: "axis", ...baseTooltip },
@@ -53,7 +55,7 @@ export const CategoryBars = memo(function CategoryBars({
     ]
   };
   return (
-    <Panel title={title}>
+    <Panel title={title} sub={sub}>
       <ReactEChartsCore
         echarts={echarts}
         option={option}

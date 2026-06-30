@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from norviq.api.auth import get_current_user, require_admin, require_admin_or_service, scoped_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
+from norviq.api.routers.settings_router import assert_apply_allowed  # F-51: shared dry-run-only gate
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -317,9 +318,22 @@ async def apply_policy(
     body: ApplyRequest,
     request: Request,
     user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
 ) -> dict:
     """Apply a saved policy to a target scope."""
     require_admin(user)
+    # F-42: the create path guards reserved scopes (NRVQ-API-7016) but apply did not — apply to __pack__/__baseline__
+    # returned 200, defeating the invariant. Reject the managed scopes here too (baseline = seed, pack = packs API).
+    if agent_class in ("__baseline__", "__pack__"):
+        log.warning("nrvq.api.policy.reserved_scope", namespace=namespace, agent_class=agent_class,
+                    actor=user.get("sub"), code="NRVQ-API-7016")
+        raise HTTPException(
+            status_code=422,
+            detail=f"'{agent_class}' is a managed scope and cannot be applied via this endpoint — change a baseline "
+                   "via its seed and sector packs via POST /api/v1/policy-packs/{id}/enable.",
+        )
+    # F-51: high-assurance namespaces can be set dry-run-only — the API rejects applies (server-enforced, admin too).
+    await assert_apply_allowed(session, body.target_namespace)
     loader = request.app.state.loader
     rego = loader.get_current(namespace, agent_class)
     if not rego:

@@ -30,11 +30,28 @@ class SettingsUpdate(BaseModel):
     violation_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
     rate_limit: int | None = Field(default=None, ge=1, le=100000)
     sector: str | None = Field(default=None, max_length=64)  # F047: org sector hint (pack suggestions)
+    apply_mode: str | None = Field(default=None, pattern="^(enforce|dry_run_only)$")  # F-51: apply governance
+
+
+async def assert_apply_allowed(session: AsyncSession, namespace: str) -> None:
+    """F-51: raise 409 if the namespace is in dry_run_only mode (the API must reject policy applies for it).
+    Server-enforced so a direct API call is gated, not just the console. dry-run + drafts stay allowed."""
+    row = (
+        await session.execute(select(NamespaceSettings).where(NamespaceSettings.namespace == namespace))
+    ).scalar_one_or_none()
+    if row is not None and getattr(row, "apply_mode", None) == "dry_run_only":
+        log.warning("nrvq.api.apply.blocked_dry_run_only", namespace=namespace, code="NRVQ-API-7087")
+        raise HTTPException(
+            status_code=409,
+            detail=f"namespace '{namespace}' is in dry-run-only mode — policy applies are disabled "
+                   "(dry-run and draft saves are still allowed). An admin can re-enable enforcement in Settings.",
+        )
 
 
 def _effective(row: NamespaceSettings | None) -> dict:
     """Merge the live config defaults with any persisted override row."""
     return {
+        "apply_mode": (getattr(row, "apply_mode", None) if row and getattr(row, "apply_mode", None) else "enforce"),
         "enforcement_mode": (row.enforcement_mode if row and row.enforcement_mode else app_settings.enforcement_mode),
         "trust_threshold": (
             row.trust_threshold if row and row.trust_threshold is not None else app_settings.trust_threshold

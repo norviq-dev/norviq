@@ -11,13 +11,30 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 from jose import jwt
 
+from norviq.api.db.session import get_session
 from norviq.api.main import create_app
 from norviq.config import settings
+
+
+class _FakeSession:
+    """Empty audit store -> the efficacy overlay reports 0 observed/blocked (best-effort)."""
+
+    async def execute(self, stmt):
+        _ = stmt
+        return SimpleNamespace(all=lambda: [])
+
+    async def close(self) -> None:
+        return None
 
 
 def _client(policies: dict[str, dict]) -> TestClient:
     app = create_app()
     app.state.loader = SimpleNamespace(_policies=policies)
+
+    async def _override():
+        yield _FakeSession()
+
+    app.dependency_overrides[get_session] = _override
     return TestClient(app)
 
 
@@ -38,6 +55,10 @@ def test_coverage_happy_reflects_loaded_rules() -> None:
     assert cats["Data Protection"]["covered"] == 1
     assert cats["Prompt Injection"]["covered"] == 0
     assert 0 < body["coverage_pct"] < 100
+    # F-44/F-45 honesty: score is presence, declared by basis; the efficacy overlay is present (0 with no audit).
+    assert body["basis"] == "rules_present"
+    assert cats["Data Protection"]["effective"] is False  # rule present but no blocked traffic -> not proven
+    assert all("observed" in c and "blocked" in c for c in body["categories"])
 
 
 def test_coverage_empty_when_no_policy_loaded() -> None:

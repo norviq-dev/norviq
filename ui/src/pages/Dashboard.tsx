@@ -19,6 +19,7 @@ import { PageHead } from "../components/common/PageHead";
 import { Panel } from "../components/common/Panel";
 import { ScoreGauge } from "../components/common/ScoreGauge";
 import { useApi } from "../hooks/useApi";
+import { exportCsv } from "../lib/csv";
 import { fmtTime } from "../lib/format";
 import { useApp } from "../store/AppContext";
 
@@ -37,6 +38,8 @@ type AuditRecord = {
   rule_id?: string;
   namespace?: string;
   latency_ms?: number;
+  agent_class?: string; // F-46: included in the CSV export
+  reason?: string;
 };
 
 type Agent = { category?: string };
@@ -151,6 +154,17 @@ export function Dashboard() {
   // Posture = overall real policy coverage %; category bars = real per-category coverage scores.
   const score = coverage.data?.coverage_pct ?? 0;
 
+  // F-46: export the loaded audit records as CSV (the Export button + Report ▼ "Export CSV" were both dead).
+  const onExportCsv = () => {
+    const rows = Array.isArray(records.data) ? records.data : [];
+    setReportMenuOpen(false);
+    exportCsv(
+      `norviq-audit-${selectedNamespace}-${timeRange}.csv`,
+      rows,
+      ["timestamp", "decision", "tool_name", "rule_id", "agent_class", "namespace", "latency_ms", "reason"]
+    );
+  };
+
   const categoryScores = useMemo(
     () => (coverage.data?.categories ?? []).map((c) => ({ category: c.category, score: c.score })),
     [coverage.data]
@@ -204,7 +218,7 @@ export function Dashboard() {
                   zIndex: 20
                 }}
               >
-                <button className="dd-item" style={{ padding: "8px 12px" }}>
+                <button className="dd-item" style={{ padding: "8px 12px" }} onClick={onExportCsv}>
                   Export CSV
                 </button>
                 <button className="dd-item" style={{ padding: "8px 12px", color: "#666666" }} disabled>
@@ -218,6 +232,7 @@ export function Dashboard() {
             <KitButton
               variant="ghost"
               icon={Download}
+              onClick={onExportCsv}
               style={{
                 background: "transparent",
                 border: "1px solid #A0A0A0",
@@ -245,7 +260,11 @@ export function Dashboard() {
           <TopBlockedTools data={topBlockedData} />
         </div>
 
-        <CategoryBars data={categoryScores} title="Policy Coverage by Category" />
+        <CategoryBars
+          data={categoryScores}
+          title="Policy Coverage by Category"
+          sub="Rules present in the loaded policy — not efficacy-tested. Prove blocking with the Red Team suite."
+        />
 
         <VolumeChart data={Array.isArray(volume.data) ? volume.data : []} />
 

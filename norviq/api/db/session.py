@@ -100,6 +100,10 @@ async def create_tables() -> None:
             await conn.execute(
                 text("ALTER TABLE namespace_settings ADD COLUMN IF NOT EXISTS sector VARCHAR(64)")
             )
+            # F-51: per-namespace apply governance mode (enforce | dry_run_only).
+            await conn.execute(
+                text("ALTER TABLE namespace_settings ADD COLUMN IF NOT EXISTS apply_mode VARCHAR(20)")
+            )
             part, start, end = _partition_bounds()
             await conn.execute(
                 text(
