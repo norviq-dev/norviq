@@ -32,6 +32,11 @@ spec:
           ports:
             - containerPort: {{ .Values.ui.port }}
               name: http
+          # F-25: per-cluster runtime config (build-once image). Set ui.fleetApiUrl="/fleet-api" on the hub so the
+          # console shows the Fleet view; left empty on spokes/single-cluster (Fleet stays gated off).
+          env:
+            - name: FLEET_API_URL
+              value: {{ .Values.ui.fleetApiUrl | default "" | quote }}
           resources:
             {{- toYaml .Values.ui.resources | nindent 12 }}
           startupProbe:

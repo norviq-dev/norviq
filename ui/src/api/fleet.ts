@@ -6,7 +6,13 @@
 
 import { authHeaders } from "./client";
 
-const FLEET_BASE = (import.meta.env.VITE_FLEET_API_URL ?? "").replace(/\/+$/, "");
+// F-25: build-time VITE_FLEET_API_URL OR the runtime-injected window.__NRVQ_CONFIG__.fleetApiUrl (config.js,
+// written by the container entrypoint from FLEET_API_URL) — one built image, configured per cluster.
+const FLEET_BASE = (
+  import.meta.env.VITE_FLEET_API_URL ??
+  (typeof window !== "undefined" ? window.__NRVQ_CONFIG__?.fleetApiUrl : "") ??
+  ""
+).replace(/\/+$/, "");
 
 /** True when a fleet hub is configured — gates the Fleet nav entry + page. */
 export const fleetEnabled = Boolean(FLEET_BASE);

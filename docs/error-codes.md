@@ -132,6 +132,7 @@ Multi-cluster fleet (F045). Spoke relay + hub fleet-api. Distinct prefix from `N
 | NRVQ-ENG-2004 | `nrvq.engine.cache_hit` | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2005 | `nrvq.engine.policy_loaded` | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2006 | `nrvq.engine.invalid_identity` (F-11: invalid SPIFFE id → named fail-closed `invalid_spiffe_identity`) | `norviq/engine/evaluator.py` |
+| NRVQ-ENG-2057 | `nrvq.engine.unattributed_block` (F-24: a block reached persist with empty/`default_allow` rule_id → clamped to `unattributed_block` + alarm) | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2010 | `nrvq.engine.blocked` | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2015 | `nrvq.engine.escalated` | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2020 | `nrvq.engine.timeout` | `norviq/engine/evaluator.py` |
@@ -151,7 +152,7 @@ Multi-cluster fleet (F045). Spoke relay + hub fleet-api. Distinct prefix from `N
 | SDC | NRVQ-SDC-3000..3005,3010,3011,3020..3023 | `norviq/sidecar/*` |
 | TEL | NRVQ-TEL-12000..12007 | `norviq/telemetry/*` |
 | CLI | NRVQ-CLI-8000..8004 | `norviq/cli/*` |
-| SDK | NRVQ-SDK-1000,1002,1010..1013,1020..1022,1030..1032,1040..1042 | `norviq/sdk/*` |
+| SDK | NRVQ-SDK-1000,1002,1010..1013,1020..1022,1030..1032,1040..1043 | `norviq/sdk/*` (1043 = F-22 output-DLP redaction, opt-in) |
 | IDT | NRVQ-IDT-10000..10006 | `norviq/engine/identity.py` |
 | AUTH | NRVQ-AUTH-14000..14006 | `norviq/api/auth.py`, `norviq/api/jwks.py` |
 | FLT | NRVQ-FLT-15000..15026 | `norviq/fleet/*`, `norviq/fleet_relay.py` |
@@ -171,7 +172,7 @@ NRVQ-IDT-10000, NRVQ-IDT-10001, NRVQ-IDT-10002, NRVQ-IDT-10003, NRVQ-IDT-10004, 
 NRVQ-RED-13000, NRVQ-RED-13001, NRVQ-RED-13002, NRVQ-RED-13003, NRVQ-RED-13004, NRVQ-RED-13005
 NRVQ-REG-5000, NRVQ-REG-5001, NRVQ-REG-5002, NRVQ-REG-5003, NRVQ-REG-5004, NRVQ-REG-5005, NRVQ-REG-5006, NRVQ-REG-5007, NRVQ-REG-5008, NRVQ-REG-5010, NRVQ-REG-5011, NRVQ-REG-5012, NRVQ-REG-5013, NRVQ-REG-5014, NRVQ-REG-5015
 NRVQ-SDC-3000, NRVQ-SDC-3001, NRVQ-SDC-3002, NRVQ-SDC-3003, NRVQ-SDC-3004, NRVQ-SDC-3005, NRVQ-SDC-3010, NRVQ-SDC-3011, NRVQ-SDC-3020, NRVQ-SDC-3021, NRVQ-SDC-3022, NRVQ-SDC-3023
-NRVQ-SDK-1000, NRVQ-SDK-1002, NRVQ-SDK-1010, NRVQ-SDK-1011, NRVQ-SDK-1012, NRVQ-SDK-1013, NRVQ-SDK-1020, NRVQ-SDK-1021, NRVQ-SDK-1022, NRVQ-SDK-1030, NRVQ-SDK-1031, NRVQ-SDK-1032, NRVQ-SDK-1040, NRVQ-SDK-1041, NRVQ-SDK-1042
+NRVQ-SDK-1000, NRVQ-SDK-1002, NRVQ-SDK-1010, NRVQ-SDK-1011, NRVQ-SDK-1012, NRVQ-SDK-1013, NRVQ-SDK-1020, NRVQ-SDK-1021, NRVQ-SDK-1022, NRVQ-SDK-1030, NRVQ-SDK-1031, NRVQ-SDK-1032, NRVQ-SDK-1040, NRVQ-SDK-1041, NRVQ-SDK-1042, NRVQ-SDK-1043
 NRVQ-SIEM-14000, NRVQ-SIEM-14001, NRVQ-SIEM-14002
 NRVQ-TEL-12000, NRVQ-TEL-12001, NRVQ-TEL-12002, NRVQ-TEL-12003, NRVQ-TEL-12004, NRVQ-TEL-12005, NRVQ-TEL-12006, NRVQ-TEL-12007
 ```

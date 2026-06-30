@@ -40,6 +40,21 @@ test_sql_block_has_reason {
     o.reason != "Allowed"
 }
 
+# F-20: destructive SQL in a RENAMED tool's param (no metachar) — must block regardless of tool_name
+test_sql_in_renamed_tool_blocks {
+    o := _d({"tool_name": "run_report", "tool_params": {"query": "DROP TABLE ledger"}})
+    o.decision == "block"
+    o.rule_id == "deny_sql_injection"
+}
+test_sql_delete_from_in_any_param_blocks {
+    o := _d({"tool_name": "read_record", "tool_params": {"q": "DELETE FROM patients"}})
+    o.decision == "block"
+}
+test_benign_report_name_not_sql_blocked {
+    o := _d({"tool_name": "run_report", "tool_params": {"name": "monthly revenue summary"}})
+    o.decision == "allow"
+}
+
 test_escalate_has_reason {
     o := _d({"tool_name": "modify_config", "tool_params": {"k": "v"}})
     o.decision == "escalate"

@@ -43,6 +43,9 @@ injection_detected {
 
 # SQL injection
 sql_patterns = ["drop table", "union select", "or '1'='1'", "or 1=1", "delete from", "xp_cmdshell", "exec ("]
+# F-20: clearly-destructive SQL caught in ANY tool's params (a renamed tool — run_report/read_record — carrying
+# a destructive statement bypassed the execute_sql-only rule). Kept tight to avoid benign free-text false-blocks.
+sql_destructive_patterns = ["drop table", "delete from", "truncate table", "; drop", "xp_cmdshell", "union select"]
 
 sql_injection_detected {
     input.tool_name == "execute_sql"
@@ -55,6 +58,21 @@ sql_injection_detected {
     query := input.tool_params_normalized.query
     pattern := sql_patterns[_]
     contains(query, pattern)
+}
+# F-20: destructive SQL in any string param, regardless of tool_name (original + normalized).
+sql_injection_detected {
+    some k
+    val := input.tool_params[k]
+    is_string(val)
+    pattern := sql_destructive_patterns[_]
+    contains(lower(val), pattern)
+}
+sql_injection_detected {
+    some k
+    val := input.tool_params_normalized[k]
+    is_string(val)
+    pattern := sql_destructive_patterns[_]
+    contains(val, pattern)
 }
 
 # Shell injection

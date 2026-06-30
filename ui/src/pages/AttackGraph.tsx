@@ -24,6 +24,7 @@ export function AttackGraph() {
   const [error, setError] = useState("");
   const [severity, setSeverity] = useState<string>("all");
   const [selected, setSelected] = useState<AttackPath | undefined>(undefined);
+  const [recomputing, setRecomputing] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -48,7 +49,21 @@ export function AttackGraph() {
     return () => {
       alive = false;
     };
-  }, [namespace, severity]);
+  }, [namespace, severity, recomputing]);
+
+  // F-26: attack paths are PRECOMPUTED server-side (from the recorded asset graph) into the attack_paths table.
+  // The page now offers an explicit recompute so an empty graph is not a silent dead-end.
+  const recompute = async () => {
+    setRecomputing(true);
+    setError("");
+    try {
+      await apiSend(`/api/v1/attack-paths/compute?namespace=${encodeURIComponent(namespace)}`, "POST");
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Recompute failed");
+    } finally {
+      setRecomputing(false); // toggles the load effect to refetch
+    }
+  };
 
   const paths = useMemo(() => data?.paths ?? [], [data]);
   const criticalCount = paths.filter((p) => p.severity === "critical").length;
@@ -89,7 +104,24 @@ export function AttackGraph() {
 
   if (loading) return <div>Loading attack graph...</div>;
   if (error) return <div>Failed to load attack graph: {error}</div>;
-  if (!data || paths.length === 0) return <div>No attack paths found for this namespace.</div>;
+  if (!data || paths.length === 0) {
+    return (
+      <div className="page-enter">
+        <PageHead title="Attack Graph" subtitle={`Showing: ${namespace}`} />
+        <Panel title="No attack paths yet" sub="Attack paths are precomputed from the runtime asset graph">
+          <p style={{ color: "var(--text-secondary)", maxWidth: 640 }}>
+            Attack paths are derived server-side from the asset graph the engine records (agent → tool → data) and
+            stored for this namespace. None are stored yet — either no critical agent→tool→data chains have been
+            observed for <code>{namespace}</code>, or a recompute has not run. Recompute reads the latest recorded
+            graph (source: <code>/api/v1/attack-paths/compute</code>).
+          </p>
+          <button onClick={recompute} disabled={recomputing}>
+            {recomputing ? "Recomputing…" : "Recompute attack paths"}
+          </button>
+        </Panel>
+      </div>
+    );
+  }
 
   return (
     <div className="page-enter">

@@ -93,6 +93,12 @@ class NorviqSettings(BaseSettings):
     debug_opa_logging: bool = Field(default=False, validation_alias=AliasChoices("DEBUG_OPA_LOGGING", "DEBUG_OPA"))
     evaluator_rate_limit_per_window: int = 60
     evaluator_rate_limit_window_s: int = 60
+    # F-23: exempt read-like tools from the per-identity rate limiter so a benign read spike isn't denied
+    # (a legitimate availability hit under load). Write/destructive tools are still rate-limited (fail-safe).
+    evaluator_rate_limit_read_exempt: bool = True
+    evaluator_rate_limit_read_prefixes: tuple[str, ...] = (
+        "get_", "read_", "list_", "query_", "fetch_", "describe_", "view_", "monitor_", "poll_", "report_", "search_",
+    )
     evaluator_delete_prefix: str = "delete"
     evaluator_wildcard_value: str = "*"
     evaluator_sql_deny_keywords: tuple[str, ...] = (
@@ -103,6 +109,9 @@ class NorviqSettings(BaseSettings):
         "; --",
     )
     evaluator_non_cacheable_rules: tuple[str, ...] = ("rate_limit_exceeded", "escalate_low_trust")
+    # F-22: OPT-IN, default-OFF output-DLP. Norviq's PEP is INPUT-only; when enabled the SDK adapter scans an
+    # allowed tool's RETURN value and redacts PAN/SSN before it propagates (minimal; full output-DLP is roadmap).
+    sdk_output_dlp_enabled: bool = False
     pg_url: str = "postgresql://norviq:norviq_dev@localhost:5432/norviq"
     db_ssl_mode: str = Field(
         default="prefer",

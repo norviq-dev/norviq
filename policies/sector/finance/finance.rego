@@ -73,6 +73,49 @@ blocks["sod_violation"] {
     fin_sod_missing_approver
 }
 reasons["sod_violation"] = "Finance: segregation-of-duties — the same identity must not initiate AND approve (case/homoglyph-insensitive; a distinct, non-empty approver is required)"
+
+# F-21: export/egress guard (mirrors telecom F-17). A data-export tool (export_statement/send/upload/…) routed to an
+# EXTERNAL destination is exfil → block; to no/internal destination → escalate for review. Param-semantic, so a
+# renamed export tool or a clean-param "export everything by id" call is caught (the live FN: export_statement →
+# s3://exfil). Money-movement verbs are excluded (handled by the wire/SoD rules).
+# Narrow to clear DATA-EXPORT verbs. Excluded on purpose: bare "transfer" (collides with approve/wire_transfer)
+# and general comms verbs send/email/post/share (normal agent notifications — secret exfil on those is already
+# governed by comprehensive's data_leakage rule). This keeps the guard about bulk data export, not messaging.
+fin_egress_verbs = ["export", "upload", "dump", "extract", "backup", "sync", "sftp", "ftp", "publish", "download", "exfiltrate"]
+fin_dest_keys = {"destination", "dest", "target", "url", "endpoint", "bucket", "recipient", "to", "sink", "upload_url", "callback", "webhook"}
+
+fin_is_egress_tool {
+    contains(fin_tool, fin_egress_verbs[_])
+    not fin_is_money_move
+}
+fin_external_destination {
+    some k
+    fin_dest_keys[lower(k)]
+    v := input.tool_params[k]
+    is_string(v)
+    fin_external_pattern(lower(v))
+}
+fin_external_pattern(v) { startswith(v, "s3://") }
+fin_external_pattern(v) { startswith(v, "http://") }
+fin_external_pattern(v) { startswith(v, "https://") }
+fin_external_pattern(v) { startswith(v, "ftp://") }
+fin_external_pattern(v) { startswith(v, "sftp://") }
+fin_external_pattern(v) { startswith(v, "gs://") }
+fin_external_pattern(v) { startswith(v, "azure://") }
+fin_external_pattern(v) { contains(v, "external") }
+fin_external_pattern(v) { contains(v, "@") }
+
+blocks["finance_export_exfil_blocked"] {
+    fin_is_egress_tool
+    fin_external_destination
+}
+reasons["finance_export_exfil_blocked"] = "Finance: account/statement data routed to an external destination — blocked (GLBA/SOX data exfil)"
+
+escalates["finance_export_review_escalate"] {
+    fin_is_egress_tool
+    not fin_external_destination
+}
+reasons["finance_export_review_escalate"] = "Finance: data-export tool — hold for review (no/internal destination)"
 # >>> PACK-CONTRIB-END finance
 
 # >>> RESOLVER-BEGIN

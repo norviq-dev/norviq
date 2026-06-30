@@ -51,3 +51,10 @@ def mask_params(params: dict | None) -> dict:
     if not isinstance(params, dict):
         return {}
     return {k: mask_value(k, v) for k, v in params.items()}
+
+
+def mask_text(value: str) -> str:
+    """F-22: mask PAN then SSN inside a free string (for opt-in output-DLP on tool return values)."""
+    if not isinstance(value, str):
+        return value
+    return _mask_string(value)
