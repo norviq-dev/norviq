@@ -104,6 +104,10 @@ async def create_tables() -> None:
             await conn.execute(
                 text("ALTER TABLE namespace_settings ADD COLUMN IF NOT EXISTS apply_mode VARCHAR(20)")
             )
+            # F-52: spoke fleet-bundle manifest (applied keys) for retract/reconcile.
+            await conn.execute(
+                text("ALTER TABLE fleet_bundle_state ADD COLUMN IF NOT EXISTS last_manifest TEXT")
+            )
             part, start, end = _partition_bounds()
             await conn.execute(
                 text(

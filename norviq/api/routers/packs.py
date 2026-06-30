@@ -134,3 +134,105 @@ async def disable_pack(
     log.info("nrvq.api.pack.disabled", namespace=namespace, pack_id=pack_id, enabled=ids,
              actor=user.get("sub"), actor_role=user.get("role"), code="NRVQ-API-7096")
     return {"namespace": namespace, "pack_id": pack_id, "enabled": False, "enabled_packs": ids}
+
+
+# --- F-54: view a pack's rego + author a per-namespace tighten-only OVERRIDE (revertable) ---
+
+_OVERRIDE_KEY = "__pack_override__"
+_WEAKEN_KEY = "__pack_weaken__"
+
+
+class PackOverrideBody(BaseModel):
+    """Per-namespace pack override. Default = a tighten-only overlay (never weakens a pack's block). With
+    allow_weaken=true (the loud, audited Advanced opt-in) it is stored as a WEAKEN overlay that may RELAX a pack's
+    added restriction — still floored by the comprehensive baseline (the engine never drops below it)."""
+
+    namespace: str = "default"
+    rego_source: str
+    allow_weaken: bool = False  # fleet-mgmt: explicit "allow weakening this pack" opt-in (admin; audited)
+
+
+@router.get("/policy-packs/{pack_id}/rego")
+async def get_pack_rego(pack_id: str, user: dict = Depends(get_current_user)) -> dict:
+    """F-54: the pack's actual rego source (read-only) so an operator can see what they're customizing."""
+    _ = user
+    if not pack_lib.is_known(pack_id):
+        raise HTTPException(status_code=404, detail="Unknown pack id")
+    return {"pack_id": pack_id, "rego": pack_lib.read_rego(pack_id)}
+
+
+@router.get("/policy-packs/override")
+async def get_pack_override(
+    namespace: str = Query("default"),
+    request: Request = None,
+    user: dict = Depends(get_current_user),
+) -> dict:
+    """F-54: the namespace's current pack override/weaken (empty string if none)."""
+    _ = user
+    weaken = request.app.state.loader.get_current(namespace, _WEAKEN_KEY) or ""
+    rego = weaken or request.app.state.loader.get_current(namespace, _OVERRIDE_KEY) or ""
+    return {"namespace": namespace, "rego_source": rego, "active": bool(rego),
+            "mode": "weaken" if weaken else "tighten-only"}
+
+
+@router.put("/policy-packs/override")
+async def put_pack_override(
+    body: PackOverrideBody,
+    request: Request,
+    user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """F-54: author/replace the namespace's pack override. It is a TIGHTEN-ONLY overlay (the evaluator caps it so
+    it can only make a decision stricter, never weaken/remove a pack's block). Admin; honors the F-51 apply gate;
+    validated by compiling against OPA before it goes live."""
+    require_admin(user)
+    namespace = scoped_namespace(user, body.namespace) or "default"
+    await assert_apply_allowed(session, namespace)  # F-51: a dry-run-only namespace rejects override applies too
+    # Validate the rego compiles + yields a decision (reuse the dry-run probe) before it can affect enforcement.
+    evaluator = request.app.state.evaluator
+    probe = {"tool_name": "____probe____", "tool_params": {}, "agent": {"namespace": namespace, "agent_class": "x"},
+             "trust_score": 1.0, "call_depth": 0}
+    # The weaken overlay and the tighten-only override are mutually exclusive — clear the other so a save replaces it.
+    key = _WEAKEN_KEY if body.allow_weaken else _OVERRIDE_KEY
+    other = _OVERRIDE_KEY if body.allow_weaken else _WEAKEN_KEY
+    try:
+        res = await evaluator._evaluate_opa(f"override-validate:{namespace}", namespace, key, probe, body.rego_source)
+        if res.get("rule_id") == "evaluator_invalid_payload":
+            raise ValueError("policy compiled but produced no valid decision object")
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"override rego is invalid: {str(exc)[:160]}") from exc
+    await request.app.state.loader.delete(namespace, other)
+    await request.app.state.loader.create(
+        namespace, key, body.rego_source, saved_by=str(user.get("sub", "")),
+        priority=pack_lib.pack_priority() + 5, enforcement_mode="block",
+        policy_name="pack-weaken" if body.allow_weaken else "pack-override",
+    )
+    cache = getattr(request.app.state.loader, "_cache", None)
+    if cache is not None:
+        await cache.invalidate_eval_scope(namespace)
+    if body.allow_weaken:
+        # LOUD audit: this namespace now lets a pack edit RELAX a pack block (bounded by the comprehensive floor).
+        log.warning("nrvq.api.pack.weaken_applied", namespace=namespace, actor=user.get("sub"), code="NRVQ-API-7099")
+    else:
+        log.info("nrvq.api.pack.override_saved", namespace=namespace, actor=user.get("sub"), code="NRVQ-API-7098")
+    return {"namespace": namespace, "active": True, "mode": "weaken" if body.allow_weaken else "tighten-only"}
+
+
+@router.delete("/policy-packs/override")
+async def delete_pack_override(
+    namespace: str = Query("default"),
+    request: Request = None,
+    user: dict = Depends(get_current_user),
+) -> dict:
+    """F-54: REVERT — delete the override so the original pack is cleanly restored (no 'permanent' trap)."""
+    require_admin(user)
+    namespace = scoped_namespace(user, namespace) or "default"
+    # Revert clears BOTH the tighten-only override and the weaken overlay — the shipped pack is cleanly restored.
+    removed = await request.app.state.loader.delete(namespace, _OVERRIDE_KEY)
+    removed_weaken = await request.app.state.loader.delete(namespace, _WEAKEN_KEY)
+    cache = getattr(request.app.state.loader, "_cache", None)
+    if cache is not None:
+        await cache.invalidate_eval_scope(namespace)
+    log.info("nrvq.api.pack.override_reverted", namespace=namespace, removed=removed or removed_weaken,
+             actor=user.get("sub"), code="NRVQ-API-7098")
+    return {"namespace": namespace, "active": False, "reverted": removed or removed_weaken}

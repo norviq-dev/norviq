@@ -59,6 +59,15 @@ def test_cluster_info_happy_dedupes_and_sorts() -> None:
     assert body["namespaces"] == ["analytics", "default", "payments"]
 
 
+def test_cluster_info_excludes_all_wildcard() -> None:
+    # "all" is the reserved "All namespaces" sentinel — a fleet-wide policy seeded into namespace "all" must
+    # NOT surface as a selectable tenant namespace (it would render a duplicate "All namespaces" in the console).
+    client = _client(["all", "default", "payments"])
+    resp = client.get("/api/v1/cluster-info", headers={"Authorization": f"Bearer {_token()}"})
+    assert resp.status_code == 200
+    assert resp.json()["namespaces"] == ["default", "payments"]
+
+
 def test_cluster_info_empty_returns_default() -> None:
     client = _client([])
     resp = client.get("/api/v1/cluster-info", headers={"Authorization": f"Bearer {_token()}"})

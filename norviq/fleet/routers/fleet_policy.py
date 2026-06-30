@@ -87,6 +87,42 @@ async def author_policy(
     return {"name": body.name, "version": version}
 
 
+@router.get("/fleet/policies")
+async def list_policies(
+    session: AsyncSession = Depends(fleet_get_session),
+    user: dict = Depends(get_current_user),
+) -> list[dict]:
+    """List authored fleet policies (so the console can show what's pushed + offer Retract). Admin/service."""
+    require_admin_or_service(user)
+    rows = list((await session.execute(select(FleetPolicy))).scalars().all())
+    return [{
+        "name": p.name, "namespace": p.namespace, "agent_class": p.agent_class,
+        "target_selector": p.target_selector, "enforcement_mode": p.enforcement_mode,
+        "priority": p.priority, "version": p.version,
+        "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+    } for p in sorted(rows, key=lambda r: r.name)]
+
+
+@router.delete("/fleet/policies/{name}")
+async def retract_policy(
+    name: str,
+    session: AsyncSession = Depends(fleet_get_session),
+    user: dict = Depends(get_current_user),
+) -> dict:
+    """F-52: RETRACT a fleet policy — delete the row so it leaves every cluster's bundle. On the next pull each
+    affected spoke RECONCILES (deletes the dropped key), so a push is fully reversible. Admin only."""
+    require_admin(user)
+    existing = (await session.execute(select(FleetPolicy).where(FleetPolicy.name == name))).scalar_one_or_none()
+    if existing is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"fleet policy '{name}' not found")
+    sel = existing.target_selector or {}
+    await session.delete(existing)
+    await session.commit()
+    log.info("nrvq.fleet.policy_retracted", name=name, selector=sel, actor=user.get("sub"), code="NRVQ-FLT-15029")
+    return {"retracted": name, "target_selector": sel,
+            "note": "the next bundle pull (<=1 interval) reconciles each affected spoke"}
+
+
 def _resolve_for_cluster(policies: list[FleetPolicy], cluster: Cluster) -> list[dict]:
     """Selector match (target_selector subset of cluster.labels) + per-cluster override precedence."""
     labels = cluster.labels or {}

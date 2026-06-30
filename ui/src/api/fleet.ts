@@ -48,6 +48,8 @@ export type FleetCluster = {
   endpoint: string;
   last_heartbeat: string | null;
   status: string;
+  // F-69 Stage 4: the cluster's own console URL (optional) — drives the "open <cluster>'s console" deep-link.
+  console_url?: string;
 };
 export type FleetAgent = {
   cluster_id: string;
@@ -106,6 +108,28 @@ export const fetchFleetRollout = () => fleetGet<FleetRollout[]>("/api/v1/fleet/r
 
 export const authorFleetPolicy = (body: FleetPolicyAuthor) =>
   fleetSend<{ name: string; version: number }>("/api/v1/fleet/policies", "POST", body);
+
+// F-52: the list of authored fleet policies + a retract that removes one (spokes reconcile on next pull).
+export type FleetPolicyRow = {
+  name: string;
+  namespace: string;
+  agent_class: string;
+  target_selector?: Record<string, string> | null;
+  enforcement_mode?: string;
+  priority?: number;
+  version?: number;
+  updated_at?: string | null;
+};
+export const fetchFleetPolicies = () => fleetGet<FleetPolicyRow[]>("/api/v1/fleet/policies");
+export const retractFleetPolicy = (name: string) =>
+  fleetSend<{ retracted: string }>(`/api/v1/fleet/policies/${encodeURIComponent(name)}`, "DELETE", undefined);
+
+// Single-cluster-first enrollment: mint a join token for a new spoke + remove (deregister) a cluster.
+export type JoinTokenResult = { cluster_id: string; token: string; join_command: string; expires_at: string };
+export const mintJoinToken = (clusterId: string, hubUrl: string) =>
+  fleetSend<JoinTokenResult>("/api/v1/fleet/clusters/join-token", "POST", { cluster_id: clusterId, hub_url: hubUrl });
+export const removeCluster = (id: string) =>
+  fleetSend<{ removed: string }>(`/api/v1/fleet/clusters/${encodeURIComponent(id)}`, "DELETE", undefined);
 
 // --- P3: live drill-down into one cluster's audit (P4 residency may block it) ---
 export type FleetAuditRecord = {

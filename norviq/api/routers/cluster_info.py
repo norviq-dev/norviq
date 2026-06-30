@@ -40,6 +40,11 @@ async def cluster_info(
     for model in (Policy, AuditLogEntry, AgentRegistryEntry):
         result = await session.execute(select(model.namespace).distinct())
         observed.update(ns for ns in result.scalars().all() if ns)
+    # "all" is the reserved wildcard sentinel (the console's "All namespaces" option + the query-wildcard the
+    # audit/stats routes treat as "no namespace filter"). A fleet-wide policy seeded into namespace "all" must
+    # NOT surface as a selectable tenant namespace — it collides with that sentinel and renders a duplicate
+    # "All namespaces" entry in the selector. Drop it from the observed tenant list.
+    observed.discard("all")
 
     # Non-admin tokens see only their own namespace claim — consistent with scoped audit/agent/policy reads.
     role = str(user.get("role", "")).lower()

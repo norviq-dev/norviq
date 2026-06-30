@@ -3,6 +3,7 @@
 // its own origin (always browser-reachable). Set VITE_API_BASE_URL to an absolute origin only for a
 // split-origin deploy where the API has its own ingress (requires CORS on the API).
 import { oidcEnabled, oidcLogout } from "../auth/oidc";
+import { blockedByRemoteCluster, remoteMutationError } from "./clusterGuard";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
 
@@ -53,6 +54,10 @@ export async function apiGet<T>(path: string): Promise<T> {
 }
 
 export async function apiSend<T>(path: string, method: "POST" | "PUT" | "DELETE", body?: unknown): Promise<T> {
+  // F-69 Stage 1: never send a cluster-scoped mutation to the LOCAL api while a REMOTE cluster is the active
+  // context — it would change the served cluster under a remote label. Refuse before the fetch (hard backstop;
+  // the UI also routes remote pages to a deep-link, but this guarantees it even if a control slips through).
+  if (blockedByRemoteCluster(method, path)) throw remoteMutationError();
   const response = await fetch(apiUrl(path), {
     method,
     headers: authHeaders({ "Content-Type": "application/json" }),
@@ -133,6 +138,28 @@ export async function enablePolicyPack(packId: string, namespace: string): Promi
 /** Disable a sector pack for a namespace (admin-only). */
 export async function disablePolicyPack(packId: string, namespace: string): Promise<PackActionResult> {
   return apiSend<PackActionResult>(`/api/v1/policy-packs/${encodeURIComponent(packId)}/disable`, "POST", { namespace });
+}
+
+// F-54: view a pack's rego + author a per-namespace tighten-only override (revertable).
+export async function fetchPackRego(packId: string): Promise<{ pack_id: string; rego: string }> {
+  return apiGet(`/api/v1/policy-packs/${encodeURIComponent(packId)}/rego`);
+}
+export async function fetchPackOverride(namespace: string): Promise<{ namespace: string; rego_source: string; active: boolean; mode?: string }> {
+  return apiGet(`/api/v1/policy-packs/override?namespace=${encodeURIComponent(namespace)}`);
+}
+// allowWeaken=true is the loud, audited "Advanced: allow weakening this pack" opt-in (stored as a weaken overlay,
+// still floored by the comprehensive baseline). Default false = tighten-only (cannot weaken a pack block).
+export async function savePackOverride(namespace: string, regoSource: string, allowWeaken = false): Promise<{ namespace: string; active: boolean; mode?: string }> {
+  return apiSend(`/api/v1/policy-packs/override`, "PUT", { namespace, rego_source: regoSource, allow_weaken: allowWeaken });
+}
+export async function revertPackOverride(namespace: string): Promise<{ namespace: string; active: boolean; reverted: boolean }> {
+  return apiSend(`/api/v1/policy-packs/override?namespace=${encodeURIComponent(namespace)}`, "DELETE", undefined);
+}
+
+// F-58: the effective policy stack governing a (namespace, agent_class) — derived from the real evaluator.
+export type EffectiveLayer = { scope: string; label: string; priority: number; overlay: boolean };
+export async function fetchEffectivePolicy(namespace: string, agentClass: string): Promise<{ namespace: string; agent_class: string; layers: EffectiveLayer[]; note?: string }> {
+  return apiGet(`/api/v1/policies/effective?namespace=${encodeURIComponent(namespace)}&agent_class=${encodeURIComponent(agentClass)}`);
 }
 
 export type VersionInfo = { version: string; license: string };
@@ -244,6 +271,7 @@ export async function fetchAuditRecords(filters: {
   namespace?: string;
   decision?: string;
   tool_name?: string;
+  agent?: string; // F-53: SPIFFE/agent-id substring, filtered server-side over the range
   limit?: number;
   offset?: number;
 }): Promise<
@@ -444,8 +472,8 @@ export async function applyPolicy(
     target_kind?: string;
     enforcement_mode: string;
   }
-): Promise<{ applied?: boolean }> {
-  return apiSend<{ applied?: boolean }>(
+): Promise<{ applied?: boolean; policy?: string; target_type?: string; enforcement_mode?: string }> {
+  return apiSend(
     `/api/v1/policies/${encodeURIComponent(namespace)}/${encodeURIComponent(agentClass)}/apply`,
     "POST",
     data

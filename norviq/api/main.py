@@ -18,7 +18,7 @@ from norviq.api.db.session import close_db, create_tables, ensure_schema_compati
 from norviq.api.siem import AuditForwarder
 from norviq.fleet_relay import FleetRelayForwarder
 from norviq.fleet_puller import FleetPolicyPuller
-from norviq.api.routers import attack_graph_compute, agents, audit, cluster_info, coverage, deployments, evaluate, graph, graphs, health, keys, me, mitre, packs, policies, redteam, settings_router, version
+from norviq.api.routers import attack_graph_compute, agents, audit, cluster_info, coverage, deployments, evaluate, fleet_enroll, graph, graphs, health, keys, me, mitre, packs, policies, redteam, settings_router, version
 from norviq.config import settings
 from norviq.engine.audit_emitter import AuditEmitter
 from norviq.engine.cache import RedisCache
@@ -122,6 +122,17 @@ async def lifespan(app: FastAPI):
         log.info("nrvq.startup.warm_cache_done", code="NRVQ-DB-DEBUG-6")
     app.state.siem_forwarder = AuditForwarder()
     await app.state.siem_forwarder.start()  # no-op unless settings.siem_enabled
+    # Single-cluster-first: a token-joined spoke persists its enrollment in FleetJoinState; re-apply it over env
+    # BEFORE the relay/puller start so a `norviq fleet join` survives restarts (and a `leave` keeps fleet off).
+    try:
+        provider = get_session()
+        _sess = await provider.__anext__()
+        try:
+            await fleet_enroll.configure_from_join_state(_sess)
+        finally:
+            await provider.aclose()
+    except Exception as exc:  # pragma: no cover - best-effort; never block startup on join-state load
+        log.warning("nrvq.startup.join_state_load_failed", error=str(exc), code="NRVQ-FLT-15034")
     app.state.fleet_relay = FleetRelayForwarder()
     await app.state.fleet_relay.start()  # no-op unless settings.fleet_enabled (F045; fire-and-forget)
     app.state.fleet_puller = FleetPolicyPuller(loader=app.state.loader)
@@ -167,6 +178,7 @@ def create_app() -> FastAPI:
     app.include_router(version.router, prefix="/api/v1", tags=["version"])
     app.include_router(keys.router, prefix="/api/v1", tags=["keys"])
     app.include_router(packs.router, prefix="/api/v1", tags=["packs"])
+    app.include_router(fleet_enroll.router, prefix="/api/v1", tags=["fleet-enroll"])
     app.state.audit_hub = AuditHub()
 
     @app.websocket("/ws/audit")

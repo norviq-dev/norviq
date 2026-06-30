@@ -1,4 +1,5 @@
 import Editor from "@monaco-editor/react";
+import { registerRego } from "../lib/monaco-rego";
 import {
   AlertCircle,
   ArrowUpCircle,
@@ -17,7 +18,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { apiGet, apiSend, applyPolicy, dryRunPolicy, fetchSettings } from "../api/client";
-import { CategoryCoverage } from "../components/common/CategoryCoverage";
+import { ApplyResultPanel, type ApplyResult } from "../components/common/ApplyResultPanel";
 import { DecisionBadge, type Decision } from "../components/common/DecisionBadge";
 import { KitButton } from "../components/common/KitButton";
 import { PageHead } from "../components/common/PageHead";
@@ -579,6 +580,7 @@ export function PolicyCatalog() {
   const [editorStatus, setEditorStatus] = useState<"saved" | "unsaved" | `syntax:${number}`>("saved");
   const [dryRunResult, setDryRunResult] = useState<DryRunResult | null>(null);
   const [dryRunLoading, setDryRunLoading] = useState(false);
+  const [applyResult, setApplyResult] = useState<ApplyResult | null>(null);  // Stage 1: apply-result transparency
 
   const policies = useApi<Policy[]>(
     () => apiGet<Policy[]>(`/api/v1/policies?namespace=${encodeURIComponent(namespace)}`).then(withTargetType),
@@ -638,16 +640,37 @@ export function PolicyCatalog() {
 
   const onApply = async (mode: Policy["mode"]) => {
     if (!selected) return;
+    const ns = selected.namespace ?? namespace;
+    const ac = selected.agent_class ?? "";
     try {
       const targetType = selected.target_type === "class" ? "agent_class" : selected.target_type ?? "agent_class";
-      await applyPolicy(selected.namespace ?? namespace, selected.agent_class ?? "", {
+      const res = await applyPolicy(ns, ac, {
         target_type: targetType,
-        target_namespace: selected.namespace ?? namespace,
+        target_namespace: ns,
         target_name: selected.target,
         target_kind: selected.target_type === "workload" ? "Deployment" : undefined,
         enforcement_mode: mode ?? "block"
       });
       await refreshPolicies();
+      // Stage 1: honest local outcome — a policy-store write + an in-memory engine load (NOT a kubectl/CRD apply).
+      setApplyResult({
+        kind: "local",
+        title: `Configured ${ns}/${ac}`,
+        ok: true,
+        outcome: `Loaded into this cluster's policy engine — enforcement "${res.enforcement_mode ?? mode}". Stored in the policy store + hot-reloaded; effective immediately on the next tool call.`,
+        manifest: { namespace: ns, agent_class: ac, enforcement_mode: res.enforcement_mode ?? mode ?? "block" }
+      });
+    } catch (e) {
+      const msg = String(e).replace(/^Error:\s*/, "");
+      const codeMatch = msg.match(/NRVQ-[A-Z]+-\d+/);
+      setApplyResult({
+        kind: "local",
+        title: "Apply rejected",
+        ok: false,
+        outcome: msg,
+        code: codeMatch ? codeMatch[0] : undefined,
+        manifest: { namespace: ns, agent_class: ac, enforcement_mode: mode ?? "block" }
+      });
     } finally {
       setSelected(null);
     }
@@ -697,6 +720,18 @@ export function PolicyCatalog() {
     }
   };
 
+  // Stage 1: a real current-vs-new diff for Dry-Run — what the edit actually changes vs the loaded policy.
+  const regoDiff = useMemo(() => {
+    const cur = (detail.data?.rego_source ?? "").split("\n");
+    const next = (regoDraft ?? "").split("\n");
+    if (cur.join("\n") === next.join("\n")) return null;
+    const curSet = new Set(cur);
+    const nextSet = new Set(next);
+    const removed = cur.filter((l) => !nextSet.has(l)).map((text) => ({ sign: "-", text }));
+    const added = next.filter((l) => !curSet.has(l)).map((text) => ({ sign: "+", text }));
+    return [...removed, ...added];
+  }, [detail.data?.rego_source, regoDraft]);
+
   return (
     <div className="page-enter">
       <PageHead
@@ -724,9 +759,11 @@ export function PolicyCatalog() {
         }
       />
 
-      <div className="stack">
-        <CategoryCoverage />
+      {/* Stage 1: apply-result transparency — the exact resource configured + honest outcome (policy-store + engine load). */}
+      <ApplyResultPanel result={applyResult} onClose={() => setApplyResult(null)} />
 
+      <div className="stack">
+        {/* F-61: "Policy Coverage by Category" lives on Overview only (was duplicated here). */}
         <div className="tabs-kit" style={{ alignSelf: "flex-start" }}>
           {(["catalog", "editor", "versions"] as const).map((t) => (
             <button
@@ -848,6 +885,7 @@ export function PolicyCatalog() {
                   </div>
                   <Editor
                     defaultLanguage="rego"
+                    beforeMount={registerRego}
                     theme="vs-dark"
                     height="350px"
                     value={regoDraft || "# Select a policy from the list"}
@@ -940,6 +978,23 @@ export function PolicyCatalog() {
                     }}
                   >
                     <div style={{ fontWeight: 600, marginBottom: 6 }}>Dry-Run Results</div>
+                    {regoDiff && (
+                      <div style={{ marginBottom: 10 }}>
+                        <div style={{ color: "var(--text-muted)", fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 4 }}>
+                          Changes vs the loaded policy
+                        </div>
+                        <pre
+                          className="mono"
+                          style={{ margin: 0, maxHeight: 140, overflow: "auto", background: "#0e0e0e", border: "1px solid var(--border,#2a2a2a)", borderRadius: 6, padding: "8px 10px", fontSize: 11.5 }}
+                        >
+                          {regoDiff.map((d, i) => (
+                            <div key={i} style={{ color: d.sign === "+" ? "var(--success,#30a46c)" : "var(--danger,#e5484d)" }}>
+                              {d.sign} {d.text}
+                            </div>
+                          ))}
+                        </pre>
+                      </div>
+                    )}
                     <div>Records checked: {(dryRunResult.total_records_checked ?? 0).toLocaleString()}</div>
                     <div>
                       Would block: {dryRunResult.would_block ?? 0} ({dryRunResult.block_rate_pct ?? 0}%)

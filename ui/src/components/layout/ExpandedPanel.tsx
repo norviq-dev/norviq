@@ -56,11 +56,17 @@ const PANEL_CONFIG: Record<Section, { title: string; groups: Group[] }> = {
           { to: "/test", label: "Policy Tester", icon: Beaker }
           // Red Team is a Day-8 stub; hidden from nav until the feature ships.
         ]
-      }
+      },
+      // F-64: Fleet is multi-cluster MANAGEMENT (opt-in) — it belongs in Security Operations, not Analytics. Only
+      // shown when a fleet-api hub is configured.
+      ...(fleetEnabled
+        ? [{ id: "fleet", label: "MANAGEMENT", items: [{ to: "/fleet", label: "Fleet", icon: Network }] }]
+        : [])
     ]
   },
   intelligence: {
-    title: "INTELLIGENCE",
+    // F-64: the home Overview is no longer buried under "Intelligence" — this section reads as the home/analytics.
+    title: "OVERVIEW",
     groups: [
       {
         id: "analytics",
@@ -75,11 +81,7 @@ const PANEL_CONFIG: Record<Section, { title: string; groups: Group[] }> = {
           { to: "/threats/graph", label: "Attack Graph", icon: Network },
           { to: "/threats/mitre", label: "MITRE Coverage", icon: Award }
         ]
-      },
-      // F045: cross-cluster fleet view — only shown when a fleet-api hub is configured (VITE_FLEET_API_URL).
-      ...(fleetEnabled
-        ? [{ id: "fleet", label: "FLEET", items: [{ to: "/fleet", label: "Fleet", icon: Network }] }]
-        : [])
+      }
     ]
   },
   settings: {

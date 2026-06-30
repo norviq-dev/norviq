@@ -704,6 +704,21 @@ class OPAEvaluator:
         if guardrail_key in self._loader._policies:
             entry = self._loader._policies[guardrail_key]
             candidates.append({"key": guardrail_key, "rego": entry["rego"], "priority": entry["priority"]})
+        # F-54: per-namespace sector-pack OVERRIDE — an operator-authored tighten-only overlay that customizes
+        # the pack (e.g. add a stricter block). Same additive discipline: absent by default, tighten-only, never
+        # weakens a pack's block. Revertable by deleting the (ns,__pack_override__) policy.
+        override_key = f"{namespace}:__pack_override__"
+        if override_key in self._loader._policies:
+            entry = self._loader._policies[override_key]
+            candidates.append({"key": override_key, "rego": entry["rego"], "priority": entry["priority"]})
+        # fleet-mgmt: per-namespace pack WEAKEN overlay — an explicit, admin-authored, audited customization that may
+        # RELAX a pack's added restriction (unlike __pack_override__ which is tighten-only). Same additive/in-memory
+        # discipline: absent by default (zero hot-path cost, single-cluster/attacks unchanged). The base comprehensive
+        # policy is still a hard floor (_resolve_with_packs), so a weaken can never drop below the org baseline.
+        weaken_key = f"{namespace}:__pack_weaken__"
+        if weaken_key in self._loader._policies:
+            entry = self._loader._policies[weaken_key]
+            candidates.append({"key": weaken_key, "rego": entry["rego"], "priority": entry["priority"]})
         return candidates
 
     def _resolve_with_packs(self, results: list[dict]) -> dict:
@@ -728,11 +743,22 @@ class OPAEvaluator:
 
     @staticmethod
     def _is_overlay(key: str) -> bool:
-        """Additive-only overlay candidates (tighten-only): sector packs and the F-14 allowlist guardrail."""
-        return key.endswith(":__pack__") or key.endswith(":__guardrail__")
+        """Overlay candidates resolved against the base floor: sector packs, the F-14 allowlist guardrail, the F-54
+        tighten-only override, and the fleet-mgmt admin pack WEAKEN overlay."""
+        return (key.endswith(":__pack__") or key.endswith(":__guardrail__")
+                or key.endswith(":__pack_override__") or key.endswith(":__pack_weaken__"))
 
     def _resolve_overlay(self, results: list[dict]) -> dict:
-        """Most restrictive overlay wins (tighten-only); ties broken by highest priority."""
+        """Most restrictive overlay wins (tighten-only); ties broken by highest priority. EXCEPTION: an explicit
+        admin pack-WEAKEN overlay (:__pack_weaken__) supersedes the other overlays so it can RELAX a pack's added
+        block — but the caller (_resolve_with_packs) still floors the result against the base, so a weaken can never
+        drop below the comprehensive baseline. Absent by default → unchanged tighten-only behaviour."""
+        weaken = [r for r in results if str(r["key"]).endswith(":__pack_weaken__")]
+        if weaken:
+            rank = {"block": 0, "escalate": 1, "audit": 2, "allow": 3}
+            # if several weaken overlays exist, the most permissive (the operator's deliberate relaxation) wins.
+            weaken.sort(key=lambda item: (-rank.get(item["decision"].decision, 3), -int(item["priority"])))
+            return weaken[0]
         rank = {"block": 0, "escalate": 1, "audit": 2, "allow": 3}
         results.sort(key=lambda item: (rank.get(item["decision"].decision, 3), -int(item["priority"])))
         return results[0]
@@ -791,6 +817,14 @@ class OPAEvaluator:
             key: {"rego": rego_source, "priority": int(priority), "package_name": package_name},
         }
         log.info("nrvq.engine.policy_loaded", key=key, code="NRVQ-ENG-2005")
+
+    def unload_policy(self, namespace: str, agent_class: str) -> None:
+        """F-52: remove a policy from the in-memory index (copy-on-write) so a deleted/retracted policy stops
+        being evaluated — the counterpart to load_policy (delete previously left it loaded)."""
+        key = f"{namespace}:{agent_class}"
+        if key in self._policies:
+            self._policies = {k: v for k, v in self._policies.items() if k != key}
+            log.info("nrvq.engine.policy_unloaded", key=key, code="NRVQ-ENG-2031")
 
     def reload_policy(self, namespace: str, agent_class: str, rego_source: str) -> None:
         """Hot-reload a single policy without restarting."""

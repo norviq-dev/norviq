@@ -121,8 +121,10 @@ def test_relay_cannot_write_another_cluster() -> None:
 def test_clusters_status_and_scope() -> None:
     now = datetime.now(timezone.utc)
     rows = [
-        SimpleNamespace(id="cluster-a", name="a", region="r1", endpoint="e1", last_heartbeat=now),
-        SimpleNamespace(id="cluster-b", name="b", region="r2", endpoint="e2", last_heartbeat=now - timedelta(hours=2)),
+        SimpleNamespace(id="cluster-a", name="a", region="r1", endpoint="e1",
+                        console_url="https://a.console", last_heartbeat=now),
+        SimpleNamespace(id="cluster-b", name="b", region="r2", endpoint="e2",
+                        console_url="", last_heartbeat=now - timedelta(hours=2)),
     ]
     # admin sees both, with computed status (recent=healthy, old=stale)
     s = FakeFleetSession(results=[rows])
@@ -131,6 +133,23 @@ def test_clusters_status_and_scope() -> None:
         out = c.get("/api/v1/fleet/clusters", headers=_headers(role="admin")).json()
         by = {x["id"]: x["status"] for x in out}
         assert by == {"cluster-a": "healthy", "cluster-b": "stale"}
+        # F-69: console_url flows through to the console (drives the deep-link); absent -> "".
+        urls = {x["id"]: x["console_url"] for x in out}
+        assert urls == {"cluster-a": "https://a.console", "cluster-b": ""}
+    finally:
+        c.close()
+
+
+def test_heartbeat_accepts_console_url() -> None:
+    # F-69: a spoke advertises its own console URL on heartbeat; the hub upserts it onto the Cluster row.
+    s = FakeFleetSession()
+    c = _client(s)
+    try:
+        r = c.post("/api/v1/fleet/clusters/cluster-a/heartbeat",
+                   json={"name": "prod-west", "endpoint": "https://a", "console_url": "https://a.console"},
+                   headers=_headers(role="service", cluster="cluster-a"))
+        assert r.status_code == 200 and r.json()["status"] == "healthy"
+        assert s.committed
     finally:
         c.close()
 

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-// F-34: /fleet must resolve to the Intelligence section (its nav item lives there), not fall through to Security.
+// F-64: /fleet is multi-cluster MANAGEMENT — it resolves to the Security Operations section (was Intelligence/F-34).
 import { describe, expect, it } from "vitest";
 import { sectionFromPath } from "./AppContext";
 
 describe("sectionFromPath", () => {
-  it("maps /fleet to intelligence (F-34)", () => {
-    expect(sectionFromPath("/fleet")).toBe("intelligence");
+  it("maps /fleet to security (F-64: Fleet is management/ops)", () => {
+    expect(sectionFromPath("/fleet")).toBe("security");
   });
   it("keeps the existing mappings", () => {
     expect(sectionFromPath("/")).toBe("intelligence");

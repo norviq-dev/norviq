@@ -19,6 +19,7 @@ class HeartbeatBody(BaseModel):
     labels: dict[str, str] = {}     # P2: target_selector matching
     residency: bool = False         # P4: this spoke keeps raw audit in-cluster
     spiffe_id: str = ""             # S3: the spoke's attested SPIFFE identity (workload-api mode)
+    console_url: str = ""           # F-69: the spoke's own console URL (drives the hub deep-link)
 
 
 class PolicyAuthorBody(BaseModel):

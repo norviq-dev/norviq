@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -43,6 +44,8 @@ class FleetPolicyPuller:
 
     async def start(self) -> None:
         """Launch the pull loop. No-op unless fleet is enabled, configured, AND a trust-root pubkey is set."""
+        if self._task is not None and not self._task.done():
+            return  # idempotent: already running (e.g. a second `norviq fleet join`)
         if not settings.fleet_enabled:
             return
         if not (settings.fleet_api_url and settings.fleet_cluster_id):
@@ -117,21 +120,42 @@ class FleetPolicyPuller:
             return {"applied": False, "reason": "not_newer"}
 
         # (5) APPLY — only now do we touch enforcement. A per-policy failure -> report failed, do NOT bump.
+        new_manifest = sorted(f"{p['namespace']}:{p['agent_class']}" for p in payload["policies"])
         try:
             for p in payload["policies"]:
                 await self._loader.create(p["namespace"], p["agent_class"], p["rego_source"],
                                           saved_by=f"fleet:bundle:{version}", priority=p.get("priority", 100),
                                           enforcement_mode=p.get("enforcement_mode", "block"))
+            # F-52 RECONCILE: a policy that was applied from a prior bundle but is no longer present has been
+            # RETRACTED — delete it from the spoke so a push is reversible (was: dropped policies persisted forever).
+            for key in await self._dropped_keys(new_manifest):
+                ns, _, ac = key.partition(":")
+                await self._loader.delete(ns, ac)
+                log.info("nrvq.fleet.bundle_retracted", key=key, version=version, code="NRVQ-FLT-15028")
         except Exception as exc:
             log.error("nrvq.fleet.bundle_apply_failed", error=str(exc), code="NRVQ-FLT-15022")
             await self._report(version, "failed", last, str(exc)[:200])
             return {"applied": False, "reason": "apply_failed"}
 
-        # (6) persist version ONLY after the full apply loop succeeds (partial apply re-applies next cycle)
-        await self._persist(version, hashlib.sha256(canonical_bytes(payload)).hexdigest())
+        # (6) persist version + manifest ONLY after the full apply+reconcile succeeds (partial -> re-applies next cycle)
+        await self._persist(version, hashlib.sha256(canonical_bytes(payload)).hexdigest(), new_manifest)
         log.info("nrvq.fleet.bundle_applied", version=version, policies=len(payload["policies"]), code="NRVQ-FLT-15022")
         await self._report(version, "applied", version, "")
         return {"applied": True, "version": version}
+
+    async def _dropped_keys(self, new_manifest: list[str]) -> list[str]:
+        """F-52: keys applied from the LAST bundle that are absent from the new one (i.e. retracted)."""
+        provider = self._session_factory()
+        session = await provider.__anext__()
+        try:
+            row = (await session.execute(
+                select(FleetBundleState).where(FleetBundleState.cluster_id == settings.fleet_cluster_id)
+            )).scalar_one_or_none()
+            prior = json.loads(row.last_manifest) if row and row.last_manifest else []
+            return [k for k in prior if k not in set(new_manifest)]
+        finally:
+            if hasattr(provider, "aclose"):
+                await provider.aclose()
 
     async def _last_applied(self) -> int:
         provider = self._session_factory()
@@ -145,16 +169,18 @@ class FleetPolicyPuller:
             if hasattr(provider, "aclose"):
                 await provider.aclose()
 
-    async def _persist(self, version: int, sha: str) -> None:
+    async def _persist(self, version: int, sha: str, manifest: list[str]) -> None:
         provider = self._session_factory()
         session = await provider.__anext__()
         try:
             now = datetime.now(timezone.utc)
+            man = json.dumps(manifest)
             await session.execute(insert(FleetBundleState).values(
-                cluster_id=settings.fleet_cluster_id, last_applied_version=version, applied_at=now, last_bundle_sha256=sha,
+                cluster_id=settings.fleet_cluster_id, last_applied_version=version, applied_at=now,
+                last_bundle_sha256=sha, last_manifest=man,
             ).on_conflict_do_update(
                 index_elements=["cluster_id"],
-                set_={"last_applied_version": version, "applied_at": now, "last_bundle_sha256": sha},
+                set_={"last_applied_version": version, "applied_at": now, "last_bundle_sha256": sha, "last_manifest": man},
             ))
             await session.commit()
         finally:

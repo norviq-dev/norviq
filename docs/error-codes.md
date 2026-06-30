@@ -9,7 +9,7 @@ Generated from `norviq/**/*.py` log/error code literals (`NRVQ-*`).
 | API | 23 | `norviq/api/main.py`, `norviq/api/routers/*` |
 | AUD | 9 | `norviq/engine/audit_emitter.py` |
 | AUTH | 6 | `norviq/api/auth.py`, `norviq/api/jwks.py` |
-| FLT | 23 | `norviq/fleet/*`, `norviq/fleet_relay.py`, `norviq/fleet_puller.py` |
+| FLT | 31 | `norviq/fleet/*`, `norviq/fleet_relay.py`, `norviq/fleet_puller.py` |
 | CLI | 5 | `norviq/cli/main.py`, `norviq/cli/api_client.py` |
 | DB | 34 | `norviq/api/db/session.py`, `norviq/engine/cache.py`, `norviq/api/main.py` |
 | ENG | 36 | `norviq/engine/evaluator.py`, `norviq/engine/trust/*`, `norviq/engine/opa_client.py` |
@@ -66,6 +66,9 @@ Total documented unique codes: **217**
 | NRVQ-API-7095 | `nrvq.api.pack.enabled` (F047 pack materialized for a namespace) | `norviq/api/routers/packs.py` |
 | NRVQ-API-7096 | `nrvq.api.pack.disabled` (F047 pack removed from a namespace) | `norviq/api/routers/packs.py` |
 | NRVQ-API-7097 | `nrvq.api.pack.error` (F047 unknown pack id / missing rego or manifest) | `norviq/api/routers/packs.py` |
+| NRVQ-API-7098 | `nrvq.api.pack.override_saved` / `override_reverted` (F-54 per-ns pack override) | `norviq/api/routers/packs.py` |
+| NRVQ-API-7099 | `nrvq.api.pack.weaken_applied` (fleet-mgmt: LOUD audit — a pack WEAKEN overlay was applied; may relax a pack block, still floored by the comprehensive baseline) | `norviq/api/routers/packs.py` |
+| NRVQ-API-7100 | `nrvq.api.policies.effective` (F-58 effective-resolution view) | `norviq/api/routers/policies.py` |
 
 ## AUTH
 
@@ -107,8 +110,16 @@ Multi-cluster fleet (F045). Spoke relay + hub fleet-api. Distinct prefix from `N
 | NRVQ-FLT-15020 | `nrvq.fleet.rollout_reported` | `norviq/fleet_puller.py`, `fleet/routers/fleet_policy.py` |
 | NRVQ-FLT-15021 | `nrvq.fleet.policy_authored` | `norviq/fleet/routers/fleet_policy.py` |
 | NRVQ-FLT-15023 | `nrvq.fleet.policy.reserved_scope` (F-40: rejected a fleet push to `__baseline__`/`__pack__` — 422) | `norviq/fleet/routers/fleet_policy.py` |
-| NRVQ-FLT-15027 | `nrvq.fleet.policy.confirm_required` (F-40: fleet-wide push without `confirm_fleet_wide` — 422) | `norviq/fleet/routers/fleet_policy.py` |
+| NRVQ-FLT-15028, NRVQ-FLT-15029, NRVQ-FLT-15030, NRVQ-FLT-15031, NRVQ-FLT-15032, NRVQ-FLT-15033, NRVQ-FLT-15034, NRVQ-FLT-15035, NRVQ-FLT-15027 | `nrvq.fleet.policy.confirm_required` (F-40: fleet-wide push without `confirm_fleet_wide` — 422) | `norviq/fleet/routers/fleet_policy.py` |
 | NRVQ-FLT-15022 | `nrvq.fleet.bundle_applied` / `bundle_apply_failed` | `norviq/fleet_puller.py` |
+| NRVQ-FLT-15028 | `nrvq.fleet.bundle_retracted` (F-52 spoke reconcile deletes a retracted key) | `norviq/fleet_puller.py` |
+| NRVQ-FLT-15029 | `nrvq.fleet.policy_retracted` (F-52 hub retract endpoint) | `norviq/fleet/routers/fleet_policy.py` |
+| NRVQ-FLT-15030 | `nrvq.fleet.join_token_minted` (hub mints a join token) | `norviq/fleet/routers/fleet.py` |
+| NRVQ-FLT-15031 | `nrvq.fleet.join_token_claimed` (single-use claim) | `norviq/fleet/routers/fleet.py` |
+| NRVQ-FLT-15032 | `nrvq.fleet.cluster_removed` (hub deregister) | `norviq/fleet/routers/fleet.py` |
+| NRVQ-FLT-15033 | `nrvq.fleet.join_rejected` (bad/expired token) | `norviq/api/routers/fleet_enroll.py` |
+| NRVQ-FLT-15034 | `nrvq.fleet.joined` (spoke enrolled) | `norviq/api/routers/fleet_enroll.py` |
+| NRVQ-FLT-15035 | `nrvq.fleet.left` (spoke de-enrolled, sheds pushed policy) | `norviq/api/routers/fleet_enroll.py` |
 | NRVQ-FLT-15024 | `nrvq.fleet.spiffe_id_changed` (S3: SVID binding change) | `norviq/fleet/routers/ingest.py` |
 | NRVQ-FLT-15025 | `nrvq.fleet.drilldown_served` / `drilldown_failed` (P3) | `norviq/fleet/routers/fleet_policy.py` |
 | NRVQ-FLT-15026 | `nrvq.fleet.drilldown_residency_blocked` (P4) | `norviq/fleet/routers/fleet_policy.py` |
@@ -143,8 +154,15 @@ Multi-cluster fleet (F045). Spoke relay + hub fleet-api. Distinct prefix from `N
 | NRVQ-ENG-2020 | `nrvq.engine.timeout` | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2021 | `nrvq.engine.timeout_fallback` | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2030 | `nrvq.engine.policy_hot_reloaded` | `norviq/engine/evaluator.py` |
+| NRVQ-ENG-2031 | `nrvq.engine.policy_unloaded` (F-52 evaluator unload on delete) | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2040..2050 | trust calculator/profile/history/cache codes | `norviq/engine/trust/*`, `norviq/engine/evaluator.py` |
 | NRVQ-ENG-DEBUG-* | OPA I/O and evaluator debug traces | `norviq/engine/evaluator.py` |
+
+## UI
+
+| Code | Message (event key) | Source |
+|---|---|---|
+| NRVQ-UI-4601 | `nrvq.ui.remote_cluster_mutation_blocked` (F-69: a cluster-scoped write to the LOCAL api was refused because a REMOTE cluster is the active context — editing applies to the served cluster only) | `ui/src/api/clusterGuard.ts` (enforced in `ui/src/api/client.ts` `apiSend`) |
 
 ## REG / GRP / AUD / RED / SDC / TEL / CLI / SDK / IDT
 
@@ -160,16 +178,16 @@ Multi-cluster fleet (F045). Spoke relay + hub fleet-api. Distinct prefix from `N
 | SDK | NRVQ-SDK-1000,1002,1010..1013,1020..1022,1030..1032,1040..1043 | `norviq/sdk/*` (1043 = F-22 output-DLP redaction, opt-in) |
 | IDT | NRVQ-IDT-10000..10006 | `norviq/engine/identity.py` |
 | AUTH | NRVQ-AUTH-14000..14006 | `norviq/api/auth.py`, `norviq/api/jwks.py` |
-| FLT | NRVQ-FLT-15000..15026 | `norviq/fleet/*`, `norviq/fleet_relay.py` |
+| FLT | NRVQ-FLT-15000..15035 | `norviq/fleet/*`, `norviq/fleet_relay.py` |
 
 ## Full Code Index
 
 ```text
-NRVQ-API-7000, NRVQ-API-7001, NRVQ-API-7002, NRVQ-API-7010, NRVQ-API-7011, NRVQ-API-7012, NRVQ-API-7016, NRVQ-API-7013, NRVQ-API-7014, NRVQ-API-7015, NRVQ-API-7020, NRVQ-API-7021, NRVQ-API-7022, NRVQ-API-7023, NRVQ-API-7024, NRVQ-API-7030, NRVQ-API-7031, NRVQ-API-7032, NRVQ-API-7050, NRVQ-API-7050-ERR, NRVQ-API-7051, NRVQ-API-7051-ERR, NRVQ-API-7061, NRVQ-API-7070, NRVQ-API-7071, NRVQ-API-7080, NRVQ-API-7081, NRVQ-API-7081-ERR, NRVQ-API-7082, NRVQ-API-7083, NRVQ-API-7084, NRVQ-API-7085, NRVQ-API-7086, NRVQ-API-7087, NRVQ-API-7090, NRVQ-API-7091, NRVQ-API-7092, NRVQ-API-7093, NRVQ-API-7094, NRVQ-API-7095, NRVQ-API-7096, NRVQ-API-7097, NRVQ-API-7099
+NRVQ-API-7000, NRVQ-API-7001, NRVQ-API-7002, NRVQ-API-7010, NRVQ-API-7011, NRVQ-API-7012, NRVQ-API-7016, NRVQ-API-7013, NRVQ-API-7014, NRVQ-API-7015, NRVQ-API-7020, NRVQ-API-7021, NRVQ-API-7022, NRVQ-API-7023, NRVQ-API-7024, NRVQ-API-7030, NRVQ-API-7031, NRVQ-API-7032, NRVQ-API-7050, NRVQ-API-7050-ERR, NRVQ-API-7051, NRVQ-API-7051-ERR, NRVQ-API-7061, NRVQ-API-7070, NRVQ-API-7071, NRVQ-API-7080, NRVQ-API-7081, NRVQ-API-7081-ERR, NRVQ-API-7082, NRVQ-API-7083, NRVQ-API-7084, NRVQ-API-7085, NRVQ-API-7086, NRVQ-API-7087, NRVQ-API-7090, NRVQ-API-7091, NRVQ-API-7092, NRVQ-API-7093, NRVQ-API-7094, NRVQ-API-7095, NRVQ-API-7096, NRVQ-API-7097, NRVQ-API-7098, NRVQ-API-7099, NRVQ-API-7100
 NRVQ-AUD-6000, NRVQ-AUD-6001, NRVQ-AUD-6002, NRVQ-AUD-6003, NRVQ-AUD-6004, NRVQ-AUD-6005, NRVQ-AUD-6006, NRVQ-AUD-6007, NRVQ-AUD-6008
 NRVQ-CLI-8000, NRVQ-CLI-8001, NRVQ-CLI-8002, NRVQ-CLI-8003, NRVQ-CLI-8004
 NRVQ-DB-9000, NRVQ-DB-9001, NRVQ-DB-9002, NRVQ-DB-9003, NRVQ-DB-9010, NRVQ-DB-9011, NRVQ-DB-9012, NRVQ-DB-9013, NRVQ-DB-9014, NRVQ-DB-9015, NRVQ-DB-9016, NRVQ-DB-9017, NRVQ-DB-9018, NRVQ-DB-9019, NRVQ-DB-9020, NRVQ-DB-9021, NRVQ-DB-9022, NRVQ-DB-9023, NRVQ-DB-9024, NRVQ-DB-9025, NRVQ-DB-9030, NRVQ-DB-9031, NRVQ-DB-9032, NRVQ-DB-9033, NRVQ-DB-DEBUG-1, NRVQ-DB-DEBUG-2, NRVQ-DB-DEBUG-2-ERR, NRVQ-DB-DEBUG-2A, NRVQ-DB-DEBUG-2B, NRVQ-DB-DEBUG-2C, NRVQ-DB-DEBUG-2D, NRVQ-DB-DEBUG-3, NRVQ-DB-DEBUG-4, NRVQ-DB-DEBUG-5, NRVQ-DB-DEBUG-6, NRVQ-DB-DEBUG-CONNECT-ARGS, NRVQ-DB-DEBUG-METADATA
-NRVQ-ENG-2000, NRVQ-ENG-2001, NRVQ-ENG-2002, NRVQ-ENG-2003, NRVQ-ENG-2004, NRVQ-ENG-2005, NRVQ-ENG-2006, NRVQ-ENG-2010, NRVQ-ENG-2015, NRVQ-ENG-2020, NRVQ-ENG-2021, NRVQ-ENG-2030, NRVQ-ENG-2040, NRVQ-ENG-2041, NRVQ-ENG-2042, NRVQ-ENG-2043, NRVQ-ENG-2044, NRVQ-ENG-2045, NRVQ-ENG-2046, NRVQ-ENG-2047, NRVQ-ENG-2048, NRVQ-ENG-2049, NRVQ-ENG-2050, NRVQ-ENG-2051, NRVQ-ENG-2052, NRVQ-ENG-2053, NRVQ-ENG-2054, NRVQ-ENG-2055, NRVQ-ENG-2056, NRVQ-ENG-2057, NRVQ-ENG-DEBUG-1, NRVQ-ENG-DEBUG-2, NRVQ-ENG-DEBUG-3, NRVQ-ENG-DEBUG-4, NRVQ-ENG-DEBUG-5, NRVQ-ENG-DEBUG-ERR, NRVQ-ENG-DEBUG-INPUT, NRVQ-ENG-DEBUG-OPA, NRVQ-ENG-DEBUG-OPA-IN
+NRVQ-ENG-2000, NRVQ-ENG-2001, NRVQ-ENG-2002, NRVQ-ENG-2003, NRVQ-ENG-2004, NRVQ-ENG-2005, NRVQ-ENG-2006, NRVQ-ENG-2010, NRVQ-ENG-2015, NRVQ-ENG-2020, NRVQ-ENG-2021, NRVQ-ENG-2030, NRVQ-ENG-2031, NRVQ-ENG-2040, NRVQ-ENG-2041, NRVQ-ENG-2042, NRVQ-ENG-2043, NRVQ-ENG-2044, NRVQ-ENG-2045, NRVQ-ENG-2046, NRVQ-ENG-2047, NRVQ-ENG-2048, NRVQ-ENG-2049, NRVQ-ENG-2050, NRVQ-ENG-2051, NRVQ-ENG-2052, NRVQ-ENG-2053, NRVQ-ENG-2054, NRVQ-ENG-2055, NRVQ-ENG-2056, NRVQ-ENG-2057, NRVQ-ENG-DEBUG-1, NRVQ-ENG-DEBUG-2, NRVQ-ENG-DEBUG-3, NRVQ-ENG-DEBUG-4, NRVQ-ENG-DEBUG-5, NRVQ-ENG-DEBUG-ERR, NRVQ-ENG-DEBUG-INPUT, NRVQ-ENG-DEBUG-OPA, NRVQ-ENG-DEBUG-OPA-IN
 NRVQ-GRP-11000, NRVQ-GRP-11001, NRVQ-GRP-11010, NRVQ-GRP-11011, NRVQ-GRP-11012, NRVQ-GRP-11013, NRVQ-GRP-11014, NRVQ-GRP-11015, NRVQ-GRP-11016
 NRVQ-AUTH-14000, NRVQ-AUTH-14001, NRVQ-AUTH-14002, NRVQ-AUTH-14003, NRVQ-AUTH-14004, NRVQ-AUTH-14005, NRVQ-AUTH-14006
 NRVQ-FLT-15000, NRVQ-FLT-15001, NRVQ-FLT-15002, NRVQ-FLT-15003, NRVQ-FLT-15004, NRVQ-FLT-15005, NRVQ-FLT-15009, NRVQ-FLT-15010, NRVQ-FLT-15011, NRVQ-FLT-15012, NRVQ-FLT-15013, NRVQ-FLT-15014, NRVQ-FLT-15015, NRVQ-FLT-15016, NRVQ-FLT-15017, NRVQ-FLT-15018, NRVQ-FLT-15019, NRVQ-FLT-15020, NRVQ-FLT-15021, NRVQ-FLT-15022, NRVQ-FLT-15023, NRVQ-FLT-15024, NRVQ-FLT-15025, NRVQ-FLT-15026, NRVQ-FLT-15027

@@ -229,14 +229,34 @@ class PolicyLoader:
         return self._policies.get(self._key(namespace, agent_class))
 
     async def delete(self, namespace: str, agent_class: str) -> bool:
-        """Delete policy from memory, versions, and cache."""
+        """Delete a policy from EVERY layer so it cannot be resurrected. F-52: previously this only cleared the
+        in-memory loader dict + the Redis policy cache, leaving the Postgres row (rehydrated on restart) AND the
+        evaluator's in-memory copy (kept enforcing) AND a possibly-stale eval-result cache. Now it removes all
+        four: Postgres rows, evaluator index, loader dict, Redis policy + eval caches."""
         key = self._key(namespace, agent_class)
+        # Absent from the in-memory index -> nothing to delete (warm_cache rehydrates every stored policy into
+        # _policies on startup, so a key the spoke actually holds is present here; this also keeps a delete of a
+        # non-existent policy a clean 404 without a DB round-trip).
         if key not in self._policies:
             return False
         self._policies = {k: v for k, v in self._policies.items() if k != key}
         self._versions = {k: v for k, v in self._versions.items() if k != key}
+        # Postgres: drop the policy + its version history (so warm_cache on restart can't bring it back).
+        async with self._db_engine().begin() as conn:
+            await conn.execute(
+                text("DELETE FROM policy_versions WHERE policy_id IN "
+                     "(SELECT id FROM policies WHERE namespace = :ns AND agent_class = :ac)"),
+                {"ns": namespace, "ac": agent_class},
+            )
+            await conn.execute(
+                text("DELETE FROM policies WHERE namespace = :ns AND agent_class = :ac"),
+                {"ns": namespace, "ac": agent_class},
+            )
+        # Evaluator in-memory index (the counterpart to load_policy on create).
+        if hasattr(self._evaluator, "unload_policy"):
+            self._evaluator.unload_policy(namespace, agent_class)
         await self._cache.delete_policy(namespace, agent_class)
-        await self._invalidate_eval_for_policy_scope(namespace, agent_class)
+        await self._invalidate_eval_for_policy_scope(namespace, agent_class)  # clear stale eval-result cache
         await self._cache.publish_policy_event("delete", namespace, agent_class, version=0)
         log.info("nrvq.policy.deleted", key=key, code="NRVQ-REG-5007")
         return True

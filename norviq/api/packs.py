@@ -94,6 +94,11 @@ def _read_rego(pack_id: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def read_rego(pack_id: str) -> str:
+    """F-54: public accessor for a pack's rego source (read-only view in the console)."""
+    return _read_rego(pack_id)
+
+
 def _between(text: str, begin: str, end: str) -> str:
     """Return the text strictly between the first begin-marker line and the end-marker."""
     bi = text.index(begin)

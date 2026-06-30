@@ -86,6 +86,55 @@ async def list_policies(
     return rows
 
 
+_LAYER_LABELS = {
+    "__baseline__": "namespace baseline",
+    "__pack__": "sector pack (overlay)",
+    "__guardrail__": "tool-allowlist guardrail (overlay)",
+    "__pack_override__": "pack override (overlay)",
+}
+
+
+@router.get("/policies/effective")
+async def effective_policy(
+    request: Request,
+    namespace: str = Query("default"),
+    agent_class: str = Query(...),
+    user: dict = Depends(get_current_user),
+) -> dict:
+    """F-58: the EFFECTIVE policy stack governing a (namespace, agent_class) right now — the ordered candidate
+    layers the evaluator ACTUALLY resolves. Strictly read-only/derived: it calls the same
+    `evaluator._collect_candidates` enforcement uses, so it can never drift from real behaviour."""
+    from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
+
+    namespace = scoped_namespace(user, namespace) or "default"
+    evaluator = request.app.state.evaluator
+    event = ToolCallEvent(
+        tool_name="__effective_probe__", tool_params={},
+        agent_identity=AgentIdentity(
+            spiffe_id=f"spiffe://norviq/ns/{namespace}/sa/{agent_class}", namespace=namespace, agent_class=agent_class),
+        session_id="effective",
+    )
+    candidates = await evaluator._collect_candidates(event)
+    layers = []
+    for c in candidates:
+        key = str(c["key"])
+        ns, _, ac = key.partition(":")
+        if ac == agent_class:
+            label = "agent-class policy"
+        elif ns == "__cluster__" and ac == "__baseline__":
+            label = "cluster baseline (comprehensive)"
+        else:
+            label = _LAYER_LABELS.get(ac, ac)
+        layers.append({
+            "scope": key, "label": label, "priority": int(c.get("priority", 100)),
+            "overlay": evaluator._is_overlay(key),
+        })
+    log.info("nrvq.api.policies.effective", namespace=namespace, agent_class=agent_class,
+             layers=len(layers), code="NRVQ-API-7100")
+    return {"namespace": namespace, "agent_class": agent_class, "layers": layers,
+            "note": "overlay layers are tighten-only (can only make a decision stricter)"}
+
+
 @router.get("/policies/{namespace}/{agent_class}")
 async def get_policy(
     namespace: str, agent_class: str, request: Request, user: dict = Depends(get_current_user)
@@ -108,13 +157,13 @@ async def create_policy(body: PolicyCreate, request: Request, user: dict = Depen
     # F-37: `__pack__` is a managed scope OWNED by the packs router (materialized from NamespacePack rows). A direct
     # write here is silently wiped the next time any pack is toggled (and reads as 0 coverage) — reject it and point
     # at the real enable path. (`__guardrail__` is intentionally operator-loaded via this endpoint, F-14.)
-    if agent_class == "__pack__":
+    if agent_class in ("__pack__", "__pack_override__"):
         log.warning("nrvq.api.policy.reserved_scope", namespace=body.namespace, agent_class=agent_class,
                     code="NRVQ-API-7016")
         raise HTTPException(
             status_code=422,
-            detail="'__pack__' is a managed scope — enable a sector pack via POST /api/v1/policy-packs/{id}/enable, "
-                   "not the generic policy endpoint (a direct write is wiped when packs are re-materialized).",
+            detail=f"'{agent_class}' is a managed scope — enable a sector pack via POST /api/v1/policy-packs/{{id}}/enable "
+                   "and customize it via PUT /api/v1/policy-packs/override, not the generic policy endpoint.",
         )
     version = await request.app.state.loader.create(
         body.namespace,
@@ -324,7 +373,7 @@ async def apply_policy(
     require_admin(user)
     # F-42: the create path guards reserved scopes (NRVQ-API-7016) but apply did not — apply to __pack__/__baseline__
     # returned 200, defeating the invariant. Reject the managed scopes here too (baseline = seed, pack = packs API).
-    if agent_class in ("__baseline__", "__pack__"):
+    if agent_class in ("__baseline__", "__pack__", "__pack_override__"):
         log.warning("nrvq.api.policy.reserved_scope", namespace=namespace, agent_class=agent_class,
                     actor=user.get("sub"), code="NRVQ-API-7016")
         raise HTTPException(

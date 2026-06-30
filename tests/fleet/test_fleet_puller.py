@@ -30,25 +30,33 @@ def _pub(priv_pem: str) -> str:
     return RSAKey(priv_pem, "RS256").public_key().to_pem().decode()
 
 
-def _bundle(version: int, nbf_delta=-60, exp_delta=900, cluster="fleet-a") -> dict:
+_DEFAULT_POLICIES = [{"namespace": "default", "agent_class": "bot", "rego_source": "package x",
+                      "priority": 100, "enforcement_mode": "block", "version": 1}]
+
+
+def _bundle(version: int, nbf_delta=-60, exp_delta=900, cluster="fleet-a", policies=None) -> dict:
     now = datetime.now(timezone.utc)
     return {
         "cluster_id": cluster, "bundle_version": version, "issued_at": rfc3339_z(now),
         "not_before": rfc3339_z(now + timedelta(seconds=nbf_delta)),
         "expires_at": rfc3339_z(now + timedelta(seconds=exp_delta)),
         "prev_bundle_version": version - 1,
-        "policies": [{"namespace": "default", "agent_class": "bot", "rego_source": "package x",
-                      "priority": 100, "enforcement_mode": "block", "version": 1}],
+        "policies": _DEFAULT_POLICIES if policies is None else policies,
     }
 
 
 class _FakeLoader:
     def __init__(self):
         self.created = []
+        self.deleted = []
 
     async def create(self, namespace, agent_class, rego_source, saved_by="", priority=100, enforcement_mode="block"):
         self.created.append((namespace, agent_class, rego_source))
         return 1
+
+    async def delete(self, namespace, agent_class):
+        self.deleted.append((namespace, agent_class))
+        return True
 
 
 class _Resp:
@@ -79,15 +87,17 @@ class _FakeHub:
 
 
 class _FakeSpokeSession:
-    def __init__(self, last_applied=0):
+    def __init__(self, last_applied=0, last_manifest=None):
         self.last_applied = last_applied
+        self.last_manifest = last_manifest  # JSON string of prior applied keys (F-52)
         self.persisted = []
 
     async def execute(self, stmt):
         if getattr(stmt, "is_insert", False):
             self.persisted.append(stmt)
             return SimpleNamespace()
-        row = SimpleNamespace(last_applied_version=self.last_applied) if self.last_applied else None
+        row = (SimpleNamespace(last_applied_version=self.last_applied, last_manifest=self.last_manifest)
+               if (self.last_applied or self.last_manifest) else None)
         return SimpleNamespace(scalar_one_or_none=lambda: row)
 
     async def commit(self):
@@ -103,13 +113,14 @@ def _factory(session):
     return _gen
 
 
-def _puller(priv, hub, loader, last_applied=0, pubkey=None, monkeypatch=None):
+def _puller(priv, hub, loader, last_applied=0, pubkey=None, monkeypatch=None, last_manifest=None):
     monkeypatch.setattr(settings, "fleet_api_url", "http://hub:8080")
     monkeypatch.setattr(settings, "fleet_cluster_id", "fleet-a")
     monkeypatch.setattr(settings, "fleet_oidc_token_url", "")
     monkeypatch.setattr(settings, "legacy_hs256_enabled", True)
     monkeypatch.setattr(settings, "fleet_bundle_pubkey", pubkey if pubkey is not None else _pub(priv))
-    p = FleetPolicyPuller(loader=loader, session_factory=_factory(_FakeSpokeSession(last_applied)), client=hub)
+    session = _FakeSpokeSession(last_applied, last_manifest)
+    p = FleetPolicyPuller(loader=loader, session_factory=_factory(session), client=hub)
     return p
 
 
@@ -183,6 +194,39 @@ async def test_compromised_hub_allow_all_rejected(monkeypatch) -> None:
     p = _puller(trust, _FakeHub(body), loader, pubkey=_pub(trust), monkeypatch=monkeypatch)
     out = await p.pull_once()
     assert out["applied"] is False and loader.created == []  # trust root holds
+
+
+@pytest.mark.asyncio
+async def test_retract_reconciles_dropped_key(monkeypatch) -> None:
+    # F-52: a key applied from a PRIOR bundle but absent from the new (empty) bundle is RETRACTED -> deleted.
+    # This is the regression for "a fleet push could not be reversed" — proves the spoke removes the dropped key.
+    import json
+    priv = _gen_rsa_pem()
+    loader = _FakeLoader()
+    empty = sign_bundle(_bundle(43, policies=[]), priv)  # new bundle: zero policies (the policy was retracted)
+    p = _puller(priv, _FakeHub(empty), loader, last_applied=42,
+                last_manifest=json.dumps(["default:bot"]), monkeypatch=monkeypatch)
+    out = await p.pull_once()
+    assert out["applied"] and out["version"] == 43
+    assert loader.created == []                      # nothing to add
+    assert loader.deleted == [("default", "bot")]    # the retracted key is DELETED from the spoke
+
+
+@pytest.mark.asyncio
+async def test_reconcile_only_removes_absent_keys(monkeypatch) -> None:
+    # Prior had two keys; the new bundle keeps one -> only the dropped one is deleted; the kept one is re-applied.
+    import json
+    priv = _gen_rsa_pem()
+    loader = _FakeLoader()
+    keep = [{"namespace": "default", "agent_class": "bot", "rego_source": "package x",
+             "priority": 100, "enforcement_mode": "block", "version": 2}]
+    body = sign_bundle(_bundle(50, policies=keep), priv)
+    p = _puller(priv, _FakeHub(body), loader, last_applied=42,
+                last_manifest=json.dumps(["default:bot", "default:gone"]), monkeypatch=monkeypatch)
+    out = await p.pull_once()
+    assert out["applied"]
+    assert ("default", "bot") in [(c[0], c[1]) for c in loader.created]  # kept -> re-applied
+    assert loader.deleted == [("default", "gone")]                       # only the dropped key removed
 
 
 @pytest.mark.asyncio

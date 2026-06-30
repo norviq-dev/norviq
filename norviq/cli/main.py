@@ -280,6 +280,39 @@ def config_set(ctx: click.Context, key: str, value: str) -> None:
 cli.add_command(redteam)
 
 
+@cli.group()
+def fleet() -> None:
+    """Fleet enrollment for a single-cluster install (opt-in)."""
+
+
+@fleet.command("join")
+@click.argument("token")
+@click.pass_context
+def fleet_join(ctx: click.Context, token: str) -> None:
+    """Enroll this cluster into a fleet using a hub-minted join token."""
+    data = ctx.obj["client"].post("/api/v1/fleet/join", {"token": token})
+    click.echo(f"Joined fleet as cluster '{data.get('cluster_id')}' (hub {data.get('hub_url')}).")
+    _ok("fleet.join")
+
+
+@fleet.command("leave")
+@click.pass_context
+def fleet_leave(ctx: click.Context) -> None:
+    """Leave the fleet: stop pulling + shed any pushed policy (back to single-cluster)."""
+    data = ctx.obj["client"].post("/api/v1/fleet/leave", {})
+    click.echo(f"Left fleet. Shed {len(data.get('shed_policies', []))} pushed policy/policies.")
+    _ok("fleet.leave")
+
+
+@fleet.command("status")
+@click.pass_context
+def fleet_status(ctx: click.Context) -> None:
+    """Show whether this cluster is single-cluster or enrolled in a fleet."""
+    data = ctx.obj["client"].get("/api/v1/fleet/status")
+    click.echo(f"Mode: {data.get('mode')}  cluster: {data.get('cluster_id') or '(local)'}  hub: {data.get('hub_url') or '-'}")
+    _ok("fleet.status")
+
+
 def main() -> None:
     """Run CLI entry point."""
     cli()

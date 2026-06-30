@@ -42,6 +42,8 @@ class FleetRelayForwarder:
 
     async def start(self) -> None:
         """Launch the relay loop when enabled + configured (else a no-op)."""
+        if self._task is not None and not self._task.done():
+            return  # idempotent: already running
         if not settings.fleet_enabled:
             return
         if not (settings.fleet_api_url and settings.fleet_cluster_id):
@@ -99,6 +101,7 @@ class FleetRelayForwarder:
             "name": settings.fleet_cluster_name, "endpoint": settings.fleet_cluster_endpoint,
             "region": settings.fleet_cluster_region, "labels": settings.fleet_cluster_labels,
             "residency": settings.fleet_residency, "spiffe_id": await self._spiffe_id(),
+            "console_url": settings.fleet_cluster_console_url,  # F-69: advertise this cluster's own console URL
         })
         hb.raise_for_status()
         log.debug("nrvq.fleet.heartbeat_sent", code="NRVQ-FLT-15002")

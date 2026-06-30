@@ -83,6 +83,23 @@ class FleetBundleState(Base):
     last_applied_version: Mapped[int] = mapped_column(Integer, default=0)
     applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     last_bundle_sha256: Mapped[str] = mapped_column(String(64), default="")
+    # F-52: JSON list of "namespace:agent_class" keys applied from the last bundle, so the next pull can
+    # RECONCILE — delete spoke policies that have been retracted (dropped from the bundle). null = none yet.
+    last_manifest: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class FleetJoinState(Base):
+    """Single-cluster-first: the spoke's fleet enrollment, set by `norviq fleet join <token>` and read at startup so
+    the relay/puller are (re)configured WITHOUT per-spoke Helm wiring. One row (id=1). `enabled=False` after a
+    `leave` keeps the spoke single-cluster even if env still has fleet config."""
+
+    __tablename__ = "fleet_join_state"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    enabled: Mapped[bool] = mapped_column(default=False)
+    cluster_id: Mapped[str] = mapped_column(String(255), default="")
+    hub_url: Mapped[str] = mapped_column(Text, default="")
+    bundle_pubkey: Mapped[str] = mapped_column(Text, default="")
+    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
 
 class NamespaceSettings(Base):

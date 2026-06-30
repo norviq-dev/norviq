@@ -182,6 +182,9 @@ class NorviqSettings(BaseSettings):
     fleet_cluster_name: str = ""
     fleet_cluster_region: str = ""
     fleet_cluster_endpoint: str = ""
+    # F-69: this cluster's OWN console URL, advertised to the hub on heartbeat so the hub console can deep-link
+    # "open <cluster>'s console" for a remote selection. Optional — absent -> the deep-link shows guidance instead.
+    fleet_cluster_console_url: str = ""
     fleet_relay_interval_s: int = 60
     fleet_stale_after_s: int = 180      # hub: heartbeat older than this -> cluster status "stale"
     # Relay->hub auth: OIDC client-credentials (preferred); falls back to a self-minted HS256 service

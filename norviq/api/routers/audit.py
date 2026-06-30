@@ -75,13 +75,15 @@ async def list_audit_records(
     namespace: str | None = Query(default=None),
     decision: str | None = Query(default=None),
     tool_name: str | None = Query(default=None),
+    agent: str | None = Query(default=None),  # F-53: SPIFFE/agent-id substring, filtered SERVER-SIDE over the range
     range: Literal["1h", "6h", "24h", "7d", "30d"] = Query(default="24h"),
     limit: int = Query(default=50, le=500),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
     user: dict = Depends(get_current_user),
 ) -> list[dict]:
-    """List audit records with pagination and filters."""
+    """List audit records with pagination and filters. F-53: tool_name + agent are CASE-INSENSITIVE SUBSTRING
+    matches applied server-side across the whole range (not exact-equality, not a client-side page filter)."""
     namespace = scoped_namespace(user, namespace)
     since = _since_for_range(range)
     query = (
@@ -96,7 +98,9 @@ async def list_audit_records(
     if decision:
         query = query.where(AuditLogEntry.decision == decision)
     if tool_name:
-        query = query.where(AuditLogEntry.tool_name == tool_name)
+        query = query.where(AuditLogEntry.tool_name.icontains(tool_name, autoescape=True))  # F-53: substring, not ==
+    if agent:
+        query = query.where(AuditLogEntry.agent_id.icontains(agent, autoescape=True))  # F-53: server-side SPIFFE filter
     rows = (await session.execute(query)).scalars().all()
     log.debug("nrvq.api.audit.listed", count=len(rows), code="NRVQ-API-7020")
     return [_to_dict(row) for row in rows]
