@@ -29,7 +29,15 @@ async function fleetSend<T>(path: string, method: string, body: unknown): Promis
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body)
   });
-  if (!res.ok) throw new Error(`fleet request failed: ${res.status}`);
+  if (!res.ok) {
+    // F-33: surface the server's validation detail instead of a bare status code.
+    let detail = "";
+    try {
+      const j = (await res.json()) as { detail?: unknown };
+      if (j?.detail) detail = `: ${typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail)}`;
+    } catch { /* non-JSON body */ }
+    throw new Error(`fleet request failed (${res.status})${detail}`);
+  }
   return (await res.json()) as T;
 }
 

@@ -31,6 +31,7 @@ Total documented unique codes: **217**
 | NRVQ-API-7000 | `nrvq.api.started` | `norviq/api/main.py` |
 | NRVQ-API-7001 | `nrvq.api.stopped` | `norviq/api/main.py` |
 | NRVQ-API-7010 | `nrvq.api.policies.listed` | `norviq/api/routers/policies.py` |
+| NRVQ-API-7016 | `nrvq.api.policy.reserved_scope` (F-37: rejected a direct write to the managed `__pack__` scope) | `norviq/api/routers/policies.py` |
 | NRVQ-API-7011 | `nrvq.api.policy.saved` | `norviq/api/routers/policies.py` |
 | NRVQ-API-7012 | `nrvq.api.policy.deleted` | `norviq/api/routers/policies.py` |
 | NRVQ-API-7013 | `nrvq.api.policy.rolled_back` | `norviq/api/routers/policies.py` |
@@ -43,6 +44,7 @@ Total documented unique codes: **217**
 | NRVQ-API-7030 | `nrvq.api.agents.listed` | `norviq/api/routers/agents.py` |
 | NRVQ-API-7031 | `nrvq.api.agent.trust_updated` | `norviq/api/routers/agents.py` |
 | NRVQ-API-7061 | `nrvq.api.me.served` (A3: current-user claims) | `norviq/api/routers/me.py` |
+| NRVQ-API-7071 | `nrvq.api.mitre.activity_unavailable` (F-39: audit activity overlay best-effort; DB unavailable) | `norviq/api/routers/mitre.py` |
 | NRVQ-API-7050 | `nrvq.api.asset_graph.served` | `norviq/api/routers/graphs.py` |
 | NRVQ-API-7050-ERR | `nrvq.api.asset_graph.error` | `norviq/api/routers/graphs.py` |
 | NRVQ-API-7051 | `nrvq.api.attack_paths.served` | `norviq/api/routers/graphs.py` |
@@ -160,7 +162,7 @@ Multi-cluster fleet (F045). Spoke relay + hub fleet-api. Distinct prefix from `N
 ## Full Code Index
 
 ```text
-NRVQ-API-7000, NRVQ-API-7001, NRVQ-API-7002, NRVQ-API-7010, NRVQ-API-7011, NRVQ-API-7012, NRVQ-API-7013, NRVQ-API-7014, NRVQ-API-7015, NRVQ-API-7020, NRVQ-API-7021, NRVQ-API-7022, NRVQ-API-7023, NRVQ-API-7024, NRVQ-API-7030, NRVQ-API-7031, NRVQ-API-7032, NRVQ-API-7050, NRVQ-API-7050-ERR, NRVQ-API-7051, NRVQ-API-7051-ERR, NRVQ-API-7061, NRVQ-API-7080, NRVQ-API-7081, NRVQ-API-7081-ERR, NRVQ-API-7082, NRVQ-API-7083, NRVQ-API-7084, NRVQ-API-7085, NRVQ-API-7086, NRVQ-API-7090, NRVQ-API-7091, NRVQ-API-7092, NRVQ-API-7093, NRVQ-API-7094, NRVQ-API-7095, NRVQ-API-7096, NRVQ-API-7097, NRVQ-API-7099
+NRVQ-API-7000, NRVQ-API-7001, NRVQ-API-7002, NRVQ-API-7010, NRVQ-API-7011, NRVQ-API-7012, NRVQ-API-7016, NRVQ-API-7013, NRVQ-API-7014, NRVQ-API-7015, NRVQ-API-7020, NRVQ-API-7021, NRVQ-API-7022, NRVQ-API-7023, NRVQ-API-7024, NRVQ-API-7030, NRVQ-API-7031, NRVQ-API-7032, NRVQ-API-7050, NRVQ-API-7050-ERR, NRVQ-API-7051, NRVQ-API-7051-ERR, NRVQ-API-7061, NRVQ-API-7070, NRVQ-API-7071, NRVQ-API-7080, NRVQ-API-7081, NRVQ-API-7081-ERR, NRVQ-API-7082, NRVQ-API-7083, NRVQ-API-7084, NRVQ-API-7085, NRVQ-API-7086, NRVQ-API-7090, NRVQ-API-7091, NRVQ-API-7092, NRVQ-API-7093, NRVQ-API-7094, NRVQ-API-7095, NRVQ-API-7096, NRVQ-API-7097, NRVQ-API-7099
 NRVQ-AUD-6000, NRVQ-AUD-6001, NRVQ-AUD-6002, NRVQ-AUD-6003, NRVQ-AUD-6004, NRVQ-AUD-6005, NRVQ-AUD-6006, NRVQ-AUD-6007, NRVQ-AUD-6008
 NRVQ-CLI-8000, NRVQ-CLI-8001, NRVQ-CLI-8002, NRVQ-CLI-8003, NRVQ-CLI-8004
 NRVQ-DB-9000, NRVQ-DB-9001, NRVQ-DB-9002, NRVQ-DB-9003, NRVQ-DB-9010, NRVQ-DB-9011, NRVQ-DB-9012, NRVQ-DB-9013, NRVQ-DB-9014, NRVQ-DB-9015, NRVQ-DB-9016, NRVQ-DB-9017, NRVQ-DB-9018, NRVQ-DB-9019, NRVQ-DB-9020, NRVQ-DB-9021, NRVQ-DB-9022, NRVQ-DB-9023, NRVQ-DB-9024, NRVQ-DB-9025, NRVQ-DB-9030, NRVQ-DB-9031, NRVQ-DB-9032, NRVQ-DB-9033, NRVQ-DB-DEBUG-1, NRVQ-DB-DEBUG-2, NRVQ-DB-DEBUG-2-ERR, NRVQ-DB-DEBUG-2A, NRVQ-DB-DEBUG-2B, NRVQ-DB-DEBUG-2C, NRVQ-DB-DEBUG-2D, NRVQ-DB-DEBUG-3, NRVQ-DB-DEBUG-4, NRVQ-DB-DEBUG-5, NRVQ-DB-DEBUG-6, NRVQ-DB-DEBUG-CONNECT-ARGS, NRVQ-DB-DEBUG-METADATA

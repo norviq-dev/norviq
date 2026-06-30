@@ -42,7 +42,13 @@ export function TargetSettings() {
         ) : deployments.error ? (
           <div style={{ color: "var(--block)", fontSize: 13 }}>Could not load workloads.</div>
         ) : rows.length === 0 ? (
-          <div style={{ color: "var(--text-secondary)", fontSize: 13 }}>No workloads observed in this namespace.</div>
+          // F-38: explain WHY it's empty — workloads only appear for webhook-injected sidecars; the SDK
+          // remote-PDP path observes no deployments, which is expected, not broken.
+          <div style={{ color: "var(--text-secondary)", fontSize: 13, lineHeight: 1.5 }}>
+            No norviq-injected workloads observed in <code>{namespace}</code>. Workloads appear here only when the
+            mutating webhook injects the sidecar (label <code>norviq-injection=enabled</code>). Agents using the SDK
+            in-process/remote-PDP integration are governed by policy but are not listed as injected workloads.
+          </div>
         ) : (
           <table className="tbl">
             <thead>

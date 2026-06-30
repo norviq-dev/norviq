@@ -295,11 +295,16 @@ export type MitreTechnique = {
   policies: string[];
   covered_policies: string[];
   covered: boolean;
+  observed?: number; // F-39: observed attempts from audit
+  blocked?: number; // F-39: blocked/escalated from audit
 };
 export type MitreCoverage = {
   namespace: string;
   covered: number;
   total: number;
+  observed?: number; // F-39
+  blocked?: number; // F-39
+  range?: string;
   techniques: MitreTechnique[];
 };
 

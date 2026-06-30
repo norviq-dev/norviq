@@ -8,7 +8,7 @@ import {
   X
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   fetchAllAgents,
   fetchAuditRecordsByTool,
@@ -48,6 +48,9 @@ export function Header({
   const { selectedCluster, selectedNamespace, clusters, namespaces, timeRange, setCluster, setNamespace, setTimeRange } =
     useApp();
   const navigate = useNavigate();
+  // F-29: the cluster selector only repoints the Fleet page; on every other page the data is the local cluster's.
+  // So allow switching ONLY on /fleet and show a read-only "viewing local cluster" notice elsewhere (no false affordance).
+  const onFleet = useLocation().pathname.startsWith("/fleet");
   const [open, setOpen] = useState<Dropdown | "user">(null);
   const [searchText, setSearchText] = useState("");
   const [searchFocused, setSearchFocused] = useState(false);
@@ -256,16 +259,30 @@ export function Header({
           <div className="dropdown cluster-dd">
             <div className="cluster-col">
               <div className="dd-head">CLUSTERS</div>
-              {clusters.map((c) => (
-                <button
-                  key={c}
-                  className={`dd-item${c === selectedCluster ? " sel" : ""}`}
-                  onClick={() => setCluster(c)}
-                >
-                  <span>{c}</span>
-                  {c === selectedCluster && <Check size={14} style={{ color: "var(--allow)" }} />}
-                </button>
-              ))}
+              {onFleet ? (
+                clusters.map((c) => (
+                  <button
+                    key={c}
+                    className={`dd-item${c === selectedCluster ? " sel" : ""}`}
+                    onClick={() => setCluster(c)}
+                  >
+                    <span>{c}</span>
+                    {c === selectedCluster && <Check size={14} style={{ color: "var(--allow)" }} />}
+                  </button>
+                ))
+              ) : (
+                <div style={{ padding: "6px 10px", color: "var(--text-secondary)", fontSize: 12, maxWidth: 220 }}>
+                  <div className="mono" style={{ color: "var(--text-primary)" }}>{selectedCluster || "—"} (local)</div>
+                  Viewing this cluster's data. Switch clusters on the{" "}
+                  <button
+                    className="link-btn"
+                    style={{ color: "var(--accent)", background: "none", border: 0, padding: 0, cursor: "pointer" }}
+                    onClick={() => { navigate("/fleet"); close(); }}
+                  >
+                    Fleet page
+                  </button>.
+                </div>
+              )}
             </div>
             <div className="cluster-col" style={{ borderLeft: "1px solid var(--border)" }}>
               <div className="dd-head">NAMESPACES</div>

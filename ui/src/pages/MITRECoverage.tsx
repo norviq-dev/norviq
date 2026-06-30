@@ -25,10 +25,15 @@ export function MITRECoverage() {
       <PageHead title="MITRE Coverage" subtitle={`Showing: ${namespace}`} />
       <Panel
         title="ATLAS Coverage"
-        sub="Adversarial ML techniques mapped to active Norviq policies"
+        sub="Adversarial ML techniques mapped to active policies, overlaid with observed activity from audit"
         action={
           <span className="mono" style={{ fontSize: 13, color: covered > 0 ? COVERED : "var(--text-muted)" }}>
             {covered}/{total} covered · {pct}%
+            {(coverage.data?.observed ?? 0) > 0 && (
+              <span style={{ color: "var(--text-secondary)" }}>
+                {" "}· {coverage.data?.blocked ?? 0} blocked / {coverage.data?.observed ?? 0} attempts
+              </span>
+            )}
           </span>
         }
       >
@@ -76,6 +81,12 @@ export function MITRECoverage() {
                 </span>
               </div>
               <div style={{ marginTop: 8, fontSize: 14, fontWeight: 600 }}>{t.name}</div>
+              {/* F-39: real activity overlay per technique (observed attempts + blocked) */}
+              {(t.observed ?? 0) > 0 && (
+                <div style={{ marginTop: 6, fontSize: 12, color: "var(--text-secondary)" }}>
+                  <span style={{ color: COVERED }}>{t.blocked ?? 0} blocked</span> / {t.observed ?? 0} attempts
+                </div>
+              )}
               <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 6 }}>
                 {t.policies.map((p) => {
                   const active = t.covered_policies.includes(p);

@@ -104,6 +104,17 @@ async def create_policy(body: PolicyCreate, request: Request, user: dict = Depen
     require_admin_or_service(user)
     validate_policy_create(body)
     agent_class = resolve_policy_key(body)
+    # F-37: `__pack__` is a managed scope OWNED by the packs router (materialized from NamespacePack rows). A direct
+    # write here is silently wiped the next time any pack is toggled (and reads as 0 coverage) — reject it and point
+    # at the real enable path. (`__guardrail__` is intentionally operator-loaded via this endpoint, F-14.)
+    if agent_class == "__pack__":
+        log.warning("nrvq.api.policy.reserved_scope", namespace=body.namespace, agent_class=agent_class,
+                    code="NRVQ-API-7016")
+        raise HTTPException(
+            status_code=422,
+            detail="'__pack__' is a managed scope — enable a sector pack via POST /api/v1/policy-packs/{id}/enable, "
+                   "not the generic policy endpoint (a direct write is wiped when packs are re-materialized).",
+        )
     version = await request.app.state.loader.create(
         body.namespace,
         agent_class,

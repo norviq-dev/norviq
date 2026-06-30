@@ -38,6 +38,13 @@ export function AuditLog() {
   const initialDecision = (searchParams.get("decision") as DecisionFilter | null) ?? "all";
   const [decision, setDecision] = useState<DecisionFilter>(DEC.includes(initialDecision) ? initialDecision : "all");
   const [tool, setTool] = useState(searchParams.get("tool_name") ?? "");
+  // F-35: debounce the tool-name filter — the input stays responsive but only ONE request fires after typing
+  // settles (was one request per keystroke). The filter is already server-side over the selected range.
+  const [debouncedTool, setDebouncedTool] = useState(tool);
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedTool(tool), 400);
+    return () => clearTimeout(t);
+  }, [tool]);
   const [agentFilter, setAgentFilter] = useState("");
   const [live, setLive] = useState(true);
   const [selected, setSelected] = useState<AuditRecord | null>(null);
@@ -50,11 +57,11 @@ export function AuditLog() {
         range: timeRange,
         namespace: selectedNamespace,
         decision: decision === "all" ? undefined : decision,
-        tool_name: tool || undefined,
+        tool_name: debouncedTool || undefined,
         limit: pageSize,
         offset: page * pageSize
       }),
-    [timeRange, selectedNamespace, decision, tool, page]
+    [timeRange, selectedNamespace, decision, debouncedTool, page]
   );
   const totalRecords = useApi<AuditRecord[]>(
     () =>
@@ -62,11 +69,11 @@ export function AuditLog() {
         range: timeRange,
         namespace: selectedNamespace,
         decision: decision === "all" ? undefined : decision,
-        tool_name: tool || undefined,
+        tool_name: debouncedTool || undefined,
         limit: 500,
         offset: 0
       }),
-    [timeRange, selectedNamespace, decision, tool]
+    [timeRange, selectedNamespace, decision, debouncedTool]
   );
 
   // The /ws/audit socket authenticates before accepting — pass the bearer token as a query param
@@ -93,7 +100,7 @@ export function AuditLog() {
           range: timeRange,
           namespace: selectedNamespace,
           decision: decision === "all" ? undefined : decision,
-          tool_name: tool || undefined,
+          tool_name: debouncedTool || undefined,
           limit: 10,
           offset: 0
         });
@@ -113,7 +120,7 @@ export function AuditLog() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [live, ws.connected, timeRange, selectedNamespace, decision, tool]);
+  }, [live, ws.connected, timeRange, selectedNamespace, decision, debouncedTool]);
 
   const streamed = useMemo(() => {
     const merged = [...ws.messages, ...polled];
@@ -140,7 +147,7 @@ export function AuditLog() {
 
   useEffect(() => {
     setPage(0);
-  }, [timeRange, selectedNamespace, decision, tool]);
+  }, [timeRange, selectedNamespace, decision, debouncedTool]);
 
   const columns: Array<Column<AuditRecord>> = [
     {
@@ -203,6 +210,15 @@ export function AuditLog() {
             value={agentFilter}
             onChange={(e) => setAgentFilter(e.target.value)}
           />
+        </div>
+
+        {/* F-36: visible feedback for a time-range / filter change even when the rows look similar. */}
+        <div className="muted" style={{ fontSize: 12, minHeight: 16 }}>
+          {base.loading || totalRecords.loading
+            ? "Loading…"
+            : `Showing ${rows.length} of ${totalRecords.data?.length ?? 0} record${
+                (totalRecords.data?.length ?? 0) === 1 ? "" : "s"
+              } in range (${timeRange})${debouncedTool ? ` · tool “${debouncedTool}”` : ""}`}
         </div>
 
         <DataTable

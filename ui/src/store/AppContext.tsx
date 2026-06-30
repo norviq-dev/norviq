@@ -7,7 +7,15 @@ export type Section = "security" | "intelligence" | "settings";
 export type TimeRange = "1h" | "6h" | "24h" | "7d" | "30d";
 
 export function sectionFromPath(pathname: string): Section {
-  if (pathname === "/" || pathname.startsWith("/threats") || pathname.startsWith("/asset-graph")) return "intelligence";
+  // F-34: /fleet's nav item lives under Intelligence, so its active section must be "intelligence" (was falling
+  // through to "security", which flipped the sidebar on navigation to /fleet).
+  if (
+    pathname === "/" ||
+    pathname.startsWith("/threats") ||
+    pathname.startsWith("/asset-graph") ||
+    pathname.startsWith("/fleet")
+  )
+    return "intelligence";
   if (pathname.startsWith("/settings")) return "settings";
   return "security";
 }
@@ -82,7 +90,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
         if (cancelled) return;
         setClusters(clusterIds);
         setNamespaces(info.namespaces);
-        setClusterState((prev) => (prev && clusterIds.includes(prev) ? prev : clusterIds[0] ?? ""));
+        // F-30: default the pill to the ACTUALLY-SERVED cluster (/cluster-info), not the non-deterministically
+        // ordered fleet list's [0] (which made the label flip fleet-a/b/c across navigations). The console only
+        // ever serves its own cluster's data, so this is the truthful, stable label.
+        setClusterState((prev) => (prev && clusterIds.includes(prev) ? prev : info.cluster_id || clusterIds[0] || ""));
         setNamespaceState((prev) => (info.namespaces.includes(prev) ? prev : info.namespaces[0] ?? "default"));
       } catch {
         /* unauthenticated or API down -> leave lists empty (honest empty selector) */

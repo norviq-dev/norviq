@@ -49,7 +49,7 @@ export function Fleet() {
   const [name, setName] = useState("");
   const [ns, setNs] = useState("default");
   const [agentClass, setAgentClass] = useState("");
-  const [selector, setSelector] = useState("");
+  const [selector, setSelector] = useState('{"env":"prod"}');  // F-33: sane default target (was empty -> 422)
   const [pushMsg, setPushMsg] = useState<string | null>(null);
 
   const reload = () => {
@@ -72,16 +72,21 @@ export function Fleet() {
 
   const push = async () => {
     setPushMsg(null);
+    // F-33: client-side validation — no request fires on an empty/invalid form; surface the server's detail otherwise.
+    if (!name.trim()) { setPushMsg("policy name required"); return; }
+    if (!agentClass.trim()) { setPushMsg("agent_class required (e.g. __baseline__ or a specific class)"); return; }
     let target: Record<string, string> = {};
     if (selector.trim()) {
-      try { target = JSON.parse(selector); } catch { setPushMsg("selector must be JSON, e.g. {\"env\":\"prod\"}"); return; }
+      try { target = JSON.parse(selector); } catch { setPushMsg("target must be JSON, e.g. {\"env\":\"prod\"}"); return; }
     }
+    if (Object.keys(target).length === 0) { setPushMsg("target required, e.g. {\"env\":\"prod\"} or {\"cluster_id\":\"fleet-a\"}"); return; }
     try {
       const res = await authorFleetPolicy({ name, namespace: ns, agent_class: agentClass, rego_source: rego, target_selector: target });
       setPushMsg(`Signed policy "${res.name}" v${res.version} published — clusters will pull + verify + apply.`);
       reload();
     } catch (e) {
-      setPushMsg(`Push failed (${String(e).includes("403") ? "admin role required" : String(e)})`);
+      const msg = String(e).replace(/^Error:\s*/, "");
+      setPushMsg(`Push failed: ${msg.includes("403") ? "admin role required" : msg}`);
     }
   };
 
