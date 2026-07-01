@@ -302,15 +302,16 @@ class OPAEvaluator:
     @staticmethod
     def _normalize_for_match(params: dict) -> dict:
         """F-02: confusable-skeleton string values for injection MATCHING only (original preserved for audit)."""
-        out: dict = {}
-        for key, value in params.items():
+        def _norm(value):
             if isinstance(value, str):
-                out[key] = skeleton(value)
-            elif isinstance(value, list):
-                out[key] = [skeleton(v) if isinstance(v, str) else v for v in value]
-            else:
-                out[key] = value
-        return out
+                return skeleton(value)
+            if isinstance(value, list):
+                return [_norm(v) for v in value]
+            if isinstance(value, dict):
+                return {k: _norm(v) for k, v in value.items()}
+            return value
+
+        return _norm(params)
 
     @staticmethod
     def _redacted_input(input_doc: dict) -> dict:

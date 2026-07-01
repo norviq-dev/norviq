@@ -36,18 +36,34 @@ injection_action_keywords = ["reveal", "dump", "export", "print", "show", "delet
 injection_target_keywords = ["secret", "secrets", "confidential", "credential", "credentials", "token", "tokens", "hidden credentials", "confidential data"]
 
 injection_scan_texts[t] {
-    some k
-    val := input.tool_params[k]
+    walk(input.tool_params, [_, val])
     is_string(val)
     t := lower(val)
 }
 
 # Unicode confusable/zero-width folding path provided by engine; keep this path to preserve F-02 coverage.
 injection_scan_texts[t] {
-    some k
-    val := input.tool_params_normalized[k]
+    walk(input.tool_params_normalized, [_, val])
     is_string(val)
     t := lower(val)
+}
+
+# Base64-decoded view is fed into the same LLM01 intent scanner.
+injection_scan_texts[t] {
+    decoded := b64_decoded[_]
+    t := decoded
+}
+
+injection_scan_texts_raw[t] {
+    walk(input.tool_params, [_, val])
+    is_string(val)
+    t := val
+}
+
+injection_scan_texts_raw[t] {
+    walk(input.tool_params_normalized, [_, val])
+    is_string(val)
+    t := val
 }
 
 normalized_text(s) = out {
@@ -73,16 +89,12 @@ combined_injection_compact = out {
 }
 
 injection_detected {
-    some k
-    val := input.tool_params[k]
-    is_string(val)
+    val := injection_scan_texts[_]
     pattern := injection_patterns[_]
-    contains(lower(val), pattern)
+    contains(val, pattern)
 }
 injection_detected {
-    some k
-    val := input.tool_params[k]
-    is_string(val)
+    val := injection_scan_texts_raw[_]
     pattern := injection_patterns_fullwidth[_]
     contains(val, pattern)
 }
@@ -108,14 +120,6 @@ injection_detected {
     contains_any(normalized, injection_action_keywords)
 }
 # F-02: confusable skeleton (homoglyph/zero-width) — engine folds tool_params to ASCII (match-only).
-injection_detected {
-    some k
-    val := input.tool_params_normalized[k]
-    is_string(val)
-    pattern := injection_patterns[_]
-    contains(val, pattern)
-}
-
 # SQL injection
 sql_patterns = ["drop table", "union select", "or '1'='1'", "or 1=1", "delete from", "xp_cmdshell", "exec ("]
 # F-20: clearly-destructive SQL caught in ANY tool's params (a renamed tool — run_report/read_record — carrying
@@ -313,20 +317,8 @@ chain_depth_exceeded {
     input.call_depth >= max_safe_call_depth
 }
 
-# Base64 payload (audit) + decoded-threat (block)
-base64_payload_detected {
-    some k
-    val := input.tool_params[k]
-    is_string(val)
-    count(val) >= 16
-    count(val) % 4 == 0
-    regex.match(`^[A-Za-z0-9+/]+={0,2}$`, val)
-    not regex.match(`^\d+$`, val)
-}
-
 b64_decoded[decoded] {
-    some k
-    val := input.tool_params[k]
+    walk(input.tool_params, [_, val])
     is_string(val)
     count(val) >= 16
     count(val) % 4 == 0
@@ -337,10 +329,6 @@ b64_decoded[decoded] {
 
 decoded_shell_patterns = ["rm -rf", "/etc/passwd", "/etc/shadow", "wget ", "curl ", "nc -e"]
 
-base64_decoded_threat {
-    decoded := b64_decoded[_]
-    contains(decoded, injection_patterns[_])
-}
 base64_decoded_threat {
     decoded := b64_decoded[_]
     contains(decoded, sql_patterns[_])
@@ -377,7 +365,6 @@ blocks["base64_decoded_threat"] { base64_decoded_threat }
 
 escalates["llm06_excessive_agency"] { elevated_tools[input.tool_name] }
 
-audits["base64_payload_detected"] { base64_payload_detected }
 audits["scope_violation_dangerous_tool"] { scope_violation_dangerous_tool }
 
 # reason text per rule_id (F-08). default_allow + the engine fallback are included for completeness.
@@ -393,7 +380,6 @@ reasons = {
     "cross_tenant_access": "Cross-tenant / cross-namespace access denied",
     "chain_depth_limit": "Chained tool-call depth exceeds the safe limit (agent chaining / recursion) — OWASP LLM08",
     "base64_decoded_threat": "Base64-encoded payload decodes to a known-malicious pattern",
-    "base64_payload_detected": "Base64-encoded payload — audited for visibility",
     "scope_violation_dangerous_tool": "Out-of-scope dangerous tool for this agent class",
     "default_allow": "Allowed",
 }
