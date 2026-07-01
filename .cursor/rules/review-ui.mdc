@@ -1,0 +1,282 @@
+---
+alwaysApply: false
+---
+UPDATE THE NORVIQ UI SIDEBAR AND TOP BAR.
+
+═══════════════════════════════════════════════════
+FILES TO MODIFY (read each one first before changing):
+═══════════════════════════════════════════════════
+
+UPDATE these existing files:
+- ui/src/App.tsx (update routes + wrap with context)
+- ui/src/components/layout/Sidebar.tsx (replace with dual sidebar: icon rail + panel)
+- ui/src/components/layout/Shell.tsx (update layout for new sidebar width)
+- ui/src/components/layout/Header.tsx (update top bar: namespace selector, bell badge, avatar rightmost)
+- ui/src/pages/Dashboard.tsx (change title to "Overview")
+- ui/src/store/AppContext.tsx (add activeSection + selectedNamespace state)
+
+CREATE these new files:
+- ui/src/components/layout/IconRail.tsx (48px icon rail)
+- ui/src/components/layout/ExpandedPanel.tsx (swappable panel content)
+- ui/src/pages/PolicyEditor.tsx (stub — Monaco Rego editor placeholder)
+- ui/src/pages/TargetSettings.tsx (stub — agent class/workload/namespace targeting)
+- ui/src/pages/AttackGraph.tsx (stub — if ThreatGraph.tsx doesn't cover this)
+- ui/src/pages/MITRECoverage.tsx (stub — MITRE ATLAS coverage grid)
+- ui/src/pages/AccountSettings.tsx (stub — user profile)
+- ui/src/pages/APIKeys.tsx (stub — API key management)
+- ui/src/pages/GeneralSettings.tsx (stub — enforcement mode, thresholds)
+- ui/src/pages/ConnectionSettings.tsx (stub — Redis/PostgreSQL/OTel status)
+- ui/src/pages/AboutPage.tsx (stub — version, license, links)
+
+DO NOT TOUCH these files (they work fine):
+- ui/src/api/client.ts
+- ui/src/components/charts/*
+- ui/src/components/common/*
+- ui/src/components/ui/*
+- ui/src/hooks/*
+- ui/src/lib/*
+- ui/src/main.tsx
+- ui/src/pages/AgentMonitor.tsx (keep as-is)
+- ui/src/pages/AuditLog.tsx (keep as-is)
+- ui/src/pages/PolicyCatalog.tsx (keep as-is)
+
+═══════════════════════════════════════════════════
+SIDEBAR — Zscaler-style dual sidebar with 3 sections
+═══════════════════════════════════════════════════
+
+Replace ui/src/components/layout/Sidebar.tsx with a dual sidebar: IconRail (left) + ExpandedPanel (right).
+
+ICON RAIL (ui/src/components/layout/IconRail.tsx — 48px wide, fixed, 100vh):
+
+Top: existing norviq logo mark (keep current logo from Sidebar.tsx). Make it CLICKABLE — clicking navigates to / and sets activeSection to 'intelligence'.
+
+3 section icons below logo (40x40px each, 4px gap):
+  1. Crosshair icon → sets activeSection to 'security' (DEFAULT on first load)
+  2. Brain icon → sets activeSection to 'intelligence'
+  3. Settings icon → sets activeSection to 'settings'
+
+Active section icon: background #111D35, left border 2px #3B7BF7, icon color #3B7BF7
+Inactive: no background, icon color #4A5A78
+Hover: background #0F1724
+
+Spacer (flex:1)
+
+Bottom icons (greyed out #3A4560, 36x36px, icon only):
+  - HelpCircle (support)
+  - MessageCircle (feedback)
+  - BookOpen (documentation)
+
+Use lucide-react icons:
+  Crosshair, Brain, Settings, HelpCircle, MessageCircle, BookOpen
+
+EXPANDED PANEL (ui/src/components/layout/ExpandedPanel.tsx — 200px wide, background #0A0F1E):
+
+Panel content swaps based on activeSection from AppContext.
+Use React state — NOT 3 separate panels.
+
+SECTION TITLE (top of panel, changes per section):
+  Color: #5A93FF (brighter than icon highlight)
+  Font: 10px, weight 600, letter-spacing 0.1em, uppercase
+  'security' → "SECURITY OPERATIONS"
+  'intelligence' → "INTELLIGENCE"
+  'settings' → "SETTINGS"
+
+When activeSection === 'security' (DEFAULT):
+
+  Sub-section label: ENFORCEMENT (9px, #4A5A78, uppercase, letter-spacing 0.08em)
+    - Policy Catalog (ShieldCheck icon) → /policies/catalog
+    - Policy Editor (Code icon) → /policies/editor
+    - Target Settings (Target icon) → /policies/targets
+
+  Sub-section label: MONITORING
+    - Audit Log (BarChart3 icon) → /audit
+    - Agents (Users icon) → /agents
+
+When activeSection === 'intelligence':
+
+  Sub-section label: ANALYTICS
+    - Overview (LayoutDashboard icon) → /
+
+  Sub-section label: THREAT INTEL
+    - Attack Graph (Network icon) → /threats/graph
+    - MITRE Coverage (Award icon) → /threats/mitre
+
+When activeSection === 'settings':
+
+  Sub-section label: USER
+    - Account Settings (User icon) → /settings/account
+    - API Keys (Key icon) → /settings/api-keys
+
+  Sub-section label: SYSTEM
+    - General (SlidersHorizontal icon) → /settings/general
+    - Connections (Plug icon) → /settings/connections
+
+  Sub-section label: ABOUT
+    - About Norviq (Info icon) → /settings/about
+
+  Logout button above footer:
+    LogOut icon, text #FF3B5C, hover background #1A1015
+
+Nav item styling:
+  Default: 13px, color #8494B2, padding 7px 10px, radius 6px
+  Active (matches current route): background #111D35, color #E8EDF5, weight 500
+  Hover: background #0F1724
+  Use useLocation() to determine active item
+
+FOOTER (all sections, pinned to bottom):
+  © 2026 Norviq Contributors
+  All rights reserved. · Version 0.1.0
+  Font: 9px, color #3A4560
+
+SIDEBAR.TSX — update to compose IconRail + ExpandedPanel:
+  <div style="display:flex; height:100vh; position:fixed;">
+    <IconRail />
+    <ExpandedPanel />
+  </div>
+
+═══════════════════════════════════════════════════
+TOP BAR — Fix Header.tsx
+═══════════════════════════════════════════════════
+
+Update ui/src/components/layout/Header.tsx:
+
+Layout: flex, align-items center, full width, gap 16px
+
+LEFT-CENTER: Cluster/Namespace selector
+  Display text: [production-aks / chatbot-prod ▼]
+  Pill shape: background #0C1425, border 1px #1A2744, radius 20px, padding 6px 16px
+  Server icon before text, color #3B7BF7
+  Click opens dropdown (can be stub for now):
+    CLUSTERS: production-aks, staging-aks, dev-aks
+    NAMESPACES: chatbot-prod, payments, analytics
+  Store selected namespace in AppContext
+
+CENTER: Search bar
+  Keep existing search styling
+  Add ⌘K hint at right end inside input, 11px, #4A5A78
+
+RIGHT side (THIS ORDER — left to right):
+  1. FIRST: Notification bell (Bell icon, 20px)
+     Red count badge: 16px circle, #FF3B5C background, white text "3", position absolute top-right
+  2. SECOND (RIGHTMOST): User avatar
+     32px circle, #3B7BF7 background, white initials "SP", font-weight 600, 12px
+     Click opens dropdown:
+       Santosh Puppala (#E8EDF5, 14px, weight 500)
+       admin (#8494B2, 12px)
+       ─── separator ───
+       Account Settings (User icon) → /settings/account
+       API Keys (Key icon) → /settings/api-keys
+       Documentation ↗ (ExternalLink icon) → opens new tab
+       ─── separator ───
+       Logout (LogOut icon, #FF3B5C on hover)
+     Dropdown: bg #0C1425, border 1px #1A2744, radius 10px, width 220px
+
+  IMPORTANT: Avatar must be the RIGHTMOST element. Bell is to its left.
+
+═══════════════════════════════════════════════════
+APP CONTEXT — Update store/AppContext.tsx
+═══════════════════════════════════════════════════
+
+Update ui/src/store/AppContext.tsx to include:
+
+  type Section = 'security' | 'intelligence' | 'settings'
+  
+  interface AppState {
+    activeSection: Section        // default: 'security'
+    selectedCluster: string       // default: 'production-aks'
+    selectedNamespace: string     // default: 'chatbot-prod'
+    // ... keep any existing state
+  }
+
+  Actions:
+    setActiveSection(section: Section)
+    setCluster(cluster: string)
+    setNamespace(namespace: string)
+
+═══════════════════════════════════════════════════
+ROUTING — Update App.tsx
+═══════════════════════════════════════════════════
+
+Update ui/src/App.tsx routes:
+
+  /                       → Dashboard.tsx (Overview page)
+  /policies/catalog       → PolicyCatalog.tsx (existing)
+  /policies/editor        → PolicyEditor.tsx (new stub)
+  /policies/targets       → TargetSettings.tsx (new stub)
+  /audit                  → AuditLog.tsx (existing)
+  /agents                 → AgentMonitor.tsx (existing)
+  /threats/graph          → AttackGraph.tsx (new stub or existing ThreatGraph.tsx)
+  /threats/mitre          → MITRECoverage.tsx (new stub)
+  /settings/account       → AccountSettings.tsx (new stub)
+  /settings/api-keys      → APIKeys.tsx (new stub)
+  /settings/general       → GeneralSettings.tsx (new stub)
+  /settings/connections   → ConnectionSettings.tsx (new stub)
+  /settings/about         → AboutPage.tsx (new stub)
+
+  If ThreatGraph.tsx already exists, reuse it for /threats/graph
+  If Settings.tsx already exists, reuse it for /settings/general
+
+  Wrap routes with AppContext provider
+
+  For redirects:
+    /policies → redirect to /policies/catalog
+    /threats → redirect to /threats/graph
+    /settings → redirect to /settings/general
+
+═══════════════════════════════════════════════════
+STUB PAGES — Create missing pages
+═══════════════════════════════════════════════════
+
+For each new stub page, create a minimal component:
+
+  export default function PageName() {
+    return (
+      <div>
+        <h1 style={{color:'#E8EDF5', fontSize:'24px', fontWeight:600}}>Page Title</h1>
+        <p style={{color:'#8494B2', marginTop:'8px'}}>Coming soon</p>
+      </div>
+    )
+  }
+
+Stubs needed (only if they don't already exist):
+  PolicyEditor.tsx — "Policy Editor — Rego editor coming soon"
+  TargetSettings.tsx — "Target Settings — Namespace/Workload targeting coming soon"
+  AttackGraph.tsx — "Attack Graph — Threat visualization coming soon"
+  MITRECoverage.tsx — "MITRE Coverage — ATLAS technique mapping coming soon"
+  AccountSettings.tsx — "Account Settings"
+  APIKeys.tsx — "API Keys — Key management coming soon"
+  GeneralSettings.tsx — can reuse existing Settings.tsx content
+  ConnectionSettings.tsx — "Connections — Redis/PostgreSQL/OTel status"
+  AboutPage.tsx — "About Norviq — v0.1.0, Apache 2.0"
+
+═══════════════════════════════════════════════════
+DEPENDENCY CHANGES — Existing pages affected
+═══════════════════════════════════════════════════
+
+1. Dashboard.tsx — change page title from "Security Command Center" or "Dashboard" to "Overview"
+
+2. Shell.tsx — update layout to accommodate new sidebar width (48px rail + 200px panel = 248px total).
+   Main content area: margin-left 248px or use flex layout.
+
+3. All data-fetching pages (Dashboard, AuditLog, AgentMonitor, PolicyCatalog):
+   Read selectedNamespace from AppContext
+   When namespace changes → re-fetch data for that namespace
+   Show "Showing: {namespace}" subtitle below page title, 13px, #8494B2
+
+4. Sidebar.tsx — gut the current content, replace with:
+   import IconRail from './IconRail'
+   import ExpandedPanel from './ExpandedPanel'
+   return <div style={{display:'flex'}}><IconRail/><ExpandedPanel/></div>
+
+═══════════════════════════════════════════════════
+ICONS — Use lucide-react (already installed)
+═══════════════════════════════════════════════════
+
+Import from 'lucide-react':
+  Crosshair, Brain, Settings, ShieldCheck, Code, Target,
+  BarChart3, Users, LayoutDashboard, Network, Award,
+  User, Key, SlidersHorizontal, Plug, Info,
+  HelpCircle, MessageCircle, BookOpen, LogOut,
+  Bell, ExternalLink, Server, ChevronDown, Search
+
+Write all changes to disk. Do NOT rebuild from scratch — update existing files.

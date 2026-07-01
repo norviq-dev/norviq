@@ -42,6 +42,13 @@ build-backend = "setuptools.build_meta"
 line-length = 120
 target-version = "py311"
 
+# Bandit SAST config (used by pre-commit + security.yml). Skip tests + attack payloads (which
+# intentionally contain injection strings). Baseline exclusions are triaged in
+# docs/engineering/security-baseline.md; do not broaden `skips` without a recorded rationale.
+[tool.bandit]
+exclude_dirs = ["tests", "norviq/redteam", "norviq/sdk/attacks", ".venv"]
+skips = []
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

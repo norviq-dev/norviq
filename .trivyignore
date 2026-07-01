@@ -1,0 +1,5 @@
+# Trivy ignore — CVE IDs / misconfig IDs baselined with rationale.
+# EMPTY on purpose: the first CI run's HIGH/CRITICAL findings get triaged into this file WITH a
+# rationale recorded in docs/engineering/security-baseline.md, then the whole-repo trivy/image jobs
+# ratchet to blocking. Add one ID per line, e.g.:
+#   CVE-2024-XXXXX   # base-image openssl; no fixed version yet; not reachable from our code (2026-07-01)

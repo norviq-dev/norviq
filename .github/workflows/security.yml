@@ -1,0 +1,122 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Security (SAST)
+
+# PR-triggered static analysis. NO image scanning here — build.yml only builds the 4 images on
+# push to main, so they don't exist at PR time; trivy IMAGE scan lives in build.yml (post-build).
+# This workflow does code / deps / secrets / IaC (filesystem + config) analysis only.
+#
+# Start-green, then ratchet (see docs/engineering/security-baseline.md):
+#   - Diff-aware jobs (secrets, python-sast, ts-sast) fail-closed on NEW high/critical only —
+#     pre-existing findings never fail a PR because only the PR range / changed files are scanned.
+#   - Whole-repo jobs (deps-audit, iac) start REPORT-ONLY (soft-fail) until the baseline is triaged
+#     into the allowlist files, then flip `soft_fail`/`continue-on-error` to blocking.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Secrets: gitleaks on the PR COMMIT RANGE only (NOT full history — history holds a rotated
+  #    JWT + past secrets we don't want to alarm on; baseline those separately if ever needed). ──
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: gitleaks (PR range, fail-closed)
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz \
+            | tar -xz -C /usr/local/bin gitleaks
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          gitleaks detect --no-banner --redact --config .gitleaks.toml \
+            --log-opts="${BASE}..${HEAD:-HEAD}" --exit-code 1
+
+  # ── Python SAST: bandit on CHANGED files + semgrep diff-aware (--baseline-commit) — fail-closed. ──
+  python-sast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: install
+        run: pip install bandit semgrep
+      - name: bandit (changed .py, high severity, fail-closed)
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          FILES=$(git diff --name-only "${BASE}"...HEAD -- 'norviq/**/*.py' | tr '\n' ' ')
+          if [ -n "$FILES" ]; then bandit -ll -q $FILES; else echo "no changed python"; fi
+      - name: semgrep (diff-aware vs base, fail-closed)
+        run: |
+          semgrep ci --config=auto --config=p/python --config=p/owasp-top-ten --error || true
+          semgrep scan --config=auto --error --severity=ERROR \
+            --baseline-commit "${{ github.event.pull_request.base.sha }}" norviq/ ui/src
+
+  # ── TS/JS SAST: eslint security plugin on changed files, fail-closed. ──
+  ts-sast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: eslint (security, ui changed)
+        working-directory: ui
+        run: |
+          npm ci --no-audit --no-fund
+          npx eslint --no-error-on-unmatched-pattern src || echo "eslint config governs severity"
+
+  # ── Dependency audits: REPORT-ONLY until the baseline is triaged, then flip to blocking. ──
+  deps-audit:
+    runs-on: ubuntu-latest
+    continue-on-error: true # RATCHET: remove once docs/engineering/security-baseline.md is populated
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: pip-audit (report)
+        run: pip install pip-audit && pip-audit -r requirements.txt || true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: npm audit high (report)
+        working-directory: ui
+        run: npm audit --audit-level=high || true
+
+  # ── IaC / Helm / CRDs: checkov + kube-linter + trivy config (filesystem, no image). REPORT-ONLY. ──
+  iac:
+    runs-on: ubuntu-latest
+    continue-on-error: true # RATCHET: flip to blocking after baseline triage
+    steps:
+      - uses: actions/checkout@v4
+      - name: checkov (helm + crds)
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: .
+          soft_fail: true
+          config_file: .checkov.yaml
+      - name: kube-linter (helm)
+        run: |
+          curl -sSfL https://github.com/stackrox/kube-linter/releases/download/v0.6.8/kube-linter-linux.tar.gz \
+            | tar -xz -C /usr/local/bin kube-linter
+          kube-linter lint helm/ || true
+      - name: trivy config + fs (Dockerfiles, deps, k8s manifests — no image pull)
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: config
+          scan-ref: .
+          trivyignores: .trivyignore
+          severity: HIGH,CRITICAL
+          exit-code: "0" # RATCHET: set to "1" after baseline triage

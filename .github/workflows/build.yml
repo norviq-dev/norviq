@@ -52,3 +52,18 @@ jobs:
             sanman97/norviq-engine:${{ matrix.component }}-latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Trivy IMAGE scan of the just-pushed image.
+      # (Image scanning lives HERE, not in security.yml: images only exist after this build.)
+      # REPORT-ONLY for now (exit-code "0"): the images have never been scanned, so a fail-closed
+      # gate would break the first main build→deploy. RATCHET: capture a .trivyignore baseline from
+      # the first real scan, then set exit-code "1". See docs/engineering/security-baseline.md.
+      - name: trivy image scan (${{ matrix.component }}) — report-only
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: sanman97/norviq-engine:${{ matrix.component }}-${{ github.sha }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+          exit-code: "0" # RATCHET → "1" after baseline (see security-baseline.md)

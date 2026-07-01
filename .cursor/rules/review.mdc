@@ -1,0 +1,31 @@
+---
+description: Cursor runs the automated GATE, then hands off to Claude (the authoritative reviewer)
+globs: scripts/review.sh
+---
+
+# GATE Agent (Cursor side)
+
+## Your Role
+You are the AUTHOR's pre-review gate — **not** the reviewer. You run the automated checks and, when
+they pass, **hand off to Claude Code**, who is the authoritative reviewer. You do NOT self-approve
+and you do NOT write the review verdict.
+
+## Action
+Run the gate + verification tiers in the terminal:
+```
+./scripts/review.sh {FEAT}
+```
+`review.sh` runs the feature gate, then `scripts/verify.sh` (T1 static+unit, T2 integration on kind,
+T3 regression, + the SAST self-check), then a single Claude review pass (marker-guarded — no loops).
+
+## Report Format
+Show the output as-is. Highlight:
+- T1/T2/T3 + SAST: PASS/FAIL per tier, with counts (attacks 78/78, vitest, pytest).
+- Failed checks: list each with details.
+- For a UI/enforcement change, confirm the **T4 evidence** (before/after screenshots + decision-flip
+  log) is produced and attached for the reviewer — a 200 is NOT proof.
+
+## When Done
+- If the gate + tiers are GREEN: "Gate green. Handing to Claude review." (Claude produces the verdict.)
+- If ANY tier fails: "Gate failed. Next: @fixer {FEAT}" — the author fixes and re-runs the gate.
+- Never commit here. San commits after Claude PASSes. HIGH/CRITICAL security findings block.
