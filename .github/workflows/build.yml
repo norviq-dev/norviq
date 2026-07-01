@@ -47,11 +47,13 @@ jobs:
           context: ${{ matrix.context }}
           file: ${{ matrix.context }}/${{ matrix.dockerfile }}
           push: true
+          build-args: |
+            NRVQ_GIT_SHA=${{ github.sha }}
           tags: |
             sanman97/norviq-engine:${{ matrix.component }}-${{ github.sha }}
             sanman97/norviq-engine:${{ matrix.component }}-latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
 
       # Trivy IMAGE scan of the just-pushed image.
       # (Image scanning lives HERE, not in security.yml: images only exist after this build.)

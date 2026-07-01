@@ -14,6 +14,9 @@ COPY --from=builder /deps /usr/local/lib/python3.12/site-packages
 
 # OPA arch matches the build target (TARGETARCH = amd64|arm64; AKS=amd64, local kind on Apple Silicon=arm64).
 ARG TARGETARCH=amd64
+ARG NRVQ_GIT_SHA=unknown
+ENV NRVQ_BUILD_GIT_SHA=${NRVQ_GIT_SHA}
+LABEL org.opencontainers.image.revision=${NRVQ_GIT_SHA}
 # Install OPA binary
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
     curl -L -o /usr/local/bin/opa "https://openpolicyagent.org/downloads/latest/opa_linux_${TARGETARCH}_static" && \
@@ -24,6 +27,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     rm -rf /var/lib/apt/lists/*
 
 RUN /usr/local/bin/opa version
+
+# Build provenance stamp: changing NRVQ_GIT_SHA invalidates downstream COPY cache.
+RUN printf "%s\n" "${NRVQ_GIT_SHA}" > /app/.build_git_sha
 
 COPY norviq/ norviq/
 COPY policies/ policies/
