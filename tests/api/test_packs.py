@@ -168,3 +168,28 @@ def test_disable_keeps_remaining_packs() -> None:
 def test_packs_requires_auth() -> None:
     client, _, _ = _client(rows=[])
     assert client.get("/api/v1/policy-packs").status_code in (401, 403)
+
+
+def test_enable_rejects_target_cluster_mismatch() -> None:
+    # R2 (P1) server backstop: a cluster-scoped mutation whose X-Nrvq-Target-Cluster != the served cluster is
+    # refused (409) and NOTHING is written — even with a valid admin token (direct-API bypass of the UI guard).
+    client, session, loader = _client(rows=[])
+    resp = client.post(
+        "/api/v1/policy-packs/energy-ot/enable", json={"namespace": "default"},
+        headers={**_h(), "X-Nrvq-Target-Cluster": "some-other-cluster"},
+    )
+    assert resp.status_code == 409
+    assert "target cluster" in resp.json()["detail"].lower()
+    assert session.added == [] and loader.created == []  # no write happened
+
+
+def test_enable_allows_matching_or_absent_target_cluster() -> None:
+    served = settings.fleet_cluster_id or "local"
+    # matching header -> allowed
+    c1, _, _ = _client(rows=[])
+    assert c1.post("/api/v1/policy-packs/energy-ot/enable", json={"namespace": "default"},
+                   headers={**_h(), "X-Nrvq-Target-Cluster": served}).status_code == 200
+    # absent header (SDK / existing clients) -> local intent -> allowed
+    c2, _, _ = _client(rows=[])
+    assert c2.post("/api/v1/policy-packs/energy-ot/enable", json={"namespace": "default"},
+                   headers=_h()).status_code == 200

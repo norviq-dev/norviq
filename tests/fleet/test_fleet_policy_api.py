@@ -13,9 +13,62 @@ from norviq.fleet.routers.fleet_policy import _resolve_for_cluster, report_rollo
 from tests.fleet.test_fleet_api import FakeFleetSession, _client, _headers
 
 
-def _author_body(name="p1", selector=None):
-    return {"name": name, "namespace": "default", "agent_class": "bot", "rego_source": "package x",
-            "priority": 100, "enforcement_mode": "block", "target_selector": selector or {}}
+def _author_body(name="p1", selector=None, agent_class="bot", confirm=True):
+    return {"name": name, "namespace": "default", "agent_class": agent_class, "rego_source": "package x",
+            "priority": 100, "enforcement_mode": "block", "target_selector": selector or {},
+            "confirm_fleet_wide": confirm}  # F-40: a fleet-wide selector needs confirmation
+
+
+def test_fleet_push_reserved_scope_rejected() -> None:
+    # F-40: a push to __baseline__/__pack__ must 422 (and never reach the DB) — baseline/pack are per-cluster managed.
+    for scope in ("__baseline__", "__pack__"):
+        c = _client(FakeFleetSession())
+        try:
+            r = c.post("/api/v1/fleet/policies", json=_author_body(agent_class=scope), headers=_headers(role="admin"))
+            assert r.status_code == 422
+            assert "packs" in r.json()["detail"] or "baseline" in r.json()["detail"]
+        finally:
+            c.close()
+
+
+def test_fleet_wide_push_requires_confirm() -> None:
+    # F-40: env-scoped (no cluster_id -> matches >1 cluster) without confirm -> 422; with confirm -> 200.
+    c = _client(FakeFleetSession())
+    try:
+        r = c.post("/api/v1/fleet/policies",
+                   json=_author_body(selector={"env": "prod"}, confirm=False), headers=_headers(role="admin"))
+        assert r.status_code == 422 and "confirm_fleet_wide" in r.json()["detail"]
+    finally:
+        c.close()
+    c = _client(FakeFleetSession(results=[[]]))  # existing select -> none -> version 1
+    try:
+        r = c.post("/api/v1/fleet/policies",
+                   json=_author_body(selector={"env": "prod"}, confirm=True), headers=_headers(role="admin"))
+        assert r.status_code == 200
+    finally:
+        c.close()
+
+
+def test_single_cluster_push_no_confirm_needed() -> None:
+    # F-40: a single-cluster override ({"cluster_id":…}) is not fleet-wide -> no confirm required.
+    c = _client(FakeFleetSession(results=[[]]))
+    try:
+        r = c.post("/api/v1/fleet/policies",
+                   json=_author_body(selector={"cluster_id": "fleet-a"}, confirm=False), headers=_headers(role="admin"))
+        assert r.status_code == 200
+    finally:
+        c.close()
+
+
+def test_resolve_excludes_reserved_scope() -> None:
+    # F-40 defense-in-depth: a reserved-scope policy already in the DB never lands in a bundle.
+    cluster = SimpleNamespace(id="fleet-a", labels={"env": "prod"})
+    pol = lambda name, cls: SimpleNamespace(  # noqa: E731
+        name=name, namespace="default", agent_class=cls, rego_source="R", priority=100,
+        enforcement_mode="block", version=1, target_selector={})
+    out = _resolve_for_cluster([pol("baseline", "__baseline__"), pol("pack", "__pack__"), pol("ok", "bot")], cluster)
+    classes = {o["agent_class"] for o in out}
+    assert classes == {"bot"} and "__baseline__" not in classes and "__pack__" not in classes
 
 
 def test_author_requires_admin() -> None:

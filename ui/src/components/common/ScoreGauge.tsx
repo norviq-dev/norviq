@@ -8,10 +8,21 @@ import { Panel } from "./Panel";
 
 echarts.use([GaugeChart, TooltipComponent, CanvasRenderer]);
 
-export const ScoreGauge = memo(function ScoreGauge({ score }: { score: number }) {
+export const ScoreGauge = memo(function ScoreGauge({
+  score,
+  title = "Security Score",
+  unit = "%",
+  sub
+}: {
+  score: number;
+  title?: string;
+  unit?: string;
+  sub?: string;
+}) {
   const bounded = Math.max(0, Math.min(100, score));
-  const risk = bounded > 75 ? "Low Risk" : bounded > 50 ? "Medium Risk" : "High Risk";
+  // F-63: the caption is supplied by the caller (the gauge is honest about WHAT it measures); default coloring.
   const color = bounded > 75 ? "#00e5a0" : bounded > 50 ? "#ffb020" : "#ff3b5c";
+  const caption = sub ?? (bounded > 75 ? "Low Risk" : bounded > 50 ? "Medium Risk" : "High Risk");
 
   const option = {
     series: [
@@ -54,7 +65,7 @@ export const ScoreGauge = memo(function ScoreGauge({ score }: { score: number })
   };
 
   return (
-    <Panel title="Security Score">
+    <Panel title={title}>
       <div style={{ position: "relative" }}>
         <ReactEChartsCore
           echarts={echarts}
@@ -63,8 +74,8 @@ export const ScoreGauge = memo(function ScoreGauge({ score }: { score: number })
           className="chart-box"
         />
         <div style={{ textAlign: "center", marginTop: -86 }}>
-          <div style={{ fontSize: 40, fontWeight: 700, letterSpacing: "-.02em", lineHeight: 1 }}>{bounded}</div>
-          <div style={{ fontSize: 13, color, marginTop: 2 }}>{risk}</div>
+          <div style={{ fontSize: 40, fontWeight: 700, letterSpacing: "-.02em", lineHeight: 1 }}>{bounded}{unit}</div>
+          <div style={{ fontSize: 13, color, marginTop: 2 }}>{caption}</div>
         </div>
       </div>
     </Panel>

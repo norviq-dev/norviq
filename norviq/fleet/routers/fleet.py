@@ -10,17 +10,39 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 import structlog
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
+from sqlalchemy import delete as sql_delete
+from sqlalchemy import update as sql_update
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from norviq.api.auth import get_current_user, scoped_cluster
+from norviq.api.auth import get_current_user, require_admin, require_admin_or_service, scoped_cluster
 from norviq.config import settings
 from norviq.fleet.db import fleet_get_session
-from norviq.fleet.models import AgentRollup, AuditRollup, Cluster
+from norviq.fleet.join_token import derive_bundle_pubkey, mint_join_token
+from norviq.fleet.models import AgentRollup, AuditRollup, Cluster, PolicyRollout, UsedJoinToken
 
 log = structlog.get_logger()
 router = APIRouter()
+
+
+class JoinTokenBody(BaseModel):
+    """Mint a join token for a NEW spoke (single-cluster-first enrollment)."""
+
+    cluster_id: str
+    hub_url: str = ""          # the externally-reachable hub URL the spoke will pull from (defaults to fleet_api_url)
+    name: str = ""
+    region: str = ""
+    labels: dict = {}
+    ttl_s: int = 600
+
+
+class ClaimBody(BaseModel):
+    """A spoke claims its join token (single-use) during enrollment."""
+
+    jti: str
+    cluster_id: str
 
 _RANGE_HOURS = {"1h": 1, "6h": 6, "24h": 24, "7d": 168, "30d": 720}
 
@@ -48,11 +70,100 @@ async def list_clusters(
         age = (now - c.last_heartbeat).total_seconds() if c.last_heartbeat else 1e9
         out.append({
             "id": c.id, "name": c.name, "region": c.region, "endpoint": c.endpoint,
+            "console_url": c.console_url,  # F-69: drives the hub console's "open <cluster>'s console" deep-link
             "last_heartbeat": c.last_heartbeat.isoformat() if c.last_heartbeat else None,
             "status": "healthy" if age <= settings.fleet_stale_after_s else "stale",
         })
     log.debug("nrvq.fleet.clusters_listed", count=len(out), code="NRVQ-FLT-15004")
     return out
+
+
+@router.post("/fleet/clusters/join-token")
+async def mint_cluster_join_token(
+    body: JoinTokenBody,
+    session: AsyncSession = Depends(fleet_get_session),
+    user: dict = Depends(get_current_user),
+) -> dict:
+    """Single-cluster-first enrollment: MINT a short-lived, scoped, single-use join token for a new spoke. Admin
+    only. The token carries the hub endpoint + cluster_id + the bundle PUBLIC key (trust root) — the spoke runs one
+    `norviq fleet join <token>`, no per-spoke Helm wiring. The private signing key never leaves the hub."""
+    require_admin(user)
+    if not settings.fleet_signing_key:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="hub signing key not configured")
+    pubkey = derive_bundle_pubkey(settings.fleet_signing_key)
+    hub_url = body.hub_url or settings.fleet_api_url
+    if not hub_url:
+        raise HTTPException(status_code=400, detail="hub_url required (the spoke-reachable hub endpoint)")
+    token, payload = mint_join_token(
+        secret=settings.api_secret_key, hub_url=hub_url, cluster_id=body.cluster_id, bundle_pubkey=pubkey,
+        ttl_s=body.ttl_s, cluster_name=body.name, cluster_region=body.region, labels=body.labels,
+    )
+    session.add(UsedJoinToken(
+        jti=payload["jti"], cluster_id=body.cluster_id,
+        expires_at=datetime.fromtimestamp(payload["exp"], tz=timezone.utc), claimed=False,
+    ))
+    await session.commit()
+    log.info("nrvq.fleet.join_token_minted", cluster_id=body.cluster_id, jti=payload["jti"],
+             actor=user.get("sub"), code="NRVQ-FLT-15030")
+    return {
+        "cluster_id": body.cluster_id, "token": token,
+        "join_command": f"norviq fleet join {token}",
+        "expires_at": datetime.fromtimestamp(payload["exp"], tz=timezone.utc).isoformat(),
+    }
+
+
+@router.post("/fleet/clusters/join-token/claim")
+async def claim_join_token(
+    body: ClaimBody,
+    session: AsyncSession = Depends(fleet_get_session),
+    user: dict = Depends(get_current_user),
+) -> dict:
+    """Single-use guard: a spoke claims its jti during enrollment. Rejects an unknown/expired/already-claimed jti
+    or a cluster_id mismatch (so a leaked token can't be redeemed twice or for another cluster)."""
+    require_admin_or_service(user)
+    row = (await session.execute(select(UsedJoinToken).where(UsedJoinToken.jti == body.jti))).scalar_one_or_none()
+    now = datetime.now(timezone.utc)
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown join token")
+    if row.cluster_id != body.cluster_id:
+        raise HTTPException(status_code=403, detail="join token is not scoped to this cluster")
+    if row.expires_at and row.expires_at < now:
+        raise HTTPException(status_code=410, detail="join token expired")
+    # R3: single-use is enforced by an ATOMIC conditional UPDATE (WHERE claimed=false) — not a check-then-set — so
+    # two concurrent claims of the same jti can never both succeed (the DB row-locks; exactly one flips claimed).
+    result = await session.execute(
+        sql_update(UsedJoinToken)
+        .where(UsedJoinToken.jti == body.jti, UsedJoinToken.claimed.is_(False))
+        .values(claimed=True, claimed_at=now)
+    )
+    await session.commit()
+    if result.rowcount == 0:
+        raise HTTPException(status_code=409, detail="join token already used")
+    log.info("nrvq.fleet.join_token_claimed", cluster_id=body.cluster_id, jti=body.jti, code="NRVQ-FLT-15031")
+    return {"ok": True, "cluster_id": body.cluster_id}
+
+
+@router.delete("/fleet/clusters/{cluster_id}")
+async def remove_cluster(
+    cluster_id: str,
+    session: AsyncSession = Depends(fleet_get_session),
+    user: dict = Depends(get_current_user),
+) -> dict:
+    """REMOVE/deregister a cluster from the hub (admin). Deletes the cluster + its rollups/rollout, so it drops out
+    of the fleet table and its bundle endpoint 404s. The spoke's `norviq fleet leave` stops it pulling + sheds the
+    pushed policy (reusing the F-52 retract/reconcile machinery)."""
+    require_admin(user)
+    row = (await session.execute(select(Cluster).where(Cluster.id == cluster_id))).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"cluster '{cluster_id}' not registered")
+    # R4: also delete the cluster's join-token rows (UsedJoinToken) — otherwise removing a cluster leaves stale
+    # single-use records behind (unbounded growth + confusing audit). Cluster/rollups/rollout as before.
+    for model in (AgentRollup, AuditRollup, PolicyRollout, UsedJoinToken):
+        await session.execute(sql_delete(model).where(model.cluster_id == cluster_id))
+    await session.execute(sql_delete(Cluster).where(Cluster.id == cluster_id))
+    await session.commit()
+    log.info("nrvq.fleet.cluster_removed", cluster_id=cluster_id, actor=user.get("sub"), code="NRVQ-FLT-15032")
+    return {"removed": cluster_id}
 
 
 @router.get("/fleet/agents")

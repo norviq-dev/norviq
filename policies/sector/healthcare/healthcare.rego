@@ -41,6 +41,43 @@ blocks["phi_identifier_egress"] {
     contains(lower(k), hc_phi_fields[_])
 }
 reasons["phi_identifier_egress"] = "Healthcare: PHI identifier on an egress tool blocked (HIPAA §164.312)"
+
+# F-21: destination-based egress guard (complements phi_identifier_egress, which keys on a PHI field name). An
+# export tool to an EXTERNAL destination is PHI exfil even when no PHI field is in the params (the record body
+# carries it) → block; to no/internal destination → escalate. Block precedence means a PHI-key egress still blocks.
+hc_dest_keys = {"destination", "dest", "target", "url", "endpoint", "bucket", "recipient", "to", "sink", "upload_url", "callback", "webhook"}
+# Narrow DATA-EXPORT verbs for the destination-based rule (general send/email/share stay governed by the
+# existing PHI-key phi_identifier_egress, so benign patient messaging is not over-escalated).
+hc_data_export_verbs = ["export", "upload", "dump", "extract", "backup", "sync", "sftp", "ftp", "publish", "download", "transmit"]
+
+hc_external_destination {
+    some k
+    hc_dest_keys[lower(k)]
+    v := input.tool_params[k]
+    is_string(v)
+    hc_external_pattern(lower(v))
+}
+hc_external_pattern(v) { startswith(v, "s3://") }
+hc_external_pattern(v) { startswith(v, "http://") }
+hc_external_pattern(v) { startswith(v, "https://") }
+hc_external_pattern(v) { startswith(v, "ftp://") }
+hc_external_pattern(v) { startswith(v, "sftp://") }
+hc_external_pattern(v) { startswith(v, "gs://") }
+hc_external_pattern(v) { startswith(v, "azure://") }
+hc_external_pattern(v) { contains(v, "external") }
+hc_external_pattern(v) { contains(v, "@") }
+
+blocks["phi_export_exfil_blocked"] {
+    contains(hc_tool, hc_data_export_verbs[_])
+    hc_external_destination
+}
+reasons["phi_export_exfil_blocked"] = "Healthcare: PHI export routed to an external destination — blocked (HIPAA §164.312)"
+
+escalates["phi_export_review_escalate"] {
+    contains(hc_tool, hc_data_export_verbs[_])
+    not hc_external_destination
+}
+reasons["phi_export_review_escalate"] = "Healthcare: PHI-export tool — hold for review (no/internal destination)"
 # >>> PACK-CONTRIB-END healthcare
 
 # >>> RESOLVER-BEGIN

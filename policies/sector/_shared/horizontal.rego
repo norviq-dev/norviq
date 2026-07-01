@@ -16,21 +16,22 @@ package norviq.sector.shared
 # PCI — PAN by field name or Luhn-valid value (mirrors comprehensive.rego).
 pci_keys = {"cc_number", "card_number", "credit_card"}
 
+# F-15: a PAN-named key at ANY depth (last path element is the immediate key).
 blocks["pci_card_numbers"] {
-    some k
-    input.tool_params[k]
+    walk(input.tool_params, [path, _])
+    count(path) > 0
+    k := path[count(path) - 1]
+    is_string(k)
     pci_keys[lower(k)]
 }
 blocks["pci_card_numbers"] {
-    some k
-    val := input.tool_params[k]
+    walk(input.tool_params, [_, val])
     is_string(val)
     regex.match(`^\d{13,19}$`, val)
     shared_luhn_valid(val)
 }
 blocks["pci_card_numbers"] {
-    some k
-    val := input.tool_params[k]
+    walk(input.tool_params, [_, val])
     is_string(val)
     candidate := regex.find_n(`\d{4}[ -]?\d{4}[ -]?\d{4}[ -]?\d{4}`, val, -1)[_]
     digits_only := regex.replace(candidate, `[ -]`, "")
@@ -62,16 +63,14 @@ shared_luhn_digit(d, parity) = sub {
 # >>> END SHARED-RULE pci
 
 # >>> SHARED-RULE pii
-# PII — SSN shapes in params (mirrors comprehensive.rego).
+# PII — SSN shapes in params (mirrors comprehensive.rego). F-15: walk() recurses nested objects/arrays.
 blocks["pii_detection"] {
-    some k
-    val := input.tool_params[k]
+    walk(input.tool_params, [_, val])
     is_string(val)
     regex.match(`^(\d{3}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2}|[A-Z]{2}\d{7})$`, val)
 }
 blocks["pii_detection"] {
-    some k
-    val := input.tool_params[k]
+    walk(input.tool_params, [_, val])
     is_string(val)
     regex.match(`\b\d{3}-\d{2}-\d{4}\b`, val)
 }

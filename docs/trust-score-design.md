@@ -401,6 +401,31 @@ Trust computation is designed to add minimal overhead to the policy evaluation h
 
 ---
 
+## 11b. `trust_threshold` semantics — ADVISORY, not a hard gate (F-18)
+
+A company-simulation buyer observed that a call with a caller-supplied `trust_score=0.1` against
+`settings.trust_threshold=0.7` was still **allowed** on a benign tool, and asked whether the threshold is
+enforced. It is — but as an **advisory escalation signal on a server-recomputed score**, not as a hard
+allow/deny gate. Two facts make this correct-by-design:
+
+1. **Caller-supplied `trust_score` is ignored and recomputed.** The evaluate route strips the client value
+   (`ToolCallEvent.model_validate(payload.model_dump(exclude={"trust_score"}))`, `routers/evaluate.py`) and the
+   engine recomputes trust from the agent's *observed behavior* (the signals in §3–§7). A client cannot lower
+   (or raise) its own trust by asserting a number — spoofing the field has no effect.
+2. **`trust_threshold` tunes the low-trust ESCALATION, it is not a deny line.** When the recomputed score is
+   below threshold the engine applies the `escalate_low_trust` override (a policy `block` stays block; a policy
+   `allow` becomes `escalate`); it never turns a policy `allow` into a hard `block` on score alone, and a high
+   score never overrides a policy `block`. Policy decisions (injection, PCI/PII, OT control, SoD, …) are the
+   enforcement line; trust modulates escalation/HITL pressure around them.
+
+**Recompute is visible.** The recomputed score is returned on every decision (`EvaluateResponse.trust_score`)
+and written to every audit record (`trust_score`, plus `trust_category`/`trust_signals`/`trust_dominant_signal`
+on the decision), so an operator can always see the value the engine actually used — not the value the caller
+claimed. To make trust a *harder* gate for a tenant, lower `trust_threshold` (more escalation) or author a
+namespace policy that blocks on `input.trust_category`; the score itself stays behavior-derived.
+
+---
+
 ## 12. References
 
 - OWASP LLM Top 10 (2025): https://owasp.org/www-project-top-10-for-large-language-model-applications/

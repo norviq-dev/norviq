@@ -3,6 +3,7 @@
 // its own origin (always browser-reachable). Set VITE_API_BASE_URL to an absolute origin only for a
 // split-origin deploy where the API has its own ingress (requires CORS on the API).
 import { oidcEnabled, oidcLogout } from "../auth/oidc";
+import { blockedByRemoteCluster, remoteMutationError, targetClusterHeader } from "./clusterGuard";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
 
@@ -53,9 +54,19 @@ export async function apiGet<T>(path: string): Promise<T> {
 }
 
 export async function apiSend<T>(path: string, method: "POST" | "PUT" | "DELETE", body?: unknown): Promise<T> {
+  // F-69 Stage 1: never send a cluster-scoped mutation to the LOCAL api while a REMOTE cluster is the active
+  // context — it would change the served cluster under a remote label. Refuse before the fetch (hard backstop;
+  // the UI also routes remote pages to a deep-link, but this guarantees it even if a control slips through).
+  if (blockedByRemoteCluster(method, path)) throw remoteMutationError();
+  // R2: declare the operator's intended target cluster so the SERVER can refuse a mutation aimed at another
+  // cluster (X-Nrvq-Target-Cluster). The UI guard above already blocks remote mutations, so this header equals the
+  // served cluster on any request that actually gets here — the server check is the backstop for non-SPA callers.
+  const target = targetClusterHeader();
+  const extra: Record<string, string> = { "Content-Type": "application/json" };
+  if (target) extra["X-Nrvq-Target-Cluster"] = target;
   const response = await fetch(apiUrl(path), {
     method,
-    headers: authHeaders({ "Content-Type": "application/json" }),
+    headers: authHeaders(extra),
     body: body ? JSON.stringify(body) : undefined
   });
   if (!response.ok) {
@@ -79,6 +90,7 @@ export type RuntimeSettings = {
   violation_penalty: number;
   rate_limit: number;
   sector?: string | null;
+  apply_mode?: "enforce" | "dry_run_only"; // F-51: when dry_run_only the API rejects policy applies for this ns
 };
 
 /** Effective runtime settings (config defaults + persisted overrides) for a namespace (F046). */
@@ -92,7 +104,7 @@ export async function fetchSettings(namespace?: string): Promise<RuntimeSettings
 /** Persist a per-namespace settings override (admin-only). */
 export async function saveSettings(
   namespace: string,
-  body: Partial<Pick<RuntimeSettings, "enforcement_mode" | "trust_threshold" | "violation_penalty" | "rate_limit" | "sector">>
+  body: Partial<Pick<RuntimeSettings, "enforcement_mode" | "trust_threshold" | "violation_penalty" | "rate_limit" | "sector" | "apply_mode">>
 ): Promise<RuntimeSettings> {
   const params = new URLSearchParams();
   if (namespace && namespace !== "all") params.set("namespace", namespace);
@@ -134,6 +146,28 @@ export async function disablePolicyPack(packId: string, namespace: string): Prom
   return apiSend<PackActionResult>(`/api/v1/policy-packs/${encodeURIComponent(packId)}/disable`, "POST", { namespace });
 }
 
+// F-54: view a pack's rego + author a per-namespace tighten-only override (revertable).
+export async function fetchPackRego(packId: string): Promise<{ pack_id: string; rego: string }> {
+  return apiGet(`/api/v1/policy-packs/${encodeURIComponent(packId)}/rego`);
+}
+export async function fetchPackOverride(namespace: string): Promise<{ namespace: string; rego_source: string; active: boolean; mode?: string }> {
+  return apiGet(`/api/v1/policy-packs/override?namespace=${encodeURIComponent(namespace)}`);
+}
+// allowWeaken=true is the loud, audited "Advanced: allow weakening this pack" opt-in (stored as a weaken overlay,
+// still floored by the comprehensive baseline). Default false = tighten-only (cannot weaken a pack block).
+export async function savePackOverride(namespace: string, regoSource: string, allowWeaken = false): Promise<{ namespace: string; active: boolean; mode?: string }> {
+  return apiSend(`/api/v1/policy-packs/override`, "PUT", { namespace, rego_source: regoSource, allow_weaken: allowWeaken });
+}
+export async function revertPackOverride(namespace: string): Promise<{ namespace: string; active: boolean; reverted: boolean }> {
+  return apiSend(`/api/v1/policy-packs/override?namespace=${encodeURIComponent(namespace)}`, "DELETE", undefined);
+}
+
+// F-58: the effective policy stack governing a (namespace, agent_class) — derived from the real evaluator.
+export type EffectiveLayer = { scope: string; label: string; priority: number; overlay: boolean };
+export async function fetchEffectivePolicy(namespace: string, agentClass: string): Promise<{ namespace: string; agent_class: string; layers: EffectiveLayer[]; note?: string }> {
+  return apiGet(`/api/v1/policies/effective?namespace=${encodeURIComponent(namespace)}&agent_class=${encodeURIComponent(agentClass)}`);
+}
+
 export type VersionInfo = { version: string; license: string };
 
 /** The single-source product version + license (F046). */
@@ -172,6 +206,8 @@ export type RedteamResult = {
   attack_id: string;
   attack_name: string;
   category: string;
+  agent_class?: string; // F-44: the identity this scenario was evaluated against
+  namespace?: string;
   expected: string;
   actual: string;
   rule_id: string;
@@ -181,6 +217,8 @@ export type RedteamResult = {
 };
 export type RedteamReport = {
   run_id?: string;
+  namespace?: string;
+  targets?: string[]; // F-44: the seeded agent classes the suite was run against
   total: number;
   passed: number;
   failed: number;
@@ -191,6 +229,12 @@ export type RedteamReport = {
 /** The red-team attack catalog (F017). */
 export async function fetchRedteamCatalog(): Promise<RedteamAttack[]> {
   return apiGet<RedteamAttack[]>("/api/v1/redteam/catalog");
+}
+
+/** F-44: the real agent classes seeded in a namespace, for the target selector. */
+export async function fetchRedteamTargets(namespace?: string): Promise<{ namespace: string; targets: string[] }> {
+  const q = namespace && namespace !== "all" ? `?namespace=${encodeURIComponent(namespace)}` : "";
+  return apiGet<{ namespace: string; targets: string[] }>(`/api/v1/redteam/targets${q}`);
 }
 
 /** Run the full red-team suite against the live evaluator and return the real report. */
@@ -233,6 +277,7 @@ export async function fetchAuditRecords(filters: {
   namespace?: string;
   decision?: string;
   tool_name?: string;
+  agent?: string; // F-53: SPIFFE/agent-id substring, filtered server-side over the range
   limit?: number;
   offset?: number;
 }): Promise<
@@ -295,11 +340,16 @@ export type MitreTechnique = {
   policies: string[];
   covered_policies: string[];
   covered: boolean;
+  observed?: number; // F-39: observed attempts from audit
+  blocked?: number; // F-39: blocked/escalated from audit
 };
 export type MitreCoverage = {
   namespace: string;
   covered: number;
   total: number;
+  observed?: number; // F-39
+  blocked?: number; // F-39
+  range?: string;
   techniques: MitreTechnique[];
 };
 
@@ -310,10 +360,24 @@ export async function fetchMitreCoverage(namespace?: string): Promise<MitreCover
   return apiGet<MitreCoverage>(query ? `/api/v1/mitre/coverage?${query}` : "/api/v1/mitre/coverage");
 }
 
-export type CategoryCoverageItem = { category: string; covered: number; total: number; score: number };
-export type CoverageByCategory = { namespace: string; coverage_pct: number; categories: CategoryCoverageItem[] };
+export type CategoryCoverageItem = {
+  category: string;
+  covered: number;
+  total: number;
+  score: number; // F-44/F-45: rules PRESENT (loaded), not efficacy
+  observed?: number; // audit attempts touching this category's rules
+  blocked?: number; // of those, how many were blocked/escalated
+  effective?: boolean; // at least one rule in the category has actually blocked traffic
+};
+export type CoverageByCategory = {
+  namespace: string;
+  coverage_pct: number;
+  basis?: string; // "rules_present" — score is presence, not a protection guarantee
+  categories: CategoryCoverageItem[];
+};
 
-/** Real policy coverage per risk category (F046): covered = mapped rules present in the loaded rego. */
+/** Policy coverage per risk category (F046): score = mapped rules PRESENT in the loaded rego (not efficacy;
+ * F-44/F-45). observed/blocked/effective overlay real audit activity. */
 export async function fetchCoverageByCategory(namespace?: string): Promise<CoverageByCategory> {
   const params = new URLSearchParams();
   if (namespace && namespace !== "all") params.set("namespace", namespace);
@@ -414,8 +478,8 @@ export async function applyPolicy(
     target_kind?: string;
     enforcement_mode: string;
   }
-): Promise<{ applied?: boolean }> {
-  return apiSend<{ applied?: boolean }>(
+): Promise<{ applied?: boolean; policy?: string; target_type?: string; enforcement_mode?: string }> {
+  return apiSend(
     `/api/v1/policies/${encodeURIComponent(namespace)}/${encodeURIComponent(agentClass)}/apply`,
     "POST",
     data

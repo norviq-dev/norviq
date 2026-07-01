@@ -10,6 +10,8 @@ from pydantic import BaseModel, Field
 
 from norviq.api.audit_hub import audit_record
 from norviq.api.auth import get_current_user, scoped_namespace
+from norviq.config import settings
+from norviq.engine.masking import mask_params
 from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.events import ToolCallEvent
 
@@ -57,7 +59,12 @@ async def evaluate_tool_call(
     # event.agent_identity.namespace, so audit data is tenant-scoped like everything else.
     emitter = getattr(request.app.state, "emitter", None)
     if emitter is not None:
-        emitter.emit(event, decision)
+        # F-19 (opt-in, default OFF): persist MASKED tool_params for event reconstruction (PCI 10.3) without
+        # storing raw PAN/PII. Off by default so the audit payload is unchanged for everyone who hasn't opted in.
+        audit_payload = None
+        if settings.audit_capture_masked_params:
+            audit_payload = {"masked_params": mask_params(event.tool_params)}
+        emitter.emit(event, decision, payload=audit_payload)
     # Fan the decision out to live /ws/audit subscribers (in-process, non-blocking).
     hub = getattr(request.app.state, "audit_hub", None)
     if hub is not None:

@@ -12,9 +12,10 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from norviq.api.auth import get_current_user, require_admin, require_admin_or_service, scoped_namespace
+from norviq.api.auth import get_current_user, require_admin, require_admin_or_service, require_target_cluster, scoped_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
+from norviq.api.routers.settings_router import assert_apply_allowed  # F-51: shared dry-run-only gate
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -85,6 +86,55 @@ async def list_policies(
     return rows
 
 
+_LAYER_LABELS = {
+    "__baseline__": "namespace baseline",
+    "__pack__": "sector pack (overlay)",
+    "__guardrail__": "tool-allowlist guardrail (overlay)",
+    "__pack_override__": "pack override (overlay)",
+}
+
+
+@router.get("/policies/effective")
+async def effective_policy(
+    request: Request,
+    namespace: str = Query("default"),
+    agent_class: str = Query(...),
+    user: dict = Depends(get_current_user),
+) -> dict:
+    """F-58: the EFFECTIVE policy stack governing a (namespace, agent_class) right now — the ordered candidate
+    layers the evaluator ACTUALLY resolves. Strictly read-only/derived: it calls the same
+    `evaluator._collect_candidates` enforcement uses, so it can never drift from real behaviour."""
+    from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
+
+    namespace = scoped_namespace(user, namespace) or "default"
+    evaluator = request.app.state.evaluator
+    event = ToolCallEvent(
+        tool_name="__effective_probe__", tool_params={},
+        agent_identity=AgentIdentity(
+            spiffe_id=f"spiffe://norviq/ns/{namespace}/sa/{agent_class}", namespace=namespace, agent_class=agent_class),
+        session_id="effective",
+    )
+    candidates = await evaluator._collect_candidates(event)
+    layers = []
+    for c in candidates:
+        key = str(c["key"])
+        ns, _, ac = key.partition(":")
+        if ac == agent_class:
+            label = "agent-class policy"
+        elif ns == "__cluster__" and ac == "__baseline__":
+            label = "cluster baseline (comprehensive)"
+        else:
+            label = _LAYER_LABELS.get(ac, ac)
+        layers.append({
+            "scope": key, "label": label, "priority": int(c.get("priority", 100)),
+            "overlay": evaluator._is_overlay(key),
+        })
+    log.info("nrvq.api.policies.effective", namespace=namespace, agent_class=agent_class,
+             layers=len(layers), code="NRVQ-API-7100")
+    return {"namespace": namespace, "agent_class": agent_class, "layers": layers,
+            "note": "overlay layers are tighten-only (can only make a decision stricter)"}
+
+
 @router.get("/policies/{namespace}/{agent_class}")
 async def get_policy(
     namespace: str, agent_class: str, request: Request, user: dict = Depends(get_current_user)
@@ -99,11 +149,22 @@ async def get_policy(
 
 
 @router.post("/policies")
-async def create_policy(body: PolicyCreate, request: Request, user: dict = Depends(get_current_user)) -> dict:
+async def create_policy(body: PolicyCreate, request: Request, user: dict = Depends(get_current_user), _target: None = Depends(require_target_cluster)) -> dict:
     """Create or update a policy (admin, or the webhook controller's service identity)."""
     require_admin_or_service(user)
     validate_policy_create(body)
     agent_class = resolve_policy_key(body)
+    # F-37: `__pack__` is a managed scope OWNED by the packs router (materialized from NamespacePack rows). A direct
+    # write here is silently wiped the next time any pack is toggled (and reads as 0 coverage) — reject it and point
+    # at the real enable path. (`__guardrail__` is intentionally operator-loaded via this endpoint, F-14.)
+    if agent_class in ("__pack__", "__pack_override__"):
+        log.warning("nrvq.api.policy.reserved_scope", namespace=body.namespace, agent_class=agent_class,
+                    code="NRVQ-API-7016")
+        raise HTTPException(
+            status_code=422,
+            detail=f"'{agent_class}' is a managed scope — enable a sector pack via POST /api/v1/policy-packs/{{id}}/enable "
+                   "and customize it via PUT /api/v1/policy-packs/override, not the generic policy endpoint.",
+        )
     version = await request.app.state.loader.create(
         body.namespace,
         agent_class,
@@ -219,6 +280,7 @@ async def rollback_policy(
     body: RollbackRequest,
     request: Request,
     user: dict = Depends(get_current_user),
+    _target: None = Depends(require_target_cluster),
 ) -> dict:
     """Rollback policy to a previous version."""
     require_admin(user)
@@ -270,6 +332,7 @@ async def dry_run_policy(
     request: Request,
     session: AsyncSession = Depends(get_session),
     user: dict = Depends(get_current_user),
+    _target: None = Depends(require_target_cluster),
 ) -> dict:
     """Validate the submitted rego (compile + sample decision) and report recent block-rate."""
     _ = user  # authenticated; any role may dry-run (read-only simulation)
@@ -306,9 +369,23 @@ async def apply_policy(
     body: ApplyRequest,
     request: Request,
     user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+    _target: None = Depends(require_target_cluster),
 ) -> dict:
     """Apply a saved policy to a target scope."""
     require_admin(user)
+    # F-42: the create path guards reserved scopes (NRVQ-API-7016) but apply did not — apply to __pack__/__baseline__
+    # returned 200, defeating the invariant. Reject the managed scopes here too (baseline = seed, pack = packs API).
+    if agent_class in ("__baseline__", "__pack__", "__pack_override__"):
+        log.warning("nrvq.api.policy.reserved_scope", namespace=namespace, agent_class=agent_class,
+                    actor=user.get("sub"), code="NRVQ-API-7016")
+        raise HTTPException(
+            status_code=422,
+            detail=f"'{agent_class}' is a managed scope and cannot be applied via this endpoint — change a baseline "
+                   "via its seed and sector packs via POST /api/v1/policy-packs/{id}/enable.",
+        )
+    # F-51: high-assurance namespaces can be set dry-run-only — the API rejects applies (server-enforced, admin too).
+    await assert_apply_allowed(session, body.target_namespace)
     loader = request.app.state.loader
     rego = loader.get_current(namespace, agent_class)
     if not rego:

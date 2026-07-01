@@ -93,6 +93,12 @@ class NorviqSettings(BaseSettings):
     debug_opa_logging: bool = Field(default=False, validation_alias=AliasChoices("DEBUG_OPA_LOGGING", "DEBUG_OPA"))
     evaluator_rate_limit_per_window: int = 60
     evaluator_rate_limit_window_s: int = 60
+    # F-23: exempt read-like tools from the per-identity rate limiter so a benign read spike isn't denied
+    # (a legitimate availability hit under load). Write/destructive tools are still rate-limited (fail-safe).
+    evaluator_rate_limit_read_exempt: bool = True
+    evaluator_rate_limit_read_prefixes: tuple[str, ...] = (
+        "get_", "read_", "list_", "query_", "fetch_", "describe_", "view_", "monitor_", "poll_", "report_", "search_",
+    )
     evaluator_delete_prefix: str = "delete"
     evaluator_wildcard_value: str = "*"
     evaluator_sql_deny_keywords: tuple[str, ...] = (
@@ -103,6 +109,9 @@ class NorviqSettings(BaseSettings):
         "; --",
     )
     evaluator_non_cacheable_rules: tuple[str, ...] = ("rate_limit_exceeded", "escalate_low_trust")
+    # F-22: OPT-IN, default-OFF output-DLP. Norviq's PEP is INPUT-only; when enabled the SDK adapter scans an
+    # allowed tool's RETURN value and redacts PAN/SSN before it propagates (minimal; full output-DLP is roadmap).
+    sdk_output_dlp_enabled: bool = False
     pg_url: str = "postgresql://norviq:norviq_dev@localhost:5432/norviq"
     db_ssl_mode: str = Field(
         default="prefer",
@@ -115,6 +124,12 @@ class NorviqSettings(BaseSettings):
     # Recycle pooled DB connections older than this (bounds staleness; pairs with pool_pre_ping).
     db_pool_recycle_s: int = 300
     audit_retention_days: int = 365
+    # F-19 (opt-in, default OFF): capture MASKED tool_params on the audit record (PAN->****1111,
+    # SSN->***-**-6789, secrets->****) for event reconstruction (PCI 10.3) without storing raw PII/PAN.
+    audit_capture_masked_params: bool = False
+    # F-19 (opt-in): HMAC-SHA256 key for the tamper-evident /audit/export?signed=true manifest. Empty =
+    # the signed export still hash-chains (integrity) but the manifest signature is null (no shared-key auth).
+    audit_export_signing_key: str = ""
     otel_endpoint: str = "http://localhost:4317"
     otel_enabled: bool = True
     otel_disabled: bool = False
@@ -167,6 +182,9 @@ class NorviqSettings(BaseSettings):
     fleet_cluster_name: str = ""
     fleet_cluster_region: str = ""
     fleet_cluster_endpoint: str = ""
+    # F-69: this cluster's OWN console URL, advertised to the hub on heartbeat so the hub console can deep-link
+    # "open <cluster>'s console" for a remote selection. Optional — absent -> the deep-link shows guidance instead.
+    fleet_cluster_console_url: str = ""
     fleet_relay_interval_s: int = 60
     fleet_stale_after_s: int = 180      # hub: heartbeat older than this -> cluster status "stale"
     # Relay->hub auth: OIDC client-credentials (preferred); falls back to a self-minted HS256 service

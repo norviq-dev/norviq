@@ -28,6 +28,11 @@ from norviq.fleet.schemas import PolicyAuthorBody, RolloutReportBody
 log = structlog.get_logger()
 router = APIRouter()
 
+# F-40: scopes a fleet push must NEVER replace — a cluster's baseline (comprehensive) and its materialized sector
+# pack are managed PER-CLUSTER (the seed / packs-enable path), not by fleet distribution. A push that targeted
+# __baseline__ once wiped comprehensive across all three prod clusters.
+_RESERVED_SCOPES = {"__baseline__", "__pack__"}
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -41,6 +46,24 @@ async def author_policy(
 ) -> dict:
     """Create/update a fleet policy (admin only). Re-authoring the same name bumps its version."""
     require_admin(user)  # authoring allow/deny rules is admin-only (service/viewer -> 403)
+    # F-40 (1): a fleet push must not replace a managed per-cluster scope (baseline/pack) fleet-wide.
+    if body.agent_class in _RESERVED_SCOPES:
+        log.warning("nrvq.fleet.policy.reserved_scope", name=body.name, agent_class=body.agent_class,
+                    actor=user.get("sub"), code="NRVQ-FLT-15023")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"'{body.agent_class}' is a managed per-cluster scope and cannot be fleet-pushed — change a "
+                   "cluster's baseline via its seed and sector packs via the packs API (POST /policy-packs/{id}/enable).",
+        )
+    # F-40 (2): a fleet-WIDE push (no cluster_id -> matches >1 cluster) needs an explicit confirm.
+    if not body.target_selector.get("cluster_id") and not body.confirm_fleet_wide:
+        log.warning("nrvq.fleet.policy.confirm_required", name=body.name, selector=body.target_selector,
+                    actor=user.get("sub"), code="NRVQ-FLT-15027")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="fleet-wide push (no cluster_id in target_selector — matches more than one cluster) requires "
+                   "confirm_fleet_wide=true.",
+        )
     # If the policy targets a specific cluster (override), enforce cluster scope on that target.
     if body.target_selector.get("cluster_id"):
         scoped_cluster(user, body.target_selector["cluster_id"])
@@ -64,11 +87,51 @@ async def author_policy(
     return {"name": body.name, "version": version}
 
 
+@router.get("/fleet/policies")
+async def list_policies(
+    session: AsyncSession = Depends(fleet_get_session),
+    user: dict = Depends(get_current_user),
+) -> list[dict]:
+    """List authored fleet policies (so the console can show what's pushed + offer Retract). Admin/service."""
+    require_admin_or_service(user)
+    rows = list((await session.execute(select(FleetPolicy))).scalars().all())
+    return [{
+        "name": p.name, "namespace": p.namespace, "agent_class": p.agent_class,
+        "target_selector": p.target_selector, "enforcement_mode": p.enforcement_mode,
+        "priority": p.priority, "version": p.version,
+        "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+    } for p in sorted(rows, key=lambda r: r.name)]
+
+
+@router.delete("/fleet/policies/{name}")
+async def retract_policy(
+    name: str,
+    session: AsyncSession = Depends(fleet_get_session),
+    user: dict = Depends(get_current_user),
+) -> dict:
+    """F-52: RETRACT a fleet policy — delete the row so it leaves every cluster's bundle. On the next pull each
+    affected spoke RECONCILES (deletes the dropped key), so a push is fully reversible. Admin only."""
+    require_admin(user)
+    existing = (await session.execute(select(FleetPolicy).where(FleetPolicy.name == name))).scalar_one_or_none()
+    if existing is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"fleet policy '{name}' not found")
+    sel = existing.target_selector or {}
+    await session.delete(existing)
+    await session.commit()
+    log.info("nrvq.fleet.policy_retracted", name=name, selector=sel, actor=user.get("sub"), code="NRVQ-FLT-15029")
+    return {"retracted": name, "target_selector": sel,
+            "note": "the next bundle pull (<=1 interval) reconciles each affected spoke"}
+
+
 def _resolve_for_cluster(policies: list[FleetPolicy], cluster: Cluster) -> list[dict]:
     """Selector match (target_selector subset of cluster.labels) + per-cluster override precedence."""
     labels = cluster.labels or {}
     chosen: dict[tuple[str, str], tuple[bool, FleetPolicy]] = {}  # (ns,class) -> (is_override, policy)
     for p in policies:
+        # F-40 defense-in-depth: a reserved-scope policy already in the DB (e.g. a pre-guard or neutralized row)
+        # must never be distributed in a bundle — baseline/pack are per-cluster managed, never fleet-pushed.
+        if p.agent_class in _RESERVED_SCOPES:
+            continue
         sel = p.target_selector or {}
         is_override = sel.get("cluster_id") == cluster.id
         if is_override:

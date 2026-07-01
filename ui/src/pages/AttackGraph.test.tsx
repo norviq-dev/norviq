@@ -39,6 +39,22 @@ describe("AttackGraph page", () => {
     await waitFor(() => expect(screen.getByText(/total: 1/i)).toBeInTheDocument());
   });
 
+  it("F-31: a severity filter that matches 0 (but paths exist) shows '0 of N', NOT the recompute no-data state", async () => {
+    const lowPath = { ...PATH, path_id: "p2", severity: "low" };
+    server.use(http.get("/api/v1/attack-paths", () => HttpResponse.json({ paths: [lowPath], nodes: [] })));
+    renderPage();
+    await waitFor(() => expect(screen.getByText(/total: 1/i)).toBeInTheDocument());
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "high" } });
+    expect(await screen.findByText(/0 of 1 path/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Recompute attack paths/i)).not.toBeInTheDocument();
+  });
+
+  it("F-31: genuinely zero stored paths shows the recompute no-data state", async () => {
+    server.use(http.get("/api/v1/attack-paths", () => HttpResponse.json({ paths: [], nodes: [] })));
+    renderPage();
+    expect(await screen.findByText(/Recompute attack paths/i)).toBeInTheDocument();
+  });
+
   it("Simulate runs a REAL evaluation (calls /api/v1/evaluate) and renders the decision (#6)", async () => {
     let evaluateCalled = 0;
     server.use(

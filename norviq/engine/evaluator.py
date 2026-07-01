@@ -22,6 +22,7 @@ import structlog
 from norviq.config import settings
 from norviq.engine.cache import RedisCache
 from norviq.engine.confusables import skeleton
+from norviq.engine.masking import mask_params
 from norviq.engine.graph.asset_graph import AssetGraphBuilder
 from norviq.engine.graph.store import GraphStore
 from norviq.engine.opa_client import OpaClient, managed_package, rewrite_package, sanitize_key
@@ -34,6 +35,10 @@ from norviq.sdk.core.events import ToolCallEvent
 from norviq.sdk.core.trust import TrustScore
 
 log = structlog.get_logger()
+
+
+class InvalidSpiffeIdentity(ValueError):
+    """Raised when an agent's SPIFFE id fails format validation (F-11: named fallback attribution)."""
 
 
 class OPAEvaluator:
@@ -97,6 +102,8 @@ class OPAEvaluator:
             if cached is not None:
                 cache_hit = True
                 decision = await self._handle_cache_hit(event, cached, start, trust_result)
+                # F-13: stamp the real measured end-to-end latency so the audit record reflects it (not 0.0).
+                decision = decision.model_copy(update={"latency_ms": round((time.monotonic() - start) * 1000, 2)})
                 await self._persist_behavior(event, decision, trust_result)
                 self._record_telemetry(event, decision, start, cache_hit, span)
                 return decision
@@ -151,6 +158,10 @@ class OPAEvaluator:
             if base_decision.rule_id not in settings.evaluator_non_cacheable_rules:
                 await self._cache.set_eval(event.agent_identity.namespace, event.agent_identity.agent_class, cache_tool, base_decision)
             decision = self._apply_trust_overrides(base_decision, trust_result, event.event_id)
+            decision = self._ensure_block_attribution(decision, event.event_id)  # F-24
+            # F-13: the multi-candidate path builds per-candidate decisions with latency_ms=0.0; stamp the real
+            # measured end-to-end latency on the winning decision so every audit record carries it (AU-12/SLA).
+            decision = decision.model_copy(update={"latency_ms": round((time.monotonic() - start) * 1000, 2)})
             await self._persist_behavior(event, decision, trust_result)
             self._record_telemetry(event, decision, start, cache_hit, span)
             return decision
@@ -160,10 +171,16 @@ class OPAEvaluator:
             decision = self._timeout_decision(event, elapsed_ms)
             self._record_telemetry(event, decision, start, cache_hit, span)
             return decision
+        except InvalidSpiffeIdentity:
+            elapsed_ms = (time.monotonic() - start) * 1000
+            log.warning("nrvq.engine.invalid_identity", event_id=event.event_id, code="NRVQ-ENG-2006")
+            decision = self._invalid_identity_decision(event, elapsed_ms)
+            self._record_telemetry(event, decision, start, cache_hit, span)
+            return decision
         except Exception as exc:
             elapsed_ms = (time.monotonic() - start) * 1000
             log.error("nrvq.engine.error", event_id=event.event_id, error=str(exc), code="NRVQ-ENG-2000")
-            decision = self._fallback_decision(event, elapsed_ms)
+            decision = self._ensure_block_attribution(self._fallback_decision(event, elapsed_ms), event.event_id)
             self._record_telemetry(event, decision, start, cache_hit, span)
             return decision
         finally:
@@ -204,10 +221,33 @@ class OPAEvaluator:
         trust_result: TrustResult,
     ) -> PolicyDecision:
         """Apply cache-hit controls before returning a cached decision."""
-        if cached.rule_id == "default_allow" and await self._is_rate_limited(event.agent_identity.spiffe_id):
+        if (cached.rule_id == "default_allow" and not self._is_rate_limit_exempt(event.tool_name)
+                and await self._is_rate_limited(event.agent_identity.spiffe_id)):
             return await self._rate_limit_decision(event, start)
         decision = self._apply_trust_overrides(cached, trust_result, event.event_id)
         log.debug("nrvq.engine.cache_hit", event_id=event.event_id, code="NRVQ-ENG-2004")
+        return self._ensure_block_attribution(decision, event.event_id)
+
+    @staticmethod
+    def _is_rate_limit_exempt(tool_name: str) -> bool:
+        """F-23: read-like tools are exempt from the per-identity rate limiter (benign read spike not denied)."""
+        if not settings.evaluator_rate_limit_read_exempt:
+            return False
+        name = (tool_name or "").lower()
+        if name.endswith("_status") or name.endswith("_read"):
+            return True
+        return any(name.startswith(p) for p in settings.evaluator_rate_limit_read_prefixes)
+
+    @staticmethod
+    def _ensure_block_attribution(decision: PolicyDecision, event_id: str) -> PolicyDecision:
+        """F-24: a block must NEVER carry an empty or allow-rule rule_id (the audit/UI mislabels). The OTel span
+        path is already correct; this clamps the persisted/audited decision and alarms if an unattributed block
+        ever reaches here."""
+        if decision.decision == "block" and decision.rule_id in ("", "default_allow"):
+            log.warning("nrvq.engine.unattributed_block", event_id=event_id, prior_rule=decision.rule_id,
+                        code="NRVQ-ENG-2057")
+            return decision.model_copy(update={"rule_id": "unattributed_block",
+                                               "reason": decision.reason or "Blocked (attribution unavailable)"})
         return decision
 
     async def _trust(self, spiffe_id: str) -> TrustScore:
@@ -247,7 +287,9 @@ class OPAEvaluator:
         )
         if trust_result.category == "frozen":
             log.warning("nrvq.engine.trust.override_block", event_id=event_id, code="NRVQ-ENG-2046")
-            return decision.model_copy(update={"decision": "block", "reason": "Agent trust frozen — all tool calls blocked"})
+            # F-24: name the rule_id (was keeping the prior allow rule_id -> block/default_allow in the audit).
+            return decision.model_copy(update={"decision": "block", "rule_id": "trust_frozen",
+                                               "reason": "Agent trust frozen — all tool calls blocked"})
         if trust_result.category == "low" and decision.decision == "allow":
             reason = f"Low trust ({trust_result.score:.2f}): {trust_result.dominant_signal}"
             log.warning("nrvq.engine.trust.override_escalate", event_id=event_id, code="NRVQ-ENG-2045")
@@ -270,10 +312,23 @@ class OPAEvaluator:
                 out[key] = value
         return out
 
+    @staticmethod
+    def _redacted_input(input_doc: dict) -> dict:
+        """F-28: mask tool_params before any log so raw PII/PAN/PHI can never reach a logger (PCI 3.4 / HIPAA)."""
+        safe = dict(input_doc)
+        if "tool_params" in safe:
+            safe["tool_params"] = mask_params(safe.get("tool_params"))
+        if "tool_params_normalized" in safe:
+            safe["tool_params_normalized"] = mask_params(safe.get("tool_params_normalized"))
+        return safe
+
     def _build_input(self, event: ToolCallEvent, trust_result: TrustResult) -> dict:
         """Build OPA input payload from tool event and trust state."""
         return {
             "tool_name": event.tool_name,
+            # F-09: confusable-skeleton of the tool NAME (homoglyph/zero-width evasion on the name itself,
+            # e.g. Cyrillic "open_bгeaker"); rego matches control verbs/surface against this for parity.
+            "tool_name_normalized": skeleton(event.tool_name),
             "tool_params": event.tool_params,
             # F-02: matching-only confusable skeleton (homoglyph/zero-width evasion); rego scans this for injection.
             "tool_params_normalized": self._normalize_for_match(event.tool_params),
@@ -510,7 +565,7 @@ class OPAEvaluator:
                 log.info(
                     "nrvq.opa.input",
                     rego_preview=rego[:200],
-                    input_doc=str(opa_input)[:500],
+                    input_doc=str(self._redacted_input(opa_input))[:500],  # F-28: masked even when debug on
                     package_name=package_name or "",
                     query=query,
                     code="NRVQ-ENG-DEBUG-OPA-IN",
@@ -577,7 +632,10 @@ class OPAEvaluator:
         """Evaluate one candidate policy source and return typed decision."""
         try:
             input_doc = self._build_input(event, trust_result)
-            log.info("nrvq.eval.opa_input", input_doc=str(input_doc)[:500], code="NRVQ-ENG-DEBUG-INPUT")
+            # F-28: gated AND masked — raw tool_params never logged (was an ungated INFO leak of SSN/PAN/PHI).
+            if settings.debug_opa_logging:
+                log.info("nrvq.eval.opa_input", input_doc=str(self._redacted_input(input_doc))[:500],
+                         code="NRVQ-ENG-DEBUG-INPUT")
             result = await self._evaluate_opa(
                 key, event.agent_identity.namespace, event.agent_identity.agent_class, input_doc, rego_source
             )
@@ -640,26 +698,70 @@ class OPAEvaluator:
         if pack_key in self._loader._policies:
             entry = self._loader._policies[pack_key]
             candidates.append({"key": pack_key, "rego": entry["rego"], "priority": entry["priority"]})
+        # F-14: opt-in per-namespace tool allowlist guardrail. Same additive/in-memory-only discipline as
+        # __pack__: absent by default (zero hot-path cost, single-cluster/attacks unchanged) and tighten-only.
+        guardrail_key = f"{namespace}:__guardrail__"
+        if guardrail_key in self._loader._policies:
+            entry = self._loader._policies[guardrail_key]
+            candidates.append({"key": guardrail_key, "rego": entry["rego"], "priority": entry["priority"]})
+        # F-54: per-namespace sector-pack OVERRIDE — an operator-authored tighten-only overlay that customizes
+        # the pack (e.g. add a stricter block). Same additive discipline: absent by default, tighten-only, never
+        # weakens a pack's block. Revertable by deleting the (ns,__pack_override__) policy.
+        override_key = f"{namespace}:__pack_override__"
+        if override_key in self._loader._policies:
+            entry = self._loader._policies[override_key]
+            candidates.append({"key": override_key, "rego": entry["rego"], "priority": entry["priority"]})
+        # fleet-mgmt: per-namespace pack WEAKEN overlay — an explicit, admin-authored, audited customization that may
+        # RELAX a pack's added restriction (unlike __pack_override__ which is tighten-only). Same additive/in-memory
+        # discipline: absent by default (zero hot-path cost, single-cluster/attacks unchanged). The base comprehensive
+        # policy is still a hard floor (_resolve_with_packs), so a weaken can never drop below the org baseline.
+        weaken_key = f"{namespace}:__pack_weaken__"
+        if weaken_key in self._loader._policies:
+            entry = self._loader._policies[weaken_key]
+            candidates.append({"key": weaken_key, "rego": entry["rego"], "priority": entry["priority"]})
         return candidates
 
     def _resolve_with_packs(self, results: list[dict]) -> dict:
-        """F047: sector packs are an ADDITIVE-ONLY overlay — a (ns,__pack__) candidate can only TIGHTEN
-        the decision (block < escalate < audit < allow), never loosen it, regardless of priority. So we
-        resolve the non-pack candidates normally, then let the pack win only if it is more restrictive.
-        This makes a pack's block enforce over a permissive baseline AND prevents a pack escalate/allow
-        from ever weakening a stricter policy (the F-07 trap)."""
+        """F047/F-14: sector packs (:__pack__) and the opt-in tool-allowlist guardrail (:__guardrail__) are
+        ADDITIVE-ONLY overlays — they can only TIGHTEN the decision (block < escalate < audit < allow), never
+        loosen it, regardless of priority. We resolve the non-overlay candidates normally, then let the most
+        restrictive overlay win only if it is stricter than the base. This makes an overlay's block/escalate
+        enforce over a permissive baseline AND prevents an overlay escalate/allow from ever weakening a
+        stricter policy (the F-07 trap)."""
         rank = {"block": 0, "escalate": 1, "audit": 2, "allow": 3}
-        pack = [r for r in results if str(r["key"]).endswith(":__pack__")]
-        base = [r for r in results if not str(r["key"]).endswith(":__pack__")]
+        overlay = [r for r in results if self._is_overlay(str(r["key"]))]
+        base = [r for r in results if not self._is_overlay(str(r["key"]))]
         base_winner = self._resolve_precedence(base) if base else None
-        pack_winner = self._resolve_precedence(pack) if pack else None
+        overlay_winner = self._resolve_overlay(overlay) if overlay else None
         if base_winner is None:
-            return pack_winner
-        if pack_winner is None:
+            return overlay_winner
+        if overlay_winner is None:
             return base_winner
-        pack_rank = rank.get(pack_winner["decision"].decision, 3)
+        overlay_rank = rank.get(overlay_winner["decision"].decision, 3)
         base_rank = rank.get(base_winner["decision"].decision, 3)
-        return pack_winner if pack_rank < base_rank else base_winner
+        return overlay_winner if overlay_rank < base_rank else base_winner
+
+    @staticmethod
+    def _is_overlay(key: str) -> bool:
+        """Overlay candidates resolved against the base floor: sector packs, the F-14 allowlist guardrail, the F-54
+        tighten-only override, and the fleet-mgmt admin pack WEAKEN overlay."""
+        return (key.endswith(":__pack__") or key.endswith(":__guardrail__")
+                or key.endswith(":__pack_override__") or key.endswith(":__pack_weaken__"))
+
+    def _resolve_overlay(self, results: list[dict]) -> dict:
+        """Most restrictive overlay wins (tighten-only); ties broken by highest priority. EXCEPTION: an explicit
+        admin pack-WEAKEN overlay (:__pack_weaken__) supersedes the other overlays so it can RELAX a pack's added
+        block — but the caller (_resolve_with_packs) still floors the result against the base, so a weaken can never
+        drop below the comprehensive baseline. Absent by default → unchanged tighten-only behaviour."""
+        weaken = [r for r in results if str(r["key"]).endswith(":__pack_weaken__")]
+        if weaken:
+            rank = {"block": 0, "escalate": 1, "audit": 2, "allow": 3}
+            # if several weaken overlays exist, the most permissive (the operator's deliberate relaxation) wins.
+            weaken.sort(key=lambda item: (-rank.get(item["decision"].decision, 3), -int(item["priority"])))
+            return weaken[0]
+        rank = {"block": 0, "escalate": 1, "audit": 2, "allow": 3}
+        results.sort(key=lambda item: (rank.get(item["decision"].decision, 3), -int(item["priority"])))
+        return results[0]
 
     def _resolve_precedence(self, results: list[dict]) -> dict:
         """Highest priority wins; most restrictive wins on ties."""
@@ -678,7 +780,18 @@ class OPAEvaluator:
         log.warning("nrvq.engine.fallback", event_id=event.event_id, mode=mode, code="NRVQ-ENG-2003")
         return PolicyDecision(
             decision=mode,
+            rule_id="evaluator_fallback",  # F-24: name the fail-closed block (was empty -> block/"" under load)
             reason=f"Evaluation failed, fallback={mode}",
+            latency_ms=round(elapsed_ms, 2),
+            event_id=event.event_id,
+        )
+
+    def _invalid_identity_decision(self, event: ToolCallEvent, elapsed_ms: float) -> PolicyDecision:
+        """F-11: named fail-closed decision for an invalid SPIFFE identity (SIEM can alert on the spoof class)."""
+        return PolicyDecision(
+            decision="block",
+            rule_id="invalid_spiffe_identity",
+            reason="Agent SPIFFE identity failed validation — fail-closed block",
             latency_ms=round(elapsed_ms, 2),
             event_id=event.event_id,
         )
@@ -704,6 +817,14 @@ class OPAEvaluator:
             key: {"rego": rego_source, "priority": int(priority), "package_name": package_name},
         }
         log.info("nrvq.engine.policy_loaded", key=key, code="NRVQ-ENG-2005")
+
+    def unload_policy(self, namespace: str, agent_class: str) -> None:
+        """F-52: remove a policy from the in-memory index (copy-on-write) so a deleted/retracted policy stops
+        being evaluated — the counterpart to load_policy (delete previously left it loaded)."""
+        key = f"{namespace}:{agent_class}"
+        if key in self._policies:
+            self._policies = {k: v for k, v in self._policies.items() if k != key}
+            log.info("nrvq.engine.policy_unloaded", key=key, code="NRVQ-ENG-2031")
 
     def reload_policy(self, namespace: str, agent_class: str, rego_source: str) -> None:
         """Hot-reload a single policy without restarting."""
@@ -775,4 +896,4 @@ class OPAEvaluator:
     def _validate_spiffe(self, spiffe_id: str) -> None:
         """Validate SPIFFE identifier format before trust operations."""
         if not spiffe_id.startswith("spiffe://"):
-            raise ValueError("invalid spiffe_id")
+            raise InvalidSpiffeIdentity("invalid spiffe_id")

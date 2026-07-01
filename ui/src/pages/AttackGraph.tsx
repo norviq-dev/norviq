@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { AttackGraphCanvas } from "../components/attack-graph/AttackGraphCanvas";
+import { AttackGraphLegend } from "../components/attack-graph/AttackGraphLegend";
 import { AttackPathDetail } from "../components/attack-graph/AttackPathDetail";
 import { AttackPathList } from "../components/attack-graph/AttackPathList";
 import { SimulateAttackButton } from "../components/attack-graph/SimulateAttackButton";
@@ -24,14 +25,16 @@ export function AttackGraph() {
   const [error, setError] = useState("");
   const [severity, setSeverity] = useState<string>("all");
   const [selected, setSelected] = useState<AttackPath | undefined>(undefined);
+  const [recomputing, setRecomputing] = useState(false);
 
   useEffect(() => {
     let alive = true;
     const token = localStorage.getItem("nrvq_token");
-    const query = severity === "all" ? "" : `&severity=${encodeURIComponent(severity)}`;
+    // F-31: fetch ALL paths (no &severity=) and filter client-side, so "0 at this severity" is distinguishable
+    // from "0 stored" (the recompute empty-state must only show when there are genuinely zero stored paths).
     setLoading(true);
     setError("");
-    fetch(apiUrl(`/api/v1/attack-paths?namespace=${encodeURIComponent(namespace)}${query}`), {
+    fetch(apiUrl(`/api/v1/attack-paths?namespace=${encodeURIComponent(namespace)}`), {
       headers: token ? { Authorization: `Bearer ${token}` } : {}
     })
       .then(async (res) => {
@@ -48,11 +51,30 @@ export function AttackGraph() {
     return () => {
       alive = false;
     };
-  }, [namespace, severity]);
+  }, [namespace, recomputing]);
 
-  const paths = useMemo(() => data?.paths ?? [], [data]);
-  const criticalCount = paths.filter((p) => p.severity === "critical").length;
-  const highCount = paths.filter((p) => p.severity === "high").length;
+  // F-26: attack paths are PRECOMPUTED server-side (from the recorded asset graph) into the attack_paths table.
+  // The page now offers an explicit recompute so an empty graph is not a silent dead-end.
+  const recompute = async () => {
+    setRecomputing(true);
+    setError("");
+    try {
+      await apiSend(`/api/v1/attack-paths/compute?namespace=${encodeURIComponent(namespace)}`, "POST");
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Recompute failed");
+    } finally {
+      setRecomputing(false); // toggles the load effect to refetch
+    }
+  };
+
+  // F-31: allPaths = everything stored; paths = the severity-filtered view.
+  const allPaths = useMemo(() => data?.paths ?? [], [data]);
+  const paths = useMemo(
+    () => (severity === "all" ? allPaths : allPaths.filter((p) => p.severity === severity)),
+    [allPaths, severity]
+  );
+  const criticalCount = allPaths.filter((p) => p.severity === "critical").length;
+  const highCount = allPaths.filter((p) => p.severity === "high").length;
 
   // Make Simulate discoverable: auto-select the highest-risk path (API returns paths sorted desc).
   useEffect(() => {
@@ -89,7 +111,26 @@ export function AttackGraph() {
 
   if (loading) return <div>Loading attack graph...</div>;
   if (error) return <div>Failed to load attack graph: {error}</div>;
-  if (!data || paths.length === 0) return <div>No attack paths found for this namespace.</div>;
+  // F-31: the recompute/no-data state shows ONLY when there are genuinely zero STORED paths (not when a severity
+  // filter merely matched zero — that case is handled inline below with a "0 of N" notice).
+  if (!data || allPaths.length === 0) {
+    return (
+      <div className="page-enter">
+        <PageHead title="Attack Graph" subtitle={`Showing: ${namespace}`} />
+        <Panel title="No attack paths yet" sub="Attack paths are precomputed from the runtime asset graph">
+          <p style={{ color: "var(--text-secondary)", maxWidth: 640 }}>
+            Attack paths are derived server-side from the asset graph the engine records (agent → tool → data) and
+            stored for this namespace. None are stored yet — either no critical agent→tool→data chains have been
+            observed for <code>{namespace}</code>, or a recompute has not run. Recompute reads the latest recorded
+            graph (source: <code>/api/v1/attack-paths/compute</code>).
+          </p>
+          <button onClick={recompute} disabled={recomputing}>
+            {recomputing ? "Recomputing…" : "Recompute attack paths"}
+          </button>
+        </Panel>
+      </div>
+    );
+  }
 
   return (
     <div className="page-enter">
@@ -109,17 +150,34 @@ export function AttackGraph() {
           <option value="low">low</option>
         </select>
       </label>
-      <Panel title="Threat Relationships" sub="Computed attack paths">
-        <AttackGraphCanvas
-          paths={paths}
-          nodes={data.nodes}
-          selectedPathId={selected?.path_id}
-          onSelectPath={setSelected}
-        />
-        <AttackPathList paths={paths} selectedPathId={selected?.path_id} onSelect={setSelected} />
-        <AttackPathDetail path={selected} />
-        <SimulateAttackButton path={selected} onSimulate={simulatePath} />
-      </Panel>
+      {paths.length === 0 ? (
+        // F-31: filter matched zero but paths exist — say so, don't show the recompute/no-data state.
+        <Panel title="Threat Relationships" sub="Computed attack paths">
+          <p style={{ color: "var(--text-secondary)" }}>
+            0 of {allPaths.length} path{allPaths.length === 1 ? "" : "s"} at severity “{severity}”.{" "}
+            <button
+              style={{ color: "var(--accent)", background: "none", border: 0, padding: 0, cursor: "pointer" }}
+              onClick={() => setSeverity("all")}
+            >
+              Show all
+            </button>
+            .
+          </p>
+        </Panel>
+      ) : (
+        <Panel title="Threat Relationships" sub="Computed attack paths">
+          <AttackGraphLegend />
+          <AttackGraphCanvas
+            paths={paths}
+            nodes={data.nodes}
+            selectedPathId={selected?.path_id}
+            onSelectPath={setSelected}
+          />
+          <AttackPathList paths={paths} selectedPathId={selected?.path_id} onSelect={setSelected} />
+          <AttackPathDetail path={selected} />
+          <SimulateAttackButton path={selected} onSimulate={simulatePath} />
+        </Panel>
+      )}
     </div>
   );
 }

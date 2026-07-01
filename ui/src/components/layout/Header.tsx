@@ -18,6 +18,7 @@ import {
   logout,
   Me
 } from "../../api/client";
+import { fleetEnabled } from "../../api/fleet";
 import { TimeRange, useApp } from "@/store/AppContext";
 
 type Dropdown = "cluster" | "inbox" | null;
@@ -48,6 +49,8 @@ export function Header({
   const { selectedCluster, selectedNamespace, clusters, namespaces, timeRange, setCluster, setNamespace, setTimeRange } =
     useApp();
   const navigate = useNavigate();
+  // F-29: the cluster selector only repoints the Fleet page; on every other page the data is the local cluster's.
+  // So allow switching ONLY on /fleet and show a read-only "viewing local cluster" notice elsewhere (no false affordance).
   const [open, setOpen] = useState<Dropdown | "user">(null);
   const [searchText, setSearchText] = useState("");
   const [searchFocused, setSearchFocused] = useState(false);
@@ -248,28 +251,36 @@ export function Header({
         <button className="cluster-sel" onClick={() => setOpen(open === "cluster" ? null : "cluster")}>
           <Server size={15} style={{ color: "var(--accent)" }} />
           <span className="mono">
-            {compactCluster} / <span style={{ color: "var(--text-primary)" }}>{selectedNamespace}</span>
+            {/* Single-cluster-first: the cluster concept only appears when fleet is enabled. Off -> namespace only. */}
+            {fleetEnabled && <>{compactCluster} / </>}
+            <span style={{ color: "var(--text-primary)" }}>{selectedNamespace}</span>
           </span>
           <ChevronDown size={14} style={{ color: "var(--text-secondary)" }} />
         </button>
         {open === "cluster" && (
           <div className="dropdown cluster-dd">
-            <div className="cluster-col">
-              <div className="dd-head">CLUSTERS</div>
-              {clusters.map((c) => (
-                <button
-                  key={c}
-                  className={`dd-item${c === selectedCluster ? " sel" : ""}`}
-                  onClick={() => setCluster(c)}
-                >
-                  <span>{c}</span>
-                  {c === selectedCluster && <Check size={14} style={{ color: "var(--allow)" }} />}
-                </button>
-              ))}
-            </div>
-            <div className="cluster-col" style={{ borderLeft: "1px solid var(--border)" }}>
+            {fleetEnabled && (
+              <div className="cluster-col">
+                <div className="dd-head">CLUSTER</div>
+                {/* F-59: the global nav dropdown is the ONE cluster switcher (the page-level Fleet selector is gone).
+                    Switching repoints the fleet view in place — no force-navigation. */}
+                {[...new Set(["all", ...clusters])].map((c) => (
+                  <button
+                    key={c}
+                    className={`dd-item${c === selectedCluster ? " sel" : ""}`}
+                    onClick={() => { setCluster(c); close(); }}
+                  >
+                    <span>{c === "all" ? "All clusters" : c}</span>
+                    {c === selectedCluster && <Check size={14} style={{ color: "var(--allow)" }} />}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="cluster-col" style={fleetEnabled ? { borderLeft: "1px solid var(--border)" } : undefined}>
               <div className="dd-head">NAMESPACES</div>
-              {["all", ...namespaces].map((ns) => (
+              {/* dedupe: "all" is the synthetic "All namespaces" sentinel — a tenant ns literally named "all"
+                  (a fleet-wide policy) would otherwise render a duplicate entry. */}
+              {[...new Set(["all", ...namespaces])].map((ns) => (
                 <button
                   key={ns}
                   className={`dd-item${ns === selectedNamespace ? " sel" : ""}`}

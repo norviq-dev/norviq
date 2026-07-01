@@ -45,12 +45,13 @@ async def heartbeat(
         log.warning("nrvq.fleet.spiffe_id_changed", cluster_id=cluster_id, old=existing.spiffe_id,
                     new=body.spiffe_id, code="NRVQ-FLT-15024")
     stmt = insert(Cluster).values(
-        id=cluster_id, name=body.name, endpoint=body.endpoint, region=body.region,
+        id=cluster_id, name=body.name, endpoint=body.endpoint, console_url=body.console_url, region=body.region,
         labels=body.labels, residency=body.residency, spiffe_id=body.spiffe_id, status="healthy", last_heartbeat=now,
     ).on_conflict_do_update(
         index_elements=["id"],
-        set_={"name": body.name, "endpoint": body.endpoint, "region": body.region, "labels": body.labels,
-               "residency": body.residency, "spiffe_id": body.spiffe_id, "status": "healthy", "last_heartbeat": now},
+        set_={"name": body.name, "endpoint": body.endpoint, "console_url": body.console_url, "region": body.region,
+               "labels": body.labels, "residency": body.residency, "spiffe_id": body.spiffe_id,
+               "status": "healthy", "last_heartbeat": now},
     )
     await session.execute(stmt)
     await session.commit()

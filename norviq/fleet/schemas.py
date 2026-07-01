@@ -5,9 +5,15 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+import structlog
+from pydantic import BaseModel, Field, field_validator
+
+log = structlog.get_logger()
+
+_SAFE_URL = re.compile(r"^https?://", re.IGNORECASE)
 
 
 class HeartbeatBody(BaseModel):
@@ -19,6 +25,20 @@ class HeartbeatBody(BaseModel):
     labels: dict[str, str] = {}     # P2: target_selector matching
     residency: bool = False         # P4: this spoke keeps raw audit in-cluster
     spiffe_id: str = ""             # S3: the spoke's attested SPIFFE identity (workload-api mode)
+    console_url: str = ""           # F-69: the spoke's own console URL (drives the hub deep-link)
+
+    @field_validator("console_url")
+    @classmethod
+    def _safe_console_url(cls, v: str) -> str:
+        # R1 (P1): a spoke SELF-REPORTS console_url; the hub later renders it as a link a hub admin can click. Only
+        # http(s) is safe — BLANK anything else (javascript:, data:, vbscript: …) so a malicious spoke can never
+        # store a stored-XSS vector across the spoke->hub-admin trust boundary. Strip (don't 422) so a bad URL
+        # doesn't drop the whole heartbeat/rollup.
+        v = (v or "").strip()
+        if v and not _SAFE_URL.match(v):
+            log.warning("nrvq.fleet.console_url_rejected", scheme=v.split(":", 1)[0][:24], code="NRVQ-FLT-15040")
+            return ""
+        return v
 
 
 class PolicyAuthorBody(BaseModel):
@@ -31,6 +51,8 @@ class PolicyAuthorBody(BaseModel):
     priority: int = 100
     enforcement_mode: str = "block"
     target_selector: dict[str, str] = {}   # {"env":"prod"} or {"cluster_id":"cluster-a"} (override)
+    # F-40: a fleet-wide push (no cluster_id in the selector -> matches >1 cluster) must set this explicitly.
+    confirm_fleet_wide: bool = False
 
 
 class RolloutReportBody(BaseModel):

@@ -143,6 +143,25 @@ def require_admin_or_service(user: dict) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin or service role required")
 
 
+async def require_target_cluster(request: Request) -> None:
+    """R2 (P1) SERVER backstop for the F-69 cluster mutation guard. A cluster-scoped WRITE must only affect the
+    cluster this API actually serves. The console sends the operator's intended target on the
+    ``X-Nrvq-Target-Cluster`` header; if it is present and does not match this deployment's served cluster id, the
+    write is refused (409) — a mutation aimed at another cluster must never silently land on this one, regardless of
+    what label the UI shows. An absent/empty header means local intent (the default), so the SDK/sidecar hot path and
+    every existing client are unaffected. This is the server half of the guard; the UI (NRVQ-UI-4601) is the first
+    line."""
+    target = (request.headers.get("X-Nrvq-Target-Cluster") or "").strip()
+    served = settings.fleet_cluster_id or "local"
+    if target and target != served:
+        log.warning("nrvq.api.target_cluster_mismatch", target=target[:64], served=served, code="NRVQ-API-7460")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"target cluster '{target}' does not match this deployment's served cluster '{served}' — "
+                   "this API only mutates its own cluster; open the target cluster's own console to change it",
+        )
+
+
 def scoped_namespace(user: dict, requested: str | None) -> str | None:
     """Restrict a non-admin caller to its own namespace claim.
 

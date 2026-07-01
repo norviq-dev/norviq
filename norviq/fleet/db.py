@@ -9,6 +9,7 @@ from __future__ import annotations
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import structlog
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from norviq.config import settings
@@ -63,6 +64,9 @@ async def fleet_create_tables() -> None:
         raise RuntimeError("Fleet DB not initialized. Call fleet_init_db() first.")
     async with _fleet_engine.begin() as conn:
         await conn.run_sync(FleetBase.metadata.create_all)
+        # F-69: additive column on the pre-existing `cluster` table — create_all only creates missing TABLES, not
+        # columns. Idempotent (ADD COLUMN IF NOT EXISTS) so an already-registered fleet upgrades cleanly in place.
+        await conn.execute(text("ALTER TABLE cluster ADD COLUMN IF NOT EXISTS console_url VARCHAR(512) DEFAULT ''"))
 
 
 async def fleet_get_session() -> AsyncSession:

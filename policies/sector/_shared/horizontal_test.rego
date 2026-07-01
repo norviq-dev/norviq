@@ -33,3 +33,21 @@ test_pii_freetext_ssn_blocked {
 test_benign_allowed {
     shared.decision == "allow" with input as {"tool_name": "search_kb", "tool_params": {"q": "shipping status"}}
 }
+
+# F-15: nested objects/arrays must be scanned identically to comprehensive.rego (parity).
+test_nested_ssn_blocked {
+    shared.decision == "block" with input as {"tool_name": "api_post", "tool_params": {"payload": {"ssn": "123-45-6789"}}}
+    shared.rule_id == "pii_detection" with input as {"tool_name": "api_post", "tool_params": {"payload": {"ssn": "123-45-6789"}}}
+}
+test_nested_pan_value_blocked {
+    shared.decision == "block" with input as {"tool_name": "api_post", "tool_params": {"payload": {"data": {"v": "4111111111111111"}}}}
+}
+test_nested_pan_field_blocked {
+    shared.decision == "block" with input as {"tool_name": "api_post", "tool_params": {"body": {"card_number": "x"}}}
+}
+test_nested_in_array_blocked {
+    shared.decision == "block" with input as {"tool_name": "api_post", "tool_params": {"items": [{"note": "ok"}, {"ssn": "123-45-6789"}]}}
+}
+test_nested_benign_allowed {
+    shared.decision == "allow" with input as {"tool_name": "api_post", "tool_params": {"payload": {"note": "hello world", "qty": 3}}}
+}

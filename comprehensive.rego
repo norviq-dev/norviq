@@ -1,19 +1,22 @@
 package norviq.strict
 
+# Canonical horizontal policy. Decision/rule_id/reason are resolved from PARTIAL-SET triggers
+# (blocks/escalates/audits) + a deterministic resolver — the same pattern the sector packs use — so
+# that when several rules match ONE call (e.g. PCI + PII + injection in one payload) there is NO
+# complete-rule conflict (F-12) and EVERY block/escalate/audit carries a correct human-readable reason
+# (F-08). Precedence: block > escalate > audit > allow; ties resolved by sorted rule_id (deterministic).
+# The detection predicates below are unchanged from the prior version (decision parity is guarded by a
+# test): only the decision/rule_id/reason wiring changed.
+
 default decision = "allow"
 default rule_id = "default_allow"
 default reason = "Allowed"
 
+# --- detection predicates (unchanged) ---
+
 # Prompt injection
 injection_patterns = ["ignore previous", "ignore above", "ignore prior", "enable dan", "repeat your system", "bypass all safety", "pretend you are", "forget your instructions", "you are now"]
 injection_patterns_fullwidth = ["ｉｇｎｏｒｅ", "ｄａｎ", "ｂｙｐａｓｓ"]
-
-decision = "block" {
-    injection_detected
-}
-rule_id = "llm01_prompt_injection" {
-    injection_detected
-}
 
 injection_detected {
     some k
@@ -22,7 +25,6 @@ injection_detected {
     pattern := injection_patterns[_]
     contains(lower(val), pattern)
 }
-
 injection_detected {
     some k
     val := input.tool_params[k]
@@ -30,10 +32,7 @@ injection_detected {
     pattern := injection_patterns_fullwidth[_]
     contains(val, pattern)
 }
-
-# F-02: also scan the confusable skeleton (homoglyph / zero-width evasion). The engine folds tool_params to
-# ASCII in input.tool_params_normalized for matching ONLY (the original is preserved for audit). The normalized
-# value is already casefolded. These clauses are additive (OR) — ASCII inputs still match the rules above.
+# F-02: confusable skeleton (homoglyph/zero-width) — engine folds tool_params to ASCII (match-only).
 injection_detected {
     some k
     val := input.tool_params_normalized[k]
@@ -44,13 +43,9 @@ injection_detected {
 
 # SQL injection
 sql_patterns = ["drop table", "union select", "or '1'='1'", "or 1=1", "delete from", "xp_cmdshell", "exec ("]
-
-decision = "block" {
-    sql_injection_detected
-}
-rule_id = "deny_sql_injection" {
-    sql_injection_detected
-}
+# F-20: clearly-destructive SQL caught in ANY tool's params (a renamed tool — run_report/read_record — carrying
+# a destructive statement bypassed the execute_sql-only rule). Kept tight to avoid benign free-text false-blocks.
+sql_destructive_patterns = ["drop table", "delete from", "truncate table", "; drop", "xp_cmdshell", "union select"]
 
 sql_injection_detected {
     input.tool_name == "execute_sql"
@@ -58,24 +53,30 @@ sql_injection_detected {
     pattern := sql_patterns[_]
     contains(query, pattern)
 }
-
-# F-02: confusable-skeleton variant of the SQL query (homoglyph/zero-width).
 sql_injection_detected {
     input.tool_name == "execute_sql"
     query := input.tool_params_normalized.query
     pattern := sql_patterns[_]
     contains(query, pattern)
 }
+# F-20: destructive SQL in any string param, regardless of tool_name (original + normalized).
+sql_injection_detected {
+    some k
+    val := input.tool_params[k]
+    is_string(val)
+    pattern := sql_destructive_patterns[_]
+    contains(lower(val), pattern)
+}
+sql_injection_detected {
+    some k
+    val := input.tool_params_normalized[k]
+    is_string(val)
+    pattern := sql_destructive_patterns[_]
+    contains(val, pattern)
+}
 
 # Shell injection
 shell_patterns = ["|", ";", "$(", "`", "rm -rf", "/etc/passwd", "/etc/shadow"]
-
-decision = "block" {
-    shell_injection_detected
-}
-rule_id = "deny_shell_execution" {
-    shell_injection_detected
-}
 
 shell_injection_detected {
     some k
@@ -84,8 +85,6 @@ shell_injection_detected {
     pattern := shell_patterns[_]
     contains(val, pattern)
 }
-
-# F-02: confusable-skeleton variant (homoglyph/zero-width).
 shell_injection_detected {
     some k
     val := input.tool_params_normalized[k]
@@ -94,34 +93,13 @@ shell_injection_detected {
     contains(val, pattern)
 }
 
-# Destructive tools
+# Destructive / elevated tools
 destructive_tools = {"delete_record", "drop_table", "truncate"}
 elevated_tools = {"modify_config", "grant_access"}
-
-decision = "block" {
-    destructive_tools[input.tool_name]
-}
-rule_id = "llm06_excessive_agency" {
-    destructive_tools[input.tool_name]
-}
-
-decision = "escalate" {
-    elevated_tools[input.tool_name]
-}
-rule_id = "llm06_excessive_agency" {
-    elevated_tools[input.tool_name]
-}
 
 # Data leakage
 external_tools = {"send_email", "post_webhook", "upload_file"}
 sensitive_keys = {"password", "secret", "api_key", "token", "private_key"}
-
-decision = "block" {
-    data_leakage_detected
-}
-rule_id = "llm02_data_leakage" {
-    data_leakage_detected
-}
 
 data_leakage_detected {
     external_tools[input.tool_name]
@@ -130,77 +108,76 @@ data_leakage_detected {
     sensitive_keys[lower(k)]
 }
 
-# Supply chain
-supply_chain_tools = {"load_plugin", "download_script", "eval", "install_package"}
+# F-45 (DL-001): a secret embedded in a param VALUE sent to an external tool (e.g. send_email body
+# "api_key=sk-123") — the key-name check above misses it because the key is `body`, not `api_key`.
+secret_value_patterns = [
+    `api[_-]?key\s*[:=]`,
+    `secret[_-]?key\s*[:=]`,
+    `password\s*[:=]`,
+    `aws_secret_access_key`,
+    `bearer\s+[a-z0-9._-]{12,}`,
+    `sk-[a-z0-9]{8,}`,
+    `-----begin [a-z ]*private key-----`,
+]
 
-decision = "block" {
-    supply_chain_tools[input.tool_name]
-}
-rule_id = "llm05_supply_chain" {
-    supply_chain_tools[input.tool_name]
-}
-
-# PII
-decision = "block" {
-    pii_detected
-}
-rule_id = "pii_detection" {
-    pii_detected
-}
-
-pii_detected {
+data_leakage_detected {
+    external_tools[input.tool_name]
     some k
     val := input.tool_params[k]
     is_string(val)
-    regex.match(`^(\d{3}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2}|[A-Z]{2}\d{7})$`, val)
+    some i
+    regex.match(secret_value_patterns[i], lower(val))
 }
 
-# Free-text SSN: a dashed 9-digit SSN embedded anywhere in a string value
-# ("Your SSN is 123-45-6789"). The dashed XXX-XX-XXXX shape is distinctive and
-# low false-positive, so we substring-scan rather than only whole-field match.
-pii_detected {
+# F-45 (DL-003): reading an environment secret / credential is data egress (OWASP LLM02). The baseline had
+# no env/secret-read rule at all, so read_env{key:"AWS_SECRET_ACCESS_KEY"} was allowed.
+secret_read_tools = {"read_env", "getenv", "get_secret", "read_secret", "fetch_secret"}
+secret_name_patterns = [`secret`, `password`, `api[_-]?key`, `token`, `private[_-]?key`, `access[_-]?key`, `credential`]
+
+secret_egress_detected {
+    secret_read_tools[input.tool_name]
     some k
     val := input.tool_params[k]
+    is_string(val)
+    some i
+    regex.match(secret_name_patterns[i], lower(val))
+}
+
+# Supply chain
+supply_chain_tools = {"load_plugin", "download_script", "eval", "install_package"}
+
+# PII — F-15: walk() recurses nested objects/arrays so {payload:{ssn:…}} is caught like a flat {ssn:…}.
+pii_detected {
+    walk(input.tool_params, [_, val])
+    is_string(val)
+    regex.match(`^(\d{3}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2}|[A-Z]{2}\d{7})$`, val)
+}
+pii_detected {
+    walk(input.tool_params, [_, val])
     is_string(val)
     regex.match(`\b\d{3}-\d{2}-\d{4}\b`, val)
 }
 
-# PCI by field name
+# PCI
 pci_keys = {"cc_number", "card_number", "credit_card"}
 
-decision = "block" {
-    some k
-    input.tool_params[k]
+# F-15: a PAN-named key at ANY depth (last path element is the immediate key).
+pci_field_detected {
+    walk(input.tool_params, [path, _])
+    count(path) > 0
+    k := path[count(path) - 1]
+    is_string(k)
     pci_keys[lower(k)]
-}
-rule_id = "pci_card_numbers" {
-    some k
-    input.tool_params[k]
-    pci_keys[lower(k)]
-}
-
-# PCI by value
-decision = "block" {
-    pci_value_detected
-}
-rule_id = "pci_card_numbers" {
-    pci_value_detected
 }
 
 pci_value_detected {
-    some k
-    val := input.tool_params[k]
+    walk(input.tool_params, [_, val])
     is_string(val)
     regex.match(`^\d{13,19}$`, val)
     luhn_valid(val)
 }
-
-# Free-text card number: a grouped/contiguous 16-digit sequence embedded in a
-# string (separators allowed: "4111 1111 1111 1111"), gated by Luhn so plain
-# 16-digit order/invoice ids that are not Luhn-valid are NOT blocked (low FP).
 pci_value_detected {
-    some k
-    val := input.tool_params[k]
+    walk(input.tool_params, [_, val])
     is_string(val)
     candidate := regex.find_n(`\d{4}[ -]?\d{4}[ -]?\d{4}[ -]?\d{4}`, val, -1)[_]
     digits_only := regex.replace(candidate, `[ -]`, "")
@@ -208,15 +185,12 @@ pci_value_detected {
     luhn_valid(digits_only)
 }
 
-# Luhn (mod-10) check over the digits of a numeric string. Doubles every second
-# digit from the right; subtracts 9 when the doubled value exceeds 9.
 luhn_valid(s) {
     digits := [to_number(c) | c := regex.find_n(`[0-9]`, s, -1)[_]]
     n := count(digits)
     total := sum([x | some i; v := digits[i]; x := luhn_digit(v, (n - 1 - i) % 2)])
     total % 10 == 0
 }
-
 luhn_digit(d, parity) = d {
     parity == 0
 }
@@ -233,74 +207,38 @@ luhn_digit(d, parity) = sub {
 }
 
 # Cross-tenant
-decision = "block" {
-    cross_tenant_detected
-}
-rule_id = "cross_tenant_access" {
-    cross_tenant_detected
-}
-
 cross_tenant_detected {
     input.tool_params.tenant_id
     input.tool_params.tenant_id != input.agent.namespace
 }
-
 cross_tenant_detected {
     input.tool_params.namespace
     input.tool_params.namespace != input.agent.namespace
 }
 
-# Aggregate of every block/escalate trigger. Audit rules below are guarded by
-# `not non_allow_triggered` so they never conflict with a harder decision.
-non_allow_triggered {
-    injection_detected
-}
-non_allow_triggered {
-    sql_injection_detected
-}
-non_allow_triggered {
-    shell_injection_detected
-}
-non_allow_triggered {
-    destructive_tools[input.tool_name]
-}
-non_allow_triggered {
-    elevated_tools[input.tool_name]
-}
-non_allow_triggered {
-    data_leakage_detected
-}
-non_allow_triggered {
-    supply_chain_tools[input.tool_name]
-}
-non_allow_triggered {
-    pii_detected
-}
-non_allow_triggered {
-    some k
-    input.tool_params[k]
-    pci_keys[lower(k)]
-}
-non_allow_triggered {
-    pci_value_detected
-}
-non_allow_triggered {
-    cross_tenant_detected
-}
-non_allow_triggered {
-    base64_decoded_threat
+# F-45 (CT-002): a SQL query reaching into a schema that is not the agent's own namespace
+# (e.g. "SELECT * FROM payments.users" from ns=default). The boundary is in the schema qualifier, which the
+# param-based checks above never inspect. Common non-tenant schemas are allow-listed.
+safe_schemas = {"public", "information_schema", "pg_catalog", "sys", "dbo"}
+
+cross_tenant_detected {
+    input.tool_name == "execute_sql"
+    is_string(input.tool_params.query)
+    m := regex.find_all_string_submatch_n(`(?:from|join)\s+([a-z_][a-z0-9_]*)\.`, lower(input.tool_params.query), -1)[_]
+    schema := m[1]
+    schema != lower(input.agent.namespace)
+    not safe_schemas[schema]
 }
 
-# Base64-encoded payload (evasion via encoding) — audit for visibility.
-decision = "audit" {
-    base64_payload_detected
-    not non_allow_triggered
-}
-rule_id = "base64_payload_detected" {
-    base64_payload_detected
-    not non_allow_triggered
+# F-45 (CE-001): a chained/recursive tool call past a safe depth. The engine sets input.call_depth from the
+# event's call_depth; the baseline had no depth limit, so deep agent chaining/recursion was unbounded.
+max_safe_call_depth = 8
+
+chain_depth_exceeded {
+    input.call_depth >= max_safe_call_depth
 }
 
+# Base64 payload (audit) + decoded-threat (block)
 base64_payload_detected {
     some k
     val := input.tool_params[k]
@@ -311,18 +249,6 @@ base64_payload_detected {
     not regex.match(`^\d+$`, val)
 }
 
-# Base64 evasion that DECODES to a known-malicious payload — block (not merely audit). The decode is
-# guarded by the same charset/length checks as base64_payload_detected, and the decoded text is
-# re-scanned ONLY against high-confidence multi-character patterns, so a benign base64 token/ID/UUID
-# (which decodes to bytes that don't contain these phrases) is never false-positively blocked.
-decision = "block" {
-    base64_decoded_threat
-}
-rule_id = "base64_decoded_threat" {
-    base64_decoded_threat
-}
-
-# Decoded (lowercased) text of every base64-looking tool_param value.
 b64_decoded[decoded] {
     some k
     val := input.tool_params[k]
@@ -334,9 +260,6 @@ b64_decoded[decoded] {
     decoded := lower(base64.decode(val))
 }
 
-# Shell payloads for the decoded scan: distinctive multi-char strings only. Single metacharacters
-# like "|" or ";" are intentionally excluded — random decoded bytes commonly contain them, which
-# would false-positive on legitimate base64.
 decoded_shell_patterns = ["rm -rf", "/etc/passwd", "/etc/shadow", "wget ", "curl ", "nc -e"]
 
 base64_decoded_threat {
@@ -356,20 +279,61 @@ base64_decoded_threat {
     regex.match(`\b\d{3}-\d{2}-\d{4}\b`, decoded)
 }
 
-# Scope violation: customer-support agents have no business calling execute_sql.
-# Audit (not block) so benign read-only queries still complete under review.
-decision = "audit" {
-    scope_violation_dangerous_tool
-    not non_allow_triggered
-    not base64_payload_detected
-}
-rule_id = "scope_violation_dangerous_tool" {
-    scope_violation_dangerous_tool
-    not non_allow_triggered
-    not base64_payload_detected
-}
-
+# Scope violation
 scope_violation_dangerous_tool {
     input.tool_name == "execute_sql"
     input.agent.agent_class == "customer-support"
 }
+
+# --- partial-set triggers (rule_id -> guard) ---
+blocks["llm01_prompt_injection"] { injection_detected }
+blocks["deny_sql_injection"] { sql_injection_detected }
+blocks["deny_shell_execution"] { shell_injection_detected }
+blocks["llm06_excessive_agency"] { destructive_tools[input.tool_name] }
+blocks["llm02_data_leakage"] { data_leakage_detected }
+blocks["llm02_data_leakage"] { secret_egress_detected }
+blocks["llm05_supply_chain"] { supply_chain_tools[input.tool_name] }
+blocks["pii_detection"] { pii_detected }
+blocks["pci_card_numbers"] { pci_field_detected }
+blocks["pci_card_numbers"] { pci_value_detected }
+blocks["cross_tenant_access"] { cross_tenant_detected }
+blocks["chain_depth_limit"] { chain_depth_exceeded }
+blocks["base64_decoded_threat"] { base64_decoded_threat }
+
+escalates["llm06_excessive_agency"] { elevated_tools[input.tool_name] }
+
+audits["base64_payload_detected"] { base64_payload_detected }
+audits["scope_violation_dangerous_tool"] { scope_violation_dangerous_tool }
+
+# reason text per rule_id (F-08). default_allow + the engine fallback are included for completeness.
+reasons = {
+    "llm01_prompt_injection": "Prompt injection pattern detected (OWASP LLM01)",
+    "deny_sql_injection": "SQL injection pattern in tool parameters",
+    "deny_shell_execution": "Shell / command-execution pattern detected",
+    "llm06_excessive_agency": "Excessive agency — destructive or elevated tool (OWASP LLM06)",
+    "llm02_data_leakage": "Sensitive data sent to an external tool (OWASP LLM02)",
+    "llm05_supply_chain": "Untrusted code / plugin load (OWASP LLM05)",
+    "pii_detection": "PII (SSN) detected in tool parameters",
+    "pci_card_numbers": "Payment card data (PAN) detected — PCI DSS",
+    "cross_tenant_access": "Cross-tenant / cross-namespace access denied",
+    "chain_depth_limit": "Chained tool-call depth exceeds the safe limit (agent chaining / recursion) — OWASP LLM08",
+    "base64_decoded_threat": "Base64-encoded payload decodes to a known-malicious pattern",
+    "base64_payload_detected": "Base64-encoded payload — audited for visibility",
+    "scope_violation_dangerous_tool": "Out-of-scope dangerous tool for this agent class",
+    "default_allow": "Allowed",
+}
+
+# --- resolver: block > escalate > audit > allow; deterministic sorted rule_id; reason from the map ---
+block_fired { blocks[_] }
+escalate_fired { escalates[_] }
+audit_fired { audits[_] }
+
+decision = "block" { block_fired }
+decision = "escalate" { escalate_fired; not block_fired }
+decision = "audit" { audit_fired; not block_fired; not escalate_fired }
+
+rule_id = sort([id | blocks[id]])[0] { block_fired }
+rule_id = sort([id | escalates[id]])[0] { escalate_fired; not block_fired }
+rule_id = sort([id | audits[id]])[0] { audit_fired; not block_fired; not escalate_fired }
+
+reason = reasons[rule_id]

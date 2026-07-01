@@ -28,6 +28,7 @@ class Cluster(FleetBase):
     id: Mapped[str] = mapped_column(String(255), primary_key=True)
     name: Mapped[str] = mapped_column(String(255), default="")
     endpoint: Mapped[str] = mapped_column(String(512), default="")
+    console_url: Mapped[str] = mapped_column(String(512), default="")  # F-69: the spoke's own console URL (deep-link)
     region: Mapped[str] = mapped_column(String(128), default="")
     status: Mapped[str] = mapped_column(String(20), default="healthy")  # advisory; recomputed on read
     labels: Mapped[dict] = mapped_column(JSONB, default=dict)        # P2: policy target_selector matching
@@ -100,3 +101,15 @@ class PolicyRollout(FleetBase):
     applied_version: Mapped[int] = mapped_column(Integer, default=0)        # version the spoke last reported applying
     detail: Mapped[str] = mapped_column(String(512), default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class UsedJoinToken(FleetBase):
+    """Single-use guard for join tokens: the hub records each minted jti and marks it claimed on enrollment, so a
+    leaked/replayed token cannot be redeemed twice. Rows older than the token TTL are harmless to prune."""
+
+    __tablename__ = "used_join_token"
+    jti: Mapped[str] = mapped_column(String(64), primary_key=True)
+    cluster_id: Mapped[str] = mapped_column(String(255), default="")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    claimed: Mapped[bool] = mapped_column(default=False)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

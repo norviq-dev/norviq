@@ -62,6 +62,7 @@ export function Settings() {
   const [violationPenalty, setViolationPenalty] = useState("");
   const [rateLimit, setRateLimit] = useState("");
   const [sector, setSector] = useState("");
+  const [applyMode, setApplyMode] = useState<"enforce" | "dry_run_only">("enforce"); // F-51
   const [loading, setLoading] = useState(true);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -83,6 +84,7 @@ export function Settings() {
         setViolationPenalty(String(s.violation_penalty));
         setRateLimit(String(s.rate_limit));
         setSector(s.sector ?? "");
+        setApplyMode(s.apply_mode === "dry_run_only" ? "dry_run_only" : "enforce");
         setError(null);
       })
       .catch(() => active && setError("Could not load settings"))
@@ -100,7 +102,8 @@ export function Settings() {
         trust_threshold: Number(trustThreshold),
         violation_penalty: Number(violationPenalty),
         rate_limit: Number(rateLimit),
-        sector
+        sector,
+        apply_mode: applyMode
       });
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
@@ -152,6 +155,19 @@ export function Settings() {
                 onChange={(e) => setRateLimit(e.target.value)}
                 style={{ width: 90, textAlign: "right" }}
               />
+            </Field>
+            <Field label="Apply Governance" hint="Dry-run-only blocks policy applies for this namespace (server-enforced) — for high-assurance tenants">
+              <div className="tabs-kit">
+                {(["enforce", "dry_run_only"] as const).map((m) => (
+                  <button
+                    key={m}
+                    className={`tab-kit${applyMode === m ? " active" : ""}`}
+                    onClick={() => setApplyMode(m)}
+                  >
+                    {m === "enforce" ? "Enforce" : "Dry-run only"}
+                  </button>
+                ))}
+              </div>
             </Field>
             <Field label="Sector" hint="Suggests matching starter Policy Packs">
               <select

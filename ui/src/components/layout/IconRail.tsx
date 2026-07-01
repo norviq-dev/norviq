@@ -12,7 +12,7 @@ function NorviqMark({ size = 22 }: { size?: number }) {
 }
 
 const SECTION_ICONS: Array<{ section: Section; title: string; icon: typeof Crosshair }> = [
-  { section: "intelligence", title: "Intelligence", icon: Brain },
+  { section: "intelligence", title: "Overview", icon: Brain },
   { section: "security", title: "Security Operations", icon: Crosshair },
   { section: "settings", title: "Settings", icon: Settings }
 ];

@@ -38,7 +38,21 @@ export function AuditLog() {
   const initialDecision = (searchParams.get("decision") as DecisionFilter | null) ?? "all";
   const [decision, setDecision] = useState<DecisionFilter>(DEC.includes(initialDecision) ? initialDecision : "all");
   const [tool, setTool] = useState(searchParams.get("tool_name") ?? "");
+  // F-35: debounce the tool-name filter — the input stays responsive but only ONE request fires after typing
+  // settles (was one request per keystroke). The filter is already server-side over the selected range.
+  const [debouncedTool, setDebouncedTool] = useState(tool);
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedTool(tool), 400);
+    return () => clearTimeout(t);
+  }, [tool]);
   const [agentFilter, setAgentFilter] = useState("");
+  // F-53: the SPIFFE filter is now SERVER-SIDE over the whole range (was a client-side filter of the current page,
+  // so it silently missed matches off-page). Debounced like the tool filter.
+  const [debouncedAgent, setDebouncedAgent] = useState(agentFilter);
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedAgent(agentFilter), 400);
+    return () => clearTimeout(t);
+  }, [agentFilter]);
   const [live, setLive] = useState(true);
   const [selected, setSelected] = useState<AuditRecord | null>(null);
   const [page, setPage] = useState(0);
@@ -50,11 +64,12 @@ export function AuditLog() {
         range: timeRange,
         namespace: selectedNamespace,
         decision: decision === "all" ? undefined : decision,
-        tool_name: tool || undefined,
+        tool_name: debouncedTool || undefined,
+        agent: debouncedAgent || undefined,
         limit: pageSize,
         offset: page * pageSize
       }),
-    [timeRange, selectedNamespace, decision, tool, page]
+    [timeRange, selectedNamespace, decision, debouncedTool, debouncedAgent, page]
   );
   const totalRecords = useApi<AuditRecord[]>(
     () =>
@@ -62,11 +77,12 @@ export function AuditLog() {
         range: timeRange,
         namespace: selectedNamespace,
         decision: decision === "all" ? undefined : decision,
-        tool_name: tool || undefined,
+        tool_name: debouncedTool || undefined,
+        agent: debouncedAgent || undefined,
         limit: 500,
         offset: 0
       }),
-    [timeRange, selectedNamespace, decision, tool]
+    [timeRange, selectedNamespace, decision, debouncedTool, debouncedAgent]
   );
 
   // The /ws/audit socket authenticates before accepting — pass the bearer token as a query param
@@ -93,7 +109,7 @@ export function AuditLog() {
           range: timeRange,
           namespace: selectedNamespace,
           decision: decision === "all" ? undefined : decision,
-          tool_name: tool || undefined,
+          tool_name: debouncedTool || undefined,
           limit: 10,
           offset: 0
         });
@@ -113,7 +129,7 @@ export function AuditLog() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [live, ws.connected, timeRange, selectedNamespace, decision, tool]);
+  }, [live, ws.connected, timeRange, selectedNamespace, decision, debouncedTool]);
 
   const streamed = useMemo(() => {
     const merged = [...ws.messages, ...polled];
@@ -129,18 +145,20 @@ export function AuditLog() {
   }, [ws.messages, polled]);
 
   const rows = useMemo(() => {
+    // F-53: filtering is server-side now (tool + agent); the live stream is only merged on page 0.
     const liveIds = new Set(streamed.map((r) => r.id).filter(Boolean));
-    const all = [...(page === 0 ? streamed : []), ...(base.data ?? []).filter((r) => !liveIds.has(r.id))];
-    return all.filter((r) =>
-      agentFilter ? (r.agent_id ?? "").toLowerCase().includes(agentFilter.toLowerCase()) : true
-    );
-  }, [streamed, base.data, agentFilter, page]);
+    return [...(page === 0 ? streamed : []), ...(base.data ?? []).filter((r) => !liveIds.has(r.id))];
+  }, [streamed, base.data, page]);
 
-  const totalPages = Math.max(1, Math.ceil((totalRecords.data?.length ?? 0) / pageSize));
+  const totalCount = totalRecords.data?.length ?? 0;
+  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const loading = base.loading || totalRecords.loading;
+  const hasFilter = Boolean(debouncedTool || debouncedAgent || decision !== "all");
+  const noResults = !loading && rows.length === 0;
 
   useEffect(() => {
     setPage(0);
-  }, [timeRange, selectedNamespace, decision, tool]);
+  }, [timeRange, selectedNamespace, decision, debouncedTool, debouncedAgent]);
 
   const columns: Array<Column<AuditRecord>> = [
     {
@@ -205,14 +223,36 @@ export function AuditLog() {
           />
         </div>
 
-        <DataTable
-          columns={columns}
-          rows={rows}
-          rowKey="id"
-          selectedKey={selected?.id ?? null}
-          onRowClick={(r) => setSelected(r)}
-          placeholder="Quick filter rows…"
-        />
+        {/* F-36 + F-53: visible count + an explicit no-results state (was: an empty table with no explanation). */}
+        <div className="muted" style={{ fontSize: 12, minHeight: 16 }}>
+          {loading
+            ? "Loading…"
+            : `Showing ${rows.length} of ${totalCount} record${totalCount === 1 ? "" : "s"} in range (${timeRange})${
+                debouncedTool ? ` · tool contains “${debouncedTool}”` : ""
+              }${debouncedAgent ? ` · agent contains “${debouncedAgent}”` : ""}`}
+        </div>
+
+        {noResults ? (
+          <div
+            style={{
+              padding: "28px 16px", textAlign: "center", color: "var(--text-secondary)", fontSize: 13,
+              border: "1px solid var(--border, #2a2a2a)", borderRadius: "var(--radius-md)"
+            }}
+          >
+            No matching records in the last {timeRange}
+            {hasFilter ? " for these filters." : "."}
+            {hasFilter && " Try a broader time range or clearing the tool/agent/decision filters."}
+          </div>
+        ) : (
+          <DataTable
+            columns={columns}
+            rows={rows}
+            rowKey="id"
+            selectedKey={selected?.id ?? null}
+            onRowClick={(r) => setSelected(r)}
+            placeholder="Quick filter rows…"
+          />
+        )}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
           <KitButton
             variant="outline"

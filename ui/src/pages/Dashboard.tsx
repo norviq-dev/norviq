@@ -9,6 +9,8 @@ import {
   fetchTopBlocked,
   fetchVolume
 } from "../api/client";
+import { fleetEnabled, fetchFleetAuditSummary, fetchFleetAgents } from "../api/fleet";
+import { RemoteScopedPanel } from "../components/common/RemoteClusterNotice";
 import { CategoryBars } from "../components/charts/CategoryBars";
 import { VolumeChart } from "../components/charts/VolumeChart";
 import { DecisionBadge } from "../components/common/DecisionBadge";
@@ -19,6 +21,7 @@ import { PageHead } from "../components/common/PageHead";
 import { Panel } from "../components/common/Panel";
 import { ScoreGauge } from "../components/common/ScoreGauge";
 import { useApi } from "../hooks/useApi";
+import { exportCsv } from "../lib/csv";
 import { fmtTime } from "../lib/format";
 import { useApp } from "../store/AppContext";
 
@@ -37,6 +40,8 @@ type AuditRecord = {
   rule_id?: string;
   namespace?: string;
   latency_ms?: number;
+  agent_class?: string; // F-46: included in the CSV export
+  reason?: string;
 };
 
 type Agent = { category?: string };
@@ -88,8 +93,14 @@ function TopBlockedTools({ data }: { data: Array<{ tool: string; count: number }
 }
 
 export function Dashboard() {
-  const { selectedNamespace, timeRange } = useApp();
+  const { selectedNamespace, selectedCluster, servedCluster, timeRange, selectedClusterConsoleUrl } = useApp();
   const navigate = useNavigate();
+  // Cluster-aware Overview: in fleet mode, picking a cluster OTHER than the one this console serves (or "All
+  // clusters") sources the cluster-scoped metrics from the HUB rollups (the only cross-cluster source). The
+  // metrics the hub keeps per cluster (Total/Blocked/Block-Rate + Trust) then change on switch; the deep
+  // telemetry the hub does NOT keep per cluster (latency, coverage, top-tools, volume) is honestly scoped out.
+  const useHub = fleetEnabled && selectedCluster !== "" && selectedCluster !== servedCluster;
+  const scopeCluster = selectedCluster === "all" ? "All clusters" : selectedCluster || servedCluster;
   const [reportMenuOpen, setReportMenuOpen] = useState(false);
   const stats = useApi<AuditStats>(
     () => fetchAuditStats(timeRange, selectedNamespace),
@@ -126,9 +137,26 @@ export function Dashboard() {
     staleTimeMs: 60_000
   });
 
-  const totalCalls = stats.data?.total ?? 0;
-  const blockedToday = stats.data?.blocked ?? 0;
-  const blockRate = Math.round(stats.data?.block_rate_pct ?? 0);
+  // Hub-rollup sources — only fetched when the Overview is scoped to a remote cluster (or "All clusters").
+  const hubSummary = useApi(
+    () => (useHub ? fetchFleetAuditSummary(timeRange, selectedCluster) : Promise.resolve([])),
+    [useHub, timeRange, selectedCluster]
+  );
+  const hubAgents = useApi(
+    () => (useHub ? fetchFleetAgents(selectedCluster) : Promise.resolve([])),
+    [useHub, selectedCluster]
+  );
+  const hubTotals = useMemo(() => {
+    const rows = Array.isArray(hubSummary.data) ? hubSummary.data : [];
+    const scoped = selectedCluster === "all" ? rows : rows.filter((r) => r.cluster_id === selectedCluster);
+    const total = scoped.reduce((a, r) => a + (r.total ?? 0), 0);
+    const block = scoped.reduce((a, r) => a + (r.block ?? 0), 0);
+    return { total, block, rate: total ? Math.round((block / total) * 100) : 0 };
+  }, [hubSummary.data, selectedCluster]);
+
+  const totalCalls = useHub ? hubTotals.total : stats.data?.total ?? 0;
+  const blockedToday = useHub ? hubTotals.block : stats.data?.blocked ?? 0;
+  const blockRate = useHub ? hubTotals.rate : Math.round(stats.data?.block_rate_pct ?? 0);
 
   const avgLatency = useMemo(() => {
     const rows = Array.isArray(records.data) ? records.data : [];
@@ -137,19 +165,31 @@ export function Dashboard() {
     return Math.round(sum / rows.length);
   }, [records.data]);
 
-  const trust = useMemo(
-    () =>
-      ["high", "medium", "low", "frozen"].map((name) => ({
-        name,
-        value: (Array.isArray(agents.data) ? agents.data : []).filter(
-          (agent) => (agent.category ?? "").toLowerCase() === name
-        ).length
-      })),
-    [agents.data]
-  );
+  const trust = useMemo(() => {
+    // Trust IS available per cluster from the hub (FleetAgent.trust_category), so the donut stays accurate
+    // when scoped to a remote cluster; locally it's derived from the served cluster's agents.
+    const cats = useHub
+      ? (Array.isArray(hubAgents.data) ? hubAgents.data : []).map((a) => a.trust_category ?? "")
+      : (Array.isArray(agents.data) ? agents.data : []).map((a) => a.category ?? "");
+    return ["high", "medium", "low", "frozen"].map((name) => ({
+      name,
+      value: cats.filter((c) => c.toLowerCase() === name).length
+    }));
+  }, [useHub, hubAgents.data, agents.data]);
 
   // Posture = overall real policy coverage %; category bars = real per-category coverage scores.
   const score = coverage.data?.coverage_pct ?? 0;
+
+  // F-46: export the loaded audit records as CSV (the Export button + Report ▼ "Export CSV" were both dead).
+  const onExportCsv = () => {
+    const rows = Array.isArray(records.data) ? records.data : [];
+    setReportMenuOpen(false);
+    exportCsv(
+      `norviq-audit-${selectedNamespace}-${timeRange}.csv`,
+      rows,
+      ["timestamp", "decision", "tool_name", "rule_id", "agent_class", "namespace", "latency_ms", "reason"]
+    );
+  };
 
   const categoryScores = useMemo(
     () => (coverage.data?.categories ?? []).map((c) => ({ category: c.category, score: c.score })),
@@ -165,7 +205,9 @@ export function Dashboard() {
     [topBlocked.data]
   );
 
-  const apiError = stats.error || blocked.error || records.error || agents.error || topBlocked.error || volume.error;
+  const apiError = useHub
+    ? hubSummary.error || hubAgents.error
+    : stats.error || blocked.error || records.error || agents.error || topBlocked.error || volume.error;
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -178,7 +220,11 @@ export function Dashboard() {
     <div className="page-enter">
       <PageHead
         title="Overview"
-        subtitle={`Showing: ${selectedNamespace}`}
+        subtitle={
+          fleetEnabled
+            ? `Showing: ${scopeCluster} · ${selectedNamespace}${useHub ? " — summary from fleet hub" : ""}`
+            : `Showing: ${selectedNamespace}`
+        }
         actions={
           <>
             <KitButton
@@ -204,7 +250,7 @@ export function Dashboard() {
                   zIndex: 20
                 }}
               >
-                <button className="dd-item" style={{ padding: "8px 12px" }}>
+                <button className="dd-item" style={{ padding: "8px 12px" }} onClick={onExportCsv}>
                   Export CSV
                 </button>
                 <button className="dd-item" style={{ padding: "8px 12px", color: "#666666" }} disabled>
@@ -218,6 +264,7 @@ export function Dashboard() {
             <KitButton
               variant="ghost"
               icon={Download}
+              onClick={onExportCsv}
               style={{
                 background: "transparent",
                 border: "1px solid #A0A0A0",
@@ -236,19 +283,54 @@ export function Dashboard() {
           <KPICard label={`Total Calls ${timeRange}`} value={totalCalls} color="#2ddab8" />
           <KPICard label={`Blocked (${timeRange})`} value={blockedToday} color="#ff3b5c" />
           <KPICard label={`Block Rate % (${timeRange})`} value={blockRate} color="#ffb020" />
-          <KPICard label={`Avg Latency ms (${timeRange})`} value={avgLatency} color="#00e5a0" />
+          {/* Latency isn't kept per-cluster at the hub — show "—" rather than the served cluster's number. */}
+          {useHub ? (
+            <div className="panel kpi" style={{ background: "var(--bg-surface)", boxShadow: "var(--shadow-card)" }}>
+              <div className="kpi-label">{`Avg Latency ms (${timeRange})`}</div>
+              <div className="kpi-value" style={{ color: "var(--text-muted)" }}>—</div>
+              <div className="kpi-trend" style={{ color: "var(--text-muted)" }}>per-cluster, on its own console</div>
+            </div>
+          ) : (
+            <KPICard label={`Avg Latency ms (${timeRange})`} value={avgLatency} color="#00e5a0" />
+          )}
         </div>
 
         <div className="grid grid-cols-3 lg:grid-cols-3 md:grid-cols-1 gap-5 dashboard-row-two">
-          <ScoreGauge score={score} />
+          {/* F-63: one honest headline — this gauge IS policy coverage (rules present), not a "Security Score /
+              High Risk" verdict on the same number. The Trust donut + the per-category bars are its support. */}
+          {useHub ? (
+            <RemoteScopedPanel title="Policy Coverage" cluster={scopeCluster} consoleUrl={selectedClusterConsoleUrl} />
+          ) : (
+            <ScoreGauge score={score} title="Policy Coverage" unit="%" sub="rules present — not efficacy-tested" />
+          )}
+          {/* Trust is cluster-aware (hub keeps it per cluster) — the donut changes on switch. */}
           <DonutChart data={trust} />
-          <TopBlockedTools data={topBlockedData} />
+          {useHub ? (
+            <RemoteScopedPanel title="Top blocked tools" sub="Most-blocked in selected range" cluster={scopeCluster} consoleUrl={selectedClusterConsoleUrl} />
+          ) : (
+            <TopBlockedTools data={topBlockedData} />
+          )}
         </div>
 
-        <CategoryBars data={categoryScores} title="Policy Coverage by Category" />
+        {useHub ? (
+          <RemoteScopedPanel title="Policy Coverage by Category" cluster={scopeCluster} consoleUrl={selectedClusterConsoleUrl} />
+        ) : (
+          <CategoryBars
+            data={categoryScores}
+            title="Policy Coverage by Category"
+            sub="Rules present in the loaded policy — not efficacy-tested. Prove blocking with the Red Team suite."
+          />
+        )}
 
-        <VolumeChart data={Array.isArray(volume.data) ? volume.data : []} />
+        {useHub ? (
+          <RemoteScopedPanel title="Tool Call Volume" cluster={scopeCluster} consoleUrl={selectedClusterConsoleUrl} />
+        ) : (
+          <VolumeChart data={Array.isArray(volume.data) ? volume.data : []} />
+        )}
 
+        {useHub ? (
+          <RemoteScopedPanel title="Recent Blocked" sub="Last 10 blocked tool calls" cluster={scopeCluster} consoleUrl={selectedClusterConsoleUrl} />
+        ) : (
         <Panel
           title="Recent Blocked"
           sub="Last 10 blocked tool calls"
@@ -310,6 +392,7 @@ export function Dashboard() {
             )}
           </div>
         </Panel>
+        )}
 
         {apiError && (
           <div style={{ color: "var(--block)", fontSize: 13 }}>

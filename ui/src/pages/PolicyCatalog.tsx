@@ -1,4 +1,5 @@
 import Editor from "@monaco-editor/react";
+import { registerRego } from "../lib/monaco-rego";
 import {
   AlertCircle,
   ArrowUpCircle,
@@ -16,8 +17,8 @@ import {
   X
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { apiGet, apiSend, applyPolicy, dryRunPolicy } from "../api/client";
-import { CategoryCoverage } from "../components/common/CategoryCoverage";
+import { apiGet, apiSend, applyPolicy, dryRunPolicy, fetchSettings } from "../api/client";
+import { ApplyResultPanel, type ApplyResult } from "../components/common/ApplyResultPanel";
 import { DecisionBadge, type Decision } from "../components/common/DecisionBadge";
 import { KitButton } from "../components/common/KitButton";
 import { PageHead } from "../components/common/PageHead";
@@ -348,29 +349,44 @@ function PolicyTarget({
   );
 }
 
-function PolicySheet({
+export function PolicySheet({
   policy,
   deployments,
+  applyMode = "enforce",
   onClose,
   onApply
 }: {
   policy: Policy;
   deployments: Deployment[];
+  applyMode?: "enforce" | "dry_run_only";
   onClose: () => void;
   onApply: (mode: Policy["mode"]) => void;
 }) {
   const [enforcement, setEnforcement] = useState<NonNullable<Policy["mode"]>>(policy.mode ?? "block");
   const [paramsOpen, setParamsOpen] = useState(false);
   const [dryRun, setDryRun] = useState(false);
+  const [reviewing, setReviewing] = useState(false); // F-50: confirm + diff step before the write
+  const dryRunOnly = applyMode === "dry_run_only";
+  // F-50: a brand-new policy has no prior version to overwrite; an existing one shows a diff of what changes.
+  const isNew = policy.current_version == null;
+  const currentMode = policy.mode ?? "block";
+  const enforcementChanged = !isNew && currentMode !== enforcement;
+  // F-49: the custom-params inputs used to be uncontrolled defaultValues that the YAML preview + Apply both
+  // dropped (a silent no-op). Bind them to state and generate the YAML from them so the preview is honest.
+  const [rateLimit, setRateLimit] = useState("10");
+  const [keywords, setKeywords] = useState("secret,token,password");
+  const [trustThreshold, setTrustThreshold] = useState("0.7");
 
+  const keywordList = keywords.split(",").map((k) => k.trim()).filter(Boolean);
   const yamlPreview = `apiVersion: norviq.io/v1
 kind: NrvqPolicy
 spec:
   targetType: ${policy.target_type ?? "class"}
   target: ${policy.target ?? policy.agent_class ?? ""}
   enforcement: ${enforcement}
-  rateLimit: 10
-  keywords: [secret, token, password]`;
+  rateLimit: ${rateLimit || "0"}
+  trustThreshold: ${trustThreshold || "0"}
+  keywords: [${keywordList.join(", ")}]`;
 
   return (
     <>
@@ -416,15 +432,19 @@ spec:
           <div style={{ marginTop: 8 }}>
             <div className="field-row">
               <label className="field-label">Rate limit (calls/min)</label>
-              <input className="input mono" defaultValue="10" />
+              <input className="input mono" value={rateLimit} onChange={(e) => setRateLimit(e.target.value)} />
             </div>
             <div className="field-row">
               <label className="field-label">Block keywords</label>
-              <input className="input mono" defaultValue="secret,token,password" />
+              <input className="input mono" value={keywords} onChange={(e) => setKeywords(e.target.value)} />
             </div>
             <div className="field-row">
               <label className="field-label">Trust threshold override</label>
-              <input className="input mono" defaultValue="0.7" />
+              <input className="input mono" value={trustThreshold} onChange={(e) => setTrustThreshold(e.target.value)} />
+            </div>
+            {/* F-49: be honest — these shape the generated YAML preview but the Apply path does not yet enforce them. */}
+            <div className="panel-sub" style={{ marginTop: 6, color: "var(--text-muted)" }}>
+              Preview only — these tune the generated YAML below but are not yet enforced on Apply.
             </div>
           </div>
         )}
@@ -459,15 +479,75 @@ spec:
               marginBottom: 10
             }}
           >
-            <Info size={14} /> Would have blocked{" "}
-            <strong style={{ color: "#ffcf7a" }}>23 calls</strong> in the last 24h.
+            <Info size={14} /> Run a real dry-run from the editor’s <strong style={{ color: "#ffcf7a" }}>Dry-Run</strong>{" "}
+            to evaluate this policy against recent traffic (this sheet shows the generated YAML only).
+          </div>
+        )}
+
+        {/* F-51: a dry-run-only namespace disables Apply (the API also rejects it). */}
+        {dryRunOnly && (
+          <div
+            style={{
+              fontSize: 12.5, color: "#ffb020", background: "#ffb02010", border: "1px solid #ffb02030",
+              borderRadius: "var(--radius-md)", padding: "9px 12px", marginBottom: 10
+            }}
+          >
+            This namespace is <strong>dry-run-only</strong> — policy applies are disabled (server-enforced). Dry-Run is
+            still available. An admin can re-enable enforcement in Settings → Apply Governance.
+          </div>
+        )}
+
+        {/* F-50: review + confirm the change before the write — no silent one-click overwrite of a live policy. */}
+        {reviewing && !dryRunOnly && (
+          <div
+            data-testid="apply-review"
+            style={{
+              fontSize: 12.5, border: "1px solid var(--border, #2a2a2a)", borderRadius: "var(--radius-md)",
+              padding: "10px 12px", marginBottom: 10, background: "var(--bg-elevated, #161616)"
+            }}
+          >
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>
+              {isNew ? "Apply new policy" : "Review changes before applying"}
+            </div>
+            {isNew ? (
+              <div className="panel-sub">
+                New policy for <code>{policy.target ?? policy.agent_class}</code> — no existing version to overwrite.
+              </div>
+            ) : (
+              <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 12px" }}>
+                <span className="panel-sub">Target</span>
+                <span className="mono">{policy.target ?? policy.agent_class} (v{policy.current_version})</span>
+                <span className="panel-sub">Enforcement</span>
+                <span className="mono">
+                  {enforcementChanged ? (
+                    <>
+                      <span style={{ color: "#ff3b5c", textDecoration: "line-through" }}>{currentMode}</span>{" → "}
+                      <span style={{ color: "#00e5a0" }}>{enforcement}</span>
+                    </>
+                  ) : (
+                    <span>{enforcement} (unchanged)</span>
+                  )}
+                </span>
+              </div>
+            )}
           </div>
         )}
 
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-          <KitButton variant="primary" icon={Check} onClick={() => onApply(enforcement)}>
-            Apply
-          </KitButton>
+          {reviewing && !dryRunOnly ? (
+            <>
+              <KitButton variant="primary" icon={Check} onClick={() => onApply(enforcement)}>
+                Confirm Apply
+              </KitButton>
+              <KitButton variant="ghost" onClick={() => setReviewing(false)}>
+                Back
+              </KitButton>
+            </>
+          ) : (
+            <KitButton variant="primary" icon={Check} disabled={dryRunOnly} onClick={() => setReviewing(true)}>
+              Apply
+            </KitButton>
+          )}
           <KitButton variant="outline" icon={Play} onClick={() => setDryRun(true)}>
             Dry-Run
           </KitButton>
@@ -500,6 +580,7 @@ export function PolicyCatalog() {
   const [editorStatus, setEditorStatus] = useState<"saved" | "unsaved" | `syntax:${number}`>("saved");
   const [dryRunResult, setDryRunResult] = useState<DryRunResult | null>(null);
   const [dryRunLoading, setDryRunLoading] = useState(false);
+  const [applyResult, setApplyResult] = useState<ApplyResult | null>(null);  // Stage 1: apply-result transparency
 
   const policies = useApi<Policy[]>(
     () => apiGet<Policy[]>(`/api/v1/policies?namespace=${encodeURIComponent(namespace)}`).then(withTargetType),
@@ -514,6 +595,9 @@ export function PolicyCatalog() {
     () => apiGet<Deployment[]>(`/api/v1/deployments?namespace=${encodeURIComponent(namespace)}`),
     [namespace]
   );
+  // F-51: a dry-run-only namespace disables Apply in the sheet (the API also rejects it — defence in depth).
+  const settings = useApi(() => fetchSettings(namespace), [namespace], { cacheKey: `policy-settings:${namespace}`, staleTimeMs: 30_000 });
+  const applyMode = settings.data?.apply_mode === "dry_run_only" ? "dry_run_only" : "enforce";
 
   const editorPolicy = useMemo(() => {
     const list = policies.data ?? [];
@@ -556,16 +640,37 @@ export function PolicyCatalog() {
 
   const onApply = async (mode: Policy["mode"]) => {
     if (!selected) return;
+    const ns = selected.namespace ?? namespace;
+    const ac = selected.agent_class ?? "";
     try {
       const targetType = selected.target_type === "class" ? "agent_class" : selected.target_type ?? "agent_class";
-      await applyPolicy(selected.namespace ?? namespace, selected.agent_class ?? "", {
+      const res = await applyPolicy(ns, ac, {
         target_type: targetType,
-        target_namespace: selected.namespace ?? namespace,
+        target_namespace: ns,
         target_name: selected.target,
         target_kind: selected.target_type === "workload" ? "Deployment" : undefined,
         enforcement_mode: mode ?? "block"
       });
       await refreshPolicies();
+      // Stage 1: honest local outcome — a policy-store write + an in-memory engine load (NOT a kubectl/CRD apply).
+      setApplyResult({
+        kind: "local",
+        title: `Configured ${ns}/${ac}`,
+        ok: true,
+        outcome: `Loaded into this cluster's policy engine — enforcement "${res.enforcement_mode ?? mode}". Stored in the policy store + hot-reloaded; effective immediately on the next tool call.`,
+        manifest: { namespace: ns, agent_class: ac, enforcement_mode: res.enforcement_mode ?? mode ?? "block" }
+      });
+    } catch (e) {
+      const msg = String(e).replace(/^Error:\s*/, "");
+      const codeMatch = msg.match(/NRVQ-[A-Z]+-\d+/);
+      setApplyResult({
+        kind: "local",
+        title: "Apply rejected",
+        ok: false,
+        outcome: msg,
+        code: codeMatch ? codeMatch[0] : undefined,
+        manifest: { namespace: ns, agent_class: ac, enforcement_mode: mode ?? "block" }
+      });
     } finally {
       setSelected(null);
     }
@@ -615,6 +720,18 @@ export function PolicyCatalog() {
     }
   };
 
+  // Stage 1: a real current-vs-new diff for Dry-Run — what the edit actually changes vs the loaded policy.
+  const regoDiff = useMemo(() => {
+    const cur = (detail.data?.rego_source ?? "").split("\n");
+    const next = (regoDraft ?? "").split("\n");
+    if (cur.join("\n") === next.join("\n")) return null;
+    const curSet = new Set(cur);
+    const nextSet = new Set(next);
+    const removed = cur.filter((l) => !nextSet.has(l)).map((text) => ({ sign: "-", text }));
+    const added = next.filter((l) => !curSet.has(l)).map((text) => ({ sign: "+", text }));
+    return [...removed, ...added];
+  }, [detail.data?.rego_source, regoDraft]);
+
   return (
     <div className="page-enter">
       <PageHead
@@ -642,9 +759,11 @@ export function PolicyCatalog() {
         }
       />
 
-      <div className="stack">
-        <CategoryCoverage />
+      {/* Stage 1: apply-result transparency — the exact resource configured + honest outcome (policy-store + engine load). */}
+      <ApplyResultPanel result={applyResult} onClose={() => setApplyResult(null)} />
 
+      <div className="stack">
+        {/* F-61: "Policy Coverage by Category" lives on Overview only (was duplicated here). */}
         <div className="tabs-kit" style={{ alignSelf: "flex-start" }}>
           {(["catalog", "editor", "versions"] as const).map((t) => (
             <button
@@ -766,6 +885,7 @@ export function PolicyCatalog() {
                   </div>
                   <Editor
                     defaultLanguage="rego"
+                    beforeMount={registerRego}
                     theme="vs-dark"
                     height="350px"
                     value={regoDraft || "# Select a policy from the list"}
@@ -858,6 +978,23 @@ export function PolicyCatalog() {
                     }}
                   >
                     <div style={{ fontWeight: 600, marginBottom: 6 }}>Dry-Run Results</div>
+                    {regoDiff && (
+                      <div style={{ marginBottom: 10 }}>
+                        <div style={{ color: "var(--text-muted)", fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 4 }}>
+                          Changes vs the loaded policy
+                        </div>
+                        <pre
+                          className="mono"
+                          style={{ margin: 0, maxHeight: 140, overflow: "auto", background: "#0e0e0e", border: "1px solid var(--border,#2a2a2a)", borderRadius: 6, padding: "8px 10px", fontSize: 11.5 }}
+                        >
+                          {regoDiff.map((d, i) => (
+                            <div key={i} style={{ color: d.sign === "+" ? "var(--success,#30a46c)" : "var(--danger,#e5484d)" }}>
+                              {d.sign} {d.text}
+                            </div>
+                          ))}
+                        </pre>
+                      </div>
+                    )}
                     <div>Records checked: {(dryRunResult.total_records_checked ?? 0).toLocaleString()}</div>
                     <div>
                       Would block: {dryRunResult.would_block ?? 0} ({dryRunResult.block_rate_pct ?? 0}%)
@@ -948,6 +1085,7 @@ export function PolicyCatalog() {
         <PolicySheet
           policy={selected}
           deployments={deployments.data ?? []}
+          applyMode={applyMode}
           onClose={() => setSelected(null)}
           onApply={onApply}
         />
