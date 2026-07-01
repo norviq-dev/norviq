@@ -13,6 +13,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import delete as sql_delete
+from sqlalchemy import update as sql_update
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -128,11 +129,16 @@ async def claim_join_token(
         raise HTTPException(status_code=403, detail="join token is not scoped to this cluster")
     if row.expires_at and row.expires_at < now:
         raise HTTPException(status_code=410, detail="join token expired")
-    if row.claimed:
-        raise HTTPException(status_code=409, detail="join token already used")
-    row.claimed = True
-    row.claimed_at = now
+    # R3: single-use is enforced by an ATOMIC conditional UPDATE (WHERE claimed=false) — not a check-then-set — so
+    # two concurrent claims of the same jti can never both succeed (the DB row-locks; exactly one flips claimed).
+    result = await session.execute(
+        sql_update(UsedJoinToken)
+        .where(UsedJoinToken.jti == body.jti, UsedJoinToken.claimed.is_(False))
+        .values(claimed=True, claimed_at=now)
+    )
     await session.commit()
+    if result.rowcount == 0:
+        raise HTTPException(status_code=409, detail="join token already used")
     log.info("nrvq.fleet.join_token_claimed", cluster_id=body.cluster_id, jti=body.jti, code="NRVQ-FLT-15031")
     return {"ok": True, "cluster_id": body.cluster_id}
 
@@ -150,7 +156,9 @@ async def remove_cluster(
     row = (await session.execute(select(Cluster).where(Cluster.id == cluster_id))).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail=f"cluster '{cluster_id}' not registered")
-    for model in (AgentRollup, AuditRollup, PolicyRollout):
+    # R4: also delete the cluster's join-token rows (UsedJoinToken) — otherwise removing a cluster leaves stale
+    # single-use records behind (unbounded growth + confusing audit). Cluster/rollups/rollout as before.
+    for model in (AgentRollup, AuditRollup, PolicyRollout, UsedJoinToken):
         await session.execute(sql_delete(model).where(model.cluster_id == cluster_id))
     await session.execute(sql_delete(Cluster).where(Cluster.id == cluster_id))
     await session.commit()

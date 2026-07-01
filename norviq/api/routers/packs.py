@@ -21,7 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from norviq.api import packs as pack_lib
-from norviq.api.auth import get_current_user, require_admin, scoped_namespace
+from norviq.api.auth import get_current_user, require_admin, require_target_cluster, scoped_namespace
 from norviq.api.routers.settings_router import assert_apply_allowed  # F-51: shared dry-run-only gate
 from norviq.api.db.models import NamespacePack
 from norviq.api.db.session import get_session
@@ -93,6 +93,7 @@ async def enable_pack(
     request: Request,
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
+    _target: None = Depends(require_target_cluster),
 ) -> dict:
     """Enable a sector pack for a namespace (admin-only, idempotent, audited)."""
     require_admin(user)
@@ -122,6 +123,7 @@ async def disable_pack(
     request: Request,
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
+    _target: None = Depends(require_target_cluster),
 ) -> dict:
     """Disable a sector pack for a namespace (admin-only, idempotent, audited)."""
     require_admin(user)
@@ -181,6 +183,7 @@ async def put_pack_override(
     request: Request,
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
+    _target: None = Depends(require_target_cluster),
 ) -> dict:
     """F-54: author/replace the namespace's pack override. It is a TIGHTEN-ONLY overlay (the evaluator caps it so
     it can only make a decision stricter, never weaken/remove a pack's block). Admin; honors the F-51 apply gate;
@@ -223,6 +226,7 @@ async def delete_pack_override(
     namespace: str = Query("default"),
     request: Request = None,
     user: dict = Depends(get_current_user),
+    _target: None = Depends(require_target_cluster),
 ) -> dict:
     """F-54: REVERT — delete the override so the original pack is cleanly restored (no 'permanent' trap)."""
     require_admin(user)

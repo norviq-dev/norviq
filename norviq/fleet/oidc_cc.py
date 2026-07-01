@@ -7,8 +7,10 @@ webhook controller's pattern: fetch a client-credentials access token, cache it,
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta, timezone
 
 import httpx
+from jose import jwt
 
 from norviq.config import settings
 
@@ -38,3 +40,19 @@ class ClientCredentialsToken:
         self._token = body["access_token"]
         self._expiry = time.monotonic() + float(body.get("expires_in", 300))
         return self._token
+
+
+async def fleet_service_bearer(cluster_id: str, client: httpx.AsyncClient, *, sub: str = "norviq-fleet",
+                               ttl_minutes: int = 60) -> str:
+    """The spoke->hub SERVICE bearer, OIDC-preferring — the canonical acquisition shared by the relay's
+    self-mint and the enrollment claim. R5: when the hub runs OIDC-only (``legacy_hs256_enabled=false``) an
+    HS256-only enrollment token 401s; using OIDC client-credentials here (when ``fleet_oidc_token_url`` is set) makes
+    the claim work. Falls back to a self-minted HS256 service token ONLY when legacy HS256 is enabled; otherwise ""."""
+    if settings.fleet_oidc_token_url:
+        return await ClientCredentialsToken(client).bearer()
+    if settings.legacy_hs256_enabled:
+        now = datetime.now(timezone.utc)
+        claims = {"sub": sub, "role": "service", "cluster": cluster_id,
+                  "iat": int(now.timestamp()), "exp": int((now + timedelta(minutes=ttl_minutes)).timestamp())}
+        return jwt.encode(claims, settings.api_secret_key, algorithm="HS256")
+    return ""

@@ -11,16 +11,22 @@
 import { Panel } from "./Panel";
 import { PageHead } from "./PageHead";
 
-/** Shared inner body: the wording + the deep-link (or a non-dead fallback when console_url is unknown). */
+// R1 (P1): the console_url is SELF-REPORTED by the spoke. Only emit a real link for http(s) — never a
+// javascript:/data: scheme (defense-in-depth atop the hub-side write validation) so clicking "Open console"
+// can't XSS a hub admin. Anything else falls back to inert text.
+const isSafeHttpUrl = (u?: string): boolean => /^https?:\/\//i.test((u ?? "").trim());
+
+/** Shared inner body: the wording + the deep-link (or a non-dead fallback when console_url is unknown/unsafe). */
 function NoticeBody({ what, cluster, consoleUrl }: { what: string; cluster: string; consoleUrl?: string }) {
+  const safeUrl = isSafeHttpUrl(consoleUrl) ? consoleUrl : undefined;
   return (
     <div style={{ color: "var(--text-muted)", fontSize: 13, lineHeight: 1.7, textAlign: "center" }}>
       {what} isn’t aggregated at the fleet hub for{" "}
       <span className="mono" style={{ color: "var(--text-secondary)" }}>{cluster}</span>.
       <div style={{ marginTop: 12 }}>
-        {consoleUrl ? (
+        {safeUrl ? (
           <a
-            href={consoleUrl}
+            href={safeUrl}
             target="_blank"
             rel="noreferrer"
             className="btn btn-primary"

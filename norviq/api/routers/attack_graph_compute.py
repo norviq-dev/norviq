@@ -6,7 +6,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from norviq.api.auth import get_current_user, require_admin
+from norviq.api.auth import get_current_user, require_admin, require_target_cluster
 from norviq.api.db.session import get_session
 from norviq.engine.attack_graph import AttackGraphEngine
 
@@ -20,6 +20,7 @@ async def trigger_attack_graph_computation(
     namespace: str | None = None,
     session: AsyncSession = Depends(get_session),
     user: dict = Depends(get_current_user),
+    _target: None = Depends(require_target_cluster),
 ):
     """Trigger attack graph recomputation for one or all namespaces."""
     require_admin(user)

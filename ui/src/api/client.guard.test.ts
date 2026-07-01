@@ -6,12 +6,16 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { apiSend } from "./client";
-import { setRemoteClusterContext } from "./clusterGuard";
+import { setRemoteClusterContext, setSelectedClusterId } from "./clusterGuard";
 
 describe("apiSend remote-cluster backstop (F-69 Stage 1)", () => {
-  beforeEach(() => setRemoteClusterContext(false));
+  beforeEach(() => {
+    setRemoteClusterContext(false);
+    setSelectedClusterId("");
+  });
   afterEach(() => {
     setRemoteClusterContext(false);
+    setSelectedClusterId("");
     vi.restoreAllMocks();
   });
 
@@ -29,5 +33,26 @@ describe("apiSend remote-cluster backstop (F-69 Stage 1)", () => {
     setRemoteClusterContext(false);
     await apiSend("/api/v1/policies", "POST", { rego_source: "x" });
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("R2: sends X-Nrvq-Target-Cluster with the selected cluster on a mutation", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    setRemoteClusterContext(false);
+    setSelectedClusterId("fleet-a");
+    await apiSend("/api/v1/policies", "POST", { rego_source: "x" });
+    const headers = (fetchSpy.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    expect(headers["X-Nrvq-Target-Cluster"]).toBe("fleet-a");
+  });
+
+  it("R2: omits the header when no concrete cluster is selected (local intent)", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    setSelectedClusterId(""); // "" or "all" -> no explicit target
+    await apiSend("/api/v1/policies", "POST", { rego_source: "x" });
+    const headers = (fetchSpy.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    expect(headers["X-Nrvq-Target-Cluster"]).toBeUndefined();
   });
 });

@@ -10,12 +10,10 @@ pushed policy via the F-52 reconcile path. Admin only."""
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
 
 import httpx
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
-from jose import jwt
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +23,7 @@ from norviq.api.db.models import FleetBundleState, FleetJoinState
 from norviq.api.db.session import get_session
 from norviq.config import settings
 from norviq.fleet.join_token import verify_join_token
+from norviq.fleet.oidc_cc import fleet_service_bearer
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -52,11 +51,8 @@ async def configure_from_join_state(session: AsyncSession) -> bool:
     return bool(row.enabled)
 
 
-def _service_token(cluster_id: str) -> str:
-    now = datetime.now(timezone.utc)
-    claims = {"sub": "norviq-join", "role": "service", "cluster": cluster_id,
-              "iat": int(now.timestamp()), "exp": int((now + timedelta(minutes=2)).timestamp())}
-    return jwt.encode(claims, settings.api_secret_key, algorithm="HS256")
+# R5: the enrollment claim uses the shared OIDC-preferring service bearer (fleet_service_bearer) so a hardened
+# hub (legacy_hs256_enabled=false) accepts an OIDC-authenticated claim instead of 401ing an HS256-only token.
 
 
 @router.get("/fleet/status")
@@ -94,9 +90,10 @@ async def fleet_join(
     # single-use: claim the jti at the hub before we enroll (rejected if expired/already used/wrong cluster).
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
+            bearer = await fleet_service_bearer(cluster_id, client, sub="norviq-join", ttl_minutes=2)
             r = await client.post(
                 f"{hub_url.rstrip('/')}/api/v1/fleet/clusters/join-token/claim",
-                headers={"Authorization": f"Bearer {_service_token(cluster_id)}"},
+                headers={"Authorization": f"Bearer {bearer}"},
                 json={"jti": jti, "cluster_id": cluster_id},
             )
         if r.status_code != 200:

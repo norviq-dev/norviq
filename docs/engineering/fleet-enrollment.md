@@ -33,6 +33,11 @@ relay+puller **live**. The enrollment is re-applied at startup, so it survives r
   blindly fetched. `verify_bundle` remains fail-closed on a bad/empty pubkey.
 - In kind the relay's hub auth is the shared HS256 service secret (`api_secret_key`, `cluster`-scoped); production
   should use per-cluster OIDC client-credentials (`fleet.oidc.*`).
+- **Enrollment claim auth (R5):** the `POST /fleet/join` → hub `…/join-token/claim` call uses the SAME OIDC-preferring
+  service bearer as the relay (`fleet_service_bearer`): OIDC client-credentials when `fleet.oidc.tokenUrl` is set, else
+  a self-minted HS256 service token only when `legacy_hs256_enabled`. So a **hardened hub** (`legacy_hs256_enabled=false`)
+  accepts the OIDC-authenticated claim — configure the spoke's `fleet.oidc.*` before joining such a hub, or the claim
+  will have no bearer and 401.
 
 ## Removing a cluster
 - Console: **Fleet → Remove** (per cluster) → `DELETE /api/v1/fleet/clusters/{id}` deregisters at the hub (deletes
@@ -60,7 +65,10 @@ detail. So when an operator selects a **remote** cluster in the nav:
   MITRE) renders the same deep-link instead of the served cluster's data — it never shows local data under a remote
   label (`ui/src/components/common/ClusterScoped.tsx`).
 - **Mutations are hard-blocked**: a cluster-scoped write to the local API while a remote cluster is selected is
-  refused by the client guard (`ui/src/api/clusterGuard.ts`, `NRVQ-UI-4601`) — you cannot change the served cluster
+  refused on TWO levels — the UI client guard (`ui/src/api/clusterGuard.ts`, `NRVQ-UI-4601`, first line) AND a SERVER
+  backstop (`require_target_cluster` in `norviq/api/auth.py`, `NRVQ-API-7460`): the console sends the intended target
+  on `X-Nrvq-Target-Cluster`, and the API 409s any mutation whose target != its served cluster, so even a non-SPA
+  caller cannot change the served cluster
   under a remote label. Edit a remote cluster from its own console.
 
 ### `console_url` (the deep-link target)

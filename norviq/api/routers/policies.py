@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from norviq.api.auth import get_current_user, require_admin, require_admin_or_service, scoped_namespace
+from norviq.api.auth import get_current_user, require_admin, require_admin_or_service, require_target_cluster, scoped_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
 from norviq.api.routers.settings_router import assert_apply_allowed  # F-51: shared dry-run-only gate
@@ -149,7 +149,7 @@ async def get_policy(
 
 
 @router.post("/policies")
-async def create_policy(body: PolicyCreate, request: Request, user: dict = Depends(get_current_user)) -> dict:
+async def create_policy(body: PolicyCreate, request: Request, user: dict = Depends(get_current_user), _target: None = Depends(require_target_cluster)) -> dict:
     """Create or update a policy (admin, or the webhook controller's service identity)."""
     require_admin_or_service(user)
     validate_policy_create(body)
@@ -280,6 +280,7 @@ async def rollback_policy(
     body: RollbackRequest,
     request: Request,
     user: dict = Depends(get_current_user),
+    _target: None = Depends(require_target_cluster),
 ) -> dict:
     """Rollback policy to a previous version."""
     require_admin(user)
@@ -331,6 +332,7 @@ async def dry_run_policy(
     request: Request,
     session: AsyncSession = Depends(get_session),
     user: dict = Depends(get_current_user),
+    _target: None = Depends(require_target_cluster),
 ) -> dict:
     """Validate the submitted rego (compile + sample decision) and report recent block-rate."""
     _ = user  # authenticated; any role may dry-run (read-only simulation)
@@ -368,6 +370,7 @@ async def apply_policy(
     request: Request,
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
+    _target: None = Depends(require_target_cluster),
 ) -> dict:
     """Apply a saved policy to a target scope."""
     require_admin(user)

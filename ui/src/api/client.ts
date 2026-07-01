@@ -3,7 +3,7 @@
 // its own origin (always browser-reachable). Set VITE_API_BASE_URL to an absolute origin only for a
 // split-origin deploy where the API has its own ingress (requires CORS on the API).
 import { oidcEnabled, oidcLogout } from "../auth/oidc";
-import { blockedByRemoteCluster, remoteMutationError } from "./clusterGuard";
+import { blockedByRemoteCluster, remoteMutationError, targetClusterHeader } from "./clusterGuard";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
 
@@ -58,9 +58,15 @@ export async function apiSend<T>(path: string, method: "POST" | "PUT" | "DELETE"
   // context — it would change the served cluster under a remote label. Refuse before the fetch (hard backstop;
   // the UI also routes remote pages to a deep-link, but this guarantees it even if a control slips through).
   if (blockedByRemoteCluster(method, path)) throw remoteMutationError();
+  // R2: declare the operator's intended target cluster so the SERVER can refuse a mutation aimed at another
+  // cluster (X-Nrvq-Target-Cluster). The UI guard above already blocks remote mutations, so this header equals the
+  // served cluster on any request that actually gets here — the server check is the backstop for non-SPA callers.
+  const target = targetClusterHeader();
+  const extra: Record<string, string> = { "Content-Type": "application/json" };
+  if (target) extra["X-Nrvq-Target-Cluster"] = target;
   const response = await fetch(apiUrl(path), {
     method,
-    headers: authHeaders({ "Content-Type": "application/json" }),
+    headers: authHeaders(extra),
     body: body ? JSON.stringify(body) : undefined
   });
   if (!response.ok) {

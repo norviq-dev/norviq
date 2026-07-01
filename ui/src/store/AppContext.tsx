@@ -2,7 +2,7 @@ import { createContext, ReactNode, useContext, useEffect, useMemo, useState } fr
 import { oidcEnabled, login } from "../auth/oidc";
 import { fetchClusterInfo } from "../api/client";
 import { fleetEnabled, fetchFleetClusters } from "../api/fleet";
-import { setRemoteClusterContext } from "../api/clusterGuard";
+import { setRemoteClusterContext, setSelectedClusterId } from "../api/clusterGuard";
 
 export type Section = "security" | "intelligence" | "settings";
 export type TimeRange = "1h" | "6h" | "24h" | "7d" | "30d";
@@ -140,10 +140,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const scopeCluster = selectedCluster === "all" ? "All clusters" : selectedCluster || servedCluster;
   const selectedClusterConsoleUrl = clusterConsoleUrls[selectedCluster] ?? "";
 
-  // Keep the stateless api-client guard in sync so a cluster-scoped mutation is refused while remote (Stage 1).
+  // Keep the stateless api-client guard in sync: the UI refuses a cluster-scoped mutation while remote (F-69), and
+  // declares the intended target cluster on every mutation so the SERVER can enforce it too (R2 backstop).
   useEffect(() => {
     setRemoteClusterContext(isRemote);
-  }, [isRemote]);
+    setSelectedClusterId(selectedCluster || servedCluster);
+  }, [isRemote, selectedCluster, servedCluster]);
 
   const value = useMemo(
     () => ({

@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from norviq.api.auth import get_current_user, require_admin, scoped_namespace
+from norviq.api.auth import get_current_user, require_admin, require_target_cluster, scoped_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
 from norviq.sdk.core.trust import TrustScore
@@ -215,7 +215,8 @@ async def get_agent(spiffe_id: str, request: Request, user: dict = Depends(get_c
 
 @router.put("/agents/{spiffe_id:path}/trust")
 async def update_trust(
-    spiffe_id: str, body: TrustUpdate, request: Request, user: dict = Depends(get_current_user)
+    spiffe_id: str, body: TrustUpdate, request: Request, user: dict = Depends(get_current_user),
+    _target: None = Depends(require_target_cluster)
 ) -> dict:
     """Set an agent trust score manually."""
     require_admin(user)

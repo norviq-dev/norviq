@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from norviq.api.auth import get_current_user, require_admin, scoped_namespace
+from norviq.api.auth import get_current_user, require_admin, require_target_cluster, scoped_namespace
 from norviq.api.db.models import NamespaceSettings
 from norviq.api.db.session import get_session
 from norviq.config import settings as app_settings
@@ -89,6 +89,7 @@ async def put_settings(
     namespace: str = Query("default"),
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
+    _target: None = Depends(require_target_cluster),
 ) -> dict:
     """Persist a per-namespace settings override (admin-only, validated, audited)."""
     require_admin(user)

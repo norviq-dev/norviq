@@ -8,10 +8,22 @@
 // UI renders or disables. AppContext keeps `remoteContext` in sync with the selected/served cluster.
 
 let remoteContext = false;
+let selectedClusterId = "";
 
 /** AppContext calls this whenever isRemote changes. */
 export function setRemoteClusterContext(isRemote: boolean): void {
   remoteContext = isRemote;
+}
+
+/** AppContext keeps the operator's currently-selected cluster here so mutations can declare their intended target
+ *  to the server (R2 backstop). "all"/empty means "no explicit target" → treated as local by the server. */
+export function setSelectedClusterId(id: string): void {
+  selectedClusterId = id === "all" ? "" : id;
+}
+
+/** The X-Nrvq-Target-Cluster header value the client sends on cluster-scoped mutations (R2). */
+export function targetClusterHeader(): string {
+  return selectedClusterId;
 }
 
 export function isRemoteClusterActive(): boolean {
