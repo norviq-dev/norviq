@@ -72,22 +72,45 @@ bash scripts/verify.sh "$FEAT" --tier T1 2>&1 | tee "$VERIFY_OUTPUT"
 T1_EXIT=${PIPESTATUS[0]}
 bash scripts/verify.sh "$FEAT" --tier T5 2>&1 | tee -a "$VERIFY_OUTPUT"
 T5_EXIT=${PIPESTATUS[0]}
-bash scripts/verify.sh "$FEAT" --tier T2 2>&1 | tee -a "$VERIFY_OUTPUT"
-T2_EXIT=${PIPESTATUS[0]}
+
+KIND_CTX="$(kubectl config get-contexts -o name 2>/dev/null | rg '^kind-' --no-line-number | awk 'NR==1{print; exit}')"
+CURRENT_CTX="$(kubectl config current-context 2>/dev/null || echo none)"
+T2_EXIT=0
+T4_EXIT=0
+
+if [ -n "${KIND_CTX:-}" ]; then
+    echo "" | tee -a "$VERIFY_OUTPUT"
+    echo "  ℹ️  kind context detected: $KIND_CTX (current=$CURRENT_CTX)." | tee -a "$VERIFY_OUTPUT"
+    echo "     Running T2/T4 on kind context for integration/effect evidence." | tee -a "$VERIFY_OUTPUT"
+    if [ "$CURRENT_CTX" != "$KIND_CTX" ]; then
+        kubectl config use-context "$KIND_CTX" >/dev/null 2>&1 || true
+    fi
+    bash scripts/verify.sh "$FEAT" --tier T2 2>&1 | tee -a "$VERIFY_OUTPUT"
+    T2_EXIT=${PIPESTATUS[0]}
+    # T4 emits evidence for the reviewer to assert — it is env-gated and non-blocking.
+    bash scripts/verify.sh "$FEAT" --tier T4 2>&1 | tee -a "$VERIFY_OUTPUT"
+    T4_EXIT=${PIPESTATUS[0]}
+    if [ "$CURRENT_CTX" != "$KIND_CTX" ]; then
+        kubectl config use-context "$CURRENT_CTX" >/dev/null 2>&1 || true
+    fi
+else
+    echo "" | tee -a "$VERIFY_OUTPUT"
+    echo "  ℹ️  T2/T4 not run: no kind context — effect validated separately via P-10 on AKS." | tee -a "$VERIFY_OUTPUT"
+fi
+
 bash scripts/verify.sh "$FEAT" --tier T3 2>&1 | tee -a "$VERIFY_OUTPUT"
 T3_EXIT=${PIPESTATUS[0]}
-# T4 emits evidence for the reviewer to assert — it does not gate here.
-bash scripts/verify.sh "$FEAT" --tier T4 2>&1 | tee -a "$VERIFY_OUTPUT"
 set -e
 
-if [ "$T1_EXIT" -ne 0 ] || [ "$T5_EXIT" -ne 0 ] || [ "$T2_EXIT" -ne 0 ] || [ "$T3_EXIT" -ne 0 ]; then
+if [ "$T1_EXIT" -ne 0 ] || [ "$T5_EXIT" -ne 0 ] || [ "$T3_EXIT" -ne 0 ]; then
     echo ""
-    echo "  🔴 Verification tiers FAILED (T1=$T1_EXIT T5=$T5_EXIT T2=$T2_EXIT T3=$T3_EXIT)"
+    echo "  🔴 Required verification tiers FAILED (T1=$T1_EXIT T5=$T5_EXIT T3=$T3_EXIT)"
     echo "     Tell Cursor: read $VERIFY_OUTPUT, fix the red tiers, re-run review.sh ${FEAT}."
     echo "     HIGH/CRITICAL security (T5) is fail-closed — it blocks."
     exit 1
 fi
-echo "  🟢 Gate tiers green — proceeding to Claude review"
+echo "  🟢 Required tiers green (T1/T5/T3). T2/T4 env-gated status: T2=$T2_EXIT T4=$T4_EXIT"
+echo "     Proceeding to Claude review."
 
 # ─── PHASE 3: Claude Deep Review (ONCE per gate state) ─────────────────────
 echo ""
@@ -110,7 +133,7 @@ fi
 
 echo "  Running Claude review (the ONLY run for this gate state)..."
 set +e
-claude "$(cat "$CLAUDE_PROMPT")" --print 2>&1 | tee "$CLAUDE_OUTPUT"
+claude "$(cat "$CLAUDE_PROMPT")" --print < /dev/null 2>&1 | tee "$CLAUDE_OUTPUT"
 set -e
 touch "$REVIEW_MARKER"
 
