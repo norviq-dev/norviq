@@ -7,6 +7,7 @@ Replaces the console's hardcoded "0.1.0". The version comes from the installed p
 (pyproject [project].version), so there is exactly one place it is defined.
 """
 
+import os
 from importlib import metadata
 
 import structlog
@@ -31,5 +32,6 @@ async def version(user: dict = Depends(get_current_user)) -> dict:
     """Return the product version + license for the About page."""
     _ = user
     ver = _version()
+    build_sha = os.getenv("NRVQ_BUILD_GIT_SHA", "unknown")
     log.debug("nrvq.api.version.served", version=ver, code="NRVQ-API-7086")
-    return {"version": ver, "license": "Apache-2.0"}
+    return {"version": ver, "build_git_sha": build_sha, "license": "Apache-2.0"}
