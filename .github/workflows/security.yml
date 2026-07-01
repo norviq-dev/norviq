@@ -113,7 +113,7 @@ jobs:
             | tar -xz -C /usr/local/bin kube-linter
           kube-linter lint helm/ || true
       - name: trivy config + fs (Dockerfiles, deps, k8s manifests — no image pull)
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: config
           scan-ref: .
