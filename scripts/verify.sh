@@ -52,6 +52,43 @@ guard_not_aks() {
   esac
 }
 
+# Require explicit AKS context + served cluster identity for post-deploy checks.
+# This prevents accidental verification against local kind contexts.
+guard_aks_context() {
+  local expected_ctx="${1:-norviq}"
+  local expected_cluster="${2:-aks-dev}"
+  local ctx cluster_id
+
+  ctx="$(kubectl config current-context 2>/dev/null || echo none)"
+  if [ "$ctx" != "$expected_ctx" ]; then
+    fail "AKS preflight failed: current context '$ctx' != '$expected_ctx'"
+    return 1
+  fi
+  pass "AKS preflight: context '$ctx' confirmed"
+
+  if ! command -v curl >/dev/null 2>&1; then
+    fail "AKS preflight failed: curl required for cluster-info check"
+    return 1
+  fi
+
+  # Require an explicit bearer token from the caller to keep this guard read-only.
+  if [ -z "${NRVQ_API_TOKEN:-}" ]; then
+    fail "AKS preflight failed: set NRVQ_API_TOKEN to query /api/v1/cluster-info"
+    return 1
+  fi
+
+  cluster_id="$(curl -fsS \
+    -H "Authorization: Bearer ${NRVQ_API_TOKEN}" \
+    "${NRVQ_API_BASE_URL:-http://127.0.0.1:8080}/api/v1/cluster-info" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("cluster_id",""))' 2>/dev/null || true)"
+
+  if [ "$cluster_id" != "$expected_cluster" ]; then
+    fail "AKS preflight failed: served cluster_id '$cluster_id' != '$expected_cluster'"
+    return 1
+  fi
+  pass "AKS preflight: served cluster_id '$cluster_id' confirmed"
+}
+
 # ─── T1 — static + unit (fast; fail-closed) ────────────────────────────────
 tier_t1() {
   say "T1 — static + unit"

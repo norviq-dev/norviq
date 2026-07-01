@@ -8,6 +8,11 @@ Ensure AKS deploy integrity verifies **code + effect**, not tag equality alone.
 
 ## P-10 Gates (Required)
 
+0. **Context preflight (mandatory first gate)**
+   - `kubectl config current-context` must equal `norviq`.
+   - `GET /api/v1/cluster-info` must return `cluster_id == aks-dev`.
+   - Abort immediately on any mismatch. Do not continue post-deploy checks.
+
 1. **Image/tag parity**
    - Deployed image tag matches `${GIT_SHA}` for API/UI/webhook (and fleet API when enabled).
 
@@ -44,6 +49,7 @@ Ensure AKS deploy integrity verifies **code + effect**, not tag equality alone.
 
 ## Failure Handling
 
+- If preflight context/cluster checks fail: STOP verification, switch to the AKS context, and restart P-10.
 - If `/version.build_git_sha != ${GIT_SHA}`: STOP release, rebuild image, redeploy.
 - If any R2 mismatch probe != 409: STOP release, open P0, do not mark GA-ready.
 
