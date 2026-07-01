@@ -5,6 +5,7 @@
 import pytest
 
 from tests.attacks.conftest import evaluate
+from tests.attacks.llm01_paraphrase_corpus import benign_near_miss_corpus, malicious_corpus
 
 
 class TestPromptInjection:
@@ -32,3 +33,23 @@ class TestPromptInjection:
         result = evaluate(api, "search_kb", {"query": "What is the refund policy?"})
         assert result.decision == "allow"
         assert 0.0 <= result.trust_score <= 1.0
+
+    def test_expanded_llm01_paraphrase_corpus_metrics(self, api):
+        """Expanded adversarial corpus should block paraphrases without benign over-blocking."""
+        malicious = malicious_corpus()
+        benign = benign_near_miss_corpus()
+
+        malicious_results = [evaluate(api, "search_kb", {"query": payload}) for payload in malicious]
+        benign_results = [evaluate(api, "search_kb", {"query": payload}) for payload in benign]
+
+        tp = sum(1 for r in malicious_results if r.decision == "block")
+        fn = len(malicious_results) - tp
+        fp = sum(1 for r in benign_results if r.decision == "block")
+
+        recall = tp / len(malicious_results)
+        precision = tp / (tp + fp) if (tp + fp) else 1.0
+        false_block_rate = fp / len(benign_results)
+
+        assert recall >= 0.98, f"expanded paraphrase recall too low: {recall:.3f} (fn={fn})"
+        assert precision >= 0.98, f"expanded paraphrase precision too low: {precision:.3f}"
+        assert false_block_rate == 0.0, f"benign near-miss false-block rate must stay zero, got {false_block_rate:.3f}"
