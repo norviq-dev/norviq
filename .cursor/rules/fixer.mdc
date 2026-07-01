@@ -10,16 +10,22 @@ or memory — the REVIEWER (Claude) owns `_bug-catalog.md`, `bug-patterns.md`, a
 
 When asked to fix a bug or modify ANY file in `norviq/`, do this FIRST:
 
-1. Identify the feature ID(s) that own the files being changed.
+1. **Pick up the review with NO human relay.** If `.reviews/{FEAT}-fixes.md` exists, READ it first
+   (+ `.reviews/{FEAT}-claude.md` for full context) and apply those fixes in-scope — do NOT wait to
+   be handed the list; the reviewer (Claude) writes that file fresh each cycle (overwrite). Fix the
+   items there, then re-run the gate (`./scripts/review.sh {FEAT}`). If the file is ABSENT, this is
+   first-authoring (not a fix cycle) — just continue with the history reads below.
+
+2. Identify the feature ID(s) that own the files being changed.
    Example: editing `norviq/engine/evaluator.py` -> F009 owns this.
 
-2. Read `tests/.history/{FEAT}.md` for those features.
+3. Read `tests/.history/{FEAT}.md` for those features.
    Look for:
    - Bugs previously caught in this code (do not reintroduce)
    - Tests that must continue passing
    - Known limitations (document new ones, do not claim to fix what's deferred)
 
-3. Read `tests/.history/_bug-catalog.md` + `docs/engineering/bug-patterns.md` for cross-cutting bug
+4. Read `tests/.history/_bug-catalog.md` + `docs/engineering/bug-patterns.md` for cross-cutting bug
    patterns (READ them — you do not write them; the reviewer curates both).
    Watch for:
    - Hardcoded fallbacks (OPA stub, default decision returns)
@@ -28,12 +34,12 @@ When asked to fix a bug or modify ANY file in `norviq/`, do this FIRST:
    - Memory state vs DB state mismatches
    - Cache TTLs masking real behavior
 
-4. After making changes, run:
+5. After making changes, run:
    - All tests listed in "What MUST Continue Passing" of relevant history files
    - All unit tests in the file you touched
    - Relevant integration tests
 
-5. Update **your** history file `tests/.history/{FEAT}.md` with:
+6. Update **your** history file `tests/.history/{FEAT}.md` with:
    - Tests you added
    - Bugs you caught
    - Files touched

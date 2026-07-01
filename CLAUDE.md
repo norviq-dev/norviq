@@ -45,8 +45,17 @@ Only after Step 0 do you begin the review.
 2. You receive: the spec + changed file paths + the T1–T3/SAST results + the T4 evidence artifacts
    (screenshots + decision-flip log) Cursor produced.
 3. You read the code from disk (Serena-first) and apply the review checklist below.
-4. You output the structured verdict: PASS / REJECT + a precise fix-list. On REJECT, Cursor fixes and
-   you RE-review the diff. Loop until 0 REJECT-level findings and all gates green.
+4. You output the structured verdict: PASS / REJECT + a precise fix-list, AND you **WRITE it to the
+   deterministic handoff files** so Cursor picks it up with no human relay:
+   - full review → `.reviews/{FEAT}-claude.md`
+   - verdict + actionable fix-list → `.reviews/{FEAT}-fixes.md`
+   **OVERWRITE** both each cycle — they are the single review-of-record, never appended (durable
+   findings go to `_bug-catalog.md` via Step N). This holds BOTH ways: when review runs via
+   `./scripts/review.sh {FEAT}` (it captures stdout into those files) AND when you review
+   interactively — in that case **you write the two files yourself with the Write tool**. The paths
+   are fixed and ephemeral (`.reviews/` is gitignored — per-cycle scratch, not committed).
+   On REJECT, Cursor's fixer reads `.reviews/{FEAT}-fixes.md` first and applies the fixes; you
+   RE-review the diff. Loop until 0 REJECT-level findings and all gates green.
    **Ping-pong guard:** if the same finding recurs >2 cycles, STOP and escalate to San (spec ambiguity).
 
 ## Verification tiers you enforce (a 200 is NOT proof — see AGENTS.md rule 1)
@@ -99,6 +108,10 @@ Serena reindexed vs HEAD: yes/no. Memories health-checked: {list} — {ok / refr
 
 ### Verdict: PASS | REJECT   (REJECT if any tier FAIL or any HIGH/CRITICAL finding)
 ```
+**Write this whole block to `.reviews/{FEAT}-claude.md`, and the "Fix instructions for Cursor" +
+Verdict to `.reviews/{FEAT}-fixes.md` — OVERWRITE both (fresh each cycle).** That is the file-based
+handoff Cursor's fixer reads automatically (no human paste). Keep the fix-list actionable
+(file:line + what to change) so the author can apply it in-scope.
 
 ---
 

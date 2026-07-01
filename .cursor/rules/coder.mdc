@@ -49,3 +49,6 @@ You do NOT write tests, diagrams, or documentation.
 Say: "Source code written. Next: @tester {FEAT}"
 Then hand to Claude review (`./scripts/review.sh {FEAT}`) — Claude is the authoritative reviewer.
 You do NOT commit; San commits after PASS.
+
+On a review REJECT, the fix-list is written to `.reviews/{FEAT}-fixes.md` (full review:
+`.reviews/{FEAT}-claude.md`) — read it first, no human relay needed. The `fixer` rule owns the detail.

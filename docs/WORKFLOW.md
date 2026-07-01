@@ -35,6 +35,18 @@ Termination: loop until 0 REJECT-level findings AND all gate tiers green.
 Ping-pong guard: if the SAME finding recurs > 2 cycles, STOP and escalate to San (spec ambiguity).
 ```
 
+### Review→fix handoff (file-based, no human relay)
+The REJECT→fix arrow above runs through files, not a human paste:
+- **Path convention:** the reviewer WRITES `.reviews/{FEAT}-fixes.md` (actionable verdict + fix-list)
+  and `.reviews/{FEAT}-claude.md` (full review); the author's `fixer` rule READS `-fixes.md` first
+  (STEP 1) and applies the fixes in-scope, then re-runs the gate.
+- **OVERWRITE semantics:** each review overwrites both files — the latest review is the single
+  source of truth (never appended). Durable, cross-cutting findings are promoted to
+  `tests/.history/_bug-catalog.md` (Part F) — that is the append-only history, not `.reviews/`.
+- **Reviewer writes / author reads.** Holds both via `scripts/review.sh` (stdout capture) and
+  interactive review (Claude writes the two files itself).
+- **Ephemeral:** `.reviews/` is gitignored — per-cycle scratch, NOT committed.
+
 ## "Major change" (triggers the full gate set)
 Any change to: **enforcement logic (engine / rego)**, **API surface**, **auth / security /
 fleet-trust surface**, or a **user-facing UI feature**. Trivial (docs, comments, string/style) →
