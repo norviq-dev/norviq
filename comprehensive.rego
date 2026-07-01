@@ -15,12 +15,24 @@ default reason = "Allowed"
 # --- detection predicates (unchanged) ---
 
 # Prompt injection
-injection_patterns = ["ignore previous", "ignore above", "ignore prior", "enable dan", "repeat your system", "bypass all safety", "pretend you are", "forget your instructions", "you are now"]
+injection_patterns = [
+    "ignore previous instructions",
+    "ignore above instructions",
+    "ignore prior instructions",
+    "ignore earlier instructions",
+    "ignore above and act as admin",
+    "enable dan",
+    "repeat your system",
+    "bypass all safety",
+    "pretend you are",
+    "forget your instructions",
+    "you are now",
+]
 injection_patterns_fullwidth = ["ｉｇｎｏｒｅ", "ｄａｎ", "ｂｙｐａｓｓ"]
 injection_override_keywords = ["ignore", "disregard", "override", "forget", "skip", "bypass"]
 injection_context_keywords = ["previous", "prior", "above", "earlier", "system"]
 injection_directive_keywords = ["instruction", "instructions", "guardrail", "guardrails", "rule", "rules", "policy", "directions"]
-injection_action_keywords = ["reveal", "dump", "export", "print", "show"]
+injection_action_keywords = ["reveal", "dump", "export", "print", "show", "delete"]
 injection_target_keywords = ["secret", "secrets", "confidential", "credential", "credentials", "token", "tokens", "hidden credentials", "confidential data"]
 
 injection_scan_texts[t] {
@@ -51,6 +63,15 @@ contains_any(text, terms) {
     contains(text, term)
 }
 
+combined_injection_text = out {
+    parts := [normalized_text(t) | t := injection_scan_texts[_]]
+    out := concat(" ", parts)
+}
+
+combined_injection_compact = out {
+    out := compact_text(combined_injection_text)
+}
+
 injection_detected {
     some k
     val := input.tool_params[k]
@@ -76,6 +97,15 @@ injection_detected {
     contains_any(normalized, injection_directive_keywords)
     contains_any(normalized, injection_action_keywords)
     contains_any(normalized, injection_target_keywords)
+}
+# Split-across-params paraphrase guard: aggregate signals across all text params.
+injection_detected {
+    normalized := combined_injection_text
+    compact := combined_injection_compact
+    contains_any(compact, injection_override_keywords)
+    contains_any(normalized, injection_context_keywords)
+    contains_any(normalized, injection_directive_keywords)
+    contains_any(normalized, injection_action_keywords)
 }
 # F-02: confusable skeleton (homoglyph/zero-width) — engine folds tool_params to ASCII (match-only).
 injection_detected {
