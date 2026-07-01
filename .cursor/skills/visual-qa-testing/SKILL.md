@@ -54,7 +54,8 @@ Cursor's built-in browser (`cursor-ide-browser` MCP) can navigate, screenshot, r
    - Screenshot path
    - Console state (clean / errors listed)
    - Network state (healthy / failures listed)
-   - Bugs found -> also log to docs/backlog.md
+   - Bugs found -> apply the doable in-scope fix now (per AGENTS.md), then attach the before/after
+     screenshots as the T4 EFFECT evidence for Claude's review. Do NOT route to a backlog.
 
 ## Norviq Pages to Test (Day 9 walkthrough)
 

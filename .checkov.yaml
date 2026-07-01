@@ -1,0 +1,15 @@
+# Checkov config for helm/ + crds/ IaC scanning.
+# soft-fail during rollout (report-only); flip to false after baseline triage
+# (docs/engineering/security-baseline.md), then the iac job in security.yml ratchets to blocking.
+soft-fail: true
+directory:
+  - helm
+  - crds
+skip-path:
+  - ui/node_modules
+  - tests
+framework:
+  - helm
+  - kubernetes
+  - dockerfile
+compact: true

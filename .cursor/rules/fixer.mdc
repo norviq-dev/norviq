@@ -1,0 +1,56 @@
+---
+description: Cursor fixer with regression history awareness
+alwaysApply: false
+---
+# Cursor Fixer Rule - Read Test History
+
+Read `AGENTS.md` (repo root) first — shared standards + process discipline. You are the **AUTHOR**:
+you own ALL code fixes (including the fix-list Claude's review hands back). You do NOT write lessons
+or memory — the REVIEWER (Claude) owns `_bug-catalog.md`, `bug-patterns.md`, and Serena/graph memory.
+
+When asked to fix a bug or modify ANY file in `norviq/`, do this FIRST:
+
+1. Identify the feature ID(s) that own the files being changed.
+   Example: editing `norviq/engine/evaluator.py` -> F009 owns this.
+
+2. Read `tests/.history/{FEAT}.md` for those features.
+   Look for:
+   - Bugs previously caught in this code (do not reintroduce)
+   - Tests that must continue passing
+   - Known limitations (document new ones, do not claim to fix what's deferred)
+
+3. Read `tests/.history/_bug-catalog.md` + `docs/engineering/bug-patterns.md` for cross-cutting bug
+   patterns (READ them — you do not write them; the reviewer curates both).
+   Watch for:
+   - Hardcoded fallbacks (OPA stub, default decision returns)
+   - Regex shortcuts that skip real logic
+   - Sub-second timeouts on subprocess calls
+   - Memory state vs DB state mismatches
+   - Cache TTLs masking real behavior
+
+4. After making changes, run:
+   - All tests listed in "What MUST Continue Passing" of relevant history files
+   - All unit tests in the file you touched
+   - Relevant integration tests
+
+5. Update **your** history file `tests/.history/{FEAT}.md` with:
+   - Tests you added
+   - Bugs you caught
+   - Files touched
+   - New limitations (with `Phase 2:` prefix if deferred)
+   Do NOT touch `_bug-catalog.md` / `bug-patterns.md` / Serena memory — those are reviewer-owned
+   (Claude appends raw findings + promotes durable lessons on PASS; see `docs/WORKFLOW.md` Part F).
+
+IMMUTABLE FILES - never edit:
+- scripts/**
+- prompts/**
+- docs/norviq-ops-guide.md
+- tests/.history/_bug-catalog.md (reviewer-owned — Claude appends findings; the author never writes it)
+- docs/engineering/bug-patterns.md (reviewer-owned — curated lessons)
+
+NEVER do:
+- Add `@pytest.mark.xfail` without explaining the reason in a comment
+- Remove existing tests without confirming with human
+- Silently increase timeouts to hide subprocess issues
+- Defer a doable in-scope fix to a backlog. Per AGENTS.md, APPLY doable fixes now; escalate only
+  genuine spec/threat-model decisions to San. (No routing findings to `docs/backlog.md`.)

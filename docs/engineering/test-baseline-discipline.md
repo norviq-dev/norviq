@@ -13,11 +13,12 @@ cache. A green local run does not imply a green cluster run, and a red local run
 pollution, not a code regression. When local and AKS disagree, **AKS wins**; investigate the local
 drift before "fixing" code.
 
-## Baseline: 66/66
+## Baseline: 78/78
 
-The `tests/attacks/` suite must be **66 passed, 0 failed, 0 xfailed**. `xfailed` is not "fine" —
+The `tests/attacks/` suite must be **78 passed, 0 failed, 0 xfailed**. `xfailed` is not "fine" —
 per [bug-patterns.md](bug-patterns.md) (P-7), an `xfail` from a connection error is a masked failure.
-A real 66/66 has zero xfails.
+A real 78/78 has zero xfails. (Baseline grew 66→78 through the company-sim / live-pentest / fleet
+hardening; the number here must track the recorded baseline — see `tests/.baseline` if present.)
 
 ## Verify cluster HEALTH before measuring
 
@@ -74,7 +75,7 @@ one, **narrow the rule**, never weaken the guard:
 2. For trust-driven behavior, seed Redis state via fixtures — never via caller `trust_score`
    (see [opa-input-schema.md](opa-input-schema.md)).
 3. Re-seed: `python scripts/seed-local-policies.py`; restart the API.
-4. Run the full suite; require 66/66 with **0 xfailed**.
+4. Run the full suite; require 78/78 with **0 xfailed**.
 5. Confirm the five guard tests above are in the passing set.
 6. Promote the change to AKS and re-measure there (source of truth).
 

@@ -27,7 +27,8 @@ sequence below is now a **fallback**, not routine. Applied to `api-deployment.ya
   *requests*, where a surge pod can never schedule (the old hardcoded default deadlocked — surge pod
   stuck `Pending (Insufficient cpu)`, old pod unable to drain). Replace-in-place terminates the old
   pod first, then schedules the new one. Verified: clean rollouts, 0 restarts, no Pending, no manual
-  intervention; baseline held at 66/66.
+  intervention; the attack baseline held (66/66 at the time of this incident; the current baseline
+  is 78/78 — see test-baseline-discipline.md).
 - **`.github/workflows/deploy.yml` passes `-f helm/norviq/values-aks-dev.yaml`** — without it, every
   CI deploy re-applies the zero-downtime default on the saturated node and re-triggers the deadlock
   (this is exactly how ui/webhook got stuck before the overlay existed).

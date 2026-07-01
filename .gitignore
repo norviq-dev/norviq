@@ -11,16 +11,17 @@ bin/
 node_modules/
 ui/dist/
 
-# AI workflow (keep private), except the committed prompt archive (process evidence)
+# AI-workflow config is TRACKED while the repo is PRIVATE (durability + history):
+# CLAUDE.md, .cursor/**, .serena/memories + project.yml, docs/mcp-workflow.md, .mcp-memory.
+# RE-REVIEW before going public (see docs/engineering/security-baseline.md).
+# Still private: specs (except the prompt archive), registry, reviews, design-system.
 specs/*
 !specs/prompts/
-.cursor/
 registry/
 .reviews/
 prompts/reviews/
 docs/design-system/
 download_specs.sh
-CLAUDE.md
 
 # Local dev
 .env.dev
@@ -42,11 +43,11 @@ ui/tsconfig.tsbuildinfo
 # OS cruft
 .DS_Store
 
-# Serena MCP — keep internal AI memory/config private (not for public release)
-.serena/
+# Serena MCP — memories + project.yml are TRACKED (AI-workflow config; repo private).
+# .serena/cache/ + .serena/project.local.yml stay ignored via .serena/.gitignore (regenerable / local).
 
-# Codebase-memory MCP knowledge graph (local only)
-.mcp-memory/
+# Codebase-memory MCP knowledge graph — TRACKED for durability (repo private).
+# (memory.json is absent in this tree today; the path is un-ignored so it tracks when present.)
 
 # Lessons / gotchas log (local only)
 .lessons/
@@ -62,7 +63,6 @@ migrate-pack.ps1
 /package-lock.json
 scripts/ui-validate.mjs
 docs/IMPLEMENTATION-STATUS.md
-docs/mcp-workflow.md
 ui/tsconfig.node.tsbuildinfo
 webhook/webhook
 scripts/fleet-local/fleet-signing-*.pem
