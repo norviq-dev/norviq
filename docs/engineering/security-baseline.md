@@ -41,6 +41,15 @@ _(empty — populate during the first CI baseline pass. One row per baselined it
 |------|------|--------------|--------------|-------------------------------|--------|
 | — | — | — | — | — | — |
 
+## Third-party GitHub Actions must be SHA-pinned (supply-chain)
+Pin actions by **immutable commit SHA**, not a mutable tag — a compromised tag can be re-pointed at
+malicious code (trivy-action itself had a March-2026 compromise; we use it AS our security gate).
+- **Done:** `aquasecurity/trivy-action` pinned to `57a97c7e7821a5776cebc9bb87c984fa69cba8f1` # v0.35.0
+  in `build.yml` + `security.yml`.
+- **Follow-up (not in this hotfix):** SHA-pin the remaining actions — `azure/login`,
+  `azure/setup-helm`, `actions/checkout`, `docker/*-action`, `actions/setup-*` — across
+  `build.yml`, `deploy.yml`, `security.yml`. Tag pins on those are a residual supply-chain risk.
+
 ## Notes
 - Full history is deliberately **not** secret-scanned (it holds a rotated JWT + past secrets). If a
   history scan is ever needed, baseline those known findings here first.
