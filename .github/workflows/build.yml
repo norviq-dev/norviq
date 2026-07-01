@@ -59,7 +59,7 @@ jobs:
       # gate would break the first main build→deploy. RATCHET: capture a .trivyignore baseline from
       # the first real scan, then set exit-code "1". See docs/engineering/security-baseline.md.
       - name: trivy image scan (${{ matrix.component }}) — report-only
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
           image-ref: sanman97/norviq-engine:${{ matrix.component }}-${{ github.sha }}
           format: table
