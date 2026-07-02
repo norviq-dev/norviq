@@ -111,3 +111,20 @@ def test_model_dump_works() -> None:
     assert dumped["decision"] == "audit"
     assert dumped["payload"] is None
     assert record.timestamp_utc.tzinfo == timezone.utc
+
+
+def test_obs2_audit_record_carries_framework() -> None:
+    """OBS-2: the decision source (event.framework) is persisted on the audit record."""
+    from norviq.sdk.core.audit import AuditRecord
+    from norviq.sdk.core.decisions import PolicyDecision
+    from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
+
+    ev = ToolCallEvent(
+        tool_name="execute_sql",
+        tool_params={"query": "drop table users"},
+        agent_identity=AgentIdentity(spiffe_id="spiffe://norviq/ns/default/sa/x", namespace="default", agent_class="x"),
+        session_id="s",
+        framework="sidecar",
+    )
+    rec = AuditRecord.from_event_and_decision(ev, PolicyDecision(decision="block", rule_id="deny_sql_injection"))
+    assert rec.framework == "sidecar"

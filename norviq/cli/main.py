@@ -313,6 +313,50 @@ def fleet_status(ctx: click.Context) -> None:
     _ok("fleet.status")
 
 
+@cli.command("login")
+@click.option("--namespace", "-n", default="norviq", show_default=True, help="Kubernetes namespace of the Norviq release.")
+@click.option("--context", "kube_context", default=None, help="kubectl context (default: current).")
+@click.option("--ttl", type=int, default=3600, show_default=True, help="Token lifetime in seconds.")
+@click.option("--console-url", default="http://localhost:8080", show_default=True,
+              help="Base URL where you reach the console (e.g. your port-forward / ingress).")
+@click.pass_context
+def login(ctx: click.Context, namespace: str, kube_context: str | None, ttl: int, console_url: str) -> None:
+    """First login (no-IdP quick start): mint a short-lived admin token IN-CLUSTER via kubectl exec.
+
+    The signing key never leaves the api pod and is never printed — kubectl exec runs the in-pod minter,
+    and we only capture the resulting token. Prints a ready-to-use console deep-link.
+    """
+    import subprocess  # local import: only needed for this command
+
+    kubectl = ["kubectl"]
+    if kube_context:
+        kubectl += ["--context", kube_context]
+    cmd = kubectl + [
+        "-n", namespace, "exec", "deploy/norviq-api", "-c", "api", "--",
+        "python", "-m", "norviq.api.token_mint", "--ttl", str(ttl),
+    ]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except FileNotFoundError:
+        raise click.ClickException("kubectl not found on PATH — install kubectl and target your cluster.")
+    except subprocess.TimeoutExpired:
+        raise click.ClickException("Timed out reaching the api pod. Is the deployment running and your context correct?")
+    if out.returncode != 0:
+        raise click.ClickException(f"Could not mint a token (kubectl exec failed):\n{out.stderr.strip()}")
+    token = out.stdout.strip().splitlines()[-1].strip() if out.stdout.strip() else ""
+    if not token:
+        raise click.ClickException("The api pod returned an empty token.")
+    deep_link = f"{console_url.rstrip('/')}/login#access_token={token}"
+    click.echo("Norviq first login (admin, expires in %d min):" % (max(60, ttl) // 60))
+    click.echo("")
+    click.echo("  1) Open this link to sign in — no password, no manual token:")
+    click.echo(f"     {deep_link}")
+    click.echo("")
+    click.echo("  Or paste this token into the console login screen:")
+    click.echo(f"     {token}")
+    _ok("login")
+
+
 def main() -> None:
     """Run CLI entry point."""
     cli()

@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field, ValidationError
 
 from norviq.api.audit_hub import audit_record
 from norviq.api.auth import get_current_user, scoped_namespace
@@ -51,7 +51,12 @@ async def evaluate_tool_call(
     # asks to evaluate — admin = any, non-admin → 403 on mismatch (matches every other tenant-scoped route).
     if str(user.get("role", "")).lower() != "service":
         scoped_namespace(user, (payload.agent_identity or {}).get("namespace"))
-    event = ToolCallEvent.model_validate(payload.model_dump(exclude={"trust_score"}))
+    # OBS-1: a malformed agent_identity (e.g. missing the required spiffe_id) is a client error — return
+    # 422, not a raw 500 from the downstream model validation.
+    try:
+        event = ToolCallEvent.model_validate(payload.model_dump(exclude={"trust_score"}))
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=f"invalid agent_identity / tool call: {exc.errors()}") from exc
     decision: PolicyDecision = await request.app.state.evaluator.evaluate(event)
     # Fire-and-forget audit emission (DB write + OTel span). emit() schedules its own
     # background task, holds the reference, and swallows write errors — so this never

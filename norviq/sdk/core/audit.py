@@ -29,6 +29,9 @@ class AuditRecord(BaseModel):
     session_id: str = ""
     trust_score: float = 0.0
     latency_ms: float = 0.0
+    # OBS-2: decision source / interception surface (sidecar, sidecar-http, sdk, redteam, ...) so the
+    # audit trail distinguishes sidecar-enforced calls from API/console-originated ones.
+    framework: str = ""
     timestamp_utc: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     payload: dict | None = None
 
@@ -53,5 +56,6 @@ class AuditRecord(BaseModel):
             session_id=event.session_id,
             trust_score=decision.trust_score,
             latency_ms=decision.latency_ms,
+            framework=event.framework,
             payload=payload,
         )

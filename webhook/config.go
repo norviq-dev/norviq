@@ -27,6 +27,23 @@ type Config struct {
 	SpiffeInject bool
 	SpiffeMode   string
 	SpiffeSocket string
+	// SIDE-2: mode injected into sidecars. "proxy" (default) = thin sidecar POSTs to the central
+	// norviq-api /evaluate with a namespace-scoped service JWT; "embedded" = full local engine.
+	SidecarMode string
+	// Central API URL + HS256 signing secret. In proxy mode the injector wires ApiURL and mints a
+	// per-workload service token from ApiSecret (reused from the controller's env).
+	ApiURL    string
+	ApiSecret string
+	// Lifetime (hours) of the minted sidecar service JWT. The token is baked into the pod env and
+	// cannot self-refresh, so it is long-lived by necessity; mTLS + short-lived tokens are the
+	// documented fast-follow (FLAG-D). NRVQ_SIDECAR_TOKEN_TTL_HOURS.
+	SidecarTokenTTLHours int
+	// SIDE-1 embedded-mode wiring passed through from the webhook's own env (sourced from
+	// norviq-config/norviq-secrets). Only used when SidecarMode=embedded.
+	RedisURL  string
+	PgURL     string
+	DBSSLMode string
+	OpaMode   string
 }
 
 type RuntimeConfig struct {
@@ -42,7 +59,10 @@ func LoadConfig() Config {
 		KeyFile:              envStr("NRVQ_TLS_KEY", "/etc/webhook/certs/tls.key"),
 		SidecarImage:         envStr("NRVQ_SIDECAR_IMAGE", "sanman97/norviq-engine:engine-latest"),
 		SidecarPort:          envInt("NRVQ_SIDECAR_PORT", 8282),
-		EnableLabel:          envStr("NRVQ_ENABLE_LABEL", "norviq"),
+		// SIDE-3: unify the opt-in/out label key with the MutatingWebhookConfiguration namespaceSelector
+		// (norviq-injection). The namespace opts in (MWC selector); a pod opts OUT with
+		// norviq-injection=disabled. Default flipped from the legacy "norviq" key.
+		EnableLabel:          envStr("NRVQ_ENABLE_LABEL", "norviq-injection"),
 		EnableValue:          envStr("NRVQ_ENABLE_VALUE", "enabled"),
 		AgentClassLabel:      envStr("NRVQ_AGENT_CLASS_LABEL", "norviq.io/agent-class"),
 		AdminPolicyNamespace: envStr("NRVQ_ADMIN_POLICY_NAMESPACE", "norviq"),
@@ -51,6 +71,14 @@ func LoadConfig() Config {
 		SpiffeInject:         envBool("NRVQ_SPIFFE_INJECT", false),
 		SpiffeMode:           envStr("NRVQ_SPIFFE_MODE", "mock"),
 		SpiffeSocket:         envStr("NRVQ_SPIFFE_SOCKET", "/spiffe-workload-api/spire-agent.sock"),
+		SidecarMode:          envStr("NRVQ_SIDECAR_MODE", "proxy"),
+		ApiURL:               envStr("NRVQ_API_URL", "http://norviq-api:8080"),
+		ApiSecret:            envStr("NRVQ_API_SECRET_KEY", envStr("NRVQ_API_TOKEN", "")),
+		SidecarTokenTTLHours: envInt("NRVQ_SIDECAR_TOKEN_TTL_HOURS", 720),
+		RedisURL:             envStr("NRVQ_REDIS_URL", ""),
+		PgURL:                envStr("NRVQ_PG_URL", ""),
+		DBSSLMode:            envStr("NRVQ_DB_SSL_MODE", "require"),
+		OpaMode:              envStr("NRVQ_SIDECAR_OPA_MODE", "subprocess"),
 	}
 	runtime.SetSidecarImage(cfg.SidecarImage)
 	return cfg

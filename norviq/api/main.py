@@ -27,6 +27,7 @@ from norviq.engine.graph.store import GraphStore
 from norviq.engine.opa_client import shutdown_managed_opa
 from norviq.engine.policy_loader import PolicyLoader
 from norviq.telemetry.exporter import mount_metrics_endpoint
+from norviq.api.body_limit import BodySizeLimitMiddleware
 from norviq.telemetry.middleware import TelemetryMiddleware
 from norviq.telemetry.provider import setup_telemetry, shutdown_telemetry
 from norviq.api.db.models import Base
@@ -221,6 +222,8 @@ def create_app() -> FastAPI:
             log.info("nrvq.api.ws_audit.close", code="NRVQ-API-7041")
 
     app.add_middleware(TelemetryMiddleware)
+    # PERF-1: cap request-body size (413) before evaluation — bounds the base64 fan-out DoS amplifier.
+    app.add_middleware(BodySizeLimitMiddleware)
     mount_metrics_endpoint(app)
     return app
 

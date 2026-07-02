@@ -196,16 +196,19 @@ func (h *Handler) handleAdmission(req *admissionv1.AdmissionRequest) *admissionv
 	return h.patchResponse(req, pod)
 }
 
+// shouldSkipInjection implements SIDE-3: the namespace opts in via the MutatingWebhookConfiguration
+// namespaceSelector (norviq-injection=enabled), so every pod in a selected namespace is injected UNLESS
+// it explicitly opts out (norviq-injection=disabled label or the skip annotation) or already has a
+// sidecar. This makes the documented "label the namespace" workflow actually inject, instead of the old
+// behavior that also silently required a per-pod enable label. Skips are logged at INFO, not DEBUG.
 func shouldSkipInjection(cfg Config, pod *corev1.Pod, namespace string) bool {
 	if pod.Labels[cfg.EnableLabel] == "disabled" || pod.Annotations["norviq.io/skip-injection"] == "true" {
-		return true
-	}
-	if pod.Labels[cfg.EnableLabel] != cfg.EnableValue {
-		slog.Debug("NRVQ-WHK-4007: pod skipped", "pod", pod.Name, "namespace", namespace)
+		slog.Info("NRVQ-WHK-4007: injection opted out for pod", "pod", pod.Name, "namespace", namespace,
+			"hint", "remove label "+cfg.EnableLabel+"=disabled / annotation norviq.io/skip-injection to enable")
 		return true
 	}
 	if hasSidecar(pod) {
-		slog.Debug("NRVQ-WHK-4008: sidecar already present", "pod", pod.Name)
+		slog.Info("NRVQ-WHK-4008: sidecar already present, skipping", "pod", pod.Name, "namespace", namespace)
 		return true
 	}
 	return false
@@ -218,7 +221,7 @@ func (h *Handler) patchResponse(req *admissionv1.AdmissionRequest, pod *corev1.P
 		slog.Warn("NRVQ-WHK-4015: invalid agent class label, injecting with empty class", "value", agentClass, "pod", pod.Name, "namespace", req.Namespace)
 		agentClass = ""
 	}
-	patch, err := h.injector.CreatePatch(pod, agentClass)
+	patch, err := h.injector.CreatePatch(pod, agentClass, req.Namespace)
 	if err != nil {
 		slog.Error("NRVQ-WHK-4009: patch creation failed", "error", err)
 		return &admissionv1.AdmissionResponse{

@@ -143,6 +143,8 @@ async def ensure_schema_compatibility() -> None:
             ") WHERE namespace IS NULL"
         ),
         "CREATE INDEX IF NOT EXISTS ix_attack_paths_namespace ON attack_paths (namespace)",
+        # OBS-2: audit decision-source column (idempotent; existing rows default to '').
+        "ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS framework VARCHAR(32) NOT NULL DEFAULT ''",
     )
     async with _engine.begin() as conn:
         for statement in statements:

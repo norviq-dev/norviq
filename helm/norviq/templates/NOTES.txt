@@ -4,16 +4,29 @@ To access the UI:
   kubectl port-forward svc/norviq-ui 3000:80 -n {{ .Values.namespace }}
   Then open: http://localhost:3000
 
+FIRST LOGIN
+  SSO (recommended for teams): enable OIDC (see docs/onboarding-login.md), then the console shows
+  "Sign in with SSO". Your IdP group maps to a Norviq role + namespace (Entra / Okta / Auth0 / Keycloak).
+
+  No IdP yet? One-command admin login (no password, no manual token, key never leaves the cluster):
+      norviq login -n {{ .Values.namespace }} --console-url http://localhost:3000
+  It mints a short-lived admin token in-cluster (kubectl exec) and prints a sign-in link. Open the link
+  and you are in. (Or paste the printed token into the console login screen.)
+
 To access the API:
   kubectl port-forward svc/norviq-api 8080:{{ .Values.api.port }} -n {{ .Values.namespace }}
   Then: curl http://localhost:8080/healthz
 
 {{- if .Values.webhook.injection.enabled }}
 
-Sidecar injection is ENABLED. TLS was auto-bootstrapped by the norviq-webhook-cert hook Job
-(self-signed cert -> norviq-webhook-tls secret -> patched webhook caBundle).
+Sidecar injection is ENABLED (mode: {{ .Values.webhook.injection.sidecarMode | default "proxy" }}). TLS was
+auto-bootstrapped by the norviq-webhook-cert hook Job (self-signed cert -> norviq-webhook-tls secret ->
+patched webhook caBundle).
   Opt a namespace in:  kubectl label ns <ns> norviq-injection=enabled
-  New pods in labeled namespaces get the Norviq sidecar injected automatically.
+  Every NEW pod in that namespace gets the Norviq sidecar injected — no per-pod label needed.
+  Opt a single pod OUT:  set the pod label  norviq-injection=disabled  (or annotation
+                         norviq.io/skip-injection=true).
+  Optionally set the agent class:  pod label  norviq.io/agent-class=<class>.
 {{- else }}
 
 Sidecar injection is DISABLED. Turn it on (turnkey, auto-TLS, no cert-manager needed):

@@ -40,11 +40,15 @@ func TestReadyz(t *testing.T) {
 	}
 }
 
-func TestMutateNoLabel(t *testing.T) {
+// SIDE-3: the namespace opts in via the MutatingWebhookConfiguration namespaceSelector (not exercised
+// in this unit test), so a pod that reaches the handler with no opt-out label IS injected. Previously an
+// unlabeled pod was silently skipped even in a selected namespace, which made the documented
+// "label the namespace" workflow a no-op.
+func TestMutateNoLabelStillInjects(t *testing.T) {
 	h := NewHandler(LoadConfig())
 	resp := sendReview(t, h, createReview(map[string]string{}, nil))
-	if !resp.Response.Allowed || resp.Response.Patch != nil {
-		t.Fatal("expected allowed response without patch")
+	if !resp.Response.Allowed || resp.Response.Patch == nil {
+		t.Fatal("expected injection for a pod with no opt-out label (namespace-gated by the MWC)")
 	}
 }
 
@@ -146,7 +150,8 @@ func TestMutateAlreadyInjected(t *testing.T) {
 
 func TestMutate_DisabledLabel(t *testing.T) {
 	h := NewHandler(LoadConfig())
-	labels := map[string]string{"norviq": "disabled", "norviq.io/agent-class": "sales"}
+	// SIDE-3: opt out with the unified norviq-injection=disabled label (the default EnableLabel).
+	labels := map[string]string{"norviq-injection": "disabled", "norviq.io/agent-class": "sales"}
 	resp := sendReview(t, h, createReview(labels, nil))
 	if !resp.Response.Allowed || resp.Response.Patch != nil {
 		t.Fatal("expected allowed response without patch")

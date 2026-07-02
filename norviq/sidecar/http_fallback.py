@@ -18,7 +18,9 @@ from norviq.sdk.core.interceptor import ToolInterceptor
 log = structlog.get_logger()
 
 
-def create_http_fallback(interceptor: ToolInterceptor, emitter: AuditEmitter, resolver: SPIFFEResolver) -> FastAPI:
+def create_http_fallback(
+    interceptor: ToolInterceptor, emitter: AuditEmitter | None, resolver: SPIFFEResolver
+) -> FastAPI:
     """Create HTTP fallback app for non-Unix-socket runtimes."""
     app = FastAPI(title="Norviq Sidecar HTTP Fallback")
 
@@ -43,7 +45,9 @@ def create_http_fallback(interceptor: ToolInterceptor, emitter: AuditEmitter, re
             session_id=session_id,
             framework="sidecar-http",
         )
-        emitter.emit(event, decision)
+        # Proxy mode has no local emitter (the central /evaluate persisted the record); embedded emits here.
+        if emitter is not None:
+            emitter.emit(event, decision)
         action = "forward" if decision.is_allowed() else "drop"
         log.info("nrvq.sidecar.http.processed", tool=tool_name, action=action, code="NRVQ-SDC-3010")
         return {"action": action, "decision": decision.model_dump(mode="json")}
@@ -52,5 +56,10 @@ def create_http_fallback(interceptor: ToolInterceptor, emitter: AuditEmitter, re
     async def health() -> dict[str, str]:
         """Return sidecar liveness status."""
         return {"status": "ok"}
+
+    @app.get("/readyz")
+    async def ready() -> dict[str, str]:
+        """Readiness: the interceptor is wired and the sidecar can serve enforcement decisions."""
+        return {"status": "ready"}
 
     return app

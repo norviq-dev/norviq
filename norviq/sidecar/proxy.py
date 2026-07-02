@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from norviq.engine.identity import SPIFFEResolver
 from norviq.engine.policy_loader import PolicyLoader
 from norviq.sdk.core.events import ToolCallEvent
 from norviq.sdk.core.interceptor import ToolInterceptor
+from norviq.sidecar.remote_evaluator import RemoteEvaluator
 
 log = structlog.get_logger()
 
@@ -40,20 +42,37 @@ class SidecarProxy:
         self._policy_event_task: asyncio.Task | None = None
 
     async def start(self) -> None:
-        """Initialize dependencies and start Unix socket listener."""
-        self._cache = RedisCache()
-        await self._cache.connect()
-        self._evaluator = OPAEvaluator(self._cache)
-        self._loader = PolicyLoader(self._cache, self._evaluator)
-        await self._loader.warm_cache()
+        """Initialize dependencies (by mode) and start the Unix socket listener."""
         self._resolver = SPIFFEResolver()
+        if settings.sidecar_mode == "embedded":
+            # Air-gapped/edge: full local engine (needs NRVQ_REDIS_URL/NRVQ_PG_URL/NRVQ_OPA_* wired in).
+            self._cache = RedisCache()
+            await self._cache.connect()
+            self._evaluator = OPAEvaluator(self._cache)
+            self._loader = PolicyLoader(self._cache, self._evaluator)
+            await self._loader.warm_cache()
+            self._emitter = AuditEmitter()
+            await self._emitter.init()
+            self._policy_event_task = asyncio.create_task(self._watch_policy_events())
+            log.info("nrvq.sidecar.mode.embedded", code="NRVQ-SDC-3033")
+            log.info("nrvq.sidecar.pubsub_watcher_started", code="NRVQ-SDC-3023")
+        else:
+            # SIDE-2 default: thin proxy to the central engine. No Redis/OPA/Postgres in the pod; the
+            # central /evaluate writes the audit record (with framework="sidecar"), so no local emitter.
+            self._evaluator = RemoteEvaluator()
+            await self._evaluator.connect()
+            self._emitter = None
+            log.info("nrvq.sidecar.mode.proxy", api_url=settings.api_url, code="NRVQ-SDC-3032")
         self._interceptor = ToolInterceptor(self._evaluator, self._resolver)
-        self._emitter = AuditEmitter()
-        await self._emitter.init()
-        self._policy_event_task = asyncio.create_task(self._watch_policy_events())
-        log.info("nrvq.sidecar.pubsub_watcher_started", code="NRVQ-SDC-3023")
         await self._unlink_existing_socket()
         self._server = await asyncio.start_unix_server(self._handle_connection, path=self._socket_path)
+        # SIDE-1: the injected sidecar runs as uid 65534 while the application container runs as its image's
+        # own (different) uid, so the app must be able to connect() to the shared unix socket. Make the
+        # socket world-connectable (it lives on a pod-private emptyDir, not exposed outside the pod).
+        try:
+            os.chmod(self._socket_path, 0o777)
+        except OSError as exc:  # pragma: no cover - non-fatal; log and continue
+            log.warning("nrvq.sidecar.socket_chmod_failed", error=str(exc), code="NRVQ-SDC-3006")
         log.info("nrvq.sidecar.started", socket=self._socket_path, code="NRVQ-SDC-3000")
 
     async def _watch_policy_events(self) -> None:
@@ -127,7 +146,13 @@ class SidecarProxy:
         return params if isinstance(params, dict) else {}
 
     async def _emit_audit(self, tool_name: str, tool_params: dict[str, Any], session_id: str, decision: Any) -> None:
-        """Emit sidecar audit without blocking the response path."""
+        """Emit sidecar audit without blocking the response path.
+
+        In proxy mode the central /evaluate already persisted the audit record (framework="sidecar"),
+        and this pod has no Postgres — so there is no local emitter and nothing to do here.
+        """
+        if self._emitter is None:
+            return
         identity = await self._resolver.resolve()
         event = ToolCallEvent(
             tool_name=tool_name,

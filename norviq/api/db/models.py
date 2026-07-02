@@ -166,6 +166,8 @@ class AuditLogEntry(Base):
     session_id: Mapped[str] = mapped_column(String(255), default="")
     trust_score: Mapped[float] = mapped_column(Float, default=0.0)
     latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    # OBS-2: decision source (sidecar / sidecar-http / sdk / redteam / ...) for audit attribution + UI filter.
+    framework: Mapped[str] = mapped_column(String(32), default="", server_default="")
     timestamp_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True, default=_utcnow)
     payload: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
     __table_args__ = (

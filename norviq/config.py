@@ -139,6 +139,19 @@ class NorviqSettings(BaseSettings):
     socket_path: str = "/tmp/norviq-proxy.sock"
     http_fallback_port: int = 8282
     api_port: int = 8080
+    # PERF-1: reject over-large request bodies (defense against the base64 fan-out DoS amplifier and
+    # generic memory abuse). 256 KiB is far above any legitimate tool-call payload. NRVQ_MAX_REQUEST_BODY_BYTES.
+    max_request_body_bytes: int = 262144
+    # SIDE-2: injected-sidecar evaluation mode. "proxy" (default) = the sidecar POSTs each tool call to
+    # the central norviq-api /api/v1/evaluate with a namespace-scoped service JWT (DB/OPA stay central,
+    # nothing per-pod). "embedded" = the sidecar runs its own RedisCache+OPA+PolicyLoader (air-gapped/edge;
+    # needs NRVQ_REDIS_URL/NRVQ_PG_URL/NRVQ_OPA_* wired in). NRVQ_SIDECAR_MODE.
+    sidecar_mode: str = "proxy"
+    # Central API base URL the thin-proxy sidecar calls (NRVQ_API_URL). Same value the webhook injects.
+    api_url: str = "http://norviq-api:8080"
+    # Bearer token the thin-proxy sidecar presents to /evaluate (role=service, namespace-scoped). The
+    # webhook mints + injects this per workload; empty in embedded mode. NRVQ_API_TOKEN.
+    api_token: str = ""
     api_secret_key: str = Field(
         default="change-me-in-production",  # Replace in non-dev deployments.
         # NRVQ_API_SECRET_KEY is what the Helm chart sets — include it so the key is rotatable.

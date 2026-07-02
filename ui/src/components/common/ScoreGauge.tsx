@@ -1,5 +1,5 @@
 import { memo } from "react";
-import ReactEChartsCore from "echarts-for-react/lib/core";
+import ReactEChartsCore from "./EChart";
 import * as echarts from "echarts/core";
 import { GaugeChart } from "echarts/charts";
 import { TooltipComponent } from "echarts/components";

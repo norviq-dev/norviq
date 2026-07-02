@@ -10,6 +10,7 @@ import { ClusterScopedMonitor } from "./components/common/ClusterScopedMonitor";
 import { RemoteAgents } from "./components/common/RemoteAgents";
 import { AppProvider } from "./store/AppContext";
 import { OidcCallback } from "./auth/OidcCallback";
+import { Login } from "./auth/Login";
 
 const Dashboard = lazy(() => import("./pages/Dashboard").then((m) => ({ default: m.Dashboard })));
 const PolicyCatalog = lazy(() => import("./pages/PolicyCatalog").then((m) => ({ default: m.PolicyCatalog })));
@@ -39,6 +40,15 @@ function App() {
   // Handle the OIDC redirect outside the authenticated Shell (no token exists yet at this point).
   if (window.location.pathname === "/auth/callback") {
     return <OidcCallback />;
+  }
+  // Dev convenience: keep the local dev-token bootstrap (never used in a built image).
+  if (import.meta.env.DEV && !localStorage.getItem("nrvq_token") && import.meta.env.VITE_DEV_TOKEN) {
+    localStorage.setItem("nrvq_token", import.meta.env.VITE_DEV_TOKEN as string);
+  }
+  // LOGIN-1: the login GATE. No valid session (or the /login route) → render the login screen instead
+  // of a blank/unauthenticated console. Login stores the token then reloads into the Shell below.
+  if (!localStorage.getItem("nrvq_token") || window.location.pathname === "/login") {
+    return <Login />;
   }
   return (
     <AppProvider>

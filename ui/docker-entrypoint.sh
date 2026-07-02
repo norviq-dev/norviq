@@ -7,7 +7,12 @@
 set -e
 
 cat > /usr/share/nginx/html/config.js <<EOF
-window.__NRVQ_CONFIG__ = { fleetApiUrl: "${FLEET_API_URL:-}" };
+window.__NRVQ_CONFIG__ = {
+  fleetApiUrl: "${FLEET_API_URL:-}",
+  oidcIssuer: "${OIDC_ISSUER:-}",
+  oidcClientId: "${OIDC_CLIENT_ID:-}",
+  oidcRedirectUri: "${OIDC_REDIRECT_URI:-}"
+};
 EOF
 
 if [ -n "${FLEET_API_URL:-}" ]; then

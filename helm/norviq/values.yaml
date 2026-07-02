@@ -132,6 +132,11 @@ webhook:
   #   kubectl label ns <ns> norviq-injection=enabled
   injection:
     enabled: false
+    # SIDE-2: injected-sidecar evaluation mode. "proxy" (DEFAULT) = the sidecar POSTs each tool call to
+    # the central norviq-api /evaluate with a namespace-scoped service JWT (DB/OPA stay centralized,
+    # nothing per-pod). "embedded" = the sidecar runs its own RedisCache+OPA(subprocess)+PolicyLoader
+    # for air-gapped/edge (the chart then wires NRVQ_REDIS_URL/NRVQ_PG_URL through to the injector).
+    sidecarMode: proxy
     # Image with kubectl + openssl for the cert-bootstrap hook Job. alpine/k8s ships both and is
     # publicly pullable (bitnami/kubectl tags were removed from Docker Hub in the 2025 Bitnami change).
     certJobImage: "alpine/k8s:1.30.0"
@@ -271,6 +276,10 @@ oidc:
   enabled: false
   issuer: ""              # https://<tenant>/  (the token `iss`)
   audience: ""            # the API's client/audience id (the token `aud`)
+  # LOGIN-1: the PUBLIC (browser/SPA) OIDC client id the console uses for Auth Code + PKCE sign-in.
+  # Register a SPA/public client in your IdP with redirect URI <console>/auth/callback. When set (and
+  # oidc.enabled), the UI renders "Sign in with SSO" — no UI rebuild needed (injected at runtime).
+  consoleClientId: ""
   jwksUrl: ""             # the IdP JWKS endpoint
   groupClaim: groups      # claim holding the user's group list
   legacyHs256Enabled: true

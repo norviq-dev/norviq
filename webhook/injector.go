@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 )
@@ -44,7 +45,7 @@ func NewInjector(cfg Config) *Injector {
 	}
 }
 
-func (inj *Injector) CreatePatch(pod *corev1.Pod, agentClass string) ([]byte, error) {
+func (inj *Injector) CreatePatch(pod *corev1.Pod, agentClass string, namespace string) ([]byte, error) {
 	image := inj.cfg.Runtime.SidecarImage(inj.cfg.SidecarImage)
 	if !inj.validateImage(image) {
 		slog.Error("NRVQ-WHK-4033: blocked unauthorized sidecar image", "image", image)
@@ -54,7 +55,7 @@ func (inj *Injector) CreatePatch(pod *corev1.Pod, agentClass string) ([]byte, er
 	envStates := envState(pod.Spec.Containers)
 	containerCount := len(pod.Spec.Containers)
 	patches := make([]patchOp, 0, 6)
-	patches = append(patches, patchOp{Op: "add", Path: "/spec/containers/-", Value: inj.buildSidecar(agentClass)})
+	patches = append(patches, patchOp{Op: "add", Path: "/spec/containers/-", Value: inj.buildSidecar(agentClass, namespace)})
 	patches = append(patches, volumePatch(len(pod.Spec.Volumes) > 0, inj.sharedVolume))
 	if inj.cfg.SpiffeInject {
 		// After the first volume add, /spec/volumes always exists -> append the SPIFFE CSI volume.
@@ -161,10 +162,10 @@ func envState(containers []corev1.Container) []containerPatchState {
 	return result
 }
 
-func (inj *Injector) buildSidecar(agentClass string) map[string]interface{} {
+func (inj *Injector) buildSidecar(agentClass string, namespace string) map[string]interface{} {
 	sidecar := cloneMap(inj.sidecarTemplate)
 	sidecar["image"] = inj.cfg.Runtime.SidecarImage(inj.cfg.SidecarImage)
-	sidecar["env"] = sidecarEnv(agentClass, inj.cfg)
+	sidecar["env"] = sidecarEnv(agentClass, namespace, inj.cfg)
 	return sidecar
 }
 
@@ -182,15 +183,41 @@ func newSidecarTemplate(cfg Config) map[string]interface{} {
 		"resources":       sidecarResources(),
 		"securityContext": sidecarSecurityContext(),
 		"livenessProbe":   sidecarLivenessProbe(cfg.SidecarPort),
+		"readinessProbe":  sidecarReadinessProbe(cfg.SidecarPort),
 		"volumeMounts":    mounts,
 	}
 }
 
-func sidecarEnv(agentClass string, cfg Config) []map[string]interface{} {
+// sidecarEnv wires the injected sidecar so it can actually enforce (SIDE-1). Base env is common to both
+// modes; proxy mode (SIDE-2 default) adds the central API URL + a namespace-scoped service JWT and needs
+// no Redis/OPA/Postgres; embedded mode passes the cluster datastore wiring through from the webhook's env.
+// NRVQ_NAMESPACE is always set to the pod's namespace so mock identity resolves the real tenant (SIDE-4).
+func sidecarEnv(agentClass string, namespace string, cfg Config) []map[string]interface{} {
 	env := []map[string]interface{}{
 		{"name": "NRVQ_AGENT_CLASS", "value": agentClass},
+		{"name": "NRVQ_NAMESPACE", "value": namespace},
 		{"name": "NRVQ_HTTP_FALLBACK_PORT", "value": fmt.Sprintf("%d", cfg.SidecarPort)},
 		{"name": "NRVQ_SOCKET_PATH", "value": socketFilePath},
+		{"name": "NRVQ_SIDECAR_MODE", "value": sidecarMode(cfg)},
+	}
+	if sidecarMode(cfg) == "embedded" {
+		// Air-gapped/edge: the sidecar runs its own engine and needs the datastore wiring. OPA runs as a
+		// subprocess fork (the sidecar pod has no OPA server sidecar).
+		env = appendIfSet(env, "NRVQ_REDIS_URL", cfg.RedisURL)
+		env = appendIfSet(env, "NRVQ_PG_URL", cfg.PgURL)
+		env = append(env,
+			map[string]interface{}{"name": "NRVQ_OPA_MODE", "value": cfg.OpaMode},
+			map[string]interface{}{"name": "NRVQ_DB_SSL_MODE", "value": cfg.DBSSLMode},
+		)
+	} else {
+		// Thin proxy (default): call the central engine with a per-workload namespace-scoped service JWT.
+		env = append(env, map[string]interface{}{"name": "NRVQ_API_URL", "value": cfg.ApiURL})
+		if tok := mintSidecarToken(cfg, namespace); tok != "" {
+			env = append(env, map[string]interface{}{"name": "NRVQ_API_TOKEN", "value": tok})
+		} else {
+			slog.Warn("NRVQ-WHK-4037: no API secret to mint sidecar token; thin-proxy sidecar will fail closed",
+				"namespace", namespace)
+		}
 	}
 	if cfg.SpiffeInject {
 		env = append(env,
@@ -199,6 +226,48 @@ func sidecarEnv(agentClass string, cfg Config) []map[string]interface{} {
 		)
 	}
 	return env
+}
+
+// sidecarMode normalizes the configured mode; anything other than "embedded" is the safe thin-proxy default.
+func sidecarMode(cfg Config) string {
+	if cfg.SidecarMode == "embedded" {
+		return "embedded"
+	}
+	return "proxy"
+}
+
+func appendIfSet(env []map[string]interface{}, name, value string) []map[string]interface{} {
+	if value == "" {
+		return env
+	}
+	return append(env, map[string]interface{}{"name": name, "value": value})
+}
+
+// mintSidecarToken issues the namespace-scoped role=service JWT the thin-proxy sidecar presents to
+// /evaluate. The token is baked into the pod env (cannot self-refresh), hence the long TTL; mTLS +
+// short-lived tokens are the documented fast-follow (FLAG-D). Returns "" if no signing secret is set.
+func mintSidecarToken(cfg Config, namespace string) string {
+	if cfg.ApiSecret == "" {
+		return ""
+	}
+	now := time.Now()
+	ttl := time.Duration(cfg.SidecarTokenTTLHours) * time.Hour
+	if ttl <= 0 {
+		ttl = 720 * time.Hour
+	}
+	claims := map[string]interface{}{
+		"sub":       "norviq-sidecar",
+		"role":      "service",
+		"namespace": namespace,
+		"iat":       now.Unix(),
+		"exp":       now.Add(ttl).Unix(),
+	}
+	tok, err := signHS256JWT(cfg.ApiSecret, claims)
+	if err != nil {
+		slog.Error("NRVQ-WHK-4038: sidecar token mint failed", "namespace", namespace, "error", err)
+		return ""
+	}
+	return tok
 }
 
 func sidecarResources() map[string]interface{} {
@@ -224,6 +293,17 @@ func sidecarLivenessProbe(sidecarPort int) map[string]interface{} {
 		"httpGet":             map[string]interface{}{"path": "/healthz", "port": sidecarPort},
 		"initialDelaySeconds": 5,
 		"periodSeconds":       15,
+		"failureThreshold":    3,
+	}
+}
+
+// sidecarReadinessProbe (SIDE-1) gates pod Readiness on the sidecar actually serving enforcement, so a
+// mis-wired or crash-looping sidecar surfaces as NotReady instead of silently forwarding tool calls.
+func sidecarReadinessProbe(sidecarPort int) map[string]interface{} {
+	return map[string]interface{}{
+		"httpGet":             map[string]interface{}{"path": "/readyz", "port": sidecarPort},
+		"initialDelaySeconds": 3,
+		"periodSeconds":       10,
 		"failureThreshold":    3,
 	}
 }

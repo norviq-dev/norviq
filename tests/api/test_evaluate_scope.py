@@ -95,3 +95,36 @@ def test_scoped_namespace_mapped_viewer_match() -> None:
     assert auth_mod.scoped_namespace({"role": "viewer", "namespace": "team-a"}, "team-a") == "team-a"
     with pytest.raises(HTTPException):
         auth_mod.scoped_namespace({"role": "viewer", "namespace": "team-a"}, "payments")
+
+
+def test_obs1_missing_spiffe_id_returns_422() -> None:
+    """OBS-1: a malformed agent_identity (no spiffe_id) is a 422 client error, not a raw 500."""
+    client = _client()
+    body = {
+        "tool_name": "get_order",
+        "tool_params": {},
+        "agent_identity": {"namespace": "default", "agent_class": "x"},  # missing required spiffe_id
+        "session_id": "s",
+    }
+    resp = client.post("/api/v1/evaluate", json=body, headers={"Authorization": f"Bearer {_token()}"})
+    assert resp.status_code == 422
+
+
+def test_perf1_oversized_body_returns_413() -> None:
+    """PERF-1: a request body over the configured limit is rejected with 413 before evaluation."""
+    client = _client()
+    huge = "A" * (settings.max_request_body_bytes + 1024)
+    body = {
+        "tool_name": "get_order",
+        "tool_params": {"blob": huge},
+        "agent_identity": {"spiffe_id": "spiffe://norviq/ns/default/sa/x", "namespace": "default", "agent_class": "x"},
+        "session_id": "s",
+    }
+    resp = client.post("/api/v1/evaluate", json=body, headers={"Authorization": f"Bearer {_token()}"})
+    assert resp.status_code == 413
+
+
+def test_perf1_normal_body_passes() -> None:
+    """PERF-1: a normal-size body is unaffected by the limit."""
+    client = _client()
+    assert _eval(client, _token("admin", "default"), "default") == 200

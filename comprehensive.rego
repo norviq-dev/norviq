@@ -30,10 +30,15 @@ injection_patterns = [
 ]
 injection_patterns_fullwidth = ["ｉｇｎｏｒｅ", "ｄａｎ", "ｂｙｐａｓｓ"]
 injection_override_keywords = ["ignore", "disregard", "override", "forget", "skip", "bypass"]
+# SEC-1: multi-word override phrases matched against the space-normalized text (compact matching above
+# only catches single tokens / spaced-out evasion). Covers "do not follow the rules" style jailbreaks.
+injection_override_phrases = ["do not follow", "dont follow", "stop following", "no longer follow", "act as admin"]
 injection_context_keywords = ["previous", "prior", "above", "earlier", "system"]
-injection_directive_keywords = ["instruction", "instructions", "guardrail", "guardrails", "rule", "rules", "policy", "directions"]
-injection_action_keywords = ["reveal", "dump", "export", "print", "show", "delete"]
-injection_target_keywords = ["secret", "secrets", "confidential", "credential", "credentials", "token", "tokens", "hidden credentials", "confidential data"]
+# SEC-1: expanded so paraphrases that name the guardrail without saying "instructions" still match
+# (guidelines/restrictions/filters/prompt/safety were all bypasses in the live pentest).
+injection_directive_keywords = ["instruction", "instructions", "guardrail", "guardrails", "rule", "rules", "policy", "policies", "directions", "guideline", "guidelines", "restriction", "restrictions", "filter", "filters", "prompt", "safety"]
+injection_action_keywords = ["reveal", "dump", "export", "print", "show", "delete", "leak", "exfiltrate", "disclose"]
+injection_target_keywords = ["secret", "secrets", "confidential", "credential", "credentials", "token", "tokens", "hidden credentials", "confidential data", "password", "passwords", "api key", "api keys", "private key"]
 
 security_scan_texts[t] {
     walk(input.tool_params, [_, val])
@@ -108,25 +113,46 @@ injection_detected {
     pattern := injection_patterns_fullwidth[_]
     contains(val, pattern)
 }
-# LLM01 paraphrase guard: normalized intent matching (keyword sets + normalization),
-# not only contiguous/exact substring checks.
+# SEC-1: an override is present when a single override token appears in the compacted text (catches
+# spaced-out evasion) OR a multi-word override phrase appears in the normalized text.
+injection_override_present(normalized, compact) {
+    contains_any(compact, injection_override_keywords)
+}
+injection_override_present(normalized, compact) {
+    contains_any(normalized, injection_override_phrases)
+}
+# SEC-1: intent = the paraphrase names WHAT to subvert or WHY. Any one of context/target/action suffices
+# once an override + a directive are present (the old rule wrongly REQUIRED a temporal context word, so
+# natural jailbreaks like "override the rules and reveal the token" slipped through).
+injection_intent(normalized) { contains_any(normalized, injection_context_keywords) }
+injection_intent(normalized) { contains_any(normalized, injection_target_keywords) }
+injection_intent(normalized) { contains_any(normalized, injection_action_keywords) }
+
+# LLM01 paraphrase guard: override + directive + intent (normalized/compact matching, not only
+# contiguous/exact substrings).
 injection_detected {
     txt := injection_scan_texts[_]
     normalized := normalized_text(txt)
     compact := compact_text(txt)
-    contains_any(compact, injection_override_keywords)
-    contains_any(normalized, injection_context_keywords)
+    injection_override_present(normalized, compact)
     contains_any(normalized, injection_directive_keywords)
-    contains_any(normalized, injection_action_keywords)
-    contains_any(normalized, injection_target_keywords)
+    injection_intent(normalized)
 }
 # Split-across-params paraphrase guard: aggregate signals across all text params.
 injection_detected {
     normalized := combined_injection_text
     compact := combined_injection_compact
-    contains_any(compact, injection_override_keywords)
-    contains_any(normalized, injection_context_keywords)
+    injection_override_present(normalized, compact)
     contains_any(normalized, injection_directive_keywords)
+    injection_intent(normalized)
+}
+# SEC-1: system-prompt exfiltration — "reveal/show/dump/print your system prompt" carries no override
+# verb, so require system + prompt + an action verb together (tight enough to avoid benign prose).
+injection_detected {
+    txt := injection_scan_texts[_]
+    normalized := normalized_text(txt)
+    contains(normalized, "system")
+    contains(normalized, "prompt")
     contains_any(normalized, injection_action_keywords)
 }
 # F-02: confusable skeleton (homoglyph/zero-width) — engine folds tool_params to ASCII (match-only).
@@ -142,12 +168,18 @@ sql_injection_detected {
     pattern := sql_patterns[_]
     contains(query, pattern)
 }
-# F-20: destructive SQL in any string param, regardless of tool_name (original + normalized).
+# F-20 + SEC-4: destructive SQL in ANY tool's params, but only with SQL-SYNTAX CONTEXT so natural
+# business prose ("please delete from my calendar", "we should drop table service at the restaurant")
+# is not hard-blocked. Context = the value LEADS with the destructive statement (bare SQL, e.g. a
+# renamed run_report/read_record carrying "drop table users") OR contains a statement separator ";".
 sql_injection_detected {
     val := security_scan_texts[_]
     pattern := sql_destructive_patterns[_]
     contains(val, pattern)
+    sql_syntax_context(val, pattern)
 }
+sql_syntax_context(val, pattern) { startswith(trim_space(val), pattern) }
+sql_syntax_context(val, _) { contains(val, ";") }
 
 # Shell injection
 shell_patterns = ["|", ";", "$(", "`", "rm -rf", "/etc/passwd", "/etc/shadow"]
@@ -316,48 +348,51 @@ b64_candidate_clean(v) = out {
     out := regex.replace(out4, `_`, "/")
 }
 
-b64_candidate_texts_base[s] {
+# PERF-1: gate the whole base64 fan-out on a bounded serialized size. A pathological large payload with
+# hundreds of base64-ish tokens forced ~40x eval cost per cache-miss; above the threshold we skip the
+# (expensive) decode pass — raw pattern detectors still run, and an oversized encoded blob is itself
+# suspicious. The API also enforces a request-body size limit (defense in depth).
+b64_scan_max_bytes = 8192
+
+b64_scan_enabled {
+    count(json.marshal(input.tool_params)) <= b64_scan_max_bytes
+}
+
+# SEC-2: re-pad a cleaned base64 candidate to a valid length so base64.decode never errors on unpadded
+# input (b64 length%4 must be 0/2/3; ==1 is invalid -> undefined -> skipped).
+b64_pad(s) = s { count(s) % 4 == 0 }
+b64_pad(s) = sprintf("%s==", [s]) { count(s) % 4 == 2 }
+b64_pad(s) = sprintf("%s=", [s]) { count(s) % 4 == 3 }
+
+# SEC-2: normalize any string into a decodable base64 candidate. The floor is on the ENCODED length only
+# for validity (>= 8, i.e. >= ~5 decoded bytes) — the actual THREAT gate is the DECODED content matching a
+# malicious pattern, so short encoded payloads like base64("rm -rf /") (12 chars) are no longer skipped.
+b64_norm(v) = out {
+    cleaned := b64_candidate_clean(v)
+    stripped := trim_right(cleaned, "=")
+    count(stripped) >= 8
+    regex.match(`^[A-Za-z0-9+/]+$`, stripped)
+    not regex.match(`^\d+$`, stripped)
+    out := b64_pad(stripped)
+}
+
+# SEC-3: bounded iterative decode to depth 4 (was a hand-unrolled depth of 2, so triple-nested base64
+# evaded). Each level re-normalizes + decodes the previous level's output; the depth cap bounds cost.
+b64_decoded_l1[d] {
+    b64_scan_enabled
     walk(input.tool_params, [_, val])
     is_string(val)
-    cleaned := b64_candidate_clean(val)
-    count(cleaned) >= 16
-    regex.match(`^[A-Za-z0-9+/]+={0,2}$`, cleaned)
-    not regex.match(`^\d+$`, cleaned)
-    s := cleaned
+    c := b64_norm(val)
+    d := base64.decode(c)
 }
+b64_decoded_l2[d] { p := b64_decoded_l1[_]; c := b64_norm(p); d := base64.decode(c) }
+b64_decoded_l3[d] { p := b64_decoded_l2[_]; c := b64_norm(p); d := base64.decode(c) }
+b64_decoded_l4[d] { p := b64_decoded_l3[_]; c := b64_norm(p); d := base64.decode(c) }
 
-b64_candidate_texts[s] {
-    s := b64_candidate_texts_base[_]
-}
-
-b64_candidate_texts[s] {
-    base := b64_candidate_texts_base[_]
-    not endswith(base, "=")
-    s := sprintf("%s=", [base])
-}
-
-b64_candidate_texts[s] {
-    base := b64_candidate_texts_base[_]
-    not endswith(base, "=")
-    s := sprintf("%s==", [base])
-}
-
-b64_decoded_once[decoded] {
-    candidate := b64_candidate_texts[_]
-    decoded := base64.decode(candidate)
-}
-
-b64_decoded_raw[decoded] {
-    decoded := b64_decoded_once[_]
-}
-
-b64_decoded_raw[decoded] {
-    first := b64_decoded_once[_]
-    cleaned := b64_candidate_clean(first)
-    count(cleaned) >= 16
-    regex.match(`^[A-Za-z0-9+/]+={0,2}$`, cleaned)
-    decoded := base64.decode(cleaned)
-}
+b64_decoded_raw[d] { d := b64_decoded_l1[_] }
+b64_decoded_raw[d] { d := b64_decoded_l2[_] }
+b64_decoded_raw[d] { d := b64_decoded_l3[_] }
+b64_decoded_raw[d] { d := b64_decoded_l4[_] }
 
 b64_decoded[decoded] {
     raw := b64_decoded_raw[_]

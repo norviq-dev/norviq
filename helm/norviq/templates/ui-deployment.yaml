@@ -37,6 +37,14 @@ spec:
           env:
             - name: FLEET_API_URL
               value: {{ .Values.ui.fleetApiUrl | default "" | quote }}
+            {{- if .Values.oidc.enabled }}
+            # LOGIN-1: SSO config injected at runtime (config.js) so the console shows "Sign in with SSO"
+            # without a UI rebuild. Register a public/SPA client with redirect URI <console>/auth/callback.
+            - name: OIDC_ISSUER
+              value: {{ .Values.oidc.issuer | quote }}
+            - name: OIDC_CLIENT_ID
+              value: {{ .Values.oidc.consoleClientId | quote }}
+            {{- end }}
           resources:
             {{- toYaml .Values.ui.resources | nindent 12 }}
           startupProbe:

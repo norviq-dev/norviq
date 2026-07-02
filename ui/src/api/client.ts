@@ -45,8 +45,21 @@ export function wsUrl(path: string): string {
   return `${proto}//${window.location.host}${path}`;
 }
 
+/** LOGIN-1: a 401 means the session is invalid/expired — clear it and route to the login screen (never a
+ *  silent failure or a blank console). OIDC users re-auth via the login screen's SSO button. */
+function handleUnauthorized(): void {
+  localStorage.removeItem("nrvq_token");
+  if (window.location.pathname !== "/login") {
+    window.location.assign("/login");
+  }
+}
+
 export async function apiGet<T>(path: string): Promise<T> {
   const response = await fetch(apiUrl(path), { headers: authHeaders() });
+  if (response.status === 401) {
+    handleUnauthorized();
+    throw new Error("Unauthorized");
+  }
   if (!response.ok) {
     throw new Error(`Request failed: ${response.status}`);
   }
@@ -69,6 +82,10 @@ export async function apiSend<T>(path: string, method: "POST" | "PUT" | "DELETE"
     headers: authHeaders(extra),
     body: body ? JSON.stringify(body) : undefined
   });
+  if (response.status === 401) {
+    handleUnauthorized();
+    throw new Error("Unauthorized");
+  }
   if (!response.ok) {
     const message = await response.text();
     throw new Error(message || `Request failed: ${response.status}`);

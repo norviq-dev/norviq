@@ -26,6 +26,7 @@ type AuditRecord = {
   session_id?: string;
   trust_score?: number;
   latency_ms?: number;
+  framework?: string; // OBS-2: decision source (sidecar / sidecar-http / sdk / redteam / ...)
   _live?: boolean;
 };
 
@@ -175,6 +176,8 @@ export function AuditLog() {
     { key: "decision", title: "Decision", render: (v) => <DecisionBadge decision={v as AuditRecord["decision"]} /> },
     { key: "rule_id", title: "Rule", render: (v) => <span className="mono muted">{(v as string) || "—"}</span> },
     { key: "agent_class", title: "Agent Class" },
+    // OBS-2: decision source so sidecar-enforced calls are distinguishable from API/console-originated ones.
+    { key: "framework", title: "Source", render: (v) => <span className="mono muted">{(v as string) || "—"}</span> },
     {
       key: "trust_score",
       title: "Trust",

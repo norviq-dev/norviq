@@ -1,5 +1,5 @@
 import { memo } from "react";
-import ReactEChartsCore from "echarts-for-react/lib/core";
+import ReactEChartsCore from "../common/EChart";
 import * as echarts from "echarts/core";
 import { BarChart } from "echarts/charts";
 import { GridComponent, TooltipComponent } from "echarts/components";

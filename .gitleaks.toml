@@ -12,6 +12,8 @@ paths = [
   '''norviq/sdk/attacks/.*''',
   '''.*\.md$''',                 # docs/specs use example tokens
   '''specs/prompts/.*''',
+  '''scripts/live-pentest/.*''',        # local-kind E2E / release-exit overlays: dummy secretKeys for throwaway clusters
+  '''webhook/presets/.*_test\.rego$''', # rego test fixtures: fake api_key/PII payloads that exercise the detectors
 ]
 # Common non-secret placeholders used in dev/kind (e.g. norviq-redis-password).
 regexes = [

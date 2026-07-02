@@ -53,3 +53,24 @@ Ensure AKS deploy integrity verifies **code + effect**, not tag equality alone.
 - If `/version.build_git_sha != ${GIT_SHA}`: STOP release, rebuild image, redeploy.
 - If any R2 mismatch probe != 409: STOP release, open P0, do not mark GA-ready.
 
+
+---
+
+## Pre-GA remediation → release tail (release/pre-ga-remediation)
+
+After the kind release-exit + final fable pentest PASS (see `.reviews/live-pentest/FINAL-PENTEST-PRE-GA.md`), the
+actual release is:
+
+1. **Commit + merge** `release/pre-ga-remediation` → `main` (San). The images were stamped `pre-ga-<sha>` during the
+   uncommitted release-exit; the merge commit's real SHA becomes the release `GIT_SHA`.
+2. **Rebuild all 4 images** (api/engine/webhook/ui) from the merged `main` HEAD with `NRVQ_GIT_SHA=${GIT_SHA}` — the UI
+   image now builds via the shipped `Dockerfile.ui` (BUG-1 fixed). Push to the registry.
+3. **AKS deploy** the chart (thin-proxy sidecar mode is the default; embedded is opt-in for air-gapped/edge).
+4. **Hardened P-10 on AKS**: assert `/api/v1/version.build_git_sha == ${GIT_SHA}` (provenance==HEAD) AND the live
+   409/effect probes. STOP release on any mismatch.
+
+Deployment caveats surfaced at release-exit (address before/at deploy):
+- Chart `helm upgrade` conflicts with the cert-job's kubectl-patched MutatingWebhookConfiguration `caBundle`
+  (server-side-apply field ownership). Fresh `helm install` is unaffected; for upgrades, treat caBundle as
+  externally-managed or reconcile field managers.
+- With `webhook.failurePolicy: Ignore`, roll tenant workloads AFTER the webhook is Ready so injection isn't skipped.

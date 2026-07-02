@@ -20,7 +20,12 @@ interface ImportMeta {
   readonly env: ImportMetaEnv;
 }
 
-// F-25: runtime config injected by the container entrypoint (config.js) — see ui/docker-entrypoint.sh.
+// F-25 + LOGIN-1: runtime config injected by the container entrypoint (config.js) — see ui/docker-entrypoint.sh.
 interface Window {
-  __NRVQ_CONFIG__?: { fleetApiUrl?: string };
+  __NRVQ_CONFIG__?: {
+    fleetApiUrl?: string;
+    oidcIssuer?: string;
+    oidcClientId?: string;
+    oidcRedirectUri?: string;
+  };
 }

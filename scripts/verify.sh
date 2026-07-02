@@ -101,8 +101,12 @@ tier_t1() {
   say "T1 — static + unit"
   req "ruff"           ruff check norviq/ tests/
   req_in_dir "ui" "tsc (ui)" npx --no-install tsc --noEmit
-  req "opa check"      opa check --v0-compatible comprehensive.rego policies/
+  req "opa check"      opa check --v0-compatible comprehensive.rego webhook/presets/ policies/
   req "opa test"       opa test --v0-compatible policies/
+  # comprehensive.rego + the SEC-5 composed strict baseline live at the repo root / webhook/presets, not
+  # under policies/ — gate their unit tests + the drift-parity test explicitly (previously ungated).
+  req "opa test (comprehensive)" opa test --v0-compatible comprehensive.rego comprehensive_test.rego
+  req "opa test (strict parity)" opa test --v0-compatible comprehensive.rego webhook/presets/strict.rego webhook/presets/strict_parity_test.rego
   req_in_dir "ui" "vitest unit" npm run test:run --silent
   # pytest unit only — attacks/integration run in T2
   req "pytest unit"    pytest tests/ -q --ignore=tests/attacks -p no:cacheprovider

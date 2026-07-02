@@ -66,6 +66,8 @@ def _to_dict(row: AuditLogEntry) -> dict:
         "session_id": getattr(row, "session_id", ""),
         "trust_score": row.trust_score,
         "latency_ms": row.latency_ms,
+        # OBS-2: decision source (sidecar / sidecar-http / sdk / redteam / ...) for the UI Source column + filter.
+        "framework": getattr(row, "framework", ""),
         "timestamp": row.timestamp_utc.isoformat(),
     }
 
@@ -76,6 +78,7 @@ async def list_audit_records(
     decision: str | None = Query(default=None),
     tool_name: str | None = Query(default=None),
     agent: str | None = Query(default=None),  # F-53: SPIFFE/agent-id substring, filtered SERVER-SIDE over the range
+    framework: str | None = Query(default=None),  # OBS-2: decision source (sidecar / api / sdk / redteam / ...)
     range: Literal["1h", "6h", "24h", "7d", "30d"] = Query(default="24h"),
     limit: int = Query(default=50, le=500),
     offset: int = Query(default=0, ge=0),
@@ -101,6 +104,8 @@ async def list_audit_records(
         query = query.where(AuditLogEntry.tool_name.icontains(tool_name, autoescape=True))  # F-53: substring, not ==
     if agent:
         query = query.where(AuditLogEntry.agent_id.icontains(agent, autoescape=True))  # F-53: server-side SPIFFE filter
+    if framework:
+        query = query.where(AuditLogEntry.framework == framework)  # OBS-2: filter by decision source
     rows = (await session.execute(query)).scalars().all()
     log.debug("nrvq.api.audit.listed", count=len(rows), code="NRVQ-API-7020")
     return [_to_dict(row) for row in rows]

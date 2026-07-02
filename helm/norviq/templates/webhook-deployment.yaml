@@ -63,10 +63,35 @@ spec:
               value: "{{ .Values.images.registry }}{{ .Values.images.engine.repository }}:{{ .Values.images.engine.tag }}"
             - name: NRVQ_CONTROLLER_ENABLED
               value: "true"
+            # FQDN (namespace-qualified) so the value is resolvable BOTH from the controller (in this
+            # namespace) AND from thin-proxy sidecars injected into OTHER tenant namespaces (SIDE-2).
             - name: NRVQ_API_URL
-              value: "http://norviq-api:{{ .Values.api.port }}"
+              value: "http://norviq-api.{{ .Values.namespace }}.svc:{{ .Values.api.port }}"
             - name: NRVQ_ADMIN_POLICY_NAMESPACE
               value: "{{ .Values.namespace }}"
+            # SIDE-2: mode injected into sidecars. "proxy" (default) = thin sidecar POSTs to the central
+            # /evaluate with a minted namespace-scoped service JWT (nothing per-pod); "embedded" = full
+            # local engine for air-gapped/edge (needs the datastore wiring below).
+            - name: NRVQ_SIDECAR_MODE
+              value: {{ .Values.webhook.injection.sidecarMode | default "proxy" | quote }}
+            {{- if eq (.Values.webhook.injection.sidecarMode | default "proxy") "embedded" }}
+            # Embedded sidecars run their own RedisCache + OPA(subprocess) + PolicyLoader, so the injector
+            # must propagate the datastore wiring. The thin-proxy default needs none of this.
+            - name: NRVQ_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: norviq-secrets
+                  key: NRVQ_REDIS_URL
+            - name: NRVQ_PG_URL
+              valueFrom:
+                secretKeyRef:
+                  name: norviq-secrets
+                  key: NRVQ_PG_URL
+            - name: NRVQ_DB_SSL_MODE
+              value: {{ .Values.config.dbSslMode | quote }}
+            - name: NRVQ_SIDECAR_OPA_MODE
+              value: "subprocess"
+            {{- end }}
             # HS256 signing key for the controller's short-lived service JWT (API auth).
             - name: NRVQ_API_SECRET_KEY
               valueFrom:

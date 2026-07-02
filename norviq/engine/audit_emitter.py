@@ -96,6 +96,7 @@ class AuditEmitter:
                     session_id=record.session_id,
                     trust_score=record.trust_score,
                     latency_ms=record.latency_ms,
+                    framework=record.framework,
                     payload=record.payload,
                 )
             )

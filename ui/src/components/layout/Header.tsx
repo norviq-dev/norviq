@@ -558,7 +558,11 @@ export function Header({
           >
             <div style={{ padding: "12px 14px" }}>
               <div style={{ fontSize: 14, fontWeight: 500, color: "#FFFFFF" }}>{displayName}</div>
-              <div style={{ fontSize: 12, color: "#A0A0A0", marginTop: 2 }}>{displayRole}</div>
+              {/* LOGIN-3: surface the server-resolved permission scope (role + namespace) so the operator
+                  always sees who they are signed in as and what they can reach. */}
+              <div style={{ fontSize: 12, color: "#A0A0A0", marginTop: 2 }}>
+                {displayRole} · {me?.namespace ? `namespace: ${me.namespace}` : "all namespaces"}
+              </div>
             </div>
             <div className="dd-divider" />
             <button

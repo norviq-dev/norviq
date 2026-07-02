@@ -7,15 +7,21 @@
 
 import { UserManager, WebStorageStateStore } from "oidc-client-ts";
 
-const issuer = import.meta.env.VITE_OIDC_ISSUER as string | undefined;
-const clientId = import.meta.env.VITE_OIDC_CLIENT_ID as string | undefined;
+// LOGIN-1: OIDC config is runtime-first (window.__NRVQ_CONFIG__, written by the container entrypoint from
+// Helm OIDC_ISSUER/OIDC_CLIENT_ID) with a build-time VITE_* fallback — one built image, per-cluster config,
+// so a buyer enables SSO by setting Helm values without rebuilding the UI.
+const runtime = (typeof window !== "undefined" && window.__NRVQ_CONFIG__) || {};
+const issuer = runtime.oidcIssuer || (import.meta.env.VITE_OIDC_ISSUER as string | undefined);
+const clientId = runtime.oidcClientId || (import.meta.env.VITE_OIDC_CLIENT_ID as string | undefined);
 
-/** True when an IdP is configured. When false the app keeps its dev-token / unauthenticated behavior. */
+/** True when an IdP is configured. When false the app shows the no-IdP quick-start login. */
 export const oidcEnabled = Boolean(issuer && clientId);
 
 const TOKEN_KEY = "nrvq_token";
 const redirectUri =
-  (import.meta.env.VITE_OIDC_REDIRECT_URI as string) || `${window.location.origin}/auth/callback`;
+  runtime.oidcRedirectUri ||
+  (import.meta.env.VITE_OIDC_REDIRECT_URI as string) ||
+  `${window.location.origin}/auth/callback`;
 
 let mgr: UserManager | null = null;
 
