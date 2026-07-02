@@ -95,6 +95,16 @@ test_sql_delete_from_in_any_param_blocks {
     o := _d({"tool_name": "read_record", "tool_params": {"q": "DELETE FROM patients"}})
     o.decision == "block"
 }
+test_sql_nested_blocks {
+    o := _d({"tool_name": "run_report", "tool_params": {"payload": {"q": "drop table users"}}})
+    o.decision == "block"
+    o.rule_id == "deny_sql_injection"
+}
+test_sql_base64_nested_blocks {
+    o := _d({"tool_name": "run_report", "tool_params": {"payload": {"q": "ZHJvcCB0YWJsZSB1c2Vycw=="}}})
+    o.decision == "block"
+    o.rule_id == "base64_decoded_threat"
+}
 test_benign_report_name_not_sql_blocked {
     o := _d({"tool_name": "run_report", "tool_params": {"name": "monthly revenue summary"}})
     o.decision == "allow"
@@ -104,6 +114,18 @@ test_escalate_has_reason {
     o := _d({"tool_name": "modify_config", "tool_params": {"k": "v"}})
     o.decision == "escalate"
     o.reason != "Allowed"
+}
+
+test_shell_nested_blocks {
+    o := _d({"tool_name": "search_kb", "tool_params": {"payload": {"cmd": "cat /etc/passwd"}}})
+    o.decision == "block"
+    o.rule_id == "deny_shell_execution"
+}
+
+test_shell_base64_blocks {
+    o := _d({"tool_name": "search_kb", "tool_params": {"payload": {"cmd": "Y2F0IC9ldGMvcGFzc3dk"}}})
+    o.decision == "block"
+    o.rule_id == "base64_decoded_threat"
 }
 
 test_audit_has_reason {
@@ -160,10 +182,34 @@ test_dl001_secret_in_value_blocks {                       # DL-001: secret in an
     o.rule_id == "llm02_data_leakage"
     o.reason != "Allowed"
 }
+test_dl001_nested_secret_in_value_blocks {
+    o := _d({"tool_name": "send_email", "tool_params": {"msg": {"body": "api_key=sk-12345678"}}})
+    o.decision == "block"
+    o.rule_id == "llm02_data_leakage"
+}
+test_dl001_base64_secret_value_blocks {
+    o := _d({"tool_name": "upload_file", "tool_params": {"blob": "cGFzc3dvcmQ9c3VwZXItc2VjcmV0"}})
+    o.decision == "block"
+    o.rule_id == "llm02_data_leakage"
+}
 test_dl003_secret_egress_blocks {                         # DL-003: reading an env secret is egress
     o := _d({"tool_name": "read_env", "tool_params": {"key": "AWS_SECRET_ACCESS_KEY"}})
     o.decision == "block"
     o.rule_id == "llm02_data_leakage"
+}
+test_dl003_nested_secret_egress_blocks {
+    o := _d({"tool_name": "read_env", "tool_params": {"payload": {"name": "AWS_SECRET_ACCESS_KEY"}}})
+    o.decision == "block"
+    o.rule_id == "llm02_data_leakage"
+}
+test_dl003_base64_secret_egress_blocks {
+    o := _d({"tool_name": "get_secret", "tool_params": {"path": "cHJpdmF0ZV9rZXlfbWF0ZXJpYWw="}})
+    o.decision == "block"
+    o.rule_id == "llm02_data_leakage"
+}
+test_benign_nested_encoded_non_llm_allows {
+    o := _d({"tool_name": "run_report", "tool_params": {"payload": {"q": "select customer trends"}}})
+    o.decision == "allow"
 }
 test_ct002_cross_schema_sql_blocks {                      # CT-002: schema-qualified cross-namespace SQL
     o := _d({"tool_name": "execute_sql", "tool_params": {"query": "SELECT * FROM payments.users"}, "agent": {"namespace": "default"}})

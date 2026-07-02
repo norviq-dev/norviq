@@ -38,13 +38,13 @@
     "@types/react": "^18.3.23",
     "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react": "^4.7.0",
-    "@vitest/ui": "^2.1.8",
+    "@vitest/ui": "^4.1.9",
     "jsdom": "^25.0.1",
     "msw": "^2.6.8",
     "shadcn": "^4.8.3",
     "tailwindcss": "^4.1.8",
     "typescript": "^5.8.3",
-    "vite": "^5.4.19",
-    "vitest": "^2.1.8"
+    "vite": "^8.1.2",
+    "vitest": "^4.1.9"
   }
 }

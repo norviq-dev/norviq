@@ -144,7 +144,13 @@ echo "║  PHASE 4: Verdict                      ║"
 echo "╚═══════════════════════════════════════╝"
 
 # HIGH-security and CRITICAL both BLOCK (fail-closed). No severity is routed to a backlog.
-BLOCKERS=$(grep -ciE "CRITICAL|CRIT-|HIGH[- ]*SEC|HIGH[- ]*SECURITY|SECURITY.*HIGH" "$CLAUDE_OUTPUT" 2>/dev/null || echo 0)
+BLOCKER_PATTERN="CRITICAL|CRIT-|HIGH[- ]*SEC|HIGH[- ]*SECURITY|SECURITY.*HIGH|\\(HIGH\\)"
+BLOCKERS_RAW="$( (grep -iE "$BLOCKER_PATTERN" "$CLAUDE_OUTPUT" 2>/dev/null || true) | wc -l | tr -d '[:space:]' )"
+if [[ "$BLOCKERS_RAW" =~ ^[0-9]+$ ]]; then
+    BLOCKERS="$BLOCKERS_RAW"
+else
+    BLOCKERS=0
+fi
 
 cat > "$FIX_OUTPUT" << FIXEOF
 # ${FEAT} — Fix Instructions (author applies; reviewer verifies)
@@ -154,7 +160,7 @@ cat > "$FIX_OUTPUT" << FIXEOF
 
 ## Blocking items (CRITICAL + HIGH-security) extracted from the review:
 FIXEOF
-grep -B1 -A6 -iE "CRITICAL|CRIT-|HIGH[- ]*SEC|HIGH[- ]*SECURITY" "$CLAUDE_OUTPUT" 2>/dev/null >> "$FIX_OUTPUT" || echo "None." >> "$FIX_OUTPUT"
+grep -B1 -A6 -iE "$BLOCKER_PATTERN" "$CLAUDE_OUTPUT" 2>/dev/null >> "$FIX_OUTPUT" || echo "None." >> "$FIX_OUTPUT"
 
 if [ "$BLOCKERS" -gt 0 ]; then
     echo "  🔴 BLOCKING findings (CRITICAL or HIGH-security) — fail-closed."

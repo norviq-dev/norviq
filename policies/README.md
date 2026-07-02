@@ -39,7 +39,7 @@ opa test --v0-compatible policies/
 | `pii_detection` | SSN / PII shapes in params | Data protection |
 | `pci_card_numbers` | PAN by field name or Luhn-valid value | Data protection (PCI) |
 | `cross_tenant_access` | cross-namespace / cross-tenant access | AML.T0049 |
-| `base64_payload_detected`, `base64_decoded_threat` | base64-encoded evasion (audit / block on decoded threat) | Evasion |
+| `base64_decoded_threat` | base64-encoded evasion (block on decoded SQL/shell/PII threat) | Evasion |
 | `scope_violation_dangerous_tool` | out-of-scope dangerous tool | Least privilege |
 
 ## Sector packs (F047)

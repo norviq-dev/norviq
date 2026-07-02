@@ -35,35 +35,45 @@ injection_directive_keywords = ["instruction", "instructions", "guardrail", "gua
 injection_action_keywords = ["reveal", "dump", "export", "print", "show", "delete"]
 injection_target_keywords = ["secret", "secrets", "confidential", "credential", "credentials", "token", "tokens", "hidden credentials", "confidential data"]
 
-injection_scan_texts[t] {
+security_scan_texts[t] {
     walk(input.tool_params, [_, val])
     is_string(val)
     t := lower(val)
 }
 
-# Unicode confusable/zero-width folding path provided by engine; keep this path to preserve F-02 coverage.
-injection_scan_texts[t] {
+security_scan_texts[t] {
     walk(input.tool_params_normalized, [_, val])
     is_string(val)
     t := lower(val)
 }
 
-# Base64-decoded view is fed into the same LLM01 intent scanner.
-injection_scan_texts[t] {
+security_scan_texts[t] {
     decoded := b64_decoded[_]
     t := decoded
 }
 
-injection_scan_texts_raw[t] {
+injection_scan_texts[t] {
+    t := security_scan_texts[_]
+}
+
+security_scan_texts_raw[t] {
     walk(input.tool_params, [_, val])
     is_string(val)
     t := val
 }
 
-injection_scan_texts_raw[t] {
+security_scan_texts_raw[t] {
     walk(input.tool_params_normalized, [_, val])
     is_string(val)
     t := val
+}
+
+security_scan_decoded_raw[t] {
+    t := b64_decoded_raw[_]
+}
+
+injection_scan_texts_raw[t] {
+    t := security_scan_texts_raw[_]
 }
 
 normalized_text(s) = out {
@@ -128,47 +138,29 @@ sql_destructive_patterns = ["drop table", "delete from", "truncate table", "; dr
 
 sql_injection_detected {
     input.tool_name == "execute_sql"
-    query := lower(input.tool_params.query)
-    pattern := sql_patterns[_]
-    contains(query, pattern)
-}
-sql_injection_detected {
-    input.tool_name == "execute_sql"
-    query := input.tool_params_normalized.query
+    query := security_scan_texts[_]
     pattern := sql_patterns[_]
     contains(query, pattern)
 }
 # F-20: destructive SQL in any string param, regardless of tool_name (original + normalized).
 sql_injection_detected {
-    some k
-    val := input.tool_params[k]
-    is_string(val)
-    pattern := sql_destructive_patterns[_]
-    contains(lower(val), pattern)
-}
-sql_injection_detected {
-    some k
-    val := input.tool_params_normalized[k]
-    is_string(val)
+    val := security_scan_texts[_]
     pattern := sql_destructive_patterns[_]
     contains(val, pattern)
 }
 
 # Shell injection
 shell_patterns = ["|", ";", "$(", "`", "rm -rf", "/etc/passwd", "/etc/shadow"]
+shell_patterns_decoded = ["|", "$(", "`", "rm -rf", "/etc/passwd", "/etc/shadow", "nc -e", "wget ", "curl "]
 
 shell_injection_detected {
-    some k
-    val := input.tool_params[k]
-    is_string(val)
+    val := security_scan_texts_raw[_]
     pattern := shell_patterns[_]
     contains(val, pattern)
 }
 shell_injection_detected {
-    some k
-    val := input.tool_params_normalized[k]
-    is_string(val)
-    pattern := shell_patterns[_]
+    val := lower(security_scan_decoded_raw[_])
+    pattern := shell_patterns_decoded[_]
     contains(val, pattern)
 }
 
@@ -182,8 +174,10 @@ sensitive_keys = {"password", "secret", "api_key", "token", "private_key"}
 
 data_leakage_detected {
     external_tools[input.tool_name]
-    some k
-    input.tool_params[k]
+    walk(input.tool_params, [path, _])
+    count(path) > 0
+    k := path[count(path) - 1]
+    is_string(k)
     sensitive_keys[lower(k)]
 }
 
@@ -201,11 +195,9 @@ secret_value_patterns = [
 
 data_leakage_detected {
     external_tools[input.tool_name]
-    some k
-    val := input.tool_params[k]
-    is_string(val)
+    val := security_scan_texts[_]
     some i
-    regex.match(secret_value_patterns[i], lower(val))
+    regex.match(secret_value_patterns[i], val)
 }
 
 # F-45 (DL-003): reading an environment secret / credential is data egress (OWASP LLM02). The baseline had
@@ -215,11 +207,9 @@ secret_name_patterns = [`secret`, `password`, `api[_-]?key`, `token`, `private[_
 
 secret_egress_detected {
     secret_read_tools[input.tool_name]
-    some k
-    val := input.tool_params[k]
-    is_string(val)
+    val := security_scan_texts[_]
     some i
-    regex.match(secret_name_patterns[i], lower(val))
+    regex.match(secret_name_patterns[i], val)
 }
 
 # Supply chain
@@ -317,14 +307,61 @@ chain_depth_exceeded {
     input.call_depth >= max_safe_call_depth
 }
 
-b64_decoded[decoded] {
+b64_candidate_clean(v) = out {
+    out0 := regex.replace(v, `\s+`, "")
+    out1 := regex.replace(out0, "​", "")
+    out2 := regex.replace(out1, "‌", "")
+    out3 := regex.replace(out2, "‍", "")
+    out4 := regex.replace(out3, `-`, "+")
+    out := regex.replace(out4, `_`, "/")
+}
+
+b64_candidate_texts_base[s] {
     walk(input.tool_params, [_, val])
     is_string(val)
-    count(val) >= 16
-    count(val) % 4 == 0
-    regex.match(`^[A-Za-z0-9+/]+={0,2}$`, val)
-    not regex.match(`^\d+$`, val)
-    decoded := lower(base64.decode(val))
+    cleaned := b64_candidate_clean(val)
+    count(cleaned) >= 16
+    regex.match(`^[A-Za-z0-9+/]+={0,2}$`, cleaned)
+    not regex.match(`^\d+$`, cleaned)
+    s := cleaned
+}
+
+b64_candidate_texts[s] {
+    s := b64_candidate_texts_base[_]
+}
+
+b64_candidate_texts[s] {
+    base := b64_candidate_texts_base[_]
+    not endswith(base, "=")
+    s := sprintf("%s=", [base])
+}
+
+b64_candidate_texts[s] {
+    base := b64_candidate_texts_base[_]
+    not endswith(base, "=")
+    s := sprintf("%s==", [base])
+}
+
+b64_decoded_once[decoded] {
+    candidate := b64_candidate_texts[_]
+    decoded := base64.decode(candidate)
+}
+
+b64_decoded_raw[decoded] {
+    decoded := b64_decoded_once[_]
+}
+
+b64_decoded_raw[decoded] {
+    first := b64_decoded_once[_]
+    cleaned := b64_candidate_clean(first)
+    count(cleaned) >= 16
+    regex.match(`^[A-Za-z0-9+/]+={0,2}$`, cleaned)
+    decoded := base64.decode(cleaned)
+}
+
+b64_decoded[decoded] {
+    raw := b64_decoded_raw[_]
+    decoded := lower(raw)
 }
 
 decoded_shell_patterns = ["rm -rf", "/etc/passwd", "/etc/shadow", "wget ", "curl ", "nc -e"]

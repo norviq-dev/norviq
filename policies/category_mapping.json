@@ -1,6 +1,6 @@
 {
   "_comment": "Risk-category -> Rego rule_id taxonomy (F046). A category is 'covered' for a namespace when its mapped rule_ids appear in the rego loaded for that namespace. Rule ids are the real rule_id values emitted by the bundled policies (see comprehensive.rego). This is a documented taxonomy artifact (like mitre_mapping.json), not fabricated coverage data.",
-  "Prompt Injection": ["llm01_prompt_injection", "base64_decoded_threat", "base64_payload_detected"],
+  "Prompt Injection": ["llm01_prompt_injection", "base64_decoded_threat"],
   "Data Protection": ["llm02_data_leakage", "pii_detection", "pci_card_numbers"],
   "Tool Safety": ["deny_sql_injection", "deny_shell_execution", "scope_violation_dangerous_tool"],
   "Excessive Agency": ["llm06_excessive_agency"],

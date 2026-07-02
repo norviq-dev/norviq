@@ -43,6 +43,13 @@ req() { # req "<label>" <cmd...>
   if "$@" >/dev/null 2>&1; then pass "$label"; else fail "$label"; fi
 }
 
+req_in_dir() { # req_in_dir "<dir>" "<label>" <cmd...>
+  local dir="$1"; shift
+  local label="$1"; shift
+  if ! command -v "$1" >/dev/null 2>&1; then warn "$label — '$1' not installed (CI enforces)"; return 0; fi
+  if ( cd "$dir" && "$@" >/dev/null 2>&1 ); then pass "$label"; else fail "$label"; fi
+}
+
 # Refuse T2/T4 against AKS — its teardowns delete policy rows (see AGENTS.md rule 4 + baseline doc).
 guard_not_aks() {
   local ctx; ctx="$(kubectl config current-context 2>/dev/null || echo none)"
@@ -93,10 +100,10 @@ guard_aks_context() {
 tier_t1() {
   say "T1 — static + unit"
   req "ruff"           ruff check norviq/ tests/
-  ( cd ui && req "tsc (ui)" npx --no-install tsc --noEmit )
+  req_in_dir "ui" "tsc (ui)" npx --no-install tsc --noEmit
   req "opa check"      opa check --v0-compatible comprehensive.rego policies/
   req "opa test"       opa test --v0-compatible policies/
-  ( cd ui && req "vitest unit" npm run test:run --silent )
+  req_in_dir "ui" "vitest unit" npm run test:run --silent
   # pytest unit only — attacks/integration run in T2
   req "pytest unit"    pytest tests/ -q --ignore=tests/attacks -p no:cacheprovider
   # fast SAST subset (secrets + python) — full set is T5 / security.yml
@@ -117,7 +124,7 @@ tier_t2() {
 tier_t3() {
   say "T3 — regression (zero new failures vs baseline)"
   req "pytest full"    pytest tests/ -q -p no:cacheprovider
-  ( cd ui && req "vitest full" npm run test:run --silent )
+  req_in_dir "ui" "vitest full" npm run test:run --silent
   if [ -f tests/.baseline ]; then
     pass "baseline present: $(head -1 tests/.baseline)"
   else
@@ -154,7 +161,7 @@ tier_t5() {
   req "semgrep"    semgrep --error --quiet --config=auto norviq/ ui/src
   req "pip-audit"  pip-audit -q
   req "gitleaks"   gitleaks detect --no-banner --redact --log-opts="-1"
-  ( cd ui && req "npm audit (high)" npm audit --audit-level=high )
+  req_in_dir "ui" "npm audit (high)" npm audit --audit-level=high
   req "checkov (helm/crds)" checkov -d helm --quiet --compact
   req "kube-linter" kube-linter lint helm/
   echo "  (Container-image trivy runs post-build in build.yml, not here — images don't exist at PR/local time.)"

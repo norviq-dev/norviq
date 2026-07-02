@@ -55,7 +55,12 @@ def malicious_base64_corpus() -> list[str]:
     """Base64-encoded prompt-injection variants that must be blocked."""
     encoded: set[str] = set()
     for payload in malicious_corpus():
-        encoded.add(base64.b64encode(payload.encode("utf-8")).decode("ascii"))
+        b64 = base64.b64encode(payload.encode("utf-8")).decode("ascii")
+        encoded.add(b64)
+        encoded.add(b64.replace("+", "-").replace("/", "_").rstrip("="))  # URL-safe no padding
+        encoded.add(base64.b64encode(b64.encode("utf-8")).decode("ascii"))  # double-encoding
+        # Insert zero-width chars that should be stripped before decode.
+        encoded.add(b64[:6] + "\u200b" + b64[6:12] + "\u200d" + b64[12:])
     return sorted(encoded)
 
 
@@ -141,7 +146,13 @@ def benign_base64_corpus() -> list[str]:
         "daily metrics: uptime=99.95",
         "meeting_notes: moved standup to 10:30",
     ]
-    return [base64.b64encode(v.encode("utf-8")).decode("ascii") for v in plaintexts]
+    out: list[str] = []
+    for v in plaintexts:
+        b64 = base64.b64encode(v.encode("utf-8")).decode("ascii")
+        out.append(b64)
+        out.append(b64.replace("+", "-").replace("/", "_").rstrip("="))
+        out.append(base64.b64encode(b64.encode("utf-8")).decode("ascii"))
+    return out
 
 
 def benign_nested_payloads() -> list[dict]:
