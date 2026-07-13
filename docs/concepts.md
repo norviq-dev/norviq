@@ -6,17 +6,16 @@
 The mental model behind Norviq: how an agent is identified, how policies are layered, how a
 decision gets made, and what happens after it does.
 
-```
-  Agent (LangGraph / LangChain / SDK)
-        │  tool call: {tool, params, agent identity}
-        ▼
-  Norviq sidecar / SDK  ──────►  POST /evaluate  ──►  Engine
-                                                       ├─ resolve identity (SPIFFE SVID)
-                                                       ├─ collect policies (class → namespace → cluster tiers + overlays)
-                                                       ├─ evaluate against OPA/Rego
-                                                       └─ decision: allow | block | escalate | audit
-        ◄──────────────── decision + rule_id + reason ─┘
-                                                       └─ audit log · trust score · asset/attack graph
+```mermaid
+flowchart LR
+    A["Agent tool call<br/>{tool, params, identity}"] --> P["Sidecar / SDK"]
+    P -->|POST /evaluate| E["Engine"]
+    E --> I["Resolve SPIFFE<br/>identity"]
+    I --> C["Collect policy<br/>tiers + overlays"]
+    C --> O["Evaluate<br/>(OPA / Rego)"]
+    O --> R["Decision:<br/>allow · block · escalate · audit<br/>+ rule_id + reason"]
+    R --> P
+    E --> L["Audit log ·<br/>trust score · graphs"]
 ```
 
 ## Agent identity
@@ -144,6 +143,23 @@ into an `allow`. (Two narrower escape hatches exist for operators: `__pack_overr
 operator *tighten* a sector pack further, and `__pack_weaken__` lets an admin explicitly relax a
 pack's own added restriction — but a weaken can never reach outside the pack family to relax a
 `__guardrail__` or a `__remediation__` overlay, which stay hard tighten-only.)
+
+```mermaid
+flowchart TB
+    subgraph base["Base tiers — highest priority wins, most-restrictive on ties"]
+        cls["Agent-class policy"]
+        nsb["Namespace baseline<br/>(__baseline__) — floor"]
+        clb["Cluster baseline<br/>(__cluster__) — floor"]
+    end
+    subgraph ov["Tighten-only overlays — can only ADD a block, never weaken the base"]
+        pack["Sector packs<br/>(__pack__)"]
+        guard["Guardrails<br/>(__guardrail__)"]
+        rem["Compliance remediation<br/>(&lt;class&gt;__remediation__)"]
+    end
+    base --> M{"Combine:<br/>most-restrictive wins"}
+    ov --> M
+    M --> D["Final decision<br/>for this tool call"]
+```
 
 **Example:** namespace `chatbot-prod` has a class policy (`customer-support`, `strict` preset,
 priority 200) and a namespace baseline (`chatbot-prod`, `permissive` preset, `audit` mode, priority

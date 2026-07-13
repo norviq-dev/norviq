@@ -160,6 +160,31 @@ bundle, verifies it locally, and applies it. **The hub never dials into a spoke*
 to a fleet you only need to allow spoke→hub outbound traffic; no inbound access to the spoke is
 required.
 
+```mermaid
+flowchart TB
+    subgraph hub["Hub cluster"]
+        fapi["fleet-api"]
+        fpg[("fleet Postgres")]
+        sign["Signed bundle<br/>(private signing key)"]
+        fapi --- fpg
+        fapi --- sign
+    end
+    subgraph spokeA["Spoke cluster A"]
+        relayA["relay → heartbeats / rollups"]
+        pullA["puller → verify + apply bundle"]
+    end
+    subgraph spokeB["Spoke cluster B"]
+        relayB["relay → heartbeats / rollups"]
+        pullB["puller → verify + apply bundle"]
+    end
+    relayA -->|outbound POST| fapi
+    relayB -->|outbound POST| fapi
+    fapi -->|signed bundle GET| pullA
+    fapi -->|signed bundle GET| pullB
+```
+
+*All arrows are spoke-initiated and outbound; the hub is never a client of a spoke.*
+
 **Bring up a hub:**
 
 ```bash

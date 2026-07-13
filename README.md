@@ -19,12 +19,6 @@ workload's Kubernetes/SPIFFE identity, and then **allowed, blocked, escalated, o
 the tool runs. It turns "the model decided to call `execute_sql` / `send_email` / `shell`" from an
 implicit trust into an enforced, per-identity, auditable decision.
 
-<div align="center">
-  <img src=".github/assets/console-login.png" alt="Signing in to the Norviq console" width="760" />
-  <br />
-  <sub>Signing in to the Norviq console — behind it: the policy catalog &amp; editor, attack/asset graphs, agent trust, and a live audit stream.</sub>
-</div>
-
 ---
 
 ## Why
@@ -36,17 +30,23 @@ that surface, so a tool call only happens if an explicit policy for that agent's
 
 ## How it works
 
-```
-  Agent (LangGraph / LangChain / SDK)
-        │  tool call: {tool, params, agent identity}
-        ▼
-  Norviq sidecar / SDK  ──────►  POST /evaluate  ──►  Engine
-                                                       ├─ resolve identity (SPIFFE SVID)
-                                                       ├─ collect policies (class → namespace → cluster tiers + overlays)
-                                                       ├─ evaluate against OPA/Rego
-                                                       └─ decision: allow | block | escalate | audit
-        ◄──────────────── decision + rule_id + reason ─┘
-                                                       └─ audit log · trust score · asset/attack graph
+Every tool call takes a round trip through the engine before it executes:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Agent as Agent (LangGraph / SDK)
+    participant PEP as Norviq sidecar / SDK
+    participant Engine
+    participant OPA as OPA / Rego
+    Agent->>PEP: tool call — {tool, params, identity}
+    PEP->>Engine: POST /evaluate
+    Note over Engine: resolve SPIFFE identity<br/>collect policy tiers + overlays
+    Engine->>OPA: evaluate
+    OPA-->>Engine: decision
+    Engine-->>PEP: allow / block / escalate / audit<br/>+ rule_id + reason
+    PEP-->>Agent: enforced decision
+    Engine->>Engine: audit log · trust score · asset/attack graph
 ```
 
 - **Interception** — an injected sidecar (or the SDK) forwards each tool call to the engine's `/evaluate`.
@@ -56,6 +56,31 @@ that surface, so a tool call only happens if an explicit policy for that agent's
   with tighten-only overlays; the most-restrictive matching rule wins.
 - **Modes** — `block` (deny + reason), `escalate`, `audit` (log only / monitor mode), so you can roll
   out enforcement observably before turning it on.
+
+### Deployed components
+
+```mermaid
+flowchart LR
+    subgraph tenant["Agent namespace"]
+        pod["Agent pod<br/>+ Norviq sidecar (PEP)"]
+    end
+    subgraph norviq["norviq namespace"]
+        api["API"]
+        engine["Engine"]
+        opa["OPA<br/>(per replica)"]
+        pg[("PostgreSQL")]
+        redis[("Redis")]
+        ui["Console UI"]
+        webhook["Admission<br/>webhook"]
+    end
+    pod -->|POST /evaluate| api
+    api --> engine
+    engine --> opa
+    engine --> pg
+    engine --> redis
+    webhook -. injects sidecar .-> pod
+    ui --> api
+```
 
 ## Features
 
