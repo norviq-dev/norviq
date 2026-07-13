@@ -9,6 +9,10 @@ COPY ui/ .
 RUN npm run build
 
 FROM nginx:alpine
+# Patch fixable OS-package CVEs in the base at build time (e.g. c-ares/libcrypto HIGHs) so the shipped
+# image isn't stale relative to the alpine security repo — keeps the fail-closed Trivy image gate green
+# without ignoring genuinely-fixable vulns.
+RUN apk update && apk upgrade --no-cache
 COPY --from=builder /build/dist /usr/share/nginx/html
 COPY ui/nginx.conf /etc/nginx/conf.d/default.conf
 COPY ui/docker-entrypoint.sh /docker-entrypoint.d/99-nrvq-config.sh
