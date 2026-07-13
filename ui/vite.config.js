@@ -18,8 +18,6 @@ export default defineConfig({
         rollupOptions: {
             output: {
                 manualChunks: function (id) {
-                    if (id.includes("echarts-for-react"))
-                        return "echarts-react";
                     if (id.includes("zrender"))
                         return "zrender";
                     if (id.includes("echarts"))
@@ -44,6 +42,10 @@ export default defineConfig({
         globals: true,
         environment: "jsdom",
         setupFiles: "./src/test/setup.ts",
+        // Vitest owns the unit tests under src/. The Playwright E2E suite (tests/e2e/**, @playwright/test)
+        // must NOT be collected by vitest — its `test()` is a different runner and errors on import.
+        include: ["src/**/*.{test,spec}.{ts,tsx}"],
+        exclude: ["**/node_modules/**", "**/dist/**", "tests/e2e/**"],
         coverage: {
             provider: "v8",
             reporter: ["text", "html"],

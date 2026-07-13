@@ -19,7 +19,6 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id) {
-          if (id.includes("echarts-for-react")) return "echarts-react";
           if (id.includes("zrender")) return "zrender";
           if (id.includes("echarts")) return "echarts-core";
           return undefined;
