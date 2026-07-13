@@ -3,3 +3,11 @@
 # rationale recorded in docs/engineering/security-baseline.md, then the whole-repo trivy/image jobs
 # ratchet to blocking. Add one ID per line, e.g.:
 #   CVE-2024-XXXXX   # base-image openssl; no fixed version yet; not reachable from our code (2026-07-01)
+
+# CVE-2026-39822 (HIGH, Go stdlib os.Root symlink-following, fixed Go 1.25.12/1.26.5/1.27.0-rc.2).
+# Present via the embedded Go runtime of the PINNED OPA binary (opa 1.18.0-static, compiled with Go
+# 1.26.4) in the api/engine images, and the webhook Go binary. ACCEPTED: os.Root filesystem-sandbox
+# symlink traversal is not on any Norviq code path — OPA is invoked as a policy evaluator over an HTTP
+# API with no untrusted-filesystem/symlink surface, and the webhook does no os.Root traversal. Revisit
+# and drop this line when an OPA release built with Go >=1.26.5 is pinned (see security-baseline.md).
+CVE-2026-39822
