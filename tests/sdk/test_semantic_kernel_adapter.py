@@ -33,13 +33,18 @@ class _FakeFunctionResult:
 
 
 class _FakeContext:
-    """Mimic Semantic Kernel's FunctionInvocationContext."""
+    """Mimic Semantic Kernel's FunctionInvocationContext.
 
-    def __init__(self, function: Any = None, arguments: Any = None, function_result: Any = None) -> None:
+    Real SK (>=1.x, verified on 1.44) exposes the invocation result as ``.result`` —
+    this fake mirrors that so the DLP test exercises the REAL attribute contract
+    (the old ``function_result`` name was a fake-drift bug that masked a dead DLP path).
+    """
+
+    def __init__(self, function: Any = None, arguments: Any = None, result: Any = None) -> None:
         """Store context fields used by the filter."""
         self.function = function
         self.arguments = arguments
-        self.function_result = function_result
+        self.result = result
 
 
 class _UnIterableArguments:
@@ -139,13 +144,33 @@ async def test_filter_params_extraction_failure_still_evaluates() -> None:
 
 
 async def test_filter_applies_output_dlp_after_next(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When output DLP is enabled, a str function_result.value should be redacted in place."""
+    """When output DLP is enabled, a str context.result.value should be redacted in place."""
     from norviq.config import settings
 
     monkeypatch.setattr(settings, "sdk_output_dlp_enabled", True)
     interceptor = _FakeInterceptor()
     result = _FakeFunctionResult("ssn 123-45-6789")
-    context = _FakeContext(function=_FakeFunction("lookup"), arguments={}, function_result=result)
+    context = _FakeContext(function=_FakeFunction("lookup"), arguments={}, result=result)
+
+    async def next_fn(ctx: Any) -> None:
+        pass
+
+    filt = policy_filter(interceptor)  # type: ignore[arg-type]
+    await filt(context, next_fn)
+    assert "123-45-6789" not in result.value
+    assert "***-**-6789" in result.value
+
+
+async def test_filter_output_dlp_legacy_function_result_attr(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The legacy `.function_result` context shape must still get DLP (fallback path)."""
+    from norviq.config import settings
+
+    monkeypatch.setattr(settings, "sdk_output_dlp_enabled", True)
+    interceptor = _FakeInterceptor()
+    result = _FakeFunctionResult("ssn 123-45-6789")
+    context = _FakeContext(function=_FakeFunction("lookup"), arguments={})
+    context.function_result = result  # legacy attribute name, no `.result`
+    context.result = None
 
     async def next_fn(ctx: Any) -> None:
         pass

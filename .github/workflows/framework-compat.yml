@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Catches upstream agent-framework breaking releases before users do. Each adapter under
+# `norviq/sdk/**` is pinned in `pyproject.toml` to a MINIMUM version (e.g. `langchain-core>=0.2`)
+# so users on newer releases get whatever that framework ships today — a base-class rename, a
+# changed method signature, or a removed API in a new release can silently break interception
+# without ever failing a normal PR (which installs the SAME pinned floor every time).
+#
+# This workflow installs the LATEST released version of each framework (unpinned, on purpose)
+# and runs both the adapter's real-framework compat test (`tests/sdk/compat/test_<x>_real.py`)
+# and its existing unit test (`tests/sdk/test_<x>_adapter.py`) against it, on a weekly schedule
+# and on demand. A red run here means an adapter needs updating for a new framework version — it
+# does NOT gate merges on unrelated code: the `pull_request` trigger is path-filtered to only the
+# adapters/tests/this-workflow themselves, so everyday PRs never see this job.
+name: Framework Compat
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"        # weekly, Monday 06:00 UTC
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "norviq/sdk/**"
+      - "tests/sdk/compat/**"
+      - ".github/workflows/framework-compat.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: framework-compat-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20        # crewai's install is heavy (transitive ML/embedding deps)
+    strategy:
+      fail-fast: false         # one framework's breakage must not hide another's
+      matrix:
+        framework: [langchain, langgraph, crewai, autogen, semantic-kernel]
+        include:
+          - framework: langchain
+            package: langchain-core
+            compat_file: tests/sdk/compat/test_langchain_real.py
+            unit_file: tests/sdk/test_langchain_adapter.py
+          - framework: langgraph
+            package: langgraph
+            compat_file: tests/sdk/compat/test_langgraph_real.py
+            unit_file: tests/sdk/test_langgraph_adapter.py
+          - framework: crewai
+            package: crewai
+            compat_file: tests/sdk/compat/test_crewai_real.py
+            unit_file: tests/sdk/test_crewai_adapter.py
+          - framework: autogen
+            package: autogen-core
+            compat_file: tests/sdk/compat/test_autogen_real.py
+            unit_file: tests/sdk/test_autogen_adapter.py
+          - framework: semantic-kernel
+            package: semantic-kernel
+            compat_file: tests/sdk/compat/test_semantic_kernel_real.py
+            unit_file: tests/sdk/test_semantic_kernel_adapter.py
+    services:
+      # Only the langchain leg's unit test needs Redis (a real ToolInterceptor over RedisCache);
+      # the other legs' unit tests use an in-process fake and ignore it. Shared here so every leg
+      # can run the identical two-step "compat + unit" command without a per-framework branch.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      NRVQ_REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: install opa (langchain leg's unit test uses a real OPAEvaluator)
+        # Pinned to the version the engine/webhook ship, integrity-checked against the published
+        # digest so a bad download fails the job rather than silently running an unverified binary.
+        run: |
+          set -euo pipefail
+          curl -fL -o /usr/local/bin/opa https://openpolicyagent.org/downloads/v1.18.0/opa_linux_amd64_static
+          echo "65d700b14b99b354982b61031b40bdc8e316ea93dadd61818f066d1d9a69dcce  /usr/local/bin/opa" | sha256sum -c -
+          chmod +x /usr/local/bin/opa
+          opa version
+      - name: install norviq (dev extras)
+        run: pip install -e ".[dev]"
+      - name: install ${{ matrix.framework }} (latest, unpinned — the whole point)
+        run: pip install "${{ matrix.package }}"
+      - name: compat + unit tests (${{ matrix.framework }})
+        run: python -m pytest "${{ matrix.compat_file }}" "${{ matrix.unit_file }}" -q

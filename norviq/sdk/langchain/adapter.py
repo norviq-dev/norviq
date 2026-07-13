@@ -22,15 +22,35 @@ def _get_base_tool() -> type[Any]:
     return BaseTool
 
 
-def protect(tools: list[Any], interceptor: ToolInterceptor, session_id: str = "") -> list[Any]:
+def protect(
+    tools: list[Any], interceptor: ToolInterceptor, session_id: str = "", *, allow_unwrapped: bool = False
+) -> list[Any]:
     """Wrap LangChain tools so policy runs before execution.
 
     In sync-in-async usage, prefer `_arun` because async Redis clients are event-loop bound.
+
+    Fail-closed by default: a framework upgrade that moves/renames `BaseTool` (or a caller that
+    hands in something that was never a `BaseTool`) must be a loud startup error, not a silently
+    unprotected tool — an item Norviq doesn't recognize as a `BaseTool` cannot be wrapped, so
+    letting it through unwrapped means it runs with NO policy enforcement at all. Pass
+    `allow_unwrapped=True` to downgrade this to a logged warning and accept the item as-is.
     """
     base_tool = _get_base_tool()
     protected: list[Any] = []
     for tool in tools:
         if not isinstance(tool, base_tool):
+            if not allow_unwrapped:
+                raise TypeError(
+                    f"norviq.sdk.langchain.adapter.protect: {type(tool).__name__!r} is not a "
+                    f"{base_tool.__name__} instance and cannot be wrapped — fail-closed protection: "
+                    "this tool would run WITHOUT policy enforcement. Pass allow_unwrapped=True to "
+                    "permit it deliberately."
+                )
+            log.warning(
+                "nrvq.langchain.unwrapped",
+                tool_type=type(tool).__name__,
+                code="NRVQ-SDK-1044",
+            )
             protected.append(tool)
             continue
         original_run = tool._run

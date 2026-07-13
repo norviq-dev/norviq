@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+import structlog.testing
 
 from norviq.exceptions import NorviqBlockError
 from norviq.sdk.autogen.adapter import protect
@@ -86,12 +87,30 @@ async def test_protect_blocked_tool_raises_and_skips_execution(fake_base_tool: t
     assert tool.calls == 0
 
 
-async def test_protect_passthrough_for_non_base_tool(fake_base_tool: type[_FakeBaseTool]) -> None:
-    """Non-BaseTool objects should pass through unwrapped."""
+async def test_protect_passthrough_for_non_base_tool_when_allowed(fake_base_tool: type[_FakeBaseTool]) -> None:
+    """Non-BaseTool objects pass through unwrapped only when allow_unwrapped=True, loudly."""
     interceptor = _FakeInterceptor()
     sentinel = object()
-    protected = protect([sentinel], interceptor)  # type: ignore[arg-type]
+    with structlog.testing.capture_logs() as cap_logs:
+        protected = protect([sentinel], interceptor, allow_unwrapped=True)  # type: ignore[arg-type]
     assert protected == [sentinel]
+    assert interceptor.calls == []
+    assert any(
+        entry["event"] == "nrvq.autogen.unwrapped"
+        and entry["log_level"] == "warning"
+        and entry["code"] == "NRVQ-SDK-1063"
+        for entry in cap_logs
+    )
+
+
+async def test_protect_default_raises_on_non_base_tool_and_evaluates_nothing(
+    fake_base_tool: type[_FakeBaseTool],
+) -> None:
+    """Fail-closed default: an unrecognized item raises TypeError and nothing is evaluated."""
+    interceptor = _FakeInterceptor()
+    sentinel = object()
+    with pytest.raises(TypeError, match="object"):
+        protect([sentinel], interceptor)  # type: ignore[arg-type]
     assert interceptor.calls == []
 
 

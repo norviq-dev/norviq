@@ -6,15 +6,19 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 import os
+from typing import Any
 import uuid
 
 import pytest
+import structlog.testing
 
 from norviq.engine.cache import RedisCache
 from norviq.engine.evaluator import OPAEvaluator
 from norviq.engine.identity import SPIFFEResolver
 from norviq.exceptions import NorviqBlockError
+from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.interceptor import ToolInterceptor
 from norviq.sdk.core.wrapping import _run_sync
 from norviq.sdk.langchain.adapter import protect
@@ -79,6 +83,21 @@ def _session() -> str:
     return uuid.uuid4().hex
 
 
+@dataclass
+class _FakeInterceptor:
+    """Track intercepted tool calls without a real evaluator (used for the passthrough/raise tests,
+    which never reach an evaluator and so don't need the Redis-backed fixture above)."""
+
+    calls: list[tuple[str, dict[str, Any], str]] = field(default_factory=list)
+
+    async def intercept_or_raise(
+        self, tool_name: str, tool_params: dict[str, Any], session_id: str = "", framework: str = ""
+    ) -> PolicyDecision:
+        """Record call; never raises in this fake."""
+        self.calls.append((tool_name, tool_params, framework))
+        return PolicyDecision(decision="allow")
+
+
 async def test_protect_blocked_tool_raises(interceptor: ToolInterceptor) -> None:
     """Blocked calls should raise before original tool body executes."""
     tool = _TestTool(name="execute_sql")
@@ -99,3 +118,28 @@ async def test_protect_async_tool_executes(interceptor: ToolInterceptor) -> None
     tool = _TestTool(name="search_kb")
     wrapped = protect([tool], interceptor, session_id=_session())
     assert await wrapped[0]._arun(query="hello") == "async:hello"
+
+
+def test_protect_passthrough_for_non_base_tool_when_allowed() -> None:
+    """Non-BaseTool objects pass through unwrapped only when allow_unwrapped=True, loudly."""
+    interceptor = _FakeInterceptor()
+    sentinel = object()
+    with structlog.testing.capture_logs() as cap_logs:
+        protected = protect([sentinel], interceptor, allow_unwrapped=True)  # type: ignore[arg-type]
+    assert protected == [sentinel]
+    assert interceptor.calls == []
+    assert any(
+        entry["event"] == "nrvq.langchain.unwrapped"
+        and entry["log_level"] == "warning"
+        and entry["code"] == "NRVQ-SDK-1044"
+        for entry in cap_logs
+    )
+
+
+def test_protect_default_raises_on_non_base_tool_and_evaluates_nothing() -> None:
+    """Fail-closed default: an unrecognized item raises TypeError and nothing is evaluated."""
+    interceptor = _FakeInterceptor()
+    sentinel = object()
+    with pytest.raises(TypeError, match="object"):
+        protect([sentinel], interceptor)  # type: ignore[arg-type]
+    assert interceptor.calls == []

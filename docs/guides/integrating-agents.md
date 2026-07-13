@@ -172,7 +172,20 @@ return value before it propagates back to the agent, so a tool whose output happ
 sensitive data doesn't silently exfiltrate it. Disabled by default: exact passthrough, no
 behavior change.
 
-## 6. Adapter import paths
+## 6. Version compatibility
+
+Adapters are thin and duck-typed where possible, but each still has to recognize its
+framework's tool base class to wrap it — so `protect()` is **fail-closed by default**: an item
+that isn't an instance of the framework's `BaseTool` raises `TypeError` instead of being passed
+through unprotected, because an unrecognized tool object would otherwise run with **no** policy
+enforcement at all. Pass `allow_unwrapped=True` to opt out and accept it as-is (logged as a
+warning). A weekly CI job (`.github/workflows/framework-compat.yml`) installs the **latest**
+released version of every adapter's framework and runs its compat + unit tests against it, so a
+framework upgrade that moves or renames its base class is caught before users hit it. The
+generic core (§2) has no framework coupling at all, so it always works as the fallback if an
+adapter is temporarily broken by upstream drift.
+
+## 7. Adapter import paths
 
 | Framework | pip extra | Adapter import |
 |---|---|---|

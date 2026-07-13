@@ -58,7 +58,12 @@ def _extract_tool_params(context: Any) -> dict[str, Any]:
 def _apply_output_dlp(context: Any, tool_name: str) -> None:
     """Best-effort output DLP on the function result; enforcement above already ran."""
     try:
-        function_result = getattr(context, "function_result", None)
+        # semantic-kernel's FunctionInvocationContext exposes the result as `.result`
+        # (verified against SK 1.44 model_fields); `.function_result` kept as a fallback
+        # for older/alternative context shapes.
+        function_result = getattr(context, "result", None)
+        if function_result is None:
+            function_result = getattr(context, "function_result", None)
         if function_result is None:
             return
         value = getattr(function_result, "value", None)
