@@ -11,6 +11,7 @@ on:
       - 'policies/**'
       - 'Dockerfile*'
       - 'pyproject.toml'
+      - '.trivyignore'                 # the image-scan gate baseline — re-run the scan when it changes
       - '.github/workflows/build.yml'
   workflow_dispatch:
 
