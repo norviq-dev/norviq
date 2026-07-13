@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/open-policy-agent/opa/ast"
+	"github.com/open-policy-agent/opa/v1/ast"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -655,7 +655,11 @@ func namespaceBaselineKey(u *unstructured.Unstructured) (ns, class string, ok bo
 }
 
 func validateRego(rego string) error {
-	module, err := ast.ParseModule("policy.rego", rego)
+	// OPA v1's ast.ParseModule defaults to RegoV1 syntax (requires the `if`/`contains` keywords).
+	// The engine's OPA server/check runs with --v0-compatible (norviq/engine/opa_client.py), and
+	// every shipped/customer policy is written in v0 syntax without `import rego.v1`. Pin the parser
+	// to RegoV0 here so validation stays consistent with what actually evaluates the policy.
+	module, err := ast.ParseModuleWithOpts("policy.rego", rego, ast.ParserOptions{RegoVersion: ast.RegoV0})
 	if err != nil {
 		return fmt.Errorf("rego parse failed: %w", err)
 	}
