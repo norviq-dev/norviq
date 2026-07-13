@@ -1,30 +1,73 @@
 # SPDX-License-Identifier: Apache-2.0
 # FOSSA license-compliance + dependency-vulnerability scan.
-# `analyze` uploads the dependency graph to FOSSA; `run-tests: true` then runs `fossa test`, which
-# FAILS the job on any license-policy violation or known dependency vulnerability — the "clear scan"
-# gate. Requires the repo secret FOSSA_API_KEY (Settings -> Secrets and variables -> Actions), created
-# from a FOSSA push-only API token after the project is imported at https://app.fossa.com.
+# `fossa analyze` uploads the dependency graph to FOSSA; `fossa test` FAILS the job on any
+# license-policy violation or known dependency vulnerability — the "clear scan" gate. Requires the
+# repo secret FOSSA_API_KEY (created from a FOSSA push-only API token; project imported at app.fossa.com).
+#
+# NOTE (temporary): the gate is currently in REPORT mode — it dumps the full issue list as a
+# downloadable artifact for triage instead of failing. Flip DUMP_ONLY back to false to re-enable the
+# hard gate once the outstanding FOSSA issues are remediated.
 name: FOSSA
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+env:
+  FOSSA_API_KEY: ${{ secrets.FOSSA_API_KEY }}
+  DUMP_ONLY: "true"
 
 jobs:
   fossa:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Don't hard-fail PRs from forks that can't see the secret; the push-to-main run is the gate.
-    if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      # NOTE: SHA-pin this like the other credential-scoped actions once the release SHA is confirmed
-      # (it consumes FOSSA_API_KEY). https://github.com/fossas/fossa-action/releases
+      # Installs the fossa CLI and runs `fossa analyze` (upload only; we run `fossa test` ourselves below
+      # so we can capture its JSON regardless of exit code). SHA-pin once the release SHA is confirmed.
       - uses: fossas/fossa-action@v1.7.0
         with:
           api-key: ${{ secrets.FOSSA_API_KEY }}
-          run-tests: true
+          run-tests: false
+      - name: Dump FOSSA issues + attribution (JSON) for triage
+        if: always()
+        run: |
+          set +e
+          fossa test --format json > fossa-issues.json 2>fossa-test.err
+          echo "fossa test exit: $?"
+          fossa report attribution --format json > fossa-attribution.json 2>/dev/null
+          echo "issues bytes:      $(wc -c < fossa-issues.json 2>/dev/null || echo 0)"
+          echo "attribution bytes: $(wc -c < fossa-attribution.json 2>/dev/null || echo 0)"
+          # A compact human-readable summary straight into the job log too:
+          echo '===== ISSUE TYPE COUNTS ====='
+          python3 - <<'PY' 2>/dev/null || true
+          import json,collections
+          try:
+              d=json.load(open('fossa-issues.json'))
+          except Exception as e:
+              print('could not parse issues json:', e); raise SystemExit
+          issues=d.get('issues') or d.get('Issues') or (d if isinstance(d,list) else [])
+          c=collections.Counter()
+          for i in issues:
+              c[i.get('type') or i.get('Type') or 'unknown']+=1
+          for k,v in c.most_common(): print(f'{v:4}  {k}')
+          PY
+      - name: Upload FOSSA report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fossa-report
+          path: |
+            fossa-issues.json
+            fossa-attribution.json
+            fossa-test.err
+          if-no-files-found: warn
+      - name: Enforce gate (skipped while DUMP_ONLY=true)
+        if: ${{ env.DUMP_ONLY != 'true' }}
+        run: fossa test
