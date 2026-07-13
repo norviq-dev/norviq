@@ -1,0 +1,344 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Copyright 2026 Norviq Contributors -->
+
+# Writing Policies
+
+A practical guide to authoring `NrvqPolicy` Rego for Norviq: the contract every policy must satisfy,
+the positive-security (allowlist) model the console's Attack Graph generates for you, the tighten-only
+overlays that let compliance and platform teams add restrictions without touching a team's own policy,
+enforcement modes, and how to validate a policy before it ever blocks real traffic.
+
+If you haven't read **[Concepts](../concepts.md)** yet, do that first — it covers agent identity,
+policy tiers/precedence, and the decision model this guide assumes.
+
+## 1. The policy contract
+
+Every policy is a Rego module. At evaluation time the engine resolves your module's package and
+queries exactly one path: **`data.<package>.decision`** (`norviq/engine/evaluator.py`,
+`_evaluate_opa_server`). Alongside `decision` it also reads `rule_id` and `reason` from the same
+result object, so both must be defined for every reachable `decision` value.
+
+`POST /api/v1/policies` (and `/policies/dry-run`, and `PUT /policy-packs/override`) all run the
+**same** validator — `validate_rego_source` in `norviq/api/routers/policies.py` — before your Rego is
+ever compiled by OPA:
+
+- **Size/complexity caps**: ≤65536 characters, ≤500 non-blank lines, ≤25 `regex.*`/`re_match(` calls
+  (a soft abuse heuristic — OPA's RE2 engine is linear-time, so this isn't a ReDoS guard, just a
+  sanity cap the shipped `comprehensive.rego` fits with headroom).
+- **Forbidden builtins / cross-package data** (`_FORBIDDEN_REGO_TOKENS`): `http.send`, `opa.runtime`,
+  `net.*`, `io.*`, `rego.parse_module`, `trace(...)`, and any `data.` reference outside your own
+  declared package — most pointedly `data.norviq.managed` (OPA's shared per-tenant namespace; a
+  submission that reaches into it can read another namespace's compiled policy). None of these are
+  reachable from legitimate policy logic — every shipped/generated policy only ever reads `input` and
+  its own rules.
+- **A decision resolver must exist** (`assert_decision_resolver`): either a complete rule
+  (`decision = "block" { ... }` / `decision = "escalate" { ... }`) or the partial-set idiom
+  (`blocks[...]`/`escalates[...]`/`audits[...]`) *plus* the resolver that turns a fired set into a
+  `decision`. A partial-set rule with no resolver is rejected outright — it would leave `decision`
+  undefined and the engine would treat that as a **silent allow**.
+- **A `default decision = "..."` is required.** Without one, a `decision = "block" { <condition> }`
+  rule whose condition never matches on real input produces *no* binding at all, and the engine's
+  fallback (`str(result.get("decision", "allow"))`) would silently default to `"allow"` — a fired block
+  turned into an invisible allow. Requiring the default makes that structurally impossible: you must
+  say explicitly what "nothing matched" means for your policy.
+- `decision`, `rule_id`, and `reason` must all appear as identifiers somewhere in the source (a cheap
+  lint that catches an obviously incomplete module before it ever reaches OPA).
+
+### Minimal working policy
+
+The engine builds its `input` from the real evaluator schema (`tool_name`, `tool_name_normalized`,
+`tool_params`, `agent.namespace`, `agent.agent_class`, `call_depth` — see
+`norviq/engine/evaluator.py::_build_input`; there is no `input.action`/`input.resource`). Here is the
+full working example from `crds/examples/policy-custom-rego.yaml` — block `execute_sql` when the
+query contains `DROP`, allow everything else:
+
+```yaml
+apiVersion: norviq.io/v1alpha1
+kind: NrvqPolicy
+metadata:
+  name: custom-sql-guard
+  namespace: chatbot-prod
+spec:
+  target:
+    kind: Deployment
+    name: smartsales-agent
+  enforcementMode: block
+  rego: |
+    package norviq.custom.sql_guard
+    violation {
+      input.tool_name == "execute_sql"
+      contains(lower(input.tool_params.query), "drop")
+    }
+    decision = "block" { violation }
+    decision = "allow" { not violation }
+    rule_id = "custom_sql_guard" { decision == "block" }
+    reason = "DROP statement blocked by custom policy" { decision == "block" }
+    rule_id = "default_allow" { decision == "allow" }
+    reason = "Allowed" { decision == "allow" }
+  priority: 300
+```
+
+A `target` is one of `agentClass` (every agent of that class, any namespace), `namespace` (a
+namespace-wide baseline), or `kind` + `name` (one specific workload) — see
+`crds/norviq.io_nrvqpolicies.yaml`. Instead of `rego`, you can set `preset: strict|moderate|permissive`
+to use one of the shipped starter policies (`webhook/presets/*.rego`) — `rego` always wins if both are
+set. `priority` is 0–499 for a namespace-scoped policy; 500–1000 (`clusterPriority`) is admin-only.
+
+## 2. Positive-security / intent policies
+
+The alternative to hand-writing block rules is to flip the model: **allowlist the tools an agent class
+is actually supposed to call, and default-deny everything else.** This is what the console's Attack
+Graph "Defend" flow generates via `generate_intent_rego` in `norviq/api/threat_intent.py`.
+
+Given an agent class, an explicit list of intended tool names, and up to four refinement toggles
+(`readonly`, `scope`, `rate`, `egress`), it emits a **default-deny** module: a call is allowed only if
+it's this class **and** the tool is in the allowlist **and** every enabled toggle holds. Everything
+else — a non-allowlisted tool, or an allowlisted tool that fails an enabled toggle — is blocked, with
+an honest `reason` that names which guard actually failed (`intent_refinement_mismatch` vs
+`intent_default_deny`), not a generic "not allowed".
+
+The allowlist match is **evasion-normalized**: it checks both the lower-cased tool name and its
+confusable `skeleton()` (the same normalization the evaluator applies to `tool_name_normalized`), so a
+homoglyph or zero-width-character trick can't smuggle a tool past the allow.
+
+The refinement toggles:
+
+- **`readonly`** — the tool's verb must be a read verb (`read`, `get`, `list`, `search`, `fetch`,
+  `describe`, `query`, `lookup`, `view`, `find`, `scan`, `count` — `READ_VERBS`). If an admin has
+  promoted a tool's classification (learned verbs, e.g. a misleadingly-named `warehouse_task` promoted
+  to `write`), that overrides the name heuristic in both directions.
+- **`egress`** ("no external egress") — the tool must not be a known egress sink (`send_email`,
+  `send_sms`, `http_post`, `webhook`, `upload`, `export_data`, `s3_put`, `publish`, … — `EGRESS_TOOLS`),
+  again subject to learned-verb overrides.
+- **`scope`** ("namespace-scoped") — any `namespace`/`ns`/`tenant` field in `tool_params` must equal
+  the caller's own `agent.namespace` (blocks cross-tenant reach through an allowlisted tool).
+- **`rate`** — **advisory only**. A stateless OPA policy can't count calls/minute; this toggle checks
+  `input.call_depth <= 8` as a proxy. The real rate limiter is a separate layer (§6, F-03), not
+  something a Rego policy can enforce on its own.
+
+Generated intent policies are pushed at the **same priority as the cluster baseline**, so the
+evaluator's most-restrictive tie-break means a baseline `block` always wins over the intent policy's
+`allow` — applying one can only ever *add* denials, never turn an existing baseline block into an
+allow (`test_threat_intent.py` / `policies/threat_intent_test.rego` pin this against the canonical
+baseline-blocked attacks: delete, SQL exec, egress, cross-tenant).
+
+There's a narrower sibling generator, `generate_capability_rego`, used by the Attack-Graph "Defend"
+action on a single reachable data source: instead of an allowlist, it blocks any tool matching a set of
+destructive verb fragments (`delete`/`drop`/`truncate`/…) by name pattern **plus** the concrete tool
+names observed reaching that source — a forward guard against a not-yet-seen renamed tool, and belt-
+and-suspenders coverage for the ones you've already seen. It's tighten-only at baseline priority, same
+as the intent generator.
+
+## 3. Tighten-only overlays
+
+Beyond the base tiers (agent-class → namespace baseline → cluster baseline, resolved by
+highest-priority-wins), Norviq layers **overlays** that can only make a decision *more* restrictive
+than the base result, never less — regardless of their own priority (`_resolve_with_packs` in
+`norviq/engine/evaluator.py`):
+
+- **`__baseline__`** (per-namespace) — not strictly an overlay; it's the namespace-wide *floor* every
+  agent class in that namespace falls back to when no more specific policy matches. Author it like any
+  other policy (`crds/examples/policy-namespace-baseline.yaml` targets a whole namespace with the
+  `permissive` preset in `audit` mode, priority 50 — low, so a real class policy always outranks it).
+- **`__guardrail__`** — an opt-in per-namespace tool-allowlist overlay (F-14). Operator-authored via the
+  normal `POST /policies` endpoint, same as `__baseline__`.
+- **`<agent_class>__remediation__`** — the per-class compliance remediation overlay. When you use the
+  compliance dashboard's "Generate enforcing policy" action for a MITRE ATLAS / OWASP LLM control gap,
+  the draft is built by `generate_remediation_rego` (`norviq/api/threat_intent.py`): a **default-allow**
+  policy scoped to one agent class that adds one `blocks[...]` clause per control-mapped `rule_id` (SQL
+  injection, prompt injection, excessive agency, supply chain, data leakage, cross-tenant access,
+  base64-obfuscated threat — whichever the control maps to and Norviq has a runtime template for). It
+  is applied to the **dedicated key** `(namespace, "<agent_class>__remediation__")` — never to the
+  base `(namespace, agent_class)` key — so it can only *add* a block for the gap the control closes; the
+  class's own comprehensive/custom policy is never overwritten or replaced.
+
+Overlays are resolved as their own group and then combined with the base-tier winner by
+most-restrictive-wins: an overlay `block` beats a permissive base `allow`, but an overlay can never
+turn a base `block` into an `allow`. Two narrower exceptions exist for sector packs specifically
+(`__pack__`/`__pack_override__`/`__pack_weaken__`, materialized by the packs router, not written
+directly): `__pack_override__` lets an operator tighten a pack further, and an admin-only
+`__pack_weaken__` can relax a *pack's own* added restriction — but a weaken can never reach outside the
+pack family to relax a `__guardrail__` or a `__remediation__` overlay, which stay hard tighten-only no
+matter what (see `_resolve_overlay`/`_resolve_hard_overlay`).
+
+`GET /api/v1/policies/effective?namespace=<ns>&agent_class=<class>` returns the real ordered candidate
+stack the evaluator would resolve for that scope right now — the fastest way to see which layer is
+actually winning.
+
+## 4. Enforcement modes
+
+Every `NrvqPolicy` declares `spec.enforcementMode: block | audit | escalate` (required by the CRD).
+This is the policy's own declared posture, and it's what the catalog and editor show/persist for it.
+Separately, and layered on top, a **namespace** can be put into monitor mode wholesale:
+`PUT /api/v1/settings?namespace=<ns>` with `{"enforcement_mode": "audit"}` softens *any* would-block or
+would-escalate decision in that namespace to a logged `audit` decision (`rule_id` prefixed
+`monitor_would_block:...`) — visibility only, the call still proceeds. A small set of decisions stay
+hard regardless of posture (an admin trust freeze, an engine-not-ready block, the rate limiter) because
+those are safety/health signals, not policy calls to monitor away. See `_apply_posture` in
+`norviq/engine/evaluator.py`.
+
+The practical safe-rollout loop for a new or changed policy:
+
+1. Author the Rego (custom or preset-backed).
+2. **Dry-run it** — `norviq policy dry-run -f policy.rego -n <namespace> -c <agent_class>` (or
+   `POST /api/v1/policies/dry-run`, §5). This *replays* the candidate against real recent traffic for
+   its scope without touching anything live, and tells you specifically how many *currently-allowed*
+   calls it would newly block.
+3. If you want a whole namespace to run in observe-only mode while you validate a batch of changes
+   (rather than dry-running one policy at a time), flip that namespace's posture to `audit` via
+   `PUT /api/v1/settings` as above, watch the audit log for `monitor_would_block:*` entries, then flip
+   it back to `block` once you're satisfied. (`apply_mode: dry_run_only` on the same endpoint goes
+   further and makes the API refuse policy *applies* entirely for that namespace — drafts and dry-runs
+   still work — a harder gate for a namespace that must never auto-enforce.)
+4. `norviq policy create` to save, then `norviq policy apply` (or the console's Apply flow) to push it
+   to a target scope with `enforcementMode: block`.
+
+## 5. Validation & red-team
+
+**Write-time validation** (`validate_rego_source`, §1) runs on every entry point that accepts Rego
+source — create, dry-run, and pack-override — in cheapest-check-first order: size/line/regex caps,
+then the forbidden-builtin/cross-package reject, then the decision-resolver shape check.
+
+**Dry-run** (`POST /api/v1/policies/dry-run`) compiles the submitted Rego, evaluates one sample input
+against it, and then **replays it against up to 500 real audit records from the last 24 hours** for the
+policy's scope (namespace, optionally narrowed to one agent class), excluding synthetic/red-team/probe
+traffic — it answers "would this break real traffic", not "what did the live policy already do". The
+response:
+
+```jsonc
+{
+  "valid": true,
+  "errors": [],
+  "sample_decision": {"decision": "allow", "rule_id": "...", "reason": "..."},
+  "scope": {"namespace": "chatbot-prod", "agent_class": "customer-support"},
+  "time_range": "last 24 hours",
+  "recommendation": "Would NEWLY block 3 of 210 recent calls (1.4%) — review the flips before deploying.",
+  "total_records_checked": 210,
+  "would_block": 8, "would_allow": 198, "would_escalate": 4,
+  "newly_blocked": 3, "newly_allowed": 0,
+  "newly_blocked_samples": [{"tool_name": "send_email", "was": "allow", "now": "block", "rule_id": "llm02_data_leakage"}],
+  "block_rate_pct": 3.81, "truncated": false, "replay_cap": 500
+}
+```
+
+`newly_blocked`/`newly_allowed` are the decision **flips** relative to what actually happened — the
+number that matters before you apply. Dry-run is namespace-scoped like every sibling read route: a
+non-admin caller can only replay their own namespace's traffic.
+
+**Red-team**: `norviq redteam run --agent <agent_class> --namespace <namespace>` (or
+`POST /api/v1/redteam/suite`) runs the built-in adversarial attack catalog — prompt injection,
+encoding/nesting evasion, SQL/shell injection, PII/PCI exfiltration, and more — against the
+in-process evaluator for every seeded agent class in the namespace (or one explicit class), and scores
+pass/fail plus an "efficacy" roll-up (caught vs. got-through). An attack tied to a sector-pack control
+only counts as *applicable* when that pack's enforcing rule is actually loaded for the namespace, so
+you're scored against what you enabled, not a hypothetical. This is how you prove a policy blocks, not
+just that it compiles.
+
+Recommended loop: author → dry-run replay → red-team suite → apply.
+
+## 6. Common patterns
+
+The shipped baseline, `comprehensive.rego` (also inlined as the `strict` preset,
+`webhook/presets/strict.rego`), is the reference implementation for all of these. It — and the sector
+packs under `policies/sector/<sector>/*.rego` (finance, healthcare, government, energy, telecom,
+ecommerce, erp-crm, media-entertainment — catalog in `policies/sector/packs.json`, enabled per-namespace
+via `POST /api/v1/policy-packs/{id}/enable`) — use the same partial-set + resolver idiom: `blocks[id]`,
+`escalates[id]`, `audits[id]` guards, a `reasons` map, and the canonical resolver tail
+(`block_fired`/`escalate_fired`/`audit_fired` → `decision`/`rule_id`/`reason`, precedence
+block > escalate > audit > allow, ties broken by sorted `rule_id`). Copy that shape for a new policy —
+it's what lets several rules fire on one call without a compile-time conflict, and every fired rule
+still carries a distinct, correct `reason`.
+
+**Deny SQL injection** — a syntax-context check, not a bare substring match, so business prose
+("please delete from my calendar") isn't hard-blocked:
+
+```rego
+sql_destructive_patterns = ["drop table", "delete from", "truncate table", "; drop", "xp_cmdshell", "union select"]
+sql_injection_detected {
+    val := security_scan_texts[_]
+    pattern := sql_destructive_patterns[_]
+    contains(val, pattern)
+    sql_syntax_context(val, pattern)          # the value LEADS with the statement, or contains a ";" separator
+}
+blocks["deny_sql_injection"] { sql_injection_detected }
+```
+
+**Deny shell execution** — shell metacharacters, checked on both raw and base64-decoded parameter
+values (the baseline iteratively decodes base64 up to depth 4, bounded by an 8KB payload-size gate):
+
+```rego
+shell_patterns = ["|", ";", "$(", "`", "rm -rf", "/etc/passwd", "/etc/shadow"]
+blocks["deny_shell_execution"] {
+    val := security_scan_texts_raw[_]
+    pattern := shell_patterns[_]
+    contains(val, pattern)
+}
+```
+
+**No external egress / secret exfiltration** — three angles: a sensitive-named *key* going to an
+egress tool, a secret-shaped *value* embedded in a param (e.g. `api_key=sk-...` inside an email body),
+and reading a secret via a dedicated secret-read tool:
+
+```rego
+external_tools = {"send_email", "post_webhook", "upload_file"}
+sensitive_keys = {"password", "secret", "api_key", "token", "private_key"}
+data_leakage_detected {
+    external_tools[input.tool_name]
+    walk(input.tool_params, [path, _])
+    k := path[count(path) - 1]
+    sensitive_keys[lower(k)]
+}
+secret_value_patterns = [`api[_-]?key\s*[:=]`, `bearer\s+[a-z0-9._-]{12,}`, `sk-[a-z0-9]{8,}`, `-----begin [a-z ]*private key-----`]
+data_leakage_detected {
+    external_tools[input.tool_name]
+    val := security_scan_texts[_]
+    some i
+    regex.match(secret_value_patterns[i], val)
+}
+blocks["llm02_data_leakage"] { data_leakage_detected }
+```
+
+**Rate limits** — there is no stateful per-minute counter authored *in* Rego (a policy evaluation is
+stateless). The closest Rego-level control is a call-chain depth cap
+(`chain_depth_exceeded { input.call_depth >= 8 }`, `blocks["chain_depth_limit"]`), which bounds chained
+agent-to-agent recursion, not call volume. Real rate limiting is a separate engine layer keyed off the
+caller's SPIFFE ID (`config.rateLimit` / `evaluator_rate_limit_per_window`, default 60/window,
+overridable per namespace via the same `PUT /api/v1/settings` used for enforcement mode) — this is
+also why the intent generator's `rate` toggle (§2) is explicitly advisory only.
+
+**PII / PCI** — PII is SSN-shaped strings anywhere in `tool_params` (`walk()` recurses nested
+objects/arrays); PCI is a card-number-named *key* at any depth, or a Luhn-valid 13–19 digit value:
+
+```rego
+pii_detected {
+    walk(input.tool_params, [_, val])
+    is_string(val)
+    regex.match(`\b\d{3}-\d{2}-\d{4}\b`, val)
+}
+pci_keys = {"cc_number", "card_number", "credit_card"}
+pci_field_detected {
+    walk(input.tool_params, [path, _])
+    k := path[count(path) - 1]
+    pci_keys[lower(k)]
+}
+blocks["pii_detection"] { pii_detected }
+blocks["pci_card_numbers"] { pci_field_detected }
+```
+
+**Cross-tenant access** — a `tenant_id`/`namespace` param that doesn't match the caller's own
+`agent.namespace`, plus a SQL-specific check for a query reaching into a schema qualifier that isn't
+the caller's own (with a small allowlist for `public`/`information_schema`/etc.):
+
+```rego
+cross_tenant_detected {
+    input.tool_params.tenant_id
+    input.tool_params.tenant_id != input.agent.namespace
+}
+blocks["cross_tenant_access"] { cross_tenant_detected }
+```
+
+If a pattern here matches your sector, check `policies/sector/<sector>/*.rego` and
+`policies/sector/_shared/horizontal.rego` (the shared PCI/PII rules every sector pack composes) before
+writing it from scratch — enabling the matching pack via `POST /api/v1/policy-packs/{id}/enable`
+materializes it as a tighten-only `__pack__` overlay (§3) for the namespace, with a customization path
+(`__pack_override__`) if you need to go further.
