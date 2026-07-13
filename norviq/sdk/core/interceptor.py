@@ -3,11 +3,10 @@
 
 """Framework-agnostic tool-call interceptor."""
 
-from typing import Any
+from typing import Any, Protocol
 
 import structlog
 
-from norviq.engine.evaluator import OPAEvaluator
 from norviq.engine.identity import SPIFFEResolver
 from norviq.exceptions import NorviqBlockError, NorviqEscalateError
 from norviq.sdk.core.decisions import PolicyDecision
@@ -16,10 +15,23 @@ from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
 log = structlog.get_logger()
 
 
+class SupportsEvaluate(Protocol):
+    """Structural type for anything ToolInterceptor can delegate evaluation to.
+
+    Both the in-cluster `norviq.engine.evaluator.OPAEvaluator` and the out-of-cluster
+    `norviq.sdk.client.engine.PolicyEngineClient` satisfy this protocol, so either can be
+    passed to `ToolInterceptor` without a shared base class.
+    """
+
+    async def evaluate(self, event: ToolCallEvent) -> PolicyDecision:
+        """Evaluate a tool call event and return a policy decision."""
+        ...
+
+
 class ToolInterceptor:
     """Generic tool call interceptor for policy evaluation."""
 
-    def __init__(self, evaluator: OPAEvaluator, resolver: SPIFFEResolver | None = None) -> None:
+    def __init__(self, evaluator: SupportsEvaluate, resolver: SPIFFEResolver | None = None) -> None:
         """Store evaluator and identity resolver."""
         self._evaluator = evaluator
         self._resolver = resolver or SPIFFEResolver()

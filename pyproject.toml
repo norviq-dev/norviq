@@ -33,6 +33,21 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "httpx", "ruff>=0.2"]
 # Real SPIFFE workload identity (NRVQ_SPIFFE_MODE=workload-api). Optional + import-guarded so mock
 # mode (default) and CI/attack venvs install lean; only real SPIRE deployments need it.
 spiffe = ["spiffe>=0.2"]
+# SDK framework adapters (norviq/sdk/**). Each is import-guarded — the adapter module only
+# imports its framework lazily inside a loader function — so installing norviq alone never pulls
+# any of these in; pick the extra(s) matching the agent framework(s) you actually use.
+langchain = ["langchain-core>=0.2"]
+langgraph = ["langgraph>=0.2"]
+crewai = ["crewai>=0.80"]
+autogen = ["autogen-core>=0.4"]
+semantic-kernel = ["semantic-kernel>=1.0"]
+frameworks = [
+    "langchain-core>=0.2",
+    "langgraph>=0.2",
+    "crewai>=0.80",
+    "autogen-core>=0.4",
+    "semantic-kernel>=1.0",
+]
 
 [build-system]
 requires = ["setuptools>=68.0"]

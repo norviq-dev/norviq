@@ -115,3 +115,43 @@ async def test_circuit_breaker_short_circuits_after_failures() -> None:
     await client.evaluate(make_event())
     assert call_count == before
     await client.close()
+
+
+async def test_evaluate_posts_api_v1_path_with_bearer_token() -> None:
+    """Client must hit the real central-API route (/api/v1/evaluate) and present its token.
+
+    Regression: the client used to post /v1/evaluate with no Authorization header — a
+    guaranteed 404/401 against norviq-api, so every SDK call fell back to the fallback mode.
+    """
+    seen: dict[str, str] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["auth"] = request.headers.get("Authorization", "")
+        return httpx.Response(200, json={"decision": "allow", "rule_id": "ok", "trust_score": 0.9})
+
+    client = PolicyEngineClient(base_url="http://engine.local", timeout_ms=20, token="svc-token-123")
+    client._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://engine.local",
+        headers={"Authorization": "Bearer svc-token-123"},
+        timeout=0.02,
+    )
+    decision = await client.evaluate(make_event())
+    assert decision.decision == "allow"
+    assert seen["path"] == "/api/v1/evaluate"
+    assert seen["auth"] == "Bearer svc-token-123"
+    await client.close()
+
+
+async def test_get_client_builds_auth_header_from_token() -> None:
+    """The lazily-built real client carries the bearer header (not just the mock)."""
+    client = PolicyEngineClient(base_url="http://engine.local", timeout_ms=20, token="svc-token-123")
+    built = await client._get_client()
+    assert built.headers.get("Authorization") == "Bearer svc-token-123"
+    await client.close()
+
+    no_token = PolicyEngineClient(base_url="http://engine.local", timeout_ms=20, token="")
+    built2 = await no_token._get_client()
+    assert "Authorization" not in built2.headers
+    await no_token.close()

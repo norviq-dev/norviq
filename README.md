@@ -82,6 +82,19 @@ flowchart LR
     ui --> api
 ```
 
+## Works with your agent framework
+
+The sidecar above is zero-code-change. For in-process interception instead — no sidecar, your
+own event loop — the SDK (`norviq/sdk/`) wraps the tool-calling point of these frameworks so a
+block/escalate decision raises before the tool ever runs. See
+**[docs/guides/integrating-agents.md](docs/guides/integrating-agents.md)** for setup and snippets.
+
+- **LangChain** — `norviq.sdk.langchain.adapter.protect(tools, interceptor)`
+- **LangGraph** — `norviq.sdk.langgraph.adapter.GuardedToolNode(tools, interceptor)`
+- **CrewAI** — `norviq.sdk.crewai.adapter.protect(tools, interceptor)`
+- **AutoGen** — `norviq.sdk.autogen.adapter.protect(tools, interceptor)`
+- **Azure / Semantic Kernel** — `norviq.sdk.semantic_kernel.adapter.policy_filter(interceptor)`
+
 ## Features
 
 - **Policy enforcement** — OPA/Rego evaluated per tool call, sub-second, fail-closed.
@@ -137,6 +150,7 @@ kubectl label namespace <your-agent-namespace> norviq-injection=enabled
 - **[Getting Started](docs/getting-started.md)** — install, first policy, see enforcement flip a decision
 - **[Concepts](docs/concepts.md)** — agent classes, policy tiers, enforcement modes, SPIFFE identity
 - **[Writing Policies](docs/guides/writing-policies.md)** — authoring Rego, the intent generator, red-team
+- **[Integrating Agent Frameworks](docs/guides/integrating-agents.md)** — the SDK: LangChain, LangGraph, CrewAI, AutoGen, Azure/Semantic Kernel
 - **[Configuration](docs/configuration.md)** — Helm `values.yaml` reference
 - **[Deployment](docs/deployment.md)** — kind, cloud/AKS, HA, and multi-cluster fleet
 - **[Security Model](docs/security-model.md)** — trust boundaries and the threat model

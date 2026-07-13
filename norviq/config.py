@@ -50,7 +50,9 @@ class NorviqSettings(BaseSettings):
         extra="ignore",
     )
 
-    policy_engine_url: str = "http://localhost:8181"
+    # Base URL the SDK's PolicyEngineClient posts /api/v1/evaluate to (NRVQ_POLICY_ENGINE_URL).
+    # Default matches the in-cluster central API service (same target as api_url).
+    policy_engine_url: str = "http://norviq-api:8080"
     enforcement_mode: str = "block"
     # F-04: decision when an enforcing namespace has NO policy loaded (deny-by-default for a PEP).
     # "deny" (default) blocks unconfigured namespaces in block mode; "allow" restores the old fail-open.

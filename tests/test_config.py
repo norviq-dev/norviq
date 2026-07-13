@@ -15,7 +15,8 @@ def test_settings_defaults(monkeypatch) -> None:
             monkeypatch.delenv(key, raising=False)
     # _env_file=None ignores the dev .env/.env.local so we assert true code defaults.
     loaded = NorviqSettings(_env_file=None)
-    assert loaded.policy_engine_url == "http://localhost:8181"
+    # In-cluster central API service — the URL PolicyEngineClient posts /api/v1/evaluate to.
+    assert loaded.policy_engine_url == "http://norviq-api:8080"
     assert loaded.redis_url == "redis://localhost:6379"
     assert loaded.enforcement_mode == "block"  # secure fail-closed default (see config.py)
     assert loaded.trust_threshold == 0.7

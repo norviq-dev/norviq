@@ -22,8 +22,11 @@ log = structlog.get_logger()
 class PolicyEngineClient:
     """Async client for the Norviq policy engine."""
 
-    def __init__(self, base_url: str | None = None, timeout_ms: int | None = None) -> None:
+    def __init__(self, base_url: str | None = None, timeout_ms: int | None = None, token: str | None = None) -> None:
         self._base_url = base_url or settings.policy_engine_url
+        # /api/v1/evaluate requires a bearer token (service or human); same knob the thin-proxy
+        # sidecar uses (NRVQ_API_TOKEN). Empty -> no Authorization header (local dev/test servers).
+        self._token = token if token is not None else settings.api_token
         self._timeout_ms = timeout_ms or settings.sdk_timeout_ms
         self._max_retries = settings.sdk_retry_max_attempts
         self._backoff_base_ms = settings.sdk_retry_backoff_base_ms
@@ -36,8 +39,10 @@ class PolicyEngineClient:
     async def _get_client(self) -> httpx.AsyncClient:
         """Lazy-init httpx client with connection pooling."""
         if self._client is None:
+            headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
             self._client = httpx.AsyncClient(
                 base_url=self._base_url,
+                headers=headers,
                 timeout=httpx.Timeout(self._timeout_ms / 1000),
                 limits=httpx.Limits(
                     max_connections=settings.sdk_http_max_connections,
@@ -66,7 +71,9 @@ class PolicyEngineClient:
         client = await self._get_client()
         for attempt in range(self._max_retries + 1):
             try:
-                response = await client.post("/v1/evaluate", json=event.model_dump(mode="json"))
+                # The central API mounts the evaluate router at /api/v1 (norviq/api/main.py) — same
+                # endpoint + auth contract the thin-proxy sidecar's RemoteEvaluator uses.
+                response = await client.post("/api/v1/evaluate", json=event.model_dump(mode="json"))
                 response.raise_for_status()
                 self._record_success()
                 return response.json()
