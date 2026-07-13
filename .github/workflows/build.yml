@@ -4,6 +4,14 @@ name: Build & Push
 on:
   push:
     branches: [main]
+    paths:                       # only rebuild images when something that ships in one changes
+      - 'norviq/**'
+      - 'ui/**'
+      - 'webhook/**'
+      - 'policies/**'
+      - 'Dockerfile*'
+      - 'pyproject.toml'
+      - '.github/workflows/build.yml'
   workflow_dispatch:
 
 concurrency:
