@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+# FOSSA license-compliance + dependency-vulnerability scan.
+# `analyze` uploads the dependency graph to FOSSA; `run-tests: true` then runs `fossa test`, which
+# FAILS the job on any license-policy violation or known dependency vulnerability — the "clear scan"
+# gate. Requires the repo secret FOSSA_API_KEY (Settings -> Secrets and variables -> Actions), created
+# from a FOSSA push-only API token after the project is imported at https://app.fossa.com.
+name: FOSSA
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  fossa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Don't hard-fail PRs from forks that can't see the secret; the push-to-main run is the gate.
+    if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      # NOTE: SHA-pin this like the other credential-scoped actions once the release SHA is confirmed
+      # (it consumes FOSSA_API_KEY). https://github.com/fossas/fossa-action/releases
+      - uses: fossas/fossa-action@v1.7.0
+        with:
+          api-key: ${{ secrets.FOSSA_API_KEY }}
+          run-tests: true

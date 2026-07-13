@@ -1,0 +1,20 @@
+# FOSSA license-compliance + vulnerability scan config (fossa-cli v3).
+# https://github.com/fossas/fossa-cli/blob/master/docs/references/files/fossa-yml.md
+#
+# FOSSA auto-detects the dependency graphs in this monorepo:
+#   - Python  : pyproject.toml + uv.lock
+#   - Node    : ui/package.json (+ package-lock.json)
+#   - Go      : webhook/go.mod (+ go.sum)
+#
+# Test-only and example manifests are NOT part of the distributed product, so they are excluded
+# from the compliance graph to keep the scan focused on what actually ships. Remove an exclusion
+# if you want those dependency licenses reviewed too.
+version: 3
+
+project:
+  name: Norviq
+
+paths:
+  exclude:
+    - ui/tests/e2e            # Playwright e2e tooling — dev/test only, not shipped
+    - examples                # example integrations — not shipped
