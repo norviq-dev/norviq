@@ -155,3 +155,47 @@ async def test_get_client_builds_auth_header_from_token() -> None:
     built2 = await no_token._get_client()
     assert "Authorization" not in built2.headers
     await no_token.close()
+
+
+def test_get_client_is_per_event_loop() -> None:
+    """Each event loop must get its OWN pooled client; the same loop reuses its client.
+
+    Regression: one shared httpx.AsyncClient was created on the first loop and reused from
+    every later loop — the loop-bound pool then crashed cross-loop ('bound to a different
+    event loop') and healthy traffic turned into fail-closed fallback blocks (found live in
+    the kind E2E via the LangChain sync path).
+    """
+    import asyncio
+
+    client = PolicyEngineClient(base_url="http://engine.local", timeout_ms=20, token="")
+
+    async def grab_twice() -> tuple:
+        a = await client._get_client()
+        b = await client._get_client()
+        return a, b
+
+    a1, b1 = asyncio.run(grab_twice())
+    assert a1 is b1  # same loop -> same pooled client
+    a2, _ = asyncio.run(grab_twice())
+    assert a2 is not a1  # different loop -> different client
+
+
+def test_run_sync_uses_one_stable_background_loop() -> None:
+    """_run_sync must execute every call on the SAME background loop (loop-bound resources stay valid)."""
+    import asyncio
+
+    from norviq.sdk.core.wrapping import _run_sync
+
+    async def which_loop() -> int:
+        return id(asyncio.get_running_loop())
+
+    first = _run_sync(which_loop())
+    second = _run_sync(which_loop())
+    assert first == second
+
+    async def call_from_async_context() -> int:
+        # caller HAS a running loop; _run_sync must still work and use the same bg loop
+        return await asyncio.get_running_loop().run_in_executor(None, lambda: _run_sync(which_loop()))
+
+    third = asyncio.run(call_from_async_context())
+    assert third == first

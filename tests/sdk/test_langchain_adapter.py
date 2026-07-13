@@ -16,6 +16,7 @@ from norviq.engine.evaluator import OPAEvaluator
 from norviq.engine.identity import SPIFFEResolver
 from norviq.exceptions import NorviqBlockError
 from norviq.sdk.core.interceptor import ToolInterceptor
+from norviq.sdk.core.wrapping import _run_sync
 from norviq.sdk.langchain.adapter import protect
 from tests.conftest import flush_runtime
 
@@ -59,8 +60,18 @@ async def interceptor(redis_url: str, seeded_loader) -> AsyncIterator[ToolInterc
     evaluator.bind_loader(seeded_loader)
     resolver = SPIFFEResolver()
     yield ToolInterceptor(evaluator=evaluator, resolver=resolver)
-    await evaluator.close()
-    await cache.close()
+    # Sync-path tests evaluate on _run_sync's persistent background loop, so the evaluator's audit
+    # tasks and the redis connections it used live THERE and can't be awaited/closed from the pytest
+    # loop — drain each on the loop it was created on. (Same documented sharp edge as the adapter
+    # docstring: loop-bound in-process evaluators prefer the async path.)
+    try:
+        await evaluator.close()
+    except RuntimeError:
+        _run_sync(evaluator.close())
+    try:
+        await cache.close()
+    except RuntimeError:
+        _run_sync(cache.close())
 
 
 def _session() -> str:

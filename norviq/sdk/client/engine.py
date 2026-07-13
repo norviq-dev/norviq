@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import weakref
 from time import monotonic
 
 import httpx
@@ -32,24 +33,41 @@ class PolicyEngineClient:
         self._backoff_base_ms = settings.sdk_retry_backoff_base_ms
         self._fail_threshold = settings.sdk_circuit_fail_threshold
         self._reset_after_ms = settings.sdk_circuit_reset_after_ms
+        # Explicit injection point (tests/mocks). When set it is used verbatim on every loop.
         self._client: httpx.AsyncClient | None = None
+        # Per-event-loop clients: an httpx connection pool is bound to the loop it was created on,
+        # and adapter sync wrappers (_run_sync) evaluate on a background loop while async wrappers
+        # use the caller's loop — reusing one pool across loops crashes and turns healthy traffic
+        # into fail-closed fallback blocks. Weak keys: a GC'd loop drops its client with it.
+        self._loop_clients: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.AsyncClient]" = (
+            weakref.WeakKeyDictionary()
+        )
         self._failure_count = 0
         self._circuit_open_until = 0.0
 
+    def _build_client(self) -> httpx.AsyncClient:
+        """Construct a pooled httpx client for the current event loop."""
+        headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
+        return httpx.AsyncClient(
+            base_url=self._base_url,
+            headers=headers,
+            timeout=httpx.Timeout(self._timeout_ms / 1000),
+            limits=httpx.Limits(
+                max_connections=settings.sdk_http_max_connections,
+                max_keepalive_connections=settings.sdk_http_max_keepalive_connections,
+            ),
+        )
+
     async def _get_client(self) -> httpx.AsyncClient:
-        """Lazy-init httpx client with connection pooling."""
-        if self._client is None:
-            headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
-            self._client = httpx.AsyncClient(
-                base_url=self._base_url,
-                headers=headers,
-                timeout=httpx.Timeout(self._timeout_ms / 1000),
-                limits=httpx.Limits(
-                    max_connections=settings.sdk_http_max_connections,
-                    max_keepalive_connections=settings.sdk_http_max_keepalive_connections,
-                ),
-            )
-        return self._client
+        """Return the injected client, or the pooled client for the CURRENT event loop."""
+        if self._client is not None:
+            return self._client
+        loop = asyncio.get_running_loop()
+        client = self._loop_clients.get(loop)
+        if client is None or client.is_closed:
+            client = self._build_client()
+            self._loop_clients[loop] = client
+        return client
 
     def _is_circuit_open(self) -> bool:
         """Check whether the circuit breaker is currently open."""
@@ -149,7 +167,16 @@ class PolicyEngineClient:
         )
 
     async def close(self) -> None:
-        """Close the HTTP client connection pool."""
+        """Close the injected client and the current loop's pooled client.
+
+        Clients living on OTHER loops cannot be aclosed from here (cross-loop); their references
+        are dropped and the pools are reclaimed with their loops.
+        """
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+        loop = asyncio.get_running_loop()
+        current = self._loop_clients.pop(loop, None)
+        if current is not None and not current.is_closed:
+            await current.aclose()
+        self._loop_clients.clear()

@@ -4,7 +4,7 @@
 """Shared tool-wrapping helpers for framework adapters."""
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+import threading
 from typing import Any
 
 import structlog
@@ -13,7 +13,25 @@ from norviq.config import settings
 from norviq.engine.masking import mask_text
 
 log = structlog.get_logger()
-_SYNC_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+
+# One persistent background loop for EVERY sync-wrapped call (daemon thread: never blocks exit).
+# A throwaway `asyncio.run` per call gives each call a different loop, so any loop-bound resource
+# the evaluator holds (httpx/redis connection pools) is reused across loops and crashes — which the
+# client then converts to its fail-closed fallback, silently blocking healthy traffic. A single
+# stable loop keeps the sync path loop-consistent for the lifetime of the process.
+_BG_LOOP: asyncio.AbstractEventLoop | None = None
+_BG_LOOP_LOCK = threading.Lock()
+
+
+def _background_loop() -> asyncio.AbstractEventLoop:
+    """Return the shared background loop, starting its daemon thread on first use."""
+    global _BG_LOOP
+    with _BG_LOOP_LOCK:
+        if _BG_LOOP is None or _BG_LOOP.is_closed():
+            loop = asyncio.new_event_loop()
+            threading.Thread(target=loop.run_forever, name="nrvq-sdk-sync-loop", daemon=True).start()
+            _BG_LOOP = loop
+        return _BG_LOOP
 
 
 def _output_dlp(tool_name: str, result: Any) -> Any:
@@ -34,9 +52,6 @@ def _tool_params(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any
 
 
 def _run_sync(coro: Any) -> Any:
-    """Run coroutine from sync context regardless of active loop."""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-    return _SYNC_EXECUTOR.submit(asyncio.run, coro).result()
+    """Run coroutine from sync context on the shared background loop (works with or without an
+    active loop in the caller, and keeps loop-bound evaluator resources on ONE stable loop)."""
+    return asyncio.run_coroutine_threadsafe(coro, _background_loop()).result()
