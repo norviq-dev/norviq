@@ -1,15 +1,29 @@
+<div align="center">
+
+<img src=".github/assets/norviq-mark.svg" alt="Norviq" height="76" />
+
 # Norviq
+
+**Runtime policy enforcement for LLM agent tool calls on Kubernetes.**
 
 [![FOSSA Security](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fnorviq-dev%2Fnorviq.svg?type=shield&issueType=security)](https://app.fossa.com/projects/git%2Bgithub.com%2Fnorviq-dev%2Fnorviq?ref=badge_shield&issueType=security)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-1.30%2B-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io)
+[![OPA](https://img.shields.io/badge/policy-OPA%2FRego-7D4698?logo=openpolicyagent&logoColor=white)](https://www.openpolicyagent.org)
 
-**Runtime policy enforcement for LLM agent tool calls on Kubernetes.**
+</div>
 
 Norviq is a policy enforcement point (PEP) that sits between an AI agent's reasoning loop and the
 tools it can call. Every tool call is intercepted, evaluated against OPA/Rego policies scoped to the
 workload's Kubernetes/SPIFFE identity, and then **allowed, blocked, escalated, or audited** — before
 the tool runs. It turns "the model decided to call `execute_sql` / `send_email` / `shell`" from an
 implicit trust into an enforced, per-identity, auditable decision.
+
+<div align="center">
+  <img src=".github/assets/console-login.png" alt="Signing in to the Norviq console" width="760" />
+  <br />
+  <sub>Signing in to the Norviq console — behind it: the policy catalog &amp; editor, attack/asset graphs, agent trust, and a live audit stream.</sub>
+</div>
 
 ---
 
