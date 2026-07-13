@@ -1,0 +1,7 @@
+sequenceDiagram
+    participant Eval as Evaluator
+    participant Trust as TrustScore
+
+    Eval->>Trust: is_trusted()
+    Eval->>Trust: after_violation()
+    Trust-->>Eval: updated immutable score

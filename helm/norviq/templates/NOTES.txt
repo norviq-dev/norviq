@@ -1,0 +1,56 @@
+Norviq has been deployed.
+
+To access the UI:
+  kubectl port-forward svc/norviq-ui 3000:80 -n {{ .Values.namespace }}
+  Then open: http://localhost:3000
+
+FIRST LOGIN
+{{- if .Values.auth.enabled }}
+  Local login (default): open the console and sign in with
+      username: {{ .Values.auth.adminUsername | default "admin" }}    password: {{ .Values.auth.adminPassword | default "norviq" }}
+  You will be prompted to change the password on first login. Set auth.adminPassword before production
+  (with api.requireStrongSecret=true the API refuses to start on the default password).
+{{- end }}
+
+  SSO (recommended for teams): enable OIDC (see docs/onboarding-login.md), then the console also shows
+  "Sign in with SSO". Your IdP group maps to a Norviq role + namespace (Entra / Okta / Auth0 / Keycloak).
+
+  Automation/CI: mint a short-lived admin token in-cluster (no password, key never leaves the cluster):
+      norviq login -n {{ .Values.namespace }} --console-url http://localhost:3000
+  It prints a sign-in link (or paste the printed token under the console login's "Advanced" section).
+
+To access the API:
+  kubectl port-forward svc/norviq-api 8080:{{ .Values.api.port }} -n {{ .Values.namespace }}
+  Then: curl http://localhost:8080/healthz
+
+{{- if .Values.webhook.injection.enabled }}
+
+Sidecar injection is ENABLED (mode: {{ .Values.webhook.injection.sidecarMode | default "proxy" }}). TLS was
+auto-bootstrapped by the norviq-webhook-cert hook Job (self-signed cert -> norviq-webhook-tls secret ->
+patched webhook caBundle).
+  Opt a namespace in:  kubectl label ns <ns> norviq-injection=enabled
+  Every NEW pod in that namespace gets the Norviq sidecar injected — no per-pod label needed.
+  Opt a single pod OUT:  set the pod label  norviq-injection=disabled  (or annotation
+                         norviq.io/skip-injection=true).
+  Optionally set the agent class:  pod label  norviq.io/agent-class=<class>.
+{{- else }}
+
+Sidecar injection is DISABLED. Turn it on (turnkey, auto-TLS, no cert-manager needed):
+  helm upgrade --install norviq ./helm/norviq --set webhook.injection.enabled=true
+  kubectl label ns <ns> norviq-injection=enabled
+{{- end }}
+
+To check status:
+  kubectl get pods -n {{ .Values.namespace }}
+
+To view logs:
+  kubectl logs -f deployment/norviq-api -n {{ .Values.namespace }}
+  kubectl logs -f deployment/norviq-engine -n {{ .Values.namespace }}
+
+Production reminder:
+  Override api.secretKey, redis.password, and postgresql.password before production deployment.
+  Set values.policyQuotaNamespaces to include every tenant namespace (for example: default, chatbot-prod, analytics); quotas and baseline policies render from this list.
+  A baseline high-priority policy is installed by default (values.baselineClusterPolicy.*); keep it enabled to preserve fail-closed posture.
+  Bind ClusterRoles to your tenant/admin groups (this chart ships roles but not subject-specific bindings).
+  Policies with permissive preset and/or enforcementMode=audit provide visibility only and do not enforce blocks.
+  ValidatingAdmissionPolicy requires Kubernetes 1.30+; disable with values.validatingAdmissionPolicyEnabled=false on older clusters.

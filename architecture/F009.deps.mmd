@@ -1,0 +1,25 @@
+graph LR
+    S002[S002 Config]
+    F001[F001 Events]
+    F002[F002 Decisions]
+    F005[F005 TrustScore]
+    F008[F008 Redis Cache]
+    F009[F009 OPA Evaluator]
+    F010[F010 Policy Loader]
+    F011[F011 Interceptor]
+    F015[F015 Sidecar]
+    OPACLIENT[OpaClient]
+    OPA[OPA server sidecar / managed]
+
+    S002 --> F009
+    F001 --> F009
+    F002 --> F009
+    F005 --> F009
+    F008 --> F009
+    F009 --> OPACLIENT
+    OPACLIENT --> OPA
+    F009 --> F010
+    F009 --> F011
+    F009 --> F015
+
+    style F009 fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#1e3a8a

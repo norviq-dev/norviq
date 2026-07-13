@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+apiVersion: norviq.io/v1alpha1
+kind: NrvqClass
+metadata:
+  name: data-analyst
+spec:
+  description: Internal analyst agents that query data and generate reports
+  allowedTools:
+    - execute_sql
+    - read_file
+    - generate_report
+    - send_email
+  blockedTools:
+    - delete_record
+    - drop_table
+    - spawn_pod
+    - exec_shell
+  maxCallsPerMinute: 120
+  initialTrustScore: 0.7
+  trustThreshold: 0.5

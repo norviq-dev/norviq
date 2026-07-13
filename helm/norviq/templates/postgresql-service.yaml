@@ -1,0 +1,17 @@
+{{- if .Values.postgresql.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: norviq-postgresql
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: norviq-postgresql
+spec:
+  selector:
+    app: norviq-postgresql
+  ports:
+    - port: {{ .Values.postgresql.port }}
+      targetPort: postgres
+      name: postgres
+  clusterIP: None
+{{- end }}

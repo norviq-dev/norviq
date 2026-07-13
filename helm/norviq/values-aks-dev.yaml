@@ -1,0 +1,79 @@
+# SPDX-License-Identifier: Apache-2.0
+# Single-node AKS dev cluster — ~1.9 vCPU allocatable, CPU-saturated (~97% requests, ~48m free).
+# Two jobs here: (1) replace-in-place rollout (no surge pods can schedule); (2) right-size the new
+# OPA sidecars / HA replicas so they fit the tight node instead of going Pending. Remove this overlay
+# once the agentpool is scaled (then values.yaml defaults give HA + zero-downtime).
+# See docs/backlog.md "Node capacity — right-size AKS agentpool for zero-downtime".
+api:
+  replicas: 1            # single node can't provide real HA; one replica + its OPA sidecar
+  pdb:
+    enabled: false       # PDB minAvailable:1 + replicas:1 → disruptionsAllowed:0 → blocks node drains
+  rollout:
+    maxSurge: 0
+    maxUnavailable: 1
+engine:
+  replicas: 0            # standalone engine not needed for API-driven eval; frees ~150m (engine + its
+                         # OPA sidecar). Sidecar INJECTION uses the engine IMAGE, not this deployment.
+  rollout:
+    maxSurge: 0
+    maxUnavailable: 1
+ui:
+  rollout:
+    maxSurge: 0
+    maxUnavailable: 1
+webhook:
+  replicas: 1            # 1 is enough on the single node
+  injection:
+    enabled: true        # turnkey TLS + injection ON — validates R1 end-to-end with the real engine image
+  rollout:
+    maxSurge: 0
+    maxUnavailable: 1
+
+# Trim the OPA sidecar request so the api pod's extra container fits the saturated node.
+opa:
+  resources:
+    requests:
+      cpu: 25m
+      memory: 48Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+config:
+  # In-cluster Postgres has no TLS. The A2 alias fix means NRVQ_DB_SSL_MODE is now actually read
+  # (it was silently ignored before, falling back to "prefer"), so the chart default "require" would
+  # make asyncpg demand SSL and the API would CrashLoop on "rejected SSL upgrade". Disable it here.
+  dbSslMode: disable
+
+# --- Fleet R3 (F045) — S7 single-cluster AKS rollout. Hub + spoke on this one cluster. ---
+# Everything below was DORMANT before this; flipping it on is what activates the fleet plane.
+# The spoke's pubkey (below) is the trust root; the hub's PRIVATE signing key is read from a
+# pre-created in-cluster Secret (fleet.hub.signingKeySecretName) — never in git/CI.
+fleet:
+  enabled: true                 # run the in-process relay (rollups) + the signed-bundle puller
+  clusterId: "aks-dev"
+  clusterName: "aks-dev-eastus"
+  region: "eastus"
+  apiUrl: "http://norviq-fleet-api.norviq.svc:8080"   # hub reached in-cluster
+  clusterEndpoint: "http://norviq-api.norviq.svc:8080" # P3 drill-down target (this cluster's api)
+  relayIntervalSeconds: 30
+  pullIntervalSeconds: 30
+  residency: false
+  labels:
+    env: dev
+    cloud: aks
+  # P2 trust root (PUBLIC key — safe to commit). Empty would make the spoke apply NO bundle (fail-closed).
+  bundlePubkey: |
+    -----BEGIN PUBLIC KEY-----
+    MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAkJXEtqcoLLlQpmwIa4H+
+    /KD3ypQ+hg9Hy/AgYYPmDuv1gJQkoJspTyViJpxuo9fnAAzTsVZQ+akDNqFkWk9F
+    +F0VZXUioxd8voNR0k1PUH8xSMsHvtV5AedFh/srcLxUfYux3Kp8FzA6w1K5b66Z
+    6fo604toPWdOjXPBNhKg+0pxbmzydVjsy637suBwzGkB7TyxarV7AJuTgzz1oOy5
+    fBra/Agd+rmVCTfv//AqlIf9kfELmGEjKTtZwXap8d56Kyg27T0ta0qu7zDHMh66
+    0VIZdNYVzrpLSZuLZivVc5X35qlKafEN7RwZyz5UxzfkzB7Xk+2WdQW/2xbIZef7
+    vQIDAQAB
+    -----END PUBLIC KEY-----
+  hub:
+    enabled: true               # render the fleet-api control plane + dedicated fleet-postgresql
+    signingKeySecretName: "norviq-fleet-signing"   # pre-created Secret holds NRVQ_FLEET_SIGNING_KEY
+    bundleTtlSeconds: 900

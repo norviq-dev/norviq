@@ -1,0 +1,40 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+%% F048 — Attack Graph: enriched kill-chains, positive-security intent coverage, and a DRY-RUN draft
+%% that never enforces on its own (enforcement is the operator's explicit Policies apply).
+sequenceDiagram
+    actor Analyst
+    participant UI as Console (Attack Graph)
+    participant API as ThreatsRouter
+    participant AG as asset-graph helpers
+    participant Gen as threat_intent (generator)
+    participant Eng as OPAEvaluator (dry-run key)
+    participant Store as app.state.intent_drafts
+    participant Pol as Policies (existing, gated)
+
+    Analyst->>UI: Open Attack Graph (ns, range)
+    UI->>API: GET /threats/attack-paths?ns=&cls=&range=
+    API->>AG: _resolve_namespaces (scope + ns=all) + _latest_snapshots + _decision_counts
+    AG-->>API: nodes + edges (+ real 24h decision history)
+    API->>API: DFS kill-chains → enriched ThreatPath[] (status/dec from real audit data)
+    API-->>UI: { paths worst-first, namespaces }
+    UI-->>Analyst: ranked list · d3 kill-chain · inspector · stat strip
+
+    Analyst->>UI: Define intended behaviour (toggles)
+    UI->>API: POST /threats/intent-coverage {ns, cls, intent}
+    API->>Gen: generate_intent_rego (DEFAULT-DENY, tighten-only)
+    loop each path chokepoint
+        API->>Eng: _evaluate_opa("dryrun:threat:cls", opa_input, rego)
+        Eng-->>API: decision (block ⇒ path covered)
+    end
+    API-->>UI: { rego, covered[], residual[], covered_count/total }  %% eval-only, NO persistence
+
+    Analyst->>UI: Apply intent (draft)
+    UI->>API: POST /threats/intent-draft {ns, cls, intent}
+    Note over API: require_admin + require_target_cluster (R2) + reject reserved scope
+    API->>Store: stash draft (NON-enforcing; evaluator never reads it)
+    API-->>UI: { draft_id, deeplink:/policies/catalog?intent_draft=, enforcement:"draft" }
+    UI-->>Analyst: "Draft created · dry-run in Policies"
+
+    Analyst->>Pol: (explicit) review + apply the generated rego
+    Note over Pol: existing F-40 reserved-scope + F-51 apply_mode + R2 gates enforce here — the ONLY enforcement path

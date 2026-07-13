@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chatbot-demo
+  labels:
+    norviq-injection: enabled

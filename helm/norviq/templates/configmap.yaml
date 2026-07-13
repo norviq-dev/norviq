@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: norviq-config
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+data:
+  NRVQ_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  NRVQ_ENFORCEMENT_MODE: {{ .Values.config.enforcementMode | quote }}
+  # F-04: decision when an enforcing namespace has no policy loaded (deny-by-default). "deny" | "allow".
+  NRVQ_NO_POLICY_DECISION: {{ .Values.config.noPolicyDecision | default "deny" | quote }}
+  NRVQ_REQUIRE_STRONG_SECRET: {{ .Values.config.requireStrongSecret | default false | quote }}
+  NRVQ_OPA_MODE: {{ .Values.config.opaMode | default "server" | quote }}
+  NRVQ_OPA_URL: {{ printf "http://localhost:%v" .Values.opa.port | quote }}
+  NRVQ_SIEM_ENABLED: {{ .Values.siem.enabled | default false | quote }}
+  NRVQ_SIEM_WEBHOOK_URL: {{ .Values.siem.webhookUrl | default "" | quote }}
+  NRVQ_SIEM_FORMAT: {{ .Values.siem.format | default "ndjson" | quote }}
+  NRVQ_SIEM_POLL_INTERVAL_S: {{ .Values.siem.pollIntervalSeconds | default 30 | quote }}
+  {{- if .Values.fleet.enabled }}
+  # Fleet spoke relay (F045): the api pushes agent+audit rollups to the hub. Fire-and-forget; off the enforce path.
+  NRVQ_FLEET_ENABLED: "true"
+  NRVQ_FLEET_API_URL: {{ .Values.fleet.apiUrl | quote }}
+  NRVQ_FLEET_CLUSTER_ID: {{ .Values.fleet.clusterId | quote }}
+  NRVQ_FLEET_CLUSTER_NAME: {{ .Values.fleet.clusterName | default .Values.fleet.clusterId | quote }}
+  NRVQ_FLEET_CLUSTER_REGION: {{ .Values.fleet.region | default "" | quote }}
+  NRVQ_FLEET_CLUSTER_ENDPOINT: {{ .Values.fleet.clusterEndpoint | default "" | quote }}
+  NRVQ_FLEET_RELAY_INTERVAL_S: {{ .Values.fleet.relayIntervalSeconds | default 60 | quote }}
+  NRVQ_FLEET_PULL_INTERVAL_S: {{ .Values.fleet.pullIntervalSeconds | default 60 | quote }}
+  NRVQ_FLEET_RESIDENCY: {{ .Values.fleet.residency | default false | quote }}
+  NRVQ_FLEET_CLUSTER_LABELS: {{ .Values.fleet.labels | default dict | toJson | quote }}
+  NRVQ_FLEET_OIDC_TOKEN_URL: {{ .Values.fleet.oidc.tokenUrl | default "" | quote }}
+  NRVQ_FLEET_OIDC_CLIENT_ID: {{ .Values.fleet.oidc.clientId | default "" | quote }}
+  # P2: the signing PUBLIC key (trust root). Empty -> the spoke applies NO bundle (fail-closed).
+  NRVQ_FLEET_BUNDLE_PUBKEY: {{ .Values.fleet.bundlePubkey | default "" | quote }}
+  {{- end }}
+  NRVQ_TRUST_THRESHOLD: {{ .Values.config.trustThreshold | quote }}
+  NRVQ_VIOLATION_PENALTY: {{ .Values.config.violationPenalty | quote }}
+  NRVQ_RATE_LIMIT: {{ .Values.config.rateLimit | quote }}
+  NRVQ_DB_SSL_MODE: {{ .Values.config.dbSslMode | quote }}
+  NRVQ_DB_POOL_MAX_OVERFLOW: {{ .Values.config.dbPoolMaxOverflow | quote }}
+  NRVQ_DB_POOL_TIMEOUT: {{ .Values.config.dbPoolTimeout | quote }}
+  NRVQ_DB_COMMAND_TIMEOUT: {{ .Values.config.dbCommandTimeout | quote }}
+  # --- Part B: draft + version retention windows (retention is decoupled from enforcement). ---
+  {{- $ret := .Values.config.retention | default dict }}
+  NRVQ_DRAFT_TTL_DAYS: {{ $ret.draftTtlDays | default 14 | quote }}
+  NRVQ_DRAFT_TTL_TEST_HOURS: {{ $ret.draftTtlTestHours | default 24 | quote }}
+  NRVQ_DRAFT_CAP_PER_NAMESPACE: {{ $ret.draftCapPerNamespace | default 50 | quote }}
+  NRVQ_DRAFTS_PAGE_SIZE: {{ $ret.draftsPageSize | default 15 | quote }}
+  NRVQ_POLICY_VERSION_KEEP_COUNT: {{ $ret.policyVersionKeepCount | default 20 | quote }}
+  NRVQ_POLICY_VERSION_KEEP_DAYS: {{ $ret.policyVersionKeepDays | default 90 | quote }}
+  # D3: red-team run retention (read-only evidence; never touches enforcement). Detail (per-attack rows) is
+  # kept only for the newest few runs / short TTL; older runs keep just the SUMMARY; the latest run is never
+  # pruned. Bounds both the DB and the history view.
+  NRVQ_REDTEAM_DETAIL_KEEP_RUNS: {{ $ret.redteamDetailKeepRuns | default 1 | quote }}
+  NRVQ_REDTEAM_DETAIL_KEEP_DAYS: {{ $ret.redteamDetailKeepDays | default 7 | quote }}
+  NRVQ_REDTEAM_SUMMARY_KEEP_RUNS: {{ $ret.redteamSummaryKeepRuns | default 20 | quote }}
+  NRVQ_REDTEAM_SUMMARY_KEEP_DAYS: {{ $ret.redteamSummaryKeepDays | default 30 | quote }}
+  NRVQ_REDTEAM_HISTORY_PAGE_SIZE: {{ $ret.redteamHistoryPageSize | default 20 | quote }}
+  # --- LOGIN-2: local username/password login (non-secret tunables; seed creds live in norviq-secrets). ---
+  NRVQ_AUTH_LOGIN_ENABLED: {{ .Values.auth.enabled | default true | quote }}
+  NRVQ_AUTH_SESSION_TTL_S: {{ .Values.auth.sessionTtlSeconds | default 3600 | quote }}
+  NRVQ_AUTH_LOGIN_MAX_ATTEMPTS: {{ .Values.auth.loginMaxAttempts | default 5 | quote }}
+  NRVQ_AUTH_LOGIN_WINDOW_S: {{ .Values.auth.loginWindowSeconds | default 300 | quote }}
+  NRVQ_AUTH_MIN_PASSWORD_LENGTH: {{ .Values.auth.minPasswordLength | default 12 | quote }}
+  # --- Identity epic: OIDC (A1/A2) + workload-identity mode (B2). Default-off; legacy HS256 stays on. ---
+  NRVQ_OIDC_ENABLED: {{ .Values.oidc.enabled | default false | quote }}
+  NRVQ_OIDC_ISSUER: {{ .Values.oidc.issuer | default "" | quote }}
+  NRVQ_OIDC_AUDIENCE: {{ .Values.oidc.audience | default "" | quote }}
+  NRVQ_OIDC_JWKS_URL: {{ .Values.oidc.jwksUrl | default "" | quote }}
+  NRVQ_OIDC_GROUP_CLAIM: {{ .Values.oidc.groupClaim | default "groups" | quote }}
+  NRVQ_OIDC_GROUP_MAPPINGS: {{ .Values.oidc.groupMappings | default dict | toJson | quote }}
+  NRVQ_LEGACY_HS256_ENABLED: {{ .Values.oidc.legacyHs256Enabled | default true | quote }}
+  NRVQ_SPIFFE_MODE: {{ .Values.config.spiffeMode | default "mock" | quote }}
+  NRVQ_SPIFFE_SOCKET: {{ .Values.config.spiffeSocket | default "/spiffe-workload-api/spire-agent.sock" | quote }}
+  NRVQ_OTEL_ENDPOINT: {{ .Values.otel.endpoint | quote }}
+  NRVQ_OTEL_ENABLED: {{ .Values.otel.enabled | quote }}
+  NRVQ_PROMETHEUS_PORT: {{ .Values.otel.prometheusPort | quote }}

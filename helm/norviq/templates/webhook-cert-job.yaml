@@ -1,0 +1,151 @@
+{{- if and .Values.webhook.enabled .Values.webhook.injection.enabled }}
+# TLS bootstrap for the sidecar-injector webhook. A post-install/post-upgrade Helm hook Job
+# self-signs a serving cert for norviq-webhook.<ns>.svc, writes the norviq-webhook-tls secret the
+# webhook Deployment mounts, and patches the MutatingWebhookConfiguration caBundle (the self-signed
+# cert is its own CA). Scoped RBAC: namespaced secret writes + cluster patch of the webhook config.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: norviq-webhook-cert
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade,post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: norviq-webhook-cert
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade,post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: norviq-webhook-cert
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade,post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+subjects:
+  - kind: ServiceAccount
+    name: norviq-webhook-cert
+    namespace: {{ .Values.namespace }}
+roleRef:
+  kind: Role
+  name: norviq-webhook-cert
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: norviq-webhook-cert
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade,post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["mutatingwebhookconfigurations"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: norviq-webhook-cert
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade,post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+subjects:
+  - kind: ServiceAccount
+    name: norviq-webhook-cert
+    namespace: {{ .Values.namespace }}
+roleRef:
+  kind: ClusterRole
+  name: norviq-webhook-cert
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: norviq-webhook-cert
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: norviq-webhook
+    {{- include "norviq.labels" . | nindent 4 }}
+  annotations:
+    # post-install/upgrade so the MutatingWebhookConfiguration already exists to patch.
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: norviq-webhook
+    spec:
+      serviceAccountName: norviq-webhook-cert
+      restartPolicy: Never
+      securityContext:
+        # Short-lived bootstrap hook: runs as root so it can `apk add openssl` at runtime (the
+        # alpine/k8s image ships kubectl but not openssl). The Job is hook-deleted after it succeeds.
+        runAsNonRoot: false
+        runAsUser: 0
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cert-bootstrap
+          image: {{ .Values.webhook.injection.certJobImage | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              # Ensure openssl is present (alpine/k8s ships kubectl but not openssl).
+              command -v openssl >/dev/null 2>&1 || apk add --no-cache openssl >/dev/null 2>&1
+              NS={{ .Values.namespace }}
+              SVC=norviq-webhook
+              SECRET=norviq-webhook-tls
+              WEBHOOK=norviq-sidecar-injector
+              CN="${SVC}.${NS}.svc"
+              TMP="$(mktemp -d)"
+              echo "generating self-signed serving cert for ${CN}"
+              openssl req -x509 -newkey rsa:2048 -nodes \
+                -keyout "${TMP}/tls.key" -out "${TMP}/tls.crt" -days 3650 \
+                -subj "/CN=${CN}" \
+                -addext "subjectAltName=DNS:${SVC},DNS:${SVC}.${NS},DNS:${SVC}.${NS}.svc,DNS:${SVC}.${NS}.svc.cluster.local"
+              echo "upserting secret ${SECRET}"
+              kubectl -n "${NS}" create secret tls "${SECRET}" \
+                --cert="${TMP}/tls.crt" --key="${TMP}/tls.key" \
+                --dry-run=client -o yaml | kubectl apply -f -
+              CA="$(base64 < "${TMP}/tls.crt" | tr -d '\n')"
+              echo "patching ${WEBHOOK} caBundle"
+              kubectl patch mutatingwebhookconfiguration "${WEBHOOK}" --type=json \
+                -p "[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"${CA}\"}]"
+              echo "done"
+{{- end }}

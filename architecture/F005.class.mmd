@@ -1,0 +1,16 @@
+classDiagram
+    class TrustScore {
+        +float score
+        +str category
+        +datetime computed_at
+        +int violation_count
+        +dict factors
+        +score_in_range(value) float
+        +after_violation() TrustScore
+        +is_trusted() bool
+    }
+    class Settings {
+        +float trust_threshold
+        +float trust_violation_penalty
+    }
+    TrustScore --> Settings : reads thresholds

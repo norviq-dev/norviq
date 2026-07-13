@@ -1,0 +1,58 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+classDiagram
+    class Main {
+      +main()
+      +setLogger(cfg)
+      +newServer(cfg)
+      +shutdownOnSignal(server)
+    }
+    class Config {
+      +int Port
+      +string CertFile
+      +string KeyFile
+      +string SidecarImage
+      +int SidecarPort
+      +string EnableLabel
+      +string EnableValue
+      +string AgentClassLabel
+      +slog.Level LogLevel
+      +bool SpiffeInject
+      +string SpiffeMode
+      +string SpiffeSocket
+    }
+    %% B3: when SpiffeInject, CreatePatch also adds a 2nd csi.spiffe.io volume + mount + NRVQ_SPIFFE_*
+    %% env into the sidecar and app containers so they resolve a real attested SVID.
+    class Handler {
+      -Config cfg
+      -Injector injector
+      +Healthz()
+      +Readyz()
+      +Mutate()
+      -handleAdmission()
+      -patchResponse()
+    }
+    class Injector {
+      -Config cfg
+      +CreatePatch(pod, agentClass)
+      +buildSidecar(agentClass)
+    }
+    class SidecarMain {
+      +main()
+    }
+    class SidecarProxy {
+      +start()
+      +stop()
+    }
+    class HttpFallback {
+      +create_http_fallback()
+      +GET /healthz
+      +POST /v1/evaluate
+    }
+    Main --> Handler : wires routes
+    Main --> Config : loads
+    Handler --> Injector : uses
+    Handler --> Config : configured by
+    Injector --> Config : uses sidecar settings
+    SidecarMain --> SidecarProxy : starts socket proxy
+    SidecarMain --> HttpFallback : starts HTTP fallback

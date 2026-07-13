@@ -1,0 +1,14 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+flowchart LR
+    F036[F036 Asset Graph]
+    F013[F013 SPIFFE Agent Registry]
+    F014[F014 Audit Pipeline]
+    F027[F027 Behavioral Trust]
+    Eval[Evaluator]
+    API[Graph API]
+    F036 --> F013
+    F036 --> F014
+    F036 --> F027
+    Eval --> F036
+    API --> F036

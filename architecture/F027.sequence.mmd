@@ -1,0 +1,38 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+sequenceDiagram
+    participant TC as ToolCall
+    participant E as Evaluator
+    participant Calc as TrustCalculator
+    participant H as HistoryStore (Redis)
+    participant P as ProfileStore (Redis)
+    participant S1 as ViolationRate
+    participant S2 as ToolNovelty
+    participant S3 as ScopeDrift
+    participant S4 as ParamEntropy
+    participant S5 as TimeDecay
+    participant S6 as ChainDepth
+    participant S7 as SessionVelocity
+
+    TC->>E: evaluate(event)
+    E->>E: policy evaluation
+    E->>Calc: calculate(trust_input)
+    Calc->>H: get_history(spiffe_id)
+    H-->>Calc: history[] (sorted set)
+    Calc->>P: get_profile(spiffe_id, agent_class)
+    P-->>Calc: profile{}
+    par Compute 7 signals
+        Calc->>S1: compute(input, history, profile)
+        Calc->>S2: compute(input, history, profile)
+        Calc->>S3: compute(input, history, profile)
+        Calc->>S4: compute(input, history, profile)
+        Calc->>S5: compute(input, history, profile)
+        Calc->>S6: compute(input, history, profile)
+        Calc->>S7: compute(input, history, profile)
+    end
+    Calc->>Calc: weighted_sum(signals)
+    Calc->>Calc: categorize(score)
+    Note over Calc: Fire-and-forget persist
+    Calc-->>E: TrustResult
+    E->>E: low trust? override to escalate
+    E-->>TC: PolicyDecision + trust

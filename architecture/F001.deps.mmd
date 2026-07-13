@@ -1,0 +1,17 @@
+graph LR
+    F001[F001 Events]
+    F002[F002 PolicyDecision]
+    F003[F003 AuditRecord]
+    F006[F006 Engine Client]
+    F009[F009 OPA Evaluator]
+    F011[F011 Tool Interceptor]
+    F014[F014 OTel Emitter]
+
+    F001 --> F002
+    F001 --> F003
+    F001 --> F006
+    F001 --> F009
+    F001 --> F011
+    F001 --> F014
+
+    style F001 fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#1e3a8a

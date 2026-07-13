@@ -1,0 +1,10 @@
+sequenceDiagram
+    participant Caller
+    participant Event as ToolCallEvent
+    participant Decision as PolicyDecision
+    participant Audit as AuditRecord
+
+    Caller->>Audit: from_event_and_decision(event, decision, payload)
+    Audit->>Event: read event fields
+    Audit->>Decision: read decision fields
+    Audit-->>Caller: frozen audit record

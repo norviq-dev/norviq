@@ -1,0 +1,54 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+%% F046 dependency graph — console pages -> client methods -> new/extended API routers -> data sources.
+graph LR
+    subgraph Console_F018[Console pages/components]
+        AppContext[store/AppContext.tsx]
+        Dash[Dashboard]
+        CatCov[CategoryCoverage]
+        AgentMon[AgentMonitor]
+        Conn[ConnectionSettings]
+        Acct[AccountSettings]
+        Settings[Settings/General/Target]
+        About[AboutPage + ExpandedPanel footer]
+        Keys[APIKeys]
+        Red[RedTeam]
+        Header[Header]
+        Asset[AssetGraphCanvas]
+    end
+    Client[api/client.ts]
+
+    AppContext --> Client
+    Dash --> Client
+    CatCov --> Client
+    AgentMon --> Client
+    Conn --> Client
+    Acct --> Client
+    Settings --> Client
+    About --> Client
+    Keys --> Client
+    Red --> Client
+    Header --> Client
+
+    Client --> ClusterInfo[/cluster-info/]
+    Client --> Coverage[/coverage-by-category/]
+    Client --> ToolUse[/agents/:id/tool-usage/]
+    Client --> TrustHist[/agents/:id/trust-history/]
+    Client --> SettingsR[/settings GET-PUT/]
+    Client --> Version[/version/]
+    Client --> KeysR[/keys GET-POST-DELETE/]
+    Client --> Me[/me existing/]
+    Client --> Readyz[/readyz existing/]
+    Client --> Deploy[/deployments existing/]
+    Client --> Redteam[/redteam existing/]
+    Asset --> AssetGraphR[/asset-graph existing/]
+
+    ClusterInfo --> PG[(PostgreSQL)]
+    Coverage --> LoaderRego[PolicyLoader rego + category_mapping.json]
+    ToolUse --> PG
+    TrustHist --> PG
+    SettingsR --> PG
+    KeysR --> PG
+    Version --> Meta[importlib.metadata]
+    KeysR -.api-key fallback.-> Auth[get_current_user]
+    Auth --> PG

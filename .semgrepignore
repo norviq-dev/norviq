@@ -1,0 +1,11 @@
+# Semgrep ignore — paths excluded from SAST (tests, generated, deps, attack payloads).
+# The PR job is diff-aware (--baseline-commit) so pre-existing findings don't fail a PR anyway;
+# this just keeps noise down. Triage promotions/removals: docs/engineering/security-baseline.md
+tests/
+norviq/redteam/
+norviq/sdk/attacks/
+ui/node_modules/
+ui/dist/
+.venv/
+**/__pycache__/
+**/*.min.js

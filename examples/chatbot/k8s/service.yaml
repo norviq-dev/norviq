@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-chatbot
+  namespace: chatbot-demo
+spec:
+  selector:
+    app: demo-chatbot
+  ports:
+    - port: 8000
+      targetPort: 8000

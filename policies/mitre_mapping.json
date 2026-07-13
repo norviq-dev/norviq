@@ -1,0 +1,99 @@
+{
+  "AML.T0051": {
+    "name": "LLM Prompt Injection",
+    "scope": "enforceable",
+    "description": "An adversary crafts inputs (direct or indirect) that override the model's instructions to make it take unintended actions through its tools.",
+    "policies": ["llm01_prompt_injection"],
+    "also": "OWASP LLM · LLM01:2025"
+  },
+  "AML.T0054": {
+    "name": "LLM Jailbreak",
+    "scope": "enforceable",
+    "description": "An adversary bypasses the model's safety guardrails so it performs restricted operations (e.g. shell/command execution) via its tools.",
+    "policies": ["deny_shell_execution", "llm01_prompt_injection"],
+    "also": "OWASP LLM · LLM01:2025"
+  },
+  "AML.T0057": {
+    "name": "LLM Data Leakage",
+    "scope": "enforceable",
+    "description": "An adversary induces the model to disclose sensitive data (secrets, PII, proprietary content) through tool calls, including encoded/obfuscated exfiltration.",
+    "policies": ["llm02_data_leakage", "base64_decoded_threat"],
+    "also": "OWASP LLM · LLM02:2025"
+  },
+  "AML.T0053": {
+    "name": "LLM Plugin Compromise",
+    "scope": "enforceable",
+    "description": "An adversary abuses a plugin/tool the agent can call to gain capabilities beyond intended scope (excessive agency, unsafe tool use).",
+    "policies": ["llm05_supply_chain", "llm06_excessive_agency"],
+    "also": "OWASP LLM · LLM07:2025"
+  },
+  "AML.T0050": {
+    "name": "Command and Scripting Interpreter",
+    "scope": "enforceable",
+    "description": "An adversary executes commands or scripts through an agent tool (shell/interpreter) to run arbitrary code.",
+    "policies": ["deny_shell_execution"]
+  },
+  "AML.T0049": {
+    "name": "Exploit Public-Facing Application",
+    "scope": "enforceable",
+    "description": "An adversary exploits an internet-facing application the agent exposes (e.g. SQL injection through a tool) to gain access or manipulate data.",
+    "policies": ["deny_sql_injection"]
+  },
+  "AML.T0012": {
+    "name": "Valid Accounts",
+    "scope": "enforceable",
+    "description": "An adversary uses legitimate credentials/identity to access resources across tenants; enforced by cross-tenant/namespace isolation at the tool boundary.",
+    "policies": ["cross_tenant_access"]
+  },
+  "AML.T0055": {
+    "name": "Unsecured Credentials",
+    "scope": "enforceable",
+    "priority": "high",
+    "description": "An adversary harvests credentials/secrets an agent can reach through its tools. Runtime-enforceable (block secret-reading tool calls) but no dedicated rule is loaded yet.",
+    "policies": []
+  },
+  "AML.T0056": {
+    "name": "LLM Meta Prompt Extraction",
+    "scope": "enforceable",
+    "priority": "medium",
+    "description": "An adversary extracts the system/meta prompt via crafted inputs. Runtime-observable at the tool boundary but no dedicated rule is loaded yet.",
+    "policies": []
+  },
+  "AML.T0061": {
+    "name": "LLM Prompt Self-Replication",
+    "scope": "enforceable",
+    "priority": "medium",
+    "description": "A self-replicating prompt propagates through tool outputs to other agents/systems. Enforceable by blocking propagation via tool calls; no dedicated rule yet.",
+    "policies": []
+  },
+  "AML.T0024": {
+    "name": "Exfiltration via ML Inference API",
+    "scope": "out_of_scope",
+    "description": "Membership inference / model inversion / extraction performed against the model's inference API. Occurs below the tool-call boundary — a runtime tool-call PEP cannot observe raw inference.",
+    "policies": []
+  },
+  "AML.T0048": {
+    "name": "External Harms",
+    "scope": "out_of_scope",
+    "description": "Financial/reputational/societal/user harm resulting from an AI system. An impact/governance concern, not a tool-call vector a runtime PEP enforces directly.",
+    "policies": []
+  },
+  "AML.T0020": {
+    "name": "Poison Training Data",
+    "scope": "out_of_scope",
+    "description": "An adversary poisons the training dataset. A build/training-time supply-chain concern outside a runtime tool-call PEP.",
+    "policies": []
+  },
+  "AML.T0018": {
+    "name": "Backdoor ML Model",
+    "scope": "out_of_scope",
+    "description": "An adversary embeds a backdoor in the model during training. A model-lifecycle concern outside a runtime tool-call PEP.",
+    "policies": []
+  },
+  "AML.T0031": {
+    "name": "Erode ML Model Integrity",
+    "scope": "out_of_scope",
+    "description": "An adversary degrades the model's integrity/accuracy over time. A model-integrity/monitoring concern outside a runtime tool-call PEP.",
+    "policies": []
+  }
+}

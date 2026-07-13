@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: Apache-2.0
+# Multi-stage build for minimal image
+
+FROM python:3.12-slim AS builder
+WORKDIR /build
+COPY pyproject.toml .
+COPY norviq/ norviq/
+# [spiffe] extra installs pyspiffe so NRVQ_SPIFFE_MODE=workload-api works (import-guarded; mock unaffected).
+RUN pip install --no-cache-dir --target=/deps '.[spiffe]'
+
+FROM python:3.12-slim
+WORKDIR /app
+COPY --from=builder /deps /usr/local/lib/python3.12/site-packages
+COPY norviq/ norviq/
+COPY policies/ policies/
+
+# OPA arch matches the build target (TARGETARCH = amd64|arm64; AKS=amd64, local kind on Apple Silicon=arm64).
+ARG TARGETARCH=amd64
+# Install the OPA binary so the `subprocess` rollback mode works in-cluster (server mode uses the
+# OPA sidecar and does not need this; kept for parity with Dockerfile.api).
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
+    curl -L -o /usr/local/bin/opa "https://openpolicyagent.org/downloads/latest/opa_linux_${TARGETARCH}_static" && \
+    chmod +x /usr/local/bin/opa && \
+    opa version && \
+    apt-get remove -y curl && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN useradd -r -s /usr/sbin/nologin norviq
+USER norviq
+
+EXPOSE 8282
+ENV NRVQ_SOCKET_PATH=/tmp/norviq-proxy.sock
+ENV NRVQ_HTTP_FALLBACK_PORT=8282
+
+CMD ["python", "-m", "norviq.sidecar"]

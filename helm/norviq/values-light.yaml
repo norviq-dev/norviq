@@ -1,0 +1,56 @@
+# values-light.yaml — the smallest viable single-node Norviq footprint (fable-audit Phase 4).
+#
+# Runs the FULL product (enforcement, console, audit, compliance, packs) on one replica of each workload with
+# every optional plane OFF. Enforcement is BYTE-IDENTICAL to the default: this overlay only changes replica counts,
+# PDBs, and resource envelopes — it does NOT touch the images, rego, evaluator, or any enforcement code. The attacks
+# baseline (103/103) and opa (123/123) are unchanged because none of those inputs change.
+#
+# Usage:  helm upgrade --install norviq helm/norviq -f helm/norviq/values-light.yaml
+#
+# vs the default overlay: api 2->1 replica, no api PDB, webhook 2->1 replica, tighter limits. All optional
+# components (fleet, CNPG/RedisFailover HA, HPA, SPIRE/CSI, sidecar injection) are already OFF by default and stay
+# off here (verified: `helm template` renders 0 fleet/HA/HPA/SPIRE objects).
+
+api:
+  replicas: 1            # single-node: one API pod serves /evaluate + the console API
+  pdb:
+    enabled: false       # a PDB with a single replica just blocks drains; off for minimal
+  autoscaling:
+    enabled: false
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 384Mi      # headroom for OPA sidecar + eval under load
+
+engine:
+  replicas: 1
+  pdb:
+    enabled: false
+
+webhook:
+  replicas: 1            # default is 2 (HA); one is enough single-node
+  pdb:
+    enabled: false
+  autoscaling:
+    enabled: false
+
+# Optional planes — all OFF (these are the defaults; pinned here so the light profile is explicit + self-documenting).
+fleet:
+  enabled: false
+  hub:
+    enabled: false
+postgresql:
+  ha:
+    enabled: false
+redis:
+  ha:
+    enabled: false
+
+config:
+  opaMode: server        # server mode = one long-lived OPA per pod (fewer forks than subprocess under load)
+  spiffeMode: mock       # no SPIRE/CSI footprint; workload-api needs the (heavier) [spiffe] image + SPIRE
+  spiffeCsi:
+    enabled: false

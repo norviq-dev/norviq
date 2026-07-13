@@ -1,0 +1,13 @@
+# kind cluster for the IDENTITY local e2e (Keycloak OIDC + real SPIRE).
+# Single node. The extraPortMapping exposes Keycloak's NodePort (30080) on the host at :8080 so the
+# BROWSER reaches the same issuer host (keycloak.localtest.me:8080) the in-cluster API validates against
+# (the issuer-host-match fix). The SPIFFE CSI driver needs no extraMounts on modern kind.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: norviq-identity
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30080   # Keycloak NodePort
+        hostPort: 8080
+        protocol: TCP

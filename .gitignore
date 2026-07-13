@@ -1,0 +1,91 @@
+﻿__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+dist/
+build/
+bin/
+.env
+.env.dev
+*.log
+node_modules/
+ui/dist/
+
+# Internal-only: specs, registry, reviews, design-system, AI-authoring/review tooling.
+# Kept on local disk, untracked from git ahead of the public release.
+specs/*
+registry/
+.reviews/
+portal/
+prompts/reviews/
+docs/design-system/
+download_specs.sh
+
+# AI author/reviewer tooling — internal, not part of the public product.
+.serena/
+.cursor/
+.claude/
+CLAUDE.md
+AGENTS.md
+docs/WORKFLOW.md
+docs/mcp-workflow.md
+tests/.history/
+
+# Internal one-off dev/debug scripts + test/dev harnesses — not part of the public product.
+scripts/cluster-probe.mjs
+scripts/cluster-switch-test.mjs
+scripts/debug-page.mjs
+scripts/diagnose-pg.py
+scripts/diagnose-sqlalchemy.py
+scripts/ui-scout.mjs
+scripts/ns-payments-redteam.mjs
+scripts/review-ui.sh
+scripts/review.sh
+scripts/serena-refresh.sh
+scripts/live-pentest/
+scripts/test-campaign/
+scripts/ha-local/
+scripts/eval/
+
+# Local dev
+.env.dev
+.venv/
+*.log
+__pycache__/
+.env.local
+.env.local.*
+*.local
+!.env.local.example
+
+create_agents.sh
+opa.exe
+.tmp/
+
+# TypeScript incremental build cache (artifact)
+ui/tsconfig.tsbuildinfo
+
+# OS cruft
+.DS_Store
+
+# Lessons / gotchas log (local only)
+.lessons/
+
+# Migration / new-machine setup + kubeconfig — internal, never publish
+kube/
+NEW-MACHINE-SETUP*.md
+docs/NEW-MACHINE-SETUP*.md
+migrate-pack.ps1
+
+# Day9 / migration untracked artifacts — internal, not for origin (root-anchored)
+/package.json
+/package-lock.json
+scripts/ui-validate.mjs
+docs/IMPLEMENTATION-STATUS.md
+ui/tsconfig.node.tsbuildinfo
+webhook/webhook
+scripts/fleet-local/fleet-signing-*.pem
+.tmp_commit_ci.sh
+scripts/verify.sh
+scripts/gate-*.sh
+docs/engineering/test-baseline-discipline.md
+.github/workflows/

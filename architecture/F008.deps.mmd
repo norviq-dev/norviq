@@ -1,0 +1,17 @@
+graph LR
+    S002[S002 Config]
+    F002[F002 Decisions]
+    F005[F005 TrustScore]
+    F008[F008 Redis Cache]
+    F009[F009 OPA Evaluator]
+    F010[F010 Policy Loader]
+    F015[F015 Sidecar]
+
+    S002 --> F008
+    F002 --> F008
+    F005 --> F008
+    F008 --> F009
+    F008 --> F010
+    F008 --> F015
+
+    style F008 fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#1e3a8a

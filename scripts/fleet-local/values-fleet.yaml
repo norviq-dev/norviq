@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: Apache-2.0
+# Lean kind overlay for the fleet local 2-cluster validation (F045). Per-cluster fleet.clusterId /
+# fleet.apiUrl / fleet.hub.enabled are passed via --set in 00-up.sh. Fleet uses the HS256 break-glass
+# relay->hub auth (shared secret) so no Keycloak is needed for the local proof.
+validatingAdmissionPolicyEnabled: false
+baselineClusterPolicy:
+  enabled: false
+otel:
+  enabled: false
+webhook:
+  enabled: false        # injection not needed for the fleet demo; the API evaluates in-process
+engine:
+  replicas: 0
+policyQuotaNamespaces:
+  - default
+config:
+  enforcementMode: block
+  logLevel: INFO
+  dbSslMode: disable
+
+# Fleet ON: the in-process relay pushes agent+audit rollups to the hub. clusterId/apiUrl/hub.enabled
+# come from --set per cluster. relayIntervalSeconds short so the demo converges quickly.
+fleet:
+  enabled: true
+  relayIntervalSeconds: 15
+  pullIntervalSeconds: 15
+  staleAfterSeconds: 60
+  hub:
+    enabled: false        # overridden to true on the hub cluster (fleet-a)
+    nodePort: 31090       # exposes fleet-api so the second kind cluster reaches it over the shared net

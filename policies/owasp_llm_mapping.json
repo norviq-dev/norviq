@@ -1,0 +1,72 @@
+{
+  "LLM01:2025": {
+    "name": "Prompt Injection",
+    "scope": "enforceable",
+    "description": "User or embedded content manipulates the model's behavior to make it perform unintended actions through its tools.",
+    "policies": ["llm01_prompt_injection"],
+    "also": "MITRE ATLAS · AML.T0051"
+  },
+  "LLM02:2025": {
+    "name": "Sensitive Information Disclosure",
+    "scope": "enforceable",
+    "description": "The model discloses sensitive data (secrets, PII, proprietary content) through its tool calls, including encoded exfiltration.",
+    "policies": ["llm02_data_leakage", "base64_decoded_threat"],
+    "also": "MITRE ATLAS · AML.T0057",
+    "remediation": "egress"
+  },
+  "LLM03:2025": {
+    "name": "Supply Chain",
+    "scope": "out_of_scope",
+    "description": "Vulnerabilities in third-party models, datasets, and components introduced during build/training — a supply-chain concern outside a runtime tool-call PEP.",
+    "policies": []
+  },
+  "LLM04:2025": {
+    "name": "Data and Model Poisoning",
+    "scope": "out_of_scope",
+    "description": "Training or fine-tuning data is poisoned to introduce backdoors/bias. A model-lifecycle concern outside a runtime tool-call PEP.",
+    "policies": []
+  },
+  "LLM05:2025": {
+    "name": "Improper Output Handling",
+    "scope": "enforceable",
+    "description": "Downstream systems trust unsanitized model output; enforced by blocking dangerous tool calls (e.g. SQL injection, encoded payloads) that result from that output.",
+    "policies": ["deny_sql_injection", "base64_decoded_threat"],
+    "also": "MITRE ATLAS · AML.T0050"
+  },
+  "LLM06:2025": {
+    "name": "Excessive Agency",
+    "scope": "enforceable",
+    "description": "The agent has excessive permissions/autonomy and performs high-impact actions (e.g. shell/command execution) beyond its intent.",
+    "policies": ["llm06_excessive_agency", "deny_shell_execution"],
+    "also": "MITRE ATLAS · AML.T0053"
+  },
+  "LLM07:2025": {
+    "name": "System Prompt Leakage",
+    "scope": "enforceable",
+    "priority": "high",
+    "description": "The system/meta prompt is extracted via crafted inputs. Runtime-observable at the tool boundary but no dedicated rule is loaded yet.",
+    "policies": [],
+    "also": "MITRE ATLAS · AML.T0056"
+  },
+  "LLM08:2025": {
+    "name": "Vector and Embedding Weaknesses",
+    "scope": "out_of_scope",
+    "description": "Weaknesses in the RAG vector store / embedding pipeline. An infrastructure/data concern outside a runtime tool-call PEP.",
+    "policies": []
+  },
+  "LLM09:2025": {
+    "name": "Misinformation",
+    "scope": "out_of_scope",
+    "description": "The model produces false or misleading output. An output-quality/model concern a runtime tool-call PEP cannot adjudicate.",
+    "policies": []
+  },
+  "LLM10:2025": {
+    "name": "Unbounded Consumption",
+    "scope": "enforceable",
+    "priority": "medium",
+    "description": "Uncontrolled resource/cost consumption (denial-of-wallet). Runtime-enforceable via rate/cost limits on tool calls, but no dedicated rule is loaded yet.",
+    "policies": [],
+    "also": "MITRE ATLAS · AML.T0034",
+    "remediation": "rate"
+  }
+}

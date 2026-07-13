@@ -1,0 +1,129 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+%% F045 multi-cluster fleet (P1 read-only). Hub fleet-api over a SEPARATE FleetBase store; each spoke
+%% runs an in-process relay that pushes agent+audit rollups. Fleet OFF by default -> single-cluster unaffected.
+classDiagram
+    class FleetApp {
+        +create_fleet_app() FastAPI
+        +lifespan(app)  %% own DB only (no OPA/cache/SIEM)
+    }
+    class FleetBase {
+        <<DeclarativeBase>>
+    }
+    class Cluster {
+        +str id
+        +str name
+        +str region
+        +datetime last_heartbeat
+        +str status
+        +dict labels
+        +int bundle_version
+        +bool residency
+        +str spiffe_id
+    }
+    class FleetPolicy {
+        +str name
+        +str namespace
+        +str agent_class
+        +str rego_source
+        +int priority
+        +str enforcement_mode
+        +int version
+        +dict target_selector
+        +datetime not_before
+        +datetime expires_at
+    }
+    class PolicyRollout {
+        +str cluster_id
+        +int policy_bundle_version
+        +str state
+        +int applied_version
+        +str detail
+    }
+    class FleetBundleState {
+        +str cluster_id
+        +int last_applied_version
+        +str last_bundle_sha256
+        %% spoke-side Base (not FleetBase)
+    }
+    class Bundle {
+        +canonical_bytes(payload) bytes
+        +sign_bundle(payload, key) dict
+        +verify_bundle(body, pubkey) dict
+    }
+    class FleetPolicyRouter {
+        +author_policy(body)  %% require_admin
+        +get_bundle(cluster_id)  %% resolve+sign
+        +report_rollout(cluster_id, body)
+        +list_rollout()
+        +drilldown_audit(cluster_id)  %% residency-aware
+    }
+    class FleetPolicyPuller {
+        +start()  %% no-op unless fleet_enabled + pubkey
+        +pull_once() dict
+        -_bearer() str
+        -_last_applied() int
+        +stop()
+    }
+    class AgentRollup {
+        +str cluster_id
+        +str spiffe_id
+        +float trust_score
+        +str trust_category
+    }
+    class AuditRollup {
+        +str cluster_id
+        +str namespace
+        +datetime bucket_ts
+        +str decision
+        +int count
+    }
+    class IngestRouter {
+        +heartbeat(cluster_id, body)
+        +rollup(cluster_id, body)  %% SET-absolute upsert; scoped_cluster(path)
+    }
+    class FleetRouter {
+        +list_clusters()
+        +list_agents(cluster)
+        +audit_summary(cluster, range)
+        +trust_distribution(cluster)
+    }
+    class FleetRelayForwarder {
+        +start()  %% no-op unless fleet_enabled
+        +relay_once() dict
+        -_aggregate() tuple
+        -_bearer() str  %% OIDC-CC or HS256 fallback
+        +stop()
+    }
+    class ClientCredentialsToken {
+        +bearer() str
+    }
+    class Auth {
+        +get_current_user(creds)
+        +scoped_cluster(user, requested)
+        +_apply_group_mapping(claims)  %% +cluster dimension
+    }
+
+    FleetApp --> IngestRouter : include_router
+    FleetApp --> FleetRouter : include_router
+    FleetBase <|-- Cluster
+    FleetBase <|-- AgentRollup
+    FleetBase <|-- AuditRollup
+    IngestRouter --> Cluster : upsert
+    IngestRouter --> AgentRollup : upsert
+    IngestRouter --> AuditRollup : upsert
+    IngestRouter --> Auth : require_admin_or_service + scoped_cluster
+    FleetRouter --> Auth : scoped_cluster (read filter)
+    FleetRelayForwarder --> ClientCredentialsToken : hub auth
+    FleetRelayForwarder ..> IngestRouter : POST heartbeat + rollu
+    FleetApp --> FleetPolicyRouter : include_router
+    FleetBase <|-- FleetPolicy
+    FleetBase <|-- PolicyRollout
+    FleetPolicyRouter --> FleetPolicy : resolve selector+override
+    FleetPolicyRouter --> Bundle : sign_bundle
+    FleetPolicyRouter --> PolicyRollout : state machine
+    FleetPolicyRouter --> Auth : require_admin / scoped_cluster
+    FleetPolicyPuller --> Bundle : verify_bundle (trust root)
+    FleetPolicyPuller --> FleetBundleState : persist last_applied_version
+    FleetPolicyPuller ..> FleetPolicyRouter : GET bundle + POST rollout
+end

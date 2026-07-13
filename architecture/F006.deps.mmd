@@ -1,0 +1,19 @@
+graph LR
+    S002[S002 Config]
+    S003[S003 Exceptions]
+    F001[F001 Events]
+    F002[F002 Decisions]
+    F006[F006 Engine Client]
+    F011[F011 Interceptor]
+    F012[F012 LangGraph Adapter]
+    F015[F015 Sidecar]
+
+    S002 --> F006
+    S003 --> F006
+    F001 --> F006
+    F002 --> F006
+    F006 --> F011
+    F006 --> F012
+    F006 --> F015
+
+    style F006 fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#1e3a8a

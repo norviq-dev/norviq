@@ -1,0 +1,39 @@
+{{- if and .Values.postgresql.enabled .Values.postgresql.ha.enabled }}
+{{- /* HA Postgres via the CloudNativePG operator (multi-node prod). GATED, default off, and NOT
+       live-validated on the single-node dev cluster. REQUIRES the CloudNativePG operator to be
+       installed in the cluster first (kubectl apply the operator manifest). The cluster exposes a
+       <name>-rw read-write service (postgresql.ha.serviceName) that the API's NRVQ_PG_URL targets. */ -}}
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: norviq-postgresql-ha
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+spec:
+  instances: {{ .Values.postgresql.ha.instances }}
+  imageName: "{{ .Values.images.postgresql.repository }}:{{ .Values.images.postgresql.tag }}"
+  bootstrap:
+    initdb:
+      database: {{ .Values.postgresql.database }}
+      owner: {{ .Values.postgresql.username }}
+      secret:
+        name: norviq-postgresql-ha-app
+  storage:
+    size: {{ .Values.postgresql.storage }}
+  resources:
+    {{- toYaml .Values.postgresql.resources | nindent 4 }}
+---
+# Credentials secret consumed by the CNPG bootstrap (username/password = the chart's pg creds).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: norviq-postgresql-ha-app
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+type: kubernetes.io/basic-auth
+stringData:
+  username: {{ .Values.postgresql.username | quote }}
+  password: {{ .Values.postgresql.password | quote }}
+{{- end }}

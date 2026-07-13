@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: norviq-ui
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: norviq-ui
+    {{- include "norviq.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.ui.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: {{ .Values.ui.rollout.maxSurge }}
+      maxUnavailable: {{ .Values.ui.rollout.maxUnavailable }}
+  selector:
+    matchLabels:
+      app: norviq-ui
+  template:
+    metadata:
+      labels:
+        app: norviq-ui
+    spec:
+      {{- include "norviq.imagePullSecrets" . | nindent 6 }}
+      terminationGracePeriodSeconds: 30
+      # Static nginx SPA — no backend dependency at startup (the browser calls the API
+      # at runtime), so no initContainer is needed.
+      containers:
+        - name: ui
+          image: "{{ .Values.images.registry }}{{ .Values.images.ui.repository }}:{{ .Values.images.ui.tag }}"
+          imagePullPolicy: {{ .Values.images.ui.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.ui.port }}
+              name: http
+          # F-25: per-cluster runtime config (build-once image). Set ui.fleetApiUrl="/fleet-api" on the hub so the
+          # console shows the Fleet view; left empty on spokes/single-cluster (Fleet stays gated off).
+          env:
+            - name: FLEET_API_URL
+              value: {{ .Values.ui.fleetApiUrl | default "" | quote }}
+            {{- if .Values.oidc.enabled }}
+            # LOGIN-1: SSO config injected at runtime (config.js) so the console shows "Sign in with SSO"
+            # without a UI rebuild. Register a public/SPA client with redirect URI <console>/auth/callback.
+            - name: OIDC_ISSUER
+              value: {{ .Values.oidc.issuer | quote }}
+            - name: OIDC_CLIENT_ID
+              value: {{ .Values.oidc.consoleClientId | quote }}
+            # LOGIN-2: human-readable IdP name for login copy ("Redirecting to Okta…").
+            - name: OIDC_PROVIDER_NAME
+              value: {{ .Values.oidc.providerName | default "" | quote }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.ui.resources | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12          # up to 60s for nginx to come up
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3

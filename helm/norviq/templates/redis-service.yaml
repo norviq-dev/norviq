@@ -1,0 +1,17 @@
+{{- if .Values.redis.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: norviq-redis
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: norviq-redis
+spec:
+  selector:
+    app: norviq-redis
+  ports:
+    - port: {{ .Values.redis.port }}
+      targetPort: redis
+      name: redis
+  clusterIP: None
+{{- end }}

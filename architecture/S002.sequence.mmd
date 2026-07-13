@@ -1,0 +1,11 @@
+sequenceDiagram
+    participant ENV as Environment
+    participant CFG as norviq.config
+    participant CLS as NorviqSettings
+    participant APP as Consumer Module
+
+    ENV->>CLS: NRVQ_* values
+    CFG->>CLS: instantiate settings model
+    CLS-->>CFG: validated settings
+    APP->>CFG: import settings singleton
+    CFG-->>APP: shared config values

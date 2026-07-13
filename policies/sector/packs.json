@@ -1,0 +1,100 @@
+{
+  "_comment": "Sector starter policy packs (F047). The catalog (GET /policy-packs) + 'enable pack' backend read THIS manifest + the referenced rego. Enabling a pack materializes its rego as the namespace's (ns,__pack__) policy via the normal policy-create path (default-OFF until enabled). STARTER templates — customers tune the listed verbs/thresholds in the materialized policy. rule_ids here are the real rule_id values the rego emits (and appear in category_mapping.json).",
+  "pack_priority": 800,
+  "packs": [
+    {
+      "id": "energy-ot",
+      "sector": "Energy",
+      "title": "Energy OT/IT Segmentation",
+      "enforces": "Fail-safe OT surface: hard-blocks control commands in tool name OR params (breaker/relay/recloser/setpoint, modbus write_register, dnp3 direct_operate, valve/pump/tap); escalates OT-adjacent OMS/ADMS writes and any OT-surface tool that is not a clear read; allows IT reads.",
+      "rego": "policies/sector/energy/energy.rego",
+      "rule_ids": ["ot_control_command_blocked", "ot_adjacent_write_escalate", "ot_surface_review_escalate"],
+      "categories": ["OT Safety"],
+      "compliance": ["NERC CIP-005", "NERC CIP-007", "NIST 800-82"],
+      "tunables": ["energy_ot_control_verbs", "energy_ot_adjacent_verbs"]
+    },
+    {
+      "id": "finance-money-movement",
+      "sector": "Finance",
+      "title": "Finance Money-Movement & Segregation of Duties",
+      "enforces": "Escalates money movement over a threshold and transfers to new/unverified beneficiaries; blocks same-identity initiate+approve (SoD). Pair with the PCI cardholder-data rules.",
+      "rego": "policies/sector/finance/finance.rego",
+      "rule_ids": ["wire_over_threshold_escalate", "new_beneficiary_escalate", "sod_violation"],
+      "requires": ["pci"],
+      "categories": ["Financial Controls", "Data Protection"],
+      "compliance": ["SOX §404", "PCI DSS Req.7/8/10", "GLBA", "SR 11-7"],
+      "tunables": ["fin_money_verbs", "fin_threshold"]
+    },
+    {
+      "id": "healthcare-phi",
+      "sector": "Healthcare",
+      "title": "Healthcare Clinical Safety & Minimum-Necessary PHI",
+      "enforces": "Escalates clinical-action tools (order/prescribe/modify chart) for human sign-off; blocks bulk-PHI reads over a threshold and PHI identifiers on egress tools. Builds on hipaa_phi.",
+      "rego": "policies/sector/healthcare/healthcare.rego",
+      "rule_ids": ["clinical_action_escalate", "phi_min_necessary", "phi_identifier_egress"],
+      "requires": ["pii"],
+      "categories": ["Clinical Safety / PHI", "Data Protection"],
+      "compliance": ["HIPAA §164.312", "HIPAA §164.514(d)", "FDA HITL"],
+      "tunables": ["hc_clinical_verbs", "hc_phi_fields", "hc_bulk_threshold"]
+    },
+    {
+      "id": "government-cui",
+      "sector": "Government",
+      "title": "Government Rights-Impacting & CUI/FTI",
+      "enforces": "Escalates rights-impacting decisions (benefit deny/approve, adjudication) for human review; blocks CUI/FTI markings (SSN/tax) on egress tools.",
+      "rego": "policies/sector/government/government.rego",
+      "rule_ids": ["rights_impacting_escalate", "cui_fti_egress_blocked"],
+      "requires": ["pii"],
+      "categories": ["Government / CUI", "Data Protection"],
+      "compliance": ["OMB M-25-21", "NIST 800-53 AC-3/AU-12/SI-4", "IRS Pub 1075"],
+      "tunables": ["gov_rights_verbs", "gov_cui_fields"]
+    },
+    {
+      "id": "telecom-cpni",
+      "sector": "Telecom",
+      "title": "Telecom SIM-Swap & CPNI Protection",
+      "enforces": "Escalates SIM-swap / number-port without a verified strong-auth flag; blocks bulk CPNI/location reads over a threshold.",
+      "rego": "policies/sector/telecom/telecom.rego",
+      "rule_ids": ["sim_swap_escalate", "cpni_bulk_blocked"],
+      "categories": ["Telecom / CPNI"],
+      "compliance": ["CPNI 47 CFR §64.2010(h)", "47 USC §222", "§64.2011"],
+      "tunables": ["tel_simswap_verbs", "tel_cpni_read_verbs", "tel_bulk_threshold"]
+    },
+    {
+      "id": "erp-crm",
+      "sector": "ERP/CRM",
+      "title": "ERP/CRM Financial Controls & SoD",
+      "enforces": "Escalates financial postings / payment runs / PO approvals and vendor master-data changes; blocks vendor bank-account changes, privileged transactions, segregation-of-duties violations, and mass exports over a threshold. Composes canonical PII.",
+      "rego": "policies/sector/erp-crm/erp-crm.rego",
+      "rule_ids": ["erp_financial_posting_escalate", "erp_master_data_change_escalate", "erp_bank_detail_change_blocked", "erp_privileged_txn_blocked", "erp_sod_violation", "erp_mass_export_blocked"],
+      "requires": ["pii"],
+      "categories": ["ERP Controls", "Data Protection"],
+      "compliance": ["SOX §404 ITGC", "GDPR", "least privilege"],
+      "tunables": ["erp_posting_verbs", "erp_bank_verbs", "erp_export_threshold"]
+    },
+    {
+      "id": "media-entertainment",
+      "sector": "Media/Entertainment",
+      "title": "Media Pre-release, DRM & Distribution",
+      "enforces": "Blocks pre-release/embargoed content access/export and DRM/content-key access; escalates publish/distribute/takedown changes and royalty/licensing actions; blocks bulk subscriber PII / viewing-history export over a threshold. Composes canonical PII.",
+      "rego": "policies/sector/media-entertainment/media-entertainment.rego",
+      "rule_ids": ["media_prerelease_blocked", "media_drm_key_access_blocked", "media_distribute_escalate", "media_royalty_action_escalate", "media_bulk_pii_export_blocked"],
+      "requires": ["pii"],
+      "categories": ["Media Protection", "Data Protection"],
+      "compliance": ["content licensing", "DMCA", "GDPR/CCPA"],
+      "tunables": ["media_prerelease_terms", "media_drm_terms", "media_bulk_threshold"]
+    },
+    {
+      "id": "ecommerce",
+      "sector": "E-commerce",
+      "title": "E-commerce Refunds, Pricing & PII",
+      "enforces": "Escalates over-threshold refunds and account-takeover actions; blocks mass refunds, price/discount manipulation (price→0 / 100%+ / unlimited coupon), and bulk customer PII/order-history export. Composes canonical PCI + PII.",
+      "rego": "policies/sector/ecommerce/ecommerce.rego",
+      "rule_ids": ["ecom_refund_over_threshold_escalate", "ecom_mass_refund_blocked", "ecom_price_manipulation_blocked", "ecom_bulk_pii_export_blocked", "ecom_account_takeover_escalate"],
+      "requires": ["pci", "pii"],
+      "categories": ["E-commerce Controls", "Data Protection"],
+      "compliance": ["PCI DSS", "GDPR/CCPA", "SOX"],
+      "tunables": ["ecom_refund_threshold", "ecom_mass_threshold", "ecom_export_threshold"]
+    }
+  ]
+}

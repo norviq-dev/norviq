@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v2
+name: norviq
+description: Runtime security for LLM agent tool calls
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://norviq.dev
+sources:
+  - https://github.com/norviq-dev/norviq
+maintainers:
+  - name: Norviq
+    email: opensource@norviq.dev
+keywords:
+  - llm
+  - security
+  - kubernetes
+  - opa
+  - ai-safety

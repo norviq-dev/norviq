@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+apiVersion: norviq.io/v1alpha1
+kind: NrvqClass
+metadata:
+  name: customer-support
+spec:
+  description: Customer-facing chatbot agents for orders, refunds, and product help
+  allowedTools:
+    - search_kb
+    - get_customer
+    - get_order
+    - update_order_status
+    - send_email
+  blockedTools:
+    - execute_sql
+    - delete_record
+    - spawn_pod
+    - exec_shell
+  maxCallsPerMinute: 60
+  initialTrustScore: 0.8
+  trustThreshold: 0.4

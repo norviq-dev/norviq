@@ -1,0 +1,25 @@
+{{- if .Values.rbac.exampleBindings.enabled }}
+# Example bindings of the shipped Norviq ClusterRoles to your subjects (IdP groups / ServiceAccounts).
+# Populate .Values.rbac.bindings; each entry binds one role to one subject.
+{{- range $i, $b := .Values.rbac.bindings }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ printf "%s-binding-%d" $b.role (int $i) }}
+  labels:
+    {{- include "norviq.labels" $ | nindent 4 }}
+subjects:
+  - kind: {{ $b.kind }}
+    name: {{ $b.name | quote }}
+    {{- if eq $b.kind "ServiceAccount" }}
+    namespace: {{ $b.namespace | default $.Values.namespace }}
+    {{- else }}
+    apiGroup: rbac.authorization.k8s.io
+    {{- end }}
+roleRef:
+  kind: ClusterRole
+  name: {{ $b.role }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}
+{{- end }}

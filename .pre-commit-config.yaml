@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: Apache-2.0
+# Fast local pre-commit subset (the full SAST set runs in .github/workflows/security.yml).
+# Install:  pip install pre-commit && pre-commit install
+# Scope:    STAGED changes only — fast, so it doesn't get bypassed.
+minimum_pre_commit_version: "3.5.0"
+default_stages: [pre-commit]
+
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks # scans staged changes; config .gitleaks.toml (diff, not history)
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff # lint norviq/ tests/ (matches Makefile `lint`)
+        args: [--force-exclude]
+
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.9
+    hooks:
+      - id: bandit # fast python SAST, high severity only
+        args: ["-ll", "-q"]
+        exclude: ^(tests/|norviq/redteam/|norviq/sdk/attacks/)
+
+  - repo: local
+    hooks:
+      - id: tsc-lite
+        name: tsc (ui, no emit)
+        language: system
+        files: ^ui/src/.*\.(ts|tsx)$
+        pass_filenames: false
+        entry: bash -c 'cd ui && npx --no-install tsc --noEmit'

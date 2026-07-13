@@ -1,0 +1,18 @@
+sequenceDiagram
+    participant Tool as LangChain Tool
+    participant Adapter as protect wrapper
+    participant Interceptor as ToolInterceptor
+    participant Resolver as SPIFFEResolver
+    participant Eval as OPAEvaluator
+
+    Tool->>Adapter: _run/_arun(...)
+    Adapter->>Interceptor: intercept_or_raise(tool_name, tool_params)
+    Interceptor->>Resolver: resolve() when identity missing
+    Interceptor->>Interceptor: build ToolCallEvent
+    Interceptor->>Eval: evaluate(event)
+    Eval-->>Interceptor: PolicyDecision
+    alt blocked/escalated
+        Interceptor-->>Adapter: raise NorviqBlockError/NorviqEscalateError
+    else allowed/audit
+        Adapter-->>Tool: call original method
+    end

@@ -1,0 +1,29 @@
+classDiagram
+    class Exception
+    class NorviqError {
+        +str message
+        +str code
+        +__init__(message: str, code: str) None
+    }
+    class NorviqBlockError {
+        +decision: Any
+        +__init__(decision: Any, code: str) None
+    }
+    class NorviqEscalateError {
+        +decision: Any
+        +__init__(decision: Any, code: str) None
+    }
+    class NorviqTimeoutError {
+        +timeout_ms: int
+        +__init__(timeout_ms: int, code: str) None
+    }
+    class NorviqConfigError {
+        +field: str
+        +__init__(field: str, reason: str, code: str) None
+    }
+
+    Exception <|-- NorviqError
+    NorviqError <|-- NorviqBlockError
+    NorviqError <|-- NorviqEscalateError
+    NorviqError <|-- NorviqTimeoutError
+    NorviqError <|-- NorviqConfigError

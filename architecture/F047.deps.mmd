@@ -1,0 +1,36 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+%% F047 dependency graph — upstream inputs and downstream consumers of the sector packs feature.
+graph LR
+    subgraph bundled[Bundled content - image]
+        REGO[policies/sector/*.rego]
+        MAN[policies/sector/packs.json]
+        CAT[policies/category_mapping.json]
+    end
+    subgraph backend[API backend]
+        LIB[norviq/api/packs.py]
+        ROUTER[norviq/api/routers/packs.py]
+        SET[settings_router.sector]
+        MODELS[db/models: NamespacePack + sector]
+        SESSION[db/session: idempotent ALTER]
+    end
+    subgraph engine[Engine]
+        LOADER[policy_loader.create/delete]
+        EVAL[evaluator: __pack__ candidate + _drop_pack_allow]
+    end
+    subgraph ui[Console]
+        VIEW[PolicyPacks view]
+        GEN[GeneralSettings sector field]
+    end
+
+    REGO --> LIB
+    MAN --> LIB
+    LIB --> ROUTER
+    MODELS --> ROUTER
+    ROUTER --> LOADER
+    LOADER --> EVAL
+    MODELS --> SESSION
+    ROUTER --> VIEW
+    SET --> GEN
+    CAT -. coverage taxonomy .-> ROUTER
+    EVAL --> DECISION[allow / block / escalate / audit]

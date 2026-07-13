@@ -1,0 +1,16 @@
+{{- if and .Values.postgresql.enabled (not .Values.postgresql.ha.enabled) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: norviq-postgresql-pvc
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: norviq-postgresql
+    {{- include "norviq.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.postgresql.storage }}
+{{- end }}

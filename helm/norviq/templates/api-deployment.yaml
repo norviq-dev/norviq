@@ -1,0 +1,136 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: norviq-api
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: norviq-api
+    {{- include "norviq.labels" . | nindent 4 }}
+spec:
+  {{- /* When the HPA owns the replica count, the Deployment must NOT also set `replicas` — otherwise every
+         reconcile resets it and fights the autoscaler (scale-up flapping). Omit it when autoscaling is on. */}}
+  {{- if not .Values.api.autoscaling.enabled }}
+  replicas: {{ .Values.api.replicas }}
+  {{- end }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: {{ .Values.api.rollout.maxSurge }}
+      maxUnavailable: {{ .Values.api.rollout.maxUnavailable }}
+  selector:
+    matchLabels:
+      app: norviq-api
+  template:
+    metadata:
+      labels:
+        app: norviq-api
+        {{- if .Values.config.spiffeCsi.enabled }}
+        norviq.io/svid: "true"        # opt-in to a SPIRE SVID (ClusterSPIFFEID podSelector)
+        {{- end }}
+    spec:
+      {{- include "norviq.imagePullSecrets" . | nindent 6 }}
+      {{- if .Values.config.spiffeCsi.enabled }}
+      serviceAccountName: norviq-api  # self-describing SVID: spiffe://norviq/ns/<ns>/sa/norviq-api
+      {{- end }}
+      {{- if .Values.api.spread.enabled }}
+      {{- include "norviq.spread" (dict "app" "norviq-api") | nindent 6 }}
+      {{- end }}
+      terminationGracePeriodSeconds: 30
+      initContainers:
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command: ['sh','-c','until nc -z norviq-postgresql 5432; do echo waiting for postgres; sleep 2; done']
+        - name: wait-for-redis
+          image: busybox:1.36
+          command: ['sh','-c','until nc -z norviq-redis 6379; do echo waiting for redis; sleep 2; done']
+      containers:
+        - name: api
+          image: "{{ .Values.images.registry }}{{ .Values.images.api.repository }}:{{ .Values.images.api.tag }}"
+          imagePullPolicy: {{ .Values.images.api.pullPolicy }}
+          {{- include "norviq.preStop" . | nindent 10 }}
+          ports:
+            - containerPort: {{ .Values.api.port }}
+              name: http
+          envFrom:
+            - secretRef:
+                name: norviq-secrets
+            - configMapRef:
+                name: norviq-config
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 30          # up to 150s for migrations + warm_cache
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          {{- if .Values.config.spiffeCsi.enabled }}
+          volumeMounts:
+            - name: spiffe-workload-api
+              mountPath: /spiffe-workload-api
+              readOnly: true
+          {{- end }}
+{{- if .Values.opa.enabled }}
+        # Long-lived OPA policy engine (per-replica sidecar). The API queries it at localhost:8181.
+        # NOTE (Wave 1 engine lockdown): `opa run --server` has NO `--capabilities` flag (only `opa
+        # build`/`opa check`/`opa eval` accept one — verified against the pinned opa.image version above), so
+        # a locked-down builtin set cannot be handed to this long-lived server directly. The real control is
+        # norviq/engine/opa_client.py::_check_capabilities, which independently re-compiles every pushed rego
+        # with `opa check --capabilities=<the same file>` (baked into the api/engine image) BEFORE it ever
+        # reaches this server — see helm/norviq/files/opa-capabilities.json / scripts/gen-opa-capabilities.py.
+        - name: opa
+          image: "{{ .Values.opa.image }}"
+          args:
+            - "run"
+            - "--server"
+            - "--v0-compatible"
+            - "--addr=0.0.0.0:{{ .Values.opa.port }}"
+            - "--log-level=error"
+          ports:
+            - containerPort: {{ .Values.opa.port }}
+              name: opa
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: opa
+            periodSeconds: 30
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: opa
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.opa.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+{{- end }}
+      {{- if .Values.config.spiffeCsi.enabled }}
+      volumes:
+        - name: spiffe-workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+      {{- end }}

@@ -1,0 +1,60 @@
+[project]
+name = "norviq"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.1",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "structlog>=23.0",
+    "httpx>=0.24",
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp>=1.20",
+    "opentelemetry-exporter-prometheus>=0.41b0",
+    "prometheus-client>=0.20",
+    "redis>=5.0",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    "alembic>=1.13",
+    "networkx>=3.0",
+    "fastapi>=0.109",
+    "uvicorn>=0.27",
+    "websockets>=12",
+    "python-jose>=3.3",
+    "passlib[bcrypt]>=1.7",
+]
+
+[project.scripts]
+norviq = "norviq.cli.main:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "httpx", "ruff>=0.2"]
+# Real SPIFFE workload identity (NRVQ_SPIFFE_MODE=workload-api). Optional + import-guarded so mock
+# mode (default) and CI/attack venvs install lean; only real SPIRE deployments need it.
+spiffe = ["spiffe>=0.2"]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+# Bandit SAST config (used by pre-commit + security.yml). Skip tests + attack payloads (which
+# intentionally contain injection strings). Baseline exclusions are triaged in
+# docs/engineering/security-baseline.md; do not broaden `skips` without a recorded rationale.
+[tool.bandit]
+exclude_dirs = ["tests", "norviq/redteam", "norviq/sdk/attacks", ".venv"]
+skips = []
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# Put the repo root on sys.path so `from tests.conftest import ...` resolves under a
+# bare `pytest` invocation (make test), matching `python -m pytest` behavior.
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["norviq*"]

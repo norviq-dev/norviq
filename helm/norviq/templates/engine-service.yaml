@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: norviq-engine
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: norviq-engine
+    {{- include "norviq.labels" . | nindent 4 }}
+spec:
+  selector:
+    app: norviq-engine
+  ports:
+    - port: {{ .Values.engine.port }}
+      targetPort: http
+      protocol: TCP
+      name: http

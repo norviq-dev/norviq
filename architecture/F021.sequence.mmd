@@ -1,0 +1,18 @@
+sequenceDiagram
+    participant User
+    participant UI
+    participant API
+    participant Engine
+    participant Redis
+    participant PostgreSQL
+
+    User->>UI: Open dashboard
+    UI->>API: GET /api/*
+    API->>Redis: lookup context
+    Redis-->>API: cached data (optional)
+    API->>Engine: evaluate tool call
+    Engine->>Redis: cache decision
+    Engine-->>API: allow/deny + reason
+    API->>PostgreSQL: store audit event
+    API-->>UI: decision payload
+    UI-->>User: render result

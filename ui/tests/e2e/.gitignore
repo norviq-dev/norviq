@@ -1,0 +1,5 @@
+node_modules/
+artifacts/
+storageState.json
+test-results/
+playwright-report/

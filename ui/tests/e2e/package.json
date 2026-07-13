@@ -1,0 +1,16 @@
+{
+  "name": "norviq-ui-e2e",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Playwright end-to-end suite for the Norviq console (authored against the REAL app + backend).",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "test:list": "playwright test --list",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "@types/node": "^22.10.0"
+  }
+}

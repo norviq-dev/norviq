@@ -1,0 +1,11 @@
+graph LR
+    S002[S002 Config]
+    F005[F005 TrustScore]
+    F008[F008 Redis Cache]
+    F009[F009 OPA Evaluator]
+
+    S002 --> F005
+    F005 --> F008
+    F005 --> F009
+
+    style F005 fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#1e3a8a

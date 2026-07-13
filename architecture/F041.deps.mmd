@@ -1,0 +1,20 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+flowchart LR
+    F041[F041 Red-Team Hooks]
+    F009[F009 Policy Engine]
+    F011[F011 Trust Scoring]
+    F014[F014 Audit Pipeline]
+    F027[F027 Trust Signals]
+    F036[F036 Asset Graph]
+    CLI[Click CLI]
+    API[FastAPI]
+    HTTPX[httpx AsyncClient]
+    F041 --> F009
+    F041 --> F011
+    F041 --> F014
+    F041 --> F027
+    F041 --> F036
+    F041 --> CLI
+    F041 --> API
+    F041 --> HTTPX

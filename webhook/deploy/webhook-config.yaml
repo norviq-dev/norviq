@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: norviq-sidecar-injector
+  labels:
+    app: norviq-webhook
+webhooks:
+  - name: sidecar-injector.norviq.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    clientConfig:
+      # caBundle is required for apiserver TLS verification in-cluster.
+      caBundle: REPLACE_BASE64_CA
+      service:
+        name: norviq-webhook
+        namespace: norviq
+        path: /mutate
+    rules:
+      - operations: ["CREATE"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+    namespaceSelector:
+      matchExpressions:
+        - key: norviq-injection
+          operator: In
+          values: ["enabled"]
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values: ["kube-system", "kube-public", "kube-node-lease", "norviq"]
+    failurePolicy: Ignore
+    reinvocationPolicy: Never
+    timeoutSeconds: 5

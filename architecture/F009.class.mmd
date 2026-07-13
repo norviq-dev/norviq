@@ -1,0 +1,51 @@
+classDiagram
+    class OPAEvaluator {
+        -RedisCache _cache
+        -asyncio.Semaphore _semaphore
+        -OpaClient opa
+        -dict[str, str] _pushed
+        -set[asyncio.Task[None]] _audit_tasks
+        -dict[str, str] _policies
+        +__init__(cache: RedisCache) None
+        +evaluate(event: ToolCallEvent) PolicyDecision
+        +_eval_slot() AbstractContextManager
+        +_handle_cache_hit(event: ToolCallEvent, cached: PolicyDecision, start: float) PolicyDecision
+        +_trust(spiffe_id: str) TrustScore
+        +_build_input(event: ToolCallEvent, trust: TrustResult) dict
+        +_collect_candidates(event: ToolCallEvent) list
+        +_resolve_precedence(results: list) dict
+        +_cache_tool_key(tool_name: str, tool_params: dict) str
+        +_evaluate_opa(key: str, namespace: str, agent_class: str, opa_input: dict, rego_source: str) dict
+        +_evaluate_opa_server(key: str, rego: str, opa_input: dict) dict
+        +_evaluate_opa_subprocess(namespace: str, agent_class: str, opa_input: dict, rego: str, package_name: str) dict
+        +_build_decision(result: dict, event: ToolCallEvent, trust: TrustResult, elapsed_ms: float) PolicyDecision
+        +_fallback_decision(event: ToolCallEvent, elapsed_ms: float) PolicyDecision
+        +_timeout_decision(event: ToolCallEvent, elapsed_ms: float) PolicyDecision
+        +load_policy(namespace: str, agent_class: str, rego_source: str) None
+        +reload_policy(namespace: str, agent_class: str, rego_source: str) None
+        +close() None
+    }
+    class OpaClient {
+        -bool _managed
+        -str _base_url
+        -float _timeout
+        -httpx.AsyncClient _client
+        +start() None
+        +push_policy(module_id: str, rego_source: str) None
+        +delete_policy(module_id: str) None
+        +query(package_name: str, opa_input: dict) dict
+        +health() bool
+        +stop() None
+    }
+    class RedisCache
+    class ToolCallEvent
+    class TrustResult
+    class PolicyDecision
+    class OPAServer["OPA server (sidecar / managed subprocess)"]
+
+    OPAEvaluator --> OpaClient : server-mode push + query
+    OPAEvaluator --> RedisCache : reads/writes cache
+    OPAEvaluator --> ToolCallEvent : evaluates
+    OPAEvaluator --> TrustResult : trust state
+    OPAEvaluator --> PolicyDecision : outputs
+    OpaClient --> OPAServer : HTTP /v1/policies + /v1/data

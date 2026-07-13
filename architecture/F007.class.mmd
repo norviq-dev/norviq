@@ -1,0 +1,23 @@
+%% B2 (IDENTITY epic): _resolve_from_socket dispatches on settings.spiffe_mode — "mock"
+%% (env-var identity, default) or "workload-api" (real SVID via the _svid_source seam,
+%% fail-closed via SpiffeResolutionError; the attested SVID's ns/sa win over env vars).
+classDiagram
+    class SPIFFEResolver {
+        -str _socket_path
+        -dict[str, tuple[AgentIdentity, float]] _cache
+        -asyncio.Lock _lock
+        +__init__(socket_path: str|None) None
+        +resolve() AgentIdentity
+        +_get_cached() AgentIdentity|None
+        +_resolve_from_socket() AgentIdentity
+        +_resolve_workload_api() AgentIdentity
+        +_svid_source() WorkloadApiClient
+        +_mock_resolve() AgentIdentity
+        +_fallback_identity() AgentIdentity
+        +clear_cache() None
+    }
+    class AgentIdentity
+    class SpiffeResolutionError
+
+    SPIFFEResolver --> AgentIdentity : builds identity
+    SPIFFEResolver ..> SpiffeResolutionError : workload-api fail-closed

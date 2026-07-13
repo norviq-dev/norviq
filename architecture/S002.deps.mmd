@@ -1,0 +1,19 @@
+graph LR
+    S002[S002 Config]
+    S003[S003 Exceptions]
+    F001[F001 Events]
+    F005[F005 TrustScore]
+    F006[F006 Engine Client]
+    F007[F007 SPIFFE Resolver]
+    F008[F008 Redis Cache]
+    F009[F009 OPA Evaluator]
+
+    S002 --> S003
+    S002 --> F001
+    S002 --> F005
+    S002 --> F006
+    S002 --> F007
+    S002 --> F008
+    S002 --> F009
+
+    style S002 fill:#dbeafe,stroke:#1d4ed8,stroke-width:2px,color:#1e3a8a

@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: Apache-2.0
+# B2 live proof: the resolver returns the ATTESTED SVID (spoof-proof) and FAILS CLOSED with no socket.
+# Independent of the sidecar tool-call path — runs SPIFFEResolver().resolve() directly in a pod that
+# has the SPIFFE CSI socket, the engine image (now ships pyspiffe), and BOGUS NRVQ_NAMESPACE/SA env.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: norviq-test
+  namespace: norviq
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: norviq-svid-proof
+  namespace: norviq
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        norviq.io/svid: "true"          # matches the ClusterSPIFFEID podSelector
+    spec:
+      serviceAccountName: norviq-test
+      restartPolicy: Never
+      containers:
+        - name: proof
+          image: norviq/norviq-engine:engine-latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: NRVQ_SPIFFE_MODE,   value: "workload-api" }
+            - { name: NRVQ_SPIFFE_SOCKET, value: "/spiffe-workload-api/spire-agent.sock" }
+            # BOGUS env — workload-api mode must IGNORE these (spoof test):
+            - { name: NRVQ_NAMESPACE,       value: "attacker" }
+            - { name: NRVQ_SERVICE_ACCOUNT, value: "evil" }
+          command: ["python", "-c"]
+          args:
+            - |
+              import asyncio, time
+              from norviq.engine.identity import SPIFFEResolver, SpiffeResolutionError
+              # A real workload waits for SPIRE to mint+propagate its SVID at startup (the resolver itself
+              # fail-closes per call). Retry briefly until the Workload API issues the SVID.
+              ident = None
+              for i in range(20):
+                  try:
+                      ident = asyncio.run(SPIFFEResolver().resolve()); break
+                  except SpiffeResolutionError as e:
+                      print(f"[{i}] waiting for SVID: {str(e)[:70]}"); time.sleep(3)
+              assert ident is not None, "SVID never issued"
+              print("RESOLVED:", ident.spiffe_id, "ns=", ident.namespace, "sa=", ident.service_account)
+              assert ident.spiffe_id == "spiffe://norviq/ns/norviq/sa/norviq-test", ident.spiffe_id
+              assert ident.namespace == "norviq" and ident.service_account == "norviq-test"
+              print("SPOOF-RESISTANT PASS: env attacker/evil ignored; attested SVID won")
+          volumeMounts:
+            - { name: spiffe-workload-api, mountPath: /spiffe-workload-api, readOnly: true }
+      volumes:
+        - name: spiffe-workload-api
+          csi: { driver: csi.spiffe.io, readOnly: true }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: norviq-svid-failclosed
+  namespace: norviq
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        norviq.io/svid: "true"
+    spec:
+      serviceAccountName: norviq-test
+      restartPolicy: Never
+      containers:
+        - name: proof
+          image: norviq/norviq-engine:engine-latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: NRVQ_SPIFFE_MODE,   value: "workload-api" }
+            - { name: NRVQ_SPIFFE_SOCKET, value: "/spiffe-workload-api/spire-agent.sock" }
+          command: ["python", "-c"]
+          args:
+            - |
+              import asyncio
+              from norviq.engine.identity import SPIFFEResolver, SpiffeResolutionError
+              try:
+                  asyncio.run(SPIFFEResolver().resolve())
+                  raise SystemExit("FAIL: expected SpiffeResolutionError (no socket mounted)")
+              except SpiffeResolutionError as e:
+                  print("FAIL-CLOSED PASS:", str(e)[:120])
+          # NO spiffe socket volume -> the resolver must fail closed (not env-fallback).

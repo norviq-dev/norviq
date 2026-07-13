@@ -1,0 +1,34 @@
+classDiagram
+    class BaseSettings
+    class SettingsConfigDict
+    class NorviqSettings {
+        +str policy_engine_url
+        +str enforcement_mode
+        +int sdk_timeout_ms
+        +str sdk_fallback_mode
+        +str spiffe_socket
+        +str redis_url
+        +int redis_ttl_policy_s
+        +int redis_ttl_trust_s
+        +float trust_threshold
+        +float trust_violation_penalty
+        +str pg_url
+        +int pg_pool_size
+        +int audit_retention_days
+        +str otel_endpoint
+        +str log_level
+        +str log_format
+        +str socket_path
+        +int http_fallback_port
+        +int api_port
+        +str api_secret_key
+        +int webhook_port
+        +str webhook_cert_dir
+        +str sidecar_image
+        +int session_ttl_s
+    }
+    class settings
+
+    BaseSettings <|-- NorviqSettings
+    SettingsConfigDict ..> NorviqSettings : model_config
+    NorviqSettings --> settings : singleton

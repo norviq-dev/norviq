@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+apiVersion: norviq.io/v1alpha1
+kind: NrvqPolicy
+metadata:
+  name: prod-baseline
+  namespace: chatbot-prod
+spec:
+  target:
+    namespace: chatbot-prod
+  enforcementMode: audit
+  preset: permissive
+  priority: 50

@@ -1,0 +1,23 @@
+%% SPDX-License-Identifier: Apache-2.0
+%% Copyright 2026 Norviq Contributors
+%% F045 fleet dependency graph.
+graph LR
+    subgraph Spoke[Spoke cluster - api pod]
+        RELAY[FleetRelayForwarder<br/>norviq/fleet_relay.py]
+        SPOKEDB[(spoke postgres<br/>agent_registry, audit_log)]
+        RELAY -->|read only| SPOKEDB
+    end
+    subgraph Hub[Hub cluster]
+        FAPI[fleet-api<br/>norviq/fleet/main.py]
+        FDB[(fleet-postgresql<br/>cluster, agent_rollup, audit_rollup)]
+        FAPI --> FDB
+    end
+    AUTH[norviq/api/auth.py<br/>get_current_user + scoped_cluster]
+    CONSOLE[Console Fleet view<br/>ui/src/pages/Fleet.tsx]
+
+    RELAY -->|POST heartbeat + rollup| FAPI
+    FAPI -->|token validate| AUTH
+    RELAY -.->|reuses HS256/OIDC| AUTH
+    CONSOLE -->|GET fleet/*| FAPI
+    HELM[helm: gated fleet block<br/>fleet.enabled / fleet.hub.enabled] -.->|renders nothing when off| Spoke
+    HELM -.-> Hub

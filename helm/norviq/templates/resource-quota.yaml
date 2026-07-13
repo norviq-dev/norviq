@@ -1,0 +1,18 @@
+{{- $namespaces := .Values.policyQuotaNamespaces -}}
+{{- if not $namespaces }}
+{{- fail "policyQuotaNamespaces must list tenant namespaces to protect NrvqPolicy quota" -}}
+{{- end }}
+{{- range $ns := $namespaces }}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: norviq-crd-quota
+  namespace: {{ $ns }}
+  labels:
+    {{- include "norviq.labels" $ | nindent 4 }}
+spec:
+  hard:
+    count/nrvqpolicies.norviq.io: "100"
+---
+{{- end }}
+# NrvqClass and NrvqConfig are cluster-scoped — limited by RBAC, not ResourceQuota.

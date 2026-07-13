@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+# Multi-stage build for minimal UI image
+
+FROM node:20-alpine AS builder
+WORKDIR /build
+COPY ui/package*.json ./
+RUN npm ci
+COPY ui/ .
+RUN npm run build
+
+FROM nginx:alpine
+COPY --from=builder /build/dist /usr/share/nginx/html
+COPY ui/nginx.conf /etc/nginx/conf.d/default.conf
+COPY ui/docker-entrypoint.sh /docker-entrypoint.d/99-nrvq-config.sh
+RUN chmod +x /docker-entrypoint.d/99-nrvq-config.sh
+# Single-cluster default: an empty fleet-proxy include so nginx starts with no fleet-api dependency; the entrypoint
+# overwrites it with the real proxy block only when FLEET_API_URL is set (the hub).
+RUN touch /etc/nginx/fleet-proxy.conf
+
+EXPOSE 80
+# F-25: the entrypoint writes /config.js from FLEET_API_URL, then runs nginx.
+CMD ["/docker-entrypoint.d/99-nrvq-config.sh"]

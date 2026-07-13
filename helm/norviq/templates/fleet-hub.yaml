@@ -1,0 +1,225 @@
+{{- if .Values.fleet.hub.enabled }}
+# Fleet hub control plane (F045): the fleet-api (SAME api image, different command) over a dedicated
+# fleet-postgresql. Rendered ONLY where fleet.hub.enabled — a normal single-cluster install renders none of this.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: norviq-fleet-config
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+data:
+  NRVQ_FLEET_PG_URL: {{ .Values.fleet.hub.pgUrl | quote }}
+  NRVQ_FLEET_STALE_AFTER_S: {{ .Values.fleet.staleAfterSeconds | default 180 | quote }}
+  NRVQ_FLEET_BUNDLE_TTL_S: {{ .Values.fleet.hub.bundleTtlSeconds | default 900 | quote }}
+  NRVQ_DB_SSL_MODE: {{ .Values.config.dbSslMode | quote }}
+  NRVQ_REQUIRE_STRONG_SECRET: {{ .Values.config.requireStrongSecret | default false | quote }}
+  # OIDC validation (the hub validates the same tokens as the spoke api).
+  NRVQ_OIDC_ENABLED: {{ .Values.oidc.enabled | default false | quote }}
+  NRVQ_OIDC_ISSUER: {{ .Values.oidc.issuer | default "" | quote }}
+  NRVQ_OIDC_AUDIENCE: {{ .Values.oidc.audience | default "" | quote }}
+  NRVQ_OIDC_JWKS_URL: {{ .Values.oidc.jwksUrl | default "" | quote }}
+  NRVQ_OIDC_GROUP_CLAIM: {{ .Values.oidc.groupClaim | default "groups" | quote }}
+  NRVQ_OIDC_GROUP_MAPPINGS: {{ .Values.oidc.groupMappings | default dict | toJson | quote }}
+  NRVQ_LEGACY_HS256_ENABLED: {{ .Values.oidc.legacyHs256Enabled | default true | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: norviq-fleet-api
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: norviq-fleet-api
+    {{- include "norviq.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.fleet.hub.replicas | default 1 }}
+  selector:
+    matchLabels:
+      app: norviq-fleet-api
+  template:
+    metadata:
+      labels:
+        app: norviq-fleet-api
+    spec:
+      {{- include "norviq.imagePullSecrets" . | nindent 6 }}
+      {{- if .Values.fleet.hub.spread.enabled }}
+      {{- include "norviq.spread" (dict "app" "norviq-fleet-api" "ctx" $) | nindent 6 }}
+      {{- end }}
+      initContainers:
+        - name: wait-for-fleet-postgres
+          image: busybox:1.36
+          command: ['sh','-c','until nc -z fleet-postgresql 5432; do echo waiting for fleet-postgresql; sleep 2; done']
+      containers:
+        - name: fleet-api
+          image: "{{ .Values.images.registry }}{{ .Values.images.api.repository }}:{{ .Values.images.api.tag }}"
+          imagePullPolicy: {{ .Values.images.api.pullPolicy }}
+          command: ["python", "-m", "uvicorn", "norviq.fleet.main:app", "--host", "0.0.0.0", "--port", "8080"]
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - secretRef:
+                name: norviq-secrets        # NRVQ_API_SECRET_KEY for token validation
+            - configMapRef:
+                name: norviq-fleet-config   # NRVQ_FLEET_PG_URL + OIDC validation settings
+          {{- if .Values.fleet.hub.signingKeySecretName }}
+          # P2: read the bundle signing PRIVATE key from a pre-created in-cluster Secret (never in values/
+          # git/CI). An explicit env overrides the empty envFrom default. Empty -> hub cannot sign (fail-closed).
+          env:
+            - name: NRVQ_FLEET_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.fleet.hub.signingKeySecretName }}
+                  key: NRVQ_FLEET_SIGNING_KEY
+          {{- end }}
+          resources:
+            {{- toYaml .Values.fleet.hub.resources | nindent 12 }}
+          startupProbe:
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 30
+            failureThreshold: 5
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: norviq-fleet-api
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: norviq-fleet-api
+spec:
+  {{- if .Values.fleet.hub.nodePort }}
+  type: NodePort   # local multi-cluster: lets a second kind cluster reach the hub over the shared network
+  {{- end }}
+  selector:
+    app: norviq-fleet-api
+  ports:
+    - port: 8080
+      targetPort: http
+      name: http
+      {{- if .Values.fleet.hub.nodePort }}
+      nodePort: {{ .Values.fleet.hub.nodePort }}
+      {{- end }}
+{{- if not .Values.fleet.hub.postgresql.ha.enabled }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: fleet-postgresql
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: fleet-postgresql
+    {{- include "norviq.labels" . | nindent 4 }}
+spec:
+  serviceName: fleet-postgresql
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fleet-postgresql
+  template:
+    metadata:
+      labels:
+        app: fleet-postgresql
+    spec:
+      containers:
+        - name: postgresql
+          image: "{{ .Values.images.postgresql.repository }}:{{ .Values.images.postgresql.tag }}"
+          ports:
+            - containerPort: {{ .Values.fleet.hub.postgresql.port }}
+              name: postgres
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.fleet.hub.postgresql.database }}
+            - name: POSTGRES_USER
+              value: {{ .Values.fleet.hub.postgresql.username }}
+            - name: POSTGRES_PASSWORD
+              value: {{ .Values.fleet.hub.postgresql.password }}
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          resources:
+            {{- toYaml .Values.fleet.hub.postgresql.resources | nindent 12 }}
+          volumeMounts:
+            - name: fleet-pg-data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: fleet-pg-data
+          persistentVolumeClaim:
+            claimName: fleet-postgresql-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fleet-postgresql
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: fleet-postgresql
+spec:
+  selector:
+    app: fleet-postgresql
+  ports:
+    - port: {{ .Values.fleet.hub.postgresql.port }}
+      targetPort: postgres
+      name: postgres
+  clusterIP: None
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fleet-postgresql-pvc
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: fleet-postgresql
+    {{- include "norviq.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.fleet.hub.postgresql.storage }}
+{{- end }}
+{{- if .Values.fleet.hub.postgresql.ha.enabled }}
+---
+# HA fleet store via the CloudNativePG operator (prod). GATED; requires the CNPG operator installed.
+# Exposes fleet-postgresql-ha-rw; point fleet.hub.pgUrl at it.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: fleet-postgresql-ha
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+spec:
+  instances: {{ .Values.fleet.hub.postgresql.ha.instances }}
+  imageName: "{{ .Values.images.postgresql.repository }}:{{ .Values.images.postgresql.tag }}"
+  bootstrap:
+    initdb:
+      database: {{ .Values.fleet.hub.postgresql.database }}
+      owner: {{ .Values.fleet.hub.postgresql.username }}
+      secret:
+        name: fleet-postgresql-ha-app
+  storage:
+    size: {{ .Values.fleet.hub.postgresql.storage }}
+  resources:
+    {{- toYaml .Values.fleet.hub.postgresql.resources | nindent 4 }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: fleet-postgresql-ha-app
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+type: kubernetes.io/basic-auth
+stringData:
+  username: {{ .Values.fleet.hub.postgresql.username | quote }}
+  password: {{ .Values.fleet.hub.postgresql.password | quote }}
+{{- end }}
+{{- end }}

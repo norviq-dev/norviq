@@ -1,0 +1,38 @@
+{{- if and .Values.webhook.enabled .Values.webhook.injection.enabled }}
+# Sidecar-injector admission webhook. caBundle is left empty here and patched at install time by
+# the webhook-cert-job hook (self-signed cert acts as its own CA). failurePolicy: Ignore so a
+# not-yet-bootstrapped webhook never blocks pod creation.
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: norviq-sidecar-injector
+  labels:
+    app: norviq-webhook
+    {{- include "norviq.labels" . | nindent 4 }}
+webhooks:
+  - name: sidecar-injector.norviq.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    clientConfig:
+      caBundle: ""
+      service:
+        name: norviq-webhook
+        namespace: {{ .Values.namespace }}
+        path: /mutate
+    rules:
+      - operations: ["CREATE"]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+    namespaceSelector:
+      matchExpressions:
+        - key: norviq-injection
+          operator: In
+          values: ["enabled"]
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values: ["kube-system", "kube-public", "kube-node-lease", {{ .Values.namespace | quote }}]
+    failurePolicy: Ignore
+    reinvocationPolicy: Never
+    timeoutSeconds: 5
+{{- end }}

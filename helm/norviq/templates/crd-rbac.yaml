@@ -1,0 +1,38 @@
+# Cluster admins can manage all Norviq CRDs
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: norviq-admin
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["norviq.io"]
+    resources: ["nrvqpolicies", "nrvqclasses", "nrvqconfigs"]
+    verbs: ["*"]
+  - apiGroups: ["norviq.io"]
+    resources: ["nrvqpolicies/status", "nrvqclasses/status", "nrvqconfigs/status"]
+    verbs: ["get", "update", "patch"]
+---
+# Namespace users can manage policies in their namespace only
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: norviq-policy-editor
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["norviq.io"]
+    resources: ["nrvqpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+# Read-only access for viewing policies
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: norviq-viewer
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["norviq.io"]
+    resources: ["nrvqpolicies", "nrvqclasses", "nrvqconfigs"]
+    verbs: ["get", "list", "watch"]

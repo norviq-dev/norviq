@@ -1,0 +1,13 @@
+flowchart TD
+  F018[F018: Norviq Web Console]
+  F017[F017: FastAPI API]
+  F013[F013: DB Models]
+  F017U[F017-update: New Endpoints]
+  BLOCKS[F018 blocks]
+  NONE[None (standalone)]
+
+  F018 --> F017
+  F018 --> F013
+  F018 --> F017U
+
+  BLOCKS --> NONE
