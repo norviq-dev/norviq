@@ -88,4 +88,4 @@ scripts/fleet-local/fleet-signing-*.pem
 scripts/verify.sh
 scripts/gate-*.sh
 docs/engineering/test-baseline-discipline.md
-.github/workflows/
+.github/workflows/deploy.yml

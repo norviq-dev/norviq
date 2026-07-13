@@ -12,28 +12,28 @@ baselineClusterPolicy:
   preset: strict
 
 images:
-  # Optional registry prefix (with trailing slash) prepended to every component repository so
-  # any registry is a drop-in. Set this to your own registry before deploying, e.g.:
+  # Registry prefix (trailing slash) prepended to every component repository. Defaults to the
+  # project's public GHCR org, so `helm install` pulls the official public images out of the box.
+  # Override to run your own build, e.g.:
+  #   Your own GHCR:            "ghcr.io/<your-org>/"
   #   Google Artifact Registry: "us-docker.pkg.dev/<PROJECT_ID>/<REPO>/"
-  #   Google Container Registry (legacy): "gcr.io/<PROJECT_ID>/"
-  #   GHCR: "ghcr.io/" (+ repository "<org>/norviq-engine")
-  #   ACR: "<acct>.azurecr.io/"
-  # Empty = Docker Hub, using the repository values below as-is.
-  registry: ""
+  #   ACR:                      "<acct>.azurecr.io/"
+  #   Docker Hub:               "" (+ set repository to "<user>/norviq-engine")
+  registry: "ghcr.io/norviq-dev/"
   engine:
-    repository: norviq/norviq-engine
+    repository: norviq-engine
     tag: engine-latest
     pullPolicy: Always
   api:
-    repository: norviq/norviq-engine
+    repository: norviq-engine
     tag: api-latest
     pullPolicy: Always
   ui:
-    repository: norviq/norviq-engine
+    repository: norviq-engine
     tag: ui-latest
     pullPolicy: Always
   webhook:
-    repository: norviq/norviq-engine
+    repository: norviq-engine
     tag: webhook-latest
     pullPolicy: Always
   redis:
@@ -43,10 +43,9 @@ images:
     repository: postgres
     tag: "16-alpine"
 
-# Pull secrets for the component images. Default to the Docker Hub creds; set to [] when the images
-# are public (the locked default) or override with the GHCR/ACR pull secret name.
-imagePullSecrets:
-  - name: dockerhub-secret
+# Pull secrets for the component images. The default public GHCR images need NONE (empty list).
+# Set a pull-secret name here only if you point `images.registry` at a private registry.
+imagePullSecrets: []
 
 # Graceful shutdown: a preStop sleep lets the Service deregister the endpoint before SIGTERM so
 # in-flight requests drain during a rolling upgrade. Applied to api/engine/webhook. 0 = no hook.

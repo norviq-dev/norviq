@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Build & Push
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # GHCR — public images under the org, pushed with the built-in GITHUB_TOKEN (no external secrets).
+  REPOSITORY: ghcr.io/norviq-dev/norviq-engine
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - component: engine
+            dockerfile: Dockerfile.engine
+            context: .
+          - component: api
+            dockerfile: Dockerfile.api
+            context: .
+          - component: ui
+            dockerfile: Dockerfile.ui
+            context: .
+          - component: webhook
+            dockerfile: Dockerfile
+            context: webhook
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.context }}/${{ matrix.dockerfile }}
+          push: true
+          build-args: |
+            NRVQ_GIT_SHA=${{ github.sha }}
+          tags: |
+            ${{ env.REPOSITORY }}:${{ matrix.component }}-${{ github.sha }}
+            ${{ env.REPOSITORY }}:${{ matrix.component }}-latest
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+
+      # Trivy IMAGE scan of the just-pushed image.
+      # (Image scanning lives HERE, not in security.yml: images only exist after this build.)
+      # REPORT-ONLY for now (exit-code "0"): the images have never been scanned, so a fail-closed
+      # gate would break the first main build→deploy. RATCHET: capture a .trivyignore baseline from
+      # the first real scan, then set exit-code "1". See docs/engineering/security-baseline.md.
+      - name: trivy image scan (${{ matrix.component }}) — report-only
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: ${{ env.REPOSITORY }}:${{ matrix.component }}-${{ github.sha }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+          exit-code: "0" # RATCHET → "1" after baseline (see security-baseline.md)

@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: Apache-2.0
+# Release the Helm chart as an OCI artifact to GHCR on a version tag.
+# Consumers then: helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version <x.y.z>
+name: Release Chart
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+jobs:
+  chart:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write        # push the OCI chart to GHCR with the built-in token
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Lint
+        run: helm lint helm/norviq
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Package
+        run: helm package helm/norviq -d dist/
+      - name: Push chart to GHCR (OCI)
+        run: helm push dist/norviq-*.tgz oci://ghcr.io/norviq-dev/charts
