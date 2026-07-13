@@ -17,9 +17,18 @@ COPY policies/ policies/
 # OPA arch matches the build target (TARGETARCH = amd64|arm64; AKS=amd64, local kind on Apple Silicon=arm64).
 ARG TARGETARCH=amd64
 # Install the OPA binary so the `subprocess` rollback mode works in-cluster (server mode uses the
-# OPA sidecar and does not need this; kept for parity with Dockerfile.api).
+# OPA sidecar and does not need this; kept for parity with Dockerfile.api). Pinned to the same version
+# as the Helm sidecar image (openpolicyagent/opa:1.18.0-static) and integrity-checked against the
+# published SHA256 digest so a compromised/mismatched download fails the build closed instead of
+# silently installing an unverified decision-engine binary.
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
-    curl -L -o /usr/local/bin/opa "https://openpolicyagent.org/downloads/latest/opa_linux_${TARGETARCH}_static" && \
+    case "${TARGETARCH}" in \
+        amd64) OPA_SHA256="65d700b14b99b354982b61031b40bdc8e316ea93dadd61818f066d1d9a69dcce" ;; \
+        arm64) OPA_SHA256="93499a6eead5277ba1a52304111103ec4e7779d4f6b11716a4f07905b7ee4a96" ;; \
+        *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac && \
+    curl -fL -o /usr/local/bin/opa "https://openpolicyagent.org/downloads/v1.18.0/opa_linux_${TARGETARCH}_static" && \
+    echo "${OPA_SHA256}  /usr/local/bin/opa" | sha256sum -c - && \
     chmod +x /usr/local/bin/opa && \
     opa version && \
     apt-get remove -y curl && \

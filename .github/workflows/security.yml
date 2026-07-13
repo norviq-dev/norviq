@@ -28,7 +28,7 @@ jobs:
   secrets:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
       - name: gitleaks (PR range, fail-closed)
@@ -44,10 +44,10 @@ jobs:
   python-sast:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
       - name: install
@@ -67,8 +67,8 @@ jobs:
   ts-sast:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
       - name: eslint (security, ui changed)
@@ -82,13 +82,13 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true # RATCHET: remove once docs/engineering/security-baseline.md is populated
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
       - name: pip-audit (report)
         run: pip install pip-audit && pip-audit -r requirements.txt || true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
       - name: npm audit high (report)
@@ -100,7 +100,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true # RATCHET: flip to blocking after baseline triage
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: checkov (helm + crds)
         uses: bridgecrewio/checkov-action@v12
         with:
