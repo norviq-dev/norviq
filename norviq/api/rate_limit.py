@@ -37,8 +37,8 @@ from __future__ import annotations
 import json
 import time
 
+import jwt
 import structlog
-from jose import jwt
 
 from norviq.config import settings
 
@@ -93,7 +93,10 @@ def _unverified_sub(scope) -> str | None:
             return None
         token = raw[7:].strip()
         try:
-            claims = jwt.get_unverified_claims(token)
+            # Deliberately unverified (see module docstring): no signature/JWKS check, just a base64
+            # claims peek to pick a rate-limit bucket. `verify_signature: False` is PyJWT's equivalent
+            # of jose's `get_unverified_claims` (both skip signature AND every other claim check).
+            claims = jwt.decode(token, options={"verify_signature": False})
         except Exception:  # noqa: BLE001 - malformed/garbage token -> fall back to IP keying
             return None
         sub = claims.get("sub")

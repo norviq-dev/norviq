@@ -11,9 +11,9 @@ import hashlib
 from datetime import datetime, timedelta, timezone
 
 import httpx
+import jwt
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from jose import jwt
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession

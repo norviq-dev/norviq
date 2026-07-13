@@ -14,9 +14,9 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import jwt
 import pytest
 from fastapi.testclient import TestClient
-from jose import jwt
 
 from norviq.api import passwords as pw
 from norviq.api.db.session import get_session

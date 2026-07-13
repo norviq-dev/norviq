@@ -22,7 +22,7 @@ import time
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials
-from jose import JWTError
+from jwt import PyJWTError as JWTError
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession

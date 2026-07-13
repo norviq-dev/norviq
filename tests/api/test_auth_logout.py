@@ -16,9 +16,10 @@ from __future__ import annotations
 import time
 from types import SimpleNamespace
 
+import jwt
 import pytest
 from fastapi.testclient import TestClient
-from jose import JWTError, jwt
+from jwt import PyJWTError as JWTError
 from starlette.websockets import WebSocketDisconnect
 
 from norviq.api import session_revocation as sr

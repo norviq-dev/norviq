@@ -12,10 +12,10 @@ from __future__ import annotations
 import asyncio
 
 import httpx
+import jwt
 import pytest
 import websockets
 import websockets.exceptions  # websockets>=15 does not auto-import the submodule
-from jose import jwt
 
 from norviq.config import settings
 

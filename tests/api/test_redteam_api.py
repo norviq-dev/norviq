@@ -52,7 +52,7 @@ def _client(seeded: list[str] | None = None) -> TestClient:
 
 def _token(role: str = "admin") -> str:
     """Create an auth token for the given role."""
-    from jose import jwt
+    import jwt
 
     from norviq.config import settings
 

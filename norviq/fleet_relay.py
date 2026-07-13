@@ -14,8 +14,8 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 import httpx
+import jwt
 import structlog
-from jose import jwt
 from sqlalchemy import func, select
 
 from norviq.api.db.models import AgentRegistryEntry, AuditLogEntry

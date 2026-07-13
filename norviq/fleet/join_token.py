@@ -33,9 +33,14 @@ def _unb64(s: str) -> bytes:
 
 def derive_bundle_pubkey(signing_key_pem: str) -> str:
     """Derive the RS256 PUBLIC key PEM (the bundle trust root) from the hub's PRIVATE signing key PEM."""
-    from jose.backends import RSAKey
+    from cryptography.hazmat.primitives import serialization
 
-    return RSAKey(signing_key_pem, "RS256").public_key().to_pem().decode()
+    private_key = serialization.load_pem_private_key(signing_key_pem.encode(), password=None)
+    # SubjectPublicKeyInfo ("-----BEGIN PUBLIC KEY-----") — the same PEM format jose's
+    # `RSAKey(...).public_key().to_pem()` (default pem_format="PKCS8") produced.
+    return private_key.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+    ).decode()
 
 
 def mint_join_token(

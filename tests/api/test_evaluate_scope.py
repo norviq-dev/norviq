@@ -8,10 +8,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import jwt
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from jose import jwt
 
 from norviq.api import auth as auth_mod
 from norviq.api.main import create_app

@@ -12,8 +12,8 @@ import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import jwt
 from fastapi.testclient import TestClient
-from jose import jwt
 
 from norviq.api import api_keys as ak
 from norviq.api.db.session import get_session

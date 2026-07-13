@@ -10,8 +10,8 @@ import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import jwt
 from fastapi.testclient import TestClient
-from jose import jwt
 
 from norviq.api.db.session import get_session
 from norviq.api.main import create_app

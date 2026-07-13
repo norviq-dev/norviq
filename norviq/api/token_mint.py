@@ -16,7 +16,7 @@ import argparse
 import sys
 import time
 
-from jose import jwt
+import jwt
 
 from norviq.config import settings
 

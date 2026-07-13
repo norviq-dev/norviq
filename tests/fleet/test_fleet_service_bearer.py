@@ -7,8 +7,8 @@ falls back to a self-minted HS256 service token only when legacy HS256 is enable
 
 from __future__ import annotations
 
+import jwt
 import pytest
-from jose import jwt
 
 from norviq.config import settings
 from norviq.fleet.oidc_cc import fleet_service_bearer

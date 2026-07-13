@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 
 import httpx
-from jose import jwt
+import jwt
 import pytest
 
 

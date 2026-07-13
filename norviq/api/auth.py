@@ -11,10 +11,11 @@ applied to validated OIDC claims so all consumers (HTTP deps + the WebSocket pat
 normalized ``role``/``namespace``/``sub`` shape.
 """
 
+import jwt
 import structlog
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt
+from jwt import PyJWTError as JWTError
 
 from norviq.api.jwks import get_jwks_client
 from norviq.api.session_revocation import is_revoked, token_hash
@@ -47,14 +48,24 @@ async def _validate_oidc(token: str, header: dict) -> dict:
         raise JWTError("OIDC token missing kid")
     key = await get_jwks_client().get_key(kid)
     try:
+        # PyJWT's `decode` wants an actual key object, not a raw JWK dict (jose accepted the dict
+        # directly) — wrap it. `PyJWK` infers the algorithm from the JWK's `kty`/`crv` (RSA -> RS256,
+        # EC P-256 -> ES256) when the JWK has no explicit `alg`, matching this deployment's supported set,
+        # and PyJWT then requires the token's header `alg` to equal that inferred algorithm — a strictly
+        # tighter alg-confusion guard than jose's plain allowlist check.
+        signing_key = jwt.PyJWK(key)
+    except JWTError as exc:
+        log.warning("nrvq.auth.oidc_rejected", error=str(exc), code="NRVQ-AUTH-14001")
+        raise JWTError(f"invalid JWKS key: {exc}") from exc
+    try:
         claims = dict(
             jwt.decode(
                 token,
-                key,
+                signing_key,
                 algorithms=["RS256", "ES256"],
                 issuer=settings.oidc_issuer,
                 audience=settings.oidc_audience,
-                options={"require_exp": True, "verify_aud": True, "verify_iss": True},
+                options={"require": ["exp"], "verify_aud": True, "verify_iss": True},
             )
         )
     except JWTError as exc:

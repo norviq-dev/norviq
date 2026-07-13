@@ -10,9 +10,9 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
+import jwt
 import pytest
 from fastapi.testclient import TestClient
-from jose import jwt
 from sqlalchemy import text
 
 from norviq.api.db.session import create_tables, ensure_schema_compatibility, get_session

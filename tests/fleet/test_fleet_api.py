@@ -11,8 +11,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import jwt
 from fastapi.testclient import TestClient
-from jose import jwt
 
 from norviq.config import settings
 from norviq.fleet.db import fleet_get_session

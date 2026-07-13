@@ -17,10 +17,10 @@ import json
 import time
 
 import httpx
+import jwt
 import pytest
 from fastapi.security import HTTPAuthorizationCredentials
-from jose import JWTError, jwt
-from jose.backends import RSAKey
+from jwt import PyJWTError as JWTError
 
 from norviq.api import auth as auth_mod
 from norviq.api.jwks import JwksClient
@@ -30,7 +30,7 @@ _KID = "test-kid"
 
 
 def _gen_rsa_pem() -> str:
-    """Generate a 2048-bit RSA private key PEM (pure-python rsa lib; jose has no cryptography backend)."""
+    """Generate a 2048-bit RSA private key PEM (prefers `cryptography`; falls back to the pure-python `rsa` lib)."""
     try:  # prefer cryptography if a future env adds it
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric import rsa as crsa
@@ -51,10 +51,17 @@ def _gen_rsa_pem() -> str:
 @pytest.fixture(scope="module")
 def rsa_keys() -> dict:
     """Private PEM + public JWK (with kid) for signing/verifying synthetic OIDC tokens."""
+    from cryptography.hazmat.primitives import serialization
+
     priv_pem = _gen_rsa_pem()
-    jwk = RSAKey(priv_pem, "RS256").public_key().to_dict()
+    private_key = serialization.load_pem_private_key(priv_pem.encode(), password=None)
+    public_key = private_key.public_key()
+    jwk = jwt.algorithms.RSAAlgorithm.to_jwk(public_key, as_dict=True)
+    jwk["alg"] = "RS256"
     jwk["kid"] = _KID
-    pub_pem = RSAKey(priv_pem, "RS256").public_key().to_pem().decode()
+    pub_pem = public_key.public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+    ).decode()
     return {"priv_pem": priv_pem, "jwk": jwk, "pub_pem": pub_pem}
 
 
@@ -238,6 +245,33 @@ async def test_hs256_rejected_when_legacy_disabled(oidc_on, monkeypatch) -> None
     token = jwt.encode({"sub": "svc", "role": "admin"}, settings.api_secret_key, algorithm="HS256")
     with pytest.raises(Exception) as exc:
         await auth_mod.get_current_user(_creds(token))
+    assert getattr(exc.value, "status_code", None) == 401
+
+
+@pytest.mark.asyncio
+async def test_rs256_token_rejected_on_hs256_only_path(rsa_keys, monkeypatch) -> None:
+    """PyJWT-swap regression: a validly-signed RS256 token must NOT be accepted when OIDC is off
+    (legacy-HS256-only mode) — the two paths stay mutually exclusive after the jose->PyJWT swap."""
+    monkeypatch.setattr(settings, "oidc_enabled", False)
+    monkeypatch.setattr(settings, "legacy_hs256_enabled", True)
+    token = _mint(rsa_keys["priv_pem"], {"sub": "attacker", "role": "admin"})
+    with pytest.raises(Exception) as exc:
+        await auth_mod.get_current_user(_creds(token))
+    assert getattr(exc.value, "status_code", None) == 401
+
+
+@pytest.mark.asyncio
+async def test_alg_none_rejected(oidc_on) -> None:
+    """`alg: none` (the classic unsigned-token forgery) must never validate on either path."""
+
+    def b64(d: bytes) -> str:
+        return base64.urlsafe_b64encode(d).rstrip(b"=").decode()
+
+    header = b64(json.dumps({"alg": "none", "typ": "JWT"}).encode())
+    payload = b64(json.dumps({"sub": "attacker", "role": "admin", "namespace": ""}).encode())
+    forged = f"{header}.{payload}."  # no signature segment, as `alg: none` prescribes
+    with pytest.raises(Exception) as exc:
+        await auth_mod.get_current_user(_creds(forged))
     assert getattr(exc.value, "status_code", None) == 401
 
 

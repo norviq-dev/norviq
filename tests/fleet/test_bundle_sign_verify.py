@@ -10,7 +10,6 @@ import copy
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from jose.backends import RSAKey
 
 from norviq.fleet.bundle import (
     BundleVerifyError,
@@ -38,7 +37,12 @@ def _gen_rsa_pem() -> str:
 
 
 def _pub(priv_pem: str) -> str:
-    return RSAKey(priv_pem, "RS256").public_key().to_pem().decode()
+    from cryptography.hazmat.primitives import serialization
+
+    private_key = serialization.load_pem_private_key(priv_pem.encode(), password=None)
+    return private_key.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+    ).decode()
 
 
 def _bundle() -> dict:

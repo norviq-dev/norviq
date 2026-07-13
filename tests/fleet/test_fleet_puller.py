@@ -12,7 +12,6 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from jose.backends import RSAKey
 
 from norviq.config import settings
 from norviq.fleet.bundle import rfc3339_z, sign_bundle
@@ -20,14 +19,22 @@ from norviq.fleet_puller import FleetPolicyPuller
 
 
 def _gen_rsa_pem() -> str:
-    import rsa as rsalib
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa as crsa
 
-    _, priv = rsalib.newkeys(2048)
-    return priv.save_pkcs1().decode()
+    key = crsa.generate_private_key(public_exponent=65537, key_size=2048)
+    return key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+    ).decode()
 
 
 def _pub(priv_pem: str) -> str:
-    return RSAKey(priv_pem, "RS256").public_key().to_pem().decode()
+    from cryptography.hazmat.primitives import serialization
+
+    private_key = serialization.load_pem_private_key(priv_pem.encode(), password=None)
+    return private_key.public_key().public_bytes(
+        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+    ).decode()
 
 
 _DEFAULT_POLICIES = [{"namespace": "default", "agent_class": "bot", "rego_source": "package x",

@@ -15,7 +15,7 @@ import time
 
 import httpx
 import structlog
-from jose import JWTError
+from jwt import PyJWTError as JWTError
 
 from norviq.config import settings
 

@@ -21,7 +21,7 @@ dependencies = [
     "fastapi>=0.109",
     "uvicorn>=0.27",
     "websockets>=12",
-    "python-jose>=3.3",
+    "pyjwt[crypto]>=2.8",
     "passlib[bcrypt]>=1.7",
 ]
 

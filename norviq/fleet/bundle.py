@@ -15,7 +15,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from jose import JWSError, jws
+from jwt import PyJWTError as JWSError
+from jwt import api_jws as jws
 
 
 def rfc3339_z(dt: datetime) -> str:
@@ -39,7 +40,7 @@ def canonical_bytes(payload: dict) -> bytes:
 
 def sign_bundle(payload: dict, signing_key_pem: str, kid: str = "fleet-bundle-1") -> dict:
     """Hub: sign the canonical bundle bytes (RS256) and return the wire body {payload, jws}."""
-    token = jws.sign(canonical_bytes(payload), signing_key_pem, algorithm="RS256", headers={"kid": kid})
+    token = jws.encode(canonical_bytes(payload), signing_key_pem, algorithm="RS256", headers={"kid": kid})
     return {"payload": payload, "jws": token}
 
 
@@ -59,7 +60,7 @@ def verify_bundle(body: dict, pubkey_pem: str) -> dict:
     if not token:
         raise BundleVerifyError("missing bundle signature")
     try:
-        verified = jws.verify(token, pubkey_pem, algorithms=["RS256"])  # single-alg allowlist (alg-confusion-safe)
+        verified = jws.decode(token, pubkey_pem, algorithms=["RS256"])  # single-alg allowlist (alg-confusion-safe)
     except (JWSError, Exception) as exc:  # noqa: BLE001 - any verify failure is fail-closed
         raise BundleVerifyError(f"signature verify failed: {exc}") from exc
     # The signature covers `verified`; re-derive canonical bytes from the wire payload and require equality,

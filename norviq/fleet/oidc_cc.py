@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import httpx
-from jose import jwt
+import jwt
 
 from norviq.config import settings
 

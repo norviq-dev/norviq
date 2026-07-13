@@ -246,7 +246,7 @@ def create_app() -> FastAPI:
     async def ws_audit(websocket: WebSocket) -> None:
         """Stream live decisions to the Audit Log feed, scoped by the token's namespace claim."""
         # Authenticate BEFORE accepting the socket (token via ?token= or Authorization header).
-        from jose import JWTError
+        from jwt import PyJWTError as JWTError
 
         from norviq.api.auth import decode_token, scoped_namespace
 

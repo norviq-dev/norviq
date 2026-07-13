@@ -16,8 +16,8 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import httpx
+import jwt
 import structlog
-from jose import jwt
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
