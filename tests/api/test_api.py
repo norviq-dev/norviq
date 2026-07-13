@@ -348,7 +348,7 @@ async def test_policy_crud_flow(real_db: None) -> None:
     """Create, list, get, delete policy."""
     client = _client()
     try:
-        rego = 'package norviq\ndecision = "block" { input.tool_name == "danger" }\nrule_id = "r"\nreason = "x"'
+        rego = 'package norviq\ndefault decision = "allow"\ndecision = "block" { input.tool_name == "danger" }\nrule_id = "r"\nreason = "x"'
         body = {"namespace": "payments", "agent_class": "planner", "rego_source": rego}
         created = client.post("/api/v1/policies", json=body, headers=_auth_headers())
         assert created.status_code == 200
@@ -423,7 +423,7 @@ async def test_policy_create_regex_text_literal_allowed(real_db: None) -> None:
         body = {
             "namespace": "payments",
             "agent_class": "planner",
-            "rego_source": 'package norviq\ndecision = "block" { input.tool_name == "regex.match literal" }\nrule_id = "r"\nreason = "x"',
+            "rego_source": 'package norviq\ndefault decision = "allow"\ndecision = "block" { input.tool_name == "regex.match literal" }\nrule_id = "r"\nreason = "x"',
         }
         response = client.post("/api/v1/policies", json=body, headers=_auth_headers())
         assert response.status_code == 200
@@ -629,7 +629,7 @@ def test_dry_run() -> None:
     client.app.dependency_overrides[get_session] = _override_session
     client.app.state.evaluator = FakeEvaluator()
     try:
-        body = {"namespace": "payments", "agent_class": "planner", "rego_source": 'package norviq\ndecision = "block" { input.tool_name == "danger" }\nrule_id = "r"\nreason = "x"'}
+        body = {"namespace": "payments", "agent_class": "planner", "rego_source": 'package norviq\ndefault decision = "allow"\ndecision = "block" { input.tool_name == "danger" }\nrule_id = "r"\nreason = "x"'}
         response = client.post("/api/v1/policies/dry-run", json=body, headers=_auth_headers())
         assert response.status_code == 200
         data = response.json()
@@ -645,7 +645,7 @@ async def test_apply_policy(real_db: None) -> None:
     """Apply a saved policy to target scope."""
     client = _client()
     try:
-        create_body = {"namespace": "payments", "agent_class": "planner", "rego_source": 'package norviq\ndecision = "block" { input.tool_name == "danger" }\nrule_id = "r"\nreason = "x"'}
+        create_body = {"namespace": "payments", "agent_class": "planner", "rego_source": 'package norviq\ndefault decision = "allow"\ndecision = "block" { input.tool_name == "danger" }\nrule_id = "r"\nreason = "x"'}
         assert client.post("/api/v1/policies", json=create_body, headers=_auth_headers()).status_code == 200
         apply_body = {
             "target_type": "namespace",

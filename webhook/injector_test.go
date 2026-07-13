@@ -19,7 +19,7 @@ func TestCreatePatchWithVolumes(t *testing.T) {
 	}
 	var ops []patchOp
 	_ = json.Unmarshal(patch, &ops)
-	if len(ops) != 4 || ops[1].Path != "/spec/volumes/-" || ops[2].Path != "/spec/containers/0/volumeMounts/-" || ops[3].Path != "/spec/containers/0/env/-" {
+	if len(ops) != 5 || ops[1].Path != "/spec/volumes/-" || ops[2].Path != "/spec/containers/0/volumeMounts/-" || ops[3].Path != "/spec/containers/0/env/-" {
 		t.Fatal("expected append volume patch when volumes exist")
 	}
 }
@@ -33,7 +33,7 @@ func TestCreatePatchWithoutVolumes(t *testing.T) {
 	}
 	var ops []patchOp
 	_ = json.Unmarshal(patch, &ops)
-	if len(ops) != 4 || ops[1].Path != "/spec/volumes" || ops[2].Path != "/spec/containers/0/volumeMounts" || ops[3].Path != "/spec/containers/0/env" {
+	if len(ops) != 5 || ops[1].Path != "/spec/volumes" || ops[2].Path != "/spec/containers/0/volumeMounts" || ops[3].Path != "/spec/containers/0/env" {
 		t.Fatal("expected volumes initialization patch when no volumes exist")
 	}
 }
@@ -51,8 +51,8 @@ func TestCreatePatchSkipsDuplicateMountAndEnv(t *testing.T) {
 	}
 	var ops []patchOp
 	_ = json.Unmarshal(patch, &ops)
-	if len(ops) != 2 {
-		t.Fatalf("expected only sidecar+volume ops, got %d", len(ops))
+	if len(ops) != 3 {
+		t.Fatalf("expected only sidecar+volume+annotation ops, got %d", len(ops))
 	}
 }
 
@@ -161,6 +161,44 @@ func TestCreatePatchSpiffeInjectOffByDefault(t *testing.T) {
 	patch, _ := inj.CreatePatch(testPodWithContainers(nil, []corev1.Container{{Name: "app"}}), "sales", "default")
 	if strings.Contains(string(patch), "spiffe") {
 		t.Fatalf("default injection must not reference spiffe; got %s", patch)
+	}
+}
+
+// FIX 4: the injector must stamp injectedAnnotation on every patch it produces so hasSidecar
+// (handler.go) can positively identify a real prior injection independent of the attacker-controllable
+// container name.
+func TestCreatePatchStampsInjectedAnnotation(t *testing.T) {
+	inj := NewInjector(LoadConfig())
+	pod := testPodWithContainers(nil, []corev1.Container{{Name: "app"}})
+	patch, err := inj.CreatePatch(pod, "sales", "default")
+	if err != nil {
+		t.Fatalf("create patch failed: %v", err)
+	}
+	var ops []patchOp
+	_ = json.Unmarshal(patch, &ops)
+	last := ops[len(ops)-1]
+	if last.Path != "/metadata/annotations" {
+		t.Fatalf("expected initial annotations map patch, got path %q", last.Path)
+	}
+	value, ok := last.Value.(map[string]interface{})
+	if !ok || value[injectedAnnotation] != "true" {
+		t.Fatalf("expected %s=true annotation, got %+v", injectedAnnotation, last.Value)
+	}
+}
+
+func TestCreatePatchStampsInjectedAnnotationWhenAnnotationsExist(t *testing.T) {
+	inj := NewInjector(LoadConfig())
+	pod := testPodWithContainers(nil, []corev1.Container{{Name: "app"}})
+	pod.Annotations = map[string]string{"other": "value"}
+	patch, err := inj.CreatePatch(pod, "sales", "default")
+	if err != nil {
+		t.Fatalf("create patch failed: %v", err)
+	}
+	var ops []patchOp
+	_ = json.Unmarshal(patch, &ops)
+	last := ops[len(ops)-1]
+	if last.Path != "/metadata/annotations/norviq.io~1injected" || last.Value != "true" {
+		t.Fatalf("expected single-key annotation add patch, got %+v", last)
 	}
 }
 

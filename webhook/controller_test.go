@@ -540,11 +540,36 @@ reason = "regex flood test"`
 
 func TestValidateRegoDoesNotCountRegexInStringLiterals(t *testing.T) {
 	rego := `package norviq
+default decision = "allow"
 decision = "block" { input.tool_name == "regex.match in string" }
 rule_id = "R-1"
 reason = "string literal should not count regex op"`
 	if err := validateRego(rego); err != nil {
 		t.Fatalf("expected policy with regex text literals to pass, got %v", err)
+	}
+}
+
+// FIX 5 (enforcement-correctness parity): a policy with a block rule but no `default decision`
+// silently evaluates `decision` as undefined (== allow to the engine) whenever the rule doesn't fire.
+// Reject it at admission time, same error path as the other validateRego failures.
+func TestValidateRegoRejectsMissingDefaultDecision(t *testing.T) {
+	rego := `package norviq
+decision = "block" { input.tool_name == "delete_user" }
+rule_id = "R-1"
+reason = "no default"`
+	if err := validateRego(rego); err == nil {
+		t.Fatal("expected rego without default decision to be rejected")
+	}
+}
+
+func TestValidateRegoAcceptsExplicitDefaultDecision(t *testing.T) {
+	rego := `package norviq
+default decision = "allow"
+decision = "block" { input.tool_name == "delete_user" }
+rule_id = "R-1"
+reason = "has default"`
+	if err := validateRego(rego); err != nil {
+		t.Fatalf("expected rego with default decision to be accepted, got %v", err)
 	}
 }
 

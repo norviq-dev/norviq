@@ -63,7 +63,18 @@ func (inj *Injector) CreatePatch(pod *corev1.Pod, agentClass string, namespace s
 	}
 	patches = append(patches, mountPatches(containerCount, mountStates, inj.cfg.SpiffeInject)...)
 	patches = append(patches, envPatches(containerCount, envStates, inj.cfg)...)
+	patches = append(patches, injectedAnnotationPatch(pod.Annotations))
 	return json.Marshal(patches)
+}
+
+// injectedAnnotationPatch stamps injectedAnnotation ("norviq.io/injected": "true") on every patched
+// pod. hasSidecar (handler.go) trusts this over the container name, which an attacker can forge with a
+// decoy container; the annotation is set only here, by the injector itself, on the admission path.
+func injectedAnnotationPatch(annotations map[string]string) patchOp {
+	if len(annotations) == 0 {
+		return patchOp{Op: "add", Path: "/metadata/annotations", Value: map[string]string{injectedAnnotation: "true"}}
+	}
+	return patchOp{Op: "add", Path: "/metadata/annotations/norviq.io~1injected", Value: "true"}
 }
 
 func (inj *Injector) validateImage(image string) bool {

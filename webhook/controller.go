@@ -679,6 +679,13 @@ func validateRego(rego string) error {
 			return fmt.Errorf("policy must define %s", name)
 		}
 	}
+	// FIX 5 (enforcement-correctness parity): without a `default decision` a policy whose sole
+	// `decision = "block" { ... }` rule never fires (e.g. an unreachable condition, or simply no
+	// matching input) evaluates `decision` as undefined, which the engine's evaluator treats as
+	// allow. Every legitimate/shipped policy already declares a default, so require it here too.
+	if !hasDefaultDecision(module) {
+		return fmt.Errorf("policy must define default decision")
+	}
 	if strings.Count(cleaned, "\n") > 500 {
 		return fmt.Errorf("policy exceeds 500 line limit")
 	}
@@ -726,6 +733,19 @@ func validateTarget(namespace, adminPolicyNamespace string, target map[string]in
 		return nil
 	}
 	return fmt.Errorf("target must include agentClass, namespace, or workload kind+name")
+}
+
+// hasDefaultDecision reports whether the module declares `default decision = ...`. Required so that a
+// `decision` rule which never fires (unreachable condition, or simply no matching input) has an
+// explicit fallback value instead of evaluating to undefined, which the engine's evaluator otherwise
+// treats as allow.
+func hasDefaultDecision(module *ast.Module) bool {
+	for _, rule := range module.Rules {
+		if rule.Default && string(rule.Head.Name) == "decision" {
+			return true
+		}
+	}
+	return false
 }
 
 func hasEnforcementDecision(module *ast.Module) bool {

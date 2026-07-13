@@ -49,9 +49,14 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     )
 
 
-def assert_safe_url(url: str, *, context: str = "outbound fleet request") -> None:
+def assert_safe_url(url: str, *, context: str = "outbound fleet request") -> list[str]:
     """Raise `SSRFBlockedError` unless `url` is http(s) AND every address its host resolves to is a
-    public, routable unicast address.
+    public, routable unicast address. Returns the validated IP address strings (in `getaddrinfo`
+    resolution order) so a caller that is about to DIAL the URL can PIN the connection to one of them
+    (see `norviq.fleet.pinned_transport`) instead of letting the HTTP client re-resolve the hostname
+    independently at connect time — that resolve/connect gap is exactly what a DNS-rebinding attacker
+    exploits (this function's lookup returns a public IP; the client's own later lookup returns
+    169.254.169.254/an internal address for the same hostname).
 
     Synchronous (blocking DNS via `socket.getaddrinfo`) — safe to call from a pydantic
     `field_validator` or any other sync context. Async callers (FastAPI route handlers) MUST use
@@ -70,6 +75,7 @@ def assert_safe_url(url: str, *, context: str = "outbound fleet request") -> Non
         raise SSRFBlockedError(f"{context}: could not resolve host '{host}': {exc}") from exc
     if not infos:
         raise SSRFBlockedError(f"{context}: host '{host}' resolved to no addresses")
+    validated: list[str] = []
     for _family, _type, _proto, _canon, sockaddr in infos:
         raw_addr = sockaddr[0]
         try:
@@ -83,12 +89,16 @@ def assert_safe_url(url: str, *, context: str = "outbound fleet request") -> Non
                 f"{context}: host '{host}' resolves to a blocked address {ip} "
                 "(loopback/link-local incl. cloud metadata/private/unspecified/multicast/reserved)"
             )
+        if raw_addr not in validated:
+            validated.append(raw_addr)
+    return validated
 
 
-async def assert_safe_url_async(url: str, *, context: str = "outbound fleet request") -> None:
+async def assert_safe_url_async(url: str, *, context: str = "outbound fleet request") -> list[str]:
     """Async wrapper: runs the (blocking) DNS resolution off the event loop via a worker thread — use
-    this from FastAPI route handlers so a slow/hanging resolver can't stall the hot path."""
-    await asyncio.to_thread(assert_safe_url, url, context=context)
+    this from FastAPI route handlers so a slow/hanging resolver can't stall the hot path. Returns the
+    same validated-IPs list as `assert_safe_url` (see its docstring) for pinning at dial time."""
+    return await asyncio.to_thread(assert_safe_url, url, context=context)
 
 
 def is_safe_url(url: str, *, context: str = "outbound fleet request") -> bool:

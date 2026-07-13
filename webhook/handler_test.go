@@ -72,8 +72,8 @@ func TestMutateWithLabel(t *testing.T) {
 	if err := json.Unmarshal(resp.Response.Patch, &patches); err != nil {
 		t.Fatalf("patch unmarshal failed: %v", err)
 	}
-	if len(patches) != 4 {
-		t.Fatalf("expected 4 patch ops, got %d", len(patches))
+	if len(patches) != 5 {
+		t.Fatalf("expected 5 patch ops, got %d", len(patches))
 	}
 	sidecarEnv := patches[0].Value.(map[string]interface{})["env"].([]interface{})
 	found := false
@@ -136,15 +136,62 @@ func TestMutate_NoAgentClassStillInjects(t *testing.T) {
 	}
 }
 
+// FIX 4: hasSidecar must identify the real sidecar by the injector-controlled IMAGE (or the
+// injectedAnnotation it stamps), never by the attacker-controllable container NAME. A pod already
+// carrying the REAL sidecar image is skipped (idempotency preserved).
 func TestMutateAlreadyInjected(t *testing.T) {
-	h := NewHandler(LoadConfig())
+	cfg := LoadConfig()
+	h := NewHandler(cfg)
 	pod := corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "test", Labels: map[string]string{"norviq": "enabled"}},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}, {Name: "norviq-sidecar"}}},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}, {Name: "norviq-sidecar", Image: cfg.SidecarImage}}},
 	}
 	resp := sendReview(t, h, makeReviewFromPod(pod, metav1.GroupVersionKind{Kind: "Pod"}, "default"))
 	if !resp.Response.Allowed || resp.Response.Patch != nil {
-		t.Fatal("expected no patch for already injected sidecar")
+		t.Fatal("expected no patch for pod already carrying the real sidecar image")
+	}
+}
+
+// A pod already stamped with injectedAnnotation is also treated as injected, even if the configured
+// sidecar image has since rotated (NrvqConfig image update) and no container image matches anymore.
+func TestMutateAlreadyInjectedByAnnotation(t *testing.T) {
+	h := NewHandler(LoadConfig())
+	pod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "test",
+			Labels:      map[string]string{"norviq": "enabled"},
+			Annotations: map[string]string{injectedAnnotation: "true"},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}, {Name: "norviq-sidecar", Image: "norviq/norviq-engine:some-old-sha"}}},
+	}
+	resp := sendReview(t, h, makeReviewFromPod(pod, metav1.GroupVersionKind{Kind: "Pod"}, "default"))
+	if !resp.Response.Allowed || resp.Response.Patch != nil {
+		t.Fatal("expected no patch for pod already stamped with the injected annotation")
+	}
+}
+
+// H6-style decoy: an attacker-controlled container merely NAMED "norviq-sidecar" but running a
+// different image must NOT suppress injection of the real sidecar — otherwise the pod runs unpoliced.
+func TestMutateDecoySidecarNameStillInjectsRealSidecar(t *testing.T) {
+	h := NewHandler(LoadConfig())
+	pod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Labels: map[string]string{"norviq": "enabled"}},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{
+			{Name: "app", Image: "nginx"},
+			{Name: "norviq-sidecar", Image: "attacker/decoy:latest"},
+		}},
+	}
+	resp := sendReview(t, h, makeReviewFromPod(pod, metav1.GroupVersionKind{Kind: "Pod"}, "default"))
+	if !resp.Response.Allowed || resp.Response.Patch == nil {
+		t.Fatal("expected the real sidecar to be injected despite a decoy container named norviq-sidecar with a different image")
+	}
+	var patches []patchOp
+	if err := json.Unmarshal(resp.Response.Patch, &patches); err != nil {
+		t.Fatalf("patch unmarshal failed: %v", err)
+	}
+	sidecar := patches[0].Value.(map[string]interface{})
+	if sidecar["name"] != "norviq-sidecar" || sidecar["image"] != h.cfg.SidecarImage {
+		t.Fatalf("expected the real norviq-sidecar container to be appended, got %+v", sidecar)
 	}
 }
 
@@ -360,7 +407,7 @@ func TestValidatePolicyRejectsCrossNamespaceTarget(t *testing.T) {
 			UID:       "uid-validate",
 			Kind:      metav1.GroupVersionKind{Group: "norviq.io", Version: "v1alpha1", Kind: "NrvqPolicy"},
 			Namespace: "default",
-			Object: runtime.RawExtension{Raw: []byte(`{"apiVersion":"norviq.io/v1alpha1","kind":"NrvqPolicy","metadata":{"name":"bad","namespace":"default"},"spec":{"target":{"namespace":"other"},"enforcementMode":"block","rego":"package p\ndecision = \"block\" { true }\nrule_id = \"r\"\nreason = \"x\""}}`)},
+			Object:    runtime.RawExtension{Raw: []byte(`{"apiVersion":"norviq.io/v1alpha1","kind":"NrvqPolicy","metadata":{"name":"bad","namespace":"default"},"spec":{"target":{"namespace":"other"},"enforcementMode":"block","rego":"package p\ndecision = \"block\" { true }\nrule_id = \"r\"\nreason = \"x\""}}`)},
 		},
 	}
 	body, _ := json.Marshal(review)
@@ -388,7 +435,7 @@ func TestValidatePolicyAllowsValidPolicy(t *testing.T) {
 			UID:       "uid-validate-ok",
 			Kind:      metav1.GroupVersionKind{Group: "norviq.io", Version: "v1alpha1", Kind: "NrvqPolicy"},
 			Namespace: "default",
-			Object: runtime.RawExtension{Raw: []byte(`{"apiVersion":"norviq.io/v1alpha1","kind":"NrvqPolicy","metadata":{"name":"ok","namespace":"default"},"spec":{"target":{"agentClass":"customer-support"},"enforcementMode":"block","rego":"package p\ndecision = \"block\" { true }\nrule_id = \"r\"\nreason = \"x\""}}`)},
+			Object:    runtime.RawExtension{Raw: []byte(`{"apiVersion":"norviq.io/v1alpha1","kind":"NrvqPolicy","metadata":{"name":"ok","namespace":"default"},"spec":{"target":{"agentClass":"customer-support"},"enforcementMode":"block","rego":"package p\ndefault decision = \"allow\"\ndecision = \"block\" { true }\nrule_id = \"r\"\nreason = \"x\""}}`)},
 		},
 	}
 	body, _ := json.Marshal(review)
@@ -414,7 +461,7 @@ func TestValidatePolicyRejectsClusterPriorityWithoutAdminGroup(t *testing.T) {
 			Kind:      metav1.GroupVersionKind{Group: "norviq.io", Version: "v1alpha1", Kind: "NrvqPolicy"},
 			Namespace: "norviq",
 			UserInfo:  authv1.UserInfo{Groups: []string{"devs"}},
-			Object: runtime.RawExtension{Raw: []byte(`{"apiVersion":"norviq.io/v1alpha1","kind":"NrvqPolicy","metadata":{"name":"cp-no-admin","namespace":"norviq"},"spec":{"target":{"agentClass":"customer-support"},"enforcementMode":"block","clusterPriority":700,"rego":"package p\ndecision = \"block\" { true }\nrule_id = \"r\"\nreason = \"x\""}}`)},
+			Object:    runtime.RawExtension{Raw: []byte(`{"apiVersion":"norviq.io/v1alpha1","kind":"NrvqPolicy","metadata":{"name":"cp-no-admin","namespace":"norviq"},"spec":{"target":{"agentClass":"customer-support"},"enforcementMode":"block","clusterPriority":700,"rego":"package p\ndecision = \"block\" { true }\nrule_id = \"r\"\nreason = \"x\""}}`)},
 		},
 	}
 	body, _ := json.Marshal(review)
@@ -440,7 +487,7 @@ func TestValidatePolicyAllowsClusterPriorityForAdminGroup(t *testing.T) {
 			Kind:      metav1.GroupVersionKind{Group: "norviq.io", Version: "v1alpha1", Kind: "NrvqPolicy"},
 			Namespace: "norviq",
 			UserInfo:  authv1.UserInfo{Groups: []string{"system:masters"}},
-			Object: runtime.RawExtension{Raw: []byte(`{"apiVersion":"norviq.io/v1alpha1","kind":"NrvqPolicy","metadata":{"name":"cp-admin","namespace":"norviq"},"spec":{"target":{"agentClass":"customer-support"},"enforcementMode":"block","clusterPriority":700,"rego":"package p\ndecision = \"block\" { true }\nrule_id = \"r\"\nreason = \"x\""}}`)},
+			Object:    runtime.RawExtension{Raw: []byte(`{"apiVersion":"norviq.io/v1alpha1","kind":"NrvqPolicy","metadata":{"name":"cp-admin","namespace":"norviq"},"spec":{"target":{"agentClass":"customer-support"},"enforcementMode":"block","clusterPriority":700,"rego":"package p\ndefault decision = \"allow\"\ndecision = \"block\" { true }\nrule_id = \"r\"\nreason = \"x\""}}`)},
 		},
 	}
 	body, _ := json.Marshal(review)

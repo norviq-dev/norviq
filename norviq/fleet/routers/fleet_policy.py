@@ -24,7 +24,8 @@ from norviq.fleet.bundle import rfc3339_z, sign_bundle
 from norviq.fleet.db import fleet_get_session
 from norviq.fleet.models import Cluster, FleetPolicy, PolicyRollout
 from norviq.fleet.schemas import PolicyAuthorBody, RolloutReportBody
-from norviq.fleet.ssrf_guard import SSRFBlockedError, assert_safe_url_async
+from norviq.fleet.pinned_transport import resolve_and_pin
+from norviq.fleet.ssrf_guard import SSRFBlockedError
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -246,8 +247,16 @@ async def drilldown(
     heartbeat — with a MINTED ADMIN BEARER attached. Unlike the sibling admin routes in this file it
     was previously gated by `scoped_cluster` alone (no `require_admin`), and the endpoint was never
     range-checked before being dialed: a malicious/compromised spoke could point `endpoint` at an
-    internal service (or attacker host) and have the hub hand it a hub-valid admin token. Both are
-    fixed here: `require_admin` below, and `assert_safe_url_async` right before the outbound call.
+    internal service (or attacker host) and have the hub hand it a hub-valid admin token. Fixed with
+    `require_admin` below.
+
+    SSRF-02 (CRITICAL, DNS-rebind): `assert_safe_url_async` alone validates the RESOLVED addresses, but
+    handing the raw hostname to `httpx` afterward lets httpx re-resolve INDEPENDENTLY at connect time —
+    a rebinding DNS server can answer the guard's lookup with a public IP and httpx's later lookup with
+    169.254.169.254/an internal address for the same hostname, capturing the admin bearer. Fixed via
+    `pinned_transport.resolve_and_pin`: the host is resolved ONCE, and the outbound dial is pinned to
+    that already-validated IP (the original hostname is still used for the Host header and TLS SNI, so
+    virtual hosting/cert checks are unaffected — see `pinned_transport.py`).
     """
     require_admin(user)
     scoped_cluster(user, cluster_id)
@@ -261,7 +270,9 @@ async def drilldown(
     if not cluster.endpoint:
         return {"cluster_id": cluster_id, "records": [], "error": "no endpoint registered"}
     try:
-        await assert_safe_url_async(cluster.endpoint, context=f"fleet drill-down dial (cluster={cluster_id})")
+        _pinned_ip, pinned_transport = await resolve_and_pin(
+            cluster.endpoint, context=f"fleet drill-down dial (cluster={cluster_id})"
+        )
     except SSRFBlockedError as exc:
         # Never dial, and never mint/attach the admin bearer, for a host that fails the SSRF guard.
         log.warning("nrvq.fleet.drilldown_ssrf_blocked", cluster_id=cluster_id, error=str(exc),
@@ -277,8 +288,10 @@ async def drilldown(
     try:
         # follow_redirects=False: a validated host must not be allowed to 302 an authenticated request
         # (with the admin bearer attached) onward to a blocked address (e.g. the metadata IP) — that
-        # would bypass the SSRF guard above via a redirect hop it never re-checks.
-        async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
+        # would bypass the SSRF guard above via a redirect hop it never re-checks. transport=pinned_transport
+        # pins the socket target to the already-validated IP (SSRF-02) so httpx cannot re-resolve the
+        # hostname independently at connect time.
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=False, transport=pinned_transport) as client:
             resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
             resp.raise_for_status()
             rows = resp.json()

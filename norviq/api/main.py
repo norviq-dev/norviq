@@ -260,6 +260,19 @@ def create_app() -> FastAPI:
         except JWTError:
             await websocket.close(code=1008)  # policy violation: invalid/missing/revoked token
             return
+        # H1 (WS parity): decode_token only checks signature + revocation, not must_change — mirror
+        # get_current_user's fail-closed gate here too, or a token minted with must_change=True (the
+        # seeded default admin / any account post admin_reset, i.e. still on a KNOWN password) could
+        # stream live namespace-scoped audit data while every REST route correctly locks it out.
+        if user.get("must_change"):
+            log.info(
+                "nrvq.auth.must_change_blocked",
+                sub=user.get("sub"),
+                path="/ws/audit",
+                code="NRVQ-AUTH-14018",
+            )
+            await websocket.close(code=1008)  # policy violation: password change required
+            return
         requested_ns = websocket.query_params.get("namespace", "")
         try:
             namespace = scoped_namespace(user, requested_ns) or ""

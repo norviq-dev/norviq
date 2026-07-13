@@ -11,9 +11,9 @@ import (
 	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -23,6 +23,11 @@ type Handler struct {
 }
 
 const maxAdmissionBodySize = 1 << 20
+
+// injectedAnnotation is stamped onto every pod the injector patches (see injector.go), independent of
+// the attacker-controllable container name, so hasSidecar can positively identify a real prior
+// injection even if the configured sidecar image has since rotated.
+const injectedAnnotation = "norviq.io/injected"
 
 var systemExcludedNamespaces = map[string]bool{
 	"kube-system":     true,
@@ -207,7 +212,7 @@ func shouldSkipInjection(cfg Config, pod *corev1.Pod, namespace string) bool {
 			"hint", "remove label "+cfg.EnableLabel+"=disabled / annotation norviq.io/skip-injection to enable")
 		return true
 	}
-	if hasSidecar(pod) {
+	if hasSidecar(cfg, pod) {
 		slog.Info("NRVQ-WHK-4008: sidecar already present, skipping", "pod", pod.Name, "namespace", namespace)
 		return true
 	}
@@ -246,9 +251,26 @@ func parsePod(req *admissionv1.AdmissionRequest) (*corev1.Pod, bool) {
 	return &pod, true
 }
 
-func hasSidecar(pod *corev1.Pod) bool {
+// hasSidecar reports whether the pod already carries the REAL enforcement sidecar. It must not trust
+// the attacker-controllable container NAME (an attacker can add a decoy container named
+// "norviq-sidecar" running anything, which previously caused the real sidecar to be silently skipped
+// and the pod to run unpoliced). Instead it checks injector-controlled signals only: the container
+// IMAGE matches the currently configured sidecar image (injectedAnnotation
+// (norviq.io/injected=true), which the injector itself stamps on every patch it produces (handles the
+// case where the configured image has since changed via NrvqConfig and an already-injected pod's
+// image no longer matches the current default).
+func hasSidecar(cfg Config, pod *corev1.Pod) bool {
+	if pod.Annotations[injectedAnnotation] == "true" {
+		return true
+	}
+	runtime := cfg.Runtime
+	if runtime == nil {
+		runtime = &RuntimeConfig{}
+		runtime.SetSidecarImage(cfg.SidecarImage)
+	}
+	configuredImage := runtime.SidecarImage(cfg.SidecarImage)
 	for _, c := range pod.Spec.Containers {
-		if c.Name == "norviq-sidecar" {
+		if c.Image != "" && c.Image == configuredImage {
 			return true
 		}
 	}

@@ -397,16 +397,33 @@ async def create_policy(body: PolicyCreate, request: Request, user: dict = Depen
     return {"namespace": body.namespace, "agent_class": agent_class, "version": version, "policy_name": body.policy_name, "priority": body.priority}
 
 
+_DEFAULT_DECISION_RE = re.compile(r'\bdefault\s+decision\s*=\s*"(?:allow|block|escalate|audit)"')
+
+
 def assert_decision_resolver(cleaned_rego: str) -> None:
     """A module MUST define a `decision` (the engine queries `data.<pkg>.decision`); a partial-set rule
     with no resolver leaves `decision` undefined and would silently ALLOW a fired block (P1-2). Accept the
     complete-rule form (`decision = "block"|"escalate" {`) OR partial sets accompanied by a resolver; when
     partial sets appear WITHOUT one, name that precisely so the guardrail/pack idiom stays authorable.
     `cleaned_rego` is comment-stripped source.
+
+    FIX-3 (CRITICAL, silent-allow): a `decision = "block"|"escalate" { <condition> }` COMPLETE rule whose
+    condition never matches the real input produces NO `decision` binding at all — OPA returns an empty
+    result for that key, and the evaluator's `str(result.get("decision", "allow"))` (evaluator.py ~656/731)
+    silently defaults to "allow", shadowing the cluster baseline at whatever priority the policy was pushed
+    at. This is invisible in review because the rego LOOKS like a block policy. Every legitimate policy
+    already declares `default decision = "..."` (comprehensive.rego, the sector packs, and every
+    threat_intent.py template) so the resolver's output is always DEFINED — the author explicitly picks
+    what "no rule matched" means for their policy. Requiring it here makes silent-allow structurally
+    impossible for any admitted policy: a deliberate no-op "fake block" must now honestly spell out
+    `default decision = "allow"` instead of relying on an absent binding. This check does NOT change the
+    evaluator's runtime default (an absent `default decision` policy is rejected at write time instead —
+    changing absent-at-runtime to fail-closed would break legitimate NARROW block policies whose whole
+    point is to allow every non-matching tool).
     """
     if re.search(r'decision\s*=\s*"(block|escalate)"\s*\{', cleaned_rego):
-        return
-    if re.search(r"\b(blocks|escalates|audits)\s*\[", cleaned_rego):
+        has_resolver = True
+    elif re.search(r"\b(blocks|escalates|audits)\s*\[", cleaned_rego):
         raise HTTPException(
             status_code=422,
             detail="rego_source defines partial-set rules (blocks/escalates/audits) but no `decision` "
@@ -415,7 +432,17 @@ def assert_decision_resolver(cleaned_rego: str) -> None:
                    "matching rule_id/reason lines; see comprehensive.rego RESOLVER-BEGIN..END), or author "
                    'a complete `decision = "block" { <condition> }` rule.',
         )
-    raise HTTPException(status_code=422, detail="rego_source must include block or escalate decision")
+    else:
+        raise HTTPException(status_code=422, detail="rego_source must include block or escalate decision")
+    if has_resolver and not _DEFAULT_DECISION_RE.search(cleaned_rego):
+        raise HTTPException(
+            status_code=422,
+            detail='rego_source must declare a `default decision = "allow"|"block"|"escalate"|"audit"` — '
+                   "without one, a decision rule whose condition never matches real input produces no "
+                   'binding and silently falls back to "allow" at evaluation time (a fired-block-turned-'
+                   'silent-allow). Add e.g. `default decision = "allow"` at module scope; a policy that is '
+                   'meant to always block should say so explicitly with `default decision = "block"`.',
+        )
 
 
 # S1: builtins that let a submitted policy escape the pure-decision sandbox. Each is a network/env/parser
@@ -430,6 +457,21 @@ def assert_decision_resolver(cleaned_rego: str) -> None:
 #   io.*                - io.jwt.decode/verify/encode (io.jwt) - token forging/inspection surface
 #   rego.parse_module   - compiles rego AT EVAL TIME from attacker-controlled input - parser/sandbox escape
 #   trace               - trace() - internal evaluation state disclosure
+#   data.norviq.managed - FIX-1 (CRITICAL, cross-tenant read): OPA's shared managed server namespaces every
+#                          pushed module under `data.norviq.managed.<sanitized-key>` (see
+#                          `engine/opa_client.managed_package`/`rewrite_package`). At PUSH TIME the server
+#                          REWRITES a submitted module's declared `package` line to its own computed
+#                          `managed_package(f"{ns}:{class}")` — but it does NOT rewrite `data.` references
+#                          left in the module BODY. The old own-package allowance below trusted the
+#                          attacker-DECLARED `package` line: a tenant could declare `package
+#                          norviq.managed.<victim-key>` (the victim's SERVER-COMPUTED package) as its own,
+#                          pass the self-reference check, and read the victim's compiled policy — exfiltrated
+#                          via the dry-run `reason` string. This ban is unconditional (checked before the
+#                          own-package allowance, and before any self-reference logic runs) because no
+#                          legitimate policy ever needs to reach into OPA's internal per-tenant namespace —
+#                          every shipped/generated policy (comprehensive.rego, policies/sector/*.rego,
+#                          threat_intent.py templates) only ever uses `input` + its own rules. Whitespace
+#                          between the dots is tolerated (`data . norviq . managed`) since rego permits it.
 _FORBIDDEN_REGO_TOKENS: frozenset[str] = frozenset({
     r"\bhttp\.send\b",
     r"\bopa\.runtime\b",
@@ -437,6 +479,7 @@ _FORBIDDEN_REGO_TOKENS: frozenset[str] = frozenset({
     r"\bio\.[a-z_]+\b",
     r"\brego\.parse_module\b",
     r"\btrace\s*\(",  # FIX-6: only the builtin CALL form — a bare identifier/var/rule named `trace` is legal rego
+    r"\bdata\s*\.\s*norviq\s*\.\s*managed\b",  # FIX-1: no legit policy ever references OPA's internal per-tenant namespace
 })
 
 

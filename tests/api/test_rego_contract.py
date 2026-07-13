@@ -148,3 +148,54 @@ def test_override_with_resolver_passes_static_guard() -> None:
     from norviq.api.routers.policies import assert_decision_resolver
 
     assert_decision_resolver('package norviq.pack\nblocks["o"] { input.tool_name == "x" }\n' + _RESOLVER)
+
+
+# --- FIX-3 (CRITICAL, silent-allow): a "block" policy whose condition never matches real input ------
+#
+# `str(result.get("decision", "allow"))` (evaluator.py) defaults to "allow" when a module produces NO
+# `decision` binding at all. A complete-rule `decision = "block" { <condition> }` policy with no
+# `default decision` produces exactly that when its condition doesn't match: OPA returns an empty
+# result for `decision`, and the policy silently evaluates to allow — even though it LOOKS like a block
+# policy on review. Every legitimate policy already declares `default decision = "..."`, so requiring it
+# at write time makes this failure mode structurally impossible for any admitted policy.
+
+
+def test_complete_rule_without_default_decision_is_rejected() -> None:
+    """A `decision = "block" { <condition> }` rule with NO `default decision` declaration → 422. Without
+    this, a condition that never matches real input silently falls back to allow at evaluation time."""
+    from norviq.api.routers.policies import assert_decision_resolver
+
+    rego = (
+        'package norviq.strict\ndecision = "block" { input.tool_name == "definitely-never-matches" }\n'
+        'rule_id = "b" { input.tool_name == "definitely-never-matches" }\n'
+        'reason = "r" { input.tool_name == "definitely-never-matches" }\n'
+    )
+    with pytest.raises(HTTPException) as ei:
+        assert_decision_resolver(rego)
+    assert ei.value.status_code == 422
+    assert "default decision" in ei.value.detail
+
+
+def test_complete_rule_with_default_decision_allow_is_accepted() -> None:
+    """A policy that honestly declares `default decision = "allow"` alongside its block rule passes —
+    the author explicitly chose what 'no rule matched' means, so there is no silent fallback."""
+    from norviq.api.routers.policies import assert_decision_resolver
+
+    rego = (
+        'package norviq.strict\ndefault decision = "allow"\ndefault rule_id = "default_allow"\n'
+        'default reason = "ok"\ndecision = "block" { input.tool_name == "x" }\n'
+        'rule_id = "b" { input.tool_name == "x" }\nreason = "r" { input.tool_name == "x" }\n'
+    )
+    assert_decision_resolver(rego)  # must not raise
+
+
+def test_full_validate_policy_create_rejects_missing_default_decision() -> None:
+    """End-to-end through the same entry point create/dry-run/pack-override all share."""
+    rego = (
+        'package norviq.strict\ndecision = "block" { input.tool_name == "x" }\n'
+        'rule_id = "b" { input.tool_name == "x" }\nreason = "r" { input.tool_name == "x" }\n'
+    )
+    with pytest.raises(HTTPException) as ei:
+        validate_policy_create(_policy(rego))
+    assert ei.value.status_code == 422
+    assert "default decision" in ei.value.detail

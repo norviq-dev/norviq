@@ -54,11 +54,11 @@ type RuntimeConfig struct {
 func LoadConfig() Config {
 	runtime := &RuntimeConfig{}
 	cfg := Config{
-		Port:                 envInt("NRVQ_WEBHOOK_PORT", 8443),
-		CertFile:             envStr("NRVQ_TLS_CERT", "/etc/webhook/certs/tls.crt"),
-		KeyFile:              envStr("NRVQ_TLS_KEY", "/etc/webhook/certs/tls.key"),
-		SidecarImage:         envStr("NRVQ_SIDECAR_IMAGE", "norviq/norviq-engine:engine-latest"),
-		SidecarPort:          envInt("NRVQ_SIDECAR_PORT", 8282),
+		Port:         envInt("NRVQ_WEBHOOK_PORT", 8443),
+		CertFile:     envStr("NRVQ_TLS_CERT", "/etc/webhook/certs/tls.crt"),
+		KeyFile:      envStr("NRVQ_TLS_KEY", "/etc/webhook/certs/tls.key"),
+		SidecarImage: envStr("NRVQ_SIDECAR_IMAGE", "norviq/norviq-engine:engine-latest"),
+		SidecarPort:  envInt("NRVQ_SIDECAR_PORT", 8282),
 		// SIDE-3: unify the opt-in/out label key with the MutatingWebhookConfiguration namespaceSelector
 		// (norviq-injection). The namespace opts in (MWC selector); a pod opts OUT with
 		// norviq-injection=disabled. Default flipped from the legacy "norviq" key.

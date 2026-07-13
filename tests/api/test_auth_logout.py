@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 from jose import JWTError, jwt
+from starlette.websockets import WebSocketDisconnect
 
 from norviq.api import session_revocation as sr
 from norviq.api import passwords as pw
@@ -95,13 +96,12 @@ def _client(cache=None) -> TestClient:
     return TestClient(app)
 
 
-def _mint(ttl: int = 600) -> str:
+def _mint(ttl: int = 600, must_change: bool = False) -> str:
     now = int(time.time())
-    return jwt.encode(
-        {"sub": "admin", "role": "admin", "namespace": "*", "iat": now, "exp": now + ttl},
-        settings.api_secret_key,
-        algorithm="HS256",
-    )
+    claims = {"sub": "admin", "role": "admin", "namespace": "*", "iat": now, "exp": now + ttl}
+    if must_change:
+        claims["must_change"] = True
+    return jwt.encode(claims, settings.api_secret_key, algorithm="HS256")
 
 
 def _login(client: TestClient) -> str:
@@ -185,6 +185,33 @@ async def test_decode_token_consults_mirror_even_without_cache() -> None:
     await sr.revoke(None, token, exp=int(time.time()) + 600)
     with pytest.raises(JWTError, match="logged out"):
         await decode_token(token)  # positional-compatible: no cache arg at all
+
+
+# --- H1 (WS parity): must_change lock on /ws/audit -----------------------------------------------
+# decode_token() (above) only checks signature + revocation — it does NOT check must_change. Every
+# REST route goes through get_current_user, which fail-closes a must_change=True session to
+# /auth/change-password, /auth/logout, /me only. Pre-fix, /ws/audit bypassed that gate entirely: an
+# admin still on a known/default/just-reset password (the H1 threat model) could open the socket and
+# stream live namespace-scoped audit data while "locked" everywhere else.
+
+
+def test_ws_audit_rejects_a_must_change_token() -> None:
+    client = _client()
+    token = _mint(must_change=True)
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect(f"/ws/audit?namespace=default&token={token}"):
+            pass  # must never get here — the close happens before accept()
+    assert exc_info.value.code == 1008  # policy violation, same code as the invalid/revoked-token path
+
+
+def test_ws_audit_accepts_a_normal_token() -> None:
+    """Control: a non-must_change token must still be able to open the stream (no regression)."""
+    client = _client()
+    token = _mint(must_change=False)
+    with client.websocket_connect(f"/ws/audit?namespace=default&token={token}") as ws:
+        client.app.state.audit_hub.publish({"namespace": "default", "tool_name": "probe"})
+        rec = ws.receive_json()
+        assert rec["tool_name"] == "probe"
 
 
 # --- session_revocation primitives ---------------------------------------------------------------
