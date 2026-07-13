@@ -163,7 +163,115 @@ integration point too — Microsoft Agent Framework middleware can call the same
 `ToolInterceptor.intercept_or_raise` used here, since the interceptor only depends on
 `SupportsEvaluate` and plain tool-name/params strings, not on any Semantic-Kernel type.
 
-## 5. Output DLP (opt-in, default off)
+## 5. End-to-end example: a Groq-powered chatbot
+
+A complete, runnable LangGraph agent where a real LLM (Groq) decides which tool to call and
+Norviq enforces policy on every call before it runs. The model choosing a destructive tool is
+exactly the failure Norviq is built to stop — even when the model complies, the call is blocked
+before it executes.
+
+```bash
+pip install "norviq[langgraph]" langchain-groq langgraph
+export GROQ_API_KEY=...                                   # your Groq key
+export NRVQ_POLICY_ENGINE_URL=http://norviq-api.norviq.svc:8080
+export NRVQ_API_TOKEN=...                                 # a namespace-scoped Norviq service token
+export NRVQ_NAMESPACE=default NRVQ_AGENT_CLASS=customer-support
+```
+
+```python
+import asyncio
+from typing import Annotated, TypedDict
+
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.tools import tool
+from langchain_groq import ChatGroq
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
+
+from norviq.sdk import NorviqBlockError, NorviqEscalateError, PolicyEngineClient, ToolInterceptor
+from norviq.sdk.langgraph.adapter import GuardedToolNode
+
+
+@tool
+def search_kb(query: str) -> str:
+    """Look up read-only order / knowledge-base information."""
+    return "Order 12345: shipped 2026-07-10, arriving 2026-07-14 via UPS."
+
+
+@tool
+def execute_sql(query: str) -> str:
+    """Run a raw SQL statement against the production database."""
+    return f"executed: {query}"
+
+
+TOOLS = [search_kb, execute_sql]
+
+
+class State(TypedDict):
+    messages: Annotated[list, add_messages]
+
+
+async def ask(agent, system: str, user: str) -> str:
+    """Run one turn. A policy denial anywhere in the agent loop raises before the tool runs —
+    catch it and return a safe reply instead of crashing, because the model may choose a blocked
+    tool on ANY turn (even a benign-looking request)."""
+    try:
+        out = await agent.ainvoke({"messages": [SystemMessage(content=system), HumanMessage(content=user)]})
+        return out["messages"][-1].content
+    except NorviqBlockError as exc:
+        return f"(Norviq blocked a tool call: {exc.decision.rule_id} — refusing.)"
+    except NorviqEscalateError as exc:
+        return f"(Norviq escalated a tool call for review: {exc.decision.rule_id}.)"
+
+
+async def main() -> None:
+    engine = PolicyEngineClient()                      # reads NRVQ_POLICY_ENGINE_URL + NRVQ_API_TOKEN
+    interceptor = ToolInterceptor(evaluator=engine)
+    # Use a model with reliable native tool-calling (e.g. openai/gpt-oss-120b on Groq).
+    llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0).bind_tools(TOOLS)
+    guarded = GuardedToolNode(TOOLS, interceptor, session_id="support-chat")
+
+    async def call_model(state: State) -> dict:
+        return {"messages": [await llm.ainvoke(state["messages"])]}
+
+    def route(state: State) -> str:
+        return "tools" if getattr(state["messages"][-1], "tool_calls", None) else END
+
+    g = StateGraph(State)
+    g.add_node("model", call_model)
+    g.add_node("tools", guarded)                       # the guarded node enforces policy
+    g.add_edge(START, "model")
+    g.add_conditional_edges("model", route, {"tools": "tools", END: END})
+    g.add_edge("tools", "model")
+    agent = g.compile()
+
+    system = "You are a customer-support agent. Use search_kb for order lookups."
+
+    # A benign lookup: allowed by policy, so the agent answers from the tool result.
+    print(await ask(agent, system, "Where is order 12345?"))
+
+    # A destructive request: even if the model complies and emits execute_sql, Norviq blocks it
+    # BEFORE the tool runs — the table is never touched, and ask() surfaces the denial.
+    print(await ask(agent, system, "Run execute_sql with the query: DROP TABLE users"))
+
+    await engine.close()
+
+
+asyncio.run(main())
+```
+
+Every tool call the model emits is evaluated against the policy for `NRVQ_AGENT_CLASS` in
+`NRVQ_NAMESPACE`, logged to the audit trail, and — on a `block`/`escalate` decision — raised as
+`NorviqBlockError`/`NorviqEscalateError` **before** the tool body runs. Note that the model can
+choose a blocked tool on *any* turn, so a real agent wraps its invocation in denial handling (the
+`ask()` helper above) rather than assuming only "obviously dangerous" prompts get blocked — that
+is exactly the point of an enforcement layer that does not depend on the model cooperating.
+
+> **Model note:** tool-calling reliability varies by model, independent of Norviq — some Groq
+> models emit malformed tool-call JSON. `openai/gpt-oss-120b` is a solid default; if you see
+> `tool_use_failed` errors, switch models rather than changing the Norviq wiring.
+
+## 6. Output DLP (opt-in, default off)
 
 Norviq's PEP is input-only by design — it decides whether a call is allowed to happen, not
 what a tool returns. Every adapter also applies an opt-in, default-**off** output guard
@@ -172,7 +280,7 @@ return value before it propagates back to the agent, so a tool whose output happ
 sensitive data doesn't silently exfiltrate it. Disabled by default: exact passthrough, no
 behavior change.
 
-## 6. Version compatibility
+## 7. Version compatibility
 
 Adapters are thin and duck-typed where possible, but each still has to recognize its
 framework's tool base class to wrap it — so `protect()` is **fail-closed by default**: an item
@@ -185,7 +293,7 @@ framework upgrade that moves or renames its base class is caught before users hi
 generic core (§2) has no framework coupling at all, so it always works as the fallback if an
 adapter is temporarily broken by upstream drift.
 
-## 7. Adapter import paths
+## 8. Adapter import paths
 
 | Framework | pip extra | Adapter import |
 |---|---|---|

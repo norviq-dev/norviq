@@ -95,6 +95,8 @@ block/escalate decision raises before the tool ever runs. See
 - **AutoGen** — `norviq.sdk.autogen.adapter.protect(tools, interceptor)`
 - **Azure / Semantic Kernel** — `norviq.sdk.semantic_kernel.adapter.policy_filter(interceptor)`
 
+The guide includes a runnable **[LLM chatbot example](docs/guides/integrating-agents.md#5-end-to-end-example-a-groq-powered-chatbot)** (Groq + LangGraph) where the model decides the tool calls and Norviq blocks the dangerous ones before they run.
+
 ## Features
 
 - **Policy enforcement** — OPA/Rego evaluated per tool call, sub-second, fail-closed.
