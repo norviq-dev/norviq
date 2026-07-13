@@ -6,6 +6,7 @@ type: application
 version: 0.1.0
 appVersion: "0.1.0"
 home: https://norviq.dev
+icon: https://raw.githubusercontent.com/norviq-dev/norviq/main/.github/assets/norviq-mark.svg
 sources:
   - https://github.com/norviq-dev/norviq
 maintainers:
@@ -17,3 +18,18 @@ keywords:
   - kubernetes
   - opa
   - ai-safety
+annotations:
+  # Artifact Hub listing metadata (https://artifacthub.io/docs/topics/annotations/helm/).
+  # Inert unless the repo is registered on Artifact Hub; safe to carry pre-launch.
+  artifacthub.io/category: security
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/links: |
+    - name: Homepage
+      url: https://norviq.dev
+    - name: Source
+      url: https://github.com/norviq-dev/norviq
+    - name: Documentation
+      url: https://github.com/norviq-dev/norviq/tree/main/docs
+    - name: Security policy
+      url: https://github.com/norviq-dev/norviq/blob/main/SECURITY.md
+  artifacthub.io/operator: "false"

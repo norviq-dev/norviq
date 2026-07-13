@@ -1,6 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-# Release the Helm chart as an OCI artifact to GHCR on a version tag.
-# Consumers then: helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version <x.y.z>
+# Release the Helm chart as an OCI artifact to GHCR on a version tag, then sign
+# it with cosign (keyless / Sigstore) so consumers can verify provenance.
+#
+# Consumers then:
+#   helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version <x.y.z>
+#   cosign verify ghcr.io/norviq-dev/charts/norviq:<x.y.z> \
+#     --certificate-identity-regexp '^https://github.com/norviq-dev/norviq/.github/workflows/release.yml@.*' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com
 name: Release Chart
 
 on:
@@ -15,9 +21,11 @@ jobs:
     permissions:
       contents: read
       packages: write        # push the OCI chart to GHCR with the built-in token
+      id-token: write        # keyless cosign signing via the workflow's OIDC identity
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
       - name: Lint
         run: helm lint helm/norviq
       - name: Log in to GHCR
@@ -25,4 +33,17 @@ jobs:
       - name: Package
         run: helm package helm/norviq -d dist/
       - name: Push chart to GHCR (OCI)
-        run: helm push dist/norviq-*.tgz oci://ghcr.io/norviq-dev/charts
+        id: push
+        run: |
+          set -euo pipefail
+          helm push dist/norviq-*.tgz oci://ghcr.io/norviq-dev/charts 2>&1 | tee push.log
+          digest="$(grep -oE 'sha256:[0-9a-f]{64}' push.log | head -n1)"
+          if [ -z "$digest" ]; then
+            echo "::error::could not parse chart digest from helm push output" >&2
+            exit 1
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+      - name: Sign chart (keyless, Sigstore)
+        env:
+          COSIGN_YES: "true"
+        run: cosign sign "ghcr.io/norviq-dev/charts/norviq@${{ steps.push.outputs.digest }}"

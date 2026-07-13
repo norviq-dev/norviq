@@ -1,0 +1,23 @@
+# Artifact Hub repository-ownership metadata.
+# https://artifacthub.io/docs/topics/repositories/#ownership-claim
+#
+# This file proves you own the Norviq Helm chart repo on Artifact Hub. It is INERT
+# on its own — it only takes effect once you (a) register the OCI repo on Artifact
+# Hub and (b) publish this file to the registry so the ownership claim can be verified.
+#
+# Activation (do this at public launch, after the first `v*.*.*` tag has published
+# the chart to ghcr.io/norviq-dev/charts/norviq):
+#
+#   1. Add the repository on Artifact Hub (Control Panel > Repositories > Add):
+#        Kind: Helm charts   URL: oci://ghcr.io/norviq-dev/charts/norviq
+#   2. Copy the Repository ID it assigns and paste it into `repositoryID` below.
+#   3. Publish this metadata to the registry so Artifact Hub can verify ownership:
+#        oras push ghcr.io/norviq-dev/charts/norviq:artifacthub.io \
+#          --config /dev/null:application/vnd.cncf.artifacthub.config.v1+yaml \
+#          artifacthub-repo.yml:application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml
+#   4. Trigger a refresh on Artifact Hub; the repo shows as verified + owned.
+
+repositoryID: ""   # fill in from Artifact Hub after registering the repo
+owners:
+  - name: Norviq
+    email: opensource@norviq.dev
