@@ -26,7 +26,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 35        # arm64 is built under QEMU emulation — slower than a native amd64-only build
     permissions:
       contents: read
       packages: write
@@ -47,6 +47,10 @@ jobs:
             context: webhook
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      # QEMU registers arm64 emulation so buildx can build the linux/arm64 variant on the amd64
+      # runner. (The Go webhook cross-compiles natively via TARGETARCH and skips emulation; the
+      # Python/UI images build under emulation, installing prebuilt aarch64 wheels/apk packages.)
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
@@ -58,6 +62,10 @@ jobs:
           context: ${{ matrix.context }}
           file: ${{ matrix.context }}/${{ matrix.dockerfile }}
           push: true
+          platforms: linux/amd64,linux/arm64
+          # Keep the pushed index to exactly the two OS/arch images — no extra unknown/unknown
+          # attestation manifest, which some kubelets/tools misread as a missing platform match.
+          provenance: false
           build-args: |
             NRVQ_GIT_SHA=${{ github.sha }}
           tags: |
@@ -68,6 +76,8 @@ jobs:
 
       # Trivy IMAGE scan of the just-pushed image.
       # (Image scanning lives HERE, not in security.yml: images only exist after this build.)
+      # Trivy resolves the multi-arch index to the runner's platform (amd64) and scans that variant;
+      # the arm64 variant ships identical OS/pip package versions, so the amd64 scan is representative.
       # FAIL-CLOSED (exit-code "1"): NEW fixable HIGH/CRITICAL vulns block the build. Accepted
       # findings get triaged into .trivyignore WITH a rationale recorded in
       # docs/engineering/security-baseline.md — ignore-unfixed stays true so only actionable
