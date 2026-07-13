@@ -8,9 +8,9 @@ The SAST gate (`.github/workflows/security.yml` + `.pre-commit-config.yaml`, wir
 a gate that is red on day one gets bypassed. This doc records how "green" is achieved and where the
 baselined findings live, so nothing is silently ignored.
 
-## Triage rule (also in AGENTS.md)
+## Triage rule
 - **HIGH / CRITICAL → BLOCK** (fail-closed). Never backlogged.
-- **MEDIUM / LOW →** fix in-scope if doable (AGENTS.md rule 2), else record here with a rationale +
+- **MEDIUM / LOW →** fix in-scope if doable, else record here with a rationale +
   a ticket.
 
 ## How the gate starts green (and how it ratchets to blocking)

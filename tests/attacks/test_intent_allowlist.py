@@ -38,9 +38,10 @@ def allowlisted_class(api):
         pytest.skip("no API token — policy admin not available")
     cls = f"allowlist-probe-{uuid.uuid4().hex[:8]}"
     ns = "default"
-    # This whole suite (tests/attacks/) is a LIVE integration suite against a deployed Norviq API (T2, see
-    # docs/WORKFLOW.md — kind-only). A missing token skips above; a present-but-unreachable API (e.g. no
-    # server running locally) must skip too, not error — catch the connection failure precisely.
+    # This whole suite (tests/attacks/) is a LIVE integration suite against a deployed Norviq API
+    # (kind-only — never against a shared/production cluster). A missing token skips above; a
+    # present-but-unreachable API (e.g. no server running locally) must skip too, not error —
+    # catch the connection failure precisely.
     try:
         # 1) generate the allowlist rego for THIS class (package + class guards must match the applied class).
         cov = api.post(

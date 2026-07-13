@@ -2,7 +2,7 @@
 // Copyright 2026 Norviq Contributors
 //
 // EFFECT PROOF for the usage-driven intent ALLOWLIST builder (feat/intent-allowlist). A 200 is NOT proof
-// (AGENTS.md rule 1) — this spec drives the REAL evaluator through the authenticated page and asserts the
+// — this spec drives the REAL evaluator through the authenticated page and asserts the
 // generated positive-security policy actually FLIPS decisions on a running backend:
 //
 //   1. GET  /api/v1/threats/attack-paths        → pick a class that has ≥1 intent-suggest tool.

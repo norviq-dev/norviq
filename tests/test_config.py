@@ -17,7 +17,7 @@ def test_settings_defaults(monkeypatch) -> None:
     loaded = NorviqSettings(_env_file=None)
     assert loaded.policy_engine_url == "http://localhost:8181"
     assert loaded.redis_url == "redis://localhost:6379"
-    assert loaded.enforcement_mode == "block"  # secure default (see CLAUDE.md / config.py)
+    assert loaded.enforcement_mode == "block"  # secure fail-closed default (see config.py)
     assert loaded.trust_threshold == 0.7
     assert loaded.log_level == "INFO"
 

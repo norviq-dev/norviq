@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// console-fixes-batch2 (branch feat/console-fixes-batch2) — EFFECT assertions (a 200 is NOT proof; AGENTS.md
-// rule 1) for the 7 GA polish fixes, driven against the REAL app + backend:
+// console-fixes-batch2 (branch feat/console-fixes-batch2) — EFFECT assertions (a 200 is NOT proof)
+// for the 7 GA polish fixes, driven against the REAL app + backend:
 //
 //   1. ASSET GRAPH hull encloses every ring node — parse each cluster hull's (cx,cy,r) from its arc `d` and
 //      each `g.ag-node`'s translate(x,y); every node's center sits inside its nearest hull (dist <= r + ~9).

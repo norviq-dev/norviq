@@ -70,6 +70,15 @@ ui/tsconfig.tsbuildinfo
 # Lessons / gotchas log (local only)
 .lessons/
 
+# Internal-only: per-feature architecture diagrams, dev screenshots, orphaned scratch
+# deploy manifests, and internal author/reviewer capability map — not part of the public
+# product. Kept on local disk, untracked from git ahead of the public release.
+architecture/
+docs/screenshots/
+.tmp_commit_push.sh
+webhook/deploy/
+docs/registry-capabilities.md
+
 # Migration / new-machine setup + kubeconfig — internal, never publish
 kube/
 NEW-MACHINE-SETUP*.md

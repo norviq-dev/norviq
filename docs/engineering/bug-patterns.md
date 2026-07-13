@@ -106,7 +106,7 @@ write a test that proves the *real* path runs (see P-1, P-13).
 
 ## Codegen stubs (P-1, P-13)
 
-Cursor (or any codegen) tends to emit a plausible stub and leave the real logic unreachable.
+Codegen (human or LLM-assisted) tends to emit a plausible stub and leave the real logic unreachable.
 
 - **P-1 — Hardcoded fallback disguised as MVP.** `_evaluate_opa` once returned
   `{"decision": "allow"}` regardless of Rego; the real OPA call sat below, never executed.
