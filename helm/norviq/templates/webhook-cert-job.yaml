@@ -1,4 +1,4 @@
-{{- if and .Values.webhook.enabled .Values.webhook.injection.enabled }}
+{{- if .Values.webhook.enabled }}
 # TLS bootstrap for the sidecar-injector webhook. A post-install/post-upgrade Helm hook Job
 # self-signs a serving cert for norviq-webhook.<ns>.svc, writes the norviq-webhook-tls secret the
 # webhook Deployment mounts, and patches the MutatingWebhookConfiguration caBundle (the self-signed
@@ -134,18 +134,35 @@ spec:
               WEBHOOK=norviq-sidecar-injector
               CN="${SVC}.${NS}.svc"
               TMP="$(mktemp -d)"
-              echo "generating self-signed serving cert for ${CN}"
-              openssl req -x509 -newkey rsa:2048 -nodes \
-                -keyout "${TMP}/tls.key" -out "${TMP}/tls.crt" -days 3650 \
-                -subj "/CN=${CN}" \
-                -addext "subjectAltName=DNS:${SVC},DNS:${SVC}.${NS},DNS:${SVC}.${NS}.svc,DNS:${SVC}.${NS}.svc.cluster.local"
-              echo "upserting secret ${SECRET}"
-              kubectl -n "${NS}" create secret tls "${SECRET}" \
-                --cert="${TMP}/tls.crt" --key="${TMP}/tls.key" \
-                --dry-run=client -o yaml | kubectl apply -f -
+              # Idempotent: if the serving cert secret already exists, REUSE it so the cert identity is
+              # stable across upgrades (e.g. enabling injection later). Regenerating a fresh cert here
+              # while the webhook Deployment keeps serving the one it loaded at startup would make the
+              # MutatingWebhookConfiguration caBundle and the served cert diverge -> API-server TLS
+              # handshake failures -> injection silently skipped (failurePolicy). Only generate when absent.
+              if kubectl -n "${NS}" get secret "${SECRET}" >/dev/null 2>&1; then
+                echo "reusing existing serving cert from secret ${SECRET}"
+                kubectl -n "${NS}" get secret "${SECRET}" -o jsonpath='{.data.tls\.crt}' | base64 -d > "${TMP}/tls.crt"
+              else
+                echo "generating self-signed serving cert for ${CN}"
+                openssl req -x509 -newkey rsa:2048 -nodes \
+                  -keyout "${TMP}/tls.key" -out "${TMP}/tls.crt" -days 3650 \
+                  -subj "/CN=${CN}" \
+                  -addext "subjectAltName=DNS:${SVC},DNS:${SVC}.${NS},DNS:${SVC}.${NS}.svc,DNS:${SVC}.${NS}.svc.cluster.local"
+                echo "creating secret ${SECRET}"
+                kubectl -n "${NS}" create secret tls "${SECRET}" \
+                  --cert="${TMP}/tls.crt" --key="${TMP}/tls.key" \
+                  --dry-run=client -o yaml | kubectl apply -f -
+              fi
               CA="$(base64 < "${TMP}/tls.crt" | tr -d '\n')"
-              echo "patching ${WEBHOOK} caBundle"
-              kubectl patch mutatingwebhookconfiguration "${WEBHOOK}" --type=json \
-                -p "[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"${CA}\"}]"
+              # The MutatingWebhookConfiguration only exists when injection is enabled; patch its
+              # caBundle when present, otherwise skip (the webhook/controller pod still needs the
+              # serving cert above so it can start and run the CRD controller).
+              if kubectl get mutatingwebhookconfiguration "${WEBHOOK}" >/dev/null 2>&1; then
+                echo "patching ${WEBHOOK} caBundle"
+                kubectl patch mutatingwebhookconfiguration "${WEBHOOK}" --type=json \
+                  -p "[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"${CA}\"}]"
+              else
+                echo "MutatingWebhookConfiguration ${WEBHOOK} absent (injection disabled) — skipping caBundle patch"
+              fi
               echo "done"
 {{- end }}

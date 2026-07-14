@@ -7,6 +7,8 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -50,7 +52,7 @@ var configGVR = schema.GroupVersionResource{
 const deleteSyncedAnnotation = "norviq.io/delete-synced"
 
 var finalizerMaxAge = 15 * time.Minute
-var allowedSidecarImagePattern = regexp.MustCompile(`^(norviq/norviq-engine|docker\.io/norviq/norviq-engine):[a-zA-Z0-9._-]+$`)
+var allowedSidecarImagePattern = regexp.MustCompile(`^(norviq/norviq-engine|docker\.io/norviq/norviq-engine|ghcr\.io/norviq-dev/norviq-engine):[a-zA-Z0-9._-]+$`)
 
 type policySyncRequest struct {
 	Namespace       string                 `json:"namespace"`
@@ -101,7 +103,7 @@ func NewController(apiURL, apiToken string) (*Controller, error) {
 }
 
 func NewControllerWithClient(client dynamic.Interface, apiURL, apiSecret string) *Controller {
-	defaultSidecar := envStr("NRVQ_SIDECAR_IMAGE", "norviq/norviq-engine:engine-latest")
+	defaultSidecar := envStr("NRVQ_SIDECAR_IMAGE", "ghcr.io/norviq-dev/norviq-engine:engine-latest")
 	runtime := &RuntimeConfig{}
 	runtime.SetSidecarImage(defaultSidecar)
 	var oidcTS oauth2.TokenSource
@@ -113,14 +115,23 @@ func NewControllerWithClient(client dynamic.Interface, apiURL, apiSecret string)
 		oidcTS = ccfg.TokenSource(context.Background())
 		slog.Info("NRVQ-WHK-4042: controller using OIDC client-credentials identity", "clientID", clientID, "tokenURL", tokenURL)
 	}
+	httpClient, err := buildAPIHTTPClient(envBool("NRVQ_INTERNAL_TLS", false), envStr("NRVQ_CA_CERT_FILE", ""))
+	if err != nil {
+		// Fail closed: internal-TLS is requested but the CA could not be loaded. Use a client whose
+		// RootCAs pool is empty so every TLS handshake to the API fails verification, rather than
+		// silently downgrading to plaintext.
+		slog.Error("NRVQ-WHK-4046: internal-TLS API client build failed; using fail-closed client", "error", err)
+		httpClient = &http.Client{
+			Timeout:   5 * time.Second,
+			Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: x509.NewCertPool(), MinVersion: tls.VersionTLS12}},
+		}
+	}
 	return &Controller{
-		client:          client,
-		apiURL:          apiURL,
-		apiSecret:       apiSecret,
-		oidcTokenSource: oidcTS,
-		httpClient: &http.Client{
-			Timeout: 5 * time.Second,
-		},
+		client:               client,
+		apiURL:               apiURL,
+		apiSecret:            apiSecret,
+		oidcTokenSource:      oidcTS,
+		httpClient:           httpClient,
 		syncSemaphore:        make(chan struct{}, 10),
 		presetBasePath:       "/app/presets",
 		adminPolicyNamespace: envStr("NRVQ_ADMIN_POLICY_NAMESPACE", "norviq"),
@@ -129,6 +140,30 @@ func NewControllerWithClient(client dynamic.Interface, apiURL, apiSecret string)
 		classQueue:           make(chan *unstructured.Unstructured, 64),
 		configQueue:          make(chan *unstructured.Unstructured, 64),
 	}
+}
+
+// buildAPIHTTPClient builds the controller's HTTP client for talking to the central API. When
+// internalTLS is false it returns the historical plaintext client (byte-identical to the pre-mTLS
+// behavior). When true it pins the API's serving cert to the internal CA loaded from caCertFile
+// (server-auth TLS); the controller keeps its bearer service JWT for authentication on top.
+func buildAPIHTTPClient(internalTLS bool, caCertFile string) (*http.Client, error) {
+	if !internalTLS {
+		return &http.Client{Timeout: 5 * time.Second}, nil
+	}
+	pemBytes, err := os.ReadFile(caCertFile)
+	if err != nil {
+		return nil, fmt.Errorf("NRVQ-WHK-4044: read internal CA cert %q: %w", caCertFile, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return nil, fmt.Errorf("NRVQ-WHK-4045: internal CA cert %q contained no valid PEM certificates", caCertFile)
+	}
+	return &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+		},
+	}, nil
 }
 
 func (c *Controller) Start(ctx context.Context) error {

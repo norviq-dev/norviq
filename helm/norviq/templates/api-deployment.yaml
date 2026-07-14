@@ -127,10 +127,54 @@ spec:
             seccompProfile:
               type: RuntimeDefault
 {{- end }}
-      {{- if .Values.config.spiffeCsi.enabled }}
+{{- if .Values.config.internalTls.enabled }}
+        # Auto-mTLS terminator: serves TLS (+optional client-cert mTLS) on :8443 and proxies to the app
+        # on loopback. The app itself stays HTTP (probes/tests unaffected); nothing is plaintext on the wire.
+        - name: tls-proxy
+          image: {{ .Values.config.internalTls.proxyImage | default "nginx:1.27-alpine" | quote }}
+          command: ["nginx", "-c", "/etc/nginx/nginx.conf", "-g", "daemon off;"]
+          ports:
+            - containerPort: 8443
+              name: https
+          readinessProbe:
+            tcpSocket:
+              port: 8443
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          volumeMounts:
+            - name: api-tls
+              mountPath: /etc/norviq/tls
+              readOnly: true
+            - name: api-tls-proxy-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+          resources:
+            requests: { cpu: 10m, memory: 24Mi }
+            limits: { memory: 64Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 101
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+{{- end }}
+      {{- if or .Values.config.spiffeCsi.enabled .Values.config.internalTls.enabled }}
       volumes:
+        {{- if .Values.config.spiffeCsi.enabled }}
         - name: spiffe-workload-api
           csi:
             driver: csi.spiffe.io
             readOnly: true
+        {{- end }}
+        {{- if .Values.config.internalTls.enabled }}
+        - name: api-tls
+          secret:
+            secretName: norviq-api-tls
+        - name: api-tls-proxy-config
+          configMap:
+            name: norviq-api-tls-proxy
+        {{- end }}
       {{- end }}

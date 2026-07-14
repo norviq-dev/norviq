@@ -1,0 +1,55 @@
+{{- if .Values.config.internalTls.enabled }}
+# nginx config for the API pod's TLS terminator sidecar. Terminates TLS (and OPTIONAL mTLS) on :8443
+# and proxies cleartext to the Python app on 127.0.0.1 (same pod, loopback — never on the wire). mTLS is
+# "optional" so a bearer-token client (console/CLI over TLS) still works while a sidecar presenting a
+# CA-signed client cert gets verified and its identity forwarded to the app as headers.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: norviq-api-tls-proxy
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+data:
+  nginx.conf: |
+    worker_processes 1;
+    error_log /dev/stderr warn;
+    pid /tmp/nginx.pid;
+    events { worker_connections 1024; }
+    http {
+      access_log off;
+      client_body_temp_path /tmp/nginx-body;
+      proxy_temp_path /tmp/nginx-proxy;
+      fastcgi_temp_path /tmp/nginx-fastcgi;
+      uwsgi_temp_path /tmp/nginx-uwsgi;
+      scgi_temp_path /tmp/nginx-scgi;
+      server {
+        listen 8443 ssl;
+        http2 on;
+        ssl_certificate     /etc/norviq/tls/tls.crt;
+        ssl_certificate_key /etc/norviq/tls/tls.key;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        # mTLS: verify a presented client cert against the internal CA, but do not REQUIRE one, so
+        # bearer-token clients (console/CLI) still reach the API over TLS.
+        ssl_client_certificate /etc/norviq/tls/ca.crt;
+        ssl_verify_client optional;
+        ssl_verify_depth 2;
+        client_max_body_size 2m;
+        location / {
+          proxy_pass http://127.0.0.1:{{ .Values.api.port }};
+          proxy_http_version 1.1;
+          proxy_set_header Host $host;
+          proxy_set_header X-Forwarded-For $remote_addr;
+          proxy_set_header X-Forwarded-Proto https;
+          # Forward the verified client identity to the app (empty when no/failed client cert).
+          proxy_set_header X-Nrvq-Client-Verify $ssl_client_verify;
+          proxy_set_header X-Nrvq-Client-Subject $ssl_client_s_dn;
+          # websockets (audit stream)
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection $http_connection;
+          proxy_read_timeout 3600s;
+        }
+      }
+      map $http_upgrade $http_connection { default upgrade; '' close; }
+    }
+{{- end }}

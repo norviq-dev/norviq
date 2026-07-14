@@ -44,6 +44,13 @@ type Config struct {
 	PgURL     string
 	DBSSLMode string
 	OpaMode   string
+	// Auto-mTLS (internal-TLS). When InternalTLS is true, the controller verifies the API's serving
+	// cert against the internal CA (CACertFile) and the injector mints a per-namespace client cert
+	// (signed by CACertFile/CAKeyFile, mounted from secret norviq-internal-ca) so the sidecar does
+	// mTLS to https://norviq-api:8443. Default off -> current plaintext behavior, byte-identical.
+	InternalTLS bool
+	CACertFile  string
+	CAKeyFile   string
 }
 
 type RuntimeConfig struct {
@@ -57,7 +64,7 @@ func LoadConfig() Config {
 		Port:         envInt("NRVQ_WEBHOOK_PORT", 8443),
 		CertFile:     envStr("NRVQ_TLS_CERT", "/etc/webhook/certs/tls.crt"),
 		KeyFile:      envStr("NRVQ_TLS_KEY", "/etc/webhook/certs/tls.key"),
-		SidecarImage: envStr("NRVQ_SIDECAR_IMAGE", "norviq/norviq-engine:engine-latest"),
+		SidecarImage: envStr("NRVQ_SIDECAR_IMAGE", "ghcr.io/norviq-dev/norviq-engine:engine-latest"),
 		SidecarPort:  envInt("NRVQ_SIDECAR_PORT", 8282),
 		// SIDE-3: unify the opt-in/out label key with the MutatingWebhookConfiguration namespaceSelector
 		// (norviq-injection). The namespace opts in (MWC selector); a pod opts OUT with
@@ -79,6 +86,9 @@ func LoadConfig() Config {
 		PgURL:                envStr("NRVQ_PG_URL", ""),
 		DBSSLMode:            envStr("NRVQ_DB_SSL_MODE", "require"),
 		OpaMode:              envStr("NRVQ_SIDECAR_OPA_MODE", "subprocess"),
+		InternalTLS:          envBool("NRVQ_INTERNAL_TLS", false),
+		CACertFile:           envStr("NRVQ_CA_CERT_FILE", ""),
+		CAKeyFile:            envStr("NRVQ_CA_KEY_FILE", ""),
 	}
 	runtime.SetSidecarImage(cfg.SidecarImage)
 	return cfg

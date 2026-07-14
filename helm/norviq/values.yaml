@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 namespace: norviq
-policyQuotaNamespaces:
-  - default
-  - chatbot-prod
-  - analytics
+# Per-tenant NrvqPolicy quota (ResourceQuota count/nrvqpolicies.norviq.io). OPT-IN: list the tenant
+# namespaces you want protected — each must already exist. Empty by default so a fresh install never
+# fails on a namespace that hasn't been created yet. Example: [prod-agents, analytics].
+policyQuotaNamespaces: []
 validatingAdmissionPolicyEnabled: true
 baselineClusterPolicy:
   enabled: true
@@ -144,6 +144,13 @@ webhook:
     # nothing per-pod). "embedded" = the sidecar runs its own RedisCache+OPA(subprocess)+PolicyLoader
     # for air-gapped/edge (the chart then wires NRVQ_REDIS_URL/NRVQ_PG_URL through to the injector).
     sidecarMode: proxy
+    # Admission failure posture for the injector. "Fail" (DEFAULT) = fail-CLOSED: if the injector is
+    # unavailable, pod creation in an injection-enabled namespace is REJECTED so an agent pod can never
+    # start un-guarded (correct for a policy-enforcement product; the webhook is HA — 2 replicas + PDB,
+    # and the control-plane/kube-system namespaces are excluded from the selector so this never self-
+    # deadlocks). Set "Ignore" (fail-open) only for a dev/eval cluster where an un-injected pod is
+    # acceptable.
+    failurePolicy: Fail
     # Image with kubectl + openssl for the cert-bootstrap hook Job. alpine/k8s ships both and is
     # publicly pullable (bitnami/kubectl tags were removed from Docker Hub in the 2025 Bitnami change).
     certJobImage: "alpine/k8s:1.30.0"
@@ -253,9 +260,22 @@ ingress:
   enabled: false
   className: nginx
   host: norviq.example.com
+  # TLS for the enterprise HTTPS path. Set true and either pre-create the secret named below or use a
+  # cert-manager issuer annotation (see `annotations`). Leaving false serves plaintext (dev only).
   tls: false
+  tlsSecretName: norviq-ingress-tls
+  # Extra ingress annotations (e.g. cert-manager.io/cluster-issuer, body-size, timeouts). The console
+  # nginx already proxies /api/* to the API, so a single host routes both UI and API — no path rewrite.
+  annotations: {}
 
 config:
+  # Zero-touch internal TLS/mTLS for control-plane traffic. When true (DEFAULT), a Helm hook auto-mints
+  # an internal CA + the API serving cert, the API pod runs a TLS terminator on :8443, and the injector
+  # gives each sidecar a CA-signed client cert for mTLS to the control plane — all automatic, no operator
+  # certs/CSRs. Set false only for a plaintext dev cluster.
+  internalTls:
+    enabled: true
+    proxyImage: "nginx:1.27-alpine"
   logLevel: INFO
   enforcementMode: block
   noPolicyDecision: deny   # F-04: no-policy namespace -> deny in block mode ("allow" restores fail-open)

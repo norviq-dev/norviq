@@ -208,6 +208,21 @@ class NorviqSettings(BaseSettings):
     # Bearer token the thin-proxy sidecar presents to /evaluate (role=service, namespace-scoped). The
     # webhook mints + injects this per workload; empty in embedded mode. NRVQ_API_TOKEN.
     api_token: str = ""
+    # --- auto-mTLS (internal control-plane TLS). OFF by default -> plaintext http, EXACTLY as today
+    # (byte-identical behavior keeps the whole suite + k8s probes green). When true AND api_url is https,
+    # the sidecar builds a mutual-TLS ssl.SSLContext: trusts the internal CA (internal_api_ca_pem) and
+    # presents the injected client cert/key (internal_client_cert_pem/internal_client_key_pem). The webhook
+    # injector mints the per-namespace client cert and injects all four as env (NRVQ_INTERNAL_TLS +
+    # NRVQ_API_CA_PEM/NRVQ_CLIENT_CERT_PEM/NRVQ_CLIENT_KEY_PEM); the bearer token is kept (defense in depth).
+    internal_tls: bool = False
+    # Already-decoded PEM strings (NOT file paths) injected by the webhook from the internal CA secrets.
+    internal_api_ca_pem: str = Field(default="", validation_alias=AliasChoices("API_CA_PEM", "NRVQ_API_CA_PEM"))
+    internal_client_cert_pem: str = Field(
+        default="", validation_alias=AliasChoices("CLIENT_CERT_PEM", "NRVQ_CLIENT_CERT_PEM")
+    )
+    internal_client_key_pem: str = Field(
+        default="", validation_alias=AliasChoices("CLIENT_KEY_PEM", "NRVQ_CLIENT_KEY_PEM")
+    )
     api_secret_key: str = Field(
         default="change-me-in-production",  # Replace in non-dev deployments.
         # NRVQ_API_SECRET_KEY is what the Helm chart sets — include it so the key is rotatable.

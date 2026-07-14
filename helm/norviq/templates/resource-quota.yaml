@@ -1,8 +1,10 @@
-{{- $namespaces := .Values.policyQuotaNamespaces -}}
-{{- if not $namespaces }}
-{{- fail "policyQuotaNamespaces must list tenant namespaces to protect NrvqPolicy quota" -}}
-{{- end }}
-{{- range $ns := $namespaces }}
+{{- /*
+  Optional per-tenant NrvqPolicy quota. Opt-in: only namespaces listed in `policyQuotaNamespaces`
+  get a ResourceQuota, and each MUST already exist (a ResourceQuota is namespaced). Empty by default
+  so a fresh install never fails on a namespace that hasn't been created yet — add tenant namespaces
+  here (via `helm upgrade`) once they exist.
+*/ -}}
+{{- range $ns := .Values.policyQuotaNamespaces }}
 apiVersion: v1
 kind: ResourceQuota
 metadata:

@@ -3,9 +3,18 @@
 package main
 
 import (
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
+	"math/big"
+	"os"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -222,12 +231,19 @@ func sidecarEnv(agentClass string, namespace string, cfg Config) []map[string]in
 		)
 	} else {
 		// Thin proxy (default): call the central engine with a per-workload namespace-scoped service JWT.
-		env = append(env, map[string]interface{}{"name": "NRVQ_API_URL", "value": cfg.ApiURL})
+		// When auto-mTLS is on, the API URL is upgraded to https and mTLS material is delivered as PEM
+		// env alongside the JWT (defense in depth). When off, the env below is byte-identical to before.
+		apiURL := cfg.ApiURL
+		tlsEnv, tlsOn := buildSidecarTLSEnv(cfg, namespace, &apiURL)
+		env = append(env, map[string]interface{}{"name": "NRVQ_API_URL", "value": apiURL})
 		if tok := mintSidecarToken(cfg, namespace); tok != "" {
 			env = append(env, map[string]interface{}{"name": "NRVQ_API_TOKEN", "value": tok})
 		} else {
 			slog.Warn("NRVQ-WHK-4037: no API secret to mint sidecar token; thin-proxy sidecar will fail closed",
 				"namespace", namespace)
+		}
+		if tlsOn {
+			env = append(env, tlsEnv...)
 		}
 	}
 	if cfg.SpiffeInject {
@@ -279,6 +295,125 @@ func mintSidecarToken(cfg Config, namespace string) string {
 		return ""
 	}
 	return tok
+}
+
+// buildSidecarTLSEnv returns the auto-mTLS env for the injected sidecar (defense in depth alongside
+// the JWT): the trusted CA PEM plus a freshly minted per-namespace client cert/key, and NRVQ_INTERNAL_TLS
+// so the Python sidecar builds an SSLContext. It also upgrades apiURL to https (leaving an already-https
+// cfg.ApiURL untouched). Returns (nil,false) when the flag is off OR the CA material can't be read/minted
+// — in the failure case the caller keeps the current plaintext+JWT env so injection never hard-fails.
+func buildSidecarTLSEnv(cfg Config, namespace string, apiURL *string) ([]map[string]interface{}, bool) {
+	if !cfg.InternalTLS {
+		return nil, false
+	}
+	caPEM, err := os.ReadFile(cfg.CACertFile)
+	if err != nil {
+		slog.Error("NRVQ-WHK-4047: read internal CA cert for sidecar mTLS failed; falling back to plaintext+JWT",
+			"namespace", namespace, "error", err)
+		return nil, false
+	}
+	certPEM, keyPEM, err := mintClientCert(cfg, namespace)
+	if err != nil {
+		slog.Error("NRVQ-WHK-4048: sidecar client cert mint failed; falling back to plaintext+JWT",
+			"namespace", namespace, "error", err)
+		return nil, false
+	}
+	if !strings.HasPrefix(*apiURL, "https://") {
+		*apiURL = "https://norviq-api:8443"
+	}
+	return []map[string]interface{}{
+		{"name": "NRVQ_INTERNAL_TLS", "value": "true"},
+		{"name": "NRVQ_API_CA_PEM", "value": string(caPEM)},
+		{"name": "NRVQ_CLIENT_CERT_PEM", "value": certPEM},
+		{"name": "NRVQ_CLIENT_KEY_PEM", "value": keyPEM},
+	}, true
+}
+
+// mintClientCert mints a per-namespace CLIENT certificate signed by the internal CA (ca.crt/ca.key read
+// from cfg.CACertFile/cfg.CAKeyFile, mounted from secret norviq-internal-ca). The leaf is a 2048-bit RSA
+// key, CN=norviq-sidecar, OU=<namespace>, ExtKeyUsage=ClientAuth, 30-day validity. Both PEMs are returned
+// as strings so the injector can deliver them to the sidecar via pod env.
+func mintClientCert(cfg Config, namespace string) (certPEM string, keyPEM string, err error) {
+	caCertBytes, err := os.ReadFile(cfg.CACertFile)
+	if err != nil {
+		return "", "", fmt.Errorf("NRVQ-WHK-4049: read CA cert %q: %w", cfg.CACertFile, err)
+	}
+	caKeyBytes, err := os.ReadFile(cfg.CAKeyFile)
+	if err != nil {
+		return "", "", fmt.Errorf("NRVQ-WHK-4050: read CA key %q: %w", cfg.CAKeyFile, err)
+	}
+	caCert, caSigner, err := parseCAKeyPair(caCertBytes, caKeyBytes)
+	if err != nil {
+		return "", "", err
+	}
+
+	leafKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return "", "", fmt.Errorf("NRVQ-WHK-4051: generate sidecar key: %w", err)
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return "", "", fmt.Errorf("NRVQ-WHK-4052: generate serial: %w", err)
+	}
+	now := time.Now()
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			CommonName:         "norviq-sidecar",
+			OrganizationalUnit: []string{namespace},
+		},
+		NotBefore:             now.Add(-1 * time.Minute),
+		NotAfter:              now.Add(30 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &leafKey.PublicKey, caSigner)
+	if err != nil {
+		return "", "", fmt.Errorf("NRVQ-WHK-4053: sign sidecar cert: %w", err)
+	}
+	certPEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	keyPEM = string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(leafKey)}))
+	return certPEM, keyPEM, nil
+}
+
+// parseCAKeyPair decodes the internal CA's cert + private key PEM. The key may be PKCS#1, PKCS#8, or SEC1
+// (EC); any crypto.Signer is accepted so the CA can be RSA or ECDSA.
+func parseCAKeyPair(certPEM, keyPEM []byte) (*x509.Certificate, crypto.Signer, error) {
+	certBlock, _ := pem.Decode(certPEM)
+	if certBlock == nil || certBlock.Type != "CERTIFICATE" {
+		return nil, nil, fmt.Errorf("NRVQ-WHK-4054: CA cert PEM did not decode to a CERTIFICATE block")
+	}
+	caCert, err := x509.ParseCertificate(certBlock.Bytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("NRVQ-WHK-4055: parse CA cert: %w", err)
+	}
+	keyBlock, _ := pem.Decode(keyPEM)
+	if keyBlock == nil {
+		return nil, nil, fmt.Errorf("NRVQ-WHK-4056: CA key PEM did not decode")
+	}
+	signer, err := parsePrivateKey(keyBlock.Bytes)
+	if err != nil {
+		return nil, nil, err
+	}
+	return caCert, signer, nil
+}
+
+// parsePrivateKey parses a DER-encoded private key trying PKCS#8, then PKCS#1 (RSA), then SEC1 (EC).
+func parsePrivateKey(der []byte) (crypto.Signer, error) {
+	if k, err := x509.ParsePKCS8PrivateKey(der); err == nil {
+		if signer, ok := k.(crypto.Signer); ok {
+			return signer, nil
+		}
+		return nil, fmt.Errorf("NRVQ-WHK-4057: PKCS#8 CA key is not a crypto.Signer")
+	}
+	if k, err := x509.ParsePKCS1PrivateKey(der); err == nil {
+		return k, nil
+	}
+	if k, err := x509.ParseECPrivateKey(der); err == nil {
+		return k, nil
+	}
+	return nil, fmt.Errorf("NRVQ-WHK-4058: CA private key is not a supported PKCS#8/PKCS#1/SEC1 key")
 }
 
 func sidecarResources() map[string]interface{} {

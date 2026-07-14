@@ -1,7 +1,7 @@
 {{- if and .Values.webhook.enabled .Values.webhook.injection.enabled }}
 # Sidecar-injector admission webhook. caBundle is left empty here and patched at install time by
-# the webhook-cert-job hook (self-signed cert acts as its own CA). failurePolicy: Ignore so a
-# not-yet-bootstrapped webhook never blocks pod creation.
+# the webhook-cert-job hook (self-signed cert acts as its own CA). failurePolicy defaults to Fail
+# (fail-closed — an agent pod can't start un-guarded); override via webhook.injection.failurePolicy.
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:
@@ -32,7 +32,7 @@ webhooks:
         - key: kubernetes.io/metadata.name
           operator: NotIn
           values: ["kube-system", "kube-public", "kube-node-lease", {{ .Values.namespace | quote }}]
-    failurePolicy: Ignore
+    failurePolicy: {{ .Values.webhook.injection.failurePolicy | default "Fail" }}
     reinvocationPolicy: Never
     timeoutSeconds: 5
 {{- end }}

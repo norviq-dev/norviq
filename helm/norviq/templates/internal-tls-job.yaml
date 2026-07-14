@@ -1,0 +1,134 @@
+{{- if .Values.config.internalTls.enabled }}
+# Zero-touch internal TLS bootstrap. A pre-install/pre-upgrade Helm hook Job mints (once, idempotently):
+#   1. a self-signed Norviq internal CA           -> secret norviq-internal-ca   (ca.crt, ca.key)
+#   2. a CA-signed serving cert for norviq-api    -> secret norviq-api-tls       (tls.crt, tls.key, ca.crt)
+# The API pod's TLS terminator serves (2); every cross-pod client (controller, sidecar, console) trusts
+# the CA from (1); the injector signs per-namespace client certs with the CA for sidecar mTLS. No
+# operator action, no cert-manager, no manual CSRs — `helm install` yields encrypted control-plane
+# traffic out of the box. Idempotent: existing secrets are REUSED so the CA identity is stable across
+# upgrades (a regenerated CA would break every already-issued cert until every pod restarts).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: norviq-internal-tls
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-6"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: norviq-internal-tls
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-6"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: norviq-internal-tls
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-6"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+subjects:
+  - kind: ServiceAccount
+    name: norviq-internal-tls
+    namespace: {{ .Values.namespace }}
+roleRef:
+  kind: Role
+  name: norviq-internal-tls
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: norviq-internal-tls
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: norviq-internal-tls
+    spec:
+      serviceAccountName: norviq-internal-tls
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: false
+        runAsUser: 0
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: tls-bootstrap
+          image: {{ .Values.webhook.injection.certJobImage | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              command -v openssl >/dev/null 2>&1 || apk add --no-cache openssl >/dev/null 2>&1
+              NS={{ .Values.namespace }}
+              CA_SECRET=norviq-internal-ca
+              API_SECRET=norviq-api-tls
+              SVC=norviq-api
+              TMP="$(mktemp -d)"
+
+              # ---- 1. CA (idempotent: reuse if present) ----
+              if kubectl -n "${NS}" get secret "${CA_SECRET}" >/dev/null 2>&1; then
+                echo "reusing existing internal CA ${CA_SECRET}"
+                kubectl -n "${NS}" get secret "${CA_SECRET}" -o jsonpath='{.data.ca\.crt}' | base64 -d > "${TMP}/ca.crt"
+                kubectl -n "${NS}" get secret "${CA_SECRET}" -o jsonpath='{.data.ca\.key}' | base64 -d > "${TMP}/ca.key"
+              else
+                echo "generating Norviq internal CA"
+                openssl req -x509 -newkey rsa:2048 -nodes -keyout "${TMP}/ca.key" -out "${TMP}/ca.crt" \
+                  -days 3650 -subj "/CN=Norviq Internal CA/O=norviq" \
+                  -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign"
+                kubectl -n "${NS}" create secret generic "${CA_SECRET}" \
+                  --from-file=ca.crt="${TMP}/ca.crt" --from-file=ca.key="${TMP}/ca.key" \
+                  --dry-run=client -o yaml | kubectl apply -f -
+              fi
+
+              # ---- 2. API serving cert (idempotent) signed by the CA ----
+              if kubectl -n "${NS}" get secret "${API_SECRET}" >/dev/null 2>&1; then
+                echo "reusing existing API serving cert ${API_SECRET}"
+              else
+                echo "issuing API serving cert for ${SVC}"
+                printf 'subjectAltName=DNS:%s,DNS:%s.%s,DNS:%s.%s.svc,DNS:%s.%s.svc.cluster.local,DNS:localhost,IP:127.0.0.1\n' \
+                  "${SVC}" "${SVC}" "${NS}" "${SVC}" "${NS}" "${SVC}" "${NS}" > "${TMP}/san.cnf"
+                openssl req -newkey rsa:2048 -nodes -keyout "${TMP}/tls.key" -out "${TMP}/tls.csr" \
+                  -subj "/CN=${SVC}.${NS}.svc/O=norviq"
+                openssl x509 -req -in "${TMP}/tls.csr" -CA "${TMP}/ca.crt" -CAkey "${TMP}/ca.key" \
+                  -CAcreateserial -days 3650 -extfile "${TMP}/san.cnf" -out "${TMP}/tls.crt"
+                kubectl -n "${NS}" create secret generic "${API_SECRET}" \
+                  --from-file=tls.crt="${TMP}/tls.crt" --from-file=tls.key="${TMP}/tls.key" \
+                  --from-file=ca.crt="${TMP}/ca.crt" \
+                  --dry-run=client -o yaml | kubectl apply -f -
+              fi
+              echo "internal-tls bootstrap done"
+{{- end }}

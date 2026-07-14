@@ -14,3 +14,10 @@ spec:
       targetPort: http
       protocol: TCP
       name: http
+    {{- if .Values.config.internalTls.enabled }}
+    # TLS (+optional mTLS) terminator port — the encrypted control-plane endpoint cross-pod clients use.
+    - port: 8443
+      targetPort: https
+      protocol: TCP
+      name: https
+    {{- end }}

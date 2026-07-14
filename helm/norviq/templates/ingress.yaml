@@ -6,11 +6,22 @@ metadata:
   namespace: {{ .Values.namespace }}
   labels:
     {{- include "norviq.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
   annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tlsSecretName | default "norviq-ingress-tls" }}
+  {{- end }}
   rules:
+    # Single host → the console (norviq-ui). Its nginx serves the SPA AND reverse-proxies /api/* to
+    # the API, so one backend routes both — no path rewrite (a rewrite-target here breaks SPA asset
+    # paths and /api routing). This mirrors the port-forward path exactly.
     - host: {{ .Values.ingress.host }}
       http:
         paths:
@@ -21,11 +32,4 @@ spec:
                 name: norviq-ui
                 port:
                   number: 80
-          - path: /api
-            pathType: Prefix
-            backend:
-              service:
-                name: norviq-api
-                port:
-                  number: {{ .Values.api.port }}
 {{- end }}

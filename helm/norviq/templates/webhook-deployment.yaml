@@ -21,6 +21,7 @@ spec:
     metadata:
       labels:
         app: norviq-webhook
+        app.kubernetes.io/component: webhook
     spec:
       serviceAccountName: norviq-controller
       {{- include "norviq.imagePullSecrets" . | nindent 6 }}
@@ -66,7 +67,21 @@ spec:
             # FQDN (namespace-qualified) so the value is resolvable BOTH from the controller (in this
             # namespace) AND from thin-proxy sidecars injected into OTHER tenant namespaces (SIDE-2).
             - name: NRVQ_API_URL
+              {{- if .Values.config.internalTls.enabled }}
+              value: "https://norviq-api.{{ .Values.namespace }}.svc:8443"
+              {{- else }}
               value: "http://norviq-api.{{ .Values.namespace }}.svc:{{ .Values.api.port }}"
+              {{- end }}
+            {{- if .Values.config.internalTls.enabled }}
+            # Auto-mTLS: controller verifies the API cert against the internal CA; injector signs a
+            # per-namespace client cert from the CA (ca.key) for sidecar mTLS. Mounted below.
+            - name: NRVQ_INTERNAL_TLS
+              value: "true"
+            - name: NRVQ_CA_CERT_FILE
+              value: /etc/norviq/ca/ca.crt
+            - name: NRVQ_CA_KEY_FILE
+              value: /etc/norviq/ca/ca.key
+            {{- end }}
             - name: NRVQ_ADMIN_POLICY_NAMESPACE
               value: "{{ .Values.namespace }}"
             # SIDE-2: mode injected into sidecars. "proxy" (default) = thin sidecar POSTs to the central
@@ -127,6 +142,11 @@ spec:
             - name: webhook-certs
               mountPath: /etc/webhook/certs
               readOnly: true
+            {{- if .Values.config.internalTls.enabled }}
+            - name: internal-ca
+              mountPath: /etc/norviq/ca
+              readOnly: true
+            {{- end }}
           resources:
             {{- toYaml .Values.webhook.resources | nindent 12 }}
           startupProbe:
@@ -157,4 +177,9 @@ spec:
         - name: webhook-certs
           secret:
             secretName: norviq-webhook-tls
+        {{- if .Values.config.internalTls.enabled }}
+        - name: internal-ca
+          secret:
+            secretName: norviq-internal-ca
+        {{- end }}
 {{- end }}

@@ -123,8 +123,20 @@ func TestInjector_ValidateImage(t *testing.T) {
 	if !inj.validateImage("docker.io/norviq/norviq-engine:engine-latest") {
 		t.Fatal("expected docker.io official image to be allowed")
 	}
+	// D7 regression: the public release ships GHCR images; the chart injects
+	// ghcr.io/norviq-dev/norviq-engine, which the allowlist must accept (it was Docker-Hub-only,
+	// so every agent pod was rejected on a fresh public install).
+	if !inj.validateImage("ghcr.io/norviq-dev/norviq-engine:engine-latest") {
+		t.Fatal("expected GHCR official image to be allowed")
+	}
+	if !inj.validateImage("ghcr.io/norviq-dev/norviq-engine:engine-157c7c9") {
+		t.Fatal("expected GHCR sha-pinned image to be allowed")
+	}
 	if inj.validateImage("attacker/malware:latest") {
 		t.Fatal("expected unauthorized image to be rejected")
+	}
+	if inj.validateImage("ghcr.io/attacker/norviq-engine:latest") {
+		t.Fatal("expected look-alike GHCR image to be rejected")
 	}
 }
 
