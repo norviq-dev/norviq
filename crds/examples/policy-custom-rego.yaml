@@ -12,6 +12,7 @@ spec:
   enforcementMode: block
   rego: |
     package norviq.custom.sql_guard
+    default decision = "allow"
     violation {
       input.tool_name == "execute_sql"
       contains(lower(input.tool_params.query), "drop")

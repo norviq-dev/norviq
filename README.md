@@ -10,6 +10,9 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Kubernetes](https://img.shields.io/badge/Kubernetes-1.30%2B-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io)
 [![OPA](https://img.shields.io/badge/policy-OPA%2FRego-7D4698?logo=openpolicyagent&logoColor=white)](https://www.openpolicyagent.org)
+[![Docs](https://img.shields.io/badge/docs-docs.norviq.dev-00a576)](https://docs.norviq.dev)
+
+**[Documentation](https://docs.norviq.dev)** · **[Website](https://norviq.dev)** · **[Getting started](https://docs.norviq.dev/getting-started/)**
 
 </div>
 
@@ -149,14 +152,21 @@ kubectl label namespace <your-agent-namespace> norviq-injection=enabled
 
 ## Documentation
 
-- **[Getting Started](docs/getting-started.md)** — install, first policy, see enforcement flip a decision
-- **[Concepts](docs/concepts.md)** — agent classes, policy tiers, enforcement modes, SPIFFE identity
-- **[Writing Policies](docs/guides/writing-policies.md)** — authoring Rego, the intent generator, red-team
-- **[Integrating Agent Frameworks](docs/guides/integrating-agents.md)** — the SDK: LangChain, LangGraph, CrewAI, AutoGen, Azure/Semantic Kernel
-- **[Configuration](docs/configuration.md)** — Helm `values.yaml` reference
-- **[Deployment](docs/deployment.md)** — kind, cloud/AKS, HA, and multi-cluster fleet
-- **[Security Model](docs/security-model.md)** — trust boundaries and the threat model
-- Engineering references live under [`docs/engineering/`](docs/engineering/).
+Full documentation is at **[docs.norviq.dev](https://docs.norviq.dev)**:
+
+- **[Getting started](https://docs.norviq.dev/getting-started/)** — install, first login, sidecar injection, first policy
+- **[Concepts](https://docs.norviq.dev/concepts/)** — agent classes, policy tiers, enforcement modes, trust score, SPIFFE identity
+- **[Writing policies](https://docs.norviq.dev/guides/writing-policies/)** — the Rego contract, packages, tighten-only overlays, validation
+- **[Policy cookbook](https://docs.norviq.dev/guides/policy-cookbook/)** — copy-paste `NrvqPolicy` recipes + validated Rego building blocks
+- **[Asset & attack graphs](https://docs.norviq.dev/guides/graphs/)** — real reach, kill chains, Simulate, Defend, tool classification
+- **[Compliance & coverage](https://docs.norviq.dev/guides/compliance/)** — MITRE ATLAS / OWASP LLM coverage, gaps, remediation, evidence pack
+- **[Integrating agents](https://docs.norviq.dev/guides/integrating-agents/)** — the SDK: LangChain, LangGraph, CrewAI, AutoGen, Semantic Kernel
+- **[CLI reference](https://docs.norviq.dev/cli/)** — `norviq login`, policies, audit, agents, red-team, fleet
+- **[Configuration](https://docs.norviq.dev/configuration/)** — Helm `values.yaml` reference
+- **[Deployment](https://docs.norviq.dev/deployment/)** — production HA, cloud (AKS / EKS / GKE), and multi-cluster fleet
+- **[Security model](https://docs.norviq.dev/security-model/)** — trust boundaries and the threat model
+
+Engineering references live under [`docs/engineering/`](docs/engineering/).
 
 ## Development
 
