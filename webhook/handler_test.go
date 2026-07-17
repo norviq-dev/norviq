@@ -152,21 +152,42 @@ func TestMutateAlreadyInjected(t *testing.T) {
 	}
 }
 
-// A pod already stamped with injectedAnnotation is also treated as injected, even if the configured
-// sidecar image has since rotated (NrvqConfig image update) and no container image matches anymore.
-func TestMutateAlreadyInjectedByAnnotation(t *testing.T) {
+// SECURITY (self-stamp bypass, DEF-webhook): a tenant who self-stamps norviq.io/injected=true on a pod
+// that carries NO real sidecar structure must NOT be treated as injected — the annotation is attacker-
+// controllable on an unadmitted CREATE, and trusting it lets the pod run UNPOLICED. The real sidecar MUST
+// still be injected (patch present). FAIL-ON-BUG: fails on the pre-fix code (annotation → skip → no patch).
+func TestMutateSelfStampAnnotationDoesNotBypassInjection(t *testing.T) {
 	h := NewHandler(LoadConfig())
 	pod := corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        "test",
+			Name:        "attacker",
 			Labels:      map[string]string{"norviq": "enabled"},
-			Annotations: map[string]string{injectedAnnotation: "true"},
+			Annotations: map[string]string{injectedAnnotation: "true"}, // self-stamped, no real sidecar
 		},
-		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}, {Name: "norviq-sidecar", Image: "norviq/norviq-engine:some-old-sha"}}},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "busybox"}}},
+	}
+	resp := sendReview(t, h, makeReviewFromPod(pod, metav1.GroupVersionKind{Kind: "Pod"}, "default"))
+	if !resp.Response.Allowed || resp.Response.Patch == nil {
+		t.Fatal("self-stamped norviq.io/injected annotation must be IGNORED and the real sidecar injected (patch expected) — else the pod runs unpoliced")
+	}
+}
+
+// Idempotency after an NrvqConfig image rotation: an already-injected pod is recognized by the injector's
+// structural signature (the norviq enforcement-socket mount on its sidecar) even when the container image
+// no longer matches the current default — WITHOUT trusting the attacker-controllable annotation.
+func TestMutateAlreadyInjectedAfterImageDrift(t *testing.T) {
+	h := NewHandler(LoadConfig())
+	pod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Labels: map[string]string{"norviq": "enabled"}},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{
+			{Name: "app"},
+			{Name: "norviq-sidecar", Image: "norviq/norviq-engine:some-old-sha",
+				VolumeMounts: []corev1.VolumeMount{{Name: "norviq-socket", MountPath: socketMountPath}}},
+		}},
 	}
 	resp := sendReview(t, h, makeReviewFromPod(pod, metav1.GroupVersionKind{Kind: "Pod"}, "default"))
 	if !resp.Response.Allowed || resp.Response.Patch != nil {
-		t.Fatal("expected no patch for pod already stamped with the injected annotation")
+		t.Fatal("expected no patch for an already-injected pod recognized by its socket-mount structure after image drift")
 	}
 }
 

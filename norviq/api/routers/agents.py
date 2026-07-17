@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from norviq.api.auth import get_current_user, read_namespace, require_admin, require_target_cluster
@@ -273,6 +273,7 @@ async def get_agent(spiffe_id: str, request: Request, user: dict = Depends(get_c
 @router.put("/agents/{spiffe_id:path}/trust")
 async def update_trust(
     spiffe_id: str, body: TrustUpdate, request: Request, user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
     _target: None = Depends(require_target_cluster)
 ) -> dict:
     """Set an agent trust score manually.
@@ -296,8 +297,49 @@ async def update_trust(
         await cache.set_trust_override(spiffe_id, body.score)
     trust = TrustScore(score=body.score, category="frozen" if body.score == 0 else "")
     await cache.set_trust(spiffe_id, trust)
-    log.info("nrvq.api.agent.trust_updated", spiffe_id=spiffe_id, score=body.score, code="NRVQ-API-7031")
+    # SECURITY (fail-open fix): persist the freeze/cap DURABLY (source of truth) so a Redis flush/restart can
+    # never silently lift the kill-switch. Warm-seeded back into Redis at startup (warm_agent_overrides).
+    # Best-effort UPDATE of the registered agent's row; an unregistered agent gets its durable state stamped
+    # on its next registration path if needed — the common case (freezing a known misbehaving agent) is covered.
+    frozen = body.score == 0
+    cap = body.score if (0 < body.score < 1.0) else None
+    try:
+        await session.execute(
+            text("UPDATE agent_registry SET frozen = :f, trust_cap = :c WHERE spiffe_id = :s"),
+            {"f": frozen, "c": cap, "s": spiffe_id},
+        )
+        await session.commit()
+    except Exception as exc:  # noqa: BLE001 - durability is best-effort; the Redis write already took effect
+        log.warning("nrvq.api.agent.trust_persist_failed", spiffe_id=spiffe_id, error=str(exc), code="NRVQ-API-7033")
+    log.info("nrvq.api.agent.trust_updated", spiffe_id=spiffe_id, score=body.score, frozen=frozen, cap=cap,
+             code="NRVQ-API-7031")
     return {"spiffe_id": spiffe_id, "score": trust.score, "category": trust.category.lower()}
+
+
+async def warm_agent_overrides(cache, session_factory=get_session) -> int:
+    """SECURITY (fail-open fix): at startup, re-seed durable admin freeze/cap from agent_registry into Redis so
+    a Redis restart/flush (which loses the ephemeral agent_frozen:/override keys) can NEVER leave a killed or
+    capped agent running unpoliced. Mirrors settings_router.warm_ns_settings. Best-effort; returns count seeded."""
+    provider = session_factory()
+    session = await provider.__anext__()
+    seeded = 0
+    try:
+        rows = (await session.execute(
+            text("SELECT spiffe_id, frozen, trust_cap FROM agent_registry WHERE frozen = true OR trust_cap IS NOT NULL")
+        )).mappings().all()
+        for r in rows:
+            if r["frozen"]:
+                await cache._client().set(f"agent_frozen:{r['spiffe_id']}", "1")
+                seeded += 1
+            elif r["trust_cap"] is not None:
+                await cache.set_trust_override(r["spiffe_id"], float(r["trust_cap"]))
+                seeded += 1
+        log.info("nrvq.api.agent.overrides_warmed", count=seeded, code="NRVQ-API-7034")
+    except Exception as exc:  # noqa: BLE001 - warm is best-effort; a DB hiccup must not block startup
+        log.warning("nrvq.api.agent.overrides_warm_failed", error=str(exc), code="NRVQ-API-7035")
+    finally:
+        await provider.aclose()
+    return seeded
 
 
 @router.delete("/agents/{spiffe_id:path}")

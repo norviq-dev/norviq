@@ -323,3 +323,28 @@ test_q1_shell_payload_still_reports_shell_id {
     o.decision == "block"
     o.rule_id == "deny_shell_execution"
 }
+
+# --- SEC fixes: renamed-destructive-tool, egress-verb secret sink, base64 padding (pre-GA hunt) ---
+test_sec_renamed_destructive_tool_blocks {                # renamed destructive tool must not bypass excessive-agency
+    o := _d({"tool_name": "wipe_table", "tool_params": {"t": "orders"}})
+    o.decision == "block"
+    o.rule_id == "llm06_excessive_agency"
+}
+test_sec_destroy_records_blocks {
+    o := _d({"tool_name": "destroy_records", "tool_params": {"scope": "all"}})
+    o.decision == "block"
+}
+test_sec_egress_verb_secret_blocks {                      # secret sent via a non-allowlisted egress-verb tool
+    o := _d({"tool_name": "send_slack", "tool_params": {"api_key": "sk-live-xxxx"}})
+    o.decision == "block"
+    o.rule_id == "llm02_data_leakage"
+}
+test_sec_httppost_secret_blocks {
+    o := _d({"tool_name": "http_post", "tool_params": {"password": "hunter2"}})
+    o.decision == "block"
+    o.rule_id == "llm02_data_leakage"
+}
+test_sec_benign_egress_no_secret_allows {                 # egress-verb tool WITHOUT a sensitive key stays allowed
+    o := _d({"tool_name": "send_message", "tool_params": {"text": "hello team"}})
+    o.decision == "allow"
+}

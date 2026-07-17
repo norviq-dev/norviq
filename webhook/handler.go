@@ -259,17 +259,18 @@ func parsePod(req *admissionv1.AdmissionRequest) (*corev1.Pod, bool) {
 }
 
 // hasSidecar reports whether the pod already carries the REAL enforcement sidecar. It must not trust
-// the attacker-controllable container NAME (an attacker can add a decoy container named
-// "norviq-sidecar" running anything, which previously caused the real sidecar to be silently skipped
-// and the pod to run unpoliced). Instead it checks injector-controlled signals only: the container
-// IMAGE matches the currently configured sidecar image (injectedAnnotation
-// (norviq.io/injected=true), which the injector itself stamps on every patch it produces (handles the
-// case where the configured image has since changed via NrvqConfig and an already-injected pod's
-// image no longer matches the current default).
+// ANY attacker-controllable pod field. Two such signals were abused historically and are BOTH refused
+// here: (1) the container NAME (a decoy named "norviq-sidecar" running anything), and (2) the
+// `norviq.io/injected` ANNOTATION — which the injector stamps on its OWN output, but which a tenant can
+// also self-stamp on an unadmitted CREATE to make hasSidecar return true and skip injection, running the
+// pod UNPOLICED (the self-stamp bypass). The annotation is therefore NEVER read as a trust input.
+// Recognition is by injector-controlled CONTAINER STRUCTURE only: a container whose IMAGE matches the
+// configured sidecar image, OR any container mounting the norviq enforcement socket (this second check
+// still recognizes an already-injected pod after an NrvqConfig image change, without trusting the
+// annotation). NOTE (DEF-052, follow-up): a determined attacker could still craft a decoy container that
+// matches the image or socket mount but neuters enforcement via a command override — a deeper
+// injector-trust gap tracked separately; this fix closes the trivial one-line annotation self-stamp.
 func hasSidecar(cfg Config, pod *corev1.Pod) bool {
-	if pod.Annotations[injectedAnnotation] == "true" {
-		return true
-	}
 	runtime := cfg.Runtime
 	if runtime == nil {
 		runtime = &RuntimeConfig{}
@@ -278,6 +279,9 @@ func hasSidecar(cfg Config, pod *corev1.Pod) bool {
 	configuredImage := runtime.SidecarImage(cfg.SidecarImage)
 	for _, c := range pod.Spec.Containers {
 		if c.Image != "" && c.Image == configuredImage {
+			return true
+		}
+		if hasSocketMount(c) {
 			return true
 		}
 	}

@@ -124,7 +124,7 @@ class OPAEvaluator:
             posture = await self._resolve_posture(event.agent_identity.namespace)
             trust = await self._trust(event.agent_identity.spiffe_id)
             trust_result = await self._compute_trust(event, trust, posture["trust_threshold"])
-            cache_tool = self._cache_tool_key(event.tool_name, event.tool_params)
+            cache_tool = self._cache_tool_key(event)
             cached = await self._cache.get_eval(event.agent_identity.namespace, event.agent_identity.agent_class, cache_tool)
             if cached is not None:
                 cache_hit = True
@@ -520,7 +520,7 @@ class OPAEvaluator:
     async def _safe_record_history(self, event: ToolCallEvent, decision: PolicyDecision) -> None:
         """Persist enforced decision for rolling trust-history features."""
         try:
-            cache_tool = self._cache_tool_key(event.tool_name, event.tool_params)
+            cache_tool = self._cache_tool_key(event)
             await self._history.record(
                 event.agent_identity.spiffe_id,
                 {
@@ -559,11 +559,20 @@ class OPAEvaluator:
         self._audit_tasks.add(task)
         task.add_done_callback(self._audit_tasks.discard)
 
-    def _cache_tool_key(self, tool_name: str, tool_params: dict) -> str:
-        """Build cache key suffix from tool name plus stable params hash."""
-        payload = json.dumps(tool_params, sort_keys=True, separators=(",", ":"))
+    def _cache_tool_key(self, event: "ToolCallEvent") -> str:
+        """Build the eval-cache key suffix from EVERY decision-relevant input dimension, not just tool +
+        params. SECURITY (cache-key-scope, fail-open): the 5s eval cache keys on (namespace, agent_class,
+        <this suffix>); any decision input NOT in the suffix lets one call's cached decision shadow a
+        different call's within the TTL — an enforcement bypass. Two such inputs were omitted and are added
+        here: `call_depth` (drives the chain_depth_limit / OWASP-LLM08 anti-recursion block — a shallow-depth
+        allow must NOT shadow a deep-depth block) and `workload` (workload-tier `deployment:` policies — one
+        workload's decision must NOT bleed to another sharing tool+params). Include them so the cached
+        decision is only ever served for an identical decision input."""
+        payload = json.dumps(event.tool_params, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
-        return f"{tool_name}:{digest}"
+        workload = getattr(event.agent_identity, "workload", "") or ""
+        depth = int(getattr(event, "call_depth", 0) or 0)
+        return f"{event.tool_name}:{digest}:d{depth}:w{workload}"
 
     def _extract_package_name(self, rego_source: str) -> str | None:
         """Extract package name from Rego source header."""

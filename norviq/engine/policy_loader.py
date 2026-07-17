@@ -22,6 +22,8 @@ from norviq.exceptions import NorviqError
 log = structlog.get_logger()
 
 _MAX_VERSIONS = int(getattr(settings, "policy_max_versions", 10))
+# COMP-GEN-02: the per-class compliance-remediation overlay key suffix; its eval results cache under the base class.
+_REMEDIATION_SUFFIX = "__remediation__"
 
 
 @dataclass(slots=True)
@@ -754,15 +756,23 @@ class PolicyLoader:
         the cached `allow` for ~TTL seconds). A concrete class scope stays narrowly scoped as before.
         """
         ns_wide = agent_class.startswith("__")  # __baseline__/__guardrail__/__pack__* affect every class in the ns
+        # COMP-GEN-02 (cache-key-scope, DEF-003): a per-class compliance-remediation overlay is stored under the
+        # compound key "<class>__remediation__", which does NOT start with "__" — but its rego is a tighten-only
+        # overlay the evaluator BLENDS INTO the BASE class's decision, and eval results are cached under the BASE
+        # class, never under the compound key. Invalidating the literal "<class>__remediation__" scope therefore
+        # hit a phantom scope nobody caches under, leaving the base class serving a stale (possibly `allow`)
+        # decision for ~eval TTL after a compliance control was applied/reverted. Resolve the overlay to its base
+        # class so the scope that actually holds the affected decisions is cleared.
+        target: str | None = None if ns_wide else agent_class
+        if target is not None and target.endswith(_REMEDIATION_SUFFIX) and len(target) > len(_REMEDIATION_SUFFIX):
+            target = target[: -len(_REMEDIATION_SUFFIX)]
         # ALWAYS delegate to the cache's own scope invalidation so the key SEGMENTS are hashed exactly the
-        # way set_eval writes them. cache.py now sha256-hashes each eval-key segment to defeat colon-stuffing
-        # collisions (an attacker shaping agent_class/tool_name to bypass a block policy); a direct, unhashed
-        # `eval:{namespace}:*` scan here would silently match NOTHING against the hashed keys, leaving a stale
-        # (possibly `allow`) decision served until the short eval TTL. `invalidate_eval_scope(ns, None)`
-        # builds the `eval:{h(ns)}:*` wildcard (every class in the ns) for the ns-wide overlay case.
-        await self._cache.invalidate_eval_scope(namespace, None if ns_wide else agent_class)
+        # way set_eval writes them. cache.py sha256-hashes each eval-key segment to defeat colon-stuffing
+        # collisions; a direct, unhashed `eval:{namespace}:*` scan here would silently match NOTHING against the
+        # hashed keys. `invalidate_eval_scope(ns, None)` builds the `eval:{h(ns)}:*` wildcard for the ns-wide case.
+        await self._cache.invalidate_eval_scope(namespace, target)
         log.debug("nrvq.policy.eval_cache_cleared", namespace=namespace, agent_class=agent_class,
-                  ns_wide=ns_wide, code="NRVQ-REG-5011")
+                  invalidated_scope=target, ns_wide=ns_wide, code="NRVQ-REG-5011")
 
     async def _reload_policy(self, namespace: str, agent_class: str) -> None:
         """Reload a single policy from cache or DB into memory."""

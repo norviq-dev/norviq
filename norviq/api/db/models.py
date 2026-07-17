@@ -76,6 +76,11 @@ class AgentRegistryEntry(Base):
     violation_count: Mapped[int] = mapped_column(Integer, default=0)
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    # SECURITY (fail-open fix): the admin FREEZE kill-switch + tighten-only trust CAP were Redis-only, so a
+    # Redis flush/restart silently LIFTED them (a frozen/compromised agent un-froze). Persist them durably
+    # here; they are warm-seeded back into Redis at startup so cache loss never re-permits a killed agent.
+    frozen: Mapped[bool] = mapped_column(default=False)
+    trust_cap: Mapped[float | None] = mapped_column(Float, nullable=True)
     __table_args__ = (
         Index("idx_agent_ns", "namespace"),
         Index("idx_agent_spiffe", "spiffe_id"),

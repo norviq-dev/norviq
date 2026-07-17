@@ -767,15 +767,26 @@ async def list_intent_drafts(
     user: dict = Depends(get_current_user),
 ):
     """Part B (B6): a BOUNDED, paginated page of pending intent drafts (non-enforcing) + the total count, so the
-    Policy Catalog never renders the whole list at once. Lazily GCs expired drafts first (non-enforcing only — the
-    evaluator never reads ``intent_drafts``). Reads from the dedicated table — never ``policies``."""
-    await gc_expired_drafts(session, ns)  # B1: drop expired non-enforcing drafts before counting/paging
+    Policy Catalog never renders the whole list at once. Reads from the dedicated table — never ``policies``.
+
+    SECURITY (IDOR + read-causes-cross-tenant-write): the caller's namespace set is resolved FAIL-CLOSED via
+    _resolve_namespaces (a scoped tenant naming another namespace gets 403; "all"/none → only its own), so this
+    endpoint can no longer enumerate/read every tenant's drafts, and the lazy GC is scoped to that same set so a
+    read-only viewer can no longer DELETE another namespace's rows through a GET."""
+    namespaces = _resolve_namespaces(user, ns if ns is not None else "all")  # None = unrestricted (admin/service)
+    # Lazy GC of expired (non-enforcing) drafts — scoped to the caller's OWN namespaces only. The background
+    # RetentionPruner also sweeps these globally, so a viewer never needs (and never gets) cross-tenant reach.
+    if namespaces is None:
+        await gc_expired_drafts(session, None)
+    else:
+        for _n in namespaces:
+            await gc_expired_drafts(session, _n)
     page = int(limit or settings.drafts_page_size)
     where = ""
     params: dict = {}
-    if ns and ns.lower() != "all":
-        where = " WHERE namespace = :ns"
-        params["ns"] = ns
+    if namespaces is not None:
+        where = " WHERE namespace = ANY(:nslist)"
+        params["nslist"] = namespaces
     total = int((await session.execute(text(f"SELECT COUNT(*) FROM intent_drafts{where}"), params)).scalar() or 0)
     rows = (await session.execute(
         text("SELECT id, namespace, agent_class, affected_class, allow_tools, toggles, covered_count, total, "
@@ -849,6 +860,11 @@ async def get_intent_draft(draft_id: str, session: AsyncSession = Depends(get_se
         )
     ).mappings().first()
     if r is None:
+        raise HTTPException(status_code=404, detail="draft not found (regenerate from Attack Graph)")
+    # SECURITY (IDOR): a scoped tenant must not read another namespace's draft (full generated rego + classes).
+    # Resolve the caller's allowed set fail-closed; a draft outside it is reported as 404 (never leak existence).
+    _allowed = _resolve_namespaces(user, "all")  # None = unrestricted (admin/service)
+    if _allowed is not None and r["namespace"] not in _allowed:
         raise HTTPException(status_code=404, detail="draft not found (regenerate from Attack Graph)")
     return {
         "draft_id": r["id"], "ns": r["namespace"], "cls": r["agent_class"],

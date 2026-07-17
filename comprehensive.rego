@@ -200,12 +200,43 @@ shell_injection_detected {
 destructive_tools = {"delete_record", "drop_table", "truncate"}
 elevated_tools = {"modify_config", "grant_access"}
 
+# SEC-DESTRUCTIVE (renamed-tool fix): the exact-name set above is trivially bypassed by renaming the tool
+# (wipe_table, destroy_records, purge_db). Mirror F-20: also treat any tool whose name LEADS with an
+# unambiguous destructive verb as destructive. Kept to strong verbs so benign tools (remove_tag, delete_
+# is intentionally included as data-destructive) aren't over-swept beyond clear intent.
+destructive_verb_tool {
+    name := lower(input.tool_name)
+    verbs := ["delete_", "drop_", "truncate_", "destroy_", "wipe_", "purge_", "erase_"]
+    startswith(name, verbs[_])
+}
+
 # Data leakage
 external_tools = {"send_email", "post_webhook", "upload_file"}
 sensitive_keys = {"password", "secret", "api_key", "token", "private_key"}
 
+# SEC-EGRESS (fail-open fix): the named-sink allowlist above only ever covered 3 tools, so a secret sent
+# via any OTHER egress-verb tool (send_slack, post_data, http_post, publish_event, export_csv, put_object,
+# webhook_call, …) exfiltrated freely. Mirror the F-20 renamed-tool defense: treat any tool whose name
+# STRONGLY implies external egress as a sink. Kept to unambiguous egress verbs so benign tools aren't
+# swept in; a deployment can still allowlist a specific tool via its own policy.
+egress_verb_tool {
+    name := lower(input.tool_name)
+    prefixes := ["send_", "post_", "upload_", "publish_", "export_", "http_", "fetch_", "sync_to_", "push_to_"]
+    startswith(name, prefixes[_])
+}
+egress_verb_tool { contains(lower(input.tool_name), "webhook") }
+egress_verb_tool { contains(lower(input.tool_name), "exfil") }
+
 data_leakage_detected {
     external_tools[input.tool_name]
+    walk(input.tool_params, [path, _])
+    count(path) > 0
+    k := path[count(path) - 1]
+    is_string(k)
+    sensitive_keys[lower(k)]
+}
+data_leakage_detected {
+    egress_verb_tool
     walk(input.tool_params, [path, _])
     count(path) > 0
     k := path[count(path) - 1]
@@ -348,11 +379,13 @@ b64_candidate_clean(v) = out {
     out := regex.replace(out4, `_`, "/")
 }
 
-# PERF-1: gate the whole base64 fan-out on a bounded serialized size. A pathological large payload with
-# hundreds of base64-ish tokens forced ~40x eval cost per cache-miss; above the threshold we skip the
-# (expensive) decode pass — raw pattern detectors still run, and an oversized encoded blob is itself
-# suspicious. The API also enforces a request-body size limit (defense in depth).
-b64_scan_max_bytes = 8192
+# PERF-1 / SEC-B64 (padding-evasion fix): gate the base64 fan-out on a bounded serialized size to cap
+# the ~40x pathological decode cost. The old 8192 bound was trivially abused: pad tool_params past 8KB and
+# the decode pass (which catches base64-obfuscated threats) was SKIPPED. Raised to 64KB so a padding-only
+# evasion must now inflate the payload 8x further (itself highly anomalous), and the API request-body size
+# limit bounds the extreme. (Follow-up DEF-053: bound the WORK — cap the number of decoded candidates —
+# rather than the input size, to close padding evasion entirely without a perf regression.)
+b64_scan_max_bytes = 65536
 
 b64_scan_enabled {
     count(json.marshal(input.tool_params)) <= b64_scan_max_bytes
@@ -425,6 +458,7 @@ blocks["llm01_prompt_injection"] { injection_detected }
 blocks["deny_sql_injection"] { sql_injection_detected }
 blocks["deny_shell_execution"] { shell_injection_detected }
 blocks["llm06_excessive_agency"] { destructive_tools[input.tool_name] }
+blocks["llm06_excessive_agency"] { destructive_verb_tool }
 blocks["llm02_data_leakage"] { data_leakage_detected }
 blocks["llm02_data_leakage"] { secret_egress_detected }
 blocks["llm05_supply_chain"] { supply_chain_tools[input.tool_name] }

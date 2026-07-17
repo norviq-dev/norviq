@@ -171,6 +171,13 @@ async def lifespan(app: FastAPI):
         await settings_router.warm_ns_settings(app.state.cache)
     except Exception as exc:  # noqa: BLE001 — advisory warm; never block startup
         log.error("nrvq.startup.ns_settings_warm_failed", error=str(exc), code="NRVQ-API-7063")
+    # SECURITY (trust fail-open fix): re-seed durable admin freeze/cap from the DB into Redis so a Redis
+    # restart/flush cannot leave a killed/capped agent running unpoliced.
+    try:
+        from norviq.api.routers.agents import warm_agent_overrides
+        await warm_agent_overrides(app.state.cache)
+    except Exception as exc:  # noqa: BLE001 — advisory warm; never block startup
+        log.error("nrvq.startup.agent_overrides_warm_failed", error=str(exc), code="NRVQ-API-7035")
     app.state.siem_forwarder = AuditForwarder()
     await app.state.siem_forwarder.start()  # no-op unless settings.siem_enabled
     # Single-cluster-first: a token-joined spoke persists its enrollment in FleetJoinState; re-apply it over env

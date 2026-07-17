@@ -183,6 +183,9 @@ async def ensure_schema_compatibility() -> None:
         "ALTER TABLE intent_drafts ADD COLUMN IF NOT EXISTS affected_class VARCHAR(255)",
         # RETENTION: optional API-key expiry (NULL = never — keys issued before this column keep working).
         "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ",
+        # SECURITY (trust fail-open fix): durable freeze/cap so a Redis flush can't lift a kill-switch.
+        "ALTER TABLE agent_registry ADD COLUMN IF NOT EXISTS frozen BOOLEAN NOT NULL DEFAULT false",
+        "ALTER TABLE agent_registry ADD COLUMN IF NOT EXISTS trust_cap DOUBLE PRECISION",
     )
     async with _engine.begin() as conn:
         for statement in statements:

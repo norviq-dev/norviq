@@ -9,7 +9,7 @@ import re
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from norviq.api.auth import get_current_user, read_namespace, require_admin, require_admin_or_service, require_target_cluster, scoped_namespace
@@ -423,16 +423,33 @@ async def create_policy(body: PolicyCreate, request: Request, user: dict = Depen
     if _is_remediation_overlay_class(agent_class):
         incoming_controls = parse_remediation_controls(body.rego_source)
         if incoming_controls:
-            existing_pol = getattr(loader, "_policies", {}).get(f"{body.namespace}:{agent_class}")
-            existing_rego = str(existing_pol.get("rego", "") or "") if isinstance(existing_pol, dict) else ""
             base_class = agent_class[: -len(_REMEDIATION_OVERLAY_SUFFIX)]
-            merged = union_remediation_controls(parse_remediation_controls(existing_rego), incoming_controls)
-            combined = generate_remediation_overlay_rego(base_class, merged)
-            validate_rego_source(combined, body.enforcement_mode)  # the merged rego re-clears the write gate
-            body = body.model_copy(update={"rego_source": combined})
+            # COMP-GEN-02 (stale-read + read-modify-write race, live-reproduced): read the overlay's existing
+            # controls DB-AUTHORITATIVELY (never the possibly-cold in-memory `_policies`, which on a peer/cold
+            # replica is empty and made a concurrent/peer apply CLOBBER prior controls), and hold a Postgres
+            # SESSION advisory lock keyed on (namespace, agent_class) across the read+merge+write so two
+            # simultaneous applies to the SAME overlay serialize instead of racing (one silently dropping the
+            # other's control). The lock is on a dedicated connection held for the whole critical section.
+            async with loader._db_engine().connect() as _lk:
+                await _lk.execute(text("SELECT pg_advisory_lock(hashtext(:k))"),
+                                  {"k": f"nrvq:remediation:{body.namespace}:{agent_class}"})
+                try:
+                    existing = await loader.load_from_db(body.namespace, agent_class)
+                    existing_rego = str(existing.get("rego", "") or "") if existing else ""
+                    merged = union_remediation_controls(parse_remediation_controls(existing_rego), incoming_controls)
+                    combined = generate_remediation_overlay_rego(base_class, merged)
+                    validate_rego_source(combined, body.enforcement_mode)  # the merged rego re-clears the write gate
+                    version = await loader.create(
+                        body.namespace, agent_class, combined, saved_by=body.saved_by,
+                        priority=body.priority, enforcement_mode=body.enforcement_mode, policy_name=body.policy_name)
+                finally:
+                    await _lk.execute(text("SELECT pg_advisory_unlock(hashtext(:k))"),
+                                      {"k": f"nrvq:remediation:{body.namespace}:{agent_class}"})
             log.info("nrvq.api.policy.remediation_accumulated", namespace=body.namespace, agent_class=agent_class,
                      controls=[c["control_id"] for c in merged], added=[c["control_id"] for c in incoming_controls],
-                     actor=user.get("sub"), code="NRVQ-API-7123")
+                     version=version, actor=user.get("sub"), code="NRVQ-API-7123")
+            return {"namespace": body.namespace, "agent_class": agent_class, "version": version,
+                    "policy_name": body.policy_name, "priority": body.priority}
     version = await loader.create(
         body.namespace,
         agent_class,
@@ -685,16 +702,30 @@ async def delete_policy(
     # confirm_managed gate as a full overlay delete (already enforced above). If it was the last control, fall
     # through to the normal full delete of the overlay key.
     if control_id and _is_remediation_overlay_class(agent_class):
-        existing_pol = getattr(loader, "_policies", {}).get(f"{namespace}:{agent_class}")
-        existing_rego = str(existing_pol.get("rego", "") or "") if isinstance(existing_pol, dict) else ""
-        remaining = [c for c in parse_remediation_controls(existing_rego) if c["control_id"] != control_id]
+        base_class = agent_class[: -len(_REMEDIATION_OVERLAY_SUFFIX)]
+        # COMP-GEN-02 (stale-read over-delete, live-reproduced): read DB-AUTHORITATIVELY under the same advisory
+        # lock as apply. Previously this read the possibly-cold in-memory `_policies`; on a cold/peer replica it
+        # returned "" -> parse=[] -> remaining=[] -> the whole multi-control overlay was destroyed when the
+        # operator asked to remove ONE control. DB-read + lock make the revert see the true control set and
+        # serialize against a concurrent apply.
+        _lock_k = f"nrvq:remediation:{namespace}:{agent_class}"
+        async with loader._db_engine().connect() as _lk:
+            await _lk.execute(text("SELECT pg_advisory_lock(hashtext(:k))"), {"k": _lock_k})
+            try:
+                existing = await loader.load_from_db(namespace, agent_class)
+                existing_rego = str(existing.get("rego", "") or "") if existing else ""
+                existing_priority = int(existing.get("priority", 1)) if existing else 1
+                remaining = [c for c in parse_remediation_controls(existing_rego) if c["control_id"] != control_id]
+                if remaining:
+                    new_version = await loader.create(namespace, agent_class,
+                                                      generate_remediation_overlay_rego(base_class, remaining),
+                                                      saved_by=str(user.get("sub") or ""), priority=existing_priority,
+                                                      enforcement_mode="block")
+                else:
+                    new_version = None  # last control removed -> fall through to a full delete of the overlay key
+            finally:
+                await _lk.execute(text("SELECT pg_advisory_unlock(hashtext(:k))"), {"k": _lock_k})
         if remaining:
-            base_class = agent_class[: -len(_REMEDIATION_OVERLAY_SUFFIX)]
-            priority = int(existing_pol.get("priority", 1)) if isinstance(existing_pol, dict) else 1
-            new_version = await loader.create(namespace, agent_class,
-                                              generate_remediation_overlay_rego(base_class, remaining),
-                                              saved_by=str(user.get("sub") or ""), priority=priority,
-                                              enforcement_mode="block")
             log.info("nrvq.api.policy.remediation_control_reverted", namespace=namespace, agent_class=agent_class,
                      removed=control_id, remaining=[c["control_id"] for c in remaining], actor=user.get("sub"),
                      actor_role=user.get("role"), code="NRVQ-API-7124")

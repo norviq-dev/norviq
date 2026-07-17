@@ -1,4 +1,14 @@
 {{- if .Values.baselineClusterPolicy.enabled }}
+{{- if not .Values.policyQuotaNamespaces }}
+{{- /*
+  DEF-001 (fail-closed config): the baseline guard renders ONE NrvqPolicy per namespace in
+  policyQuotaNamespaces. With that list empty, `enabled: true` would render ZERO baselines — every
+  agent class would run WITHOUT the fail-closed cluster baseline (injection/threat protection), while
+  NOTES.txt claims a baseline "installed by default". Two safe defaults combining into a silent security
+  gap is refused here: fail the install loudly instead of shipping the gap.
+*/ -}}
+{{- fail "\n\nbaselineClusterPolicy.enabled=true but policyQuotaNamespaces is EMPTY.\nNo baseline guard would be rendered, leaving every agent class without the fail-closed cluster baseline.\nEither:\n  - set config.policyQuotaNamespaces to your tenant namespaces (the baseline renders one per namespace), or\n  - set baselineClusterPolicy.enabled=false to explicitly run WITHOUT a cluster baseline (not recommended).\n" }}
+{{- end }}
 {{- range $ns := .Values.policyQuotaNamespaces }}
 apiVersion: norviq.io/v1alpha1
 kind: NrvqPolicy
