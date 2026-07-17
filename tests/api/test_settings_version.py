@@ -65,13 +65,15 @@ def test_settings_returns_effective_config_defaults() -> None:
 
 def test_settings_persisted_override_wins() -> None:
     row = SimpleNamespace(
-        namespace="default", enforcement_mode="audit", trust_threshold=0.55, violation_penalty=None, rate_limit=None
+        namespace="default", enforcement_mode="audit", trust_threshold=0.55, rate_limit=None
     )
     client, _ = _client(row=row)
     body = client.get("/api/v1/settings?namespace=default", headers={"Authorization": f"Bearer {_token()}"}).json()
     assert body["enforcement_mode"] == "audit"  # override
     assert body["trust_threshold"] == 0.55  # override
-    assert body["violation_penalty"] == settings.trust_violation_penalty  # falls back to config
+    assert body["rate_limit"] == settings.evaluator_rate_limit_per_window  # null falls back to config
+    # violation_penalty was a dead per-ns control (never reached the engine) — it must NOT be surfaced.
+    assert "violation_penalty" not in body
 
 
 def test_settings_put_persists_admin_only() -> None:

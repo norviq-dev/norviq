@@ -8,7 +8,11 @@ metadata:
     app: norviq-webhook
     {{- include "norviq.labels" . | nindent 4 }}
 spec:
+  {{- /* When the HPA owns the replica count, the Deployment must NOT also set `replicas` — otherwise every
+         reconcile resets it and fights the autoscaler (scale-up flapping). Omit it when autoscaling is on. */}}
+  {{- if not .Values.webhook.autoscaling.enabled }}
   replicas: {{ .Values.webhook.replicas }}
+  {{- end }}
   strategy:
     type: RollingUpdate
     rollingUpdate:

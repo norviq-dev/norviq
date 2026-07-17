@@ -116,12 +116,17 @@ class RetentionPruner:
         return result.rowcount or 0
 
     async def _prune_coverage_snapshots(self, session) -> int:
-        """mitre_coverage_snapshots (trend points + export events) older than the window (<=0 disables)."""
+        """mitre_coverage_snapshots trend points older than the window (<=0 disables). ONLY kind='snapshot'
+        (the coverage-trend series) is pruned — kind='export' rows are evidence-pack export provenance
+        markers (the "last exported" indicator) and are audit evidence, so retention NEVER touches them."""
         days = int(getattr(settings, "coverage_snapshot_retention_days", 0))
         if days <= 0:
             return 0
         result = await session.execute(
-            text("DELETE FROM mitre_coverage_snapshots WHERE timestamp_utc < :cutoff"),
+            text(
+                "DELETE FROM mitre_coverage_snapshots "
+                "WHERE timestamp_utc < :cutoff AND kind = 'snapshot'"
+            ),
             {"cutoff": datetime.now(timezone.utc) - timedelta(days=days)},
         )
         return result.rowcount or 0

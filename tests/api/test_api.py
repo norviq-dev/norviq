@@ -150,6 +150,18 @@ class FakeSession:
     async def execute(self, stmt):
         """Return canned scalar and grouped results."""
         sql = str(stmt)
+        # audit_stats' real-traffic-only aggregation groups by framework/agent_class/rule_id too and reads the
+        # rows positionally in Python — yield one grouped tuple PER seeded row (count 1 each) so the router does
+        # its own redteam/synthetic exclusion, exactly as it does against Postgres.
+        if "GROUP BY" in sql and "audit_log.framework" in sql:
+            return SimpleNamespace(all=lambda: [
+                (
+                    r.tool_name, r.decision, getattr(r, "agent_class", ""), getattr(r, "framework", ""),
+                    getattr(r, "rule_id", ""), 1, getattr(r, "latency_ms", 0.0),
+                    1 if getattr(r, "latency_ms", None) is not None else 0,
+                )
+                for r in self.rows
+            ])
         if "GROUP BY" in sql:
             return SimpleNamespace(all=lambda: [SimpleNamespace(tool_name="tool.alpha", count=2)])
         if "count(audit_log.id)" in sql and "decision" in sql:
@@ -546,6 +558,35 @@ def test_audit_stats_with_range() -> None:
     try:
         stats = client.get("/api/v1/audit/stats?range=7d", headers=_auth_headers()).json()
         assert stats["total"] == 1 and stats["blocked"] == 1
+    finally:
+        client.close()
+
+
+def test_audit_stats_excludes_redteam_and_synthetic() -> None:
+    """RECONCILE: /audit/stats is REAL-traffic-only — a red-team (framework=='redteam') row and a synthetic/probe
+    identity (A1 is_synthetic_identity, e.g. class 'policy-tester') must NOT be counted, so the Overview KPIs +
+    top-tools reconcile with the Compliance/MITRE + RedTeam governance surfaces (which exclude the same rows).
+    Only the one real row is counted. Fails on the old pure-SQL COUNT() code, which counted all three."""
+    def _row(tool: str, cls: str, framework: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=uuid4(), event_id=uuid4(), tool_name=tool, decision="block",
+            agent_id=f"spiffe://example/ns/default/sa/{cls}", agent_class=cls, framework=framework,
+            namespace="default", rule_id="deny", reason="test", trust_score=0.5, latency_ms=12.3,
+            timestamp_utc=datetime.now(timezone.utc), payload={"ok": True},
+        )
+
+    rows = [
+        _row("tool.real", "customer-support", "sidecar"),   # real traffic → counted
+        _row("tool.rt", "customer-support", "redteam"),     # red-team efficacy tooling → excluded
+        _row("tool.syn", "policy-tester", "sidecar"),       # synthetic/probe identity → excluded
+    ]
+    client = _client()
+    _override_session(client, FakeSession(rows))
+    try:
+        stats = client.get("/api/v1/audit/stats", headers=_auth_headers()).json()
+        assert stats["total"] == 1, f"redteam/synthetic leaked into total: {stats}"
+        assert stats["blocked"] == 1
+        assert [t["tool_name"] for t in stats["top_tools"]] == ["tool.real"], stats["top_tools"]
     finally:
         client.close()
 

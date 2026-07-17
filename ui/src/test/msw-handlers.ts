@@ -17,7 +17,6 @@ export const handlers = [
       namespace: "default",
       enforcement_mode: "block",
       trust_threshold: 0.7,
-      violation_penalty: 0.05,
       rate_limit: 60
     })
   ),

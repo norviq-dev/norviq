@@ -124,6 +124,10 @@ class NamespaceSettings(Base):
     namespace: Mapped[str] = mapped_column(String(255), primary_key=True)
     enforcement_mode: Mapped[str | None] = mapped_column(String(20), nullable=True)
     trust_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # DEPRECATED/vestigial: never reached the engine (not in _ENGINE_POSTURE_FIELDS), so a per-ns value
+    # here was inert. The Settings knob + API surface were removed; the column is retained (nullable,
+    # no longer written) only to avoid a migration on existing rows. Do not resurrect without wiring it
+    # into the posture mirror + evaluator and proving the effect (T4).
     violation_penalty: Mapped[float | None] = mapped_column(Float, nullable=True)
     rate_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # F047: org sector hint (advisory) — drives sector-pack suggestions in the console.

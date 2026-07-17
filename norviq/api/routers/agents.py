@@ -252,9 +252,15 @@ async def get_agent(spiffe_id: str, request: Request, user: dict = Depends(get_c
     """Get one agent trust score."""
     # H2: the sibling routes (list_agents, agent_tool_usage, agent_trust_history) all scope by namespace —
     # this one trusted the spiffe_id path param outright, letting any authenticated caller read another
-    # tenant's agent trust signals (cross-tenant IDOR) by simply guessing/enumerating a spiffe_id. Parse the
-    # namespace out of the SVID (same helper the list route uses) and enforce the same scope here.
-    read_namespace(user, _namespace_from_spiffe(spiffe_id))
+    # tenant's agent trust signals (cross-tenant IDOR) by simply guessing/enumerating a spiffe_id. Mirror
+    # list_agents' scoping EXACTLY: resolve the caller's namespace scope, then require the agent's own
+    # namespace to match it. Passing the agent's ns as the *requested* value (the prior fix) 403'd a
+    # cross-tenant guess but still let a scoped tenant read a NAMESPACELESS agent — requested None returned
+    # the tenant's own claim without ever comparing it — i.e. exactly the agent list_agents hides. Treat a
+    # non-matching (namespaceless or other-ns) agent as 404, the same "not visible" outcome as the list.
+    scope_ns = read_namespace(user, None)  # None => admin/all; own ns for a tenant; 403 for a no-scope viewer
+    if scope_ns and _namespace_from_spiffe(spiffe_id) != scope_ns:
+        raise HTTPException(status_code=404, detail="Agent not found")
     trust = await request.app.state.cache.get_trust(spiffe_id)
     if trust is None:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -346,6 +352,7 @@ async def warm_agent_overrides(cache, session_factory=get_session) -> int:
 async def deregister_agent(
     spiffe_id: str, request: Request, user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
+    _target: None = Depends(require_target_cluster)
 ) -> dict:
     """RETENTION: admin removal of a decommissioned agent identity from the registry (previously there
     was NO delete path — stale agents were listed forever and surfaced as phantom 'awaiting' nodes on

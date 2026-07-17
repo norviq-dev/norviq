@@ -143,13 +143,17 @@ export function AuditLog() {
     [timeRange, selectedNamespace, decision, debouncedTool, debouncedAgent, rule]
   );
 
-  // The /ws/audit socket authenticates before accepting — pass the bearer token as a query param
-  // (browsers can't set Authorization headers on WebSocket handshakes).
+  // The /ws/audit socket authenticates before accepting. Browsers can't set Authorization headers on a
+  // WebSocket handshake, so the bearer token rides in the Sec-WebSocket-Protocol header as
+  // ["nrvq-audit-jwt", token] — NOT a `?token=` query string, which would leak the credential into
+  // access logs / browser history / Referer. The server reads it from the subprotocol (main.py).
   const wsToken = getToken() ?? "";
-  const wsUrl = buildWsUrl(
-    `/ws/audit?namespace=${encodeURIComponent(selectedNamespace)}&token=${encodeURIComponent(wsToken)}`
+  const wsUrl = buildWsUrl(`/ws/audit?namespace=${encodeURIComponent(selectedNamespace)}`);
+  const wsProtocols = useMemo(
+    () => (wsToken ? ["nrvq-audit-jwt", wsToken] : undefined),
+    [wsToken]
   );
-  const ws = useWebSocket<AuditRecord>(wsUrl, live);
+  const ws = useWebSocket<AuditRecord>(wsUrl, live, wsProtocols);
 
   // Fallback: when the socket isn't connected but Live is on, poll recent records on an
   // interval and merge them in (deduped by id) so the Live feed still updates.
@@ -209,7 +213,16 @@ export function AuditLog() {
   }, [streamed, base.data, page]);
 
   const totalCount = totalRecords.data?.length ?? 0;
-  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  // F-63: the total-count probe is server-capped at limit=500 (audit/records enforces le=500), so records
+  // PAST offset 500 used to be unreachable — totalPages maxed at 10 and Next was disabled at page 10 even
+  // though the server offset has no upper bound. When the probe comes back full there are likely more rows
+  // than it can see, so fall back to "there IS a next page iff the current page returned a full pageSize"
+  // and keep the page/record totals honest (show a trailing "+") once we're past what the probe can count.
+  const countCapped = totalCount >= 500;
+  const pageFull = (base.data?.length ?? 0) === pageSize;
+  const knownPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const totalPages = Math.max(knownPages, page + 1);
+  const canNext = page < knownPages - 1 || (countCapped && pageFull);
   const loading = base.loading || totalRecords.loading;
   const hasFilter = Boolean(debouncedTool || debouncedAgent || decision !== "all");
   const noResults = !loading && rows.length === 0;
@@ -294,7 +307,7 @@ export function AuditLog() {
         <div className="muted" style={{ fontSize: 12, minHeight: 16 }}>
           {loading
             ? "Loading…"
-            : `Showing ${rows.length} of ${totalCount} record${totalCount === 1 ? "" : "s"} in range (${timeRange})${
+            : `Showing ${rows.length} of ${totalCount}${countCapped ? "+" : ""} record${totalCount === 1 ? "" : "s"} in range (${timeRange})${
                 debouncedTool ? ` · tool contains “${debouncedTool}”` : ""
               }${debouncedAgent ? ` · agent contains “${debouncedAgent}”` : ""}`}
         </div>
@@ -330,13 +343,14 @@ export function AuditLog() {
             ← Prev
           </KitButton>
           <span className="muted" style={{ fontSize: 12 }}>
-            Page {Math.min(page + 1, totalPages)} of {totalPages}
+            Page {page + 1} of {totalPages}
+            {canNext && page + 1 >= totalPages ? "+" : ""}
           </span>
           <KitButton
             variant="outline"
             size="sm"
-            onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
-            disabled={page >= totalPages - 1}
+            onClick={() => setPage((p) => p + 1)}
+            disabled={!canNext}
           >
             Next →
           </KitButton>

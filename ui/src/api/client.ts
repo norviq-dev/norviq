@@ -121,7 +121,6 @@ export type RuntimeSettings = {
   namespace: string;
   enforcement_mode: "block" | "audit";
   trust_threshold: number;
-  violation_penalty: number;
   rate_limit: number;
   sector?: string | null;
   apply_mode?: "enforce" | "dry_run_only"; // F-51: when dry_run_only the API rejects policy applies for this ns
@@ -138,7 +137,7 @@ export async function fetchSettings(namespace?: string): Promise<RuntimeSettings
 /** Persist a per-namespace settings override (admin-only). */
 export async function saveSettings(
   namespace: string,
-  body: Partial<Pick<RuntimeSettings, "enforcement_mode" | "trust_threshold" | "violation_penalty" | "rate_limit" | "sector" | "apply_mode">>
+  body: Partial<Pick<RuntimeSettings, "enforcement_mode" | "trust_threshold" | "rate_limit" | "sector" | "apply_mode">>
 ): Promise<RuntimeSettings> {
   const params = new URLSearchParams();
   if (namespace && namespace !== "all") params.set("namespace", namespace);

@@ -217,6 +217,64 @@ async def test_apply_remote_event_upsert_refreshes_version_history(
 
 
 @pytest.mark.asyncio
+async def test_rehydrate_versions_for_key_caps_to_max_versions(
+    loader: PolicyLoader, db_engine: AsyncEngine
+) -> None:
+    """RETENTION regression: `_rehydrate_versions_for_key` (apply_remote_event's upsert branch) must cap the
+    stored history to `_MAX_VERSIONS`, exactly like the append path (`create()`) and the full-rehydrate path
+    (`_rehydrate_versions`). The DB may retain more rows than `_MAX_VERSIONS` (policy_version_keep_count can
+    exceed it), and previously this single-key path stored the WHOLE DB history — so a peer replica that
+    received an upsert accumulated an unbounded version list the live append path would never build,
+    diverging rollback targets across replicas. Seed the DB with more rows than `_MAX_VERSIONS`, apply the
+    remote upsert on a fresh peer, and assert its in-memory history holds exactly `_MAX_VERSIONS` (the most
+    recent), not the full DB count."""
+    from norviq.engine.policy_loader import _MAX_VERSIONS
+
+    namespace = f"ns7-{uuid.uuid4().hex}"
+    agent_class = "class7"
+    rego = 'package retention\ndefault decision = "block"'
+    key = f"{namespace}:{agent_class}"
+    total_db_rows = _MAX_VERSIONS + 5  # keep_count > _MAX_VERSIONS: DB retains more than memory should hold
+
+    # create() writes version 1; seed the remaining rows directly so the DB history exceeds _MAX_VERSIONS.
+    await loader.create(namespace, agent_class, rego, "admin", 100, enforcement_mode="block")
+    async with db_engine.begin() as conn:
+        policy_id = (
+            await conn.execute(
+                text("SELECT id FROM policies WHERE namespace = :ns AND agent_class = :cls"),
+                {"ns": namespace, "cls": agent_class},
+            )
+        ).scalar_one()
+        for version in range(2, total_db_rows + 1):
+            await conn.execute(
+                text(
+                    "INSERT INTO policy_versions "
+                    "(id, policy_id, version, rego_source, saved_at, saved_by, priority, enforcement_mode) "
+                    "VALUES (:id, :policy_id, :version, :rego_source, NOW(), :saved_by, 100, 'block')"
+                ),
+                {
+                    "id": str(uuid.uuid4()),
+                    "policy_id": policy_id,
+                    "version": version,
+                    "rego_source": rego,
+                    "saved_by": "admin",
+                },
+            )
+
+    # A fresh peer replica applies the remote upsert -> rehydrates just this key from the durable table.
+    peer = PolicyLoader(cache=_CacheStub(), evaluator=_SyncEvaluatorStub())  # type: ignore[arg-type]
+    try:
+        await peer.apply_remote_event("upsert", namespace, agent_class)
+        # Pre-fix this held all `total_db_rows` snapshots; must be capped to _MAX_VERSIONS.
+        assert len(peer._versions[key]) == _MAX_VERSIONS
+        # The cap keeps the most recent versions (tail), matching create()/_rehydrate_versions.
+        assert peer._versions[key][-1].version == total_db_rows
+        assert peer._versions[key][0].version == total_db_rows - _MAX_VERSIONS + 1
+    finally:
+        await peer.close()
+
+
+@pytest.mark.asyncio
 async def test_apply_remote_event_upsert_converges_applied_at(
     loader: PolicyLoader, db_engine: AsyncEngine
 ) -> None:

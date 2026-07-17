@@ -113,7 +113,6 @@ describe("P1-1: governance posture in context", () => {
         namespace: "analytics",
         enforcement_mode: "audit",
         trust_threshold: 0.7,
-        violation_penalty: 0.05,
         rate_limit: 60,
         apply_mode: "enforce"
       })

@@ -78,7 +78,6 @@ export function Settings() {
   // from two places. This page keeps the per-namespace TUNING defaults (trust/penalty/rate/sector) and
   // links to Target Settings for governance.
   const [trustThreshold, setTrustThreshold] = useState("");
-  const [violationPenalty, setViolationPenalty] = useState("");
   const [rateLimit, setRateLimit] = useState("");
   const [sector, setSector] = useState("");
   const [loading, setLoading] = useState(true);
@@ -100,7 +99,6 @@ export function Settings() {
       .then((s) => {
         if (!active) return;
         setTrustThreshold(String(s.trust_threshold));
-        setViolationPenalty(String(s.violation_penalty));
         setRateLimit(String(s.rate_limit));
         setSector(s.sector ?? "");
         setError(null);
@@ -124,13 +122,11 @@ export function Settings() {
   }, []);
 
   // SET-VALIDATE (audit #14): reject non-numeric / out-of-range tuning values client-side instead of
-  // shipping NaN to the server. trust threshold + violation penalty are 0..1; rate limit is a non-negative int.
+  // shipping NaN to the server. trust threshold is 0..1; rate limit is a non-negative int.
   const validateTuning = (): string | null => {
     const t = Number(trustThreshold);
-    const v = Number(violationPenalty);
     const r = Number(rateLimit);
     if (!Number.isFinite(t) || t < 0 || t > 1) return "Trust Threshold must be a number between 0 and 1.";
-    if (!Number.isFinite(v) || v < 0 || v > 1) return "Violation Penalty must be a number between 0 and 1.";
     if (!Number.isInteger(r) || r < 0) return "Rate Limit must be a non-negative whole number.";
     return null;
   };
@@ -145,7 +141,6 @@ export function Settings() {
     try {
       await saveSettings(namespace, {
         trust_threshold: Number(trustThreshold),
-        violation_penalty: Number(violationPenalty),
         rate_limit: Number(rateLimit),
         sector
       });
@@ -200,14 +195,6 @@ export function Settings() {
                 className="input mono"
                 value={trustThreshold}
                 onChange={(e) => setTrustThreshold(e.target.value)}
-                style={{ width: 90, textAlign: "right" }}
-              />
-            </Field>
-            <Field label="Violation Penalty" hint="Trust deducted per blocked call">
-              <input
-                className="input mono"
-                value={violationPenalty}
-                onChange={(e) => setViolationPenalty(e.target.value)}
                 style={{ width: 90, textAlign: "right" }}
               />
             </Field>

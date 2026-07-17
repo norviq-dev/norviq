@@ -53,7 +53,10 @@ class SettingsUpdate(BaseModel):
 
     enforcement_mode: str | None = Field(default=None, pattern="^(block|audit)$")
     trust_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
-    violation_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
+    # NOTE: no per-namespace violation_penalty — it never reached the engine (_ENGINE_POSTURE_FIELDS
+    # carries only enforcement_mode/trust_threshold/rate_limit) so a value set here was inert. The knob
+    # was removed from the settings surface; the SDK's in-process decay still uses the global
+    # settings.trust_violation_penalty.
     rate_limit: int | None = Field(default=None, ge=1, le=100000)
     sector: str | None = Field(default=None, max_length=64)  # F047: org sector hint (pack suggestions)
     apply_mode: str | None = Field(default=None, pattern="^(enforce|dry_run_only)$")  # F-51: apply governance
@@ -81,11 +84,6 @@ def _effective(row: NamespaceSettings | None) -> dict:
         "enforcement_mode": (row.enforcement_mode if row and row.enforcement_mode else app_settings.enforcement_mode),
         "trust_threshold": (
             row.trust_threshold if row and row.trust_threshold is not None else app_settings.trust_threshold
-        ),
-        "violation_penalty": (
-            row.violation_penalty
-            if row and row.violation_penalty is not None
-            else app_settings.trust_violation_penalty
         ),
         "rate_limit": (
             row.rate_limit if row and row.rate_limit is not None else app_settings.evaluator_rate_limit_per_window

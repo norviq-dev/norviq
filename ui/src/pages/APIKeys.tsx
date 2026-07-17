@@ -19,8 +19,17 @@ export function APIKeys() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // A key must bind to a REAL tenant namespace. Under the "All namespaces" aggregate scope the value is
+  // the literal "all" — no tenant is named "all", so a key issued here would be scoped to a phantom
+  // namespace that grants nothing. Mirror the pack/policy write guards: block and prompt for a concrete ns.
+  const scopeIsAll = namespace === "all";
+
   const onCreate = async () => {
     if (!name.trim()) return;
+    if (scopeIsAll) {
+      setError("Pick a concrete namespace (top-left) before issuing a key — a key can't be scoped to \"All namespaces\".");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -85,10 +94,15 @@ export function APIKeys() {
             aria-label="Expires in (days)"
             style={{ width: 170 }}
           />
-          <KitButton variant="outline" size="sm" onClick={onCreate} disabled={busy || !name.trim()}>
+          <KitButton variant="outline" size="sm" onClick={onCreate} disabled={busy || !name.trim() || scopeIsAll}>
             {busy ? "Creating…" : "Create key"}
           </KitButton>
         </div>
+        {scopeIsAll && (
+          <div data-testid="apikey-scope-prompt" style={{ color: "var(--text-secondary)", fontSize: 13, marginTop: 10 }}>
+            Select a concrete namespace (top-left) to issue a key — keys can't be scoped to "All namespaces".
+          </div>
+        )}
         {error && <div style={{ color: "var(--block)", fontSize: 13, marginTop: 10 }}>{error}</div>}
         {created && (
           <div

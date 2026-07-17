@@ -735,8 +735,12 @@ class PolicyLoader:
                 )
                 for row in rows
             ]
-            self._versions = {**self._versions, key: snapshots}
-            log.info("nrvq.policy.versions_rehydrated_key", key=key, count=len(snapshots), code="NRVQ-REG-5020")
+            # RETENTION consistency: cap to the same in-memory bound the append/full-rehydrate paths enforce
+            # (_MAX_VERSIONS). The DB may retain more (policy_version_keep_count > _MAX_VERSIONS), but a peer's
+            # post-upsert memory must not hold an unbounded history the live path would never accumulate — else
+            # rollback targets diverge across replicas.
+            self._versions = {**self._versions, key: snapshots[-_MAX_VERSIONS:]}
+            log.info("nrvq.policy.versions_rehydrated_key", key=key, count=len(snapshots[-_MAX_VERSIONS:]), code="NRVQ-REG-5020")
         except Exception as exc:  # noqa: BLE001 — history is derived; a failure never blocks the sync listener
             log.warning("nrvq.policy.version_rehydrate_key_failed", key=key, error=str(exc), code="NRVQ-REG-5021")
 

@@ -1,4 +1,18 @@
 {{- if .Values.fleet.hub.enabled }}
+{{- if .Values.config.requireStrongSecret }}
+{{- /* HIGH: with requireStrongSecret on (the hardened/prod posture) refuse to ship the well-known default
+       fleet-store credential. Fail LOUDLY at render/install time so the operator MUST supply a real fleet DB
+       password (--set fleet.hub.postgresql.password=... / .pgUrl=... or a sealed secret) instead of silently
+       deploying with the shipped `norviq_dev`. Mirrors the API's requireStrongSecret guard on the JWT/admin
+       secrets — those are covered in secret.yaml/the engine; the fleet store was the remaining gap. */}}
+{{- $fleetPw := .Values.fleet.hub.postgresql.password | default "" }}
+{{- if or (eq $fleetPw "") (eq $fleetPw "norviq_dev") }}
+{{- fail "config.requireStrongSecret=true but fleet.hub.postgresql.password is empty or the shipped default 'norviq_dev' — set a strong fleet DB password (--set fleet.hub.postgresql.password=...)." }}
+{{- end }}
+{{- if regexMatch ":norviq_dev@" (.Values.fleet.hub.pgUrl | default "") }}
+{{- fail "config.requireStrongSecret=true but fleet.hub.pgUrl embeds the shipped default password 'norviq_dev' — point it at your fleet DB with a strong credential." }}
+{{- end }}
+{{- end }}
 # Fleet hub control plane (F045): the fleet-api (SAME api image, different command) over a dedicated
 # fleet-postgresql. Rendered ONLY where fleet.hub.enabled — a normal single-cluster install renders none of this.
 apiVersion: v1
@@ -32,7 +46,11 @@ metadata:
     app: norviq-fleet-api
     {{- include "norviq.labels" . | nindent 4 }}
 spec:
+  {{- /* When the HPA owns the replica count, the Deployment must NOT also set `replicas` — otherwise every
+         reconcile resets it and fights the autoscaler (scale-up flapping). Omit it when autoscaling is on. */}}
+  {{- if not .Values.fleet.hub.autoscaling.enabled }}
   replicas: {{ .Values.fleet.hub.replicas | default 1 }}
+  {{- end }}
   selector:
     matchLabels:
       app: norviq-fleet-api

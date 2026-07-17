@@ -19,7 +19,6 @@ beforeEach(() => {
         namespace: "default",
         enforcement_mode: "block",
         trust_threshold: 0.7,
-        violation_penalty: 0.05,
         rate_limit: 60
       })
     ),
@@ -29,7 +28,6 @@ beforeEach(() => {
         namespace: "default",
         enforcement_mode: "block",
         trust_threshold: 0.55,
-        violation_penalty: 0.05,
         rate_limit: 60
       });
     })
@@ -67,6 +65,8 @@ describe("Settings (#8) — server-backed", () => {
     expect(putBody).toMatchObject({ trust_threshold: 0.55 });
     expect(putBody).not.toHaveProperty("enforcement_mode");
     expect(putBody).not.toHaveProperty("apply_mode");
+    // violation_penalty was a dead control (never reached the engine) — it must no longer be sent.
+    expect(putBody).not.toHaveProperty("violation_penalty");
   });
 
   it("GOV-IA: governance is not duplicated here — it links to Target Settings instead", async () => {

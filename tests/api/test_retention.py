@@ -175,7 +175,10 @@ async def test_pruner_registry_and_coverage_scoped_and_disable_knobs(monkeypatch
     assert "DELETE FROM agent_registry WHERE last_seen < :cutoff" in sess.calls[0][0]
     sess2 = _PrunerSession()
     assert await p._prune_coverage_snapshots(sess2) == 1
-    assert "DELETE FROM mitre_coverage_snapshots WHERE timestamp_utc < :cutoff" in sess2.calls[0][0]
+    cov_sql = sess2.calls[0][0]
+    assert "DELETE FROM mitre_coverage_snapshots WHERE timestamp_utc < :cutoff" in cov_sql
+    # ONLY the trend series is pruned — kind='export' provenance markers are audit evidence, kept forever.
+    assert "kind = 'snapshot'" in cov_sql
     # <=0 disables each window: no SQL executed at all.
     monkeypatch.setattr(settings, "agent_registry_retention_days", 0)
     monkeypatch.setattr(settings, "coverage_snapshot_retention_days", 0)
@@ -183,6 +186,45 @@ async def test_pruner_registry_and_coverage_scoped_and_disable_knobs(monkeypatch
     for fn in (p._prune_agent_registry, p._prune_coverage_snapshots, p._prune_asset_graph):
         quiet = _PrunerSession()
         assert await fn(quiet) == 0 and quiet.calls == []
+
+
+class _CoverageRowSession(_PrunerSession):
+    """A tiny in-memory model of mitre_coverage_snapshots: applies the DELETE's WHERE clause to real rows so
+    we can assert WHAT SURVIVES, not just the SQL text. Rows are (kind, timestamp_utc)."""
+
+    def __init__(self, rows):
+        super().__init__()
+        self.rows = list(rows)
+
+    async def execute(self, stmt, params=None):
+        sql = str(stmt)
+        params = dict(params or {})
+        cutoff = params["cutoff"]
+        # Model the DELETE: age gate always applies; the kind gate only if the query is scoped to it.
+        kind_scoped = "kind = 'snapshot'" in sql
+        survivors = [
+            (k, ts) for (k, ts) in self.rows
+            if not (ts < cutoff and (not kind_scoped or k == "snapshot"))
+        ]
+        deleted = len(self.rows) - len(survivors)
+        self.rows = survivors
+        return _Result(rowcount=deleted)
+
+
+async def test_coverage_prune_keeps_old_export_provenance_deletes_old_snapshot():
+    """FAIL-ON-BUG: the coverage retention window must prune only kind='snapshot' trend points. An old
+    kind='export' row (evidence-pack export provenance backing the "last exported" indicator) MUST survive
+    the same prune that removes an equally-old kind='snapshot' row — losing it erases audit evidence. On the
+    pre-fix (kind-blind) DELETE the export row is wrongly deleted and this test fails."""
+    from norviq.api.audit_retention import RetentionPruner
+
+    old = datetime.now(timezone.utc) - timedelta(days=settings.coverage_snapshot_retention_days + 5)
+    sess = _CoverageRowSession([("snapshot", old), ("export", old)])
+    n = await RetentionPruner(_factory_for(sess))._prune_coverage_snapshots(sess)
+    assert n == 1                                              # only the trend snapshot was pruned
+    kinds = {k for (k, _ts) in sess.rows}
+    assert kinds == {"export"}                                # the export provenance marker survives
+    assert ("snapshot", old) not in sess.rows                 # the old trend point is gone
 
 
 async def test_prune_once_isolates_a_failing_step(monkeypatch):

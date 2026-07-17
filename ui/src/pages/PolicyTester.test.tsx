@@ -12,7 +12,7 @@ import { AppProvider } from "../store/AppContext";
 
 const server = setupServer(
   http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "local", cluster_name: "local", namespaces: ["default"] })),
-  http.get("/api/v1/settings", () => HttpResponse.json({ namespace: "default", enforcement_mode: "block", trust_threshold: 0.7, violation_penalty: 0.05, rate_limit: 60, apply_mode: "enforce" }))
+  http.get("/api/v1/settings", () => HttpResponse.json({ namespace: "default", enforcement_mode: "block", trust_threshold: 0.7, rate_limit: 60, apply_mode: "enforce" }))
 );
 beforeAll(() => server.listen({ onUnhandledRequest: "bypass" }));
 afterEach(() => server.resetHandlers());

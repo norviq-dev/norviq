@@ -34,6 +34,11 @@ from norviq.telemetry.middleware import TelemetryMiddleware
 from norviq.telemetry.provider import setup_telemetry, shutdown_telemetry
 from norviq.api.db.models import Base
 
+# Sec-WebSocket-Protocol marker carrying the audit-stream JWT out of the URL (see ws_audit): the client
+# offers ["nrvq-audit-jwt", "<token>"]; the server reads the token from the handshake header and echoes
+# ONLY this marker back on accept() — never the token — so the credential never lands in an access log.
+_WS_JWT_SUBPROTOCOL = "nrvq-audit-jwt"
+
 log = structlog.get_logger()
 log.info(
     "nrvq.startup.tables_in_metadata",
@@ -253,12 +258,24 @@ def create_app() -> FastAPI:
     @app.websocket("/ws/audit")
     async def ws_audit(websocket: WebSocket) -> None:
         """Stream live decisions to the Audit Log feed, scoped by the token's namespace claim."""
-        # Authenticate BEFORE accepting the socket (token via ?token= or Authorization header).
+        # Authenticate BEFORE accepting the socket. Preferred: the JWT rides in the
+        # Sec-WebSocket-Protocol handshake header as ["nrvq-audit-jwt", "<token>"] — browsers can't set
+        # Authorization on a WS handshake, and a `?token=` query string leaks the credential into access
+        # logs / browser history / Referer (SEC). Read the subprotocol first; keep the query-param and
+        # Authorization paths as a deprecated fallback for non-browser clients (curl, the integration
+        # harness). We echo ONLY the marker back on accept() below, never the token value.
         from jwt import PyJWTError as JWTError
 
         from norviq.api.auth import decode_token, scoped_namespace
 
-        raw = websocket.query_params.get("token") or ""
+        offered = list(websocket.scope.get("subprotocols") or [])
+        raw = ""
+        if _WS_JWT_SUBPROTOCOL in offered:
+            i = offered.index(_WS_JWT_SUBPROTOCOL)
+            if i + 1 < len(offered):
+                raw = offered[i + 1]
+        if not raw:
+            raw = websocket.query_params.get("token") or ""
         if not raw:
             header = websocket.headers.get("authorization", "")
             raw = header[7:] if header.lower().startswith("bearer ") else ""
@@ -287,7 +304,10 @@ def create_app() -> FastAPI:
         except Exception:
             await websocket.close(code=1008)
             return
-        await websocket.accept()
+        # RFC 6455: the selected subprotocol MUST be one the client offered — echo the marker back only
+        # when it was offered, and never echo the token value.
+        accept_proto = _WS_JWT_SUBPROTOCOL if _WS_JWT_SUBPROTOCOL in offered else None
+        await websocket.accept(subprotocol=accept_proto)
         hub: AuditHub = websocket.app.state.audit_hub
         queue = hub.subscribe()
         log.info("nrvq.api.ws_audit.open", namespace=namespace, code="NRVQ-API-7040")

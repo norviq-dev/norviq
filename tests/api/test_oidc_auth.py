@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import json
 import time
+from types import SimpleNamespace
 
 import httpx
 import jwt
@@ -195,6 +196,42 @@ async def test_bad_iss_aud_exp_rejected(oidc_on, bad) -> None:
     with pytest.raises(Exception) as exc:
         await auth_mod.get_current_user(_creds(token))
     assert getattr(exc.value, "status_code", None) == 401
+
+
+# --- H1: must_change lockdown is an EXACT-path allowlist, not a URL-suffix test ---
+
+
+def _req(path: str) -> SimpleNamespace:
+    """Minimal Request double: get_current_user reads only ``request.url.path`` (+ app.state.cache,
+    which is None-safe here)."""
+    return SimpleNamespace(url=SimpleNamespace(path=path), app=None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/api/v1/auth/change-password", "/api/v1/auth/logout", "/api/v1/me"])
+async def test_must_change_token_allowed_on_exact_flag_clearing_paths(oidc_on, path) -> None:
+    token = _mint(oidc_on["priv_pem"], {"groups": ["norviq-admins"], "must_change": True})
+    user = await auth_mod.get_current_user(_creds(token), _req(path))
+    assert user["role"] == "admin" and user["must_change"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/policies",                       # a real, non-allowed route
+        "/api/v1/policies/x/auth/change-password",  # crafted to END WITH an allowed suffix
+        "/api/v1/agents/spoof/auth/logout",         # crafted to END WITH an allowed suffix
+        "/api/v1/audit/frame/me",                   # crafted to END WITH `/me`
+    ],
+)
+async def test_must_change_token_blocked_on_suffix_crafted_paths(oidc_on, path) -> None:
+    # FAIL-ON-BUG: the old `path.endswith((...))` gate let the last three through (403 never raised).
+    # With the exact-equality allowlist, every real route other than the three exact ones is 403.
+    token = _mint(oidc_on["priv_pem"], {"groups": ["norviq-admins"], "must_change": True})
+    with pytest.raises(Exception) as exc:
+        await auth_mod.get_current_user(_creds(token), _req(path))
+    assert getattr(exc.value, "status_code", None) == 403
 
 
 @pytest.mark.asyncio

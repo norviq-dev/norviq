@@ -370,8 +370,9 @@ export function Compliance() {
   // COMP-GEN-01 multi-select: generate one CONTROL-SPECIFIC draft per (selected control × class) in ONE batch
   // call, honouring the class-scope mode. Marks each drafted control + surfaces a rollup toast that deep-links
   // to the first draft (all land in the Policy Catalog inbox).
-  async function onGenerateBatch() {
-    const ids = [...selectedGaps];
+  // `ids` is the caller-supplied set of controls to generate — the DetailView passes only the
+  // currently-VISIBLE generatable gaps (selected ∩ visible), never hidden selections the user can't see.
+  async function onGenerateBatch(ids: string[]) {
     if (!ids.length) return;
     try {
       const res = await generateMitrePolicyBatch(ids, namespace ?? "default", genClassMode, framework);
@@ -875,7 +876,7 @@ function DetailView(props: {
   onClearGapSelect: () => void;
   genClassMode: string;
   setGenClassMode: (v: string) => void;
-  onGenerateBatch: () => void;
+  onGenerateBatch: (ids: string[]) => void;
   batchOutcome: GenerateResult[] | null;
   onDismissBatchOutcome: () => void;
   onOpenRule: (ruleId: string) => void;
@@ -1236,7 +1237,7 @@ function DetailView(props: {
               <button
                 type="button"
                 data-testid="gap-batch-generate"
-                onClick={onGenerateBatch}
+                onClick={() => onGenerateBatch(selectedGapIds)}
                 style={{ fontSize: 11.5, fontWeight: 700, padding: "6px 12px", borderRadius: 7, background: "linear-gradient(180deg, #2ddab8, #22c4a4)", color: "#0d0d0d", border: "none", cursor: "pointer" }}
               >
                 Generate for selected

@@ -258,10 +258,13 @@ export function AttackGraph() {
     setSimResult({});
     try {
       const token = getToken();
-      await fetch(apiUrl(`/api/v1/attack-paths/compute?namespace=${encodeURIComponent(selectedNamespace)}`), {
+      const res = await fetch(apiUrl(`/api/v1/attack-paths/compute?namespace=${encodeURIComponent(selectedNamespace)}`), {
         method: "POST",
         headers: token ? { Authorization: `Bearer ${token}` } : {}
       });
+      // A non-2xx (500 / 403 / …) does NOT throw from fetch — check res.ok explicitly so a failed
+      // recompute surfaces the degraded banner instead of silently claiming success and refetching.
+      if (!res.ok) setDegraded(true);
     } catch {
       setDegraded(true);
     } finally {

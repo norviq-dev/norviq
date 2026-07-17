@@ -27,6 +27,15 @@ security = HTTPBearer(auto_error=False)
 # Role strength for deterministic group-mapping precedence (admin wins). Flip here for least-privilege.
 _ROLE_RANK = {"admin": 3, "service": 2, "viewer": 1}
 
+# H1: the ONLY routes a must_change=True token may reach (exact paths, matched by equality — see
+# get_current_user). These are the concrete mounted paths (routers are included under `/api/v1`):
+# clear the flag (change-password), exit the session (logout), or read one's own identity (me, the
+# console's session-restore path). Exact match — never a suffix test — so a crafted path that merely
+# *ends* with one of these (e.g. `/api/v1/policies/x/auth/logout`) can't slip the lockdown.
+_MUST_CHANGE_ALLOWED_PATHS = frozenset(
+    {"/api/v1/auth/change-password", "/api/v1/auth/logout", "/api/v1/me"}
+)
+
 
 async def _validate_token(token: str) -> dict:
     """Validate a token (OIDC or legacy HS256) and return normalized claims. Raises JWTError."""
@@ -156,7 +165,7 @@ async def get_current_user(
     # only absent for direct/non-HTTP callers (tests, internal use) — nothing to gate there.
     if claims.get("must_change") and request is not None:
         path = request.url.path
-        allowed = path.endswith(("/auth/change-password", "/auth/logout", "/me"))
+        allowed = path in _MUST_CHANGE_ALLOWED_PATHS
         if not allowed:
             log.info(
                 "nrvq.auth.must_change_blocked",

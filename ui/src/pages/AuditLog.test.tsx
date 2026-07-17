@@ -65,6 +65,55 @@ describe("AuditLog live feed (#5)", () => {
   });
 });
 
+describe("AuditLog pagination beyond the 500-offset cap (F-63)", () => {
+  // FAIL-ON-BUG: with a full count-probe (server caps limit at 500) and full pages, the pager must let
+  // the user advance past page 10 / offset 500. Old code disabled Next at page 10 (totalPages-1), so
+  // offset 500 was never fetched and records beyond it were unreachable.
+  it("keeps Next enabled past page 10 and fetches offset >= 500", async () => {
+    const pageOffsets: number[] = [];
+    const makeRecords = (n: number, offset: number) =>
+      Array.from({ length: n }, (_v, i) => ({
+        id: `rec-${offset + i}`,
+        timestamp: "2026-07-03T12:00:00Z",
+        tool_name: "shell_exec",
+        decision: "allow" as const
+      }));
+    server.use(
+      http.get("/api/v1/audit/records", ({ request }) => {
+        const url = new URL(request.url);
+        const limit = Number(url.searchParams.get("limit") ?? "50");
+        const offset = Number(url.searchParams.get("offset") ?? "0");
+        // The count probe (limit=500) comes back full → there are more rows than it can see.
+        if (limit === 500) return HttpResponse.json(makeRecords(500, 0));
+        // Every 50-row page is full → paging must not stop.
+        if (limit === 50) {
+          pageOffsets.push(offset);
+          return HttpResponse.json(makeRecords(50, offset));
+        }
+        return HttpResponse.json(makeRecords(Math.min(limit, 10), offset)); // live-poll probe
+      })
+    );
+    renderPage();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+
+    // Click Next 10 times: page 0 → 10 (offset 500). Old code disabled Next at page 9 (offset 450).
+    for (let i = 0; i < 10; i += 1) {
+      const next = screen.getByRole("button", { name: /Next/i });
+      await act(async () => {
+        fireEvent.click(next);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(300);
+      });
+    }
+
+    expect(Math.max(...pageOffsets)).toBeGreaterThanOrEqual(500);
+    expect(screen.getByRole("button", { name: /Next/i })).not.toBeDisabled();
+  });
+});
+
 describe("AuditLog structured event detail (E2b)", () => {
   it("renders structured fields + the engine-fault note for evaluator_error rows", async () => {
     server.use(

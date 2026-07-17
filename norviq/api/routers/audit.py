@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from norviq.api.auth import get_current_user, read_namespace, scoped_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
+from norviq.api.synthetic import is_synthetic_identity  # A1: the ONE shared synthetic/probe classifier (do not fork)
 from norviq.config import settings
 
 
@@ -144,37 +145,64 @@ async def audit_stats(
     """Return aggregate audit stats."""
     namespace = read_namespace(user, namespace)
     since = _since_for_range(range)
-    base = select(func.count(AuditLogEntry.id)).where(AuditLogEntry.timestamp_utc >= since)
-    if namespace:
-        base = base.where(AuditLogEntry.namespace == namespace)
-    total = int((await session.scalar(base)) or 0)
-    blocked = int((await session.scalar(base.where(AuditLogEntry.decision == "block"))) or 0)
-    tools_stmt = (
-        select(AuditLogEntry.tool_name, func.count(AuditLogEntry.id))
-        .group_by(AuditLogEntry.tool_name)
-        .order_by(desc(func.count(AuditLogEntry.id)))
-        .limit(5)
+    # RECONCILE (real-traffic-only): the Overview KPIs/top-tools must count the SAME population the governance
+    # surfaces do (Compliance/MITRE `_activity_by_rule`, RedTeam `compute_efficacy`) — REAL traffic only. So we
+    # exclude red-team framework events (efficacy tooling, not live enforcement) and synthetic/probe/eval
+    # identities (A1 `is_synthetic_identity`). `is_synthetic_identity` is a Python prefix/regex classifier that
+    # is NOT expressible in SQL, so — exactly like `_activity_by_rule` — we GROUP BY the discriminating columns
+    # and drop the excluded rows Python-side before aggregating (bounded cardinality, not a full table scan).
+    stmt = (
+        select(
+            AuditLogEntry.tool_name,
+            AuditLogEntry.decision,
+            AuditLogEntry.agent_class,
+            AuditLogEntry.framework,
+            AuditLogEntry.rule_id,
+            func.count(AuditLogEntry.id),
+            func.sum(AuditLogEntry.latency_ms),
+            func.count(AuditLogEntry.latency_ms),  # non-null latency count → matches AVG() semantics
+        )
+        .where(AuditLogEntry.timestamp_utc >= since)
+        .group_by(
+            AuditLogEntry.tool_name, AuditLogEntry.decision, AuditLogEntry.agent_class,
+            AuditLogEntry.framework, AuditLogEntry.rule_id,
+        )
     )
     if namespace:
-        tools_stmt = tools_stmt.where(AuditLogEntry.namespace == namespace)
-    top_tools = []
-    for row in (await session.execute(tools_stmt)).all():
-        if hasattr(row, "tool_name"):
-            top_tools.append({"tool_name": row.tool_name, "count": row.count})
-        else:
-            top_tools.append({"tool_name": row[0], "count": row[1]})
-    rate = round((blocked / total) * 100, 2) if total else 0.0
+        stmt = stmt.where(AuditLogEntry.namespace == namespace)
+    total = 0
+    blocked = 0
     # FIX-3: engine (OPA-eval) errors are fail-closed ENGINE faults, not policy decisions. Surface them as a
     # distinct dashboard signal so an `evaluator_error` spike reads as an engine-health problem, not a wall of
     # "policy blocks". A clean input never produces one (transient errors self-heal via the evaluator retry).
-    engine_errors = int((await session.scalar(base.where(AuditLogEntry.rule_id == "evaluator_error"))) or 0)
-    # K2: real average end-to-end latency over the SAME window (+ namespace) predicate. latency_ms is the measured
-    # evaluate latency stamped on every audit record (F-13), so this is a real number, not a placeholder 0. The
-    # Overview's Avg-latency KPI binds this instead of averaging a capped client-side records sample.
-    avg_stmt = select(func.avg(AuditLogEntry.latency_ms)).where(AuditLogEntry.timestamp_utc >= since)
-    if namespace:
-        avg_stmt = avg_stmt.where(AuditLogEntry.namespace == namespace)
-    avg_latency_ms = round(float((await session.scalar(avg_stmt)) or 0.0), 2)
+    engine_errors = 0
+    # K2: real average end-to-end latency over the SAME window (+ namespace + real-traffic) predicate. latency_ms
+    # is the measured evaluate latency stamped on every audit record (F-13); summing it and dividing by the count
+    # of non-null latencies reproduces AVG() over exactly the rows we kept. The Overview's Avg-latency KPI binds
+    # this instead of averaging a capped client-side records sample.
+    latency_sum = 0.0
+    latency_n = 0
+    tool_counts: dict[str, int] = {}
+    for tool_name, decision, agent_class, framework, rule_id, count, lat_sum, lat_n in (
+        await session.execute(stmt)
+    ).all():
+        if str(framework or "") == "redteam" or is_synthetic_identity(str(agent_class or "")):
+            continue  # excluded from Overview so it reconciles with Compliance/MITRE + RedTeam efficacy
+        n = int(count or 0)
+        total += n
+        if decision == "block":
+            blocked += n
+        if rule_id == "evaluator_error":
+            engine_errors += n
+        tool_counts[str(tool_name or "")] = tool_counts.get(str(tool_name or ""), 0) + n
+        latency_sum += float(lat_sum or 0.0)
+        latency_n += int(lat_n or 0)
+    top_tools = [
+        {"tool_name": name, "count": count}
+        for name, count in sorted(tool_counts.items(), key=lambda kv: -kv[1])[:5]
+    ]
+    rate = round((blocked / total) * 100, 2) if total else 0.0
+    avg_latency_ms = round(latency_sum / latency_n, 2) if latency_n else 0.0
     log.debug("nrvq.api.audit.stats", total=total, blocked=blocked, engine_errors=engine_errors,
               avg_latency_ms=avg_latency_ms, code="NRVQ-API-7021")
     return {"total": total, "blocked": blocked, "allowed": total - blocked, "block_rate_pct": rate,
