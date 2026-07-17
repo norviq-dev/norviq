@@ -163,7 +163,9 @@ async def logout(
     cache = _cache(request)
     if await is_revoked(cache, creds.credentials):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session has been logged out")
-    exp = int(claims.get("exp") or 0) or int(time.time()) + 1  # a JWT without exp dies immediately
+    # exp is guaranteed present: _validate_token now requires it (auth._validate_token, options require exp),
+    # so a no-exp token 401s above and never reaches here. The +1 fallback is defensive belt-and-suspenders.
+    exp = int(claims.get("exp") or 0) or int(time.time()) + 1
     await revoke(cache, creds.credentials, exp)
     log.info(
         "nrvq.auth.logout_ok",

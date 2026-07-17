@@ -12,6 +12,8 @@ still rejected before ``accept()``.
 
 from __future__ import annotations
 
+import time
+
 import jwt
 import pytest
 from fastapi.testclient import TestClient
@@ -29,7 +31,7 @@ def _client() -> TestClient:
 
 def _token(namespace: str = "default") -> str:
     return jwt.encode(
-        {"sub": "admin", "role": "admin", "namespace": namespace},
+        {"sub": "admin", "role": "admin", "namespace": namespace, "exp": int(time.time()) + 3600},
         settings.api_secret_key,
         algorithm="HS256",
     )

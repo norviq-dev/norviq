@@ -348,3 +348,61 @@ test_sec_benign_egress_no_secret_allows {                 # egress-verb tool WIT
     o := _d({"tool_name": "send_message", "tool_params": {"text": "hello team"}})
     o.decision == "allow"
 }
+
+# ---------------------------------------------------------------------------
+# DEF-015 + DEF-005 fail-on-bug guards (pre-GA phased hunt).
+# ---------------------------------------------------------------------------
+
+# DEF-015: a secret embedded in a param VALUE must block on ANY egress-verb sink, not only the 3 named
+# external_tools. Pre-fix the secret-VALUE rule was gated on external_tools[tool_name] only, so these
+# ALLOWED (http_post/s3_put/send_sms fell through). FAIL-ON-BUG: fails pre-fix, passes after.
+test_def015_httppost_secret_value_blocks {
+    o := _d({"tool_name": "http_post", "tool_params": {"body": "api_key=sk-livedeadbeef1234"}})
+    o.decision == "block"
+    o.rule_id == "llm02_data_leakage"
+    o.reason != "Allowed"
+}
+test_def015_s3put_secret_value_blocks {
+    o := _d({"tool_name": "s3_put", "tool_params": {"body": "password=Hunter2Hunter2"}})
+    o.decision == "block"
+    o.rule_id == "llm02_data_leakage"
+}
+test_def015_send_sms_bearer_value_blocks {
+    o := _d({"tool_name": "send_sms", "tool_params": {"body": "bearer abcdef012345"}})
+    o.decision == "block"
+    o.rule_id == "llm02_data_leakage"
+}
+# DEF-015: s3_put/put_object/call_api now match an egress prefix, so a sensitive KEY name egress-blocks too.
+test_def015_s3put_secret_keyname_blocks {
+    o := _d({"tool_name": "s3_put", "tool_params": {"password": "Hunter2"}})
+    o.decision == "block"
+    o.rule_id == "llm02_data_leakage"
+}
+test_def015_put_object_secret_keyname_blocks {
+    o := _d({"tool_name": "put_object", "tool_params": {"api_key": "sk-live-xxxx"}})
+    o.decision == "block"
+    o.rule_id == "llm02_data_leakage"
+}
+# DEF-015 false-positive guard: an egress-verb sink with NO secret (value or key) still allows.
+test_def015_egress_no_secret_allows {
+    o := _d({"tool_name": "s3_put", "tool_params": {"body": "monthly report attached"}})
+    o.decision == "allow"
+}
+
+# DEF-005 (DEF-053): oversized-payload base64 padding evasion. base64("rm -rf /") in a param plus ~70KB
+# of benign filler pushed serialized tool_params past the old size gate; pre-fix the decode fan-out was
+# SKIPPED entirely and this ALLOWED. Cap-the-WORK fix always decodes (bounded candidate count), so it
+# now blocks. FAIL-ON-BUG: fails pre-fix (allow), passes after (block).
+_big_filler := concat("", ["a" | numbers.range(1, 70000)[_]])
+
+test_def005_oversized_padding_b64_threat_blocks {
+    o := _d({"tool_name": "search_kb", "tool_params": {"cmd": "cm0gLXJmIC8=", "filler": _big_filler}})
+    o.decision == "block"
+    o.rule_id == "base64_decoded_threat"
+}
+# DEF-005 guard: a large payload with NO encoded threat must still ALLOW — proves the fix bounds the
+# WORK (capped candidate decode) rather than blanket-blocking every oversized payload.
+test_def005_oversized_benign_allows {
+    o := _d({"tool_name": "search_kb", "tool_params": {"note": _big_filler}})
+    o.decision == "allow"
+}

@@ -70,10 +70,16 @@ postgresql:
     enabled: true
     instances: 3
   storage: 20Gi
+  # DEF-004: do NOT ship the well-known default DB password in a prod overlay. Blank here so the operator
+  # MUST supply a strong credential (--set postgresql.password=... or a sealed secret); with
+  # config.requireStrongSecret an install left empty fails loudly at render (secret.yaml gate).
+  password: ""
 redis:
   ha:
     enabled: true
     replicas: 3
+  # DEF-004: same for the cache credential — no shipped default in prod; the operator supplies a strong one.
+  password: ""
 
 config:
   requireStrongSecret: true

@@ -52,11 +52,17 @@ def _client(seeded: list[str] | None = None) -> TestClient:
 
 def _token(role: str = "admin") -> str:
     """Create an auth token for the given role."""
+    import time
+
     import jwt
 
     from norviq.config import settings
 
-    return jwt.encode({"sub": "test", "role": role}, settings.api_secret_key, algorithm="HS256")
+    return jwt.encode(
+        {"sub": "test", "role": role, "exp": int(time.time()) + 3600},
+        settings.api_secret_key,
+        algorithm="HS256",
+    )
 
 
 def test_redteam_endpoints_are_admin_only() -> None:

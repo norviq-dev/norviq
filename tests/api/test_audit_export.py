@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -62,7 +63,11 @@ def _client(rows: list[SimpleNamespace]) -> TestClient:
 
 
 def _token(role: str = "admin", namespace: str = "default") -> dict[str, str]:
-    tok = jwt.encode({"sub": "t", "role": role, "namespace": namespace}, settings.api_secret_key, algorithm="HS256")
+    tok = jwt.encode(
+        {"sub": "t", "role": role, "namespace": namespace, "exp": int(time.time()) + 3600},
+        settings.api_secret_key,
+        algorithm="HS256",
+    )
     return {"Authorization": f"Bearer {tok}"}
 
 

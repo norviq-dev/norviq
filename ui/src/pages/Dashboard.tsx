@@ -68,7 +68,9 @@ type AuditRecord = {
   reason?: string;
 };
 
-type Agent = { category?: string };
+// DEF-051: `synthetic` marks a probe/eval/test identity (backend /agents flag). The Overview trust donut
+// excludes them by default so it reconciles with the asset/attack graph, which hides exactly these probes.
+type Agent = { category?: string; synthetic?: boolean };
 
 function TopBlockedTools({ data }: { data: Array<{ tool: string; count: number }> }) {
   const max = Math.max(...data.map((d) => d.count), 1);
@@ -222,7 +224,9 @@ export function Dashboard() {
     // when scoped to a remote cluster; locally it's derived from the served cluster's agents.
     const cats = useHub
       ? (Array.isArray(hubAgents.data) ? hubAgents.data : []).map((a) => a.trust_category ?? "")
-      : (Array.isArray(agents.data) ? agents.data : []).map((a) => a.category ?? "");
+      // DEF-051: exclude synthetic/probe identities so the donut counts the SAME real identities the
+      // asset/attack graph shows (it default-hides these probes). Reconciles the two Overview surfaces.
+      : (Array.isArray(agents.data) ? agents.data : []).filter((a) => !a.synthetic).map((a) => a.category ?? "");
     return ["high", "medium", "low", "frozen"].map((name) => ({
       name,
       value: cats.filter((c) => c.toLowerCase() === name).length

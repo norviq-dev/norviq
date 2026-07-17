@@ -9,8 +9,8 @@ Critical operational knowledge for deployment, testing, and Lenovo/Zscaler pente
 
 | Rule | Why | How to Verify |
 |---|---|---|
-| failurePolicy: Ignore | Webhook down → pods still create normally | `kubectl get mutatingwebhookconfiguration norviq-sidecar-injector -o jsonpath='{.webhooks[0].failurePolicy}'` |
-| System namespaces excluded | Never inject into kube-system, kube-public, kube-node-lease, norviq | Check namespaceSelector in webhook config |
+| failurePolicy: Fail (default) | Webhook down → pod creation in **injection-enabled** namespaces is BLOCKED (fail-closed — no un-guarded agent pods). Control-plane / system namespaces are excluded via namespaceSelector, so they still create. Override with `webhook.injection.failurePolicy=Ignore` only if you accept un-guarded pods on webhook outage. | `kubectl get mutatingwebhookconfiguration norviq-sidecar-injector -o jsonpath='{.webhooks[0].failurePolicy}'` (expect `Fail`) |
+| System namespaces excluded | Never inject into kube-system, kube-public, kube-node-lease, norviq (the exclusion is what keeps a fail-closed webhook from deadlocking the control plane) | Check namespaceSelector in webhook config |
 | Code-level namespace check | Belt + suspenders — handler.go also blocks system namespaces | Read webhook logs for NRVQ-WHK-4007 |
 | timeoutSeconds: 5 | Webhook too slow → K8s skips it, pod creates normally | Check webhook config |
 | Panic recovery | Webhook panics → returns Allowed:true → pod creates | Read handler code |
@@ -123,7 +123,7 @@ $CA_BUNDLE = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes("tls.crt")
 |---|---|---|
 | `certificate relies on legacy Common Name field, use SANs instead` | Cert has CN but no SANs | Regenerate with `-extensions v3_ext` and openssl.cnf |
 | `x509: certificate signed by unknown authority` | caBundle doesn't match the cert webhook is serving | Delete secret, regenerate cert, recreate secret, update caBundle |
-| Webhook silently skipped (failurePolicy: Ignore) | TLS verification failed | Temporarily set failurePolicy: Fail to see the actual error |
+| Pod creation blocked in an injection-enabled namespace | Webhook error (e.g. TLS verification failed) under the default `failurePolicy: Fail` | The injector is fail-closed by design — a webhook error blocks pods rather than silently skipping. Fix the underlying error (check webhook logs / caBundle); do NOT switch to `Ignore` as a workaround (that lets un-guarded pods through). |
 
 ## 4. Container Image Management
 

@@ -41,16 +41,31 @@ def new_id() -> str:
     return str(uuid.uuid4())
 
 
+def _authfail_key(prefix: str) -> str:
+    return f"apikey-authfail:{prefix}"
+
+
 async def _record_authfail(cache, prefix: str) -> None:
     """F-03: count + audit repeated nrvq_ auth failures per display-prefix (best-effort; never raises)."""
     if cache is None:
         return
     try:
-        count = await cache.incr_call_count(f"apikey-authfail:{prefix}", window_s=_AUTHFAIL_WINDOW_S)
+        count = await cache.incr_call_count(_authfail_key(prefix), window_s=_AUTHFAIL_WINDOW_S)
         if count >= _AUTHFAIL_THRESHOLD:
             log.warning("nrvq.auth.apikey_failed", prefix=prefix, attempts=int(count), code="NRVQ-AUTH-14006")
     except Exception:  # pragma: no cover - throttle/audit must never break auth
         pass
+
+
+async def _is_authfail_locked(cache, prefix: str) -> bool:
+    """F-03: True once this display-prefix has hit the failed-auth ceiling in the window. Fail-OPEN if the
+    cache is down (a Redis outage must never lock legitimate keys out) — mirrors passwords.is_locked_out."""
+    if cache is None:
+        return False
+    try:
+        return int(await cache.peek_call_count(_authfail_key(prefix))) >= _AUTHFAIL_THRESHOLD
+    except Exception:  # pragma: no cover - throttle is defense-in-depth, never breaks auth
+        return False
 
 
 async def authenticate_api_key(raw: str, session_factory=get_session, cache=None) -> dict | None:
@@ -62,6 +77,13 @@ async def authenticate_api_key(raw: str, session_factory=get_session, cache=None
     if not raw.startswith(_PREFIX):
         return None
     prefix = raw[: len(_PREFIX) + 8]
+    # F-03: fail-CLOSED throttle. Once a display-prefix has burned _AUTHFAIL_THRESHOLD failed auths in the
+    # window, short-circuit BEFORE the DB lookup so an online guessing campaign is actually rate-limited
+    # (not merely logged) and stops issuing DB round-trips. The window TTL (_AUTHFAIL_WINDOW_S) self-heals;
+    # fail-open if the cache is unavailable so a Redis outage never locks out valid keys.
+    if await _is_authfail_locked(cache, prefix):
+        log.warning("nrvq.auth.apikey_throttled", prefix=prefix, code="NRVQ-AUTH-14007")
+        return None
     digest = hash_key(raw)
     provider = session_factory()
     session = await provider.__anext__()

@@ -49,3 +49,62 @@ test_baseline_allows_benign {
         strict.decision == "allow" with input as _norm(inp)
     }
 }
+
+# DEF-016: the strict baseline must block RENAMED destructive tools (wipe_/purge_/erase_) to reach
+# 7-verb parity with comprehensive.rego:207-211 destructive_verb_tool. Pre-fix the baseline only
+# covered delete_/drop_/truncate_/destroy_, so these fell through to ALLOW on the DEFAULT
+# webhook-enforced path. FAIL-ON-BUG: fails against the pre-fix strict.rego, passes after the fix.
+_renamed_destructive := [
+    {"tool_name": "wipe_table", "tool_params": {"t": "orders"}},
+    {"tool_name": "purge_db", "tool_params": {"scope": "all"}},
+    {"tool_name": "erase_records", "tool_params": {"id": "5"}},
+]
+
+test_baseline_blocks_renamed_destructive {
+    every inp in _renamed_destructive {
+        strict.decision == "block" with input as _norm(inp)
+    }
+}
+
+test_baseline_matches_comprehensive_on_renamed_destructive {
+    every inp in _renamed_destructive {
+        strict.decision == canonical.decision with input as _norm(inp)
+    }
+}
+
+# DEF-015: a secret in a param VALUE or KEY sent to ANY egress-verb sink (not just the 3 named
+# external_tools) must block on the enforced baseline. FAIL-ON-BUG against the pre-fix strict.rego,
+# which only covered send_email/post_webhook/upload_file and let s3_put/http_post/… exfiltrate freely.
+_egress_secret_leak := [
+    {"tool_name": "s3_put", "tool_params": {"body": "api_key=sk-livedeadbeef1234"}},
+    {"tool_name": "http_post", "tool_params": {"body": "password=Hunter2Hunter2"}},
+    {"tool_name": "put_object", "tool_params": {"api_key": "sk-livedeadbeef1234"}},
+    {"tool_name": "notify_external", "tool_params": {"body": "bearer abcdef0123456789"}},
+]
+
+test_baseline_blocks_egress_verb_secret_leak {
+    every inp in _egress_secret_leak {
+        strict.decision == "block" with input as _norm(inp)
+    }
+}
+
+test_baseline_matches_comprehensive_on_egress_leak {
+    every inp in _egress_secret_leak {
+        strict.decision == canonical.decision with input as _norm(inp)
+    }
+}
+
+# DEF-005: an oversized/padded payload must NOT skip base64 decode detection. base64("rm -rf /") buried
+# under ~9KB of filler exceeds the pre-fix strict.rego 8192-byte gate (which SKIPPED decode entirely →
+# ALLOW) but not comprehensive.rego's larger gate — so pre-fix the two DISAGREE (parity broken) and the
+# preset leaks. Post-fix both bound the WORK (candidate cap) not the input size, so both decode + block.
+_pad9k := concat("", [x | numbers.range(1, 900)[_]; x := "AAAAAAAAAA"])
+_padded_b64 := {"tool_name": "search_kb", "tool_params": {"cmd": "cm0gLXJmIC8=", "pad": _pad9k}}
+
+test_baseline_blocks_padded_base64 {
+    strict.decision == "block" with input as _norm(_padded_b64)
+}
+
+test_baseline_matches_comprehensive_on_padded_base64 {
+    strict.decision == canonical.decision with input as _norm(_padded_b64)
+}

@@ -326,6 +326,19 @@ class MitreCoverageSnapshot(Base):
     __table_args__ = (
         Index("idx_mitre_snap_ns_fw_kind", "namespace", "framework", "kind"),
         Index("idx_mitre_snap_ts", "timestamp_utc"),
+        # DEF-032: single-writer-per-hour for SNAPSHOTS — the structural backstop that makes the router's
+        # read-then-insert throttle safe under concurrent GETs (the router also takes a transaction-scoped
+        # advisory lock keyed on the same tuple). It is a FUNCTIONAL partial-unique index on the UTC-hour of
+        # timestamp_utc over the EXISTING columns (deliberately no new column: an added column would need an
+        # ALTER backfill in session.py to avoid breaking INSERTs on a DB provisioned before it, whereas a
+        # functional index over existing columns never touches the INSERT statement and so cannot regress a
+        # legacy table). `AT TIME ZONE 'UTC'` reduces timestamptz→timestamp so date_trunc is IMMUTABLE
+        # (Postgres rejects a STABLE, tz-dependent expression in an index). Scoped to kind='snapshot' so
+        # evidence-pack exports — several per hour are legitimate and must each refresh "last exported" — stay
+        # unconstrained.
+        Index("uq_mitre_snap_hourly", "namespace", "framework",
+              text("date_trunc('hour', timestamp_utc AT TIME ZONE 'UTC')"), unique=True,
+              postgresql_where=text("kind = 'snapshot'")),
     )
 
 

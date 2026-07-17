@@ -140,7 +140,15 @@ export function APIKeys() {
               </tr>
             </thead>
             <tbody>
-              {rows.map((k) => (
+              {rows.map((k) => {
+                // DEF-041: derive Status from BOTH revoked AND expiry. An expired-not-revoked key is
+                // already inert server-side (api_keys.authenticate returns None once expires_at <= now),
+                // so it must never read the green "Active" that contradicts its EXPIRED badge. Reuse the
+                // exact expiry test the Expires column uses (below) so the two columns stay consistent.
+                const isExpired = !!k.expires_at && new Date(k.expires_at).getTime() < Date.now();
+                const status = k.revoked ? "Revoked" : isExpired ? "Expired" : "Active";
+                const inert = k.revoked || isExpired;
+                return (
                 <tr key={k.id}>
                   <td className="mono">{k.prefix}…</td>
                   <td>{k.name || "—"}</td>
@@ -170,16 +178,18 @@ export function APIKeys() {
                       "—"
                     )}
                   </td>
-                  <td style={{ color: k.revoked ? "var(--block)" : "#00e5a0" }}>{k.revoked ? "Revoked" : "Active"}</td>
+                  <td style={{ color: inert ? "var(--block)" : "#00e5a0" }}>{status}</td>
                   <td>
-                    {!k.revoked && (
+                    {/* An expired key is already inert server-side, so only a live key exposes Revoke. */}
+                    {!inert && (
                       <KitButton variant="outline" size="sm" onClick={() => onRevoke(k.id)}>
                         Revoke
                       </KitButton>
                     )}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         )}

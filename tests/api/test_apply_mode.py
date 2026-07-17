@@ -7,6 +7,7 @@ the enforcement of EXISTING policies are unaffected."""
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 import jwt
@@ -52,7 +53,7 @@ def _client(apply_mode: str | None) -> TestClient:
 
 
 def _admin() -> dict:
-    return {"Authorization": f"Bearer {jwt.encode({'sub': 'a', 'role': 'admin'}, settings.api_secret_key, algorithm='HS256')}"}
+    return {"Authorization": f"Bearer {jwt.encode({'sub': 'a', 'role': 'admin', 'exp': int(time.time()) + 3600}, settings.api_secret_key, algorithm='HS256')}"}
 
 
 _BODY = {"target_type": "agent_class", "target_namespace": "default"}

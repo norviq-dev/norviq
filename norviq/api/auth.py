@@ -44,7 +44,19 @@ async def _validate_token(token: str) -> dict:
     if settings.oidc_enabled and alg in {"RS256", "ES256"}:
         return await _validate_oidc(token, header)
     if settings.legacy_hs256_enabled and alg == "HS256":
-        claims = dict(jwt.decode(token, settings.api_secret_key, algorithms=["HS256"]))
+        # AUTH-01: require an `exp` claim (matching the OIDC branch above). Without this, PyJWT verifies
+        # exp only when present and never *requires* it, so a validly-signed HS256 token minted with no
+        # exp is immortal AND defeats logout (revocation TTL falls back to ~1s at auth_login.py). Every
+        # legitimate mint sets exp (token_mint.mint_admin_token / mint_session_token), so this rejects
+        # only forged/no-exp tokens (JWTError -> 401).
+        claims = dict(
+            jwt.decode(
+                token,
+                settings.api_secret_key,
+                algorithms=["HS256"],
+                options={"require": ["exp"]},
+            )
+        )
         log.info("nrvq.auth.legacy_hs256", sub=claims.get("sub"), code="NRVQ-AUTH-14005")
         return claims
     raise JWTError(f"unsupported or disabled token alg: {alg!r}")

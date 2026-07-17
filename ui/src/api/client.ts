@@ -476,6 +476,11 @@ export type MitreTechnique = {
   covered: boolean;
   observed?: number;
   blocked?: number;
+  // DEF-038: per-rule blocked counts { rule_id: blocked } over the selected range. The evidence rows render
+  // each covered rule's OWN count from this map; `blocked` above is the technique-wide total (sum over all
+  // covered policies) kept for the headline, and must NOT be shown per-row (it over-attributes when a
+  // technique is enforced by >1 rule). Shipped per technique by the backend (mitre.py, from its `by_rule`).
+  blocked_by_rule?: Record<string, number>;
   affected_classes?: Array<{ class: string; blocked: number }>;
 };
 export type MitreCoverage = {

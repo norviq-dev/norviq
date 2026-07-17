@@ -10,6 +10,7 @@ viewer privilege-escalation, unauthenticated /ws/audit).
 from __future__ import annotations
 
 import asyncio
+import time
 
 import httpx
 import jwt
@@ -22,7 +23,9 @@ from norviq.config import settings
 
 def _viewer_headers() -> dict[str, str]:
     token = jwt.encode(
-        {"sub": "viewer", "role": "viewer", "namespace": "default"}, settings.api_secret_key, algorithm="HS256"
+        {"sub": "viewer", "role": "viewer", "namespace": "default", "exp": int(time.time()) + 3600},
+        settings.api_secret_key,
+        algorithm="HS256",
     )
     return {"Authorization": f"Bearer {token}"}
 

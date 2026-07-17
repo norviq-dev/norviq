@@ -29,6 +29,18 @@ spec:
         - name: ui
           image: "{{ .Values.images.registry }}{{ .Values.images.ui.repository }}:{{ .Values.images.ui.tag }}"
           imagePullPolicy: {{ .Values.images.ui.pullPolicy }}
+          {{- /* DEF-029: with the unprivileged nginx image (uid 101, port 8080) the console runs non-root
+                 and needs no NET_BIND_SERVICE, so the pod drops ALL caps. readOnlyRootFilesystem is NOT set
+                 because the entrypoint writes config.js + fleet-proxy.conf to the rootfs at startup. */}}
+          {{- if .Values.securityContext.enabled }}
+          securityContext:
+            runAsNonRoot: {{ .Values.securityContext.runAsNonRoot }}
+            allowPrivilegeEscalation: {{ .Values.securityContext.allowPrivilegeEscalation }}
+            capabilities:
+              {{- toYaml .Values.securityContext.capabilities | nindent 14 }}
+            seccompProfile:
+              {{- toYaml .Values.securityContext.seccompProfile | nindent 14 }}
+          {{- end }}
           ports:
             - containerPort: {{ .Values.ui.port }}
               name: http

@@ -187,9 +187,16 @@ class OPAEvaluator:
                 base_decision = winner["decision"]
             if base_decision.rule_id not in settings.evaluator_non_cacheable_rules:
                 await self._cache.set_eval(event.agent_identity.namespace, event.agent_identity.agent_class, cache_tool, base_decision)
-            decision = self._apply_trust_overrides(base_decision, trust_result, event.event_id)
-            decision = self._apply_posture(decision, posture, event.event_id)  # CFG-SETTINGS-INERT-01: monitor mode
-            decision = self._ensure_block_attribution(decision, event.event_id)  # F-24
+            # DEF-048: run the per-ns rate-limit throttle on the FRESH path too — otherwise call #1 (a cache
+            # MISS) and non-cacheable allows never count against the window, and the ns-wide backstop only
+            # ever engages on cache-hit replays. Same allow-only footing as the cache-hit path.
+            throttled = await self._maybe_rate_limit(event, base_decision, start, posture)
+            if throttled is not None:
+                decision = throttled
+            else:
+                decision = self._apply_trust_overrides(base_decision, trust_result, event.event_id)
+                decision = self._apply_posture(decision, posture, event.event_id)  # CFG-SETTINGS-INERT-01: monitor mode
+                decision = self._ensure_block_attribution(decision, event.event_id)  # F-24
             # F-13: the multi-candidate path builds per-candidate decisions with latency_ms=0.0; stamp the real
             # measured end-to-end latency on the winning decision so every audit record carries it (AU-12/SLA).
             decision = decision.model_copy(update={"latency_ms": round((time.monotonic() - start) * 1000, 2)})
@@ -253,15 +260,35 @@ class OPAEvaluator:
         posture: dict,
     ) -> PolicyDecision:
         """Apply cache-hit controls before returning a cached decision."""
-        if (cached.rule_id == "default_allow" and not self._is_rate_limit_exempt(event.tool_name)
-                and await self._is_rate_limited(event.agent_identity.spiffe_id, posture["rate_limit"])):
-            # rate_limit_exceeded is exempt from monitor softening (a throttle is a resource control, not a policy
-            # decision) — the posture pass leaves it untouched via _POSTURE_EXEMPT_RULES.
-            return self._apply_posture(await self._rate_limit_decision(event, start, posture["rate_limit"]), posture, event.event_id)
+        # DEF-048: throttle on the ALLOW footing (not just the no-policy `default_allow` rule) so the per-ns
+        # rate_limit backstop applies to every explicitly-governed allow class too. rate_limit_exceeded is
+        # exempt from monitor softening (a throttle is a resource control, not a policy decision) — the posture
+        # pass inside _maybe_rate_limit leaves it untouched via _POSTURE_EXEMPT_RULES.
+        throttled = await self._maybe_rate_limit(event, cached, start, posture)
+        if throttled is not None:
+            return throttled
         decision = self._apply_trust_overrides(cached, trust_result, event.event_id)
         decision = self._apply_posture(decision, posture, event.event_id)  # CFG-SETTINGS-INERT-01: monitor mode
         log.debug("nrvq.engine.cache_hit", event_id=event.event_id, code="NRVQ-ENG-2004")
         return self._ensure_block_attribution(decision, event.event_id)
+
+    async def _maybe_rate_limit(
+        self, event: ToolCallEvent, base_decision: PolicyDecision, start: float, posture: dict
+    ) -> PolicyDecision | None:
+        """DEF-048: the per-namespace rate_limit is a namespace-wide DoS backstop, so it must throttle EVERY
+        allowed call in the namespace — not only the no-policy `default_allow` class. Gate on the ALLOW decision
+        (never block/escalate/audit — those are not resource grants and must not be flipped to a throttle),
+        keeping the F-23 read-tool carve-out. Returns a posture-applied `rate_limit_exceeded` block when the
+        window is exceeded, else None. Invoked from BOTH the cache-hit and fresh-eval paths so call #1 and
+        non-cacheable allows are counted too; a single evaluate() traverses exactly one path, so the window
+        counter increments exactly once per allowed non-exempt call."""
+        if (base_decision.decision == "allow"
+                and not self._is_rate_limit_exempt(event.tool_name)
+                and await self._is_rate_limited(event.agent_identity.spiffe_id, posture["rate_limit"])):
+            return self._apply_posture(
+                await self._rate_limit_decision(event, start, posture["rate_limit"]), posture, event.event_id
+            )
+        return None
 
     async def _resolve_posture(self, namespace: str) -> dict:
         """CFG-SETTINGS-INERT-01: resolve a namespace's effective posture from the Redis mirror, per-field fallback

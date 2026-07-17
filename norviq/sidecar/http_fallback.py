@@ -33,6 +33,11 @@ def create_http_fallback(
             # Fail CLOSED: an undecodable body must DROP, not forward (no bypass on the error path).
             log.error("nrvq.sidecar.http.decode_error", error=str(exc), code="NRVQ-SDC-3011")
             return {"action": "drop", "error": "invalid_json_body"}
+        # Fail CLOSED: valid JSON that is not an object (list/str/number/null) has no .get, so the
+        # coercion below would raise AttributeError -> bare 500 (a bypass on the error path). DROP it.
+        if not isinstance(data, dict):
+            log.error("nrvq.sidecar.http.decode_error", error="non_object_json_body", code="NRVQ-SDC-3011")
+            return {"action": "drop", "error": "invalid_json_body"}
         tool_name = str(data.get("tool_name", ""))
         tool_params = data.get("tool_params", {})
         session_id = str(data.get("session_id", ""))

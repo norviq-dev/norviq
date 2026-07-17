@@ -9,6 +9,7 @@ and that authenticate_api_key resolves a valid key to its scoped principal but r
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -55,7 +56,11 @@ def _client(rows: list) -> TestClient:
 
 
 def _token(role: str = "admin") -> str:
-    return jwt.encode({"sub": "u", "role": role}, settings.api_secret_key, algorithm="HS256")
+    return jwt.encode(
+        {"sub": "u", "role": role, "exp": int(time.time()) + 3600},
+        settings.api_secret_key,
+        algorithm="HS256",
+    )
 
 
 def test_create_returns_secret_once_and_stores_only_hash() -> None:

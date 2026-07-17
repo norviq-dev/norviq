@@ -35,8 +35,10 @@ sequence below is now a **fallback**, not routine. Applied to `api-deployment.ya
 - **terminationGracePeriodSeconds: 30** for clean shutdown.
 - **ui** is static nginx → **no initContainer** (browser calls the API at runtime); it gained
   startup/readiness probes on `/`. **webhook** waits on the API (`wait-for-api` initContainer) — safe
-  because the sidecar-injector webhook is `failurePolicy=Ignore` and excludes the control-plane
-  namespace, so a not-yet-ready webhook never blocks pod creation.
+  because the sidecar-injector webhook is `failurePolicy=Fail` (fail-closed) but its `namespaceSelector`
+  EXCLUDES the control-plane namespace (`.Values.namespace`), so a not-yet-ready webhook never blocks
+  control-plane / system pod creation. It WILL block pod creation in injection-enabled tenant namespaces
+  until the webhook is ready — the `wait-for-api` initContainer minimizes that window.
 
 **Switching to zero-downtime:** add node capacity (bigger VM or a 2-node pool) or lower CPU requests,
 confirm headroom with `kubectl top nodes`, then **drop the `-f values-aks-dev.yaml` overlay** — the

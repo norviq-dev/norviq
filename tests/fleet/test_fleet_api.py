@@ -8,6 +8,7 @@ triggered, so the real fleet DB is never initialized); fleet_get_session is over
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -73,7 +74,11 @@ def _client(session) -> TestClient:
 
 
 def _headers(role: str = "service", cluster: str = "*") -> dict[str, str]:
-    token = jwt.encode({"sub": "t", "role": role, "cluster": cluster}, settings.api_secret_key, algorithm="HS256")
+    token = jwt.encode(
+        {"sub": "t", "role": role, "cluster": cluster, "exp": int(time.time()) + 3600},
+        settings.api_secret_key,
+        algorithm="HS256",
+    )
     return {"Authorization": f"Bearer {token}"}
 
 

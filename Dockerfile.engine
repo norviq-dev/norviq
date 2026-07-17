@@ -16,6 +16,8 @@ COPY policies/ policies/
 
 # OPA arch matches the build target (TARGETARCH = amd64|arm64; AKS=amd64, local kind on Apple Silicon=arm64).
 ARG TARGETARCH=amd64
+# DEF-002: build-provenance stamp (broadcast by CI: build.yml build-args NRVQ_GIT_SHA=github.sha).
+ARG NRVQ_GIT_SHA=unknown
 # Install the OPA binary so the `subprocess` rollback mode works in-cluster (server mode uses the
 # OPA sidecar and does not need this; kept for parity with Dockerfile.api). Pinned to the same version
 # as the Helm sidecar image (openpolicyagent/opa:1.18.0-static) and integrity-checked against the
@@ -35,8 +37,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
 
-RUN useradd -r -s /usr/sbin/nologin norviq
-USER norviq
+# DEF-002: uniform build provenance across ALL shipped images (mirrors Dockerfile.api:18-19,41), not just
+# api. Stamped AFTER the OPA layer so changing the SHA busts only these trivial layers, never the OPA
+# download cache. NRVQ_BUILD_GIT_SHA is the runtime NO-STALE marker; the label is the OCI revision.
+ENV NRVQ_BUILD_GIT_SHA=${NRVQ_GIT_SHA}
+LABEL org.opencontainers.image.revision=${NRVQ_GIT_SHA}
+RUN printf "%s\n" "${NRVQ_GIT_SHA}" > /app/.build_git_sha
+
+# DEF-029: pin a NUMERIC uid and reference it numerically in USER so kubelet can verify the
+# securityContext runAsNonRoot=true (a name-based `USER norviq` fails with "non-numeric user").
+RUN useradd -r -u 999 -s /usr/sbin/nologin norviq
+USER 999
 
 EXPOSE 8282
 ENV NRVQ_SOCKET_PATH=/tmp/norviq-proxy.sock

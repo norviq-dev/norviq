@@ -91,6 +91,11 @@ export function AttackGraph() {
   const [syntheticHidden, setSyntheticHidden] = useState(0);
 
   const canvasRef = useRef<AttackCanvasHandle>(null);
+  // DEF-021: a failed recompute POST raises `degraded`, but the finally re-triggers the display-fetch
+  // effect (recomputing in deps) and a successful READ GET would unconditionally clear it — clobbering
+  // the banner the instant stale paths re-render as fresh. Persist the recompute-failure across that
+  // refetch: set true on a non-2xx compute POST, cleared only when a compute POST returns ok.
+  const recomputeFailedRef = useRef(false);
 
   // ── fetch ────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -102,7 +107,9 @@ export function AttackGraph() {
         setPaths(res.paths ?? []);
         setApiNamespaces(res.namespaces ?? []);
         setSyntheticHidden(res.synthetic_hidden ?? 0);
-        setDegraded(false);
+        // DEF-021: a successful GET does NOT clear a still-outstanding recompute failure — the paths it
+        // returned are the STALE precompute the failed recompute couldn't refresh, so keep the banner up.
+        setDegraded(recomputeFailedRef.current);
       })
       .catch(() => {
         // Degraded: keep whatever we already have; the banner surfaces the fetch failure.
@@ -264,8 +271,12 @@ export function AttackGraph() {
       });
       // A non-2xx (500 / 403 / …) does NOT throw from fetch — check res.ok explicitly so a failed
       // recompute surfaces the degraded banner instead of silently claiming success and refetching.
-      if (!res.ok) setDegraded(true);
+      // DEF-021: latch the outcome so the follow-on refetch (below) can't clear the banner on a
+      // successful READ of the stale paths — only a compute POST that returns ok clears the latch.
+      if (!res.ok) { recomputeFailedRef.current = true; setDegraded(true); }
+      else recomputeFailedRef.current = false;
     } catch {
+      recomputeFailedRef.current = true;
       setDegraded(true);
     } finally {
       setRecomputing(false); // flips the fetch effect to refetch

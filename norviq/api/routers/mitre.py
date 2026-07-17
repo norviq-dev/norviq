@@ -8,6 +8,7 @@ computation. Scope splits techniques into runtime-enforceable (counted) vs out-o
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -172,6 +173,10 @@ async def _compute_coverage(request: Request, session: AsyncSession, namespace: 
         )
         observed = sum(by_rule.get(p, {}).get("observed", 0) for p in policies)
         blocked = sum(by_rule.get(p, {}).get("blocked", 0) for p in policies)
+        # DEF-038: PER-RULE blocked counts (rule_id → blocked), so an evidence row attributes blocks to the
+        # RIGHT rule instead of repeating the technique-wide `blocked` total on every covered-rule row. Keyed
+        # over the technique's mapped policies (a mapped-but-inactive rule reads 0).
+        blocked_by_rule = {p: by_rule.get(p, {}).get("blocked", 0) for p in policies}
         # Affected agent-classes: aggregate blocked-by-class across this technique's covered rules (synthetic
         # already excluded in _blocked_by_rule_class), sort worst-first, cap.
         agg: dict[str, int] = {}
@@ -193,6 +198,7 @@ async def _compute_coverage(request: Request, session: AsyncSession, namespace: 
             "covered": covered,
             "observed": observed,
             "blocked": blocked,
+            "blocked_by_rule": blocked_by_rule,
             "affected_classes": affected,
         })
     techniques.sort(key=lambda t: t["technique_id"])
@@ -227,11 +233,57 @@ def _ns_key(namespace: str | None) -> str:
     return namespace or "__all__"
 
 
+async def _coverage_cached(
+    request: Request, session: AsyncSession, namespace: str | None, range_token: str, framework: str = "atlas"
+) -> dict:
+    """DEF-033: request-scoped memoization of _compute_coverage. The coverage aggregation runs two audit
+    GROUP BY scans (_activity_by_rule + _blocked_by_rule_class) that are LOOP-INVARIANT within one request —
+    (namespace, range, framework) don't change across a batch's techniques. Batch generate must therefore
+    compute coverage ONCE, not 2*N times. The cache lives on request.state so it never leaks across requests
+    (a fresh request recomputes)."""
+    cache = getattr(request.state, "_coverage_cache", None)
+    if cache is None:
+        cache = {}
+        request.state._coverage_cache = cache
+    key = (_ns_key(namespace), range_token, framework)
+    hit = cache.get(key)
+    if hit is None:
+        hit = await _compute_coverage(request, session, namespace, range_token, framework)
+        cache[key] = hit
+    return hit
+
+
+def _snapshot_lock_key(namespace: str, framework: str, hour_start: datetime) -> int:
+    """DEF-032: a stable signed-64-bit key for pg_advisory_xact_lock so concurrent same-hour snapshot writers
+    serialize on the SAME lock (the second reads the first's committed row and short-circuits). sha256 keeps it
+    seed-independent across replicas; usedforsecurity=False — this is a lock key, not a credential."""
+    raw = "|".join((namespace, framework, hour_start.isoformat()))
+    return int.from_bytes(hashlib.sha256(raw.encode(), usedforsecurity=False).digest()[:8], "big", signed=True)
+
+
+def _stable_draft_id(framework: str, technique_id: str, namespace: str, target: str) -> str:
+    """DEF-031: the F4 dedup id for a compliance-remediation draft, as a SEED-INDEPENDENT pure function of its
+    (framework, control, namespace, class) content. sha256 (not Python's PYTHONHASHSEED-salted builtin hash())
+    so the same inputs mint the same id on every replica — a deeplink minted on one replica resolves after a
+    regenerate lands on another. usedforsecurity=False: this is a display/dedup id token, not a credential."""
+    digest = hashlib.sha256("|".join((framework, technique_id, namespace, target)).encode(),
+                            usedforsecurity=False).hexdigest()
+    return f"dmitre{digest[:11]}"
+
+
 async def _record_snapshot(session: AsyncSession, namespace: str | None, cov: dict, framework: str) -> None:
     """B1.3: upsert at most ONE coverage snapshot per (namespace, framework, hour) so the trend accumulates a
     real series with no scheduler. Best-effort — never fails the coverage read."""
     try:
         hour_start = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        # DEF-032: serialize concurrent same-hour writers before the read-then-insert. A transaction-scoped
+        # advisory lock keyed on (namespace, framework, hour) makes the throttle single-writer even under READ
+        # COMMITTED and across replicas — the second writer blocks until the first commits, then reads the row
+        # and returns without inserting. (The partial UNIQUE index on mitre_coverage_snapshots is the
+        # structural backstop on a fresh DB.)
+        await session.execute(
+            select(func.pg_advisory_xact_lock(_snapshot_lock_key(_ns_key(namespace), framework, hour_start)))
+        )
         existing = await session.scalar(
             select(func.count(MitreCoverageSnapshot.id)).where(
                 MitreCoverageSnapshot.namespace == _ns_key(namespace),
@@ -394,6 +446,9 @@ async def mitre_export(
                 "technique_id": t["technique_id"], "name": t["name"], "scope": t["scope"], "status": t["status"],
                 "mapped_policies": t["policies"], "enforcing_policies": t["covered_policies"],
                 "blocked": t["blocked"], "observed": t["observed"],
+                # DEF-038: PER-RULE blocked counts (the docstring above promises this) so the exported evidence
+                # pack attributes blocks to each enforcing rule instead of repeating the technique-wide total.
+                "blocked_by_rule": t["blocked_by_rule"],
                 "affected_classes": t["affected_classes"],
             }
             for t in cov["techniques"]
@@ -436,7 +491,7 @@ async def _resolve_target_class(
     requested = (requested or "").strip()
     if requested and requested.lower() != "default" and not is_synthetic_identity(requested):
         return requested
-    cov = await _compute_coverage(request, session, namespace, range_token, framework)
+    cov = await _coverage_cached(request, session, namespace, range_token, framework)  # DEF-033: memoized per request
     tech = next((t for t in cov["techniques"] if t["technique_id"] == technique_id), None)
     if tech:
         for chip in tech.get("affected_classes", []):
@@ -455,7 +510,7 @@ async def _affected_real_classes(
     """Every REAL (non-synthetic) agent class the control affects in range — the fan-out set for the batch
     "all affected classes" mode. Falls back to the namespace's top active class when the technique has no
     recorded affected class yet, so "all" still remediates something real rather than nothing."""
-    cov = await _compute_coverage(request, session, namespace, range_token, framework)
+    cov = await _coverage_cached(request, session, namespace, range_token, framework)  # DEF-033: memoized per request
     tech = next((t for t in cov["techniques"] if t["technique_id"] == technique_id), None)
     out: list[str] = []
     for chip in (tech or {}).get("affected_classes", []) if tech else []:
@@ -530,7 +585,11 @@ async def _generate_remediation_draft(
     # controls for the same class stay as TWO distinct drafts (different control_id). Also clears any STALE
     # pre-fix draft that was keyed directly on `target` (the old, destructive key) so it can never later be
     # "reviewed & applied" and destroy the base policy.
-    draft_id = f"dmitre{abs(hash((framework, technique_id, namespace, target))) % (10**11):011d}"
+    # DEF-031: the id MUST be a pure function of its content so a deeplink minted on replica A still resolves
+    # after a regenerate lands on replica B. Python's builtin hash() of a str/tuple is PYTHONHASHSEED-salted
+    # per process (no PYTHONHASHSEED pinning here + api.replicas>=2), so the old `abs(hash(...))` produced a
+    # different id per replica and the deeplink 404'd. sha256 is seed-independent across processes/replicas.
+    draft_id = _stable_draft_id(framework, technique_id, namespace, target)
     created_at = datetime.now(timezone.utc)
     await session.execute(
         text("DELETE FROM intent_drafts WHERE namespace = :ns AND agent_class IN (:cls, :legacy_cls) "

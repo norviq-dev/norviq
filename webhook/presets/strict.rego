@@ -211,8 +211,28 @@ elevated_tools = {"modify_config", "grant_access"}
 external_tools = {"send_email", "post_webhook", "upload_file"}
 sensitive_keys = {"password", "secret", "api_key", "token", "private_key"}
 
+# DEF-015: the enforced strict cluster baseline previously covered ONLY the 3 named external_tools, so a
+# secret sent via any other egress-verb sink (http_post, s3_put, put_object, call_api, notify_external,
+# smtp_send, *webhook*, *exfil*) leaked freely. Mirror comprehensive.rego's egress_verb_tool so both the
+# key-name and value-pattern checks below treat any egress-verb tool as an external sink.
+egress_verb_tool {
+    name := lower(input.tool_name)
+    prefixes := ["send_", "post_", "upload_", "publish_", "export_", "http_", "fetch_", "sync_to_", "push_to_", "put_", "s3_", "call_", "notify_", "smtp"]
+    startswith(name, prefixes[_])
+}
+egress_verb_tool { contains(lower(input.tool_name), "webhook") }
+egress_verb_tool { contains(lower(input.tool_name), "exfil") }
+
 data_leakage_detected {
     external_tools[input.tool_name]
+    walk(input.tool_params, [path, _])
+    count(path) > 0
+    k := path[count(path) - 1]
+    is_string(k)
+    sensitive_keys[lower(k)]
+}
+data_leakage_detected {
+    egress_verb_tool
     walk(input.tool_params, [path, _])
     count(path) > 0
     k := path[count(path) - 1]
@@ -234,6 +254,14 @@ secret_value_patterns = [
 
 data_leakage_detected {
     external_tools[input.tool_name]
+    val := security_scan_texts[_]
+    some i
+    regex.match(secret_value_patterns[i], val)
+}
+# DEF-015: a secret in a param VALUE must also block on ANY egress-verb sink, not only the 3 named
+# external_tools — mirrors the egress-verb key-name rule above and comprehensive.rego.
+data_leakage_detected {
+    egress_verb_tool
     val := security_scan_texts[_]
     some i
     regex.match(secret_value_patterns[i], val)
@@ -355,15 +383,21 @@ b64_candidate_clean(v) = out {
     out := regex.replace(out4, `_`, "/")
 }
 
-# PERF-1: gate the whole base64 fan-out on a bounded serialized size. A pathological large payload with
-# hundreds of base64-ish tokens forced ~40x eval cost per cache-miss; above the threshold we skip the
-# (expensive) decode pass — raw pattern detectors still run, and an oversized encoded blob is itself
-# suspicious. The API also enforces a request-body size limit (defense in depth).
-b64_scan_max_bytes = 8192
+# DEF-005 / DEF-053 (padding-evasion fix): bound the WORK, not the input size. The old 8192-byte gate
+# SKIPPED the entire base64 fan-out once tool_params serialized past the threshold, so padding tool_params
+# past it silently evaded decode detection on this enforced baseline. Instead ALWAYS run the decode scan
+# but cap the NUMBER of base64 candidates decoded per level; a payload with more candidates than the cap
+# is caught by the backstop threat rule below (can't bury a blob past the scanned window).
+b64_scan_max_candidates = 64
 
-b64_scan_enabled {
-    count(json.marshal(input.tool_params)) <= b64_scan_max_bytes
-}
+# Deterministic, size-independent candidate list: every string value that normalizes to a valid base64
+# blob, sorted so the capped slice is stable across evaluations.
+b64_candidates = sort([val |
+    walk(input.tool_params, [_, val])
+    is_string(val)
+    c := b64_norm(val)
+    c != ""
+])
 
 # SEC-2: re-pad a cleaned base64 candidate to a valid length so base64.decode never errors on unpadded
 # input (b64 length%4 must be 0/2/3; ==1 is invalid -> undefined -> skipped).
@@ -386,9 +420,9 @@ b64_norm(v) = out {
 # SEC-3: bounded iterative decode to depth 4 (was a hand-unrolled depth of 2, so triple-nested base64
 # evaded). Each level re-normalizes + decodes the previous level's output; the depth cap bounds cost.
 b64_decoded_l1[d] {
-    b64_scan_enabled
-    walk(input.tool_params, [_, val])
-    is_string(val)
+    some idx
+    val := b64_candidates[idx]
+    idx < b64_scan_max_candidates
     c := b64_norm(val)
     d := base64.decode(c)
 }
@@ -420,6 +454,11 @@ base64_decoded_threat {
     decoded := b64_decoded[_]
     regex.match(`\b\d{3}-\d{2}-\d{4}\b`, decoded)
 }
+# DEF-005 backstop: more base64 candidates than the scan cap could bury a malicious blob past the scanned
+# slice — treat that anomaly as a threat so an attacker cannot pad past the cap. Mirrors comprehensive.rego.
+base64_decoded_threat {
+    count(b64_candidates) > b64_scan_max_candidates
+}
 
 # Scope violation
 scope_violation_dangerous_tool {
@@ -448,6 +487,12 @@ blocks["strict_default_block"] { startswith(lower(input.tool_name), "delete_") }
 blocks["strict_default_block"] { startswith(lower(input.tool_name), "drop_") }
 blocks["strict_default_block"] { startswith(lower(input.tool_name), "truncate_") }
 blocks["strict_default_block"] { startswith(lower(input.tool_name), "destroy_") }
+# DEF-016: reach 7-verb parity with comprehensive.rego:207-211 destructive_verb_tool. The baseline
+# only covered 4 verbs, so a RENAMED destructive tool (wipe_table / purge_db / erase_records) fell
+# through to allow on the DEFAULT webhook-enforced path. Add the missing wipe_/purge_/erase_ prefixes.
+blocks["strict_default_block"] { startswith(lower(input.tool_name), "wipe_") }
+blocks["strict_default_block"] { startswith(lower(input.tool_name), "purge_") }
+blocks["strict_default_block"] { startswith(lower(input.tool_name), "erase_") }
 
 escalates["llm06_excessive_agency"] { elevated_tools[input.tool_name] }
 

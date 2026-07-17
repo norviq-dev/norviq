@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 import jwt
@@ -50,7 +51,11 @@ def _client(row=None) -> tuple[TestClient, _FakeSession]:
 
 
 def _token(role: str = "admin") -> str:
-    return jwt.encode({"sub": "u", "role": role}, settings.api_secret_key, algorithm="HS256")
+    return jwt.encode(
+        {"sub": "u", "role": role, "exp": int(time.time()) + 3600},
+        settings.api_secret_key,
+        algorithm="HS256",
+    )
 
 
 def test_settings_returns_effective_config_defaults() -> None:

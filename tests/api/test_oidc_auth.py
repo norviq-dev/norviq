@@ -271,7 +271,11 @@ async def test_alg_confusion_hs256_with_public_key_rejected(oidc_on) -> None:
 @pytest.mark.asyncio
 async def test_legacy_hs256_still_accepted_during_migration(oidc_on) -> None:
     """With oidc_enabled AND legacy_hs256_enabled, a real api_secret_key HS256 token still works."""
-    token = jwt.encode({"sub": "svc", "role": "admin"}, settings.api_secret_key, algorithm="HS256")
+    token = jwt.encode(
+        {"sub": "svc", "role": "admin", "exp": int(time.time()) + 3600},
+        settings.api_secret_key,
+        algorithm="HS256",
+    )
     user = await auth_mod.get_current_user(_creds(token))
     assert user["role"] == "admin"
 

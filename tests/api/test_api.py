@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import uuid4
@@ -281,7 +282,7 @@ async def real_db() -> None:
 
 def _auth_headers(role: str = "admin", sub: str = "test-user", namespace: str | None = None) -> dict[str, str]:
     """Build valid auth header for protected endpoints."""
-    claims: dict[str, object] = {"sub": sub, "role": role}
+    claims: dict[str, object] = {"sub": sub, "role": role, "exp": int(time.time()) + 3600}
     if namespace is not None:
         claims["namespace"] = namespace
     token = jwt.encode(claims, settings.api_secret_key, algorithm="HS256")

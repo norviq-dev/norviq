@@ -6,6 +6,7 @@ actually loaded for a namespace. Covers happy (some rules present), empty (no po
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 import jwt
@@ -39,7 +40,11 @@ def _client(policies: dict[str, dict]) -> TestClient:
 
 
 def _token() -> str:
-    return jwt.encode({"sub": "u", "role": "admin"}, settings.api_secret_key, algorithm="HS256")
+    return jwt.encode(
+        {"sub": "u", "role": "admin", "exp": int(time.time()) + 3600},
+        settings.api_secret_key,
+        algorithm="HS256",
+    )
 
 
 def test_coverage_happy_reflects_loaded_rules() -> None:

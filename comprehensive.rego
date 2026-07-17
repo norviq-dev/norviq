@@ -221,7 +221,10 @@ sensitive_keys = {"password", "secret", "api_key", "token", "private_key"}
 # swept in; a deployment can still allowlist a specific tool via its own policy.
 egress_verb_tool {
     name := lower(input.tool_name)
-    prefixes := ["send_", "post_", "upload_", "publish_", "export_", "http_", "fetch_", "sync_to_", "push_to_"]
+    # DEF-015: widened so object-store / RPC / notification sinks (s3_put, put_object, call_api,
+    # notify_external, smtp*) are also treated as external egress for BOTH the key-name and the
+    # value-pattern secret checks below — previously they matched no prefix and leaked freely.
+    prefixes := ["send_", "post_", "upload_", "publish_", "export_", "http_", "fetch_", "sync_to_", "push_to_", "put_", "s3_", "call_", "notify_", "smtp"]
     startswith(name, prefixes[_])
 }
 egress_verb_tool { contains(lower(input.tool_name), "webhook") }
@@ -258,6 +261,15 @@ secret_value_patterns = [
 
 data_leakage_detected {
     external_tools[input.tool_name]
+    val := security_scan_texts[_]
+    some i
+    regex.match(secret_value_patterns[i], val)
+}
+# DEF-015: a secret in a param VALUE must ALSO block on ANY egress-verb sink, not only the 3 named
+# external_tools — mirrors the key-name egress rule above. Otherwise http_post/s3_put/send_sms
+# carrying "api_key=sk-…" / "password=…" / "bearer …" in a body param exfiltrated freely.
+data_leakage_detected {
+    egress_verb_tool
     val := security_scan_texts[_]
     some i
     regex.match(secret_value_patterns[i], val)
@@ -379,17 +391,21 @@ b64_candidate_clean(v) = out {
     out := regex.replace(out4, `_`, "/")
 }
 
-# PERF-1 / SEC-B64 (padding-evasion fix): gate the base64 fan-out on a bounded serialized size to cap
-# the ~40x pathological decode cost. The old 8192 bound was trivially abused: pad tool_params past 8KB and
-# the decode pass (which catches base64-obfuscated threats) was SKIPPED. Raised to 64KB so a padding-only
-# evasion must now inflate the payload 8x further (itself highly anomalous), and the API request-body size
-# limit bounds the extreme. (Follow-up DEF-053: bound the WORK — cap the number of decoded candidates —
-# rather than the input size, to close padding evasion entirely without a perf regression.)
-b64_scan_max_bytes = 65536
+# DEF-053 (padding-evasion fix): bound the WORK, not the input size. The old size gate SKIPPED the
+# entire base64 fan-out once tool_params serialized past a byte threshold — so padding tool_params past
+# it (but under the API request-body limit) silently evaded decode detection. Instead we ALWAYS run the
+# decode scan but cap the NUMBER of base64 candidates decoded per level, so the ~40x pathological
+# fan-out cost is bounded regardless of total payload size and no oversized/padded payload can skip it.
+b64_scan_max_candidates = 64
 
-b64_scan_enabled {
-    count(json.marshal(input.tool_params)) <= b64_scan_max_bytes
-}
+# Deterministic, size-independent candidate list: every string value that normalizes to a valid base64
+# blob (b64_norm defined), sorted so the capped slice is stable across evaluations.
+b64_candidates = sort([val |
+    walk(input.tool_params, [_, val])
+    is_string(val)
+    c := b64_norm(val)
+    c != ""
+])
 
 # SEC-2: re-pad a cleaned base64 candidate to a valid length so base64.decode never errors on unpadded
 # input (b64 length%4 must be 0/2/3; ==1 is invalid -> undefined -> skipped).
@@ -412,9 +428,9 @@ b64_norm(v) = out {
 # SEC-3: bounded iterative decode to depth 4 (was a hand-unrolled depth of 2, so triple-nested base64
 # evaded). Each level re-normalizes + decodes the previous level's output; the depth cap bounds cost.
 b64_decoded_l1[d] {
-    b64_scan_enabled
-    walk(input.tool_params, [_, val])
-    is_string(val)
+    some idx
+    val := b64_candidates[idx]
+    idx < b64_scan_max_candidates
     c := b64_norm(val)
     d := base64.decode(c)
 }
@@ -445,6 +461,14 @@ base64_decoded_threat {
 base64_decoded_threat {
     decoded := b64_decoded[_]
     regex.match(`\b\d{3}-\d{2}-\d{4}\b`, decoded)
+}
+# DEF-005 backstop: the candidate cap bounds decode WORK, but a payload with MORE than the cap of
+# base64 blobs could bury a malicious one past the scanned slice (b64_candidates is sorted, so the
+# scanned window is attacker-influenceable by value order). Rather than let a buried blob slip, treat an
+# anomalously large number of base64 candidates as itself a threat — an attacker cannot pad past the scan
+# cap without tripping this. Benign tool calls carry far fewer than b64_scan_max_candidates base64 blobs.
+base64_decoded_threat {
+    count(b64_candidates) > b64_scan_max_candidates
 }
 
 # Scope violation

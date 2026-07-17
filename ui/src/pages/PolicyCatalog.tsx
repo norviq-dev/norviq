@@ -1178,6 +1178,11 @@ export function PolicyCatalog() {
   // silently showing outdated numbers as if they still described the current draft.
   const [dryRunRego, setDryRunRego] = useState<string | null>(null);
   const [dryRunLoading, setDryRunLoading] = useState(false);
+  // DEF-037: a dry-run that failed to evaluate. A swallowed error MUST NOT masquerade as an all-zero
+  // "safe" preview (green "0 newly blocked") — surface a degraded/error state instead so the operator
+  // never reads a network/engine failure as a validated zero-impact result. Travels WITH dryRunResult:
+  // set on catch (result nulled), cleared whenever a fresh run starts or the dry-run panel is reset.
+  const [dryRunError, setDryRunError] = useState<string | null>(null);
   const [applyResult, setApplyResult] = useState<ApplyResult | null>(null);  // Stage 1: apply-result transparency
   // B-1: authoring a brand-new policy from raw rego for a chosen ns+class in the editor (null = editing existing).
   const [newPolicy, setNewPolicy] = useState<{ namespace: string; agent_class: string; mode: NonNullable<Policy["mode"]> } | null>(null);
@@ -1306,6 +1311,7 @@ export function PolicyCatalog() {
     setRegoDraft(d.rego);
     setEditorStatus("unsaved");
     setDryRunResult(null);
+    setDryRunError(null);  // DEF-037: reset the dry-run panel — no stale error banner on the loaded draft
     setPendingDraft({ id: d.draft_id, ns: d.ns, cls: d.cls });  // retire it only on a save that realises IT
     setTab("editor");
     // The editor lives ABOVE the drafts panel the user clicked from, so a silent tab-switch read as
@@ -1387,6 +1393,7 @@ export function PolicyCatalog() {
     setRegoDraft(NEW_POLICY_REGO);
     setEditorStatus("unsaved");
     setDryRunResult(null);
+    setDryRunError(null);  // DEF-037: reset the dry-run panel for the fresh policy
     setApplyResult(null);
   };
 
@@ -1394,6 +1401,7 @@ export function PolicyCatalog() {
     setNewPolicy(null);
     setEditorStatus("saved");
     setDryRunResult(null);
+    setDryRunError(null);  // DEF-037: reset the dry-run panel
     resetDraftFlow();
   };
 
@@ -1604,6 +1612,7 @@ export function PolicyCatalog() {
     setRegoDraft(detail.data?.rego_source ?? "");
     setEditorStatus("saved");
     setDryRunResult(null);
+    setDryRunError(null);  // DEF-037: switching the loaded policy resets the dry-run panel — no leaked error banner
   }, [editorIdentity, detail.data?.rego_source, newPolicy]);
 
   // MUT-1: switching the loaded policy while the buffer has unsaved edits would discard them silently
@@ -1726,6 +1735,7 @@ export function PolicyCatalog() {
   const runDryRun = async () => {
     if (!editorTarget?.namespace || !editorTarget?.agent_class) return;
     setDryRunLoading(true);
+    setDryRunError(null);  // DEF-037: a fresh run clears any prior degraded/error state
     try {
       const ran = regoDraft || detail.data?.rego_source || "";
       const result = await dryRunPolicy({
@@ -1736,13 +1746,11 @@ export function PolicyCatalog() {
       setDryRunResult(result);
       setDryRunRego(ran);
     } catch {
-      setDryRunResult({
-        total_records_checked: 0,
-        would_block: 0,
-        would_allow: 0,
-        block_rate_pct: 0,
-        recommendation: "Unable to evaluate right now"
-      });
+      // DEF-037: DO NOT fabricate an all-zero DryRunResult — a swallowed failure rendered as a green
+      // "0 newly blocked / would block 0" preview reads as a validated zero-impact result. Null the
+      // result and surface an explicit error so the operator knows the run did not evaluate.
+      setDryRunResult(null);
+      setDryRunError("Dry-run could not evaluate — no result (retry).");
     } finally {
       setDryRunLoading(false);
     }
@@ -2352,6 +2360,27 @@ export function PolicyCatalog() {
                     })()}
                   </div>
                 )}
+                {/* DEF-037: a failed dry-run renders as an explicit degraded/error state — NEVER a green
+                    all-zero "safe" preview. Independent of the stale-badge guard so it shows on a first-ever
+                    failed run (dryRunRego still null) and a no-edit re-run alike. */}
+                {dryRunError != null && (
+                  <div
+                    data-testid="dryrun-error"
+                    role="alert"
+                    style={{
+                      padding: "10px 14px",
+                      borderTop: "1px solid var(--border)",
+                      fontSize: 12.5,
+                      color: "var(--block)",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8
+                    }}
+                  >
+                    <AlertCircle size={14} style={{ flex: "none" }} />
+                    <span>{dryRunError}</span>
+                  </div>
+                )}
               </div>
             </div>
           </Panel>
@@ -2500,6 +2529,7 @@ export function PolicyCatalog() {
             setRegoDraft(seed.rego);
             setEditorStatus("unsaved");
             setDryRunResult(null);
+            setDryRunError(null);  // DEF-037: reset the dry-run panel for the seeded raw editor
             setApplyResult(null);
           }}
         />

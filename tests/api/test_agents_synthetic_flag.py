@@ -1,0 +1,255 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+
+"""FAIL-ON-BUG regressions for the agents-dashboard reconciliation group (DEF-034, DEF-050, DEF-051).
+
+DEF-051 (/agents synthetic flag): every ``/agents`` row must carry a ``synthetic`` boolean (via the ONE
+    shared ``is_synthetic_identity`` classifier) — true for probe/eval/test identities, false for real
+    ones — so the Overview trust donut + Agent Monitor can exclude exactly the identities the asset/attack
+    graph already hides. Before the fix the row had no such key at all.
+
+DEF-034 (list_agents perf): ``list_agents`` must scope the Redis SCAN to the caller's namespace
+    (``trust:spiffe://*/ns/<ns>/*``) instead of scanning the whole cluster-wide ``trust:*`` keyspace and
+    filtering in Python, and must BATCH the per-agent reads via MGET instead of a GET per agent. A tenant
+    listing its 3 agents must not traverse another tenant's 20 keys, and must not issue N sequential GETs.
+
+DEF-050 (Overview reconciliation): ``/audit/top-blocked`` and ``/audit/volume`` must exclude red-team
+    framework events + synthetic/probe identities — the SAME real-traffic population the headline KPI
+    (``/audit/stats``) and Compliance/MITRE already count — so the two Overview widgets stop contradicting
+    their own headline.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from fnmatch import fnmatch
+from types import SimpleNamespace
+
+import jwt
+from fastapi.testclient import TestClient
+
+import norviq.api.routers.agents as agents_mod
+from norviq.api.db.session import get_session
+from norviq.api.main import create_app
+from norviq.config import settings
+from norviq.sdk.core.trust import TrustScore
+
+# ---- identities -------------------------------------------------------------------------------------
+REAL_AGENT = "spiffe://norviq/ns/alpha/sa/customer-support"        # real product class -> synthetic False
+PROBE_AGENT = "spiffe://norviq/ns/alpha/sa/allowlist-probe-42"     # prefix match       -> synthetic True
+SCORER_AGENT = "spiffe://norviq/ns/alpha/sa/scorer"                # exact eval class    -> synthetic True
+
+
+def _token(role: str = "admin", namespace: str | None = None) -> str:
+    # AUTH-01: the HS256 validator requires an `exp` claim (norviq/api/auth.py _validate_token).
+    claims: dict[str, object] = {
+        "sub": "u",
+        "role": role,
+        "exp": datetime.now(timezone.utc) + timedelta(hours=1),
+    }
+    if namespace is not None:
+        claims["namespace"] = namespace
+    return jwt.encode(claims, settings.api_secret_key, algorithm="HS256")
+
+
+def _hdr(role: str = "admin", namespace: str | None = None) -> dict[str, str]:
+    return {"Authorization": f"Bearer {_token(role, namespace)}"}
+
+
+# ==== DEF-034 + DEF-051 : /agents ===================================================================
+
+
+class _CountingCache:
+    """Redis-double that emulates SCAN MATCH globbing + MGET, and counts commands so a test can assert
+    the SCAN is namespace-scoped (DEF-034) and the per-agent reads are batched (DEF-034). It also backs
+    the legacy per-agent ``get_trust`` path so the pre-fix code runs (and trips the assertion) rather
+    than erroring — proving the test is fail-on-bug, not fake-incompatible."""
+
+    def __init__(self, trust_json: dict[str, str]) -> None:
+        self._trust = trust_json  # keyed by spiffe_id (no "trust:" prefix)
+        self.scanned = 0
+        self.mget_calls = 0
+        self.get_trust_calls = 0
+        self._redis = object()
+
+    def _client(self) -> "_CountingCache":
+        return self
+
+    async def scan_iter(self, match: str):
+        # Emulate real Redis SCAN MATCH: only keys matching the glob reach the client.
+        for sid in self._trust:
+            key = f"trust:{sid}"
+            if fnmatch(key, match):
+                self.scanned += 1
+                yield key
+
+    async def mget(self, keys: list[str]) -> list[str | None]:
+        self.mget_calls += 1
+        out: list[str | None] = []
+        for k in keys:
+            if k.startswith("trust:"):
+                out.append(self._trust.get(k[len("trust:"):]))
+            else:  # trustcalc:* — none seeded, falls back to trust.factors
+                out.append(None)
+        return out
+
+    async def get(self, key: str) -> str | None:
+        return None  # no trustcalc:* payloads
+
+    async def get_trust(self, spiffe_id: str) -> TrustScore | None:  # legacy per-agent path (pre-fix)
+        self.get_trust_calls += 1
+        raw = self._trust.get(spiffe_id)
+        return TrustScore.model_validate_json(raw) if raw else None
+
+
+def _trust_blob(category: str = "High", score: float = 0.9) -> str:
+    return TrustScore(score=score, category=category).model_dump_json()
+
+
+def _agents_app(cache: _CountingCache, monkeypatch) -> TestClient:
+    app = create_app()
+    app.state.cache = cache
+
+    async def _no_last_seen(_ns):
+        return {}
+
+    monkeypatch.setattr(agents_mod, "_registry_last_seen", _no_last_seen)  # avoid a real DB round-trip
+    return TestClient(app)
+
+
+def test_agents_row_carries_synthetic_flag(monkeypatch) -> None:
+    """DEF-051 FAIL-ON-BUG: a real identity is synthetic=False; a probe and an eval-scorer are
+    synthetic=True. Before the fix the row had NO ``synthetic`` key (KeyError below)."""
+    cache = _CountingCache({
+        REAL_AGENT: _trust_blob("High"),
+        PROBE_AGENT: _trust_blob("Low"),
+        SCORER_AGENT: _trust_blob("Medium"),
+    })
+    client = _agents_app(cache, monkeypatch)
+    try:
+        resp = client.get("/api/v1/agents?namespace=alpha", headers=_hdr(role="admin"))
+        assert resp.status_code == 200
+        by_id = {row["spiffe_id"]: row for row in resp.json()}
+        assert set(by_id) == {REAL_AGENT, PROBE_AGENT, SCORER_AGENT}
+        # The key must exist (pre-fix rows omit it) AND classify correctly.
+        assert by_id[REAL_AGENT]["synthetic"] is False
+        assert by_id[PROBE_AGENT]["synthetic"] is True
+        assert by_id[SCORER_AGENT]["synthetic"] is True
+    finally:
+        client.close()
+
+
+def test_list_agents_scan_is_namespace_scoped_and_batched(monkeypatch) -> None:
+    """DEF-034 FAIL-ON-BUG: seed 20 keys in ns 'other' + 3 in ns 'alpha'; a request scoped to 'alpha'
+    must (a) only SCAN the 3 alpha keys (Redis-side MATCH, not a full-keyspace walk) and (b) batch the
+    reads via MGET, not one GET per agent. Pre-fix: scan_iter('trust:*') scans all 23 and calls
+    get_trust per agent -> both assertions fail."""
+    seed: dict[str, str] = {
+        f"spiffe://norviq/ns/other/sa/svc-{i}": _trust_blob("High") for i in range(20)
+    }
+    alpha_ids = [
+        "spiffe://norviq/ns/alpha/sa/customer-support",
+        "spiffe://norviq/ns/alpha/sa/deploy-bot",
+        "spiffe://norviq/ns/alpha/sa/report-runner",
+    ]
+    for sid in alpha_ids:
+        seed[sid] = _trust_blob("Medium")
+    cache = _CountingCache(seed)
+    client = _agents_app(cache, monkeypatch)
+    try:
+        resp = client.get("/api/v1/agents?namespace=alpha", headers=_hdr(role="admin"))
+        assert resp.status_code == 200
+        assert {row["spiffe_id"] for row in resp.json()} == set(alpha_ids)
+        # (a) scoped SCAN: only the 3 alpha keys ever reached the client — NOT all 23.
+        assert cache.scanned == len(alpha_ids), f"scan was not ns-scoped: scanned={cache.scanned}"
+        # (b) batched reads: two MGETs (trust: + trustcalc:), zero per-agent GET_TRUST round-trips.
+        assert cache.mget_calls == 2, f"reads not batched: mget_calls={cache.mget_calls}"
+        assert cache.get_trust_calls == 0, f"still doing per-agent GETs: {cache.get_trust_calls}"
+    finally:
+        client.close()
+
+
+# ==== DEF-050 : /audit/top-blocked + /audit/volume reconciliation ===================================
+
+
+class _AuditResult:
+    """Result double supporting BOTH the pre-fix (``.all()`` over grouped rows) and post-fix
+    (``.scalars().all()`` over full ORM rows) access patterns, so the test fails on the OLD code via a
+    clean assertion instead of an AttributeError."""
+
+    def __init__(self, rows: list[SimpleNamespace]) -> None:
+        self._rows = rows
+
+    def all(self) -> list[SimpleNamespace]:
+        return self._rows
+
+    def scalars(self) -> SimpleNamespace:
+        return SimpleNamespace(all=lambda: self._rows)
+
+
+class _AuditSession:
+    def __init__(self, rows: list[SimpleNamespace]) -> None:
+        self._rows = rows
+
+    async def execute(self, _stmt) -> _AuditResult:
+        return _AuditResult(self._rows)
+
+    async def close(self) -> None:
+        return None
+
+
+def _rec(tool: str, framework: str, agent_class: str, decision: str = "block") -> SimpleNamespace:
+    return SimpleNamespace(
+        tool_name=tool,
+        decision=decision,
+        framework=framework,
+        agent_class=agent_class,
+        namespace="alpha",
+        count=1,  # lets the PRE-FIX grouped-query path run (row.count) so failure is a clean assertion
+        timestamp_utc=datetime(2026, 7, 16, 10, 30, tzinfo=timezone.utc),
+    )
+
+
+def _audit_app(rows: list[SimpleNamespace]) -> TestClient:
+    app = create_app()
+
+    async def _override():
+        yield _AuditSession(rows)
+
+    app.dependency_overrides[get_session] = _override
+    return TestClient(app)
+
+
+# One real block, one red-team block, one synthetic-probe block — all on distinct tools, same hour.
+_MIXED = [
+    _rec("db.query", framework="sidecar", agent_class="customer-support"),  # real -> kept
+    _rec("shell.exec", framework="redteam", agent_class="attacker"),        # red-team -> excluded
+    _rec("net.exfil", framework="sidecar", agent_class="allowlist-probe-9"),  # synthetic -> excluded
+]
+
+
+def test_top_blocked_excludes_redteam_and_synthetic() -> None:
+    """DEF-050 FAIL-ON-BUG: only the real block survives; the red-team + synthetic tools must not appear.
+    Pre-fix (no exclusion) returned all three tool names."""
+    client = _audit_app(_MIXED)
+    try:
+        resp = client.get("/api/v1/audit/top-blocked", headers=_hdr(role="admin"))
+        assert resp.status_code == 200
+        body = resp.json()
+        tools = {row["tool_name"] for row in body}
+        assert tools == {"db.query"}, f"top-blocked leaked excluded traffic: {tools}"
+    finally:
+        client.close()
+
+
+def test_volume_excludes_redteam_and_synthetic() -> None:
+    """DEF-050 FAIL-ON-BUG: the volume chart counts only the real block (1), not all three (3). Pre-fix
+    bucketed every row -> block==3."""
+    client = _audit_app(_MIXED)
+    try:
+        resp = client.get("/api/v1/audit/volume", headers=_hdr(role="admin"))
+        assert resp.status_code == 200
+        total_block = sum(int(bucket.get("block", 0)) for bucket in resp.json())
+        assert total_block == 1, f"volume did not exclude red-team/synthetic: block={total_block}"
+    finally:
+        client.close()

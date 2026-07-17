@@ -9,6 +9,7 @@ non-admin scope (a namespace-claimed token sees only its own namespace).
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 import jwt
@@ -44,7 +45,7 @@ def _client(namespaces: list[str]) -> TestClient:
 
 
 def _token(role: str = "admin", namespace: str = "") -> str:
-    claims = {"sub": "u", "role": role}
+    claims = {"sub": "u", "role": role, "exp": int(time.time()) + 3600}
     if namespace:
         claims["namespace"] = namespace
     return jwt.encode(claims, settings.api_secret_key, algorithm="HS256")

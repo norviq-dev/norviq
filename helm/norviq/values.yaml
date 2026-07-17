@@ -51,6 +51,25 @@ imagePullSecrets: []
 gracefulShutdown:
   preStopSleepSeconds: 3
 
+# DEF-029: hardened container securityContext for the primary app containers (defense-in-depth). The
+# chart previously carried NO securityContext on its own containers and relied on an external PSA/Kyverno
+# restricted-profile mutation ("injected by cluster policy") that need not exist on the target cluster.
+# This restricted profile matches the opa/tls-proxy sidecars: non-root, no privilege escalation, all caps
+# dropped, seccomp RuntimeDefault, read-only root FS. Consumers whose container writes its root FS must
+# provide a writable emptyDir mount (the api/engine/webhook images already run as a non-root USER, and the
+# webhook writes nothing to its rootfs). The UI (nginx) is NOT covered by this default — it runs as root
+# and binds :80, so it needs a component-specific uid/port/emptyDir treatment. Set enabled:false to defer
+# entirely to a cluster-level PodSecurity/Kyverno policy.
+securityContext:
+  enabled: true
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+  seccompProfile:
+    type: RuntimeDefault
+
 engine:
   replicas: 1
   pdb:
@@ -125,7 +144,10 @@ ui:
     limits:
       cpu: 200m
       memory: 128Mi
-  port: 80
+  # DEF-029: the console now runs on the unprivileged nginx image (uid 101) which binds an unprivileged
+  # port — so the container no longer runs as root. 8080 needs no NET_BIND_SERVICE, letting the pod drop
+  # ALL caps. The Service + probes reference the named "http" port, so this cascades automatically.
+  port: 8080
 
 webhook:
   enabled: true

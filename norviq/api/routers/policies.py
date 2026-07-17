@@ -715,7 +715,14 @@ async def delete_policy(
                 existing = await loader.load_from_db(namespace, agent_class)
                 existing_rego = str(existing.get("rego", "") or "") if existing else ""
                 existing_priority = int(existing.get("priority", 1)) if existing else 1
-                remaining = [c for c in parse_remediation_controls(existing_rego) if c["control_id"] != control_id]
+                existing_controls = parse_remediation_controls(existing_rego)
+                # DEF-030: a control that was never in the overlay is a no-op — do NOT report a phantom
+                # `removed_control`, bump the version, or write a `remediation_control_reverted` audit line for
+                # it. 404 instead of a success that lies. (Raising here still runs the `finally` below, so the
+                # advisory lock is released on this error path.)
+                if not any(c["control_id"] == control_id for c in existing_controls):
+                    raise HTTPException(status_code=404, detail="control_id not found in overlay")
+                remaining = [c for c in existing_controls if c["control_id"] != control_id]
                 if remaining:
                     new_version = await loader.create(namespace, agent_class,
                                                       generate_remediation_overlay_rego(base_class, remaining),

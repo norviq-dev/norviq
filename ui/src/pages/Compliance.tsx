@@ -240,6 +240,11 @@ export function Compliance() {
     setDrafted({});
     setSelectedGaps(new Set());
     setBatchOutcome(null);
+    // DEF-039: revert the batch class-scope to the safe default on any scope change too. A specific class
+    // picked in ns-A (from ns-A's affected classes) won't exist in ns-B; left stale, the controlled <select>
+    // holds an off-list value and onGenerateBatch submits it verbatim → a zero-draft "no_affected_classes"
+    // batch in ns-B. Resetting here matches how drafted/selectedGaps/batchOutcome are already cleared.
+    setGenClassMode("affected");
   }, [namespace, framework]);
 
   // ---- REAL data. Both live frameworks fetch their OWN coverage — the overview renders TWO cards,
@@ -1374,23 +1379,33 @@ function TechniqueDetail({
           </div>
           {evidence.length > 0 ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {evidence.map((rule) => (
-                <div
-                  key={rule}
-                  onClick={() => onOpenRule(rule)}
-                  style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, background: "#131316", border: "1px solid #2a2a2e", borderRadius: 9, padding: "10px 13px", cursor: "pointer" }}
-                >
-                  <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 12, color: "#d6d6da", minWidth: 0, overflowWrap: "anywhere" }}>
-                    {rule}
-                  </span>
-                  <span style={{ display: "flex", alignItems: "center", gap: 7, whiteSpace: "nowrap" }}>
-                    <span style={{ fontSize: 11.5, fontWeight: 600, color: (t.blocked ?? 0) > 0 ? ENFORCED : "#6e6e76" }}>
-                      {fmt(t.blocked)} blocked · {RANGE_LABEL[range]}
+              {evidence.map((rule) => {
+                // DEF-038: render THIS rule's own blocked count, not the technique-wide `t.blocked` total.
+                // `t.blocked` sums over every covered policy, so a technique enforced by >1 rule repeated the
+                // same total on each row and over-attributed all blocks to each rule. Consume the per-rule
+                // `blocked_by_rule` map shipped by the backend; if it is momentarily absent, a single-rule
+                // technique's total IS that rule's count (safe fallback), a multi-rule one shows 0 rather
+                // than the misleading total.
+                const ruleBlocked =
+                  t.blocked_by_rule?.[rule] ?? (evidence.length === 1 ? (t.blocked ?? 0) : 0);
+                return (
+                  <div
+                    key={rule}
+                    onClick={() => onOpenRule(rule)}
+                    style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, background: "#131316", border: "1px solid #2a2a2e", borderRadius: 9, padding: "10px 13px", cursor: "pointer" }}
+                  >
+                    <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 12, color: "#d6d6da", minWidth: 0, overflowWrap: "anywhere" }}>
+                      {rule}
                     </span>
-                    <span style={{ color: "#5f5f67" }}>↗</span>
-                  </span>
-                </div>
-              ))}
+                    <span style={{ display: "flex", alignItems: "center", gap: 7, whiteSpace: "nowrap" }}>
+                      <span style={{ fontSize: 11.5, fontWeight: 600, color: ruleBlocked > 0 ? ENFORCED : "#6e6e76" }}>
+                        {fmt(ruleBlocked)} blocked · {RANGE_LABEL[range]}
+                      </span>
+                      <span style={{ color: "#5f5f67" }}>↗</span>
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           ) : (
             <div style={{ padding: "12px 14px", background: "#17171a", border: "1px solid #2a2a2e", borderRadius: 9, fontSize: 12.5, color: "#a2a2aa", lineHeight: 1.55 }}>

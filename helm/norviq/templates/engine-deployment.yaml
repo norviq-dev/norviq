@@ -43,6 +43,17 @@ spec:
         - name: engine
           image: "{{ .Values.images.registry }}{{ .Values.images.engine.repository }}:{{ .Values.images.engine.tag }}"
           imagePullPolicy: {{ .Values.images.engine.pullPolicy }}
+          {{- /* DEF-029: hardened securityContext on the primary container (image runs as USER norviq).
+                 readOnlyRootFilesystem is not forced on the Python app; the CIS-critical controls are. */}}
+          {{- if .Values.securityContext.enabled }}
+          securityContext:
+            runAsNonRoot: {{ .Values.securityContext.runAsNonRoot }}
+            allowPrivilegeEscalation: {{ .Values.securityContext.allowPrivilegeEscalation }}
+            capabilities:
+              {{- toYaml .Values.securityContext.capabilities | nindent 14 }}
+            seccompProfile:
+              {{- toYaml .Values.securityContext.seccompProfile | nindent 14 }}
+          {{- end }}
           {{- include "norviq.preStop" . | nindent 10 }}
           ports:
             - containerPort: {{ .Values.engine.port }}

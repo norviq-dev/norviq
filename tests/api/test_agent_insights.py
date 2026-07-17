@@ -8,6 +8,7 @@ GET must NOT swallow the /tool-usage and /trust-history suffixes."""
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -44,7 +45,11 @@ def _client(rows: list[tuple]) -> TestClient:
 
 
 def _token() -> str:
-    return jwt.encode({"sub": "u", "role": "admin"}, settings.api_secret_key, algorithm="HS256")
+    return jwt.encode(
+        {"sub": "u", "role": "admin", "exp": int(time.time()) + 3600},
+        settings.api_secret_key,
+        algorithm="HS256",
+    )
 
 
 def test_tool_usage_aggregates_counts() -> None:

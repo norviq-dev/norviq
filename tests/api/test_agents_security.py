@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 import jwt
@@ -53,7 +54,7 @@ def _client(trusted: set[str]) -> TestClient:
 
 
 def _token(role: str = "admin", namespace: str | None = None) -> str:
-    claims: dict[str, object] = {"sub": "u", "role": role}
+    claims: dict[str, object] = {"sub": "u", "role": role, "exp": int(time.time()) + 3600}
     if namespace is not None:
         claims["namespace"] = namespace
     return jwt.encode(claims, settings.api_secret_key, algorithm="HS256")
@@ -137,3 +138,45 @@ def test_deregister_local_intent_still_works() -> None:
     resp = client.request("DELETE", f"/api/v1/agents/{NS_AGENT}", headers=_hdr(role="admin"))
     assert resp.status_code == 200
     assert resp.json() == {"deleted": True, "spiffe_id": NS_AGENT}
+
+
+# --- Cold-cache parity: get_agent falls back to the persistent registry (mirrors list_agents) --------
+
+
+def _patch_registry(monkeypatch, result):
+    """Stub agents._agent_from_registry (it calls get_session() directly, not via Depends)."""
+    async def _fake(spiffe_id):
+        return None if result is None else {**result, "spiffe_id": spiffe_id}
+    import norviq.api.routers.agents as agents_mod
+    monkeypatch.setattr(agents_mod, "_agent_from_registry", _fake)
+
+
+def test_get_agent_cold_cache_falls_back_to_registry(monkeypatch) -> None:
+    """FAIL-ON-BUG: an agent whose hot trust:* entry has expired (get_trust None) but which is still in
+    the registry must return 200 from the registry snapshot — not 404. Before the fix get_agent read
+    only the hot cache, so a listed agent's detail view 404'd once its TTL lapsed."""
+    _, client = _client(set())  # empty trusted set => get_trust returns None (cold cache)
+    _patch_registry(monkeypatch, {"score": 0.72, "category": "medium", "violation_count": 3,
+                                  "signals": {}, "dominant_signal": "", "recommendation": ""})
+    resp = client.get(f"/api/v1/agents/{NS_AGENT}", headers=_hdr(role="admin"))
+    assert resp.status_code == 200
+    assert resp.json()["score"] == 0.72
+    assert resp.json()["violation_count"] == 3
+
+
+def test_get_agent_cold_cache_fallback_stays_scope_gated(monkeypatch) -> None:
+    """The registry fallback must NOT weaken the IDOR guard: a team-a viewer reading a team-b agent is
+    404 even though the registry has it — the scope check short-circuits before the fallback runs."""
+    _, client = _client(set())
+    _patch_registry(monkeypatch, {"score": 0.9, "category": "high", "violation_count": 0,
+                                  "signals": {}, "dominant_signal": "", "recommendation": ""})
+    resp = client.get(f"/api/v1/agents/{OTHER_NS_AGENT}", headers=_hdr(role="viewer", namespace="team-a"))
+    assert resp.status_code == 404
+
+
+def test_get_agent_absent_from_cache_and_registry_is_404(monkeypatch) -> None:
+    """Genuine not-found: cold cache AND no registry row => 404 (fallback returns None)."""
+    _, client = _client(set())
+    _patch_registry(monkeypatch, None)
+    resp = client.get(f"/api/v1/agents/{NS_AGENT}", headers=_hdr(role="admin"))
+    assert resp.status_code == 404

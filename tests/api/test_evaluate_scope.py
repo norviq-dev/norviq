@@ -6,6 +6,7 @@ empty-claim least-privilege floor. The agent's own service/workload credential (
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 import jwt
@@ -20,7 +21,7 @@ from norviq.sdk.core.decisions import PolicyDecision
 
 
 def _token(role: str = "admin", namespace: str = "default") -> str:
-    claims = {"sub": f"{role}-{namespace}", "role": role}
+    claims = {"sub": f"{role}-{namespace}", "role": role, "exp": int(time.time()) + 3600}
     if namespace is not None:
         claims["namespace"] = namespace
     return jwt.encode(claims, settings.api_secret_key, algorithm="HS256")

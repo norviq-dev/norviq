@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from norviq.api.auth import get_current_user, read_namespace, require_admin, require_target_cluster
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
+from norviq.api.synthetic import is_synthetic_identity  # DEF-051: the ONE shared synthetic/probe classifier
 from norviq.sdk.core.trust import TrustScore
 
 log = structlog.get_logger()
@@ -22,6 +23,12 @@ router = APIRouter()
 
 # A bound so one agent's history query never loads an unbounded slice of audit_log into memory.
 _AGENT_AUDIT_LIMIT = 5000
+
+# DEF-034 (perf): default + hard caps on the number of agent rows /agents returns, so one request can
+# never fan out into an O(total-fleet) list. The namespace-scoped SCAN already bounds a tenant to its own
+# agents; this additionally bounds the admin / all-namespaces view.
+_AGENT_LIST_DEFAULT_LIMIT = 1000
+_AGENT_LIST_MAX_LIMIT = 5000
 
 
 def _since_for_range(range_value: str) -> datetime:
@@ -83,6 +90,7 @@ class TrustUpdate(BaseModel):
 async def list_agents(
     request: Request,
     namespace: str | None = Query(default=None),
+    limit: int = Query(default=_AGENT_LIST_DEFAULT_LIMIT, ge=1, le=_AGENT_LIST_MAX_LIMIT),
     user: dict = Depends(get_current_user),
 ) -> list[dict]:
     """List agents with trust scores, scoped to the caller's namespace.
@@ -93,33 +101,76 @@ async def list_agents(
     namespace = read_namespace(user, namespace)  # None => all namespaces (admin); own ns for a tenant
     cache = request.app.state.cache
     last_seen_map = await _registry_last_seen(namespace)  # B4: real Last Seen, batched
-    rows = []
-    async for key in cache._client().scan_iter("trust:*"):
+    client = cache._client()
+    # DEF-034 (perf): scope the SCAN Redis-side to the caller's namespace instead of walking the ENTIRE
+    # cluster-wide ``trust:*`` keyspace and filtering in Python — a single-tenant list is then O(its own
+    # agents), not O(total fleet). The SVID encodes ns as ``.../ns/<ns>/...`` so a ns-anchored glob returns
+    # only that tenant's keys. The exact ``_namespace_from_spiffe`` check stays as a hard scoping backstop
+    # (the glob merely bounds the scan; the check guarantees correctness even for an odd namespace value).
+    match = f"trust:spiffe://*/ns/{namespace}/*" if namespace else "trust:*"
+    spiffe_ids: list[str] = []
+    async for key in client.scan_iter(match):
         spiffe_id = str(key).replace("trust:", "", 1)
         if namespace and _namespace_from_spiffe(spiffe_id) != namespace:
             continue
-        trust = await cache.get_trust(spiffe_id)
-        if trust:
-            details = await _trust_details(request, spiffe_id, trust.factors)
-            rows.append(
-                {
-                    "spiffe_id": spiffe_id,
-                    # B4: the SVID encodes ns + class — parse them so the table stops showing "–".
-                    "namespace": _namespace_from_spiffe(spiffe_id),
-                    "agent_class": _class_from_spiffe(spiffe_id),
-                    "last_seen": last_seen_map.get(spiffe_id),
-                    "score": trust.score,
-                    "category": trust.category.lower(),
-                    "violation_count": trust.violation_count,
-                    "signals": details["signals"],
-                    "dominant_signal": details["dominant_signal"],
-                    "recommendation": details["recommendation"],
-                }
-            )
+        spiffe_ids.append(spiffe_id)
+        if len(spiffe_ids) >= limit:  # DEF-034: cap the returned list
+            break
+    rows = await _hydrate_agent_rows(request, cache, spiffe_ids, last_seen_map)
     if not rows:
         rows = await _agents_from_registry(namespace)
     log.debug("nrvq.api.agents.listed", count=len(rows), code="NRVQ-API-7030")
     return rows
+
+
+async def _hydrate_agent_rows(request: Request, cache, spiffe_ids: list[str], last_seen_map: dict) -> list[dict]:
+    """DEF-034 (perf): build the list rows for a set of spiffe_ids while BATCHING the two per-agent reads
+    (``trust:`` + ``trustcalc:``) into two pipelined MGETs, instead of two sequential GETs per agent — the
+    N+1 the finding flagged. A real Redis client (has ``mget``) collapses N agents to ~2 round-trips; a
+    unit-test / legacy client without ``mget`` degrades to the per-agent path (small N). The emitted row
+    shape is identical on both paths (including the DEF-051 ``synthetic`` flag)."""
+    if not spiffe_ids:
+        return []
+    client = cache._client()
+    mget = getattr(client, "mget", None)
+    rows: list[dict] = []
+    if mget is not None:
+        trust_vals = list(await mget([f"trust:{sid}" for sid in spiffe_ids]))
+        calc_vals = list(await mget([f"trustcalc:{sid}" for sid in spiffe_ids]))
+        for sid, tval, cval in zip(spiffe_ids, trust_vals, calc_vals):
+            if not tval:
+                continue  # entry aged out between the SCAN and the MGET
+            trust = TrustScore.model_validate_json(tval)
+            rows.append(_agent_row(sid, trust, _details_from_raw(cval, trust.factors), last_seen_map.get(sid)))
+        return rows
+    for sid in spiffe_ids:
+        trust = await cache.get_trust(sid)
+        if trust:
+            details = await _trust_details(request, sid, trust.factors)
+            rows.append(_agent_row(sid, trust, details, last_seen_map.get(sid)))
+    return rows
+
+
+def _agent_row(spiffe_id: str, trust: TrustScore, details: dict, last_seen: str | None) -> dict:
+    """The single shared shape for one ``/agents`` list row (used by both the batched and legacy paths)."""
+    agent_class = _class_from_spiffe(spiffe_id)
+    return {
+        "spiffe_id": spiffe_id,
+        # B4: the SVID encodes ns + class — parse them so the table stops showing "–".
+        "namespace": _namespace_from_spiffe(spiffe_id),
+        "agent_class": agent_class,
+        "last_seen": last_seen,
+        "score": trust.score,
+        "category": trust.category.lower(),
+        "violation_count": trust.violation_count,
+        "signals": details["signals"],
+        "dominant_signal": details["dominant_signal"],
+        "recommendation": details["recommendation"],
+        # DEF-051: flag synthetic/probe/eval identities (the ONE shared classifier) so the Overview trust
+        # donut + Agent Monitor exclude them and RECONCILE with the asset/attack graph, which already hides
+        # exactly these probes by default.
+        "synthetic": is_synthetic_identity(agent_class, spiffe_id),
+    }
 
 
 async def _agents_from_registry(namespace: str) -> list[dict]:
@@ -143,22 +194,68 @@ async def _agents_from_registry(namespace: str) -> list[dict]:
     except Exception as exc:  # pragma: no cover
         log.error("nrvq.api.agents.registry_read_failed", error=str(exc), code="NRVQ-API-7032")
         return []
-    return [
-        {
-            "spiffe_id": entry.spiffe_id,
-            # B4: the registry already stores ns/class/last_seen — surface them (was dropped → "–").
-            "namespace": entry.namespace or _namespace_from_spiffe(entry.spiffe_id),
-            "agent_class": entry.agent_class or _class_from_spiffe(entry.spiffe_id),
-            "last_seen": entry.last_seen.isoformat() if entry.last_seen else None,
-            "score": entry.trust_score,
-            "category": entry.trust_category.lower(),
-            "violation_count": entry.violation_count,
-            "signals": {},
-            "dominant_signal": "",
-            "recommendation": "",
-        }
-        for entry in entries
-    ]
+    rows = []
+    for entry in entries:
+        agent_class = entry.agent_class or _class_from_spiffe(entry.spiffe_id)
+        rows.append(
+            {
+                "spiffe_id": entry.spiffe_id,
+                # B4: the registry already stores ns/class/last_seen — surface them (was dropped → "–").
+                "namespace": entry.namespace or _namespace_from_spiffe(entry.spiffe_id),
+                "agent_class": agent_class,
+                "last_seen": entry.last_seen.isoformat() if entry.last_seen else None,
+                "score": entry.trust_score,
+                "category": entry.trust_category.lower(),
+                "violation_count": entry.violation_count,
+                "signals": {},
+                "dominant_signal": "",
+                "recommendation": "",
+                # DEF-051: same synthetic flag on the cold-cache (registry) path so the list reconciles
+                # with the graph whether it is served hot (trust:*) or cold (agent_registry).
+                "synthetic": is_synthetic_identity(agent_class, entry.spiffe_id),
+            }
+        )
+    return rows
+
+
+async def _agent_from_registry(spiffe_id: str) -> dict | None:
+    """One agent from the persistent registry — the single-identity counterpart of
+    ``_agents_from_registry``. ``trust:*`` cache entries carry a TTL, so an agent that still shows in
+    the (registry-backed) list would 404 in its detail view once its hot entry lapses. ``get_agent``
+    falls back here for cold-cache parity with ``list_agents``. Returns None when the identity isn't in
+    the registry either (a genuine 404). Namespace scoping is enforced by the caller BEFORE this runs."""
+    try:
+        from sqlalchemy import select
+
+        from norviq.api.db.models import AgentRegistryEntry
+        from norviq.api.db.session import get_session
+
+        provider = get_session()
+        session = await provider.__anext__()
+        try:
+            entry = (
+                await session.execute(
+                    select(AgentRegistryEntry).where(AgentRegistryEntry.spiffe_id == spiffe_id)
+                )
+            ).scalar_one_or_none()
+        finally:
+            await provider.aclose()
+    except Exception as exc:  # pragma: no cover
+        log.error("nrvq.api.agent.registry_read_failed", spiffe_id=spiffe_id, error=str(exc), code="NRVQ-API-7033")
+        return None
+    if entry is None:
+        return None
+    return {
+        "spiffe_id": entry.spiffe_id,
+        "score": entry.trust_score,
+        "category": (entry.trust_category or "unknown").lower(),
+        "violation_count": entry.violation_count,
+        # No live behavioral factors when served from the registry snapshot (the hot signals expired
+        # with the cache entry); the detail view shows the persisted score without the signal breakdown.
+        "signals": {},
+        "dominant_signal": "",
+        "recommendation": "",
+    }
 
 
 # NOTE: these specific routes MUST be declared before the greedy /agents/{spiffe_id:path} GET below,
@@ -263,6 +360,12 @@ async def get_agent(spiffe_id: str, request: Request, user: dict = Depends(get_c
         raise HTTPException(status_code=404, detail="Agent not found")
     trust = await request.app.state.cache.get_trust(spiffe_id)
     if trust is None:
+        # Cold-cache parity with list_agents (which falls back to the persistent registry when the
+        # trust:* cache is cold): the hot entry has a TTL, so without this a listed agent's detail view
+        # 404s once its entry lapses. Scope was already enforced above, so this fallback stays tenant-safe.
+        fallback = await _agent_from_registry(spiffe_id)
+        if fallback is not None:
+            return fallback
         raise HTTPException(status_code=404, detail="Agent not found")
     details = await _trust_details(request, spiffe_id, trust.factors)
     return {
@@ -381,9 +484,10 @@ async def deregister_agent(
     return {"deleted": True, "spiffe_id": spiffe_id}
 
 
-async def _trust_details(request: Request, spiffe_id: str, factors: dict) -> dict:
-    """Return latest trust signal breakdown for one agent."""
-    raw = await request.app.state.cache._client().get(f"trustcalc:{spiffe_id}")
+def _details_from_raw(raw: str | None, factors: dict) -> dict:
+    """Build the trust-signal breakdown from a raw ``trustcalc:`` payload, falling back to the trust
+    score's own ``factors`` when no live breakdown is cached. Shared by the batched list path
+    (``_hydrate_agent_rows``) and the single-agent detail route so both stay byte-identical."""
     if raw:
         payload = json.loads(raw)
         return {
@@ -396,3 +500,9 @@ async def _trust_details(request: Request, spiffe_id: str, factors: dict) -> dic
         "dominant_signal": factors.get("dominant_signal", ""),
         "recommendation": factors.get("recommendation", ""),
     }
+
+
+async def _trust_details(request: Request, spiffe_id: str, factors: dict) -> dict:
+    """Return latest trust signal breakdown for one agent."""
+    raw = await request.app.state.cache._client().get(f"trustcalc:{spiffe_id}")
+    return _details_from_raw(raw, factors)

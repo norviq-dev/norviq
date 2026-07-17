@@ -7,6 +7,7 @@ and disable re-materialize/delete."""
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 import jwt
@@ -85,7 +86,11 @@ def _client(rows: list | None = None) -> tuple[TestClient, _FakeSession, _FakeLo
 
 
 def _token(role: str = "admin", namespace: str = "default") -> str:
-    return jwt.encode({"sub": "u", "role": role, "namespace": namespace}, settings.api_secret_key, algorithm="HS256")
+    return jwt.encode(
+        {"sub": "u", "role": role, "namespace": namespace, "exp": int(time.time()) + 3600},
+        settings.api_secret_key,
+        algorithm="HS256",
+    )
 
 
 def _h(role: str = "admin") -> dict:

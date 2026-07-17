@@ -47,6 +47,20 @@ spec:
         - name: api
           image: "{{ .Values.images.registry }}{{ .Values.images.api.repository }}:{{ .Values.images.api.tag }}"
           imagePullPolicy: {{ .Values.images.api.pullPolicy }}
+          {{- /* DEF-029: hardened securityContext on the PRIMARY container (the chart carried none, relying
+                 on an external PSA/Kyverno mutation that need not exist). The api image runs as USER norviq
+                 (non-root). readOnlyRootFilesystem is intentionally NOT forced on the Python app container
+                 (it writes tmp at runtime); the CIS-critical controls (non-root, no priv-esc, drop ALL caps,
+                 seccomp RuntimeDefault) are applied. */}}
+          {{- if .Values.securityContext.enabled }}
+          securityContext:
+            runAsNonRoot: {{ .Values.securityContext.runAsNonRoot }}
+            allowPrivilegeEscalation: {{ .Values.securityContext.allowPrivilegeEscalation }}
+            capabilities:
+              {{- toYaml .Values.securityContext.capabilities | nindent 14 }}
+            seccompProfile:
+              {{- toYaml .Values.securityContext.seccompProfile | nindent 14 }}
+          {{- end }}
           {{- include "norviq.preStop" . | nindent 10 }}
           ports:
             - containerPort: {{ .Values.api.port }}

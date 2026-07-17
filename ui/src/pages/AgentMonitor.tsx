@@ -41,6 +41,9 @@ type AgentRow = {
 export function AgentMonitor() {
   const { namespace, timeRange } = useApp();
   const [selected, setSelected] = useState<AgentRow | null>(null);
+  // DEF-040: a freeze/reset that fails (e.g. 403 for a non-admin viewer, network, 5xx) must NOT be
+  // swallowed — surface the reason near the action buttons so the control isn't a silent dead no-op.
+  const [actionError, setActionError] = useState<string | null>(null);
   // P5: the detail renders below a potentially long table — scroll it into view on select so clicking a row
   // visibly OPENS the detail (trust history + freeze/adjust) instead of silently rendering off-screen.
   const detailRef = useRef<HTMLDivElement | null>(null);
@@ -77,9 +80,15 @@ export function AgentMonitor() {
   );
 
   const updateTrust = async (id: string, score: number) => {
+    setActionError(null);
     try {
       await apiSend(`/api/v1/agents/${encodeURIComponent(id)}/trust`, "PUT", { score });
-      const next = rows.map((a) =>
+      // DEF-022: read-modify-write the FULL fleet (agents.data), not `rows` — which is a strict subset
+      // when a ?class= deep-link filter is active. setData below fully REPLACES agents.data, so building
+      // `next` from the filtered `rows` would drop every other agent until the 60s refetch (clearing the
+      // filter would then show only the one class and the StatTiles would undercount). The
+      // (a.spiffe_id === id) predicate still mutates only the frozen/reset agent.
+      const next = (agents.data ?? []).map((a) =>
         a.spiffe_id === id
           ? { ...a, score, category: score === 0 ? "frozen" : trustCategory(score) }
           : a
@@ -91,8 +100,10 @@ export function AgentMonitor() {
       if (selected?.spiffe_id === id) {
         setSelected({ ...selected, score, category: score === 0 ? "frozen" : trustCategory(score) });
       }
-    } catch {
-      // ignore
+    } catch (e) {
+      // DEF-040: surface the failure instead of swallowing it (backend requires admin — apiSend throws on
+      // a 403 !ok — plus network/5xx). Without this the Freeze/Reset buttons look like dead controls.
+      setActionError((e as Error).message || "Trust update failed");
     }
   };
 
@@ -271,6 +282,15 @@ export function AgentMonitor() {
                   Freeze Agent
                 </KitButton>
               </div>
+              {actionError && (
+                // DEF-040: failed freeze/reset feedback — the control is no longer silent on 403/network/5xx.
+                <div
+                  role="alert"
+                  style={{ marginTop: 12, fontSize: 12.5, color: "var(--block)", wordBreak: "break-word" }}
+                >
+                  {actionError}
+                </div>
+              )}
             </Panel>
           </div>
         )}

@@ -220,19 +220,31 @@ async def top_blocked_tools(
     """Top blocked tool names by count."""
     namespace = read_namespace(user, namespace)
     since = _since_for_range(range)
+    # DEF-050 (RECONCILE): the Overview headline (audit_stats) already excludes red-team framework events +
+    # synthetic/probe identities so it counts the SAME real-traffic population as Compliance/MITRE. This
+    # sibling widget must too, or the Top-Blocked-Tools list on the same page contradicts its own headline.
+    # is_synthetic_identity is a Python prefix/regex classifier NOT expressible in SQL, so — exactly like
+    # audit_stats — we load the blocked rows (already the small decision=='block' subset) and drop the
+    # excluded ones Python-side before summing per tool_name and taking the top-N.
     query = (
-        select(AuditLogEntry.tool_name, func.count(AuditLogEntry.id).label("count"))
+        select(AuditLogEntry)
         .where(AuditLogEntry.decision == "block")
         .where(AuditLogEntry.timestamp_utc >= since)
-        .group_by(AuditLogEntry.tool_name)
-        .order_by(func.count(AuditLogEntry.id).desc())
-        .limit(limit)
     )
     if namespace:
         query = query.where(AuditLogEntry.namespace == namespace)
-    rows = (await session.execute(query)).all()
-    log.debug("nrvq.api.audit.top_blocked", count=len(rows), code="NRVQ-API-7022")
-    return [{"tool_name": row.tool_name, "count": row.count} for row in rows]
+    records = (await session.execute(query)).scalars().all()
+    tool_counts: dict[str, int] = {}
+    for record in records:
+        if str(getattr(record, "framework", "") or "") == "redteam" or is_synthetic_identity(
+            str(getattr(record, "agent_class", "") or "")
+        ):
+            continue  # excluded from the Overview so it reconciles with the headline + Compliance/MITRE
+        name = str(record.tool_name or "")
+        tool_counts[name] = tool_counts.get(name, 0) + 1
+    top = sorted(tool_counts.items(), key=lambda kv: -kv[1])[:limit]
+    log.debug("nrvq.api.audit.top_blocked", count=len(top), code="NRVQ-API-7022")
+    return [{"tool_name": name, "count": count} for name, count in top]
 
 
 @router.get("/audit/volume")
@@ -251,6 +263,13 @@ async def audit_volume(
     records = (await session.execute(query)).scalars().all()
     buckets: dict[str, dict[str, int | str]] = {}
     for record in records:
+        # DEF-050 (RECONCILE): drop red-team + synthetic/probe traffic so the volume chart counts the same
+        # real-traffic population as the Overview headline + Compliance/MITRE (this query already loads full
+        # rows, so agent_class/framework are on-hand — no extra query).
+        if str(getattr(record, "framework", "") or "") == "redteam" or is_synthetic_identity(
+            str(getattr(record, "agent_class", "") or "")
+        ):
+            continue
         hour_key = record.timestamp_utc.strftime("%Y-%m-%d %H:00")
         if hour_key not in buckets:
             buckets[hour_key] = {"time": hour_key, "allow": 0, "block": 0, "escalate": 0, "audit": 0}
