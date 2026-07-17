@@ -25,6 +25,7 @@ by the tool-name verb + agent namespace, not by a synthetic action field.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 
@@ -440,6 +441,67 @@ def remediation_generatable_rules(rule_ids: list[str]) -> list[str]:
     return seen
 
 
+# --------------------------------------------------------------------------------------------------
+# COMP-GEN-02 (accumulate): a per-class remediation OVERLAY holds the UNION of every applied control, not
+# just the last one. The single overlay key ("<class>__remediation__") stores ONE rego, and apply is a
+# full-replace UPSERT — so without accumulation, applying control B silently erased control A (a false-
+# coverage bug). Each generated rego therefore carries a machine-readable MANIFEST comment naming every
+# control it encodes; the gated apply path (policies.create_policy) parses the incoming draft + the existing
+# overlay, UNIONS their controls, and re-materializes one combined rego. The manifest is the source of truth
+# (block keys alone are ambiguous for control ids that contain ':' e.g. OWASP "LLM05:2025"); it is a rego
+# COMMENT, invisible to OPA and untouched by the evaluator's package rewrite.
+# --------------------------------------------------------------------------------------------------
+
+_REMEDIATION_MANIFEST_TAG = "nrvq:remediation-manifest"
+
+
+def _manifest_line(controls: list[dict]) -> str:
+    """One-line JSON manifest naming each control (framework, id, name, usable rule_ids) an overlay encodes."""
+    payload = [
+        {"fw": c["framework"], "id": c["control_id"], "name": c.get("control_name") or c["control_id"],
+         "rules": remediation_generatable_rules(list(c.get("rule_ids") or []))}
+        for c in controls
+    ]
+    return f"# {_REMEDIATION_MANIFEST_TAG} " + json.dumps(payload, separators=(",", ":"), ensure_ascii=True)
+
+
+def parse_remediation_controls(rego: str) -> list[dict]:
+    """Recover the control list a remediation rego encodes, from its manifest comment. Returns a list of
+    {framework, control_id, control_name, rule_ids}; empty when the rego is not a recognized compliance
+    remediation overlay (so the apply path leaves any other rego byte-identical)."""
+    prefix = f"# {_REMEDIATION_MANIFEST_TAG} "
+    for line in (rego or "").splitlines():
+        s = line.strip()
+        if not s.startswith(prefix):
+            continue
+        try:
+            data = json.loads(s[len(prefix):])
+        except (ValueError, TypeError):
+            return []
+        out: list[dict] = []
+        for c in data if isinstance(data, list) else []:
+            rules = remediation_generatable_rules(list(c.get("rules") or []))
+            cid = str(c.get("id") or "")
+            if cid and rules:
+                out.append({"framework": str(c.get("fw") or ""), "control_id": cid,
+                            "control_name": str(c.get("name") or cid), "rule_ids": rules})
+        return out
+    return []
+
+
+def union_remediation_controls(existing: list[dict], incoming: list[dict]) -> list[dict]:
+    """UNION two control lists keyed by (framework, control_id); a re-applied control (same key) takes the
+    incoming rule set, and existing controls keep their position so a stable rego is produced."""
+    by_key: dict[tuple[str, str], dict] = {}
+    order: list[tuple[str, str]] = []
+    for c in list(existing) + list(incoming):
+        k = (c.get("framework", ""), c["control_id"])
+        if k not in by_key:
+            order.append(k)
+        by_key[k] = c
+    return [by_key[k] for k in order]
+
+
 def _framework_token(framework: str) -> str:
     return re.sub(r"[^a-z0-9_]", "_", (framework or "fw").strip().lower()) or "fw"
 
@@ -493,6 +555,7 @@ def generate_remediation_rego(
 # TIGHTEN-ONLY at baseline priority (most-restrictive tie-break) — only ADDS denials, never weakens a
 # baseline block. NEVER auto-enforces — the operator reviews + applies via the gated Policies flow.
 # Mapped rules: {", ".join(usable)}
+{_manifest_line([{"framework": framework, "control_id": control_id, "control_name": control_name, "rule_ids": usable}])}
 
 default decision = "allow"
 default rule_id  = "remediation_noop"
@@ -512,6 +575,73 @@ block_fired {{ blocks[_] }}
 decision = "block" {{ block_fired }}
 rule_id = sort([id | blocks[id]])[0] {{ block_fired }}
 reason = "{framework} {control_id} {safe_name} — remediation block" {{ block_fired }}
+"""
+    return header + tail
+
+
+def generate_remediation_overlay_rego(agent_class: str, controls: list[dict]) -> str:
+    """COMP-GEN-02: the COMBINED per-class remediation overlay — one rego encoding the UNION of every applied
+    control. Used only by the gated apply path (policies.create_policy) when accumulating drafts into the
+    single `"<class>__remediation__"` key; drafts themselves stay per-control via generate_remediation_rego.
+
+    Emits `package norviq.remediation.overlay.<class>` (class-scoped — it spans controls/frameworks; the
+    evaluator detects+rewrites the package, so the name is free) with one class-scoped block clause per
+    (control, mapped rule), a manifest naming every control, and the shared decision resolver. Tighten-only,
+    default-allow. `controls` is a list of {framework, control_id, control_name, rule_ids}; raises ValueError
+    when none contributes a runtime-expressible rule (the caller then leaves the incoming rego untouched)."""
+    norm: list[dict] = []
+    for c in controls:
+        rules = remediation_generatable_rules(list(c.get("rule_ids") or []))
+        if rules:
+            norm.append({"framework": str(c.get("framework") or ""), "control_id": str(c["control_id"]),
+                         "control_name": str(c.get("control_name") or c["control_id"]), "rule_ids": rules})
+    if not norm:
+        raise ValueError("no runtime-expressible remediation rule across the supplied controls")
+
+    class_tok = _control_token(agent_class)
+    safe_class = agent_class.replace('"', "'")
+    helper_lines: list[str] = []
+    seen_helpers: set[str] = set()
+    block_lines: list[str] = []
+    for c in norm:
+        fw_tok = _framework_token(c["framework"])
+        for rid in c["rule_ids"]:
+            helpers, cond = _REMEDIATION_RULES[rid]
+            for h in helpers:
+                if h not in seen_helpers:
+                    seen_helpers.add(h)
+                    helper_lines.append(h)
+            block_lines.append(
+                f'blocks["remediation:{fw_tok}:{c["control_id"]}:{rid}"] {{ is_remediation_class; {cond} }}'
+            )
+    control_summary = ", ".join(f'{c["framework"]} {c["control_id"]}' for c in norm)
+
+    header = f"""package norviq.remediation.overlay.{class_tok}
+
+# COMPLIANCE remediation OVERLAY for agent class "{safe_class}" — GENERATED, DRY-RUN until applied.
+# Accumulates the UNION of every applied compliance control (one block per control × mapped rule); applying
+# another control UNIONS into this same overlay instead of replacing it (COMP-GEN-02). TIGHTEN-ONLY at
+# baseline priority (most-restrictive tie-break) — only ADDS denials, never weakens a baseline block.
+# Controls: {control_summary}
+{_manifest_line(norm)}
+
+default decision = "allow"
+default rule_id  = "remediation_noop"
+default reason   = "Allowed"
+
+is_remediation_class {{ input.agent.agent_class == "{safe_class}" }}
+"""
+    helpers_block = "\n".join(helper_lines)
+    blocks_block = "\n".join(block_lines)
+    tail = f"""
+{helpers_block}
+
+{blocks_block}
+
+block_fired {{ blocks[_] }}
+decision = "block" {{ block_fired }}
+rule_id = sort([id | blocks[id]])[0] {{ block_fired }}
+reason = sprintf("compliance remediation block: %s", [sort([id | blocks[id]])[0]]) {{ block_fired }}
 """
     return header + tail
 

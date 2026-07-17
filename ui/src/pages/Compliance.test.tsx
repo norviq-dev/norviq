@@ -281,10 +281,12 @@ describe("Compliance — F2 efficacy overlay (proven-blocking from the last Red 
       ...owaspPayload(),
       techniques: [
         { technique_id: "LLM06:2025", name: "Excessive Agency", description: "d", scope: "enforceable",
-          status: "gap", priority: "high", policies: [], covered_policies: [], covered: false,
+          status: "gap", generatable: true, priority: "high", policies: ["llm06_excessive_agency"],
+          covered_policies: [], covered: false,
           observed: 40, blocked: 0, affected_classes: [{ class: "ops-runner", blocked: 0 }] },
         { technique_id: "LLM05:2025", name: "Improper Output Handling", description: "d", scope: "enforceable",
-          status: "gap", priority: "medium", policies: [], covered_policies: [], covered: false,
+          status: "gap", generatable: true, priority: "medium", policies: ["deny_sql_injection"],
+          covered_policies: [], covered: false,
           observed: 10, blocked: 0, affected_classes: [{ class: "billing-bot", blocked: 0 }] }
       ]
     });

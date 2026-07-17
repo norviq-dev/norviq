@@ -156,6 +156,10 @@ class ApiKey(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked: Mapped[bool] = mapped_column(default=False)
+    # RETENTION: NULL = never expires (keys issued before this column existed keep working — unchanged
+    # behavior). New keys default to now + api_key_default_ttl_days unless the creator overrides
+    # (0 = never). The auth resolver rejects an expired key exactly like a revoked one.
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AuditLogEntry(Base):

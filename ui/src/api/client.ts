@@ -202,6 +202,29 @@ export async function fetchEffectivePolicy(namespace: string, agentClass: string
   return apiGet(`/api/v1/policies/effective?namespace=${encodeURIComponent(namespace)}&agent_class=${encodeURIComponent(agentClass)}`);
 }
 
+/** Cluster-wide data-retention limits (read-only; set via Helm values `config.*`). 0/negative = disabled (keep forever). */
+export type RetentionSettings = {
+  audit_retention_days: number;
+  coverage_snapshot_retention_days: number;
+  graph_snapshot_keep_per_namespace: number;
+  agent_registry_retention_days: number;
+  api_key_default_ttl_days: number;
+  draft_ttl_days: number;
+  draft_ttl_test_hours: number;
+  draft_cap_per_namespace: number;
+  policy_version_keep_count: number;
+  policy_version_keep_days: number;
+  redteam_detail_keep_runs: number;
+  redteam_detail_keep_days: number;
+  redteam_summary_keep_runs: number;
+  redteam_summary_keep_days: number;
+};
+
+/** Fetch the cluster-wide retention limits for the read-only Settings card. */
+export async function fetchRetentionSettings(): Promise<RetentionSettings> {
+  return apiGet<RetentionSettings>("/api/v1/settings/retention");
+}
+
 export type VersionInfo = { version: string; license: string };
 
 /** The single-source product version + license (F046). */
@@ -218,6 +241,8 @@ export type ApiKey = {
   created_at: string | null;
   last_used_at: string | null;
   revoked: boolean;
+  // Server-computed expiry (may be absent while the backend rollout is in flight; null = never expires).
+  expires_at?: string | null;
 };
 
 /** List issued API keys (no secrets); admin-only (F046). */
@@ -225,8 +250,9 @@ export async function fetchApiKeys(): Promise<ApiKey[]> {
   return apiGet<ApiKey[]>("/api/v1/keys");
 }
 
-/** Issue a new API key — the returned `key` secret is shown ONCE. */
-export async function createApiKey(body: { name: string; namespace?: string; role?: string }): Promise<ApiKey & { key: string }> {
+/** Issue a new API key — the returned `key` secret is shown ONCE.
+ *  `expires_in_days` is optional: omit to use the server default TTL; 0 = never expires. */
+export async function createApiKey(body: { name: string; namespace?: string; role?: string; expires_in_days?: number }): Promise<ApiKey & { key: string }> {
   return apiSend<ApiKey & { key: string }>("/api/v1/keys", "POST", body);
 }
 
@@ -441,6 +467,9 @@ export type MitreTechnique = {
   description?: string;
   scope: "enforceable" | "out_of_scope";
   status: "enforced" | "gap" | "out_of_scope";
+  // A gap is `generatable` only if it maps to a runtime-expressible rule; a bespoke control (no such rule)
+  // escalates on generate, so the UI must not offer a "Generate" checkbox for it.
+  generatable?: boolean;
   priority?: "high" | "medium" | "low" | null;
   also?: string | null;
   policies: string[];
@@ -466,7 +495,7 @@ export type MitreCoverage = {
   blocked?: number;
   agent_classes?: number;
   // COMP-EVIDENCE: count of synthetic/simulated + red-team events excluded from observed/blocked so the
-  // evidence pack counts real traffic only (San decision b) and can state the exclusion.
+  // evidence pack counts real traffic only (product decision) and can state the exclusion.
   synthetic_excluded?: number;
   last_exported?: string | null;
   techniques: MitreTechnique[];

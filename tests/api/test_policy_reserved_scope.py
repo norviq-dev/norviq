@@ -380,3 +380,61 @@ def test_bare_remediation_suffix_class_is_not_treated_as_an_overlay():
                                                  "rego_source": _VALID_REGO, "priority": 1})
     assert resp.status_code == 200
     assert ("default", "__remediation__") in loader.created
+
+
+# --- P1 (SECURITY): priority-band enforcement --------------------------------------------------------
+# The CRD caps a namespace policy at priority 0-499 and reserves the clusterPriority band (500-1000) for
+# cluster admins, but the API's create path enforced NO bound — a namespace-scoped service-role API key
+# (which passes require_admin_or_service and is floored to its own namespace, but is NOT an admin) could POST
+# priority=800 (200 OK) and shadow control-plane policy for its namespace via highest-priority-wins. The band
+# is now enforced: only a human admin or the control-plane webhook controller may write >= 500.
+
+
+def test_scoped_apikey_cannot_set_cluster_priority_band():
+    # The live-confirmed vector: a namespace-scoped service key POSTing priority=800 must now be refused (422)
+    # and never reach the loader.
+    client, loader = _client(_SVC_KEY_DEFAULT)
+    resp = client.post("/api/v1/policies", json={"namespace": "default", "agent_class": "finance-agent",
+                                                 "rego_source": _VALID_REGO, "priority": 800})
+    assert resp.status_code == 422
+    assert "clusterPriority" in resp.json()["detail"]     # points at the reserved admin band
+    assert loader.created == []                            # short-circuits before loader.create
+
+
+def test_scoped_apikey_namespace_band_still_succeeds():
+    # Existing valid behavior is preserved: a scoped key writing inside the namespace band (0-499) succeeds.
+    client, loader = _client(_SVC_KEY_DEFAULT)
+    resp = client.post("/api/v1/policies", json={"namespace": "default", "agent_class": "finance-agent",
+                                                 "rego_source": _VALID_REGO, "priority": 100})
+    assert resp.status_code == 200
+    assert ("default", "finance-agent") in loader.created
+
+
+def test_priority_band_boundaries_for_non_admin():
+    # 499 is the top of the namespace band (allowed); 500 is the first clusterPriority value (rejected).
+    client, loader = _client(_SVC_KEY_DEFAULT)
+    resp = client.post("/api/v1/policies", json={"namespace": "default", "agent_class": "a",
+                                                 "rego_source": _VALID_REGO, "priority": 499})
+    assert resp.status_code == 200
+    resp = client.post("/api/v1/policies", json={"namespace": "default", "agent_class": "b",
+                                                 "rego_source": _VALID_REGO, "priority": 500})
+    assert resp.status_code == 422
+
+
+def test_admin_may_set_cluster_priority_band():
+    # An admin is authorized for the clusterPriority band (500-1000) — this is the intended admin override.
+    client, loader = _client()  # defaults to _ADMIN
+    resp = client.post("/api/v1/policies", json={"namespace": "default", "agent_class": "finance-agent",
+                                                 "rego_source": _VALID_REGO, "priority": 800})
+    assert resp.status_code == 200
+    assert ("default", "finance-agent") in loader.created
+
+
+def test_webhook_controller_may_sync_cluster_priority_band():
+    # Existing valid behavior: the control-plane webhook controller (sub 'norviq-webhook') syncs admin-authored
+    # clusterPriority CRDs (500-1000) via this endpoint — it must stay exempt from the namespace-band floor.
+    client, loader = _client(_SVC_JWT_CONTROLLER)
+    resp = client.post("/api/v1/policies", json={"namespace": "tenant-b", "agent_class": "finance-agent",
+                                                 "rego_source": _VALID_REGO, "priority": 800})
+    assert resp.status_code == 200
+    assert ("tenant-b", "finance-agent") in loader.created

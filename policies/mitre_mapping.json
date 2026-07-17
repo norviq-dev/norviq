@@ -49,22 +49,24 @@
     "name": "Unsecured Credentials",
     "scope": "enforceable",
     "priority": "high",
-    "description": "An adversary harvests credentials/secrets an agent can reach through its tools. Runtime-enforceable (block secret-reading tool calls) but no dedicated rule is loaded yet.",
-    "policies": []
+    "description": "An adversary harvests credentials/secrets an agent can reach through its tools. Enforced by blocking secret-reading tool calls (get_secret, read_env, read_secret and similar).",
+    "policies": ["llm02_data_leakage"]
   },
   "AML.T0056": {
     "name": "LLM Meta Prompt Extraction",
     "scope": "enforceable",
     "priority": "medium",
-    "description": "An adversary extracts the system/meta prompt via crafted inputs. Runtime-observable at the tool boundary but no dedicated rule is loaded yet.",
-    "policies": []
+    "description": "An adversary extracts the system/meta prompt via crafted inputs. Extraction happens in model I/O, outside the tool-call boundary, so no runtime tool-call rule can detect it — control it with system-prompt hardening and SDK output-DLP.",
+    "policies": [],
+    "remediation": "bespoke"
   },
   "AML.T0061": {
     "name": "LLM Prompt Self-Replication",
     "scope": "enforceable",
     "priority": "medium",
-    "description": "A self-replicating prompt propagates through tool outputs to other agents/systems. Enforceable by blocking propagation via tool calls; no dedicated rule yet.",
-    "policies": []
+    "description": "A self-replicating prompt propagates through tool outputs to other agents/systems. Propagation rides tool OUTPUTS while the runtime PEP governs tool CALLS — control it with SDK output-DLP and downstream input validation.",
+    "policies": [],
+    "remediation": "bespoke"
   },
   "AML.T0024": {
     "name": "Exfiltration via ML Inference API",

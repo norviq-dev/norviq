@@ -181,10 +181,20 @@ async def ensure_schema_compatibility() -> None:
         # COMP-GEN-01 fix: the real affected class for a compliance-remediation draft, once `agent_class`
         # becomes the compound "<class>__remediation__" persistence key (NULL for other draft kinds).
         "ALTER TABLE intent_drafts ADD COLUMN IF NOT EXISTS affected_class VARCHAR(255)",
+        # RETENTION: optional API-key expiry (NULL = never — keys issued before this column keep working).
+        "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ",
     )
     async with _engine.begin() as conn:
         for statement in statements:
             await conn.execute(text(statement))
+        # RETENTION backfill: drafts created before the expires_at column existed have NULL expiry and the
+        # GC's WHERE clause (expires_at IS NOT NULL) never touches them — stamp them with the normal TTL
+        # from their created_at so they age out like every other draft. Idempotent (only fills NULLs).
+        await conn.execute(
+            text("UPDATE intent_drafts SET expires_at = created_at + make_interval(days => :d) "
+                 "WHERE expires_at IS NULL"),
+            {"d": int(settings.draft_ttl_days)},
+        )
     log.info("nrvq.db.schema_compat_applied", statements=len(statements), code="NRVQ-DB-9003")
 
 

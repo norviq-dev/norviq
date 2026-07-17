@@ -214,6 +214,28 @@ func TestMutate_SkipAnnotation(t *testing.T) {
 	}
 }
 
+// P3: when allowPodOptOut=false, the per-pod opt-out (skip-injection annotation / disabled label)
+// is IGNORED so a pod author cannot self-exempt from enforcement — the pod is injected anyway.
+func TestMutate_OptOutIgnoredWhenDisabled_Annotation(t *testing.T) {
+	t.Setenv("NRVQ_ALLOW_POD_OPT_OUT", "false")
+	h := NewHandler(LoadConfig())
+	labels := map[string]string{"norviq": "enabled", "norviq.io/agent-class": "sales"}
+	resp := sendReview(t, h, createReviewWithAnnotations(labels, map[string]string{"norviq.io/skip-injection": "true"}, nil, "default"))
+	if !resp.Response.Allowed || resp.Response.Patch == nil {
+		t.Fatal("with allowPodOptOut=false, skip-injection annotation must be ignored and the pod injected (patch expected)")
+	}
+}
+
+func TestMutate_OptOutIgnoredWhenDisabled_Label(t *testing.T) {
+	t.Setenv("NRVQ_ALLOW_POD_OPT_OUT", "false")
+	h := NewHandler(LoadConfig())
+	labels := map[string]string{"norviq-injection": "disabled", "norviq.io/agent-class": "sales"}
+	resp := sendReview(t, h, createReviewWithAnnotations(labels, nil, nil, "default"))
+	if !resp.Response.Allowed || resp.Response.Patch == nil {
+		t.Fatal("with allowPodOptOut=false, norviq-injection=disabled must be ignored and the pod injected (patch expected)")
+	}
+}
+
 func TestMutate_SystemNamespace(t *testing.T) {
 	h := NewHandler(LoadConfig())
 	labels := map[string]string{"norviq": "enabled", "norviq.io/agent-class": "sales"}

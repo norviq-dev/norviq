@@ -4,7 +4,6 @@ namespace: norviq
 # namespaces you want protected — each must already exist. Empty by default so a fresh install never
 # fails on a namespace that hasn't been created yet. Example: [prod-agents, analytics].
 policyQuotaNamespaces: []
-validatingAdmissionPolicyEnabled: true
 baselineClusterPolicy:
   enabled: true
   name: baseline-cluster-guard
@@ -130,8 +129,6 @@ ui:
 
 webhook:
   enabled: true
-  validating:
-    enabled: false
   # Turnkey sidecar injection: render the MutatingWebhookConfiguration from the chart and
   # auto-bootstrap TLS via a pre/post-install hook Job (self-signs a cert, writes the
   # norviq-webhook-tls secret, patches the webhook caBundle). No cert-manager required.
@@ -151,6 +148,11 @@ webhook:
     # deadlocks). Set "Ignore" (fail-open) only for a dev/eval cluster where an un-injected pod is
     # acceptable.
     failurePolicy: Fail
+    # P3: honor the per-pod injection opt-out (norviq-injection=disabled label / norviq.io/skip-injection
+    # annotation)? Default true (backward-compatible). Set false to make injection namespace-uniform — a
+    # pod author in an injection-enabled namespace can no longer self-exempt their workload from
+    # enforcement (a real bypass otherwise). Pair with RBAC on pod label/annotation writes.
+    allowPodOptOut: true
     # Image with kubectl + openssl for the cert-bootstrap hook Job. alpine/k8s ships both and is
     # publicly pullable (bitnami/kubectl tags were removed from Docker Hub in the 2025 Bitnami change).
     certJobImage: "alpine/k8s:1.30.0"
@@ -292,9 +294,19 @@ config:
   dbPoolMaxOverflow: 10
   dbPoolTimeout: 10
   dbCommandTimeout: 10
-  # Part B — Policy-Catalog draft + version retention (keeps the store + UI bounded). NONE of these ever
-  # touch an enforcing policy or the current-enforcing version — retention is decoupled from enforcement.
+  # Data retention (keeps the store + UI bounded). NONE of these ever touch an enforcing policy or the
+  # current-enforcing version — retention is decoupled from enforcement, and enforcing policies never
+  # expire. One hourly background pruner applies every window; 0 (or negative) on any window disables
+  # that window (keep forever).
   retention:
+    # Audit log — 30d default: the console never displays a window longer than 30d, so anything older
+    # serves only external compliance horizons. SOC2/ISO users: raise to 90-365; use the audit-evidence
+    # export packs for durable long-term evidence.
+    auditRetentionDays: 30
+    coverageSnapshotRetentionDays: 30   # compliance trend points + export events (covers the 30d trend view)
+    graphSnapshotKeepPerNamespace: 10   # asset-graph snapshots: keep newest N per namespace (readers use only the newest)
+    agentRegistryRetentionDays: 90      # remove agent identities unseen for N days (0 = keep forever)
+    apiKeyDefaultTtlDays: 90            # NEW API keys default to N-day expiry (per-key override at creation; 0 = never)
     draftTtlDays: 14           # real intent drafts auto-expire after N days
     draftTtlTestHours: 24      # test/e2e (synthetic-class) drafts expire fast
     draftCapPerNamespace: 50   # hard ceiling of real drafts per namespace (evict oldest beyond it)

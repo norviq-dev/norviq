@@ -53,4 +53,3 @@ Production reminder:
   A baseline high-priority policy is installed by default (values.baselineClusterPolicy.*); keep it enabled to preserve fail-closed posture.
   Bind ClusterRoles to your tenant/admin groups (this chart ships roles but not subject-specific bindings).
   Policies with permissive preset and/or enforcementMode=audit provide visibility only and do not enforce blocks.
-  ValidatingAdmissionPolicy requires Kubernetes 1.30+; disable with values.validatingAdmissionPolicyEnabled=false on older clusters.

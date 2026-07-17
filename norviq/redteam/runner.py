@@ -15,6 +15,15 @@ from norviq.redteam.reporter import RedTeamReporter
 from norviq.redteam.simulator import AttackSimulator
 
 log = structlog.get_logger()
+# Keep the fallback host aligned with the shared CLI group (norviq/cli/main.py).
+DEFAULT_API_URL = "http://127.0.0.1:8080"
+
+
+def _shared(ctx: click.Context, key: str, override: str | None, default: str) -> str:
+    """Prefer a per-command flag; else the shared CLI group context (ctx.obj); else the default."""
+    if override:
+        return override
+    return (ctx.obj or {}).get(key) or default
 
 
 @click.group()
@@ -23,14 +32,17 @@ def redteam() -> None:
 
 
 @redteam.command()
-@click.option("--api-url", envvar="NRVQ_API_URL", default="http://localhost:8080")
-@click.option("--token", envvar="NRVQ_API_TOKEN", default="")
+@click.option("--api-url", default=None)
+@click.option("--token", default=None)
 @click.option("--agent", default="test-agent")
 @click.option("--namespace", default="default")
 @click.option("--category", default=None)
 @click.option("--output", "-o", type=click.Choice(["table", "json", "markdown"]), default="table")
-def run(api_url: str, token: str, agent: str, namespace: str, category: str | None, output: str) -> None:
+@click.pass_context
+def run(ctx: click.Context, api_url: str | None, token: str | None, agent: str, namespace: str, category: str | None, output: str) -> None:
     """Run full suite or one category."""
+    api_url = _shared(ctx, "api_url", api_url, DEFAULT_API_URL)
+    token = _shared(ctx, "token", token, "")
     asyncio.run(_run_suite(api_url, token, agent, namespace, category, output))
 
 
@@ -58,11 +70,14 @@ def _render_table(report) -> None:
 
 
 @redteam.command()
-@click.option("--api-url", envvar="NRVQ_API_URL", default="http://localhost:8080")
-@click.option("--token", envvar="NRVQ_API_TOKEN", default="")
+@click.option("--api-url", default=None)
+@click.option("--token", default=None)
 @click.argument("attack_id")
-def single(api_url: str, token: str, attack_id: str) -> None:
+@click.pass_context
+def single(ctx: click.Context, api_url: str | None, token: str | None, attack_id: str) -> None:
     """Run one attack by ID."""
+    api_url = _shared(ctx, "api_url", api_url, DEFAULT_API_URL)
+    token = _shared(ctx, "token", token, "")
     asyncio.run(_run_single(api_url, token, attack_id))
 
 

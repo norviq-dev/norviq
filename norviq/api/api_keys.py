@@ -74,6 +74,14 @@ async def authenticate_api_key(raw: str, session_factory=get_session, cache=None
         if row is None or not hmac.compare_digest(row.key_hash, digest):
             await _record_authfail(cache, prefix)
             return None
+        # RETENTION: an expired key is rejected exactly like a revoked one (fail closed). NULL
+        # expires_at = never expires (keys issued before expiry shipped keep working).
+        expires_at = getattr(row, "expires_at", None)
+        if expires_at is not None and expires_at <= datetime.now(timezone.utc):
+            log.info("nrvq.api.apikey.expired", prefix=row.prefix, expired_at=expires_at.isoformat(),
+                     code="NRVQ-API-7122")
+            await _record_authfail(cache, prefix)
+            return None
         row.last_used_at = datetime.now(timezone.utc)
         await session.commit()
         log.info("nrvq.api.apikey.authenticated", prefix=row.prefix, code="NRVQ-API-7090")

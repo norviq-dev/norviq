@@ -348,7 +348,7 @@ export function Compliance() {
         return;
       }
       if (res.status === "escalate") {
-        showToast(res.message ?? "This control needs a bespoke rule — escalate to San.");
+        showToast(res.message ?? "This control can't be auto-generated — the risk doesn't show up in tool-call traffic, so it needs a manual (configuration/process) control.");
         return;
       }
       setDrafted((d) => ({ ...d, [t.technique_id]: true }));
@@ -953,9 +953,10 @@ function DetailView(props: {
   }
   const treeEmpty = groups.every((g) => g.techs.length === 0);
 
-  // COMP-GEN-01 multi-select: only GAP techniques are generatable; the real (non-synthetic) affected classes
-  // across the visible techniques populate the "specific class" options in the class-scope picker.
-  const gapIdSet = new Set(gapList.map((t) => t.technique_id));
+  // COMP-GEN-01 multi-select: only GENERATABLE gap techniques are selectable (a bespoke gap escalates on
+  // generate → never gets a checkbox). The real (non-synthetic) affected classes across the visible techniques
+  // populate the "specific class" options in the class-scope picker.
+  const gapIdSet = new Set(gapList.filter((t) => t.generatable).map((t) => t.technique_id));
   const selectedGapIds = [...selectedGaps].filter((id) => gapIdSet.has(id));
   const realClassOptions = [...new Set(
     techniques.flatMap((t) => (t.affected_classes ?? []).map((c) => c.class)).filter(Boolean)
@@ -1102,7 +1103,7 @@ function DetailView(props: {
           <div style={{ fontSize: 10.5, color: FAINT, textAlign: "right" }}>
             {data?.last_exported ? `Last exported ${data.last_exported}` : "Not exported yet"}
           </div>
-          {/* COMP-EVIDENCE (San decision b): the pack is real-traffic only — state how many synthetic/
+          {/* COMP-EVIDENCE (product decision): the pack is real-traffic only — state how many synthetic/
               simulated + red-team events were excluded, so it can't be read as understating enforcement. */}
           {!!data?.synthetic_excluded && data.synthetic_excluded > 0 && (
             <div data-testid="evidence-synthetic-excluded" style={{ fontSize: 10.5, color: FAINT, textAlign: "right", maxWidth: 220 }}>
@@ -1163,8 +1164,9 @@ function DetailView(props: {
                         onClick={() => setSelectedId(t.technique_id)}
                         style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 16px", fontSize: 13, color: "#ededf0", cursor: "pointer", background: on ? "#132320" : "transparent", boxShadow: on ? "inset 3px 0 0 #2ddab8" : "none" }}
                       >
-                        {/* COMP-GEN-01 multi-select: only GAP controls are generatable → only they get a checkbox. */}
-                        {isGap ? (
+                        {/* COMP-GEN-01: only GENERATABLE gaps get a checkbox. A bespoke gap (no runtime rule)
+                            would only escalate, so it is shown but not selectable for auto-generation. */}
+                        {isGap && t.generatable ? (
                           <input
                             type="checkbox"
                             aria-label={`Select ${t.name} for remediation`}
@@ -1182,6 +1184,14 @@ function DetailView(props: {
                         {t.status === "gap" && t.priority && (
                           <span style={{ flex: "none", fontSize: 8.5, fontWeight: 800, letterSpacing: "0.04em", color: prioColor(t.priority), border: `1px solid ${prioColor(t.priority)}`, borderRadius: 4, padding: "1px 5px" }}>
                             {t.priority === "high" ? "HIGH" : t.priority === "medium" ? "MED" : "LOW"}
+                          </span>
+                        )}
+                        {isGap && !t.generatable && (
+                          <span
+                            title="No runtime-detectable signal — enforce this via configuration or process, not a tool-call policy. It can't be auto-generated."
+                            style={{ flex: "none", fontSize: 8.5, fontWeight: 800, letterSpacing: "0.04em", color: "var(--escalate)", border: "1px solid var(--escalate)", borderRadius: 4, padding: "1px 5px" }}
+                          >
+                            BESPOKE
                           </span>
                         )}
                       </div>
@@ -1261,7 +1271,7 @@ function DetailView(props: {
                     {r.technique_id}
                     {r.control_name ? ` · ${r.control_name}` : ""}
                     <span style={{ marginLeft: 8, fontSize: 10.5, fontWeight: 700, color: r.status === "error" ? "var(--block)" : "var(--escalate)" }}>
-                      {r.status === "escalate" ? "NEEDS BESPOKE RULE" : r.status === "no_affected_classes" ? "NO AFFECTED CLASS" : "FAILED"}
+                      {r.status === "escalate" ? "NEEDS MANUAL CONTROL" : r.status === "no_affected_classes" ? "NO AFFECTED CLASS" : "FAILED"}
                     </span>
                   </div>
                   {r.message && (
@@ -1411,32 +1421,43 @@ function TechniqueDetail({
               <div style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: "0.05em", textTransform: "uppercase", color: FAINT, margin: "18px 0 9px" }}>
                 Remediation
               </div>
-              <button
-                type="button"
-                onClick={() => !drafted && onGenerate(t)}
-                disabled={drafted}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 8,
-                  height: 36,
-                  padding: "0 15px",
-                  border: drafted ? "1px solid #1f4635" : "1px solid transparent",
-                  borderRadius: 9,
-                  background: drafted ? "transparent" : "linear-gradient(180deg, #5ae8cc, #2ddab8)",
-                  color: drafted ? "#6ee7b7" : "#04211d",
-                  fontFamily: "inherit",
-                  fontSize: 13,
-                  fontWeight: 700,
-                  cursor: drafted ? "default" : "pointer"
-                }}
-              >
-                {drafted ? "✓ Draft created · pending in Policies" : "Generate enforcing policy"}
-              </button>
-              <div style={{ fontSize: 11.5, color: MUTED, marginTop: 9, lineHeight: 1.5 }}>
-                Creates a <b style={{ color: "#d6d6da" }}>tighten-only dry-run draft</b> in Policies that denies this
-                control for the affected agent classes — review &amp; apply from Policies.
-              </div>
+              {t.generatable ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => !drafted && onGenerate(t)}
+                    disabled={drafted}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 8,
+                      height: 36,
+                      padding: "0 15px",
+                      border: drafted ? "1px solid #1f4635" : "1px solid transparent",
+                      borderRadius: 9,
+                      background: drafted ? "transparent" : "linear-gradient(180deg, #5ae8cc, #2ddab8)",
+                      color: drafted ? "#6ee7b7" : "#04211d",
+                      fontFamily: "inherit",
+                      fontSize: 13,
+                      fontWeight: 700,
+                      cursor: drafted ? "default" : "pointer"
+                    }}
+                  >
+                    {drafted ? "✓ Draft created · pending in Policies" : "Generate enforcing policy"}
+                  </button>
+                  <div style={{ fontSize: 11.5, color: MUTED, marginTop: 9, lineHeight: 1.5 }}>
+                    Creates a <b style={{ color: "#d6d6da" }}>tighten-only dry-run draft</b> in Policies that denies this
+                    control for the affected agent classes — review &amp; apply from Policies.
+                  </div>
+                </>
+              ) : (
+                <div style={{ padding: "12px 14px", background: "#1a1712", border: "1px solid #3a2f1a", borderRadius: 9, fontSize: 12.5, color: "var(--escalate)", lineHeight: 1.55 }}>
+                  <b>Needs a manual control.</b> This risk doesn&apos;t show up in agent tool-call traffic, so no
+                  runtime policy can detect or block it — there is nothing for a generated rule to match. Address
+                  it in configuration or process (secret management, access reviews, prompt hardening), and track
+                  it outside runtime enforcement.
+                </div>
+              )}
             </>
           )}
         </>

@@ -94,6 +94,29 @@ def _effective(row: NamespaceSettings | None) -> dict:
     }
 
 
+@router.get("/settings/retention")
+async def get_retention_settings(user: dict = Depends(get_current_user)) -> dict:
+    """RETENTION: the cluster's effective data-retention windows, read-only (adjust via Helm/env — a
+    UI write here could silently shorten audit evidence, so mutation stays operator-only). Non-secret
+    config values; any authenticated user may read them. Drives the Settings page's retention card."""
+    return {
+        "audit_retention_days": int(app_settings.audit_retention_days),
+        "coverage_snapshot_retention_days": int(app_settings.coverage_snapshot_retention_days),
+        "graph_snapshot_keep_per_namespace": int(app_settings.graph_snapshot_keep_per_namespace),
+        "agent_registry_retention_days": int(app_settings.agent_registry_retention_days),
+        "api_key_default_ttl_days": int(app_settings.api_key_default_ttl_days),
+        "draft_ttl_days": int(app_settings.draft_ttl_days),
+        "draft_ttl_test_hours": int(app_settings.draft_ttl_test_hours),
+        "draft_cap_per_namespace": int(app_settings.draft_cap_per_namespace),
+        "policy_version_keep_count": int(app_settings.policy_version_keep_count),
+        "policy_version_keep_days": int(app_settings.policy_version_keep_days),
+        "redteam_detail_keep_runs": int(app_settings.redteam_detail_keep_runs),
+        "redteam_detail_keep_days": int(app_settings.redteam_detail_keep_days),
+        "redteam_summary_keep_runs": int(app_settings.redteam_summary_keep_runs),
+        "redteam_summary_keep_days": int(app_settings.redteam_summary_keep_days),
+    }
+
+
 @router.get("/settings")
 async def get_settings(
     namespace: str = Query("default"),

@@ -13,6 +13,8 @@ export function APIKeys() {
   const keys = useApi(() => fetchApiKeys(), []);
   const [name, setName] = useState("");
   const [role, setRole] = useState<(typeof ROLES)[number]>("viewer");
+  // Optional expiry override; "" = untouched → OMIT expires_in_days so the server default TTL applies.
+  const [expiresIn, setExpiresIn] = useState("");
   const [created, setCreated] = useState<{ prefix: string; key: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -22,9 +24,17 @@ export function APIKeys() {
     setBusy(true);
     setError(null);
     try {
-      const k = await createApiKey({ name: name.trim(), namespace, role });
+      const expiresTyped = expiresIn.trim();
+      const k = await createApiKey({
+        name: name.trim(),
+        namespace,
+        role,
+        // Only send the field when the user typed a valid number — otherwise the server default applies.
+        ...(expiresTyped !== "" && Number.isFinite(Number(expiresTyped)) ? { expires_in_days: Number(expiresTyped) } : {})
+      });
       setCreated({ prefix: k.prefix, key: k.key });
       setName("");
+      setExpiresIn("");
       keys.refetch();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not create key");
@@ -64,6 +74,17 @@ export function APIKeys() {
               </option>
             ))}
           </select>
+          <input
+            className="input mono"
+            type="number"
+            min={0}
+            value={expiresIn}
+            onChange={(e) => setExpiresIn(e.target.value)}
+            placeholder="default 90 (0 = never)"
+            title="Expires in (days)"
+            aria-label="Expires in (days)"
+            style={{ width: 170 }}
+          />
           <KitButton variant="outline" size="sm" onClick={onCreate} disabled={busy || !name.trim()}>
             {busy ? "Creating…" : "Create key"}
           </KitButton>
@@ -99,6 +120,7 @@ export function APIKeys() {
                 <th>Role</th>
                 <th>Namespace</th>
                 <th>Last used</th>
+                <th>Expires</th>
                 <th>Status</th>
                 <th />
               </tr>
@@ -111,6 +133,29 @@ export function APIKeys() {
                   <td className="mono">{k.role}</td>
                   <td className="mono muted">{k.namespace}</td>
                   <td className="mono muted">{k.last_used_at ? new Date(k.last_used_at).toLocaleString() : "never"}</td>
+                  <td className="mono muted">
+                    {/* expires_at may be absent while the backend rollout is in flight — render defensively. */}
+                    {k.expires_at ? (
+                      new Date(k.expires_at).getTime() < Date.now() ? (
+                        <span
+                          style={{
+                            color: "var(--block)",
+                            border: "1px solid var(--block)",
+                            borderRadius: 4,
+                            padding: "1px 6px",
+                            fontSize: 11,
+                            fontWeight: 700
+                          }}
+                        >
+                          EXPIRED
+                        </span>
+                      ) : (
+                        `expires ${new Date(k.expires_at).toLocaleDateString()}`
+                      )
+                    ) : (
+                      "—"
+                    )}
+                  </td>
                   <td style={{ color: k.revoked ? "var(--block)" : "#00e5a0" }}>{k.revoked ? "Revoked" : "Active"}</td>
                   <td>
                     {!k.revoked && (

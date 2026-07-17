@@ -1617,6 +1617,18 @@ export function PolicyCatalog() {
     );
   };
 
+  // MUT-1 (tab close): confirmDiscardIfDirty only guards in-app switches — closing/reloading the tab with
+  // unsaved edits would still lose them silently. Registered only while the buffer is dirty; removed on save/unmount.
+  useEffect(() => {
+    if (editorStatus !== "unsaved") return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [editorStatus]);
+
   // B-1: the ns/class/mode the editor is authoring against — the new-policy scope when creating, else the loaded
   // policy. saveEditorPolicy + runDryRun both read this so create and edit share one code path.
   const editorTarget = newPolicy

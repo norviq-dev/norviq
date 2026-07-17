@@ -300,6 +300,38 @@ async def update_trust(
     return {"spiffe_id": spiffe_id, "score": trust.score, "category": trust.category.lower()}
 
 
+@router.delete("/agents/{spiffe_id:path}")
+async def deregister_agent(
+    spiffe_id: str, request: Request, user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """RETENTION: admin removal of a decommissioned agent identity from the registry (previously there
+    was NO delete path — stale agents were listed forever and surfaced as phantom 'awaiting' nodes on
+    the asset graph; the background pruner ages them out after agent_registry_retention_days, this is
+    the immediate manual path). Registry + trust-cache only — never touches policies or audit history;
+    a live agent that calls again is simply re-registered on its next evaluated call."""
+    require_admin(user)
+    from norviq.api.db.models import AgentRegistryEntry
+
+    row = (
+        await session.execute(select(AgentRegistryEntry).where(AgentRegistryEntry.spiffe_id == spiffe_id))
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Agent not found in registry")
+    await session.delete(row)
+    await session.commit()
+    # Best-effort: drop the live trust/freeze cache entries so a deleted identity doesn't linger there.
+    try:
+        cache = request.app.state.cache
+        await cache._client().delete(f"agent_frozen:{spiffe_id}")
+        await cache.clear_trust_override(spiffe_id)
+    except Exception:  # noqa: BLE001 - cache cleanup is cosmetic; the registry row is already gone
+        pass
+    log.info("nrvq.api.agent.deregistered", spiffe_id=spiffe_id, actor=user.get("sub"),
+             actor_role=user.get("role"), code="NRVQ-API-7121")
+    return {"deleted": True, "spiffe_id": spiffe_id}
+
+
 async def _trust_details(request: Request, spiffe_id: str, factors: dict) -> dict:
     """Return latest trust signal breakdown for one agent."""
     raw = await request.app.state.cache._client().get(f"trustcalc:{spiffe_id}")

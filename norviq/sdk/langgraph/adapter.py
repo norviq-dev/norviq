@@ -9,6 +9,7 @@ import structlog
 
 from norviq.exceptions import NorviqBlockError, NorviqEscalateError
 from norviq.sdk.core.interceptor import ToolInterceptor
+from norviq.sdk.core.wrapping import _output_dlp
 
 log = structlog.get_logger()
 
@@ -27,6 +28,29 @@ def _tool_call_field(tool_call: Any, key: str, default: Any) -> Any:
     if isinstance(tool_call, dict):
         return tool_call.get(key, default)
     return getattr(tool_call, key, default)
+
+
+def _apply_output_dlp(result: Any) -> None:
+    """Best-effort output DLP on each executed tool's ToolMessage; enforcement above already ran.
+
+    F-22 (opt-in, default OFF): redact PAN/SSN in an allowed tool's string return before it
+    propagates. ToolNode returns ``{"messages": [ToolMessage, ...]}`` (or a bare list), each
+    ToolMessage carrying the tool's string result in ``.content``; masked in place to mirror the
+    other adapters. Disabled → exact passthrough (no hot-path or behavior change).
+    """
+    try:
+        messages = result.get("messages") if isinstance(result, dict) else result
+        if not isinstance(messages, list):
+            return
+        for msg in messages:
+            content = getattr(msg, "content", None)
+            if not isinstance(content, str):
+                continue
+            masked = _output_dlp(str(_tool_call_field(msg, "name", "") or "unknown"), content)
+            if masked != content:
+                msg.content = masked
+    except Exception as exc:  # noqa: BLE001 - DLP is best-effort, must not affect the result
+        log.warning("nrvq.langgraph.output_dlp_failed", error=str(exc), code="NRVQ-SDK-1043")
 
 
 class GuardedToolNode:
@@ -60,5 +84,6 @@ class GuardedToolNode:
                 raise
             log.debug("nrvq.langgraph.allowed", tool=name, code="NRVQ-SDK-1041")
         result = await self._node.ainvoke(state)
+        _apply_output_dlp(result)
         log.info("nrvq.langgraph.executed", tool_count=len(calls), code="NRVQ-SDK-1042")
         return result

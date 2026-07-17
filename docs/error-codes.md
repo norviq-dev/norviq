@@ -78,6 +78,10 @@ Total documented unique codes: **217**
 | NRVQ-API-7062 | `nrvq.api.policy.managed_scope_reverted` (POLICY-RESERVED-01: admin confirm-deleted an operator-authored `__baseline__`/`__guardrail__`) | `norviq/api/routers/policies.py` |
 | NRVQ-API-7063 | `nrvq.api.settings.warmed` / `settings.mirror_failed` (CFG-SETTINGS-INERT-01: per-ns posture mirror warm/write) | `norviq/api/routers/settings_router.py` |
 | NRVQ-API-7115 | `nrvq.api.search.served` (P2-2: scoped ⌘K search across tools/agents/policies) | `norviq/api/routers/search.py` |
+| NRVQ-API-7121 | `nrvq.api.agent.deregistered` (RETENTION: admin removed a decommissioned agent identity from the registry) | `norviq/api/routers/agents.py` |
+| NRVQ-API-7122 | `nrvq.api.apikey.expired` (RETENTION: an expired API key was presented — rejected like a revoked one) | `norviq/api/api_keys.py` |
+| NRVQ-API-7123 | `nrvq.api.policy.remediation_accumulated` (COMP-GEN-02: applying a compliance control UNIONED into the class's remediation overlay) | `norviq/api/routers/policies.py` |
+| NRVQ-API-7124 | `nrvq.api.policy.remediation_control_reverted` (COMP-GEN-02: one control removed from the accumulated overlay; remaining controls re-materialized) | `norviq/api/routers/policies.py` |
 
 ## AUTH
 
@@ -195,6 +199,7 @@ Multi-cluster fleet (F045). Spoke relay + hub fleet-api. Distinct prefix from `N
 | REG | NRVQ-REG-5000..5008, 5010..5021 | `norviq/engine/policy_loader.py` |
 | GRP | NRVQ-GRP-11000,11001,11010..11016 | `norviq/engine/graph/*`, `norviq/engine/evaluator.py` |
 | AUD | NRVQ-AUD-6000..6007 | `norviq/engine/audit_emitter.py`, `norviq/engine/evaluator.py` |
+| AUD (retention) | NRVQ-AUD-6009 (`nrvq.retention.started`), 6010 (`nrvq.retention.pruned`), 6012 (`nrvq.retention.prune_failed`), 6013 (`nrvq.retention.step_failed` — one table's prune isolated-failed) | `norviq/api/audit_retention.py` (unified background retention pruner) |
 | RED | NRVQ-RED-13000..13006 | `norviq/redteam/*`, `norviq/api/routers/redteam.py` |
 | SDC | NRVQ-SDC-3000..3005,3010,3011,3020..3023 | `norviq/sidecar/*` |
 | TEL | NRVQ-TEL-12000..12007 | `norviq/telemetry/*` |

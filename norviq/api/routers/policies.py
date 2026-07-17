@@ -17,6 +17,8 @@ from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
 from norviq.api.routers.settings_router import assert_apply_allowed  # F-51: shared dry-run-only gate
 from norviq.api.synthetic import is_synthetic_identity  # M3: exclude probe/test traffic from dry-run replay
+from norviq.api.threat_intent import (  # COMP-GEN-02: accumulate remediation controls in the single overlay
+    generate_remediation_overlay_rego, parse_remediation_controls, union_remediation_controls)
 from norviq.config import settings
 
 log = structlog.get_logger()
@@ -106,6 +108,41 @@ def _reserved_scope_delete_error(namespace: str, agent_class: str) -> HTTPExcept
 #     JWT also carries no `namespace` claim at all (only `cluster`), so if it ever DID reach this guard it
 #     would fail-closed here rather than fail-open.
 _TRUSTED_CROSS_NS_SUBS: frozenset[str] = frozenset({"norviq-webhook"})
+
+
+# SECURITY (P1): the NrvqPolicy CRD caps a namespace policy's priority at 0-499 and reserves the
+# clusterPriority band (500-1000) for admin-authored control-plane policies, but the generic
+# POST /api/v1/policies never enforced that split — a namespace-scoped service-role API key (which passes
+# require_admin_or_service and is floored to its own namespace, but is NOT an admin) could POST priority=800
+# (200 OK) and shadow control-plane policy for its own namespace via the engine's highest-priority-wins
+# precedence. Bound the band on the API too so the DB/OPA layer matches the CRD contract.
+_CLUSTER_PRIORITY_FLOOR = 500  # first priority in the admin-only clusterPriority band (mirrors the CRD schema)
+
+
+def _may_set_cluster_priority(user: dict) -> bool:
+    """Whether a caller may write in the admin clusterPriority band (>= _CLUSTER_PRIORITY_FLOOR). Only a human
+    admin, or the control-plane webhook controller — the one sub trusted to sync admin-authored clusterPriority
+    CRDs (see _TRUSTED_CROSS_NS_SUBS) — qualifies. Every other principal, including a namespace-scoped
+    service-role API key, is floored to the namespace band. Mirrors the _enforce_apikey_write_scope trust model
+    so a scoped key cannot escalate priority any more than it can cross a namespace."""
+    if str(user.get("role", "")).lower() == "admin":
+        return True
+    return str(user.get("sub") or "") in _TRUSTED_CROSS_NS_SUBS
+
+
+def _enforce_priority_band(user: dict, priority: int) -> None:
+    """SECURITY (P1): reject (422) a non-admin/non-control-plane write into the admin clusterPriority band so a
+    namespace-scoped token cannot set priority >= _CLUSTER_PRIORITY_FLOOR and shadow control-plane policy. The
+    legitimate namespace band (0-499) and the admin/controller cluster band are preserved. Rejected, not
+    silently clamped, so the caller learns the write was refused (parity with the reserved-scope guards)."""
+    if not _may_set_cluster_priority(user) and not (0 <= priority < _CLUSTER_PRIORITY_FLOOR):
+        log.warning("nrvq.api.policy.priority_band_denied", priority=priority, actor=user.get("sub"),
+                    actor_role=user.get("role"), code="NRVQ-API-7020")
+        raise HTTPException(
+            status_code=422,
+            detail=f"priority {priority} is outside the namespace band (0-{_CLUSTER_PRIORITY_FLOOR - 1}); the "
+                   f"clusterPriority band ({_CLUSTER_PRIORITY_FLOOR}-1000) is reserved for cluster administrators.",
+        )
 
 
 def _enforce_apikey_write_scope(user: dict, namespace: str) -> None:
@@ -320,6 +357,7 @@ async def create_policy(body: PolicyCreate, request: Request, user: dict = Depen
     """Create or update a policy (admin, or the webhook controller's service identity)."""
     require_admin_or_service(user)
     _enforce_apikey_write_scope(user, body.namespace)  # a scoped API key may not write another namespace
+    _enforce_priority_band(user, body.priority)  # P1: a scoped/non-admin caller may not set the admin clusterPriority band
     # H4: create loads straight into the read path (it ENFORCES on the next call), so a dry-run-only
     # namespace must reject it exactly like /apply does — else "Save" is a full apply the namespace claims
     # to forbid. (Dry-run + non-enforcing intent drafts stay allowed; they never touch this loader path.)
@@ -374,6 +412,27 @@ async def create_policy(body: PolicyCreate, request: Request, user: dict = Depen
                 detail=f"namespace '{body.namespace}' already has {existing_count} policy scopes (max {cap}) — "
                        "delete an unused scope before creating a new one.",
             )
+    # COMP-GEN-02 (accumulate): the single "<class>__remediation__" overlay must hold the UNION of EVERY
+    # applied compliance control, not just the last one. Apply is a full-replace UPSERT, so without this a
+    # second applied control silently ERASED the first (false-coverage bug: the dashboard flipped the new
+    # control to "enforced" while quietly reverting the previous one to "gap"). If the incoming rego is a
+    # recognized compliance-remediation overlay (carries the COMP-GEN-02 manifest), merge its controls with
+    # whatever the overlay already holds and re-materialize ONE combined rego. Any other rego (a manual
+    # __guardrail__ load, a capability policy, arbitrary operator rego) does not parse to controls and is
+    # left byte-identical — so this narrows strictly to the compliance-remediation flow.
+    if _is_remediation_overlay_class(agent_class):
+        incoming_controls = parse_remediation_controls(body.rego_source)
+        if incoming_controls:
+            existing_pol = getattr(loader, "_policies", {}).get(f"{body.namespace}:{agent_class}")
+            existing_rego = str(existing_pol.get("rego", "") or "") if isinstance(existing_pol, dict) else ""
+            base_class = agent_class[: -len(_REMEDIATION_OVERLAY_SUFFIX)]
+            merged = union_remediation_controls(parse_remediation_controls(existing_rego), incoming_controls)
+            combined = generate_remediation_overlay_rego(base_class, merged)
+            validate_rego_source(combined, body.enforcement_mode)  # the merged rego re-clears the write gate
+            body = body.model_copy(update={"rego_source": combined})
+            log.info("nrvq.api.policy.remediation_accumulated", namespace=body.namespace, agent_class=agent_class,
+                     controls=[c["control_id"] for c in merged], added=[c["control_id"] for c in incoming_controls],
+                     actor=user.get("sub"), code="NRVQ-API-7123")
     version = await loader.create(
         body.namespace,
         agent_class,
@@ -583,7 +642,7 @@ def resolve_policy_key(body: PolicyCreate) -> str:
 @router.delete("/policies/{namespace}/{agent_class}")
 async def delete_policy(
     namespace: str, agent_class: str, request: Request, user: dict = Depends(get_current_user),
-    confirm_managed: bool = Query(False),
+    confirm_managed: bool = Query(False), control_id: str | None = Query(None),
 ) -> dict:
     """Delete a policy from every layer (admin, or the webhook controller's service identity).
 
@@ -621,6 +680,27 @@ async def delete_policy(
                         actor=user.get("sub"), actor_role=user.get("role"), code="NRVQ-API-7017")
             raise HTTPException(status_code=reserved.status_code, detail=reserved.detail + hint) if hint else reserved
     loader = request.app.state.loader
+    # COMP-GEN-02: per-control revert — `?control_id=<id>` removes ONE compliance control from the accumulated
+    # overlay (re-materializing the union MINUS it) instead of deleting the whole overlay. Same admin +
+    # confirm_managed gate as a full overlay delete (already enforced above). If it was the last control, fall
+    # through to the normal full delete of the overlay key.
+    if control_id and _is_remediation_overlay_class(agent_class):
+        existing_pol = getattr(loader, "_policies", {}).get(f"{namespace}:{agent_class}")
+        existing_rego = str(existing_pol.get("rego", "") or "") if isinstance(existing_pol, dict) else ""
+        remaining = [c for c in parse_remediation_controls(existing_rego) if c["control_id"] != control_id]
+        if remaining:
+            base_class = agent_class[: -len(_REMEDIATION_OVERLAY_SUFFIX)]
+            priority = int(existing_pol.get("priority", 1)) if isinstance(existing_pol, dict) else 1
+            new_version = await loader.create(namespace, agent_class,
+                                              generate_remediation_overlay_rego(base_class, remaining),
+                                              saved_by=str(user.get("sub") or ""), priority=priority,
+                                              enforcement_mode="block")
+            log.info("nrvq.api.policy.remediation_control_reverted", namespace=namespace, agent_class=agent_class,
+                     removed=control_id, remaining=[c["control_id"] for c in remaining], actor=user.get("sub"),
+                     actor_role=user.get("role"), code="NRVQ-API-7124")
+            return {"deleted": True, "namespace": namespace, "agent_class": agent_class,
+                    "removed_control": control_id, "remaining_controls": [c["control_id"] for c in remaining],
+                    "version": new_version}
     # Capture the version being removed BEFORE the delete (get_versions is empty after) so the audit record names
     # exactly which version was destroyed.
     versions = loader.get_versions(namespace, agent_class)
@@ -641,8 +721,9 @@ async def get_versions(
     """Return policy version history, including each version's rego so the console can INSPECT a
     historical version read-only before restoring it (the rego already lives on the loader's
     PolicyVersion; it was previously dropped, which made the console's 'Load in Editor' show the
-    current policy for every row — a lie). Bounded by policy_max_versions (default 10), so returning
-    the source per row is cheap."""
+    current policy for every row — a lie). Bounded by the loader's in-memory cap (_MAX_VERSIONS = 10
+    newest per scope; the DB retains more per policy_version_keep_count/keep_days = 20/90d), so
+    returning the source per row is cheap."""
     scoped_namespace(user, namespace)  # 403 if a non-admin reads another namespace's versions
     versions = request.app.state.loader.get_versions(namespace, agent_class)
     return [

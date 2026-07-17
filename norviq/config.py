@@ -147,12 +147,30 @@ class NorviqSettings(BaseSettings):
     db_command_timeout: int = 5
     # Recycle pooled DB connections older than this (bounds staleness; pairs with pool_pre_ping).
     db_pool_recycle_s: int = 300
-    audit_retention_days: int = 365
-    # HIGH-2a: how often the background pruning task sweeps audit_log for rows older than
-    # audit_retention_days (started/cancelled from the API lifespan). <=0 on audit_retention_days
-    # disables pruning entirely (keep forever); the interval itself has no disable switch — it just
-    # finds nothing to delete once the table is already within the window.
+    # RETENTION: 30-day default — the console never displays a window longer than 30d (time ranges cap
+    # at 30d), so anything older serves only external compliance horizons. Compliance/SOC2/ISO users
+    # raise this to 90-365 via Helm (auditRetentionDays); the audit-evidence export packs are the
+    # supported path for durable long-term evidence. <=0 disables pruning (keep forever).
+    audit_retention_days: int = 30
+    # HIGH-2a: how often the background retention pruner sweeps ALL retention-managed tables
+    # (audit_log, coverage snapshots, expired drafts, agent registry, asset-graph snapshots) — started/
+    # cancelled from the API lifespan. Each table has its own <=0 disable switch; the interval itself
+    # has no disable — a sweep just finds nothing to delete once a table is within its window.
     audit_retention_prune_interval_s: int = 3600
+    # Compliance coverage trend snapshots + evidence-export events: 30d exactly covers the UI's 30d
+    # trend view; raise alongside audit_retention_days for longer compliance horizons. <=0 keeps forever.
+    coverage_snapshot_retention_days: int = 30
+    # Asset-graph snapshots: one full-graph row is persisted per evaluated tool call, but every reader
+    # only uses the NEWEST row per namespace — keep a small history for restore/debugging and prune the
+    # rest (rows referenced by attack_paths are always kept: FK has no cascade). <=0 keeps forever.
+    graph_snapshot_keep_per_namespace: int = 10
+    # Agent registry hygiene: identities unseen for this many days are removed (decommissioned agents
+    # otherwise accumulate forever and surface as phantom "awaiting" nodes). <=0 keeps forever.
+    agent_registry_retention_days: int = 90
+    # New API keys default to this expiry (per-key override at creation; 0 at creation = never).
+    # Pre-existing keys (no expires_at) never expire — unchanged behavior. <=0 here = new keys
+    # default to never-expiring.
+    api_key_default_ttl_days: int = 90
     # HIGH-2b: bounded concurrency for audit_emitter's fire-and-forget DB writes, so a flood of tool
     # calls can't fan out enough concurrent audit INSERTs to exhaust the DB pool (pg_pool_size +
     # db_pool_max_overflow) and starve every other endpoint. Sized comfortably under the pool ceiling.

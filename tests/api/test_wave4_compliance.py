@@ -110,9 +110,10 @@ def test_evidence_pdf_is_valid():
     from norviq.api.routers.mitre import _evidence_pdf
 
     pack = {
+        "framework": "MITRE ATLAS", "framework_id": "atlas",
         "namespace": None, "range": "24h", "generated_at": "2026-07-05T00:00:00+00:00",
         "coverage_pct": 70, "enforced": 7, "enforceable_total": 10, "gap": 3, "out_of_scope": 5,
-        "blocked_over_range": 1240,
+        "blocked_over_range": 1240, "synthetic_excluded": 0,
         "controls": [{"technique_id": "AML.T0051", "name": "LLM Prompt Injection", "status": "enforced",
                       "blocked": 842, "enforcing_policies": ["llm01_prompt_injection"]}],
     }
@@ -120,6 +121,32 @@ def test_evidence_pdf_is_valid():
     assert pdf.startswith(b"%PDF-1.4")
     assert pdf.rstrip().endswith(b"%%EOF")
     assert b"AML.T0051" in pdf
+    # P4(a): the title reflects the pack's framework, not a hardcoded ATLAS.
+    assert b"MITRE ATLAS Evidence Pack" in pdf
+    # P4(b): no exclusion line when nothing was excluded.
+    assert b"excluded" not in pdf
+
+
+def test_evidence_pdf_titles_owasp_and_states_exclusion():
+    """P4: the OWASP export must be titled for OWASP (not mis-titled 'MITRE ATLAS'), and — matching the console's
+    'real traffic only' promise — the PDF must state how many synthetic/simulated events were excluded."""
+    from norviq.api.routers.mitre import _evidence_pdf
+
+    pack = {
+        "framework": "OWASP LLM Top 10 (2025)", "framework_id": "owasp",
+        "namespace": None, "range": "24h", "generated_at": "2026-07-05T00:00:00+00:00",
+        "coverage_pct": 60, "enforced": 6, "enforceable_total": 10, "gap": 4, "out_of_scope": 0,
+        "blocked_over_range": 12, "synthetic_excluded": 7,
+        "controls": [{"technique_id": "LLM01", "name": "Prompt Injection", "status": "enforced",
+                      "blocked": 12, "enforcing_policies": ["llm01_prompt_injection"]}],
+    }
+    pdf = _evidence_pdf(pack)
+    # the PDF content stream escapes '(' and ')', so match the paren-free segments of the title.
+    assert b"OWASP LLM Top 10" in pdf
+    assert b"Evidence Pack" in pdf
+    assert b"MITRE ATLAS" not in pdf
+    # · is U+00B7 → survives the latin-1 PDF encoding as a single byte 0xB7.
+    assert "Real traffic only · 7 synthetic/simulated events excluded".encode("latin-1") in pdf
 
 
 class _StubResult:
@@ -173,8 +200,11 @@ def test_coverage_scope_status_and_headline():
     # enforced (rule in the blob)
     assert by_id["AML.T0051"]["status"] == "enforced" and by_id["AML.T0051"]["scope"] == "enforceable"
     assert by_id["AML.T0057"]["status"] == "enforced"
+    # T0055 now maps llm02_data_leakage (secret-read block — the rule its description always named), so the
+    # blob covers it too; AML.T0049 (deny_sql_injection, not in the blob) is the gap example instead.
+    assert by_id["AML.T0055"]["status"] == "enforced"
     # gap (enforceable but no rule in the blob)
-    assert by_id["AML.T0055"]["status"] == "gap" and by_id["AML.T0055"]["scope"] == "enforceable"
+    assert by_id["AML.T0049"]["status"] == "gap" and by_id["AML.T0049"]["scope"] == "enforceable"
     # out-of-scope (never counted)
     assert by_id["AML.T0024"]["status"] == "out_of_scope" and by_id["AML.T0024"]["scope"] == "out_of_scope"
     # headline: enforced / enforceable, OOS not counted
@@ -453,6 +483,50 @@ def test_comp_gen_01_two_controls_yield_different_control_specific_rego():
     assert "llm01_prompt_injection" in inj and "llm01_prompt_injection" not in sql
 
 
+def test_comp_gen_02_overlay_accumulates_controls_never_overwrites():
+    """COMP-GEN-02 (the accumulate bug): the per-class remediation overlay holds the UNION of EVERY applied
+    control. Before the fix, applying control B to the single "<class>__remediation__" key full-replaced
+    control A — the dashboard flipped B to 'enforced' while silently reverting A to 'gap' (false coverage).
+    Proven at the parse/union/render level: a manifest round-trips, and merging a second control keeps the
+    first's rule (incl. an OWASP control id with a ':' — "LLM05:2025" — the manifest, not block-key parsing,
+    is the source of truth)."""
+    from norviq.api.threat_intent import (generate_remediation_rego, generate_remediation_overlay_rego,
+                                          parse_remediation_controls, union_remediation_controls)
+
+    draft_a = generate_remediation_rego("atlas", "AML.T0049", "Exploit Public-Facing Application", "data-analyst",
+                                        ["deny_sql_injection"])
+    draft_b = generate_remediation_rego("owasp", "LLM05:2025", "Improper Output Handling", "data-analyst",
+                                        ["llm01_prompt_injection"])
+    # each per-control draft carries a parseable manifest naming exactly its own control
+    ca, cb = parse_remediation_controls(draft_a), parse_remediation_controls(draft_b)
+    assert [c["control_id"] for c in ca] == ["AML.T0049"]
+    assert [c["control_id"] for c in cb] == ["LLM05:2025"]  # colon id survives the manifest round-trip
+
+    # apply A -> overlay {A}; then apply B ON TOP -> UNION {A, B}, not a replace
+    overlay_a = generate_remediation_overlay_rego("data-analyst", ca)
+    merged = union_remediation_controls(parse_remediation_controls(overlay_a), cb)
+    overlay_ab = generate_remediation_overlay_rego("data-analyst", merged)
+
+    assert {c["control_id"] for c in parse_remediation_controls(overlay_ab)} == {"AML.T0049", "LLM05:2025"}
+    assert "deny_sql_injection" in overlay_ab, "control A's rule must SURVIVE control B being applied"
+    assert "llm01_prompt_injection" in overlay_ab, "control B's rule must be present"
+    # re-applying an already-present control is idempotent (union keyed by (framework, control_id))
+    twice = union_remediation_controls(merged, ca)
+    assert len(twice) == 2, "re-applying a control must not duplicate it"
+
+
+def test_comp_gen_02_non_remediation_rego_is_left_untouched():
+    """COMP-GEN-02 safety: the accumulate path only recognizes regos carrying the compliance-remediation
+    manifest. An arbitrary operator/guardrail rego parses to NO controls, so the apply path leaves it
+    byte-identical (never rewrites a manual __remediation__-suffixed load into an empty overlay)."""
+    from norviq.api.threat_intent import parse_remediation_controls
+
+    assert parse_remediation_controls("package norviq.strict\n\ndefault decision = \"allow\"\n") == []
+    assert parse_remediation_controls("") == []
+    # a corrupt manifest line degrades to 'unrecognized' rather than raising
+    assert parse_remediation_controls("# nrvq:remediation-manifest {not json") == []
+
+
 def test_comp_gen_01_no_runtime_rule_escalates_not_faked():
     """COMP-GEN-01: a control whose mapping has NO runtime-expressible rule (empty policies) ESCALATES instead
     of emitting a generic deny-all — via the real endpoint (LLM07 = System Prompt Leakage, policies=[])."""
@@ -463,7 +537,7 @@ def test_comp_gen_01_no_runtime_rule_escalates_not_faked():
     assert r.status_code == 200
     b = r.json()
     assert b["status"] == "escalate" and b["draft_id"] is None
-    assert "escalate" in b["message"].lower()
+    assert "bespoke" in b["message"].lower()  # message explains it needs a bespoke (non-auto-generatable) control
 
 
 def test_f4_dedup_key_is_framework_control_class():

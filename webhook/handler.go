@@ -207,10 +207,17 @@ func (h *Handler) handleAdmission(req *admissionv1.AdmissionRequest) *admissionv
 // sidecar. This makes the documented "label the namespace" workflow actually inject, instead of the old
 // behavior that also silently required a per-pod enable label. Skips are logged at INFO, not DEBUG.
 func shouldSkipInjection(cfg Config, pod *corev1.Pod, namespace string) bool {
-	if pod.Labels[cfg.EnableLabel] == "disabled" || pod.Annotations["norviq.io/skip-injection"] == "true" {
+	optedOut := pod.Labels[cfg.EnableLabel] == "disabled" || pod.Annotations["norviq.io/skip-injection"] == "true"
+	if optedOut && cfg.AllowPodOptOut {
 		slog.Info("NRVQ-WHK-4007: injection opted out for pod", "pod", pod.Name, "namespace", namespace,
 			"hint", "remove label "+cfg.EnableLabel+"=disabled / annotation norviq.io/skip-injection to enable")
 		return true
+	}
+	if optedOut && !cfg.AllowPodOptOut {
+		// P3: pod-level opt-out is disabled cluster-wide — inject anyway so a pod author can't self-exempt
+		// from enforcement. Logged so the denied bypass attempt is observable.
+		slog.Warn("NRVQ-WHK-4009: pod-level injection opt-out is disabled (allowPodOptOut=false); injecting anyway",
+			"pod", pod.Name, "namespace", namespace)
 	}
 	if hasSidecar(cfg, pod) {
 		slog.Info("NRVQ-WHK-4008: sidecar already present, skipping", "pod", pod.Name, "namespace", namespace)

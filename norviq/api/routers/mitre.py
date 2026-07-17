@@ -67,7 +67,7 @@ async def _activity_by_rule(
     """Per-rule_id observed-attempt + blocked counts from audit, EXCLUDING synthetic/simulated events, plus
     the count of events excluded (best-effort; ({}, 0) if the DB is unavailable).
 
-    COMP-EVIDENCE (San decision b): an audit-evidence pack is an attestation to an auditor — it must count
+    COMP-EVIDENCE (product decision): an audit-evidence pack is an attestation to an auditor — it must count
     REAL traffic only. Synthetic/probe/eval identities (A1 classifier) and red-team framework events
     (efficacy tooling, not live enforcement) are excluded from the observed/blocked headline so the pack
     can't be read as real enforcement evidence. Red-team efficacy still lives in its own clearly-labelled
@@ -164,6 +164,12 @@ async def _compute_coverage(request: Request, session: AsyncSession, namespace: 
             status = "enforced"
         else:
             status = "gap"
+        # COMP-GEN-01: is this control auto-generatable, or does it need a bespoke (non-tool-call) control?
+        # A gap with no runtime-expressible rule (bespoke, or empty `policies`) ESCALATES on generate — the UI
+        # must know up front so it doesn't offer a "Generate" checkbox that only ever dead-ends.
+        generatable = (
+            status == "gap" and not _control_is_bespoke(info) and bool(remediation_generatable_rules(policies))
+        )
         observed = sum(by_rule.get(p, {}).get("observed", 0) for p in policies)
         blocked = sum(by_rule.get(p, {}).get("blocked", 0) for p in policies)
         # Affected agent-classes: aggregate blocked-by-class across this technique's covered rules (synthetic
@@ -179,6 +185,7 @@ async def _compute_coverage(request: Request, session: AsyncSession, namespace: 
             "description": info.get("description", ""),
             "scope": scope,
             "status": status,
+            "generatable": generatable,
             "priority": info.get("priority"),
             "also": info.get("also"),
             "policies": policies,
@@ -209,7 +216,7 @@ async def _compute_coverage(request: Request, session: AsyncSession, namespace: 
         # back-compat headline fields (old page)
         "covered": enforced, "total": enforceable_total,
         "observed": total_observed, "blocked": total_blocked, "agent_classes": agent_classes,
-        # COMP-EVIDENCE (San decision b): the count of synthetic/simulated + red-team events excluded from
+        # COMP-EVIDENCE (product decision): the count of synthetic/simulated + red-team events excluded from
         # observed/blocked, so the console + evidence pack can state the exclusion explicitly.
         "synthetic_excluded": synthetic_excluded,
         "techniques": techniques,
@@ -379,6 +386,9 @@ async def mitre_export(
         "coverage_pct": cov["coverage_pct"], "enforced": cov["enforced"],
         "enforceable_total": cov["enforceable_total"], "gap": cov["gap"], "out_of_scope": cov["oos"],
         "blocked_over_range": cov["blocked"],
+        # COMP-EVIDENCE (product decision): carry the synthetic/simulated + red-team exclusion count into the
+        # pack so the JSON export and the PDF can state "real traffic only" honestly.
+        "synthetic_excluded": cov["synthetic_excluded"],
         "controls": [
             {
                 "technique_id": t["technique_id"], "name": t["name"], "scope": t["scope"], "status": t["status"],
@@ -486,8 +496,10 @@ async def _generate_remediation_draft(
                  code="NRVQ-API-7079")
         return {"status": "escalate", "draft_id": None, "technique_id": technique_id,
                 "control_name": control_name, "framework": framework,
-                "message": f"{technique_id} {control_name} has no runtime-expressible rule the policy model "
-                           f"can encode — escalate to San rather than generating a generic deny-all."}
+                "message": f"{technique_id} {control_name} can't be auto-generated as a runtime policy — this "
+                           f"risk doesn't show up in agent tool-call traffic, so there is no signal a policy "
+                           f"rule could match at enforcement time. Address it with a bespoke control in "
+                           f"configuration or process (outside runtime enforcement)."}
 
     # Scope to a REAL class; never invent a 'default' deny-all when there's nothing to remediate.
     target = await _resolve_target_class(request, session, namespace, range_token, framework,
@@ -693,14 +705,19 @@ async def compliance_generate_batch(
 def _evidence_pdf(pack: dict) -> bytes:
     """Render a minimal, VALID single-page PDF summary of the evidence pack — no external dependency, no egress.
     (The JSON export carries the full machine-readable pack; the PDF is the human-readable summary.)"""
+    excluded = int(pack.get("synthetic_excluded") or 0)
     lines = [
-        "Norviq — MITRE ATLAS Evidence Pack",
+        f"Norviq — {pack['framework']} Evidence Pack",
         f"Namespace: {pack['namespace'] or 'all'}   Range: {pack['range']}",
         f"Generated: {pack['generated_at']}",
         f"Coverage: {pack['coverage_pct']}%  (enforced {pack['enforced']} / {pack['enforceable_total']} enforceable)",
         f"Gaps: {pack['gap']}   Out-of-scope: {pack['out_of_scope']}   Blocked over range: {pack['blocked_over_range']}",
-        "",
     ]
+    # COMP-EVIDENCE: real-traffic-only promise — synthetic/simulated + red-team events are excluded from the
+    # counts above; state how many, matching the console line.
+    if excluded > 0:
+        lines.append(f"Real traffic only · {excluded} synthetic/simulated event{'' if excluded == 1 else 's'} excluded")
+    lines.append("")
     for c in pack["controls"]:
         lines.append(f"{c['technique_id']}  {c['name']}  [{c['status']}]  blocked={c['blocked']}")
         if c["enforcing_policies"]:

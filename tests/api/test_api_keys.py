@@ -152,3 +152,66 @@ def test_constant_time_compare_rejects_hash_mismatch() -> None:
         yield _FakeSession([row])
 
     assert asyncio.run(ak.authenticate_api_key(full, session_factory=_factory)) is None
+
+
+# --- RETENTION: API-key expiry (expires_at; NULL = never — legacy keys keep working) ---------------
+
+
+def test_authenticate_rejects_expired_key() -> None:
+    from datetime import timedelta
+
+    full, prefix, key_hash = ak.generate_key()
+    row = SimpleNamespace(
+        id="1", prefix=prefix, key_hash=key_hash, name="k", namespace="team-a", role="viewer",
+        revoked=False, last_used_at=None,
+        expires_at=datetime.now(timezone.utc) - timedelta(seconds=5),
+    )
+
+    async def _factory():
+        yield _FakeSession([row])
+
+    assert asyncio.run(ak.authenticate_api_key(full, session_factory=_factory)) is None
+    assert row.last_used_at is None  # rejected BEFORE the last-used stamp — expired == unauthenticated
+
+
+def test_authenticate_allows_legacy_key_without_expiry() -> None:
+    # Keys issued before the expires_at column existed (attribute absent entirely) must keep working.
+    full, prefix, key_hash = ak.generate_key()
+    row = SimpleNamespace(
+        id="1", prefix=prefix, key_hash=key_hash, name="legacy", namespace="default", role="viewer",
+        revoked=False, last_used_at=None,
+    )
+
+    async def _factory():
+        yield _FakeSession([row])
+
+    principal = asyncio.run(ak.authenticate_api_key(full, session_factory=_factory))
+    assert principal is not None and principal["sub"] == f"apikey:{prefix}"
+
+
+def test_create_key_defaults_to_configured_ttl_and_zero_means_never() -> None:
+    from datetime import timedelta
+
+    rows: list = []
+    client = _client(rows)
+    # Omitted expires_in_days -> server default (api_key_default_ttl_days, 90).
+    body = client.post(
+        "/api/v1/keys", json={"name": "d"}, headers={"Authorization": f"Bearer {_token('admin')}"}
+    ).json()
+    assert body["expires_at"] is not None
+    got = datetime.fromisoformat(body["expires_at"])
+    expected = datetime.now(timezone.utc) + timedelta(days=settings.api_key_default_ttl_days)
+    assert abs((got - expected).total_seconds()) < 300
+    # Explicit 0 -> never expires (an intentional service-key choice).
+    body0 = client.post(
+        "/api/v1/keys", json={"name": "svc", "expires_in_days": 0},
+        headers={"Authorization": f"Bearer {_token('admin')}"},
+    ).json()
+    assert body0["expires_at"] is None
+    # Explicit N -> now + N days.
+    body7 = client.post(
+        "/api/v1/keys", json={"name": "wk", "expires_in_days": 7},
+        headers={"Authorization": f"Bearer {_token('admin')}"},
+    ).json()
+    got7 = datetime.fromisoformat(body7["expires_at"])
+    assert abs((got7 - (datetime.now(timezone.utc) + timedelta(days=7))).total_seconds()) < 300

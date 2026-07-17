@@ -41,8 +41,14 @@ data:
   NRVQ_DB_POOL_MAX_OVERFLOW: {{ .Values.config.dbPoolMaxOverflow | quote }}
   NRVQ_DB_POOL_TIMEOUT: {{ .Values.config.dbPoolTimeout | quote }}
   NRVQ_DB_COMMAND_TIMEOUT: {{ .Values.config.dbCommandTimeout | quote }}
-  # --- Part B: draft + version retention windows (retention is decoupled from enforcement). ---
+  # --- Data retention windows (one hourly background pruner; 0 disables a window; retention is
+  # decoupled from enforcement — enforcing policies never expire). ---
   {{- $ret := .Values.config.retention | default dict }}
+  NRVQ_AUDIT_RETENTION_DAYS: {{ $ret.auditRetentionDays | default 30 | quote }}
+  NRVQ_COVERAGE_SNAPSHOT_RETENTION_DAYS: {{ $ret.coverageSnapshotRetentionDays | default 30 | quote }}
+  NRVQ_GRAPH_SNAPSHOT_KEEP_PER_NAMESPACE: {{ $ret.graphSnapshotKeepPerNamespace | default 10 | quote }}
+  NRVQ_AGENT_REGISTRY_RETENTION_DAYS: {{ $ret.agentRegistryRetentionDays | default 90 | quote }}
+  NRVQ_API_KEY_DEFAULT_TTL_DAYS: {{ $ret.apiKeyDefaultTtlDays | default 90 | quote }}
   NRVQ_DRAFT_TTL_DAYS: {{ $ret.draftTtlDays | default 14 | quote }}
   NRVQ_DRAFT_TTL_TEST_HOURS: {{ $ret.draftTtlTestHours | default 24 | quote }}
   NRVQ_DRAFT_CAP_PER_NAMESPACE: {{ $ret.draftCapPerNamespace | default 50 | quote }}

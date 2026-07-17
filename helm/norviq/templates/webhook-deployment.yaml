@@ -117,6 +117,11 @@ spec:
               value: /etc/webhook/certs/tls.crt
             - name: NRVQ_TLS_KEY
               value: /etc/webhook/certs/tls.key
+            {{- if not .Values.webhook.injection.allowPodOptOut }}
+            # P3: pod-level opt-out disabled — the injector ignores norviq-injection=disabled / skip-injection.
+            - name: NRVQ_ALLOW_POD_OPT_OUT
+              value: "false"
+            {{- end }}
             {{- if .Values.webhook.spiffe.inject }}
             # B3: injected workloads also get the SPIFFE Workload API socket + workload-api mode.
             - name: NRVQ_SPIFFE_INJECT

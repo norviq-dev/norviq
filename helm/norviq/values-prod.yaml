@@ -9,7 +9,7 @@
 # Public/managed registry recommended for prod (GHCR has no Docker Hub anonymous pull-rate limit at
 # scale). Drop-in: set registry + repository, or point at your ACR. Empty imagePullSecrets = public.
 images:
-  registry: ""              # e.g. "ghcr.io/" (then repository: norviq-dev/norviq-engine) or "<acct>.azurecr.io/"
+  registry: "ghcr.io/norviq-dev/"   # public default (copy-paste-clean). Override with your mirror, e.g. "<acct>.azurecr.io/" + repository, for supply-chain control.
   api: { pullPolicy: IfNotPresent }
   engine: { pullPolicy: IfNotPresent }
   ui: { pullPolicy: IfNotPresent }

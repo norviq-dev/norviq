@@ -18,6 +18,11 @@ type Config struct {
 	EnableLabel          string
 	EnableValue          string
 	AgentClassLabel      string
+	// P3: when false, the injector IGNORES the per-pod opt-out (norviq-injection=disabled label /
+	// norviq.io/skip-injection annotation) so a pod author in an injection-enabled namespace cannot
+	// self-exempt their workload from enforcement — the namespace-uniform guarantee holds. Default
+	// true (opt-out honored, backward-compatible); govern label/annotation write access with RBAC.
+	AllowPodOptOut       bool
 	AdminPolicyNamespace string
 	LogLevel             slog.Level
 	Runtime              *RuntimeConfig
@@ -75,6 +80,7 @@ func LoadConfig() Config {
 		AdminPolicyNamespace: envStr("NRVQ_ADMIN_POLICY_NAMESPACE", "norviq"),
 		LogLevel:             slog.LevelInfo,
 		Runtime:              runtime,
+		AllowPodOptOut:       envBool("NRVQ_ALLOW_POD_OPT_OUT", true),
 		SpiffeInject:         envBool("NRVQ_SPIFFE_INJECT", false),
 		SpiffeMode:           envStr("NRVQ_SPIFFE_MODE", "mock"),
 		SpiffeSocket:         envStr("NRVQ_SPIFFE_SOCKET", "/spiffe-workload-api/spire-agent.sock"),

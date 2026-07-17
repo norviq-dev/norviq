@@ -14,7 +14,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from norviq.api.audit_hub import AuditHub
-from norviq.api.audit_retention import AuditRetentionPruner
+from norviq.api.audit_retention import RetentionPruner
 from norviq.api.db.session import close_db, create_tables, ensure_schema_compatibility, get_session, init_db
 from norviq.api.rate_limit import RateLimitMiddleware
 from norviq.api.siem import AuditForwarder
@@ -127,8 +127,9 @@ async def lifespan(app: FastAPI):
     app.state.evaluator.bind_graph_store(app.state.graph_store)
     app.state.emitter = AuditEmitter()
     await app.state.emitter.init()
-    # HIGH-2a: periodic audit_log retention pruning (no-op if audit_retention_days <= 0).
-    app.state.audit_retention_pruner = AuditRetentionPruner()
+    # RETENTION: unified background pruner — audit_log, coverage snapshots, expired drafts, stale
+    # agent-registry rows, and old asset-graph snapshots; each table's window has its own <=0 disable.
+    app.state.audit_retention_pruner = RetentionPruner()
     await app.state.audit_retention_pruner.start()
     app.state.loader = PolicyLoader(app.state.cache, app.state.evaluator)
     app.state.evaluator.bind_loader(app.state.loader)

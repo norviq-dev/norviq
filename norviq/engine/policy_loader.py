@@ -685,6 +685,10 @@ class PolicyLoader:
                     saved_at=row["saved_at"],
                 )
                 rehydrated.setdefault(key, []).append(snapshot)
+            # RETENTION consistency: cap each rehydrated list to the same in-memory bound the append path
+            # enforces (_MAX_VERSIONS) — the DB may retain more (policy_version_keep_count/keep_days), but
+            # post-restart memory must not hold an unbounded history the live path would never accumulate.
+            rehydrated = {k: v[-_MAX_VERSIONS:] for k, v in rehydrated.items()}
             # In-process history (written this lifetime) wins over rehydrated for a key already tracked.
             self._versions = {**rehydrated, **self._versions}
             log.info("nrvq.policy.versions_rehydrated", keys=len(rehydrated), code="NRVQ-REG-5016")
