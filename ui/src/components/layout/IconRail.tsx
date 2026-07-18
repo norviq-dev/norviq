@@ -54,7 +54,7 @@ export default function IconRail({
         <button
           type="button"
           className="rail-logo"
-          style={{ color: "var(--text-primary)" }}
+          style={{ color: "var(--accent)" }}
           title="Go to Overview"
           onClick={() => {
             setActiveSection("intelligence");

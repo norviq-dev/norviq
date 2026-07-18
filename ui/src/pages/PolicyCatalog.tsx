@@ -1930,7 +1930,11 @@ export function PolicyCatalog() {
                                 display: "flex",
                                 justifyContent: "space-between",
                                 alignItems: "center",
-                                gap: 8
+                                gap: 8,
+                                // Reserve room on the right for the absolutely-positioned delete button (top:8/right:8,
+                                // 36px .icon-btn) so the mode badge doesn't collide with the trash icon. Only when the
+                                // delete control is actually rendered (reserved/managed scopes have none → no gap).
+                                paddingRight: !isReservedScope(p.agent_class, p.namespace) ? 36 : 0
                               }}
                             >
                               <span className="policy-name mono" style={{ display: "flex", alignItems: "center", gap: 6 }} title={p.target ?? p.agent_class ?? undefined}>

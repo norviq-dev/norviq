@@ -394,12 +394,14 @@ export function Login() {
 
               <label htmlFor="nv-user" style={label}>Username</label>
               <input id="nv-user" type="text" className="nv-input" autoFocus value={username} aria-label="Username"
+                maxLength={128}
                 onChange={(e) => { setUsername(e.target.value); setError(""); }} onKeyDown={enter(() => void signIn())}
                 autoComplete="username" style={{ marginBottom: 14 }} />
 
               <label htmlFor="nv-pass" style={label}>Password</label>
               <div style={{ position: "relative", marginBottom: 4 }}>
                 <input id="nv-pass" type={showPwd ? "text" : "password"} className="nv-input" value={password} aria-label="Password"
+                  maxLength={256}
                   onChange={(e) => { setPassword(e.target.value); setError(""); }} onKeyDown={enter(() => void signIn())}
                   autoComplete="current-password" style={{ padding: "0 44px 0 13px" }} />
                 <button type="button" tabIndex={-1} className="nv-show" onClick={() => setShowPwd(!showPwd)}>
@@ -430,6 +432,7 @@ export function Login() {
               {devOpen && (
                 <div style={{ margin: "0 0 16px" }}>
                   <input type="text" className="nv-input" value={devToken} aria-label="Access token"
+                    maxLength={4096}
                     onChange={(e) => { setDevToken(e.target.value); setError(""); }} onKeyDown={enter(() => void signIn())}
                     placeholder="nrvq_dev_••••••••••••••••"
                     style={{ height: 40, fontFamily: "ui-monospace, 'SF Mono', 'JetBrains Mono', monospace", fontSize: 12 }} />
@@ -482,12 +485,14 @@ export function Login() {
 
               <label htmlFor="nv-cur" style={label}>Current password</label>
               <input id="nv-cur" type="password" className="nv-input" value={curPwd} aria-label="Current password"
+                maxLength={256}
                 onChange={(e) => { setCurPwd(e.target.value); setError(""); }} onKeyDown={enter(() => void saveNew())}
                 autoComplete="current-password" style={{ marginBottom: 14 }} />
 
               <label htmlFor="nv-new" style={label}>New password</label>
               <div style={{ position: "relative" }}>
                 <input id="nv-new" type={showNewPwd ? "text" : "password"} className="nv-input" value={newPwd} aria-label="New password"
+                  maxLength={256}
                   onChange={(e) => { setNewPwd(e.target.value); setError(""); }} onKeyDown={enter(() => void saveNew())}
                   autoComplete="new-password" placeholder="At least 12 characters" style={{ padding: "0 44px 0 13px" }} />
                 <button type="button" tabIndex={-1} className="nv-show" onClick={() => setShowNewPwd(!showNewPwd)}>
@@ -511,6 +516,7 @@ export function Login() {
               <label htmlFor="nv-confirm" style={label}>Confirm new password</label>
               <div style={{ position: "relative" }}>
                 <input id="nv-confirm" type="password" className="nv-input" value={confirmPwd} aria-label="Confirm new password"
+                  maxLength={256}
                   onChange={(e) => { setConfirmPwd(e.target.value); setError(""); }} onKeyDown={enter(() => void saveNew())}
                   autoComplete="new-password" placeholder="Re-enter new password"
                   style={{ padding: "0 40px 0 13px", borderColor: confirmPwd.length > 0 ? (matchOk ? "#00e5a0" : "#ff3b5c40") : "#1c2029" }} />
