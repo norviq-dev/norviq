@@ -1,0 +1,79 @@
+{{- if .Values.agentEgressPolicy.enabled }}
+{{- /* FLAG-D defense-in-depth: default-deny egress for agent-workload namespaces, so a pod that ignores
+       the cooperative sidecar PEP still cannot reach anything except the norviq control plane, DNS, and the
+       operator-approved tool allowlist. Requires a NetworkPolicy-enforcing CNI (Calico/Cilium). */}}
+{{- $root := . }}
+{{- $ep := .Values.agentEgressPolicy }}
+{{- $nsList := $ep.namespaces }}
+{{- if not $nsList }}{{- $nsList = .Values.policyQuotaNamespaces }}{{- end }}
+{{- if not $nsList }}
+{{-   fail "agentEgressPolicy.enabled=true but no namespaces to lock down — set agentEgressPolicy.namespaces or policyQuotaNamespaces (empty would silently protect nothing)." }}
+{{- end }}
+{{- range $ns := $nsList }}
+{{-   if eq $ns $root.Values.namespace }}{{- fail (printf "agentEgressPolicy must not target the norviq control-plane namespace %q — list only tenant/agent namespaces." $ns) }}{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: norviq-agent-egress-lockdown
+  namespace: {{ $ns }}
+  labels:
+    {{- include "norviq.labels" $root | nindent 4 }}
+spec:
+  # All pods in the tenant namespace. The injected sidecar shares each agent pod, so its egress to the
+  # norviq API is covered by the control-plane rule below; the agent's own tool egress is the allowlist.
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    {{- if $ep.allowDNS }}
+    # DNS resolution (kube-dns / CoreDNS in kube-system).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- end }}
+    # Norviq control plane: the sidecar (proxy mode) calls the norviq API for every decision.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $root.Values.namespace }}
+          podSelector:
+            matchLabels:
+              app: norviq-api
+    {{- if $ep.embeddedDatastores }}
+    # embedded sidecar mode: the sidecar runs its own engine off the cluster datastores.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $root.Values.namespace }}
+          podSelector:
+            matchLabels:
+              app: norviq-postgresql
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $root.Values.namespace }}
+          podSelector:
+            matchLabels:
+              app: norviq-redis
+    {{- end }}
+    {{- range $cidr := $ep.allowedCIDRs }}
+    # Operator-approved tool endpoint.
+    - to:
+        - ipBlock:
+            cidr: {{ $cidr | quote }}
+      {{- with $ep.allowedPorts }}
+      ports:
+        {{- range . }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+      {{- end }}
+    {{- end }}
+{{- end }}
+{{- end }}

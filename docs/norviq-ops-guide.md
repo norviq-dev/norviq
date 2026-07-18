@@ -24,9 +24,19 @@ local socket (`NRVQ_SOCKET_PATH`) and the SDK routes tool calls through it. The 
 mutating webhook can close and must be handled operationally:
 
 1. **Runtime bypass** — an app that, at runtime, *ignores* the injected socket and dials tools directly is
-   not policed by the sidecar. Mitigate with a **NetworkPolicy** restricting agent egress to only the
-   sidecar/API, or the planned **mandatory iptables/NET_ADMIN interception** (forces all egress through the
-   PEP). Prompt-injection of the model is NOT this case — enforcement sits in the tool-call path.
+   not policed by the sidecar (the PEP is cooperative: the sidecar returns a forward/drop decision and the
+   *agent* executes the tool). Two layers of mitigation:
+   - **Shipped now — `agentEgressPolicy` (default-deny egress NetworkPolicy).** Set
+     `agentEgressPolicy.enabled=true` + `agentEgressPolicy.allowedCIDRs=[...]` (your approved tool
+     endpoints). An agent pod may then egress ONLY to the norviq API, DNS, and that allowlist — arbitrary
+     data-exfiltration to the internet/attacker endpoints is blocked at the network layer. **Requires a
+     NetworkPolicy-enforcing CNI (Calico/Cilium); kindnet ignores NetworkPolicy.** This bounds the blast
+     radius but does NOT stop per-call param abuse of an *allowed* tool (e.g. `execute_sql` with
+     `DROP TABLE` against an approved DB) — that still relies on the SDK routing the call through the PEP.
+   - **Roadmap — non-cooperative enforcement.** Making the sidecar *execute* tools (agent → sidecar →
+     tool, so a pod physically cannot run a tool without the PEP) is the full close; it is a separate
+     re-architecture, not shipped. Prompt-injection of the model is NOT this case — enforcement sits in
+     the tool-call path, so a routed-but-injected agent is still governed.
 2. **`pods/ephemeralcontainers`** — the webhook intercepts pods `CREATE`, not the ephemeral-containers
    subresource, so a debug container added to a running pod is unwired. Mitigate by **not granting
    `pods/ephemeralcontainers`** to tenant roles (it is a break-glass/debug capability).

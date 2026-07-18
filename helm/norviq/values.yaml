@@ -4,6 +4,29 @@ namespace: norviq
 # namespaces you want protected — each must already exist. Empty by default so a fresh install never
 # fails on a namespace that hasn't been created yet. Example: [prod-agents, analytics].
 policyQuotaNamespaces: []
+
+# FLAG-D (mandatory-interception, defense-in-depth): Norviq's tool-call PEP is COOPERATIVE — the agent's
+# SDK asks the sidecar for a forward/drop decision and the AGENT executes the tool itself. A pod that
+# ignores the SDK can therefore reach tools directly (runtime bypass). This opt-in default-deny egress
+# NetworkPolicy bounds that at the NETWORK layer: an agent pod may egress ONLY to the norviq API, DNS, and
+# an operator-approved tool allowlist — arbitrary data-exfiltration egress is denied. It does NOT replace
+# the PEP (per-call param policy still needs the SDK) and REQUIRES a NetworkPolicy-enforcing CNI
+# (Calico/Cilium; kindnet ignores NetworkPolicy). Full non-cooperative enforcement (the sidecar executing
+# tools) is a separate roadmap item.
+agentEgressPolicy:
+  enabled: false
+  # Namespaces to lock down. Empty => reuse policyQuotaNamespaces (the tenant namespaces).
+  namespaces: []
+  allowDNS: true
+  # Operator-approved tool endpoints the agent may reach (CIDRs). EVERYTHING ELSE (incl. the internet) is
+  # denied. Leave empty ONLY if the agent's tools all live in the norviq namespace — otherwise its tool
+  # calls will fail. Example: ["10.0.0.0/8"] for in-cluster tool services, or a SaaS API's egress CIDR.
+  allowedCIDRs: []
+  # Restrict the allowlisted CIDRs to these TCP ports (empty => all ports on those CIDRs).
+  allowedPorts: []
+  # embedded sidecar mode reaches Redis/Postgres directly (not the API) — set true to also permit egress
+  # to the norviq datastores. Leave false for the default proxy mode (sidecar → API only).
+  embeddedDatastores: false
 baselineClusterPolicy:
   enabled: true
   name: baseline-cluster-guard
