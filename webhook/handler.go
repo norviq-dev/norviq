@@ -24,9 +24,9 @@ type Handler struct {
 
 const maxAdmissionBodySize = 1 << 20
 
-// injectedAnnotation is stamped onto every pod the injector patches (see injector.go), independent of
-// the attacker-controllable container name, so hasSidecar can positively identify a real prior
-// injection even if the configured sidecar image has since rotated.
+// injectedAnnotation is stamped onto every pod the injector patches (see injector.go) purely as an
+// operator-visible marker ("this pod was injected"). It is NEVER read back as a trust input — a tenant can
+// self-stamp it on an unadmitted CREATE. Injection recognition is by structural wiring only (classifyPod).
 const injectedAnnotation = "norviq.io/injected"
 
 var systemExcludedNamespaces = map[string]bool{
@@ -195,35 +195,42 @@ func (h *Handler) handleAdmission(req *admissionv1.AdmissionRequest) *admissionv
 			Result:  &metav1.Status{Message: "invalid pod object"},
 		}
 	}
-	if shouldSkipInjection(h.cfg, pod, req.Namespace) {
+	// Enforcement-integrity classification (DEF-052 + the broader webhook-trust class a red-team surfaced):
+	// the norviq-socket volume, the socket mount, the NRVQ_SOCKET_PATH env, and the sidecar container are
+	// ALL injector-owned. A fresh tenant pod carries none of them. So: SKIP only a pod that is already
+	// FULLY + CORRECTLY injected (idempotent re-admission); DENY a pod that carries norviq enforcement
+	// artifacts but is NOT fully injected (a decoy, a pre-occupied socket path/volume/env, or a partially
+	// wired pod — the injector cannot safely wire over attacker-placed plumbing, and skipping would run the
+	// pod UNPOLICED); otherwise INJECT. This runs BEFORE opt-out so a decoy/pre-occupied pod cannot combine
+	// with an opt-out to bypass.
+	switch verdict, reason := classifyPod(h.cfg, pod); verdict {
+	case verdictDeny:
+		slog.Warn("NRVQ-WHK-4034: enforcement-integrity denial", "pod", pod.Name, "namespace", req.Namespace, "reason", reason)
+		return &admissionv1.AdmissionResponse{
+			Allowed: false,
+			Result: &metav1.Status{Message: "NRVQ-WHK-4034: " + reason +
+				" — the norviq webhook owns the sidecar + enforcement-socket plumbing; a pod that presents a fake, partial, or pre-occupied version of it is refused fail-closed. Remove the norviq sidecar / norviq-socket volume+mount / NRVQ_SOCKET_PATH env, or run the pod in a namespace without norviq injection."},
+		}
+	case verdictSkip:
+		slog.Info("NRVQ-WHK-4008: pod already fully injected, skipping", "pod", pod.Name, "namespace", req.Namespace)
 		return &admissionv1.AdmissionResponse{Allowed: true}
+	}
+	// verdictInject: a fresh pod. Honor an explicit opt-out only when the cluster allows it.
+	if optedOut(h.cfg, pod) {
+		if h.cfg.AllowPodOptOut {
+			slog.Info("NRVQ-WHK-4007: injection opted out for pod", "pod", pod.Name, "namespace", req.Namespace,
+				"hint", "remove label "+h.cfg.EnableLabel+"=disabled / annotation norviq.io/skip-injection to enable")
+			return &admissionv1.AdmissionResponse{Allowed: true}
+		}
+		// P3: pod-level opt-out is disabled cluster-wide — inject anyway so a pod author can't self-exempt.
+		slog.Warn("NRVQ-WHK-4009: pod-level injection opt-out is disabled (allowPodOptOut=false); injecting anyway",
+			"pod", pod.Name, "namespace", req.Namespace)
 	}
 	return h.patchResponse(req, pod)
 }
 
-// shouldSkipInjection implements SIDE-3: the namespace opts in via the MutatingWebhookConfiguration
-// namespaceSelector (norviq-injection=enabled), so every pod in a selected namespace is injected UNLESS
-// it explicitly opts out (norviq-injection=disabled label or the skip annotation) or already has a
-// sidecar. This makes the documented "label the namespace" workflow actually inject, instead of the old
-// behavior that also silently required a per-pod enable label. Skips are logged at INFO, not DEBUG.
-func shouldSkipInjection(cfg Config, pod *corev1.Pod, namespace string) bool {
-	optedOut := pod.Labels[cfg.EnableLabel] == "disabled" || pod.Annotations["norviq.io/skip-injection"] == "true"
-	if optedOut && cfg.AllowPodOptOut {
-		slog.Info("NRVQ-WHK-4007: injection opted out for pod", "pod", pod.Name, "namespace", namespace,
-			"hint", "remove label "+cfg.EnableLabel+"=disabled / annotation norviq.io/skip-injection to enable")
-		return true
-	}
-	if optedOut && !cfg.AllowPodOptOut {
-		// P3: pod-level opt-out is disabled cluster-wide — inject anyway so a pod author can't self-exempt
-		// from enforcement. Logged so the denied bypass attempt is observable.
-		slog.Warn("NRVQ-WHK-4009: pod-level injection opt-out is disabled (allowPodOptOut=false); injecting anyway",
-			"pod", pod.Name, "namespace", namespace)
-	}
-	if hasSidecar(cfg, pod) {
-		slog.Info("NRVQ-WHK-4008: sidecar already present, skipping", "pod", pod.Name, "namespace", namespace)
-		return true
-	}
-	return false
+func optedOut(cfg Config, pod *corev1.Pod) bool {
+	return pod.Labels[cfg.EnableLabel] == "disabled" || pod.Annotations["norviq.io/skip-injection"] == "true"
 }
 
 func (h *Handler) patchResponse(req *admissionv1.AdmissionRequest, pod *corev1.Pod) *admissionv1.AdmissionResponse {
@@ -258,34 +265,254 @@ func parsePod(req *admissionv1.AdmissionRequest) (*corev1.Pod, bool) {
 	return &pod, true
 }
 
-// hasSidecar reports whether the pod already carries the REAL enforcement sidecar. It must not trust
-// ANY attacker-controllable pod field. Two such signals were abused historically and are BOTH refused
-// here: (1) the container NAME (a decoy named "norviq-sidecar" running anything), and (2) the
-// `norviq.io/injected` ANNOTATION — which the injector stamps on its OWN output, but which a tenant can
-// also self-stamp on an unadmitted CREATE to make hasSidecar return true and skip injection, running the
-// pod UNPOLICED (the self-stamp bypass). The annotation is therefore NEVER read as a trust input.
-// Recognition is by injector-controlled CONTAINER STRUCTURE only: a container whose IMAGE matches the
-// configured sidecar image, OR any container mounting the norviq enforcement socket (this second check
-// still recognizes an already-injected pod after an NrvqConfig image change, without trusting the
-// annotation). NOTE (DEF-052, follow-up): a determined attacker could still craft a decoy container that
-// matches the image or socket mount but neuters enforcement via a command override — a deeper
-// injector-trust gap tracked separately; this fix closes the trivial one-line annotation self-stamp.
-func hasSidecar(cfg Config, pod *corev1.Pod) bool {
+type podVerdict int
+
+const (
+	verdictInject podVerdict = iota
+	verdictSkip
+	verdictDeny
+)
+
+// classifyPod decides inject/skip/deny for a CREATE pod in an injection-enabled namespace. The
+// enforcement plumbing — the norviq-socket volume, the socket mount at socketMountPath, the
+// NRVQ_SOCKET_PATH env, and the sidecar container — is entirely injector-owned; a fresh tenant pod has
+// none of it. The `norviq.io/injected` annotation is NEVER trusted (a tenant can self-stamp it on an
+// unadmitted CREATE). Order matters: a neutered decoy is denied first; a fully+correctly injected pod is
+// skipped; any REMAINING norviq artifact means the pod is partially/deceptively wired → deny fail-closed;
+// otherwise the pod is fresh → inject.
+func classifyPod(cfg Config, pod *corev1.Pod) (podVerdict, string) {
+	if reason, ok := neuteredSidecarDecoy(cfg, pod); ok {
+		return verdictDeny, reason
+	}
+	if fullyInjected(cfg, pod) {
+		return verdictSkip, ""
+	}
+	if reason, ok := enforcementArtifact(cfg, pod); ok {
+		return verdictDeny, reason
+	}
+	return verdictInject, ""
+}
+
+// allPodContainers is every container an attacker can place a workload in — init AND app containers.
+// (Ephemeral containers are a separate subresource, not part of a pod CREATE.)
+func allPodContainers(pod *corev1.Pod) []corev1.Container {
+	out := make([]corev1.Container, 0, len(pod.Spec.InitContainers)+len(pod.Spec.Containers))
+	out = append(out, pod.Spec.InitContainers...)
+	out = append(out, pod.Spec.Containers...)
+	return out
+}
+
+// isSidecarContainer reports whether c is (or masquerades as) the enforcement sidecar by image identity:
+// the configured image, or the enforcement socket mounted from a same-NAME image (a drifted tag/registry).
+func isSidecarContainer(c corev1.Container, configuredImage string) bool {
+	if configuredImage != "" && c.Image == configuredImage {
+		return true
+	}
+	return hasSocketMount(c) && sameSidecarImageName(c.Image, configuredImage)
+}
+
+// neuteredSidecarDecoy: a sidecar-identity container that overrides command/args (the injector never
+// does) — it would masquerade as the sidecar while enforcing nothing. Checked across init + app containers.
+func neuteredSidecarDecoy(cfg Config, pod *corev1.Pod) (string, bool) {
+	configuredImage := configuredSidecarImage(cfg)
+	if configuredImage == "" {
+		return "", false
+	}
+	for _, c := range allPodContainers(pod) {
+		if (len(c.Command) > 0 || len(c.Args) > 0) && isSidecarContainer(c, configuredImage) {
+			return "container " + c.Name + " presents as the norviq sidecar but overrides command/args (neutered decoy)", true
+		}
+	}
+	return "", false
+}
+
+// fullyInjected reports whether the pod EXACTLY carries the injector's output: the norviq-socket volume,
+// a real sidecar container (sidecar identity, no command/args override), and EVERY other container (app +
+// init) wired to that socket — mounting the norviq-socket volume at socketMountPath AND carrying
+// NRVQ_SOCKET_PATH == socketFilePath. Only such a pod is skipped (idempotent re-admission); a pod with a
+// sidecar but an UNWIRED app container is NOT "already injected" and must not be skipped, or the app runs
+// unpoliced.
+func fullyInjected(cfg Config, pod *corev1.Pod) bool {
+	configuredImage := configuredSidecarImage(cfg)
+	if !hasNorviqSocketVolume(pod) {
+		return false
+	}
+	sidecars := 0
+	for _, c := range pod.Spec.Containers {
+		// SKIP-path strictness: only a container running a TRUSTED sidecar image (the exact configured
+		// image, or the injector's own registry-pinned allowlist) counts as the real sidecar. The broad
+		// same-NAME match (isSidecarContainer) is used only on the DENY paths — a same-name image from an
+		// attacker registry (e.g. docker.io/attacker/norviq-engine, which the injector itself would refuse
+		// to inject) must NOT let a self-wired pod be treated as "already injected" and skipped unpoliced.
+		if len(c.Command) == 0 && len(c.Args) == 0 && isSidecarContainer(c, configuredImage) &&
+			(c.Image == configuredImage || isAllowedSidecarImage(c.Image)) &&
+			sidecarRoutingTrusted(c, cfg) {
+			sidecars++
+			continue
+		}
+		if !containerWired(c) {
+			return false
+		}
+	}
+	if sidecars == 0 {
+		return false
+	}
+	for _, c := range pod.Spec.InitContainers {
+		if !containerWired(c) {
+			return false
+		}
+	}
+	return true
+}
+
+// enforcementArtifact reports any injector-owned plumbing on a pod that is NOT fully injected: a
+// sidecar-identity container, a mount at the socket path (or of the norviq-socket volume), a
+// NRVQ_SOCKET_PATH env, or a norviq-socket volume. Present-but-not-fully-injected == a partial or
+// pre-occupied bypass (the injector can't safely wire over it) → deny fail-closed. Tenant app images use
+// their own names, so ordinary workloads never match.
+func enforcementArtifact(cfg Config, pod *corev1.Pod) (string, bool) {
+	configuredImage := configuredSidecarImage(cfg)
+	if hasNorviqSocketVolume(pod) {
+		return "pod declares the injector-owned norviq-socket volume but is not fully injected", true
+	}
+	for _, c := range allPodContainers(pod) {
+		if isSidecarContainer(c, configuredImage) {
+			return "container " + c.Name + " presents as the norviq sidecar but the pod is not fully injected", true
+		}
+		if mountsSocketPath(c) {
+			return "container " + c.Name + " pre-occupies the enforcement socket mount at " + socketMountPath, true
+		}
+		if hasSocketPathEnv(c) {
+			return "container " + c.Name + " pre-sets the injector-owned NRVQ_SOCKET_PATH env", true
+		}
+	}
+	return "", false
+}
+
+func containerWired(c corev1.Container) bool {
+	return mountsNorviqSocketVolume(c) && hasCorrectSocketEnv(c)
+}
+
+func mountsSocketPath(c corev1.Container) bool {
+	for _, m := range c.VolumeMounts {
+		if m.MountPath == socketMountPath || m.Name == "norviq-socket" {
+			return true
+		}
+	}
+	return false
+}
+
+func mountsNorviqSocketVolume(c corev1.Container) bool {
+	for _, m := range c.VolumeMounts {
+		if m.Name == "norviq-socket" && m.MountPath == socketMountPath {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSocketPathEnv(c corev1.Container) bool {
+	for _, e := range c.Env {
+		if e.Name == "NRVQ_SOCKET_PATH" {
+			return true
+		}
+	}
+	return false
+}
+
+// envValue returns the EFFECTIVE value of an env var — the LAST occurrence, matching Kubernetes' own
+// precedence. Reading the first occurrence let an attacker append a second NRVQ_SOCKET_PATH (a valid
+// first, an evil last) that passed the check but won at runtime.
+func envValue(c corev1.Container, name string) (string, bool) {
+	val, found := "", false
+	for _, e := range c.Env {
+		if e.Name == name {
+			val, found = e.Value, true
+		}
+	}
+	return val, found
+}
+
+func hasCorrectSocketEnv(c corev1.Container) bool {
+	v, ok := envValue(c, "NRVQ_SOCKET_PATH")
+	return ok && v == socketFilePath
+}
+
+// sidecarRoutingTrusted reports whether a sidecar container's injector-owned ROUTING env points at the
+// real control plane. A same-image sidecar with NRVQ_API_URL swung to a co-located allow-all engine (or an
+// embedded sidecar pointed at a foreign datastore) enforces nothing; such a pod must NOT be treated as
+// already-injected and skipped. The routing env is deterministic injector output, so the skip path
+// re-derives + compares it.
+func sidecarRoutingTrusted(c corev1.Container, cfg Config) bool {
+	mode, _ := envValue(c, "NRVQ_SIDECAR_MODE")
+	if mode != sidecarMode(cfg) {
+		return false
+	}
+	if mode == "embedded" {
+		// Air-gapped: the sidecar runs its own engine off the cluster datastores; a foreign datastore = no
+		// real policy. Every datastore URL the injector sets must match (empty cfg value = not injected).
+		if cfg.RedisURL != "" {
+			if v, _ := envValue(c, "NRVQ_REDIS_URL"); v != cfg.RedisURL {
+				return false
+			}
+		}
+		if cfg.PgURL != "" {
+			if v, _ := envValue(c, "NRVQ_PG_URL"); v != cfg.PgURL {
+				return false
+			}
+		}
+		return true
+	}
+	// proxy (default): NRVQ_API_URL must be the injector's value — cfg.ApiURL, or the https upgrade the
+	// auto-mTLS path applies (buildSidecarTLSEnv) to a plaintext cfg.ApiURL.
+	url, ok := envValue(c, "NRVQ_API_URL")
+	if !ok {
+		return false
+	}
+	if url == cfg.ApiURL {
+		return true
+	}
+	return cfg.InternalTLS && !strings.HasPrefix(cfg.ApiURL, "https://") && url == "https://norviq-api:8443"
+}
+
+func hasNorviqSocketVolume(pod *corev1.Pod) bool {
+	for _, v := range pod.Spec.Volumes {
+		if v.Name == "norviq-socket" {
+			return true
+		}
+	}
+	return false
+}
+
+func configuredSidecarImage(cfg Config) string {
 	runtime := cfg.Runtime
 	if runtime == nil {
 		runtime = &RuntimeConfig{}
 		runtime.SetSidecarImage(cfg.SidecarImage)
 	}
-	configuredImage := runtime.SidecarImage(cfg.SidecarImage)
-	for _, c := range pod.Spec.Containers {
-		if c.Image != "" && c.Image == configuredImage {
-			return true
-		}
-		if hasSocketMount(c) {
-			return true
-		}
+	return runtime.SidecarImage(cfg.SidecarImage)
+}
+
+// sameSidecarImageName reports whether two image refs share the same repository NAME (final path
+// segment), ignoring registry, tag and digest — e.g. ghcr.io/norviq-dev/norviq-engine:engine-latest and
+// norviq/norviq-engine:some-old-sha both have the name "norviq-engine". Empty names never match.
+func sameSidecarImageName(a, configured string) bool {
+	na := imageName(a)
+	return na != "" && na == imageName(configured)
+}
+
+func imageName(img string) string {
+	if i := strings.IndexByte(img, '@'); i >= 0 { // strip digest
+		img = img[:i]
 	}
-	return false
+	seg := img
+	if slash := strings.LastIndexByte(img, '/'); slash >= 0 {
+		seg = img[slash+1:]
+	}
+	if colon := strings.IndexByte(seg, ':'); colon >= 0 { // strip tag
+		seg = seg[:colon]
+	}
+	return seg
 }
 
 func hasSocketMount(container corev1.Container) bool {

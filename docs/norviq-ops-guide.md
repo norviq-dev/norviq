@@ -14,6 +14,22 @@ Critical operational knowledge for deployment, testing, and Lenovo/Zscaler pente
 | Code-level namespace check | Belt + suspenders — handler.go also blocks system namespaces | Read webhook logs for NRVQ-WHK-4007 |
 | timeoutSeconds: 5 | Webhook too slow → K8s skips it, pod creates normally | Check webhook config |
 | Panic recovery | Webhook panics → returns Allowed:true → pod creates | Read handler code |
+| Anti-tamper (fail-closed) | A pod that presents a fake/partial/pre-occupied version of the injector-owned plumbing (a sidecar with a command/args override, an untrusted-registry `norviq-engine` image, a rogue `NRVQ_API_URL`, a pre-set `norviq-socket` mount / `NRVQ_SOCKET_PATH` env, or a socket-mounting decoy) is **DENIED** (`NRVQ-WHK-4034`) rather than run un-injected. Injection is skipped only for a pod that is already *fully + correctly* wired. Init containers are wired too. | Try to create such a pod → expect admission denial |
+
+### Enforcement-model limitations (defense-in-depth to add)
+
+Sidecar enforcement is **cooperative-socket**: the injector wires each agent container to the sidecar's
+local socket (`NRVQ_SOCKET_PATH`) and the SDK routes tool calls through it. The webhook makes this
+**tamper-proof at admission time** (see the anti-tamper row above), but two vectors are outside what a
+mutating webhook can close and must be handled operationally:
+
+1. **Runtime bypass** — an app that, at runtime, *ignores* the injected socket and dials tools directly is
+   not policed by the sidecar. Mitigate with a **NetworkPolicy** restricting agent egress to only the
+   sidecar/API, or the planned **mandatory iptables/NET_ADMIN interception** (forces all egress through the
+   PEP). Prompt-injection of the model is NOT this case — enforcement sits in the tool-call path.
+2. **`pods/ephemeralcontainers`** — the webhook intercepts pods `CREATE`, not the ephemeral-containers
+   subresource, so a debug container added to a running pod is unwired. Mitigate by **not granting
+   `pods/ephemeralcontainers`** to tenant roles (it is a break-glass/debug capability).
 
 ### Emergency: Webhook Breaking Cluster
 

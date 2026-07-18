@@ -136,19 +136,46 @@ func TestMutate_NoAgentClassStillInjects(t *testing.T) {
 	}
 }
 
-// FIX 4: hasSidecar must identify the real sidecar by the injector-controlled IMAGE (or the
-// injectedAnnotation it stamps), never by the attacker-controllable container NAME. A pod already
-// carrying the REAL sidecar image is skipped (idempotency preserved).
+// Idempotency: a pod that is ALREADY FULLY injected (the norviq-socket volume + the real sidecar image
+// with no command override + every app container wired to the socket with the correct NRVQ_SOCKET_PATH) is
+// skipped. A sidecar container ALONE no longer suffices — that hardened contract closes the bypass where a
+// bare sidecar-image container suppresses injection while the app runs unwired (see the bypass tests).
+func fullyInjectedContainer(name, image string) corev1.Container {
+	return corev1.Container{
+		Name:         name,
+		Image:        image,
+		VolumeMounts: []corev1.VolumeMount{{Name: "norviq-socket", MountPath: socketMountPath}},
+		Env:          []corev1.EnvVar{{Name: "NRVQ_SOCKET_PATH", Value: socketFilePath}},
+	}
+}
+
+// trustedSidecar is a sidecar container carrying the injector's real routing env (proxy mode pointed at
+// the configured engine), as the skip path now requires. extraMounts lets the drift test add the socket.
+func trustedSidecar(name, image string, cfg Config, mounts ...corev1.VolumeMount) corev1.Container {
+	return corev1.Container{
+		Name:         name,
+		Image:        image,
+		VolumeMounts: mounts,
+		Env: []corev1.EnvVar{
+			{Name: "NRVQ_SIDECAR_MODE", Value: "proxy"},
+			{Name: "NRVQ_API_URL", Value: cfg.ApiURL},
+		},
+	}
+}
+
 func TestMutateAlreadyInjected(t *testing.T) {
 	cfg := LoadConfig()
 	h := NewHandler(cfg)
 	pod := corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "test", Labels: map[string]string{"norviq": "enabled"}},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}, {Name: "norviq-sidecar", Image: cfg.SidecarImage}}},
+		Spec: corev1.PodSpec{
+			Volumes:    []corev1.Volume{{Name: "norviq-socket"}},
+			Containers: []corev1.Container{fullyInjectedContainer("app", "nginx"), trustedSidecar("norviq-sidecar", cfg.SidecarImage, cfg)},
+		},
 	}
 	resp := sendReview(t, h, makeReviewFromPod(pod, metav1.GroupVersionKind{Kind: "Pod"}, "default"))
 	if !resp.Response.Allowed || resp.Response.Patch != nil {
-		t.Fatal("expected no patch for pod already carrying the real sidecar image")
+		t.Fatal("expected no patch for a pod already FULLY injected (volume + wired app + real sidecar)")
 	}
 }
 
@@ -179,15 +206,19 @@ func TestMutateAlreadyInjectedAfterImageDrift(t *testing.T) {
 	h := NewHandler(LoadConfig())
 	pod := corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "test", Labels: map[string]string{"norviq": "enabled"}},
-		Spec: corev1.PodSpec{Containers: []corev1.Container{
-			{Name: "app"},
-			{Name: "norviq-sidecar", Image: "norviq/norviq-engine:some-old-sha",
-				VolumeMounts: []corev1.VolumeMount{{Name: "norviq-socket", MountPath: socketMountPath}}},
-		}},
+		Spec: corev1.PodSpec{
+			Volumes: []corev1.Volume{{Name: "norviq-socket"}},
+			Containers: []corev1.Container{
+				fullyInjectedContainer("app", "nginx"),
+				// drifted image (old tag) but same name "norviq-engine" + socket mount + trusted routing → recognized.
+				trustedSidecar("norviq-sidecar", "norviq/norviq-engine:some-old-sha", h.cfg,
+					corev1.VolumeMount{Name: "norviq-socket", MountPath: socketMountPath}),
+			},
+		},
 	}
 	resp := sendReview(t, h, makeReviewFromPod(pod, metav1.GroupVersionKind{Kind: "Pod"}, "default"))
 	if !resp.Response.Allowed || resp.Response.Patch != nil {
-		t.Fatal("expected no patch for an already-injected pod recognized by its socket-mount structure after image drift")
+		t.Fatal("expected no patch for a fully-injected pod whose sidecar image drifted (same name + socket mount)")
 	}
 }
 

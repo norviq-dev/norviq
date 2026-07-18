@@ -60,25 +60,28 @@ func (inj *Injector) CreatePatch(pod *corev1.Pod, agentClass string, namespace s
 		slog.Error("NRVQ-WHK-4033: blocked unauthorized sidecar image", "image", image)
 		return nil, fmt.Errorf("unauthorized sidecar image")
 	}
-	mountStates := mountState(pod.Spec.Containers)
-	envStates := envState(pod.Spec.Containers)
-	containerCount := len(pod.Spec.Containers)
-	patches := make([]patchOp, 0, 6)
+	patches := make([]patchOp, 0, 8)
 	patches = append(patches, patchOp{Op: "add", Path: "/spec/containers/-", Value: inj.buildSidecar(agentClass, namespace)})
 	patches = append(patches, volumePatch(len(pod.Spec.Volumes) > 0, inj.sharedVolume))
 	if inj.cfg.SpiffeInject {
 		// After the first volume add, /spec/volumes always exists -> append the SPIFFE CSI volume.
 		patches = append(patches, volumePatch(true, spiffeVolumeTemplate()))
 	}
-	patches = append(patches, mountPatches(containerCount, mountStates, inj.cfg.SpiffeInject)...)
-	patches = append(patches, envPatches(containerCount, envStates, inj.cfg)...)
+	// Wire the app containers AND the init containers to the enforcement socket: an agent workload placed
+	// in an initContainer would otherwise run before the sidecar with no socket mount/env — unpoliced
+	// (webhook enforcement-integrity class). The socket only exists once the sidecar starts, so a wired
+	// init container that reaches for it fails CLOSED, which is the correct posture for init-phase calls.
+	patches = append(patches, mountPatches("containers", len(pod.Spec.Containers), mountState(pod.Spec.Containers), inj.cfg.SpiffeInject)...)
+	patches = append(patches, envPatches("containers", len(pod.Spec.Containers), envState(pod.Spec.Containers), inj.cfg)...)
+	patches = append(patches, mountPatches("initContainers", len(pod.Spec.InitContainers), mountState(pod.Spec.InitContainers), inj.cfg.SpiffeInject)...)
+	patches = append(patches, envPatches("initContainers", len(pod.Spec.InitContainers), envState(pod.Spec.InitContainers), inj.cfg)...)
 	patches = append(patches, injectedAnnotationPatch(pod.Annotations))
 	return json.Marshal(patches)
 }
 
-// injectedAnnotationPatch stamps injectedAnnotation ("norviq.io/injected": "true") on every patched
-// pod. hasSidecar (handler.go) trusts this over the container name, which an attacker can forge with a
-// decoy container; the annotation is set only here, by the injector itself, on the admission path.
+// injectedAnnotationPatch stamps injectedAnnotation ("norviq.io/injected": "true") on every patched pod
+// as an operator-visible marker only. It is NOT a trust input: classifyPod (handler.go) recognizes an
+// injected pod by its structural wiring, never by this annotation (a tenant can self-stamp it).
 func injectedAnnotationPatch(annotations map[string]string) patchOp {
 	if len(annotations) == 0 {
 		return patchOp{Op: "add", Path: "/metadata/annotations", Value: map[string]string{injectedAnnotation: "true"}}
@@ -97,7 +100,8 @@ func volumePatch(hasVolumes bool, volume map[string]interface{}) patchOp {
 	return patchOp{Op: "add", Path: "/spec/volumes", Value: []map[string]interface{}{volume}}
 }
 
-func mountPatches(containerCount int, states []containerPatchState, spiffeInject bool) []patchOp {
+// kind is the pod-spec container slice being wired: "containers" or "initContainers".
+func mountPatches(kind string, containerCount int, states []containerPatchState, spiffeInject bool) []patchOp {
 	mounts := []map[string]interface{}{{"name": "norviq-socket", "mountPath": socketMountPath}}
 	if spiffeInject {
 		mounts = append(mounts, map[string]interface{}{"name": "spiffe-workload-api", "mountPath": spiffeMountPath, "readOnly": true})
@@ -111,7 +115,7 @@ func mountPatches(containerCount int, states []containerPatchState, spiffeInject
 		if !state.HasList {
 			patches = append(patches, patchOp{
 				Op:    "add",
-				Path:  fmt.Sprintf("/spec/containers/%d/volumeMounts", idx),
+				Path:  fmt.Sprintf("/spec/%s/%d/volumeMounts", kind, idx),
 				Value: mounts,
 			})
 			continue
@@ -119,7 +123,7 @@ func mountPatches(containerCount int, states []containerPatchState, spiffeInject
 		for _, m := range mounts {
 			patches = append(patches, patchOp{
 				Op:    "add",
-				Path:  fmt.Sprintf("/spec/containers/%d/volumeMounts/-", idx),
+				Path:  fmt.Sprintf("/spec/%s/%d/volumeMounts/-", kind, idx),
 				Value: m,
 			})
 		}
@@ -127,7 +131,7 @@ func mountPatches(containerCount int, states []containerPatchState, spiffeInject
 	return patches
 }
 
-func envPatches(containerCount int, states []containerPatchState, cfg Config) []patchOp {
+func envPatches(kind string, containerCount int, states []containerPatchState, cfg Config) []patchOp {
 	envs := []map[string]interface{}{{"name": "NRVQ_SOCKET_PATH", "value": socketFilePath}}
 	if cfg.SpiffeInject {
 		envs = append(envs,
@@ -144,7 +148,7 @@ func envPatches(containerCount int, states []containerPatchState, cfg Config) []
 		if !state.HasList {
 			patches = append(patches, patchOp{
 				Op:    "add",
-				Path:  fmt.Sprintf("/spec/containers/%d/env", idx),
+				Path:  fmt.Sprintf("/spec/%s/%d/env", kind, idx),
 				Value: envs,
 			})
 			continue
@@ -152,7 +156,7 @@ func envPatches(containerCount int, states []containerPatchState, cfg Config) []
 		for _, e := range envs {
 			patches = append(patches, patchOp{
 				Op:    "add",
-				Path:  fmt.Sprintf("/spec/containers/%d/env/-", idx),
+				Path:  fmt.Sprintf("/spec/%s/%d/env/-", kind, idx),
 				Value: e,
 			})
 		}
