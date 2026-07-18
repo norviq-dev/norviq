@@ -15,6 +15,11 @@ policyQuotaNamespaces: []
 # tools) is a separate roadmap item.
 agentEgressPolicy:
   enabled: false
+  # Policy engine:
+  #   networkpolicy (default) — a portable Kubernetes NetworkPolicy. Allowlist is IP/CIDR-based only.
+  #   cilium                  — a CiliumNetworkPolicy that ALSO supports FQDN (hostname) allowlisting
+  #                             (allowedFQDNs / allowedFQDNPatterns). Requires the Cilium CNI.
+  engine: networkpolicy
   # Namespaces to lock down. Empty => reuse policyQuotaNamespaces (the tenant namespaces).
   namespaces: []
   allowDNS: true
@@ -22,7 +27,13 @@ agentEgressPolicy:
   # denied. Leave empty ONLY if the agent's tools all live in the norviq namespace — otherwise its tool
   # calls will fail. Example: ["10.0.0.0/8"] for in-cluster tool services, or a SaaS API's egress CIDR.
   allowedCIDRs: []
-  # Restrict the allowlisted CIDRs to these TCP ports (empty => all ports on those CIDRs).
+  # engine=cilium ONLY: allow egress by HOSTNAME (Cilium's DNS-aware toFQDNs). Cleaner than chasing a SaaS
+  # tool's rotating/CDN IPs. Exact names in allowedFQDNs, wildcards in allowedFQDNPatterns.
+  #   allowedFQDNs:        ["api.openai.com", "api.anthropic.com"]
+  #   allowedFQDNPatterns: ["*.googleapis.com"]
+  allowedFQDNs: []
+  allowedFQDNPatterns: []
+  # Restrict the allowlisted CIDRs/FQDNs to these TCP ports (empty => all ports).
   allowedPorts: []
   # embedded sidecar mode reaches Redis/Postgres directly (not the API) — set true to also permit egress
   # to the norviq datastores. Leave false for the default proxy mode (sidecar → API only).

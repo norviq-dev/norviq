@@ -26,9 +26,15 @@ mutating webhook can close and must be handled operationally:
 1. **Runtime bypass** — an app that, at runtime, *ignores* the injected socket and dials tools directly is
    not policed by the sidecar (the PEP is cooperative: the sidecar returns a forward/drop decision and the
    *agent* executes the tool). Two layers of mitigation:
-   - **Shipped now — `agentEgressPolicy` (default-deny egress NetworkPolicy).** Set
-     `agentEgressPolicy.enabled=true` + `agentEgressPolicy.allowedCIDRs=[...]` (your approved tool
-     endpoints). An agent pod may then egress ONLY to the norviq API, DNS, and that allowlist — arbitrary
+   - **Shipped now — `agentEgressPolicy` (default-deny egress).** Set `agentEgressPolicy.enabled=true`
+     and list your approved tool endpoints. Two engines:
+     - `engine: networkpolicy` (default, portable) — allowlist by **CIDR**: `allowedCIDRs`, `allowedPorts`.
+     - `engine: cilium` (requires the **Cilium** CNI) — allowlist by **hostname**: `allowedFQDNs`
+       (exact, e.g. `api.openai.com`) and `allowedFQDNPatterns` (wildcard, e.g. `*.googleapis.com`), plus
+       `allowedCIDRs` for IP-addressable tools. Cleaner for SaaS tools behind rotating/CDN IPs. The chart
+       auto-adds the required Cilium DNS-visibility rule so `toFQDNs` resolves.
+
+     Either way, an agent pod may then egress ONLY to the norviq API, DNS, and that allowlist — arbitrary
      data-exfiltration to the internet/attacker endpoints is blocked at the network layer. **Requires a
      NetworkPolicy-enforcing CNI (Calico/Cilium); kindnet ignores NetworkPolicy.** This bounds the blast
      radius but does NOT stop per-call param abuse of an *allowed* tool (e.g. `execute_sql` with

@@ -67,3 +67,38 @@ def test_egress_policy_refuses_control_plane_namespace() -> None:
     )
     assert res.returncode != 0
     assert "must not target the norviq control-plane" in res.stderr
+
+
+# --- engine=cilium: FQDN (hostname) egress allowlisting -------------------------------------------
+
+
+def test_cilium_engine_renders_fqdn_policy() -> None:
+    res = _template(
+        "--set", "policyQuotaNamespaces={prod-agents}",
+        "--set", "agentEgressPolicy.enabled=true",
+        "--set", "agentEgressPolicy.engine=cilium",
+        "--set", "agentEgressPolicy.allowedFQDNs={api.openai.com}",
+        "--set", "agentEgressPolicy.allowedFQDNPatterns={*.googleapis.com}",
+        "--set", "agentEgressPolicy.allowedPorts={443}",
+    )
+    assert res.returncode == 0, res.stderr
+    out = res.stdout
+    assert "kind: CiliumNetworkPolicy" in out
+    # the standard NetworkPolicy must NOT also render (engines are mutually exclusive)
+    assert "\nkind: NetworkPolicy" not in out
+    # FQDN allowlist + the MANDATORY DNS-visibility rule (without it toFQDNs resolves nothing)
+    assert 'matchName: "api.openai.com"' in out and 'matchPattern: "*.googleapis.com"' in out
+    assert "toFQDNs:" in out
+    assert "rules:" in out and "dns:" in out and 'matchPattern: "*"' in out
+    # control plane still reachable; port restriction applied
+    assert "app: norviq-api" in out and 'port: "443"' in out
+
+
+def test_invalid_engine_fails() -> None:
+    res = _template(
+        "--set", "agentEgressPolicy.enabled=true",
+        "--set", "agentEgressPolicy.namespaces={prod-agents}",
+        "--set", "agentEgressPolicy.engine=bogus",
+    )
+    assert res.returncode != 0
+    assert "engine must be" in res.stderr
