@@ -1,4 +1,4 @@
-import { RotateCcw, Snowflake } from "lucide-react";
+import { ArrowLeft, RotateCcw, Snowflake, Sun } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { apiGet, apiSend, fetchAgentToolUsage, fetchAgentTrustHistory } from "../api/client";
@@ -54,11 +54,15 @@ export function AgentMonitor() {
   }, [selected?.spiffe_id]);
   const agents = useApi<AgentRow[]>(
     () => apiGet(`/api/v1/agents?namespace=${encodeURIComponent(namespace)}`),
-    [namespace],
+    // Pause the 60s auto-refetch while an agent detail is OPEN so the list + panel don't mutate under the
+    // operator mid-interaction (freezing/inspecting an agent shouldn't have the view refresh itself). The
+    // `!!selected` dep re-runs the effect only on the open↔close transition — switching between two already-
+    // open agents doesn't refetch; closing (Back) resumes the interval and pulls a fresh, persisted list.
+    [namespace, !!selected],
     {
       cacheKey: `agent-monitor:${namespace}`,
       staleTimeMs: 60_000,
-      refetchIntervalMs: 60_000
+      refetchIntervalMs: selected ? undefined : 60_000
     }
   );
 
@@ -266,21 +270,40 @@ export function AgentMonitor() {
                   </div>
                 ))}
               </div>
-              <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
-                <KitButton
-                  variant="primary"
-                  icon={RotateCcw}
-                  onClick={() => updateTrust(selected.spiffe_id, 0.8)}
-                >
-                  Reset Trust
+              <div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
+                {/* Explicit way back to the full list — the detail renders below the table with no other exit. */}
+                <KitButton variant="ghost" icon={ArrowLeft} onClick={() => setSelected(null)}>
+                  Back to all agents
                 </KitButton>
-                <KitButton
-                  variant="destructive"
-                  icon={Snowflake}
-                  onClick={() => updateTrust(selected.spiffe_id, 0)}
-                >
-                  Freeze Agent
-                </KitButton>
+                {selected.category === "frozen" || selected.score === 0 ? (
+                  // A frozen agent's one meaningful action is to UNFREEZE (restore trust) — resetting the score
+                  // of a frozen agent is a no-op-looking dead end, so swap the Freeze control for an explicit
+                  // Unfreeze rather than leaving the operator with only "Reset Trust" to guess at.
+                  <KitButton
+                    variant="primary"
+                    icon={Sun}
+                    onClick={() => updateTrust(selected.spiffe_id, 0.8)}
+                  >
+                    Unfreeze Agent
+                  </KitButton>
+                ) : (
+                  <>
+                    <KitButton
+                      variant="primary"
+                      icon={RotateCcw}
+                      onClick={() => updateTrust(selected.spiffe_id, 0.8)}
+                    >
+                      Reset Trust
+                    </KitButton>
+                    <KitButton
+                      variant="destructive"
+                      icon={Snowflake}
+                      onClick={() => updateTrust(selected.spiffe_id, 0)}
+                    >
+                      Freeze Agent
+                    </KitButton>
+                  </>
+                )}
               </div>
               {actionError && (
                 // DEF-040: failed freeze/reset feedback — the control is no longer silent on 403/network/5xx.
