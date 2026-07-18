@@ -24,6 +24,12 @@ from norviq.config import settings
 log = structlog.get_logger()
 security = HTTPBearer(auto_error=False)
 
+# Bound the bearer credential BEFORE any crypto. The Authorization header is NOT covered by the
+# request-body 413 limit, so an attacker could feed jwt.decode a multi-megabyte "token" as a cheap DoS
+# probe. 8 KiB is far above any legitimate HS256 session token (~200 B), API key, or OIDC RS256 token
+# (with group claims, ~1-4 KiB); anything larger is rejected as invalid up front.
+_MAX_BEARER_LEN = 8192
+
 # Role strength for deterministic group-mapping precedence (admin wins). Flip here for least-privilege.
 _ROLE_RANK = {"admin": 3, "service": 2, "viewer": 1}
 
@@ -143,6 +149,8 @@ async def get_current_user(
     """
     if not creds:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
+    if len(creds.credentials) > _MAX_BEARER_LEN:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     try:
         claims = await _validate_token(creds.credentials)
     except JWTError as exc:

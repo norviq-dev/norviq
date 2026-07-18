@@ -53,15 +53,19 @@ _INVALID_CREDS = "Invalid username or password"
 class LoginRequest(BaseModel):
     """Username/password login body."""
 
-    username: str = Field(min_length=1, max_length=255)
-    password: str = Field(min_length=1, max_length=1024)
+    # Tight caps = the authoritative control (the UI maxLength is client-side and trivially bypassed).
+    # 64/128 comfortably fits any real credential (NIST 800-63B: permit >=64-char passwords) while shrinking
+    # the attack surface — no oversized body to log, buffer, or probe. Body-size 413 + bcrypt-sha256 prehash
+    # already blunt the long-password hashing DoS; these bounds close the rest.
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=128)
 
 
 class ChangePasswordRequest(BaseModel):
     """Authenticated password change (re-checks the current password)."""
 
-    current_password: str = Field(min_length=1, max_length=1024)
-    new_password: str = Field(min_length=1, max_length=1024)
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=1, max_length=128)
 
 
 def _cache(request: Request):
