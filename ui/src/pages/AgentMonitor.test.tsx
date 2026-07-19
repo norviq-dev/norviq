@@ -59,7 +59,7 @@ describe("UI-1: AgentMonitor mounts", () => {
     expect(screen.getByText(/ago|just now/i)).toBeInTheDocument();
   });
 
-  it("DEF-040: a freeze that fails (403) surfaces an error instead of silently no-op'ing", async () => {
+  it("a freeze that fails (403) surfaces an error instead of silently no-op'ing", async () => {
     server.use(
       http.get("/api/v1/agents", () =>
         HttpResponse.json([
@@ -89,7 +89,7 @@ describe("UI-1: AgentMonitor mounts", () => {
     expect(alert).toHaveTextContent("Admin role required");
   });
 
-  it("DEF-022: a successful freeze under a ?class= filter keeps the full fleet (doesn't collapse to one class)", async () => {
+  it("a successful freeze under a ?class= filter keeps the full fleet (doesn't collapse to one class)", async () => {
     server.use(
       http.get("/api/v1/agents", () =>
         HttpResponse.json([
@@ -160,6 +160,98 @@ describe("UI-1: AgentMonitor mounts", () => {
     expect(within(trackedTile).getByText("3")).toBeInTheDocument();
   });
 
+  it("UX-BACK: freeze → 'Back to all agents' keeps the FULL list and does NOT refetch (frozen stays frozen)", async () => {
+    // Reproduces the reported issue: after freezing an agent and pressing "Back to all agents" the list
+    // collapsed to just the frozen agent. Root cause was a regression that added `!!selected` to the
+    // fetch deps (+ a 60s auto-poll): pressing Back flipped selected→null, re-ran the effect, and the
+    // refetch (cache just busted by the freeze) raced the optimistic setData → list collapsed. The fix
+    // fetches on mount/namespace only, so Back is a pure setSelected(null) — the full list is untouched.
+    let agentsGets = 0;
+    const fleet = [
+      { spiffe_id: "spiffe://norviq/ns/default/sa/report-gen-1", namespace: "default", agent_class: "report-gen", last_seen: new Date().toISOString(), score: 0.82, category: "high", violation_count: 0, signals: {}, dominant_signal: "", recommendation: "allow" },
+      { spiffe_id: "spiffe://norviq/ns/default/sa/report-gen-2", namespace: "default", agent_class: "report-gen", last_seen: new Date().toISOString(), score: 0.71, category: "medium", violation_count: 1, signals: {}, dominant_signal: "", recommendation: "allow" },
+      { spiffe_id: "spiffe://norviq/ns/default/sa/billing-bot", namespace: "default", agent_class: "billing", last_seen: new Date().toISOString(), score: 0.9, category: "high", violation_count: 0, signals: {}, dominant_signal: "", recommendation: "allow" }
+    ];
+    server.use(
+      http.get("/api/v1/agents", () => { agentsGets += 1; return HttpResponse.json(fleet); }),
+      http.get(/\/api\/v1\/agents\/.*\/trust-history/, () => HttpResponse.json([])),
+      http.get(/\/api\/v1\/agents\/.*\/tool-usage/, () => HttpResponse.json([])),
+      http.put(/\/api\/v1\/agents\/.*\/trust$/, () => HttpResponse.json({ score: 0 }))
+    );
+    render(
+      <MemoryRouter>
+        <AppProvider>
+          <AgentMonitor />
+        </AppProvider>
+      </MemoryRouter>
+    );
+
+    // All three agents present on load.
+    await screen.findByText("spiffe://norviq/ns/default/sa/report-gen-1");
+    expect(screen.getByText("spiffe://norviq/ns/default/sa/report-gen-2")).toBeInTheDocument();
+    expect(screen.getByText("spiffe://norviq/ns/default/sa/billing-bot")).toBeInTheDocument();
+
+    // Select an agent and freeze it. Detail swaps Freeze/Reset for the explicit Unfreeze control.
+    fireEvent.click(screen.getByText("spiffe://norviq/ns/default/sa/report-gen-1"));
+    fireEvent.click(await screen.findByText("Freeze Agent"));
+    await screen.findByText("Unfreeze Agent");
+    expect(screen.queryByText("Reset Trust")).toBeNull(); // frozen agent → no dead "Reset" path
+    await waitFor(() => {
+      const frozenTile = screen.getByText("Frozen").closest(".panel") as HTMLElement;
+      expect(within(frozenTile).getByText("1")).toBeInTheDocument();
+    });
+
+    // Press "Back to all agents": detail closes and the FULL fleet is still there (the reported bug).
+    fireEvent.click(screen.getByText("Back to all agents"));
+    await waitFor(() => expect(screen.queryByText("Agent Actions")).toBeNull());
+    expect(screen.getByText("spiffe://norviq/ns/default/sa/report-gen-1")).toBeInTheDocument();
+    expect(screen.getByText("spiffe://norviq/ns/default/sa/report-gen-2")).toBeInTheDocument();
+    expect(screen.getByText("spiffe://norviq/ns/default/sa/billing-bot")).toBeInTheDocument();
+    const trackedTile = screen.getByText("Agents Tracked").closest(".panel") as HTMLElement;
+    expect(within(trackedTile).getByText("3")).toBeInTheDocument();
+    // The frozen agent stayed frozen (no auto-refetch un-did the optimistic freeze).
+    const stillFrozen = screen.getByText("Frozen").closest(".panel") as HTMLElement;
+    expect(within(stillFrozen).getByText("1")).toBeInTheDocument();
+
+    // The core guard: /agents was fetched exactly ONCE (mount). The buggy deps refetched on Back;
+    // any auto-poll would push this above 1. Select + freeze + Back trigger no extra fleet fetch.
+    expect(agentsGets).toBe(1);
+  });
+
+  it("UX-UNFREEZE: a frozen agent can be unfrozen from its detail (restores trust, list intact)", async () => {
+    const fleet = [
+      { spiffe_id: "spiffe://norviq/ns/default/sa/frozen-bot", namespace: "default", agent_class: "batch", last_seen: new Date().toISOString(), score: 0, category: "frozen", violation_count: 5, signals: {}, dominant_signal: "", recommendation: "block" },
+      { spiffe_id: "spiffe://norviq/ns/default/sa/healthy-bot", namespace: "default", agent_class: "web", last_seen: new Date().toISOString(), score: 0.9, category: "high", violation_count: 0, signals: {}, dominant_signal: "", recommendation: "allow" }
+    ];
+    server.use(
+      http.get("/api/v1/agents", () => HttpResponse.json(fleet)),
+      http.get(/\/api\/v1\/agents\/.*\/trust-history/, () => HttpResponse.json([])),
+      http.get(/\/api\/v1\/agents\/.*\/tool-usage/, () => HttpResponse.json([])),
+      http.put(/\/api\/v1\/agents\/.*\/trust$/, () => HttpResponse.json({ score: 0.8 }))
+    );
+    render(
+      <MemoryRouter>
+        <AppProvider>
+          <AgentMonitor />
+        </AppProvider>
+      </MemoryRouter>
+    );
+    // Select the already-frozen agent → only the Unfreeze action is offered.
+    fireEvent.click(await screen.findByText("spiffe://norviq/ns/default/sa/frozen-bot"));
+    const unfreeze = await screen.findByText("Unfreeze Agent");
+    expect(screen.queryByText("Freeze Agent")).toBeNull();
+    // Unfreeze → optimistic restore to trust 0.8: the Frozen tile drops to 0, no error surfaced.
+    fireEvent.click(unfreeze);
+    await waitFor(() => {
+      const frozenTile = screen.getByText("Frozen").closest(".panel") as HTMLElement;
+      expect(within(frozenTile).getByText("0")).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("alert")).toBeNull();
+    // Both agents still tracked.
+    const trackedTile = screen.getByText("Agents Tracked").closest(".panel") as HTMLElement;
+    expect(within(trackedTile).getByText("2")).toBeInTheDocument();
+  });
+
   it("P5: clicking an agent row opens the detail panel with freeze/trust actions", async () => {
     server.use(
       http.get("/api/v1/agents", () =>
@@ -182,7 +274,7 @@ describe("UI-1: AgentMonitor mounts", () => {
       </MemoryRouter>
     );
     fireEvent.click(await screen.findByText("deploy-bot"));
-    // The detail panel opens with the audited actions (was rendered off-screen / not opening per the reviewer).
+    // The detail panel opens with the audited actions.
     expect(await screen.findByText("Agent Actions")).toBeInTheDocument();
     expect(screen.getByText("Freeze Agent")).toBeInTheDocument();
     expect(screen.getByText("Reset Trust")).toBeInTheDocument();

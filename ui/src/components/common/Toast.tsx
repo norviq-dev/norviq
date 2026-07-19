@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// P1-3: the ONE feedback surface for async outcomes. Convention (enforced in review): no fetch
+// The ONE feedback surface for async outcomes. Convention: no fetch
 // result may be silently dropped — every mutation surfaces success/partial/failure here (or in a
 // dedicated in-context panel), and error/warning toasts are STICKY until dismissed so a failed
-// or partial outcome can't expire unseen (the old per-page 3.5s toasts lost escalation messages).
+// or partial outcome can't expire unseen.
 import { createContext, ReactNode, useCallback, useContext, useMemo, useRef, useState } from "react";
 
 export type ToastKind = "success" | "error" | "warning" | "info";

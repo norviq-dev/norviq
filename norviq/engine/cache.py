@@ -185,7 +185,7 @@ class RedisCache:
         agent_class OUT of the returned dict key via `key.split(":", 2)`, so we reconstruct a
         plaintext `policy:{namespace}:{agent_class}` DISPLAY key here from the namespace/agent_class
         carried in the cached VALUE (set_policy/warm_policy embed them) instead of the real hashed
-        Redis key. Entries cached before this fix (no namespace/agent_class in the value) are skipped
+        Redis key. Entries cached without namespace/agent_class in the value are skipped
         rather than guessed at — they age out on the short policy TTL and get re-cached correctly.
         """
         entries: dict[str, dict] = {}
@@ -341,15 +341,15 @@ class RedisCache:
         return int(count)
 
     async def peek_call_count(self, spiffe_id: str) -> int:
-        """Read the current windowed call count WITHOUT incrementing (LOGIN-2 lockout pre-check)."""
+        """Read the current windowed call count WITHOUT incrementing (lockout pre-check)."""
         raw = await self._client().get(f"callcount:{spiffe_id}")
         return int(raw) if raw is not None else 0
 
     async def reset_call_count(self, spiffe_id: str) -> None:
-        """Clear a windowed call counter (LOGIN-2: a successful login resets its failed-attempt count)."""
+        """Clear a windowed call counter (a successful login resets its failed-attempt count)."""
         await self._client().delete(f"callcount:{spiffe_id}")
 
-    # F-05: graph ANALYSIS result cache, keyed by (namespace, content-hash version, type, params) so a
+    # Graph ANALYSIS result cache, keyed by (namespace, content-hash version, type, params) so a
     # repeated analysis call is served from cache and invalidated automatically when the graph changes.
     @staticmethod
     def _analysis_key(namespace: str, version: str, analysis_type: str, params: str = "") -> str:
@@ -393,17 +393,17 @@ class RedisCache:
         await self._client().setex(key, settings.session_ttl_s, json.dumps(data))
 
     async def revoke_token(self, token_hash: str, ttl_s: int) -> None:
-        """AUTH-01 logout denylist: mark a token hash revoked until the token's own expiry."""
+        """Logout denylist: mark a token hash revoked until the token's own expiry."""
         key = f"revoked:{token_hash}"
         await self._client().setex(key, max(1, int(ttl_s)), "1")
         log.info("nrvq.cache.token.revoked", key=key[:20], ttl=ttl_s, code="NRVQ-DB-9026")
 
     async def is_token_revoked(self, token_hash: str) -> bool:
-        """AUTH-01 logout denylist: True if this token hash was revoked and has not yet expired."""
+        """Logout denylist: True if this token hash was revoked and has not yet expired."""
         return await self._client().get(f"revoked:{token_hash}") is not None
 
     async def set_ns_settings(self, namespace: str, fields: dict) -> None:
-        """CFG-SETTINGS-INERT-01: mirror a namespace's RAW persisted settings override into Redis so the engine
+        """Mirror a namespace's RAW persisted settings override into Redis so the engine
         hot path can resolve per-ns posture without a per-eval DB read (the evaluator holds only this cache, and
         multi-replica correctness needs a shared store). Nulls are preserved — the evaluator does per-field
         fallback to the global config. No TTL; the source of truth stays the DB row (settings_router writes both)."""
@@ -411,16 +411,16 @@ class RedisCache:
         log.info("nrvq.cache.ns_settings.set", namespace=namespace, code="NRVQ-DB-9027")
 
     async def get_ns_settings(self, namespace: str) -> dict | None:
-        """CFG-SETTINGS-INERT-01: the mirrored per-ns settings override, or None if the namespace has none."""
+        """The mirrored per-ns settings override, or None if the namespace has none."""
         value = await self._client().get(f"nsconfig:{namespace}")
         return None if value is None else json.loads(value)
 
     async def set_trust_override(self, spiffe_id: str, score: float) -> None:
-        """AGT-TRUST-02: durable admin trust CAP for one agent (mirrors the agent_frozen: pattern, no TTL). The
+        """Durable admin trust CAP for one agent (mirrors the agent_frozen: pattern, no TTL). The
         routine trust:{spiffe} behavioral score is recomputed + clobbered every eval, so a manual pin needs its own
         key. Applied as min(computed, override) — tighten-only, never raises trust above what behavior justifies."""
         await self._client().set(f"agent_trust_override:{spiffe_id}", str(float(score)))
 
     async def clear_trust_override(self, spiffe_id: str) -> None:
-        """AGT-TRUST-02: remove the admin trust cap (score cleared / set to 1.0 / frozen)."""
+        """Remove the admin trust cap (score cleared / set to 1.0 / frozen)."""
         await self._client().delete(f"agent_trust_override:{spiffe_id}")

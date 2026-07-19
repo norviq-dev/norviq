@@ -48,13 +48,13 @@ function renderPage() {
   );
 }
 
-// ── DEF-021 ──────────────────────────────────────────────────────────────────────────────────────
+// ── ──────────────────────────────────────────────────────────────────────────────────────
 // A failed recompute POST (500/403) raises the degraded banner, but recompute()'s finally flips
 // `recomputing` which re-triggers the display-fetch effect; the follow-on READ GET succeeds and the
 // pre-fix code unconditionally called setDegraded(false) — clobbering the banner the instant the STALE
 // precompute re-rendered as if fresh. The fix latches the recompute failure across that refetch so the
 // banner survives a successful GET of the stale paths (only a compute POST that returns ok clears it).
-describe("DEF-021: a failed recompute keeps the degraded banner up across the follow-on refetch", () => {
+describe("a failed recompute keeps the degraded banner up across the follow-on refetch", () => {
   it("keeps 'API unavailable. Showing partial data.' visible after a 500 compute + 200 read settle", async () => {
     let getCount = 0;
     let computeCount = 0;

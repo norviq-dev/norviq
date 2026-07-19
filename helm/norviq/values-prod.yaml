@@ -70,7 +70,7 @@ postgresql:
     enabled: true
     instances: 3
   storage: 20Gi
-  # DEF-004: do NOT ship the well-known default DB password in a prod overlay. Blank here so the operator
+  # Do NOT ship the well-known default DB password in a prod overlay. Blank here so the operator
   # MUST supply a strong credential (--set postgresql.password=... or a sealed secret); with
   # config.requireStrongSecret an install left empty fails loudly at render (secret.yaml gate).
   password: ""
@@ -78,7 +78,7 @@ redis:
   ha:
     enabled: true
     replicas: 3
-  # DEF-004: same for the cache credential — no shipped default in prod; the operator supplies a strong one.
+  # Same for the cache credential — no shipped default in prod; the operator supplies a strong one.
   password: ""
 
 config:
@@ -88,7 +88,7 @@ config:
 gracefulShutdown:
   preStopSleepSeconds: 5
 
-# Fleet plane prod-readiness (F045 P2 S3). STILL gated by fleet.hub.enabled / fleet.enabled (so a
+# Fleet plane prod-readiness. STILL gated by fleet.hub.enabled / fleet.enabled (so a
 # values-prod install WITHOUT fleet renders zero fleet resources). When the hub is enabled on a prod
 # cluster, these turn on HA: >=2 fleet-api replicas + PDB + HPA + spread, and CloudNativePG fleet store.
 fleet:

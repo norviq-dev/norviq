@@ -176,7 +176,7 @@ def test_create_in_dry_run_only_namespace_is_rejected():
 def test_dry_run_is_namespace_scoped_for_a_tenant():
     tenant = {"role": "viewer", "namespace": "team-a", "sub": "t"}
     client, _ = _client(user=tenant)
-    # replaying a DIFFERENT namespace's traffic must 403 (was: any role, any namespace)
+    # replaying a DIFFERENT namespace's traffic must 403
     resp = client.post("/api/v1/policies/dry-run", json={"namespace": "payments", "agent_class": "x",
                                                         "rego_source": _VALID_REGO})
     assert resp.status_code == 403
@@ -264,7 +264,7 @@ def test_controller_service_jwt_cross_namespace_is_allowed():
     assert ("tenant-b", "finance-agent") in loader.created
 
 
-# --- POLICY-RESERVED-01: confirm-gated revert of operator-authored reserved scopes ---------------
+# --- Confirm-gated revert of operator-authored reserved scopes -----------------------------------
 # create ALLOWS __baseline__/__guardrail__ but DELETE refused ALL reserved scopes -> they were un-revertable.
 # `?confirm_managed=true` is the supported admin-only revert; the seeded cluster baseline + pack overlays stay
 # protected; the no-flag path is byte-identical to before (guarded by the tests above).
@@ -311,7 +311,7 @@ def test_no_confirm_flag_is_byte_identical_422():
     assert loader.deleted == []
 
 
-# --- COMP-GEN-01: per-class compliance remediation overlay ("<class>__remediation__") ---------------
+# --- Per-class compliance remediation overlay ("<class>__remediation__") ----------------------------
 # A compliance-remediation draft, once applied, must land at this DYNAMIC per-class key, never the real
 # class's own (ns, class) key — that would let "Review & Apply" replace the class's comprehensive policy
 # (the data-loss bug). It follows the `__guardrail__` precedent: directly writable via create, reserved from

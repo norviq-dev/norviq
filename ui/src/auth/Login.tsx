@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// LOGIN-2: the login gate, built to the design handoff (design_handoff_login) — three states in one view:
+// The login gate — three states in one view:
 //   1. Default login  — username/password (primary), "keep me signed in", collapsible CLI/dev-token field,
 //                       and SSO when an IdP is configured.
 //   2. First login    — forced password change from the default admin credential (strength meter, rule
@@ -39,7 +39,7 @@ function bootMinMs(): number {
   return 1100;
 }
 
-// A1: a floor on how long the in-flight sign-in loader is shown. Token / API-key auth resolves in ~1 frame
+// A floor on how long the in-flight sign-in loader is shown. Token / API-key auth resolves in ~1 frame
 // (unlike bcrypt password), so without this the brand loader flashed sub-perceptibly and the user just saw
 // "Sign in". We transition to the app (or an error) only after BOTH auth resolves AND this minimum elapses.
 const MIN_LOADER_MS = 400;
@@ -124,6 +124,11 @@ export function Login() {
   const [devOpen, setDevOpen] = useState(false);
   const [devToken, setDevToken] = useState("");
   const [curPwd, setCurPwd] = useState("");
+  // The forced first-login change prefills the current password from the sign-in that JUST happened. Track
+  // that so we can LOCK the field (readOnly) — a browser password manager was autofilling-over the correct
+  // prefilled value (→ "current password is wrong") and re-filling on every backspace (→ the field never
+  // cleared). Reads back as false on a bare reload, keeping the field editable when nothing was prefilled.
+  const [curPrefilled, setCurPrefilled] = useState(false);
   const [newPwd, setNewPwd] = useState("");
   const [confirmPwd, setConfirmPwd] = useState("");
   const [showNewPwd, setShowNewPwd] = useState(false);
@@ -189,7 +194,7 @@ export function Login() {
   const signIn = async () => {
     if (busy || done) return;
     const token = devToken.trim();
-    // A1: start the minimum-loader clock the moment we commit to signing, so a fast token/api-key auth still
+    // Start the minimum-loader clock the moment we commit to signing, so a fast token/api-key auth still
     // shows the brand loader for at least MIN_LOADER_MS before we transition to the app (or reveal an error).
     // CLI/dev token path: validate the pasted token against the real API (GET /me), same success path.
     if (devOpen && token && !(username.trim() && password)) {
@@ -227,7 +232,7 @@ export function Login() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username: username.trim(), password })
       });
-      await minTimer; // A1: floor the loader duration (no-op when bcrypt already took longer than the min)
+      await minTimer; // Floor the loader duration (no-op when bcrypt already took longer than the min)
       if (resp.status === 429) {
         setPhase("idle");
         setError("Too many failed attempts. Try again in a few minutes.");
@@ -249,6 +254,7 @@ export function Login() {
         setMustChange(true);
         setDefaultPwInUse(Boolean(body.default_password_in_use));
         setCurPwd(password); // they just proved it — prefill so the change is one step
+        setCurPrefilled(true); // lock the prefilled field: immune to password-manager autofill-overwrite
         setPassword("");
         setPhase("idle");
         setViewRaw("first");
@@ -364,7 +370,7 @@ export function Login() {
             boxShadow: "0 24px 60px -22px rgba(0,0,0,0.75), inset 0 1px 0 rgba(255,255,255,0.04)"
           }}
         >
-          {/* L4: brand lockup — CENTERED (was left-aligned) so the mark shares the loader's anchor and never
+          {/* Brand lockup — CENTERED so the mark shares the loader's anchor and never
               jumps between the login form, the loading overlay, and the app shell. Token color (brand teal). */}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginBottom: 22 }}>
             <svg viewBox="0 0 166 200" width={20} height={24} fill="currentColor" role="img" aria-label="Norviq"
@@ -441,7 +447,7 @@ export function Login() {
 
               {error && <div role="alert" style={{ ...errorBox, marginBottom: 14 }}>{error}</div>}
 
-              {/* L2: in-flight sign-in shows the shared BrandLoader (not a "Signing in…" text + generic spinner);
+              {/* In-flight sign-in shows the shared BrandLoader (not a "Signing in…" text + generic spinner);
                   the button is disabled + aria-busy, and the loader's sr-only label announces the state. */}
               <button className="nv-primary" onClick={() => void signIn()} disabled={!credReady || busy} aria-busy={phase === "signing"}>
                 {phase === "signing" ? (
@@ -466,7 +472,7 @@ export function Login() {
                 </p>
               )}
 
-              {/* D1: no-egress password recovery. There is deliberately NO email/SMTP (that would be outbound
+              {/* No-egress password recovery. There is deliberately NO email/SMTP (that would be outbound
                   network); recovery is an authenticated in-cluster reset run by an operator with kubectl. */}
               <details style={{ marginTop: 16, fontSize: 11.5, color: "#6b7280" }}>
                 <summary style={{ cursor: "pointer", textAlign: "center", listStyle: "none" }}>Can’t sign in?</summary>
@@ -486,8 +492,19 @@ export function Login() {
               <label htmlFor="nv-cur" style={label}>Current password</label>
               <input id="nv-cur" type="password" className="nv-input" value={curPwd} aria-label="Current password"
                 maxLength={128}
+                // readOnly when prefilled: a readOnly input is skipped by browser password managers, so the
+                // correct just-verified value can't be autofilled-over and the field can't be emptied by a
+                // backspace the manager instantly re-fills. autoComplete=off + a non-standard name harden it
+                // further. Left editable (curPrefilled=false) on a bare reload so the value can still be typed.
+                readOnly={curPrefilled}
                 onChange={(e) => { setCurPwd(e.target.value); setError(""); }} onKeyDown={enter(() => void saveNew())}
-                autoComplete="current-password" style={{ marginBottom: 14 }} />
+                autoComplete="off" name="nv-current-secret"
+                style={{ marginBottom: curPrefilled ? 4 : 14 }} />
+              {curPrefilled && (
+                <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 14 }}>
+                  Carried over from the credentials you just signed in with — no need to re-enter.
+                </div>
+              )}
 
               <label htmlFor="nv-new" style={label}>New password</label>
               <div style={{ position: "relative" }}>
@@ -553,7 +570,7 @@ export function Login() {
               branded logo for boot / signing / redirecting / success. Every status caption ("Establishing secure
               session", "Signed in", "Session established… ", "Loading Norviq", the SSO/save variants) is carried
               solely by the BrandLoader's aria-label on its role=status live region — sr-only, announced to screen
-              readers, never rendered visibly (no visible innerText, no ✓, no fallback text/button). B2 centers the
+              readers, never rendered visibly (no visible innerText, no ✓, no fallback text/button). The overlay centers the
               mark on both axes (direct flex child of the full-viewport overlay). */}
           <BrandLoader
             size={booting ? 60 : 56}

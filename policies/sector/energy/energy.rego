@@ -23,13 +23,13 @@ package norviq.sector.energy
 # >>> PACK-CONTRIB-BEGIN energy
 energy_tool = lower(input.tool_name)
 
-# F-09: the engine also supplies a confusable-skeleton fold of the tool NAME (homoglyph/zero-width on
+# The engine also supplies a confusable-skeleton fold of the tool NAME (homoglyph/zero-width on
 # the name itself, e.g. Cyrillic "open_bгeaker"). Match verbs/surface against this too for parity.
 energy_tool_norm = lower(input.tool_name_normalized)
 
 # Distinctive multi-token control verbs (low read false-positive; word-order variants included).
-# F-09: noun-first forms (valve_close, pump_start, switch_open, gate_close, …) added so the common
-# SCADA naming convention BLOCKS like its verb-first twin. F-16: set_voltage / configure_protection.
+# Noun-first forms (valve_close, pump_start, switch_open, gate_close, …) added so the common
+# SCADA naming convention BLOCKS like its verb-first twin. set_voltage / configure_protection.
 energy_control_verbs = [
     "open_breaker", "close_breaker", "breaker_open", "breaker_close", "trip_breaker", "breaker_trip", "breaker_control",
     "open_relay", "close_relay", "relay_open", "relay_close", "trip_relay", "relay_trip",
@@ -41,11 +41,11 @@ energy_control_verbs = [
     "shed_load", "load_shed", "field_switching", "execute_switching", "apply_switching",
     "der_dispatch", "agc_dispatch", "dispatch_control",
     "open_valve", "close_valve", "start_pump", "stop_pump", "start_generator", "start_motor", "stop_motor", "start_turbine",
-    # F-09 noun-first control names (the bypass set)
+    # Noun-first control names (the bypass set)
     "valve_open", "valve_close", "pump_start", "pump_stop", "gate_open", "gate_close",
     "switch_open", "switch_close", "motor_start", "motor_stop", "generator_start", "generator_stop",
     "turbine_start", "turbine_stop", "breaker_open", "breaker_close",
-    # F-16 additional SCADA control verbs
+    # Additional SCADA control verbs
     "set_voltage", "set_frequency", "configure_protection", "protection_setting", "set_protection",
     "energize", "deenergize", "de_energize",
     "remote_open", "remote_close", "remote_trip", "remote_control", "send_control", "issue_control",
@@ -53,7 +53,7 @@ energy_control_verbs = [
 ]
 
 # OT protocol/system surface — nouns/prefixes that mean "this touches grid OT".
-# F-09/F-16: device-noun ROOTS added (valve/pump/gate/switch/motor/generator/turbine/capacitor/regulator)
+# Device-noun ROOTS added (valve/pump/gate/switch/motor/generator/turbine/capacitor/regulator)
 # so ANY non-read tool on these devices hits the fail-safe escalate net (deny-by-default on the OT surface).
 energy_ot_surface = [
     "scada", "ems_", "dms_", "adms", "oms_", "rtu", "ied_", "plc", "hmi_", "agc_",
@@ -63,7 +63,7 @@ energy_ot_surface = [
     "valve", "pump", "gate", "switch", "motor", "generator", "turbine", "capacitor", "regulator",
 ]
 
-# Bare actuation verbs + device nouns for DECOMPOSED param phrasing (F-16):
+# Bare actuation verbs + device nouns for DECOMPOSED param phrasing:
 # {"verb":"open","device_type":"breaker"} — neither field alone is a multi-token control verb.
 # Scoped to ACTION-named + DEVICE-named keys so benign params (e.g. {state:"open", asset:"transformer-7"} on a
 # non-control tool) don't false-block; the verb must land in an action field and the device in a device field/name.
@@ -78,7 +78,7 @@ energy_read_prefixes = ["get_", "read_", "list_", "query_", "fetch_", "describe_
 energy_control_in_name {
     contains(energy_tool, energy_control_verbs[_])
 }
-# homoglyph parity on the NAME (F-09)
+# homoglyph parity on the NAME
 energy_control_in_name {
     contains(energy_tool_norm, energy_control_verbs[_])
 }
@@ -101,12 +101,12 @@ energy_control_in_params {
 energy_on_ot_surface {
     contains(energy_tool, energy_ot_surface[_])
 }
-# homoglyph parity on the NAME (F-09)
+# homoglyph parity on the NAME
 energy_on_ot_surface {
     contains(energy_tool_norm, energy_ot_surface[_])
 }
 
-# F-16: decomposed param phrasing — a bare actuation verb in one field + a device noun in another
+# Decomposed param phrasing — a bare actuation verb in one field + a device noun in another
 # (or in the name) is a control command split across params. Matched on original + normalized params.
 energy_actuation_verb_in_params {
     some k

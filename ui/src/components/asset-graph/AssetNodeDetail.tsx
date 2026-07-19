@@ -30,7 +30,7 @@ const chipStyle: React.CSSProperties = {
 };
 const sectionLabel: React.CSSProperties = { fontSize: 11, fontWeight: 600, letterSpacing: "0.04em", color: "#a0a0a0", textTransform: "uppercase" };
 
-// CAP-1: per-verb status presentation. Open statuses (undefended/dormant) are the finding; defended is
+// Per-verb status presentation. Open statuses (undefended/dormant) are the finding; defended is
 // reassurance; latent is muted (the source could do it but nothing grants/observes it).
 const STATUS_META: Record<string, { label: string; color: string; bg: string }> = {
   undefended: { label: "UNDEFENDED", color: "#FF3B5C", bg: "rgba(255,59,92,0.12)" },
@@ -51,14 +51,14 @@ export function AssetNodeDetail({ node, model, reach, cluster, side, onClose }: 
   const agentN = reachNodes.filter((n) => n.kind === "agent").length;
   const blastMain = isData ? agentN + toolN : dataN;
   const blastColor = blastMain > 0 ? "#FFB020" : "#6e6e6e";
-  // CAP-1: the source's verb-capability posture (data nodes with a registry-known source type).
+  // The source's verb-capability posture (data nodes with a registry-known source type).
   const cap = node.capability;
   const worst = cap?.worst ?? null;
   const toast = useToast();
   const navigate = useNavigate();
   const [defending, setDefending] = useState(false);
 
-  // CAP→POLICY: the class to defend for an open finding (the first agent-class exercising the verb).
+  // The class to defend for an open finding (the first agent-class exercising the verb).
   const defendClass = (f: CapabilityFinding | null): string | null => f?.agent_classes?.[0] ?? null;
 
   // Generate a DRY-RUN policy draft that blocks this verb on the source for the class, then hand off to
@@ -155,7 +155,7 @@ export function AssetNodeDetail({ node, model, reach, cluster, side, onClose }: 
           </div>
         </div>
 
-        {/* CAP-1: source capability — what verbs THIS source exposes, and which are open. The single
+        {/* Source capability — what verbs THIS source exposes, and which are open. The single
             highest-value block for a data node: turns "an agent reaches this" into "write/delete here
             is undefended / a dormant grant". Only rendered for registry-known sources (ES/Postgres). */}
         {isData && cap && (
@@ -179,7 +179,7 @@ export function AssetNodeDetail({ node, model, reach, cluster, side, onClose }: 
                     )}
                   </div>
                 </div>
-                {/* CAP→POLICY: one-click defense — generates a dry-run policy draft for the class exercising
+                {/* One-click defense — generates a dry-run policy draft for the class exercising
                     the verb, landing in the Policies inbox (never auto-enforces). */}
                 {cap?.source_type && defendClass(worst) && (
                   <button

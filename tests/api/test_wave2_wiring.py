@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Wave-2 UI-wiring unit tests (UI-AUDIT round 3).
+"""Wave-2 UI-wiring unit tests.
 
 A1 — synthetic/probe classification + graph filtering (default-hide seeded test identities).
 B4 — parse namespace + agent_class from a SPIFFE id for the Agents table.

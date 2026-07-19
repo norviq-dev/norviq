@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// DEF-037: a dry-run that fails to evaluate MUST surface a degraded/error state — NEVER a fabricated
+// A dry-run that fails to evaluate MUST surface a degraded/error state — NEVER a fabricated
 // all-zero "safe" preview. The pre-fix catch swallowed the failure and set a zeroed DryRunResult
 // ({ total_records_checked: 0, would_block: 0, would_allow: 0, ... }), which the renderer painted as a
 // GREEN "0 currently-allowed calls would be newly blocked · would block 0, allow 0" — indistinguishable
@@ -15,7 +15,7 @@ import { AppProvider } from "../store/AppContext";
 import { clearApiCache } from "../hooks/useApi";
 
 // A functional Monaco stub: a textarea that forwards edits so the editor's regoDraft is a real,
-// non-empty buffer (the DEF-037 repro requires a non-empty regoDraft with dryRunRego still null).
+// non-empty buffer (the repro requires a non-empty regoDraft with dryRunRego still null).
 vi.mock("@monaco-editor/react", () => ({
   default: ({ value, onChange }: { value?: string; onChange?: (v: string) => void }) => (
     <textarea data-testid="monaco-editor" value={value} onChange={(e) => onChange?.(e.target.value)} />
@@ -65,7 +65,7 @@ async function loadEditorAndDryRun() {
   fireEvent.click(screen.getByRole("button", { name: /^dry-run$/i }));
 }
 
-describe("PolicyCatalog dry-run failure (DEF-037)", () => {
+describe("PolicyCatalog dry-run failure", () => {
   it("renders an explicit error — NOT a green all-zero 'safe' preview — when the dry-run API fails", async () => {
     seedLoadedPolicy();
     // The dry-run engine call fails (e.g. 503 / engine unreachable).

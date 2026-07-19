@@ -115,12 +115,12 @@ class FakeCache:
         return {f"policy:{key}": value for key, value in self.policy.items()}
 
     async def set_trust_override(self, spiffe_id: str, score: float) -> None:
-        """AGT-TRUST-02: durable admin trust cap — mirrors RedisCache.set_trust_override's
+        """Durable admin trust cap — mirrors RedisCache.set_trust_override's
         agent_trust_override:{spiffe} key via the generic set()/get()/delete() this fake already backs."""
         await self.set(f"agent_trust_override:{spiffe_id}", str(float(score)))
 
     async def clear_trust_override(self, spiffe_id: str) -> None:
-        """AGT-TRUST-02: remove the admin trust cap."""
+        """Remove the admin trust cap."""
         await self.delete(f"agent_trust_override:{spiffe_id}")
 
 
@@ -340,14 +340,14 @@ def test_readyz_db_failure_returns_503(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_policy_write_accepts_service_role_rejects_viewer() -> None:
-    """C1: only the allowlisted control-plane controller (sub=norviq-webhook) writes cross-namespace; a
-    viewer is rejected, and a GENERIC service token (not on the allowlist, no ns claim) is now floored to
-    its namespace claim — it can no longer write an arbitrary namespace just by holding role=service."""
+    """Only the allowlisted control-plane controller (sub=norviq-webhook) writes cross-namespace; a
+    viewer is rejected, and a GENERIC service token (not on the allowlist, no ns claim) is floored to
+    its namespace claim — it cannot write an arbitrary namespace just by holding role=service."""
     client = _client()
     try:
         # viewer is rejected at the auth gate
         assert client.delete("/api/v1/policies/x/y", headers=_auth_headers(role="viewer")).status_code == 403
-        # a generic (non-controller) service token no longer gets blanket cross-ns write — floored → 403
+        # a generic (non-controller) service token does not get blanket cross-ns write — floored → 403
         assert client.delete("/api/v1/policies/x/y", headers=_auth_headers(role="service")).status_code == 403
         # the allowlisted webhook controller passes the write-scope gate (404 = not found, NOT 403)
         assert client.delete(
@@ -652,7 +652,7 @@ def test_dry_run() -> None:
         tool_name="tool.alpha",
         decision="block",
         agent_id="spiffe://example/ns/default/sa/a",
-        agent_class="planner",  # M3: _replay_recent's synthetic-identity filter reads rec.agent_class
+        agent_class="planner",  # _replay_recent's synthetic-identity filter reads rec.agent_class
         namespace="default",
         rule_id="deny",
         reason="test",

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// SLIM-MONACO: point @monaco-editor/react's loader at the LOCALLY BUNDLED monaco-editor instead of its
+// Point @monaco-editor/react's loader at the LOCALLY BUNDLED monaco-editor instead of its
 // default, which fetches Monaco's AMD loader + language chunks from cdn.jsdelivr.net at first editor open.
 // For a security console that CDN dependency is wrong: it breaks air-gapped/offline installs and pins an
 // untracked monaco version. Importing this module (side-effect) before any <Editor> mounts makes Vite

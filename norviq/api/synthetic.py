@@ -4,7 +4,7 @@
 """Classify synthetic / test / probe / eval agent identities so the Asset & Attack graphs (and the Compliance
 "affected agent-classes" join) can exclude them by default.
 
-Round-3 (A1): the graphs were dominated by scattered probe/eval SVIDs minted by the red-team / e2e / eval /
+The graphs would otherwise be dominated by scattered probe/eval SVIDs minted by the red-team / e2e / eval /
 policy-tester / scorer harnesses — NOT a real runtime concept (they exist only on seeded / test clusters).
 Default-hide them, with a "N test/probe hidden — Show" toggle. This is the ONE shared classifier used by
 ``/asset-graph``, ``/attack-paths`` AND the Compliance affected-agent-class join — never fork a second copy.

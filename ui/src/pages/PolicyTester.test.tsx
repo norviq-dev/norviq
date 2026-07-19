@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// MUT-SIGNALS: the Result panel must show ONLY telemetry the engine actually returned. When /evaluate
+// The Result panel must show ONLY telemetry the engine actually returned. When /evaluate
 // omits trust_signals it previously substituted all-1.0 defaults that rendered as real "1.00 OK" bars
 // — indistinguishable from genuine per-call signal data. Now it says so honestly.
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -28,7 +28,7 @@ function renderPage() {
   );
 }
 
-describe("PolicyTester signals honesty (MUT-SIGNALS)", () => {
+describe("PolicyTester signals honesty", () => {
   it("shows an explicit 'no signals' note when the engine returns none (no fabricated 1.00 OK bars)", async () => {
     server.use(
       http.post("/api/v1/evaluate", () =>

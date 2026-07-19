@@ -71,7 +71,7 @@ async def list_clusters(
         age = (now - c.last_heartbeat).total_seconds() if c.last_heartbeat else 1e9
         out.append({
             "id": c.id, "name": c.name, "region": c.region, "endpoint": c.endpoint,
-            "console_url": c.console_url,  # F-69: drives the hub console's "open <cluster>'s console" deep-link
+            "console_url": c.console_url,  # drives the hub console's "open <cluster>'s console" deep-link
             "last_heartbeat": c.last_heartbeat.isoformat() if c.last_heartbeat else None,
             "status": "healthy" if age <= settings.fleet_stale_after_s else "stale",
         })
@@ -138,7 +138,7 @@ async def claim_join_token(
         raise HTTPException(status_code=403, detail="join token is not scoped to this cluster")
     if row.expires_at and row.expires_at < now:
         raise HTTPException(status_code=410, detail="join token expired")
-    # R3: single-use is enforced by an ATOMIC conditional UPDATE (WHERE claimed=false) — not a check-then-set — so
+    # Single-use is enforced by an ATOMIC conditional UPDATE (WHERE claimed=false) — not a check-then-set — so
     # two concurrent claims of the same jti can never both succeed (the DB row-locks; exactly one flips claimed).
     result = await session.execute(
         sql_update(UsedJoinToken)
@@ -160,12 +160,12 @@ async def remove_cluster(
 ) -> dict:
     """REMOVE/deregister a cluster from the hub (admin). Deletes the cluster + its rollups/rollout, so it drops out
     of the fleet table and its bundle endpoint 404s. The spoke's `norviq fleet leave` stops it pulling + sheds the
-    pushed policy (reusing the F-52 retract/reconcile machinery)."""
+    pushed policy (reusing the retract/reconcile machinery)."""
     require_admin(user)
     row = (await session.execute(select(Cluster).where(Cluster.id == cluster_id))).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail=f"cluster '{cluster_id}' not registered")
-    # R4: also delete the cluster's join-token rows (UsedJoinToken) — otherwise removing a cluster leaves stale
+    # Also delete the cluster's join-token rows (UsedJoinToken) — otherwise removing a cluster leaves stale
     # single-use records behind (unbounded growth + confusing audit). Cluster/rollups/rollout as before.
     for model in (AgentRollup, AuditRollup, PolicyRollout, UsedJoinToken):
         await session.execute(sql_delete(model).where(model.cluster_id == cluster_id))

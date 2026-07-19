@@ -60,8 +60,8 @@ class TrustCalculator:
     async def calculate(self, input_data: TrustInput, trust_threshold: float | None = None) -> TrustResult:
         """Calculate trust score and persist short-lived breakdown.
 
-        CFG-SETTINGS-INERT-01: `trust_threshold` (per-ns override, else None) moves the high/low tier boundaries.
-        AGT-TRUST-02: a durable admin trust CAP (`agent_trust_override:{spiffe}`) is applied tighten-only —
+        `trust_threshold` (per-ns override, else None) moves the high/low tier boundaries.
+        A durable admin trust CAP (`agent_trust_override:{spiffe}`) is applied tighten-only —
         `effective = min(computed, cap)` — so an admin can force an agent toward escalate/frozen but never RAISE its
         trust above what behavior justifies. Both feed the SINGLE categorize below."""
         log.debug("nrvq.engine.trust.started", spiffe_id=input_data.spiffe_id, code="NRVQ-ENG-2040")
@@ -185,7 +185,7 @@ class TrustCalculator:
             return True
 
     async def _safe_override_only(self, spiffe_id: str) -> float | None:
-        """AGT-TRUST-02: the durable admin trust CAP for one agent, or None if unset. Fails OPEN (no cap) — a Redis
+        """The durable admin trust CAP for one agent, or None if unset. Fails OPEN (no cap) — a Redis
         error must not silently tighten every agent; the separate freeze check already fails closed, so a real
         outage still blocks via freeze semantics while the cap merely reverts to the computed behavior."""
         try:
@@ -208,7 +208,7 @@ class TrustCalculator:
 
     @staticmethod
     def _tiers(trust_threshold: float | None) -> tuple[float | None, float | None]:
-        """CFG-SETTINGS-INERT-01: the (high, low) category boundaries for a per-ns trust_threshold, or (None, None)
+        """The (high, low) category boundaries for a per-ns trust_threshold, or (None, None)
         when there is no override so `_categorize` takes the bit-identical literal 0.7/0.4 branch. The low boundary
         keeps today's ratio (0.4/0.7) so t=0.7 reproduces today's tiers exactly and a UI re-save of the displayed
         default is a behavioral no-op."""

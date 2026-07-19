@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Asset Graph view-model: maps the REAL /api/v1/asset-graph response onto the redesign's display
-// model (design_handoff_assetgraph). The backend is authoritative — every design field that isn't in
-// the API response is DERIVED here on the client (per the handoff's mapping table), never faked:
+// Asset Graph view-model: maps the REAL /api/v1/asset-graph response onto the display
+// model. The backend is authoritative — every display field that isn't in
+// the API response is DERIVED here on the client, never faked:
 //   kind        <- node.type
 //   risk        <- properties.risk_level | data-node sensitivity | "low"
 //   calls       <- tool properties.call_count | sum of incident call-edge call_counts
@@ -32,7 +32,7 @@ export interface ViewNode {
   lastSeen?: string; // ISO
   awaiting: boolean;
   isIdentity: boolean;
-  // CAP-1: source verb-capability posture (data nodes whose source type is in the registry).
+  // Source verb-capability posture (data nodes whose source type is in the registry).
   capability?: SourceCapability;
 }
 
@@ -44,7 +44,7 @@ export interface ViewEdge {
   allow: number;
   block: number;
   w: number;
-  // CAP-1: resolved operation of an accesses-edge (tool → data).
+  // Resolved operation of an accesses-edge (tool → data).
   verb?: CapabilityVerb;
 }
 
@@ -164,7 +164,7 @@ export function buildModel(nodes: AssetNode[], edges: AssetEdge[]): ViewModel {
     lastSeen: lastSeenOf(n),
     awaiting:
       Boolean(n.properties.awaiting) ||
-      // fallback derivation per the handoff: an agent with no outgoing calls and zero traffic
+      // fallback derivation: an agent with no outgoing calls and zero traffic
       (n.type === "agent" && !n.properties.is_identity && !parentOf.has(n.id) &&
         (out.get(n.id) ?? []).length === 0 && callsOf(n) === 0),
     isIdentity: Boolean(n.properties.is_identity),

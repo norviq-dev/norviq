@@ -1,8 +1,8 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Norviq Production Deploy Runbook (multi-node)
 
-The chart ships **one chart, two overlays**: `values-aks-dev.yaml` (single-node lean — the CI default)
-and `values-prod.yaml` (multi-node). Everything prod-specific is **values-gated and off by default**, so
+The chart ships **base `values.yaml` defaults** (single-node lean) plus a **`values-prod.yaml`**
+overlay (multi-node). Everything prod-specific is **values-gated and off by default**, so
 the dev cluster is unaffected. Companion: [`production-config.md`](production-config.md) (secrets/RBAC).
 
 ## Prerequisites (multi-node)
@@ -11,10 +11,10 @@ the dev cluster is unaffected. Companion: [`production-config.md`](production-co
 - **CloudNativePG operator** installed (Postgres HA renders a `postgresql.cnpg.io/v1 Cluster`).
 - **A Redis HA operator** — `values-prod` renders a Spotahome `RedisFailover` CR; swap
   `templates/redis-ha.yaml` + `redis.ha.serviceName` if you use a different stack (Bitnami, MemoryDB).
-- A **public or pull-secret'd registry**. Default images are public on Docker Hub
-  (`norviq/norviq-engine`). For scale prefer **Google Artifact Registry**
-  (`images.registry: us-docker.pkg.dev/<PROJECT_ID>/<REPO>/`) or **ACR** — no Docker Hub
-  anonymous pull-rate limit. Set `imagePullSecrets` to `[]` for a public registry, or to your
+- A **public or pull-secret'd registry**. Default images are public on GHCR
+  (`ghcr.io/norviq-dev/norviq-engine`). For scale prefer **Google Artifact Registry**
+  (`images.registry: us-docker.pkg.dev/<PROJECT_ID>/<REPO>/`) or **ACR** — no anonymous
+  pull-rate limit. Set `imagePullSecrets` to `[]` for a public registry, or to your
   registry's pull secret.
 
 ## What `values-prod.yaml` turns on
@@ -58,8 +58,7 @@ The HA StatefulSets are auto-disabled when `*.ha.enabled` (the operators own the
 
 ## Future
 - HPA on custom/Prometheus metrics (KEDA) instead of CPU.
-- Replace the shared-secret service JWT with a k8s **TokenReview/ServiceAccount** path (see
-  `specs/EPIC-sso-oidc.md`).
+- Replace the shared-secret service JWT with a k8s **TokenReview/ServiceAccount** path.
 
 ## Not live-validated on the 1-node dev cluster
 HPA, podAntiAffinity/topologySpread, and the CloudNativePG/RedisFailover HA datastores are

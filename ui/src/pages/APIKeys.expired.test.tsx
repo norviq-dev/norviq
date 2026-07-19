@@ -8,7 +8,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { APIKeys } from "./APIKeys";
 import { clearApiCache } from "../hooks/useApi";
 
-// DEF-041: an expired-not-revoked key is dead server-side (api_keys.authenticate returns None once
+// An expired-not-revoked key is dead server-side (api_keys.authenticate returns None once
 // expires_at <= now) yet the pre-fix Status column read it off k.revoked alone → green "Active",
 // contradicting the red EXPIRED badge the Expires column shows for the same row. These tests assert
 // the two columns agree: an expired key must NOT read "Active" and must NOT expose a Revoke button.
@@ -64,7 +64,7 @@ function renderPage() {
   );
 }
 
-describe("APIKeys — expired-key Status consistency (DEF-041)", () => {
+describe("APIKeys — expired-key Status consistency", () => {
   it("an expired-not-revoked key renders EXPIRED + a non-Active status, never green 'Active'", async () => {
     keysPayload = [EXPIRED_KEY];
     renderPage();

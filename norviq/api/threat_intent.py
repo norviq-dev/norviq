@@ -178,7 +178,7 @@ def generate_intent_rego(
     default block. The allowlist is matched EVASION-NORMALIZED — the lower-cased name AND the confusable
     `skeleton()` (the same normalization behind `input.tool_name_normalized`) — so homoglyph / zero-width /
     case tricks can't smuggle a non-intended tool past the allow. rate-limit stays advisory (real throttle
-    is the F-03 layer).
+    is the api-key auth-throttle layer).
 
     LEARNED VERBS (`learned_verbs`, tool → read/write/send/delete): the admin-PROMOTED classifications
     flow into the toggles, overriding the name heuristic — a tool promoted as delete/write/send is NEVER
@@ -339,16 +339,16 @@ reason = "Blocked: tool is not in the intended allowlist for {agent_class}" {{ d
 
 
 # --------------------------------------------------------------------------------------------------
-# Batch B (COMP-GEN-01) — CONTROL-SPECIFIC compliance remediation generation.
+# CONTROL-SPECIFIC compliance remediation generation.
 #
-# The compliance "Generate enforcing policy" used to emit generate_intent_rego(class, [], intent): a
-# per-CLASS default-deny allowlist keyed only on the class + a coarse readonly/egress toggle. Two
-# different controls for one class produced BYTE-IDENTICAL rego — the control never entered the policy.
+# A per-CLASS default-deny allowlist keyed only on the class + a coarse readonly/egress toggle would
+# make two different controls for one class produce BYTE-IDENTICAL rego — the control never entering
+# the policy.
 #
 # generate_remediation_rego() instead assembles a rego DRAFT from the technique's mapped rule_ids (the
 # `policies` list in mitre_mapping.json / owasp_llm_mapping.json — the same rule_ids comprehensive.rego
 # enforces). Each mapped rule contributes a control-specific, class-scoped `blocks[...]` clause; two
-# different controls reference different rule_ids → different rego (the COMP-GEN-01 fix).
+# different controls reference different rule_ids → different rego.
 #
 # INVARIANTS (kept identical to the intent path):
 #   • DRY-RUN only — the draft lives in intent_drafts and NEVER auto-enforces; apply is gated (Policies).
@@ -442,10 +442,10 @@ def remediation_generatable_rules(rule_ids: list[str]) -> list[str]:
 
 
 # --------------------------------------------------------------------------------------------------
-# COMP-GEN-02 (accumulate): a per-class remediation OVERLAY holds the UNION of every applied control, not
+# Accumulate: a per-class remediation OVERLAY holds the UNION of every applied control, not
 # just the last one. The single overlay key ("<class>__remediation__") stores ONE rego, and apply is a
-# full-replace UPSERT — so without accumulation, applying control B silently erased control A (a false-
-# coverage bug). Each generated rego therefore carries a machine-readable MANIFEST comment naming every
+# full-replace UPSERT — so without accumulation, applying control B would silently erase control A (a
+# false-coverage bug). Each generated rego therefore carries a machine-readable MANIFEST comment naming every
 # control it encodes; the gated apply path (policies.create_policy) parses the incoming draft + the existing
 # overlay, UNIONS their controls, and re-materializes one combined rego. The manifest is the source of truth
 # (block keys alone are ambiguous for control ids that contain ':' e.g. OWASP "LLM05:2025"); it is a rego
@@ -521,7 +521,7 @@ def generate_remediation_rego(
     Emits `package norviq.remediation.<framework>.<control_id>` — a default-ALLOW policy that adds one
     class-scoped block clause per mapped rule_id (from _REMEDIATION_RULES), with a `remediation:<fw>:
     <control>:<rule_id>` rule_id + a control-naming reason for audit traceability. Two different controls
-    (different mapped rule_ids) produce DIFFERENT rego — the COMP-GEN-01 fix.
+    (different mapped rule_ids) produce DIFFERENT rego.
 
     Raises ValueError when NONE of the mapped rule_ids is runtime-expressible (the caller escalates rather
     than emitting a vacuous deny). The result validates under validate_policy_create (partial sets +
@@ -580,7 +580,7 @@ reason = "{framework} {control_id} {safe_name} — remediation block" {{ block_f
 
 
 def generate_remediation_overlay_rego(agent_class: str, controls: list[dict]) -> str:
-    """COMP-GEN-02: the COMBINED per-class remediation overlay — one rego encoding the UNION of every applied
+    """The COMBINED per-class remediation overlay — one rego encoding the UNION of every applied
     control. Used only by the gated apply path (policies.create_policy) when accumulating drafts into the
     single `"<class>__remediation__"` key; drafts themselves stay per-control via generate_remediation_rego.
 
@@ -620,7 +620,7 @@ def generate_remediation_overlay_rego(agent_class: str, controls: list[dict]) ->
 
 # COMPLIANCE remediation OVERLAY for agent class "{safe_class}" — GENERATED, DRY-RUN until applied.
 # Accumulates the UNION of every applied compliance control (one block per control × mapped rule); applying
-# another control UNIONS into this same overlay instead of replacing it (COMP-GEN-02). TIGHTEN-ONLY at
+# another control UNIONS into this same overlay instead of replacing it. TIGHTEN-ONLY at
 # baseline priority (most-restrictive tie-break) — only ADDS denials, never weakens a baseline block.
 # Controls: {control_summary}
 {_manifest_line(norm)}

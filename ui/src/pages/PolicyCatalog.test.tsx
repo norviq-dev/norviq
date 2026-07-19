@@ -103,7 +103,7 @@ describe("PolicyCatalog (#3 / #4)", () => {
     expect(screen.getByText("New policy (raw rego)")).toBeInTheDocument();
   });
 
-  it("MUT-VERSION: 'View rego' expands each version's OWN source read-only", async () => {
+  it("'View rego' expands each version's OWN source read-only", async () => {
     seedHandlers("class");
     server.use(
       http.get("/api/v1/policies/default/customer-support/versions", () =>
@@ -122,7 +122,7 @@ describe("PolicyCatalog (#3 / #4)", () => {
     expect(screen.queryByTestId("version-rego-2")).not.toBeInTheDocument();
   });
 
-  it("FIX-2: the active-policy card reflects reality — health dot + last-applied time", async () => {
+  it("the active-policy card reflects reality — health dot + last-applied time", async () => {
     // The list endpoint now returns last_applied so the Catalog card can show the policy is live + when it applied.
     const recent = new Date(Date.now() - 5 * 60_000).toISOString();
     server.use(
@@ -232,7 +232,7 @@ describe("PolicyCatalog (#3 / #4)", () => {
     expect(createCalled).toBe(false);
   });
 
-  it("COMP-GEN-01: a compliance-remediation draft's Review & apply targets the compound overlay key, never the base class", async () => {
+  it("a compliance-remediation draft's Review & apply targets the compound overlay key, never the base class", async () => {
     // The base class already has its OWN comprehensive enforcing policy — the fixture proves it survives.
     server.use(
       http.get("/api/v1/policies", () =>
@@ -253,7 +253,7 @@ describe("PolicyCatalog (#3 / #4)", () => {
       ),
       http.get("/api/v1/policies/default/report-gen__remediation__/versions", () => HttpResponse.json([])),
       // The draft's persistence key (agent_class) is ALREADY the compound overlay key — `affected_class`
-      // carries the real class for display (F2/COMP-GEN-01 fix).
+      // carries the real class for display.
       http.get("/api/v1/threats/intent-drafts", () =>
         HttpResponse.json({
           drafts: [
@@ -561,10 +561,10 @@ describe("PolicyCatalog — B-1 create (raw rego) / B-2 delete (guardrails)", ()
     });
   });
 
-  // FIX-3: saveEditorPolicy only called setApplyResult inside the `newPolicy` (create) branch — the
+  // saveEditorPolicy only called setApplyResult inside the `newPolicy` (create) branch — the
   // existing-policy Save path (this is exactly Bug #2's own repro: editor Enforcement -> audit) only showed
   // the small "Saved ✓" badge, with no verify-poll giving Bug #4-style convergence feedback.
-  it("FIX-3: saving an EXISTING loaded policy also shows the apply-result panel + verify-poll, not just 'Saved'", async () => {
+  it("saving an EXISTING loaded policy also shows the apply-result panel + verify-poll, not just 'Saved'", async () => {
     seedHandlers("class");
     server.use(
       http.post("/api/v1/policies", async () => HttpResponse.json({ version: 2 }))

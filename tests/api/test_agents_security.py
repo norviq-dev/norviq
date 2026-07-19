@@ -64,12 +64,12 @@ def _hdr(role: str = "admin", namespace: str | None = None) -> dict[str, str]:
     return {"Authorization": f"Bearer {_token(role, namespace)}"}
 
 
-# --- Defect 2: get_agent namespace scoping -------------------------------------------------------
+# --- get_agent namespace scoping -----------------------------------------------------------------
 
 
 def test_scoped_tenant_cannot_read_namespaceless_agent() -> None:
-    """FAIL-ON-BUG: a viewer scoped to team-a reading a namespaceless agent got 200 before the fix
-    (list_agents hides it, but get_agent did not compare the resolved scope) — must now be 404."""
+    """FAIL-ON-BUG: a viewer scoped to team-a reading a namespaceless agent must get 404 —
+    list_agents hides it, but get_agent must also compare the resolved scope."""
     _, client = _client({ORPHAN_AGENT})
     resp = client.get(f"/api/v1/agents/{ORPHAN_AGENT}", headers=_hdr(role="viewer", namespace="team-a"))
     assert resp.status_code == 404
@@ -97,7 +97,7 @@ def test_admin_reads_namespaceless_agent() -> None:
     assert resp.status_code == 200
 
 
-# --- Defect 1: deregister_agent cluster-mutation guard -------------------------------------------
+# --- deregister_agent cluster-mutation guard -----------------------------------------------------
 
 
 def _session_override(app, row):

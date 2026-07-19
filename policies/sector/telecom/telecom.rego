@@ -33,7 +33,7 @@ blocks["cpni_bulk_blocked"] {
 }
 reasons["cpni_bulk_blocked"] = "Telecom: bulk CPNI/location read blocked (47 USC §222; §64.2011)"
 
-# F-17: CPNI exfil via a RENAMED export tool — the bulk rule keys on known read tool NAMES, so
+# CPNI exfil via a RENAMED export tool — the bulk rule keys on known read tool NAMES, so
 # `export_customer_data {call_records:true, location:true, destination:"s3://external"}` slips through.
 # Detect the exfil SEMANTICS: CPNI-typed data in params heading to an egress tool / external destination,
 # or a CPNI-named tool pointed at an external destination. Param keys + destinations matched, not just names.

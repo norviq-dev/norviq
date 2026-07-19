@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Spoke-side signed-bundle puller (F045 P2). Pulls the per-cluster bundle from the hub, VERIFIES its
+"""Spoke-side signed-bundle puller. Pulls the per-cluster bundle from the hub, VERIFIES its
 signature against the trust-root pubkey, and applies it to local enforcement via the PolicyLoader.
 
 FAIL-CLOSED + fire-and-forget: any failure (bad signature, tamper, expired, older version, malformed,
@@ -126,8 +126,8 @@ class FleetPolicyPuller:
                 await self._loader.create(p["namespace"], p["agent_class"], p["rego_source"],
                                           saved_by=f"fleet:bundle:{version}", priority=p.get("priority", 100),
                                           enforcement_mode=p.get("enforcement_mode", "block"))
-            # F-52 RECONCILE: a policy that was applied from a prior bundle but is no longer present has been
-            # RETRACTED — delete it from the spoke so a push is reversible (was: dropped policies persisted forever).
+            # RECONCILE: a policy that was applied from a prior bundle but is no longer present has been
+            # RETRACTED — delete it from the spoke so a push is reversible.
             for key in await self._dropped_keys(new_manifest):
                 ns, _, ac = key.partition(":")
                 await self._loader.delete(ns, ac)
@@ -144,7 +144,7 @@ class FleetPolicyPuller:
         return {"applied": True, "version": version}
 
     async def _dropped_keys(self, new_manifest: list[str]) -> list[str]:
-        """F-52: keys applied from the LAST bundle that are absent from the new one (i.e. retracted)."""
+        """Keys applied from the LAST bundle that are absent from the new one (i.e. retracted)."""
         provider = self._session_factory()
         session = await provider.__anext__()
         try:

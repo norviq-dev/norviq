@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Relay tests (F045): relay_once heartbeats + pushes agent/audit rollups; start() is a no-op when off."""
+"""Relay tests: relay_once heartbeats + pushes agent/audit rollups; start() is a no-op when off."""
 
 from __future__ import annotations
 

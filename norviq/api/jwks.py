@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""JWKS client for OIDC RS256/ES256 token validation (IDENTITY epic A1).
+"""JWKS client for OIDC RS256/ES256 token validation.
 
 Fetches the IdP's JSON Web Key Set, caches keys by ``kid`` with a TTL, and refreshes on an
 unknown ``kid`` (bounded, to avoid a DoS via forced refetch). Fail-closed: a fetch failure or

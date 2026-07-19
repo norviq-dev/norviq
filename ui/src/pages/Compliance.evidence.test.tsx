@@ -3,17 +3,17 @@
 //
 // FAIL-ON-BUG coverage for two evidence-attribution defects on the Compliance detail view:
 //
-//   DEF-038 — the "Enforcing policies & live evidence" rows printed the technique-WIDE `blocked`
+//   The "Enforcing policies & live evidence" rows printed the technique-WIDE `blocked`
 //     total on EVERY covered-rule row, so a technique enforced by >1 rule repeated the same number
 //     on each row and over-attributed all blocks to each rule. The fix renders each rule's OWN count
 //     from the per-rule `blocked_by_rule` map the backend now ships.
 //
-//   DEF-039 — the [namespace, framework] scope-reset effect cleared drafted/selectedGaps/batchOutcome
+//   The [namespace, framework] scope-reset effect cleared drafted/selectedGaps/batchOutcome
 //     but NOT `genClassMode`, so a specific class-scope picked in ns-A persisted across a namespace
 //     switch and got submitted verbatim to generate-batch in ns-B (where that class doesn't exist),
 //     yielding a zero-draft "no_affected_classes" batch. The fix resets genClassMode to "affected".
 //
-// Both tests FAIL against the pre-fix code (DEF-038: both rows read "40 blocked"; DEF-039: the POST
+// Both tests FAIL against the pre-fix code (both rows read "40 blocked"; the POST
 // carries class_mode "billing-agent") and PASS after the fix.
 
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -38,7 +38,7 @@ const emptyTrend = (framework: string) =>
     HttpResponse.json({ namespace: "default", range: "30d", framework: params.framework ?? framework, points: [] })
   );
 
-// ---- DEF-038 ------------------------------------------------------------------------------------
+// ---- ------------------------------------------------------------------------------------
 // One ENFORCED ATLAS technique (AML.T0054) covered by TWO rules. The technique-wide total is 40,
 // but per-rule the split is 25 / 15. The evidence rows must render the per-rule split, not 40/40.
 function atlasTwoRulePayload() {
@@ -105,7 +105,7 @@ function renderPage(initialEntry = "/") {
   );
 }
 
-describe("Compliance evidence rows — DEF-038 per-rule blocked attribution", () => {
+describe("Compliance evidence rows — per-rule blocked attribution", () => {
   it("renders each covered rule's OWN blocked count, not the technique-wide total on every row", async () => {
     server.use(
       http.get("/api/v1/compliance/:framework/coverage", ({ params }) =>
@@ -135,7 +135,7 @@ describe("Compliance evidence rows — DEF-038 per-rule blocked attribution", ()
   });
 });
 
-// ---- DEF-039 ------------------------------------------------------------------------------------
+// ---- ------------------------------------------------------------------------------------
 // A helper mounted inside the provider so the test can drive a real namespace switch (namespace lives
 // in AppContext, not a Compliance prop).
 function NsSwitcher() {
@@ -221,7 +221,7 @@ function atlasTeamB() {
   };
 }
 
-describe("Compliance batch class-scope — DEF-039 genClassMode reset on namespace change", () => {
+describe("Compliance batch class-scope — genClassMode reset on namespace change", () => {
   it("resets the batch class-scope to 'affected' when the namespace changes (no stale class submitted)", async () => {
     let batchBody: { technique_ids?: string[]; class_mode?: string; namespace?: string } | null = null;
     server.use(

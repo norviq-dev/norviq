@@ -43,7 +43,7 @@ spec:
         - name: engine
           image: "{{ .Values.images.registry }}{{ .Values.images.engine.repository }}:{{ .Values.images.engine.tag }}"
           imagePullPolicy: {{ .Values.images.engine.pullPolicy }}
-          {{- /* DEF-029: hardened securityContext on the primary container (image runs as USER norviq).
+          {{- /* Hardened securityContext on the primary container (image runs as USER norviq).
                  readOnlyRootFilesystem is not forced on the Python app; the CIS-critical controls are. */}}
           {{- if .Values.securityContext.enabled }}
           securityContext:

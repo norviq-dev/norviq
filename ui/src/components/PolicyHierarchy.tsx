@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// C2-1: the Policy precedence HIERARCHY — the resolution stack the evaluator ACTUALLY uses for a (namespace,
+// The Policy precedence HIERARCHY — the resolution stack the evaluator ACTUALLY uses for a (namespace,
 // agent-class), rendered top-to-bottom in priority order. It renders GET /policies/effective VERBATIM (scope, order,
 // priority, overlay flag) — precedence is NEVER re-implemented in the UI; it always mirrors real enforcement.
 //
-// CATHIER-MODE-01: the "Mode" column now reflects the effective per-namespace enforcement posture (Block / Monitor)
+// The "Mode" column reflects the effective per-namespace enforcement posture (Block / Monitor)
 // from GET /settings, so the hierarchy agrees with the Namespace Governance card. Still cluster-aware in STRUCTURE
 // only (the cluster header is inert on the single-cluster GA surface).
 
@@ -78,7 +78,7 @@ export function PolicyHierarchy({ namespace, testId = "policy-hierarchy" }: { na
   );
   const layers = eff.data?.layers ?? [];
 
-  // CATHIER-MODE-01: the effective per-ns enforcement posture (Block / Monitor). "audit" is displayed as "Monitor".
+  // The effective per-ns enforcement posture (Block / Monitor). "audit" is displayed as "Monitor".
   const posture = useApi(
     () => fetchSettings(namespace),
     [namespace],
@@ -147,7 +147,7 @@ export function PolicyHierarchy({ namespace, testId = "policy-hierarchy" }: { na
                 <td style={cell}>{l.overlay
                   ? <span data-testid={`${testId}-overlay`} style={{ color: "var(--accent)" }}>overlay (tighten-only)</span>
                   : <span style={{ color: "var(--text-secondary)" }}>base</span>}</td>
-                {/* CATHIER-MODE-01: the effective per-ns posture (Block / Monitor), from GET /settings. */}
+                {/* The effective per-ns posture (Block / Monitor), from GET /settings. */}
                 <td style={cell}><span data-testid={`${testId}-mode`} data-mode={modeLabel.toLowerCase()} title={modeTitle}
                   style={{ fontSize: 11, color: modeLabel === "Monitor" ? "var(--escalate)" : "var(--text-secondary)", border: "1px solid var(--border)", borderRadius: 6, padding: "1px 7px" }}>{modeLabel}</span></td>
                 <td style={cell}><span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--good, #2ecc71)" }}>

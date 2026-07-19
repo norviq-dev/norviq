@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""DEF-044 fail-on-bug: the HS256 decode must REQUIRE an `exp` claim.
+"""Fail-on-bug: the HS256 decode must REQUIRE an `exp` claim.
 
 Pre-fix (auth._validate_token HS256 branch), ``jwt.decode`` was called WITHOUT
 ``options={"require": ["exp"]}``, so PyJWT only verified ``exp`` when present and never *required* it.
@@ -93,7 +93,7 @@ def _client() -> TestClient:
 
 
 def _mint_no_exp() -> str:
-    """A validly-signed HS256 token with NO exp claim — the DEF-044 immortal/logout-proof token."""
+    """A validly-signed HS256 token with NO exp claim — the immortal/logout-proof token."""
     return jwt.encode(
         {"sub": "admin", "role": "admin", "namespace": "*"},
         settings.api_secret_key,

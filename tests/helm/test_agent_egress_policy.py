@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""FLAG-D defense-in-depth: the opt-in agent-egress NetworkPolicy renders correctly.
+"""Defense-in-depth: the opt-in agent-egress NetworkPolicy renders correctly.
 
 Norviq's tool-call PEP is cooperative (the agent executes tools itself), so this default-deny egress
 policy bounds the runtime blast radius at the network layer — an agent pod may reach ONLY the norviq API,

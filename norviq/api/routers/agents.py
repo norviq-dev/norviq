@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from norviq.api.auth import get_current_user, read_namespace, require_admin, require_target_cluster
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
-from norviq.api.synthetic import is_synthetic_identity  # DEF-051: the ONE shared synthetic/probe classifier
+from norviq.api.synthetic import is_synthetic_identity  # the ONE shared synthetic/probe classifier
 from norviq.sdk.core.trust import TrustScore
 
 log = structlog.get_logger()
@@ -24,7 +24,7 @@ router = APIRouter()
 # A bound so one agent's history query never loads an unbounded slice of audit_log into memory.
 _AGENT_AUDIT_LIMIT = 5000
 
-# DEF-034 (perf): default + hard caps on the number of agent rows /agents returns, so one request can
+# Perf: default + hard caps on the number of agent rows /agents returns, so one request can
 # never fan out into an O(total-fleet) list. The namespace-scoped SCAN already bounds a tenant to its own
 # agents; this additionally bounds the admin / all-namespaces view.
 _AGENT_LIST_DEFAULT_LIMIT = 1000
@@ -100,9 +100,9 @@ async def list_agents(
     """
     namespace = read_namespace(user, namespace)  # None => all namespaces (admin); own ns for a tenant
     cache = request.app.state.cache
-    last_seen_map = await _registry_last_seen(namespace)  # B4: real Last Seen, batched
+    last_seen_map = await _registry_last_seen(namespace)  # real Last Seen, batched
     client = cache._client()
-    # DEF-034 (perf): scope the SCAN Redis-side to the caller's namespace instead of walking the ENTIRE
+    # Perf: scope the SCAN Redis-side to the caller's namespace instead of walking the ENTIRE
     # cluster-wide ``trust:*`` keyspace and filtering in Python — a single-tenant list is then O(its own
     # agents), not O(total fleet). The SVID encodes ns as ``.../ns/<ns>/...`` so a ns-anchored glob returns
     # only that tenant's keys. The exact ``_namespace_from_spiffe`` check stays as a hard scoping backstop
@@ -114,7 +114,7 @@ async def list_agents(
         if namespace and _namespace_from_spiffe(spiffe_id) != namespace:
             continue
         spiffe_ids.append(spiffe_id)
-        if len(spiffe_ids) >= limit:  # DEF-034: cap the returned list
+        if len(spiffe_ids) >= limit:  # cap the returned list
             break
     rows = await _hydrate_agent_rows(request, cache, spiffe_ids, last_seen_map)
     if not rows:
@@ -124,11 +124,11 @@ async def list_agents(
 
 
 async def _hydrate_agent_rows(request: Request, cache, spiffe_ids: list[str], last_seen_map: dict) -> list[dict]:
-    """DEF-034 (perf): build the list rows for a set of spiffe_ids while BATCHING the two per-agent reads
-    (``trust:`` + ``trustcalc:``) into two pipelined MGETs, instead of two sequential GETs per agent — the
-    N+1 the finding flagged. A real Redis client (has ``mget``) collapses N agents to ~2 round-trips; a
+    """Build the list rows for a set of spiffe_ids while BATCHING the two per-agent reads
+    (``trust:`` + ``trustcalc:``) into two pipelined MGETs, instead of two sequential GETs per agent (avoids
+    an N+1). A real Redis client (has ``mget``) collapses N agents to ~2 round-trips; a
     unit-test / legacy client without ``mget`` degrades to the per-agent path (small N). The emitted row
-    shape is identical on both paths (including the DEF-051 ``synthetic`` flag)."""
+    shape is identical on both paths (including the ``synthetic`` flag)."""
     if not spiffe_ids:
         return []
     client = cache._client()
@@ -156,7 +156,7 @@ def _agent_row(spiffe_id: str, trust: TrustScore, details: dict, last_seen: str 
     agent_class = _class_from_spiffe(spiffe_id)
     return {
         "spiffe_id": spiffe_id,
-        # B4: the SVID encodes ns + class — parse them so the table stops showing "–".
+        # The SVID encodes ns + class — parse them so the table shows real values instead of "–".
         "namespace": _namespace_from_spiffe(spiffe_id),
         "agent_class": agent_class,
         "last_seen": last_seen,
@@ -166,7 +166,7 @@ def _agent_row(spiffe_id: str, trust: TrustScore, details: dict, last_seen: str 
         "signals": details["signals"],
         "dominant_signal": details["dominant_signal"],
         "recommendation": details["recommendation"],
-        # DEF-051: flag synthetic/probe/eval identities (the ONE shared classifier) so the Overview trust
+        # Flag synthetic/probe/eval identities (the ONE shared classifier) so the Overview trust
         # donut + Agent Monitor exclude them and RECONCILE with the asset/attack graph, which already hides
         # exactly these probes by default.
         "synthetic": is_synthetic_identity(agent_class, spiffe_id),
@@ -200,7 +200,7 @@ async def _agents_from_registry(namespace: str) -> list[dict]:
         rows.append(
             {
                 "spiffe_id": entry.spiffe_id,
-                # B4: the registry already stores ns/class/last_seen — surface them (was dropped → "–").
+                # The registry already stores ns/class/last_seen — surface them.
                 "namespace": entry.namespace or _namespace_from_spiffe(entry.spiffe_id),
                 "agent_class": agent_class,
                 "last_seen": entry.last_seen.isoformat() if entry.last_seen else None,
@@ -210,7 +210,7 @@ async def _agents_from_registry(namespace: str) -> list[dict]:
                 "signals": {},
                 "dominant_signal": "",
                 "recommendation": "",
-                # DEF-051: same synthetic flag on the cold-cache (registry) path so the list reconciles
+                # Same synthetic flag on the cold-cache (registry) path so the list reconciles
                 # with the graph whether it is served hot (trust:*) or cold (agent_registry).
                 "synthetic": is_synthetic_identity(agent_class, entry.spiffe_id),
             }
@@ -278,7 +278,7 @@ async def agent_tool_usage(
         stmt = stmt.where(AuditLogEntry.namespace == namespace)
     rows = (await session.execute(stmt.limit(_AGENT_AUDIT_LIMIT))).all()
 
-    # CAP-2: tag each tool with its risk tier (the SAME TOOL_RISK_MAP the asset graph uses) so the Tool
+    # Tag each tool with its risk tier (the SAME TOOL_RISK_MAP the asset graph uses) so the Tool
     # Usage bars can be coloured by RISK, not just call volume — an agent hammering a destructive tool no
     # longer looks identical to one hammering a benign search.
     from norviq.engine.graph.asset_graph import TOOL_RISK_MAP
@@ -347,14 +347,14 @@ async def agent_trust_history(
 @router.get("/agents/{spiffe_id:path}")
 async def get_agent(spiffe_id: str, request: Request, user: dict = Depends(get_current_user)) -> dict:
     """Get one agent trust score."""
-    # H2: the sibling routes (list_agents, agent_tool_usage, agent_trust_history) all scope by namespace —
-    # this one trusted the spiffe_id path param outright, letting any authenticated caller read another
-    # tenant's agent trust signals (cross-tenant IDOR) by simply guessing/enumerating a spiffe_id. Mirror
+    # The sibling routes (list_agents, agent_tool_usage, agent_trust_history) all scope by namespace —
+    # this one must not trust the spiffe_id path param outright, or any authenticated caller could read
+    # another tenant's agent trust signals (cross-tenant IDOR) by guessing/enumerating a spiffe_id. Mirror
     # list_agents' scoping EXACTLY: resolve the caller's namespace scope, then require the agent's own
-    # namespace to match it. Passing the agent's ns as the *requested* value (the prior fix) 403'd a
-    # cross-tenant guess but still let a scoped tenant read a NAMESPACELESS agent — requested None returned
-    # the tenant's own claim without ever comparing it — i.e. exactly the agent list_agents hides. Treat a
-    # non-matching (namespaceless or other-ns) agent as 404, the same "not visible" outcome as the list.
+    # namespace to match it. Comparing the agent's ns against the caller's RESOLVED scope (rather than
+    # passing it as the *requested* value) also blocks a scoped tenant from reading a NAMESPACELESS agent —
+    # exactly the agent list_agents hides. Treat a non-matching (namespaceless or other-ns) agent as 404,
+    # the same "not visible" outcome as the list.
     scope_ns = read_namespace(user, None)  # None => admin/all; own ns for a tenant; 403 for a no-scope viewer
     if scope_ns and _namespace_from_spiffe(spiffe_id) != scope_ns:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -387,8 +387,7 @@ async def update_trust(
 ) -> dict:
     """Set an agent trust score manually.
 
-    AGT-TRUST-02: the score is now a DURABLE, ENFORCED control (previously it was displayed but ignored by the
-    evaluator — only freeze acted). Full-state semantics, mutually exclusive:
+    The score is a DURABLE, ENFORCED control. Full-state semantics, mutually exclusive:
       score == 0    → FREEZE (block every call) + clear any cap.
       0 < score < 1 → a tighten-only trust CAP: the engine uses min(computed, score), so this can force a
                       misbehaving agent toward escalate/frozen but never RAISE trust above what behavior earns.
@@ -457,11 +456,11 @@ async def deregister_agent(
     session: AsyncSession = Depends(get_session),
     _target: None = Depends(require_target_cluster)
 ) -> dict:
-    """RETENTION: admin removal of a decommissioned agent identity from the registry (previously there
-    was NO delete path — stale agents were listed forever and surfaced as phantom 'awaiting' nodes on
-    the asset graph; the background pruner ages them out after agent_registry_retention_days, this is
-    the immediate manual path). Registry + trust-cache only — never touches policies or audit history;
-    a live agent that calls again is simply re-registered on its next evaluated call."""
+    """Admin removal of a decommissioned agent identity from the registry. The background pruner ages
+    stale agents out after agent_registry_retention_days; this is the immediate manual path (without it a
+    decommissioned agent lingers and surfaces as a phantom 'awaiting' node on the asset graph).
+    Registry + trust-cache only — never touches policies or audit history; a live agent that calls
+    again is simply re-registered on its next evaluated call."""
     require_admin(user)
     from norviq.api.db.models import AgentRegistryEntry
 

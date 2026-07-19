@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""FAIL-ON-BUG regressions for the agents-dashboard reconciliation group (DEF-034, DEF-050, DEF-051).
+"""FAIL-ON-BUG regressions for the agents-dashboard reconciliation group.
 
-DEF-051 (/agents synthetic flag): every ``/agents`` row must carry a ``synthetic`` boolean (via the ONE
+/agents synthetic flag: every ``/agents`` row must carry a ``synthetic`` boolean (via the ONE
     shared ``is_synthetic_identity`` classifier) — true for probe/eval/test identities, false for real
     ones — so the Overview trust donut + Agent Monitor can exclude exactly the identities the asset/attack
-    graph already hides. Before the fix the row had no such key at all.
+    graph already hides.
 
-DEF-034 (list_agents perf): ``list_agents`` must scope the Redis SCAN to the caller's namespace
+list_agents perf: ``list_agents`` must scope the Redis SCAN to the caller's namespace
     (``trust:spiffe://*/ns/<ns>/*``) instead of scanning the whole cluster-wide ``trust:*`` keyspace and
     filtering in Python, and must BATCH the per-agent reads via MGET instead of a GET per agent. A tenant
     listing its 3 agents must not traverse another tenant's 20 keys, and must not issue N sequential GETs.
 
-DEF-050 (Overview reconciliation): ``/audit/top-blocked`` and ``/audit/volume`` must exclude red-team
+Overview reconciliation: ``/audit/top-blocked`` and ``/audit/volume`` must exclude red-team
     framework events + synthetic/probe identities — the SAME real-traffic population the headline KPI
     (``/audit/stats``) and Compliance/MITRE already count — so the two Overview widgets stop contradicting
     their own headline.
@@ -56,12 +56,12 @@ def _hdr(role: str = "admin", namespace: str | None = None) -> dict[str, str]:
     return {"Authorization": f"Bearer {_token(role, namespace)}"}
 
 
-# ==== DEF-034 + DEF-051 : /agents ===================================================================
+# ==== /agents (list scoping + synthetic flag) =======================================================
 
 
 class _CountingCache:
     """Redis-double that emulates SCAN MATCH globbing + MGET, and counts commands so a test can assert
-    the SCAN is namespace-scoped (DEF-034) and the per-agent reads are batched (DEF-034). It also backs
+    the SCAN is namespace-scoped and the per-agent reads are batched. It also backs
     the legacy per-agent ``get_trust`` path so the pre-fix code runs (and trips the assertion) rather
     than erroring — proving the test is fail-on-bug, not fake-incompatible."""
 
@@ -118,8 +118,8 @@ def _agents_app(cache: _CountingCache, monkeypatch) -> TestClient:
 
 
 def test_agents_row_carries_synthetic_flag(monkeypatch) -> None:
-    """DEF-051 FAIL-ON-BUG: a real identity is synthetic=False; a probe and an eval-scorer are
-    synthetic=True. Before the fix the row had NO ``synthetic`` key (KeyError below)."""
+    """FAIL-ON-BUG: a real identity is synthetic=False; a probe and an eval-scorer are
+    synthetic=True."""
     cache = _CountingCache({
         REAL_AGENT: _trust_blob("High"),
         PROBE_AGENT: _trust_blob("Low"),
@@ -140,10 +140,9 @@ def test_agents_row_carries_synthetic_flag(monkeypatch) -> None:
 
 
 def test_list_agents_scan_is_namespace_scoped_and_batched(monkeypatch) -> None:
-    """DEF-034 FAIL-ON-BUG: seed 20 keys in ns 'other' + 3 in ns 'alpha'; a request scoped to 'alpha'
+    """FAIL-ON-BUG: seed 20 keys in ns 'other' + 3 in ns 'alpha'; a request scoped to 'alpha'
     must (a) only SCAN the 3 alpha keys (Redis-side MATCH, not a full-keyspace walk) and (b) batch the
-    reads via MGET, not one GET per agent. Pre-fix: scan_iter('trust:*') scans all 23 and calls
-    get_trust per agent -> both assertions fail."""
+    reads via MGET, not one GET per agent."""
     seed: dict[str, str] = {
         f"spiffe://norviq/ns/other/sa/svc-{i}": _trust_blob("High") for i in range(20)
     }
@@ -169,7 +168,7 @@ def test_list_agents_scan_is_namespace_scoped_and_batched(monkeypatch) -> None:
         client.close()
 
 
-# ==== DEF-050 : /audit/top-blocked + /audit/volume reconciliation ===================================
+# ==== /audit/top-blocked + /audit/volume reconciliation =============================================
 
 
 class _AuditResult:
@@ -229,8 +228,7 @@ _MIXED = [
 
 
 def test_top_blocked_excludes_redteam_and_synthetic() -> None:
-    """DEF-050 FAIL-ON-BUG: only the real block survives; the red-team + synthetic tools must not appear.
-    Pre-fix (no exclusion) returned all three tool names."""
+    """FAIL-ON-BUG: only the real block survives; the red-team + synthetic tools must not appear."""
     client = _audit_app(_MIXED)
     try:
         resp = client.get("/api/v1/audit/top-blocked", headers=_hdr(role="admin"))
@@ -243,8 +241,7 @@ def test_top_blocked_excludes_redteam_and_synthetic() -> None:
 
 
 def test_volume_excludes_redteam_and_synthetic() -> None:
-    """DEF-050 FAIL-ON-BUG: the volume chart counts only the real block (1), not all three (3). Pre-fix
-    bucketed every row -> block==3."""
+    """FAIL-ON-BUG: the volume chart counts only the real block (1), not all three (3)."""
     client = _audit_app(_MIXED)
     try:
         resp = client.get("/api/v1/audit/volume", headers=_hdr(role="admin"))

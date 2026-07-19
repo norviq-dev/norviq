@@ -95,25 +95,25 @@ async def create_tables() -> None:
             log.info("nrvq.startup.create_tables.connection_acquired", code="NRVQ-DB-DEBUG-2B")
             await conn.run_sync(Base.metadata.create_all)
             log.info("nrvq.startup.create_tables.create_all_done", code="NRVQ-DB-DEBUG-2C")
-            # F047: create_all never ALTERs an existing table, so add new columns idempotently for
+            # create_all never ALTERs an existing table, so add new columns idempotently for
             # databases provisioned before the column existed (e.g. the running AKS namespace_settings).
             await conn.execute(
                 text("ALTER TABLE namespace_settings ADD COLUMN IF NOT EXISTS sector VARCHAR(64)")
             )
-            # F-51: per-namespace apply governance mode (enforce | dry_run_only).
+            # Per-namespace apply governance mode (enforce | dry_run_only).
             await conn.execute(
                 text("ALTER TABLE namespace_settings ADD COLUMN IF NOT EXISTS apply_mode VARCHAR(20)")
             )
-            # F-52: spoke fleet-bundle manifest (applied keys) for retract/reconcile.
+            # Spoke fleet-bundle manifest (applied keys) for retract/reconcile.
             await conn.execute(
                 text("ALTER TABLE fleet_bundle_state ADD COLUMN IF NOT EXISTS last_manifest TEXT")
             )
-            # LOGIN-2: force-password-change flag on the local login user store (create_all never ALTERs an
+            # Force-password-change flag on the local login user store (create_all never ALTERs an
             # existing `users` table, so add it idempotently for DBs provisioned before the column existed).
             await conn.execute(
                 text("ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change BOOLEAN NOT NULL DEFAULT true")
             )
-            # D3: redteam_runs.results is now nullable (NULL = detail-pruned). create_all never ALTERs an
+            # redteam_runs.results is nullable (NULL = detail-pruned). create_all never ALTERs an
             # existing table, so drop the NOT NULL idempotently — else a retention prune (UPDATE results=NULL)
             # is rejected on a DB provisioned before D3. (No-op on a fresh DB where it's already nullable.)
             await conn.execute(
@@ -155,9 +155,9 @@ async def ensure_schema_compatibility() -> None:
     statements = (
         "ALTER TABLE policies ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 100",
         "ALTER TABLE policies ADD COLUMN IF NOT EXISTS enforcement_mode VARCHAR(20) NOT NULL DEFAULT 'block'",
-        # HA last-applied convergence: `applied_at` was previously tracked ONLY in PolicyLoader._applied_at
-        # (process-local, never persisted/broadcast) — a replica pinned by an operator's session kept showing
-        # the pre-apply (or null) timestamp forever after a peer applied. Persisting it here lets every
+        # HA last-applied convergence: `applied_at` tracked ONLY in PolicyLoader._applied_at
+        # (process-local, never persisted/broadcast) would leave a replica pinned by an operator's session
+        # showing the pre-apply (or null) timestamp after a peer applied. Persisting it here lets every
         # replica re-read the same authoritative value (via load_from_db/warm_cache/apply_remote_event),
         # consistent with how the rest of the loader (rego/version/enforcement_mode) already converges.
         "ALTER TABLE policies ADD COLUMN IF NOT EXISTS applied_at TIMESTAMPTZ",
@@ -169,19 +169,19 @@ async def ensure_schema_compatibility() -> None:
             ") WHERE namespace IS NULL"
         ),
         "CREATE INDEX IF NOT EXISTS ix_attack_paths_namespace ON attack_paths (namespace)",
-        # OBS-2: audit decision-source column (idempotent; existing rows default to '').
+        # Audit decision-source column (idempotent; existing rows default to '').
         "ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS framework VARCHAR(32) NOT NULL DEFAULT ''",
-        # F2: compliance-draft provenance (framework + control it remediates); NULL for Attack-Graph drafts.
+        # Compliance-draft provenance (framework + control it remediates); NULL for Attack-Graph drafts.
         "ALTER TABLE intent_drafts ADD COLUMN IF NOT EXISTS source_framework VARCHAR(32)",
         "ALTER TABLE intent_drafts ADD COLUMN IF NOT EXISTS source_control_id VARCHAR(64)",
         "ALTER TABLE intent_drafts ADD COLUMN IF NOT EXISTS source_control_name VARCHAR(255)",
-        # Part B: draft retention TTL — GC deletes only expired NON-enforcing drafts (never a policy/version).
+        # Draft retention TTL — GC deletes only expired NON-enforcing drafts (never a policy/version).
         "ALTER TABLE intent_drafts ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ",
         "CREATE INDEX IF NOT EXISTS ix_intent_drafts_expires_at ON intent_drafts (expires_at)",
-        # COMP-GEN-01 fix: the real affected class for a compliance-remediation draft, once `agent_class`
+        # The real affected class for a compliance-remediation draft, once `agent_class`
         # becomes the compound "<class>__remediation__" persistence key (NULL for other draft kinds).
         "ALTER TABLE intent_drafts ADD COLUMN IF NOT EXISTS affected_class VARCHAR(255)",
-        # RETENTION: optional API-key expiry (NULL = never — keys issued before this column keep working).
+        # RETENTION: optional API-key expiry (NULL = never expires).
         "ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ",
         # SECURITY (trust fail-open fix): durable freeze/cap so a Redis flush can't lift a kill-switch.
         "ALTER TABLE agent_registry ADD COLUMN IF NOT EXISTS frozen BOOLEAN NOT NULL DEFAULT false",

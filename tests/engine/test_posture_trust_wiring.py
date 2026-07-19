@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Batch E regression (fail-on-bug): CFG-SETTINGS-INERT-01 + AGT-TRUST-02 wiring.
+"""Posture + trust wiring regression (fail-on-bug).
 
-Pure-logic units for the two engine-side wirings — no Redis, no OPA. They fail on 1a7a3c9 (where the
-methods/params don't exist) and pass on the fix.
+Pure-logic units for the two engine-side wirings — no Redis, no OPA. They fail on code where the
+methods/params don't exist and pass on the correct code.
 
 - `_apply_posture`: namespace monitor (audit) mode softens a would-block/escalate to an allow-but-log `audit`
   decision, fires ONLY on an explicit per-ns override, exempts the incident-response/engine-health/rate rules,
@@ -31,7 +31,7 @@ def _dec(decision: str, rule_id: str) -> PolicyDecision:
     return PolicyDecision(decision=decision, rule_id=rule_id, reason=f"{rule_id} reason")
 
 
-# --- CFG-SETTINGS-INERT-01: monitor-mode softening (_apply_posture) ------------------------------
+# --- Monitor-mode softening (_apply_posture) -----------------------------------------------------
 
 def test_monitor_softens_block_and_escalate_to_audit():
     ev = _ev()
@@ -72,7 +72,7 @@ def test_exempt_set_contents():
     }
 
 
-# --- CFG-SETTINGS-INERT-01: trust_threshold tiers (_categorize / _tiers) --------------------------
+# --- trust_threshold tiers (_categorize / _tiers) ------------------------------------------------
 
 def _calc() -> TrustCalculator:
     return TrustCalculator(cache=None, history=None, profile=None)  # type: ignore[arg-type]
@@ -108,7 +108,7 @@ def test_frozen_and_zero_score_guards_survive_tiers():
     assert c._categorize(0.0) == "low"                             # zero-score guard
 
 
-# --- AGT-TRUST-02: the min() cap (tighten-only) via calculate() with a fake pipeline --------------
+# --- The min() cap (tighten-only) via calculate() with a fake pipeline ----------------------------
 
 class _FakeCalc(TrustCalculator):
     """A calculator whose signal/history/frozen/override inputs are injected, so we exercise the real

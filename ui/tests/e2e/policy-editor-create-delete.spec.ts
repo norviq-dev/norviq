@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// BATCH-B — Policy Editor CREATE (raw rego) + DELETE (guardrails) + the DELETE reserved-scope guard.
+// Policy Editor CREATE (raw rego) + DELETE (guardrails) + the DELETE reserved-scope guard.
 //
 // A 200 is NOT proof. Every mutation is driven through the REAL UI (or the exact client/API contract) and its
 // EFFECT is proven INDEPENDENTLY via a before/after /evaluate decision-FLIP on the discriminator rule_id
 // (custom_block_rule) on the running engine:
-//   • B-1 create-from-editor  → the new class's OWN rule fires (not baseline / no_policy_loaded).
-//   • B-2 delete              → the class FLIPS BACK (its rule no longer fires) — a true un-load, durable.
-//   • B-2 reserved            → reserved rows show NO delete affordance.
-//   • B-3 reserved DELETE     → refused server-side (422), baseline left intact.
+//   • create-from-editor  → the new class's OWN rule fires (not baseline / no_policy_loaded).
+//   • delete              → the class FLIPS BACK (its rule stops firing) — a true un-load, durable.
+//   • reserved            → reserved rows show NO delete affordance.
+//   • reserved DELETE     → refused server-side (422), baseline left intact.
 // Everything runs on THROWAWAY classes in `default` and cleans up in `finally` — it NEVER mutates
 // customer-support (the attack-suite class): the only thing done to it is a READ (/evaluate) and a REFUSED
-// baseline delete (which the B-3 guard blocks, so its baseline is untouched).
+// baseline delete (which the reserved-scope guard blocks, so its baseline is untouched).
 
 import { test, expect, waitForApp } from "./fixtures";
 import { type Page } from "@playwright/test";
@@ -102,7 +102,7 @@ test.describe("Policy Editor — create (raw rego) + delete (guardrails), proven
       await expect(page.getByTestId("delete-policy-warning")).toContainText(/currently enforcing/i);
       await page.getByTestId("delete-policy-confirm").click();
 
-      // EFFECT: the class FLIPS BACK — its own rule no longer fires (a true un-load, not a stale cache).
+      // EFFECT: the class FLIPS BACK — its own rule stops firing (a true un-load, not a stale cache).
       await expect.poll(async () => (await ev(page, NS, CLS, TOOL)).rule_id, { timeout: 20000 }).not.toBe(RULE);
       // …and the row is gone from the catalog.
       await expect(page.getByTestId(`catalog-delete-${CLS}`)).toHaveCount(0);

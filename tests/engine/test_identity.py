@@ -90,7 +90,7 @@ async def test_concurrent_resolve_only_resolves_once(monkeypatch) -> None:
     assert len({identity.spiffe_id for identity in identities}) == 1
 
 
-# --- B2: workload-api mode (real SPIFFE SVID), fail-closed + spoof-resistant ---
+# --- Workload-api mode (real SPIFFE SVID), fail-closed + spoof-resistant ---
 
 
 class _FakeSvid:

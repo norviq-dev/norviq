@@ -771,7 +771,7 @@ func TestAddFinalizerWithRetry_RetriesOnConflict(t *testing.T) {
 }
 
 func TestBearerToken_PrefersOIDCThenFallsBackToHS256(t *testing.T) {
-	// B4: with an OIDC token source set, bearerToken returns the access token (not the HS256 JWT).
+	// With an OIDC token source set, bearerToken returns the access token (not the HS256 JWT).
 	c := newTestController()
 	c.apiSecret = "secret"
 	c.oidcTokenSource = oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "oidc-access-token"})

@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Runtime settings routes (F046) — GET returns the REAL effective settings (config defaults merged
+"""Runtime settings routes — GET returns the REAL effective settings (config defaults merged
 with persisted per-namespace overrides); PUT persists overrides (admin-only, validated, audited).
-
-Replaces the console's hardcoded settings defaults + localStorage-only persistence.
 """
 
 import structlog
@@ -21,7 +19,7 @@ from norviq.config import settings as app_settings
 log = structlog.get_logger()
 router = APIRouter()
 
-# CFG-SETTINGS-INERT-01: the RAW per-ns fields the engine hot path consumes for posture. Mirrored into Redis
+# The RAW per-ns fields the engine hot path consumes for posture. Mirrored into Redis
 # (nulls preserved) so the evaluator resolves per-ns enforcement_mode / trust_threshold / rate_limit with per-field
 # fallback to the global config. apply_mode is API-side only (assert_apply_allowed) and not needed by the engine.
 _ENGINE_POSTURE_FIELDS = ("enforcement_mode", "trust_threshold", "rate_limit")
@@ -58,12 +56,12 @@ class SettingsUpdate(BaseModel):
     # was removed from the settings surface; the SDK's in-process decay still uses the global
     # settings.trust_violation_penalty.
     rate_limit: int | None = Field(default=None, ge=1, le=100000)
-    sector: str | None = Field(default=None, max_length=64)  # F047: org sector hint (pack suggestions)
-    apply_mode: str | None = Field(default=None, pattern="^(enforce|dry_run_only)$")  # F-51: apply governance
+    sector: str | None = Field(default=None, max_length=64)  # org sector hint (pack suggestions)
+    apply_mode: str | None = Field(default=None, pattern="^(enforce|dry_run_only)$")  # apply governance
 
 
 async def assert_apply_allowed(session: AsyncSession, namespace: str) -> None:
-    """F-51: raise 409 if the namespace is in dry_run_only mode (the API must reject policy applies for it).
+    """Raise 409 if the namespace is in dry_run_only mode (the API must reject policy applies for it).
     Server-enforced so a direct API call is gated, not just the console. dry-run + drafts stay allowed."""
     row = (
         await session.execute(select(NamespaceSettings).where(NamespaceSettings.namespace == namespace))
@@ -154,7 +152,7 @@ async def put_settings(
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(row, field, value)
     await session.commit()
-    # CFG-SETTINGS-INERT-01: mirror the RAW engine-facing posture into Redis so the evaluator enforces it live
+    # Mirror the RAW engine-facing posture into Redis so the evaluator enforces it live
     # (source of truth remains the DB row above). Best-effort — a mirror failure just means the engine keeps the
     # prior/global posture until the next warm/PUT; it never fails the save.
     cache = getattr(getattr(request.app, "state", None), "cache", None)

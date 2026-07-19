@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Batch A (TGT-POSTURE-01 / CATHIER-MODE-01) — REAL form login, REAL controls. Proves the Namespace
+// REAL form login, REAL controls. Proves the Namespace
 // Governance card's Block ⇄ Monitor toggle drives the LIVE enforcement effect end-to-end, the hierarchy
 // Mode column agrees, and the apply-mode is relabelled Live/Frozen.
 import { test, expect, type Page } from "@playwright/test";

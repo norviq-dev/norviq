@@ -268,8 +268,32 @@ describe("default login view", () => {
     fireEvent.click(screen.getByRole("button", { name: /^sign in$/i }));
     await screen.findByText(/set a new password/i);
     expect(localStorage.getItem("nrvq_must_change")).toBe("1");
-    // current password is prefilled from the login they just completed
-    expect(screen.getByLabelText(/current password/i)).toHaveValue("norviq");
+    // current password is prefilled from the login they just completed…
+    const cur = screen.getByLabelText(/current password/i);
+    expect(cur).toHaveValue("norviq");
+    // …and LOCKED (readOnly) so a browser password-manager can't autofill-over it or trap backspace.
+    expect(cur).toHaveAttribute("readonly");
+    expect(cur).toHaveAttribute("autocomplete", "off");
+  });
+
+  it("forced-change: submitting sends the PREFILLED current password (autofill can't corrupt the locked field)", async () => {
+    const f = mockFetch(200, { access_token: "a.b.c", must_change: true, default_password_in_use: true });
+    render(<Login />);
+    fillCreds(); // signs in with the default "norviq" → must_change → prefilled+locked current field
+    fireEvent.click(screen.getByRole("button", { name: /^sign in$/i }));
+    await screen.findByText(/set a new password/i);
+    // Fill only the NEW + confirm (the user never touches the locked current field).
+    fireEvent.change(screen.getByLabelText(/^new password$/i), { target: { value: "NorviqKind#2026x" } });
+    fireEvent.change(screen.getByLabelText(/confirm new password/i), { target: { value: "NorviqKind#2026x" } });
+    fireEvent.click(screen.getByRole("button", { name: /save & continue/i }));
+    await waitFor(() => {
+      const call = f.mock.calls.find((c) => String(c[0]).includes("/auth/change-password"));
+      expect(call).toBeTruthy();
+      expect(JSON.parse(String((call![1] as RequestInit).body))).toMatchObject({
+        current_password: "norviq",
+        new_password: "NorviqKind#2026x"
+      });
+    });
   });
 
   it("shows a generic error on 401 and a lockout message on 429", async () => {

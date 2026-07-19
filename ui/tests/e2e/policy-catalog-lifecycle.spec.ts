@@ -7,7 +7,7 @@
 // NOT proof. This drives the SAME apply the Policy Catalog's Confirm-Apply issues (POST /policies/{ns}/{cls}/apply
 // with the target scope) and INDEPENDENTLY verifies the EFFECT via a before/after /evaluate decision-flip: the
 // applied policy's own rule_id fires at the target (NOT `no_policy_loaded`). This is the exact regression that
-// fails if apply stops reaching the engine (it did before the fix — apply wrote the evaluator's unread dict). A
+// fails if apply stops reaching the engine (e.g. apply writing to the evaluator's unread dict). A
 // THROWAWAY class is used and cleaned up — never customer-support (the attack-suite class), which a default-deny
 // would break.
 

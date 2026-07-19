@@ -8,7 +8,7 @@ RUN npm ci
 COPY ui/ .
 RUN npm run build
 
-# DEF-029: the unprivileged nginx image runs as uid 101 (non-root) and binds :8080, so the console
+# The unprivileged nginx image runs as uid 101 (non-root) and binds :8080, so the console
 # container no longer runs as root and the pod can drop ALL Linux caps (no NET_BIND_SERVICE needed).
 FROM nginxinc/nginx-unprivileged:1.27-alpine
 # apk upgrade + the file COPY/chown steps need root; we drop back to uid 101 (the image default) at the end.
@@ -18,7 +18,7 @@ USER root
 # without ignoring genuinely-fixable vulns. NRVQ_GIT_SHA changes every commit, so this layer is NEVER
 # served stale from the CI docker layer cache: `apk upgrade` re-runs each build.
 ARG NRVQ_GIT_SHA=dev
-# DEF-002: carry the SHA as a runtime env + OCI revision label (broadcast by CI) so the UI image is
+# Carry the SHA as a runtime env + OCI revision label (broadcast by CI) so the UI image is
 # NO-STALE-checkable like api/engine/webhook.
 ENV NRVQ_BUILD_GIT_SHA=${NRVQ_GIT_SHA}
 LABEL org.opencontainers.image.revision=${NRVQ_GIT_SHA}
@@ -35,5 +35,5 @@ RUN chmod +x /docker-entrypoint.d/99-nrvq-config.sh \
     && chmod -R g+w /usr/share/nginx/html /etc/nginx/fleet-proxy.conf
 USER 101
 EXPOSE 8080
-# F-25: the entrypoint writes /config.js from FLEET_API_URL, then execs nginx.
+# The entrypoint writes /config.js from FLEET_API_URL, then execs nginx.
 CMD ["/docker-entrypoint.d/99-nrvq-config.sh"]

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Unicode confusable skeleton for injection MATCHING (F-02).
+"""Unicode confusable skeleton for injection MATCHING.
 
 Homoglyph evasion: "іgnоre" (Cyrillic і/о) reads as "ignore" but evades a literal ASCII match. NFKC alone does
 NOT fold cross-script look-alikes (Cyrillic о U+043E is not NFKC-equivalent to Latin o). `skeleton()` therefore:

@@ -9,7 +9,7 @@ test_listed_tool_allows {
     g.rule_id == "tool_allowlisted" with input as {"tool_name": "search_kb", "tool_params": {}}
 }
 
-# F-14 repro: a benign out-of-scope tool (the execute_sql SELECT case) -> escalate, not silent allow
+# A benign out-of-scope tool (the execute_sql SELECT case) -> escalate, not silent allow
 test_unlisted_tool_escalates {
     g.decision == "escalate" with input as {"tool_name": "execute_sql", "tool_params": {"query": "SELECT 1"}}
     g.rule_id == "tool_not_in_allowlist" with input as {"tool_name": "execute_sql", "tool_params": {}}

@@ -19,7 +19,7 @@ Security (auditor): coverage/draft generation is dry-run/eval only. A draft is d
 the ``policies`` table — the evaluator lazy-loads any policy row for a real agent_class (no draft flag), so a
 persisted row WOULD enforce. Drafts therefore live in a separate ``intent_drafts`` table (which the evaluator's
 ``_collect_candidates`` never queries); enforcement happens only when an operator explicitly creates+applies the
-rego in Policies (the existing F-40/F-51/R2-gated flow). The draft's priority == the namespace comprehensive
+rego in Policies (the existing gated flow). The draft's priority == the namespace comprehensive
 baseline priority, so an applied draft stays tighten-only under ``_resolve_precedence``'s most-restrictive tie-break.
 """
 
@@ -238,7 +238,7 @@ def _build_path(
             blocked = True
         if wb > 0 and allow == 0:
             would_blocked = True
-        # CAP-2: on a tool→data hop, resolve the ACTUAL operation (read/write/delete/send) + its risk from
+        # On a tool→data hop, resolve the ACTUAL operation (read/write/delete/send) + its risk from
         # the capability registry, so a destructive hop is distinguishable from a read. `a` is the tool
         # reaching data node `b`; None-safe when the source/verb isn't in the registry.
         op_val: str | None = None
@@ -437,10 +437,10 @@ async def _derive_paths(session: AsyncSession, namespaces: list[str] | None, cls
 @router.get("/threats/attack-paths", response_model=ThreatPathsResponse)
 async def get_threat_paths(
     ns: str | None = Query(None),
-    namespace: str | None = Query(None),  # P2-1: alias — the sibling graph endpoints spell it `namespace`
+    namespace: str | None = Query(None),  # alias — the sibling graph endpoints spell it `namespace`
     cls: str | None = Query(None),
     range: str = Query("24h"),
-    include_synthetic: bool = Query(False),  # A1: default-hide kill-chains rooted at seeded probe/test agents
+    include_synthetic: bool = Query(False),  # default-hide kill-chains rooted at seeded probe/test agents
     session: AsyncSession = Depends(get_session),
     user: dict = Depends(get_current_user),
 ):
@@ -461,7 +461,7 @@ async def get_threat_paths(
     requested = ns if ns is not None else (namespace if namespace is not None else "all")
     namespaces = _resolve_namespaces(user, requested)
     paths, seen = await _derive_paths(session, namespaces, cls)
-    # A1: a kill-chain rooted at a synthetic/probe agent is test noise — hide it by default (toggle brings it back).
+    # A kill-chain rooted at a synthetic/probe agent is test noise — hide it by default (toggle brings it back).
     synthetic_hidden = 0
     if not include_synthetic:
         kept = [p for p in paths if not is_synthetic_identity(p.cls, p.src)]
@@ -554,7 +554,7 @@ async def intent_draft(
     """Create a DRY-RUN DRAFT of the generated intent policy and deep-link to Policies. This NEVER
     enforces: the draft is persisted ONLY in the dedicated ``intent_drafts`` table (which the evaluator's
     ``_collect_candidates`` never reads), NEVER in ``policies``; an operator must explicitly review + apply
-    it in Policies (existing F-40/F-51/R2-gated flow). Its priority == the namespace baseline (tighten-only)."""
+    it in Policies (existing gated flow). Its priority == the namespace baseline (tighten-only)."""
     require_admin(user)
     if body.cls in _RESERVED_CLASSES:
         raise HTTPException(status_code=422, detail=f"'{body.cls}' is a managed scope — draft a real agent class.")
@@ -584,9 +584,9 @@ async def intent_draft(
 
     draft_id = _short_id("draft", body.ns, body.cls, ",".join(allow_tools), ",".join(intent.enabled_keys())).replace("p", "d", 1)
     created_at = datetime.now(timezone.utc)
-    # E1: DEDUPE BY CLASS — a (namespace, agent_class) keeps at most ONE pending Attack-Graph intent draft (the
+    # DEDUPE BY CLASS — a (namespace, agent_class) keeps at most ONE pending Attack-Graph intent draft (the
     # latest). Prior drafts for the same class are cleared before insert so re-drafting overwrites instead of
-    # piling up. F4: scope the delete to Attack-Graph drafts (source_control_id IS NULL) so it never clobbers a
+    # piling up. Scope the delete to Attack-Graph drafts (source_control_id IS NULL) so it never clobbers a
     # compliance draft, which is deduped separately by (framework, control, class). Drafts are dry-run only.
     await session.execute(
         text("DELETE FROM intent_drafts WHERE namespace = :ns AND agent_class = :cls "
@@ -771,8 +771,8 @@ async def list_intent_drafts(
 
     SECURITY (IDOR + read-causes-cross-tenant-write): the caller's namespace set is resolved FAIL-CLOSED via
     _resolve_namespaces (a scoped tenant naming another namespace gets 403; "all"/none → only its own), so this
-    endpoint can no longer enumerate/read every tenant's drafts, and the lazy GC is scoped to that same set so a
-    read-only viewer can no longer DELETE another namespace's rows through a GET."""
+    endpoint cannot enumerate/read every tenant's drafts, and the lazy GC is scoped to that same set so a
+    read-only viewer cannot DELETE another namespace's rows through a GET."""
     namespaces = _resolve_namespaces(user, ns if ns is not None else "all")  # None = unrestricted (admin/service)
     # Lazy GC of expired (non-enforcing) drafts — scoped to the caller's OWN namespaces only. The background
     # RetentionPruner also sweeps these globally, so a viewer never needs (and never gets) cross-tenant reach.
@@ -796,7 +796,7 @@ async def list_intent_drafts(
     )).mappings().all()
     drafts = [IntentDraftSummary(
         draft_id=r["id"], ns=r["namespace"], cls=r["agent_class"],
-        # COMP-GEN-01 fix: for a remediation draft, `agent_class`/`cls` is now the compound persistence
+        # For a remediation draft, `agent_class`/`cls` is the compound persistence
         # overlay key ("<class>__remediation__") — `affected_class` carries the real class for display.
         affected_class=r["affected_class"],
         enabled=list(r["toggles"] or []), allow_tools=list(r["allow_tools"] or []),
@@ -817,7 +817,7 @@ async def dismiss_intent_draft(
     session: AsyncSession = Depends(get_session),
     user: dict = Depends(get_current_user),
 ) -> dict:
-    """Part B (B7): manually dismiss ONE pending draft. Non-enforcing only (the evaluator never reads this table),
+    """Manually dismiss ONE pending draft. Non-enforcing only (the evaluator never reads this table),
     so this can never change enforcement. Admin-gated like the other draft mutations."""
     require_admin(user)
     result = await session.execute(text("DELETE FROM intent_drafts WHERE id = :id"), {"id": draft_id})
@@ -836,7 +836,7 @@ async def gc_intent_drafts(
     session: AsyncSession = Depends(get_session),
     user: dict = Depends(get_current_user),
 ) -> dict:
-    """Part B (B7): bulk "Clear expired" — delete all expired non-enforcing drafts on demand. Safe: never touches
+    """Bulk "Clear expired" — delete all expired non-enforcing drafts on demand. Safe: never touches
     an enforcing policy or version (drafts live in the dedicated non-enforcing table)."""
     require_admin(user)
     removed = await gc_expired_drafts(session, ns)
@@ -868,7 +868,7 @@ async def get_intent_draft(draft_id: str, session: AsyncSession = Depends(get_se
         raise HTTPException(status_code=404, detail="draft not found (regenerate from Attack Graph)")
     return {
         "draft_id": r["id"], "ns": r["namespace"], "cls": r["agent_class"],
-        # COMP-GEN-01 fix: real affected class for display (== agent_class for non-remediation drafts, where
+        # Real affected class for display (== agent_class for non-remediation drafts, where
         # affected_class is NULL — the UI falls back to `cls` in that case).
         "affected_class": r["affected_class"], "rego": r["rego_source"],
         "allow_tools": list(r["allow_tools"] or []), "enabled": list(r["toggles"] or []),
@@ -876,7 +876,7 @@ async def get_intent_draft(draft_id: str, session: AsyncSession = Depends(get_se
         "would_block": r["would_block"], "would_allow": r["would_allow"],
         "created_by": r["created_by"] or "",
         "created_at": r["created_at"].isoformat() if r["created_at"] else "", "enforcement": "draft",
-        # F2: provenance so the Policy Catalog review header can show "from OWASP LLM · LLM07 …".
+        # Provenance so the Policy Catalog review header can show "from OWASP LLM · LLM07 …".
         "source_framework": r["source_framework"], "source_control_id": r["source_control_id"],
         "source_control_name": r["source_control_name"],
     }

@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""DEF-036: the agent-class policy section of /coverage-by-category must distinguish a *failed* DB read
-from a genuinely empty namespace. Before the fix, `_agent_class_policies` caught every exception and
-returned a bare `[]` with no log — a statement timeout / serialization failure was byte-identical to
-"no agent-class policies applied". These tests fail on that pre-fix behaviour and pass once the read
-fault is surfaced as a `degraded` signal (and an observable NRVQ-API-7081 log).
+"""The agent-class policy section of /coverage-by-category must distinguish a *failed* DB read
+from a genuinely empty namespace. A handler that catches every exception and returns a bare `[]`
+with no log makes a statement timeout / serialization failure byte-identical to
+"no agent-class policies applied". These tests require the read fault to surface as a `degraded`
+signal (and an observable NRVQ-API-7081 log).
 """
 
 from __future__ import annotations
@@ -101,7 +101,7 @@ def _policy_row(agent_class: str = "report-gen") -> dict:
     }
 
 
-# --- DEF-036: the direct-function contract ---------------------------------------------------------
+# --- The direct-function contract ------------------------------------------------------------------
 
 async def test_agent_class_query_failure_marks_section_degraded() -> None:
     """A failing policies read must return a degraded signal, NOT an empty success that reads as
@@ -162,7 +162,7 @@ async def test_agent_class_empty_namespace_is_not_degraded() -> None:
     assert degraded is False
 
 
-# --- DEF-036: the flag is threaded onto the served response ----------------------------------------
+# --- The flag is threaded onto the served response -------------------------------------------------
 
 def _client(session) -> TestClient:
     app = create_app()

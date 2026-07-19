@@ -48,7 +48,7 @@ function App() {
   if (import.meta.env.DEV && !localStorage.getItem("nrvq_token") && import.meta.env.VITE_DEV_TOKEN) {
     localStorage.setItem("nrvq_token", import.meta.env.VITE_DEV_TOKEN as string);
   }
-  // LOGIN-1/LOGIN-2: the login GATE. No valid session (or the /login route) → the login screen instead of
+  // The login gate. No valid session (or the /login route) → the login screen instead of
   // a blank/unauthenticated console. A session still flagged must_change (default admin password) is
   // funneled back into Login, which opens directly on its First-login (change password) view — the prompt,
   // not a server-side lock.
@@ -60,16 +60,16 @@ function App() {
       <Shell>
         <Suspense fallback={<div data-testid="route-loader" style={{ position: "relative", minHeight: "60vh", display: "flex", alignItems: "center", justifyContent: "center" }}><BrandLoader size={56} label="Loading Norviq" /></div>}>
           <Routes>
-            {/* Dashboard (Overview) stays mounted for a remote cluster — it shows hub rollups + deep-link tiles (Stage 3). */}
+            {/* Dashboard (Overview) stays mounted for a remote cluster — it shows hub rollups + deep-link tiles. */}
             <Route path="/" element={<Dashboard />} />
             <Route path="/policies" element={<Navigate to="/policies/catalog" replace />} />
-            {/* F-69 Stage 2: per-cluster DETAIL pages must not render the served cluster's data under a remote
+            {/* Per-cluster DETAIL pages must not render the served cluster's data under a remote
                 label — <ClusterScoped> swaps them for the spoke deep-link when a remote cluster is selected. */}
             <Route path="/policies/catalog" element={<ClusterScoped page="Policy Catalog"><PolicyCatalog /></ClusterScoped>} />
             <Route path="/policies/packs" element={<ClusterScoped page="Policy Packs"><PolicyPacks /></ClusterScoped>} />
             <Route path="/policies/targets" element={<ClusterScoped page="Target Settings"><TargetSettings /></ClusterScoped>} />
             <Route path="/audit" element={<ClusterScoped page="Audit Log"><AuditLog /></ClusterScoped>} />
-            {/* Stage 3: Agents is centralized — a remote cluster renders its REAL relayed agents at the hub (with
+            {/* Agents is centralized — a remote cluster renders its REAL relayed agents at the hub (with
                 freshness); a stale/unreachable spoke falls back to the deep-link. Local renders the full page. */}
             <Route
               path="/agents"

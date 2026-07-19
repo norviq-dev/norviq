@@ -103,7 +103,7 @@ async def lifespan(app: FastAPI):
                 "Refusing to start: api_secret_key is weak (default/empty/<16 chars). "
                 "Set NRVQ_API_SECRET_KEY to a strong secret (NRVQ_REQUIRE_STRONG_SECRET is enabled)."
             )
-    # LOGIN-2 no-default-in-prod: the seeded admin password must not still be the shipped default when
+    # No-default-in-prod: the seeded admin password must not still be the shipped default when
     # strong-secret enforcement is on. Warn always; refuse to start under require_strong_secret (fail-safe).
     if settings.auth_login_enabled and settings.auth_admin_password == settings.auth_default_admin_password:
         log.warning(
@@ -142,7 +142,7 @@ async def lifespan(app: FastAPI):
     await run_migrations()
     log.info("nrvq.startup.migrations_done", code="NRVQ-DB-DEBUG-4")
     await ensure_schema_compatibility()
-    # LOGIN-2: seed the default admin (must_change=True) after the schema exists so a fresh install can log in.
+    # Seed the default admin (must_change=True) after the schema exists so a fresh install can log in.
     await auth_login.ensure_default_admin()
     if hasattr(app.state, "loader") and app.state.loader:
         log.info("nrvq.startup.warm_cache_starting", code="NRVQ-DB-DEBUG-5")
@@ -170,7 +170,7 @@ async def lifespan(app: FastAPI):
                 await asyncio.sleep(2)
 
     app.state.policy_sync_task = asyncio.create_task(_policy_sync_loop())
-    # CFG-SETTINGS-INERT-01: seed the per-ns posture mirror from persisted NamespaceSettings so pre-existing rows
+    # Seed the per-ns posture mirror from persisted NamespaceSettings so pre-existing rows
     # enforce after a restart / Redis flush (best-effort; the evaluator falls back to global config on a miss).
     try:
         await settings_router.warm_ns_settings(app.state.cache)
@@ -197,9 +197,9 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # pragma: no cover - best-effort; never block startup on join-state load
         log.warning("nrvq.startup.join_state_load_failed", error=str(exc), code="NRVQ-FLT-15034")
     app.state.fleet_relay = FleetRelayForwarder()
-    await app.state.fleet_relay.start()  # no-op unless settings.fleet_enabled (F045; fire-and-forget)
+    await app.state.fleet_relay.start()  # no-op unless settings.fleet_enabled (fire-and-forget)
     app.state.fleet_puller = FleetPolicyPuller(loader=app.state.loader)
-    await app.state.fleet_puller.start()  # P2: pull+verify+apply signed bundles (no-op unless configured)
+    await app.state.fleet_puller.start()  # pull+verify+apply signed bundles (no-op unless configured)
     log.info("nrvq.api.started", port=settings.api_port, code="NRVQ-API-7000")
     yield
     sync_task = getattr(app.state, "policy_sync_task", None)
@@ -237,7 +237,7 @@ def create_app() -> FastAPI:
     app.include_router(audit.router, prefix="/api/v1", tags=["audit"])
     app.include_router(agents.router, prefix="/api/v1", tags=["agents"])
     app.include_router(me.router, prefix="/api/v1", tags=["me"])
-    app.include_router(auth_login.router, prefix="/api/v1", tags=["auth"])  # LOGIN-2 local username/password login
+    app.include_router(auth_login.router, prefix="/api/v1", tags=["auth"])  # local username/password login
     app.include_router(cluster_info.router, prefix="/api/v1", tags=["cluster-info"])
     app.include_router(deployments.router, prefix="/api/v1", tags=["deployments"])
     app.include_router(mitre.router, prefix="/api/v1", tags=["mitre"])
@@ -250,7 +250,7 @@ def create_app() -> FastAPI:
     app.include_router(settings_router.router, prefix="/api/v1", tags=["settings"])
     app.include_router(version.router, prefix="/api/v1", tags=["version"])
     app.include_router(keys.router, prefix="/api/v1", tags=["keys"])
-    app.include_router(search.router, prefix="/api/v1", tags=["search"])  # P2-2: ⌘K backing endpoint
+    app.include_router(search.router, prefix="/api/v1", tags=["search"])  # ⌘K backing endpoint
     app.include_router(packs.router, prefix="/api/v1", tags=["packs"])
     app.include_router(fleet_enroll.router, prefix="/api/v1", tags=["fleet-enroll"])
     app.state.audit_hub = AuditHub()
@@ -280,7 +280,7 @@ def create_app() -> FastAPI:
             header = websocket.headers.get("authorization", "")
             raw = header[7:] if header.lower().startswith("bearer ") else ""
         try:
-            # AUTH-01: pass the app cache so a logged-out (revoked) token cannot open a new stream.
+            # Pass the app cache so a logged-out (revoked) token cannot open a new stream.
             user = await decode_token(raw, cache=getattr(websocket.app.state, "cache", None))
         except JWTError:
             await websocket.close(code=1008)  # policy violation: invalid/missing/revoked token
@@ -324,9 +324,9 @@ def create_app() -> FastAPI:
             log.info("nrvq.api.ws_audit.close", code="NRVQ-API-7041")
 
     app.add_middleware(TelemetryMiddleware)
-    # PERF-1: cap request-body size (413) before evaluation — bounds the base64 fan-out DoS amplifier.
+    # Cap request-body size (413) before evaluation — bounds the base64 fan-out DoS amplifier.
     app.add_middleware(BodySizeLimitMiddleware)
-    # HIGH-1: added LAST so it is OUTERMOST (Starlette wraps user middleware in reverse add-order) —
+    # Added LAST so it is OUTERMOST (Starlette wraps user middleware in reverse add-order) —
     # a flooded/over-limit caller gets 429'd before the API spends any effort buffering the body or
     # recording telemetry for the request.
     app.add_middleware(RateLimitMiddleware)

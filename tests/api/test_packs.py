@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F047: GET /policy-packs catalog + admin-only enable/disable. Covers list (with/without enabled),
+"""GET /policy-packs catalog + admin-only enable/disable. Covers list (with/without enabled),
 enable materializes the combined rego via the loader, non-admin 403, unknown pack 404, idempotency,
 and disable re-materialize/delete."""
 
@@ -180,7 +180,7 @@ def test_packs_requires_auth() -> None:
 
 
 def test_enable_rejects_target_cluster_mismatch() -> None:
-    # R2 (P1) server backstop: a cluster-scoped mutation whose X-Nrvq-Target-Cluster != the served cluster is
+    # Server backstop: a cluster-scoped mutation whose X-Nrvq-Target-Cluster != the served cluster is
     # refused (409) and NOTHING is written — even with a valid admin token (direct-API bypass of the UI guard).
     client, session, loader = _client(rows=[])
     resp = client.post(

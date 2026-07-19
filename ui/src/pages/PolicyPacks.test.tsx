@@ -105,7 +105,7 @@ describe("PolicyPacks page (F047)", () => {
     expect(sentNs).not.toContain("all");
   });
 
-  it("FIX-4: the apply-result badge never shows APPLIED while its own outcome text still says Verifying, " +
+  it("the apply-result badge never shows APPLIED while its own outcome text still says Verifying, " +
     "and converges to a matching APPLIED + 'Confirmed via a live read' once the toggle's poll resolves", async () => {
     server.use(...handlers("admin", new Set()));
     renderPage();

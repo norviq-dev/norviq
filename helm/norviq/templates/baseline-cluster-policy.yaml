@@ -1,7 +1,7 @@
 {{- if .Values.baselineClusterPolicy.enabled }}
 {{- if not .Values.policyQuotaNamespaces }}
 {{- /*
-  DEF-001 (fail-closed config): the baseline guard renders ONE NrvqPolicy per namespace in
+  Fail-closed config: the baseline guard renders ONE NrvqPolicy per namespace in
   policyQuotaNamespaces. With that list empty, `enabled: true` would render ZERO baselines — every
   agent class would run WITHOUT the fail-closed cluster baseline (injection/threat protection), while
   NOTES.txt claims a baseline "installed by default". Two safe defaults combining into a silent security

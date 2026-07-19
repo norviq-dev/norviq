@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// UI-AUDIT round 3 — Wave 3 (punch-list) E2E. Drives the REAL SPA on the live kind cluster and asserts the
+// Wave 3 (punch-list) E2E. Drives the REAL SPA on the live kind cluster and asserts the
 // visible EFFECT of each punch-list fix (P1–P5). P6/P7 are covered by vitest + the token test.
 
 import { test, expect, waitForApp } from "./fixtures";

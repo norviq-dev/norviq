@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""P2-2 SEARCH-01: the backing endpoint for the console's ⌘K search.
+"""The backing endpoint for the console's ⌘K search.
 
-Before this, the header search fanned out to three endpoints from the browser — `/audit/records`,
-`/agents` and `/policies` — pulling the ENTIRE agent and policy lists on every (debounced) keystroke
-and matching client-side. `GET /api/v1/search` replaces that with one bounded, server-scoped call.
+`GET /api/v1/search` is one bounded, server-scoped call — instead of the header search fanning out to
+`/audit/records`, `/agents` and `/policies` from the browser, pulling the ENTIRE agent and policy lists
+on every (debounced) keystroke and matching client-side.
 
 Scoping is the same contract every read route uses (`auth.read_namespace`): an admin (or a `*` claim,
 or a machine `service` principal with no claim) may search every namespace; a scoped tenant is pinned
 to its own namespace even when it asks for "all"; a non-admin human with NO namespace claim gets 403
-(the F-06 least-privilege floor). Tenant isolation is enforced by the namespace COLUMN filter, never
+(the least-privilege floor). Tenant isolation is enforced by the namespace COLUMN filter, never
 by the substring match.
 
 The query is matched with SQLAlchemy's `icontains(..., autoescape=True)` so it is parameterized AND

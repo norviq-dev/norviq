@@ -195,7 +195,7 @@ func (h *Handler) handleAdmission(req *admissionv1.AdmissionRequest) *admissionv
 			Result:  &metav1.Status{Message: "invalid pod object"},
 		}
 	}
-	// Enforcement-integrity classification (DEF-052 + the broader webhook-trust class a red-team surfaced):
+	// Enforcement-integrity classification (the broader webhook-trust bypass class):
 	// the norviq-socket volume, the socket mount, the NRVQ_SOCKET_PATH env, and the sidecar container are
 	// ALL injector-owned. A fresh tenant pod carries none of them. So: SKIP only a pod that is already
 	// FULLY + CORRECTLY injected (idempotent re-admission); DENY a pod that carries norviq enforcement
@@ -222,7 +222,7 @@ func (h *Handler) handleAdmission(req *admissionv1.AdmissionRequest) *admissionv
 				"hint", "remove label "+h.cfg.EnableLabel+"=disabled / annotation norviq.io/skip-injection to enable")
 			return &admissionv1.AdmissionResponse{Allowed: true}
 		}
-		// P3: pod-level opt-out is disabled cluster-wide — inject anyway so a pod author can't self-exempt.
+		// Pod-level opt-out is disabled cluster-wide — inject anyway so a pod author can't self-exempt.
 		slog.Warn("NRVQ-WHK-4009: pod-level injection opt-out is disabled (allowPodOptOut=false); injecting anyway",
 			"pod", pod.Name, "namespace", req.Namespace)
 	}

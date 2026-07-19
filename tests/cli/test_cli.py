@@ -185,7 +185,7 @@ def test_bad_token_exit_1(monkeypatch) -> None:
 
 
 def _capture_redteam_sim(monkeypatch) -> dict[str, Any]:
-    """Patch AttackSimulator so red-team commands record the (api_url, token) they receive (P7)."""
+    """Patch AttackSimulator so red-team commands record the (api_url, token) they receive."""
     captured: dict[str, Any] = {}
 
     class FakeSim:

@@ -35,7 +35,7 @@ def _background_loop() -> asyncio.AbstractEventLoop:
 
 
 def _output_dlp(tool_name: str, result: Any) -> Any:
-    """F-22 (opt-in, default OFF): redact PAN/SSN in an allowed tool's string return before it propagates.
+    """Opt-in, default OFF: redact PAN/SSN in an allowed tool's string return before it propagates.
     Norviq's PEP is input-only; this is a minimal output-side guard so a tool whose OUTPUT carries sensitive data
     doesn't silently exfiltrate it. Disabled by default → exact passthrough (no hot-path or behavior change)."""
     if not settings.sdk_output_dlp_enabled or not isinstance(result, str):

@@ -64,7 +64,7 @@ export function AttackPathDetail({
     whatIfIndex >= 0 ? { bg: "rgba(58,42,10,0.6)", color: "var(--escalate)", icon: "◑" }
     : status === "blocked" ? { bg: "rgba(13,42,28,0.6)", color: "#6ee7b7", icon: "✓" }
     : status === "exploitable" ? { bg: "rgba(42,15,22,0.6)", color: "#ff8fa3", icon: "⚠" }
-    : { bg: "rgba(38,38,38,0.6)", color: "#9aa4b2", icon: "○" };  /* A6: navy→neutral grey */
+    : { bg: "rgba(38,38,38,0.6)", color: "#9aa4b2", icon: "○" };  /* navy→neutral grey */
   const verdict = whatIfIndex >= 0
     ? `What-if (hypothetical): blocking ${path.steps[whatIfIndex].to} at step ${whatIfIndex + 1} WOULD neutralize this path — it would flip to blocked. Nothing is enforced until you apply a policy.`
     : path.verdict;
@@ -217,7 +217,7 @@ export function AttackPathDetail({
                 <div style={{ flex: 1, minWidth: 0, paddingBottom: 14 }}>
                   <div style={{ fontSize: 12.5, color: "#d3dae6", lineHeight: 1.45, wordBreak: "break-word" }}>
                     <b style={{ color: "#e8edf5" }}>{st.from}</b> {st.verb} <b style={{ color: "#e8edf5" }}>{st.to}</b>
-                    {/* CAP-2 + lifecycle: the ACTUAL operation on the hop, coloured by its verb risk — a
+                    {/* The ACTUAL operation on the hop, coloured by its verb risk — a
                         destructive DELETE hop reads differently from a benign READ. On a TOOL hop the
                         classifier lifecycle shows through: "✓" when the verb was admin-promoted (learned),
                         or the observation state ("observing · delete 12/14") while the verb is unproven. */}

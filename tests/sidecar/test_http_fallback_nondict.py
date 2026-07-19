@@ -3,12 +3,12 @@
 
 """Fail-closed guarantee for non-dict JSON bodies on the sidecar HTTP fallback.
 
-DEF-013 residual: the JSON decode is guarded (returns a drop on undecodable bodies) and the
+Residual: the JSON decode is guarded (returns a drop on undecodable bodies) and the
 interceptor call is wrapped in a fail-closed try/except, but the param-coercion lines
 (``str(data.get("tool_name", ""))`` etc.) sit OUTSIDE any try/except. A *valid-JSON* body that
 is not an object -- a list, string, number, or null -- has no ``.get``, so those lines raise
 AttributeError and FastAPI returns a bare HTTP 500 with no ``action`` field instead of the
-mandated fail-closed drop. These tests fail on the pre-fix code (500) and pass after the type
+mandated fail-closed drop. These tests fail on the unguarded code (500) and pass once the type
 guard is added (200 + action=drop).
 """
 

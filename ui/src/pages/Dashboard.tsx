@@ -19,7 +19,7 @@ import { KPICard } from "../components/common/KPICard";
 import { PageHead } from "../components/common/PageHead";
 import { Panel } from "../components/common/Panel";
 
-// SLIM-ECHARTS: the 4 chart components each pull echarts-core (~582KB, the app's biggest chunk). Dashboard
+// The 4 chart components each pull echarts-core (~582KB, the app's biggest chunk). Dashboard
 // is the default landing route, so importing them statically put echarts on the critical path of the first
 // authenticated screen — before the user does anything. Lazy-load them so the KPI tiles (pure numbers)
 // paint immediately and echarts streams in after, off the initial-render path. Each has a skeleton fallback.
@@ -52,8 +52,8 @@ type AuditStats = {
   blocked?: number;
   allowed?: number;
   block_rate_pct?: number;
-  engine_errors?: number;  // B5: fail-closed OPA-eval faults (distinct from policy blocks)
-  avg_latency_ms?: number; // K2: real AVG(latency_ms) over the window (added to /audit/stats)
+  engine_errors?: number;  // fail-closed OPA-eval faults (distinct from policy blocks)
+  avg_latency_ms?: number; // real AVG(latency_ms) over the window (from /audit/stats)
 };
 
 type AuditRecord = {
@@ -64,11 +64,11 @@ type AuditRecord = {
   rule_id?: string;
   namespace?: string;
   latency_ms?: number;
-  agent_class?: string; // F-46: included in the CSV export
+  agent_class?: string; // included in the CSV export
   reason?: string;
 };
 
-// DEF-051: `synthetic` marks a probe/eval/test identity (backend /agents flag). The Overview trust donut
+// `synthetic` marks a probe/eval/test identity (backend /agents flag). The Overview trust donut
 // excludes them by default so it reconciles with the asset/attack graph, which hides exactly these probes.
 type Agent = { category?: string; synthetic?: boolean };
 
@@ -120,7 +120,7 @@ function TopBlockedTools({ data }: { data: Array<{ tool: string; count: number }
 
 export function Dashboard() {
   const { selectedNamespace, selectedCluster, servedCluster, timeRange, selectedClusterConsoleUrl, posture } = useApp();
-  // MUT-2: in Monitor mode the "Blocked" tile counts WOULD-BLOCK decisions, not live blocks — label it
+  // In Monitor mode the "Blocked" tile counts WOULD-BLOCK decisions, not live blocks — label it
   // so the headline number can't be read as enforced blocks. Concrete-namespace posture only (the "all"
   // aggregate mixes namespaces with possibly different modes).
   const monitorScope = posture.mode === "audit" && selectedNamespace !== "all";
@@ -138,7 +138,7 @@ export function Dashboard() {
     {
       cacheKey: `dashboard-stats:${selectedNamespace}:${timeRange}`,
       staleTimeMs: 30_000,
-      // K1: never cache an empty {total:0}, and on a warm-up/race empty, retry a few times so the real numbers
+      // Never cache an empty {total:0}, and on a warm-up/race empty, retry a few times so the real numbers
       // bind (a genuinely-empty range still settles on 0 after the bounded retries). Combined with useApi's
       // latest-wins guard, the cards always reflect the freshest /audit/stats — never stuck at 0.
       isEmpty: (d) => !d || (d.total ?? 0) === 0,
@@ -167,19 +167,19 @@ export function Dashboard() {
     staleTimeMs: 60_000,
     refetchIntervalMs: 60_000
   });
-  // Real policy coverage per risk category (F046) — drives both the posture gauge and the category bars.
+  // Real policy coverage per risk category — drives both the posture gauge and the category bars.
   const coverage = useApi(() => fetchCoverageByCategory(selectedNamespace), [selectedNamespace], {
     cacheKey: `dashboard-coverage:${selectedNamespace}`,
     staleTimeMs: 60_000
   });
-  // F2: the last Red Team run's efficacy — coverage is "rules present"; efficacy is "proven-blocking". When a
+  // The last Red Team run's efficacy — coverage is "rules present"; efficacy is "proven-blocking". When a
   // run exists we upgrade the honest "not efficacy-tested" caption to the REAL "X% proven-blocking (last run)".
   const efficacy = useApi<RedteamLatest>(() => fetchRedteamLatest(), [], {
     cacheKey: "dashboard-redteam-latest",
     staleTimeMs: 30_000
   });
   const provenPct = efficacy.data?.has_run ? efficacy.data.efficacy?.overall.proven_blocking_pct : undefined;
-  // A4: the caption is NEUTRAL (ScoreGauge renders --text-muted); only the proven-blocking % is teal --accent.
+  // The caption is NEUTRAL (ScoreGauge renders --text-muted); only the proven-blocking % is teal --accent.
   // No block-red — that hue is reserved for real block decisions.
   const gaugeSub =
     provenPct != null ? (
@@ -208,15 +208,15 @@ export function Dashboard() {
   const totalCalls = useHub ? hubTotals.total : stats.data?.total ?? 0;
   const blockedToday = useHub ? hubTotals.block : stats.data?.blocked ?? 0;
   const blockRate = useHub ? hubTotals.rate : Math.round(stats.data?.block_rate_pct ?? 0);
-  // B5: engine (OPA-eval) faults — fail-closed, NOT policy decisions. Surfaced as a distinct signal.
+  // Engine (OPA-eval) faults — fail-closed, NOT policy decisions. Surfaced as a distinct signal.
   const engineErrors = stats.data?.engine_errors ?? 0;
-  // B1: first paint — no data resolved yet. Show skeletons instead of flashing 0/0/0 + a half-drawn donut.
+  // First paint — no data resolved yet. Show skeletons instead of flashing 0/0/0 + a half-drawn donut.
   const kpiLoading = !useHub && stats.loading && stats.data == null;
   const postureLoading = !useHub && coverage.loading && coverage.data == null;
   const trustLoading = !useHub && agents.loading && agents.data == null;
 
-  // K2: Avg latency is the real AVG(latency_ms) over the window from /audit/stats (same call as the other KPIs,
-  // updates on range change, inherits the K1 no-stuck-zero fix) — no longer averaged client-side over ≤200 records.
+  // Avg latency is the real AVG(latency_ms) over the window from /audit/stats (same call as the other KPIs,
+  // updates on range change, avoids a stuck zero) — computed server-side, not client-side over ≤200 records.
   const avgLatency = Math.round(stats.data?.avg_latency_ms ?? 0);
 
   const trust = useMemo(() => {
@@ -224,7 +224,7 @@ export function Dashboard() {
     // when scoped to a remote cluster; locally it's derived from the served cluster's agents.
     const cats = useHub
       ? (Array.isArray(hubAgents.data) ? hubAgents.data : []).map((a) => a.trust_category ?? "")
-      // DEF-051: exclude synthetic/probe identities so the donut counts the SAME real identities the
+      // Exclude synthetic/probe identities so the donut counts the SAME real identities the
       // asset/attack graph shows (it default-hides these probes). Reconciles the two Overview surfaces.
       : (Array.isArray(agents.data) ? agents.data : []).filter((a) => !a.synthetic).map((a) => a.category ?? "");
     return ["high", "medium", "low", "frozen"].map((name) => ({
@@ -236,7 +236,7 @@ export function Dashboard() {
   // Posture = overall real policy coverage %; category bars = real per-category coverage scores.
   const score = coverage.data?.coverage_pct ?? 0;
 
-  // F-46: export the loaded audit records as CSV (the Export button + Report ▼ "Export CSV" were both dead).
+  // Export the loaded audit records as CSV (wired to the Export button and Report ▼ "Export CSV").
   const onExportCsv = () => {
     const rows = Array.isArray(records.data) ? records.data : [];
     setReportMenuOpen(false);
@@ -331,15 +331,15 @@ export function Dashboard() {
                 </button>
               </div>
             )}
-            {/* P4: the standalone Export button duplicated the Report ▾ → Export CSV action — removed. The
-                Report ▾ menu is the single export affordance (it also houses the future PDF / Schedule options). */}
+            {/* The Report ▾ menu is the single export affordance — there is no separate standalone Export
+                button — and it also houses the future PDF / Schedule options. */}
           </>
         }
       />
       <div className="stack" style={{ gap: 20 }}>
         <div className="grid grid-cols-4 lg:grid-cols-4 md:grid-cols-2 gap-5 dashboard-kpi-grid">
           {kpiLoading ? (
-            // B1: skeleton cards on first paint — never flash 0/0/0 before the stats resolve.
+            // Skeleton cards on first paint — never flash 0/0/0 before the stats resolve.
             [0, 1, 2, 3].map((i) => (
               <div key={i} className="panel kpi" style={{ background: "var(--bg-surface)", boxShadow: "var(--shadow-card)" }}>
                 <div className="skeleton-line" style={{ width: "58%", height: 11, marginBottom: 12 }} />
@@ -371,7 +371,7 @@ export function Dashboard() {
           )}
         </div>
 
-        {/* B5: engine-error signal — fail-closed OPA-eval faults are made visible on the Overview (not just the
+        {/* Engine-error signal — fail-closed OPA-eval faults are made visible on the Overview (not just the
             API), and clearly distinct from policy blocks. Only shown when there ARE faults, so it stays quiet. */}
         {!useHub && engineErrors > 0 && (
           <div
@@ -387,12 +387,12 @@ export function Dashboard() {
         )}
 
         <div className="grid grid-cols-3 lg:grid-cols-3 md:grid-cols-1 gap-5 dashboard-row-two">
-          {/* F-63: one honest headline — this gauge IS policy coverage (rules present), not a "Security Score /
+          {/* One honest headline — this gauge IS policy coverage (rules present), not a "Security Score /
               High Risk" verdict on the same number. The Trust donut + the per-category bars are its support. */}
           {useHub ? (
             <RemoteScopedPanel title="Policy Coverage" cluster={scopeCluster} consoleUrl={selectedClusterConsoleUrl} />
           ) : postureLoading ? (
-            // B1: skeleton the gauge until coverage resolves (never flash a 0% ring).
+            // Skeleton the gauge until coverage resolves (never flash a 0% ring).
             <div className="panel" style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14, minHeight: 200 }}>
               <div className="skeleton-line" style={{ width: 120, height: 120, borderRadius: "50%" }} />
               <div className="skeleton-line" style={{ width: "50%", height: 12 }} />
@@ -404,13 +404,13 @@ export function Dashboard() {
           )}
           {/* Trust is cluster-aware (hub keeps it per cluster) — the donut changes on switch. */}
           {trustLoading ? (
-            // B1: skeleton the trust donut until agents resolve (never render broken fragments).
+            // Skeleton the trust donut until agents resolve (never render broken fragments).
             <div className="panel" style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14, minHeight: 200 }}>
               <div className="skeleton-line" style={{ width: 120, height: 120, borderRadius: "50%" }} />
               <div className="skeleton-line" style={{ width: "40%", height: 12 }} />
             </div>
           ) : (
-            // POLISH: the trust donut restates data fully explorable on Agent Monitor — make it a
+            // The trust donut restates data fully explorable on Agent Monitor — make it a
             // drill-through (keyboard-accessible) instead of a decorative repeat, matching "See All →".
             <div
               role="link"

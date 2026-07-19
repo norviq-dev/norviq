@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Batch C (P2-1 GRAPH-SCOPE-ALL-01 + P2-2 SEARCH-01) — REAL form login, REAL controls. Proves:
-//   P2-1: picking a concrete namespace in the Attack Graph scopes the graph — the header reads
+// REAL form login, REAL controls. Proves:
+//   Picking a concrete namespace in the Attack Graph scopes the graph — the header reads
 //         "Showing: <ns>", the request carries the scope, and the scoped path count < the all-ns count.
-//         (This also TESTS the ledger's claim that the UI "stays Showing: All namespaces".)
-//   P2-1 (API): the `namespace` alias now scopes identically to `ns` — pre-fix it was silently ignored.
-//   P2-2: ⌘K search is backed by a real, scoped GET /api/v1/search (was 404) and renders results.
+//         (This also disproves the "stays Showing: All namespaces" claim.)
+//   API: the `namespace` alias scopes identically to `ns` (not silently ignored).
+//   ⌘K search is backed by a real, scoped GET /api/v1/search and renders results.
 import { test, expect, type Page } from "@playwright/test";
 
 const PW = process.env.NRVQ_E2E_PASSWORD || "CHANGE_ME-e2e-pw";
@@ -90,7 +90,7 @@ test("P2-1 (API): the `namespace` alias scopes identically to `ns`, and a confli
 test("P2-2: ⌘K search is backed by a real scoped endpoint and renders results", async ({ page }) => {
   await realLogin(page);
 
-  // The endpoint exists (was 404) and is shaped for the palette.
+  // The endpoint exists and is shaped for the palette.
   const res = await apiJson(page, "/api/v1/search?q=a");
   expect(res.status).toBe(200);
   expect(res.body).toHaveProperty("tools");

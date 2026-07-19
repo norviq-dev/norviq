@@ -2,15 +2,15 @@
 # Copyright 2026 Norviq Contributors
 """Fail-on-bug regressions for the Compliance/MITRE defect group:
 
-    DEF-031  remediation draft_id must be a SEED-INDEPENDENT pure function of its content (was: builtin
-             hash(), PYTHONHASHSEED-salted per process → the deeplink 404'd on a second replica).
-    DEF-032  the hourly coverage-snapshot throttle must be single-writer under concurrent GETs (was: a
-             racy read-then-insert with no lock/constraint → doubled trend points).
-    DEF-033  batch generate must compute the loop-invariant coverage ONCE, not 2*N times.
-    DEF-038  each technique/control must expose PER-RULE blocked counts (was: the technique-wide total
-             repeated on every evidence row, misattributing all blocks to each rule).
+    - remediation draft_id must be a SEED-INDEPENDENT pure function of its content, so the deeplink
+      resolves on a second replica (never a PYTHONHASHSEED-salted builtin hash()).
+    - the hourly coverage-snapshot throttle must be single-writer under concurrent GETs, so a racy
+      read-then-insert cannot double the trend points.
+    - batch generate must compute the loop-invariant coverage ONCE, not 2*N times.
+    - each technique/control must expose PER-RULE blocked counts, not the technique-wide total
+      repeated on every evidence row (which misattributes all blocks to each rule).
 
-Each test fails against the pre-fix code and passes after the fix. The DEF-032 live-concurrency test is
+Each test fails against buggy code and passes on the correct code. The live-concurrency test is
 skipped unless a Postgres is reachable (NRVQ_PG_URL, else the local dev default on :5433)."""
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from norviq.api.routers import mitre
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# A technique the atlas mapping covers with exactly two rules — the DEF-038 misattribution case.
+# A technique the atlas mapping covers with exactly two rules — the misattribution case.
 _T = "AML.T0054"
 _RULE_A = "deny_shell_execution"
 _RULE_B = "llm01_prompt_injection"
@@ -109,7 +109,7 @@ def _rego_covering_both() -> str:
 
 
 # --------------------------------------------------------------------------------------------------
-# DEF-031 — deterministic, seed-independent draft id
+# Deterministic, seed-independent draft id
 # --------------------------------------------------------------------------------------------------
 
 def test_def031_stable_draft_id_matches_sha256_and_format():
@@ -141,7 +141,7 @@ def test_def031_stable_draft_id_is_seed_independent():
 
 
 def test_def031_old_builtin_hash_was_seed_dependent():
-    # Documents the DEF-031 root cause: the pre-fix `abs(hash(tuple)) % 10**11` diverges across seeds.
+    # Documents the root cause: `abs(hash(tuple)) % 10**11` diverges across seeds.
     # (Runs identically on old + new code — it exercises the builtin, not the module — proving the fix's need.)
     code = ("import sys;"
             "t=('atlas','AML.T0051','default','payments');"
@@ -150,14 +150,14 @@ def test_def031_old_builtin_hash_was_seed_dependent():
 
 
 # --------------------------------------------------------------------------------------------------
-# DEF-032 — single-writer-per-hour snapshot throttle
+# Single-writer-per-hour snapshot throttle
 # --------------------------------------------------------------------------------------------------
 
 def test_def032_snapshot_has_partial_unique_hour_index():
     idx = next((ix for ix in MitreCoverageSnapshot.__table__.indexes
                 if ix.name == "uq_mitre_snap_hourly"), None)
-    assert idx is not None, "DEF-032: missing single-writer-per-hour index on mitre_coverage_snapshots"
-    assert idx.unique, "DEF-032: the hourly snapshot index must be UNIQUE to dedup concurrent inserts"
+    assert idx is not None, "missing single-writer-per-hour index on mitre_coverage_snapshots"
+    assert idx.unique, "the hourly snapshot index must be UNIQUE to dedup concurrent inserts"
     exprs = " ".join(str(e) for e in idx.expressions)
     assert "namespace" in exprs and "framework" in exprs and "date_trunc" in exprs
     # scoped to snapshots so evidence-pack exports (several per hour) stay unconstrained
@@ -172,7 +172,7 @@ async def test_def032_record_snapshot_serializes_with_advisory_lock():
     sess.scalar_return = 0
     await mitre._record_snapshot(sess, "team-a", cov, "atlas")
     assert any("pg_advisory_xact_lock" in s for s in sess.executed), \
-        "DEF-032: _record_snapshot must take a transaction-scoped advisory lock before the read-then-insert"
+        "_record_snapshot must take a transaction-scoped advisory lock before the read-then-insert"
     assert len(sess.added) == 1
 
     # an existing row this hour → throttle still short-circuits (no duplicate)
@@ -234,7 +234,7 @@ async def test_def032_record_snapshot_blocks_on_held_advisory_lock_live():
                 text("SELECT count(*) FROM mitre_coverage_snapshots WHERE namespace=:ns AND kind='snapshot'"),
                 {"ns": ns},
             )
-            assert n == 1, f"DEF-032: expected exactly one serialized snapshot, got {n}"
+            assert n == 1, f"expected exactly one serialized snapshot, got {n}"
             await chk.execute(text("DELETE FROM mitre_coverage_snapshots WHERE namespace=:ns"), {"ns": ns})
             await chk.commit()
     finally:
@@ -243,7 +243,7 @@ async def test_def032_record_snapshot_blocks_on_held_advisory_lock_live():
 
 
 # --------------------------------------------------------------------------------------------------
-# DEF-033 — batch computes the loop-invariant coverage once
+# Batch computes the loop-invariant coverage once
 # --------------------------------------------------------------------------------------------------
 
 async def test_def033_batch_computes_coverage_once(monkeypatch):
@@ -263,11 +263,11 @@ async def test_def033_batch_computes_coverage_once(monkeypatch):
     for tid in (_T, "AML.T0057", "AML.T0053"):
         await mitre._resolve_target_class(req, sess, "default", "24h", "atlas", tid, None)
 
-    assert calls["n"] == 1, f"DEF-033: coverage recomputed per technique ({calls['n']}x); must be 1 per request"
+    assert calls["n"] == 1, f"coverage recomputed per technique ({calls['n']}x); must be 1 per request"
 
 
 # --------------------------------------------------------------------------------------------------
-# DEF-038 — per-rule blocked counts, not the technique-wide total repeated
+# Per-rule blocked counts, not the technique-wide total repeated
 # --------------------------------------------------------------------------------------------------
 
 async def test_def038_blocked_by_rule_is_per_rule_not_technique_total():
@@ -278,7 +278,7 @@ async def test_def038_blocked_by_rule_is_per_rule_not_technique_total():
     tech = next(t for t in cov["techniques"] if t["technique_id"] == _T)
     assert tech["blocked"] == 40  # technique-wide total is unchanged
     assert tech["blocked_by_rule"] == {_RULE_A: 25, _RULE_B: 15}, \
-        "DEF-038: each rule must carry its OWN blocked count, not the technique total"
+        "each rule must carry its OWN blocked count, not the technique total"
     # the exact misattribution the bug produced: both rows reading the same total
     assert tech["blocked_by_rule"][_RULE_A] != tech["blocked_by_rule"][_RULE_B]
 
@@ -299,4 +299,4 @@ def test_def038_export_pack_carries_per_rule_blocked():
     pack = json.loads(resp.content)
     ctrl = next(c for c in pack["controls"] if c["technique_id"] == _T)
     assert ctrl["blocked_by_rule"] == {_RULE_A: 25, _RULE_B: 15}, \
-        "DEF-038: the evidence export must attribute blocks per rule (docstring promises 'per-rule blocked counts')"
+        "the evidence export must attribute blocks per rule (docstring promises 'per-rule blocked counts')"

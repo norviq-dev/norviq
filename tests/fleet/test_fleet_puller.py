@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Spoke puller adversarial fail-closed matrix (F045 P2). The security heart of policy-push: a tampered,
+"""Spoke puller adversarial fail-closed matrix. The security heart of policy-push: a tampered,
 unsigned, wrong-key, expired, replayed, or wrong-cluster bundle must NEVER reach the local PolicyLoader,
 and the last-good bundle must survive a hub outage."""
 

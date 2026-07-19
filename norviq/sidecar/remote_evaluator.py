@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Thin-proxy evaluator (SIDE-2).
+"""Thin-proxy evaluator.
 
 In proxy mode the injected sidecar does NOT run its own OPA/Redis/Postgres. It resolves identity
 locally, then POSTs the tool call to the central norviq-api ``/api/v1/evaluate`` with a

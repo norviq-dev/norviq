@@ -33,4 +33,4 @@ build on.
 ## Where this is referenced
 - SDK hook: `norviq/sdk/langchain/adapter.py` (`_output_dlp`), setting in `norviq/config.py`.
 - Masking reuse: `norviq/engine/masking.py::mask_text` (same masker as the F-19 audit masking / F-28 log redaction).
-- Finding: `.reviews/live-pentest/FINDINGS.md` F-22 (and F-21, the input-side fix that closes the demonstrated route).
+- Finding: F-22 (and F-21, the input-side fix that closes the demonstrated route).

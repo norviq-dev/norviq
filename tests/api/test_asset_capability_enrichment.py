@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
-"""CAP-1: the asset-graph capability enrichment attributes a tool's OBSERVED/DEFENDED signal from its
+"""The asset-graph capability enrichment attributes a tool's OBSERVED/DEFENDED signal from its
 agent→tool ``calls`` edge (which carries decision history), not the tool→data ``accesses`` edge (which
 carries none). A live-verification regression: reading the zero-count accesses edge made every verb look
 'dormant/latent' even for actively-used tools."""

@@ -46,7 +46,7 @@ _PROTECTED = [
 @pytest.mark.parametrize("path", _PROTECTED)
 @pytest.mark.asyncio
 async def test_data_endpoint_requires_auth(api_client: httpx.AsyncClient, path: str) -> None:
-    """No token → 401 (was leaking data with no auth)."""
+    """No token → 401."""
     resp = await api_client.get(path)
     assert resp.status_code == 401, f"{path} returned {resp.status_code}, expected 401"
 
@@ -62,7 +62,7 @@ async def test_viewer_cannot_read_other_namespace(api_client: httpx.AsyncClient)
 async def test_viewer_cannot_write_or_delete_policy(
     api_client: httpx.AsyncClient, auth_headers: dict[str, str]
 ) -> None:
-    """Policy writes are admin-only; a viewer token must get 403 (was 200 — privilege escalation)."""
+    """Policy writes are admin-only; a viewer token must get 403 (privilege-escalation guard)."""
     rego = (
         "package norviq.strict\n"
         'default decision = "allow"\n'
@@ -81,7 +81,7 @@ async def test_viewer_cannot_write_or_delete_policy(
 
 @pytest.mark.asyncio
 async def test_ws_audit_rejects_missing_token(api_client: httpx.AsyncClient, api_url: str) -> None:
-    """/ws/audit must reject a handshake with no token (was accepting before any check)."""
+    """/ws/audit must reject a handshake with no token."""
     ws_url = api_url.replace("https://", "wss://").replace("http://", "ws://") + "/ws/audit?namespace=default"
     with pytest.raises((websockets.exceptions.InvalidStatus, websockets.exceptions.ConnectionClosed, OSError, asyncio.TimeoutError)):
         async with websockets.connect(ws_url, open_timeout=5) as ws:

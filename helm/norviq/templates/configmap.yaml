@@ -8,7 +8,7 @@ metadata:
 data:
   NRVQ_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
   NRVQ_ENFORCEMENT_MODE: {{ .Values.config.enforcementMode | quote }}
-  # F-04: decision when an enforcing namespace has no policy loaded (deny-by-default). "deny" | "allow".
+  # Decision when an enforcing namespace has no policy loaded (deny-by-default). "deny" | "allow".
   NRVQ_NO_POLICY_DECISION: {{ .Values.config.noPolicyDecision | default "deny" | quote }}
   NRVQ_REQUIRE_STRONG_SECRET: {{ .Values.config.requireStrongSecret | default false | quote }}
   NRVQ_OPA_MODE: {{ .Values.config.opaMode | default "server" | quote }}
@@ -18,7 +18,7 @@ data:
   NRVQ_SIEM_FORMAT: {{ .Values.siem.format | default "ndjson" | quote }}
   NRVQ_SIEM_POLL_INTERVAL_S: {{ .Values.siem.pollIntervalSeconds | default 30 | quote }}
   {{- if .Values.fleet.enabled }}
-  # Fleet spoke relay (F045): the api pushes agent+audit rollups to the hub. Fire-and-forget; off the enforce path.
+  # Fleet spoke relay: the api pushes agent+audit rollups to the hub. Fire-and-forget; off the enforce path.
   NRVQ_FLEET_ENABLED: "true"
   NRVQ_FLEET_API_URL: {{ .Values.fleet.apiUrl | quote }}
   NRVQ_FLEET_CLUSTER_ID: {{ .Values.fleet.clusterId | quote }}
@@ -31,7 +31,7 @@ data:
   NRVQ_FLEET_CLUSTER_LABELS: {{ .Values.fleet.labels | default dict | toJson | quote }}
   NRVQ_FLEET_OIDC_TOKEN_URL: {{ .Values.fleet.oidc.tokenUrl | default "" | quote }}
   NRVQ_FLEET_OIDC_CLIENT_ID: {{ .Values.fleet.oidc.clientId | default "" | quote }}
-  # P2: the signing PUBLIC key (trust root). Empty -> the spoke applies NO bundle (fail-closed).
+  # The signing PUBLIC key (trust root). Empty -> the spoke applies NO bundle (fail-closed).
   NRVQ_FLEET_BUNDLE_PUBKEY: {{ .Values.fleet.bundlePubkey | default "" | quote }}
   {{- end }}
   NRVQ_TRUST_THRESHOLD: {{ .Values.config.trustThreshold | quote }}
@@ -55,7 +55,7 @@ data:
   NRVQ_DRAFTS_PAGE_SIZE: {{ $ret.draftsPageSize | default 15 | quote }}
   NRVQ_POLICY_VERSION_KEEP_COUNT: {{ $ret.policyVersionKeepCount | default 20 | quote }}
   NRVQ_POLICY_VERSION_KEEP_DAYS: {{ $ret.policyVersionKeepDays | default 90 | quote }}
-  # D3: red-team run retention (read-only evidence; never touches enforcement). Detail (per-attack rows) is
+  # Red-team run retention (read-only evidence; never touches enforcement). Detail (per-attack rows) is
   # kept only for the newest few runs / short TTL; older runs keep just the SUMMARY; the latest run is never
   # pruned. Bounds both the DB and the history view.
   NRVQ_REDTEAM_DETAIL_KEEP_RUNS: {{ $ret.redteamDetailKeepRuns | default 1 | quote }}
@@ -63,13 +63,13 @@ data:
   NRVQ_REDTEAM_SUMMARY_KEEP_RUNS: {{ $ret.redteamSummaryKeepRuns | default 20 | quote }}
   NRVQ_REDTEAM_SUMMARY_KEEP_DAYS: {{ $ret.redteamSummaryKeepDays | default 30 | quote }}
   NRVQ_REDTEAM_HISTORY_PAGE_SIZE: {{ $ret.redteamHistoryPageSize | default 20 | quote }}
-  # --- LOGIN-2: local username/password login (non-secret tunables; seed creds live in norviq-secrets). ---
+  # --- Local username/password login (non-secret tunables; seed creds live in norviq-secrets). ---
   NRVQ_AUTH_LOGIN_ENABLED: {{ .Values.auth.enabled | default true | quote }}
   NRVQ_AUTH_SESSION_TTL_S: {{ .Values.auth.sessionTtlSeconds | default 3600 | quote }}
   NRVQ_AUTH_LOGIN_MAX_ATTEMPTS: {{ .Values.auth.loginMaxAttempts | default 5 | quote }}
   NRVQ_AUTH_LOGIN_WINDOW_S: {{ .Values.auth.loginWindowSeconds | default 300 | quote }}
   NRVQ_AUTH_MIN_PASSWORD_LENGTH: {{ .Values.auth.minPasswordLength | default 12 | quote }}
-  # --- Identity epic: OIDC (A1/A2) + workload-identity mode (B2). Default-off; legacy HS256 stays on. ---
+  # --- OIDC + workload-identity mode. Default-off; legacy HS256 stays on. ---
   NRVQ_OIDC_ENABLED: {{ .Values.oidc.enabled | default false | quote }}
   NRVQ_OIDC_ISSUER: {{ .Values.oidc.issuer | default "" | quote }}
   NRVQ_OIDC_AUDIENCE: {{ .Values.oidc.audience | default "" | quote }}

@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// UI-AUDIT round 3 — Wave 1 (correctness) E2E. Drives the REAL SPA (nginx) + API on the live kind cluster
+// Wave 1 (correctness) E2E. Drives the REAL SPA (nginx) + API on the live kind cluster
 // and asserts the EFFECT (not 200s) for the three HIGH correctness fixes:
-//   FIX-1  namespace=all resolves the real loaded policy (deny_shell_execution), same as namespace=default;
+//   namespace=all resolves the real loaded policy (deny_shell_execution), same as namespace=default;
 //          Target Settings "Effective policy" shows the real layer stack under All namespaces (not the empty
 //          "No policy layers in force" state).
-//   FIX-2  Policy apply surfaces an outcome the card consumes (last_applied populated); a forced failure
+//   Policy apply surfaces an outcome the card consumes (last_applied populated); a forced failure
 //          (reserved managed scope) returns a structured, visible failure — never a silent 200/close.
-//   FIX-3  A clean search_kb evaluation returns a real decision (never evaluator_error); the engine-error
+//   A clean search_kb evaluation returns a real decision (never evaluator_error); the engine-error
 //          class is exposed as its own /audit/stats signal, distinct from policy blocks.
 //
 // Effects are proven with in-page fetches (they inherit the SPA's localStorage token + same origin, so the
@@ -60,7 +60,7 @@ test.describe("UI-AUDIT r3 Wave-1 correctness — EFFECT proofs on the live cons
     await waitForApp(page);
   });
 
-  test("FIX-1: Policy Tester namespace=all resolves the SAME real rule as namespace=default", async ({ page }) => {
+  test("Policy Tester namespace=all resolves the SAME real rule as namespace=default", async ({ page }) => {
     const drop = { query: "DROP TABLE customers; --" };
     const def = await evaluate(page, "default", "execute_sql", drop);
     const all = await evaluate(page, "all", "execute_sql", drop);
@@ -69,13 +69,13 @@ test.describe("UI-AUDIT r3 Wave-1 correctness — EFFECT proofs on the live cons
     expect(def.decision).toBe("block");
     expect(def.rule_id).toBe("deny_shell_execution");
 
-    // FIX-1: namespace=all now resolves the same real rule — NOT the pre-fix no_policy_loaded fall-through.
+    // namespace=all now resolves the same real rule — NOT the no_policy_loaded fall-through.
     expect(all.decision).toBe(def.decision);
     expect(all.rule_id).toBe(def.rule_id);
     expect(all.rule_id).not.toBe("no_policy_loaded");
   });
 
-  test("FIX-1: Target Settings effective policy shows the real layer stack under All namespaces", async ({ page }) => {
+  test("Target Settings effective policy shows the real layer stack under All namespaces", async ({ page }) => {
     // The endpoint is the exact source of truth the Target Settings table renders from.
     const eff = await apiJson(page, "/api/v1/policies/effective?namespace=all&agent_class=customer-support");
     expect(eff.status).toBe(200);
@@ -89,14 +89,14 @@ test.describe("UI-AUDIT r3 Wave-1 correctness — EFFECT proofs on the live cons
     await expect(page.getByText(/no policy layers in force/i)).toHaveCount(0);
   });
 
-  test("FIX-3: a clean search_kb evaluation is a real decision, never evaluator_error", async ({ page }) => {
+  test("a clean search_kb evaluation is a real decision, never evaluator_error", async ({ page }) => {
     const r = await evaluate(page, "default", "search_kb", { q: "password reset link" });
     expect(r.status).toBe(200);
     expect(r.rule_id).not.toBe("evaluator_error");
     expect(["allow", "escalate"]).toContain(r.decision);
   });
 
-  test("FIX-3: /audit/stats exposes engine_errors as a distinct signal (not folded into blocks)", async ({ page }) => {
+  test("/audit/stats exposes engine_errors as a distinct signal (not folded into blocks)", async ({ page }) => {
     const s = await apiJson(page, "/api/v1/audit/stats?range=30d");
     expect(s.status).toBe(200);
     expect(s.body).toHaveProperty("engine_errors");
@@ -105,7 +105,7 @@ test.describe("UI-AUDIT r3 Wave-1 correctness — EFFECT proofs on the live cons
     expect(s.body.engine_errors).toBeLessThanOrEqual(s.body.blocked);
   });
 
-  test("FIX-2: apply populates last_applied (card data) and a forced failure is a structured, visible failure", async ({ page }) => {
+  test("apply populates last_applied (card data) and a forced failure is a structured, visible failure", async ({ page }) => {
     const cls = `wave1e2e-${Date.now()}`;
     const rego =
       'package norviq.strict\n' +

@@ -4,7 +4,7 @@
 {{- end }}
 {{- end }}
 {{- if and .Values.agentEgressPolicy.enabled (ne .Values.agentEgressPolicy.engine "cilium") }}
-{{- /* FLAG-D defense-in-depth (engine=networkpolicy): default-deny egress for agent-workload namespaces,
+{{- /* Defense-in-depth (engine=networkpolicy): default-deny egress for agent-workload namespaces,
        so a pod that ignores the cooperative sidecar PEP still cannot reach anything except the norviq
        control plane, DNS, and the operator-approved tool CIDRs. Requires a NetworkPolicy-enforcing CNI
        (Calico/Cilium). For hostname (FQDN) allowlisting, set agentEgressPolicy.engine=cilium. */}}

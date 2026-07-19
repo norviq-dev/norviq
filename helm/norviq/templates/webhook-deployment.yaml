@@ -58,7 +58,7 @@ spec:
         - name: webhook
           image: "{{ .Values.images.registry }}{{ .Values.images.webhook.repository }}:{{ .Values.images.webhook.tag }}"
           imagePullPolicy: {{ .Values.images.webhook.pullPolicy }}
-          {{- /* DEF-029: hardened container securityContext (defense-in-depth; do not rely on an external
+          {{- /* Hardened container securityContext (defense-in-depth; do not rely on an external
                  PSA/Kyverno mutation). The webhook image runs as USER 65534 and writes nothing to its
                  rootfs, so read-only root FS is safe here. */}}
           {{- with .Values.securityContext }}
@@ -80,7 +80,7 @@ spec:
             - name: NRVQ_CONTROLLER_ENABLED
               value: "true"
             # FQDN (namespace-qualified) so the value is resolvable BOTH from the controller (in this
-            # namespace) AND from thin-proxy sidecars injected into OTHER tenant namespaces (SIDE-2).
+            # namespace) AND from thin-proxy sidecars injected into OTHER tenant namespaces.
             - name: NRVQ_API_URL
               {{- if .Values.config.internalTls.enabled }}
               value: "https://norviq-api.{{ .Values.namespace }}.svc:8443"
@@ -99,7 +99,7 @@ spec:
             {{- end }}
             - name: NRVQ_ADMIN_POLICY_NAMESPACE
               value: "{{ .Values.namespace }}"
-            # SIDE-2: mode injected into sidecars. "proxy" (default) = thin sidecar POSTs to the central
+            # Mode injected into sidecars. "proxy" (default) = thin sidecar POSTs to the central
             # /evaluate with a minted namespace-scoped service JWT (nothing per-pod); "embedded" = full
             # local engine for air-gapped/edge (needs the datastore wiring below).
             - name: NRVQ_SIDECAR_MODE
@@ -133,12 +133,12 @@ spec:
             - name: NRVQ_TLS_KEY
               value: /etc/webhook/certs/tls.key
             {{- if not .Values.webhook.injection.allowPodOptOut }}
-            # P3: pod-level opt-out disabled — the injector ignores norviq-injection=disabled / skip-injection.
+            # Pod-level opt-out disabled — the injector ignores norviq-injection=disabled / skip-injection.
             - name: NRVQ_ALLOW_POD_OPT_OUT
               value: "false"
             {{- end }}
             {{- if .Values.webhook.spiffe.inject }}
-            # B3: injected workloads also get the SPIFFE Workload API socket + workload-api mode.
+            # Injected workloads also get the SPIFFE Workload API socket + workload-api mode.
             - name: NRVQ_SPIFFE_INJECT
               value: "true"
             - name: NRVQ_SPIFFE_MODE
@@ -147,7 +147,7 @@ spec:
               value: {{ .Values.config.spiffeSocket | default "/spiffe-workload-api/spire-agent.sock" | quote }}
             {{- end }}
             {{- if .Values.webhook.oidc.enabled }}
-            # B4: mint the controller's API bearer via OIDC client-credentials (Keycloak); HS256 fallback kept.
+            # Mint the controller's API bearer via OIDC client-credentials (Keycloak); HS256 fallback kept.
             - name: NRVQ_OIDC_TOKEN_URL
               value: {{ .Values.webhook.oidc.tokenUrl | quote }}
             - name: NRVQ_OIDC_CLIENT_ID

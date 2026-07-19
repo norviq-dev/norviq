@@ -41,7 +41,7 @@ export function AccountSettings() {
         )}
       </Panel>
 
-      {/* POLISH: self-service password change (was only reachable via the forced first-login flow). */}
+      {/* Self-service password change, reachable outside the forced first-login flow. */}
       <ChangePasswordPanel />
     </div>
   );

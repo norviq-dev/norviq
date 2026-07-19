@@ -21,7 +21,7 @@ baselined findings live, so nothing is silently ignored.
 | semgrep | diff-aware `--baseline-commit <base>` | **Yes** — new findings fail | ignores in `.semgrepignore` |
 | eslint-security | changed `ui/src` | Yes (per eslint config) | ui eslint config |
 | pip-audit / npm audit | whole repo | **No — report-only** | remove `continue-on-error` on `deps-audit` |
-| checkov / kube-linter / trivy-config | whole `helm/` + `crds/` | **No — report-only** | `.checkov.yaml soft-fail:false`; set `iac` job `exit-code:1`; drop `continue-on-error` |
+| checkov / kube-linter / trivy-config | whole `helm/` (chart + CRDs) | **No — report-only** | `.checkov.yaml soft-fail:false`; set `iac` job `exit-code:1`; drop `continue-on-error` |
 | trivy **image** (engine/api/ui/webhook) | post-build on `main` (`build.yml`) | **No — report-only** (`exit-code:"0"`) | capture `.trivyignore` baseline from first scan, then set `exit-code:"1"` |
 
 Diff-aware jobs are green by construction — only NEW code is judged. The whole-repo jobs are the

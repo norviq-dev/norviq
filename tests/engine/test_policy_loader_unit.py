@@ -183,9 +183,9 @@ async def test_apply_remote_event_delete_unloads_local_state() -> None:
 async def test_apply_remote_event_upsert_refreshes_version_history(
     loader: PolicyLoader, db_engine: AsyncEngine
 ) -> None:
-    """FIX-5 regression: apply_remote_event's upsert branch previously called only `load_from_db` (refreshes
-    `_policies`, so GET /policies is correct cluster-wide) but never refreshed `_versions` — so the FIX-A
-    version-snapshot mode-patch (`apply_to_target`'s `history[-1].enforcement_mode = ...`) only ever landed
+    """Regression: an apply_remote_event upsert branch that calls only `load_from_db` (refreshes
+    `_policies`, so GET /policies is correct cluster-wide) but never refreshes `_versions` leaves the
+    version-snapshot mode-patch (`apply_to_target`'s `history[-1].enforcement_mode = ...`) landing only
     on the ORIGINATING replica. A peer serving a rollback-to-current request would read a stale
     `_versions[key][-1].enforcement_mode`. Simulate: loader A creates a policy then reapplies the same rego
     under a new enforcement_mode (mode-change branch: DB UPDATE + patches loader A's OWN `_versions[-1]` in
@@ -331,8 +331,7 @@ def test_each_loader_has_a_distinct_origin() -> None:
 
 
 async def test_in_memory_entry_carries_enforcement_mode() -> None:
-    """M4: the in-memory entry now carries enforcement_mode so list_policies can report it (was absent →
-    the editor rewrote every saved policy to 'audit' on the next Save)."""
+    """The in-memory entry carries enforcement_mode so list_policies can report it."""
     loader = PolicyLoader(cache=_CacheStub(), evaluator=_SyncEvaluatorStub())  # type: ignore[arg-type]
     loader._update_memory("ns:cls", "package a", 100, "audit")
     assert loader._policies["ns:cls"]["enforcement_mode"] == "audit"

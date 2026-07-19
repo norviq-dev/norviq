@@ -34,13 +34,13 @@ export type ApplyResult = {
   fleetPolicyName?: string;
   /** fleet only: clusters the push targeted (to scope the rollout rows shown). */
   targetClusters?: string[];
-  /** local only (FIX B): the version the write claims to have produced. When set, the panel polls
+  /** local only: the version the write claims to have produced. When set, the panel polls
    *  GET /api/v1/policies?namespace= to confirm current_version actually converged before showing
    *  ENFORCING — a 200 alone is not proof the policy is loaded on the read path. */
   expectedVersion?: number;
-  /** local only (FIX B): optionally also require enforcement_mode to match before declaring a match. */
+  /** local only: optionally also require enforcement_mode to match before declaring a match. */
   expectedMode?: string;
-  /** local only (FIX-4): for a local verify flow that has NO `expectedVersion` to poll against (e.g. a
+  /** local only: for a local verify flow that has NO `expectedVersion` to poll against (e.g. a
    *  policy-pack toggle, verified by its own bespoke poll rather than the version-poll above) — the caller
    *  drives this tri-state directly: `true` while its OWN verification is still in flight, `"stalled"` if
    *  that verification gave up without confirming, `false`/unset once it confirmed. Keeps the status badge
@@ -87,7 +87,7 @@ export function ApplyResultPanel({ result, onClose }: { result: ApplyResult | nu
     };
   }, [polling, result?.fleetPolicyName]);
 
-  // FIX B: a local Apply/Create/Rollback that returns 200 is not proof the policy is loaded on the read
+  // A local Apply/Create/Rollback that returns 200 is not proof the policy is loaded on the read
   // path — poll the plain list endpoint (DB-authoritative, no session affinity assumed — either replica may
   // answer) until current_version (and enforcement_mode, when given) actually converges, or give up honestly.
   const [localVerify, setLocalVerify] = useState<"idle" | "verifying" | "matched" | "stalled">("idle");
@@ -153,7 +153,7 @@ export function ApplyResultPanel({ result, onClose }: { result: ApplyResult | nu
     ? { label: "FAILED", color: "var(--danger, #e5484d)" }
     : polling
     ? { label: "PROPAGATING", color: "var(--warning, #f5a623)" }
-    // FIX-4: a caller-driven verify with no expectedVersion (e.g. the PolicyPacks toggle) — honor its own
+    // A caller-driven verify with no expectedVersion (e.g. the PolicyPacks toggle) — honor its own
     // pending/stalled state BEFORE falling to the version-poll branches below, so the badge never shows
     // APPLIED while the body underneath still reads "Verifying…".
     : result.pendingVerify === true
@@ -281,7 +281,7 @@ export function ApplyResultPanel({ result, onClose }: { result: ApplyResult | nu
           </div>
         )}
 
-        {/* FIX B: local verify-by-poll — HONEST copy, no "loaded on every pod" claim (the Service has no
+        {/* Local verify-by-poll — HONEST copy, no "loaded on every pod" claim (the Service has no
             session affinity; this confirms a live read, not a full-fleet rollout like the fleet case above). */}
         {localVerifying && (
           <div>

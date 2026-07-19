@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F017 #5: /ws/audit streams live decisions to the Audit Log, scoped by namespace (was 403/404).
+"""/ws/audit streams live decisions to the Audit Log, scoped by namespace.
 
 Real path: open a websocket against the live API, trigger an evaluation, and assert the emitted
 decision arrives — and that a subscriber scoped to a different namespace does NOT receive it.
@@ -25,7 +25,7 @@ _AGENT = {
 
 def _ws_url(api_url: str, namespace: str, token: str) -> str:
     base = api_url.replace("https://", "wss://").replace("http://", "ws://")
-    # /ws/audit now authenticates before accept() (A1); the token rides as a query param.
+    # /ws/audit now authenticates before accept(); the token rides as a query param.
     return f"{base}/ws/audit?namespace={namespace}&token={token}"
 
 

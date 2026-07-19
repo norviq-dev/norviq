@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""DEF-048 regression: the per-namespace rate_limit backstop must throttle EVERY allowed call in the
+"""Regression: the per-namespace rate_limit backstop must throttle EVERY allowed call in the
 namespace, not only the no-policy ``default_allow`` class.
 
 Before the fix, the cache-hit throttle gate keyed on ``cached.rule_id == "default_allow"`` and the
@@ -115,7 +115,7 @@ async def test_explicit_allow_class_is_throttled_past_the_window(evaluator: OPAE
     """An agent under an explicit allow policy (rule_id "sc_allow") must be throttled once the per-ns
     rate_limit window is exceeded — NOT allowed forever. FAIL-ON-BUG: pre-fix, every call returns
     allow/sc_allow and this assertion never sees a rate_limit_exceeded block."""
-    # Non-exempt (write-ish) tool name so the F-23 read carve-out does not apply.
+    # Non-exempt (write-ish) tool name so the read carve-out does not apply.
     decisions = [await evaluator.evaluate(_event("provision_resource", i)) for i in range(_RATE_LIMIT + 3)]
 
     # The class IS governed by an explicit allow (never default_allow) — proves the gap the fix closes.
@@ -143,7 +143,7 @@ async def test_first_call_counts_on_the_fresh_path(evaluator: OPAEvaluator) -> N
 
 @pytest.mark.asyncio
 async def test_read_exempt_tool_under_explicit_allow_is_not_throttled(evaluator: OPAEvaluator) -> None:
-    """Guard the F-23 carve-out survives the DEF-048 broadening: a read-like tool (search_*) under the same
+    """Guard the read-like carve-out survives the broadened backstop: a read-like tool (search_*) under the same
     explicit allow policy is NEVER throttled, even well past the window."""
     decisions = [await evaluator.evaluate(_event("search_records", i)) for i in range(_RATE_LIMIT + 4)]
     assert all(d.decision == "allow" and d.rule_id == "sc_allow" for d in decisions)

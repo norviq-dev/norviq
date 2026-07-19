@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""LOGIN-2: local username/password login — the PRIMARY no-IdP path.
+"""Local username/password login — the PRIMARY no-IdP path.
 
-Replaces the CLI/paste-token quick-start as the default first-login experience. On success ``/auth/login``
+On success ``/auth/login``
 returns a SHORT-TTL HS256 session token (role/namespace claims, signed with the existing api_secret_key).
 Passwords are verified with a constant-time bcrypt compare against a stored hash — never in the clear, never
 logged. A per-username Redis counter provides rate-limiting + lockout (backoff) after repeated failures. The
@@ -151,7 +151,7 @@ async def logout(
     request: Request,
     creds: HTTPAuthorizationCredentials = Depends(security),
 ) -> dict:
-    """AUTH-01: log out — revoke the presented session token server-side until its own expiry.
+    """Log out — revoke the presented session token server-side until its own expiry.
 
     JWT-only by design: the raw credential is validated directly (not via get_current_user) so an
     ``nrvq_`` API key gets a 401 here — key lifecycle is ``DELETE /keys/{id}``, not logout. An

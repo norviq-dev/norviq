@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// F1 — Red Team view (TESTING). Runs the attack suite against the deployed posture and shows the REAL,
+// Red Team view (TESTING). Runs the attack suite against the deployed posture and shows the REAL,
 // durable efficacy: a proven-blocking scorecard, per-attack results, a per-ATLAS-technique / per-OWASP
 // breakdown, run history, and a link to the Audit evidence. Everything comes from the backend
 // (/redteam/results/*, /redteam/suite) — no fabricated numbers, and an honest empty state before the first run.
@@ -30,7 +30,7 @@ const DANGER = "#ff3b5c";
 const thStyle: React.CSSProperties = { textAlign: "left", padding: "8px 10px", borderBottom: "1px solid var(--border)", color: "var(--text-muted)", fontWeight: 600, whiteSpace: "nowrap" };
 const tdStyle: React.CSSProperties = { padding: "8px 10px", borderBottom: "1px solid var(--border)", verticalAlign: "top" };
 
-const PAGE_SIZE = 50; // D2: bound mounted result rows regardless of run size (avoids thousands of inline SVGs)
+const PAGE_SIZE = 50; // Bound mounted result rows regardless of run size (avoids thousands of inline SVGs)
 
 const RedTeam = () => {
   const { namespace } = useApp();
@@ -44,7 +44,7 @@ const RedTeam = () => {
   const [page, setPage] = useState(0);
   const [failedOnly, setFailedOnly] = useState(false);
   const [targetsOpen, setTargetsOpen] = useState(false); // B: expandable target-class list (collapsed default)
-  // D1: synchronous one-submit guard. `disabled` only takes effect after a re-render, so a rapid double-click
+  // Synchronous one-submit guard. `disabled` only takes effect after a re-render, so a rapid double-click
   // can fire twice before React repaints — this ref blocks the second call in the SAME tick (exactly one POST).
   const inFlightRef = useRef(false);
 
@@ -54,7 +54,7 @@ const RedTeam = () => {
     setLoading(true);
     try {
       const [l, h, t] = await Promise.all([
-        // STALE-4: scope efficacy + history to the selected namespace so the scorecard/table match the
+        // Scope efficacy + history to the selected namespace so the scorecard/table match the
         // scope the page displays (not whatever cluster-wide run was newest).
         fetchRedteamLatest(namespace),
         fetchRedteamHistory(15, namespace),
@@ -75,7 +75,7 @@ const RedTeam = () => {
     void load();
   }, [load]);
 
-  // D2: whenever the displayed run changes (new run, or detail was pruned server-side), snap back to page 0 so
+  // Whenever the displayed run changes (new run, or detail was pruned server-side), snap back to page 0 so
   // the pager can never point past the end of a smaller/scoped result set.
   useEffect(() => {
     setPage(0);
@@ -83,7 +83,7 @@ const RedTeam = () => {
   }, [latest?.run_id]);
 
   const runSuite = async () => {
-    if (inFlightRef.current) return; // D1: block a duplicate submit in the same tick → exactly one POST
+    if (inFlightRef.current) return; // Block a duplicate submit in the same tick → exactly one POST
     inFlightRef.current = true;
     setRunning(true);
     setError(null);
@@ -92,7 +92,7 @@ const RedTeam = () => {
       await runRedteamSuite(target || undefined, targetNs);
       await load();
     } catch (e) {
-      // D1: a 409 means another run for this namespace is already in flight — surface it, don't double-run.
+      // A 409 means another run for this namespace is already in flight — surface it, don't double-run.
       const msg = e instanceof Error ? e.message : "Suite run failed";
       setError(/already running/i.test(msg) ? "A red-team suite is already running for this namespace." : msg);
     } finally {
@@ -134,7 +134,7 @@ const RedTeam = () => {
   const eff = latest?.efficacy;
   const overall = eff?.overall;
 
-  // D2: scope the table to the SELECTED RUN's results (from results/latest), then filter + paginate so the
+  // Scope the table to the SELECTED RUN's results (from results/latest), then filter + paginate so the
   // number of MOUNTED rows stays bounded (≤ PAGE_SIZE) no matter how large the run is.
   const allRows = latest?.results ?? [];
   const rows = useMemo(() => (failedOnly ? allRows.filter((r) => !r.passed) : allRows), [allRows, failedOnly]);
@@ -182,7 +182,7 @@ const RedTeam = () => {
       {!loading && latest?.has_run && overall && eff && (
         <>
           <Panel data-testid="redteam-scorecard" style={{ marginBottom: 16 }}>
-            {/* A5: primary metric on the left · a grouped, evenly-spaced secondary-metric cluster in the middle
+            {/* Primary metric on the left · a grouped, evenly-spaced secondary-metric cluster in the middle
                 (breathing room + clear separation) · the run summary on the right. Wraps cleanly at narrow widths. */}
             <div style={{ display: "flex", flexWrap: "wrap", gap: 20, alignItems: "center", justifyContent: "space-between" }}>
               <div style={{ flex: "0 0 auto" }}>
@@ -197,7 +197,7 @@ const RedTeam = () => {
               <div
                 data-testid="redteam-metric-cluster"
                 style={{
-                  // C3: unboxed — the metrics keep their grid + spacing but drop the --bg-surface/--border panel
+                  // Unboxed — the metrics keep their grid + spacing but drop the --bg-surface/--border panel
                   // (reads lighter), and the group is nudged slightly RIGHT so the left primary "N%" has room.
                   display: "grid",
                   gridTemplateColumns: "repeat(auto-fit, minmax(96px, 1fr))",
@@ -299,7 +299,7 @@ const RedTeam = () => {
                   <tr>
                     <th style={thStyle}>Attack</th>
                     <th style={thStyle}>Class</th>
-                    {/* RT-FRAMEWORK-01: one "Frameworks" column of mapped chips scales to N frameworks (was 1 col each). */}
+                    {/* One "Frameworks" column of mapped chips scales to N frameworks. */}
                     <th style={thStyle}>Frameworks</th>
                     <th style={thStyle}>Expected</th>
                     <th style={thStyle}>Actual</th>
@@ -318,7 +318,7 @@ const RedTeam = () => {
                           <div className="mono panel-sub">{r.attack_id}</div>
                         </td>
                         <td style={tdStyle} className="mono">{r.agent_class ?? "—"}</td>
-                        {/* RT-FRAMEWORK-01: real mapped chips (from the same mapping), one per framework, N-scalable. */}
+                        {/* Real mapped chips (from the same mapping), one per framework, N-scalable. */}
                         <td style={tdStyle} data-testid="redteam-frameworks">
                           <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                             {r.atlas_technique && (
@@ -363,7 +363,7 @@ const RedTeam = () => {
                 </tbody>
               </table>
             </div>
-            {/* D2: pagination keeps mounted rows ≤ PAGE_SIZE regardless of result size. */}
+            {/* Pagination keeps mounted rows ≤ PAGE_SIZE regardless of result size. */}
             {pageCount > 1 && (
               <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12, marginTop: 10 }} data-testid="redteam-pager">
                 <span className="panel-sub">

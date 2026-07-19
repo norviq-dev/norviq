@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""DEF-028: the api-key auth resolver must actually THROTTLE repeated failures, not merely log them.
+"""The api-key auth resolver must actually THROTTLE repeated failures, not merely log them.
 
 The docstring/comment in api_keys.py claims an online guessing campaign is "rate-limited + visible",
-but before the fix _record_authfail only counted+logged — every attempt still ran the DB lookup and
-returned None with no short-circuit. These tests are FAIL-ON-BUG: on the pre-fix code the resolver
-runs the DB lookup on all N attempts (counter == N); after the fix it stops at _AUTHFAIL_THRESHOLD.
+but a resolver that only counts+logs still runs the DB lookup on every attempt with no short-circuit.
+These tests are FAIL-ON-BUG: a count-only resolver runs the DB lookup on all N attempts (counter == N);
+a throttling resolver stops at _AUTHFAIL_THRESHOLD.
 """
 
 from __future__ import annotations

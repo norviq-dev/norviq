@@ -141,7 +141,7 @@ func TestInjector_ValidateImage(t *testing.T) {
 }
 
 func TestCreatePatchSpiffeInject(t *testing.T) {
-	// B3: with SpiffeInject on, injected pods also get the SPIFFE CSI volume + mount + env.
+	// With SpiffeInject on, injected pods also get the SPIFFE CSI volume + mount + env.
 	cfg := LoadConfig()
 	cfg.SpiffeInject = true
 	cfg.SpiffeMode = "workload-api"
@@ -223,7 +223,7 @@ func testPodWithContainers(volumes []corev1.Volume, containers []corev1.Containe
 	}
 }
 
-// SIDE-2/SIDE-1/SIDE-4: proxy-mode sidecar env wiring (default). Asserts the thin-proxy sidecar gets
+// Proxy-mode sidecar env wiring (default). Asserts the thin-proxy sidecar gets
 // the central API URL, a minted service token, the pod namespace, proxy mode, and NO embedded datastore
 // wiring — and that embedded mode instead wires Redis/PG/OPA.
 func TestSidecarEnvProxyModeWiring(t *testing.T) {

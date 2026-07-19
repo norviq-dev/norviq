@@ -57,7 +57,7 @@ class SidecarProxy:
             log.info("nrvq.sidecar.mode.embedded", code="NRVQ-SDC-3033")
             log.info("nrvq.sidecar.pubsub_watcher_started", code="NRVQ-SDC-3023")
         else:
-            # SIDE-2 default: thin proxy to the central engine. No Redis/OPA/Postgres in the pod; the
+            # Default: thin proxy to the central engine. No Redis/OPA/Postgres in the pod; the
             # central /evaluate writes the audit record (with framework="sidecar"), so no local emitter.
             self._evaluator = RemoteEvaluator()
             await self._evaluator.connect()
@@ -66,7 +66,7 @@ class SidecarProxy:
         self._interceptor = ToolInterceptor(self._evaluator, self._resolver)
         await self._unlink_existing_socket()
         self._server = await asyncio.start_unix_server(self._handle_connection, path=self._socket_path)
-        # SIDE-1: the injected sidecar runs as uid 65534 while the application container runs as its image's
+        # The injected sidecar runs as uid 65534 while the application container runs as its image's
         # own (different) uid, so the app must be able to connect() to the shared unix socket. Make the
         # socket world-connectable (it lives on a pod-private emptyDir, not exposed outside the pod).
         try:

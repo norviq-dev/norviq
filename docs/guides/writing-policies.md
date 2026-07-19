@@ -80,7 +80,7 @@ spec:
 
 A `target` is one of `agentClass` (every agent of that class, any namespace), `namespace` (a
 namespace-wide baseline), or `kind` + `name` (one specific workload) — see
-`crds/norviq.io_nrvqpolicies.yaml`. Instead of `rego`, you can set `preset: strict|moderate|permissive`
+`helm/norviq/crds/norviq.io_nrvqpolicies.yaml`. Instead of `rego`, you can set `preset: strict|moderate|permissive`
 to use one of the shipped starter policies (`webhook/presets/*.rego`) — `rego` always wins if both are
 set. `priority` is 0–499 for a namespace-scoped policy; 500–1000 (`clusterPriority`) is admin-only.
 

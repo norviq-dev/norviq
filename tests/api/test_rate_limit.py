@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""HIGH-1 — HTTP-level rate limiting (norviq/api/rate_limit.py).
+"""HTTP-level rate limiting (norviq/api/rate_limit.py).
 
 Covers the three load-bearing behaviors: excluded paths (k8s probes) are never throttled, an
 over-limit caller gets 429 + Retry-After, and a Redis outage fails OPEN (availability > strictness)

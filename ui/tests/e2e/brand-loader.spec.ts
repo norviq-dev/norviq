@@ -93,7 +93,7 @@ test.describe("BrandLoader — login + route loaders, accent green, centered loc
     const vh = await page.evaluate(() => window.innerHeight);
     const cx = box!.x + box!.width / 2;
     const cy = box!.y + box!.height / 2;
-    // within a few px of the viewport center on BOTH axes (was ~115px left before the fix)
+    // within a few px of the viewport center on BOTH axes
     expect(Math.abs(cx - vw / 2), `logo cx=${Math.round(cx)} vs center ${vw / 2}`).toBeLessThanOrEqual(8);
     expect(Math.abs(cy - vh / 2), `logo cy=${Math.round(cy)} vs center ${vh / 2}`).toBeLessThanOrEqual(8);
   });

@@ -141,7 +141,7 @@ export function APIKeys() {
             </thead>
             <tbody>
               {rows.map((k) => {
-                // DEF-041: derive Status from BOTH revoked AND expiry. An expired-not-revoked key is
+                // Derive Status from BOTH revoked AND expiry. An expired-not-revoked key is
                 // already inert server-side (api_keys.authenticate returns None once expires_at <= now),
                 // so it must never read the green "Active" that contradicts its EXPIRED badge. Reuse the
                 // exact expiry test the Expires column uses (below) so the two columns stay consistent.

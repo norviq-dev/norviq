@@ -222,9 +222,8 @@ body {
   scrollbar-width: none;
 }
 .time-range-wrap::-webkit-scrollbar { display: none; }
-/* C2: Policy Packs horizontal layout — a flat, side-by-side grid (~4 cards per row) that wraps to the next row
-   and collapses responsively at narrow widths (Zscaler-style shelf of cards). Sector is shown per-card, so the
-   packs no longer stack one-per-sector. Tokens only. */
+/* Policy Packs horizontal layout — a flat, side-by-side grid (~4 cards per row) that wraps to the next row
+   and collapses responsively at narrow widths (a shelf of cards). Sector is shown per-card. Tokens only. */
 .pack-rail {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

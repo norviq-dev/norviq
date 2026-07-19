@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""COMP-GEN-01 data-loss fix: "Generate enforcing policy" for a compliance gap technique must persist its
+"""Data-loss fix: "Generate enforcing policy" for a compliance gap technique must persist its
 draft at the dedicated per-class overlay key ``"<real class>__remediation__"`` — NEVER at the real class's
 own key — so that "Review & Apply" (which POSTs the draft's ns/class straight into the loader's full-replace
 `ON CONFLICT ... DO UPDATE SET rego_source = EXCLUDED.rego_source` upsert) can only ever create/update the

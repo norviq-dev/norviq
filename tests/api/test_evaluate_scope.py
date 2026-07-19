@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F-01 + F-06: /evaluate binds the evaluated namespace to the CALLER; scoped_namespace denies the
+"""/evaluate binds the evaluated namespace to the CALLER; scoped_namespace denies the
 empty-claim least-privilege floor. The agent's own service/workload credential (hot path) is unaffected."""
 
 from __future__ import annotations
@@ -72,12 +72,12 @@ def test_service_any_namespace_ok_hotpath() -> None:
 
 
 def test_viewer_empty_claim_evaluate_forbidden() -> None:
-    """F-06: the empty-claim floor user has no namespace scope -> 403 (was: reached any namespace)."""
+    """The empty-claim floor user has no namespace scope -> 403."""
     client = _client()
     assert _eval(client, _token("viewer", ""), "payments") == 403
 
 
-# --- F-06 unit coverage of scoped_namespace directly ---
+# --- No-claim floor unit coverage of scoped_namespace directly ---
 def test_scoped_namespace_empty_floor_denied() -> None:
     with pytest.raises(HTTPException) as exc:
         auth_mod.scoped_namespace({"role": "viewer", "namespace": ""}, "payments")

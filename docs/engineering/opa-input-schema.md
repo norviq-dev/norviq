@@ -83,5 +83,4 @@ an `allow` to `escalate`. These overrides happen **outside** OPA, in
 Candidates are collected as `namespace:agent_class`, then `namespace:__baseline__`, then
 `__cluster__:__baseline__`. `_resolve_precedence` sorts by **highest priority first**, then most
 restrictive decision on ties (`block < escalate < audit < allow`). A high-priority cluster baseline
-can therefore override a per-class policy — watch for stray seeded baselines
-(see [test-baseline-discipline.md](test-baseline-discipline.md)).
+can therefore override a per-class policy — watch for stray seeded baselines.

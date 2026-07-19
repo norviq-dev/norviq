@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// OIDC Authorization Code + PKCE login (IDENTITY epic A3). Platform-agnostic: standard OIDC discovery,
+// OIDC Authorization Code + PKCE login. Platform-agnostic: standard OIDC discovery,
 // so pointing at Entra/Okta/Auth0 instead of Keycloak is a config swap (VITE_OIDC_ISSUER/CLIENT_ID).
 // The IdP-issued ACCESS token is stored under "nrvq_token" so the existing authHeaders() keeps working.
 
-// SLIM-OIDC: oidc-client-ts (~72KB) is imported ONLY as a TYPE here (fully erased at build), so a
+// oidc-client-ts (~72KB) is imported ONLY as a TYPE here (fully erased at build), so a
 // password-only install (no IdP) never ships it in the app-shell chunk. The runtime value is pulled via a
 // dynamic import() inside userManager(), which only runs when SSO is configured AND a login is invoked.
 import type { UserManager } from "oidc-client-ts";
 import { clearSession, setToken } from "./session";
 
-// LOGIN-1: OIDC config is runtime-first (window.__NRVQ_CONFIG__, written by the container entrypoint from
+// OIDC config is runtime-first (window.__NRVQ_CONFIG__, written by the container entrypoint from
 // Helm OIDC_ISSUER/OIDC_CLIENT_ID) with a build-time VITE_* fallback — one built image, per-cluster config,
 // so a buyer enables SSO by setting Helm values without rebuilding the UI.
 const runtime = (typeof window !== "undefined" && window.__NRVQ_CONFIG__) || {};

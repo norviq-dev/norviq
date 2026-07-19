@@ -6,7 +6,7 @@ selected path's steps (not the precomputed blocked_by_policy flag). This guards 
 decision the UI calls — allow on a safe step, block on a dangerous one, with provenance.
 
 Each test uses a fresh spiffe (unique pod) so trust history from other tests cannot drift the
-allow-path decision into an escalate (per test-baseline-discipline).
+allow-path decision into an escalate.
 """
 
 from __future__ import annotations

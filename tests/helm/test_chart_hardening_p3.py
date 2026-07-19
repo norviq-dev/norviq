@@ -1,22 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Helm/supply-chain hardening guards, batch P3 (FAIL-ON-BUG regressions).
+"""Helm/supply-chain hardening guards (FAIL-ON-BUG regressions).
 
-Covers four defects from the pre-GA hunt (DEFECT-LEDGER), each of which fails against the pre-fix
-tree and passes after:
+Covers four hardening defects; each fails against the unfixed tree and passes after the fix:
 
-* DEF-004 (P1): a stock PROD install still rendered NRVQ_PG_URL / NRVQ_REDIS_URL with the well-known
+* A stock PROD install still rendered NRVQ_PG_URL / NRVQ_REDIS_URL with the well-known
   shipped default DB/Redis passwords. The prod overlay now blanks them and secret.yaml grows a
   `config.requireStrongSecret` `{{ fail }}` gate that refuses to render an empty main-datastore
   credential — forcing the operator to supply a strong one. The single-node dev defaults are
   non-empty, so a plain `helm install` is unaffected.
-* DEF-029 (P3): the primary app containers shipped NO securityContext and relied on an external
+* The primary app containers shipped NO securityContext and relied on an external
   PodSecurity/Kyverno mutation. The webhook container now carries the restricted profile.
-* DEF-002 (P3): only Dockerfile.api stamped build provenance; engine/ui/webhook now carry the same
+* Only Dockerfile.api stamped build provenance; engine/ui/webhook now carry the same
   NRVQ_BUILD_GIT_SHA env + org.opencontainers.image.revision label (+ /app/.build_git_sha for
   engine/webhook).
-* DEF-042 (P3): the wait-for-api comment falsely claimed failurePolicy=Ignore; it now attributes the
+* The wait-for-api comment falsely claimed failurePolicy=Ignore; it now attributes the
   no-deadlock guarantee to the namespaceSelector excluding the control-plane namespace.
 
 Helm-dependent tests skip (not fail) when the `helm` binary isn't on PATH; the Dockerfile/comment
@@ -63,7 +62,7 @@ def _primary_container(manifest: str, deployment: str, container: str) -> dict:
     raise AssertionError(f"container {container!r} not found in Deployment {deployment!r}")
 
 
-# --- DEF-004: prod install must not ship the default main-datastore credentials --------------------
+# --- Prod install must not ship the default main-datastore credentials -----------------------------
 
 
 @requires_helm
@@ -113,7 +112,7 @@ def test_def004_dev_default_still_renders() -> None:
     assert "NRVQ_PG_URL" in res.stdout
 
 
-# --- DEF-029: primary containers must carry a restricted securityContext --------------------------
+# --- Primary containers must carry a restricted securityContext -----------------------------------
 
 
 @requires_helm
@@ -145,7 +144,7 @@ def test_def029_securitycontext_toggle_off() -> None:
     assert _primary_container(res.stdout, "norviq-webhook", "webhook").get("securityContext") is None
 
 
-# --- DEF-002: uniform build provenance across all four shipped images ------------------------------
+# --- Uniform build provenance across all four shipped images ---------------------------------------
 
 
 def _dockerfile(name: str) -> str:
@@ -175,7 +174,7 @@ def test_def002_webhook_dockerfile_stamps_provenance() -> None:
     assert "/app/.build_git_sha" in src
 
 
-# --- DEF-042: the wait-for-api comment must not claim failurePolicy=Ignore -------------------------
+# --- The wait-for-api comment must not claim failurePolicy=Ignore ----------------------------------
 
 
 def test_def042_stale_failurepolicy_ignore_comment_removed() -> None:

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// BATCH-C UI polish — four visual outcomes proven on the live build:
-//  C1 the Overview coverage caption sits BELOW the gauge arc (no overlap with the number/arc).
-//  C2 Policy Packs lay out as a horizontal rail (overflow-x auto, cards side-by-side), actions intact.
-//  C3 the RedTeam scorecard metric cluster is UNBOXED (no --bg-surface/--border) + nudged right; values==latest.
-//  C4 Compliance framework cards carry no "coverage steady" trend line.
+// UI polish — four visual outcomes proven on the live build:
+//  The Overview coverage caption sits BELOW the gauge arc (no overlap with the number/arc).
+//  Policy Packs lay out as a horizontal rail (overflow-x auto, cards side-by-side), actions intact.
+//  The RedTeam scorecard metric cluster is UNBOXED (no --bg-surface/--border) + nudged right; values==latest.
+//  Compliance framework cards carry no "coverage steady" trend line.
 
 import { test, expect, waitForApp } from "./fixtures";
 import { type Page } from "@playwright/test";

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// UI-AUDIT round 3 — Wave 2 (UI wiring + cosmetics) E2E. Drives the REAL SPA (nginx) + API on the live kind
+// Wave 2 (UI wiring + cosmetics) E2E. Drives the REAL SPA (nginx) + API on the live kind
 // cluster and asserts the EFFECT (not 200s) for the wiring fixes:
 //   A1  graph default-hides synthetic/probe agents; include_synthetic brings them back.
 //   B2  active-policy "matches" reflects the real governed-call count (not 0).
@@ -78,7 +78,7 @@ test.describe("UI-AUDIT r3 Wave-2 UI wiring — EFFECT proofs on the live consol
   });
 
   test("B3: version history is present after the restart (rehydrated from policy_versions)", async ({ page }) => {
-    // brand-new-agent has multiple versions persisted; before the fix this was empty after a pod restart.
+    // brand-new-agent has multiple versions persisted; they survive a pod restart (not empty).
     const versions = await apiJson(page, "/api/v1/policies/default/brand-new-agent/versions");
     expect(versions.status).toBe(200);
     expect(Array.isArray(versions.body) ? versions.body.length : 0).toBeGreaterThan(0);
@@ -108,6 +108,6 @@ test.describe("UI-AUDIT r3 Wave-2 UI wiring — EFFECT proofs on the live consol
 
     const drafts = await apiJson(page, "/api/v1/threats/intent-drafts?namespace=all");
     const mine = ((drafts.body.drafts ?? []) as any[]).filter((d) => (d.cls ?? d.agent_class) === cls);
-    expect(mine.length).toBe(1); // deduped by class (was piling up before)
+    expect(mine.length).toBe(1); // deduped by class
   });
 });

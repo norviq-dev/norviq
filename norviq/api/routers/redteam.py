@@ -26,19 +26,19 @@ from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
 
 log = structlog.get_logger()
 router = APIRouter()
-# In-process cache of the last runs (fast path); the durable record lives in the redteam_runs table (B2).
+# In-process cache of the last runs (fast path); the durable record lives in the redteam_runs table.
 REPORTS: dict[str, dict] = {}
 
-# F-44: when no real agent class is seeded yet, fall back to this synthetic identity so the suite still runs.
+# When no real agent class is seeded yet, fall back to this synthetic identity so the suite still runs.
 _FALLBACK_TARGET = "redteam-test"
 
-# D1: per-namespace in-flight guard. A suite run is long; two concurrent runs for the same namespace waste the
+# Per-namespace in-flight guard. A suite run is long; two concurrent runs for the same namespace waste the
 # engine and race the retention prune. This maps namespace -> the in-flight run_id so a second concurrent POST
 # is rejected (409) with the id of the run already going. In-process is sufficient: the guard's job is to stop
 # a double-submit (UI double-click or a rapid scripted repeat) against a single API process.
 _INFLIGHT_SUITES: dict[str, str] = {}
 
-# LOW/MED-4: process-wide cap on concurrently EXECUTING suites, on top of the per-namespace guard above. The
+# Process-wide cap on concurrently EXECUTING suites, on top of the per-namespace guard above. The
 # per-namespace guard alone lets an admin fan out one suite per namespace simultaneously — each suite is
 # len(targets) x len(ATTACKS) evaluate() calls plus a DB persist, so an unbounded fan-out across namespaces is
 # still an engine/DB load spike. Module-level (not per-request) so it is shared by every request in this
@@ -73,8 +73,8 @@ async def run_attack(
     target_namespace: str = "default",
     user: dict = Depends(get_current_user),
 ) -> dict:
-    """Run one red-team attack against the in-process evaluator, as a chosen target identity (F-44)."""
-    require_admin(user)  # F-43: red-team is admin-only (was any authenticated role)
+    """Run one red-team attack against the in-process evaluator, as a chosen target identity."""
+    require_admin(user)  # red-team is admin-only
     attack = get_attack_by_id(attack_id)
     if attack is None:
         raise HTTPException(status_code=404, detail=f"Attack {attack_id} not found")
@@ -92,11 +92,11 @@ async def run_suite(
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """Run the full red-team suite. F-44: target-aware — evaluates every attack against each seeded agent class
+    """Run the full red-team suite. Target-aware — evaluates every attack against each seeded agent class
     in the namespace (or one explicit class), so the report reflects the deployed sector posture, not a synthetic
     identity. Each result row carries the agent_class/namespace it was evaluated against."""
-    require_admin(user)  # F-43: red-team is admin-only (was any authenticated role)
-    # D1: reject a concurrent run for the same namespace (double-click / scripted double-submit) — return the
+    require_admin(user)  # red-team is admin-only
+    # Reject a concurrent run for the same namespace (double-click / scripted double-submit) — return the
     # in-flight run_id so the caller can watch it instead of starting a second identical run. Registered here,
     # before any await into the run, so the check-and-set is atomic under asyncio (no interleaving in between).
     if target_namespace in _INFLIGHT_SUITES:
@@ -110,7 +110,7 @@ async def run_suite(
     run_id = str(uuid4())
     _INFLIGHT_SUITES[target_namespace] = run_id
     try:
-        # LOW/MED-4: bound how many suites (across ALL namespaces) actually execute at once — the
+        # Bound how many suites (across ALL namespaces) actually execute at once — the
         # _INFLIGHT_SUITES check above only stops a double-submit for THIS namespace. Acquired AFTER the
         # per-namespace guard so a rejected double-submit never occupies a global slot; released before
         # `finally` pops the namespace so a queued suite behind this one can start as soon as the engine
@@ -135,7 +135,7 @@ async def run_suite(
                     except Exception as exc:
                         results.append(_error_row(attack, agent_class, target_namespace, str(exc)))
             passed = sum(1 for item in results if item.get("passed"))
-            efficacy = compute_efficacy(results)  # B3: caught-vs-got-through roll-up (synthetic excluded)
+            efficacy = compute_efficacy(results)  # caught-vs-got-through roll-up (synthetic excluded)
             report = {
                 "run_id": run_id,
                 "namespace": target_namespace,
@@ -148,7 +148,7 @@ async def run_suite(
                 "efficacy": efficacy,
             }
             REPORTS[run_id] = report
-            # B2: persist the run durably + prune to the retention window (read-only evidence; never enforces).
+            # Persist the run durably + prune to the retention window (read-only evidence; never enforces).
             created_at = await _persist_run(session, report, str(user.get("sub") or ""))
             if created_at is not None:
                 report["created_at"] = created_at
@@ -201,7 +201,7 @@ def plan_retention(
 
 
 async def _persist_run(session: AsyncSession, report: dict[str, Any], created_by: str) -> str | None:
-    """B2/D3: write one RedTeamRun row, then apply two-tier retention for its namespace (delete old rows beyond
+    """Write one RedTeamRun row, then apply two-tier retention for its namespace (delete old rows beyond
     the summary window; detail-prune mid-age rows to summary-only). Best-effort — a DB hiccup must not fail the
     run itself (the report is still returned + cached in REPORTS)."""
     ns = report["namespace"]
@@ -214,7 +214,7 @@ async def _persist_run(session: AsyncSession, report: dict[str, Any], created_by
         )
         session.add(row)
         await session.commit()
-        # D3: two-tier retention, scoped to THIS namespace. Anchor "now" on the just-written row's timestamp.
+        # Two-tier retention, scoped to THIS namespace. Anchor "now" on the just-written row's timestamp.
         now = row.created_at or datetime.now(timezone.utc)
         ns_runs = (await session.execute(
             select(RedTeamRun.id, RedTeamRun.created_at).where(RedTeamRun.namespace == ns)
@@ -254,16 +254,16 @@ async def list_targets(
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """F-44: the real agent classes seeded in a namespace, for the Policy-Tester/red-team target selector."""
-    require_admin(user)  # F-43: red-team is admin-only (was any authenticated role)
+    """The real agent classes seeded in a namespace, for the Policy-Tester/red-team target selector."""
+    require_admin(user)  # red-team is admin-only
     return {"namespace": namespace, "targets": await _seeded_classes(session, namespace)}
 
 
 @router.get("/redteam/catalog")
 async def get_catalog(user: dict = Depends(get_current_user)) -> list[dict]:
-    """B1: the red-team attack catalog, each entry mapped to its MITRE ATLAS technique + OWASP LLM control
+    """The red-team attack catalog, each entry mapped to its MITRE ATLAS technique + OWASP LLM control
     (display names resolved from the shipped compliance mappings)."""
-    require_admin(user)  # F-43: red-team is admin-only (was any authenticated role)
+    require_admin(user)  # red-team is admin-only
     log.info("nrvq.redteam.catalog_loaded", total=len(ATTACKS), code="NRVQ-RED-13004")
     return [catalog_entry(attack) for attack in ATTACKS]
 
@@ -274,10 +274,10 @@ async def latest_result(
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """B2/B3: the most recent DURABLE run (full results + efficacy roll-up). Honest empty state when none exist:
-    ``{"has_run": false}`` — the Red Team view + the Compliance/Overview efficacy overlay (F2) read this.
+    """The most recent DURABLE run (full results + efficacy roll-up). Honest empty state when none exist:
+    ``{"has_run": false}`` — the Red Team view + the Compliance/Overview efficacy overlay read this.
 
-    STALE-4: scope to a namespace when given (a concrete ns other than the "all" aggregate) so the efficacy
+    Scope to a namespace when given (a concrete ns other than the "all" aggregate) so the efficacy
     a page shows belongs to the namespace it displays — not whatever cluster-wide run happened to be newest.
     """
     require_admin(user)
@@ -298,10 +298,10 @@ async def list_results(
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """B2/F1/D3: recent run history — SUMMARIES ONLY (no per-attack detail), newest first, bounded + paginated.
+    """Recent run history — SUMMARIES ONLY (no per-attack detail), newest first, bounded + paginated.
     Never returns every run's detail (that is what blew up the DB); the page size is capped by config.
 
-    STALE-4: optional namespace filter so the history table matches the selected scope.
+    Optional namespace filter so the history table matches the selected scope.
     """
     require_admin(user)
     cap = settings.redteam_summary_keep_runs
@@ -341,7 +341,7 @@ async def get_result(
 async def get_report(run_id: str, user: dict = Depends(get_current_user)) -> dict:
     """Fetch a previously generated suite report from the in-process cache (kept for back-compat; durable reads
     should use /redteam/results/{run_id})."""
-    require_admin(user)  # F-43: red-team is admin-only (was any authenticated role)
+    require_admin(user)  # red-team is admin-only
     if run_id not in REPORTS:
         raise HTTPException(status_code=404, detail="Report not found")
     return REPORTS[run_id]
@@ -367,7 +367,7 @@ def _run_summary(row: RedTeamRun) -> dict[str, Any]:
 
 
 def _run_to_dict(row: RedTeamRun) -> dict[str, Any]:
-    """Serialize a persisted RedTeamRun row to the same shape the suite endpoint returns. D3: if the run's
+    """Serialize a persisted RedTeamRun row to the same shape the suite endpoint returns. If the run's
     per-attack detail has been retention-pruned (``results IS NULL``), return an empty results list plus
     ``detail_pruned=true`` so the caller knows the summary (efficacy) is authoritative but the rows are gone."""
     pruned = row.results is None
@@ -387,8 +387,8 @@ def _run_to_dict(row: RedTeamRun) -> dict[str, Any]:
 
 
 def _build_event(attack: Any, target_agent: str, target_namespace: str) -> ToolCallEvent:
-    """Build a tool-call event for one attack as a target identity. F-44: each class gets its own SVID so it picks
-    up its own trust history; F-45: thread a chained-call `depth` param into the event's call_depth so chain-depth
+    """Build a tool-call event for one attack as a target identity. Each class gets its own SVID so it picks
+    up its own trust history; thread a chained-call `depth` param into the event's call_depth so chain-depth
     rules can fire (the engine reads input.call_depth, not the tool param)."""
     depth = attack.tool_params.get("depth")
     return ToolCallEvent(
@@ -405,7 +405,7 @@ def _build_event(attack: Any, target_agent: str, target_namespace: str) -> ToolC
 
 
 def _mapping_fields(attack: Any) -> dict[str, Any]:
-    """B1/B3: the ATLAS/OWASP mapping fields carried on every result row so the efficacy roll-up can group by
+    """The ATLAS/OWASP mapping fields carried on every result row so the efficacy roll-up can group by
     technique + control without re-deriving them."""
     m = attack_mapping(attack)
     return {
@@ -439,7 +439,7 @@ def _attack_applicable(attack: Any, ns_rego: str) -> bool:
 
 
 def _result_row(attack: Any, agent_class: str, namespace: str, actual: str, rule_id: str, latency_ms: float, applicable: bool = True) -> dict[str, Any]:
-    """Build one successful suite row (F-44: carries the evaluated identity; B1: carries the ATLAS/OWASP map).
+    """Build one successful suite row (carries the evaluated identity + the ATLAS/OWASP map).
 
     ``applicable``=False marks a SECTOR_POLICY attack whose enforcing rule is not loaded for this namespace
     (the sector pack was never enabled). Such a row is NOT a real "got through" — the operator never opted

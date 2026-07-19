@@ -34,7 +34,7 @@ test_benign_allowed {
     shared.decision == "allow" with input as {"tool_name": "search_kb", "tool_params": {"q": "shipping status"}}
 }
 
-# F-15: nested objects/arrays must be scanned identically to comprehensive.rego (parity).
+# Nested objects/arrays must be scanned identically to comprehensive.rego (parity).
 test_nested_ssn_blocked {
     shared.decision == "block" with input as {"tool_name": "api_post", "tool_params": {"payload": {"ssn": "123-45-6789"}}}
     shared.rule_id == "pii_detection" with input as {"tool_name": "api_post", "tool_params": {"payload": {"ssn": "123-45-6789"}}}

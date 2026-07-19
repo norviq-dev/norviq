@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Batch E — REAL form login, REAL controls. Proves the deferred posture/trust controls now ENFORCE
-// end-to-end through the console (CFG-SETTINGS-INERT-01 + AGT-TRUST-02):
+// REAL form login, REAL controls. Proves the deferred posture/trust controls now ENFORCE
+// end-to-end through the console:
 //   * Settings → set a namespace to Monitor (audit) mode via the real toggle + Save → a blocked tool in
 //     that namespace softens to an allow-but-log `audit` decision; set it back to Block → it re-blocks.
 //   * Agents → Freeze Agent via the real button → that agent's calls block; Reset Trust → recovers.
@@ -78,7 +78,7 @@ test.afterAll(async ({ request, baseURL }) => {
     headers: { ...h, "Content-Type": "application/json" }, data: { enforcement_mode: "block", trust_threshold: 0.7, rate_limit: 60 } });
 });
 
-test("CFG-SETTINGS-INERT-01: the Settings Monitor toggle softens enforcement, and back re-blocks", async ({ page }) => {
+test("the Settings Monitor toggle softens enforcement, and back re-blocks", async ({ page }) => {
   await realLogin(page);
   // Confirm the seed enforces before we touch posture.
   expect(await evalTool(page, "blocked_tool")).toBe("block/e2e_block");
@@ -113,7 +113,7 @@ test("CFG-SETTINGS-INERT-01: the Settings Monitor toggle softens enforcement, an
   await expect.poll(() => evalTool(page, "blocked_tool"), { timeout: 10000 }).toBe("block/e2e_block");
 });
 
-test("AGT-TRUST-02: the real Agents 'Freeze Agent' button blocks the agent; 'Reset Trust' recovers it", async ({ page }) => {
+test("the real Agents 'Freeze Agent' button blocks the agent; 'Reset Trust' recovers it", async ({ page }) => {
   await realLogin(page);
   // Register the agent (one observed call) so it renders on the Agents page.
   const freezeSpiffe = `spiffe://norviq/ns/${NS}/sa/freeze-bot`;

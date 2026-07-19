@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F017 #4: GET /api/v1/deployments derives workloads from observed agents (was 404).
+"""GET /api/v1/deployments derives workloads from observed agents.
 
 Hits the real local API (the real auth + Redis scan), not a stub.
 """

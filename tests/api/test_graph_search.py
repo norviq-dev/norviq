@@ -1,17 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Batch C regression (fail-on-bug): P2-1 GRAPH-SCOPE-ALL-01 + P2-2 SEARCH-01.
+"""Attack-path namespace scoping + ⌘K search regression (fail-on-bug).
 
-P2-1: ``/threats/attack-paths`` named its scope param ``ns`` while the sibling graph endpoints name it
+``/threats/attack-paths`` named its scope param ``ns`` while the sibling graph endpoints name it
 ``namespace`` — so ``?namespace=X`` was SILENTLY ignored and the caller got every namespace's kill-chains.
-``namespace`` is now an accepted alias; conflicting values are a 400; the ``?ns=`` (empty string) edge is
-preserved rather than flipped to "all". These tests fail pre-fix (the alias was ignored → "all", and the
-conflict returned 200).
+``namespace`` is an accepted alias; conflicting values are a 400; the ``?ns=`` (empty string) edge is
+preserved rather than flipped to "all".
 
-P2-2: ``GET /api/v1/search`` did not exist (404). It is now a bounded, namespace-scoped endpoint backing
-the ⌘K palette. Tenant isolation comes from the namespace COLUMN filter, never the substring match; the
-F-06 no-claim floor still 403s. These tests fail pre-fix (404).
+``GET /api/v1/search`` is a bounded, namespace-scoped endpoint backing the ⌘K palette. Tenant isolation
+comes from the namespace COLUMN filter, never the substring match; the no-claim floor still 403s.
 """
 
 from __future__ import annotations
@@ -125,7 +123,7 @@ def test_scoped_viewer_all_is_pinned_to_own_namespace(captured) -> None:
 
 def test_no_claim_viewer_floor_holds(captured) -> None:
     r = _client(user=_VIEWER_NO_CLAIM).get("/api/v1/threats/attack-paths?ns=all")
-    assert r.status_code == 403 and captured == []  # F-06 floor
+    assert r.status_code == 403 and captured == []  # no-claim floor
 
 
 # --- P2-2: the scoped /api/v1/search endpoint ----------------------------------------------------

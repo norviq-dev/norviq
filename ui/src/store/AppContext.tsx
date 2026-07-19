@@ -11,14 +11,14 @@ export type Section = "security" | "intelligence" | "settings";
 export type TimeRange = "1h" | "6h" | "24h" | "7d" | "30d";
 
 export function sectionFromPath(pathname: string): Section {
-  // F-64: /fleet is multi-cluster MANAGEMENT — it now lives under Security Operations (not Intelligence/Analytics).
+  // /fleet is multi-cluster MANAGEMENT — it lives under Security Operations.
   if (pathname === "/" || pathname.startsWith("/threats") || pathname.startsWith("/asset-graph"))
     return "intelligence";
   if (pathname.startsWith("/settings")) return "settings";
   return "security";  // includes /fleet, /policies, /audit, /agents, /test
 }
 
-// P1-1: the server-enforced governance posture of the SELECTED scope — the one source of truth every
+// The server-enforced governance posture of the SELECTED scope — the one source of truth every
 // page that makes an enforcement claim ("ENFORCING", "blocked", "proven-blocking") must consult.
 // mode "audit" = Monitor (evaluate & log would-block, live traffic NOT blocked). namespace "all" carries
 // the cluster DEFAULT posture (per-ns overrides may differ — pages that aggregate handle that per-row).
@@ -37,20 +37,20 @@ type AppContextValue = {
   // The cluster this console actually serves (/cluster-info) — immutable after load. The Overview uses it to
   // tell "local cluster (full telemetry)" apart from a remote cluster picked in the nav (hub-rollup summary).
   servedCluster: string;
-  // F-69: a REMOTE cluster is selected (fleet mode, selection != the served cluster). When true, no page may render
+  // A REMOTE cluster is selected (fleet mode, selection != the served cluster). When true, no page may render
   // or mutate local data under the remote label — pages show hub rollups or an honest deep-link to the spoke console.
   isRemote: boolean;
   // Display label for the active scope ("All clusters" | cluster id | servedCluster).
   scopeCluster: string;
-  // The selected cluster's own console URL (from /fleet/clusters console_url, F-69 Stage 4) — drives the deep-link;
+  // The selected cluster's own console URL (from /fleet/clusters console_url) — drives the deep-link;
   // "" when unknown (the deep-link then shows the cluster id + guidance instead of a dead link).
   selectedClusterConsoleUrl: string;
   cluster: string;
   namespace: string;
-  // Live, fleet-aware selector source (F046): replaces the old hardcoded CLUSTERS/NS_BY_CLUSTER.
+  // Live, fleet-aware selector source: replaces the old hardcoded CLUSTERS/NS_BY_CLUSTER.
   clusters: string[];
   namespaces: string[];
-  // P1-1: governance posture of the selected scope + a refresh hook for pages that mutate it
+  // Governance posture of the selected scope + a refresh hook for pages that mutate it
   // (Target Settings / Settings save paths call refreshPosture so the global banner updates live).
   posture: Posture;
   refreshPosture: () => void;
@@ -63,9 +63,9 @@ type AppContextValue = {
 const AppContext = createContext<AppContextValue | null>(null);
 
 const NS_KEY = "nrvq_namespace";
-const NS_OWNER_KEY = "nrvq_namespace_sub"; // P1-2: which identity stored the ns selection
+const NS_OWNER_KEY = "nrvq_namespace_sub"; // Which identity stored the ns selection
 
-// P1-2: initial namespace resolution, in precedence order:
+// Initial namespace resolution, in precedence order:
 //   1. the URL's ?ns= (shareable links / refresh keep the exact scope the sender saw)
 //   2. the stored selection — but ONLY if it was stored by the SAME identity; a scoped viewer
 //      signing in after an admin must not inherit the admin's (possibly invalid) namespace.
@@ -88,24 +88,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [timeRange, setTimeRange] = useState<TimeRange>("24h");
   const location = useLocation();
   const navigate = useNavigate();
-  // F-69: persist the selected cluster so a refresh / deep-link keeps the remote scope (otherwise a reload silently
+  // Persist the selected cluster so a refresh / deep-link keeps the remote scope (otherwise a reload silently
   // drops back to the served cluster). Validated against the live cluster list in load() below.
   const [selectedCluster, setClusterState] = useState(() => localStorage.getItem("nrvq_cluster") ?? "");
   const [servedCluster, setServedCluster] = useState("");
-  // C2-4a: persist the selected namespace like the cluster, so a chosen concrete namespace STICKS across navigation
-  // instead of resetting to the aggregate "All namespaces" every route change. Empty/absent → "all" (the Batch-1
+  // Persist the selected namespace like the cluster, so a chosen concrete namespace STICKS across navigation
+  // instead of resetting to the aggregate "All namespaces" every route change. Empty/absent → "all" (the
   // aggregate guard still applies); we never silently auto-default to a concrete namespace.
-  // P1-2: URL ?ns= wins over the stored selection, and the stored selection is identity-scoped.
+  // URL ?ns= wins over the stored selection, and the stored selection is identity-scoped.
   const [selectedNamespace, setNamespaceState] = useState(() => initialNamespace(location.search));
   const [clusters, setClusters] = useState<string[]>([]);
-  // id -> console_url (F-69 Stage 4); used to build the spoke deep-link for a remote selection.
+  // id -> console_url; used to build the spoke deep-link for a remote selection.
   const [clusterConsoleUrls, setClusterConsoleUrls] = useState<Record<string, string>>({});
   const [namespaces, setNamespaces] = useState<string[]>([]);
 
   useEffect(() => {
     const KEY = "nrvq_token";
     if (getToken()) return;
-    // A3: when an IdP is configured, log in via OIDC (Auth Code + PKCE). The callback stores the token.
+    // When an IdP is configured, log in via OIDC (Auth Code + PKCE). The callback stores the token.
     if (oidcEnabled) {
       if (window.location.pathname !== "/auth/callback") {
         login().catch((e) => console.error("[oidc] login redirect failed", e));
@@ -152,7 +152,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         setClusterConsoleUrls(consoleUrls);
         setServedCluster(info.cluster_id);
         setNamespaces(info.namespaces);
-        // F-30: default the pill to the ACTUALLY-SERVED cluster (/cluster-info), not the non-deterministically
+        // Default the pill to the ACTUALLY-SERVED cluster (/cluster-info), not the non-deterministically
         // ordered fleet list's [0] (which made the label flip fleet-a/b/c across navigations). The console only
         // ever serves its own cluster's data, so this is the truthful, stable label.
         setClusterState((prev) => (prev && clusterIds.includes(prev) ? prev : info.cluster_id || clusterIds[0] || ""));
@@ -182,14 +182,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const setNamespace = (value: string) => {
     setNamespaceState(value);
     try {
-      localStorage.setItem(NS_KEY, value); // C2-4a: survive navigation + reload
-      localStorage.setItem(NS_OWNER_KEY, tokenSubject() ?? ""); // P1-2: identity-scoped
+      localStorage.setItem(NS_KEY, value); // Survive navigation + reload
+      localStorage.setItem(NS_OWNER_KEY, tokenSubject() ?? ""); // Identity-scoped
     } catch {
       /* storage disabled — selection just won't persist */
     }
   };
 
-  // P1-2: keep ?ns= on the URL in sync with the selection (state → URL, replace-only so history
+  // Keep ?ns= on the URL in sync with the selection (state → URL, replace-only so history
   // isn't spammed). "all" is the default and stays OFF the URL for clean links. Other query params
   // (audit deep-link filters, intent_draft, …) are preserved untouched.
   useEffect(() => {
@@ -203,12 +203,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     navigate(`${location.pathname}${query ? `?${query}` : ""}${location.hash}`, { replace: true });
   }, [selectedNamespace, location.pathname, location.search, location.hash, navigate]);
 
-  // P1-1: governance posture of the selected scope. "all" (no ns param) returns the cluster DEFAULT
+  // Governance posture of the selected scope. "all" (no ns param) returns the cluster DEFAULT
   // posture. postureVersion lets mutating pages (Target Settings / Settings) force a refetch so the
   // global banner reflects a mode flip immediately.
   const [posture, setPosture] = useState<Posture>({ namespace: "all", mode: null, applyMode: null, loading: false });
   const [postureVersion, setPostureVersion] = useState(0);
-  // SLIM-SETTINGS: share the settings fetch with the pages that also read it (PolicyPacks uses the same
+  // Share the settings fetch with the pages that also read it (PolicyPacks uses the same
   // `settings:${ns}` useApi key), so a namespace switch doesn't issue a duplicate GET. refreshPosture bumps
   // postureVersion which (via the mutating pages' invalidateApiCache("settings:")) forces a real refetch.
   const SETTINGS_KEY = `settings:${selectedNamespace}`; // must match PolicyPacks' useApi cacheKey exactly
@@ -245,14 +245,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
   }, [selectedNamespace, postureVersion, SETTINGS_KEY]);
 
-  // F-69: a remote cluster is selected when fleet is on and the selection differs from the served cluster (or is
+  // A remote cluster is selected when fleet is on and the selection differs from the served cluster (or is
   // "All clusters"). Only then do pages switch to hub rollups / deep-links and mutations get blocked.
   const isRemote = fleetEnabled && selectedCluster !== "" && selectedCluster !== servedCluster;
   const scopeCluster = selectedCluster === "all" ? "All clusters" : selectedCluster || servedCluster;
   const selectedClusterConsoleUrl = clusterConsoleUrls[selectedCluster] ?? "";
 
-  // Keep the stateless api-client guard in sync: the UI refuses a cluster-scoped mutation while remote (F-69), and
-  // declares the intended target cluster on every mutation so the SERVER can enforce it too (R2 backstop).
+  // Keep the stateless api-client guard in sync: the UI refuses a cluster-scoped mutation while remote, and
+  // declares the intended target cluster on every mutation so the SERVER can enforce it too (backstop).
   useEffect(() => {
     setRemoteClusterContext(isRemote);
     setSelectedClusterId(selectedCluster || servedCluster);

@@ -40,10 +40,8 @@ func TestReadyz(t *testing.T) {
 	}
 }
 
-// SIDE-3: the namespace opts in via the MutatingWebhookConfiguration namespaceSelector (not exercised
-// in this unit test), so a pod that reaches the handler with no opt-out label IS injected. Previously an
-// unlabeled pod was silently skipped even in a selected namespace, which made the documented
-// "label the namespace" workflow a no-op.
+// The namespace opts in via the MutatingWebhookConfiguration namespaceSelector (not exercised
+// in this unit test), so a pod that reaches the handler with no opt-out label IS injected.
 func TestMutateNoLabelStillInjects(t *testing.T) {
 	h := NewHandler(LoadConfig())
 	resp := sendReview(t, h, createReview(map[string]string{}, nil))
@@ -138,7 +136,7 @@ func TestMutate_NoAgentClassStillInjects(t *testing.T) {
 
 // Idempotency: a pod that is ALREADY FULLY injected (the norviq-socket volume + the real sidecar image
 // with no command override + every app container wired to the socket with the correct NRVQ_SOCKET_PATH) is
-// skipped. A sidecar container ALONE no longer suffices — that hardened contract closes the bypass where a
+// skipped. A sidecar container ALONE does not suffice — that hardened contract closes the bypass where a
 // bare sidecar-image container suppresses injection while the app runs unwired (see the bypass tests).
 func fullyInjectedContainer(name, image string) corev1.Container {
 	return corev1.Container{
@@ -249,7 +247,7 @@ func TestMutateDecoySidecarNameStillInjectsRealSidecar(t *testing.T) {
 
 func TestMutate_DisabledLabel(t *testing.T) {
 	h := NewHandler(LoadConfig())
-	// SIDE-3: opt out with the unified norviq-injection=disabled label (the default EnableLabel).
+	// Opt out with the unified norviq-injection=disabled label (the default EnableLabel).
 	labels := map[string]string{"norviq-injection": "disabled", "norviq.io/agent-class": "sales"}
 	resp := sendReview(t, h, createReview(labels, nil))
 	if !resp.Response.Allowed || resp.Response.Patch != nil {
@@ -266,7 +264,7 @@ func TestMutate_SkipAnnotation(t *testing.T) {
 	}
 }
 
-// P3: when allowPodOptOut=false, the per-pod opt-out (skip-injection annotation / disabled label)
+// When allowPodOptOut=false, the per-pod opt-out (skip-injection annotation / disabled label)
 // is IGNORED so a pod author cannot self-exempt from enforcement — the pod is injected anyway.
 func TestMutate_OptOutIgnoredWhenDisabled_Annotation(t *testing.T) {
 	t.Setenv("NRVQ_ALLOW_POD_OPT_OUT", "false")

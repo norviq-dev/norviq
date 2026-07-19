@@ -273,7 +273,7 @@ describe("Compliance — F2 efficacy overlay (proven-blocking from the last Red 
     expect(within(banner).queryByTestId("compliance-proven-blocking")).toBeNull();
   });
 
-  // COMP-GEN-01 multi-select: checking ≥1 GAP reveals the batch bar; "Generate for selected" fires ONE
+  // Multi-select: checking ≥1 GAP reveals the batch bar; "Generate for selected" fires ONE
   // batch POST carrying every checked control + the chosen class_mode.
   it("multi-select + class-mode picker → one generate-batch POST with the checked controls", async () => {
     // A 2-gap OWASP payload so multiple controls can be selected.

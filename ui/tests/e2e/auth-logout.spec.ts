@@ -48,7 +48,7 @@ test("logout returns to the login screen and the token is rejected server-side",
   await expect(loginForm(page)).toBeVisible({ timeout: 15000 });
   expect(await storedToken(page)).toEqual("");
 
-  // (2) THE defect: the same token must now be dead server-side (was 200 pre-fix).
+  // (2) THE defect: the same token must be dead server-side.
   await expect
     .poll(
       async () =>

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// F-69 — the honest "this isn't at the fleet hub" surface. When a REMOTE cluster is selected, the hub only has
+// The honest "this isn't at the fleet hub" surface. When a REMOTE cluster is selected, the hub only has
 // KPI/trust rollups, not per-spoke detail — so instead of rendering the LOCAL cluster's data under the remote
 // label, we show this notice with a deep-link to the remote cluster's OWN console (when its console_url is known).
 //

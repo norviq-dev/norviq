@@ -2,7 +2,7 @@ package norviq.presets.moderate
 
 # Decision/rule_id/reason are resolved from PARTIAL-SET triggers (blocks/escalates) + a deterministic
 # resolver — the same pattern the strict preset uses — so that when an input matches BOTH triggers
-# (e.g. execute_sql carrying "drop") there is NO complete-rule conflict (F-12): exactly one decision
+# (e.g. execute_sql carrying "drop") there is NO complete-rule conflict: exactly one decision
 # binds. Precedence: block > escalate > allow; ties resolved by sorted rule_id (deterministic).
 
 default decision = "allow"

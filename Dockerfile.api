@@ -43,7 +43,7 @@ RUN printf "%s\n" "${NRVQ_GIT_SHA}" > /app/.build_git_sha
 COPY norviq/ norviq/
 COPY policies/ policies/
 
-# DEF-029: pin a NUMERIC uid and reference it numerically in USER so kubelet can verify the
+# Pin a NUMERIC uid and reference it numerically in USER so kubelet can verify the
 # securityContext runAsNonRoot=true (a name-based `USER norviq` fails with "non-numeric user").
 RUN useradd -r -u 999 -s /usr/sbin/nologin norviq
 USER 999

@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// BATCH-1 Policy-Packs / Governance — REAL form login (not token injection). Proves the three fixes on the served
+// Policy-Packs / Governance — REAL form login (not token injection). Proves the three fixes on the served
 // build with EFFECT, not a 200:
-//   B1-2: under "All namespaces" (the default aggregate scope) every pack/override/apply-mode mutation is DISABLED
+//   Under "All namespaces" (the default aggregate scope) every pack/override/apply-mode mutation is DISABLED
 //         with an inline "Select a namespace" prompt, and NO ?namespace=all write is ever sent.
-//   B1-1: under a CONCRETE namespace, Enable flips the card to Enabled with no reload and Disable flips it back —
+//   Under a CONCRETE namespace, Enable flips the card to Enabled with no reload and Disable flips it back —
 //         3× — and the write targets the concrete namespace; the Target-Settings "packs applied" chip updates.
-//   B1-3: a dry-run-only namespace surfaces the reason inline and disables pack applies up-front.
+//   A dry-run-only namespace surfaces the reason inline and disables pack applies up-front.
 import { test, expect, type Page } from "@playwright/test";
 
 const PW = process.env.NRVQ_E2E_PASSWORD || "CHANGE_ME-e2e-pw";

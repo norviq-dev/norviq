@@ -5,7 +5,7 @@
 "deployed, awaiting first tool call" state.
 
 Covers: the namespace resolver (admin/service unrestricted, viewer pinned to its claim, cross-tenant
-403, F-06 no-claim floor), the union response (per-namespace tagging, id qualification so tool ids
+403, no-claim floor), the union response (per-namespace tagging, id qualification so tool ids
 don't collide, namespaces field), awaiting-agent synthesis (silent namespaces + deployed-but-silent
 classes, reserved __baseline__/__pack__ scopes excluded), and unchanged single-namespace shape.
 """
@@ -122,7 +122,7 @@ def test_all_unions_namespaces_with_tags_prefixes_and_awaiting(stubbed) -> None:
     # hr has protection deployed but zero traffic (no snapshot) -> awaiting; support also has a second,
     # not-yet-observed class -> awaiting inside a traffic-bearing namespace.
     stubbed["deployed"] = {"hr": {"hr-bot"}, "support": {"support-bot", "escalation-bot"}}
-    # A2: awaiting (real-but-never-observed) agents are hidden by default — opt back in to exercise them.
+    # Awaiting (real-but-never-observed) agents are hidden by default — opt back in to exercise them.
     resp = _get(ADMIN, "namespace=all&include_awaiting=true")
     assert resp.status_code == 200
     body = resp.json()

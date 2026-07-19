@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""OIDC dual-mode auth (IDENTITY epic A1/A2): RS256 validation against a SYNTHETIC in-process JWKS.
+"""OIDC dual-mode auth: RS256 validation against a SYNTHETIC in-process JWKS.
 
 No live IdP: a test-generated RSA keypair signs tokens and its public JWK is served via a stubbed
 JWKS client. Covers the good path, group->role/namespace mapping, claim rejections (iss/aud/exp/kid),
@@ -145,7 +145,7 @@ async def test_admin_group_wins_over_viewer(oidc_on) -> None:
     assert user["role"] == "admin" and user["namespace"] == ""
 
 
-# --- F045 fleet: cluster dimension in the group mapping + scoped_cluster ---
+# --- Fleet: cluster dimension in the group mapping + scoped_cluster ---
 
 
 @pytest.mark.asyncio

@@ -13,7 +13,7 @@
 {{- fail "config.requireStrongSecret=true but fleet.hub.pgUrl embeds the shipped default password 'norviq_dev' — point it at your fleet DB with a strong credential." }}
 {{- end }}
 {{- end }}
-# Fleet hub control plane (F045): the fleet-api (SAME api image, different command) over a dedicated
+# Fleet hub control plane: the fleet-api (SAME api image, different command) over a dedicated
 # fleet-postgresql. Rendered ONLY where fleet.hub.enabled — a normal single-cluster install renders none of this.
 apiVersion: v1
 kind: ConfigMap
@@ -81,7 +81,7 @@ spec:
             - configMapRef:
                 name: norviq-fleet-config   # NRVQ_FLEET_PG_URL + OIDC validation settings
           {{- if .Values.fleet.hub.signingKeySecretName }}
-          # P2: read the bundle signing PRIVATE key from a pre-created in-cluster Secret (never in values/
+          # Read the bundle signing PRIVATE key from a pre-created in-cluster Secret (never in values/
           # git/CI). An explicit env overrides the empty envFrom default. Empty -> hub cannot sign (fail-closed).
           env:
             - name: NRVQ_FLEET_SIGNING_KEY

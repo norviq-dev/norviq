@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Current-user route — the server's normalized view of the caller's identity (IDENTITY epic A3).
+"""Current-user route — the server's normalized view of the caller's identity.
 
 The console calls this after OIDC login to render the user + the role/namespace the SERVER resolved
 (group mapping already applied), rather than trusting a client-side JWT decode.

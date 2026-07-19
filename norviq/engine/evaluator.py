@@ -37,11 +37,11 @@ from norviq.sdk.core.trust import TrustScore
 
 log = structlog.get_logger()
 
-# L4: cap on concurrently-held ephemeral dry-run OPA modules (LRU-evicted past this) — bounds server
+# Cap on concurrently-held ephemeral dry-run OPA modules (LRU-evicted past this) — bounds server
 # memory + the _pushed digest map against a user dry-running arbitrary ns/class strings.
 _MAX_DRYRUN_MODULES = 256
 
-# CFG-SETTINGS-INERT-01: rule_ids that namespace monitor (audit) mode must NOT soften — they stay hard even when a
+# Rule_ids that namespace monitor (audit) mode must NOT soften — they stay hard even when a
 # namespace is set to visibility-only. An admin trust freeze is an incident-response kill switch that must outrank
 # namespace posture; a not-ready / engine-error / invalid-payload block is an engine-health signal, not a policy
 # decision to monitor away; and the rate-limit throttle is a resource control. This matches the GLOBAL audit mode,
@@ -52,7 +52,7 @@ _POSTURE_EXEMPT_RULES = frozenset(
 
 
 class InvalidSpiffeIdentity(ValueError):
-    """Raised when an agent's SPIFFE id fails format validation (F-11: named fallback attribution)."""
+    """Raised when an agent's SPIFFE id fails format validation (named fallback attribution)."""
 
 
 class OPAEvaluator:
@@ -70,13 +70,13 @@ class OPAEvaluator:
         # OPA-server client + per-key pushed-rego digests (server mode); unused in subprocess mode.
         self.opa = OpaClient()
         self._pushed: dict[str, str] = {}
-        # L4: dry-run pushes an ephemeral `dryrun:<ns>:<cls>` OPA module per scope. Any authenticated user can
+        # Dry-run pushes an ephemeral `dryrun:<ns>:<cls>` OPA module per scope. Any authenticated user can
         # dry-run with arbitrary ns/class strings, so track dry-run keys in insertion order and LRU-evict past
         # a cap (delete the OPA module + drop the digest) — bounds server memory + _pushed against abuse.
         self._dryrun_keys: OrderedDict[str, None] = OrderedDict()
         self._audit_tasks: set[asyncio.Task[None]] = set()
         self._policies: dict[str, dict] = {}
-        # FIX-3: count PERSISTENT engine (OPA-eval) errors so evaluator_error is observable, not silent. This is
+        # Count PERSISTENT engine (OPA-eval) errors so evaluator_error is observable, not silent. This is
         # an engine-health signal (a transient error self-heals on retry and is NOT counted here), distinct from
         # any policy decision. Surfaced alongside the DB-derived count on /audit/stats.
         self._engine_error_count = 0
@@ -117,7 +117,7 @@ class OPAEvaluator:
         )
         try:
             self._validate_spiffe(event.agent_identity.spiffe_id)
-            # CFG-SETTINGS-INERT-01: resolve the caller namespace's posture (enforcement_mode / trust_threshold /
+            # Resolve the caller namespace's posture (enforcement_mode / trust_threshold /
             # rate_limit) ONCE per eval, per-field fallback to the global config. A namespace with no override
             # yields the global posture and byte-identical behavior. Threaded into trust (threshold), the cache-hit
             # controls (rate_limit) and the post-resolution softening (monitor mode).
@@ -129,7 +129,7 @@ class OPAEvaluator:
             if cached is not None:
                 cache_hit = True
                 decision = await self._handle_cache_hit(event, cached, start, trust_result, posture)
-                # F-13: stamp the real measured end-to-end latency so the audit record reflects it (not 0.0).
+                # Stamp the real measured end-to-end latency so the audit record reflects it (not 0.0).
                 decision = decision.model_copy(update={"latency_ms": round((time.monotonic() - start) * 1000, 2)})
                 await self._persist_behavior(event, decision, trust_result)
                 self._record_telemetry(event, decision, start, cache_hit, span)
@@ -187,7 +187,7 @@ class OPAEvaluator:
                 base_decision = winner["decision"]
             if base_decision.rule_id not in settings.evaluator_non_cacheable_rules:
                 await self._cache.set_eval(event.agent_identity.namespace, event.agent_identity.agent_class, cache_tool, base_decision)
-            # DEF-048: run the per-ns rate-limit throttle on the FRESH path too — otherwise call #1 (a cache
+            # Run the per-ns rate-limit throttle on the FRESH path too — otherwise call #1 (a cache
             # MISS) and non-cacheable allows never count against the window, and the ns-wide backstop only
             # ever engages on cache-hit replays. Same allow-only footing as the cache-hit path.
             throttled = await self._maybe_rate_limit(event, base_decision, start, posture)
@@ -195,9 +195,9 @@ class OPAEvaluator:
                 decision = throttled
             else:
                 decision = self._apply_trust_overrides(base_decision, trust_result, event.event_id)
-                decision = self._apply_posture(decision, posture, event.event_id)  # CFG-SETTINGS-INERT-01: monitor mode
-                decision = self._ensure_block_attribution(decision, event.event_id)  # F-24
-            # F-13: the multi-candidate path builds per-candidate decisions with latency_ms=0.0; stamp the real
+                decision = self._apply_posture(decision, posture, event.event_id)  # monitor mode
+                decision = self._ensure_block_attribution(decision, event.event_id)
+            # The multi-candidate path builds per-candidate decisions with latency_ms=0.0; stamp the real
             # measured end-to-end latency on the winning decision so every audit record carries it (AU-12/SLA).
             decision = decision.model_copy(update={"latency_ms": round((time.monotonic() - start) * 1000, 2)})
             await self._persist_behavior(event, decision, trust_result)
@@ -260,7 +260,7 @@ class OPAEvaluator:
         posture: dict,
     ) -> PolicyDecision:
         """Apply cache-hit controls before returning a cached decision."""
-        # DEF-048: throttle on the ALLOW footing (not just the no-policy `default_allow` rule) so the per-ns
+        # Throttle on the ALLOW footing (not just the no-policy `default_allow` rule) so the per-ns
         # rate_limit backstop applies to every explicitly-governed allow class too. rate_limit_exceeded is
         # exempt from monitor softening (a throttle is a resource control, not a policy decision) — the posture
         # pass inside _maybe_rate_limit leaves it untouched via _POSTURE_EXEMPT_RULES.
@@ -268,17 +268,17 @@ class OPAEvaluator:
         if throttled is not None:
             return throttled
         decision = self._apply_trust_overrides(cached, trust_result, event.event_id)
-        decision = self._apply_posture(decision, posture, event.event_id)  # CFG-SETTINGS-INERT-01: monitor mode
+        decision = self._apply_posture(decision, posture, event.event_id)  # monitor mode
         log.debug("nrvq.engine.cache_hit", event_id=event.event_id, code="NRVQ-ENG-2004")
         return self._ensure_block_attribution(decision, event.event_id)
 
     async def _maybe_rate_limit(
         self, event: ToolCallEvent, base_decision: PolicyDecision, start: float, posture: dict
     ) -> PolicyDecision | None:
-        """DEF-048: the per-namespace rate_limit is a namespace-wide DoS backstop, so it must throttle EVERY
+        """The per-namespace rate_limit is a namespace-wide DoS backstop, so it must throttle EVERY
         allowed call in the namespace — not only the no-policy `default_allow` class. Gate on the ALLOW decision
         (never block/escalate/audit — those are not resource grants and must not be flipped to a throttle),
-        keeping the F-23 read-tool carve-out. Returns a posture-applied `rate_limit_exceeded` block when the
+        keeping the read-tool carve-out. Returns a posture-applied `rate_limit_exceeded` block when the
         window is exceeded, else None. Invoked from BOTH the cache-hit and fresh-eval paths so call #1 and
         non-cacheable allows are counted too; a single evaluate() traverses exactly one path, so the window
         counter increments exactly once per allowed non-exempt call."""
@@ -291,7 +291,7 @@ class OPAEvaluator:
         return None
 
     async def _resolve_posture(self, namespace: str) -> dict:
-        """CFG-SETTINGS-INERT-01: resolve a namespace's effective posture from the Redis mirror, per-field fallback
+        """Resolve a namespace's effective posture from the Redis mirror, per-field fallback
         to the global config. `monitor` is True ONLY when the namespace explicitly overrides enforcement_mode to
         'audit' — a null/global mode does NO softening (parity with today's weak global audit semantics, which only
         affect the no-policy default, never a real policy block). `trust_threshold` is None when unset so the trust
@@ -312,7 +312,7 @@ class OPAEvaluator:
         }
 
     def _apply_posture(self, decision: PolicyDecision, posture: dict, event_id: str) -> PolicyDecision:
-        """CFG-SETTINGS-INERT-01: namespace monitor mode softens a would-block/escalate to an allow-but-log `audit`
+        """Namespace monitor mode softens a would-block/escalate to an allow-but-log `audit`
         decision (visibility only). Fires ONLY on an explicit per-ns enforcement_mode='audit'. Never tightens.
         Exempt rule_ids stay hard (parity with the global audit mode, which does not weaken these): an admin trust
         freeze is an incident-response kill switch that must outrank namespace posture; engine-health/not-ready
@@ -333,7 +333,7 @@ class OPAEvaluator:
 
     @staticmethod
     def _is_rate_limit_exempt(tool_name: str) -> bool:
-        """F-23: read-like tools are exempt from the per-identity rate limiter (benign read spike not denied)."""
+        """Read-like tools are exempt from the per-identity rate limiter (benign read spike not denied)."""
         if not settings.evaluator_rate_limit_read_exempt:
             return False
         name = (tool_name or "").lower()
@@ -343,7 +343,7 @@ class OPAEvaluator:
 
     @staticmethod
     def _ensure_block_attribution(decision: PolicyDecision, event_id: str) -> PolicyDecision:
-        """F-24: a block must NEVER carry an empty or allow-rule rule_id (the audit/UI mislabels). The OTel span
+        """A block must NEVER carry an empty or allow-rule rule_id (the audit/UI mislabels). The OTel span
         path is already correct; this clamps the persisted/audited decision and alarms if an unattributed block
         ever reaches here."""
         if decision.decision == "block" and decision.rule_id in ("", "default_allow"):
@@ -367,8 +367,8 @@ class OPAEvaluator:
     ) -> TrustResult:
         """Compute trust from seven behavioral signals.
 
-        CFG-SETTINGS-INERT-01: `trust_threshold` (per-ns override, else None) moves the category tiers. AGT-TRUST-02:
-        the calculator also reads the durable admin trust CAP for this identity and applies it tighten-only. Both are
+        `trust_threshold` (per-ns override, else None) moves the category tiers. The calculator also reads
+        the durable admin trust CAP for this identity and applies it tighten-only. Both are
         threaded into the single categorize inside `calculate()` so there is exactly one recategorization site."""
         trust_input = TrustInput(
             spiffe_id=event.agent_identity.spiffe_id,
@@ -396,7 +396,7 @@ class OPAEvaluator:
         )
         if trust_result.category == "frozen":
             log.warning("nrvq.engine.trust.override_block", event_id=event_id, code="NRVQ-ENG-2046")
-            # F-24: name the rule_id (was keeping the prior allow rule_id -> block/default_allow in the audit).
+            # Name the rule_id so the audit attributes the block rather than the prior allow rule.
             return decision.model_copy(update={"decision": "block", "rule_id": "trust_frozen",
                                                "reason": "Agent trust frozen — all tool calls blocked"})
         if trust_result.category == "low" and decision.decision == "allow":
@@ -410,7 +410,7 @@ class OPAEvaluator:
 
     @staticmethod
     def _normalize_for_match(params: dict) -> dict:
-        """F-02: confusable-skeleton string values for injection MATCHING only (original preserved for audit)."""
+        """Confusable-skeleton string values for injection MATCHING only (original preserved for audit)."""
         def _norm(value):
             if isinstance(value, str):
                 return skeleton(value)
@@ -424,7 +424,7 @@ class OPAEvaluator:
 
     @staticmethod
     def _redacted_input(input_doc: dict) -> dict:
-        """F-28: mask tool_params before any log so raw PII/PAN/PHI can never reach a logger (PCI 3.4 / HIPAA)."""
+        """Mask tool_params before any log so raw PII/PAN/PHI can never reach a logger (PCI 3.4 / HIPAA)."""
         safe = dict(input_doc)
         if "tool_params" in safe:
             safe["tool_params"] = mask_params(safe.get("tool_params"))
@@ -436,11 +436,11 @@ class OPAEvaluator:
         """Build OPA input payload from tool event and trust state."""
         return {
             "tool_name": event.tool_name,
-            # F-09: confusable-skeleton of the tool NAME (homoglyph/zero-width evasion on the name itself,
+            # Confusable-skeleton of the tool NAME (homoglyph/zero-width evasion on the name itself,
             # e.g. Cyrillic "open_bгeaker"); rego matches control verbs/surface against this for parity.
             "tool_name_normalized": skeleton(event.tool_name),
             "tool_params": event.tool_params,
-            # F-02: matching-only confusable skeleton (homoglyph/zero-width evasion); rego scans this for injection.
+            # Matching-only confusable skeleton (homoglyph/zero-width evasion); rego scans this for injection.
             "tool_params_normalized": self._normalize_for_match(event.tool_params),
             "agent": {
                 "spiffe_id": event.agent_identity.spiffe_id,
@@ -617,7 +617,7 @@ class OPAEvaluator:
         return "data.norviq.strict"
 
     def _no_policy_decision(self, key: str, namespace: str) -> dict:
-        """F-04: decide when NO policy is loaded for `key`. Deny-by-default for a PEP (enforcement_mode=block),
+        """Decide when NO policy is loaded for `key`. Deny-by-default for a PEP (enforcement_mode=block),
         with three distinct, loudly-logged cases so a startup/load anomaly is never mistaken for genuine no-policy.
 
         - load FAILURE never reaches here: load_from_db raises -> evaluate() fail-closes (NRVQ-ENG-2000).
@@ -653,7 +653,7 @@ class OPAEvaluator:
         return await self._evaluate_opa_subprocess(namespace, agent_class, opa_input, rego, package_name)
 
     async def _track_dryrun_module(self, key: str) -> None:
-        """L4: LRU-bound the ephemeral dry-run OPA modules so an authenticated user can't grow the OPA server
+        """LRU-bound the ephemeral dry-run OPA modules so an authenticated user can't grow the OPA server
         + _pushed map without limit by dry-running arbitrary ns/class strings. Past the cap, evict the oldest
         dry-run module (delete it from OPA + drop its digest); a re-used key simply re-pushes on next dry-run."""
         self._dryrun_keys[key] = None
@@ -722,7 +722,7 @@ class OPAEvaluator:
                 log.info(
                     "nrvq.opa.input",
                     rego_preview=rego[:200],
-                    input_doc=str(self._redacted_input(opa_input))[:500],  # F-28: masked even when debug on
+                    input_doc=str(self._redacted_input(opa_input))[:500],  # masked even when debug on
                     package_name=package_name or "",
                     query=query,
                     code="NRVQ-ENG-DEBUG-OPA-IN",
@@ -772,7 +772,7 @@ class OPAEvaluator:
 
     @staticmethod
     def _fired_without_decision(value: dict) -> bool:
-        """P1-2 Q6: True when a partial-set rule FIRED (blocks/escalates/audits non-empty) but the module
+        """True when a partial-set rule FIRED (blocks/escalates/audits non-empty) but the module
         produced no top-level `decision` — i.e. a decision-producing rule matched but there is no resolver
         to turn it into a decision. Defaulting such a result to "allow" would silently ALLOW a fired block.
         Fail closed only in this exact case, so a legitimate complete-rule policy whose condition simply did
@@ -802,10 +802,10 @@ class OPAEvaluator:
     ) -> PolicyDecision:
         """Evaluate one candidate policy source and return typed decision.
 
-        FIX-3: a TRANSIENT OPA failure (e.g. the server-mode module lazy-load/push race right after a policy
-        apply) previously fell straight through to a fail-closed `evaluator_error` block — so a CLEAN, well-formed
-        input could be recorded as `evaluator_error` and mistaken for a real policy decision. We now retry ONCE
-        (server mode re-pushes the module on the second attempt), so a transient error self-heals and a clean
+        A TRANSIENT OPA failure (e.g. the server-mode module lazy-load/push race right after a policy
+        apply) must not fall straight through to a fail-closed `evaluator_error` block — a CLEAN, well-formed
+        input would then be recorded as `evaluator_error` and mistaken for a real policy decision. So this retries
+        ONCE (server mode re-pushes the module on the second attempt), so a transient error self-heals and a clean
         input never yields `evaluator_error`. Only a PERSISTENT engine error stays fail-closed, and it is counted
         + logged distinctly so it is visible as an engine-health signal, never confused with a policy rule. The
         retry runs ONLY on the error path, so the happy path keeps its latency."""
@@ -813,7 +813,7 @@ class OPAEvaluator:
         for attempt in (1, 2):
             try:
                 input_doc = self._build_input(event, trust_result)
-                # F-28: gated AND masked — raw tool_params never logged (was an ungated INFO leak of SSN/PAN/PHI).
+                # Gated AND masked — raw tool_params never logged, so SSN/PAN/PHI cannot leak to an INFO line.
                 if settings.debug_opa_logging and attempt == 1:
                     log.info("nrvq.eval.opa_input", input_doc=str(self._redacted_input(input_doc))[:500],
                              code="NRVQ-ENG-DEBUG-INPUT")
@@ -863,7 +863,7 @@ class OPAEvaluator:
             return []
         namespace = event.agent_identity.namespace
         agent_class = event.agent_identity.agent_class or ""
-        # FIX-1: the console's global picker sends namespace="all", which is NOT a real caller namespace (a
+        # The console's global picker sends namespace="all", which is NOT a real caller namespace (a
         # real agent always carries a concrete one). Resolve it to the UNION of every namespace that actually
         # holds a policy for this class — the same union the asset/attack graphs use — so /evaluate and
         # /policies/effective report the real winning layer (e.g. deny_shell_execution) instead of a misleading
@@ -873,7 +873,7 @@ class OPAEvaluator:
         candidates = []
 
         async def _append_policy(target_namespace: str, target_agent_class: str) -> None:
-            # FIX-H6-2: this helper is used ONLY for base/floor lookups (the caller's own class, __baseline__,
+            # This helper is used ONLY for base/floor lookups (the caller's own class, __baseline__,
             # namespace/workload tiers) — it NEVER tags "overlay": True. Overlay-ness must come from provenance
             # (where a candidate was constructed), never from a string-suffix match on the key, so a real
             # agent_class that happens to end in a reserved suffix (e.g. "...__remediation__") can never be
@@ -890,10 +890,10 @@ class OPAEvaluator:
         await _append_policy(namespace, agent_class)
         await _append_policy(namespace, "__baseline__")
         await _append_policy("__cluster__", "__baseline__")
-        # H3: the catalog advertises WORKLOAD and NAMESPACE tiers (resolve_policy_key mints
-        # `deployment:<name>` / `namespace:<ns>` keys), but they were never collected — advertised,
-        # authored, versioned, yet never enforced. Collect them here (in-memory-only, additive: zero
-        # hot-path cost when absent, and priority resolution still picks the winner):
+        # The catalog advertises WORKLOAD and NAMESPACE tiers (resolve_policy_key mints
+        # `deployment:<name>` / `namespace:<ns>` keys); collect them here so they are enforced, not just
+        # advertised (in-memory-only, additive: zero hot-path cost when absent, and priority resolution
+        # still picks the winner):
         #   - namespace tier applies to EVERY call in the namespace (like a ns-scoped baseline);
         #   - workload tier applies only when the caller identifies its workload (never guessed).
         ns_tier_key = f"{namespace}:namespace:{namespace}"
@@ -906,23 +906,23 @@ class OPAEvaluator:
             if wl_key in self._loader._policies:
                 entry = self._loader._policies[wl_key]
                 candidates.append({"key": wl_key, "rego": entry["rego"], "priority": entry["priority"]})
-        # F047: additive sector-pack candidate. In-memory ONLY (no load_from_db) so it costs nothing
+        # Additive sector-pack candidate. In-memory ONLY (no load_from_db) so it costs nothing
         # on the hot path for namespaces with no pack enabled — and is simply absent by default, so the
         # single-cluster path / attack namespaces are unchanged unless a pack is materialized here.
-        # FIX-H6-2: every overlay appended below is tagged "overlay": True AT CONSTRUCTION — this is the sole
+        # Every overlay appended below is tagged "overlay": True AT CONSTRUCTION — this is the sole
         # source of overlay-ness the resolver relies on (see _resolve_with_packs). Never derive it later from
         # the key string, which is ambiguous whenever a real agent_class collides with a reserved suffix.
         pack_key = f"{namespace}:__pack__"
         if pack_key in self._loader._policies:
             entry = self._loader._policies[pack_key]
             candidates.append({"key": pack_key, "rego": entry["rego"], "priority": entry["priority"], "overlay": True})
-        # F-14: opt-in per-namespace tool allowlist guardrail. Same additive/in-memory-only discipline as
+        # Opt-in per-namespace tool allowlist guardrail. Same additive/in-memory-only discipline as
         # __pack__: absent by default (zero hot-path cost, single-cluster/attacks unchanged) and tighten-only.
         guardrail_key = f"{namespace}:__guardrail__"
         if guardrail_key in self._loader._policies:
             entry = self._loader._policies[guardrail_key]
             candidates.append({"key": guardrail_key, "rego": entry["rego"], "priority": entry["priority"], "overlay": True})
-        # F-54: per-namespace sector-pack OVERRIDE — an operator-authored tighten-only overlay that customizes
+        # Per-namespace sector-pack OVERRIDE — an operator-authored tighten-only overlay that customizes
         # the pack (e.g. add a stricter block). Same additive discipline: absent by default, tighten-only, never
         # weakens a pack's block. Revertable by deleting the (ns,__pack_override__) policy.
         override_key = f"{namespace}:__pack_override__"
@@ -933,18 +933,18 @@ class OPAEvaluator:
         # RELAX a pack's added restriction (unlike __pack_override__ which is tighten-only). Same additive/in-memory
         # discipline: absent by default (zero hot-path cost, single-cluster/attacks unchanged). The base comprehensive
         # policy is still a hard floor (_resolve_with_packs), so a weaken can never drop below the org baseline.
-        # H6: the weaken exception is scoped to the PACK family ONLY (see _resolve_overlay) — it can never relax
+        # The weaken exception is scoped to the PACK family ONLY (see _resolve_overlay) — it can never relax
         # a __guardrail__ or a *__remediation__ overlay, which are hard tighten-only.
         weaken_key = f"{namespace}:__pack_weaken__"
         if weaken_key in self._loader._policies:
             entry = self._loader._policies[weaken_key]
             candidates.append({"key": weaken_key, "rego": entry["rego"], "priority": entry["priority"], "overlay": True})
-        # COMP-GEN-01 fix: per-CLASS compliance remediation overlay — a "Generate enforcing policy" draft for
+        # Per-CLASS compliance remediation overlay — a "Generate enforcing policy" draft for
         # a compliance gap technique is control-specific and additive (it must only ADD a block for this one
         # class, never REPLACE the class's existing comprehensive policy). It is reviewed+applied to the
         # dedicated key `(ns, "<agent_class>__remediation__")` — never to the base `(ns, agent_class)` key —
         # so the base policy stays byte-identical. Same additive/in-memory-only discipline as __pack__/
-        # __guardrail__: absent by default, zero hot-path cost, tighten-only via _resolve_with_packs — and (H6)
+        # __guardrail__: absent by default, zero hot-path cost, tighten-only via _resolve_with_packs — and
         # HARD tighten-only: a __pack_weaken__ overlay can never relax this one.
         if agent_class:
             remediation_key = f"{namespace}:{agent_class}__remediation__"
@@ -956,7 +956,7 @@ class OPAEvaluator:
         return candidates
 
     async def _collect_candidates_union(self, agent_class: str) -> list[dict]:
-        """FIX-1 union resolver for the console's namespace=all picker. Collects the class policy + baseline +
+        """Union resolver for the console's namespace=all picker. Collects the class policy + baseline +
         the additive overlays for EVERY namespace that actually holds a policy for this class, plus the single
         cluster baseline. Mirrors the concrete-namespace collection above so `_resolve_with_packs` yields the
         real winning rule (e.g. deny_shell_execution), never no_policy_loaded when a policy IS loaded. Overlays
@@ -994,7 +994,7 @@ class OPAEvaluator:
             await _append_policy(ns, "__baseline__")
             for overlay in ("__pack__", "__guardrail__", "__pack_override__", "__pack_weaken__"):
                 _append_overlay(f"{ns}:{overlay}")
-            # COMP-GEN-01 fix: mirror the per-class remediation overlay lookup from _collect_candidates for
+            # Mirror the per-class remediation overlay lookup from _collect_candidates for
             # the union resolver (console's namespace="all" picker) — same additive/in-memory-only, tighten-only.
             if agent_class:
                 _append_overlay(f"{ns}:{agent_class}__remediation__")
@@ -1002,14 +1002,14 @@ class OPAEvaluator:
         return candidates
 
     def _resolve_with_packs(self, results: list[dict]) -> dict:
-        """F047/F-14: sector packs (:__pack__) and the opt-in tool-allowlist guardrail (:__guardrail__) are
+        """Sector packs (:__pack__) and the opt-in tool-allowlist guardrail (:__guardrail__) are
         ADDITIVE-ONLY overlays — they can only TIGHTEN the decision (block < escalate < audit < allow), never
         loosen it, regardless of priority. We resolve the non-overlay candidates normally, then let the most
         restrictive overlay win only if it is stricter than the base. This makes an overlay's block/escalate
         enforce over a permissive baseline AND prevents an overlay escalate/allow from ever weakening a
-        stricter policy (the F-07 trap).
+        stricter policy.
 
-        FIX-H6-2: overlay-ness is read from the "overlay" PROVENANCE FLAG each candidate was tagged with at
+        Overlay-ness is read from the "overlay" PROVENANCE FLAG each candidate was tagged with at
         construction (_collect_candidates/_collect_candidates_union), never re-derived from the key string. A
         real agent_class whose own base policy happens to end in a reserved suffix (e.g. "...__remediation__")
         is therefore never misclassified as an overlay and always keeps its priority-based precedence."""
@@ -1030,8 +1030,8 @@ class OPAEvaluator:
     def _is_overlay(key: str) -> bool:
         """Key-suffix heuristic retained for callers that only have a key string (e.g. the console's
         /policies/effective display labeling) and cannot carry the "overlay" provenance flag. Overlay candidates:
-        sector packs, the F-14 allowlist guardrail, the F-54 tighten-only override, the fleet-mgmt admin pack
-        WEAKEN overlay, and — COMP-GEN-01 fix — a per-class compliance remediation overlay (any class segment
+        sector packs, the allowlist guardrail, the tighten-only override, the fleet-mgmt admin pack
+        WEAKEN overlay, and a per-class compliance remediation overlay (any class segment
         ending `__remediation__`, e.g. "ns:report-gen__remediation__"). The remediation suffix is dynamic (one
         overlay key per real class, unlike the fixed namespace-wide overlay names), so it's matched by suffix
         rather than an exact `:__remediation__` literal — the `__remediation__` double-underscore suffix is a
@@ -1108,14 +1108,14 @@ class OPAEvaluator:
         log.warning("nrvq.engine.fallback", event_id=event.event_id, mode=mode, code="NRVQ-ENG-2003")
         return PolicyDecision(
             decision=mode,
-            rule_id="evaluator_fallback",  # F-24: name the fail-closed block (was empty -> block/"" under load)
+            rule_id="evaluator_fallback",  # name the fail-closed block so it is never left empty
             reason=f"Evaluation failed, fallback={mode}",
             latency_ms=round(elapsed_ms, 2),
             event_id=event.event_id,
         )
 
     def _invalid_identity_decision(self, event: ToolCallEvent, elapsed_ms: float) -> PolicyDecision:
-        """F-11: named fail-closed decision for an invalid SPIFFE identity (SIEM can alert on the spoof class)."""
+        """Named fail-closed decision for an invalid SPIFFE identity (SIEM can alert on the spoof class)."""
         return PolicyDecision(
             decision="block",
             rule_id="invalid_spiffe_identity",
@@ -1147,8 +1147,8 @@ class OPAEvaluator:
         log.info("nrvq.engine.policy_loaded", key=key, code="NRVQ-ENG-2005")
 
     def unload_policy(self, namespace: str, agent_class: str) -> None:
-        """F-52: remove a policy from the in-memory index (copy-on-write) so a deleted/retracted policy stops
-        being evaluated — the counterpart to load_policy (delete previously left it loaded)."""
+        """Remove a policy from the in-memory index (copy-on-write) so a deleted/retracted policy stops
+        being evaluated — the counterpart to load_policy."""
         key = f"{namespace}:{agent_class}"
         if key in self._policies:
             self._policies = {k: v for k, v in self._policies.items() if k != key}
@@ -1157,10 +1157,10 @@ class OPAEvaluator:
     def reload_policy(self, namespace: str, agent_class: str, rego_source: str, priority: int | None = None) -> None:
         """Hot-reload a single policy without restarting.
 
-        M5: use COPY-ON-WRITE (atomic dict swap) like load_policy — the previous in-place mutation of
-        self._policies[key] risked a torn read for a concurrent candidate iteration (the phased-context
-        mutation class this branch targets). PRESERVE the existing priority (was reset to 100 on the miss
-        path, silently re-ordering the layer stack); an explicit `priority` overrides when the caller has it.
+        Use COPY-ON-WRITE (atomic dict swap) like load_policy — an in-place mutation of
+        self._policies[key] would risk a torn read for a concurrent candidate iteration. PRESERVE the
+        existing priority so the layer stack is not silently re-ordered; an explicit `priority` overrides
+        when the caller has it.
         """
         key = f"{namespace}:{agent_class}"
         package_name = self._extract_package_name(rego_source)
@@ -1188,7 +1188,7 @@ class OPAEvaluator:
 
     async def _emit_audit(self, decision: PolicyDecision) -> None:
         """Emit asynchronous audit event without blocking caller path."""
-        # Minimal non-blocking emission until dedicated pipeline integration (F014).
+        # Minimal non-blocking emission until dedicated pipeline integration.
         log.info(
             "nrvq.engine.audit_decision",
             event_id=decision.event_id,
@@ -1213,14 +1213,14 @@ class OPAEvaluator:
             await asyncio.gather(*self._audit_tasks, return_exceptions=True)
 
     async def _is_rate_limited(self, spiffe_id: str, limit: int | None = None) -> bool:
-        """Check whether rate limit is exceeded for the current window. CFG-SETTINGS-INERT-01: `limit` is the caller
+        """Check whether rate limit is exceeded for the current window. `limit` is the caller
         namespace's per-ns ceiling (already global-defaulted by _resolve_posture); None keeps the global default."""
         ceiling = int(limit) if limit is not None else settings.evaluator_rate_limit_per_window
         count = await self._cache.incr_call_count(spiffe_id, settings.evaluator_rate_limit_window_s)
         return count > ceiling
 
     async def _rate_limit_decision(self, event: ToolCallEvent, start: float, limit: int | None = None) -> PolicyDecision:
-        """Build and apply block decision when cached allow exceeds rate limit. CFG-SETTINGS-INERT-01: the reason
+        """Build and apply block decision when cached allow exceeds rate limit. The reason
         names the ACTUAL enforced ceiling (per-ns when overridden) so the audit record is not misleading."""
         elapsed_ms = (time.monotonic() - start) * 1000
         ceiling = int(limit) if limit is not None else settings.evaluator_rate_limit_per_window

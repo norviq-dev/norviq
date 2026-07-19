@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SEC-5 drift guard: the inlined "strict" baseline preset (norviq.presets.strict) must agree with the
+# Drift guard: the inlined "strict" baseline preset (norviq.presets.strict) must agree with the
 # canonical comprehensive policy (norviq.strict) on the content-threat corpus. If comprehensive.rego is
 # edited but the preset is not regenerated, this test fails. Run:
 #   opa test --v0-compatible comprehensive.rego webhook/presets/strict.rego webhook/presets/strict_parity_test.rego
@@ -50,10 +50,9 @@ test_baseline_allows_benign {
     }
 }
 
-# DEF-016: the strict baseline must block RENAMED destructive tools (wipe_/purge_/erase_) to reach
-# 7-verb parity with comprehensive.rego:207-211 destructive_verb_tool. Pre-fix the baseline only
-# covered delete_/drop_/truncate_/destroy_, so these fell through to ALLOW on the DEFAULT
-# webhook-enforced path. FAIL-ON-BUG: fails against the pre-fix strict.rego, passes after the fix.
+# The strict baseline must block RENAMED destructive tools (wipe_/purge_/erase_) to reach
+# 7-verb parity with comprehensive.rego:207-211 destructive_verb_tool — otherwise a renamed
+# destructive tool falls through to ALLOW on the DEFAULT webhook-enforced path.
 _renamed_destructive := [
     {"tool_name": "wipe_table", "tool_params": {"t": "orders"}},
     {"tool_name": "purge_db", "tool_params": {"scope": "all"}},
@@ -72,9 +71,9 @@ test_baseline_matches_comprehensive_on_renamed_destructive {
     }
 }
 
-# DEF-015: a secret in a param VALUE or KEY sent to ANY egress-verb sink (not just the 3 named
-# external_tools) must block on the enforced baseline. FAIL-ON-BUG against the pre-fix strict.rego,
-# which only covered send_email/post_webhook/upload_file and let s3_put/http_post/… exfiltrate freely.
+# A secret in a param VALUE or KEY sent to ANY egress-verb sink (not just the 3 named
+# external_tools) must block on the enforced baseline, so sinks like s3_put/http_post cannot
+# exfiltrate freely.
 _egress_secret_leak := [
     {"tool_name": "s3_put", "tool_params": {"body": "api_key=sk-livedeadbeef1234"}},
     {"tool_name": "http_post", "tool_params": {"body": "password=Hunter2Hunter2"}},
@@ -94,10 +93,9 @@ test_baseline_matches_comprehensive_on_egress_leak {
     }
 }
 
-# DEF-005: an oversized/padded payload must NOT skip base64 decode detection. base64("rm -rf /") buried
-# under ~9KB of filler exceeds the pre-fix strict.rego 8192-byte gate (which SKIPPED decode entirely →
-# ALLOW) but not comprehensive.rego's larger gate — so pre-fix the two DISAGREE (parity broken) and the
-# preset leaks. Post-fix both bound the WORK (candidate cap) not the input size, so both decode + block.
+# An oversized/padded payload must NOT skip base64 decode detection. base64("rm -rf /") buried
+# under ~9KB of filler must still decode + block and stay in parity with comprehensive.rego —
+# both bound the WORK (candidate cap) not the input size.
 _pad9k := concat("", [x | numbers.range(1, 900)[_]; x := "AAAAAAAAAA"])
 _padded_b64 := {"tool_name": "search_kb", "tool_params": {"cmd": "cm0gLXJmIC8=", "pad": _pad9k}}
 

@@ -36,7 +36,7 @@ class _StubLoader:
 def _client_with_policies(policies: dict[str, dict]) -> TestClient:
     app = create_app()
     app.state.loader = _StubLoader(policies)
-    # list_policies now requires auth (A1); inject an admin user via dependency override.
+    # list_policies now requires auth; inject an admin user via dependency override.
     app.dependency_overrides[get_current_user] = lambda: {"role": "admin", "namespace": "default"}
     return TestClient(app)
 
@@ -88,8 +88,8 @@ class _VersionLoader:
 
 
 def test_versions_endpoint_returns_per_version_rego() -> None:
-    """MUT-VERSION: each version row carries its OWN rego_source so the console can inspect a
-    historical version read-only (previously dropped — 'Load in Editor' showed current for every row)."""
+    """Each version row carries its OWN rego_source so the console can inspect a
+    historical version read-only."""
     app = create_app()
     app.state.loader = _VersionLoader(
         [

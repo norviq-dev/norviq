@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Fleet hub API tests (F045): heartbeat/rollup ingest, aggregated reads, cluster-scope RBAC.
+"""Fleet hub API tests: heartbeat/rollup ingest, aggregated reads, cluster-scope RBAC.
 
 Uses the bare-TestClient + dependency_overrides pattern from tests/api/test_api.py (lifespan is not
 triggered, so the real fleet DB is never initialized); fleet_get_session is overridden with a fake."""
@@ -138,7 +138,7 @@ def test_clusters_status_and_scope() -> None:
         out = c.get("/api/v1/fleet/clusters", headers=_headers(role="admin")).json()
         by = {x["id"]: x["status"] for x in out}
         assert by == {"cluster-a": "healthy", "cluster-b": "stale"}
-        # F-69: console_url flows through to the console (drives the deep-link); absent -> "".
+        # console_url flows through to the console (drives the deep-link); absent -> "".
         urls = {x["id"]: x["console_url"] for x in out}
         assert urls == {"cluster-a": "https://a.console", "cluster-b": ""}
     finally:
@@ -146,7 +146,7 @@ def test_clusters_status_and_scope() -> None:
 
 
 def test_heartbeat_accepts_console_url() -> None:
-    # F-69: a spoke advertises its own console URL on heartbeat; the hub upserts it onto the Cluster row.
+    # A spoke advertises its own console URL on heartbeat; the hub upserts it onto the Cluster row.
     s = FakeFleetSession()
     c = _client(s)
     try:
@@ -160,7 +160,7 @@ def test_heartbeat_accepts_console_url() -> None:
 
 
 def test_heartbeat_console_url_rejects_non_http_scheme() -> None:
-    # R1 (P1): a spoke-reported console_url with a non-http(s) scheme (stored-XSS vector) is blanked on write.
+    # A spoke-reported console_url with a non-http(s) scheme (stored-XSS vector) is blanked on write.
     from norviq.fleet.schemas import HeartbeatBody
 
     assert HeartbeatBody(console_url="javascript:alert(1)").console_url == ""
@@ -201,7 +201,7 @@ class _ClaimSession:
 
 
 def test_claim_join_token_single_use_is_atomic() -> None:
-    # R3 (P2): the second claim of the same jti loses the atomic conditional UPDATE -> 409 (no TOCTOU double-claim).
+    # The second claim of the same jti loses the atomic conditional UPDATE -> 409 (no TOCTOU double-claim).
     s = _ClaimSession()
     c = _client(s)
     try:
@@ -215,7 +215,7 @@ def test_claim_join_token_single_use_is_atomic() -> None:
 
 
 def test_remove_cluster_deletes_used_join_tokens() -> None:
-    # R4 (P3): removing a cluster also deletes its UsedJoinToken rows (no stale single-use records left behind).
+    # Removing a cluster also deletes its UsedJoinToken rows (no stale single-use records left behind).
     s = FakeFleetSession(results=[[SimpleNamespace(id="cluster-a")]])
     c = _client(s)
     try:

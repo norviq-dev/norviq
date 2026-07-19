@@ -1,38 +1,33 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- Copyright 2026 Norviq Contributors -->
 
-# Namespace scoping convention
+# Namespace scoping & tenant isolation
 
-All namespace-scoped **list endpoints default to `namespace="default"`** when no param is given —
-**fail-safe**: a forgotten/omitted param yields *incomplete* data, never an accidental cross-tenant
-leak. Cross-namespace **admin** views ("show all namespaces") require an **explicit `namespace=all`
-opt-in gated by RBAC** (auth batch) — they are never the default.
+Norviq's read APIs (Audit, Agents, MITRE/compliance coverage, Asset & Attack graph, Policies) are
+namespace-scoped and enforce tenant isolation at the **authorization** layer — not merely by convention.
 
-```python
-namespace: str = Query("default")          # default-to-"default" (fail-safe)
-# ... filter rows where the row's namespace == namespace
-```
+## How a request is scoped
 
-## Status by endpoint
+Every scoped endpoint resolves the effective namespace through a single helper
+(`read_namespace` / `scoped_namespace` in `norviq/api/auth.py`), which pins the caller to what its
+role and JWT namespace claim allow:
 
-| Endpoint | Convention | Notes |
-|----------|-----------|-------|
-| `/attack-paths` | `Query("default")` ✅ | filters `WHERE namespace = :ns` (data backfilled from asset_graph) |
-| `/agents` | `Query("default")` ✅ | namespace parsed from the spiffe_id `.../ns/{ns}/sa/...` segment |
-| `/policies` | `Query("default")` ✅ | filters on the `{namespace}:{agent_class}` loader key prefix |
-| `/asset-graph` | `Query("default")` ✅ | filters by `asset_graph.namespace` |
-| `/audit/*` | `Query(None)` → **all** ⚠️ | **known exception to align** — returns all namespaces when the param is omitted; safe only because the UI always passes namespace. Tracked in [backlog](../backlog.md). |
+- **Admin** (or a token whose namespace claim is `*`) may read any namespace; a request for "all
+  namespaces" (`namespace=all`, or an omitted param) returns the whole cluster.
+- **A tenant-scoped token** is pinned to the namespace in its claim. A request for a different
+  namespace — or for `namespace=all` — resolves to its own namespace; it can never read another
+  tenant's data through the query param.
+- **A non-admin token with no namespace claim** (the least-privilege floor) receives **403**, not data.
+
+So an omitted or forgotten `namespace` param is fail-safe: it never widens a caller's reach beyond
+what its role and claim already permit.
 
 ## Two layers — don't conflate them
 
-- **Data scoping** (this convention): honor the `namespace` param; default-to-`default`. Shipped for
-  attack-paths/agents/policies/asset-graph.
-- **Authorization** (auth batch): enforce that the *caller* may access the requested namespace
-  (bind to JWT/tenant claims). **Not yet enforced** — any valid token can request any namespace.
-  `namespace=all` admin views must land here, behind RBAC.
+- **Data scoping** — the `namespace` query param selects which tenant's rows to return.
+- **Authorization** — `read_namespace` / `scoped_namespace` enforce that the *caller* may see the
+  requested namespace, bound to the JWT role + namespace claim. Cross-namespace ("all") views are
+  admin-only.
 
-## Header widgets
-
-The header inbox/global-search call the no-param list functions, so they are now
-**`default`-namespace-scoped** (tenant-safe), not a global view. A true cross-namespace admin
-search is the `namespace=all` + RBAC work in the auth batch.
+The header inbox and global search are scoped through the same helper, so they are tenant-safe
+rather than a global view.

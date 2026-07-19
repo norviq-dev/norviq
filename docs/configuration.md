@@ -8,7 +8,6 @@ Two ready-made overlays ship alongside the defaults:
 
 - `helm/norviq/values-prod.yaml` — multi-node production posture (HA replicas, autoscaling, spread,
   TLS-required DB). Not live-validated on a single-node cluster; template-validated only.
-- `helm/norviq/values-aks-dev.yaml` — an AKS dev overlay.
 
 Apply an overlay with `helm install norviq ./helm/norviq -n norviq -f helm/norviq/values-prod.yaml`
 (or `--set` individual keys, which always wins over a `-f` file for the same key).
@@ -202,7 +201,7 @@ setting.
 
 ## Multi-cluster fleet (`fleet.*`)
 
-MVP P1, read-only. Everything is off by default — a single-cluster install renders **zero** fleet
+Read-only. Everything is off by default — a single-cluster install renders **zero** fleet
 resources and behaves exactly as a standalone install.
 
 **Spoke side** (`fleet.enabled: false`): runs an in-process relay that pushes agent/audit rollups

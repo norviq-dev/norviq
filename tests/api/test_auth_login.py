@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""LOGIN-2: local username/password login + forced first-login change.
+"""Local username/password login + forced first-login change.
 
 Covers: successful login (short-TTL token + must_change/default-password signals), wrong-password and
 unknown-user both returning the SAME generic 401, rate-limit lockout (429 after N failures), the
@@ -50,7 +50,7 @@ class _FakeSession:
 
 
 class _FakeCache:
-    """Windowed per-key counter (INCR/peek/reset) matching the RedisCache surface LOGIN-2 uses."""
+    """Windowed per-key counter (INCR/peek/reset) matching the RedisCache surface the login path uses."""
 
     def __init__(self) -> None:
         self.counts: dict[str, int] = {}
@@ -187,7 +187,7 @@ def test_change_password_success_sets_new_hash_and_clears_must_change() -> None:
     assert resp.status_code == 200 and resp.json() == {"changed": True, "must_change": False}
     assert row.must_change is False
     assert pw.verify_password("brand-new-passphrase", row.password_hash)  # new hash at rest
-    assert not pw.verify_password(_DEFAULT, row.password_hash)  # old password no longer works
+    assert not pw.verify_password(_DEFAULT, row.password_hash)  # old password is rejected
 
 
 def test_change_password_wrong_current_rejected() -> None:

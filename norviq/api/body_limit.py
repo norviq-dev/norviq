@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""PERF-1: request-body size limit middleware (pure ASGI).
+"""Request-body size limit middleware (pure ASGI).
 
 Rejects requests whose body exceeds ``settings.max_request_body_bytes`` with 413 BEFORE they reach the
 evaluator. This bounds the worst-case cost of the base64 fan-out (a pathological large payload was a ~40x
 eval-CPU amplifier) and generic memory abuse. Enforced on the declared Content-Length and, for chunked
 bodies with no length, on the actually-read size (early-reject once the accumulated bytes exceed the cap).
 
-REPORT-AUDEXPORT-01: this MUST be a pure ASGI middleware, NOT ``BaseHTTPMiddleware``. Starlette's
+This MUST be a pure ASGI middleware, NOT ``BaseHTTPMiddleware``. Starlette's
 ``BaseHTTPMiddleware`` runs the downstream response inside its own anyio task group and re-emits it; that
 is incompatible with a ``StreamingResponse`` (the request-body re-injection races the response stream and
 Starlette raises ``RuntimeError: Unexpected message received: http.request``). The only streaming endpoint

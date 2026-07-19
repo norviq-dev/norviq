@@ -52,7 +52,7 @@ class _FakeResolver:
 
 @pytest.mark.asyncio
 async def test_sidecar_start_binds_loader_and_hydrates(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    # SIDE-2: this exercises the EMBEDDED path (local loader/cache); pin the mode since proxy is now default.
+    # This exercises the EMBEDDED path (local loader/cache); pin the mode since proxy is the default.
     monkeypatch.setattr("norviq.sidecar.proxy.settings.sidecar_mode", "embedded")
     fake_cache = _FakeCache()
 
@@ -95,7 +95,7 @@ async def test_sidecar_start_binds_loader_and_hydrates(monkeypatch: pytest.Monke
 
 @pytest.mark.asyncio
 async def test_sidecar_start_proxy_mode_uses_remote_evaluator(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    # SIDE-2 default: proxy mode wires a RemoteEvaluator and NO local Redis/loader/emitter.
+    # Proxy mode (the default) wires a RemoteEvaluator and NO local Redis/loader/emitter.
     from norviq.sidecar.remote_evaluator import RemoteEvaluator
 
     monkeypatch.setattr("norviq.sidecar.proxy.settings.sidecar_mode", "proxy")

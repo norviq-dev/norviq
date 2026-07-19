@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// fleet-mgmt Stage 3 — centralize MONITOR-class pages. Unlike <ClusterScoped> (which always deep-links a remote
+// Centralize MONITOR-class pages. Unlike <ClusterScoped> (which always deep-links a remote
 // cluster), this wrapper renders the page from HUB-RELAYED data for a remote cluster — but only when that data is
-// FRESH and the spoke is not residency-restricted. Otherwise it gracefully falls back to the F-69 deep-link, so the
+// FRESH and the spoke is not residency-restricted. Otherwise it gracefully falls back to the deep-link, so the
 // hub never shows stale/empty data as if it were live. Local selection renders the real page unchanged.
 
 import { ReactNode, useEffect, useState } from "react";

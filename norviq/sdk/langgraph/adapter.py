@@ -33,7 +33,7 @@ def _tool_call_field(tool_call: Any, key: str, default: Any) -> Any:
 def _apply_output_dlp(result: Any) -> None:
     """Best-effort output DLP on each executed tool's ToolMessage; enforcement above already ran.
 
-    F-22 (opt-in, default OFF): redact PAN/SSN in an allowed tool's string return before it
+    Opt-in, default OFF: redact PAN/SSN in an allowed tool's string return before it
     propagates. ToolNode returns ``{"messages": [ToolMessage, ...]}`` (or a bare list), each
     ToolMessage carrying the tool's string result in ``.content``; masked in place to mirror the
     other adapters. Disabled → exact passthrough (no hot-path or behavior change).

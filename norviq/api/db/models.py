@@ -56,8 +56,8 @@ class PolicyVersion(Base):
     rego_source: Mapped[str] = mapped_column(Text)
     saved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     saved_by: Mapped[str] = mapped_column(String(255), default="")
-    # M2/rollback fidelity: persist the priority + enforcement_mode AT this version, so a rollback AFTER a
-    # restart restores the exact posture (rehydrated versions used to default priority=100 / mode=block).
+    # Rollback fidelity: persist the priority + enforcement_mode AT this version, so a rollback AFTER a
+    # restart restores the exact posture.
     priority: Mapped[int] = mapped_column(Integer, default=100, server_default="100")
     enforcement_mode: Mapped[str] = mapped_column(String(20), default="block", server_default="block")
     __table_args__ = (UniqueConstraint("policy_id", "version", name="uq_policyver_id_ver"),)
@@ -89,7 +89,7 @@ class AgentRegistryEntry(Base):
 
 
 class FleetBundleState(Base):
-    """Spoke-side record of the last fleet policy bundle applied (F045 P2). Drives replay/rollback
+    """Spoke-side record of the last fleet policy bundle applied. Drives replay/rollback
     defense: the spoke rejects any bundle whose version <= last_applied_version. One row per cluster id."""
 
     __tablename__ = "fleet_bundle_state"
@@ -97,7 +97,7 @@ class FleetBundleState(Base):
     last_applied_version: Mapped[int] = mapped_column(Integer, default=0)
     applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     last_bundle_sha256: Mapped[str] = mapped_column(String(64), default="")
-    # F-52: JSON list of "namespace:agent_class" keys applied from the last bundle, so the next pull can
+    # JSON list of "namespace:agent_class" keys applied from the last bundle, so the next pull can
     # RECONCILE — delete spoke policies that have been retracted (dropped from the bundle). null = none yet.
     last_manifest: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -117,29 +117,29 @@ class FleetJoinState(Base):
 
 
 class NamespaceSettings(Base):
-    """Persisted per-namespace runtime preferences (F046) — overrides for the config defaults shown in
+    """Persisted per-namespace runtime preferences — overrides for the config defaults shown in
     the Settings page. One row per namespace; null columns fall back to the effective config value."""
 
     __tablename__ = "namespace_settings"
     namespace: Mapped[str] = mapped_column(String(255), primary_key=True)
     enforcement_mode: Mapped[str | None] = mapped_column(String(20), nullable=True)
     trust_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
-    # DEPRECATED/vestigial: never reached the engine (not in _ENGINE_POSTURE_FIELDS), so a per-ns value
-    # here was inert. The Settings knob + API surface were removed; the column is retained (nullable,
-    # no longer written) only to avoid a migration on existing rows. Do not resurrect without wiring it
-    # into the posture mirror + evaluator and proving the effect (T4).
+    # DEPRECATED/vestigial: this never reaches the engine (not in _ENGINE_POSTURE_FIELDS), so a per-ns
+    # value here is inert. It has no Settings knob or API surface; the column is retained (nullable,
+    # unwritten) only to avoid a migration on existing rows. Do not resurrect without wiring it into
+    # the posture mirror + evaluator and proving the effect.
     violation_penalty: Mapped[float | None] = mapped_column(Float, nullable=True)
     rate_limit: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # F047: org sector hint (advisory) — drives sector-pack suggestions in the console.
+    # Org sector hint (advisory) — drives sector-pack suggestions in the console.
     sector: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # F-51: apply governance — "enforce" (default) or "dry_run_only" (high-assurance: the API rejects policy applies
+    # Apply governance — "enforce" (default) or "dry_run_only" (high-assurance: the API rejects policy applies
     # for this namespace; dry-run + drafts still allowed). null falls back to "enforce".
     apply_mode: Mapped[str | None] = mapped_column(String(20), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
 
 class NamespacePack(Base):
-    """F047: a sector starter pack enabled for a namespace. The combined rego of a namespace's enabled
+    """A sector starter pack enabled for a namespace. The combined rego of a namespace's enabled
     packs is materialized as its (namespace, '__pack__') policy; this table is the source of truth for
     which packs are on. Default-OFF — no rows unless an admin enables a pack."""
 
@@ -151,7 +151,7 @@ class NamespacePack(Base):
 
 
 class ApiKey(Base):
-    """Issued API key (F046). Only the salted hash is stored — the secret is shown once at creation.
+    """Issued API key. Only the salted hash is stored — the secret is shown once at creation.
     Carries a role + namespace so a presented key authenticates as a scoped principal."""
 
     __tablename__ = "api_keys"
@@ -165,9 +165,8 @@ class ApiKey(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked: Mapped[bool] = mapped_column(default=False)
-    # RETENTION: NULL = never expires (keys issued before this column existed keep working — unchanged
-    # behavior). New keys default to now + api_key_default_ttl_days unless the creator overrides
-    # (0 = never). The auth resolver rejects an expired key exactly like a revoked one.
+    # RETENTION: NULL = never expires. New keys default to now + api_key_default_ttl_days unless the
+    # creator overrides (0 = never). The auth resolver rejects an expired key exactly like a revoked one.
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
@@ -188,7 +187,7 @@ class AuditLogEntry(Base):
     session_id: Mapped[str] = mapped_column(String(255), default="")
     trust_score: Mapped[float] = mapped_column(Float, default=0.0)
     latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
-    # OBS-2: decision source (sidecar / sidecar-http / sdk / redteam / ...) for audit attribution + UI filter.
+    # Decision source (sidecar / sidecar-http / sdk / redteam / ...) for audit attribution + UI filter.
     framework: Mapped[str] = mapped_column(String(32), default="", server_default="")
     timestamp_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True, default=_utcnow)
     payload: Mapped[dict[str, object] | None] = mapped_column(JSONB, nullable=True)
@@ -208,7 +207,7 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(255), unique=True)
     password_hash: Mapped[str] = mapped_column(String(512))
     role: Mapped[str] = mapped_column(String(50), default="viewer")
-    # LOGIN-2: force a password change on first login. The seeded admin starts True; /auth/change-password
+    # Force a password change on first login. The seeded admin starts True; /auth/change-password
     # clears it. Drives the forced change-password screen + the "default password in use" banner.
     must_change: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
@@ -239,11 +238,11 @@ class IntentDraft(Base):
     __tablename__ = "intent_drafts"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)  # the draft_id
     namespace: Mapped[str] = mapped_column(String(255))
-    # COMP-GEN-01 fix: for a compliance-remediation draft, ``agent_class`` is the PERSISTENCE target — the
+    # For a compliance-remediation draft, ``agent_class`` is the PERSISTENCE target — the
     # per-class overlay key ``"<real_class>__remediation__"`` the draft is applied to (never the base
     # ``<real_class>`` key; that would let "Review & Apply" destroy the class's existing comprehensive policy —
-    # the data-loss bug this fixes). For every other draft kind (Attack-Graph intent, capability-defend),
-    # ``agent_class`` is still the real class directly (unchanged).
+    # the data-loss bug this guard prevents). For every other draft kind (Attack-Graph intent, capability-defend),
+    # ``agent_class`` is still the real class directly.
     agent_class: Mapped[str] = mapped_column(String(255))
     # The REAL agent class a compliance-remediation draft affects, for UI display/traceability — distinct
     # from ``agent_class`` above once that becomes the compound overlay key. NULL for non-remediation drafts
@@ -259,7 +258,7 @@ class IntentDraft(Base):
     would_allow: Mapped[int] = mapped_column(Integer, default=0)
     created_by: Mapped[str] = mapped_column(String(255), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-    # F2: provenance for a compliance-generated draft — which framework + control it remediates (NULL for
+    # Provenance for a compliance-generated draft — which framework + control it remediates (NULL for
     # Attack-Graph intent drafts, which have no originating control). Makes the draft traceable in Policy Catalog.
     source_framework: Mapped[str | None] = mapped_column(String(32), nullable=True)
     source_control_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -326,7 +325,7 @@ class MitreCoverageSnapshot(Base):
     __table_args__ = (
         Index("idx_mitre_snap_ns_fw_kind", "namespace", "framework", "kind"),
         Index("idx_mitre_snap_ts", "timestamp_utc"),
-        # DEF-032: single-writer-per-hour for SNAPSHOTS — the structural backstop that makes the router's
+        # Single-writer-per-hour for SNAPSHOTS — the structural backstop that makes the router's
         # read-then-insert throttle safe under concurrent GETs (the router also takes a transaction-scoped
         # advisory lock keyed on the same tuple). It is a FUNCTIONAL partial-unique index on the UTC-hour of
         # timestamp_utc over the EXISTING columns (deliberately no new column: an added column would need an
@@ -343,12 +342,11 @@ class MitreCoverageSnapshot(Base):
 
 
 class RedTeamRun(Base):
-    """B2: a DURABLE record of one red-team suite run (feat/redteam-efficacy).
+    """A DURABLE record of one red-team suite run.
 
-    The router used to keep runs only in an in-process dict (``REPORTS``), so history vanished on every API
-    restart and nothing outside that process could read a past run. This persists each run — the full result
-    rows plus the computed efficacy roll-up (B3) — so the Red Team view has real history and Compliance/Overview
-    (F2) can read the "proven-blocking" evidence from the LAST run. Retention (B2) prunes to the most recent
+    This persists each run — the full result rows plus the computed efficacy roll-up — so the Red Team
+    view has real history that survives an API restart and Compliance/Overview can read the
+    "proven-blocking" evidence from the LAST run. Retention prunes to the most recent
     ``REDTEAM_RUN_RETENTION`` runs; nothing here ever influences enforcement (read-only evidence table)."""
 
     __tablename__ = "redteam_runs"
@@ -360,7 +358,7 @@ class RedTeamRun(Base):
     passed: Mapped[int] = mapped_column(Integer, default=0)
     failed: Mapped[int] = mapped_column(Integer, default=0)
     pass_rate: Mapped[float] = mapped_column(Float, default=0.0)
-    # D3: per-attack detail is DETAIL-PRUNED to NULL once a run ages out of the detail window (summary kept). The
+    # Per-attack detail is DETAIL-PRUNED to NULL once a run ages out of the detail window (summary kept). The
     # newest run per namespace is never pruned, so results/latest always returns full detail.
     results: Mapped[list | None] = mapped_column(JSONB, nullable=True)  # per-attack×class rows; NULL once pruned
     efficacy: Mapped[dict[str, object]] = mapped_column(JSONB)  # B3 roll-up (overall + per-technique/owasp) — SUMMARY

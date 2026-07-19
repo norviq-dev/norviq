@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Fleet hub control-plane app (F045). A SEPARATE FastAPI app over the dedicated fleet store; reuses
-the spoke's token validation (norviq.api.auth) but never imports the spoke DB. Read-only P1: cluster
+"""Fleet hub control-plane app. A SEPARATE FastAPI app over the dedicated fleet store; reuses
+the spoke's token validation (norviq.api.auth) but never imports the spoke DB. Read-only: cluster
 registry + heartbeat + agent/audit rollups + aggregated reads. Started as its own pod from the SAME
 api image with command `uvicorn norviq.fleet.main:app`."""
 

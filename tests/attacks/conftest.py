@@ -6,7 +6,6 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -16,8 +15,6 @@ import redis
 API_URL = os.getenv("NRVQ_API_URL", "http://127.0.0.1:8080")
 API_TOKEN = os.getenv("NRVQ_API_TOKEN", "")
 REDIS_URL = os.getenv("NRVQ_REDIS_URL", "redis://127.0.0.1:6379/0")
-REVIEWS_DIR = Path(".reviews")
-RESULTS_FILE = REVIEWS_DIR / "DAY8-attacks.md"
 
 # Default identity derived by evaluate() for namespace=default, class=customer-support.
 DEFAULT_SPIFFE = "spiffe://norviq/ns/default/sa/customer-support"
@@ -196,65 +193,3 @@ def low_trust_agent(redis_client):
         yield DEFAULT_SPIFFE
     finally:
         client.delete(hist_key, prof_key, class_key)
-
-
-ALL_RESULTS: list[dict[str, Any]] = []
-
-
-@pytest.fixture(autouse=True)
-def collect_result(request: pytest.FixtureRequest):
-    """Collect test outcomes to make a day report."""
-    yield
-    rep = getattr(request.node, "rep_call", None)
-    ALL_RESULTS.append(
-        {
-            "name": request.node.name,
-            "file": request.node.fspath.basename,
-            "passed": bool(rep and rep.passed),
-            "skipped": bool(rep and rep.skipped),
-            "failed": bool(rep and rep.failed),
-        }
-    )
-
-
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]):
-    outcome = yield
-    rep = outcome.get_result()
-    setattr(item, f"rep_{rep.when}", rep)
-
-
-def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    REVIEWS_DIR.mkdir(parents=True, exist_ok=True)
-    total = len(ALL_RESULTS)
-    passed = len([r for r in ALL_RESULTS if r["passed"]])
-    failed = len([r for r in ALL_RESULTS if r["failed"]])
-    skipped = len([r for r in ALL_RESULTS if r["skipped"]])
-    pass_rate = (passed / total * 100.0) if total else 0.0
-
-    lines = [
-        "# DAY8 Attack Simulation Results",
-        "",
-        f"- API URL: `{API_URL}`",
-        f"- Total: **{total}**",
-        f"- Passed: **{passed}**",
-        f"- Failed: **{failed}**",
-        f"- Skipped: **{skipped}**",
-        f"- Pass rate: **{pass_rate:.1f}%**",
-        "",
-        "## Test Outcomes",
-        "",
-    ]
-
-    for result in ALL_RESULTS:
-        status = "PASS" if result["passed"] else "FAIL" if result["failed"] else "SKIP"
-        lines.append(f"- `{status}` `{result['file']}` :: `{result['name']}`")
-
-    lines.append("")
-    lines.append(f"- pytest exit status: `{exitstatus}`")
-    try:
-        RESULTS_FILE.write_text("\n".join(lines), encoding="utf-8")
-    except PermissionError:
-        # When running with shell tee/pipe to the same report file, the handle
-        # can be temporarily locked by the parent process on Windows.
-        pass

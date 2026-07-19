@@ -18,7 +18,7 @@ export function apiUrl(path: string): string {
  * GETs authenticate exactly like POST/PUT/DELETE — without it, /api/v1/agents and other
  * auth-required GETs 401. Extra headers (e.g. Content-Type) are merged in.
  */
-/** Revoke the session server-side (AUTH-01), then clear the stored JWT and redirect home.
+/** Revoke the session server-side, then clear the stored JWT and redirect home.
  *  The revocation call is best-effort with a hard timeout: a dead or hung API must never delay or
  *  trap the client-side logout, and the raw fetch (not apiSend) avoids the 401 handler double-redirect. */
 export function logout(): void {
@@ -27,7 +27,7 @@ export function logout(): void {
     return;
   }
   const finish = (): void => {
-    clearSession(); // LOGIN-2: token (either storage) + the forced-change flag go together
+    clearSession(); // Token (either storage) + the forced-change flag go together
     window.location.href = "/";
   };
   const token = getToken();
@@ -62,10 +62,10 @@ export function wsUrl(path: string): string {
   return `${proto}//${window.location.host}${path}`;
 }
 
-/** LOGIN-1: a 401 means the session is invalid/expired — clear it and route to the login screen (never a
+/** A 401 means the session is invalid/expired — clear it and route to the login screen (never a
  *  silent failure or a blank console). OIDC users re-auth via the login screen's SSO button. */
 function handleUnauthorized(): void {
-  clearSession(); // LOGIN-2: the dead session's token + forced-change flag go together
+  clearSession(); // The dead session's token + forced-change flag go together
   if (window.location.pathname !== "/login") {
     window.location.assign("/login");
   }
@@ -84,11 +84,11 @@ export async function apiGet<T>(path: string): Promise<T> {
 }
 
 export async function apiSend<T>(path: string, method: "POST" | "PUT" | "DELETE", body?: unknown): Promise<T> {
-  // F-69 Stage 1: never send a cluster-scoped mutation to the LOCAL api while a REMOTE cluster is the active
+  // Never send a cluster-scoped mutation to the LOCAL api while a REMOTE cluster is the active
   // context — it would change the served cluster under a remote label. Refuse before the fetch (hard backstop;
   // the UI also routes remote pages to a deep-link, but this guarantees it even if a control slips through).
   if (blockedByRemoteCluster(method, path)) throw remoteMutationError();
-  // R2: declare the operator's intended target cluster so the SERVER can refuse a mutation aimed at another
+  // Declare the operator's intended target cluster so the SERVER can refuse a mutation aimed at another
   // cluster (X-Nrvq-Target-Cluster). The UI guard above already blocks remote mutations, so this header equals the
   // served cluster on any request that actually gets here — the server check is the backstop for non-SPA callers.
   const target = targetClusterHeader();
@@ -112,7 +112,7 @@ export async function apiSend<T>(path: string, method: "POST" | "PUT" | "DELETE"
 
 export type ClusterInfo = { cluster_id: string; cluster_name: string; namespaces: string[] };
 
-/** This deployment's live identity + the real namespaces observed in its data (F046). */
+/** This deployment's live identity + the real namespaces observed in its data. */
 export async function fetchClusterInfo(): Promise<ClusterInfo> {
   return apiGet<ClusterInfo>("/api/v1/cluster-info");
 }
@@ -123,10 +123,10 @@ export type RuntimeSettings = {
   trust_threshold: number;
   rate_limit: number;
   sector?: string | null;
-  apply_mode?: "enforce" | "dry_run_only"; // F-51: when dry_run_only the API rejects policy applies for this ns
+  apply_mode?: "enforce" | "dry_run_only"; // When dry_run_only the API rejects policy applies for this ns
 };
 
-/** Effective runtime settings (config defaults + persisted overrides) for a namespace (F046). */
+/** Effective runtime settings (config defaults + persisted overrides) for a namespace. */
 export async function fetchSettings(namespace?: string): Promise<RuntimeSettings> {
   const params = new URLSearchParams();
   if (namespace && namespace !== "all") params.set("namespace", namespace);
@@ -144,7 +144,7 @@ export async function saveSettings(
   return apiSend<RuntimeSettings>(`/api/v1/settings?${params.toString()}`, "PUT", body);
 }
 
-// --- F047 sector policy packs ---
+// --- Sector policy packs ---
 export type PolicyPack = {
   id: string;
   sector: string;
@@ -179,7 +179,7 @@ export async function disablePolicyPack(packId: string, namespace: string): Prom
   return apiSend<PackActionResult>(`/api/v1/policy-packs/${encodeURIComponent(packId)}/disable`, "POST", { namespace });
 }
 
-// F-54: view a pack's rego + author a per-namespace tighten-only override (revertable).
+// View a pack's rego + author a per-namespace tighten-only override (revertable).
 export async function fetchPackRego(packId: string): Promise<{ pack_id: string; rego: string }> {
   return apiGet(`/api/v1/policy-packs/${encodeURIComponent(packId)}/rego`);
 }
@@ -195,7 +195,7 @@ export async function revertPackOverride(namespace: string): Promise<{ namespace
   return apiSend(`/api/v1/policy-packs/override?namespace=${encodeURIComponent(namespace)}`, "DELETE", undefined);
 }
 
-// F-58: the effective policy stack governing a (namespace, agent_class) — derived from the real evaluator.
+// The effective policy stack governing a (namespace, agent_class) — derived from the real evaluator.
 export type EffectiveLayer = { scope: string; label: string; priority: number; overlay: boolean };
 export async function fetchEffectivePolicy(namespace: string, agentClass: string): Promise<{ namespace: string; agent_class: string; layers: EffectiveLayer[]; note?: string }> {
   return apiGet(`/api/v1/policies/effective?namespace=${encodeURIComponent(namespace)}&agent_class=${encodeURIComponent(agentClass)}`);
@@ -226,7 +226,7 @@ export async function fetchRetentionSettings(): Promise<RetentionSettings> {
 
 export type VersionInfo = { version: string; license: string };
 
-/** The single-source product version + license (F046). */
+/** The single-source product version + license. */
 export async function fetchVersion(): Promise<VersionInfo> {
   return apiGet<VersionInfo>("/api/v1/version");
 }
@@ -244,7 +244,7 @@ export type ApiKey = {
   expires_at?: string | null;
 };
 
-/** List issued API keys (no secrets); admin-only (F046). */
+/** List issued API keys (no secrets); admin-only. */
 export async function fetchApiKeys(): Promise<ApiKey[]> {
   return apiGet<ApiKey[]>("/api/v1/keys");
 }
@@ -265,7 +265,7 @@ export type RedteamResult = {
   attack_id: string;
   attack_name: string;
   category: string;
-  agent_class?: string; // F-44: the identity this scenario was evaluated against
+  agent_class?: string; // The identity this scenario was evaluated against
   namespace?: string;
   expected: string;
   actual: string;
@@ -280,7 +280,7 @@ export type RedteamResult = {
 export type RedteamReport = {
   run_id?: string;
   namespace?: string;
-  targets?: string[]; // F-44: the seeded agent classes the suite was run against
+  targets?: string[]; // The seeded agent classes the suite was run against
   total: number;
   passed: number;
   failed: number;
@@ -288,12 +288,12 @@ export type RedteamReport = {
   results: RedteamResult[];
 };
 
-/** The red-team attack catalog (F017). */
+/** The red-team attack catalog. */
 export async function fetchRedteamCatalog(): Promise<RedteamAttack[]> {
   return apiGet<RedteamAttack[]>("/api/v1/redteam/catalog");
 }
 
-/** F-44: the real agent classes seeded in a namespace, for the target selector. */
+/** The real agent classes seeded in a namespace, for the target selector. */
 export async function fetchRedteamTargets(namespace?: string): Promise<{ namespace: string; targets: string[] }> {
   const q = namespace && namespace !== "all" ? `?namespace=${encodeURIComponent(namespace)}` : "";
   return apiGet<{ namespace: string; targets: string[] }>(`/api/v1/redteam/targets${q}`);
@@ -308,7 +308,7 @@ export async function runRedteamSuite(targetAgent?: string, targetNamespace?: st
   return apiSend<RedteamReport>(`/api/v1/redteam/suite${query ? `?${query}` : ""}`, "POST");
 }
 
-// B3/F1/F2 — efficacy roll-up + durable run history.
+// Efficacy roll-up + durable run history.
 export type RedteamEfficacyBucket = { total: number; caught: number; got_through: number; proven_blocking_pct: number };
 export type RedteamTechRow = RedteamEfficacyBucket & { technique_id: string; technique_name: string };
 export type RedteamOwaspRow = RedteamEfficacyBucket & { control_id: string; control_name: string };
@@ -352,14 +352,14 @@ export type RedteamRunSummary = {
   got_through: number;
 };
 
-/** B2/B3/F2: the most recent DURABLE run (results + efficacy), or {has_run:false} before the first run.
- *  STALE-4: pass a concrete namespace to scope the efficacy to the selected scope (omit/"all" = cluster-wide). */
+/** The most recent DURABLE run (results + efficacy), or {has_run:false} before the first run.
+ *  Pass a concrete namespace to scope the efficacy to the selected scope (omit/"all" = cluster-wide). */
 export async function fetchRedteamLatest(namespace?: string): Promise<RedteamLatest> {
   const q = namespace && namespace !== "all" ? `?namespace=${encodeURIComponent(namespace)}` : "";
   return apiGet<RedteamLatest>(`/api/v1/redteam/results/latest${q}`);
 }
 
-/** B2/F1: recent run history (summaries only). STALE-4: optional namespace scope. */
+/** Recent run history (summaries only). Optional namespace scope. */
 export async function fetchRedteamHistory(limit = 15, namespace?: string): Promise<{ runs: RedteamRunSummary[]; total: number }> {
   const nsq = namespace && namespace !== "all" ? `&namespace=${encodeURIComponent(namespace)}` : "";
   return apiGet<{ runs: RedteamRunSummary[]; total: number }>(`/api/v1/redteam/results?limit=${limit}${nsq}`);
@@ -402,7 +402,7 @@ export async function fetchAuditRecords(filters: {
   namespace?: string;
   decision?: string;
   tool_name?: string;
-  agent?: string; // F-53: SPIFFE/agent-id substring, filtered server-side over the range
+  agent?: string; // SPIFFE/agent-id substring, filtered server-side over the range
   rule_id?: string; // Compliance evidence-row deep-link: filter by enforcing rule
   limit?: number;
   offset?: number;
@@ -476,7 +476,7 @@ export type MitreTechnique = {
   covered: boolean;
   observed?: number;
   blocked?: number;
-  // DEF-038: per-rule blocked counts { rule_id: blocked } over the selected range. The evidence rows render
+  // Per-rule blocked counts { rule_id: blocked } over the selected range. The evidence rows render
   // each covered rule's OWN count from this map; `blocked` above is the technique-wide total (sum over all
   // covered policies) kept for the headline, and must NOT be shown per-row (it over-attributes when a
   // technique is enforced by >1 rule). Shipped per technique by the backend (mitre.py, from its `by_rule`).
@@ -498,7 +498,7 @@ export type MitreCoverage = {
   observed?: number;
   blocked?: number;
   agent_classes?: number;
-  // COMP-EVIDENCE: count of synthetic/simulated + red-team events excluded from observed/blocked so the
+  // Count of synthetic/simulated + red-team events excluded from observed/blocked so the
   // evidence pack counts real traffic only (product decision) and can state the exclusion.
   synthetic_excluded?: number;
   last_exported?: string | null;
@@ -510,7 +510,7 @@ export type MitreTrend = { namespace: string; range: string; framework: string; 
 // Compliance frameworks — both live, same real coverage machinery (atlas | owasp).
 export type ComplianceFramework = "atlas" | "owasp";
 
-// F3: the framework-neutral compliance surface — /api/v1/compliance/{framework}/* (the legacy /mitre/* routes
+// The framework-neutral compliance surface — /api/v1/compliance/{framework}/* (the legacy /mitre/* routes
 // remain as ATLAS-default back-compat aliases, unused by the client now).
 export async function fetchMitreCoverage(namespace?: string, range = "24h", framework: ComplianceFramework = "atlas"): Promise<MitreCoverage> {
   const params = new URLSearchParams();
@@ -536,7 +536,7 @@ export function mitreExportPath(namespace: string | undefined, range: string, fo
   return `/api/v1/compliance/${framework}/export?${params.toString()}`;
 }
 
-// COMP-GEN-01: the draft response carries status + control provenance + the CONTROL's mapped rule_ids.
+// The draft response carries status + control provenance + the CONTROL's mapped rule_ids.
 // status="no_affected_classes" (draft_id null) when there is no real class to scope to; status="escalate"
 // for a control with no runtime-expressible rule; status="error" only on a batch item.
 export type GenerateResult = {
@@ -560,7 +560,7 @@ export async function generateMitrePolicy(technique_id: string, namespace: strin
   return apiSend(`/api/v1/compliance/${framework}/generate`, "POST", payload);
 }
 
-// COMP-GEN-01 multi-select: generate one CONTROL-SPECIFIC draft per (technique × class). class_mode:
+// Multi-select: generate one CONTROL-SPECIFIC draft per (technique × class). class_mode:
 // "affected" = the control's top affected class · "all" = every real affected class · any other value = that
 // specific class. Returns a per-item result list + a rollup.
 export type GenerateBatchResult = {
@@ -579,7 +579,7 @@ export async function generateMitrePolicyBatch(
     { technique_ids, namespace, class_mode, framework });
 }
 
-// CAP→POLICY: turn a source-capability finding into a DRY-RUN policy draft that blocks the target verbs on
+// Turn a source-capability finding into a DRY-RUN policy draft that blocks the target verbs on
 // the source for one agent class. Empty `verbs` ⇒ block ALL the source's mutating verbs (make read-only).
 // Lands in the same intent-drafts inbox as compliance/attack-graph drafts; never auto-enforces.
 export type CapabilityDefendResult = {
@@ -590,7 +590,7 @@ export type CapabilityDefendResult = {
   source_type: string;
   verbs: string[];
   blocked_tools: string[];
-  // CAP-FIX: verbs the policy blocks by NAME PATTERN — a forward guard that catches destructive tools
+  // Verbs the policy blocks by NAME PATTERN — a forward guard that catches destructive tools
   // appearing later, so the defense is real even when blocked_tools is empty.
   forward_guard_verbs?: string[];
   read_only: boolean;
@@ -608,7 +608,7 @@ export type CategoryCoverageItem = {
   category: string;
   covered: number;
   total: number;
-  score: number; // F-44/F-45: rules PRESENT (loaded), not efficacy
+  score: number; // Rules PRESENT (loaded), not efficacy
   observed?: number; // audit attempts touching this category's rules
   blocked?: number; // of those, how many were blocked/escalated
   effective?: boolean; // at least one rule in the category has actually blocked traffic
@@ -640,8 +640,8 @@ export type CoverageByCategory = {
   agent_class_policies?: AgentClassPolicy[];
 };
 
-/** Policy coverage per risk category (F046): score = mapped rules PRESENT in the loaded rego (not efficacy;
- * F-44/F-45). observed/blocked/effective overlay real audit activity. */
+/** Policy coverage per risk category: score = mapped rules PRESENT in the loaded rego (not efficacy).
+ * observed/blocked/effective overlay real audit activity. */
 export async function fetchCoverageByCategory(namespace?: string): Promise<CoverageByCategory> {
   const params = new URLSearchParams();
   if (namespace && namespace !== "all") params.set("namespace", namespace);
@@ -652,14 +652,14 @@ export async function fetchCoverageByCategory(namespace?: string): Promise<Cover
 export type ToolUsage = { tool: string; count: number; blocked: number; risk?: "low" | "medium" | "high" | "critical" };
 export type TrustHistoryPoint = { time: string; allow: number; block: number; trust_score: number | null };
 
-/** Real per-tool call counts for one agent, aggregated from audit_log (F046). */
+/** Real per-tool call counts for one agent, aggregated from audit_log. */
 export async function fetchAgentToolUsage(spiffeId: string, namespace?: string, range = "7d"): Promise<ToolUsage[]> {
   const params = new URLSearchParams({ range });
   if (namespace && namespace !== "all") params.set("namespace", namespace);
   return apiGet<ToolUsage[]>(`/api/v1/agents/${encodeURIComponent(spiffeId)}/tool-usage?${params.toString()}`);
 }
 
-/** Real per-day allow/block + average trust for one agent, aggregated from audit_log (F046). */
+/** Real per-day allow/block + average trust for one agent, aggregated from audit_log. */
 export async function fetchAgentTrustHistory(
   spiffeId: string,
   namespace?: string,
@@ -714,7 +714,7 @@ export async function fetchPolicies(signal?: AbortSignal): Promise<SearchPolicy[
 
 export type SearchResults = { tools: SearchAuditRecord[]; agents: SearchAgent[]; policies: SearchPolicy[] };
 
-/** P2-2: the ⌘K search — ONE server-scoped, bounded call. Replaces the old three-endpoint fan-out that
+/** The ⌘K search — ONE server-scoped, bounded call. Replaces the old three-endpoint fan-out that
  *  pulled the entire agent + policy lists on every keystroke and matched client-side. The server pins a
  *  scoped tenant to its own namespace, so no namespace is passed from the UI. */
 export async function fetchSearch(q: string, signal?: AbortSignal): Promise<SearchResults> {
@@ -761,7 +761,7 @@ export async function applyPolicy(
   );
 }
 
-// FIX B: a write returning 200 is not proof the policy is loaded on the read path — ApplyResultPanel polls
+// A write returning 200 is not proof the policy is loaded on the read path — ApplyResultPanel polls
 // this after a local create/apply/rollback to confirm current_version (and optionally enforcement_mode) has
 // actually converged, the same way the fleet "kind" already polls rollout. Reuses the plain list endpoint
 // (DB-authoritative — no session affinity across replicas) rather than adding a new server route.
@@ -781,13 +781,13 @@ export async function verifyPolicyApplied(
   };
 }
 
-// B-2: delete a policy from every layer (in-mem + Redis + Postgres + version history; durable across restart).
+// Delete a policy from every layer (in-mem + Redis + Postgres + version history; durable across restart).
 // Deleting a class flips it back to the namespace baseline / default. apiSend applies the remote-cluster guard.
-// The server (B-3) refuses reserved/managed scopes with 422 even if a caller reaches this.
+// The server refuses reserved/managed scopes with 422 even if a caller reaches this.
 export async function deletePolicy(
   namespace: string,
   agentClass: string,
-  // COMP-GEN-01/POLICY-RESERVED-01: an operator-authored reserved scope (`__guardrail__`, `__baseline__`, or a
+  // An operator-authored reserved scope (`__guardrail__`, `__baseline__`, or a
   // per-class compliance remediation overlay "<class>__remediation__") requires this explicit admin-gated flag
   // to revert — a raw delete (no flag) is refused with a 422 even for these. Never set for an ordinary class.
   confirmManaged = false
@@ -799,7 +799,7 @@ export async function deletePolicy(
   );
 }
 
-// --- Attack Graph (feat/attack-graph) ---------------------------------------------------------------
+// --- Attack Graph -----------------------------------------------------------------------------------
 import type {
   ThreatPathsResponse,
   IntentCoverage,
@@ -880,13 +880,13 @@ export async function createIntentDraft(body: {
 }
 
 /** List pending (non-enforcing) intent drafts — the Policies page surfaces these for review/apply. */
-// F2: source_* fields are present for compliance-generated drafts (null for Attack-Graph drafts).
+// source_* fields are present for compliance-generated drafts (null for Attack-Graph drafts).
 type DraftSourceFields = { source_framework?: string | null; source_control_id?: string | null; source_control_name?: string | null };
-// COMP-GEN-01: for a compliance-remediation draft, `cls` is the compound persistence overlay key
+// For a compliance-remediation draft, `cls` is the compound persistence overlay key
 // ("<class>__remediation__") — `affected_class` carries the real class for display. Null/absent for
 // non-remediation drafts, where `cls` already is the real class.
 export type IntentDraftItem = { draft_id: string; ns: string; cls: string; affected_class?: string | null; enabled: string[]; covered_count: number; total: number; created_at: string; expires_at?: string } & DraftSourceFields;
-// Part B (B6): the drafts endpoint is BOUNDED + paginated — a page of drafts + the total count.
+// The drafts endpoint is BOUNDED + paginated — a page of drafts + the total count.
 export type IntentDraftPage = { drafts: IntentDraftItem[]; total: number; returned: number; offset: number; limit: number };
 
 export async function fetchIntentDrafts(ns?: string, offset = 0, limit?: number): Promise<IntentDraftPage> {
@@ -898,12 +898,12 @@ export async function fetchIntentDrafts(ns?: string, offset = 0, limit?: number)
   return apiGet(`/api/v1/threats/intent-drafts${qs ? `?${qs}` : ""}`);
 }
 
-/** Part B (B7): manually dismiss ONE non-enforcing draft. */
+/** Manually dismiss ONE non-enforcing draft. */
 export async function dismissIntentDraft(draftId: string): Promise<{ dismissed: boolean; draft_id: string }> {
   return apiSend(`/api/v1/threats/intent-drafts/${encodeURIComponent(draftId)}`, "DELETE");
 }
 
-/** Part B (B7): bulk "Clear expired" — delete all expired non-enforcing drafts (optionally scoped to a ns). */
+/** Bulk "Clear expired" — delete all expired non-enforcing drafts (optionally scoped to a ns). */
 export async function gcIntentDrafts(ns?: string): Promise<{ cleared: number; namespace: string | null }> {
   const q = ns && ns !== "all" ? `?ns=${encodeURIComponent(ns)}` : "";
   return apiSend(`/api/v1/threats/intent-drafts/gc${q}`, "POST");

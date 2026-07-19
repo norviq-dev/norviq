@@ -108,7 +108,7 @@ async def test_apply_to_a_new_target_populates_the_loader_read_path():
     assert result is not None
     version, created = result
     assert created is True                                   # a fresh target → a new version was persisted
-    assert loader.get_current("dstns", "agent") == _REGO     # ← loaded into the READ path (was the bug)
+    assert loader.get_current("dstns", "agent") == _REGO     # ← loaded into the READ path
     assert ("dstns", "agent", _REGO) in loader._evaluator.loaded
 
 
@@ -158,12 +158,12 @@ async def test_reapply_same_rego_different_mode_persists_mode_without_version_bu
 
 
 async def test_reapply_same_rego_returns_true_latest_version_not_history_count():
-    """FIX-1 regression: with pruned history (cap 10 / 90d), len(get_versions(...)) != the real latest version
-    number. The same-rego reapply branch previously returned ``len(self.get_versions(...)) or 1`` as
-    ``current_version`` — once a class passed 10 lifetime versions that understated it, which flowed into
+    """Regression: with pruned history (cap 10 / 90d), len(get_versions(...)) != the real latest version
+    number. A same-rego reapply branch that returns ``len(self.get_versions(...)) or 1`` as
+    ``current_version`` understates it once a class passes 10 lifetime versions, which flows into
     apply_policy's response -> UI expectedVersion. The verify-poll compares that against list_policies'
     CORRECT ``versions[-1].version``, so a class with >10 lifetime versions could never converge -> permanent
-    false "STALLED". current_version must be ``versions[-1].version``, matching list_policies' M1 fix
+    false "STALLED". current_version must be ``versions[-1].version``, matching list_policies' fix
     (norviq/api/routers/policies.py:227)."""
     loader = _loader()
     loader._policies = {"ns:agent": {"rego": _REGO, "priority": 100, "enforcement_mode": "block"}}

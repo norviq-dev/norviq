@@ -14,7 +14,7 @@ test_ot_control_set_setpoint_blocked {
     energy.decision == "block" with input as {"tool_name": "set_setpoint", "tool_params": {"value": "60Hz"}}
 }
 
-# --- word-order / device-class variants the flat list used to miss (block) ---
+# --- word-order / device-class variants beyond the flat list (block) ---
 test_breaker_open_word_order_blocked {
     energy.decision == "block" with input as {"tool_name": "breaker_open", "tool_params": {}}
 }
@@ -83,9 +83,9 @@ test_benign_search_not_falsely_blocked {
     energy.decision == "allow" with input as {"tool_name": "search_kb", "tool_params": {"query": "breaker maintenance schedule"}}
 }
 
-# === F-09 / F-16 regression: noun-first OT names, homoglyph name, set_voltage, decomposed params ===
+# === Regression: noun-first OT names, homoglyph name, set_voltage, decomposed params ===
 
-# noun-first control names that used to ALLOW must now NOT allow (block or escalate)
+# noun-first control names must NOT allow (block or escalate)
 test_valve_close_not_allowed {
     energy.decision != "allow" with input as {"tool_name": "valve_close", "tool_params": {}}
 }
@@ -110,12 +110,12 @@ test_valve_close_blocked {
     energy.rule_id == "ot_control_command_blocked" with input as {"tool_name": "valve_close", "tool_params": {}}
 }
 
-# F-09 homoglyph on the tool NAME (Cyrillic г folds to ASCII via tool_name_normalized) -> block
+# Homoglyph on the tool NAME (Cyrillic г folds to ASCII via tool_name_normalized) -> block
 test_homoglyph_open_breaker_blocked {
     energy.decision == "block" with input as {"tool_name": "open_bгeaker", "tool_name_normalized": "open_breaker", "tool_params": {}}
 }
 
-# F-16 additional SCADA control verbs -> block
+# Additional SCADA control verbs -> block
 test_set_voltage_blocked {
     energy.decision == "block" with input as {"tool_name": "set_voltage", "tool_params": {"bus": "B1", "kv": 13.8}}
 }
@@ -123,7 +123,7 @@ test_configure_protection_blocked {
     energy.decision == "block" with input as {"tool_name": "configure_protection", "tool_params": {"relay": "R1"}}
 }
 
-# F-16 decomposed param phrasing: verb in one field + device noun in another -> block
+# Decomposed param phrasing: verb in one field + device noun in another -> block
 test_decomposed_open_breaker_blocked {
     energy.decision == "block" with input as {"tool_name": "device_command", "tool_params": {"verb": "open", "device_type": "breaker"}}
     energy.rule_id == "ot_control_command_blocked" with input as {"tool_name": "device_command", "tool_params": {"verb": "open", "device_type": "breaker"}}

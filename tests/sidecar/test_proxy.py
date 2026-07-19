@@ -71,7 +71,7 @@ async def proxy(
     """Create and run sidecar proxy with isolated resources."""
     if not HAS_UNIX_SOCKETS:
         pytest.skip("Unix sockets are not supported on this platform")
-    # SIDE-2: settings.sidecar_mode now defaults to "proxy" (thin proxy to the central engine, no local
+    # settings.sidecar_mode defaults to "proxy" (thin proxy to the central engine, no local
     # Redis/OPA/emitter — see norviq/sidecar/proxy.py start()). This fixture exercises the full LOCAL
     # pipeline (its own RedisCache/emitter wiring below only applies in embedded mode), so pin it explicitly.
     monkeypatch.setattr(settings, "sidecar_mode", "embedded")
@@ -220,7 +220,7 @@ async def test_graceful_shutdown_closes_server(socket_path: str, monkeypatch: py
     """Proxy should stop cleanly and close socket listener."""
     if not HAS_UNIX_SOCKETS:
         pytest.skip("Unix sockets are not supported on this platform")
-    # SIDE-2: pin embedded mode explicitly — see the `proxy` fixture above for why.
+    # Pin embedded mode explicitly — see the `proxy` fixture above for why.
     monkeypatch.setattr(settings, "sidecar_mode", "embedded")
     cache = RedisCache(url=redis_url)
     monkeypatch.setattr("norviq.sidecar.proxy.RedisCache", lambda: cache)

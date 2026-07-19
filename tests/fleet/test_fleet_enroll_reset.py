@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Spoke enrollment version-lineage reset (F-68). `leave` must FORGET the last-applied bundle version (not just
+"""Spoke enrollment version-lineage reset. `leave` must FORGET the last-applied bundle version (not just
 shed policies), otherwise a later re-enrollment to a hub whose per-cluster version restarted lower (remove->rejoin)
 is permanently rejected by the spoke's anti-rollback guard (version <= last_applied -> skip) and the cluster is
 stuck "pending" forever despite governing correctly."""
@@ -90,7 +90,7 @@ async def test_leave_resets_version_lineage_and_sheds():
 
     assert res["enrolled"] is False
     assert ("default", "bot") in loader.deleted          # F-52 shed still happens
-    assert bundle.last_applied_version == 0              # F-68: version lineage forgotten
+    assert bundle.last_applied_version == 0              # version lineage forgotten
     assert bundle.last_bundle_sha256 == ""
     assert json.loads(bundle.last_manifest) == []
     assert session.join_row.enabled is False

@@ -59,7 +59,7 @@ def test_tool_usage_aggregates_counts() -> None:
     assert resp.status_code == 200
     body = resp.json()
     by_tool = {r["tool"]: r for r in body}
-    # CAP-2: each tool is tagged with its TOOL_RISK_MAP risk tier — "execute_sql" classifies as critical
+    # Each tool is tagged with its TOOL_RISK_MAP risk tier — "execute_sql" classifies as critical
     # (destruction/exec default, see classify_tool) — see norviq/api/routers/agents.py agent_tool_usage.
     assert by_tool["execute_sql"] == {"tool": "execute_sql", "count": 2, "blocked": 1, "risk": "critical"}
     assert by_tool["search_kb"]["count"] == 1

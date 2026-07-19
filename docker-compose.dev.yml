@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Local dev dependencies for Norviq (new machine, Docker-based).
 # Brings up Postgres + Redis matching .env.local (DB on host port 5433, Redis 6379).
-# API (uvicorn) and UI (vite) are run natively for hot-reload — see NEW-MACHINE-SETUP.md.
+# API (uvicorn) and UI (vite) are run natively for hot-reload — see CONTRIBUTING.md.
 #
 #   docker compose -f docker-compose.dev.yml up -d
 #   docker compose -f docker-compose.dev.yml ps

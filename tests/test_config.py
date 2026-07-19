@@ -71,7 +71,7 @@ def test_db_ssl_mode_reads_nrvq_prefixed_env(monkeypatch) -> None:
 
 
 def test_require_strong_secret_defaults_true(monkeypatch) -> None:
-    """HIGH-3: fail-closed by default — a forgeable default JWT secret is a fleet-wide trust-root
+    """Fail-closed by default — a forgeable default JWT secret is a fleet-wide trust-root
     compromise, so the boot-time refusal is ON unless explicitly disabled (NRVQ_REQUIRE_STRONG_SECRET=false)
     or a real secret is configured. Dev/tests set an explicit strong NRVQ_API_SECRET_KEY (see
     tests/conftest.py) rather than disabling the guard, so the guard itself stays covered."""

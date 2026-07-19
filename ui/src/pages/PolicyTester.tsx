@@ -173,7 +173,7 @@ export function PolicyTester() {
     trustBefore: number;
     trustAfter: number;
     trustSignals: TrustSignals;
-    // MUT-SIGNALS: whether the engine actually RETURNED per-call signals. When false we must not render
+    // Whether the engine actually RETURNED per-call signals. When false we must not render
     // fabricated all-"1.00 OK" bars that are indistinguishable from real telemetry.
     signalsAvailable: boolean;
     latencyMs: number;
@@ -182,7 +182,7 @@ export function PolicyTester() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [sessionId] = useState(randomSessionId);
 
-  // STALE-7: the Result panel reflects the LAST evaluate(). Clear it whenever any input changes — including
+  // The Result panel reflects the LAST evaluate(). Clear it whenever any input changes — including
   // when a Quick Scenario or a History row rewrites the form — so a stale decision/trust/signals block never
   // sits next to edited inputs as if it described them (mirrors the dry-run stale-clear in PolicyCatalog).
   // evaluate() reads inputs but never mutates them, so it won't self-clear the result it just set.
@@ -260,7 +260,7 @@ export function PolicyTester() {
       const response = await apiSend<EvaluateResponse>("/api/v1/evaluate", "POST", payload);
       const latencyMs = performance.now() - started;
       const trustAfter = Number.isFinite(response.trust_score) ? response.trust_score : trustBefore;
-      // MUT-SIGNALS: keep ONLY what the engine returned — never substitute fabricated defaults.
+      // Keep ONLY what the engine returned — never substitute fabricated defaults.
       const signalsAvailable = response.trust_signals != null && Object.keys(response.trust_signals).length > 0;
       const trustSignals = response.trust_signals ?? {};
       const nextResult = {
@@ -443,7 +443,7 @@ export function PolicyTester() {
 
               <div>
                 <div className="section-label">Signals</div>
-                {/* MUT-SIGNALS: real telemetry only. If the engine didn't return per-call signals, say so
+                {/* Real telemetry only. If the engine didn't return per-call signals, say so
                     rather than painting fabricated "1.00 OK" bars that read as real. */}
                 {result.signalsAvailable ? (
                   <div className="stack" style={{ gap: 8 }}>

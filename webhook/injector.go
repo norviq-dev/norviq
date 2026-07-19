@@ -212,10 +212,10 @@ func newSidecarTemplate(cfg Config) map[string]interface{} {
 	}
 }
 
-// sidecarEnv wires the injected sidecar so it can actually enforce (SIDE-1). Base env is common to both
-// modes; proxy mode (SIDE-2 default) adds the central API URL + a namespace-scoped service JWT and needs
+// sidecarEnv wires the injected sidecar so it can actually enforce. Base env is common to both
+// modes; proxy mode (the default) adds the central API URL + a namespace-scoped service JWT and needs
 // no Redis/OPA/Postgres; embedded mode passes the cluster datastore wiring through from the webhook's env.
-// NRVQ_NAMESPACE is always set to the pod's namespace so mock identity resolves the real tenant (SIDE-4).
+// NRVQ_NAMESPACE is always set to the pod's namespace so mock identity resolves the real tenant.
 func sidecarEnv(agentClass string, namespace string, cfg Config) []map[string]interface{} {
 	env := []map[string]interface{}{
 		{"name": "NRVQ_AGENT_CLASS", "value": agentClass},
@@ -276,7 +276,7 @@ func appendIfSet(env []map[string]interface{}, name, value string) []map[string]
 
 // mintSidecarToken issues the namespace-scoped role=service JWT the thin-proxy sidecar presents to
 // /evaluate. The token is baked into the pod env (cannot self-refresh), hence the long TTL; mTLS +
-// short-lived tokens are the documented fast-follow (FLAG-D). Returns "" if no signing secret is set.
+// short-lived tokens are the documented fast-follow. Returns "" if no signing secret is set.
 func mintSidecarToken(cfg Config, namespace string) string {
 	if cfg.ApiSecret == "" {
 		return ""
@@ -447,7 +447,7 @@ func sidecarLivenessProbe(sidecarPort int) map[string]interface{} {
 	}
 }
 
-// sidecarReadinessProbe (SIDE-1) gates pod Readiness on the sidecar actually serving enforcement, so a
+// sidecarReadinessProbe gates pod Readiness on the sidecar actually serving enforcement, so a
 // mis-wired or crash-looping sidecar surfaces as NotReady instead of silently forwarding tool calls.
 func sidecarReadinessProbe(sidecarPort int) map[string]interface{} {
 	return map[string]interface{}{
@@ -462,7 +462,7 @@ func volumeTemplate() map[string]interface{} {
 	return map[string]interface{}{"name": "norviq-socket", "emptyDir": map[string]interface{}{"sizeLimit": "10Mi"}}
 }
 
-// spiffeVolumeTemplate is the SPIFFE Workload API socket, published by the SPIFFE CSI driver (B3).
+// spiffeVolumeTemplate is the SPIFFE Workload API socket, published by the SPIFFE CSI driver.
 func spiffeVolumeTemplate() map[string]interface{} {
 	return map[string]interface{}{
 		"name": "spiffe-workload-api",

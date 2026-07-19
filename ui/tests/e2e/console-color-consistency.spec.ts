@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// UI-AUDIT round 3 — color-consistency pass. Drives the REAL SPA and asserts, via COMPUTED STYLES, that the
+// Color-consistency pass. Drives the REAL SPA and asserts, via COMPUTED STYLES, that the
 // Attack Graph primary CTAs resolve to the teal accent (#2ddab8 = rgb 45,218,184) and that chrome (toolbar /
 // muted text / selected row) resolves to neutral grey — never indigo/audit-purple/blue.
 

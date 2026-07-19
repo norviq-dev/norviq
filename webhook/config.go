@@ -18,7 +18,7 @@ type Config struct {
 	EnableLabel          string
 	EnableValue          string
 	AgentClassLabel      string
-	// P3: when false, the injector IGNORES the per-pod opt-out (norviq-injection=disabled label /
+	// When false, the injector IGNORES the per-pod opt-out (norviq-injection=disabled label /
 	// norviq.io/skip-injection annotation) so a pod author in an injection-enabled namespace cannot
 	// self-exempt their workload from enforcement — the namespace-uniform guarantee holds. Default
 	// true (opt-out honored, backward-compatible); govern label/annotation write access with RBAC.
@@ -26,13 +26,13 @@ type Config struct {
 	AdminPolicyNamespace string
 	LogLevel             slog.Level
 	Runtime              *RuntimeConfig
-	// SPIFFE workload-identity injection (B3). When SpiffeInject is true, injected pods also get the
+	// SPIFFE workload-identity injection. When SpiffeInject is true, injected pods also get the
 	// SPIFFE Workload API socket (csi.spiffe.io) mounted + NRVQ_SPIFFE_MODE/SOCKET env, so the sidecar
 	// and app resolve a real attested SVID. Default off so injection is unchanged where SPIRE is absent.
 	SpiffeInject bool
 	SpiffeMode   string
 	SpiffeSocket string
-	// SIDE-2: mode injected into sidecars. "proxy" (default) = thin sidecar POSTs to the central
+	// Mode injected into sidecars. "proxy" (default) = thin sidecar POSTs to the central
 	// norviq-api /evaluate with a namespace-scoped service JWT; "embedded" = full local engine.
 	SidecarMode string
 	// Central API URL + HS256 signing secret. In proxy mode the injector wires ApiURL and mints a
@@ -41,9 +41,9 @@ type Config struct {
 	ApiSecret string
 	// Lifetime (hours) of the minted sidecar service JWT. The token is baked into the pod env and
 	// cannot self-refresh, so it is long-lived by necessity; mTLS + short-lived tokens are the
-	// documented fast-follow (FLAG-D). NRVQ_SIDECAR_TOKEN_TTL_HOURS.
+	// documented fast-follow. NRVQ_SIDECAR_TOKEN_TTL_HOURS.
 	SidecarTokenTTLHours int
-	// SIDE-1 embedded-mode wiring passed through from the webhook's own env (sourced from
+	// Embedded-mode wiring passed through from the webhook's own env (sourced from
 	// norviq-config/norviq-secrets). Only used when SidecarMode=embedded.
 	RedisURL  string
 	PgURL     string
@@ -71,7 +71,7 @@ func LoadConfig() Config {
 		KeyFile:      envStr("NRVQ_TLS_KEY", "/etc/webhook/certs/tls.key"),
 		SidecarImage: envStr("NRVQ_SIDECAR_IMAGE", "ghcr.io/norviq-dev/norviq-engine:engine-latest"),
 		SidecarPort:  envInt("NRVQ_SIDECAR_PORT", 8282),
-		// SIDE-3: unify the opt-in/out label key with the MutatingWebhookConfiguration namespaceSelector
+		// Unify the opt-in/out label key with the MutatingWebhookConfiguration namespaceSelector
 		// (norviq-injection). The namespace opts in (MWC selector); a pod opts OUT with
 		// norviq-injection=disabled. Default flipped from the legacy "norviq" key.
 		EnableLabel:          envStr("NRVQ_ENABLE_LABEL", "norviq-injection"),

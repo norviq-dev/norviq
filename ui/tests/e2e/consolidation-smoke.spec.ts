@@ -2,7 +2,7 @@
 // Copyright 2026 Norviq Contributors
 //
 // CONSOLIDATION integration smoke — one GENUINE username/password login (NOT token injection), then prove the
-// major features assembled into release/pre-ga-consolidated all work TOGETHER on the served build, in one session:
+// major features assembled in this release all work TOGETHER on the served build, in one session:
 //   • app boots + login → Overview; KPI cards show real data == the app's OWN /audit/stats;
 //   • apply→ENFORCE (create a policy via the client contract → /evaluate flips to its own rule — effect, not 200);
 //   • RedTeam scorecard renders results/latest (proven-blocking %);
@@ -104,7 +104,7 @@ test.describe("CONSOLIDATION — genuine-login integration smoke (features work 
     await expect(page.getByText("MITRE ATLAS")).toBeVisible({ timeout: 20000 });
     await expect(page.getByText(/proven-blocking/i).first()).toBeVisible();
 
-    // (6) Editor create→ENFORCE then delete→FALL-BACK (BATCH-B), on the same session
+    // (6) Editor create→ENFORCE then delete→FALL-BACK, on the same session
     const CE = "consol-editor";
     let deletedViaUI = false;
     try {
@@ -116,7 +116,7 @@ test.describe("CONSOLIDATION — genuine-login integration smoke (features work 
       await page.getByTestId("new-policy-class").fill(CE);
       await page.getByTestId("editor-save-policy").click();
       await expect.poll(async () => (await ev(page, NS, CE, TOOL)).rule_id, { timeout: 20000 }).toBe("custom_block_rule");
-      // delete via the catalog row → confirm → the class falls back (its rule no longer fires)
+      // delete via the catalog row → confirm → the class falls back (its rule stops firing)
       await page.getByRole("button", { name: /^catalog$/i }).click();
       await page.getByTestId(`catalog-delete-${CE}`).click();
       await expect(page.getByTestId("delete-policy-modal")).toContainText(`${NS}/${CE}`);

@@ -42,7 +42,7 @@ test.describe("F2 — Red Team efficacy wired into Compliance + Overview (coexis
     await expect(page.getByTestId("time-range")).toBeVisible();
     await expect(page.getByTestId("range-chip-24h")).toBeVisible();
 
-    // OVERVIEW: the coverage caption upgrades to the same proven-blocking number (no longer "not efficacy-tested")
+    // OVERVIEW: the coverage caption upgrades to the same proven-blocking number (not the "not efficacy-tested" placeholder)
     await page.goto("/");
     await waitForApp(page);
     await expect(page.getByText(new RegExp(`${latest.efficacy.overall.proven_blocking_pct}% proven-blocking \\(last run\\)`, "i"))).toBeVisible({ timeout: 10000 });

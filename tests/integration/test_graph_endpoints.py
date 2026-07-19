@@ -85,7 +85,7 @@ class TestAttackPathsEndpoint:
 async def test_attack_paths_no_connection_leak(api_client, auth_headers):
     """Hit endpoint 30 times — connection pool must not exhaust.
 
-    Day 9 bug: AsyncSession not released, exhausted pool after 15 calls.
+    Regression: AsyncSession not released, exhausted pool after 15 calls.
     """
     for i in range(30):
         resp = await api_client.get("/api/v1/attack-paths", headers=auth_headers)

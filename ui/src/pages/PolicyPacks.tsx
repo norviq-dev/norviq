@@ -1,4 +1,4 @@
-import "../lib/monaco"; // SLIM-MONACO: bundle Monaco locally (no cdn.jsdelivr fetch) — must precede <Editor>
+import "../lib/monaco"; // Bundle Monaco locally (no cdn.jsdelivr fetch) — must precede <Editor>
 import Editor from "@monaco-editor/react";
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -23,13 +23,13 @@ import { useMutationScope } from "../hooks/useMutationScope";
 import { registerRego } from "../lib/monaco-rego";
 import { useApp } from "../store/AppContext";
 
-// B1-1: after a pack/override mutation, drop every cached read of pack + settings state (this page's own key AND
+// After a pack/override mutation, drop every cached read of pack + settings state (this page's own key AND
 // Target Settings' distinct `tgt-*` keys) so a remount or a hop to Target Settings reflects the change immediately
 // instead of serving a stale entry inside its staleTime window.
 function bustPackCaches(): void {
-  // C2-5: also bust the resolution-hierarchy caches so enabling/disabling a pack reflects its overlay layer in the
+  // Also bust the resolution-hierarchy caches so enabling/disabling a pack reflects its overlay layer in the
   // Catalog hierarchy with no reload.
-  // STALE-10: include `policy-settings:` so Policy Catalog's Apply-gate (apply_mode) reflects a pack change.
+  // Include `policy-settings:` so Policy Catalog's Apply-gate (apply_mode) reflects a pack change.
   for (const p of ["policy-packs:", "tgt-packs:", "settings:", "tgt-settings:", "policy-settings:", "effective:", "hier-classes:"]) invalidateApiCache(p);
 }
 
@@ -67,20 +67,20 @@ export function PolicyPacks() {
   const [confirmPack, setConfirmPack] = useState<PolicyPack | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  // F-54: view a pack's rego (read-only) + author a tighten-only per-namespace override.
+  // View a pack's rego (read-only) + author a tighten-only per-namespace override.
   const [viewRego, setViewRego] = useState<{ title: string; rego: string } | null>(null);
   const [overrideRego, setOverrideRego] = useState("");
   const [overrideActive, setOverrideActive] = useState(false);
   const [overrideMsg, setOverrideMsg] = useState<string | null>(null);
   const [overrideBusy, setOverrideBusy] = useState(false);
-  // fleet-mgmt: the loud "Advanced: allow weakening this pack" opt-in + dry-run + apply-result transparency.
+  // The loud "Advanced: allow weakening this pack" opt-in + dry-run + apply-result transparency.
   const [allowWeaken, setAllowWeaken] = useState(false);
   const [packDryRun, setPackDryRun] = useState<{ would_block?: number; would_allow?: number; block_rate_pct?: number; recommendation?: string } | null>(null);
   const [applyResult, setApplyResult] = useState<ApplyResult | null>(null);
   useEffect(() => {
-    // STALE-9: switching namespace reloads THIS ns's override rego — the dry-run / apply-result / message
-    // panels below describe the PREVIOUS ns's rego and must be cleared too (the onChange-only clear from
-    // audit #8 doesn't fire on a namespace switch).
+    // Switching namespace reloads THIS ns's override rego — the dry-run / apply-result / message
+    // panels below describe the PREVIOUS ns's rego and must be cleared too (the onChange-only clear
+    // doesn't fire on a namespace switch).
     setPackDryRun(null);
     setApplyResult(null);
     setOverrideMsg(null);
@@ -91,8 +91,8 @@ export function PolicyPacks() {
 
   const isAdmin = me.data?.role === "admin";
   const suggestedSector = (settings.data?.sector ?? "").toLowerCase();
-  // B1-2: never let a namespace/cluster-scoped mutation target the phantom aggregate ("all"). B1-3: reflect the
-  // namespace's F-51 apply-mode up-front so "dry-run-only — applies disabled" shows BEFORE a click.
+  // Never let a namespace/cluster-scoped mutation target the phantom aggregate ("all"). Reflect the
+  // namespace's apply-mode up-front so "dry-run-only — applies disabled" shows BEFORE a click.
   const { canMutate, blockedReason } = useMutationScope();
   const dryRunOnly = settings.data?.apply_mode === "dry_run_only";
   const mutationsDisabled = !canMutate || dryRunOnly;
@@ -107,7 +107,7 @@ export function PolicyPacks() {
     return [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]));
   }, [packs.data]);
 
-  // FIX B: an enable/disable write returning 200 is not proof the pack's `enabled` flag actually converged —
+  // An enable/disable write returning 200 is not proof the pack's `enabled` flag actually converged —
   // poll a fresh read of the pack list (same convergence idea as the policy-apply verify-by-poll) instead of
   // trusting the write alone. Best-effort: a poll failure just leaves the outcome text as "not yet confirmed",
   // it never blocks or reverts the mutation that already succeeded.
@@ -126,7 +126,7 @@ export function PolicyPacks() {
   };
 
   const toggle = async (pack: PolicyPack) => {
-    // B1-2: belt-and-braces — never mutate under an aggregate scope even if a control slipped through.
+    // Belt-and-braces — never mutate under an aggregate scope even if a control slipped through.
     if (!canMutate) { setActionError(blockedReason); return; }
     setActionError(null);
     setBusyId(pack.id);
@@ -135,10 +135,10 @@ export function PolicyPacks() {
     try {
       if (pack.enabled) await disablePolicyPack(pack.id, namespace);
       else await enablePolicyPack(pack.id, namespace);
-      bustPackCaches();            // B1-1: cross-page/remount reads reflect the change immediately
+      bustPackCaches();            // Cross-page/remount reads reflect the change immediately
       await packs.refetch();       // same-page card flips now (force)
-      // FIX B: the toggle was previously silent beyond the card's badge flip — surface an honest result and
-      // verify it by polling, instead of declaring success the instant the write's 200 comes back.
+      // The toggle surfaces an honest result beyond the card's badge flip and
+      // verifies it by polling, instead of declaring success the instant the write's 200 comes back.
       const title = `${verb} "${pack.title}" — ${namespace}`;
       setApplyResult({
         kind: "local",
@@ -146,7 +146,7 @@ export function PolicyPacks() {
         ok: true,
         outcome: "Verifying — confirming the change is loaded…",
         manifest: { namespace, agent_class: `__pack__${pack.id}`, enforcement_mode: wantEnabled ? "enabled" : "disabled" },
-        // FIX-4: no expectedVersion here (this toggle verifies via its OWN poll, below) — without pendingVerify
+        // No expectedVersion here (this toggle verifies via its OWN poll, below) — without pendingVerify
         // the panel's badge fell straight to APPLIED (green) while this outcome text still said "Verifying…",
         // a visible contradiction. Drive the badge from the same in-flight state as the text.
         pendingVerify: true
@@ -164,7 +164,7 @@ export function PolicyPacks() {
           : prev
       );
     } catch (e) {
-      // B1-3: surface the reason — a dry-run-only namespace returns 409 with a clear detail; show it, don't swallow.
+      // Surface the reason — a dry-run-only namespace returns 409 with a clear detail; show it, don't swallow.
       const msg = e instanceof Error ? e.message : "Action failed";
       setActionError(msg);
       setApplyResult({
@@ -204,7 +204,7 @@ export function PolicyPacks() {
     setOverrideBusy(true);
     try {
       const res = await savePackOverride(namespace, overrideRego, allowWeaken);
-      bustPackCaches();  // B1-1: keep pack/settings reads fresh across pages after an override write
+      bustPackCaches();  // Keep pack/settings reads fresh across pages after an override write
       setOverrideActive(true);
       setApplyResult({
         kind: "local",
@@ -232,7 +232,7 @@ export function PolicyPacks() {
     setOverrideBusy(true);
     try {
       await revertPackOverride(namespace);
-      bustPackCaches();  // B1-1: reflect the revert everywhere immediately
+      bustPackCaches();  // Reflect the revert everywhere immediately
       setOverrideActive(false);
       setOverrideRego(OVERRIDE_TEMPLATE);
       setAllowWeaken(false);
@@ -262,22 +262,22 @@ export function PolicyPacks() {
         )}
         {actionError && <div data-testid="pack-action-error" style={{ color: GAP, fontSize: 13, marginBottom: 8 }}>{actionError}</div>}
 
-        {/* B1-2: under an aggregate scope ("All namespaces", or "All clusters" with fleet on) a write would target a
+        {/* Under an aggregate scope ("All namespaces", or "All clusters" with fleet on) a write would target a
             phantom scope that enforces nothing — prompt for a concrete scope and disable every mutation below. */}
         {isAdmin && blockedReason && (
           <div data-testid="pack-scope-prompt" style={{ color: "var(--text-secondary)", fontSize: 13, marginBottom: 8, padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 8 }}>
             {blockedReason}
           </div>
         )}
-        {/* B1-3: reflect the namespace's F-51 apply-mode up-front — dry-run-only means applies are refused server-side. */}
+        {/* Reflect the namespace's apply-mode up-front — dry-run-only means applies are refused server-side. */}
         {isAdmin && !blockedReason && dryRunOnly && (
           <div data-testid="pack-dryrun-banner" style={{ color: GAP, fontSize: 13, marginBottom: 8, padding: "8px 12px", border: `1px solid ${GAP}`, borderRadius: 8 }}>
             This namespace is <span className="mono">dry-run-only</span> — pack applies are disabled. Switch it to Enforce in Target Settings to enable packs.
           </div>
         )}
 
-        {/* C2: a flat, side-by-side grid of ALL packs (~4 per row, wraps + collapses narrow), sector shown per
-            card — the packs no longer stack one-per-sector. */}
+        {/* A flat, side-by-side grid of ALL packs (~4 per row, wraps + collapses narrow), sector shown per
+            card — packs do not stack one-per-sector. */}
         <div className="pack-rail" data-testid="pack-rail">
           {bySector.flatMap(([sector, list]) =>
             list.map((pack) => {
@@ -371,12 +371,12 @@ export function PolicyPacks() {
             })
           )}
         </div>
-        {/* FIX B: shared with the override flow below (same `applyResult` state) — renders here too so an
+        {/* Shared with the override flow below (same `applyResult` state) — renders here too so an
             enable/disable toggle above shows its result without requiring a scroll to the second panel. */}
         <ApplyResultPanel result={applyResult} onClose={() => setApplyResult(null)} />
       </Panel>
 
-      {/* F-54: per-namespace tighten-only override — customize pack enforcement; revert restores the original. */}
+      {/* Per-namespace tighten-only override — customize pack enforcement; revert restores the original. */}
       <Panel
         title="Customize pack enforcement (tighten-only)"
         sub="A per-namespace override that can ONLY add stricter blocks — it never weakens or removes a pack's block. Revert restores the original pack cleanly."
@@ -396,7 +396,7 @@ export function PolicyPacks() {
             value={overrideRego}
             onChange={(v) => {
               setOverrideRego(v ?? "");
-              // Audit #8: a dry-run readout no longer matches the edited rego about to ship — drop it so
+              // A dry-run readout no longer matches the edited rego about to ship — drop it so
               // "Apply override" can't be clicked next to stale numbers.
               setPackDryRun(null);
             }}
@@ -421,7 +421,7 @@ export function PolicyPacks() {
               {overrideMsg && <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>{overrideMsg}</span>}
               {isAdmin && blockedReason && <span data-testid="override-scope-prompt" style={{ fontSize: 12, color: "var(--text-secondary)" }}>{blockedReason}</span>}
             </div>
-            {/* fleet-mgmt: the loud, audited Advanced opt-in. Default tighten-only; weaken is bounded by the comprehensive floor. */}
+            {/* The loud, audited Advanced opt-in. Default tighten-only; weaken is bounded by the comprehensive floor. */}
             <label style={{ marginTop: 10, display: "flex", alignItems: "flex-start", gap: 8, fontSize: 12, color: allowWeaken ? GAP : "var(--text-secondary)" }}>
               <input type="checkbox" checked={allowWeaken} onChange={(e) => setAllowWeaken(e.target.checked)} style={{ marginTop: 2 }} />
               <span>

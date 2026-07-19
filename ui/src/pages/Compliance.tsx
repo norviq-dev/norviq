@@ -46,7 +46,7 @@ const OOS_DOT = "#3a3a40";
 const MUTED = "#8b8d93";
 const FAINT = "#5c5e66";
 
-// Q3: Compliance is driven by the GLOBAL header time-range (routeMeta timeScoped:true) — so the window widens to
+// Compliance is driven by the GLOBAL header time-range (routeMeta timeScoped:true) — so the window widens to
 // the full header set (1h/6h/24h/7d/30d). No in-page picker; the header is the single source of truth.
 type Range = "1h" | "6h" | "24h" | "7d" | "30d";
 type StatusFilter = "all" | "gap" | "enforced" | "oos";
@@ -165,7 +165,7 @@ function techStatus(t: MitreTechnique): keyof typeof ST {
   return t.status; // "enforced" | "gap" | "out_of_scope" — from the API, never inferred client-side
 }
 
-// F2: efficacy overlay. When a Red Team run exists it shows the REAL proven-blocking %; before any run it
+// Efficacy overlay. When a Red Team run exists it shows the REAL proven-blocking %; before any run it
 // keeps the honest "not efficacy-tested" caption with a call to action. Coverage (rules present) ≠ efficacy.
 function ComplianceEfficacyBanner({ efficacy, onView }: { efficacy?: RedteamLatest; onView: () => void }) {
   const hasRun = !!efficacy?.has_run;
@@ -211,7 +211,7 @@ export function Compliance() {
 
   const [view, setView] = useState<"overview" | "detail">("overview");
   const [tab, setTab] = useState<"frameworks" | "custom">("frameworks");
-  // Q3: the range is the GLOBAL header time-range (reactive) — no local state, no in-page picker. Changing the
+  // The range is the GLOBAL header time-range (reactive) — no local state, no in-page picker. Changing the
   // header chip refetches coverage/evidence (keyed on `range` below), on BOTH the overview cards and the detail.
   const range: Range = timeRange;
   // The framework the DETAIL view is bound to (switcher-driven). Overview always shows both live cards.
@@ -223,16 +223,16 @@ export function Compliance() {
   const [fwMenuOpen, setFwMenuOpen] = useState(false);
   const [drafted, setDrafted] = useState<Record<string, boolean>>({});
   const [toast, setToast] = useState<{ msg: string; link?: string } | null>(null);
-  // COMP-GEN-01 multi-select: the set of GAP technique_ids checked for batch generation + the class-scope mode
+  // Multi-select: the set of GAP technique_ids checked for batch generation + the class-scope mode
   // for that batch ("affected" = each control's top affected class · "all" = every real affected class · a
   // specific class name).
   const [selectedGaps, setSelectedGaps] = useState<Set<string>>(new Set());
   const [genClassMode, setGenClassMode] = useState<string>("affected");
-  // H3: non-draft outcomes of the last batch generate (escalate / no class / error) — rendered as a
+  // Non-draft outcomes of the last batch generate (escalate / no class / error) — rendered as a
   // dismissible panel with the FULL per-control server message, so a zero-draft batch can't pass silently.
   const [batchOutcome, setBatchOutcome] = useState<GenerateResult[] | null>(null);
 
-  // STALE-3: `drafted` and `selectedGaps` are session hints keyed only by technique_id — with no
+  // `drafted` and `selectedGaps` are session hints keyed only by technique_id — with no
   // namespace/framework component. Without this, a draft made in ns-A/atlas would wrongly disable
   // "Generate" for the same technique id in ns-B (or in owasp), and a batch-generate could fire the ids
   // selected while viewing ns-A/atlas against a different scope. Reset both whenever the scope changes.
@@ -240,7 +240,7 @@ export function Compliance() {
     setDrafted({});
     setSelectedGaps(new Set());
     setBatchOutcome(null);
-    // DEF-039: revert the batch class-scope to the safe default on any scope change too. A specific class
+    // Revert the batch class-scope to the safe default on any scope change too. A specific class
     // picked in ns-A (from ns-A's affected classes) won't exist in ns-B; left stale, the controlled <select>
     // holds an off-list value and onGenerateBatch submits it verbatim → a zero-draft "no_affected_classes"
     // batch in ns-B. Resetting here matches how drafted/selectedGaps/batchOutcome are already cleared.
@@ -257,9 +257,9 @@ export function Compliance() {
     cacheKey: `mitre-coverage:owasp:${namespace}:${range}`,
     staleTimeMs: 30_000
   });
-  // F2: the last Red Team run's efficacy. Coverage answers "which controls have rules"; efficacy answers
-  // "how many are PROVEN-blocking". We surface it as a banner that coexists with the Q3 header range selector.
-  // STALE-4: scope efficacy to the selected namespace so "N% proven-blocking" describes THIS scope's last
+  // The last Red Team run's efficacy. Coverage answers "which controls have rules"; efficacy answers
+  // "how many are PROVEN-blocking". We surface it as a banner that coexists with the header range selector.
+  // Scope efficacy to the selected namespace so "N% proven-blocking" describes THIS scope's last
   // run, not whatever cluster-wide run was newest. Cache key includes the namespace so scopes don't share.
   const efficacy = useApi<RedteamLatest>(() => fetchRedteamLatest(namespace), [namespace], {
     cacheKey: `compliance-redteam-latest:${namespace}`,
@@ -343,7 +343,7 @@ export function Compliance() {
   // ---- gap remediation: create a NON-enforcing dry-run draft (for the SELECTED framework), then
   //      deep-link to Policies. -----------------------------------------------------------------
   async function onGenerate(t: MitreTechnique) {
-    // F2: don't force a "default" class — pass the control's top affected class if we have one, else let the
+    // Don't force a "default" class — pass the control's top affected class if we have one, else let the
     // backend derive the real active class (or honestly report there's nothing to remediate).
     const cls = t.affected_classes?.[0]?.class;
     try {
@@ -372,7 +372,7 @@ export function Compliance() {
     });
   }
 
-  // COMP-GEN-01 multi-select: generate one CONTROL-SPECIFIC draft per (selected control × class) in ONE batch
+  // Multi-select: generate one CONTROL-SPECIFIC draft per (selected control × class) in ONE batch
   // call, honouring the class-scope mode. Marks each drafted control + surfaces a rollup toast that deep-links
   // to the first draft (all land in the Policy Catalog inbox).
   // `ids` is the caller-supplied set of controls to generate — the DetailView passes only the
@@ -389,7 +389,7 @@ export function Compliance() {
       });
       setSelectedGaps(new Set());
       const firstLink = drafts.find((r) => r.deeplink)?.deeplink;
-      // H3: a 3.5s toast is NOT enough for a partial/zero outcome — the per-control escalation
+      // A 3.5s toast is NOT enough for a partial/zero outcome — the per-control escalation
       // reasons were dropped and "pending in Policies" was claimed even when nothing was created.
       // Every non-draft outcome now lands in a DISMISSIBLE panel (sticky, full server message);
       // the toast only carries the honest rollup.
@@ -440,8 +440,8 @@ export function Compliance() {
         </div>
       )}
 
-      {/* F2: proven-blocking efficacy overlay from the last Red Team run — coverage is "rules present",
-          this is the honest "how much is PROVEN blocking". Coexists with the Q3 header range selector. */}
+      {/* Proven-blocking efficacy overlay from the last Red Team run — coverage is "rules present",
+          this is the honest "how much is PROVEN blocking". Coexists with the header range selector. */}
       <ComplianceEfficacyBanner efficacy={efficacy.data ?? undefined} onView={() => navigate("/redteam")} />
 
       {view === "overview" ? (
@@ -765,7 +765,7 @@ function FrameworkOverviewCard({
             <span style={{ color: FAINT }}>·</span>
             <span><b style={{ color: "#ededf0" }}>{fmt(data.blocked)}</b> blocked · {RANGE_LABEL[range]}</span>
           </div>
-          {/* C4: the trend sparkline + "coverage steady" line is removed from the framework CARD (noise). The
+          {/* The framework CARD omits the trend sparkline + "coverage steady" line (noise). The
               TrendText/MiniSpark components + the trend fetch stay — they still render in the detail drill-in. */}
         </div>
 
@@ -959,7 +959,7 @@ function DetailView(props: {
   }
   const treeEmpty = groups.every((g) => g.techs.length === 0);
 
-  // COMP-GEN-01 multi-select: only GENERATABLE gap techniques are selectable (a bespoke gap escalates on
+  // Multi-select: only GENERATABLE gap techniques are selectable (a bespoke gap escalates on
   // generate → never gets a checkbox). The real (non-synthetic) affected classes across the visible techniques
   // populate the "specific class" options in the class-scope picker.
   const gapIdSet = new Set(gapList.filter((t) => t.generatable).map((t) => t.technique_id));
@@ -1046,7 +1046,7 @@ function DetailView(props: {
             <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "0.01em" }}>{fwName}</div>
             <div style={{ fontSize: 11.5, color: MUTED, marginTop: 1 }}>{fwMeta?.subtitle ?? "framework"}</div>
           </div>
-          {/* Q3: the range is driven by the GLOBAL header selector now (no duplicate in-page picker). The header
+          {/* The range is driven by the GLOBAL header selector (no duplicate in-page picker). The header
               shows the current window (RANGE_LABEL[range]) so the detail still reads it. */}
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 12, flex: "none" }}>
             <span style={{ fontSize: 10.5, color: MUTED }}>range · <b style={{ color: ACCENT }}>{RANGE_LABEL[range]}</b></span>
@@ -1109,7 +1109,7 @@ function DetailView(props: {
           <div style={{ fontSize: 10.5, color: FAINT, textAlign: "right" }}>
             {data?.last_exported ? `Last exported ${data.last_exported}` : "Not exported yet"}
           </div>
-          {/* COMP-EVIDENCE (product decision): the pack is real-traffic only — state how many synthetic/
+          {/* The pack is real-traffic only — state how many synthetic/
               simulated + red-team events were excluded, so it can't be read as understating enforcement. */}
           {!!data?.synthetic_excluded && data.synthetic_excluded > 0 && (
             <div data-testid="evidence-synthetic-excluded" style={{ fontSize: 10.5, color: FAINT, textAlign: "right", maxWidth: 220 }}>
@@ -1170,7 +1170,7 @@ function DetailView(props: {
                         onClick={() => setSelectedId(t.technique_id)}
                         style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 16px", fontSize: 13, color: "#ededf0", cursor: "pointer", background: on ? "#132320" : "transparent", boxShadow: on ? "inset 3px 0 0 #2ddab8" : "none" }}
                       >
-                        {/* COMP-GEN-01: only GENERATABLE gaps get a checkbox. A bespoke gap (no runtime rule)
+                        {/* Only GENERATABLE gaps get a checkbox. A bespoke gap (no runtime rule)
                             would only escalate, so it is shown but not selectable for auto-generation. */}
                         {isGap && t.generatable ? (
                           <input
@@ -1208,7 +1208,7 @@ function DetailView(props: {
             )}
           </div>
 
-          {/* COMP-GEN-01 multi-select action bar — visible once ≥1 gap is checked. The class-scope picker
+          {/* Multi-select action bar — visible once ≥1 gap is checked. The class-scope picker
               governs how each selected control is scoped (its top affected class · all affected classes · a
               specific class); "Generate for selected" fans out one control-specific draft per (control × class). */}
           {selectedGapIds.length > 0 && (
@@ -1250,7 +1250,7 @@ function DetailView(props: {
             </div>
           )}
 
-          {/* H3: non-draft outcomes of the last batch — sticky until dismissed, full server reason per
+          {/* Non-draft outcomes of the last batch — sticky until dismissed, full server reason per
               control. A "0 drafts created" batch previously vanished into a 3.5s toast with the
               escalation message dropped; the operator believed the gap was remediated. */}
           {batchOutcome && batchOutcome.length > 0 && (
@@ -1380,7 +1380,7 @@ function TechniqueDetail({
           {evidence.length > 0 ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {evidence.map((rule) => {
-                // DEF-038: render THIS rule's own blocked count, not the technique-wide `t.blocked` total.
+                // Render THIS rule's own blocked count, not the technique-wide `t.blocked` total.
                 // `t.blocked` sums over every covered policy, so a technique enforced by >1 rule repeated the
                 // same total on each row and over-attributed all blocks to each rule. Consume the per-rule
                 // `blocked_by_rule` map shipped by the backend; if it is momentarily absent, a single-rule

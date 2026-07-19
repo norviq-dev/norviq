@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""DEF-030: per-control remediation revert must not report a phantom removal.
+"""Per-control remediation revert must not report a phantom removal.
 
 `DELETE /api/v1/policies/{ns}/{class}__remediation__?confirm_managed=true&control_id=<id>` removes ONE
 compliance control from the accumulated overlay. When `control_id` names a control that is NOT in the

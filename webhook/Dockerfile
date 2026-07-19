@@ -5,7 +5,7 @@
 FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 ARG TARGETOS
 ARG TARGETARCH
-# DEF-002: build-provenance stamp (broadcast by CI: build.yml build-args NRVQ_GIT_SHA=github.sha). The
+# Build-provenance stamp (broadcast by CI: build.yml build-args NRVQ_GIT_SHA=github.sha). The
 # distroless final stage has no shell, so write the NO-STALE marker file HERE (alpine) and COPY it over.
 ARG NRVQ_GIT_SHA=unknown
 WORKDIR /build
@@ -17,7 +17,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -
 RUN printf "%s\n" "${NRVQ_GIT_SHA}" > /build/.build_git_sha
 
 FROM gcr.io/distroless/static-debian12
-# DEF-002: uniform build provenance across ALL shipped images (mirrors Dockerfile.api), not just api.
+# Uniform build provenance across ALL shipped images (mirrors Dockerfile.api), not just api.
 ARG NRVQ_GIT_SHA=unknown
 ENV NRVQ_BUILD_GIT_SHA=${NRVQ_GIT_SHA}
 LABEL org.opencontainers.image.revision=${NRVQ_GIT_SHA}

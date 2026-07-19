@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Hub fleet policy API (F045 P2): authoring RBAC, selector/override resolution, rollout state machine,
+"""Hub fleet policy API: authoring RBAC, selector/override resolution, rollout state machine,
 cross-cluster scope. Reuses the bare-TestClient + FakeFleetSession harness from test_fleet_api.py."""
 
 from __future__ import annotations

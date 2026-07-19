@@ -255,7 +255,7 @@ test.describe("Attack Graph", () => {
     );
     expect([...(body.allow_tools ?? [])].sort()).toEqual([...checkedNames].sort());
 
-    // The generated-rego panel now names the checked tool in allow_names (was empty {} at the deny-all default).
+    // The generated-rego panel now names the checked tool in allow_names.
     await expect(modal.getByText(/default decision = "block"/)).toBeVisible();
     await expect(modal.locator("pre")).toContainText(toolName);
   });

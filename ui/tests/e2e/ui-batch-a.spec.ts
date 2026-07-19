@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// A4 — the Overview "Policy Coverage" caption must NOT compute to block-red (#ff3b5c / rgb(255,59,92)); that
-//      hue is reserved for real block decisions. A5 — the RedTeam scorecard secondary metrics render as a
+// The Overview "Policy Coverage" caption must NOT compute to block-red (#ff3b5c / rgb(255,59,92)); that
+//      hue is reserved for real block decisions. The RedTeam scorecard secondary metrics render as a
 //      grouped, evenly-spaced cluster (no overlap/clip) at desktop AND narrow widths, values from results/latest.
 
 import { test, expect, waitForApp } from "./fixtures";

@@ -1,5 +1,5 @@
 {{- if and .Values.agentEgressPolicy.enabled (eq .Values.agentEgressPolicy.engine "cilium") }}
-{{- /* FLAG-D defense-in-depth (engine=cilium): default-deny egress for agent-workload namespaces with
+{{- /* Defense-in-depth (engine=cilium): default-deny egress for agent-workload namespaces with
        HOSTNAME (FQDN) allowlisting via Cilium's DNS-aware toFQDNs — so a SaaS tool behind rotating/CDN IPs
        can be allowed by name instead of chasing CIDRs. Requires the Cilium CNI. The DNS-visibility rule
        below (rules.dns) is MANDATORY: Cilium's DNS proxy must observe the pod's lookups to learn the

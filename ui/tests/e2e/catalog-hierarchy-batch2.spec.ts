@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// BATCH-2 Catalog precedence hierarchy + governance — REAL form login. Proves:
-//   C2-1: the Catalog hierarchy for a seeded class === a direct GET /policies/effective (scope, order, priority,
+// Catalog precedence hierarchy + governance — REAL form login. Proves:
+//   The Catalog hierarchy for a seeded class === a direct GET /policies/effective (scope, order, priority,
 //         overlay flag) — the UI renders the real resolution stack, never re-derived.
-//   C2-2: Target Settings no longer shows the effective-policy table; the "See how this resolves →" link opens the
+//   Target Settings shows a "See how this resolves →" link instead of the effective-policy table; the link opens the
 //         Catalog hierarchy with the namespace preserved.
-//   C2-5: enabling a pack for a concrete namespace makes its overlay layer APPEAR in the hierarchy (no reload);
+//   Enabling a pack for a concrete namespace makes its overlay layer APPEAR in the hierarchy (no reload);
 //         disabling makes it disappear.
-//   C2-4a: the selected concrete namespace STICKS across Packs → Targets → Catalog (3 hops).
+//   The selected concrete namespace STICKS across Packs → Targets → Catalog (3 hops).
 import { test, expect, type Page } from "@playwright/test";
 
 const PW = process.env.NRVQ_E2E_PASSWORD || "CHANGE_ME-e2e-pw";

@@ -261,11 +261,11 @@ def test_redteam_results_history_list() -> None:
     headers = {"Authorization": f"Bearer {_token()}"}
     body = client.get("/api/v1/redteam/results?limit=5", headers=headers).json()
     assert body["total"] == 1
-    assert body["offset"] == 0 and body["limit"] == 5  # D3: bounded + paginated envelope
+    assert body["offset"] == 0 and body["limit"] == 5  # bounded + paginated envelope
     run = body["runs"][0]
     assert run["run_id"] == "run-abc"
     assert run["proven_blocking_pct"] == 100.0
-    assert "results" not in run  # D3: summary only — never per-attack detail in the history list
+    assert "results" not in run  # summary only — never per-attack detail in the history list
 
 
 def test_redteam_by_id_flags_detail_pruned_run() -> None:

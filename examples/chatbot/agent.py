@@ -36,7 +36,7 @@ protected_tools = [
     protect(tool(send_email)),
 ]
 
-SYSTEM_PROMPT = """You are a helpful customer support agent for Lenovo.
+SYSTEM_PROMPT = """You are a helpful customer support agent for Acme Corp.
 You can search the knowledge base, look up customers and orders, and help with common requests.
 Never execute SQL directly unless explicitly asked. Never delete records. Be professional."""
 

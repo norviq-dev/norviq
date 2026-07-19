@@ -54,8 +54,8 @@ class NorviqSettings(BaseSettings):
     # Default matches the in-cluster central API service (same target as api_url).
     policy_engine_url: str = "http://norviq-api:8080"
     enforcement_mode: str = "block"
-    # F-04: decision when an enforcing namespace has NO policy loaded (deny-by-default for a PEP).
-    # "deny" (default) blocks unconfigured namespaces in block mode; "allow" restores the old fail-open.
+    # Decision when an enforcing namespace has NO policy loaded (deny-by-default for a PEP).
+    # "deny" (default) blocks unconfigured namespaces in block mode; "allow" restores fail-open behavior.
     # Only applies in enforcement_mode="block"; audit/monitor mode always allows (visibility only).
     no_policy_decision: str = "deny"
     sdk_timeout_ms: int = 5000
@@ -68,7 +68,7 @@ class NorviqSettings(BaseSettings):
     sdk_http_max_keepalive_connections: int = 10
     spiffe_socket: str = "/tmp/spiffe-mock.sock"
     spiffe_cache_ttl_s: int = 300
-    # Workload-identity resolution mode (IDENTITY epic B2). "mock" = env-var identity (default;
+    # Workload-identity resolution mode. "mock" = env-var identity (default;
     # local/tests/attack-suite). "workload-api" = real SPIFFE Workload API SVID, FAIL-CLOSED on
     # socket/SVID error (no env-var fallback). NRVQ_SPIFFE_MODE; revert to mock with no redeploy.
     spiffe_mode: str = "mock"
@@ -96,12 +96,12 @@ class NorviqSettings(BaseSettings):
     # happens once per (key, digest) per pod — but OPA recompiles its whole module store on every PUT,
     # which at a realistic store size exceeds the tight query timeout. Sharing opa_timeout_ms made the
     # FIRST eval of any freshly-applied/enabled policy fail closed (evaluator_error) or produce an empty
-    # override-validation error (P1-2 Defect 2). Keep the query timeout tight; give push real headroom.
+    # override-validation error. Keep the query timeout tight; give push real headroom.
     opa_push_timeout_ms: int = 5000
     debug_opa_logging: bool = Field(default=False, validation_alias=AliasChoices("DEBUG_OPA_LOGGING", "DEBUG_OPA"))
     evaluator_rate_limit_per_window: int = 60
     evaluator_rate_limit_window_s: int = 60
-    # F-23: exempt read-like tools from the per-identity rate limiter so a benign read spike isn't denied
+    # Exempt read-like tools from the per-identity rate limiter so a benign read spike isn't denied
     # (a legitimate availability hit under load). Write/destructive tools are still rate-limited (fail-safe).
     evaluator_rate_limit_read_exempt: bool = True
     evaluator_rate_limit_read_prefixes: tuple[str, ...] = (
@@ -117,7 +117,7 @@ class NorviqSettings(BaseSettings):
         "; --",
     )
     evaluator_non_cacheable_rules: tuple[str, ...] = ("rate_limit_exceeded", "escalate_low_trust")
-    # --- HTTP-level rate limiting (HIGH-1). evaluator_rate_limit_* above is an OPA POLICY decision on the
+    # --- HTTP-level rate limiting. evaluator_rate_limit_* above is an OPA POLICY decision on the
     # evaluated tool call; this is a separate HTTP-layer throttle in front of the whole API (DoS defense),
     # Redis-backed (INCR+EXPIRE fixed window) so it is shared correctly across HA replicas. Keyed per-identity
     # (unverified JWT `sub` — cheap, no signature check on the hot path; downstream auth still fully verifies
@@ -133,7 +133,7 @@ class NorviqSettings(BaseSettings):
     http_rate_limit_dry_run_per_window: int = 20
     http_rate_limit_redteam_per_window: int = 15
     http_rate_limit_default_per_window: int = 300     # everything else
-    # F-22: OPT-IN, default-OFF output-DLP. Norviq's PEP is INPUT-only; when enabled the SDK adapter scans an
+    # OPT-IN, default-OFF output-DLP. Norviq's PEP is INPUT-only; when enabled the SDK adapter scans an
     # allowed tool's RETURN value and redacts PAN/SSN before it propagates (minimal; full output-DLP is roadmap).
     sdk_output_dlp_enabled: bool = False
     pg_url: str = "postgresql://norviq:norviq_dev@localhost:5432/norviq"
@@ -152,7 +152,7 @@ class NorviqSettings(BaseSettings):
     # raise this to 90-365 via Helm (auditRetentionDays); the audit-evidence export packs are the
     # supported path for durable long-term evidence. <=0 disables pruning (keep forever).
     audit_retention_days: int = 30
-    # HIGH-2a: how often the background retention pruner sweeps ALL retention-managed tables
+    # How often the background retention pruner sweeps ALL retention-managed tables
     # (audit_log, coverage snapshots, expired drafts, agent registry, asset-graph snapshots) — started/
     # cancelled from the API lifespan. Each table has its own <=0 disable switch; the interval itself
     # has no disable — a sweep just finds nothing to delete once a table is within its window.
@@ -171,7 +171,7 @@ class NorviqSettings(BaseSettings):
     # Pre-existing keys (no expires_at) never expire — unchanged behavior. <=0 here = new keys
     # default to never-expiring.
     api_key_default_ttl_days: int = 90
-    # HIGH-2b: bounded concurrency for audit_emitter's fire-and-forget DB writes, so a flood of tool
+    # Bounded concurrency for audit_emitter's fire-and-forget DB writes, so a flood of tool
     # calls can't fan out enough concurrent audit INSERTs to exhaust the DB pool (pg_pool_size +
     # db_pool_max_overflow) and starve every other endpoint. Sized comfortably under the pool ceiling.
     audit_emit_max_concurrency: int = 8
@@ -180,11 +180,11 @@ class NorviqSettings(BaseSettings):
     draft_ttl_days: int = 14              # real intent drafts auto-expire after this many days
     draft_ttl_test_hours: int = 24        # test/e2e (synthetic-class) drafts expire fast
     draft_cap_per_namespace: int = 50     # hard ceiling of real drafts per namespace (evict oldest beyond it)
-    policy_scope_cap_per_namespace: int = 200  # M2: hard ceiling of distinct (ns,class) policy scopes per namespace
+    policy_scope_cap_per_namespace: int = 200  # hard ceiling of distinct (ns,class) policy scopes per namespace
     drafts_page_size: int = 15            # bounded drafts endpoint page size (top-N newest + total count)
     policy_version_keep_count: int = 20   # keep at least the last N versions per policy
     policy_version_keep_days: int = 90    # ...and any version saved within this window; prune older EXCEPT current
-    # D3 red-team run retention (read-only EVIDENCE table — never touches enforcement). Two tiers keep the DB +
+    # Red-team run retention (read-only EVIDENCE table — never touches enforcement). Two tiers keep the DB +
     # history view bounded: FULL per-attack detail is kept only for the newest few runs (or a short TTL); older
     # runs keep just their SUMMARY (efficacy %, counts, per-technique roll-up, targets, timestamp). SAFETY: the
     # latest run per namespace is ALWAYS protected — its detail + summary are never pruned.
@@ -193,15 +193,15 @@ class NorviqSettings(BaseSettings):
     redteam_summary_keep_runs: int = 20   # keep summaries (no detail) for the newest N runs / namespace
     redteam_summary_keep_days: int = 30   # ...and any run within this window; older runs are deleted entirely
     redteam_history_page_size: int = 20   # bounded /redteam/results history page size (summaries only)
-    # LOW/MED-4: the per-namespace in-flight guard (_INFLIGHT_SUITES) only stops a double-submit for the
+    # The per-namespace in-flight guard (_INFLIGHT_SUITES) only stops a double-submit for the
     # SAME namespace — an admin (or a compromised admin token) can still fan out concurrent suites across
     # many namespaces, each = len(targets) x len(ATTACKS) evaluate calls + a DB persist. This caps how
     # many suite runs (across ALL namespaces) may execute at once, process-wide.
     redteam_suite_global_concurrency: int = 3
-    # F-19 (opt-in, default OFF): capture MASKED tool_params on the audit record (PAN->****1111,
+    # Opt-in, default OFF: capture MASKED tool_params on the audit record (PAN->****1111,
     # SSN->***-**-6789, secrets->****) for event reconstruction (PCI 10.3) without storing raw PII/PAN.
     audit_capture_masked_params: bool = False
-    # F-19 (opt-in): HMAC-SHA256 key for the tamper-evident /audit/export?signed=true manifest. Empty =
+    # Opt-in: HMAC-SHA256 key for the tamper-evident /audit/export?signed=true manifest. Empty =
     # the signed export still hash-chains (integrity) but the manifest signature is null (no shared-key auth).
     audit_export_signing_key: str = ""
     otel_endpoint: str = "http://localhost:4317"
@@ -216,7 +216,7 @@ class NorviqSettings(BaseSettings):
     # PERF-1: reject over-large request bodies (defense against the base64 fan-out DoS amplifier and
     # generic memory abuse). 256 KiB is far above any legitimate tool-call payload. NRVQ_MAX_REQUEST_BODY_BYTES.
     max_request_body_bytes: int = 262144
-    # SIDE-2: injected-sidecar evaluation mode. "proxy" (default) = the sidecar POSTs each tool call to
+    # Injected-sidecar evaluation mode. "proxy" (default) = the sidecar POSTs each tool call to
     # the central norviq-api /api/v1/evaluate with a namespace-scoped service JWT (DB/OPA stay central,
     # nothing per-pod). "embedded" = the sidecar runs its own RedisCache+OPA+PolicyLoader (air-gapped/edge;
     # needs NRVQ_REDIS_URL/NRVQ_PG_URL/NRVQ_OPA_* wired in). NRVQ_SIDECAR_MODE.
@@ -246,13 +246,13 @@ class NorviqSettings(BaseSettings):
         # NRVQ_API_SECRET_KEY is what the Helm chart sets — include it so the key is rotatable.
         validation_alias=AliasChoices("API_SECRET_KEY", "JWT_SECRET", "NRVQ_API_SECRET_KEY"),
     )
-    # HIGH-3: when true, the API refuses to start on a weak/default/short JWT secret or the default
+    # When true, the API refuses to start on a weak/default/short JWT secret or the default
     # admin password (fail-closed — see the boot check in api/main.py). Defaults True: a forgeable
     # default secret is a fleet-wide trust-root compromise, so "secure by default" wins over
     # dev-convenience. Local dev / tests / the attack suite set NRVQ_REQUIRE_STRONG_SECRET=false (or
     # export a real NRVQ_API_SECRET_KEY, which is the better fix and satisfies this unchanged).
     require_strong_secret: bool = True
-    # --- LOGIN-2: local username/password login. The PRIMARY no-IdP path (replaces the CLI/paste-token
+    # --- Local username/password login. The PRIMARY no-IdP path (replaces the CLI/paste-token
     # quick-start as the default). The CLI/token mint (token_mint) stays for automation; OIDC SSO stays
     # for enterprise. Credentials live in norviq-secrets; the seed admin is hashed at boot (bcrypt).
     auth_login_enabled: bool = True
@@ -276,7 +276,7 @@ class NorviqSettings(BaseSettings):
     auth_login_window_s: int = 300
     # Minimum length enforced on a NEW password at change-time (defense-in-depth; not applied to the seed).
     auth_min_password_length: int = 12
-    # --- OIDC (SSO) — IDENTITY epic stage A1/A2. All default-off so legacy HS256 stays the only
+    # --- OIDC (SSO). All default-off so legacy HS256 stays the only
     # path until an IdP is wired; flipping oidc_enabled adds RS256/ES256 validation ALONGSIDE HS256.
     oidc_enabled: bool = False
     oidc_issuer: str = ""
@@ -289,7 +289,7 @@ class NorviqSettings(BaseSettings):
     # group -> {"role": "...", "namespace": "..."}; parses from a JSON env string. e.g.
     # NRVQ_OIDC_GROUP_MAPPINGS='{"norviq-admins":{"role":"admin"},"team-a":{"role":"viewer","namespace":"team-a"}}'
     oidc_group_mappings: dict[str, dict[str, str]] = {}
-    # Keep validating legacy HS256 tokens during migration; flip false at cutover (A4) once all
+    # Keep validating legacy HS256 tokens during migration; flip false at cutover once all
     # clients use OIDC (a short-TTL break-glass service token path is retained).
     legacy_hs256_enabled: bool = True
     webhook_port: int = 8443
@@ -302,7 +302,7 @@ class NorviqSettings(BaseSettings):
     siem_webhook_url: str = ""
     siem_format: str = "ndjson"  # ndjson | syslog
     siem_poll_interval_s: int = 30
-    # --- Multi-cluster fleet (F045), MVP P1 read-only. OFF by default -> single-cluster behaves as today.
+    # --- Multi-cluster fleet, read-only. OFF by default -> single-cluster behaves as today.
     # Spoke relay: pushes agent + audit ROLLUPS to the hub fleet-api. Fire-and-forget, never on the
     # enforce hot path (hub down -> local enforcement unaffected; fleet views degrade, never open).
     fleet_enabled: bool = False
@@ -311,7 +311,7 @@ class NorviqSettings(BaseSettings):
     fleet_cluster_name: str = ""
     fleet_cluster_region: str = ""
     fleet_cluster_endpoint: str = ""
-    # F-69: this cluster's OWN console URL, advertised to the hub on heartbeat so the hub console can deep-link
+    # This cluster's OWN console URL, advertised to the hub on heartbeat so the hub console can deep-link
     # "open <cluster>'s console" for a remote selection. Optional — absent -> the deep-link shows guidance instead.
     fleet_cluster_console_url: str = ""
     fleet_relay_interval_s: int = 60
@@ -323,16 +323,16 @@ class NorviqSettings(BaseSettings):
     fleet_oidc_client_secret: str = ""
     # HUB ONLY: the fleet-api's own dedicated Postgres (separate store from any spoke DB).
     fleet_pg_url: str = "postgresql://norviq:norviq_dev@fleet-postgresql:5432/norviq_fleet"
-    # --- F045 P2 signed policy-push. The signing keypair is a DEDICATED fleet trust root, DISTINCT from
+    # --- Signed policy-push. The signing keypair is a DEDICATED fleet trust root, DISTINCT from
     # api_secret_key (so compromising the token secret can't forge bundles). HUB holds the private key;
     # spokes hold ONLY the public key. A spoke with an empty pubkey FAILS CLOSED (applies no bundle).
     fleet_signing_key: str = ""         # hub: RS256 private key PEM
     fleet_bundle_pubkey: str = ""       # spoke: RS256 public key PEM (the trust root)
     fleet_bundle_ttl_s: int = 900       # hub: signed bundle validity window (expires_at = issued_at + ttl)
     fleet_pull_interval_s: int = 60     # spoke: how often to pull + verify + apply the bundle
-    # P4 residency: this spoke keeps raw audit in-cluster (rollups still leave; drill-down is blocked).
+    # Residency: this spoke keeps raw audit in-cluster (rollups still leave; drill-down is blocked).
     fleet_residency: bool = False
-    # P2: labels this cluster advertises to the hub for policy target_selector matching (e.g. {"env":"prod"}).
+    # Labels this cluster advertises to the hub for policy target_selector matching (e.g. {"env":"prod"}).
     fleet_cluster_labels: dict[str, str] = {}
 
 

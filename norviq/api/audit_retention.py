@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Unified background data-retention pruner (extends the original HIGH-2a audit_log pruner).
+"""Unified background data-retention pruner (extends the original audit_log pruner).
 
 One hourly loop (``audit_retention_prune_interval_s``) sweeps every retention-managed table; each
 table has its own knob and a ``<=0`` value disables that table's pruning (keep forever):
 
 * ``audit_log``                 — rows older than ``audit_retention_days`` (default 30)
 * ``mitre_coverage_snapshots``  — rows older than ``coverage_snapshot_retention_days`` (default 30)
-* ``intent_drafts``             — expired drafts (``expires_at``-driven; previously GC'd only lazily
-                                  when the Catalog list was loaded — a namespace nobody viewed kept
-                                  its expired rows indefinitely)
+* ``intent_drafts``             — expired drafts (``expires_at``-driven; pruned here regardless of
+                                  whether the Catalog list was ever loaded, so a namespace nobody
+                                  views does not keep its expired rows indefinitely)
 * ``agent_registry``            — identities unseen for ``agent_registry_retention_days`` (default 90)
 * ``asset_graph``               — keep the newest ``graph_snapshot_keep_per_namespace`` (default 10)
                                   snapshots per namespace; rows referenced by ``attack_paths`` are
@@ -183,5 +183,5 @@ class RetentionPruner:
             self._task = None
 
 
-# Back-compat alias: the class began life as the audit-only pruner (HIGH-2a).
+# Back-compat alias for the audit-only pruner name.
 AuditRetentionPruner = RetentionPruner

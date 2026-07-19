@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""SIDE-2: thin-proxy RemoteEvaluator — maps the central /evaluate response and fails CLOSED."""
+"""Thin-proxy RemoteEvaluator — maps the central /evaluate response and fails CLOSED."""
 
 from __future__ import annotations
 

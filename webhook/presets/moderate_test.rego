@@ -1,4 +1,4 @@
-# F-12 guard: the moderate preset resolves decision/rule_id/reason from partial-set triggers +
+# Conflict guard: the moderate preset resolves decision/rule_id/reason from partial-set triggers +
 # a resolver, so an input that matches BOTH triggers (execute_sql carrying "drop") must bind exactly
 # one decision (block > escalate) instead of raising eval_conflict_error. Run:
 #   opa test --v0-compatible moderate.rego moderate_test.rego

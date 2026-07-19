@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Coverage-by-category route (F046) — policy coverage across risk categories.
+"""Coverage-by-category route — policy coverage across risk categories.
 
-Replaces the console's fabricated category scores (magic coefficients on the block rate). A category's
+A category's
 `score` is **rules-present**: how many of its mapped rule_ids appear in the rego actually loaded for the
-namespace (or the cluster baseline). F-44/F-45: "present" is NOT "effective" — a rule can be loaded yet never
+namespace (or the cluster baseline). "present" is NOT "effective" — a rule can be loaded yet never
 fire — so this route ALSO overlays real audit efficacy (`observed`/`blocked` per category from traffic) and an
 `effective` flag, and the response declares `basis: "rules_present"` so the number can't be read as a
 protection guarantee. The category -> rule_id taxonomy lives in policies/category_mapping.json (a documented
@@ -182,7 +182,7 @@ async def coverage_by_category(
 ) -> dict:
     """Per risk category: `score` = how many mapped rules are PRESENT in this namespace's loaded rego (not a
     proof of efficacy); `observed`/`blocked` = real audit activity for those rules; `effective` = at least one
-    rule in the category has actually blocked/escalated traffic. F-44/F-45: present != effective."""
+    rule in the category has actually blocked/escalated traffic. Present != effective."""
     namespace = read_namespace(user, namespace)  # None => all namespaces
     mapping = _load_mapping()
     loader = getattr(request.app.state, "loader", None)

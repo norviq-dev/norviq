@@ -58,11 +58,11 @@ export function Header({
     setTimeRange
   } = useApp();
   const navigate = useNavigate();
-  // R1: the time-range selector is shown ONLY on routes the global range genuinely drives (one source of
+  // The time-range selector is shown ONLY on routes the global range genuinely drives (one source of
   // truth in lib/routeMeta) — hidden on current-state pages (Catalog/Packs/Targets) and on pages with their
   // own in-page range picker (Compliance/Attack Graph/Asset Graph), so there is no dead/duplicate control.
   const timeScoped = isTimeScoped(useLocation().pathname);
-  // F-29: the cluster selector only repoints the Fleet page; on every other page the data is the local cluster's.
+  // The cluster selector only repoints the Fleet page; on every other page the data is the local cluster's.
   // So allow switching ONLY on /fleet and show a read-only "viewing local cluster" notice elsewhere (no false affordance).
   const [open, setOpen] = useState<Dropdown | "user">(null);
   const [searchText, setSearchText] = useState("");
@@ -89,7 +89,7 @@ export function Header({
     return selectedCluster;
   }, [isTablet, selectedCluster]);
 
-  // The signed-in user, resolved by the server (/me). Replaces the previously hardcoded name/role.
+  // The signed-in user, resolved by the server (/me).
   useEffect(() => {
     let active = true;
     fetchMe()
@@ -118,7 +118,7 @@ export function Header({
   const loadInbox = useCallback(async () => {
     const now = Date.now();
     // Inbox is scoped to the SELECTED namespace — cache per namespace so a switch doesn't show the
-    // previous scope's counts (was a global 60s cache that ignored the namespace entirely).
+    // previous scope's counts.
     if (
       inboxCacheRef.current &&
       inboxCacheRef.current.ns === selectedNamespace &&
@@ -162,8 +162,8 @@ export function Header({
 
   const inboxBadgeCount = (inboxData?.blockedCount ?? 0) + (inboxData?.lowTrustCount ?? 0);
   const searchPanelOpen = !isTablet && searchFocused && searchText.trim().length > 0;
-  // H9: the tablet popup previously rendered ONLY the input — results were fetched and dropped on the
-  // floor (search looked dead on any viewport ≤1023px). Both widths now render the same results panel.
+  // Both the tablet popup and the desktop dropdown render the same results panel (results shown on
+  // every viewport width, including ≤1023px).
   const tabletPanelOpen = isTablet && searchOpen && searchText.trim().length > 0;
   const hasSearchResults = toolResults.length + agentResults.length + policyResults.length > 0;
 
@@ -274,8 +274,7 @@ export function Header({
     searchAbortRef.current = controller;
     setSearchLoading(true);
     try {
-      // P2-2: ONE server-scoped, bounded call. Previously this fanned out to three endpoints and pulled
-      // the entire agent + policy lists on every keystroke, matching client-side.
+      // ONE server-scoped, bounded call (replaces a three-endpoint client-side fan-out).
       const results = await fetchSearch(q, controller.signal);
       if (controller.signal.aborted) return;
       setToolResults((results.tools ?? []).slice(0, 3));
@@ -349,7 +348,7 @@ export function Header({
             {fleetEnabled && (
               <div className="cluster-col">
                 <div className="dd-head">CLUSTER</div>
-                {/* F-59: the global nav dropdown is the ONE cluster switcher (the page-level Fleet selector is gone).
+                {/* The global nav dropdown is the ONE cluster switcher.
                     Switching repoints the fleet view in place — no force-navigation. */}
                 {[...new Set(["all", ...clusters])].map((c) => (
                   <button
@@ -385,7 +384,7 @@ export function Header({
         )}
       </div>
 
-      {/* R1: rendered only where the global range drives the page (see lib/routeMeta). */}
+      {/* Rendered only where the global range drives the page (see lib/routeMeta). */}
       {timeScoped && (
       <div className="time-range-wrap" role="group" aria-label="Time range" data-testid="time-range">
         {(["1h", "6h", "24h", "7d", "30d"] as TimeRange[]).map((range) => {
@@ -394,7 +393,7 @@ export function Header({
             <button
               key={range}
               type="button"
-              // R2: visible ACTIVE state — teal --accent fill + aria-pressed + an `active` class,
+              // Visible ACTIVE state — teal --accent fill + aria-pressed + an `active` class,
               // keyboard-focusable (native button), distinct from the muted inactive chips. No off-palette hex.
               className={`range-chip${isActive ? " active" : ""}`}
               aria-pressed={isActive}
@@ -471,7 +470,7 @@ export function Header({
       )}
 
       <div className="tb-right">
-        {/* P1-1/C2: governance posture of the selected scope — Monitor = evaluate & log would-block but
+        {/* Governance posture of the selected scope — Monitor = evaluate & log would-block but
             ALLOW, so every "blocked/enforcing" claim is qualified by this chip. Lives top-RIGHT with the
             other status controls (inbox/account). Click-through → Target Settings. */}
         {posture.mode === "audit" && (
@@ -623,7 +622,7 @@ export function Header({
           >
             <div style={{ padding: "12px 14px" }}>
               <div style={{ fontSize: 14, fontWeight: 500, color: "#FFFFFF" }}>{displayName}</div>
-              {/* LOGIN-3: surface the server-resolved permission scope (role + namespace) so the operator
+              {/* Surface the server-resolved permission scope (role + namespace) so the operator
                   always sees who they are signed in as and what they can reach. */}
               <div style={{ fontSize: 12, color: "#A0A0A0", marginTop: 2 }}>
                 {displayRole} · {me?.namespace ? `namespace: ${me.namespace}` : "all namespaces"}
@@ -679,8 +678,7 @@ export function Header({
         <div className="tablet-search-pop" style={{ position: "relative" }}>
           <Search size={14} style={{ color: "var(--text-secondary)" }} />
           <input
-            // H9: focus the field the moment the popup opens — previously the first keystrokes after
-            // tapping the search icon went to the page, not the input.
+            // Focus the field the moment the popup opens, so keystrokes go to the input, not the page.
             autoFocus
             value={searchText}
             onChange={(e) => setSearchText(e.target.value)}

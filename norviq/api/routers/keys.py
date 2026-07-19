@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""API-key management routes (F046) — issue / list / revoke. Admin-only, audited. The secret is
-returned exactly once (on create); the store only ever holds its hash. Replaces the API Keys stub."""
+"""API-key management routes — issue / list / revoke. Admin-only, audited. The secret is
+returned exactly once (on create); the store only ever holds its hash."""
 
 from datetime import datetime, timedelta, timezone
 

@@ -31,7 +31,7 @@ test_benign_plan_lookup_allowed {
     d == "allow"
 }
 
-# === F-17 regression: CPNI exfil via a renamed export tool (param-semantic, not name-bound) ===
+# === Regression: CPNI exfil via a renamed export tool (param-semantic, not name-bound) ===
 
 # the flagship repro: renamed export tool carrying CPNI params to an external bucket -> block
 test_renamed_export_cpni_exfil_blocked {

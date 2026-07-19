@@ -73,7 +73,7 @@ type Controller struct {
 	tokenMu      sync.Mutex
 	cachedJWT    string
 	cachedJWTExp time.Time
-	// B4: when configured, the controller authenticates to the API with an OIDC client-credentials
+	// When configured, the controller authenticates to the API with an OIDC client-credentials
 	// access token (validated by the API's existing OIDC path) instead of the HS256 service JWT.
 	// nil -> HS256 path. The TokenSource caches + auto-refreshes.
 	oidcTokenSource      oauth2.TokenSource
@@ -1079,7 +1079,7 @@ func (c *Controller) listCachedPolicies() []*unstructured.Unstructured {
 // here so the controller authenticates to the API (which validates JWTs, not the raw secret). Returns
 // "" when no secret is configured (the request then goes unauthenticated, as before).
 func (c *Controller) bearerToken() string {
-	// B4: prefer the OIDC client-credentials access token (the TokenSource caches + auto-refreshes).
+	// Prefer the OIDC client-credentials access token (the TokenSource caches + auto-refreshes).
 	// Fall back to the HS256 service JWT on any error so policy sync never breaks mid-migration.
 	if c.oidcTokenSource != nil {
 		if tok, err := c.oidcTokenSource.Token(); err == nil && tok.AccessToken != "" {

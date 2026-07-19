@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Batch C (RT-FRAMEWORK-01 / AG-DRAFT-01 / AG-ALIGN-01) — REAL form login, REAL controls + backend.
+// REAL form login, REAL controls + backend.
 // Proves three Attack-Graph / Red-Team UX changes drive their actual on-screen + backend effect (a 200
 // is NOT a pass):
-//   • RT-FRAMEWORK-01 — the per-attack results table collapses the separate ATLAS + OWASP columns into a
-//     single "Frameworks" column of mapped chips (scales to N frameworks). The old columns are GONE.
-//   • AG-DRAFT-01    — the what-if "Draft blocking policy" button was a FABRICATED local-only "✓ Draft
+//   • The per-attack results table collapses the separate ATLAS + OWASP columns into a
+//     single "Frameworks" column of mapped chips (scales to N frameworks). The separate columns are GONE.
+//   • The what-if "Draft blocking policy" button was a FABRICATED local-only "✓ Draft
 //     created" (no POST, no id). It now POSTs a real dry-run draft (/threats/intent-draft) and the
 //     confirmation becomes a LIVE deep-link into /policies/catalog?intent_draft=<id> where the draft row
 //     is actually visible (dry-run, non-enforcing).
-//   • AG-ALIGN-01    — the ranked path list / inspector sit BELOW the KPI/severity divider (a small top
+//   • The ranked path list / inspector sit BELOW the KPI/severity divider (a small top
 //     offset), asserted geometrically against the stat strip.
 import { test, expect, type Page } from "@playwright/test";
 
@@ -26,7 +26,7 @@ async function realLogin(page: Page): Promise<void> {
   await page.waitForURL(/\/$/, { timeout: 20000 });
 }
 
-// ── RT-FRAMEWORK-01 ──────────────────────────────────────────────────────────────────────────────
+// ── Frameworks column ────────────────────────────────────────────────────────────────────────────
 test("RT-FRAMEWORK-01: the per-attack results collapse ATLAS+OWASP into a single Frameworks column of chips", async ({ page }) => {
   await realLogin(page);
   await page.goto("/redteam");
@@ -51,7 +51,7 @@ test("RT-FRAMEWORK-01: the per-attack results collapse ATLAS+OWASP into a single
   await expect(table.getByTestId("fw-chip-atlas").first()).toBeVisible();
 });
 
-// ── AG-DRAFT-01 ──────────────────────────────────────────────────────────────────────────────────
+// ── Draft blocking policy ────────────────────────────────────────────────────────────────────────
 test("AG-DRAFT-01: the what-if 'Draft blocking policy' POSTs a real dry-run draft and deep-links to it (no fabrication)", async ({ page }) => {
   await realLogin(page);
   await page.goto("/threats/graph");
@@ -105,7 +105,7 @@ test("AG-DRAFT-01: the what-if 'Draft blocking policy' POSTs a real dry-run draf
   await expect(page.locator('[data-testid^="intent-draft-"]').first()).toBeVisible();
 });
 
-// ── AG-ALIGN-01 ──────────────────────────────────────────────────────────────────────────────────
+// ── Ranked path list placement ───────────────────────────────────────────────────────────────────
 test("AG-ALIGN-01: the ranked path list drops below the KPI/severity divider (top offset present)", async ({ page }) => {
   await realLogin(page);
   await page.goto("/threats/graph");

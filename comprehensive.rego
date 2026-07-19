@@ -3,8 +3,8 @@ package norviq.strict
 # Canonical horizontal policy. Decision/rule_id/reason are resolved from PARTIAL-SET triggers
 # (blocks/escalates/audits) + a deterministic resolver — the same pattern the sector packs use — so
 # that when several rules match ONE call (e.g. PCI + PII + injection in one payload) there is NO
-# complete-rule conflict (F-12) and EVERY block/escalate/audit carries a correct human-readable reason
-# (F-08). Precedence: block > escalate > audit > allow; ties resolved by sorted rule_id (deterministic).
+# complete-rule conflict and EVERY block/escalate/audit carries a correct human-readable reason.
+# Precedence: block > escalate > audit > allow; ties resolved by sorted rule_id (deterministic).
 # The detection predicates below are unchanged from the prior version (decision parity is guarded by a
 # test): only the decision/rule_id/reason wiring changed.
 
@@ -35,7 +35,7 @@ injection_override_keywords = ["ignore", "disregard", "override", "forget", "ski
 injection_override_phrases = ["do not follow", "dont follow", "stop following", "no longer follow", "act as admin"]
 injection_context_keywords = ["previous", "prior", "above", "earlier", "system"]
 # SEC-1: expanded so paraphrases that name the guardrail without saying "instructions" still match
-# (guidelines/restrictions/filters/prompt/safety were all bypasses in the live pentest).
+# (guidelines/restrictions/filters/prompt/safety were all observed as bypass phrasings).
 injection_directive_keywords = ["instruction", "instructions", "guardrail", "guardrails", "rule", "rules", "policy", "policies", "directions", "guideline", "guidelines", "restriction", "restrictions", "filter", "filters", "prompt", "safety"]
 injection_action_keywords = ["reveal", "dump", "export", "print", "show", "delete", "leak", "exfiltrate", "disclose"]
 injection_target_keywords = ["secret", "secrets", "confidential", "credential", "credentials", "token", "tokens", "hidden credentials", "confidential data", "password", "passwords", "api key", "api keys", "private key"]
@@ -155,10 +155,10 @@ injection_detected {
     contains(normalized, "prompt")
     contains_any(normalized, injection_action_keywords)
 }
-# F-02: confusable skeleton (homoglyph/zero-width) — engine folds tool_params to ASCII (match-only).
+# Confusable skeleton (homoglyph/zero-width) — engine folds tool_params to ASCII (match-only).
 # SQL injection
 sql_patterns = ["drop table", "union select", "or '1'='1'", "or 1=1", "delete from", "xp_cmdshell", "exec ("]
-# F-20: clearly-destructive SQL caught in ANY tool's params (a renamed tool — run_report/read_record — carrying
+# Clearly-destructive SQL caught in ANY tool's params (a renamed tool — run_report/read_record — carrying
 # a destructive statement bypassed the execute_sql-only rule). Kept tight to avoid benign free-text false-blocks.
 sql_destructive_patterns = ["drop table", "delete from", "truncate table", "; drop", "xp_cmdshell", "union select"]
 
@@ -168,7 +168,7 @@ sql_injection_detected {
     pattern := sql_patterns[_]
     contains(query, pattern)
 }
-# F-20 + SEC-4: destructive SQL in ANY tool's params, but only with SQL-SYNTAX CONTEXT so natural
+# SEC-4: destructive SQL in ANY tool's params, but only with SQL-SYNTAX CONTEXT so natural
 # business prose ("please delete from my calendar", "we should drop table service at the restaurant")
 # is not hard-blocked. Context = the value LEADS with the destructive statement (bare SQL, e.g. a
 # renamed run_report/read_record carrying "drop table users") OR contains a statement separator ";".
@@ -201,7 +201,7 @@ destructive_tools = {"delete_record", "drop_table", "truncate"}
 elevated_tools = {"modify_config", "grant_access"}
 
 # SEC-DESTRUCTIVE (renamed-tool fix): the exact-name set above is trivially bypassed by renaming the tool
-# (wipe_table, destroy_records, purge_db). Mirror F-20: also treat any tool whose name LEADS with an
+# (wipe_table, destroy_records, purge_db). Mirror the renamed-destructive-SQL defense: also treat any tool whose name LEADS with an
 # unambiguous destructive verb as destructive. Kept to strong verbs so benign tools (remove_tag, delete_
 # is intentionally included as data-destructive) aren't over-swept beyond clear intent.
 destructive_verb_tool {
@@ -216,14 +216,14 @@ sensitive_keys = {"password", "secret", "api_key", "token", "private_key"}
 
 # SEC-EGRESS (fail-open fix): the named-sink allowlist above only ever covered 3 tools, so a secret sent
 # via any OTHER egress-verb tool (send_slack, post_data, http_post, publish_event, export_csv, put_object,
-# webhook_call, …) exfiltrated freely. Mirror the F-20 renamed-tool defense: treat any tool whose name
+# webhook_call, …) exfiltrated freely. Mirror the renamed-tool defense: treat any tool whose name
 # STRONGLY implies external egress as a sink. Kept to unambiguous egress verbs so benign tools aren't
 # swept in; a deployment can still allowlist a specific tool via its own policy.
 egress_verb_tool {
     name := lower(input.tool_name)
-    # DEF-015: widened so object-store / RPC / notification sinks (s3_put, put_object, call_api,
+    # Widened so object-store / RPC / notification sinks (s3_put, put_object, call_api,
     # notify_external, smtp*) are also treated as external egress for BOTH the key-name and the
-    # value-pattern secret checks below — previously they matched no prefix and leaked freely.
+    # value-pattern secret checks below.
     prefixes := ["send_", "post_", "upload_", "publish_", "export_", "http_", "fetch_", "sync_to_", "push_to_", "put_", "s3_", "call_", "notify_", "smtp"]
     startswith(name, prefixes[_])
 }
@@ -247,7 +247,7 @@ data_leakage_detected {
     sensitive_keys[lower(k)]
 }
 
-# F-45 (DL-001): a secret embedded in a param VALUE sent to an external tool (e.g. send_email body
+# DL-001: a secret embedded in a param VALUE sent to an external tool (e.g. send_email body
 # "api_key=sk-123") — the key-name check above misses it because the key is `body`, not `api_key`.
 secret_value_patterns = [
     `api[_-]?key\s*[:=]`,
@@ -265,7 +265,7 @@ data_leakage_detected {
     some i
     regex.match(secret_value_patterns[i], val)
 }
-# DEF-015: a secret in a param VALUE must ALSO block on ANY egress-verb sink, not only the 3 named
+# A secret in a param VALUE must ALSO block on ANY egress-verb sink, not only the 3 named
 # external_tools — mirrors the key-name egress rule above. Otherwise http_post/s3_put/send_sms
 # carrying "api_key=sk-…" / "password=…" / "bearer …" in a body param exfiltrated freely.
 data_leakage_detected {
@@ -275,8 +275,8 @@ data_leakage_detected {
     regex.match(secret_value_patterns[i], val)
 }
 
-# F-45 (DL-003): reading an environment secret / credential is data egress (OWASP LLM02). The baseline had
-# no env/secret-read rule at all, so read_env{key:"AWS_SECRET_ACCESS_KEY"} was allowed.
+# DL-003: reading an environment secret / credential is data egress (OWASP LLM02), so
+# read_env{key:"AWS_SECRET_ACCESS_KEY"} and similar secret reads are blocked.
 secret_read_tools = {"read_env", "getenv", "get_secret", "read_secret", "fetch_secret"}
 secret_name_patterns = [`secret`, `password`, `api[_-]?key`, `token`, `private[_-]?key`, `access[_-]?key`, `credential`]
 
@@ -290,7 +290,7 @@ secret_egress_detected {
 # Supply chain
 supply_chain_tools = {"load_plugin", "download_script", "eval", "install_package"}
 
-# PII — F-15: walk() recurses nested objects/arrays so {payload:{ssn:…}} is caught like a flat {ssn:…}.
+# PII — walk() recurses nested objects/arrays so {payload:{ssn:…}} is caught like a flat {ssn:…}.
 pii_detected {
     walk(input.tool_params, [_, val])
     is_string(val)
@@ -305,7 +305,7 @@ pii_detected {
 # PCI
 pci_keys = {"cc_number", "card_number", "credit_card"}
 
-# F-15: a PAN-named key at ANY depth (last path element is the immediate key).
+# A PAN-named key at ANY depth (last path element is the immediate key).
 pci_field_detected {
     walk(input.tool_params, [path, _])
     count(path) > 0
@@ -360,7 +360,7 @@ cross_tenant_detected {
     input.tool_params.namespace != input.agent.namespace
 }
 
-# F-45 (CT-002): a SQL query reaching into a schema that is not the agent's own namespace
+# CT-002: a SQL query reaching into a schema that is not the agent's own namespace
 # (e.g. "SELECT * FROM payments.users" from ns=default). The boundary is in the schema qualifier, which the
 # param-based checks above never inspect. Common non-tenant schemas are allow-listed.
 safe_schemas = {"public", "information_schema", "pg_catalog", "sys", "dbo"}
@@ -374,8 +374,8 @@ cross_tenant_detected {
     not safe_schemas[schema]
 }
 
-# F-45 (CE-001): a chained/recursive tool call past a safe depth. The engine sets input.call_depth from the
-# event's call_depth; the baseline had no depth limit, so deep agent chaining/recursion was unbounded.
+# CE-001: a chained/recursive tool call past a safe depth. The engine sets input.call_depth from the
+# event's call_depth, bounding deep agent chaining/recursion.
 max_safe_call_depth = 8
 
 chain_depth_exceeded {
@@ -391,11 +391,10 @@ b64_candidate_clean(v) = out {
     out := regex.replace(out4, `_`, "/")
 }
 
-# DEF-053 (padding-evasion fix): bound the WORK, not the input size. The old size gate SKIPPED the
-# entire base64 fan-out once tool_params serialized past a byte threshold — so padding tool_params past
-# it (but under the API request-body limit) silently evaded decode detection. Instead we ALWAYS run the
-# decode scan but cap the NUMBER of base64 candidates decoded per level, so the ~40x pathological
-# fan-out cost is bounded regardless of total payload size and no oversized/padded payload can skip it.
+# Bound the WORK, not the input size: a padded/oversized payload must not be able to skip the base64
+# fan-out scan. We ALWAYS run the decode scan but cap the NUMBER of base64 candidates decoded per
+# level, so the ~40x pathological fan-out cost is bounded regardless of total payload size and no
+# oversized/padded payload can skip it.
 b64_scan_max_candidates = 64
 
 # Deterministic, size-independent candidate list: every string value that normalizes to a valid base64
@@ -415,7 +414,7 @@ b64_pad(s) = sprintf("%s=", [s]) { count(s) % 4 == 3 }
 
 # SEC-2: normalize any string into a decodable base64 candidate. The floor is on the ENCODED length only
 # for validity (>= 8, i.e. >= ~5 decoded bytes) — the actual THREAT gate is the DECODED content matching a
-# malicious pattern, so short encoded payloads like base64("rm -rf /") (12 chars) are no longer skipped.
+# malicious pattern, so short encoded payloads like base64("rm -rf /") (12 chars) are scanned.
 b64_norm(v) = out {
     cleaned := b64_candidate_clean(v)
     stripped := trim_right(cleaned, "=")
@@ -425,8 +424,8 @@ b64_norm(v) = out {
     out := b64_pad(stripped)
 }
 
-# SEC-3: bounded iterative decode to depth 4 (was a hand-unrolled depth of 2, so triple-nested base64
-# evaded). Each level re-normalizes + decodes the previous level's output; the depth cap bounds cost.
+# SEC-3: bounded iterative decode to depth 4 so triple-nested base64 is caught; each level re-normalizes
+# + decodes the previous level's output, and the depth cap bounds cost.
 b64_decoded_l1[d] {
     some idx
     val := b64_candidates[idx]
@@ -462,7 +461,7 @@ base64_decoded_threat {
     decoded := b64_decoded[_]
     regex.match(`\b\d{3}-\d{2}-\d{4}\b`, decoded)
 }
-# DEF-005 backstop: the candidate cap bounds decode WORK, but a payload with MORE than the cap of
+# Backstop: the candidate cap bounds decode WORK, but a payload with MORE than the cap of
 # base64 blobs could bury a malicious one past the scanned slice (b64_candidates is sorted, so the
 # scanned window is attacker-influenceable by value order). Rather than let a buried blob slip, treat an
 # anomalously large number of base64 candidates as itself a threat — an attacker cannot pad past the scan
@@ -497,7 +496,7 @@ escalates["llm06_excessive_agency"] { elevated_tools[input.tool_name] }
 
 audits["scope_violation_dangerous_tool"] { scope_violation_dangerous_tool }
 
-# reason text per rule_id (F-08). default_allow + the engine fallback are included for completeness.
+# reason text per rule_id. default_allow + the engine fallback are included for completeness.
 reasons = {
     "llm01_prompt_injection": "Prompt injection pattern detected (OWASP LLM01)",
     "deny_sql_injection": "SQL injection pattern in tool parameters",
@@ -523,7 +522,7 @@ decision = "block" { block_fired }
 decision = "escalate" { escalate_fired; not block_fired }
 decision = "audit" { audit_fired; not block_fired; not escalate_fired }
 
-# Q1 (attribution accuracy): a SQL-injection payload commonly carries ";" (a statement separator), which is ALSO a
+# Attribution accuracy: a SQL-injection payload commonly carries ";" (a statement separator), which is ALSO a
 # shell metacharacter — so both `deny_sql_injection` and `deny_shell_execution` fire, and the deterministic sorted
 # tie-break ("deny_sh" < "deny_sq") mislabels the SQL block as `deny_shell_execution`. When the SQL rule fires, drop
 # `deny_shell_execution` from the id-selection set so the block reports the accurate `deny_sql_injection`. This is a

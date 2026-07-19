@@ -2,12 +2,12 @@
 // Copyright 2026 Norviq Contributors
 package main
 
-// DEF-052 + webhook enforcement-integrity: the norviq-socket volume, the socket mount, the
-// NRVQ_SOCKET_PATH env and the sidecar container are injector-owned. A tenant with pod-create RBAC used to
-// be able to run UNPOLICED by presenting a fake/partial/pre-occupied version of that plumbing so injection
-// was skipped, or a genuine sidecar that leaves the app unwired. The webhook now: DENIES a neutered decoy
+// Webhook enforcement-integrity: the norviq-socket volume, the socket mount, the
+// NRVQ_SOCKET_PATH env and the sidecar container are injector-owned. A tenant with pod-create RBAC could
+// otherwise run UNPOLICED by presenting a fake/partial/pre-occupied version of that plumbing so injection
+// is skipped, or a genuine sidecar that leaves the app unwired. The webhook: DENIES a neutered decoy
 // (command/args override), DENIES any pod that carries norviq artifacts without being FULLY injected, and
-// wires initContainers too. Each test below FAILS on the pre-hardening code.
+// wires initContainers too.
 
 import (
 	"strings"
@@ -23,7 +23,7 @@ func enabledPod(name string, spec corev1.PodSpec) corev1.Pod {
 	return corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{"norviq": "enabled"}}, Spec: spec}
 }
 
-// --- DEF-052: neutered command/args-override decoys → DENY ------------------------------------------
+// --- neutered command/args-override decoys → DENY ------------------------------------------
 
 func TestMutateDecoyImageWithCommandOverrideIsDenied(t *testing.T) {
 	cfg := LoadConfig()
@@ -155,7 +155,7 @@ func TestMutateFullyInjectedPodWithAppCommandSkips(t *testing.T) {
 	}
 }
 
-// Re-red-team round 3: a REAL-image sidecar whose NRVQ_API_URL is swung to a co-located allow-all engine
+// A REAL-image sidecar whose NRVQ_API_URL is swung to a co-located allow-all engine
 // enforces nothing — must be DENIED, not skipped. (fullyInjected re-derives the injector's routing env.)
 func TestMutateSidecarWithRogueApiUrlIsDenied(t *testing.T) {
 	cfg := LoadConfig()
@@ -175,7 +175,7 @@ func TestMutateSidecarWithRogueApiUrlIsDenied(t *testing.T) {
 	}
 }
 
-// Re-red-team round 3: a duplicate NRVQ_SOCKET_PATH (valid first, evil last — K8s uses the last) on the
+// A duplicate NRVQ_SOCKET_PATH (valid first, evil last — K8s uses the last) on the
 // app container must NOT pass containerWired. The pod is then not fully injected → DENIED.
 func TestMutateDuplicateSocketEnvIsDenied(t *testing.T) {
 	cfg := LoadConfig()
@@ -197,7 +197,7 @@ func TestMutateDuplicateSocketEnvIsDenied(t *testing.T) {
 	}
 }
 
-// Re-red-team residual: a same-NAME but untrusted-REGISTRY fake sidecar (attacker/norviq-engine, which
+// A same-NAME but untrusted-REGISTRY fake sidecar (attacker/norviq-engine, which
 // the injector's own allowlist would refuse) with a self-wired app must be DENIED — not accepted as
 // "already injected" and skipped. The skip path enforces the registry-pinned allowlist; the broad
 // same-name match is only safe on the deny paths.
