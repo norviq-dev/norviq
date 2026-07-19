@@ -113,7 +113,11 @@ def _agents_app(cache: _CountingCache, monkeypatch) -> TestClient:
     async def _no_last_seen(_ns):
         return {}
 
+    async def _no_registry(_ns):
+        return []
+
     monkeypatch.setattr(agents_mod, "_registry_last_seen", _no_last_seen)  # avoid a real DB round-trip
+    monkeypatch.setattr(agents_mod, "_agents_from_registry", _no_registry)  # roster union reads it too
     return TestClient(app)
 
 
@@ -164,6 +168,58 @@ def test_list_agents_scan_is_namespace_scoped_and_batched(monkeypatch) -> None:
         # (b) batched reads: two MGETs (trust: + trustcalc:), zero per-agent GET_TRUST round-trips.
         assert cache.mget_calls == 2, f"reads not batched: mget_calls={cache.mget_calls}"
         assert cache.get_trust_calls == 0, f"still doing per-agent GETs: {cache.get_trust_calls}"
+    finally:
+        client.close()
+
+
+IDLE_AGENT = "spiffe://norviq/ns/alpha/sa/report-gen"  # governed but quiet -> cache entry aged out
+
+
+def _registry_row(sid: str, score: float, category: str) -> dict:
+    return {
+        "spiffe_id": sid,
+        "namespace": agents_mod._namespace_from_spiffe(sid),
+        "agent_class": agents_mod._class_from_spiffe(sid),
+        "last_seen": None,
+        "score": score,
+        "category": category.lower(),
+        "violation_count": 0,
+        "signals": {},
+        "dominant_signal": "",
+        "recommendation": "",
+        "synthetic": False,
+    }
+
+
+def test_list_agents_unions_registry_roster_with_live_cache(monkeypatch) -> None:
+    """FAIL-ON-BUG: a quiet-but-governed agent (its short-TTL trust cache entry has aged out) must STILL
+    appear in the list — the view is the full registry roster with live trust overlaid where the cache is
+    warm. Pre-fix the registry was consulted only when the cache was 100% empty, so with even one warm key
+    the idle agent vanished from the Agent Monitor."""
+    cache = _CountingCache({REAL_AGENT: _trust_blob("High", 0.9)})  # only REAL_AGENT is warm
+    app = create_app()
+    app.state.cache = cache
+
+    async def _no_last_seen(_ns):
+        return {}
+
+    async def _roster(_ns):
+        # REAL_AGENT carries a STALE registry score (Medium); IDLE_AGENT is cache-cold (Low).
+        return [_registry_row(REAL_AGENT, 0.5, "Medium"), _registry_row(IDLE_AGENT, 0.3, "Low")]
+
+    monkeypatch.setattr(agents_mod, "_registry_last_seen", _no_last_seen)
+    monkeypatch.setattr(agents_mod, "_agents_from_registry", _roster)
+    client = TestClient(app)
+    try:
+        resp = client.get("/api/v1/agents?namespace=alpha", headers=_hdr(role="admin"))
+        assert resp.status_code == 200
+        by_id = {row["spiffe_id"]: row for row in resp.json()}
+        # Both are listed — the idle agent no longer vanishes just because another agent is warm.
+        assert set(by_id) == {REAL_AGENT, IDLE_AGENT}
+        # The warm agent shows the LIVE cache score (0.9/high), not the stale registry value (0.5/medium).
+        assert by_id[REAL_AGENT]["score"] == 0.9 and by_id[REAL_AGENT]["category"] == "high"
+        # The idle agent keeps its last-known registry score instead of disappearing.
+        assert by_id[IDLE_AGENT]["score"] == 0.3 and by_id[IDLE_AGENT]["category"] == "low"
     finally:
         client.close()
 

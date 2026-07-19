@@ -95,8 +95,10 @@ async def list_agents(
 ) -> list[dict]:
     """List agents with trust scores, scoped to the caller's namespace.
 
-    Reads the live ``trust:*`` cache first; when it is cold (entries past their TTL)
-    it falls back to the persistent ``agent_registry`` so the Agents view stays populated.
+    Returns the FULL governed fleet: the authoritative roster from ``agent_registry`` unioned with the live
+    ``trust:*`` cache, so an agent shows its live score where its cache entry is still warm and its last-known
+    registry score where the entry has aged out (trust TTL is short — ``redis_ttl_trust_s``). This avoids the
+    list collapsing to only agents evaluated within the TTL window when the cache is partially warm.
     """
     namespace = read_namespace(user, namespace)  # None => all namespaces (admin); own ns for a tenant
     cache = request.app.state.cache
@@ -116,11 +118,44 @@ async def list_agents(
         spiffe_ids.append(spiffe_id)
         if len(spiffe_ids) >= limit:  # cap the returned list
             break
-    rows = await _hydrate_agent_rows(request, cache, spiffe_ids, last_seen_map)
-    if not rows:
-        rows = await _agents_from_registry(namespace)
+    warm_rows = await _hydrate_agent_rows(request, cache, spiffe_ids, last_seen_map)
+    # Union the live cache with the authoritative registry roster. Previously the registry was consulted ONLY
+    # when the cache scan returned zero rows, so on a partially-warm cache the list collapsed to just the
+    # agents evaluated within the trust TTL — a quiet-but-governed agent vanished from the Agents view until
+    # the whole fleet went idle (cache fully empty). Merging keeps the list at the full governed fleet.
+    registry_rows = await _agents_from_registry(namespace)
+    rows = _merge_roster(registry_rows, warm_rows)[:limit]
     log.debug("nrvq.api.agents.listed", count=len(rows), code="NRVQ-API-7030")
     return rows
+
+
+# Live-trust fields overlaid from the warm cache onto the authoritative registry row (everything else —
+# spiffe/ns/class/last_seen/synthetic — stays from the registry, the source of truth for the roster).
+_LIVE_TRUST_FIELDS = ("score", "category", "violation_count", "signals", "dominant_signal", "recommendation")
+
+
+def _merge_roster(registry_rows: list[dict], warm_rows: list[dict]) -> list[dict]:
+    """Union the authoritative ``agent_registry`` roster with the live ``trust:*`` cache.
+
+    Every registered agent is listed. Where an agent's cache entry is still warm (written on its last
+    ``/evaluate``, TTL ``redis_ttl_trust_s``), its LIVE score/category/violations/signals are shown; where the
+    entry has aged out, the agent keeps its last-known registry score instead of disappearing from the view.
+    A cache-warm agent not yet persisted to the registry is still included (never drop a live agent).
+    """
+    warm_by_id = {r["spiffe_id"]: r for r in warm_rows}
+    seen: set[str] = set()
+    merged: list[dict] = []
+    for base in registry_rows:
+        sid = base["spiffe_id"]
+        seen.add(sid)
+        live = warm_by_id.get(sid)
+        merged.append({**base, **{f: live[f] for f in _LIVE_TRUST_FIELDS}} if live else base)
+    for sid, live in warm_by_id.items():
+        if sid not in seen:
+            merged.append(live)
+    # Freshest first, so the perf cap keeps the most-recently-seen agents when a fleet exceeds the limit.
+    merged.sort(key=lambda r: r.get("last_seen") or "", reverse=True)
+    return merged
 
 
 async def _hydrate_agent_rows(request: Request, cache, spiffe_ids: list[str], last_seen_map: dict) -> list[dict]:
