@@ -152,6 +152,10 @@ export function PolicyPacks() {
         pendingVerify: true
       });
       const converged = await pollPackConverged(pack.id, wantEnabled);
+      // The immediate refetch above can race the eventually-consistent write and read back the
+      // pre-flip flag, leaving the card badge/button stale ("Enable" when the pack is now on). Once
+      // the poll confirms convergence, refetch once more so the card reflects the real state.
+      if (converged) await packs.refetch();
       setApplyResult((prev) =>
         prev && prev.title === title
           ? {

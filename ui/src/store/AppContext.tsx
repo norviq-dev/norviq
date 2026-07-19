@@ -18,6 +18,18 @@ export function sectionFromPath(pathname: string): Section {
   return "security";  // includes /fleet, /policies, /audit, /agents, /test
 }
 
+// Bare parent paths whose <Route> is a pure `<Navigate>` redirect to a concrete child (see App.tsx).
+// The ns→URL sync effect below MUST skip these: on a hard page-load with a concrete namespace
+// selected, re-writing `?ns=` onto the bare path would fire AFTER the route's child <Navigate> and
+// clobber the redirect — stranding the user on an empty page. Skipping lets the redirect land, then
+// the effect re-runs on the concrete child and appends `?ns=` there. Keep in lockstep with App.tsx.
+export function isRedirectOnlyPath(pathname: string): boolean {
+  if (pathname === "/policies" || pathname === "/threats" || pathname === "/threats/mitre" || pathname === "/settings")
+    return true;
+  // /fleet only redirects when fleet is disabled; when enabled it renders a real page that keeps ?ns=.
+  return pathname === "/fleet" && !fleetEnabled;
+}
+
 // The server-enforced governance posture of the SELECTED scope — the one source of truth every
 // page that makes an enforcement claim ("ENFORCING", "blocked", "proven-blocking") must consult.
 // mode "audit" = Monitor (evaluate & log would-block, live traffic NOT blocked). namespace "all" carries
@@ -193,6 +205,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // isn't spammed). "all" is the default and stays OFF the URL for clean links. Other query params
   // (audit deep-link filters, intent_draft, …) are preserved untouched.
   useEffect(() => {
+    // Don't touch the URL of a bare redirect-only route — writing ?ns= here would out-race and cancel
+    // the route's <Navigate> redirect, leaving the user on an empty page (App.tsx / isRedirectOnlyPath).
+    if (isRedirectOnlyPath(location.pathname)) return;
     const params = new URLSearchParams(location.search);
     const urlNs = params.get("ns");
     const wantNs = selectedNamespace === "all" ? null : selectedNamespace;

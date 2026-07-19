@@ -3,10 +3,9 @@
 //
 // Compliance / AI-attack-framework coverage page.
 //
-// ABSOLUTE RULE — NO MOCK DATA. Every number, chip, evidence row, chart point and export on this page
-// is derived from a live backend response (fetchMitreCoverage / fetchMitreTrend / mitreExportPath /
-// generateMitrePolicy). There is no hardcoded technique list, no fabricated count/trend, and no fake
-// export. MITRE ATLAS and OWASP LLM Top 10 (2025) are BOTH live frameworks — each drives its own card
+// ABSOLUTE RULE — NO MOCK DATA. Every number, chip, evidence row and export on this page is derived
+// from a live backend response (fetchMitreCoverage / mitreExportPath / generateMitrePolicy). There is
+// no hardcoded technique list, no fabricated count, and no fake export. MITRE ATLAS and OWASP LLM Top 10 (2025) are BOTH live frameworks — each drives its own card
 // (overview) and the whole detail view (when selected) off its OWN backend coverage, fetched with the
 // SAME client methods and a trailing `framework` argument. Every OTHER framework renders as an inert
 // "coming soon" roadmap row with NO coverage numbers.
@@ -19,7 +18,6 @@ import { useNavigate } from "react-router-dom";
 import {
   apiUrl,
   fetchMitreCoverage,
-  fetchMitreTrend,
   fetchRedteamLatest,
   generateMitrePolicy,
   generateMitrePolicyBatch,
@@ -28,7 +26,6 @@ import {
   type GenerateResult,
   type MitreCoverage,
   type MitreTechnique,
-  type MitreTrend,
   type RedteamLatest
 } from "../api/client";
 import { getToken } from "../auth/session";
@@ -265,29 +262,14 @@ export function Compliance() {
     cacheKey: `compliance-redteam-latest:${namespace}`,
     staleTimeMs: 30_000
   });
-  const atlasTrend = useApi<MitreTrend>(() => fetchMitreTrend(namespace, "30d", "atlas"), [namespace], {
-    cacheKey: `mitre-trend:atlas:${namespace}`,
-    staleTimeMs: 60_000
-  });
-  const owaspTrend = useApi<MitreTrend>(() => fetchMitreTrend(namespace, "30d", "owasp"), [namespace], {
-    cacheKey: `mitre-trend:owasp:${namespace}`,
-    staleTimeMs: 60_000
-  });
-
   const covByFw: Record<ComplianceFramework, ReturnType<typeof useApi<MitreCoverage>>> = {
     atlas: atlasCoverage,
     owasp: owaspCoverage
   };
-  const trendByFw: Record<ComplianceFramework, ReturnType<typeof useApi<MitreTrend>>> = {
-    atlas: atlasTrend,
-    owasp: owaspTrend
-  };
 
-  // The detail view's active framework selects which coverage/trend drive it.
+  // The detail view's active framework selects which coverage drives it.
   const activeCoverage = covByFw[framework];
-  const activeTrend = trendByFw[framework];
   const data = activeCoverage.data;
-  const trend = activeTrend.data;
   // Degraded when the selected framework's coverage errored (detail) — or, on overview, when either did.
   const apiDegraded =
     view === "detail" ? !!activeCoverage.error : !!atlasCoverage.error && !!owaspCoverage.error;
@@ -451,7 +433,6 @@ export function Compliance() {
           scopeOpen={scopeOpen}
           setScopeOpen={setScopeOpen}
           covByFw={covByFw}
-          trendByFw={trendByFw}
           loading={overviewLoading}
           range={range}
           onOpen={(fw) => openDetail(fw, "all")}
@@ -462,7 +443,6 @@ export function Compliance() {
         <DetailView
           framework={framework}
           data={data}
-          trend={trend}
           loading={detailLoading}
           range={range}
           namespace={namespace}
@@ -537,15 +517,12 @@ export function Compliance() {
 // OVERVIEW
 // ================================================================================================
 type CoverageApi = ReturnType<typeof useApi<MitreCoverage>>;
-type TrendApi = ReturnType<typeof useApi<MitreTrend>>;
-
 function OverviewView({
   tab,
   setTab,
   scopeOpen,
   setScopeOpen,
   covByFw,
-  trendByFw,
   loading,
   range,
   onOpen,
@@ -557,7 +534,6 @@ function OverviewView({
   scopeOpen: boolean;
   setScopeOpen: (v: boolean) => void;
   covByFw: Record<ComplianceFramework, CoverageApi>;
-  trendByFw: Record<ComplianceFramework, TrendApi>;
   loading: boolean;
   range: Range;
   onOpen: (fw: ComplianceFramework) => void;
@@ -640,7 +616,6 @@ function OverviewView({
                   key={meta.id}
                   meta={meta}
                   data={covByFw[meta.id].data}
-                  trend={trendByFw[meta.id].data}
                   range={range}
                   onOpen={() => onOpen(meta.id)}
                   onGaps={() => onGaps(meta.id)}
@@ -699,7 +674,6 @@ function OverviewView({
 function FrameworkOverviewCard({
   meta,
   data,
-  trend,
   range,
   onOpen,
   onGaps,
@@ -707,7 +681,6 @@ function FrameworkOverviewCard({
 }: {
   meta: (typeof LIVE_FRAMEWORKS)[number];
   data: MitreCoverage | null;
-  trend: MitreTrend | null;
   range: Range;
   onOpen: () => void;
   onGaps: () => void;
@@ -765,8 +738,6 @@ function FrameworkOverviewCard({
             <span style={{ color: FAINT }}>·</span>
             <span><b style={{ color: "#ededf0" }}>{fmt(data.blocked)}</b> blocked · {RANGE_LABEL[range]}</span>
           </div>
-          {/* The framework CARD omits the trend sparkline + "coverage steady" line (noise). The
-              TrendText/MiniSpark components + the trend fetch stay — they still render in the detail drill-in. */}
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 14, flex: "none", minWidth: 200 }}>
@@ -807,57 +778,12 @@ function FrameworkOverviewCard({
   );
 }
 
-// Real trend text — honest minimal/empty state when 0 or 1 snapshots exist (NO fabricated line).
-function TrendText({ trend }: { trend: MitreTrend | null }) {
-  const points = trend?.points ?? [];
-  if (points.length <= 1) {
-    return (
-      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 600, color: "#7a7a82", marginTop: 10 }}>
-        <span style={{ width: 7, height: 7, borderRadius: "50%", background: OOS_DOT }} />
-        Trend builds as snapshots accumulate
-      </div>
-    );
-  }
-  const first = points[0];
-  const last = points[points.length - 1];
-  const dEnf = last.enforced - first.enforced;
-  const dPct = Math.round(last.coverage_pct - first.coverage_pct);
-  const enfPart = dEnf === 0 ? "coverage steady" : `${dEnf > 0 ? "+" : ""}${dEnf} technique${Math.abs(dEnf) === 1 ? "" : "s"} enforced`;
-  const pctPart = dPct === 0 ? "" : ` · ${dPct > 0 ? "+" : ""}${dPct}% coverage`;
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 600, color: "#6ee7b7", marginTop: 10 }}>
-      <MiniSpark points={points.map((p) => p.coverage_pct)} />
-      {enfPart}
-      {pctPart}
-    </div>
-  );
-}
-
-// Real sparkline from the fetched coverage_pct series (only rendered for >= 2 points).
-function MiniSpark({ points }: { points: number[] }) {
-  if (points.length < 2) return null;
-  const w = 66;
-  const h = 16;
-  const min = Math.min(...points);
-  const max = Math.max(...points);
-  const span = max - min || 1;
-  const d = points
-    .map((v, i) => `${((i / (points.length - 1)) * w).toFixed(1)},${(h - ((v - min) / span) * h + 1).toFixed(1)}`)
-    .join(" ");
-  return (
-    <svg width={w} height={h + 2} style={{ flex: "none" }} aria-hidden="true">
-      <polyline points={d} fill="none" stroke="#6ee7b7" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
 // ================================================================================================
 // DETAIL
 // ================================================================================================
 function DetailView(props: {
   framework: ComplianceFramework;
   data: MitreCoverage | null;
-  trend: MitreTrend | null;
   loading: boolean;
   range: Range;
   namespace: string;
@@ -890,7 +816,6 @@ function DetailView(props: {
   const {
     framework,
     data,
-    trend,
     loading,
     range,
     techniques,
@@ -1075,9 +1000,6 @@ function DetailView(props: {
               <span style={{ width: 10, height: 10, borderRadius: 3, background: OOS_TRACK }} />
               Out-of-scope · {oos} <span style={{ color: FAINT }}>(not counted)</span>
             </span>
-            <div style={{ marginTop: 5, paddingTop: 8, borderTop: "1px solid #26262a" }}>
-              <TrendText trend={trend} />
-            </div>
           </div>
         </div>
 
