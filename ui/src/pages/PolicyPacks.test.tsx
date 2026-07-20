@@ -96,7 +96,7 @@ describe("PolicyPacks page", () => {
     const enableBtn = await screen.findAllByRole("button", { name: "Enable" });
     expect(enableBtn.length).toBe(2);
     fireEvent.click(enableBtn[0]);
-    // PACK-CONFIRM: enabling now confirms first (names the namespace); the POST only fires on confirm.
+    // Enabling now confirms first (names the namespace); the POST only fires on confirm.
     const confirm = await screen.findByTestId("pack-confirm-apply");
     fireEvent.click(confirm);
     await waitFor(() => expect(screen.getByText("Enabled")).toBeInTheDocument());
@@ -120,7 +120,7 @@ describe("PolicyPacks page", () => {
     expect(screen.getByText("APPLIED")).toBeInTheDocument();
   });
 
-  it("PACK-CONFIRM: cancelling the confirm dialog fires no network POST", async () => {
+  it("cancelling the confirm dialog fires no network POST", async () => {
     const sentNs: string[] = [];
     server.use(...handlers("admin", new Set(), { onEnable: (ns) => sentNs.push(ns) }));
     renderPage();

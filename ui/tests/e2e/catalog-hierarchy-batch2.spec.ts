@@ -52,14 +52,14 @@ async function renderedStack(page: Page): Promise<{ scope: string; priority: str
   return out;
 }
 
-test.describe("BATCH-2 Catalog hierarchy + governance — real login", () => {
+test.describe("Catalog hierarchy + governance — real login", () => {
   test.beforeEach(async ({ page }) => {
     await realLogin(page);
     for (const id of ["ecommerce", "erp-crm"]) await apiRaw(page, `/api/v1/policy-packs/${id}/disable`, "POST", { namespace: NS });
     await apiRaw(page, `/api/v1/settings`, "PUT", { namespace: NS, apply_mode: "enforce" });
   });
 
-  test("C2-1: rendered hierarchy === direct /policies/effective (scope, order, priority)", async ({ page }) => {
+  test("rendered hierarchy === direct /policies/effective (scope, order, priority)", async ({ page }) => {
     await page.goto("/policies/catalog");
     await selectNamespace(page, NS);
     await openHierarchy(page);
@@ -75,7 +75,7 @@ test.describe("BATCH-2 Catalog hierarchy + governance — real login", () => {
     expect(await modes.first().innerText()).toMatch(/Enforce/);
   });
 
-  test("C2-2: Target Settings has no effective-policy table; the link opens the hierarchy (ns preserved)", async ({ page }) => {
+  test("Target Settings has no effective-policy table; the link opens the hierarchy (ns preserved)", async ({ page }) => {
     await page.goto("/policies/targets");
     await selectNamespace(page, NS);
     await expect(page.getByRole("heading", { name: "Namespace Governance" })).toBeVisible({ timeout: 15000 });
@@ -87,7 +87,7 @@ test.describe("BATCH-2 Catalog hierarchy + governance — real login", () => {
     await expect(page.locator("button.cluster-sel")).toContainText(NS);
   });
 
-  test("C2-5: enabling a pack makes its overlay layer appear in the hierarchy; disabling removes it", async ({ page }) => {
+  test("enabling a pack makes its overlay layer appear in the hierarchy; disabling removes it", async ({ page }) => {
     await page.goto("/policies/catalog");
     await selectNamespace(page, NS);
     await openHierarchy(page);
@@ -109,7 +109,7 @@ test.describe("BATCH-2 Catalog hierarchy + governance — real login", () => {
     await expect.poll(packPresent, { timeout: 15000 }).toBe("0");
   });
 
-  test("C2-4a: the concrete namespace STICKS across Packs → Targets → Catalog", async ({ page }) => {
+  test("the concrete namespace STICKS across Packs → Targets → Catalog", async ({ page }) => {
     await page.goto("/policies/packs");
     await selectNamespace(page, NS);
     for (const route of ["/policies/targets", "/policies/catalog", "/policies/packs"]) {

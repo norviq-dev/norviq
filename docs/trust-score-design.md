@@ -403,7 +403,7 @@ Measured benchmarks will be published once collected. Trust computation is desig
 
 ---
 
-## 11b. `trust_threshold` semantics — ADVISORY, not a hard gate (F-18)
+## 11b. `trust_threshold` semantics — ADVISORY, not a hard gate
 
 A company-simulation buyer observed that a call with a caller-supplied `trust_score=0.1` against
 `settings.trust_threshold=0.7` was still **allowed** on a benign tool, and asked whether the threshold is

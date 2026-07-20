@@ -120,6 +120,6 @@ test.describe("Apply-per-surface enforcement — each surface flips /evaluate on
 
   test("BASELINE + no-policy: an unknown ns/class fails CLOSED (block), never fail-open allow", async ({ page }) => {
     const d = await ev(page, "fbe-nopol", "fbe-none", "anything_at_all", { p: 1 });
-    expect(d.decision).toBe("block");   // F-04 fail-closed; NEVER allow when nothing is loaded
+    expect(d.decision).toBe("block");   // fail-closed; NEVER allow when nothing is loaded
   });
 });

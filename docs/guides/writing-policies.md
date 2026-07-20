@@ -113,7 +113,7 @@ The refinement toggles:
 - **`scope`** ("namespace-scoped") — any `namespace`/`ns`/`tenant` field in `tool_params` must equal
   the caller's own `agent.namespace` (blocks cross-tenant reach through an allowlisted tool).
 - **`rate`** — **advisory only**. A stateless OPA policy can't count calls/minute; this toggle checks
-  `input.call_depth <= 8` as a proxy. The real rate limiter is a separate layer (§6, F-03), not
+  `input.call_depth <= 8` as a proxy. The real rate limiter is a separate layer (§6), not
   something a Rego policy can enforce on its own.
 
 Generated intent policies are pushed at the **same priority as the cluster baseline**, so the
@@ -140,7 +140,7 @@ than the base result, never less — regardless of their own priority (`_resolve
   agent class in that namespace falls back to when no more specific policy matches. Author it like any
   other policy (`crds/examples/policy-namespace-baseline.yaml` targets a whole namespace with the
   `permissive` preset in `audit` mode, priority 50 — low, so a real class policy always outranks it).
-- **`__guardrail__`** — an opt-in per-namespace tool-allowlist overlay (F-14). Operator-authored via the
+- **`__guardrail__`** — an opt-in per-namespace tool-allowlist overlay. Operator-authored via the
   normal `POST /policies` endpoint, same as `__baseline__`.
 - **`<agent_class>__remediation__`** — the per-class compliance remediation overlay. When you use the
   compliance dashboard's "Generate enforcing policy" action for a MITRE ATLAS / OWASP LLM control gap,

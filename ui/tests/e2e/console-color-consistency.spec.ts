@@ -14,7 +14,7 @@ function parse(rgb: string) {
   return m ? { r: +m[1], g: +m[2], b: +m[3] } : null;
 }
 
-test.describe("UI-AUDIT r3 color-consistency — computed-style proofs", () => {
+test.describe("color-consistency — computed-style proofs", () => {
   test.beforeEach(async ({ page }) => {
     await page.goto("/threats/graph");
     await waitForApp(page);

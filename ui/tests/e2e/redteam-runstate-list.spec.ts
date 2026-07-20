@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// D1/D2 — Red Team run-state + list performance, end-to-end on the REAL app + engine.
-//  D1: Run suite → the button shows an in-flight state (disabled + aria-busy + "Running…"); a rapid
+// Red Team run-state + list performance, end-to-end on the REAL app + engine.
+//  Run suite → the button shows an in-flight state (disabled + aria-busy + "Running…"); a rapid
 //      double-click fires exactly ONE POST /redteam/suite (client one-submit guard + backend 409 guard).
-//  D2: the results table is scoped to the run and paginated — mounted rows stay bounded (≤50) even for a
+//  The results table is scoped to the run and paginated — mounted rows stay bounded (≤50) even for a
 //      large run; the got-through filter surfaces misses; the roll-up stays pinned above.
 
 import { test, expect, waitForApp } from "./fixtures";
 
-test.describe("D1/D2 — Red Team run-state + bounded results table", () => {
+test.describe("Red Team run-state + bounded results table", () => {
   test("run suite shows Running… + disabled, double-click fires ONE POST, table stays bounded", async ({ page }) => {
     test.setTimeout(120000);
     await page.goto("/redteam");
@@ -32,7 +32,7 @@ test.describe("D1/D2 — Red Team run-state + bounded results table", () => {
     });
 
     const runBtn = page.getByTestId("redteam-run");
-    // D1: two clicks in the SAME tick — the synchronous one-submit guard must swallow the second. Done via a
+    // Two clicks in the SAME tick — the synchronous one-submit guard must swallow the second. Done via a
     // single evaluate so both native clicks fire before React re-renders/disables (a real rapid double-click).
     await page.evaluate(() => {
       const b = document.querySelector('[data-testid="redteam-run"]') as HTMLButtonElement | null;
@@ -51,7 +51,7 @@ test.describe("D1/D2 — Red Team run-state + bounded results table", () => {
     // exactly ONE POST fired despite the double-click
     expect(posts, `expected exactly one POST /redteam/suite, saw ${posts}`).toBe(1);
 
-    // D2: the table is bounded — at most 50 rows mounted regardless of run size
+    // The table is bounded — at most 50 rows mounted regardless of run size
     const rowCount = await page.getByTestId("redteam-attack-row").count();
     expect(rowCount).toBeLessThanOrEqual(50);
 

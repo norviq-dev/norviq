@@ -43,7 +43,7 @@ relay+puller **live**. The enrollment is re-applied at startup, so it survives r
 - Console: **Fleet → Remove** (per cluster) → `DELETE /api/v1/fleet/clusters/{id}` deregisters at the hub (deletes
   the `Cluster` row + rollups/rollout, so it drops from the fleet table and its bundle endpoint 404s).
 - On the spoke: `norviq fleet leave` → `POST /api/v1/fleet/leave` stops the relay+puller and **sheds any pushed
-  policy** (reuses the F-52 retract/reconcile path). `FleetJoinState.enabled=false` persists, so the spoke stays
+  policy** (reuses the retract/reconcile path). `FleetJoinState.enabled=false` persists, so the spoke stays
   single-cluster **across restarts** even if env still has fleet config.
 
 ## Helm values (reference)
@@ -56,7 +56,7 @@ relay+puller **live**. The enrollment is re-applied at startup, so it survives r
 - `norviq fleet join <token>` — enroll.
 - `norviq fleet leave` — de-enroll (stops pulling, sheds pushed policy).
 
-## Console cluster-awareness (F-69)
+## Console cluster-awareness
 The hub console talks to ITS OWN (served) cluster's API; the hub only aggregates KPI/trust **rollups**, not per-spoke
 detail. So when an operator selects a **remote** cluster in the nav:
 - **Overview** shows the cluster-scoped metrics the hub has (Total/Blocked/Block-Rate + Trust); the tiles it doesn't

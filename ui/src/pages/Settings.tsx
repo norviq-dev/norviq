@@ -77,7 +77,7 @@ function Field({
 export function Settings() {
   const { namespace } = useApp();
   const navigate = useNavigate();
-  // GOV-IA (product decision): namespace-keyed GOVERNANCE (Block⇄Monitor enforcement + Live⇄Frozen change
+  // (product decision): namespace-keyed GOVERNANCE (Block⇄Monitor enforcement + Live⇄Frozen change
   // control) lives ONLY in Target Settings now — the duplicate toggles here mutated the same server object
   // from two places. This page keeps the per-namespace TUNING defaults (trust/penalty/rate/sector) and
   // links to Target Settings for governance.
@@ -161,7 +161,7 @@ export function Settings() {
       <div className="stack">
         <Panel pad>
           <SettingsSection label="Tuning defaults">
-            {/* GOV-IA: governance (enforcement mode + change control) is per-namespace and owned by Target
+            {/* Governance (enforcement mode + change control) is per-namespace and owned by Target
                 Settings — this callout is the one pointer, replacing the duplicate toggles. */}
             <button
               type="button"

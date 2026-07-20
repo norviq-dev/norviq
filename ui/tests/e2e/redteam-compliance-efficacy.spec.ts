@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// F2 — the Red Team efficacy is wired INTO Compliance + Overview. After a real suite run, Compliance shows
+// The Red Team efficacy is wired INTO Compliance + Overview. After a real suite run, Compliance shows
 // "X% proven-blocking (last run)" and the Overview coverage caption upgrades from "not efficacy-tested" to the
 // same proven-blocking number — both matching /api/v1/redteam/results/latest (no fabricated value).
 //
-// CRITICAL coexistence (shared file with Q3): the Compliance page must show BOTH the restored Q3 header range
-// selector AND the F2 efficacy banner at the same time — this test asserts both are present together.
+// CRITICAL coexistence: the Compliance page must show BOTH the restored header range
+// selector AND the efficacy banner at the same time — this test asserts both are present together.
 
 import { test, expect, waitForApp } from "./fixtures";
 import { type Page } from "@playwright/test";
@@ -19,8 +19,8 @@ async function api(page: Page, path: string, method = "GET"): Promise<any> {
   }, { path, method });
 }
 
-test.describe("F2 — Red Team efficacy wired into Compliance + Overview (coexists with Q3)", () => {
-  test("after a run, Compliance shows proven-blocking % (with the Q3 range selector) and Overview matches", async ({ page }) => {
+test.describe("Red Team efficacy wired into Compliance + Overview", () => {
+  test("after a run, Compliance shows proven-blocking % (with the range selector) and Overview matches", async ({ page }) => {
     test.setTimeout(120000);
     await page.goto("/");
     await waitForApp(page);
@@ -32,13 +32,13 @@ test.describe("F2 — Red Team efficacy wired into Compliance + Overview (coexis
     expect(latest.has_run).toBe(true);
     const pct = `${latest.efficacy.overall.proven_blocking_pct}% proven-blocking`;
 
-    // COMPLIANCE: the F2 banner shows the proven-blocking %, AND the Q3 header range selector is present together
+    // COMPLIANCE: the banner shows the proven-blocking %, AND the header range selector is present together
     await page.goto("/compliance");
     await waitForApp(page);
     const banner = page.getByTestId("compliance-efficacy-banner");
     await expect(banner).toBeVisible();
     await expect(banner.getByTestId("compliance-proven-blocking")).toContainText(pct);
-    // Q3 coexistence: the restored header range selector still renders on Compliance
+    // Coexistence: the restored header range selector still renders on Compliance
     await expect(page.getByTestId("time-range")).toBeVisible();
     await expect(page.getByTestId("range-chip-24h")).toBeVisible();
 

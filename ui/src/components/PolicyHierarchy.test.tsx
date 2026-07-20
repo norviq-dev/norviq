@@ -113,11 +113,11 @@ describe("PolicyHierarchy", () => {
     mockApp.scopeCluster = "kind-nrvq";
   });
 
-  // SEED-DURABNS-01 (user-reported): a pack-only namespace has a `__pack__` overlay row but NO agent-class
+  // (user-reported): a pack-only namespace has a `__pack__` overlay row but NO agent-class
   // policy. The overlay is correctly excluded from the class picker (it's a LAYER), but that left the picker
   // empty and the hierarchy rendered nothing — hiding a pack that IS enforcing. The fix offers a namespace-wide
   // "*" view so the enforcing overlays still show.
-  it("SEED-DURABNS-01: a pack-only namespace still shows its enforcing pack overlay (namespace-wide view)", async () => {
+  it("a pack-only namespace still shows its enforcing pack overlay (namespace-wide view)", async () => {
     const packLayers = [{ scope: "durab-ns:__pack__", label: "sector pack (overlay)", priority: 800, overlay: true }];
     server.use(
       // pack-only ns: /policies returns ONLY the __pack__ overlay row (no class policy)

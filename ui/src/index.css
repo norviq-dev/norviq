@@ -436,7 +436,7 @@ body {
 }
 @keyframes slideIn { from { transform: translateX(40px); opacity: .4; } to { transform: translateX(0); opacity: 1; } }
 
-/* Attack Graph (design_handoff_attackgraph) animations — names match the handoff verbatim. */
+/* Attack Graph animations — names match the handoff verbatim. */
 @keyframes agFade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 @keyframes agSlide { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: none; } }
 @keyframes akDash { to { stroke-dashoffset: -24; } }
@@ -665,7 +665,7 @@ body {
   }
 }
 
-/* B1: loading skeletons — a subtle pulsing neutral bar shown on first paint so the Overview never flashes
+/* Loading skeletons — a subtle pulsing neutral bar shown on first paint so the Overview never flashes
    0/0/0 stat values or a half-drawn donut before data resolves. */
 .skeleton-line {
   display: block;

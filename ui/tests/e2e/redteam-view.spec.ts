@@ -17,7 +17,7 @@ async function apiJson(page: Page, path: string): Promise<any> {
   }, path);
 }
 
-test.describe("F1 — Red Team view runs the suite + renders durable efficacy (real engine)", () => {
+test.describe("Red Team view runs the suite + renders durable efficacy (real engine)", () => {
   test("nav → run suite → scorecard/attacks/history render and survive a reload", async ({ page }) => {
     // reach the view via the TESTING nav (proves the route + nav item ship)
     await page.goto("/redteam");

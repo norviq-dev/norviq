@@ -56,7 +56,7 @@ test.describe("Policy Editor — create (raw rego) + delete (guardrails), proven
     await waitForApp(page);
   });
 
-  test("B-1: New policy in the editor authors raw rego and ENFORCES on the running engine (rule flip)", async ({ page, recorder }) => {
+  test("New policy in the editor authors raw rego and ENFORCES on the running engine (rule flip)", async ({ page, recorder }) => {
     const NS = "default", CLS = "bce2e-create";
     try {
       // BEFORE: the throwaway class does not yet enforce our rule.
@@ -82,7 +82,7 @@ test.describe("Policy Editor — create (raw rego) + delete (guardrails), proven
     }
   });
 
-  test("B-2: deleting from the catalog confirms ns+class+version + enforcing warning and FLIPS /evaluate back", async ({ page, recorder }) => {
+  test("deleting from the catalog confirms ns+class+version + enforcing warning and FLIPS /evaluate back", async ({ page, recorder }) => {
     const NS = "default", CLS = "bce2e-delete";
     try {
       // Seed an enforcing throwaway policy (fast, deterministic) and confirm it enforces.
@@ -113,7 +113,7 @@ test.describe("Policy Editor — create (raw rego) + delete (guardrails), proven
     }
   });
 
-  test("B-2 audit + B-3: delete echoes the audited version; a reserved-scope DELETE is refused (422) and the baseline is left intact", async ({ page }) => {
+  test("delete echoes the audited version; a reserved-scope DELETE is refused (422) and the baseline is left intact", async ({ page }) => {
     const NS = "default", CLS = "bce2e-audit";
     // The delete response echoes the audited scope + the version it destroyed (structlog records the same, NRVQ-API-7018).
     expect((await api(page, "/api/v1/policies", "POST", { namespace: NS, agent_class: CLS, rego_source: REGO, enforcement_mode: "block" })).status).toBe(200);
@@ -122,7 +122,7 @@ test.describe("Policy Editor — create (raw rego) + delete (guardrails), proven
     expect(del.body).toMatchObject({ deleted: true, namespace: NS, agent_class: CLS });
     expect(typeof del.body.version).toBe("number"); // the version removed — audited
 
-    // B-3: a raw DELETE of a reserved/managed scope is refused server-side, and the baseline stays enforcing.
+    // A raw DELETE of a reserved/managed scope is refused server-side, and the baseline stays enforcing.
     const before = await ev(page, "default", "customer-support", "search_kb");
     const refused = await api(page, "/api/v1/policies/default/__baseline__", "DELETE");
     expect(refused.status).toBe(422);
@@ -133,7 +133,7 @@ test.describe("Policy Editor — create (raw rego) + delete (guardrails), proven
     expect((await api(page, "/api/v1/policies/__cluster__/anything", "DELETE")).status).toBe(422);
   });
 
-  test("B-2: reserved scopes show NO delete affordance (a normal class does)", async ({ page }) => {
+  test("reserved scopes show NO delete affordance (a normal class does)", async ({ page }) => {
     await page.getByRole("button", { name: /^catalog$/i }).click();
     // A normal class (the seeded customer-support) carries a delete control…
     await expect(page.getByTestId("catalog-delete-customer-support")).toBeVisible({ timeout: 8000 });

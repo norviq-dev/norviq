@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// K1/K2 — the Overview KPI cards must reflect the REAL /audit/stats numbers after a genuine form login + full
+// The Overview KPI cards must reflect the REAL /audit/stats numbers after a genuine form login + full
 // reload (a token-injected / client-nav session gives false reads), and must NEVER be stuck at 0 while the API is
 // non-zero. This spec does a REAL username/password login (no token injection), reloads the page 5×, and asserts
 // each card's bound value equals /audit/stats for the active range on EVERY run; it also proves a warm-up {total:0}
@@ -43,7 +43,7 @@ async function activeRange(page: Page): Promise<string> {
   return (await page.locator(".range-chip.active").first().innerText()).trim();
 }
 
-test.describe("Overview KPI cards — real login + reload, never stuck at 0 (K1/K2)", () => {
+test.describe("Overview KPI cards — real login + reload, never stuck at 0", () => {
   test("REAL form login + reload ×5: every card == /audit/stats for the active range; never 0 while API non-zero", async ({ page }) => {
     test.setTimeout(120000);
     const consoleErrors: string[] = [];
@@ -66,7 +66,7 @@ test.describe("Overview KPI cards — real login + reload, never stuck at 0 (K1/
       await expect.poll(() => kpi(page, "kpi-total"), { timeout: 15000, message: `run ${i}: total must == ${stats.total}` }).toBe(stats.total);
       expect(await kpi(page, "kpi-blocked"), `run ${i}: blocked`).toBe(stats.blocked);
       expect(await kpi(page, "kpi-blockrate"), `run ${i}: block-rate`).toBe(Math.round(stats.block_rate_pct));
-      // K2: Avg-latency is the real avg_latency_ms from the same call.
+      // Avg-latency is the real avg_latency_ms from the same call.
       expect(await kpi(page, "kpi-latency"), `run ${i}: avg latency`).toBe(Math.round(stats.avg_latency_ms));
       if (stats.total > 0) expect(await kpi(page, "kpi-total"), `run ${i}: non-zero API must not render 0`).toBeGreaterThan(0);
     }

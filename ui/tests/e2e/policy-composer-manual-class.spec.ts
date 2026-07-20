@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Q2 — New Policy composer MANUAL agent-class entry. Proves the fix end-to-end on the REAL app+engine:
+// New Policy composer MANUAL agent-class entry. Proves the fix end-to-end on the REAL app+engine:
 //   1. The agent-class field is a real editable input (not the old dead-end fake dropdown) and works even
 //      with NO labeled deployment for the class.
 //   2. Driving the composer UI for a brand-new manual class + Confirm Apply CREATES an enforcing policy.
@@ -44,7 +44,7 @@ async function ev(page: Page, cls: string, tool: string, params: Record<string, 
   return { decision: r.body?.decision, rule_id: r.body?.rule_id };
 }
 
-test.describe("Q2 — composer manual-class entry creates an enforcing policy (real /evaluate flip)", () => {
+test.describe("composer manual-class entry creates an enforcing policy (real /evaluate flip)", () => {
   test("manual class with no deployment → Confirm Apply → allow flips to block on the engine", async ({ page }) => {
     const CLS = `q2-manual-${Date.now()}`;
     const BLOCK_RULE = `composer_block_${token(CLS)}`;

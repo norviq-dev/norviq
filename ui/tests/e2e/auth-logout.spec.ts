@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// AUTH-01 (P1 security) regression — REAL form login, REAL logout control. Proves the layered effect,
+// Security regression — REAL form login, REAL logout control. Proves the layered effect,
 // not a 200: clicking Logout (1) returns the user to the login screen, (2) revokes the token
 // SERVER-SIDE (the captured pre-logout token gets 401 on /api/v1/me via a page-independent request),
 // and (3) the browser back-button cannot restore an authenticated view.

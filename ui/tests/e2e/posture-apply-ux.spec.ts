@@ -65,7 +65,7 @@ test.afterAll(async ({ request, baseURL }) => {
   await request.put(`${baseURL}/api/v1/settings?namespace=${NS}`, { headers: { ...h, "Content-Type": "application/json" }, data: { enforcement_mode: "block" } });
 });
 
-test("TGT-POSTURE-01: the Governance Block⇄Monitor toggle drives the live enforcement effect", async ({ page }) => {
+test("the Governance Block⇄Monitor toggle drives the live enforcement effect", async ({ page }) => {
   await realLogin(page);
   expect(await evalTool(page, "delete_record")).toBe("block/gov_block");   // seed enforces
 

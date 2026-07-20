@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Wave 1 (correctness) E2E. Drives the REAL SPA (nginx) + API on the live kind cluster
+// Correctness E2E. Drives the REAL SPA (nginx) + API on the live kind cluster
 // and asserts the EFFECT (not 200s) for the three HIGH correctness fixes:
 //   namespace=all resolves the real loaded policy (deny_shell_execution), same as namespace=default;
 //          Target Settings "Effective policy" shows the real layer stack under All namespaces (not the empty
@@ -53,7 +53,7 @@ async function apiJson(page: Page, path: string): Promise<{ status: number; body
   }, path);
 }
 
-test.describe("UI-AUDIT r3 Wave-1 correctness — EFFECT proofs on the live console", () => {
+test.describe("correctness — EFFECT proofs on the live console", () => {
   test.beforeEach(async ({ page }) => {
     // Establish the app origin so in-page fetches carry the SPA's localStorage token through the nginx proxy.
     await page.goto("/policies/catalog");

@@ -511,7 +511,7 @@ export const AssetGraphCanvas = forwardRef<CanvasHandle, Props>(function AssetGr
         if (w.dragCluster) {
           let dx = ev.x - w.dragStart!.x;
           let dy = ev.y - w.dragStart!.y;
-          // AG-CLAMP: keep the dragged cluster inside the canvas — clamp the translation so the ring
+          // Keep the dragged cluster inside the canvas — clamp the translation so the ring
           // (center + radius) never leaves [pad, W-pad] × [pad, H-pad]. Previously a cluster could be
           // dragged half-off-canvas and clip. Clamp dx/dy once (not per-node) so the cluster keeps shape.
           const ring = w.rings?.find((x) => x.key === w.dragCluster);

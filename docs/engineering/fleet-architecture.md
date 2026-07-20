@@ -35,9 +35,9 @@ Every piece of cross-cluster data falls into one of three classes; the console's
 | **MANAGE** | Writes — policy create/apply, pack enable/edit, retract. | Authored at the hub (`fleet_policy`), distributed as a **signed bundle**, applied by the spoke on pull. | Already safe: the hub publishes; the spoke verifies + pulls + applies + **reports rollout state**. The console shows the manifest + propagation (distributed → pulled @vN → enforcing). |
 | **RESIDENCY** | Raw audit records and anything a customer marks residency-restricted. | **Never leaves the spoke** (`Cluster.residency` / `NRVQ_FLEET_RESIDENCY`). Only counts/rollups are relayed. | **Deep-link only** — the hub links to the spoke's own console; it never shows raw audit centrally. |
 
-The rule that ties it together (F-69): **a remote-cluster selection never renders or mutates LOCAL data under a remote
+The rule that ties it together: **a remote-cluster selection never renders or mutates LOCAL data under a remote
 label.** MONITOR data is shown from hub rollups (honest, fresh-labeled); MANAGE happens via push-signed-policy (never a
-direct write to the wrong cluster — enforced by the F-69 client guard `NRVQ-UI-4601`); RESIDENCY/raw stays a deep-link.
+direct write to the wrong cluster — enforced by the client guard `NRVQ-UI-4601`); RESIDENCY/raw stays a deep-link.
 
 ## What is built now vs roadmap
 **Built now**
@@ -45,10 +45,10 @@ direct write to the wrong cluster — enforced by the F-69 client guard `NRVQ-UI
 - Spoke→hub **rollups** (agent + audit) + **bounded monitor detail** (agent/effective-policy/coverage/graph
   summaries) → hub renders MONITOR pages for a remote cluster with freshness; deep-link fallback for raw/residency.
 - **MANAGE** via signed policy push: author at hub → per-cluster signed bundle (RS256 trust root, fail-closed) →
-  spoke pull + apply + **rollout reporting** (`pending|applied|failed|diverged`) → retract via F-52 reconcile.
+  spoke pull + apply + **rollout reporting** (`pending|applied|failed|diverged`) → retract via the reconcile path.
 - **Apply transparency**: the console shows the exact applied manifest + honest outcome + live propagation for both
   local apply and fleet push.
-- **F-69 honesty**: remote selection = hub-rollup-or-deep-link, never local-data-under-a-remote-label, and a hard
+- **Honesty**: remote selection = hub-rollup-or-deep-link, never local-data-under-a-remote-label, and a hard
   client mutation guard.
 
 **Roadmap (not built)**

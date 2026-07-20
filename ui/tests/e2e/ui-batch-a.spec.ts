@@ -23,7 +23,7 @@ async function postSuite(page: Page, query: string): Promise<any> {
   throw new Error("suite stayed busy");
 }
 
-test.describe("A4 — Overview Policy Coverage caption is neutral, not block-red", () => {
+test.describe("Overview Policy Coverage caption is neutral, not block-red", () => {
   test("the coverage caption color ∉ block-red; a real block decision badge stays red", async ({ page }) => {
     await page.goto("/");
     await waitForApp(page);
@@ -44,7 +44,7 @@ test.describe("A4 — Overview Policy Coverage caption is neutral, not block-red
 });
 
 test.describe.configure({ mode: "serial" });
-test.describe("A5 — RedTeam scorecard metrics are a spaced grouped cluster (desktop + narrow)", () => {
+test.describe("RedTeam scorecard metrics are a spaced grouped cluster (desktop + narrow)", () => {
   test("cluster renders spaced, no overlap/clip at 1440 and 720; values == results/latest", async ({ page }) => {
     test.setTimeout(120000);
     await page.setViewportSize({ width: 1440, height: 900 });

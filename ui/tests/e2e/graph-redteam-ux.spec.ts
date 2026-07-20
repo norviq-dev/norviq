@@ -27,7 +27,7 @@ async function realLogin(page: Page): Promise<void> {
 }
 
 // ── Frameworks column ────────────────────────────────────────────────────────────────────────────
-test("RT-FRAMEWORK-01: the per-attack results collapse ATLAS+OWASP into a single Frameworks column of chips", async ({ page }) => {
+test("the per-attack results collapse ATLAS+OWASP into a single Frameworks column of chips", async ({ page }) => {
   await realLogin(page);
   await page.goto("/redteam");
   await page.waitForLoadState("networkidle");
@@ -52,7 +52,7 @@ test("RT-FRAMEWORK-01: the per-attack results collapse ATLAS+OWASP into a single
 });
 
 // ── Draft blocking policy ────────────────────────────────────────────────────────────────────────
-test("AG-DRAFT-01: the what-if 'Draft blocking policy' POSTs a real dry-run draft and deep-links to it (no fabrication)", async ({ page }) => {
+test("the what-if 'Draft blocking policy' POSTs a real dry-run draft and deep-links to it (no fabrication)", async ({ page }) => {
   await realLogin(page);
   await page.goto("/threats/graph");
   await page.waitForLoadState("networkidle");
@@ -106,7 +106,7 @@ test("AG-DRAFT-01: the what-if 'Draft blocking policy' POSTs a real dry-run draf
 });
 
 // ── Ranked path list placement ───────────────────────────────────────────────────────────────────
-test("AG-ALIGN-01: the ranked path list drops below the KPI/severity divider (top offset present)", async ({ page }) => {
+test("the ranked path list drops below the KPI/severity divider (top offset present)", async ({ page }) => {
   await realLogin(page);
   await page.goto("/threats/graph");
   await page.waitForLoadState("networkidle");
