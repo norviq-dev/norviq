@@ -522,7 +522,7 @@ decision = "block" { block_fired }
 decision = "escalate" { escalate_fired; not block_fired }
 decision = "audit" { audit_fired; not block_fired; not escalate_fired }
 
-# Q1: attribute a SQL block carrying ";" (also a shell metachar) to deny_sql_injection, not deny_shell_execution —
+# Attribute a SQL block carrying ";" (also a shell metachar) to deny_sql_injection, not deny_shell_execution —
 # label only; block SET/decision unchanged; shell still wins for genuine shell payloads. Mirrors comprehensive.rego.
 _shell_shadowed_by_sql(id) { id == "deny_shell_execution"; sql_injection_detected }
 rule_id = sort([id | blocks[id]; not _shell_shadowed_by_sql(id)])[0] { block_fired }

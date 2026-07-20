@@ -151,7 +151,7 @@ async def lifespan(app: FastAPI):
 
     # HA: every API replica subscribes to the policy-mutation stream so a create/apply/delete on ANY replica
     # propagates to all of them within pub/sub latency (~ms) — without this, a peer replica keeps enforcing
-    # the stale/deleted rego until a restart (the H1/H2 multi-replica correctness gap). Skip our own echoes
+    # the stale/deleted rego until a restart (the multi-replica correctness gap). Skip our own echoes
     # (Redis broadcasts to every subscriber incl. self); the mutating call already updated local state.
     async def _on_remote_policy_event(operation: str, namespace: str, agent_class: str, origin: str) -> None:
         if origin and origin == getattr(app.state.loader, "_origin", None):
@@ -285,7 +285,7 @@ def create_app() -> FastAPI:
         except JWTError:
             await websocket.close(code=1008)  # policy violation: invalid/missing/revoked token
             return
-        # H1 (WS parity): decode_token only checks signature + revocation, not must_change — mirror
+        # WS parity: decode_token only checks signature + revocation, not must_change — mirror
         # get_current_user's fail-closed gate here too, or a token minted with must_change=True (the
         # seeded default admin / any account post admin_reset, i.e. still on a KNOWN password) could
         # stream live namespace-scoped audit data while every REST route correctly locks it out.

@@ -172,12 +172,12 @@ class IntentDraftSummary(BaseModel):
     source_framework: str | None = None
     source_control_id: str | None = None
     source_control_name: str | None = None
-    # Part B: TTL — when this non-enforcing draft auto-expires (ISO; "" = never).
+    # TTL — when this non-enforcing draft auto-expires (ISO; "" = never).
     expires_at: str = ""
 
 
 class IntentDraftPage(BaseModel):
-    """Part B (B6): a BOUNDED page of drafts + the total count, so the Policy Catalog never renders the whole
+    """A BOUNDED page of drafts + the total count, so the Policy Catalog never renders the whole
     list at once ("N more · view all")."""
 
     drafts: list[IntentDraftSummary] = []

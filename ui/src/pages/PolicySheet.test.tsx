@@ -6,7 +6,7 @@ import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { PolicySheet } from "./PolicyCatalog";
 
-// Q2: a small controlled host that mirrors how PolicyCatalog owns `selected.agent_class` and threads
+// A small controlled host that mirrors how PolicyCatalog owns `selected.agent_class` and threads
 // the typed class back down via onAgentClassChange (the field is controlled by the parent).
 function ManualComposerHost({ onApply }: { onApply: (mode: unknown, create?: { rego: string }) => void }) {
   const [policy, setPolicy] = useState<{ target_type: "class"; target: string; agent_class: string; mode: "block" }>({
@@ -37,8 +37,8 @@ const existing = {
   current_version: 3
 };
 
-describe("PolicySheet apply hardening (F-50 / F-51)", () => {
-  it("F-50: Apply opens a review/diff step and only fires onApply after Confirm", () => {
+describe("PolicySheet apply hardening", () => {
+  it("Apply opens a review/diff step and only fires onApply after Confirm", () => {
     const onApply = vi.fn();
     render(<PolicySheet policy={existing} deployments={[]} onApply={onApply} onClose={() => {}} />);
 
@@ -60,14 +60,14 @@ describe("PolicySheet apply hardening (F-50 / F-51)", () => {
     expect(onApply).toHaveBeenCalledTimes(1);
   });
 
-  it("F-50: a brand-new policy shows the 'new policy' review state", () => {
+  it("a brand-new policy shows the 'new policy' review state", () => {
     const draft = { ...existing, current_version: undefined };
     render(<PolicySheet policy={draft} deployments={[]} onApply={vi.fn()} onClose={() => {}} />);
     fireEvent.click(screen.getByRole("button", { name: "Apply" }));
     expect(screen.getByText(/no existing version to overwrite/i)).toBeInTheDocument();
   });
 
-  it("Q2: the agent-class field is a REAL editable input with a helpful empty-state (no fake dropdown)", () => {
+  it("the agent-class field is a REAL editable input with a helpful empty-state (no fake dropdown)", () => {
     const draft = { ...existing, agent_class: "", target: "", current_version: undefined };
     render(<PolicySheet policy={draft} deployments={[]} onApply={vi.fn()} onClose={() => {}} />);
     // it's an <input>, not a non-interactive select-trigger div
@@ -77,7 +77,7 @@ describe("PolicySheet apply hardening (F-50 / F-51)", () => {
     expect(screen.getByTestId("composer-no-deployments")).toHaveTextContent(/Type an agent-class name/i);
   });
 
-  it("Q2: typing a manual class + Confirm Apply CREATES with a generated enforcing rego for that class", () => {
+  it("typing a manual class + Confirm Apply CREATES with a generated enforcing rego for that class", () => {
     const onApply = vi.fn();
     render(<ManualComposerHost onApply={onApply} />);
 
@@ -101,7 +101,7 @@ describe("PolicySheet apply hardening (F-50 / F-51)", () => {
     expect(create.rego).toMatch(/decision\s*=\s*"block"\s*\{/);
   });
 
-  it("Q2: Confirm Apply is disabled until a class name is entered", () => {
+  it("Confirm Apply is disabled until a class name is entered", () => {
     render(<ManualComposerHost onApply={vi.fn()} />);
     fireEvent.click(screen.getByRole("button", { name: "Apply" }));
     const confirm = screen.getByRole("button", { name: "Confirm Apply" }) as HTMLButtonElement;
@@ -110,7 +110,7 @@ describe("PolicySheet apply hardening (F-50 / F-51)", () => {
     expect(screen.getByRole("button", { name: "Confirm Apply" })).toBeEnabled();
   });
 
-  it("Q2: an EXISTING policy re-apply does NOT carry a generated rego (stays on the apply/stamp path)", () => {
+  it("an EXISTING policy re-apply does NOT carry a generated rego (stays on the apply/stamp path)", () => {
     const onApply = vi.fn();
     render(<PolicySheet policy={existing} deployments={[]} onApply={onApply} onClose={() => {}} />);
     fireEvent.click(screen.getByRole("button", { name: "Apply" }));
@@ -120,7 +120,7 @@ describe("PolicySheet apply hardening (F-50 / F-51)", () => {
     expect(create).toBeUndefined();
   });
 
-  it("F-51: dry-run-only disables Apply with an explanatory note (Dry-Run stays)", () => {
+  it("dry-run-only disables Apply with an explanatory note (Dry-Run stays)", () => {
     const onApply = vi.fn();
     render(
       <PolicySheet policy={existing} deployments={[]} applyMode="dry_run_only" onApply={onApply} onClose={() => {}} />

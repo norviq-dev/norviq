@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// F1 — Red Team view. NO-MOCK-DATA proof: every rendered number comes from the MSW-mocked
+// Red Team view. NO-MOCK-DATA proof: every rendered number comes from the MSW-mocked
 // /api/v1/redteam/results/latest (+ /results history). Asserts the honest empty state, the
 // proven-blocking scorecard, the got-through gap warning + failed row, the per-technique breakdown,
 // and the run-history table — all sourced from the API payload, never a hardcoded frontend value.
@@ -99,7 +99,7 @@ function manyResults(n: number, failEvery = 0) {
 const targetsHandler = () =>
   http.get("*/api/v1/redteam/targets", () => HttpResponse.json({ namespace: "default", targets: ["customer-support", "finance-agent"] }));
 
-it("F1: honest empty state before any run (no fabricated efficacy)", async () => {
+it("honest empty state before any run (no fabricated efficacy)", async () => {
   server.use(
     http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json({ has_run: false })),
     http.get("*/api/v1/redteam/results", () => HttpResponse.json({ runs: [], total: 0 }))
@@ -110,7 +110,7 @@ it("F1: honest empty state before any run (no fabricated efficacy)", async () =>
   expect(screen.queryByTestId("redteam-scorecard")).toBeNull();
 });
 
-it("F1: scorecard renders the API's proven-blocking % + caught/got-through (not a hardcoded number)", async () => {
+it("scorecard renders the API's proven-blocking % + caught/got-through (not a hardcoded number)", async () => {
   server.use(
     http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json(latest())),
     http.get("*/api/v1/redteam/results", () => HttpResponse.json(historyPayload()))
@@ -123,7 +123,7 @@ it("F1: scorecard renders the API's proven-blocking % + caught/got-through (not 
   expect(screen.getByTestId("redteam-gap-warning")).toHaveTextContent(/got through/i);
 });
 
-it("A5: the secondary metrics render inside ONE grouped cluster, values mapped from results/latest", async () => {
+it("the secondary metrics render inside ONE grouped cluster, values mapped from results/latest", async () => {
   const run = latest({ pass_rate: 93.1, total: 29, efficacy: { overall: { total: 27, caught: 24, got_through: 3, proven_blocking_pct: 88.9 }, by_technique: [], by_owasp: [], non_enforcement: 0, excluded_synthetic: 0 } });
   server.use(
     http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json(run)),
@@ -138,7 +138,7 @@ it("A5: the secondary metrics render inside ONE grouped cluster, values mapped f
   expect(within(cluster).getByText("Attacks × classes")).toBeInTheDocument();
   // it is a grid group (spaced cluster), not a bare flex list
   expect(cluster).toHaveStyle({ display: "grid" });
-  // C3: the cluster is UNBOXED — no --bg-surface fill, no --border box, no radius (metrics + spacing kept)…
+  // The cluster is UNBOXED — no --bg-surface fill, no --border box, no radius (metrics + spacing kept)…
   expect(cluster.style.background).toBe("");
   expect(cluster.style.border).toBe("");
   expect(cluster.style.borderRadius).toBe("");
@@ -151,7 +151,7 @@ it("A5: the secondary metrics render inside ONE grouped cluster, values mapped f
   expect(within(cluster).getByText("Attacks × classes").parentElement).toHaveTextContent("29");
 });
 
-it("B: header shows a target-class COUNT (not the full comma list); names hide behind an expandable toggle", async () => {
+it("header shows a target-class COUNT (not the full comma list); names hide behind an expandable toggle", async () => {
   const many = latest({ targets: ["a-bot", "b-bot", "c-bot", "d-bot", "e-bot"] });
   server.use(
     http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json(many)),
@@ -169,7 +169,7 @@ it("B: header shows a target-class COUNT (not the full comma list); names hide b
   expect(screen.getByTestId("redteam-targets-list")).toHaveTextContent("a-bot, b-bot, c-bot, d-bot, e-bot");
 });
 
-it("F1: per-technique breakdown + per-attack rows come from the payload, and a miss is flagged", async () => {
+it("per-technique breakdown + per-attack rows come from the payload, and a miss is flagged", async () => {
   server.use(
     http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json(latest())),
     http.get("*/api/v1/redteam/results", () => HttpResponse.json(historyPayload()))
@@ -199,7 +199,7 @@ it("F1: per-technique breakdown + per-attack rows come from the payload, and a m
   expect(within(screen.getByTestId("redteam-history")).getAllByTestId("redteam-history-row")).toHaveLength(1);
 });
 
-it("D1: a rapid double-click fires exactly ONE POST /redteam/suite (one-submit guard)", async () => {
+it("a rapid double-click fires exactly ONE POST /redteam/suite (one-submit guard)", async () => {
   let posts = 0;
   server.use(
     targetsHandler(),
@@ -214,7 +214,7 @@ it("D1: a rapid double-click fires exactly ONE POST /redteam/suite (one-submit g
   await waitFor(() => expect(posts).toBe(1));
 });
 
-it("D1: while running, the button is disabled + aria-busy + labelled 'Running…'", async () => {
+it("while running, the button is disabled + aria-busy + labelled 'Running…'", async () => {
   let release: () => void = () => {};
   const gate = new Promise<void>((r) => (release = r));
   server.use(
@@ -233,7 +233,7 @@ it("D1: while running, the button is disabled + aria-busy + labelled 'Running…
   await waitFor(() => expect(btn).not.toBeDisabled());
 });
 
-it("D2: a large run is paginated — mounted rows stay bounded (≤50) and Next advances", async () => {
+it("a large run is paginated — mounted rows stay bounded (≤50) and Next advances", async () => {
   server.use(
     targetsHandler(),
     http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json(manyResults(120))),
@@ -248,7 +248,7 @@ it("D2: a large run is paginated — mounted rows stay bounded (≤50) and Next 
   expect(screen.getAllByTestId("redteam-attack-row")).toHaveLength(50);
 });
 
-it("D2: 'got-through only' filter shows just the misses (still bounded)", async () => {
+it("'got-through only' filter shows just the misses (still bounded)", async () => {
   server.use(
     targetsHandler(),
     http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json(manyResults(120, 4))),

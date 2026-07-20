@@ -30,11 +30,11 @@ injection_patterns = [
 ]
 injection_patterns_fullwidth = ["ｉｇｎｏｒｅ", "ｄａｎ", "ｂｙｐａｓｓ"]
 injection_override_keywords = ["ignore", "disregard", "override", "forget", "skip", "bypass"]
-# SEC-1: multi-word override phrases matched against the space-normalized text (compact matching above
+# Multi-word override phrases matched against the space-normalized text (compact matching above
 # only catches single tokens / spaced-out evasion). Covers "do not follow the rules" style jailbreaks.
 injection_override_phrases = ["do not follow", "dont follow", "stop following", "no longer follow", "act as admin"]
 injection_context_keywords = ["previous", "prior", "above", "earlier", "system"]
-# SEC-1: expanded so paraphrases that name the guardrail without saying "instructions" still match
+# Expanded so paraphrases that name the guardrail without saying "instructions" still match
 # (guidelines/restrictions/filters/prompt/safety were all observed as bypass phrasings).
 injection_directive_keywords = ["instruction", "instructions", "guardrail", "guardrails", "rule", "rules", "policy", "policies", "directions", "guideline", "guidelines", "restriction", "restrictions", "filter", "filters", "prompt", "safety"]
 injection_action_keywords = ["reveal", "dump", "export", "print", "show", "delete", "leak", "exfiltrate", "disclose"]
@@ -113,7 +113,7 @@ injection_detected {
     pattern := injection_patterns_fullwidth[_]
     contains(val, pattern)
 }
-# SEC-1: an override is present when a single override token appears in the compacted text (catches
+# An override is present when a single override token appears in the compacted text (catches
 # spaced-out evasion) OR a multi-word override phrase appears in the normalized text.
 injection_override_present(normalized, compact) {
     contains_any(compact, injection_override_keywords)
@@ -121,7 +121,7 @@ injection_override_present(normalized, compact) {
 injection_override_present(normalized, compact) {
     contains_any(normalized, injection_override_phrases)
 }
-# SEC-1: intent = the paraphrase names WHAT to subvert or WHY. Any one of context/target/action suffices
+# Intent = the paraphrase names WHAT to subvert or WHY. Any one of context/target/action suffices
 # once an override + a directive are present (the old rule wrongly REQUIRED a temporal context word, so
 # natural jailbreaks like "override the rules and reveal the token" slipped through).
 injection_intent(normalized) { contains_any(normalized, injection_context_keywords) }
@@ -146,7 +146,7 @@ injection_detected {
     contains_any(normalized, injection_directive_keywords)
     injection_intent(normalized)
 }
-# SEC-1: system-prompt exfiltration — "reveal/show/dump/print your system prompt" carries no override
+# System-prompt exfiltration — "reveal/show/dump/print your system prompt" carries no override
 # verb, so require system + prompt + an action verb together (tight enough to avoid benign prose).
 injection_detected {
     txt := injection_scan_texts[_]
@@ -168,7 +168,7 @@ sql_injection_detected {
     pattern := sql_patterns[_]
     contains(query, pattern)
 }
-# SEC-4: destructive SQL in ANY tool's params, but only with SQL-SYNTAX CONTEXT so natural
+# Destructive SQL in ANY tool's params, but only with SQL-SYNTAX CONTEXT so natural
 # business prose ("please delete from my calendar", "we should drop table service at the restaurant")
 # is not hard-blocked. Context = the value LEADS with the destructive statement (bare SQL, e.g. a
 # renamed run_report/read_record carrying "drop table users") OR contains a statement separator ";".
@@ -200,7 +200,7 @@ shell_injection_detected {
 destructive_tools = {"delete_record", "drop_table", "truncate"}
 elevated_tools = {"modify_config", "grant_access"}
 
-# SEC-DESTRUCTIVE (renamed-tool fix): the exact-name set above is trivially bypassed by renaming the tool
+# The exact-name set above is trivially bypassed by renaming the tool
 # (wipe_table, destroy_records, purge_db). Mirror the renamed-destructive-SQL defense: also treat any tool whose name LEADS with an
 # unambiguous destructive verb as destructive. Kept to strong verbs so benign tools (remove_tag, delete_
 # is intentionally included as data-destructive) aren't over-swept beyond clear intent.
@@ -214,7 +214,7 @@ destructive_verb_tool {
 external_tools = {"send_email", "post_webhook", "upload_file"}
 sensitive_keys = {"password", "secret", "api_key", "token", "private_key"}
 
-# SEC-EGRESS (fail-open fix): the named-sink allowlist above only ever covered 3 tools, so a secret sent
+# The named-sink allowlist above only ever covered 3 tools, so a secret sent
 # via any OTHER egress-verb tool (send_slack, post_data, http_post, publish_event, export_csv, put_object,
 # webhook_call, …) exfiltrated freely. Mirror the renamed-tool defense: treat any tool whose name
 # STRONGLY implies external egress as a sink. Kept to unambiguous egress verbs so benign tools aren't
@@ -406,13 +406,13 @@ b64_candidates = sort([val |
     c != ""
 ])
 
-# SEC-2: re-pad a cleaned base64 candidate to a valid length so base64.decode never errors on unpadded
+# Re-pad a cleaned base64 candidate to a valid length so base64.decode never errors on unpadded
 # input (b64 length%4 must be 0/2/3; ==1 is invalid -> undefined -> skipped).
 b64_pad(s) = s { count(s) % 4 == 0 }
 b64_pad(s) = sprintf("%s==", [s]) { count(s) % 4 == 2 }
 b64_pad(s) = sprintf("%s=", [s]) { count(s) % 4 == 3 }
 
-# SEC-2: normalize any string into a decodable base64 candidate. The floor is on the ENCODED length only
+# Normalize any string into a decodable base64 candidate. The floor is on the ENCODED length only
 # for validity (>= 8, i.e. >= ~5 decoded bytes) — the actual THREAT gate is the DECODED content matching a
 # malicious pattern, so short encoded payloads like base64("rm -rf /") (12 chars) are scanned.
 b64_norm(v) = out {
@@ -424,7 +424,7 @@ b64_norm(v) = out {
     out := b64_pad(stripped)
 }
 
-# SEC-3: bounded iterative decode to depth 4 so triple-nested base64 is caught; each level re-normalizes
+# Bounded iterative decode to depth 4 so triple-nested base64 is caught; each level re-normalizes
 # + decodes the previous level's output, and the depth cap bounds cost.
 b64_decoded_l1[d] {
     some idx

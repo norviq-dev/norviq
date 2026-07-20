@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""C4: GET /api/v1/audit/export streams audit rows as NDJSON/CSV, authenticated + namespace-scoped."""
+"""GET /api/v1/audit/export streams audit rows as NDJSON/CSV, authenticated + namespace-scoped."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ def _row(namespace: str = "default", tool: str = "search_kb", decision: str = "a
         trust_score=0.8,
         latency_ms=4.2,
         timestamp_utc=datetime.now(timezone.utc),
-        # F-19: masked_params provenance the export serializer reads directly (no getattr fallback) —
+        # masked_params provenance the export serializer reads directly (no getattr fallback) —
         # see norviq/api/routers/audit.py _export_dict.
         payload={"masked_params": {}},
     )

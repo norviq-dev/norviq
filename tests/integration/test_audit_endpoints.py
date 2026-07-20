@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Integration tests for audit + health endpoints — guards the P-15/P-16 async-session bug.
+"""Integration tests for audit + health endpoints — guards the async-session bug.
 
 These hit the REAL FastAPI app through a live local API (the real get_session lifecycle, NOT a
 monkeypatched session). With the async-generator bug (`session = await get_session()`) every
@@ -45,7 +45,7 @@ async def test_readyz_reports_db_true(api_client: httpx.AsyncClient) -> None:
 async def test_audit_endpoints_200_not_500(
     api_client: httpx.AsyncClient, auth_headers: dict[str, str], path: str
 ) -> None:
-    """Audit read endpoints must return 200, not 500 (P-15 async-generator session bug)."""
+    """Audit read endpoints must return 200, not 500 (async-generator session bug)."""
     resp = await api_client.get(path, headers=auth_headers)
     assert resp.status_code == 200, f"{path} -> {resp.status_code} (P-15 async-session bug?): {resp.text[:200]}"
 
@@ -64,8 +64,8 @@ async def test_audit_records_namespace_filter_200(
 async def test_audit_stats_reports_avg_latency_ms(
     api_client: httpx.AsyncClient, auth_headers: dict[str, str]
 ) -> None:
-    """K2: /audit/stats must carry a real avg_latency_ms = AVG(latency_ms) over the window (not a placeholder).
-    latency_ms is stamped on every audit record (evaluator F-13), so on a cluster with traffic this is > 0; the
+    """/audit/stats must carry a real avg_latency_ms = AVG(latency_ms) over the window (not a placeholder).
+    latency_ms is stamped on every audit record (evaluator), so on a cluster with traffic this is > 0; the
     Overview Avg-latency KPI binds it."""
     resp = await api_client.get("/api/v1/audit/stats?range=24h", headers=auth_headers)
     assert resp.status_code == 200

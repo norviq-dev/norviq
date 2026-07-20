@@ -1,3 +1,7 @@
+// DataTable — a small generic table: typed Column<T> config (custom cell render + responsive
+// hide-at-breakpoint columns), an optional client-side text filter across all fields, and row
+// selection/click. No sorting or paging — callers supply already-ordered rows.
+
 import { CSSProperties, ReactNode, useMemo, useState } from "react";
 
 export type Column<T> = {

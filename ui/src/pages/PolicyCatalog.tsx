@@ -1,3 +1,7 @@
+// Policy Catalog — browse the resolved policy stack, author/edit rego policies in Monaco with a
+// dry-run preview + apply-result transparency, and triage AI-generated policy drafts. Reserved scopes
+// (baseline / pack / guardrail) are read-only; author-created scopes are editable and deletable.
+
 import "../lib/monaco"; // Bundle Monaco locally (no cdn.jsdelivr fetch) — must precede <Editor>
 import Editor from "@monaco-editor/react";
 import { registerRego } from "../lib/monaco-rego";
@@ -155,7 +159,7 @@ function draftSourceLabel(d: DraftSource): string | null {
   return `from ${fw} · ${d.source_control_id}${d.source_control_name ? ` ${d.source_control_name}` : ""}`;
 }
 
-// ---- Part A: drafts triage-inbox helpers -----------------------------------------------------------------
+// ---- Drafts triage-inbox helpers -----------------------------------------------------------------
 // Mirror synthetic.py's naming so test/e2e drafts are default-hidden (server keeps them for the 24h test TTL).
 const TEST_DRAFT_RE = /^(wave\d+e2e|e2e-intent|effecttest|smoke-|canary-|probe-|evtrace-|allowlist-probe|policy-tester|scorer)/i;
 const isTestDraft = (cls: string): boolean => TEST_DRAFT_RE.test(cls);
@@ -1131,7 +1135,7 @@ function IntentDraftsPanel({
   );
 }
 
-// B-1: starter rego for a brand-new policy — a minimal, VALID block policy (the create validator requires a
+// Starter rego for a brand-new policy — a minimal, VALID block policy (the create validator requires a
 // reachable block/escalate decision plus decision/rule_id/reason). The author edits it freely; it is not a
 // template the way the composer's keyword-block generator is — the whole rego is hand-editable in Monaco.
 const NEW_POLICY_REGO = `package norviq.custom
@@ -1183,7 +1187,7 @@ export function PolicyCatalog() {
   // never reads a network/engine failure as a validated zero-impact result. Travels WITH dryRunResult:
   // set on catch (result nulled), cleared whenever a fresh run starts or the dry-run panel is reset.
   const [dryRunError, setDryRunError] = useState<string | null>(null);
-  const [applyResult, setApplyResult] = useState<ApplyResult | null>(null);  // Stage 1: apply-result transparency
+  const [applyResult, setApplyResult] = useState<ApplyResult | null>(null);  // Apply-result transparency
   // Authoring a brand-new policy from raw rego for a chosen ns+class in the editor (null = editing existing).
   const [newPolicy, setNewPolicy] = useState<{ namespace: string; agent_class: string; mode: NonNullable<Policy["mode"]> } | null>(null);
   // The policy pending a confirmed delete (drives the confirm modal). Null = no delete in flight.
@@ -1215,12 +1219,12 @@ export function PolicyCatalog() {
   const [draftsDismissed, setDraftsDismissed] = useState(false);
   const [draftDetail, setDraftDetail] = useState<IntentDraftDetail | null>(null);
   const [draftDetailLoading, setDraftDetailLoading] = useState(false);
-  // Part A/B triage state.
+  // Triage state.
   const [draftFilter, setDraftFilter] = useState<DraftStatus | "All">("All");
   const [showTestDrafts, setShowTestDrafts] = useState<boolean>(() => localStorage.getItem("nrvq_show_test_drafts") === "1");
   const [showAllDrafts, setShowAllDrafts] = useState(false);  // "view all" bumps the page limit
   const [reviewedDraftIds, setReviewedDraftIds] = useState<Set<string>>(new Set());
-  // A6/B2: the draft being applied — carries ns+cls so the retire-on-save only fires for a save that
+  // The draft being applied — carries ns+cls so the retire-on-save only fires for a save that
   // actually realises THIS draft (a later, unrelated save must never dismiss an abandoned draft).
   const [pendingDraft, setPendingDraft] = useState<{ id: string; ns: string; cls: string } | null>(null);
   const [justLoadedDraft, setJustLoadedDraft] = useState(false);  // show the "draft loaded → Create to apply" banner
@@ -1453,7 +1457,7 @@ export function PolicyCatalog() {
     }
   };
 
-  // B-2: run the confirmed delete — removes the policy across every layer, then reconciles the editor + list.
+  // Run the confirmed delete — removes the policy across every layer, then reconciles the editor + list.
   const confirmDeletePolicy = async () => {
     if (!deleteTarget?.namespace || !deleteTarget?.agent_class) {
       setDeleteTarget(null);
@@ -1553,7 +1557,7 @@ export function PolicyCatalog() {
         enforcement_mode: mode ?? "block"
       });
       await refreshPolicies();
-      // A6/B2: the applied draft is now enforcing → retire it — ONLY when this apply is for the SAME
+      // The applied draft is now enforcing → retire it — ONLY when this apply is for the SAME
       // ns/class the draft targets (guards against an unrelated policy's apply deleting an abandoned draft).
       if (pendingDraft && ns === pendingDraft.ns && ac === pendingDraft.cls) {
         await dismissIntentDraft(pendingDraft.id).catch(() => {});
@@ -1637,7 +1641,7 @@ export function PolicyCatalog() {
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [editorStatus]);
 
-  // B-1: the ns/class/mode the editor is authoring against — the new-policy scope when creating, else the loaded
+  // The ns/class/mode the editor is authoring against — the new-policy scope when creating, else the loaded
   // policy. saveEditorPolicy + runDryRun both read this so create and edit share one code path.
   const editorTarget = newPolicy
     ? newPolicy
@@ -1754,7 +1758,7 @@ export function PolicyCatalog() {
     }
   };
 
-  // Stage 1: a real current-vs-new diff for Dry-Run — what the edit actually changes vs the loaded policy.
+  // A real current-vs-new diff for Dry-Run — what the edit actually changes vs the loaded policy.
   const regoDiff = useMemo(() => {
     // A brand-new policy has no current source — diff against empty so the review shows the whole rego as added.
     const cur = (newPolicy ? "" : detail.data?.rego_source ?? "").split("\n");
@@ -1799,7 +1803,7 @@ export function PolicyCatalog() {
         }
       />
 
-      {/* Stage 1: apply-result transparency — the exact resource configured + honest outcome (policy-store + engine load). */}
+      {/* Apply-result transparency — the exact resource configured + honest outcome (policy-store + engine load). */}
       <ApplyResultPanel result={applyResult} onClose={() => setApplyResult(null)} />
 
       {/* Non-enforcing intent drafts (hidden when empty; READ + hand-off only). */}
@@ -1959,7 +1963,7 @@ export function PolicyCatalog() {
                               {p.last_applied ? <> · applied {timeAgo(p.last_applied)}</> : null}
                             </div>
                           </button>
-                          {/* B-2: per-row delete — never offered for reserved/managed scopes (baseline/pack/guardrail). */}
+                          {/* Per-row delete — never offered for reserved/managed scopes (baseline/pack/guardrail). */}
                           {!isReservedScope(p.agent_class, p.namespace) && (
                             <button
                               type="button"
@@ -2029,7 +2033,7 @@ export function PolicyCatalog() {
                 <div className="section-label" style={{ padding: "4px 8px" }}>
                   Policies
                 </div>
-                {/* B-1: author a brand-new policy from raw rego for a chosen ns+class (distinct from the header
+                {/* Author a brand-new policy from raw rego for a chosen ns+class (distinct from the header
                     composer, which only generates templated keyword-block rego). */}
                 <button
                   type="button"
@@ -2068,7 +2072,7 @@ export function PolicyCatalog() {
               </div>
               <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
                 {newPolicy && (
-                  // B-1: new-policy scope selector — the author types the namespace + agent class + enforcement mode
+                  // New-policy scope selector — the author types the namespace + agent class + enforcement mode
                   // the raw rego below will be created for (POST /api/v1/policies).
                   <div
                     data-testid="new-policy-fields"
@@ -2224,7 +2228,7 @@ export function PolicyCatalog() {
                     )}
                   </span>
                   <div style={{ flex: 1 }} />
-                  {/* B-2: delete the loaded existing policy (never a reserved scope, never during new-policy mode). */}
+                  {/* Delete the loaded existing policy (never a reserved scope, never during new-policy mode). */}
                   {!newPolicy && editorPolicy && !isReservedScope(editorPolicy.agent_class, editorPolicy.namespace) && (
                     <KitButton
                       variant="destructive"

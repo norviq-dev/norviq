@@ -89,7 +89,7 @@ async def test_leave_resets_version_lineage_and_sheds():
     res = await fleet_leave(request=_request(loader), user={"role": "admin", "sub": "op"}, session=session)
 
     assert res["enrolled"] is False
-    assert ("default", "bot") in loader.deleted          # F-52 shed still happens
+    assert ("default", "bot") in loader.deleted          # Shed still happens
     assert bundle.last_applied_version == 0              # version lineage forgotten
     assert bundle.last_bundle_sha256 == ""
     assert json.loads(bundle.last_manifest) == []

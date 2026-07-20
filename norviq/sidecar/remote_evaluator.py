@@ -116,7 +116,7 @@ class RemoteEvaluator:
             "agent_identity": event.agent_identity.model_dump(),
             "session_id": event.session_id,
             "call_depth": event.call_depth,
-            # Preserve the decision source so the central audit record is attributed to the sidecar (OBS-2).
+            # Preserve the decision source so the central audit record is attributed to the sidecar.
             "framework": event.framework or "sidecar",
         }
         try:

@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
+//
+// handler.go serves the admission webhook endpoints: /mutate injects the Norviq
+// enforcement sidecar into admitted pods (fail-closed against fake/partial/pre-occupied
+// enforcement plumbing), and /validate-policy validates NrvqPolicy custom resources.
 package main
 
 import (

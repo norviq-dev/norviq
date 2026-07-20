@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// P1 (context architecture): URL ?ns= is the shareable source of scope, the stored selection is
+// (context architecture): URL ?ns= is the shareable source of scope, the stored selection is
 // identity-scoped, and the governance posture of the selected scope is loaded into context.
 import { render, screen, act, waitFor } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
@@ -48,14 +48,14 @@ function mount(initialEntry = "/audit") {
 
 beforeEach(() => {
   localStorage.clear();
-  clearApiCache(); // SLIM-SETTINGS: posture now read/write-throughs the shared cache — isolate per test
+  clearApiCache(); // Posture now read/write-throughs the shared cache — isolate per test
   mocks.getToken.mockReturnValue(null);
   mocks.tokenSubject.mockReturnValue(null);
   mocks.fetchSettings.mockImplementation(() => Promise.reject(new Error("no net")));
 });
 afterEach(() => localStorage.clear());
 
-describe("P1-2: namespace ↔ URL", () => {
+describe("namespace ↔ URL", () => {
   it("adopts ?ns= from the URL over the stored selection (shareable links win)", () => {
     localStorage.setItem("nrvq_namespace", "team-a");
     mount("/audit?ns=analytics");
@@ -81,7 +81,7 @@ describe("P1-2: namespace ↔ URL", () => {
   });
 });
 
-describe("P1-2: identity-scoped persistence", () => {
+describe("identity-scoped persistence", () => {
   it("a different identity does NOT inherit the previous identity's namespace", () => {
     // admin picked "payments"…
     mocks.tokenSubject.mockReturnValue("admin");
@@ -105,7 +105,7 @@ describe("P1-2: identity-scoped persistence", () => {
   });
 });
 
-describe("P1-1: governance posture in context", () => {
+describe("governance posture in context", () => {
   it("loads the selected scope's enforcement mode and exposes it (monitor = 'audit')", async () => {
     mocks.getToken.mockReturnValue("t.t.t");
     mocks.fetchSettings.mockImplementation(() =>

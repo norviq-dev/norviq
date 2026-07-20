@@ -1,3 +1,6 @@
+// API Keys — issue, list, and revoke namespace-scoped API keys (viewer/service/admin roles, optional
+// expiry). A key must bind to a concrete tenant namespace; the full secret is shown once, at creation.
+
 import { useState } from "react";
 import { createApiKey, fetchApiKeys, revokeApiKey } from "../api/client";
 import { useApi } from "../hooks/useApi";

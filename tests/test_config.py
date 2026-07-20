@@ -57,14 +57,14 @@ def test_settings_singleton_import() -> None:
 
 
 def test_api_secret_key_reads_nrvq_prefixed_env(monkeypatch) -> None:
-    """A2: the chart sets NRVQ_API_SECRET_KEY — it must actually populate api_secret_key."""
+    """The chart sets NRVQ_API_SECRET_KEY — it must actually populate api_secret_key."""
     monkeypatch.setenv("NRVQ_API_SECRET_KEY", "rotated-prod-secret-123")
     loaded = NorviqSettings(_env_file=None)
     assert loaded.api_secret_key == "rotated-prod-secret-123"
 
 
 def test_db_ssl_mode_reads_nrvq_prefixed_env(monkeypatch) -> None:
-    """A2: NRVQ_DB_SSL_MODE from the chart configmap must populate db_ssl_mode."""
+    """NRVQ_DB_SSL_MODE from the chart configmap must populate db_ssl_mode."""
     monkeypatch.setenv("NRVQ_DB_SSL_MODE", "verify-full")
     loaded = NorviqSettings(_env_file=None)
     assert loaded.db_ssl_mode == "verify-full"

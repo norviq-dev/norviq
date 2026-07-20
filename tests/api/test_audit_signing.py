@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
-"""F-19: audit-export hash-chain integrity (tamper-evidence)."""
+"""Audit-export hash-chain integrity (tamper-evidence)."""
 
 from norviq.api.routers.audit import _chain_hash
 

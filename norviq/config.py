@@ -213,7 +213,7 @@ class NorviqSettings(BaseSettings):
     socket_path: str = "/tmp/norviq-proxy.sock"
     http_fallback_port: int = 8282
     api_port: int = 8080
-    # PERF-1: reject over-large request bodies (defense against the base64 fan-out DoS amplifier and
+    # Reject over-large request bodies (defense against the base64 fan-out DoS amplifier and
     # generic memory abuse). 256 KiB is far above any legitimate tool-call payload. NRVQ_MAX_REQUEST_BODY_BYTES.
     max_request_body_bytes: int = 262144
     # Injected-sidecar evaluation mode. "proxy" (default) = the sidecar POSTs each tool call to

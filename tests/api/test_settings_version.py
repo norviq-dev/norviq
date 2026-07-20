@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F046: GET/PUT /api/v1/settings (effective config + persisted overrides) and GET /api/v1/version
+"""GET/PUT /api/v1/settings (effective config + persisted overrides) and GET /api/v1/version
 (single source). Covers happy, override merge, RBAC (viewer PUT -> 403), validation, and auth."""
 
 from __future__ import annotations

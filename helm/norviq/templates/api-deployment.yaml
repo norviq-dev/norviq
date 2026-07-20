@@ -101,7 +101,7 @@ spec:
           {{- end }}
 {{- if .Values.opa.enabled }}
         # Long-lived OPA policy engine (per-replica sidecar). The API queries it at localhost:8181.
-        # NOTE (Wave 1 engine lockdown): `opa run --server` has NO `--capabilities` flag (only `opa
+        # NOTE (engine lockdown): `opa run --server` has NO `--capabilities` flag (only `opa
         # build`/`opa check`/`opa eval` accept one — verified against the pinned opa.image version above), so
         # a locked-down builtin set cannot be handed to this long-lived server directly. The real control is
         # norviq/engine/opa_client.py::_check_capabilities, which independently re-compiles every pushed rego

@@ -48,7 +48,7 @@ def _namespace_from_spiffe(spiffe_id: str) -> str | None:
 
 
 def _class_from_spiffe(spiffe_id: str) -> str | None:
-    """B4: extract the agent_class from spiffe://.../sa/{agent_class} (the SVID encodes it)."""
+    """Extract the agent_class from spiffe://.../sa/{agent_class} (the SVID encodes it)."""
     parts = spiffe_id.split("/")
     if "sa" in parts:
         idx = parts.index("sa")
@@ -58,7 +58,7 @@ def _class_from_spiffe(spiffe_id: str) -> str | None:
 
 
 async def _registry_last_seen(namespace: str | None) -> dict[str, str]:
-    """B4: batch-load {spiffe_id: last_seen ISO} from the persistent agent_registry in ONE query, so the
+    """Batch-load {spiffe_id: last_seen ISO} from the persistent agent_registry in ONE query, so the
     Agents table can show a real Last Seen even when an agent's live trust cache entry has aged out. Never
     raises into the request path — a registry read failure just yields an empty map (Last Seen falls to '–')."""
     try:

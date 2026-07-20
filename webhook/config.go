@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
+//
+// config.go defines the webhook's runtime configuration surface and loads it from
+// environment variables (image, ports, TLS/mTLS, sidecar mode, SPIFFE, opt-out policy).
 package main
 
 import (

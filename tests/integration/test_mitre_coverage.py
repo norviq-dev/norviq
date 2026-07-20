@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F017 #7: GET /api/v1/mitre/coverage serves the ATLAS technique→policy map cross-referenced
+"""GET /api/v1/mitre/coverage serves the ATLAS technique→policy map cross-referenced
 with the rego loaded for the namespace (the page was a 'coming soon' stub)."""
 
 from __future__ import annotations

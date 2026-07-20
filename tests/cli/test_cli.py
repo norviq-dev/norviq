@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""CLI tests for F020."""
+"""CLI tests."""
 
 from __future__ import annotations
 
@@ -210,7 +210,7 @@ def _capture_redteam_sim(monkeypatch) -> dict[str, Any]:
 
 
 def test_redteam_run_inherits_global_api_url_and_token(monkeypatch) -> None:
-    """P7: global --api-url/--token flow into `redteam run` via the shared group context."""
+    """Global --api-url/--token flow into `redteam run` via the shared group context."""
     captured = _capture_redteam_sim(monkeypatch)
     result = _runner().invoke(cli, ["--api-url", "http://api.example:9000", "--token", "secret", "redteam", "run"])
     assert result.exit_code == 0
@@ -218,7 +218,7 @@ def test_redteam_run_inherits_global_api_url_and_token(monkeypatch) -> None:
 
 
 def test_redteam_run_defaults_to_shared_cli_host(monkeypatch) -> None:
-    """P7: absent flags, `redteam run` uses the shared 127.0.0.1 host, not the old localhost default."""
+    """Absent flags, `redteam run` uses the shared 127.0.0.1 host, not the old localhost default."""
     captured = _capture_redteam_sim(monkeypatch)
     result = _runner().invoke(cli, ["redteam", "run"])
     assert result.exit_code == 0
@@ -226,7 +226,7 @@ def test_redteam_run_defaults_to_shared_cli_host(monkeypatch) -> None:
 
 
 def test_redteam_run_per_command_flag_overrides_global(monkeypatch) -> None:
-    """P7: an explicit per-command --api-url still overrides the global value."""
+    """An explicit per-command --api-url still overrides the global value."""
     captured = _capture_redteam_sim(monkeypatch)
     result = _runner().invoke(
         cli, ["--api-url", "http://global:1", "redteam", "run", "--api-url", "http://override:2"]
@@ -236,7 +236,7 @@ def test_redteam_run_per_command_flag_overrides_global(monkeypatch) -> None:
 
 
 def test_redteam_single_inherits_global_api_url_and_token(monkeypatch) -> None:
-    """P7: global --api-url/--token flow into `redteam single` via the shared group context."""
+    """Global --api-url/--token flow into `redteam single` via the shared group context."""
     captured = _capture_redteam_sim(monkeypatch)
     result = _runner().invoke(cli, ["--api-url", "http://api.example:9000", "--token", "secret", "redteam", "single", "PI-001"])
     assert result.exit_code == 0

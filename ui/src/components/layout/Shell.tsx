@@ -1,3 +1,6 @@
+// Shell — the authenticated app layout: wraps routed page content with the sidebar and header, and
+// mounts the toast provider so any page can surface async outcomes.
+
 import { ReactNode, useEffect, useState } from "react";
 import { Header } from "./Header";
 import { Sidebar } from "./Sidebar";

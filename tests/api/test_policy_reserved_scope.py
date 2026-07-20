@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
-"""F-37: the generic POST /api/v1/policies must reject a direct write to the managed `__pack__` scope (it is
+"""The generic POST /api/v1/policies must reject a direct write to the managed `__pack__` scope (it is
 owned by the packs router and silently wiped by _materialize), pointing the caller at the packs enable API.
-`__guardrail__` (operator-loaded, F-14) and normal class policies are NOT rejected by this guard."""
+`__guardrail__` (operator-loaded) and normal class policies are NOT rejected by this guard."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ class _StubLoader:
 
 
 class _NoSettingsSession:
-    """No persisted settings row -> apply_mode falls back to enforce (F-51 gate is a no-op for this test)."""
+    """No persisted settings row -> apply_mode falls back to enforce (the apply-mode gate is a no-op for this test)."""
 
     async def execute(self, stmt):
         _ = stmt
@@ -80,7 +80,7 @@ def test_guardrail_scope_is_allowed():
     client, loader = _client()
     resp = client.post("/api/v1/policies", json={"namespace": "default", "agent_class": "__guardrail__",
                                                  "rego_source": _VALID_REGO, "priority": 800})
-    assert resp.status_code == 200                       # F-14 operator-loaded guardrail still works
+    assert resp.status_code == 200                       # operator-loaded guardrail still works
     assert ("default", "__guardrail__") in loader.created
 
 
@@ -93,7 +93,7 @@ def test_normal_class_policy_is_allowed():
 
 
 def test_apply_to_reserved_scope_is_rejected():
-    # F-42: the apply path (sibling of create) must also reject __pack__/__baseline__ — it returned 200 before.
+    # The apply path (sibling of create) must also reject __pack__/__baseline__ — it returned 200 before.
     client, _ = _client()
     body = {"target_type": "agent_class", "target_namespace": "default"}
     for scope in ("__pack__", "__baseline__"):
@@ -103,7 +103,7 @@ def test_apply_to_reserved_scope_is_rejected():
 
 
 def test_delete_reserved_scope_is_rejected():
-    # B-3: DELETE had NO reserved-scope guard (create/apply do) — a raw DELETE of a managed scope would move the
+    # DELETE had NO reserved-scope guard (create/apply do) — a raw DELETE of a managed scope would move the
     # namespace fallback floor. Every managed class + the reserved __cluster__ ns must be refused (422) and must
     # NEVER reach loader.delete.
     client, loader = _client()
@@ -115,10 +115,10 @@ def test_delete_reserved_scope_is_rejected():
     assert resp.status_code == 422
 
 
-# --- H5: create/apply reject __pack_weaken__; apply rejects a reserved TARGET namespace ------------
+# --- create/apply reject __pack_weaken__; apply rejects a reserved TARGET namespace ------------
 
 def test_create_pack_weaken_is_rejected():
-    # H5: a direct create of __pack_weaken__ bypasses the packs router's OPA validation + weaken audit + gate.
+    # A direct create of __pack_weaken__ bypasses the packs router's OPA validation + weaken audit + gate.
     client, loader = _client()
     resp = client.post("/api/v1/policies", json={"namespace": "default", "agent_class": "__pack_weaken__",
                                                  "rego_source": _VALID_REGO, "priority": 900})
@@ -127,7 +127,7 @@ def test_create_pack_weaken_is_rejected():
 
 
 def test_apply_pack_weaken_and_guardrail_are_rejected():
-    # H5: apply previously covered only __pack__/__pack_override__/__baseline__ — weaken/guardrail slipped through.
+    # Apply previously covered only __pack__/__pack_override__/__baseline__ — weaken/guardrail slipped through.
     client, _ = _client()
     body = {"target_type": "agent_class", "target_namespace": "default"}
     for scope in ("__pack_weaken__", "__guardrail__"):
@@ -136,14 +136,14 @@ def test_apply_pack_weaken_and_guardrail_are_rejected():
 
 
 def test_apply_into_reserved_target_namespace_is_rejected():
-    # H5: apply never checked target_namespace — it could write into the managed __cluster__ scope create refuses.
+    # Apply never checked target_namespace — it could write into the managed __cluster__ scope create refuses.
     client, _ = _client()
     resp = client.post("/api/v1/policies/default/finance-agent/apply",
                        json={"target_type": "agent_class", "target_namespace": "__cluster__"})
     assert resp.status_code == 422
 
 
-# --- H4: create is gated by the dry-run-only namespace posture (like apply) ------------------------
+# --- create is gated by the dry-run-only namespace posture (like apply) ------------------------
 
 class _DryRunOnlySession:
     async def execute(self, stmt):
@@ -167,11 +167,11 @@ def test_create_in_dry_run_only_namespace_is_rejected():
     client = TestClient(app)
     resp = client.post("/api/v1/policies", json={"namespace": "default", "agent_class": "finance-agent",
                                                  "rego_source": _VALID_REGO, "priority": 100})
-    assert resp.status_code == 409                       # F-51 gate now covers create, not just apply
+    assert resp.status_code == 409                       # the apply-mode gate now covers create, not just apply
     assert loader.created == []
 
 
-# --- H7: dry-run is namespace-scoped (a tenant cannot replay another namespace) --------------------
+# --- dry-run is namespace-scoped (a tenant cannot replay another namespace) --------------------
 
 def test_dry_run_is_namespace_scoped_for_a_tenant():
     tenant = {"role": "viewer", "namespace": "team-a", "sub": "t"}
@@ -191,7 +191,7 @@ def test_delete_normal_class_reaches_loader():
     assert ("default", "finance-agent") in loader.deleted
 
 
-# --- EXHAUSTIVE-PERF-AUDIT: create/rollback reserved-scope parity + API-key write-scope (IDOR) ---
+# --- create/rollback reserved-scope parity + API-key write-scope (IDOR) ---
 
 _SVC_KEY_DEFAULT = {"role": "service", "namespace": "default", "sub": "apikey:abc123"}
 _SVC_JWT_CONTROLLER = {"role": "service", "namespace": "default", "sub": "norviq-webhook"}
@@ -382,7 +382,7 @@ def test_bare_remediation_suffix_class_is_not_treated_as_an_overlay():
     assert ("default", "__remediation__") in loader.created
 
 
-# --- P1 (SECURITY): priority-band enforcement --------------------------------------------------------
+# --- Security: priority-band enforcement --------------------------------------------------------
 # The CRD caps a namespace policy at priority 0-499 and reserves the clusterPriority band (500-1000) for
 # cluster admins, but the API's create path enforced NO bound — a namespace-scoped service-role API key
 # (which passes require_admin_or_service and is floored to its own namespace, but is NOT an admin) could POST

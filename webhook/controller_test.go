@@ -549,7 +549,7 @@ reason = "string literal should not count regex op"`
 	}
 }
 
-// FIX 5 (enforcement-correctness parity): a policy with a block rule but no `default decision`
+// A policy with a block rule but no `default decision`
 // silently evaluates `decision` as undefined (== allow to the engine) whenever the rule doesn't fire.
 // Reject it at admission time, same error path as the other validateRego failures.
 func TestValidateRegoRejectsMissingDefaultDecision(t *testing.T) {

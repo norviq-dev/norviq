@@ -65,7 +65,7 @@ describe("AuditLog live feed (#5)", () => {
   });
 });
 
-describe("AuditLog pagination beyond the 500-offset cap (F-63)", () => {
+describe("AuditLog pagination beyond the 500-offset cap", () => {
   // FAIL-ON-BUG: with a full count-probe (server caps limit at 500) and full pages, the pager must let
   // the user advance past page 10 / offset 500. Old code disabled Next at page 10 (totalPages-1), so
   // offset 500 was never fetched and records beyond it were unreachable.

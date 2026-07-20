@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
-"""F-22: opt-in, default-OFF output-DLP hook. Disabled = exact passthrough; enabled = PAN/SSN redacted."""
+"""Opt-in, default-OFF output-DLP hook. Disabled = exact passthrough; enabled = PAN/SSN redacted."""
 
 from norviq.config import settings
 from norviq.sdk.langchain.adapter import _output_dlp

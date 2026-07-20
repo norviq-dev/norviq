@@ -1,3 +1,7 @@
+// Audit Log — the live decision ledger: every allow/block/escalate/audit decision with its agent, tool,
+// rule, trust score and captured params. Backed by a paged fetch plus a WebSocket tail for new records,
+// with client-side filtering and a row-detail drawer.
+
 import { X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";

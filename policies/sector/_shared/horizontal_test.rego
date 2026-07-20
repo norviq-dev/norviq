@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
+#
+# Parity tests for the shared horizontal PCI/PII rules: card-number (name + Luhn value, grouped and
+# nested), SSN (field, free-text and nested), and benign allows — proving a sector namespace gets the
+# same data-protection coverage as comprehensive.rego.
 package norviq.sector.shared_test
 
 import data.norviq.sector.shared

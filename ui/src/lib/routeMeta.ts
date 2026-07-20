@@ -8,7 +8,7 @@
 // TRUE where the global range drives the page's data. Verified live:
 //   • `/`           Dashboard/Overview — reads `timeRange` in its fetch deps (stats/records/volume).
 //   • `/audit`      AuditLog          — reads `timeRange` in its fetch deps (records query).
-//   • `/compliance` Compliance        — Q3 CORRECTION: it IS range-scoped (per-technique blocked/observed evidence
+//   • `/compliance` Compliance        — it IS range-scoped (per-technique blocked/observed evidence
 //                     changes with the window, e.g. /compliance/atlas/coverage?range=1h ≠ range=30d) and had NO
 //                     control on its landing/overview (the only picker lived in the DETAIL header). Now the global
 //                     header range is Compliance's single source of truth (the redundant detail picker is removed)

@@ -100,7 +100,7 @@ function owaspPayload() {
   };
 }
 
-// F3: the client now uses the framework-neutral path /api/v1/compliance/:framework/coverage (+ /trend).
+// The client now uses the framework-neutral path /api/v1/compliance/:framework/coverage (+ /trend).
 function useBothFrameworks() {
   server.use(
     http.get("/api/v1/compliance/:framework/coverage", ({ params }) =>
@@ -135,7 +135,7 @@ describe("Compliance page — both frameworks live, every value from the API (no
     expect(screen.getByText("MITRE ATLAS")).toBeInTheDocument();
     expect(screen.getByText("OWASP LLM Top 10 (2025)")).toBeInTheDocument();
 
-    // F1: each card shows its OWN per-framework blocked count (ATLAS 1,234 vs OWASP 321) — DIFFERENT numbers,
+    // Each card shows its OWN per-framework blocked count (ATLAS 1,234 vs OWASP 321) — DIFFERENT numbers,
     // not a shared global total.
     expect(screen.getByText("1,234")).toBeInTheDocument();
     expect(screen.getByText("321")).toBeInTheDocument();
@@ -191,7 +191,7 @@ describe("Compliance page — both frameworks live, every value from the API (no
     expect(screen.queryByText("AML.T0050")).not.toBeInTheDocument();
   });
 
-  it("C4: framework CARDS show NO 'coverage steady' trend line — even when the trend WOULD render steady", async () => {
+  it("framework CARDS show NO 'coverage steady' trend line — even when the trend WOULD render steady", async () => {
     // seed a trend with >=2 equal-enforced points → TrendText would render "coverage steady" on the card.
     server.use(
       http.get("/api/v1/compliance/:framework/coverage", ({ params }) =>
@@ -211,7 +211,7 @@ describe("Compliance page — both frameworks live, every value from the API (no
     // cards render (default overview — no detail drill-in open)…
     expect(await screen.findByText("70%")).toBeInTheDocument();
     expect(await screen.findByText("MITRE ATLAS")).toBeInTheDocument();
-    // …and the "coverage steady" trend line is gone from the cards (C4).
+    // …and the "coverage steady" trend line is gone from the cards.
     expect(screen.queryByText(/coverage steady/i)).not.toBeInTheDocument();
     // the counts + blocked line the card keeps are still present.
     expect(screen.getByText("1,234")).toBeInTheDocument();
@@ -245,9 +245,9 @@ describe("Compliance page — both frameworks live, every value from the API (no
   });
 });
 
-// F2: the proven-blocking efficacy overlay — coexists with the Q3 header range selector (which lives in the
+// The proven-blocking efficacy overlay — coexists with the header range selector (which lives in the
 // global Header, not this page, so it is unaffected). Coverage is "rules present"; this is "proven-blocking".
-describe("Compliance — F2 efficacy overlay (proven-blocking from the last Red Team run)", () => {
+describe("Compliance — efficacy overlay (proven-blocking from the last Red Team run)", () => {
   it("shows the REAL proven-blocking % when a Red Team run exists", async () => {
     useBothFrameworks();
     server.use(

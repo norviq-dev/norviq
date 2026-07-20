@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
+"""Sidecar process entrypoint (`python -m norviq.sidecar`): runs the Unix-socket proxy
+alongside its HTTP fallback server until interrupted."""
 import asyncio
 
 import uvicorn

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Q2: the composer generates a VALID, enforcing keyword-block rego for a manually-entered agent class.
+// The composer generates a VALID, enforcing keyword-block rego for a manually-entered agent class.
 // These assert the generated source (a) satisfies the backend `validate_policy_create` guard and
 // (b) is deterministic/normalized. The live OPA decision-flip is proven by the kind e2e (a 200 is not proof).
 import { describe, it, expect } from "vitest";

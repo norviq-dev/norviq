@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""CAND-A2 — a namespace-wide overlay policy change must invalidate the WHOLE namespace's eval cache.
+"""A namespace-wide overlay policy change must invalidate the WHOLE namespace's eval cache.
 
 `__baseline__` / `__guardrail__` / `__pack__*` change the effective decision for every agent class in the
 namespace. If create/revert only cleared `eval:{ns}:{that-scope}:*`, sibling classes kept serving a stale

@@ -60,7 +60,7 @@ describe("Settings (#8) — server-backed", () => {
     fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
 
     await waitFor(() => expect(screen.getByText(/settings saved/i)).toBeInTheDocument());
-    // GOV-IA: governance (enforcement_mode/apply_mode) moved to Target Settings — Settings now only
+    // Governance (enforcement_mode/apply_mode) moved to Target Settings — Settings now only
     // persists the tuning defaults, so the PUT body must NOT carry enforcement_mode.
     expect(putBody).toMatchObject({ trust_threshold: 0.55 });
     expect(putBody).not.toHaveProperty("enforcement_mode");
@@ -69,7 +69,7 @@ describe("Settings (#8) — server-backed", () => {
     expect(putBody).not.toHaveProperty("violation_penalty");
   });
 
-  it("GOV-IA: governance is not duplicated here — it links to Target Settings instead", async () => {
+  it("governance is not duplicated here — it links to Target Settings instead", async () => {
     renderPage();
     await screen.findByDisplayValue("0.7");
     // The duplicate Block/Monitor + Live/Frozen toggles are gone; a pointer to Target Settings remains.

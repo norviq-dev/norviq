@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// A4 — a caller-supplied ScoreGauge caption is NEUTRAL grey (--text-muted), never the score's risk-band
+// A caller-supplied ScoreGauge caption is NEUTRAL grey (--text-muted), never the score's risk-band
 // #ff3b5c (block-red), which is reserved for real block decisions. The built-in risk labels (no `sub`) keep
 // the risk color.
 
@@ -13,7 +13,7 @@ vi.mock("./EChart", () => ({ default: () => null }));
 
 import { ScoreGauge } from "./ScoreGauge";
 
-describe("ScoreGauge caption color (A4)", () => {
+describe("ScoreGauge caption color", () => {
   it("a caller-supplied caption at a LOW score is grey (--text-muted), NOT block-red", () => {
     render(<ScoreGauge score={40} title="Policy Coverage" sub={<span>rules present · <b>72% proven-blocking</b></span>} />);
     const caption = screen.getByTestId("score-gauge-caption");
@@ -36,7 +36,7 @@ describe("ScoreGauge caption color (A4)", () => {
     expect(screen.getByTestId("score-gauge-caption").style.color).toBe("var(--text-muted)");
   });
 
-  it("C1: the caption sits BELOW the gauge (a sibling after the number overlay), not inside the in-arc overlay", () => {
+  it("the caption sits BELOW the gauge (a sibling after the number overlay), not inside the in-arc overlay", () => {
     render(<ScoreGauge score={40} title="Policy Coverage" sub={<span>rules present · <b>88.9% proven-blocking</b> (last run)</span>} />);
     const caption = screen.getByTestId("score-gauge-caption");
     // the big % lives in the pulled-up (-86) overlay; the caption must NOT be inside that overlay anymore.

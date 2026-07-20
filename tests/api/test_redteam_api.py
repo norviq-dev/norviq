@@ -25,7 +25,7 @@ class FakeEvaluator:
 
 
 class _FakeSession:
-    """Returns the seeded agent classes for the distinct-agent_class query (F-44)."""
+    """Returns the seeded agent classes for the distinct-agent_class query."""
 
     def __init__(self, classes: list[str]) -> None:
         self.classes = classes
@@ -66,7 +66,7 @@ def _token(role: str = "admin") -> str:
 
 
 def test_redteam_endpoints_are_admin_only() -> None:
-    """F-43: the red-team router is admin-only — a viewer is 403 on catalog/suite/run/targets/report."""
+    """The red-team router is admin-only — a viewer is 403 on catalog/suite/run/targets/report."""
     client = _client(seeded=["finance-agent"])
     vh = {"Authorization": f"Bearer {_token('viewer')}"}
     assert client.get("/api/v1/redteam/catalog", headers=vh).status_code == 403
@@ -90,7 +90,7 @@ def test_redteam_suite_report_round_trip() -> None:
 
 
 def test_redteam_suite_concurrent_run_rejected() -> None:
-    """D1: a second suite run for a namespace already in-flight is rejected 409 with the in-flight run_id."""
+    """A second suite run for a namespace already in-flight is rejected 409 with the in-flight run_id."""
     from norviq.api.routers import redteam as rt
 
     client = _client(seeded=["finance-agent"])
@@ -111,7 +111,7 @@ def test_redteam_suite_concurrent_run_rejected() -> None:
 
 
 def test_redteam_seeded_targets_exclude_synthetic() -> None:
-    """D2 run-writer: the suite/target selection is scoped to REAL classes — synthetic/probe identities
+    """Run-writer: the suite/target selection is scoped to REAL classes — synthetic/probe identities
     (allowlist-probe-*, scorer, policy-tester, …) are excluded so a run never stores the full synthetic matrix."""
     seeded = ["finance-agent", "allowlist-probe-abc123", "scorer", "policy-tester", "data-analyst", "probe-xyz"]
     client = _client(seeded=seeded)
@@ -125,7 +125,7 @@ def test_redteam_seeded_targets_exclude_synthetic() -> None:
 
 
 def test_redteam_suite_is_target_aware() -> None:
-    """F-44: with multiple seeded classes the suite iterates each, tags every row with its identity, and the
+    """With multiple seeded classes the suite iterates each, tags every row with its identity, and the
     report lists the evaluated targets — proving it is not the old fixed redteam-test/default identity."""
     client = _client(seeded=["finance-agent", "data-analyst"])
     headers = {"Authorization": f"Bearer {_token()}"}
@@ -146,7 +146,7 @@ def test_redteam_suite_falls_back_when_no_seeded_classes() -> None:
 
 
 def test_redteam_targets_lists_seeded_classes() -> None:
-    """F-44: the target selector endpoint returns the namespace's real seeded classes."""
+    """The target selector endpoint returns the namespace's real seeded classes."""
     client = _client(seeded=["finance-agent", "data-analyst"])
     headers = {"Authorization": f"Bearer {_token()}"}
     body = client.get("/api/v1/redteam/targets?namespace=default", headers=headers).json()
@@ -155,7 +155,7 @@ def test_redteam_targets_lists_seeded_classes() -> None:
 
 
 def test_redteam_catalog() -> None:
-    """B1: the catalog is a list, each entry enriched with its ATLAS technique + OWASP control mapping."""
+    """The catalog is a list, each entry enriched with its ATLAS technique + OWASP control mapping."""
     app = create_app()
     app.state.evaluator = FakeEvaluator()
     client = TestClient(app)
@@ -172,7 +172,7 @@ def test_redteam_catalog() -> None:
 
 
 def test_redteam_suite_includes_efficacy_rollup() -> None:
-    """B3: the suite response carries the caught-vs-got-through efficacy roll-up (overall + per technique)."""
+    """The suite response carries the caught-vs-got-through efficacy roll-up (overall + per technique)."""
     client = _client(seeded=["finance-agent"])
     headers = {"Authorization": f"Bearer {_token()}"}
     body = client.post("/api/v1/redteam/suite", headers=headers).json()
@@ -200,7 +200,7 @@ class _ResultsSession:
             def all(self_inner):
                 return [row] if row else []
 
-        # `.scalar()` backs the history-list COUNT query (D3 pagination total).
+        # `.scalar()` backs the history-list COUNT query (pagination total).
         return SimpleNamespace(scalars=lambda: _Scalars(), scalar=lambda: (1 if row else 0))
 
     async def close(self) -> None:
@@ -235,7 +235,7 @@ def _sample_run():
 
 
 def test_redteam_results_latest_empty_state() -> None:
-    """B2: honest empty state when no run has been persisted yet."""
+    """Honest empty state when no run has been persisted yet."""
     client = _results_client(None)
     headers = {"Authorization": f"Bearer {_token()}"}
     body = client.get("/api/v1/redteam/results/latest", headers=headers).json()
@@ -243,7 +243,7 @@ def test_redteam_results_latest_empty_state() -> None:
 
 
 def test_redteam_results_latest_and_by_id() -> None:
-    """B2/B3: the latest durable run is returned with its efficacy roll-up; by-id reads the same row."""
+    """The latest durable run is returned with its efficacy roll-up; by-id reads the same row."""
     client = _results_client(_sample_run())
     headers = {"Authorization": f"Bearer {_token()}"}
     latest = client.get("/api/v1/redteam/results/latest", headers=headers).json()
@@ -256,7 +256,7 @@ def test_redteam_results_latest_and_by_id() -> None:
 
 
 def test_redteam_results_history_list() -> None:
-    """B2/F1/D3: the history list returns run SUMMARIES ONLY (no per-attack rows), newest-first, bounded."""
+    """The history list returns run SUMMARIES ONLY (no per-attack rows), newest-first, bounded."""
     client = _results_client(_sample_run())
     headers = {"Authorization": f"Bearer {_token()}"}
     body = client.get("/api/v1/redteam/results?limit=5", headers=headers).json()
@@ -269,7 +269,7 @@ def test_redteam_results_history_list() -> None:
 
 
 def test_redteam_by_id_flags_detail_pruned_run() -> None:
-    """D3: a run whose per-attack detail was retention-pruned (results IS NULL) returns detail_pruned=true with
+    """A run whose per-attack detail was retention-pruned (results IS NULL) returns detail_pruned=true with
     an empty results list, but keeps its summary (efficacy)."""
     from datetime import datetime, timezone
 

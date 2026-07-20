@@ -245,7 +245,7 @@ def test_reload_policy_is_copy_on_write_and_preserves_priority() -> None:
 
 @pytest.mark.asyncio
 async def test_collect_candidates_includes_namespace_and_workload_tiers(evaluator: OPAEvaluator) -> None:
-    """H3: the WORKLOAD (deployment:<name>) and NAMESPACE (namespace:<ns>) tiers the catalog advertises are
+    """The WORKLOAD (deployment:<name>) and NAMESPACE (namespace:<ns>) tiers the catalog advertises are
     now actually COLLECTED for evaluation (they were minted/listed/versioned but never enforced)."""
     loader = evaluator._loader  # type: ignore[attr-defined]
     loader._policies = {

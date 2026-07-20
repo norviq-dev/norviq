@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F046: /api/v1/keys issue/list/revoke (admin-only, hashed) + the api-key auth resolver.
+"""/api/v1/keys issue/list/revoke (admin-only, hashed) + the api-key auth resolver.
 
 Covers create (secret returned once, only hash stored), list (no secret), revoke, viewer 403,
 and that authenticate_api_key resolves a valid key to its scoped principal but rejects revoked/bogus."""
@@ -123,7 +123,7 @@ def test_authenticate_api_key_rejects_bogus_and_non_prefixed() -> None:
 
 
 class _FakeCache:
-    """F-03: minimal Redis-counter stub (per-key INCR with a window)."""
+    """Minimal Redis-counter stub (per-key INCR with a window)."""
 
     def __init__(self) -> None:
         self.counts: dict[str, int] = {}
@@ -134,7 +134,7 @@ class _FakeCache:
 
 
 def test_authfail_throttle_counts_per_prefix() -> None:
-    """F-03: each failed nrvq_ auth increments a per-prefix counter (keyed on the display prefix)."""
+    """Each failed nrvq_ auth increments a per-prefix counter (keyed on the display prefix)."""
     cache = _FakeCache()
 
     async def _empty():
@@ -148,7 +148,7 @@ def test_authfail_throttle_counts_per_prefix() -> None:
 
 
 def test_constant_time_compare_rejects_hash_mismatch() -> None:
-    """F-03: defense-in-depth — a row whose stored hash != the computed digest is rejected (compare_digest)."""
+    """Defense-in-depth — a row whose stored hash != the computed digest is rejected (compare_digest)."""
     full, prefix, _ = ak.generate_key()
     row = SimpleNamespace(id="1", prefix=prefix, key_hash="deadbeef" * 8, name="k",
                           namespace="default", role="viewer", revoked=False, last_used_at=None)

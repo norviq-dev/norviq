@@ -602,10 +602,10 @@ async def _generate_remediation_draft(
         covered_count=0, total=0, would_block=0, would_allow=0,
         created_by=str(user.get("sub") or ""), created_at=created_at,
         source_framework=framework, source_control_id=technique_id, source_control_name=control_name,
-        expires_at=draft_expiry(target, created_at),  # Part B: TTL (24h test / 14d real)
+        expires_at=draft_expiry(target, created_at),  # TTL (24h test / 14d real)
     ))
     await session.commit()
-    await enforce_draft_cap(session, namespace)  # Part B: per-namespace cap
+    await enforce_draft_cap(session, namespace)  # per-namespace cap
     log.info("nrvq.api.mitre.generate", technique=technique_id, ns=namespace, cls=target,
              overlay_cls=overlay_class, framework=framework, rules=usable, draft_id=draft_id,
              actor=user.get("sub"), code="NRVQ-API-7077")

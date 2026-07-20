@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Attack Graph intent modal (design_handoff_attackgraph): a usage-driven ALLOWLIST BUILDER.
+// Attack Graph intent modal: a usage-driven ALLOWLIST BUILDER.
 // role="dialog" aria-modal, Esc closes, Tab focus-trap, autofocus the first control.
 //
 // On open (and whenever the active class changes in global mode) we call fetchIntentSuggest(ns,cls) and

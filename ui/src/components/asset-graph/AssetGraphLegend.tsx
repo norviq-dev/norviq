@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Asset Graph legend (design_handoff_assetgraph): floating glass card inside the canvas — node
+// Asset Graph legend: floating glass card inside the canvas — node
 // types, edge decisions, and risk rings. `side` flips it away from the inspector.
 
 import { NODE_COLORS, RISK_COLORS } from "../../lib/d3-helpers";

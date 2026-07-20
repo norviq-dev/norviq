@@ -167,7 +167,7 @@ class _SyncEvaluatorStub:
 
 async def test_apply_remote_event_delete_unloads_local_state() -> None:
     """HA: a delete published by a PEER replica must unload THIS replica's in-memory policy + evaluator index
-    (no DB read needed — the peer already deleted the row). This is the H2 propagation half."""
+    (no DB read needed — the peer already deleted the row). This is the propagation half."""
     loader = PolicyLoader(cache=_CacheStub(), evaluator=_SyncEvaluatorStub())  # type: ignore[arg-type]
     loader._policies = {"payments:billing": {"rego": "package x", "priority": 100}}
     loader._versions = {"payments:billing": []}
@@ -278,7 +278,7 @@ async def test_rehydrate_versions_for_key_caps_to_max_versions(
 async def test_apply_remote_event_upsert_converges_applied_at(
     loader: PolicyLoader, db_engine: AsyncEngine
 ) -> None:
-    """HA C1 regression: `_applied_at` was previously process-local only (never persisted/broadcast) — a
+    """HA regression: `_applied_at` was previously process-local only (never persisted/broadcast) — a
     replica pinned by an operator's session kept showing the pre-apply (or null) `last_applied` forever
     after a peer applied. `create()` and the mode-change branch of `apply_to_target()` now stamp
     `policies.applied_at` with the DB's own NOW() and hydrate this replica's `_applied_at` from that exact

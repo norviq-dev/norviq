@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// C2-1: the resolution hierarchy renders GET /policies/effective VERBATIM — same order, scopes, priorities, overlay
+// The resolution hierarchy renders GET /policies/effective VERBATIM — same order, scopes, priorities, overlay
 // flags — never re-derived. Plus the reserved static Mode column, the presence template, and (fleet on) the cluster
 // dimension.
 import type { ReactNode } from "react";
@@ -39,7 +39,7 @@ function handlers(layers: unknown[] = LAYERS, enforcementMode: "block" | "audit"
   );
 }
 
-describe("PolicyHierarchy (C2-1)", () => {
+describe("PolicyHierarchy", () => {
   it("renders /policies/effective VERBATIM — order, scope, priority, overlay flag", async () => {
     handlers();
     render(<PolicyHierarchy namespace="default" />);

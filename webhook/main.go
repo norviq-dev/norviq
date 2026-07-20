@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
+//
+// main.go is the webhook entrypoint: it starts the mutating admission HTTPS server and,
+// when enabled, the CRD controller, and handles graceful shutdown and panic recovery.
 package main
 
 import (

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// UI-1 smoke test: Agents page mounts without React #130 (renders DonutChart/VolumeChart/CategoryBars).
+// Smoke test: Agents page mounts without React #130 (renders DonutChart/VolumeChart/CategoryBars).
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
@@ -17,7 +17,7 @@ beforeAll(() => server.listen({ onUnhandledRequest: "bypass" }));
 afterEach(() => { server.resetHandlers(); clearApiCache(); });
 afterAll(() => server.close());
 
-describe("UI-1: AgentMonitor mounts", () => {
+describe("AgentMonitor mounts", () => {
   it("renders the Agent Monitor page without a React #130 crash", async () => {
     const errors: string[] = [];
     const spy = vi.spyOn(console, "error").mockImplementation((m) => errors.push(String(m)));
@@ -33,7 +33,7 @@ describe("UI-1: AgentMonitor mounts", () => {
     spy.mockRestore();
   });
 
-  it("B4: populates Namespace / Class / Last Seen columns from the /agents response", async () => {
+  it("populates Namespace / Class / Last Seen columns from the /agents response", async () => {
     const recent = new Date(Date.now() - 3 * 60_000).toISOString();
     server.use(
       http.get("/api/v1/agents", () =>
@@ -252,7 +252,7 @@ describe("UI-1: AgentMonitor mounts", () => {
     expect(within(trackedTile).getByText("2")).toBeInTheDocument();
   });
 
-  it("P5: clicking an agent row opens the detail panel with freeze/trust actions", async () => {
+  it("clicking an agent row opens the detail panel with freeze/trust actions", async () => {
     server.use(
       http.get("/api/v1/agents", () =>
         HttpResponse.json([

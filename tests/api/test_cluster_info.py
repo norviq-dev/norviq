@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F046: GET /api/v1/cluster-info returns this deployment's id/name + REAL observed namespaces.
+"""GET /api/v1/cluster-info returns this deployment's id/name + REAL observed namespaces.
 
 Covers happy (distinct namespaces deduped+sorted), empty (fresh install -> ["default"]), and the
 non-admin scope (a namespace-claimed token sees only its own namespace).

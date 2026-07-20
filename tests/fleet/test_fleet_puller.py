@@ -96,7 +96,7 @@ class _FakeHub:
 class _FakeSpokeSession:
     def __init__(self, last_applied=0, last_manifest=None):
         self.last_applied = last_applied
-        self.last_manifest = last_manifest  # JSON string of prior applied keys (F-52)
+        self.last_manifest = last_manifest  # JSON string of prior applied keys
         self.persisted = []
 
     async def execute(self, stmt):
@@ -205,7 +205,7 @@ async def test_compromised_hub_allow_all_rejected(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_retract_reconciles_dropped_key(monkeypatch) -> None:
-    # F-52: a key applied from a PRIOR bundle but absent from the new (empty) bundle is RETRACTED -> deleted.
+    # A key applied from a PRIOR bundle but absent from the new (empty) bundle is RETRACTED -> deleted.
     # This is the regression for "a fleet push could not be reversed" — proves the spoke removes the dropped key.
     import json
     priv = _gen_rsa_pem()

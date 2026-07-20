@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Fleet-mgmt Stage 1 — the Rancher-style APPLY RESULT panel. After a local Apply or a fleet Push, show HONESTLY:
+// Fleet-mgmt — the Rancher-style APPLY RESULT panel. After a local Apply or a fleet Push, show HONESTLY:
 //   - the exact declarative manifest applied (name + target cluster/namespace/agent_class + rego),
 //   - the real outcome ("stored vN + loaded into the engine" / "signed bundle distributed" — NOT a fake kubectl apply),
 //   - the NRVQ code on error,

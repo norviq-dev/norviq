@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Asset Graph inspector (design_handoff_assetgraph): floating panel with blast-radius (or exposure
+// Asset Graph inspector: floating panel with blast-radius (or exposure
 // for data nodes), trust bar, risk / tool-call cards, ns/class/cluster chips, SPIFFE identity, the
 // per-edge connection list with decision dots, and a View-in-Audit-Log action. Flips to the left
 // when the selected node sits on the right half of the canvas.

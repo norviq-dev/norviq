@@ -41,7 +41,7 @@ SCORER_AGENT = "spiffe://norviq/ns/alpha/sa/scorer"                # exact eval 
 
 
 def _token(role: str = "admin", namespace: str | None = None) -> str:
-    # AUTH-01: the HS256 validator requires an `exp` claim (norviq/api/auth.py _validate_token).
+    # The HS256 validator requires an `exp` claim (norviq/api/auth.py _validate_token).
     claims: dict[str, object] = {
         "sub": "u",
         "role": role,

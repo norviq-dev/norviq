@@ -1,3 +1,8 @@
+// Global app context: the single source of truth for cross-page UI state — the active nav section,
+// the header time-range, and the selected cluster/namespace scope (fleet-aware, incl. remote-cluster
+// handling), plus the governance Posture (enforcement + apply mode) that drives the global banner.
+// AppProvider holds the state; useApp() reads it.
+
 import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { oidcEnabled, login } from "../auth/oidc";

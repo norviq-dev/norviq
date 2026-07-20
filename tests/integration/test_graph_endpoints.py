@@ -102,7 +102,7 @@ async def test_asset_graph_no_connection_leak(api_client, auth_headers):
 
 @pytest.mark.asyncio
 async def test_asset_graph_grows_with_distinct_calls(api_client, auth_headers):
-    """P-15 regression: distinct evaluate call must increase graph nodes."""
+    """Regression: distinct evaluate call must increase graph nodes."""
     r0 = await api_client.get("/api/v1/asset-graph", headers=auth_headers)
     before = len(r0.json()["nodes"])
 

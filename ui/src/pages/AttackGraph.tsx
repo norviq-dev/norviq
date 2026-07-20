@@ -127,7 +127,7 @@ export function AttackGraph() {
   });
 
   // ── REAL status: a stored sim result (real /evaluate), else the baseline. A what-if is a
-  //    HYPOTHETICAL overlay and is deliberately EXCLUDED here — MUT-4: folding it in made a
+  //    HYPOTHETICAL overlay and is deliberately EXCLUDED here — folding it in made a
   //    hypothetical "Block this step" inflate the headline BLOCKED stat (0→1) and re-order the list
   //    (which auto-switched the selected path). Real status drives stats, ordering, and the filter;
   //    the what-if is surfaced separately via isWhatIf + the canvas/detail overlay. ──

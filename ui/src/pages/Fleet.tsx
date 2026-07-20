@@ -61,7 +61,7 @@ export function Fleet() {
   const [selector, setSelector] = useState('{"env":"prod"}');  // Sane default target (an empty selector 422s)
   const [confirmFleetWide, setConfirmFleetWide] = useState(false);  // Explicit confirm for a fleet-wide push
   const [pushMsg, setPushMsg] = useState<string | null>(null);
-  const [applyResult, setApplyResult] = useState<ApplyResult | null>(null);  // Stage 1: apply-result transparency panel
+  const [applyResult, setApplyResult] = useState<ApplyResult | null>(null);  // Apply-result transparency panel
   const [policies, setPolicies] = useState<FleetPolicyRow[]>([]);  // Pushed policies (retractable)
   // Single-cluster-first enrollment: add (mint join token) + remove cluster.
   const [addOpen, setAddOpen] = useState(false);
@@ -100,7 +100,7 @@ export function Fleet() {
     setPushMsg(null);
     try {
       await retractFleetPolicy(pname);
-      // Stage 1: show the retract outcome + watch each spoke reconcile back via the rollout poll.
+      // Show the retract outcome + watch each spoke reconcile back via the rollout poll.
       setApplyResult({
         kind: "fleet",
         title: `Retracted "${pname}"`,
@@ -156,7 +156,7 @@ export function Fleet() {
     try {
       const res = await authorFleetPolicy({ name, namespace: ns, agent_class: agentClass, rego_source: rego, target_selector: target, confirm_fleet_wide: confirmFleetWide });
       setPushMsg(null);
-      // Stage 1: the apply-result panel shows the exact manifest + honest outcome + LIVE propagation (rollout poll).
+      // The apply-result panel shows the exact manifest + honest outcome + LIVE propagation (rollout poll).
       setApplyResult({
         kind: "fleet",
         title: `Fleet policy "${res.name}" v${res.version} published`,
@@ -302,7 +302,7 @@ export function Fleet() {
         <button className="btn btn-primary" onClick={push}>Push signed policy</button>
         {pushMsg && <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>{pushMsg}</span>}
       </div>
-      {/* Stage 1: the apply-result panel — exact manifest + honest outcome + live propagation (push AND retract). */}
+      {/* The apply-result panel — exact manifest + honest outcome + live propagation (push AND retract). */}
       <ApplyResultPanel result={applyResult} onClose={() => setApplyResult(null)} />
 
       {/* Pushed policies are retractable — retract removes it from every cluster's bundle; spokes reconcile. */}

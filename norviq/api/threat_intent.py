@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Positive-security INTENT policy generator + coverage for the Attack Graph (feat/attack-graph).
+"""Positive-security INTENT policy generator + coverage for the Attack Graph.
 
 The headline of the Attack Graph is "allow the intended behaviour, block every possible scenario". A
 handful of intent toggles (read-only / namespace-scoped / rate-limit / no-egress) GENERATE a
@@ -220,7 +220,7 @@ def generate_intent_rego(
     if intent.scope:
         guards.append("    in_scope          # resource stays inside the agent's namespace")
     if intent.rate:
-        guards.append("    rate_within       # advisory throttle proxy (real limit = F-03 throttle layer)")
+        guards.append("    rate_within       # advisory throttle proxy (real limit = throttle layer)")
 
     # Toggle-specific helper blocks — emitted only when the toggle needs them.
     helper_blocks: list[str] = []
@@ -275,7 +275,7 @@ _looks_like_namespace_key(k) { lower(k) == "namespace" }
 _looks_like_namespace_key(k) { lower(k) == "ns" }
 _looks_like_namespace_key(k) { lower(k) == "tenant" }""")
     if intent.rate:
-        helper_blocks.append("""# rate_within: advisory only — a stateless policy cannot count calls/min; the real limiter is the F-03 layer.
+        helper_blocks.append("""# rate_within: advisory only — a stateless policy cannot count calls/min; the real limiter is the throttle layer.
 rate_within { input.call_depth <= 8 }""")
     helpers = ("\n\n" + "\n\n".join(helper_blocks)) if helper_blocks else ""
 

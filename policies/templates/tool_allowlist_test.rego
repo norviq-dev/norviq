@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
+#
+# Tests for the opt-in tool allowlist guardrail: a listed tool allows, an unlisted tool escalates
+# (deny-by-default, no silent allow), and a homoglyph-folded listed name is still recognized.
 package norviq.guardrail.tool_allowlist_test
 
 import data.norviq.guardrail.tool_allowlist as g

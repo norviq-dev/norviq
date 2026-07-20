@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
-"""F-28: raw tool_params (PII/PAN/PHI) must never reach a logger. The eval input is masked before logging and
+"""Raw tool_params (PII/PAN/PHI) must never reach a logger. The eval input is masked before logging and
 the input log is gated behind debug_opa_logging (default off)."""
 
 from norviq.config import settings

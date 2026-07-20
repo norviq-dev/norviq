@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// R1: the single source of truth for which routes the global header time-range drives.
+// The single source of truth for which routes the global header time-range drives.
 import { describe, it, expect } from "vitest";
 import { isTimeScoped, TIME_SCOPED_PATHS } from "./routeMeta";
 
@@ -8,7 +8,7 @@ describe("routeMeta.isTimeScoped — global range applies ONLY to genuinely rang
     expect(isTimeScoped("/")).toBe(true);
     expect(isTimeScoped("/audit")).toBe(true);
     expect(isTimeScoped("/audit/anything")).toBe(true);
-    // Q3: Compliance IS range-scoped (per-technique evidence changes with the window) — the global header range is
+    // Compliance IS range-scoped (per-technique evidence changes with the window) — the global header range is
     // now its single source of truth.
     expect(isTimeScoped("/compliance")).toBe(true);
     expect([...TIME_SCOPED_PATHS]).toEqual(["/", "/audit", "/compliance"]);

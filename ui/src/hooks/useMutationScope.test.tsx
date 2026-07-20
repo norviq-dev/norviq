@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// B1-2: the aggregate-scope guard. A namespace/cluster-scoped mutation must never target the phantom "all".
+// The aggregate-scope guard. A namespace/cluster-scoped mutation must never target the phantom "all".
 import { renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useMutationScope } from "./useMutationScope";
@@ -21,7 +21,7 @@ beforeEach(() => {
   state.app = { namespace: "default", selectedCluster: "local", isRemote: false };
 });
 
-describe("useMutationScope (B1-2 aggregate-scope guard)", () => {
+describe("useMutationScope (aggregate-scope guard)", () => {
   it("a concrete namespace can mutate (fleet off)", () => {
     const { result } = renderHook(() => useMutationScope());
     expect(result.current.canMutate).toBe(true);
@@ -64,7 +64,7 @@ describe("useMutationScope (B1-2 aggregate-scope guard)", () => {
     expect(result.current.canMutate).toBe(true);
   });
 
-  it("a remote (non-served) cluster blocks mutation (F-69) even under a concrete namespace", () => {
+  it("a remote (non-served) cluster blocks mutation even under a concrete namespace", () => {
     state.app = { namespace: "default", selectedCluster: "cluster-b", isRemote: true };
     const { result } = renderHook(() => useMutationScope());
     expect(result.current.canMutate).toBe(false);

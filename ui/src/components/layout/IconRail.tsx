@@ -1,3 +1,6 @@
+// IconRail — the slim vertical navigation rail: the Norviq mark plus the top-level section icons that
+// switch the active section and expand the sidebar panel.
+
 import { BookOpen, Brain, Crosshair, HelpCircle, MessageCircle, Settings } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { Section, useApp } from "../../store/AppContext";

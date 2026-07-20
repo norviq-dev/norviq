@@ -50,7 +50,7 @@ def _eval(client: TestClient, token: str, ns: str) -> int:
 
 
 def test_viewer_cross_namespace_evaluate_forbidden() -> None:
-    """F-01: a viewer scoped to team-a may not evaluate in another tenant."""
+    """A viewer scoped to team-a may not evaluate in another tenant."""
     client = _client()
     assert _eval(client, _token("viewer", "team-a"), "payments") == 403
 
@@ -99,7 +99,7 @@ def test_scoped_namespace_mapped_viewer_match() -> None:
 
 
 def test_obs1_missing_spiffe_id_returns_422() -> None:
-    """OBS-1: a malformed agent_identity (no spiffe_id) is a 422 client error, not a raw 500."""
+    """A malformed agent_identity (no spiffe_id) is a 422 client error, not a raw 500."""
     client = _client()
     body = {
         "tool_name": "get_order",
@@ -112,7 +112,7 @@ def test_obs1_missing_spiffe_id_returns_422() -> None:
 
 
 def test_perf1_oversized_body_returns_413() -> None:
-    """PERF-1: a request body over the configured limit is rejected with 413 before evaluation."""
+    """A request body over the configured limit is rejected with 413 before evaluation."""
     client = _client()
     huge = "A" * (settings.max_request_body_bytes + 1024)
     body = {
@@ -126,6 +126,6 @@ def test_perf1_oversized_body_returns_413() -> None:
 
 
 def test_perf1_normal_body_passes() -> None:
-    """PERF-1: a normal-size body is unaffected by the limit."""
+    """A normal-size body is unaffected by the limit."""
     client = _client()
     assert _eval(client, _token("admin", "default"), "default") == 200

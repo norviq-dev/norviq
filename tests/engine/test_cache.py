@@ -118,7 +118,7 @@ async def test_session_get_set(cache: RedisCache) -> None:
 
 
 async def test_revoke_token_sets_denylist_with_ttl(cache: RedisCache) -> None:
-    """AUTH-01: a revoked token hash is denylisted with TTL bounded by the token's remaining life."""
+    """A revoked token hash is denylisted with TTL bounded by the token's remaining life."""
     token_hash = f"deadbeef{_suffix()}"
     assert await cache.is_token_revoked(token_hash) is False
     await cache.revoke_token(token_hash, ttl_s=120)
@@ -128,7 +128,7 @@ async def test_revoke_token_sets_denylist_with_ttl(cache: RedisCache) -> None:
 
 
 async def test_revoked_token_entry_expires(cache: RedisCache) -> None:
-    """AUTH-01: the denylist self-cleans — an entry dies when the token itself would have expired."""
+    """The denylist self-cleans — an entry dies when the token itself would have expired."""
     token_hash = f"deadbeef{_suffix()}"
     await cache.revoke_token(token_hash, ttl_s=1)
     assert await cache.is_token_revoked(token_hash) is True

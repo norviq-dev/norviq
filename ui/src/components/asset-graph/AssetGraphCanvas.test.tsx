@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// L5 — the AssetGraph canvas must survive render-timing edge cases without throwing:
+// The AssetGraph canvas must survive render-timing edge cases without throwing:
 //   • it mounts when the container has NO resolved size (jsdom reports clientWidth/Height = 0) — the d3
 //     sizing is deferred, so no "SVGLength: Could not resolve relative length".
 //   • imperative-handle methods (relayout / fitView / zoomBy) called before a size resolves do NOT throw
@@ -47,7 +47,7 @@ function renderCanvas() {
   return { ref, errors, ...utils };
 }
 
-describe("AssetGraphCanvas — L5 render-timing safety", () => {
+describe("AssetGraphCanvas — render-timing safety", () => {
   it("mounts at zero container size without throwing, and renders the svg", () => {
     const { errors, getByTestId } = renderCanvas();
     expect(getByTestId("asset-graph-canvas").tagName.toLowerCase()).toBe("svg");

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Part B — draft/version retention unit tests, incl. the SAFETY INVARIANT: version-prune NEVER deletes the
+"""Draft/version retention unit tests, incl. the SAFETY INVARIANT: version-prune NEVER deletes the
 current-enforcing version, and draft GC only ever touches the dedicated (non-enforcing) intent_drafts table."""
 
 from __future__ import annotations

@@ -177,7 +177,7 @@ def test_search_policies_admin_sees_all_and_skips_reserved() -> None:
 
 def test_search_policies_never_fabricate_an_enforcement_mode() -> None:
     """The loader entry holds only {rego, priority} — inventing a `mode` would mislabel every
-    audit/escalate policy in the ⌘K dropdown (F046: no fabricated console data)."""
+    audit/escalate policy in the ⌘K dropdown (no fabricated console data)."""
     policies = {"default:support-bot": {"rego": "package x", "priority": 100}}
     rows = search_router._search_policies(
         SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(loader=SimpleNamespace(_policies=policies)))),

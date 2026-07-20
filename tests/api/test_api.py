@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""API endpoint tests for F017."""
+"""API endpoint tests."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def _override_session(client: "TestClient", session_obj: object) -> None:
 
     Do NOT monkeypatch get_session: `Depends(get_session)` captures the original at
     route-definition time, so monkeypatching the module attribute is a no-op AND masks
-    the P-15 async-generator bug (see docs/engineering/bug-patterns.md). Use
+    the async-generator bug (see docs/engineering/bug-patterns.md). Use
     dependency_overrides so the real session lifecycle is exercised.
     """
 
@@ -177,7 +177,7 @@ class FakeSession:
         """Return scalar query results."""
         sql = str(stmt)
         if "avg(audit_log.latency_ms)" in sql:
-            # K2: real avg-latency KPI — return the seeded rows' own latency_ms (float), not a row object.
+            # Real avg-latency KPI — return the seeded rows' own latency_ms (float), not a row object.
             return self.rows[0].latency_ms if self.rows else None
         if "count(audit_log.id)" in sql and "decision" in sql:
             return 1
@@ -205,7 +205,7 @@ def _client() -> TestClient:
     # see norviq/api/routers/health.py) — these unit tests aren't exercising the warm-cache mechanic itself,
     # so start "warm" like a live pod would be, matching what /readyz assumes.
     app.state.loader._warmed = True
-    # H2/F-52: PolicyLoader.create()/delete() are DB-authoritative — they always hit Postgres via the
+    # PolicyLoader.create()/delete() are DB-authoritative — they always hit Postgres via the
     # loader's own lazily-created pooled engine (_db_engine()), independent of Depends(get_session).
     # starlette's TestClient dispatches each request through its own (short-lived) background-thread event
     # loop, so a QueuePool-cached connection from one request is dead by the next — a multi-request test
@@ -290,7 +290,7 @@ def _auth_headers(role: str = "admin", sub: str = "test-user", namespace: str | 
 
 
 def test_me_returns_normalized_claims() -> None:
-    """A3: /api/v1/me returns the server's view of the caller (sub/role/namespace); unauth -> 401."""
+    """/api/v1/me returns the server's view of the caller (sub/role/namespace); unauth -> 401."""
     client = _client()
     try:
         resp = client.get("/api/v1/me", headers=_auth_headers(role="admin"))

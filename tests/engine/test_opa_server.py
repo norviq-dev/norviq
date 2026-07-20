@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""R7: OPA-server evaluator fails CLOSED on OPA unavailability, self-heals, and survives concurrency."""
+"""OPA-server evaluator fails CLOSED on OPA unavailability, self-heals, and survives concurrency."""
 
 from __future__ import annotations
 

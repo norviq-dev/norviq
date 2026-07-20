@@ -75,7 +75,7 @@ class _FakeRevocationCache:
 
 
 def _admin_row() -> SimpleNamespace:
-    # role=admin, must_change=False so a valid token reaches protected routes without the H1 lock.
+    # role=admin, must_change=False so a valid token reaches protected routes without the must_change lock.
     return SimpleNamespace(
         username="admin", password_hash=pw.hash_password(_DEFAULT), role="admin", must_change=False
     )

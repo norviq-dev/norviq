@@ -1,3 +1,7 @@
+// Agent Monitor — the governed fleet's per-agent trust view: a sortable roster with trust scores,
+// behavior signals and recommendations, plus a per-agent drill-down (tool usage by risk tier, trust
+// history, and freeze/unfreeze controls). Namespace-scoped.
+
 import { ArrowLeft, RefreshCw, RotateCcw, Snowflake, Sun } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";

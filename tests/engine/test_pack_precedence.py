@@ -61,7 +61,7 @@ def test_non_pack_precedence_unchanged() -> None:
     assert _winner([_r("ns:cs", "block", 100), _r("ns:__baseline__", "allow", 900)]) == "allow"
 
 
-# --- F-54: the per-namespace pack override is the SAME tighten-only overlay class ---
+# --- the per-namespace pack override is the SAME tighten-only overlay class ---
 
 def test_pack_override_is_overlay() -> None:
     assert _ev._is_overlay("ns:__pack_override__") is True

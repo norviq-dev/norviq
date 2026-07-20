@@ -1,3 +1,5 @@
+# The "permissive" preset: allow by default, escalating only low-trust requests
+# (trust_score < 0.4). The lightest of the three org baselines.
 package norviq.presets.permissive
 
 default decision = "allow"

@@ -243,13 +243,13 @@ async def drilldown(
     """Drill-down: live-query ONE cluster's raw audit (Option-B). Residency BLOCKS it (raw logs
     never leave). The hot aggregate path stays on the hub rollups; this is on-demand only.
 
-    SSRF-01 (CRITICAL): this route dials `cluster.endpoint` — a value a SPOKE self-reported on
+    This route dials `cluster.endpoint` — a value a SPOKE self-reported on
     heartbeat — with a MINTED ADMIN BEARER attached. It must be gated by `require_admin` AND the
     endpoint range-checked before being dialed: otherwise a malicious/compromised spoke could point
     `endpoint` at an internal service (or attacker host) and have the hub hand it a hub-valid admin
     token. `require_admin` is enforced below.
 
-    SSRF-02 (CRITICAL, DNS-rebind): `assert_safe_url_async` alone validates the RESOLVED addresses, but
+    DNS-rebind guard: `assert_safe_url_async` alone validates the RESOLVED addresses, but
     handing the raw hostname to `httpx` afterward lets httpx re-resolve INDEPENDENTLY at connect time —
     a rebinding DNS server can answer the guard's lookup with a public IP and httpx's later lookup with
     169.254.169.254/an internal address for the same hostname, capturing the admin bearer. Fixed via
@@ -288,7 +288,7 @@ async def drilldown(
         # follow_redirects=False: a validated host must not be allowed to 302 an authenticated request
         # (with the admin bearer attached) onward to a blocked address (e.g. the metadata IP) — that
         # would bypass the SSRF guard above via a redirect hop it never re-checks. transport=pinned_transport
-        # pins the socket target to the already-validated IP (SSRF-02) so httpx cannot re-resolve the
+        # pins the socket target to the already-validated IP so httpx cannot re-resolve the
         # hostname independently at connect time.
         async with httpx.AsyncClient(timeout=8.0, follow_redirects=False, transport=pinned_transport) as client:
             resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})

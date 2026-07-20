@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
+//
+// injector.go builds the JSON patch that injects the enforcement sidecar into a pod:
+// the shared socket volume, the sidecar container, per-container socket mounts + env,
+// and the optional SPIFFE and internal-mTLS material.
 package main
 
 import (

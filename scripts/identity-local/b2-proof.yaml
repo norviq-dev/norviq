@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# B2 live proof: the resolver returns the ATTESTED SVID (spoof-proof) and FAILS CLOSED with no socket.
+# Live proof: the resolver returns the ATTESTED SVID (spoof-proof) and FAILS CLOSED with no socket.
 # Independent of the sidecar tool-call path — runs SPIFFEResolver().resolve() directly in a pod that
 # has the SPIFFE CSI socket, the engine image (now ships pyspiffe), and BOGUS NRVQ_NAMESPACE/SA env.
 apiVersion: v1

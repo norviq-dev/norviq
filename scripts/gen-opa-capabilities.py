@@ -5,7 +5,7 @@
 builtins that let a policy escape the pure-decision sandbox (network egress / SSRF, OPA server env/config
 disclosure, JWT decode/verify, dynamic-module compilation, and trace/print information disclosure).
 
-This is Wave-1 engine-layer defense-in-depth (Part B) for the same class of finding the API-layer reject in
+This is engine-layer defense-in-depth for the same class of finding the API-layer reject in
 `norviq/api/routers/policies.py` (`_FORBIDDEN_REGO_TOKENS`) closes: a `--capabilities` file passed to
 `opa run --server` makes the OPA COMPILER itself reject these builtins (undefined function), so even a rego
 payload that somehow reaches the OPA server without going through the API validator (e.g. a future code path,

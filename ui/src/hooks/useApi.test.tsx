@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// K1 — the Overview KPI cards went stuck-at-0 because useApi (a) applied whichever response resolved LAST (no
+// The Overview KPI cards went stuck-at-0 because useApi (a) applied whichever response resolved LAST (no
 // latest-wins ordering, so a slow warm-up {total:0} clobbered a newer real value) and (b) cached the empty {0} for
 // staleTimeMs, short-circuiting later loads. These tests pin the fix: latest-wins + never-cache-empty + bounded
 // empty-retry.
@@ -16,7 +16,7 @@ function controllable<T>() {
   return { loader, resolve: (i: number, v: T) => calls[i](v) };
 }
 
-describe("useApi — latest-wins + no-stuck-zero (K1)", () => {
+describe("useApi — latest-wins + no-stuck-zero", () => {
   it("applies a fetched response to state and re-renders", async () => {
     const loader = vi.fn(() => Promise.resolve({ total: 5 }));
     const { result } = renderHook(() => useApi(loader, []));

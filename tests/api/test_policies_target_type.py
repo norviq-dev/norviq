@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F017 #3: GET /api/v1/policies must return a target_type per policy so the UI catalog can
+"""GET /api/v1/policies must return a target_type per policy so the UI catalog can
 group class / namespace / workload tiers (the seeded class policy was rendering nowhere)."""
 
 from __future__ import annotations

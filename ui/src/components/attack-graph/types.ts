@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Attack Graph (feat/attack-graph) — the enriched kill-chain contract the backend serves at
+// Attack Graph — the enriched kill-chain contract the backend serves at
 // GET /api/v1/threats/attack-paths. Every field is real data derived server-side from the asset-graph
 // snapshot + audit decision history (see norviq/api/routers/threats.py). No mock.
 

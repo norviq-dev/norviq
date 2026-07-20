@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Asset Graph page (design_handoff_assetgraph): per-agent circular meshes in the overview, click an
+// Asset Graph page: per-agent circular meshes in the overview, click an
 // agent to focus its subgraph as a live force layout, floating inspector with blast radius, clickable
 // stat strip. Adapted to the EXISTING backend: /api/v1/asset-graph?namespace=all|<ns>&range=… (the
 // multi-namespace union endpoint) — the Namespace dropdown drives the server-side namespace param,

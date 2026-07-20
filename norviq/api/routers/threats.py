@@ -599,11 +599,11 @@ async def intent_draft(
             allow_tools=allow_tools, toggles=intent.enabled_keys(), priority=priority,
             covered_count=len(covered), total=total, would_block=len(covered), would_allow=len(residual),
             created_by=str(user.get("sub") or ""), created_at=created_at,
-            expires_at=draft_expiry(body.cls, created_at),  # Part B: TTL (24h test / 14d real)
+            expires_at=draft_expiry(body.cls, created_at),  # TTL (24h test / 14d real)
         )
     )
     await session.commit()
-    await enforce_draft_cap(session, body.ns)  # Part B: hard ceiling per namespace (evict oldest beyond it)
+    await enforce_draft_cap(session, body.ns)  # hard ceiling per namespace (evict oldest beyond it)
     log.info("nrvq.api.intent.draft_created", draft_id=draft_id, ns=body.ns, cls=body.cls,
              allow_tools=allow_tools, enabled=intent.enabled_keys(), covered=len(covered),
              priority=priority, enforcement="draft", actor=user.get("sub"), code="NRVQ-API-7103")
@@ -766,7 +766,7 @@ async def list_intent_drafts(
     session: AsyncSession = Depends(get_session),
     user: dict = Depends(get_current_user),
 ):
-    """Part B (B6): a BOUNDED, paginated page of pending intent drafts (non-enforcing) + the total count, so the
+    """A BOUNDED, paginated page of pending intent drafts (non-enforcing) + the total count, so the
     Policy Catalog never renders the whole list at once. Reads from the dedicated table — never ``policies``.
 
     SECURITY (IDOR + read-causes-cross-tenant-write): the caller's namespace set is resolved FAIL-CLOSED via

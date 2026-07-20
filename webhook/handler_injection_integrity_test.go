@@ -59,7 +59,7 @@ func TestMutateDecoySocketMountSameNameWithCommandIsDenied(t *testing.T) {
 	}
 }
 
-// --- Bypass #2: a bare REAL-image sidecar (no command) that leaves the app unwired → DENY ------------
+// --- Bypass: a bare REAL-image sidecar (no command) that leaves the app unwired → DENY ------------
 // (Pre-hardening this was SKIPPED — hasSidecar matched the image and suppressed injection, app unpoliced.)
 
 func TestMutateBareSidecarImageUnwiredAppIsDenied(t *testing.T) {
@@ -74,7 +74,7 @@ func TestMutateBareSidecarImageUnwiredAppIsDenied(t *testing.T) {
 	}
 }
 
-// --- Bypass #8: pre-occupying the enforcement socket mount path → DENY ------------------------------
+// --- Bypass: pre-occupying the enforcement socket mount path → DENY ------------------------------
 
 func TestMutateAppPreoccupiesSocketMountIsDenied(t *testing.T) {
 	pod := enabledPod("attacker", corev1.PodSpec{
@@ -90,7 +90,7 @@ func TestMutateAppPreoccupiesSocketMountIsDenied(t *testing.T) {
 	}
 }
 
-// --- Bypass #7: pre-setting the injector-owned NRVQ_SOCKET_PATH env → DENY --------------------------
+// --- Bypass: pre-setting the injector-owned NRVQ_SOCKET_PATH env → DENY --------------------------
 
 func TestMutateAppPresetsSocketEnvIsDenied(t *testing.T) {
 	pod := enabledPod("attacker", corev1.PodSpec{Containers: []corev1.Container{
@@ -102,7 +102,7 @@ func TestMutateAppPresetsSocketEnvIsDenied(t *testing.T) {
 	}
 }
 
-// --- Bypass #1: a benign image merely mounting the socket path (no command) → DENY ------------------
+// --- Bypass: a benign image merely mounting the socket path (no command) → DENY ------------------
 
 func TestMutateBenignSocketMountDecoyIsDenied(t *testing.T) {
 	pod := enabledPod("attacker", corev1.PodSpec{Containers: []corev1.Container{
@@ -115,7 +115,7 @@ func TestMutateBenignSocketMountDecoyIsDenied(t *testing.T) {
 	}
 }
 
-// --- Bypass #6: an agent workload hidden in an initContainer must be WIRED (injected), not ignored ---
+// --- Bypass: an agent workload hidden in an initContainer must be WIRED (injected), not ignored ---
 
 func TestMutateInitContainerWorkloadIsWired(t *testing.T) {
 	pod := enabledPod("attacker", corev1.PodSpec{

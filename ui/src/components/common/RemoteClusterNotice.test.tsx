@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// R1 (P1) render defense: the spoke-reported console_url is only turned into a real link when it is http(s).
+// Render defense: the spoke-reported console_url is only turned into a real link when it is http(s).
 // A javascript:/data: url renders NO anchor (inert text), so "Open console" can't XSS a hub admin.
 
 import { render, screen } from "@testing-library/react";
 import { describe, it, expect } from "vitest";
 import { RemoteClusterPage } from "./RemoteClusterNotice";
 
-describe("RemoteClusterNotice — console_url scheme defense (R1)", () => {
+describe("RemoteClusterNotice — console_url scheme defense", () => {
   it("emits a link for an https url", () => {
     render(<RemoteClusterPage page="Agents" cluster="fleet-b" consoleUrl="https://fleet-b.example" />);
     const link = screen.getByRole("link", { name: /open fleet-b/i });

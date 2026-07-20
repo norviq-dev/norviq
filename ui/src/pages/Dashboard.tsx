@@ -1,3 +1,7 @@
+// Dashboard — the default landing overview: KPI tiles, decision-volume + coverage charts, a trust
+// gauge, top-blocked tools, and the latest red-team efficacy for the selected namespace (fleet-aware
+// on multi-cluster installs).
+
 import { FileText } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";

@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Red-team catalog mapping (B1) + efficacy roll-up (B3) — pure, DB-free, unit-testable.
+"""Red-team catalog mapping + efficacy roll-up — pure, DB-free, unit-testable.
 
-B1: every attack maps to a MITRE ATLAS technique (``mitre_technique``) and, where applicable, an OWASP LLM
+Every attack maps to a MITRE ATLAS technique (``mitre_technique``) and, where applicable, an OWASP LLM
 control (derived from the attack ``category`` enum name, e.g. ``OWASP_LLM01`` -> ``LLM01:2025``). Technique /
 control display names are resolved from the SAME shipped mapping files the Compliance feature reads
 (``policies/mitre_mapping.json`` + ``policies/owasp_llm_mapping.json``), so the two views never drift.
 
-B3: given the result rows from a suite run, compute a caught-vs-got-through efficacy roll-up — overall and per
+Given the result rows from a suite run, compute a caught-vs-got-through efficacy roll-up — overall and per
 ATLAS technique + per OWASP control. Only "block-expected" attacks count toward the proven-blocking ratio (an
 attack whose expected decision is ``allow`` is a runtime/intent control case, reported separately, never counted
 as a miss). Synthetic / probe target identities are EXCLUDED so the number reflects real deployed posture.
@@ -58,7 +58,7 @@ def owasp_control_for_category(category_name: str) -> str | None:
 
 
 def attack_mapping(attack: Any) -> dict[str, Any]:
-    """B1: the ATLAS + OWASP mapping for one attack definition (display-name resolved)."""
+    """The ATLAS + OWASP mapping for one attack definition (display-name resolved)."""
     tid = attack.mitre_technique
     category_name = attack.category.name  # enum NAME, e.g. OWASP_LLM01
     owasp_id = owasp_control_for_category(category_name)
@@ -73,7 +73,7 @@ def attack_mapping(attack: Any) -> dict[str, Any]:
 
 
 def catalog_entry(attack: Any) -> dict[str, Any]:
-    """B1: one enriched catalog row (attack fields + resolved ATLAS/OWASP mapping)."""
+    """One enriched catalog row (attack fields + resolved ATLAS/OWASP mapping)."""
     m = attack_mapping(attack)
     return {
         "attack_id": attack.id,
@@ -103,7 +103,7 @@ def _finalize(bucket: dict[str, Any]) -> dict[str, Any]:
 
 
 def compute_efficacy(results: list[dict[str, Any]]) -> dict[str, Any]:
-    """B3: caught-vs-got-through roll-up over the suite's result rows.
+    """Caught-vs-got-through roll-up over the suite's result rows.
 
     - Synthetic / probe target identities are excluded (``is_synthetic_identity``).
     - Only rows whose EXPECTED decision is ``block`` count toward the proven-blocking ratio. A ``caught`` row is

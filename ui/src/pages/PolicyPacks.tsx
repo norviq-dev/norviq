@@ -61,7 +61,7 @@ export function PolicyPacks() {
   });
 
   const [busyId, setBusyId] = useState<string | null>(null);
-  // PACK-CONFIRM (audit #7): enabling/disabling a pack changes live enforcement for the selected
+  // Enabling/disabling a pack changes live enforcement for the selected
   // namespace with a single click and no target shown. Gate it behind a confirm that NAMES the
   // namespace + the direction + the composed rules.
   const [confirmPack, setConfirmPack] = useState<PolicyPack | null>(null);
@@ -462,7 +462,7 @@ export function PolicyPacks() {
         </>
       )}
 
-      {/* PACK-CONFIRM: enabling/disabling changes live enforcement for THIS namespace — confirm with the
+      {/* Enabling/disabling changes live enforcement for THIS namespace — confirm with the
           target named + the composed canonical rules, so a pack can't be flipped by an accidental click. */}
       {confirmPack && (
         <>

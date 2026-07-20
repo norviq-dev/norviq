@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Remediation A1/A3: data endpoints require auth, are namespace-scoped, and policy writes are admin-only.
+"""Remediation: data endpoints require auth, are namespace-scoped, and policy writes are admin-only.
 
 Hits the real local API. These guard the customer-eval P0s (unauth audit/policy/graph exposure,
 viewer privilege-escalation, unauthenticated /ws/audit).

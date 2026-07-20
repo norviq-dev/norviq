@@ -177,7 +177,7 @@ class OPAEvaluator:
                             "decision": result,
                             "priority": int(candidate["priority"]),
                             "key": str(candidate["key"]),
-                            # FIX-H6-2: propagate the provenance flag set at candidate construction — the resolver
+                            # Propagate the provenance flag set at candidate construction — the resolver
                             # must never re-derive overlay-ness from the key string.
                             "overlay": bool(candidate.get("overlay", False)),
                         }
@@ -966,7 +966,7 @@ class OPAEvaluator:
         seen: set[str] = set()
 
         async def _append_policy(target_namespace: str, target_agent_class: str) -> None:
-            # FIX-H6-2: base/floor lookup only — never tags "overlay": True (mirrors _collect_candidates).
+            # Base/floor lookup only — never tags "overlay": True (mirrors _collect_candidates).
             key = f"{target_namespace}:{target_agent_class}"
             if key in seen:
                 return
@@ -982,7 +982,7 @@ class OPAEvaluator:
 
         def _append_overlay(key: str) -> None:
             # additive/in-memory-only overlays (pack/guardrail/override/weaken/remediation) — absent by default,
-            # tighten-only. FIX-H6-2: tagged "overlay": True at construction — the resolver's sole source of truth.
+            # tighten-only. Tagged "overlay": True at construction — the resolver's sole source of truth.
             if key in seen or key not in self._loader._policies:
                 return
             entry = self._loader._policies[key]
@@ -1036,7 +1036,7 @@ class OPAEvaluator:
         overlay key per real class, unlike the fixed namespace-wide overlay names), so it's matched by suffix
         rather than an exact `:__remediation__` literal — the `__remediation__` double-underscore suffix is a
         reserved naming convention (mirrors `__pack__`/`__guardrail__`) that a real agent class is not expected
-        to collide with, but CAN in principle (see FIX-H6-2). The evaluator's own resolution path
+        to collide with, but CAN in principle. The evaluator's own resolution path
         (_resolve_with_packs) does NOT use this method — it uses the "overlay" flag tagged at construction, which
         can never misclassify a real class's own base policy. Prefer the flag over this heuristic wherever the
         candidate dict is available."""
@@ -1045,7 +1045,7 @@ class OPAEvaluator:
                 or key.endswith("__remediation__"))
 
     def _resolve_overlay(self, results: list[dict]) -> dict:
-        """H6 fix: partition overlays into (a) the PACK family (:__pack__, :__pack_override__, :__pack_weaken__),
+        """Partition overlays into (a) the PACK family (:__pack__, :__pack_override__, :__pack_weaken__),
         where an explicit :__pack_weaken__ MAY relax the pack's own added block, and (b) HARD tighten-only
         overlays (:__guardrail__, *__remediation__), which a weaken must NEVER be able to relax — a
         __pack_weaken__ overlay exists ONLY to dial back a sector pack's own restriction, not to neutralize an

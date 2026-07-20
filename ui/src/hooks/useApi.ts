@@ -1,3 +1,8 @@
+// useApi — the shared data-fetching hook: runs a loader when its deps change, exposing loading/error/
+// data with an in-memory response cache (cacheKey + staleTimeMs) and optional polling (refetchIntervalMs).
+// The module-level cache helpers (prime / peek / readFresh / invalidate / clear) let callers seed and
+// bust that shared cache across components.
+
 import { useCallback, useEffect, useRef, useState } from "react";
 
 type UseApiOptions<T = unknown> = {

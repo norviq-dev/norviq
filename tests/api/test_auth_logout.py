@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""AUTH-01 regression: /auth/logout + server-side session invalidation.
+"""Regression: /auth/logout + server-side session invalidation.
 
 Fail-on-bug: on the pre-fix code POST /api/v1/auth/logout was 404 and the same token kept returning
 200 on /api/v1/me — these tests fail there and pass on the fix. Covers: the logout->401 flip on /me,
@@ -111,7 +111,7 @@ def _login(client: TestClient) -> str:
     return resp.json()["access_token"]
 
 
-# --- the AUTH-01 fail-on-bug regression ----------------------------------------------------------
+# --- the fail-on-bug regression ----------------------------------------------------------
 
 
 def test_logout_exists_and_invalidates_the_session() -> None:
@@ -154,7 +154,7 @@ def test_second_logout_is_401_session_already_gone() -> None:
 
 
 def test_logout_with_redis_down_still_revokes_via_mirror() -> None:
-    """Q3 decision: Redis write failure -> still 200 (the mirror holds the revocation on this replica)."""
+    """Decision: Redis write failure -> still 200 (the mirror holds the revocation on this replica)."""
     client = _client(_BrokenCache())
     token = _login(client)
     headers = {"Authorization": f"Bearer {token}"}
@@ -163,7 +163,7 @@ def test_logout_with_redis_down_still_revokes_via_mirror() -> None:
 
 
 def test_revocation_check_fails_open_when_redis_down_and_not_in_mirror() -> None:
-    """Q2 decision: a Redis blip must not 401 every caller (matches the lockout best-effort posture)."""
+    """Decision: a Redis blip must not 401 every caller (matches the lockout best-effort posture)."""
     client = _client(_BrokenCache())
     token = _login(client)
     assert client.get("/api/v1/me", headers={"Authorization": f"Bearer {token}"}).status_code == 200
@@ -188,11 +188,11 @@ async def test_decode_token_consults_mirror_even_without_cache() -> None:
         await decode_token(token)  # positional-compatible: no cache arg at all
 
 
-# --- H1 (WS parity): must_change lock on /ws/audit -----------------------------------------------
+# --- WS parity: must_change lock on /ws/audit -----------------------------------------------
 # decode_token() (above) only checks signature + revocation — it does NOT check must_change. Every
 # REST route goes through get_current_user, which fail-closes a must_change=True session to
 # /auth/change-password, /auth/logout, /me only. Pre-fix, /ws/audit bypassed that gate entirely: an
-# admin still on a known/default/just-reset password (the H1 threat model) could open the socket and
+# admin still on a known/default/just-reset password (the threat model) could open the socket and
 # stream live namespace-scoped audit data while "locked" everywhere else.
 
 

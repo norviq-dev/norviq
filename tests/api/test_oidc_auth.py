@@ -198,7 +198,7 @@ async def test_bad_iss_aud_exp_rejected(oidc_on, bad) -> None:
     assert getattr(exc.value, "status_code", None) == 401
 
 
-# --- H1: must_change lockdown is an EXACT-path allowlist, not a URL-suffix test ---
+# --- must_change lockdown is an EXACT-path allowlist, not a URL-suffix test ---
 
 
 def _req(path: str) -> SimpleNamespace:

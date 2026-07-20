@@ -89,14 +89,14 @@ def test_two_classes_remediation_overlays_do_not_cross_apply() -> None:
     assert "default:report-gen__remediation__" != "default:billing-agent__remediation__"
 
 
-# --- H6 fix: __pack_weaken__ may relax a PACK'S OWN block, but must NEVER relax a HARD tighten-only overlay
+# --- __pack_weaken__ may relax a PACK'S OWN block, but must NEVER relax a HARD tighten-only overlay
 # (__guardrail__ / *__remediation__). Before the fix, _resolve_overlay's weaken exception unconditionally
 # returned the weaken candidate whenever ANY __pack_weaken__ existed, discarding every other overlay — including
 # a guardrail or remediation block that has nothing to do with the pack the weaken was meant to relax. -------
 
 def test_pack_weaken_cannot_neutralize_a_remediation_block() -> None:
     # base ALLOWS + remediation BLOCKS + an unrelated pack_weaken (default-allow) present -> BLOCK must survive.
-    # This is the exact H6 regression: pre-fix this resolved to "allow" (compliance gap silently reopened).
+    # This is the exact regression: pre-fix this resolved to "allow" (compliance gap silently reopened).
     assert _winner([
         _r("default:report-gen", "allow", 700),
         _r("default:report-gen__remediation__", "block", 1),
@@ -105,7 +105,7 @@ def test_pack_weaken_cannot_neutralize_a_remediation_block() -> None:
 
 
 def test_pack_weaken_cannot_neutralize_a_guardrail_block() -> None:
-    # same regression, for the F-14 operator guardrail instead of a remediation overlay.
+    # same regression, for the operator guardrail instead of a remediation overlay.
     assert _winner([
         _r("default:report-gen", "allow", 700),
         _r("default:__guardrail__", "block", 500),

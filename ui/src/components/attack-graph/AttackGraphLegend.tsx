@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Attack Graph KEY strip (design_handoff_attackgraph): the floating legend over the kill-chain canvas.
+// Attack Graph KEY strip: the floating legend over the kill-chain canvas.
 // Node kinds (Agent/Tool/Data), the sensitive-asset diamond, and the per-hop decision line colors —
 // all pulled from the shared palette so nothing drifts from the canvas.
 

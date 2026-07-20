@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Wave-4 (Part A: graph classifier) + Compliance (Part B: MITRE ATLAS) unit/integration tests.
+"""Wave-4 (graph classifier) + Compliance (MITRE ATLAS) unit/integration tests.
 
-A1: the synthetic classifier catches the leaked identities (evtrace/scorer/…) and never a real class.
-B0: the ATLAS mapping names are correct (verified against atlas.mitre.org) + every technique has a scope.
-B1: coverage math derives enforced/gap/out_of_scope + the enforced/(enforceable) headline; the evidence PDF is
-    valid; the GAP→generate endpoint validates (admin, enforceable, non-synthetic) before creating a draft.
+- The synthetic classifier catches the leaked identities (evtrace/scorer/…) and never a real class.
+- The ATLAS mapping names are correct (verified against atlas.mitre.org) + every technique has a scope.
+- Coverage math derives enforced/gap/out_of_scope + the enforced/(enforceable) headline; the evidence PDF is
+  valid; the GAP→generate endpoint validates (admin, enforceable, non-synthetic) before creating a draft.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from norviq.api.synthetic import is_synthetic_identity
 
 
 # --------------------------------------------------------------------------------------------------
-# A1 — synthetic classifier completeness
+# Synthetic classifier completeness
 # --------------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("cls", [
@@ -52,7 +52,7 @@ def test_classifier_parses_class_from_spiffe():
 
 
 # --------------------------------------------------------------------------------------------------
-# B0 — ATLAS mapping correctness (names verified against atlas.mitre.org / MISP ATLAS galaxy)
+# ATLAS mapping correctness (names verified against atlas.mitre.org / MISP ATLAS galaxy)
 # --------------------------------------------------------------------------------------------------
 
 # Ground-truth official ATLAS names for the IDs we map (source: atlas.mitre.org + MISP misp-galaxy).
@@ -103,7 +103,7 @@ def test_mapping_has_all_three_states():
 
 
 # --------------------------------------------------------------------------------------------------
-# B1 — coverage math + status derivation + evidence PDF + generate validation
+# Coverage math + status derivation + evidence PDF + generate validation
 # --------------------------------------------------------------------------------------------------
 
 def test_evidence_pdf_is_valid():
@@ -128,7 +128,7 @@ def test_evidence_pdf_is_valid():
 
 
 def test_evidence_pdf_titles_owasp_and_states_exclusion():
-    """P4: the OWASP export must be titled for OWASP (not mis-titled 'MITRE ATLAS'), and — matching the console's
+    """The OWASP export must be titled for OWASP (not mis-titled 'MITRE ATLAS'), and — matching the console's
     'real traffic only' promise — the PDF must state how many synthetic/simulated events were excluded."""
     from norviq.api.routers.mitre import _evidence_pdf
 
@@ -218,7 +218,7 @@ def test_coverage_scope_status_and_headline():
 
 
 class _ActivityStubSession:
-    """Stub session that returns per-rule audit activity so the F1 per-framework blocked math can be exercised.
+    """Stub session that returns per-rule audit activity so the per-framework blocked math can be exercised.
     Distinguishes the two coverage queries by their SQL: the affected-class query selects `agent_class`."""
 
     def __init__(self, blocked_by_rule: dict[str, int], cls: str = "customer-support"):
@@ -270,7 +270,7 @@ def _framework_rules(mapping: dict) -> set[str]:
 
 
 def test_f1_blocked_is_per_framework_distinct_rules_not_global():
-    """F1: each framework's headline `blocked` = sum over ITS distinct mapped rule_ids (deduped), NOT the global
+    """Each framework's headline `blocked` = sum over ITS distinct mapped rule_ids (deduped), NOT the global
     audit total. ATLAS and OWASP show different, correct numbers; a rule in neither framework never leaks in; a
     rule mapped to several techniques of one framework is counted once."""
     atlas = _mapping()
@@ -451,7 +451,7 @@ def test_f2_generate_is_control_scoped_and_traceable():
 
 
 def test_f2_no_real_class_creates_no_vacuous_default_draft():
-    """F2: when there is genuinely no real affected/active class (empty audit, no explicit class), the endpoint
+    """When there is genuinely no real affected/active class (empty audit, no explicit class), the endpoint
     refuses to emit a 'default' deny-all — it returns no_affected_classes and creates NOTHING."""
     client = _coverage_client("package norviq.strict")  # _StubSession → zero audit activity
     # LLM01 maps to a runtime rule, so generation reaches the class-resolution step (where, with no real
@@ -541,7 +541,7 @@ def test_comp_gen_01_no_runtime_rule_escalates_not_faked():
 
 
 def test_f4_dedup_key_is_framework_control_class():
-    """F4: re-generating the same control for the same class is idempotent (ONE draft id); two DIFFERENT controls
+    """Re-generating the same control for the same class is idempotent (ONE draft id); two DIFFERENT controls
     for the same class produce TWO distinct drafts."""
     client = _coverage_client("package norviq.strict")
 

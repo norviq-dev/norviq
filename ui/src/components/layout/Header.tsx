@@ -1,3 +1,6 @@
+// Header — the top application bar: global search (with keyboard-navigable results), the time-range
+// selector, notifications, the cluster/namespace scope selectors, and the governance-posture chip.
+
 import {
   Bell,
   Check,
@@ -179,7 +182,7 @@ export function Header({
     return `${days}d ago`;
   };
 
-  // Shared between the desktop inline dropdown and the tablet popup (H9) — one render path so the
+  // Shared between the desktop inline dropdown and the tablet popup — one render path so the
   // two widths can never diverge again.
   const closeSearch = useCallback(() => {
     setSearchFocused(false);

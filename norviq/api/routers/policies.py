@@ -214,7 +214,7 @@ def _infer_target_type(ns: str, agent_class: str) -> str:
 
 
 async def _policy_match_counts(namespace: str | None) -> dict[tuple[str, str], int]:
-    """B2: {(ns, class): governed-call count} from the audit log, in ONE grouped query, so a policy card can
+    """{(ns, class): governed-call count} from the audit log, in ONE grouped query, so a policy card can
     show real "matches" instead of a hardcoded 0. Acquires the session lazily + best-effort: if the DB is
     unavailable (or not initialized, e.g. a unit test with no DB) it returns an empty map — matches then falls
     back to 0 and the policy list still renders."""
@@ -1021,7 +1021,7 @@ async def apply_policy(
     rego = loader.get_current(namespace, agent_class)
     if not rego:
         raise HTTPException(status_code=404, detail="Policy not found. Save it first.")
-    # Part C FIX: actually load the policy into the read path + persist it at the target so it ENFORCES (the old
+    # Actually load the policy into the read path + persist it at the target so it ENFORCES (the old
     # path wrote the evaluator's unread dict and never persisted the target — a 200 that didn't enforce). This
     # routes apply through the same read-path/cache-invalidation create() uses; idempotent for the same-namespace
     # UI flow (re-affirm, no version bump), and it now genuinely enforces cross-target too.
@@ -1036,11 +1036,11 @@ async def apply_policy(
     if result is None:
         raise HTTPException(status_code=404, detail="Policy not found. Save it first.")
     applied_version, _created = result
-    # C1/HA: apply_to_target() now re-stamps applied_at itself on every code path (persisted via DB NOW() for
+    # HA: apply_to_target() now re-stamps applied_at itself on every code path (persisted via DB NOW() for
     # a new/mode-changed apply, in-memory fast-path for a true no-op reaffirm) — calling mark_applied() again
     # here would overwrite that with a fresh datetime.now() and silently discard the cross-replica-converged
     # DB value apply_to_target just hydrated, reintroducing the per-replica drift this fix closes.
-    # FIX A: echoing body.enforcement_mode here is a 200 that can lie — apply_to_target's same-rego branch only
+    # Echoing body.enforcement_mode here is a 200 that can lie — apply_to_target's same-rego branch only
     # persists the caller's mode when it actually differs from what's stored (see NRVQ-REG-5019). Re-read the
     # TARGET entry so the response always reflects what's actually in the DB/read-path, not what was requested.
     persisted_entry = loader.get_entry(body.target_namespace, agent_class)

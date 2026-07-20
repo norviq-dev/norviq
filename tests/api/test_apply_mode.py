@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F-51: per-namespace apply governance (apply_mode = enforce | dry_run_only). When a namespace is dry_run_only
+"""Per-namespace apply governance (apply_mode = enforce | dry_run_only). When a namespace is dry_run_only
 the API must REJECT policy applies + pack enables (server-enforced, admin too) with 409, while dry-run/drafts and
 the enforcement of EXISTING policies are unaffected."""
 
@@ -35,7 +35,7 @@ class _FakeSession:
 
 class _StubLoader:
     def get_current(self, ns, ac):
-        return ""  # no saved policy -> apply would 404 (past the F-51 gate)
+        return ""  # no saved policy -> apply would 404 (past the apply-mode gate)
 
     def get_entry(self, ns, ac):
         return {}
@@ -60,7 +60,7 @@ _BODY = {"target_type": "agent_class", "target_namespace": "default"}
 
 
 def test_apply_rejected_when_dry_run_only():
-    # F-51: a dry-run-only namespace returns 409 (admin too) BEFORE any write.
+    # A dry-run-only namespace returns 409 (admin too) BEFORE any write.
     resp = _client("dry_run_only").post("/api/v1/policies/default/finance-agent/apply", json=_BODY, headers=_admin())
     assert resp.status_code == 409
     assert "dry-run-only" in resp.json()["detail"]
@@ -69,7 +69,7 @@ def test_apply_rejected_when_dry_run_only():
 def test_apply_allowed_when_enforce():
     # enforce (or unset) -> the gate passes; with no saved rego the handler then 404s (proves it got past the gate).
     resp = _client("enforce").post("/api/v1/policies/default/finance-agent/apply", json=_BODY, headers=_admin())
-    assert resp.status_code == 404  # "Policy not found. Save it first." — past the F-51 gate
+    assert resp.status_code == 404  # "Policy not found. Save it first." — past the apply-mode gate
 
 
 def test_apply_allowed_when_unset():
@@ -78,7 +78,7 @@ def test_apply_allowed_when_unset():
 
 
 def test_pack_enable_rejected_when_dry_run_only():
-    # F-51: pack mutations honor the same gate.
+    # Pack mutations honor the same gate.
     resp = _client("dry_run_only").post(
         "/api/v1/policy-packs/finance-money-movement/enable", json={"namespace": "default"}, headers=_admin()
     )

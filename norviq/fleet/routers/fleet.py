@@ -95,7 +95,7 @@ async def mint_cluster_join_token(
     hub_url = body.hub_url or settings.fleet_api_url
     if not hub_url:
         raise HTTPException(status_code=400, detail="hub_url required (the spoke-reachable hub endpoint)")
-    # SSRF-01: hub_url is embedded (signed) into the join token and later DIALED by the enrolling
+    # hub_url is embedded (signed) into the join token and later DIALED by the enrolling
     # spoke (norviq/api/routers/fleet_enroll.py::fleet_join) with the spoke's own service bearer
     # attached, and persisted as the ongoing relay/puller target. Guard it here, before it is ever
     # minted into a token or written to the join-token row, not just when the spoke dials it.

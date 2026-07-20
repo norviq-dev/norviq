@@ -176,7 +176,7 @@ def _client(session) -> TestClient:
 
 
 def _token() -> str:
-    # `exp` is required by the HS256 decode path (AUTH-01), so mint a live one.
+    # `exp` is required by the HS256 decode path, so mint a live one.
     return jwt.encode(
         {"sub": "u", "role": "admin", "exp": int(time.time()) + 3600},
         settings.api_secret_key,

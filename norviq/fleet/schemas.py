@@ -30,7 +30,7 @@ class HeartbeatBody(BaseModel):
     @field_validator("endpoint")
     @classmethod
     def _safe_endpoint_scheme(cls, v: str) -> str:
-        # SSRF-01 (CRITICAL): a spoke SELF-REPORTS endpoint; the hub later DIALS it (e.g. the audit
+        # A spoke SELF-REPORTS endpoint; the hub later DIALS it (e.g. the audit
         # drill-down route) WITH A MINTED ADMIN BEARER — an unvalidated value is SSRF + admin-token
         # exfil. Mirror console_url's shape check here (blank anything not http(s), don't 422 — a bad
         # value shouldn't drop the whole heartbeat). The full host-range reject (loopback/link-local/

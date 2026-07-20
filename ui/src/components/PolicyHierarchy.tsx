@@ -53,7 +53,7 @@ export function PolicyHierarchy({ namespace, testId = "policy-hierarchy" }: { na
     () => [...new Set((policies.data ?? []).filter((p) => p.target_type === "class" && !p.agent_class.startsWith("__")).map((p) => p.agent_class))],
     [policies.data]
   );
-  // SEED-DURABNS-01: a namespace can have ENFORCING overlays (a `__pack__` from an enabled sector pack, or a
+  // A namespace can have ENFORCING overlays (a `__pack__` from an enabled sector pack, or a
   // `__baseline__`/`__guardrail__`) with NO agent-class policy. Those overlay rows are correctly excluded from
   // the class picker (they are LAYERS, not targets), but if that left the picker empty the hierarchy rendered
   // nothing — hiding a pack that IS enforcing. Offer a namespace-wide view ("*") that resolves the ns overlays

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Part C regression: ``PolicyLoader.apply_to_target`` must load the applied policy into the READ PATH
+"""Regression: ``PolicyLoader.apply_to_target`` must load the applied policy into the READ PATH
 (``loader._policies``, which ``_collect_candidates`` consults) and persist it at the target — not the
 evaluator's own unread ``_policies`` dict. The old apply wrote the unread dict + never persisted the target,
 so ``/apply`` returned 200 but ``/evaluate`` at the target stayed ``no_policy_loaded`` (a 200 that did not
@@ -25,7 +25,7 @@ class _Row:
         return self
 
     def one(self):
-        # HA C1 fix: create()'s upsert and apply_to_target()'s mode-change UPDATE now both
+        # HA fix: create()'s upsert and apply_to_target()'s mode-change UPDATE now both
         # `RETURNING ... applied_at` (the DB-side NOW() stamp) — the fake must carry that key too,
         # matching what real Postgres would return.
         return {"id": "pid", "version": self._v, "applied_at": _FAKE_APPLIED_AT}

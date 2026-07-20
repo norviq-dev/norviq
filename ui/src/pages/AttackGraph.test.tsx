@@ -1,3 +1,4 @@
+// Tests for the AttackGraph page — headline stats, what-if isolation, and page-local namespace/reset behavior.
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
@@ -128,7 +129,7 @@ describe("AttackGraph page", () => {
     expect(await screen.findByRole("button", { name: /recompute attack paths/i })).toBeInTheDocument();
   });
 
-  // MUT-4: a hypothetical "Block this step (what-if)" must NOT inflate the real BLOCKED headline stat
+  // A hypothetical "Block this step (what-if)" must NOT inflate the real BLOCKED headline stat
   // (a screenshot of this page is read as deployed posture) — it is annotated separately.
   it("what-if block does not increment the real BLOCKED stat; it is annotated as what-if", async () => {
     // Two exploitable paths, zero real blocks → Blocked stat starts at 0.
@@ -150,7 +151,7 @@ describe("AttackGraph page", () => {
     expect(screen.getAllByTestId("path-whatif-chip").length).toBeGreaterThan(0);
   });
 
-  // AG-DRAFT-01: the what-if "Draft blocking policy" now PERSISTS a real dry-run draft (POST /threats/intent-draft)
+  // The what-if "Draft blocking policy" now PERSISTS a real dry-run draft (POST /threats/intent-draft)
   // and the confirmation deep-links to it — it was a fabricated local-only "✓ Draft created" with no POST.
   it("drafting a blocking policy POSTs a real dry-run draft and deep-links to it (no fabrication)", async () => {
     let draftBody: any = null;
@@ -175,11 +176,11 @@ describe("AttackGraph page", () => {
   });
 });
 
-// ── P2-3 GRAPH-GLOBAL-NS-SYNC ────────────────────────────────────────────────────────────────────
+// ── GRAPH-GLOBAL-NS-SYNC ────────────────────────────────────────────────────────────────────
 // The Attack Graph already scoped itself from the global selector — but its page-local "Reset" button
 // called setNamespace("all"), silently rescoping the WHOLE console (Audit Log, Policies, …) back to
 // All namespaces. A page-local filter reset must not mutate the global scope.
-describe("P2-3: page-local Reset must not clobber the GLOBAL namespace", () => {
+describe("page-local Reset must not clobber the GLOBAL namespace", () => {
   it("keeps the global namespace scoped after clicking Reset", async () => {
     const seen: string[] = [];
     server.use(

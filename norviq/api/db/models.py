@@ -263,7 +263,7 @@ class IntentDraft(Base):
     source_framework: Mapped[str | None] = mapped_column(String(32), nullable=True)
     source_control_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source_control_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    # Part B (retention): drafts auto-expire (14d real / 24h test). GC deletes ONLY expired NON-enforcing drafts —
+    # Retention: drafts auto-expire (14d real / 24h test). GC deletes ONLY expired NON-enforcing drafts —
     # never a policy/version (drafts live in this dedicated table the evaluator never reads). NULL = never expires.
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     __table_args__ = (Index("idx_intent_draft_ns", "namespace"),)
@@ -305,7 +305,7 @@ class AttackPath(Base):
 
 
 class MitreCoverageSnapshot(Base):
-    """B1.3: a periodic snapshot of Compliance (MITRE ATLAS) coverage, so the coverage-trend line renders from a
+    """A periodic snapshot of Compliance (MITRE ATLAS) coverage, so the coverage-trend line renders from a
     REAL persisted series (never fabricated). One row per (namespace, framework, hour); the coverage endpoint
     upserts the current-hour row on read (throttled), so the series accumulates over time with no scheduler.
 
@@ -361,6 +361,6 @@ class RedTeamRun(Base):
     # Per-attack detail is DETAIL-PRUNED to NULL once a run ages out of the detail window (summary kept). The
     # newest run per namespace is never pruned, so results/latest always returns full detail.
     results: Mapped[list | None] = mapped_column(JSONB, nullable=True)  # per-attack×class rows; NULL once pruned
-    efficacy: Mapped[dict[str, object]] = mapped_column(JSONB)  # B3 roll-up (overall + per-technique/owasp) — SUMMARY
+    efficacy: Mapped[dict[str, object]] = mapped_column(JSONB)  # roll-up (overall + per-technique/owasp) — SUMMARY
     created_by: Mapped[str] = mapped_column(String(255), default="")
     __table_args__ = (Index("idx_redteam_run_created", "created_at"),)

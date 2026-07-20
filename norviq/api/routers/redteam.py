@@ -325,7 +325,7 @@ async def get_result(
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """B2: fetch one durable run by id (falls back to the in-process cache for a run from this process)."""
+    """Fetch one durable run by id (falls back to the in-process cache for a run from this process)."""
     require_admin(user)
     row = (await session.execute(
         select(RedTeamRun).where(RedTeamRun.id == run_id)

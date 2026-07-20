@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// R1+R2: the header time-range selector renders ONLY on time-scoped routes, and the selected chip
+// The header time-range selector renders ONLY on time-scoped routes, and the selected chip
 // carries a visible ACTIVE state (teal --accent + aria-pressed + `active` class), distinct from the
 // muted inactive chips. Header's mount fetches are left unhandled (bypassed) — they fail gracefully;
 // the chips render synchronously from the route, which is what we assert.
@@ -27,25 +27,25 @@ function renderAt(path: string) {
   );
 }
 
-describe("Header time-range selector — R1 scope + R2 active state", () => {
-  it("R1: renders the range selector on time-scoped routes (/audit, /compliance)", () => {
+describe("Header time-range selector — scope + active state", () => {
+  it("renders the range selector on time-scoped routes (/audit, /compliance)", () => {
     renderAt("/audit");
     expect(screen.getByTestId("time-range")).toBeInTheDocument();
     expect(screen.getByTestId("range-chip-24h")).toBeInTheDocument();
   });
 
-  it("Q3: renders the range selector on Compliance (it IS range-scoped)", () => {
+  it("renders the range selector on Compliance (it IS range-scoped)", () => {
     renderAt("/compliance");
     expect(screen.getByTestId("time-range")).toBeInTheDocument();
   });
 
-  it("R1: does NOT render the range selector on Policy Catalog (current-state, not time-scoped)", () => {
+  it("does NOT render the range selector on Policy Catalog (current-state, not time-scoped)", () => {
     renderAt("/policies/catalog");
     expect(screen.queryByTestId("time-range")).not.toBeInTheDocument();
     expect(screen.queryByTestId("range-chip-24h")).not.toBeInTheDocument();
   });
 
-  it("R1: hidden on Policy Packs, Target Settings, and pages with their own range picker (Attack/Asset Graph)", () => {
+  it("hidden on Policy Packs, Target Settings, and pages with their own range picker (Attack/Asset Graph)", () => {
     for (const p of ["/policies/packs", "/policies/targets", "/threats/graph", "/asset-graph"]) {
       const { unmount } = renderAt(p);
       expect(screen.queryByTestId("time-range")).not.toBeInTheDocument();
@@ -53,7 +53,7 @@ describe("Header time-range selector — R1 scope + R2 active state", () => {
     }
   });
 
-  it("R2: the selected chip (default 24h) is ACTIVE (aria-pressed + `active` class + --accent fill); others are not", () => {
+  it("the selected chip (default 24h) is ACTIVE (aria-pressed + `active` class + --accent fill); others are not", () => {
     renderAt("/audit");
     const active = screen.getByTestId("range-chip-24h");
     expect(active).toHaveAttribute("aria-pressed", "true");

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Asset Graph canvas (design_handoff_assetgraph): two layouts driven by context —
+// Asset Graph canvas: two layouts driven by context —
 //   overview = one circular mesh per agent (agent centered, tools+data on one ring, dashed hull,
 //              namespace-colored label above); focus = live force layout of one agent's subgraph.
 // Ported from the handoff mock's d3 code: init-once simulation, restyle on state change, cluster

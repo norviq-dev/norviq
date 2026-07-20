@@ -1,3 +1,4 @@
+// Tests for the IntentModal allowlist builder — drafting an intent/allowlist policy from an attack path.
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";

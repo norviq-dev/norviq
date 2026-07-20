@@ -100,7 +100,7 @@ def test_generate_dedup_delete_targets_the_compound_key_and_the_legacy_bare_key(
               "agent_class": "report-gen", "framework": "owasp"},
     )
     assert resp.status_code == 200
-    # Scope to the F4 dedup DELETE specifically (retention's enforce_draft_cap also issues an unrelated
+    # Scope to the dedup DELETE specifically (retention's enforce_draft_cap also issues an unrelated
     # DELETE FROM intent_drafts on the same request — filter it out by its distinctive "agent_class IN" clause).
     deletes = [(sql, params) for sql, params in session.executed
                if "DELETE FROM intent_drafts" in sql and "agent_class IN" in sql]
@@ -116,7 +116,7 @@ def test_generate_dedup_delete_targets_the_compound_key_and_the_legacy_bare_key(
 
 
 def test_regenerating_the_same_control_updates_one_draft_not_the_base_class():
-    # F4 dedup parity check, now against the compound key: re-generating the same (framework, control, class)
+    # Dedup parity check, now against the compound key: re-generating the same (framework, control, class)
     # must still write exactly ONE new IntentDraft row per call (idempotent), never touch "report-gen" bare.
     session = _CapturingSession()
     client = _client(session)

@@ -97,14 +97,14 @@ describe("default login view", () => {
     expect(JSON.parse(call[1]!.body as string)).toEqual({ username: "admin", password: "norviq" });
   });
 
-  it("L4: the brand lockup is CENTERED (not left-aligned)", () => {
+  it("the brand lockup is CENTERED (not left-aligned)", () => {
     render(<Login />);
     const wordmark = screen.getByText("norviq");
     const lockup = wordmark.parentElement as HTMLElement; // the flex row wrapping the mark + wordmark
     expect(lockup).toHaveStyle({ justifyContent: "center" });
   });
 
-  it("L2: the Sign in button shows the shared BrandLoader (aria-busy), replacing the 'Signing in…' text", async () => {
+  it("the Sign in button shows the shared BrandLoader (aria-busy), replacing the 'Signing in…' text", async () => {
     // hang the /auth/login request so the signing state persists long enough to assert
     let release!: () => void;
     const pending = new Promise<Response>((r) => (release = () => r({ ok: true, json: () => Promise.resolve({ access_token: "a.b.c", must_change: false }) } as Response)));
@@ -134,7 +134,7 @@ describe("default login view", () => {
     release();
   });
 
-  it("B1: the token/CLI submit ALSO shows the shared BrandLoader (same in-flight path, aria-busy)", async () => {
+  it("the token/CLI submit ALSO shows the shared BrandLoader (same in-flight path, aria-busy)", async () => {
     // the token path validates against /me; hang it so the signing state persists
     let release!: () => void;
     const pending = new Promise<Response>((r) => (release = () => r({ ok: true, json: () => Promise.resolve({ sub: "x", role: "admin" }) } as Response)));
@@ -164,7 +164,7 @@ describe("default login view", () => {
     release();
   });
 
-  it("A1: signIn holds the loader for the MIN even when auth resolves instantly (fake timers)", async () => {
+  it("signIn holds the loader for the MIN even when auth resolves instantly (fake timers)", async () => {
     vi.useFakeTimers();
     // both /readyz (boot) and /auth/login resolve INSTANTLY — the only thing that keeps the loader up is the min
     vi.spyOn(globalThis, "fetch").mockImplementation((input: RequestInfo | URL) => {

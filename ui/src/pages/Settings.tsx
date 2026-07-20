@@ -1,3 +1,7 @@
+// Settings — per-namespace TUNING defaults (trust threshold, rate limit, sector) plus a read-only view
+// of the cluster-wide data-retention limits. Namespace governance (enforcement mode / change control)
+// lives in Target Settings, which this page links to.
+
 import { Check, ArrowRight } from "lucide-react";
 import { ReactNode, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -121,7 +125,7 @@ export function Settings() {
     };
   }, []);
 
-  // SET-VALIDATE (audit #14): reject non-numeric / out-of-range tuning values client-side instead of
+  // Reject non-numeric / out-of-range tuning values client-side instead of
   // shipping NaN to the server. trust threshold is 0..1; rate limit is a non-negative int.
   const validateTuning = (): string | null => {
     const t = Number(trustThreshold);

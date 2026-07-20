@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F046: per-agent tool-usage + trust-history aggregate real audit_log rows (no fabricated widgets).
+"""Per-agent tool-usage + trust-history aggregate real audit_log rows (no fabricated widgets).
 
 Covers happy (counts/buckets), empty (no rows -> []), and auth. The greedy /agents/{spiffe_id:path}
 GET must NOT swallow the /tool-usage and /trust-history suffixes."""

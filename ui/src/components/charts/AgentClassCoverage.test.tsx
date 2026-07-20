@@ -1,3 +1,4 @@
+// Tests for the AgentClassCoverage chart — per-agent-class policy coverage bars shown on the Overview.
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { AgentClassCoverage } from "./AgentClassCoverage";

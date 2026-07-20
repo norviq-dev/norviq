@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
+//
+// controller.go is the CRD controller: it watches NrvqPolicy / NrvqClass / NrvqConfig
+// custom resources and syncs them to the central API, validating rego and targets,
+// managing deletion finalizers, and keeping resource status up to date.
 package main
 
 import (
@@ -718,7 +722,7 @@ func validateRego(rego string) error {
 			return fmt.Errorf("policy must define %s", name)
 		}
 	}
-	// FIX 5 (enforcement-correctness parity): without a `default decision` a policy whose sole
+	// Without a `default decision` a policy whose sole
 	// `decision = "block" { ... }` rule never fires (e.g. an unreachable condition, or simply no
 	// matching input) evaluates `decision` as undefined, which the engine's evaluator treats as
 	// allow. Every legitimate/shipped policy already declares a default, so require it here too.

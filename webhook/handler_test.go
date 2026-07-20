@@ -177,7 +177,7 @@ func TestMutateAlreadyInjected(t *testing.T) {
 	}
 }
 
-// SECURITY (self-stamp bypass, DEF-webhook): a tenant who self-stamps norviq.io/injected=true on a pod
+// SECURITY (self-stamp bypass): a tenant who self-stamps norviq.io/injected=true on a pod
 // that carries NO real sidecar structure must NOT be treated as injected — the annotation is attacker-
 // controllable on an unadmitted CREATE, and trusting it lets the pod run UNPOLICED. The real sidecar MUST
 // still be injected (patch present). FAIL-ON-BUG: fails on the pre-fix code (annotation → skip → no patch).
@@ -220,7 +220,7 @@ func TestMutateAlreadyInjectedAfterImageDrift(t *testing.T) {
 	}
 }
 
-// H6-style decoy: an attacker-controlled container merely NAMED "norviq-sidecar" but running a
+// Decoy: an attacker-controlled container merely NAMED "norviq-sidecar" but running a
 // different image must NOT suppress injection of the real sidecar — otherwise the pod runs unpoliced.
 func TestMutateDecoySidecarNameStillInjectsRealSidecar(t *testing.T) {
 	h := NewHandler(LoadConfig())

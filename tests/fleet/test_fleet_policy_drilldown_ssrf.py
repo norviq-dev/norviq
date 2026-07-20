@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""SSRF-01 (CRITICAL) regression: GET /fleet/clusters/{id}/audit/records must be admin-only and must not
+"""Regression: GET /fleet/clusters/{id}/audit/records must be admin-only and must not
 dial an unvalidated cluster.endpoint. Without the guard, any cluster-scoped service/viewer token could
 reach it (no require_admin) and it would dial cluster.endpoint — a value a spoke self-reports on heartbeat
 — with a minted ADMIN bearer attached and no host-range check. Locks in both fixes: the route is admin-only,
