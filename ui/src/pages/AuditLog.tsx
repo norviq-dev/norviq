@@ -90,6 +90,9 @@ export function AuditLog() {
   const pageSize = 50;
   // Compliance deep-link: an evidence row opens the Audit Log pre-filtered by the enforcing rule (?rule=<rule_id>).
   const [rule, setRule] = useState(searchParams.get("rule") ?? "");
+  // Real-traffic-only (default ON) hides red-team + synthetic/probe rows so this log's population matches the
+  // Overview headline (which counts real traffic only). Toggle OFF to see the full ledger incl. test/eval rows.
+  const [realOnly, setRealOnly] = useState(true);
 
   // The /audit route stays MOUNTED across query-string changes (React Router doesn't remount it),
   // so a SECOND deep-link fired while already on the page — e.g. the Header Inbox's
@@ -127,10 +130,11 @@ export function AuditLog() {
         tool_name: debouncedTool || undefined,
         agent: debouncedAgent || undefined,
         rule_id: rule || undefined,
+        exclude_synthetic: realOnly || undefined,
         limit: pageSize,
         offset: page * pageSize
       }),
-    [timeRange, selectedNamespace, decision, debouncedTool, debouncedAgent, rule, page]
+    [timeRange, selectedNamespace, decision, debouncedTool, debouncedAgent, rule, realOnly, page]
   );
   const totalRecords = useApi<AuditRecord[]>(
     () =>
@@ -141,10 +145,11 @@ export function AuditLog() {
         tool_name: debouncedTool || undefined,
         agent: debouncedAgent || undefined,
         rule_id: rule || undefined,
+        exclude_synthetic: realOnly || undefined,
         limit: 500,
         offset: 0
       }),
-    [timeRange, selectedNamespace, decision, debouncedTool, debouncedAgent, rule]
+    [timeRange, selectedNamespace, decision, debouncedTool, debouncedAgent, rule, realOnly]
   );
 
   // The /ws/audit socket authenticates before accepting. Browsers can't set Authorization headers on a
@@ -176,6 +181,7 @@ export function AuditLog() {
           namespace: selectedNamespace,
           decision: decision === "all" ? undefined : decision,
           tool_name: debouncedTool || undefined,
+          exclude_synthetic: realOnly || undefined,
           limit: 10,
           offset: 0
         });
@@ -195,7 +201,7 @@ export function AuditLog() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [live, ws.connected, timeRange, selectedNamespace, decision, debouncedTool]);
+  }, [live, ws.connected, timeRange, selectedNamespace, decision, debouncedTool, realOnly]);
 
   const streamed = useMemo(() => {
     const merged = [...ws.messages, ...polled];
@@ -211,10 +217,13 @@ export function AuditLog() {
   }, [ws.messages, polled]);
 
   const rows = useMemo(() => {
-    // Filtering is server-side (tool + agent); the live stream is only merged on page 0.
+    // Filtering is server-side (tool + agent + real-only); the live stream is only merged on page 0.
     const liveIds = new Set(streamed.map((r) => r.id).filter(Boolean));
-    return [...(page === 0 ? streamed : []), ...(base.data ?? []).filter((r) => !liveIds.has(r.id))];
-  }, [streamed, base.data, page]);
+    // In real-only mode the server already hides red-team/synthetic rows — mirror that for the live tail
+    // (drop red-team-source rows) so a streamed test row can't reappear above the filtered page.
+    const live = realOnly ? streamed.filter((r) => r.framework !== "redteam") : streamed;
+    return [...(page === 0 ? live : []), ...(base.data ?? []).filter((r) => !liveIds.has(r.id))];
+  }, [streamed, base.data, page, realOnly]);
 
   const totalCount = totalRecords.data?.length ?? 0;
   // The total-count probe is server-capped at limit=500 (audit/records enforces le=500), so records
@@ -233,7 +242,7 @@ export function AuditLog() {
 
   useEffect(() => {
     setPage(0);
-  }, [timeRange, selectedNamespace, decision, debouncedTool, debouncedAgent]);
+  }, [timeRange, selectedNamespace, decision, debouncedTool, debouncedAgent, realOnly]);
 
   const columns: Array<Column<AuditRecord>> = [
     {
@@ -305,6 +314,14 @@ export function AuditLog() {
             value={agentFilter}
             onChange={(e) => setAgentFilter(e.target.value)}
           />
+          <button
+            className={`tab-kit${realOnly ? " active" : ""}`}
+            onClick={() => setRealOnly((v) => !v)}
+            title="Real traffic only hides red-team + synthetic/probe rows so this log matches the Overview totals. Toggle off to see the full ledger."
+            style={{ marginLeft: "auto" }}
+          >
+            {realOnly ? "✓ Real traffic only" : "Showing all (incl. test)"}
+          </button>
         </div>
 
         {/* Visible count + an explicit no-results state. */}
@@ -313,7 +330,9 @@ export function AuditLog() {
             ? "Loading…"
             : `Showing ${rows.length} of ${totalCount}${countCapped ? "+" : ""} record${totalCount === 1 ? "" : "s"} in range (${timeRange})${
                 debouncedTool ? ` · tool contains “${debouncedTool}”` : ""
-              }${debouncedAgent ? ` · agent contains “${debouncedAgent}”` : ""}`}
+              }${debouncedAgent ? ` · agent contains “${debouncedAgent}”` : ""}${
+                realOnly ? " · real traffic only — red-team & synthetic/probe rows hidden (matches the Overview total)" : " · showing all rows incl. red-team & synthetic (excluded from the Overview total)"
+              }`}
         </div>
 
         {noResults ? (

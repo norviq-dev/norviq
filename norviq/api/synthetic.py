@@ -79,3 +79,21 @@ def is_synthetic_identity(
     if _SYNTHETIC_RE.match(cls):
         return True
     return False
+
+
+# SQL mirror for audit_log rows. The Overview KPIs (/audit/stats) count REAL traffic only — they drop
+# red-team-framework rows AND synthetic/probe identities. To let the Audit Log offer a "Real traffic only"
+# filter that reconciles EXACTLY with that headline (instead of the two surfaces silently disagreeing over
+# synthetic rows), expose the SAME exclusion as a SQL predicate. Kept HERE, next to the one classifier, so
+# the Python and the SQL never drift. For audit rows the props-marker path never applies (no properties
+# column), so agent_class alone is authoritative — identical to what is_synthetic_identity checks in stats.
+def audit_row_is_non_real(model):
+    """SQLAlchemy predicate: True when an audit_log row is NON-real traffic (red-team source OR a
+    synthetic/test/probe agent-class). ``~audit_row_is_non_real(M)`` is the real-traffic-only filter."""
+    from sqlalchemy import func, or_
+
+    cls = func.lower(func.coalesce(model.agent_class, ""))
+    conds = [model.framework == "redteam", cls.in_(tuple(SYNTHETIC_CLASS_EXACT))]
+    conds += [cls.like(f"{p}%") for p in SYNTHETIC_CLASS_PREFIXES]  # class-name prefixes (already lowercase)
+    conds.append(cls.op("~")("^wave[0-9]+e2e"))  # mirrors _SYNTHETIC_RE (Postgres POSIX regex on the lowered class)
+    return or_(*conds)

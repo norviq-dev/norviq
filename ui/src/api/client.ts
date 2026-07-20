@@ -404,6 +404,7 @@ export async function fetchAuditRecords(filters: {
   tool_name?: string;
   agent?: string; // SPIFFE/agent-id substring, filtered server-side over the range
   rule_id?: string; // Compliance evidence-row deep-link: filter by enforcing rule
+  exclude_synthetic?: boolean; // real-traffic-only: drop red-team + synthetic rows (reconciles with the Overview total)
   limit?: number;
   offset?: number;
 }): Promise<
@@ -420,6 +421,7 @@ export async function fetchAuditRecords(filters: {
     reason?: string;
     session_id?: string;
     trust_score?: number;
+    framework?: string; // decision source (sidecar / sdk / redteam / …)
   }>
 > {
   const params = new URLSearchParams();

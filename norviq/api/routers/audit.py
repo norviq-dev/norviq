@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from norviq.api.auth import get_current_user, read_namespace, scoped_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
-from norviq.api.synthetic import is_synthetic_identity  # the ONE shared synthetic/probe classifier (do not fork)
+from norviq.api.synthetic import audit_row_is_non_real, is_synthetic_identity  # the ONE shared synthetic/probe classifier (do not fork)
 from norviq.config import settings
 
 
@@ -81,6 +81,9 @@ async def list_audit_records(
     agent: str | None = Query(default=None),  # SPIFFE/agent-id substring, filtered SERVER-SIDE over the range
     framework: str | None = Query(default=None),  # decision source (sidecar / api / sdk / redteam / ...)
     rule_id: str | None = Query(default=None),  # Compliance deep-link: filter by the enforcing rule (exact match)
+    # Real-traffic-only view: drop red-team + synthetic/probe rows so the Audit Log reconciles with the
+    # Overview headline (which counts the same real-traffic population). Same exclusion as /audit/stats.
+    exclude_synthetic: bool = Query(default=False),
     range: Literal["1h", "6h", "24h", "7d", "30d"] = Query(default="24h"),
     limit: int = Query(default=50, le=500),
     offset: int = Query(default=0, ge=0),
@@ -110,6 +113,8 @@ async def list_audit_records(
         query = query.where(AuditLogEntry.framework == framework)  # filter by decision source
     if rule_id:
         query = query.where(AuditLogEntry.rule_id == rule_id)  # Compliance evidence-row deep-link
+    if exclude_synthetic:
+        query = query.where(~audit_row_is_non_real(AuditLogEntry))  # real traffic only — reconciles with /audit/stats
     rows = (await session.execute(query)).scalars().all()
     log.debug("nrvq.api.audit.listed", count=len(rows), code="NRVQ-API-7020")
     return [_to_dict(row) for row in rows]

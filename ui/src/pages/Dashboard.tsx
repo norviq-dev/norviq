@@ -375,6 +375,15 @@ export function Dashboard() {
           )}
         </div>
 
+        {/* Totals count REAL traffic only — synthetic/probe + red-team test rows are excluded so the Overview
+            reconciles with Compliance & Red-Team efficacy. Note it here so "50 calls" vs a red-team-heavy Audit
+            Log never reads as a contradiction; the Audit Log's "Real traffic only" filter shows the same set. */}
+        {!kpiLoading && !useHub && (
+          <div className="muted" style={{ fontSize: 11.5, marginTop: -8 }}>
+            Counts real traffic — synthetic &amp; red-team test rows are excluded (visible in the Audit Log).
+          </div>
+        )}
+
         {/* Engine-error signal — fail-closed OPA-eval faults are made visible on the Overview (not just the
             API), and clearly distinct from policy blocks. Only shown when there ARE faults, so it stays quiet. */}
         {!useHub && engineErrors > 0 && (
