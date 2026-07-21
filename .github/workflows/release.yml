@@ -120,9 +120,12 @@ jobs:
             # Release: pin the version-tagged images the `images` job just published.
             python3 scripts/release_stamp.py "$VERSION" --resolve
           else
-            # Rehearsal: no version-tagged images were published, so pin this commit's images
-            # (built by build.yml on the main push). Same code path, real digests, nothing minted.
-            python3 scripts/release_stamp.py "$VERSION" --resolve --resolve-suffix "$GITHUB_SHA"
+            # Rehearsal: no version-tagged images exist, so pin whatever `-latest` currently
+            # resolves to. NOT `<comp>-$GITHUB_SHA`: build.yml has path filters, so a commit that
+            # touches only release plumbing never builds images and those tags would not exist.
+            # `-latest` always exists, and we still pin its immutable digest — same code path,
+            # real digests, nothing published.
+            python3 scripts/release_stamp.py "$VERSION" --resolve --resolve-suffix latest
           fi
           echo "--- Chart.yaml ---"; grep -E '^(version|appVersion):' helm/norviq/Chart.yaml
 
