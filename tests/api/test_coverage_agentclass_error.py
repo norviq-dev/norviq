@@ -142,7 +142,8 @@ async def test_agent_class_healthy_read_is_not_degraded() -> None:
     degraded flag genuinely discriminates failure from success (not a constant)."""
     session = _HealthySession(
         policy_rows=[_policy_row()],
-        efficacy_rows=[("report-gen", "block", "deny_x", 5)],
+        # (agent_class, decision, rule_id, framework, count) — framework "" = real traffic (not excluded)
+        efficacy_rows=[("report-gen", "block", "deny_x", "", 5)],
     )
     with structlog.testing.capture_logs() as logs:
         policies, degraded = await _agent_class_policies(session, "team-a", "block")
@@ -150,6 +151,24 @@ async def test_agent_class_healthy_read_is_not_degraded() -> None:
     assert policies[0]["blocked"] == 5 and policies[0]["effective"] is True
     assert degraded is False
     assert not any("NRVQ-API-7081-ERR" in str(rec.get("code", "")) for rec in logs)
+
+
+async def test_agent_class_efficacy_excludes_redteam_traffic() -> None:
+    """The agent-class efficacy overlay attests REAL enforcement — red-team framework rows must NOT
+    inflate a class's blocked/observed counts. Regression for the metric-dilution class: the chatbot's
+    real langchain blocks were commingled with session-'p' red-team curl-probe blocks on the same class,
+    overstating enforcement on the Overview efficacy bars."""
+    session = _HealthySession(
+        policy_rows=[_policy_row()],
+        efficacy_rows=[
+            ("report-gen", "block", "deny_x", "", 3),          # real traffic → counts
+            ("report-gen", "block", "deny_x", "redteam", 7),   # red-team efficacy run → excluded
+        ],
+    )
+    policies, degraded = await _agent_class_policies(session, "team-a", "block")
+    assert degraded is False and len(policies) == 1
+    assert policies[0]["blocked"] == 3, "red-team blocks must not inflate real efficacy"
+    assert policies[0]["observed"] == 3
 
 
 async def test_agent_class_empty_namespace_is_not_degraded() -> None:

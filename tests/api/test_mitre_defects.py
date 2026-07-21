@@ -68,10 +68,13 @@ class _StubSession:
         self.executed.append(sql)
         if "pg_advisory_xact_lock" in sql:
             return _StubResult([(1,)])
-        if "framework" in sql:  # _activity_by_rule → (rule_id, decision, agent_class, framework, count)
-            return _StubResult([(rid, dec, self._cls, "", n) for (rid, dec, n) in self._rows])
-        # _blocked_by_rule_class → (rule_id, agent_class, count) for block/escalate only
-        return _StubResult([(rid, self._cls, n) for (rid, dec, n) in self._rows if dec in ("block", "escalate")])
+        # _blocked_by_rule_class filters WHERE decision IN (block/escalate) and now selects
+        # (rule_id, agent_class, framework, count) — matched by its decision filter, which the
+        # sibling activity query never has.
+        if "decision IN" in sql:
+            return _StubResult([(rid, self._cls, "", n) for (rid, dec, n) in self._rows if dec in ("block", "escalate")])
+        # _activity_by_rule → (rule_id, decision, agent_class, framework, count), no decision filter
+        return _StubResult([(rid, dec, self._cls, "", n) for (rid, dec, n) in self._rows])
 
     async def scalar(self, *a, **k):
         return self.scalar_return

@@ -143,11 +143,23 @@ wire the *collection*:
 --set otel.metrics.serviceMonitor.additionalLabels.release=kube-prometheus-stack   # match your Prometheus selector
 # OR annotation-based Prometheus:
 --set otel.metrics.scrapeAnnotations=true
-# OPTIONAL: OTLP trace export to a collector:
---set otel.enabled=true --set otel.endpoint=http://otel-collector:4317
+# OPTIONAL: OTLP trace export — you MUST deploy a collector first (none ships with Norviq):
+--set otel.enabled=true --set otel.endpoint=http://<your-collector>:4317
 ```
 Without one of the two scrape paths, Prometheus never scrapes `/metrics` and the Grafana dashboard
 shows "No data".
+
+**Scrape per-pod when `api.replicas > 1`.** The `norviq_*` counters are in-memory and **per-replica** —
+a long-lived agent/SDK connection pins its decisions to one API pod, so each replica holds only its own
+slice (and resets on restart). Both scrape paths above discover pods individually, so Prometheus sums
+across them correctly; a **single Service-level scrape or a `kubectl port-forward` can land on one
+replica and read partial/zero** telemetry. The scrape target is the API **Service port** (`/metrics`) —
+there is no separate metrics port.
+
+**Traces (OTel) are opt-in and need a collector you run.** Norviq ships no collector. Tracing is OFF by
+default with an empty endpoint; `otel.enabled=true` **fails the Helm render** unless you also set
+`otel.endpoint` at a reachable OTLP/gRPC collector (e.g. an OpenTelemetry Collector or Grafana Tempo) —
+so spans are never silently dropped into a void. Metrics (above) are independent of this and always on.
 
 ## Air-gapped / private registry
 

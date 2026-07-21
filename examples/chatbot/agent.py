@@ -58,9 +58,16 @@ protected_tools = protect(
     session_id=SESSION_ID,
 )
 
-SYSTEM_PROMPT = """You are a helpful customer support agent for Acme Corp.
-You can search the knowledge base, look up customers and orders, and help with common requests.
-Never execute SQL directly unless explicitly asked. Never delete records. Be professional."""
+# Persona is configurable so you can demonstrate the point Norviq exists to make: enforcement lives
+# at the TOOL boundary, not in the prompt. Set NRVQ_CHATBOT_SYSTEM_PROMPT to a capable-agent persona
+# (no self-censoring "never run SQL") and let Norviq — not prompt engineering — be what stops a
+# destructive call. Defaults to the cautious persona.
+SYSTEM_PROMPT = os.getenv(
+    "NRVQ_CHATBOT_SYSTEM_PROMPT",
+    "You are a helpful customer support agent for Acme Corp.\n"
+    "You can search the knowledge base, look up customers and orders, and help with common requests.\n"
+    "Never execute SQL directly unless explicitly asked. Never delete records. Be professional.",
+)
 
 agent = create_react_agent(
     model=llm,

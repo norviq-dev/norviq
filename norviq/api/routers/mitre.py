@@ -109,20 +109,32 @@ async def _activity_by_rule(
 
 async def _blocked_by_rule_class(session: AsyncSession, namespace: str | None, range_token: str) -> dict[str, dict[str, int]]:
     """{rule_id: {agent_class: blocked_count}} over `range` — the REAL rule×audit join behind the
-    per-technique affected-agent-class chips. Synthetic/test classes are excluded via the classifier."""
+    per-technique affected-agent-class chips.
+
+    Excludes the SAME population as the headline `_activity_by_rule`: synthetic/probe/eval classes AND
+    red-team framework events. Grouping by `framework` (like the sibling helper) is what lets the
+    Python-side filter drop red-team rows — without it the affected-class chips counted red-team probes
+    the honest technique headline excluded, so the chip (e.g. 24) contradicted its own headline (9) and
+    over-attributed enforcement to a class. REAL traffic only, consistently."""
     since = datetime.now(timezone.utc) - timedelta(hours=_RANGE_HOURS.get(range_token, 24))
     stmt = (
-        select(AuditLogEntry.rule_id, AuditLogEntry.agent_class, func.count(AuditLogEntry.id))
+        select(
+            AuditLogEntry.rule_id,
+            AuditLogEntry.agent_class,
+            AuditLogEntry.framework,
+            func.count(AuditLogEntry.id),
+        )
         .where(AuditLogEntry.timestamp_utc >= since, AuditLogEntry.decision.in_(("block", "escalate")))
-        .group_by(AuditLogEntry.rule_id, AuditLogEntry.agent_class)
+        .group_by(AuditLogEntry.rule_id, AuditLogEntry.agent_class, AuditLogEntry.framework)
     )
     if namespace:
         stmt = stmt.where(AuditLogEntry.namespace == namespace)
     out: dict[str, dict[str, int]] = {}
     try:
-        for rid, cls, count in (await session.execute(stmt)).all():
+        for rid, cls, framework, count in (await session.execute(stmt)).all():
             cls = str(cls or "")
-            if not cls or is_synthetic_identity(cls):  # never list a probe/test class as "affected"
+            # never list a probe/test class or a red-team efficacy run as an "affected" class
+            if not cls or str(framework or "") == "redteam" or is_synthetic_identity(cls):
                 continue
             out.setdefault(str(rid), {})[cls] = out.setdefault(str(rid), {}).get(cls, 0) + int(count)
     except Exception as exc:  # noqa: BLE001

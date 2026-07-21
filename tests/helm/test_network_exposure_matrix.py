@@ -71,6 +71,8 @@ _PROFILES: dict[str, list[str]] = {
         "--set", "webhook.injection.enabled=true",
         "--set", "ingress.enabled=true",
         "--set", "otel.enabled=true",
+        # enabling trace export now requires a collector endpoint (chart fails the render otherwise)
+        "--set", "otel.endpoint=http://otel-collector:4317",
         "--set", "config.spiffeCsi.enabled=true",
     ],
 }

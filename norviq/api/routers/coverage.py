@@ -27,6 +27,7 @@ from norviq.api.auth import get_current_user, read_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
 from norviq.api.routers.mitre import _activity_by_rule
+from norviq.api.synthetic import is_synthetic_identity
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -116,17 +117,24 @@ async def _agent_class_policies(
     if not rows:
         return [], False
 
-    # 30d audit efficacy per class: real block / monitor would-block / total governed calls.
+    # 30d audit efficacy per class: real block / monitor would-block / total governed calls. REAL traffic
+    # only — synthetic/probe classes AND red-team framework events are excluded (same population as the
+    # MITRE/coverage headline via _activity_by_rule). Grouping by framework is what lets the Python-side
+    # filter drop red-team rows; without it these efficacy bars counted the red-team probes the rest of the
+    # dashboard excludes, overstating a class's real enforcement (the recurring metric-dilution bug class).
     since = datetime.now(timezone.utc) - timedelta(days=30)
     stmt = select(AuditLogEntry.agent_class, AuditLogEntry.decision, AuditLogEntry.rule_id,
-                  func.count(AuditLogEntry.id)).where(AuditLogEntry.timestamp_utc >= since)
+                  AuditLogEntry.framework, func.count(AuditLogEntry.id)).where(AuditLogEntry.timestamp_utc >= since)
     if namespace is not None:
         stmt = stmt.where(AuditLogEntry.namespace == namespace)
-    stmt = stmt.group_by(AuditLogEntry.agent_class, AuditLogEntry.decision, AuditLogEntry.rule_id)
+    stmt = stmt.group_by(AuditLogEntry.agent_class, AuditLogEntry.decision, AuditLogEntry.rule_id,
+                         AuditLogEntry.framework)
     eff: dict[str, dict[str, int]] = {}
     degraded = False
     try:
-        for cls, decision, rule_id, n in (await session.execute(stmt)).all():
+        for cls, decision, rule_id, framework, n in (await session.execute(stmt)).all():
+            if str(framework or "") == "redteam" or is_synthetic_identity(str(cls or "")):
+                continue  # efficacy bars attest REAL enforcement — never red-team/synthetic traffic
             d = eff.setdefault(str(cls), {"observed": 0, "blocked": 0, "would_block": 0})
             d["observed"] += int(n)
             if str(decision) == "block":

@@ -204,10 +204,15 @@ class NorviqSettings(BaseSettings):
     # Opt-in: HMAC-SHA256 key for the tamper-evident /audit/export?signed=true manifest. Empty =
     # the signed export still hash-chains (integrity) but the manifest signature is null (no shared-key auth).
     audit_export_signing_key: str = ""
-    otel_endpoint: str = "http://localhost:4317"
-    otel_enabled: bool = True
+    # OTLP trace/span export. Opt-in and endpoint-less by default: tracing is OFF unless you turn it on
+    # AND point it at a real collector. A non-empty phantom default (localhost/otel-collector:4317) made
+    # every process try to export to a target that isn't there; empty here means "no exporter" cleanly
+    # (provider.py logs no_otel_endpoint and skips) instead of failing into a void. Prometheus /metrics is
+    # served unconditionally on the API port and is unaffected by these — there is NO separate metrics port
+    # (the old prometheus_port was dead config that advertised a listener nothing bound).
+    otel_endpoint: str = ""
+    otel_enabled: bool = False
     otel_disabled: bool = False
-    prometheus_port: int = 9090
     log_level: str = "INFO"
     log_format: str = "json"
     socket_path: str = "/tmp/norviq-proxy.sock"  # nosec B108 - Settings default; the sidecar's socket lives on a pod-private emptyDir, path overridable via NRVQ_SOCKET_PATH

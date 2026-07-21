@@ -88,13 +88,23 @@ from norviq.engine.capability import (
 log = structlog.get_logger()
 router = APIRouter(prefix="/api/v1", tags=["threats"])
 
-_MAX_PATHS_PER_AGENT = 6
+# Per-chokepoint fan-out bound: a single tool that reaches many data targets contributes at most this
+# many kill-chains, so a high-fan-out tool (execute_sql -> N tables) can never crowd a sibling
+# destructive tool-terminal (delete_record) out of the ranked view.
+_MAX_CHAINS_PER_CHOKEPOINT = 3
+# Distinct chokepoints (tools) represented per agent. Visited worst-risk-first, so when an agent has
+# more reachable tools than this, the most dangerous ones are the ones kept — never dropped by
+# arbitrary graph-iteration order.
+_MAX_CHOKEPOINTS_PER_AGENT = 16
 _MAX_PATHS = 200
 _MAX_DEPTH = 4
 _RESERVED_CLASSES = {"__baseline__", "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__"}
 _SENSITIVE = {"critical", "high"}
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 _STATUS_ORDER = {"exploitable": 0, "unsimulated": 1, "blocked": 2}
+# RiskLevel.value -> rank; higher is more dangerous. Orders an agent's chokepoints so a destructive
+# tool outranks a read when the per-agent chokepoint budget truncates.
+_RISK_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 
 def _severity_from(risk: float) -> str:
@@ -136,7 +146,10 @@ async def _assemble(session: AsyncSession, namespaces: list[str] | None):
         ns_nodes, ns_edges, _ = _snapshot_to_assets(ns, graph_json, counts, prefix_ids=multi)
         for n in ns_nodes:
             nodes_by_id[n.id] = {
-                "id": n.id, "type": n.type, "name": n.name, "props": dict(n.properties or {}),
+                "id": n.id,
+                "type": n.type,
+                "name": n.name,
+                "props": dict(n.properties or {}),
             }
         for e in ns_edges:
             if e.type == "belongs_to":
@@ -177,31 +190,66 @@ def _reachable(source: str, out_edges: dict[str, list[dict]]) -> set[str]:
     return seen
 
 
+def _chokepoint_risk_rank(tool_id: str, nodes_by_id: dict[str, dict]) -> int:
+    """Higher = more dangerous. Orders an agent's chokepoints so a destructive tool (delete/exec)
+    survives per-agent truncation ahead of a read — a security operator must never lose sight of the
+    worst reachable tool because a benign one was walked first."""
+    name = (nodes_by_id.get(tool_id) or {}).get("name") or tool_id.split(":", 1)[-1]
+    _verb, risk = classify_tool(name)
+    return _RISK_RANK.get(getattr(risk, "value", ""), 0)
+
+
 def _walk_paths(source: str, out_edges: dict[str, list[dict]], nodes_by_id: dict[str, dict]) -> list[list[str]]:
-    """DFS simple kill-chains from an agent to a data node (or a terminal tool), depth <= _MAX_DEPTH."""
+    """DFS simple kill-chains from an agent to a data node (or a terminal tool), depth <= _MAX_DEPTH.
+
+    Every DISTINCT first-hop chokepoint (a tool the agent can reach) is walked under its OWN fan-out
+    budget (`_MAX_CHAINS_PER_CHOKEPOINT`), so a high-fan-out tool (execute_sql -> many data targets)
+    can never consume a shared per-agent budget and starve a sibling destructive tool-terminal
+    (delete_record) out of the ranked kill-chain.
+
+    A destructive chokepoint is NEVER capped away. A class node here is the UNION of every same-class
+    identity's tools, so a busy tenant can expose 20+ high/critical chokepoints; a flat per-agent cap
+    would silently hide a reachable delete/exec tool (e.g. delete_record) behind its siblings — exactly
+    what a security graph must not do. So we keep EVERY high/critical-risk chokepoint and only cap the
+    lower-risk tail (reads an operator can safely see fewer of).
+    """
     out: list[list[str]] = []
+    first_hops = [
+        e["target"] for e in out_edges.get(source, []) if e["target"] in nodes_by_id and e["target"] != source
+    ]
+    # de-dup preserving first appearance, then order worst-risk-first
+    ranked = sorted(dict.fromkeys(first_hops), key=lambda t: -_chokepoint_risk_rank(t, nodes_by_id))
+    high = [t for t in ranked if _chokepoint_risk_rank(t, nodes_by_id) >= _RISK_RANK["high"]]
+    low = [t for t in ranked if _chokepoint_risk_rank(t, nodes_by_id) < _RISK_RANK["high"]]
+    # keep ALL destructive chokepoints; fill the remaining budget with the low-risk tail
+    ordered_tools = high + low[: max(0, _MAX_CHOKEPOINTS_PER_AGENT - len(high))]
 
-    def dfs(node: str, path: list[str]) -> None:
-        if len(out) >= _MAX_PATHS_PER_AGENT or len(path) > _MAX_DEPTH + 1:
-            return
-        nxt = out_edges.get(node, [])
-        terminal = nodes_by_id.get(node, {}).get("type") == "data"
-        if (terminal or not nxt) and len(path) >= 2:
-            out.append(list(path))
-            return
-        for e in nxt:
-            t = e["target"]
-            if t in path:  # no cycles
-                continue
-            if t not in nodes_by_id:
-                continue
-            path.append(t)
-            dfs(t, path)
-            path.pop()
-            if len(out) >= _MAX_PATHS_PER_AGENT:
+    def _chains_through(tool: str) -> list[list[str]]:
+        local: list[list[str]] = []
+
+        def dfs(node: str, path: list[str]) -> None:
+            if len(local) >= _MAX_CHAINS_PER_CHOKEPOINT or len(path) > _MAX_DEPTH + 1:
                 return
+            nxt = out_edges.get(node, [])
+            terminal = nodes_by_id.get(node, {}).get("type") == "data"
+            if (terminal or not nxt) and len(path) >= 2:
+                local.append(list(path))
+                return
+            for e in nxt:
+                t = e["target"]
+                if t in path or t not in nodes_by_id:  # no cycles / unknown nodes
+                    continue
+                path.append(t)
+                dfs(t, path)
+                path.pop()
+                if len(local) >= _MAX_CHAINS_PER_CHOKEPOINT:
+                    return
 
-    dfs(source, [source])
+        dfs(tool, [source, tool])
+        return local
+
+    for tool in ordered_tools:
+        out.extend(_chains_through(tool))
     return out
 
 
@@ -292,10 +340,19 @@ def _build_path(
         steps.append(
             ThreatStep(
                 **{"from": src_node["name"] if a == node_ids[0] else nodes_by_id[a]["name"]},
-                to=bnode["name"], verb=("reaches" if bnode["type"] == "data" else "calls"),
-                dec=dec, kind=bnode["type"], deny=block, allow=allow, would_block=wb,
-                op=op_val, op_risk=op_risk_val, op_src=op_src_val,
-                inferred_verb=inferred_verb, inferred_count=inferred_count, observed_calls=observed_calls,
+                to=bnode["name"],
+                verb=("reaches" if bnode["type"] == "data" else "calls"),
+                dec=dec,
+                kind=bnode["type"],
+                deny=block,
+                allow=allow,
+                would_block=wb,
+                op=op_val,
+                op_risk=op_risk_val,
+                op_src=op_src_val,
+                inferred_verb=inferred_verb,
+                inferred_count=inferred_count,
+                observed_calls=observed_calls,
             )
         )
     if not chokepoint:
@@ -325,7 +382,10 @@ def _build_path(
     elif would_blocked:
         # A policy covers the chokepoint but the namespace is in Monitor mode — logged, not enforced. This
         # is NOT an open path; rank it with blocked (covered) but tell the operator it isn't enforcing.
-        status, verdict = "blocked", f"Monitor mode: '{chokepoint}' would be blocked (logged, not enforced) — switch to Block to enforce."
+        status, verdict = (
+            "blocked",
+            f"Monitor mode: '{chokepoint}' would be blocked (logged, not enforced) — switch to Block to enforce.",
+        )
     elif any_allow_all and len(steps) > 0:
         status, verdict = "exploitable", f"Every hop has allowed traffic — '{chokepoint}' is reachable end-to-end."
     else:
@@ -333,14 +393,25 @@ def _build_path(
 
     return ThreatPath(
         id=_short_id(ns, node_ids[0], node_ids[-1], str(len(node_ids))),
-        sev=sev, src=src_node["name"], tgt=tgt_node["name"], ns=ns, cls=cls,
-        mitre=mitre_for_tool(chokepoint), hops=len(node_ids) - 1, trust=round(trust, 2),
-        blast=blast, status=status, tool=chokepoint,
-        reach=reach[:8], steps=steps, verdict=verdict, fix=recommended_fix(chokepoint),
+        sev=sev,
+        src=src_node["name"],
+        tgt=tgt_node["name"],
+        ns=ns,
+        cls=cls,
+        mitre=mitre_for_tool(chokepoint),
+        hops=len(node_ids) - 1,
+        trust=round(trust, 2),
+        blast=blast,
+        status=status,
+        tool=chokepoint,
+        reach=reach[:8],
+        steps=steps,
+        verdict=verdict,
+        fix=recommended_fix(chokepoint),
     )
 
 
-_POLICY_ALLOW_RE = re.compile(r'allow_names\s*:=\s*\{([^}]*)\}')
+_POLICY_ALLOW_RE = re.compile(r"allow_names\s*:=\s*\{([^}]*)\}")
 _POLICY_QUOTED_RE = re.compile(r'"([^"]+)"')
 
 
@@ -355,11 +426,19 @@ async def _governing_policies(session: AsyncSession, namespaces: list[str] | Non
         where += " AND namespace = ANY(:nss)"
         params["nss"] = namespaces
     try:
-        rows = (await session.execute(
-            text(f"SELECT DISTINCT ON (namespace, agent_class) agent_class, rego_source FROM policies "  # nosec B608 (constant WHERE fragments; namespaces bound as :nss) # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
-                 f"WHERE {where} ORDER BY namespace, agent_class, version DESC"),
-            params,
-        )).mappings().all()
+        rows = (
+            (
+                await session.execute(
+                    text(
+                        f"SELECT DISTINCT ON (namespace, agent_class) agent_class, rego_source FROM policies "  # nosec B608 (constant WHERE fragments; namespaces bound as :nss) # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+                        f"WHERE {where} ORDER BY namespace, agent_class, version DESC"
+                    ),
+                    params,
+                )
+            )
+            .mappings()
+            .all()
+        )
     except Exception:
         return {}
     out: dict[str, dict] = {}
@@ -398,7 +477,9 @@ def _path_governed_by(gov: dict, cls: str, chokepoint: str, choke_verb: str | No
     return ""
 
 
-async def _derive_paths(session: AsyncSession, namespaces: list[str] | None, cls: str | None) -> tuple[list[ThreatPath], list[str]]:
+async def _derive_paths(
+    session: AsyncSession, namespaces: list[str] | None, cls: str | None
+) -> tuple[list[ThreatPath], list[str]]:
     nodes_by_id, out_edges, seen = await _assemble(session, namespaces)
     overrides = await _verb_overrides(session, namespaces)
     evidence = await _verb_evidence(session, namespaces)
@@ -417,10 +498,6 @@ async def _derive_paths(session: AsyncSession, namespaces: list[str] | None, cls
             choke_verb = ov[0] if ov else (lambda v: v.value if v != Verb.UNKNOWN else None)(classify_tool(p.tool)[0])
             p.governed_by = _path_governed_by(governing, p.cls, p.tool, choke_verb)
             paths.append(p)
-            if len(paths) >= _MAX_PATHS:
-                break
-        if len(paths) >= _MAX_PATHS:
-            break
     # Dedup by id (an agent can reach the same target via distinct-length chains — keep worst).
     by_id: dict[str, ThreatPath] = {}
     for p in paths:
@@ -431,7 +508,11 @@ async def _derive_paths(session: AsyncSession, namespaces: list[str] | None, cls
         by_id.values(),
         key=lambda p: (_STATUS_ORDER.get(p.status, 1), _SEVERITY_ORDER.get(p.sev, 3), -p.blast),
     )
-    return ordered, seen
+    # Cap AFTER ranking so the global truncation drops the LEAST severe paths — never hides a
+    # worst-first (exploitable / critical) path behind arbitrary graph-iteration order. Per-agent
+    # fan-out is already bounded (chokepoint + chain budgets) and the asset graph is node-bounded,
+    # so building all paths before the cap stays bounded.
+    return ordered[:_MAX_PATHS], seen
 
 
 @router.get("/threats/attack-paths", response_model=ThreatPathsResponse)
@@ -467,13 +548,26 @@ async def get_threat_paths(
         kept = [p for p in paths if not is_synthetic_identity(p.cls, p.src)]
         synthetic_hidden = len(paths) - len(kept)
         paths = kept
-    log.info("nrvq.api.attack_paths.served", ns=requested, cls=cls, count=len(paths),
-             synthetic_hidden=synthetic_hidden, resolved=seen, code="NRVQ-API-7101")
+    log.info(
+        "nrvq.api.attack_paths.served",
+        ns=requested,
+        cls=cls,
+        count=len(paths),
+        synthetic_hidden=synthetic_hidden,
+        resolved=seen,
+        code="NRVQ-API-7101",
+    )
     return ThreatPathsResponse(paths=paths, namespaces=seen, synthetic_hidden=synthetic_hidden)
 
 
-async def _coverage(request: Request, session: AsyncSession, namespaces: list[str] | None,
-                    cls: str, allow_tools: list[str], intent: Intent) -> tuple[str, list[str], list[str]]:
+async def _coverage(
+    request: Request,
+    session: AsyncSession,
+    namespaces: list[str] | None,
+    cls: str,
+    allow_tools: list[str],
+    intent: Intent,
+) -> tuple[str, list[str], list[str]]:
     """Generate the default-deny intent rego and DRY-RUN it against each path's chokepoint. Returns
     (rego, covered_ids, residual_ids). Uses the evaluator's isolated dry-run key — no persistence.
     Admin-PROMOTED verbs flow into the generation so the toggles honour them (a tool learned as delete
@@ -513,10 +607,20 @@ async def intent_coverage(
     intent = Intent.from_dict(body.intent.model_dump())
     rego, covered, residual = await _coverage(request, session, namespaces, body.cls, body.allow_tools, intent)
     total = len(covered) + len(residual)
-    log.info("nrvq.api.intent.coverage", cls=body.cls, enabled=intent.enabled_keys(),
-             covered=len(covered), total=total, code="NRVQ-API-7102")
+    log.info(
+        "nrvq.api.intent.coverage",
+        cls=body.cls,
+        enabled=intent.enabled_keys(),
+        covered=len(covered),
+        total=total,
+        code="NRVQ-API-7102",
+    )
     return IntentCoverageResponse(
-        rego=rego, covered=covered, residual=residual, covered_count=len(covered), total=total,
+        rego=rego,
+        covered=covered,
+        residual=residual,
+        covered_count=len(covered),
+        total=total,
     )
 
 
@@ -535,7 +639,9 @@ async def _baseline_priority(session: AsyncSession, ns: str) -> int:
         return int(row)
     row = (
         await session.execute(
-            text("SELECT priority FROM policies WHERE namespace = '__cluster__' AND agent_class = '__baseline__' LIMIT 1")
+            text(
+                "SELECT priority FROM policies WHERE namespace = '__cluster__' AND agent_class = '__baseline__' LIMIT 1"
+            )
         )
     ).scalar()
     if row is not None:
@@ -582,36 +688,65 @@ async def intent_draft(
         valid = False
         errors = [str(exc)]
 
-    draft_id = _short_id("draft", body.ns, body.cls, ",".join(allow_tools), ",".join(intent.enabled_keys())).replace("p", "d", 1)
+    draft_id = _short_id("draft", body.ns, body.cls, ",".join(allow_tools), ",".join(intent.enabled_keys())).replace(
+        "p", "d", 1
+    )
     created_at = datetime.now(timezone.utc)
     # DEDUPE BY CLASS — a (namespace, agent_class) keeps at most ONE pending Attack-Graph intent draft (the
     # latest). Prior drafts for the same class are cleared before insert so re-drafting overwrites instead of
     # piling up. Scope the delete to Attack-Graph drafts (source_control_id IS NULL) so it never clobbers a
     # compliance draft, which is deduped separately by (framework, control, class). Drafts are dry-run only.
     await session.execute(
-        text("DELETE FROM intent_drafts WHERE namespace = :ns AND agent_class = :cls "
-             "AND source_control_id IS NULL"),
+        text("DELETE FROM intent_drafts WHERE namespace = :ns AND agent_class = :cls AND source_control_id IS NULL"),
         {"ns": body.ns, "cls": body.cls},
     )
     session.add(
         IntentDraft(
-            id=draft_id, namespace=body.ns, agent_class=body.cls, rego_source=rego,
-            allow_tools=allow_tools, toggles=intent.enabled_keys(), priority=priority,
-            covered_count=len(covered), total=total, would_block=len(covered), would_allow=len(residual),
-            created_by=str(user.get("sub") or ""), created_at=created_at,
+            id=draft_id,
+            namespace=body.ns,
+            agent_class=body.cls,
+            rego_source=rego,
+            allow_tools=allow_tools,
+            toggles=intent.enabled_keys(),
+            priority=priority,
+            covered_count=len(covered),
+            total=total,
+            would_block=len(covered),
+            would_allow=len(residual),
+            created_by=str(user.get("sub") or ""),
+            created_at=created_at,
             expires_at=draft_expiry(body.cls, created_at),  # TTL (24h test / 14d real)
         )
     )
     await session.commit()
     await enforce_draft_cap(session, body.ns)  # hard ceiling per namespace (evict oldest beyond it)
-    log.info("nrvq.api.intent.draft_created", draft_id=draft_id, ns=body.ns, cls=body.cls,
-             allow_tools=allow_tools, enabled=intent.enabled_keys(), covered=len(covered),
-             priority=priority, enforcement="draft", actor=user.get("sub"), code="NRVQ-API-7103")
+    log.info(
+        "nrvq.api.intent.draft_created",
+        draft_id=draft_id,
+        ns=body.ns,
+        cls=body.cls,
+        allow_tools=allow_tools,
+        enabled=intent.enabled_keys(),
+        covered=len(covered),
+        priority=priority,
+        enforcement="draft",
+        actor=user.get("sub"),
+        code="NRVQ-API-7103",
+    )
     return IntentDraftResponse(
-        draft_id=draft_id, policy=f"{body.ns}/{body.cls}", ns=body.ns, cls=body.cls,
-        deeplink=f"/policies/catalog?intent_draft={draft_id}", priority=priority, enforcement="draft",
-        valid=valid, errors=errors, would_block=len(covered), would_allow=len(residual),
-        covered_count=len(covered), total=total,
+        draft_id=draft_id,
+        policy=f"{body.ns}/{body.cls}",
+        ns=body.ns,
+        cls=body.cls,
+        deeplink=f"/policies/catalog?intent_draft={draft_id}",
+        priority=priority,
+        enforcement="draft",
+        valid=valid,
+        errors=errors,
+        would_block=len(covered),
+        would_allow=len(residual),
+        covered_count=len(covered),
+        total=total,
     )
 
 
@@ -648,7 +783,8 @@ def _tools_reaching_source(nodes, edges, source_type: str, agent_class: str, tar
     data_by_id = {n.id: n for n in nodes if n.type == "data"}
     class_by_id = {n.id: str(n.properties.get("agent_class") or "") for n in nodes if n.type == "agent"}
     cls_tools = {
-        e.target for e in edges
+        e.target
+        for e in edges
         if e.type == "calls" and e.target in tool_name_by_id and class_by_id.get(e.source) == agent_class
     }
     blocked: set[str] = set()
@@ -698,17 +834,21 @@ async def capability_defend(
     for ns, graph_json in snapshots:
         counts = await _decision_counts(session, ns, datetime.now(timezone.utc) - timedelta(hours=24))
         nodes, edges, _ = _snapshot_to_assets(ns, graph_json, counts, prefix_ids=False)
-        blocked_tools.extend(
-            _tools_reaching_source(nodes, edges, body.source_type, body.cls, {Verb(v) for v in verbs})
-        )
+        blocked_tools.extend(_tools_reaching_source(nodes, edges, body.source_type, body.cls, {Verb(v) for v in verbs}))
     blocked_tools = sorted(set(blocked_tools))
 
     # Forward-guard fragments for the target verbs (so the policy blocks unobserved/renamed destructive
     # tools too, not just the ones seen today) — resolved from the same registry verbs the defense targets.
     frags = verb_fragments(body.source_type, [Verb(v) for v in verbs])
     rego = generate_capability_rego(
-        body.source_type, cast(str, meta["source_display"]), body.cls, verbs, blocked_tools,
-        cast(str, meta["rule_id"]), cast(str, meta["reason"]), verb_frags=frags,
+        body.source_type,
+        cast(str, meta["source_display"]),
+        body.cls,
+        verbs,
+        blocked_tools,
+        cast(str, meta["rule_id"]),
+        cast(str, meta["reason"]),
+        verb_frags=frags,
     )
 
     # Validate the generated rego compiles via the isolated dry-run key (never touches the live module).
@@ -729,32 +869,60 @@ async def capability_defend(
     created_at = datetime.now(timezone.utc)
     # Dedupe by (ns, class, capability control) — re-defending the same verbs/source/class overwrites.
     await session.execute(
-        text("DELETE FROM intent_drafts WHERE namespace = :ns AND agent_class = :cls "
-             "AND source_framework = 'capability' AND source_control_id = :cid"),
+        text(
+            "DELETE FROM intent_drafts WHERE namespace = :ns AND agent_class = :cls "
+            "AND source_framework = 'capability' AND source_control_id = :cid"
+        ),
         {"ns": body.ns, "cls": body.cls, "cid": control_id},
     )
     session.add(
         IntentDraft(
-            id=draft_id, namespace=body.ns, agent_class=body.cls, rego_source=rego,
-            allow_tools=blocked_tools, toggles=verbs, priority=priority,
-            covered_count=len(blocked_tools), total=len(blocked_tools),
-            would_block=len(blocked_tools), would_allow=0,
-            created_by=str(user.get("sub") or ""), created_at=created_at,
-            source_framework="capability", source_control_id=control_id,
+            id=draft_id,
+            namespace=body.ns,
+            agent_class=body.cls,
+            rego_source=rego,
+            allow_tools=blocked_tools,
+            toggles=verbs,
+            priority=priority,
+            covered_count=len(blocked_tools),
+            total=len(blocked_tools),
+            would_block=len(blocked_tools),
+            would_allow=0,
+            created_by=str(user.get("sub") or ""),
+            created_at=created_at,
+            source_framework="capability",
+            source_control_id=control_id,
             source_control_name=f"{'/'.join(verbs)} on {meta['source_display']}",
             expires_at=draft_expiry(body.cls, created_at),
         )
     )
     await session.commit()
     await enforce_draft_cap(session, body.ns)
-    log.info("nrvq.api.capability.defend", draft_id=draft_id, ns=body.ns, cls=body.cls,
-             source=body.source_type, verbs=verbs, blocked_tools=blocked_tools, priority=priority,
-             enforcement="draft", actor=user.get("sub"), code="NRVQ-API-7110")
+    log.info(
+        "nrvq.api.capability.defend",
+        draft_id=draft_id,
+        ns=body.ns,
+        cls=body.cls,
+        source=body.source_type,
+        verbs=verbs,
+        blocked_tools=blocked_tools,
+        priority=priority,
+        enforcement="draft",
+        actor=user.get("sub"),
+        code="NRVQ-API-7110",
+    )
     return CapabilityDefendResponse(
-        draft_id=draft_id, deeplink=f"/policies/catalog?intent_draft={draft_id}",
-        ns=body.ns, cls=body.cls, source_type=body.source_type, verbs=verbs,
-        blocked_tools=blocked_tools, forward_guard_verbs=verbs,
-        read_only=bool(meta["read_only"]), valid=valid, errors=errors,
+        draft_id=draft_id,
+        deeplink=f"/policies/catalog?intent_draft={draft_id}",
+        ns=body.ns,
+        cls=body.cls,
+        source_type=body.source_type,
+        verbs=verbs,
+        blocked_tools=blocked_tools,
+        forward_guard_verbs=verbs,
+        read_only=bool(meta["read_only"]),
+        valid=valid,
+        errors=errors,
     )
 
 
@@ -788,25 +956,41 @@ async def list_intent_drafts(
         where = " WHERE namespace = ANY(:nslist)"
         params["nslist"] = namespaces
     total = int((await session.execute(text(f"SELECT COUNT(*) FROM intent_drafts{where}"), params)).scalar() or 0)  # nosec B608 (constant WHERE fragment; namespaces bound as :nslist) # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
-    rows = (await session.execute(
-        text("SELECT id, namespace, agent_class, affected_class, allow_tools, toggles, covered_count, total, "  # nosec B608 (constant WHERE; namespaces/offset/limit bound :nslist/:off/:lim) # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
-             "created_by, created_at, source_framework, source_control_id, source_control_name, expires_at "
-             f"FROM intent_drafts{where} ORDER BY created_at DESC OFFSET :off LIMIT :lim"),
-        {**params, "off": int(offset), "lim": page},
-    )).mappings().all()
-    drafts = [IntentDraftSummary(
-        draft_id=r["id"], ns=r["namespace"], cls=r["agent_class"],
-        # For a remediation draft, `agent_class`/`cls` is the compound persistence
-        # overlay key ("<class>__remediation__") — `affected_class` carries the real class for display.
-        affected_class=r["affected_class"],
-        enabled=list(r["toggles"] or []), allow_tools=list(r["allow_tools"] or []),
-        covered_count=r["covered_count"], total=r["total"],
-        created_by=r["created_by"] or "",
-        created_at=r["created_at"].isoformat() if r["created_at"] else "",
-        source_framework=r["source_framework"], source_control_id=r["source_control_id"],
-        source_control_name=r["source_control_name"],
-        expires_at=r["expires_at"].isoformat() if r["expires_at"] else "",
-    ) for r in rows]
+    rows = (
+        (
+            await session.execute(
+                text(
+                    "SELECT id, namespace, agent_class, affected_class, allow_tools, toggles, covered_count, total, "  # nosec B608 (constant WHERE; namespaces/offset/limit bound :nslist/:off/:lim) # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+                    "created_by, created_at, source_framework, source_control_id, source_control_name, expires_at "
+                    f"FROM intent_drafts{where} ORDER BY created_at DESC OFFSET :off LIMIT :lim"
+                ),
+                {**params, "off": int(offset), "lim": page},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    drafts = [
+        IntentDraftSummary(
+            draft_id=r["id"],
+            ns=r["namespace"],
+            cls=r["agent_class"],
+            # For a remediation draft, `agent_class`/`cls` is the compound persistence
+            # overlay key ("<class>__remediation__") — `affected_class` carries the real class for display.
+            affected_class=r["affected_class"],
+            enabled=list(r["toggles"] or []),
+            allow_tools=list(r["allow_tools"] or []),
+            covered_count=r["covered_count"],
+            total=r["total"],
+            created_by=r["created_by"] or "",
+            created_at=r["created_at"].isoformat() if r["created_at"] else "",
+            source_framework=r["source_framework"],
+            source_control_id=r["source_control_id"],
+            source_control_name=r["source_control_name"],
+            expires_at=r["expires_at"].isoformat() if r["expires_at"] else "",
+        )
+        for r in rows
+    ]
     log.info("nrvq.api.intent.draft_listed", returned=len(drafts), total=total, offset=offset, code="NRVQ-API-7104")
     return IntentDraftPage(drafts=drafts, total=total, returned=len(drafts), offset=int(offset), limit=page)
 
@@ -823,8 +1007,13 @@ async def dismiss_intent_draft(
     result = await session.execute(text("DELETE FROM intent_drafts WHERE id = :id"), {"id": draft_id})
     await session.commit()
     dismissed = int(result.rowcount or 0)
-    log.info("nrvq.api.intent.draft_dismissed", draft_id=draft_id, dismissed=dismissed, actor=user.get("sub"),
-             code="NRVQ-API-7114")
+    log.info(
+        "nrvq.api.intent.draft_dismissed",
+        draft_id=draft_id,
+        dismissed=dismissed,
+        actor=user.get("sub"),
+        code="NRVQ-API-7114",
+    )
     if not dismissed:
         raise HTTPException(status_code=404, detail="draft not found")
     return {"dismissed": True, "draft_id": draft_id}
@@ -844,21 +1033,26 @@ async def gc_intent_drafts(
 
 
 @router.get("/threats/intent-drafts/{draft_id}")
-async def get_intent_draft(draft_id: str, session: AsyncSession = Depends(get_session),
-                           user: dict = Depends(get_current_user)) -> dict:
+async def get_intent_draft(
+    draft_id: str, session: AsyncSession = Depends(get_session), user: dict = Depends(get_current_user)
+) -> dict:
     """Fetch one pending draft in full (incl. the generated rego) so the Policies page can review + apply
     it via the existing gated create/apply flow. Read-only SELECT from ``intent_drafts`` — never enforces."""
     r = (
-        await session.execute(
-            text(
-                "SELECT id, namespace, agent_class, affected_class, rego_source, allow_tools, toggles, priority, "
-                "covered_count, total, would_block, would_allow, created_by, created_at, "
-                "source_framework, source_control_id, source_control_name "
-                "FROM intent_drafts WHERE id = :id LIMIT 1"
-            ),
-            {"id": draft_id},
+        (
+            await session.execute(
+                text(
+                    "SELECT id, namespace, agent_class, affected_class, rego_source, allow_tools, toggles, priority, "
+                    "covered_count, total, would_block, would_allow, created_by, created_at, "
+                    "source_framework, source_control_id, source_control_name "
+                    "FROM intent_drafts WHERE id = :id LIMIT 1"
+                ),
+                {"id": draft_id},
+            )
         )
-    ).mappings().first()
+        .mappings()
+        .first()
+    )
     if r is None:
         raise HTTPException(status_code=404, detail="draft not found (regenerate from Attack Graph)")
     # SECURITY (IDOR): a scoped tenant must not read another namespace's draft (full generated rego + classes).
@@ -867,17 +1061,26 @@ async def get_intent_draft(draft_id: str, session: AsyncSession = Depends(get_se
     if _allowed is not None and r["namespace"] not in _allowed:
         raise HTTPException(status_code=404, detail="draft not found (regenerate from Attack Graph)")
     return {
-        "draft_id": r["id"], "ns": r["namespace"], "cls": r["agent_class"],
+        "draft_id": r["id"],
+        "ns": r["namespace"],
+        "cls": r["agent_class"],
         # Real affected class for display (== agent_class for non-remediation drafts, where
         # affected_class is NULL — the UI falls back to `cls` in that case).
-        "affected_class": r["affected_class"], "rego": r["rego_source"],
-        "allow_tools": list(r["allow_tools"] or []), "enabled": list(r["toggles"] or []),
-        "priority": r["priority"], "covered_count": r["covered_count"], "total": r["total"],
-        "would_block": r["would_block"], "would_allow": r["would_allow"],
+        "affected_class": r["affected_class"],
+        "rego": r["rego_source"],
+        "allow_tools": list(r["allow_tools"] or []),
+        "enabled": list(r["toggles"] or []),
+        "priority": r["priority"],
+        "covered_count": r["covered_count"],
+        "total": r["total"],
+        "would_block": r["would_block"],
+        "would_allow": r["would_allow"],
         "created_by": r["created_by"] or "",
-        "created_at": r["created_at"].isoformat() if r["created_at"] else "", "enforcement": "draft",
+        "created_at": r["created_at"].isoformat() if r["created_at"] else "",
+        "enforcement": "draft",
         # Provenance so the Policy Catalog review header can show "from OWASP LLM · LLM07 …".
-        "source_framework": r["source_framework"], "source_control_id": r["source_control_id"],
+        "source_framework": r["source_framework"],
+        "source_control_id": r["source_control_id"],
         "source_control_name": r["source_control_name"],
     }
 
@@ -897,14 +1100,18 @@ async def _verb_overrides(session: AsyncSession, namespaces: list[str] | None) -
     """{tool_name: (verb, risk)} of PROMOTED verbs in scope. On a multi-ns union the worst risk wins, so a
     tool promoted differently in two namespaces can never display the weaker classification."""
     if namespaces is None:
-        rows = (await session.execute(
-            text("SELECT tool_name, verb, risk FROM tool_verb_overrides")
-        )).mappings().all()
+        rows = (await session.execute(text("SELECT tool_name, verb, risk FROM tool_verb_overrides"))).mappings().all()
     else:
-        rows = (await session.execute(
-            text("SELECT tool_name, verb, risk FROM tool_verb_overrides WHERE namespace = ANY(:nss)"),
-            {"nss": namespaces},
-        )).mappings().all()
+        rows = (
+            (
+                await session.execute(
+                    text("SELECT tool_name, verb, risk FROM tool_verb_overrides WHERE namespace = ANY(:nss)"),
+                    {"nss": namespaces},
+                )
+            )
+            .mappings()
+            .all()
+        )
     out: dict[str, tuple[str, str]] = {}
     for r in rows:
         cur = out.get(str(r["tool_name"]))
@@ -921,15 +1128,21 @@ async def _verb_evidence(session: AsyncSession, namespaces: list[str] | None) ->
     params: dict = {"cutoff": cutoff}
     if namespaces is not None:
         params["nss"] = namespaces
-    rows = (await session.execute(
-        text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
-            "SELECT tool_name, payload->>'op' AS op, count(*) AS n FROM audit_log "  # nosec B608 - ns_filter is a constant fragment; cutoff/namespaces bound via :cutoff/:nss params
-            "WHERE timestamp_utc >= :cutoff AND payload->>'op_src' = 'params' "
-            + ns_filter
-            + "GROUP BY tool_name, payload->>'op'"
-        ),
-        params,
-    )).mappings().all()
+    rows = (
+        (
+            await session.execute(
+                text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+                    "SELECT tool_name, payload->>'op' AS op, count(*) AS n FROM audit_log "  # nosec B608 - ns_filter is a constant fragment; cutoff/namespaces bound via :cutoff/:nss params
+                    "WHERE timestamp_utc >= :cutoff AND payload->>'op_src' = 'params' "
+                    + ns_filter
+                    + "GROUP BY tool_name, payload->>'op'"
+                ),
+                params,
+            )
+        )
+        .mappings()
+        .all()
+    )
     out: dict[str, dict] = {}
     for r in rows:
         d = out.setdefault(str(r["tool_name"]), {"calls": 0, "verbs": {}})
@@ -963,15 +1176,32 @@ async def tool_verbs(
     Read-only — promotion itself is the admin-gated POST below."""
     namespaces = _resolve_namespaces(user, ns)
     if namespaces is None:
-        orows = (await session.execute(text(
-            "SELECT namespace, tool_name, verb, risk, promoted_by, evidence, created_at "
-            "FROM tool_verb_overrides ORDER BY created_at DESC"
-        ))).mappings().all()
+        orows = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT namespace, tool_name, verb, risk, promoted_by, evidence, created_at "
+                        "FROM tool_verb_overrides ORDER BY created_at DESC"
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
     else:
-        orows = (await session.execute(text(
-            "SELECT namespace, tool_name, verb, risk, promoted_by, evidence, created_at "
-            "FROM tool_verb_overrides WHERE namespace = ANY(:nss) ORDER BY created_at DESC"
-        ), {"nss": namespaces})).mappings().all()
+        orows = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT namespace, tool_name, verb, risk, promoted_by, evidence, created_at "
+                        "FROM tool_verb_overrides WHERE namespace = ANY(:nss) ORDER BY created_at DESC"
+                    ),
+                    {"nss": namespaces},
+                )
+            )
+            .mappings()
+            .all()
+        )
     promoted_names = {str(r["tool_name"]) for r in orows}
     evidence = await _verb_evidence(session, namespaces)
     candidates = []
@@ -980,19 +1210,27 @@ async def tool_verbs(
             continue  # already promoted, or the name classifier resolves it now — not a candidate
         verb, count = _top_verb(d)
         risk = default_risk_of_verb(Verb(verb)) if verb else None
-        candidates.append({
-            "tool_name": tool, "calls": d["calls"], "verbs": d["verbs"],
-            "inferred_verb": verb, "inferred_count": count,
-            "suggested_risk": risk.value if risk else None,
-        })
+        candidates.append(
+            {
+                "tool_name": tool,
+                "calls": d["calls"],
+                "verbs": d["verbs"],
+                "inferred_verb": verb,
+                "inferred_count": count,
+                "suggested_risk": risk.value if risk else None,
+            }
+        )
     candidates.sort(key=lambda c: -c["calls"])
     return {
         "namespaces": namespaces or [],
         "overrides": [
             {
-                "namespace": str(r["namespace"]), "tool_name": str(r["tool_name"]),
-                "verb": str(r["verb"]), "risk": str(r["risk"]),
-                "promoted_by": str(r["promoted_by"] or ""), "evidence": r["evidence"],
+                "namespace": str(r["namespace"]),
+                "tool_name": str(r["tool_name"]),
+                "verb": str(r["verb"]),
+                "risk": str(r["risk"]),
+                "promoted_by": str(r["promoted_by"] or ""),
+                "evidence": r["evidence"],
                 "created_at": r["created_at"].isoformat() if r["created_at"] else "",
             }
             for r in orows
@@ -1034,16 +1272,24 @@ async def promote_tool_verb(
             "promoted_by = EXCLUDED.promoted_by, evidence = EXCLUDED.evidence, created_at = now()"
         ),
         {
-            "ns": ns_val, "tool": tool, "verb": verb, "risk": risk.value if risk else "low",
+            "ns": ns_val,
+            "tool": tool,
+            "verb": verb,
+            "risk": risk.value if risk else "low",
             "by": str(user.get("sub") or user.get("username") or ""),
             "ev": json.dumps(evidence) if evidence else None,
         },
     )
     await session.commit()
-    log.info("nrvq.api.toolverb.promote", ns=ns_val, tool=tool, verb=verb,
-             calls=(evidence or {}).get("calls", 0), code="NRVQ-API-7110")
-    return {"promoted": True, "ns": ns_val, "tool_name": tool, "verb": verb,
-            "risk": risk.value if risk else "low"}
+    log.info(
+        "nrvq.api.toolverb.promote",
+        ns=ns_val,
+        tool=tool,
+        verb=verb,
+        calls=(evidence or {}).get("calls", 0),
+        code="NRVQ-API-7110",
+    )
+    return {"promoted": True, "ns": ns_val, "tool_name": tool, "verb": verb, "risk": risk.value if risk else "low"}
 
 
 @router.delete("/threats/tool-verbs")
@@ -1152,16 +1398,24 @@ async def intent_suggest(
                 if ev:
                     observed_calls = int(ev.get("calls") or 0)
                     inferred_verb, inferred_count = _top_verb(ev)
-        tools.append(IntentSuggestTool(
-            name=name, allow=d["allow"], block=d["block"], tag=tag,
-            target=tool_target.get(name),
-            in_attack_path=(name in path_step_tools or name in chokepoints),
-            op=op_val, op_risk=op_risk_val, op_src=op_src,
-            observed_calls=observed_calls, inferred_verb=inferred_verb, inferred_count=inferred_count,
-        ))
+        tools.append(
+            IntentSuggestTool(
+                name=name,
+                allow=d["allow"],
+                block=d["block"],
+                tag=tag,
+                target=tool_target.get(name),
+                in_attack_path=(name in path_step_tools or name in chokepoints),
+                op=op_val,
+                op_risk=op_risk_val,
+                op_src=op_src,
+                observed_calls=observed_calls,
+                inferred_verb=inferred_verb,
+                inferred_count=inferred_count,
+            )
+        )
     # Chokepoint/egress first (they most need an explicit intent decision), then by real traffic volume.
     _tag_rank = {"chokepoint": 0, "egress": 0, "normal": 1}
     tools.sort(key=lambda t: (_tag_rank.get(t.tag, 1), -(t.block + t.allow), t.name))
-    log.info("nrvq.api.intent.suggest", ns=ns, cls=cls, count=len(tools),
-             resolved=seen, code="NRVQ-API-7105")
+    log.info("nrvq.api.intent.suggest", ns=ns, cls=cls, count=len(tools), resolved=seen, code="NRVQ-API-7105")
     return IntentSuggestResponse(ns=seen, cls=cls, tools=tools)

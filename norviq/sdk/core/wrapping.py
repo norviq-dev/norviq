@@ -46,9 +46,26 @@ def _output_dlp(tool_name: str, result: Any) -> Any:
     return masked
 
 
+# Control kwargs a framework injects into a tool's ``_run``/``_arun`` — LangChain's ``RunnableConfig``
+# and callback managers. They are plumbing, not tool arguments: they carry no authorization-relevant
+# data and are not JSON-serializable, so they must never enter the policy-evaluate payload. Signature
+# mirroring (see the LangChain adapter) makes LangChain inject these into our wrapper's ``**kwargs``;
+# the wrapper still forwards them to the original tool, but we strip them here so the engine sees only
+# the real parameters. Without this, a benign call carrying a ``CallbackManagerForToolRun`` fails to
+# serialize and the client fails closed — silently blocking healthy traffic for a non-policy reason.
+_FRAMEWORK_CONTROL_KWARGS = frozenset(
+    {"config", "run_manager", "callbacks", "callback_manager", "run_id", "run_name", "metadata", "tags"}
+)
+
+
 def _tool_params(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
-    """Build a stable parameter payload from invocation data."""
-    return kwargs or {"args": list(args)}
+    """Build a stable parameter payload from invocation data.
+
+    Framework control kwargs (``config``/``run_manager``/…) are excluded — they are plumbing, not
+    tool arguments, and are not serializable for the evaluate payload.
+    """
+    params = {k: v for k, v in kwargs.items() if k not in _FRAMEWORK_CONTROL_KWARGS}
+    return params or {"args": list(args)}
 
 
 def _run_sync(coro: Any) -> Any:

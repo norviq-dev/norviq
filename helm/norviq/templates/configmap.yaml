@@ -6,6 +6,7 @@
 {{- if not .Values.oidc.jwksUrl }}{{ fail "oidc.enabled=true but oidc.jwksUrl is empty — set your IdP JWKS endpoint (--set oidc.jwksUrl=...)." }}{{- end }}
 {{- if not .Values.oidc.audience }}{{ fail "oidc.enabled=true but oidc.audience is empty — set the API client/audience id (--set oidc.audience=...)." }}{{- end }}
 {{- end }}
+{{- if and .Values.otel.enabled (not .Values.otel.endpoint) }}{{ fail "otel.enabled=true but otel.endpoint is empty — set your OTLP collector endpoint (--set otel.endpoint=http://<collector>:4317). Enabling trace export without a collector silently drops every span." }}{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -87,6 +88,5 @@ data:
   NRVQ_LEGACY_HS256_ENABLED: {{ .Values.oidc.legacyHs256Enabled | default true | quote }}
   NRVQ_SPIFFE_MODE: {{ .Values.config.spiffeMode | default "mock" | quote }}
   NRVQ_SPIFFE_SOCKET: {{ .Values.config.spiffeSocket | default "/spiffe-workload-api/spire-agent.sock" | quote }}
-  NRVQ_OTEL_ENDPOINT: {{ .Values.otel.endpoint | quote }}
-  NRVQ_OTEL_ENABLED: {{ .Values.otel.enabled | quote }}
-  NRVQ_PROMETHEUS_PORT: {{ .Values.otel.prometheusPort | quote }}
+  NRVQ_OTEL_ENDPOINT: {{ .Values.otel.endpoint | default "" | quote }}
+  NRVQ_OTEL_ENABLED: {{ .Values.otel.enabled | default false | quote }}

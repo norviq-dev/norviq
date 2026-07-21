@@ -326,12 +326,18 @@ postgresql:
   storage: 5Gi
 
 otel:
-  # OTLP trace export to a collector (gRPC), gated by this flag.
+  # OTLP trace export to a collector (gRPC), gated by this flag. Empty endpoint by default: enabling
+  # trace export requires you to point it at a real collector (--set otel.endpoint=http://<collector>:4317).
+  # The chart FAILS the render if enabled=true with an empty endpoint, so spans are never silently
+  # dropped into a void. (No collector ships with Norviq — deploy one, e.g. an OpenTelemetry Collector or
+  # Grafana Tempo, and set the endpoint to its OTLP gRPC address.)
   enabled: false
-  endpoint: "http://otel-collector:4317"
+  endpoint: ""
   # Prometheus metrics are ALWAYS served at /metrics on the norviq-api Service port (api.port),
-  # regardless of otel.enabled. The knobs below only control how your Prometheus DISCOVERS that
-  # endpoint — nothing here changes whether metrics are produced.
+  # regardless of otel.enabled. There is NO separate metrics port. The knobs below only control how your
+  # Prometheus DISCOVERS that endpoint — nothing here changes whether metrics are produced. NOTE: counters
+  # are per-replica and in-memory, so with api.replicas > 1 you MUST scrape per-pod (ServiceMonitor or the
+  # scrape annotations below) and sum across pods — a single Service-level scrape reads only one replica.
   metrics:
     # Annotation-based discovery: add prometheus.io/scrape + port + path to the norviq-api Service,
     # for a Prometheus configured to scrape by pod/service annotations.
@@ -345,9 +351,6 @@ otel:
       # Extra labels so your Prometheus's serviceMonitorSelector picks this up
       # (e.g. {release: kube-prometheus-stack}).
       additionalLabels: {}
-  # Reserved: the /metrics endpoint is ASGI-mounted on api.port, NOT on a separate port. This value
-  # is passed through to the app but the scrape target is <norviq-api>:<api.port>/metrics.
-  prometheusPort: 9090
 
 # Long-lived OPA policy engine, run as a sidecar in the api and engine pods (localhost:8181).
 # Each replica gets its own OPA -> no shared single point of failure. config.opaMode=server (default)

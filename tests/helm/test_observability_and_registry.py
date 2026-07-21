@@ -124,6 +124,31 @@ def test_oidc_fully_configured_renders() -> None:
     assert res.returncode == 0, res.stderr[:400]
 
 
+# ---- OTel export honesty: fail-fast + no dead metrics port ---------------------------------------
+
+def test_otel_enabled_without_endpoint_fails() -> None:
+    res = _run("--set", "otel.enabled=true")  # no endpoint -> must not silently ship a void exporter
+    assert res.returncode != 0
+    assert "otel.endpoint" in res.stderr
+
+
+def test_otel_enabled_with_endpoint_renders() -> None:
+    res = _run("--set", "otel.enabled=true", "--set", "otel.endpoint=http://otel-collector:4317")
+    assert res.returncode == 0, res.stderr[:400]
+    cm = next(d for d in yaml.safe_load_all(res.stdout)
+              if d and d.get("kind") == "ConfigMap" and d["metadata"]["name"] == "norviq-config")
+    assert cm["data"]["NRVQ_OTEL_ENDPOINT"] == "http://otel-collector:4317"
+    assert cm["data"]["NRVQ_OTEL_ENABLED"] == "true"
+
+
+def test_no_dead_prometheus_port_env() -> None:
+    cm = next(d for d in yaml.safe_load_all(_render())
+              if d and d.get("kind") == "ConfigMap" and d["metadata"]["name"] == "norviq-config")
+    # /metrics is ASGI-mounted on the api port; the old NRVQ_PROMETHEUS_PORT advertised a listener
+    # nothing bound (a scrape footgun) and has been removed.
+    assert "NRVQ_PROMETHEUS_PORT" not in cm["data"]
+
+
 # ---- TH-5: tls-proxy resources knob --------------------------------------------------------------
 
 def test_tls_proxy_resources_are_configurable() -> None:
