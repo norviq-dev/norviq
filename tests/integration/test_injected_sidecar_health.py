@@ -32,6 +32,9 @@ import pytest
 
 SIDECAR_CONTAINER = "norviq-sidecar"
 INJECTION_LABEL = "norviq-injection=enabled"
+# app label of the ephemeral pod created by tests/integration/test_data_plane_enforcement.py — excluded
+# below so the two suites can run in the same session without sampling each other's transient state.
+PROBE_APP_LABEL = "norviq-dataplane-probe"
 
 pytestmark = pytest.mark.skipif(shutil.which("kubectl") is None, reason="kubectl not on PATH")
 
@@ -57,7 +60,21 @@ def _injected_pods(namespace: str) -> list[dict]:
     return [
         p for p in pods
         if any(c.get("name") == SIDECAR_CONTAINER for c in p["spec"].get("containers", []))
+        and not _is_ephemeral_probe(p)
     ]
+
+
+def _is_ephemeral_probe(pod: dict) -> bool:
+    """True for the throwaway pod test_data_plane_enforcement.py creates.
+
+    That pod is deliberately short-lived, so when the two suites run together this one would sample it
+    mid-creation (sidecar not Ready yet) or mid-termination and report a false CrashLoop/NotReady —
+    a flake that says 'the PEP is down' when nothing is wrong. Steady-state workloads only.
+    """
+    meta = pod.get("metadata", {})
+    if (meta.get("labels") or {}).get("app") == PROBE_APP_LABEL:
+        return True
+    return meta.get("deletionTimestamp") is not None
 
 
 def _sidecar_status(pod: dict) -> dict | None:
