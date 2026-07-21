@@ -31,7 +31,7 @@ class AuditEmitter:
         """Create emitter state."""
         self._tasks: set[asyncio.Task[None]] = set()
         self._tracer: trace.Tracer | None = None
-        # HIGH-2b: bound how many audit DB writes can hold a pooled connection concurrently. emit()
+        # Bound how many audit DB writes can hold a pooled connection concurrently. emit()
         # still fires a task immediately for every call (fire-and-forget latency is preserved — the
         # caller never awaits this), but excess writers queue on the semaphore instead of each
         # grabbing a connection, so a flood of tool calls can't fan out enough concurrent INSERTs to
@@ -85,7 +85,7 @@ class AuditEmitter:
     async def _write_db(self, record: AuditRecord) -> None:
         """Persist an audit record into PostgreSQL.
 
-        HIGH-2b: gated by ``_db_write_gate`` so at most ``audit_emit_max_concurrency`` writers hold a
+        Gated by ``_db_write_gate`` so at most ``audit_emit_max_concurrency`` writers hold a
         pooled DB connection at once — a queued writer here does not block the caller of ``emit()``
         (that already returned), it only delays this specific background task.
         """

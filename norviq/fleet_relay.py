@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Spoke-side fleet relay (F045): periodically pushes agent + audit ROLLUPS to the hub fleet-api.
+"""Spoke-side fleet relay: periodically pushes agent + audit ROLLUPS to the hub fleet-api.
 
 Mirrors the SIEM AuditForwarder exactly. Runs in-process in the spoke API as a background task, gated
 by `fleet_enabled`. STRICTLY off the enforce hot path and fire-and-forget: any failure (DB read, token,
@@ -101,7 +101,7 @@ class FleetRelayForwarder:
             "name": settings.fleet_cluster_name, "endpoint": settings.fleet_cluster_endpoint,
             "region": settings.fleet_cluster_region, "labels": settings.fleet_cluster_labels,
             "residency": settings.fleet_residency, "spiffe_id": await self._spiffe_id(),
-            "console_url": settings.fleet_cluster_console_url,  # F-69: advertise this cluster's own console URL
+            "console_url": settings.fleet_cluster_console_url,  # advertise this cluster's own console URL
         })
         hb.raise_for_status()
         log.debug("nrvq.fleet.heartbeat_sent", code="NRVQ-FLT-15002")

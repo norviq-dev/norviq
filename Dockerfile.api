@@ -43,8 +43,10 @@ RUN printf "%s\n" "${NRVQ_GIT_SHA}" > /app/.build_git_sha
 COPY norviq/ norviq/
 COPY policies/ policies/
 
-RUN useradd -r -s /usr/sbin/nologin norviq
-USER norviq
+# Pin a NUMERIC uid and reference it numerically in USER so kubelet can verify the
+# securityContext runAsNonRoot=true (a name-based `USER norviq` fails with "non-numeric user").
+RUN useradd -r -u 999 -s /usr/sbin/nologin norviq
+USER 999
 
 EXPOSE 8080
 CMD ["python", "-m", "uvicorn", "norviq.api.main:app", "--host", "0.0.0.0", "--port", "8080"]

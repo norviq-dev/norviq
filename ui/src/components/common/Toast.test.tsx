@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// P1-3: the shared feedback surface. Errors/warnings are STICKY (a partial outcome can't expire
+// The shared feedback surface. Errors/warnings are STICKY (a partial outcome can't expire
 // unseen); success/info auto-dismiss; the action button fires and dismisses.
 import { render, screen, act } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
@@ -20,7 +20,7 @@ const onAction = vi.fn();
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
-describe("ToastProvider (P1-3)", () => {
+describe("ToastProvider", () => {
   it("success auto-dismisses; warning is sticky with its full detail visible", () => {
     render(
       <ToastProvider>

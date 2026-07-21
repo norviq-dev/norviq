@@ -5,7 +5,7 @@
 action — `norviq fleet join <token>` -> POST /api/v1/fleet/join — instead of per-spoke Helm `--set` wiring. The token
 (minted by the hub) carries the hub endpoint + cluster_id + bundle PUBLIC key (trust root). Join persists the config
 to FleetJoinState (read again at startup) and (re)starts the relay+puller LIVE; leave stops them and sheds any
-pushed policy via the F-52 reconcile path. Admin only."""
+pushed policy via the reconcile path. Admin only."""
 
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ async def configure_from_join_state(session: AsyncSession) -> bool:
     return bool(row.enabled)
 
 
-# R5: the enrollment claim uses the shared OIDC-preferring service bearer (fleet_service_bearer) so a hardened
+# The enrollment claim uses the shared OIDC-preferring service bearer (fleet_service_bearer) so a hardened
 # hub (legacy_hs256_enabled=false) accepts an OIDC-authenticated claim instead of 401ing an HS256-only token.
 
 
@@ -88,7 +88,7 @@ async def fleet_join(
         log.warning("nrvq.fleet.join_rejected", error=str(exc), code="NRVQ-FLT-15033")
         raise HTTPException(status_code=422, detail=f"invalid join token: {exc}") from exc
     cluster_id, hub_url, pubkey, jti = payload["cid"], payload["hub"], payload["pub"], payload["jti"]
-    # SSRF-01: hub_url is dialed below (with this spoke's own service bearer attached) and, on success,
+    # hub_url is dialed below (with this spoke's own service bearer attached) and, on success,
     # PERSISTED as the ongoing relay/puller target (_apply_settings / FleetJoinState) — guard it before
     # either happens. The hub-side mint already guards hub_url (norviq/fleet/routers/fleet.py), but a
     # spoke must not trust that the token it was handed came from an unmodified hub / wasn't replayed
@@ -121,7 +121,7 @@ async def fleet_join(
     # pull from the (re)joined hub is accepted even if the hub's per-cluster version restarted lower than what this
     # spoke last applied (e.g. the cluster was removed at the hub, resetting its counter, then rejoined). Without this
     # the anti-rollback guard (version <= last_applied -> skip) would reject every bundle and the cluster stays stuck
-    # "pending" forever. The puller's F-52 reconcile still drops any policy no longer in the new hub's bundle.
+    # "pending" forever. The puller's reconcile still drops any policy no longer in the new hub's bundle.
     for stale in (await session.execute(select(FleetBundleState))).scalars().all():
         stale.last_applied_version = 0
         stale.last_bundle_sha256 = ""
@@ -139,7 +139,7 @@ async def fleet_leave(
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """De-enroll this spoke: stop the relay+puller and SHED any fleet-pushed policy (reuse the F-52 reconcile path),
+    """De-enroll this spoke: stop the relay+puller and SHED any fleet-pushed policy (reuse the reconcile path),
     so it returns to single-cluster AND stops enforcing pushed policy — across restarts (FleetJoinState.enabled=False
     overrides any env fleet config)."""
     require_admin(user)
@@ -148,7 +148,7 @@ async def fleet_leave(
         row = FleetJoinState(id=1)
         session.add(row)
     row.enabled = False
-    # Shed fleet-applied policies recorded in the spoke manifest (F-52 reconcile machinery) AND reset the bundle
+    # Shed fleet-applied policies recorded in the spoke manifest (reconcile machinery) AND reset the bundle
     # version lineage: detaching from the fleet must FORGET the last-applied version, so a later re-enrollment is not
     # permanently rejected by the anti-rollback guard if the hub's per-cluster version restarted lower (remove->
     # rejoin). Iterate every row (a spoke may carry state for more than one cluster id across re-enrollments).

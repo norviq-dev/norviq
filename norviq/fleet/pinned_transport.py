@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""SSRF-02 (CRITICAL, DNS-rebind): `ssrf_guard.assert_safe_url_async` validates a URL's resolved
+"""Close the DNS-rebinding gap: `ssrf_guard.assert_safe_url_async` validates a URL's resolved
 addresses, but a caller that then hands the raw hostname to `httpx` lets httpx RE-RESOLVE independently
 at connect time. A DNS-rebinding attacker answers the guard's lookup with a public IP and answers
 httpx's later, separate lookup with a blocked address (169.254.169.254 / an internal service) for the

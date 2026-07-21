@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Hub fleet policy API (F045 P2): authoring RBAC, selector/override resolution, rollout state machine,
+"""Hub fleet policy API: authoring RBAC, selector/override resolution, rollout state machine,
 cross-cluster scope. Reuses the bare-TestClient + FakeFleetSession harness from test_fleet_api.py."""
 
 from __future__ import annotations
@@ -16,11 +16,11 @@ from tests.fleet.test_fleet_api import FakeFleetSession, _client, _headers
 def _author_body(name="p1", selector=None, agent_class="bot", confirm=True):
     return {"name": name, "namespace": "default", "agent_class": agent_class, "rego_source": "package x",
             "priority": 100, "enforcement_mode": "block", "target_selector": selector or {},
-            "confirm_fleet_wide": confirm}  # F-40: a fleet-wide selector needs confirmation
+            "confirm_fleet_wide": confirm}  # A fleet-wide selector needs confirmation
 
 
 def test_fleet_push_reserved_scope_rejected() -> None:
-    # F-40: a push to __baseline__/__pack__ must 422 (and never reach the DB) — baseline/pack are per-cluster managed.
+    # A push to __baseline__/__pack__ must 422 (and never reach the DB) — baseline/pack are per-cluster managed.
     for scope in ("__baseline__", "__pack__"):
         c = _client(FakeFleetSession())
         try:
@@ -32,7 +32,7 @@ def test_fleet_push_reserved_scope_rejected() -> None:
 
 
 def test_fleet_wide_push_requires_confirm() -> None:
-    # F-40: env-scoped (no cluster_id -> matches >1 cluster) without confirm -> 422; with confirm -> 200.
+    # Env-scoped (no cluster_id -> matches >1 cluster) without confirm -> 422; with confirm -> 200.
     c = _client(FakeFleetSession())
     try:
         r = c.post("/api/v1/fleet/policies",
@@ -50,7 +50,7 @@ def test_fleet_wide_push_requires_confirm() -> None:
 
 
 def test_single_cluster_push_no_confirm_needed() -> None:
-    # F-40: a single-cluster override ({"cluster_id":…}) is not fleet-wide -> no confirm required.
+    # A single-cluster override ({"cluster_id":…}) is not fleet-wide -> no confirm required.
     c = _client(FakeFleetSession(results=[[]]))
     try:
         r = c.post("/api/v1/fleet/policies",
@@ -61,7 +61,7 @@ def test_single_cluster_push_no_confirm_needed() -> None:
 
 
 def test_resolve_excludes_reserved_scope() -> None:
-    # F-40 defense-in-depth: a reserved-scope policy already in the DB never lands in a bundle.
+    # Defense-in-depth: a reserved-scope policy already in the DB never lands in a bundle.
     cluster = SimpleNamespace(id="fleet-a", labels={"env": "prod"})
     pol = lambda name, cls: SimpleNamespace(  # noqa: E731
         name=name, namespace="default", agent_class=cls, rego_source="R", priority=100,
@@ -119,7 +119,7 @@ def test_resolve_selector_and_override_precedence() -> None:
 
 
 def test_drilldown_residency_blocked() -> None:
-    # P4/P5: a residency-flagged cluster must NOT have its raw audit pulled to the hub.
+    # A residency-flagged cluster must NOT have its raw audit pulled to the hub.
     s = FakeFleetSession(results=[[SimpleNamespace(id="fleet-a", endpoint="http://spoke", residency=True)]])
     c = _client(s)
     try:

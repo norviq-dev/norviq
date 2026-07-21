@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F046: GET /api/v1/coverage-by-category cross-references the category->rule taxonomy with the rego
+"""GET /api/v1/coverage-by-category cross-references the category->rule taxonomy with the rego
 actually loaded for a namespace. Covers happy (some rules present), empty (no policy loaded -> 0), and auth."""
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 import jwt
@@ -39,7 +40,11 @@ def _client(policies: dict[str, dict]) -> TestClient:
 
 
 def _token() -> str:
-    return jwt.encode({"sub": "u", "role": "admin"}, settings.api_secret_key, algorithm="HS256")
+    return jwt.encode(
+        {"sub": "u", "role": "admin", "exp": int(time.time()) + 3600},
+        settings.api_secret_key,
+        algorithm="HS256",
+    )
 
 
 def test_coverage_happy_reflects_loaded_rules() -> None:
@@ -55,7 +60,7 @@ def test_coverage_happy_reflects_loaded_rules() -> None:
     assert cats["Data Protection"]["covered"] == 1
     assert cats["Prompt Injection"]["covered"] == 0
     assert 0 < body["coverage_pct"] < 100
-    # F-44/F-45 honesty: score is presence, declared by basis; the efficacy overlay is present (0 with no audit).
+    # Honesty: score is presence, declared by basis; the efficacy overlay is present (0 with no audit).
     assert body["basis"] == "rules_present"
     assert cats["Data Protection"]["effective"] is False  # rule present but no blocked traffic -> not proven
     assert all("observed" in c and "blocked" in c for c in body["categories"])

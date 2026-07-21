@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Validate the fleet P1: heartbeat+register, cross-cluster aggregation, cluster-scope RBAC (403),
+# Validate the fleet: heartbeat+register, cross-cluster aggregation, cluster-scope RBAC (403),
 # hub-down fail-safe (spoke keeps enforcing). Evidence -> .reviews/fleet-local/.
 set -uo pipefail
 

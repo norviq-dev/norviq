@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from norviq.api.auth import get_current_user, read_namespace, scoped_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
+from norviq.api.synthetic import audit_row_is_non_real, is_synthetic_identity  # the ONE shared synthetic/probe classifier (do not fork)
 from norviq.config import settings
 
 
@@ -66,7 +67,7 @@ def _to_dict(row: AuditLogEntry) -> dict:
         "session_id": getattr(row, "session_id", ""),
         "trust_score": row.trust_score,
         "latency_ms": row.latency_ms,
-        # OBS-2: decision source (sidecar / sidecar-http / sdk / redteam / ...) for the UI Source column + filter.
+        # Decision source (sidecar / sidecar-http / sdk / redteam / ...) for the UI Source column + filter.
         "framework": getattr(row, "framework", ""),
         "timestamp": row.timestamp_utc.isoformat(),
     }
@@ -77,16 +78,19 @@ async def list_audit_records(
     namespace: str | None = Query(default=None),
     decision: str | None = Query(default=None),
     tool_name: str | None = Query(default=None),
-    agent: str | None = Query(default=None),  # F-53: SPIFFE/agent-id substring, filtered SERVER-SIDE over the range
-    framework: str | None = Query(default=None),  # OBS-2: decision source (sidecar / api / sdk / redteam / ...)
+    agent: str | None = Query(default=None),  # SPIFFE/agent-id substring, filtered SERVER-SIDE over the range
+    framework: str | None = Query(default=None),  # decision source (sidecar / api / sdk / redteam / ...)
     rule_id: str | None = Query(default=None),  # Compliance deep-link: filter by the enforcing rule (exact match)
+    # Real-traffic-only view: drop red-team + synthetic/probe rows so the Audit Log reconciles with the
+    # Overview headline (which counts the same real-traffic population). Same exclusion as /audit/stats.
+    exclude_synthetic: bool = Query(default=False),
     range: Literal["1h", "6h", "24h", "7d", "30d"] = Query(default="24h"),
     limit: int = Query(default=50, le=500),
     offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
     user: dict = Depends(get_current_user),
 ) -> list[dict]:
-    """List audit records with pagination and filters. F-53: tool_name + agent are CASE-INSENSITIVE SUBSTRING
+    """List audit records with pagination and filters. tool_name + agent are CASE-INSENSITIVE SUBSTRING
     matches applied server-side across the whole range (not exact-equality, not a client-side page filter)."""
     namespace = read_namespace(user, namespace)
     since = _since_for_range(range)
@@ -102,13 +106,15 @@ async def list_audit_records(
     if decision:
         query = query.where(AuditLogEntry.decision == decision)
     if tool_name:
-        query = query.where(AuditLogEntry.tool_name.icontains(tool_name, autoescape=True))  # F-53: substring, not ==
+        query = query.where(AuditLogEntry.tool_name.icontains(tool_name, autoescape=True))  # substring, not ==
     if agent:
-        query = query.where(AuditLogEntry.agent_id.icontains(agent, autoescape=True))  # F-53: server-side SPIFFE filter
+        query = query.where(AuditLogEntry.agent_id.icontains(agent, autoescape=True))  # server-side SPIFFE filter
     if framework:
-        query = query.where(AuditLogEntry.framework == framework)  # OBS-2: filter by decision source
+        query = query.where(AuditLogEntry.framework == framework)  # filter by decision source
     if rule_id:
         query = query.where(AuditLogEntry.rule_id == rule_id)  # Compliance evidence-row deep-link
+    if exclude_synthetic:
+        query = query.where(~audit_row_is_non_real(AuditLogEntry))  # real traffic only — reconciles with /audit/stats
     rows = (await session.execute(query)).scalars().all()
     log.debug("nrvq.api.audit.listed", count=len(rows), code="NRVQ-API-7020")
     return [_to_dict(row) for row in rows]
@@ -144,37 +150,64 @@ async def audit_stats(
     """Return aggregate audit stats."""
     namespace = read_namespace(user, namespace)
     since = _since_for_range(range)
-    base = select(func.count(AuditLogEntry.id)).where(AuditLogEntry.timestamp_utc >= since)
-    if namespace:
-        base = base.where(AuditLogEntry.namespace == namespace)
-    total = int((await session.scalar(base)) or 0)
-    blocked = int((await session.scalar(base.where(AuditLogEntry.decision == "block"))) or 0)
-    tools_stmt = (
-        select(AuditLogEntry.tool_name, func.count(AuditLogEntry.id))
-        .group_by(AuditLogEntry.tool_name)
-        .order_by(desc(func.count(AuditLogEntry.id)))
-        .limit(5)
+    # RECONCILE (real-traffic-only): the Overview KPIs/top-tools must count the SAME population the governance
+    # surfaces do (Compliance/MITRE `_activity_by_rule`, RedTeam `compute_efficacy`) — REAL traffic only. So we
+    # exclude red-team framework events (efficacy tooling, not live enforcement) and synthetic/probe/eval
+    # identities (`is_synthetic_identity`). `is_synthetic_identity` is a Python prefix/regex classifier that
+    # is NOT expressible in SQL, so — exactly like `_activity_by_rule` — we GROUP BY the discriminating columns
+    # and drop the excluded rows Python-side before aggregating (bounded cardinality, not a full table scan).
+    stmt = (
+        select(
+            AuditLogEntry.tool_name,
+            AuditLogEntry.decision,
+            AuditLogEntry.agent_class,
+            AuditLogEntry.framework,
+            AuditLogEntry.rule_id,
+            func.count(AuditLogEntry.id),
+            func.sum(AuditLogEntry.latency_ms),
+            func.count(AuditLogEntry.latency_ms),  # non-null latency count → matches AVG() semantics
+        )
+        .where(AuditLogEntry.timestamp_utc >= since)
+        .group_by(
+            AuditLogEntry.tool_name, AuditLogEntry.decision, AuditLogEntry.agent_class,
+            AuditLogEntry.framework, AuditLogEntry.rule_id,
+        )
     )
     if namespace:
-        tools_stmt = tools_stmt.where(AuditLogEntry.namespace == namespace)
-    top_tools = []
-    for row in (await session.execute(tools_stmt)).all():
-        if hasattr(row, "tool_name"):
-            top_tools.append({"tool_name": row.tool_name, "count": row.count})
-        else:
-            top_tools.append({"tool_name": row[0], "count": row[1]})
-    rate = round((blocked / total) * 100, 2) if total else 0.0
-    # FIX-3: engine (OPA-eval) errors are fail-closed ENGINE faults, not policy decisions. Surface them as a
+        stmt = stmt.where(AuditLogEntry.namespace == namespace)
+    total = 0
+    blocked = 0
+    # Engine (OPA-eval) errors are fail-closed ENGINE faults, not policy decisions. Surface them as a
     # distinct dashboard signal so an `evaluator_error` spike reads as an engine-health problem, not a wall of
     # "policy blocks". A clean input never produces one (transient errors self-heal via the evaluator retry).
-    engine_errors = int((await session.scalar(base.where(AuditLogEntry.rule_id == "evaluator_error"))) or 0)
-    # K2: real average end-to-end latency over the SAME window (+ namespace) predicate. latency_ms is the measured
-    # evaluate latency stamped on every audit record (F-13), so this is a real number, not a placeholder 0. The
-    # Overview's Avg-latency KPI binds this instead of averaging a capped client-side records sample.
-    avg_stmt = select(func.avg(AuditLogEntry.latency_ms)).where(AuditLogEntry.timestamp_utc >= since)
-    if namespace:
-        avg_stmt = avg_stmt.where(AuditLogEntry.namespace == namespace)
-    avg_latency_ms = round(float((await session.scalar(avg_stmt)) or 0.0), 2)
+    engine_errors = 0
+    # Real average end-to-end latency over the SAME window (+ namespace + real-traffic) predicate. latency_ms
+    # is the measured evaluate latency stamped on every audit record; summing it and dividing by the count
+    # of non-null latencies reproduces AVG() over exactly the rows we kept. The Overview's Avg-latency KPI binds
+    # this instead of averaging a capped client-side records sample.
+    latency_sum = 0.0
+    latency_n = 0
+    tool_counts: dict[str, int] = {}
+    for tool_name, decision, agent_class, framework, rule_id, count, lat_sum, lat_n in (
+        await session.execute(stmt)
+    ).all():
+        if str(framework or "") == "redteam" or is_synthetic_identity(str(agent_class or "")):
+            continue  # excluded from Overview so it reconciles with Compliance/MITRE + RedTeam efficacy
+        n = int(count or 0)
+        total += n
+        if decision == "block":
+            blocked += n
+        if rule_id == "evaluator_error":
+            engine_errors += n
+        tool_counts[str(tool_name or "")] = tool_counts.get(str(tool_name or ""), 0) + n
+        latency_sum += float(lat_sum or 0.0)
+        latency_n += int(lat_n or 0)
+    top_tools = [
+        {"tool_name": name, "count": count}
+        for name, count in sorted(tool_counts.items(), key=lambda kv: -kv[1])[:5]
+    ]
+    rate = round((blocked / total) * 100, 2) if total else 0.0
+    avg_latency_ms = round(latency_sum / latency_n, 2) if latency_n else 0.0
     log.debug("nrvq.api.audit.stats", total=total, blocked=blocked, engine_errors=engine_errors,
               avg_latency_ms=avg_latency_ms, code="NRVQ-API-7021")
     return {"total": total, "blocked": blocked, "allowed": total - blocked, "block_rate_pct": rate,
@@ -192,19 +225,31 @@ async def top_blocked_tools(
     """Top blocked tool names by count."""
     namespace = read_namespace(user, namespace)
     since = _since_for_range(range)
+    # Reconcile: the Overview headline (audit_stats) already excludes red-team framework events +
+    # synthetic/probe identities so it counts the SAME real-traffic population as Compliance/MITRE. This
+    # sibling widget must too, or the Top-Blocked-Tools list on the same page contradicts its own headline.
+    # is_synthetic_identity is a Python prefix/regex classifier NOT expressible in SQL, so — exactly like
+    # audit_stats — we load the blocked rows (already the small decision=='block' subset) and drop the
+    # excluded ones Python-side before summing per tool_name and taking the top-N.
     query = (
-        select(AuditLogEntry.tool_name, func.count(AuditLogEntry.id).label("count"))
+        select(AuditLogEntry)
         .where(AuditLogEntry.decision == "block")
         .where(AuditLogEntry.timestamp_utc >= since)
-        .group_by(AuditLogEntry.tool_name)
-        .order_by(func.count(AuditLogEntry.id).desc())
-        .limit(limit)
     )
     if namespace:
         query = query.where(AuditLogEntry.namespace == namespace)
-    rows = (await session.execute(query)).all()
-    log.debug("nrvq.api.audit.top_blocked", count=len(rows), code="NRVQ-API-7022")
-    return [{"tool_name": row.tool_name, "count": row.count} for row in rows]
+    records = (await session.execute(query)).scalars().all()
+    tool_counts: dict[str, int] = {}
+    for record in records:
+        if str(getattr(record, "framework", "") or "") == "redteam" or is_synthetic_identity(
+            str(getattr(record, "agent_class", "") or "")
+        ):
+            continue  # excluded from the Overview so it reconciles with the headline + Compliance/MITRE
+        name = str(record.tool_name or "")
+        tool_counts[name] = tool_counts.get(name, 0) + 1
+    top = sorted(tool_counts.items(), key=lambda kv: -kv[1])[:limit]
+    log.debug("nrvq.api.audit.top_blocked", count=len(top), code="NRVQ-API-7022")
+    return [{"tool_name": name, "count": count} for name, count in top]
 
 
 @router.get("/audit/volume")
@@ -223,6 +268,13 @@ async def audit_volume(
     records = (await session.execute(query)).scalars().all()
     buckets: dict[str, dict[str, int | str]] = {}
     for record in records:
+        # Reconcile: drop red-team + synthetic/probe traffic so the volume chart counts the same
+        # real-traffic population as the Overview headline + Compliance/MITRE (this query already loads full
+        # rows, so agent_class/framework are on-hand — no extra query).
+        if str(getattr(record, "framework", "") or "") == "redteam" or is_synthetic_identity(
+            str(getattr(record, "agent_class", "") or "")
+        ):
+            continue
         hour_key = record.timestamp_utc.strftime("%Y-%m-%d %H:00")
         if hour_key not in buckets:
             buckets[hour_key] = {"time": hour_key, "allow": 0, "block": 0, "escalate": 0, "audit": 0}
@@ -266,7 +318,7 @@ async def _stream_audit_rows(
 
 
 def _export_dict(row: AuditLogEntry) -> dict:
-    """Audit row as an export record, including masked_params when captured (F-19)."""
+    """Audit row as an export record, including masked_params when captured."""
     record = _to_dict(row)
     payload = row.payload if isinstance(row.payload, dict) else {}
     if "masked_params" in payload:
@@ -286,7 +338,7 @@ async def export_audit_records(
 ) -> StreamingResponse:
     """Stream audit records for SIEM ingest as NDJSON or CSV, namespace-scoped to the caller.
 
-    F-19: signed=true (NDJSON only) emits a tamper-evident, hash-chained stream — each record carries a
+    signed=true (NDJSON only) emits a tamper-evident, hash-chained stream — each record carries a
     `_chain` link (seq, prev_hash, record_hash) and the stream ends with a `_manifest` line whose
     chain_tip is HMAC-SHA256-signed when an export signing key is configured.
     """

@@ -147,7 +147,7 @@ class TestWorstOpenVerb:
 
 
 class TestVerbRisk:
-    """CAP-2: per-verb risk lookup drives kill-chain hop colouring (read hop != destructive hop)."""
+    """Per-verb risk lookup drives kill-chain hop colouring (read hop != destructive hop)."""
 
     def test_verb_risk_by_source(self):
         assert verb_risk("postgresql", Verb.DELETE) == RiskLevel.CRITICAL

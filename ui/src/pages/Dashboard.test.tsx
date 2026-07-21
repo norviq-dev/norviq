@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// UI-1 smoke test: the Dashboard (default landing route) must mount without throwing React #130.
+// Smoke test: the Dashboard (default landing route) must mount without throwing React #130.
 // echarts core is stubbed so the chart components render without a canvas; the interop-shape guard
 // lives in components/common/EChart.test.tsx.
 import { render, screen, waitFor } from "@testing-library/react";
@@ -21,7 +21,7 @@ beforeAll(() => server.listen({ onUnhandledRequest: "bypass" }));
 afterEach(() => { server.resetHandlers(); clearApiCache(); });
 afterAll(() => server.close());
 
-describe("UI-1: Dashboard mounts", () => {
+describe("Dashboard mounts", () => {
   it("renders the Overview page without a React #130 crash", async () => {
     const errors: string[] = [];
     const spy = vi.spyOn(console, "error").mockImplementation((m) => errors.push(String(m)));
@@ -37,7 +37,7 @@ describe("UI-1: Dashboard mounts", () => {
     spy.mockRestore();
   });
 
-  it("B5: surfaces an engine_errors signal (distinct from policy blocks) when stats report faults", async () => {
+  it("surfaces an engine_errors signal (distinct from policy blocks) when stats report faults", async () => {
     server.use(
       http.get("/api/v1/audit/stats", () =>
         HttpResponse.json({ total: 1000, blocked: 900, allowed: 100, block_rate_pct: 90, engine_errors: 174 })
@@ -56,7 +56,7 @@ describe("UI-1: Dashboard mounts", () => {
     expect(screen.getByText(/fail-closed OPA-evaluation faults/i)).toBeInTheDocument();
   });
 
-  it("K1/K2: KPI cards bind the /audit/stats numbers (total/blocked/block-rate) + real avg_latency_ms", async () => {
+  it("KPI cards bind the /audit/stats numbers (total/blocked/block-rate) + real avg_latency_ms", async () => {
     server.use(
       http.get("/api/v1/audit/stats", () =>
         HttpResponse.json({ total: 1666, blocked: 1500, allowed: 166, block_rate_pct: 90.04, avg_latency_ms: 337 })
@@ -74,11 +74,11 @@ describe("UI-1: Dashboard mounts", () => {
     await waitFor(() => expect(total).toHaveAttribute("data-value", "1666"));
     expect(screen.getByTestId("kpi-blocked-value")).toHaveAttribute("data-value", "1500");
     expect(screen.getByTestId("kpi-blockrate-value")).toHaveAttribute("data-value", "90"); // Math.round(90.04)
-    // K2: Avg latency is the real avg_latency_ms from the same call (not the old records-derived 0).
+    // Avg latency is the real avg_latency_ms from the same call (not the old records-derived 0).
     expect(screen.getByTestId("kpi-latency-value")).toHaveAttribute("data-value", "337");
   });
 
-  it("P4: exactly one export control (Report ▾) — no duplicate standalone Export button", async () => {
+  it("exactly one export control (Report ▾) — no duplicate standalone Export button", async () => {
     render(
       <MemoryRouter>
         <AppProvider>
@@ -93,7 +93,7 @@ describe("UI-1: Dashboard mounts", () => {
   });
 });
 
-describe("F2: Overview coverage caption reflects Red Team efficacy", () => {
+describe("Overview coverage caption reflects Red Team efficacy", () => {
   it("upgrades 'not efficacy-tested' to 'X% proven-blocking (last run)' when a run exists", async () => {
     server.use(
       http.get("*/api/v1/redteam/results/latest", () =>
@@ -107,7 +107,7 @@ describe("F2: Overview coverage caption reflects Red Team efficacy", () => {
         </AppProvider>
       </MemoryRouter>
     );
-    // A4: the gauge caption carries the % (teal-emphasized in its own node) and is the NEUTRAL --text-muted
+    // The gauge caption carries the % (teal-emphasized in its own node) and is the NEUTRAL --text-muted
     // token, not block-red. " (last run)" follows the bold %.
     const gaugeCaption = await screen.findByTestId("score-gauge-caption");
     expect(gaugeCaption).toHaveTextContent(/rules present · 85% proven-blocking \(last run\)/i);

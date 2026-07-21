@@ -103,7 +103,7 @@ describe("PolicyCatalog (#3 / #4)", () => {
     expect(screen.getByText("New policy (raw rego)")).toBeInTheDocument();
   });
 
-  it("MUT-VERSION: 'View rego' expands each version's OWN source read-only", async () => {
+  it("'View rego' expands each version's OWN source read-only", async () => {
     seedHandlers("class");
     server.use(
       http.get("/api/v1/policies/default/customer-support/versions", () =>
@@ -122,7 +122,7 @@ describe("PolicyCatalog (#3 / #4)", () => {
     expect(screen.queryByTestId("version-rego-2")).not.toBeInTheDocument();
   });
 
-  it("FIX-2: the active-policy card reflects reality — health dot + last-applied time", async () => {
+  it("the active-policy card reflects reality — health dot + last-applied time", async () => {
     // The list endpoint now returns last_applied so the Catalog card can show the policy is live + when it applied.
     const recent = new Date(Date.now() - 5 * 60_000).toISOString();
     server.use(
@@ -171,7 +171,7 @@ describe("PolicyCatalog (#3 / #4)", () => {
               covered_count: 3,
               total: 5,
               created_at: "2026-07-03T12:00:00Z",
-              // F2: compliance provenance so the row is traceable to the originating control.
+              // Compliance provenance so the row is traceable to the originating control.
               source_framework: "owasp",
               source_control_id: "LLM07:2025",
               source_control_name: "System Prompt Leakage"
@@ -221,7 +221,7 @@ describe("PolicyCatalog (#3 / #4)", () => {
     expect(screen.getByText(/coverage 3\/5/i)).toBeInTheDocument();
     // The deep-linked draft auto-opens its generated rego read-only.
     expect(await screen.findByTestId("intent-draft-rego")).toHaveTextContent("package norviq.intent.billing");
-    // F2: the draft is traceable to its originating framework + control — on the row AND in the review header.
+    // The draft is traceable to its originating framework + control — on the row AND in the review header.
     expect(screen.getByTestId("intent-draft-source-d-1")).toHaveTextContent("from OWASP LLM · LLM07:2025 System Prompt Leakage");
     expect(await screen.findByTestId("intent-draft-source-header")).toHaveTextContent("OWASP LLM · LLM07:2025 System Prompt Leakage");
 
@@ -232,7 +232,7 @@ describe("PolicyCatalog (#3 / #4)", () => {
     expect(createCalled).toBe(false);
   });
 
-  it("COMP-GEN-01: a compliance-remediation draft's Review & apply targets the compound overlay key, never the base class", async () => {
+  it("a compliance-remediation draft's Review & apply targets the compound overlay key, never the base class", async () => {
     // The base class already has its OWN comprehensive enforcing policy — the fixture proves it survives.
     server.use(
       http.get("/api/v1/policies", () =>
@@ -253,7 +253,7 @@ describe("PolicyCatalog (#3 / #4)", () => {
       ),
       http.get("/api/v1/policies/default/report-gen__remediation__/versions", () => HttpResponse.json([])),
       // The draft's persistence key (agent_class) is ALREADY the compound overlay key — `affected_class`
-      // carries the real class for display (F2/COMP-GEN-01 fix).
+      // carries the real class for display.
       http.get("/api/v1/threats/intent-drafts", () =>
         HttpResponse.json({
           drafts: [
@@ -334,7 +334,7 @@ describe("PolicyCatalog (#3 / #4)", () => {
     expect(createBody!.agent_class).not.toBe("report-gen");
   });
 
-  it("P6: the CURRENT version badge sits on the active (highest) version, not v1", async () => {
+  it("the CURRENT version badge sits on the active (highest) version, not v1", async () => {
     seedHandlers("class");
     server.use(
       http.get("/api/v1/policies/default/customer-support/versions", () =>
@@ -352,7 +352,7 @@ describe("PolicyCatalog (#3 / #4)", () => {
     expect(within(v1row).queryByText("current")).not.toBeInTheDocument();
   });
 
-  it("P1: clicking a draft row (no deep-link) opens its review with the generated rego", async () => {
+  it("clicking a draft row (no deep-link) opens its review with the generated rego", async () => {
     seedHandlers("class");
     server.use(
       http.get("/api/v1/threats/intent-drafts", () =>
@@ -421,25 +421,25 @@ describe("PolicyCatalog (#3 / #4)", () => {
       )
     );
     renderPage(["/"]);
-    // A1: the compliance draft renders under the "From Compliance gaps" group.
+    // The compliance draft renders under the "From Compliance gaps" group.
     const group = await screen.findByTestId("draft-group-compliance");
     expect(within(group).getByTestId("intent-draft-d-comp")).toBeInTheDocument();
-    // A2: it is SUPERSEDED (an enforcing policy already exists) with the target-linkage version.
+    // It is SUPERSEDED (an enforcing policy already exists) with the target-linkage version.
     expect(screen.getByTestId("intent-draft-status-d-comp")).toHaveTextContent(/superseded/i);
     expect(screen.getByTestId("intent-draft-target-d-comp")).toHaveTextContent("currently v8 enforcing");
-    // A3: the wave4e2e test draft is HIDDEN by default; a toggle reveals it.
+    // The wave4e2e test draft is HIDDEN by default; a toggle reveals it.
     expect(screen.queryByTestId("intent-draft-d-test")).not.toBeInTheDocument();
     const toggle = screen.getByTestId("draft-toggle-test");
     expect(toggle).toHaveTextContent(/1 test draft hidden — Show/i);
     fireEvent.click(toggle);
     expect(await screen.findByTestId("intent-draft-d-test")).toBeInTheDocument();
-    // B7: a per-draft dismiss control exists.
+    // A per-draft dismiss control exists.
     expect(screen.getByTestId("intent-draft-dismiss-d-comp")).toBeInTheDocument();
   });
 });
 
-describe("PolicyCatalog — B-1 create (raw rego) / B-2 delete (guardrails)", () => {
-  it("B-1: New policy authors raw rego for a chosen ns+class and creates via POST /policies", async () => {
+describe("PolicyCatalog — create (raw rego) / delete (guardrails)", () => {
+  it("New policy authors raw rego for a chosen ns+class and creates via POST /policies", async () => {
     seedHandlers("class");
     let createBody: Record<string, unknown> | null = null;
     server.use(
@@ -463,7 +463,7 @@ describe("PolicyCatalog — B-1 create (raw rego) / B-2 delete (guardrails)", ()
     expect(String(createBody!.rego_source)).toContain("custom_block_rule");
   });
 
-  it("B-1: Create is disabled until a non-reserved class is entered", async () => {
+  it("Create is disabled until a non-reserved class is entered", async () => {
     seedHandlers("class");
     renderPage();
     fireEvent.click(await screen.findByTestId("editor-new-policy"));
@@ -476,7 +476,7 @@ describe("PolicyCatalog — B-1 create (raw rego) / B-2 delete (guardrails)", ()
     expect(save).not.toBeDisabled();
   });
 
-  it("B-2: editor Delete confirms ns+class+version + enforcing warning, then DELETEs that scope", async () => {
+  it("editor Delete confirms ns+class+version + enforcing warning, then DELETEs that scope", async () => {
     seedHandlers("class");
     let deletePath = "";
     server.use(
@@ -495,7 +495,7 @@ describe("PolicyCatalog — B-1 create (raw rego) / B-2 delete (guardrails)", ()
     await waitFor(() => expect(deletePath).toBe("default/customer-support"));
   });
 
-  it("B-2: cancelling the delete confirm fires NO DELETE", async () => {
+  it("cancelling the delete confirm fires NO DELETE", async () => {
     seedHandlers("class");
     let deleteCalled = false;
     server.use(
@@ -512,7 +512,7 @@ describe("PolicyCatalog — B-1 create (raw rego) / B-2 delete (guardrails)", ()
     expect(deleteCalled).toBe(false);
   });
 
-  it("B-2: reserved scopes (__baseline__) show NO delete affordance in the catalog", async () => {
+  it("reserved scopes (__baseline__) show NO delete affordance in the catalog", async () => {
     server.use(
       http.get("/api/v1/policies", () =>
         HttpResponse.json([
@@ -561,10 +561,10 @@ describe("PolicyCatalog — B-1 create (raw rego) / B-2 delete (guardrails)", ()
     });
   });
 
-  // FIX-3: saveEditorPolicy only called setApplyResult inside the `newPolicy` (create) branch — the
+  // saveEditorPolicy only called setApplyResult inside the `newPolicy` (create) branch — the
   // existing-policy Save path (this is exactly Bug #2's own repro: editor Enforcement -> audit) only showed
   // the small "Saved ✓" badge, with no verify-poll giving Bug #4-style convergence feedback.
-  it("FIX-3: saving an EXISTING loaded policy also shows the apply-result panel + verify-poll, not just 'Saved'", async () => {
+  it("saving an EXISTING loaded policy also shows the apply-result panel + verify-poll, not just 'Saved'", async () => {
     seedHandlers("class");
     server.use(
       http.post("/api/v1/policies", async () => HttpResponse.json({ version: 2 }))

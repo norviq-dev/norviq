@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: Apache-2.0
-# F-25 + single-cluster-first: write the runtime config from env BEFORE nginx serves it. Build-once image, per-cluster
+# Single-cluster-first: write the runtime config from env BEFORE nginx serves it. Build-once image, per-cluster
 # config. FLEET_API_URL: the hub sets "/fleet-api" (same-origin, proxied by nginx); spokes/single-cluster leave it
 # empty. The /fleet-api nginx proxy is emitted ONLY when FLEET_API_URL is set, so the default (single-cluster) image
 # does NOT reference the norviq-fleet-api upstream and starts cleanly with no fleet-api service present.

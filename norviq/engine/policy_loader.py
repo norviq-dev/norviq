@@ -22,6 +22,8 @@ from norviq.exceptions import NorviqError
 log = structlog.get_logger()
 
 _MAX_VERSIONS = int(getattr(settings, "policy_max_versions", 10))
+# The per-class compliance-remediation overlay key suffix; its eval results cache under the base class.
+_REMEDIATION_SUFFIX = "__remediation__"
 
 
 @dataclass(slots=True)
@@ -49,11 +51,11 @@ class PolicyLoader:
         self._origin = uuid.uuid4().hex
         self._policies: dict[str, dict] = {}
         self._versions: dict[str, list[PolicyVersion]] = {}
-        # C1: when a (ns, class) policy was last APPLIED to the cluster (distinct from when it was last SAVED).
+        # When a (ns, class) policy was last APPLIED to the cluster (distinct from when it was last SAVED).
         # An apply re-stamps this even when the rego is unchanged, so the Catalog card always reflects the action.
         self._applied_at: dict[str, datetime] = {}
         self._db: AsyncEngine | None = None
-        # F-04: True once the startup warm load completes. Lets the evaluator distinguish a genuine
+        # True once the startup warm load completes. Lets the evaluator distinguish a genuine
         # "no policy for this namespace" (deny) from "policies not yet loaded" (distinctly-alarmed deny).
         self._warmed: bool = False
         if hasattr(self._evaluator, "bind_loader"):
@@ -114,8 +116,8 @@ class PolicyLoader:
         return None
 
     async def scope_exists(self, namespace: str, agent_class: str) -> bool:
-        """M2: whether (namespace, agent_class) already has a persisted policy row — DB-authoritative (same
-        source of truth `delete()`'s H2 fix uses), so this holds across HA replicas even when a scope was
+        """Whether (namespace, agent_class) already has a persisted policy row — DB-authoritative (the same
+        source of truth `delete()` uses), so this holds across HA replicas even when a scope was
         created by a peer this replica has not warmed into memory. Lets a caller distinguish a NEW scope
         (counts against the per-namespace scope cap, see `count_namespace_scopes`) from an UPDATE to an
         existing scope (exempt — it does not grow the count)."""
@@ -127,12 +129,12 @@ class PolicyLoader:
         return row is not None
 
     async def count_namespace_scopes(self, namespace: str) -> int:
-        """M2: count of DISTINCT (namespace, agent_class) policy scopes currently persisted for `namespace`.
+        """Count of DISTINCT (namespace, agent_class) policy scopes currently persisted for `namespace`.
         DB-authoritative for the same HA reason as `scope_exists`. Backs the per-namespace hard cap on the
         number of distinct scopes a namespace may hold — mirrors the existing `draft_cap_per_namespace`
         retention pattern (`norviq/api/retention.py`), but for the policy catalog rather than drafts: the
-        version history is already pruned (`prune_versions`) and drafts are capped, yet nothing previously
-        bounded the COUNT of distinct scopes a write-capable credential could create, each held forever in
+        version history is already pruned (`prune_versions`) and drafts are capped, yet nothing else
+        bounds the COUNT of distinct scopes a write-capable credential could create, each held forever in
         memory + OPA + the DB."""
         async with self._db_engine().begin() as conn:
             row = (await conn.execute(
@@ -227,9 +229,8 @@ class PolicyLoader:
         await self._cache.set_policy(namespace, agent_class, rego_source, priority=priority, version=new_version)
         # Invalidate Redis caches for this policy scope. The authoritative policy-mirror delete already
         # happened via delete_policy() above (line ~216), which uses the cache's hashed key — a direct
-        # unhashed `pool.delete(f"policy:{key}")` here would target a key that no longer exists (cache.py
-        # now hashes policy-key segments) and, pre-hashing, would have wrongly deleted the value set_policy
-        # just wrote. Only the eval-cache scope invalidation + the peer-invalidation publish remain.
+        # unhashed `pool.delete(f"policy:{key}")` here would target a key that does not exist (cache.py
+        # hashes policy-key segments). Only the eval-cache scope invalidation + the peer-invalidation publish remain.
         pool = getattr(self._cache, "_pool", None)
         await self._invalidate_eval_for_policy_scope(namespace, agent_class)
         if pool is not None:
@@ -238,11 +239,11 @@ class PolicyLoader:
         await self._cache.publish_policy_event("upsert", namespace, agent_class, version=new_version, origin=self._origin)
         self._evaluator.load_policy(namespace, agent_class, rego_source, priority=priority)
         log.info("nrvq.policy.created", key=key, version=new_version, priority=priority, code="NRVQ-REG-5003")
-        await self.prune_versions(namespace, agent_class)  # Part B (B5): bound version history (never the current)
+        await self.prune_versions(namespace, agent_class)  # Bound version history (never the current)
         return new_version
 
     async def prune_versions(self, namespace: str, agent_class: str) -> int:
-        """Part B (B5): keep the version history bounded — a version is KEPT if it is the current-enforcing
+        """Keep the version history bounded — a version is KEPT if it is the current-enforcing
         version, OR within the last ``policy_version_keep_count``, OR saved within ``policy_version_keep_days``;
         everything else is pruned from ``policy_versions``.
 
@@ -291,14 +292,14 @@ class PolicyLoader:
         saved_by: str = "",
         enforcement_mode: str = "block",
     ) -> tuple[int, bool] | None:
-        """Part C: apply a SAVED policy to a target scope so it ACTUALLY enforces on this cluster.
+        """Apply a SAVED policy to a target scope so it ACTUALLY enforces on this cluster.
 
-        The old apply path called ``self._evaluator.load_policy(...)`` — but the evaluator resolves policy
+        Apply must NOT simply call ``self._evaluator.load_policy(...)`` — the evaluator resolves policy
         CONTENT from ``self._policies`` (the loader's map, read by ``_collect_candidates``), NOT the evaluator's
-        own ``_policies`` dict. So apply wrote a dict nobody reads and never persisted/loaded the target: a 200
-        that did not enforce (``/evaluate`` at the target stayed ``no_policy_loaded``). This routes apply through
-        the SAME read-path + persistence + cache-invalidation that ``create()`` uses, so apply-from-portal
-        deterministically enforces at the target.
+        own ``_policies`` dict. A load_policy-only apply would write a dict nobody reads and never persist/load
+        the target: a 200 that does not enforce (``/evaluate`` at the target stays ``no_policy_loaded``). So this
+        routes apply through the SAME read-path + persistence + cache-invalidation that ``create()`` uses, so
+        apply-from-portal deterministically enforces at the target.
 
         Returns ``(version_now_enforcing_at_target, created_new_version)`` or ``None`` if the source has no
         current policy (caller raises 404). Idempotent: if the target already enforces byte-identical rego it
@@ -323,7 +324,7 @@ class PolicyLoader:
             existing_mode = str((existing_target or {}).get("enforcement_mode", enforcement_mode))
             mode_changed = enforcement_mode != existing_mode
             effective_mode = enforcement_mode if mode_changed else existing_mode
-            # M1 (apply_to_target variant): current_version must be the LATEST version's real number, not
+            # In the apply_to_target variant, current_version must be the LATEST version's real number, not
             # the count of retained versions — pruned history (cap 10 / 90d) means len() != the real version,
             # which understated it once a class passed 10 lifetime versions. That wrong number flowed into
             # apply_policy's response -> UI expectedVersion, which the verify-poll compares against
@@ -347,7 +348,7 @@ class PolicyLoader:
                         {"mode": enforcement_mode, "ns": target_namespace, "ac": target_agent_class},
                     )).mappings().one()
                     applied_at_db = row["applied_at"]
-                    # FIX-5 (prerequisite): also patch the CURRENT version's row in `policy_versions` — the
+                    # As a prerequisite, also patch the CURRENT version's row in `policy_versions` — the
                     # in-memory patch below only fixes THIS replica's `_versions`. Without this DB write, a
                     # peer replica's `_rehydrate_versions_for_key` (apply_remote_event's upsert branch) would
                     # re-read the STALE mode from Postgres and there would be no durable source of truth to
@@ -368,11 +369,11 @@ class PolicyLoader:
                 if history:
                     history[-1].enforcement_mode = enforcement_mode
                 log.info("nrvq.policy.mode_updated", key=target_key, mode=enforcement_mode, code="NRVQ-REG-5019")
-            # C1/HA: re-stamp applied_at on every reaffirm so the Catalog card visibly updates even when
+            # HA: re-stamp applied_at on every reaffirm so the Catalog card visibly updates even when
             # nothing enforcement-relevant changed. When the mode WAS persisted above, hydrate from that exact
             # DB value so this replica and every peer converge; a true no-op (rego AND mode unchanged) has
-            # nothing new to persist, so this stays the pre-existing in-memory-only fast path (unconverged,
-            # same as before this fix — there is no new authoritative value for a peer to read back).
+            # nothing new to persist, so this stays an in-memory-only fast path (unconverged — there is no
+            # new authoritative value for a peer to read back).
             self.mark_applied(target_namespace, target_agent_class, when=applied_at_db)
             self._update_memory(target_key, rego, priority, effective_mode)
             await self._invalidate_eval_for_policy_scope(target_namespace, target_agent_class)
@@ -461,15 +462,14 @@ class PolicyLoader:
         return self._policies.get(self._key(namespace, agent_class))
 
     async def delete(self, namespace: str, agent_class: str) -> bool:
-        """Delete a policy from EVERY layer so it cannot be resurrected. F-52: previously this only cleared the
-        in-memory loader dict + the Redis policy cache, leaving the Postgres row (rehydrated on restart) AND the
-        evaluator's in-memory copy (kept enforcing) AND a possibly-stale eval-result cache. Now it removes all
-        four: Postgres rows, evaluator index, loader dict, Redis policy + eval caches."""
+        """Delete a policy from EVERY layer so it cannot be resurrected. Removes all four: the Postgres row
+        (otherwise rehydrated on restart), the evaluator's in-memory copy (otherwise kept enforcing), the
+        loader dict, and the Redis policy + (possibly-stale) eval-result caches."""
         key = self._key(namespace, agent_class)
         in_memory = key in self._policies
         self._policies = {k: v for k, v in self._policies.items() if k != key}
         self._versions = {k: v for k, v in self._versions.items() if k != key}
-        # H2: DB-AUTHORITATIVE — always run the (idempotent) Postgres DELETE, even when the key isn't in
+        # DB-AUTHORITATIVE — always run the (idempotent) Postgres DELETE, even when the key isn't in
         # THIS replica's memory. In HA a policy created on replica A before B started may not be in B's
         # `_policies`; the old early-return-False left the row alive (404 while it survives + re-warms on
         # restart). rowcount tells us whether a row actually existed so a true no-op still returns False.
@@ -512,7 +512,7 @@ class PolicyLoader:
                 log.info("nrvq.policy.remote_unloaded", key=key, code="NRVQ-REG-5016")
             else:  # upsert (create / apply)
                 await self.load_from_db(namespace, agent_class)  # reads the peer's authoritative DB row
-                # FIX-5: load_from_db only refreshes self._policies (current row) — it never touches
+                # load_from_db only refreshes self._policies (current row) — it never touches
                 # self._versions. Without this, a peer's version-snapshot mode-patch (apply_to_target's
                 # history[-1].enforcement_mode = ...) only ever lands on the ORIGINATING replica, so a
                 # rollback-to-current request landing on THIS replica would read a stale
@@ -584,7 +584,7 @@ class PolicyLoader:
         return entry
 
     async def namespaces_for_class(self, agent_class: str) -> list[str]:
-        """FIX-1 (namespace=all): every REAL namespace that currently holds a policy for ``agent_class``.
+        """Every REAL namespace that currently holds a policy for ``agent_class``.
 
         The console's global picker sends ``namespace="all"``, which is not a real caller namespace (a real
         agent always carries a concrete one). This resolves that sentinel to the actual loaded layers — a union
@@ -593,8 +593,8 @@ class PolicyLoader:
         spoke-pushed policy not re-scanned from DB). Never returns the sentinel namespaces. Fail-closed: on a DB
         error it degrades to the in-memory set rather than widening scope.
 
-        FIX-3 (console under-report): also match ``<agent_class>__remediation__`` — a namespace can hold ONLY a
-        per-class compliance-remediation overlay (COMP-GEN-01) with no base ``<agent_class>`` row yet. Bare
+        Also match ``<agent_class>__remediation__`` — a namespace can hold ONLY a
+        per-class compliance-remediation overlay with no base ``<agent_class>`` row yet. Bare
         ``agent_class = :agent_class`` alone would silently drop that namespace from this union, so the
         console's namespace="all" aggregate view would under-report it. Real per-namespace enforcement is
         unaffected — it looks up the remediation key unconditionally; this only widens the AGGREGATE listing."""
@@ -648,16 +648,16 @@ class PolicyLoader:
                 self._evaluator.reload_policy(str(row["namespace"]), str(row["agent_class"]), entry["rego"], priority=entry["priority"])
         self._policies = {**self._policies, **policies}
         self._applied_at = {**applied_at, **self._applied_at}  # in-process values (this lifetime) win on conflict
-        await self._rehydrate_versions()  # B3: restore version history so the Versions tab + rollback survive a restart
-        self._warmed = True  # F-04: warm load done -> the no-policy path is now "genuine", not "not-ready".
+        await self._rehydrate_versions()  # Restore version history so the Versions tab + rollback survive a restart
+        self._warmed = True  # Warm load done -> the no-policy path is now "genuine", not "not-ready".
         log.info("nrvq.policy.cache_warmed", count=len(policies), code="NRVQ-REG-5015")
 
     async def _rehydrate_versions(self) -> None:
-        """B3: rebuild the in-memory ``_versions`` map from the durable ``policy_versions`` table on startup.
+        """Rebuild the in-memory ``_versions`` map from the durable ``policy_versions`` table on startup.
 
-        Previously ``_versions`` was only ever populated by an in-process ``create()``, so after a pod restart a
-        warm-loaded policy showed "No version history available" and rollback had nothing to target — even though
-        every version is persisted. This joins policy_versions → policies to key history by (namespace, class),
+        Without this, ``_versions`` would only be populated by an in-process ``create()``, so after a pod restart a
+        warm-loaded policy would show "No version history available" and rollback would have nothing to target — even
+        though every version is persisted. This joins policy_versions → policies to key history by (namespace, class),
         ordered oldest→newest so the latest snapshot stays last (matching create()'s append order). Best-effort:
         a failure leaves in-memory history as-is (still fail-safe — the current policy is unaffected)."""
         query = text(
@@ -685,6 +685,10 @@ class PolicyLoader:
                     saved_at=row["saved_at"],
                 )
                 rehydrated.setdefault(key, []).append(snapshot)
+            # RETENTION consistency: cap each rehydrated list to the same in-memory bound the append path
+            # enforces (_MAX_VERSIONS) — the DB may retain more (policy_version_keep_count/keep_days), but
+            # post-restart memory must not hold an unbounded history the live path would never accumulate.
+            rehydrated = {k: v[-_MAX_VERSIONS:] for k, v in rehydrated.items()}
             # In-process history (written this lifetime) wins over rehydrated for a key already tracked.
             self._versions = {**rehydrated, **self._versions}
             log.info("nrvq.policy.versions_rehydrated", keys=len(rehydrated), code="NRVQ-REG-5016")
@@ -694,9 +698,9 @@ class PolicyLoader:
     async def _rehydrate_versions_for_key(self, namespace: str, agent_class: str) -> None:
         """Single-key counterpart to `_rehydrate_versions`, used by `apply_remote_event`'s upsert branch.
 
-        FIX-5: that branch previously called only `load_from_db` (refreshes `_policies`, so GET /policies is
-        correct cluster-wide) but never touched `_versions` — so the FIX-A version-snapshot mode-patch
-        (`apply_to_target`'s `history[-1].enforcement_mode = ...`) only ever landed on the ORIGINATING
+        That upsert branch calls `load_from_db` (refreshes `_policies`, so GET /policies is
+        correct cluster-wide) but that never touches `_versions` — so the version-snapshot mode-patch
+        (`apply_to_target`'s `history[-1].enforcement_mode = ...`) only ever lands on the ORIGINATING
         replica. A peer serving a rollback-to-current request would read its own stale
         `_versions[key][-1].enforcement_mode`. This re-reads just this key's version history from the
         durable `policy_versions` table (DB-authoritative — the peer already wrote the row) and REPLACES
@@ -729,36 +733,48 @@ class PolicyLoader:
                 )
                 for row in rows
             ]
-            self._versions = {**self._versions, key: snapshots}
-            log.info("nrvq.policy.versions_rehydrated_key", key=key, count=len(snapshots), code="NRVQ-REG-5020")
+            # RETENTION consistency: cap to the same in-memory bound the append/full-rehydrate paths enforce
+            # (_MAX_VERSIONS). The DB may retain more (policy_version_keep_count > _MAX_VERSIONS), but a peer's
+            # post-upsert memory must not hold an unbounded history the live path would never accumulate — else
+            # rollback targets diverge across replicas.
+            self._versions = {**self._versions, key: snapshots[-_MAX_VERSIONS:]}
+            log.info("nrvq.policy.versions_rehydrated_key", key=key, count=len(snapshots[-_MAX_VERSIONS:]), code="NRVQ-REG-5020")
         except Exception as exc:  # noqa: BLE001 — history is derived; a failure never blocks the sync listener
             log.warning("nrvq.policy.version_rehydrate_key_failed", key=key, error=str(exc), code="NRVQ-REG-5021")
 
     def _update_memory(self, key: str, rego_source: str, priority: int, enforcement_mode: str = "block") -> None:
-        """Update memory map via copy-on-write swap. M4: the in-memory entry now carries enforcement_mode so
-        list_policies can report it (was absent → the editor rewrote every saved policy to 'audit')."""
+        """Update memory map via copy-on-write swap. The in-memory entry carries enforcement_mode so
+        list_policies can report it."""
         self._policies = {**self._policies, key: {"rego": rego_source, "priority": int(priority), "enforcement_mode": enforcement_mode}}
 
     async def _invalidate_eval_for_policy_scope(self, namespace: str, agent_class: str) -> None:
         """Delete cached evaluation results affected by a policy change.
 
-        CAND-A2: a namespace-wide OVERLAY scope (`__baseline__`, `__guardrail__`, and the `__pack__*` scopes)
+        A namespace-wide OVERLAY scope (`__baseline__`, `__guardrail__`, and the `__pack__*` scopes)
         changes the effective decision for EVERY agent class in the namespace — not just its own eval key. So
         creating/reverting one must invalidate the WHOLE namespace's eval cache, or sibling classes keep serving
-        a stale cached decision until the short eval TTL expires (the packs path already invalidates ns-wide;
-        the generic create/delete path did not, so a `__baseline__` that newly blocks a tool was still served as
-        the cached `allow` for ~TTL seconds). A concrete class scope stays narrowly scoped as before.
+        a stale cached decision until the short eval TTL expires (both the packs path and the generic
+        create/delete path invalidate ns-wide here; otherwise a `__baseline__` that newly blocks a tool would
+        be served as the cached `allow` for ~TTL seconds). A concrete class scope stays narrowly scoped.
         """
         ns_wide = agent_class.startswith("__")  # __baseline__/__guardrail__/__pack__* affect every class in the ns
+        # A per-class compliance-remediation overlay is stored under the
+        # compound key "<class>__remediation__", which does NOT start with "__" — but its rego is a tighten-only
+        # overlay the evaluator BLENDS INTO the BASE class's decision, and eval results are cached under the BASE
+        # class, never under the compound key. Invalidating the literal "<class>__remediation__" scope therefore
+        # hit a phantom scope nobody caches under, leaving the base class serving a stale (possibly `allow`)
+        # decision for ~eval TTL after a compliance control was applied/reverted. Resolve the overlay to its base
+        # class so the scope that actually holds the affected decisions is cleared.
+        target: str | None = None if ns_wide else agent_class
+        if target is not None and target.endswith(_REMEDIATION_SUFFIX) and len(target) > len(_REMEDIATION_SUFFIX):
+            target = target[: -len(_REMEDIATION_SUFFIX)]
         # ALWAYS delegate to the cache's own scope invalidation so the key SEGMENTS are hashed exactly the
-        # way set_eval writes them. cache.py now sha256-hashes each eval-key segment to defeat colon-stuffing
-        # collisions (an attacker shaping agent_class/tool_name to bypass a block policy); a direct, unhashed
-        # `eval:{namespace}:*` scan here would silently match NOTHING against the hashed keys, leaving a stale
-        # (possibly `allow`) decision served until the short eval TTL. `invalidate_eval_scope(ns, None)`
-        # builds the `eval:{h(ns)}:*` wildcard (every class in the ns) for the ns-wide overlay case.
-        await self._cache.invalidate_eval_scope(namespace, None if ns_wide else agent_class)
+        # way set_eval writes them. cache.py sha256-hashes each eval-key segment to defeat colon-stuffing
+        # collisions; a direct, unhashed `eval:{namespace}:*` scan here would silently match NOTHING against the
+        # hashed keys. `invalidate_eval_scope(ns, None)` builds the `eval:{h(ns)}:*` wildcard for the ns-wide case.
+        await self._cache.invalidate_eval_scope(namespace, target)
         log.debug("nrvq.policy.eval_cache_cleared", namespace=namespace, agent_class=agent_class,
-                  ns_wide=ns_wide, code="NRVQ-REG-5011")
+                  invalidated_scope=target, ns_wide=ns_wide, code="NRVQ-REG-5011")
 
     async def _reload_policy(self, namespace: str, agent_class: str) -> None:
         """Reload a single policy from cache or DB into memory."""

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F-04: an enforcing namespace with NO policy loaded now defaults to DENY (deny-by-default PEP), with a
+"""An enforcing namespace with NO policy loaded now defaults to DENY (deny-by-default PEP), with a
 distinct, loudly-logged signal for the not-yet-warmed startup window vs a genuine no-policy namespace.
 A load FAILURE (DB error) does NOT route here — it raises and fail-closes via evaluate() (NRVQ-ENG-2000)."""
 

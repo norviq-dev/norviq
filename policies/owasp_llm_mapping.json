@@ -44,9 +44,10 @@
     "name": "System Prompt Leakage",
     "scope": "enforceable",
     "priority": "high",
-    "description": "The system/meta prompt is extracted via crafted inputs. Runtime-observable at the tool boundary but no dedicated rule is loaded yet.",
+    "description": "The system/meta prompt is extracted via crafted inputs. Extraction happens in model I/O, outside the tool-call boundary, so no runtime tool-call rule can detect it — control it with system-prompt hardening and SDK output-DLP.",
     "policies": [],
-    "also": "MITRE ATLAS · AML.T0056"
+    "also": "MITRE ATLAS · AML.T0056",
+    "remediation": "bespoke"
   },
   "LLM08:2025": {
     "name": "Vector and Embedding Weaknesses",
@@ -64,7 +65,7 @@
     "name": "Unbounded Consumption",
     "scope": "enforceable",
     "priority": "medium",
-    "description": "Uncontrolled resource/cost consumption (denial-of-wallet). Runtime-enforceable via rate/cost limits on tool calls, but no dedicated rule is loaded yet.",
+    "description": "Uncontrolled resource/cost consumption (denial-of-wallet). Enforced through Norviq's rate/cost limits on tool calls (engine configuration), not a generated policy rule — configure limits in Settings.",
     "policies": [],
     "also": "MITRE ATLAS · AML.T0034",
     "remediation": "rate"

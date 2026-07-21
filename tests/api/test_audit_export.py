@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""C4: GET /api/v1/audit/export streams audit rows as NDJSON/CSV, authenticated + namespace-scoped."""
+"""GET /api/v1/audit/export streams audit rows as NDJSON/CSV, authenticated + namespace-scoped."""
 
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -34,7 +35,7 @@ def _row(namespace: str = "default", tool: str = "search_kb", decision: str = "a
         trust_score=0.8,
         latency_ms=4.2,
         timestamp_utc=datetime.now(timezone.utc),
-        # F-19: masked_params provenance the export serializer reads directly (no getattr fallback) —
+        # masked_params provenance the export serializer reads directly (no getattr fallback) —
         # see norviq/api/routers/audit.py _export_dict.
         payload={"masked_params": {}},
     )
@@ -62,7 +63,11 @@ def _client(rows: list[SimpleNamespace]) -> TestClient:
 
 
 def _token(role: str = "admin", namespace: str = "default") -> dict[str, str]:
-    tok = jwt.encode({"sub": "t", "role": role, "namespace": namespace}, settings.api_secret_key, algorithm="HS256")
+    tok = jwt.encode(
+        {"sub": "t", "role": role, "namespace": namespace, "exp": int(time.time()) + 3600},
+        settings.api_secret_key,
+        algorithm="HS256",
+    )
     return {"Authorization": f"Bearer {tok}"}
 
 

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// COMPLIANCE POLISH E2E (F1–F4). Drives the REAL SPA + API on the live kind cluster and asserts the EFFECT of the
-// four semantics/hygiene refinements: F1 per-framework blocked (ATLAS ≠ OWASP, each == its own rule-block sum),
-// F2 control-scoped + traceable remediation drafts (real class, control tag, refinement; honest empty when none),
-// F3 framework-neutral /compliance/{framework}/* routes (== the legacy /mitre alias), F4 dedup by (framework,
+// COMPLIANCE POLISH E2E. Drives the REAL SPA + API on the live kind cluster and asserts the EFFECT of the
+// four semantics/hygiene refinements: per-framework blocked (ATLAS ≠ OWASP, each == its own rule-block sum),
+// control-scoped + traceable remediation drafts (real class, control tag, refinement; honest empty when none),
+// framework-neutral /compliance/{framework}/* routes (== the legacy /mitre alias), dedup by (framework,
 // control, class). No-mock guard: each card's blocked equals a DIRECT API call.
 
 import { test, expect, waitForApp } from "./fixtures";
@@ -25,13 +25,13 @@ async function apiPost(page: Page, path: string, payload: unknown) {
   }, { path, payload });
 }
 
-test.describe("Compliance polish F1–F4 — EFFECT proofs on the live console", () => {
+test.describe("Compliance polish — EFFECT proofs on the live console", () => {
   test.beforeEach(async ({ page }) => {
     await page.goto("/");
     await waitForApp(page);
   });
 
-  test("F1: per-framework blocked differs, and each equals its OWN framework's coverage endpoint (no-mock)", async ({ page }) => {
+  test("per-framework blocked differs, and each equals its OWN framework's coverage endpoint (no-mock)", async ({ page }) => {
     const atlas = await api(page, "/api/v1/compliance/atlas/coverage?range=24h");
     const owasp = await api(page, "/api/v1/compliance/owasp/coverage?range=24h");
     expect(atlas.status).toBe(200);
@@ -53,7 +53,7 @@ test.describe("Compliance polish F1–F4 — EFFECT proofs on the live console",
     expect(bad, `unexpected 4xx/5xx on /compliance: ${bad.join(", ")}`).toEqual([]);
   });
 
-  test("F2: a gap→generate draft is scoped to a REAL class, tagged with its control, and refinement-appropriate", async ({ page }) => {
+  test("a gap→generate draft is scoped to a REAL class, tagged with its control, and refinement-appropriate", async ({ page }) => {
     // LLM07 with NO agent_class → the backend derives the real active class (not a 'default' deny-all) + tags it.
     const gen = await apiPost(page, "/api/v1/compliance/owasp/generate", { technique_id: "LLM07:2025", namespace: "default" });
     expect(gen.status).toBe(200);
@@ -82,7 +82,7 @@ test.describe("Compliance polish F1–F4 — EFFECT proofs on the live console",
     expect(((emptyDrafts.body.drafts ?? []) as any[]).length).toBe(0);
   });
 
-  test("F2 UI: the generated draft's provenance is shown in Policy Catalog (row + review header)", async ({ page }) => {
+  test("UI: the generated draft's provenance is shown in Policy Catalog (row + review header)", async ({ page }) => {
     // Ensure a tagged draft exists, then open its deep-link in the Policy Catalog.
     const gen = await apiPost(page, "/api/v1/compliance/owasp/generate", { technique_id: "LLM07:2025", namespace: "default" });
     const draftId = gen.body.draft_id as string;
@@ -93,7 +93,7 @@ test.describe("Compliance polish F1–F4 — EFFECT proofs on the live console",
     await expect(page.getByTestId("intent-draft-source-header")).toContainText("LLM07:2025 System Prompt Leakage");
   });
 
-  test("F3: /compliance/{framework}/* == the legacy /mitre alias; /mitre stays ATLAS; unknown framework 404s", async ({ page }) => {
+  test("/compliance/{framework}/* == the legacy /mitre alias; /mitre stays ATLAS; unknown framework 404s", async ({ page }) => {
     const neutral = await api(page, "/api/v1/compliance/owasp/coverage?range=24h");
     const legacy = await api(page, "/api/v1/mitre/coverage?range=24h&framework=owasp");
     expect(neutral.body.framework).toBe("owasp");
@@ -109,7 +109,7 @@ test.describe("Compliance polish F1–F4 — EFFECT proofs on the live console",
     expect((await api(page, "/api/v1/compliance/owasp/trend?range=30d")).status).toBe(200);
   });
 
-  test("F4: re-generating a control is idempotent; two controls for the same class are two drafts", async ({ page }) => {
+  test("re-generating a control is idempotent; two controls for the same class are two drafts", async ({ page }) => {
     const g1 = await apiPost(page, "/api/v1/compliance/owasp/generate", { technique_id: "LLM07:2025", namespace: "default" });
     const g2 = await apiPost(page, "/api/v1/compliance/owasp/generate", { technique_id: "LLM07:2025", namespace: "default" });
     const g3 = await apiPost(page, "/api/v1/compliance/owasp/generate", { technique_id: "LLM10:2025", namespace: "default" });

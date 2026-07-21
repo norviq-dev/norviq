@@ -110,6 +110,78 @@ async def test_guarded_tool_node_passthrough_when_no_tool_calls(fake_tool_node: 
     assert node._node.calls == 1  # type: ignore[attr-defined]
 
 
+@dataclass
+class _ToolMsg:
+    """Mimic a LangGraph ToolMessage carrying a tool's string result."""
+
+    content: Any
+    name: str = "export_statement"
+
+
+class _ResultToolNode:
+    """Fake ToolNode returning ToolMessage results (mimics executed tool output)."""
+
+    def __init__(self, tools: list[Any]) -> None:
+        """Store tools and the messages to return on invocation."""
+        self.tools = tools
+        self.calls = 0
+        self.messages: list[Any] = [_ToolMsg(content="PAN 4111111111111111 ssn 123-45-6789")]
+
+    async def ainvoke(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Return a ToolNode-shaped result with tool messages."""
+        self.calls += 1
+        return {"messages": list(self.messages)}
+
+
+@pytest.fixture
+def result_tool_node(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch adapter ToolNode loader with a result-producing fake."""
+    monkeypatch.setattr("norviq.sdk.langgraph.adapter._get_tool_node", lambda: _ResultToolNode)
+
+
+async def test_output_dlp_off_is_passthrough(result_tool_node: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With output DLP disabled (default), tool result content is returned unchanged."""
+    from norviq.config import settings
+
+    monkeypatch.setattr(settings, "sdk_output_dlp_enabled", False)
+    interceptor = _FakeInterceptor()
+    node = GuardedToolNode(tools=[object()], interceptor=interceptor, session_id="sess-dlp")  # type: ignore[arg-type]
+    state = {"messages": [_Msg(tool_calls=[{"name": "export_statement", "args": {}}])]}
+    result = await node(state)
+    assert result["messages"][0].content == "PAN 4111111111111111 ssn 123-45-6789"
+
+
+async def test_output_dlp_on_redacts_tool_message_content(
+    result_tool_node: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With output DLP enabled, PAN/SSN in an allowed tool's ToolMessage content are redacted in place."""
+    from norviq.config import settings
+
+    monkeypatch.setattr(settings, "sdk_output_dlp_enabled", True)
+    interceptor = _FakeInterceptor()
+    node = GuardedToolNode(tools=[object()], interceptor=interceptor, session_id="sess-dlp")  # type: ignore[arg-type]
+    state = {"messages": [_Msg(tool_calls=[{"name": "export_statement", "args": {}}])]}
+    result = await node(state)
+    content = result["messages"][0].content
+    assert "4111111111111111" not in content and "****1111" in content
+    assert "123-45-6789" not in content and "***-**-6789" in content
+
+
+async def test_output_dlp_on_leaves_non_string_content(
+    result_tool_node: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-string tool content is passed through untouched even with DLP enabled."""
+    from norviq.config import settings
+
+    monkeypatch.setattr(settings, "sdk_output_dlp_enabled", True)
+    interceptor = _FakeInterceptor()
+    node = GuardedToolNode(tools=[object()], interceptor=interceptor, session_id="sess-dlp")  # type: ignore[arg-type]
+    node._node.messages = [_ToolMsg(content={"rows": 1})]  # type: ignore[attr-defined]
+    state = {"messages": [_Msg(tool_calls=[{"name": "export_statement", "args": {}}])]}
+    result = await node(state)
+    assert result["messages"][0].content == {"rows": 1}
+
+
 def test_guarded_tool_node_works_as_state_graph_node() -> None:
     """Guarded node should be accepted by LangGraph StateGraph."""
     langgraph = pytest.importorskip("langgraph.graph")

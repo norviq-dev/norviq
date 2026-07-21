@@ -32,7 +32,7 @@ test.describe("OWASP LLM as a 2nd LIVE framework — EFFECT proofs on the live c
     await waitForApp(page);
   });
 
-  test("P1 real-rego: OWASP coverage is computed from the loaded rego, not the mock (4/6=67%, LLM07/LLM10 gaps, 4 OOS)", async ({ page }) => {
+  test("real-rego: OWASP coverage is computed from the loaded rego, not the mock (4/6=67%, LLM07/LLM10 gaps, 4 OOS)", async ({ page }) => {
     const cov = await api(page, "/api/v1/mitre/coverage?range=24h&framework=owasp");
     expect(cov.status).toBe(200);
     expect(cov.body.framework).toBe("owasp");
@@ -52,7 +52,7 @@ test.describe("OWASP LLM as a 2nd LIVE framework — EFFECT proofs on the live c
     expect(byId["LLM06:2025"].status).toBe("enforced");
   });
 
-  test("P1 default + unknown: framework defaults to atlas; an unknown framework 404s (no silent fallback)", async ({ page }) => {
+  test("default + unknown: framework defaults to atlas; an unknown framework 404s (no silent fallback)", async ({ page }) => {
     const dflt = await api(page, "/api/v1/mitre/coverage?range=24h");
     expect(dflt.status).toBe(200);
     expect(dflt.body.framework).toBe("atlas");
@@ -60,7 +60,7 @@ test.describe("OWASP LLM as a 2nd LIVE framework — EFFECT proofs on the live c
     expect(bad.status).toBe(404);
   });
 
-  test("P1 no-mock: BOTH live cards render their OWN coverage % from their OWN endpoint", async ({ page }) => {
+  test("no-mock: BOTH live cards render their OWN coverage % from their OWN endpoint", async ({ page }) => {
     const atlas = await api(page, "/api/v1/mitre/coverage?range=24h&framework=atlas");
     const owasp = await api(page, "/api/v1/mitre/coverage?range=24h&framework=owasp");
     expect(atlas.status).toBe(200);
@@ -84,7 +84,7 @@ test.describe("OWASP LLM as a 2nd LIVE framework — EFFECT proofs on the live c
     expect(bad, `unexpected 4xx/5xx on /compliance: ${bad.join(", ")}`).toEqual([]);
   });
 
-  test("P2 emblems: each live card + each roadmap row renders a non-empty framework emblem", async ({ page }) => {
+  test("emblems: each live card + each roadmap row renders a non-empty framework emblem", async ({ page }) => {
     await page.goto("/compliance");
     await waitForApp(page);
     await page.waitForTimeout(1200);
@@ -100,7 +100,7 @@ test.describe("OWASP LLM as a 2nd LIVE framework — EFFECT proofs on the live c
     }
   });
 
-  test("P1 switcher: opening the OWASP card drives the detail view to OWASP (Excessive Agency / LLM06:2025)", async ({ page }) => {
+  test("switcher: opening the OWASP card drives the detail view to OWASP (Excessive Agency / LLM06:2025)", async ({ page }) => {
     const owasp = await api(page, "/api/v1/mitre/coverage?range=24h&framework=owasp");
     const enforced = (owasp.body.techniques as any[]).find((t) => t.technique_id === "LLM06:2025");
     expect(enforced.name).toBe("Excessive Agency");
@@ -120,7 +120,7 @@ test.describe("OWASP LLM as a 2nd LIVE framework — EFFECT proofs on the live c
     await expect(page.getByText(/LLM06:2025/).first()).toBeVisible({ timeout: 8000 });
   });
 
-  test("P1 GAP→generate: an OWASP gap generates a real dry-run draft; an OOS control is refused", async ({ page }) => {
+  test("GAP→generate: an OWASP gap generates a real dry-run draft; an OOS control is refused", async ({ page }) => {
     // LLM07:2025 is enforceable-but-unloaded (a GAP) → generate a real tighten-only dry-run draft (never enforces).
     const gen = await apiPost(page, "/api/v1/mitre/coverage/generate", { technique_id: "LLM07:2025", namespace: "default", agent_class: "customer-support", framework: "owasp" });
     expect(gen.status).toBe(200);
@@ -136,7 +136,7 @@ test.describe("OWASP LLM as a 2nd LIVE framework — EFFECT proofs on the live c
     // NOT be "cleaned" by deleting the real customer-support POLICY.
   });
 
-  test("P1 export: the OWASP evidence pack streams a real file labelled 'OWASP LLM Top 10 (2025)' with 10 controls", async ({ page }) => {
+  test("export: the OWASP evidence pack streams a real file labelled 'OWASP LLM Top 10 (2025)' with 10 controls", async ({ page }) => {
     const exp = await page.evaluate(async () => {
       const token = localStorage.getItem("nrvq_token");
       const res = await fetch("/api/v1/mitre/coverage/export?range=24h&format=json&framework=owasp", { headers: token ? { Authorization: `Bearer ${token}` } : {} });

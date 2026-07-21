@@ -8,7 +8,6 @@ Two ready-made overlays ship alongside the defaults:
 
 - `helm/norviq/values-prod.yaml` — multi-node production posture (HA replicas, autoscaling, spread,
   TLS-required DB). Not live-validated on a single-node cluster; template-validated only.
-- `helm/norviq/values-aks-dev.yaml` — an AKS dev overlay.
 
 Apply an overlay with `helm install norviq ./helm/norviq -n norviq -f helm/norviq/values-prod.yaml`
 (or `--set` individual keys, which always wins over a `-f` file for the same key).
@@ -135,7 +134,12 @@ Related: `config.opaMode` (below) selects whether the engine actually talks to t
 | `config.rateLimit` | `60` | Default per-agent request rate limit. |
 | `config.dbSslMode` | `require` | See Production checklist — override to `disable` for the bundled (non-TLS) local Postgres. |
 | `config.dbPoolMaxOverflow`/`dbPoolTimeout`/`dbCommandTimeout` | `10` / `10` / `10` | DB connection pool tuning. |
-| `config.retention.draftTtlDays` | `14` | Real policy-intent drafts auto-expire after N days. |
+| `config.retention.auditRetentionDays` | `30` | Audit-log rows older than this are pruned. The console's Audit Log views read at most the last 30 days; raise to 90–365 for compliance evidence windows (export audit-evidence packs for long-term archival). `0` = keep forever. |
+| `config.retention.coverageSnapshotRetentionDays` | `30` | Compliance coverage trend snapshots + export events older than this are pruned. `0` = keep forever. |
+| `config.retention.graphSnapshotKeepPerNamespace` | `10` | Keep only the newest N asset-graph snapshots per namespace (readers only load the newest; caps growth under traffic). `0` = keep all. |
+| `config.retention.agentRegistryRetentionDays` | `90` | Agent-registry entries are removed N days after `last_seen` (`0` = never). Admins can remove one immediately via `DELETE /api/v1/agents/{spiffe_id}`. |
+| `config.retention.apiKeyDefaultTtlDays` | `90` | Default expiry for **newly created** API keys — per-key override at creation (incl. never). Pre-existing keys never expire; revoked keys are kept (soft revoke). `0` = new keys never expire. |
+| `config.retention.draftTtlDays` | `14` | Real policy-intent drafts auto-expire after N days (expired drafts are also swept hourly in the background). |
 | `config.retention.draftTtlTestHours` | `24` | Test/e2e (synthetic-class) drafts expire faster. |
 | `config.retention.draftCapPerNamespace` | `50` | Hard ceiling of real drafts per namespace (evicts oldest beyond it). |
 | `config.retention.draftsPageSize` | `15` | Bounded drafts endpoint page size (top-N newest + total). |
@@ -146,6 +150,11 @@ Related: `config.opaMode` (below) selects whether the engine actually talks to t
 | `config.spiffeMode` | `mock` | `mock` — env-var identity (default, no SPIRE needed). `workload-api` — real SPIFFE SVID resolution, fail-closed; requires SPIRE on the cluster + `pyspiffe`. |
 | `config.spiffeSocket` | `/spiffe-workload-api/spire-agent.sock` | SPIFFE Workload API socket path (where the SPIFFE CSI driver publishes the agent socket). |
 | `config.spiffeCsi.enabled` | `false` | Gates the `csi.spiffe.io` volume on api/engine pods. Off by default so deploys without SPIRE are unaffected (the volume would otherwise wedge pod creation with no driver/registration). Enable only where SPIRE + the SPIFFE CSI driver are installed. |
+
+All `config.retention.*` windows are enforced by a single hourly background retention pruner (an
+extension of the audit pruner); `0` means keep forever (pruning disabled for that data type).
+**Enforcing policies never expire** — an expiring security control would be silent un-protection.
+The Settings page shows the effective retention values read-only.
 
 ## Local auth (`auth.*`)
 
@@ -192,7 +201,7 @@ setting.
 
 ## Multi-cluster fleet (`fleet.*`)
 
-MVP P1, read-only. Everything is off by default — a single-cluster install renders **zero** fleet
+Read-only. Everything is off by default — a single-cluster install renders **zero** fleet
 resources and behaves exactly as a standalone install.
 
 **Spoke side** (`fleet.enabled: false`): runs an in-process relay that pushes agent/audit rollups

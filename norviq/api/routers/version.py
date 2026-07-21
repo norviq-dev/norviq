@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Version route (F046) — the single source of truth for the build version shown in the console.
+"""Version route — the single source of truth for the build version shown in the console.
 
-Replaces the console's hardcoded "0.1.0". The version comes from the installed package metadata
-(pyproject [project].version), so there is exactly one place it is defined.
+The version comes from the installed package metadata (pyproject [project].version), so there is
+exactly one place it is defined.
 """
 
 import os

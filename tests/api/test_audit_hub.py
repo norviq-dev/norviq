@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F017 #5: the in-process AuditHub fans decisions out to /ws/audit subscribers."""
+"""The in-process AuditHub fans decisions out to /ws/audit subscribers."""
 
 from __future__ import annotations
 

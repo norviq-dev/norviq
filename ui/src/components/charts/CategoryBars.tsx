@@ -22,7 +22,7 @@ export const CategoryBars = memo(function CategoryBars({
   sub,
   bare = false
 }: {
-  // CAP-2: an optional per-bar `color` overrides the default score-tier colour — used by the Tool Usage
+  // An optional per-bar `color` overrides the default score-tier colour — used by the Tool Usage
   // chart to colour bars by the tool's RISK tier instead of by call volume.
   data: Array<{ category: string; score: number; color?: string }>;
   title?: string;
@@ -31,7 +31,9 @@ export const CategoryBars = memo(function CategoryBars({
   bare?: boolean;
 }) {
   const option = {
-    tooltip: { trigger: "axis", ...baseTooltip },
+    // confine keeps the tooltip INSIDE the chart box: the Overview panels each set backdrop-filter (own
+    // stacking context), so a tooltip that overflowed the card was painted under the neighbouring panel.
+    tooltip: { trigger: "axis", confine: true, ...baseTooltip },
     // Extra right gutter so the on-bar value label ("100%") never clips against the panel edge.
     grid: { left: 130, right: 44, top: 14, bottom: 14 },
     xAxis: {

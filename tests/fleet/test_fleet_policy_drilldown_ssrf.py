@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""SSRF-01 (CRITICAL) regression: GET /fleet/clusters/{id}/audit/records used to be reachable by any
-cluster-scoped service/viewer token (no require_admin) and dialed cluster.endpoint — a value a spoke
-self-reports on heartbeat — with a minted ADMIN bearer attached, with no host-range check. Locks in
-both fixes: the route is now admin-only, and a cluster whose endpoint fails the SSRF guard is never
-dialed (so the minted admin bearer is never sent anywhere)."""
+"""Regression: GET /fleet/clusters/{id}/audit/records must be admin-only and must not
+dial an unvalidated cluster.endpoint. Without the guard, any cluster-scoped service/viewer token could
+reach it (no require_admin) and it would dial cluster.endpoint — a value a spoke self-reports on heartbeat
+— with a minted ADMIN bearer attached and no host-range check. Locks in both fixes: the route is admin-only,
+and a cluster whose endpoint fails the SSRF guard is never dialed (so the minted admin bearer is never sent
+anywhere)."""
 
 from __future__ import annotations
 

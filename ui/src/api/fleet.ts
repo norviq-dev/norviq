@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Fleet-api client (F045). Talks to the multi-cluster hub at VITE_FLEET_API_URL, reusing the same
+// Fleet-api client. Talks to the multi-cluster hub at VITE_FLEET_API_URL, reusing the same
 // bearer token as the single-cluster API. The Fleet view appears only when this is configured.
 
 import { authHeaders } from "./client";
 
-// F-25: build-time VITE_FLEET_API_URL OR the runtime-injected window.__NRVQ_CONFIG__.fleetApiUrl (config.js,
+// Build-time VITE_FLEET_API_URL OR the runtime-injected window.__NRVQ_CONFIG__.fleetApiUrl (config.js,
 // written by the container entrypoint from FLEET_API_URL) — one built image, configured per cluster.
 const FLEET_BASE = (
   import.meta.env.VITE_FLEET_API_URL ??
@@ -30,7 +30,7 @@ async function fleetSend<T>(path: string, method: string, body: unknown): Promis
     body: JSON.stringify(body)
   });
   if (!res.ok) {
-    // F-33: surface the server's validation detail instead of a bare status code.
+    // Surface the server's validation detail instead of a bare status code.
     let detail = "";
     try {
       const j = (await res.json()) as { detail?: unknown };
@@ -48,7 +48,7 @@ export type FleetCluster = {
   endpoint: string;
   last_heartbeat: string | null;
   status: string;
-  // F-69 Stage 4: the cluster's own console URL (optional) — drives the "open <cluster>'s console" deep-link.
+  // The cluster's own console URL (optional) — drives the "open <cluster>'s console" deep-link.
   console_url?: string;
 };
 export type FleetAgent = {
@@ -84,7 +84,7 @@ export const fetchFleetAuditSummary = (range = "24h", cluster?: string) => {
   return fleetGet<FleetAuditSummary[]>(`/api/v1/fleet/audit/summary?range=${range}${q ? `&${q}` : ""}`);
 };
 
-// --- P2: signed policy push + per-cluster rollout status ---
+// --- Signed policy push + per-cluster rollout status ---
 export type FleetRollout = {
   cluster_id: string;
   bundle_version: number;
@@ -101,7 +101,7 @@ export type FleetPolicyAuthor = {
   priority?: number;
   enforcement_mode?: string;
   target_selector?: Record<string, string>;
-  confirm_fleet_wide?: boolean; // F-40: required for a fleet-wide (no cluster_id) target
+  confirm_fleet_wide?: boolean; // Required for a fleet-wide (no cluster_id) target
 };
 
 export const fetchFleetRollout = () => fleetGet<FleetRollout[]>("/api/v1/fleet/rollout");
@@ -109,7 +109,7 @@ export const fetchFleetRollout = () => fleetGet<FleetRollout[]>("/api/v1/fleet/r
 export const authorFleetPolicy = (body: FleetPolicyAuthor) =>
   fleetSend<{ name: string; version: number }>("/api/v1/fleet/policies", "POST", body);
 
-// F-52: the list of authored fleet policies + a retract that removes one (spokes reconcile on next pull).
+// The list of authored fleet policies + a retract that removes one (spokes reconcile on next pull).
 export type FleetPolicyRow = {
   name: string;
   namespace: string;
@@ -131,7 +131,7 @@ export const mintJoinToken = (clusterId: string, hubUrl: string) =>
 export const removeCluster = (id: string) =>
   fleetSend<{ removed: string }>(`/api/v1/fleet/clusters/${encodeURIComponent(id)}`, "DELETE", undefined);
 
-// --- P3: live drill-down into one cluster's audit (P4 residency may block it) ---
+// --- Live drill-down into one cluster's audit (residency may block it) ---
 export type FleetAuditRecord = {
   timestamp: string;
   tool_name: string;

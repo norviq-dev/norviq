@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Batch C (P2-1 GRAPH-SCOPE-ALL-01 + P2-2 SEARCH-01) — REAL form login, REAL controls. Proves:
-//   P2-1: picking a concrete namespace in the Attack Graph scopes the graph — the header reads
+// REAL form login, REAL controls. Proves:
+//   Picking a concrete namespace in the Attack Graph scopes the graph — the header reads
 //         "Showing: <ns>", the request carries the scope, and the scoped path count < the all-ns count.
-//         (This also TESTS the ledger's claim that the UI "stays Showing: All namespaces".)
-//   P2-1 (API): the `namespace` alias now scopes identically to `ns` — pre-fix it was silently ignored.
-//   P2-2: ⌘K search is backed by a real, scoped GET /api/v1/search (was 404) and renders results.
+//         (This also disproves the "stays Showing: All namespaces" claim.)
+//   API: the `namespace` alias scopes identically to `ns` (not silently ignored).
+//   ⌘K search is backed by a real, scoped GET /api/v1/search and renders results.
 import { test, expect, type Page } from "@playwright/test";
 
 const PW = process.env.NRVQ_E2E_PASSWORD || "CHANGE_ME-e2e-pw";
@@ -33,7 +33,7 @@ async function apiJson(page: Page, path: string): Promise<{ status: number; body
 
 const pathRows = (page: Page) => page.locator("button[aria-pressed]").filter({ hasText: "→" });
 
-test("P2-1: selecting a concrete namespace scopes the Attack Graph (header + request + counts)", async ({ page }) => {
+test("selecting a concrete namespace scopes the Attack Graph (header + request + counts)", async ({ page }) => {
   await realLogin(page);
   await page.goto("/threats/graph");
   await expect(page.getByTestId("attack-graph-canvas")).toBeVisible({ timeout: 20000 });
@@ -70,7 +70,7 @@ test("P2-1: selecting a concrete namespace scopes the Attack Graph (header + req
   expect(await pathRows(page).count()).toBeLessThanOrEqual(allCount);
 });
 
-test("P2-1 (API): the `namespace` alias scopes identically to `ns`, and a conflict is a 400", async ({ page }) => {
+test("(API): the `namespace` alias scopes identically to `ns`, and a conflict is a 400", async ({ page }) => {
   await realLogin(page);
   const byNs = await apiJson(page, "/api/v1/threats/attack-paths?ns=default");
   const byAlias = await apiJson(page, "/api/v1/threats/attack-paths?namespace=default");
@@ -87,10 +87,10 @@ test("P2-1 (API): the `namespace` alias scopes identically to `ns`, and a confli
   expect(conflict.status).toBe(400);
 });
 
-test("P2-2: ⌘K search is backed by a real scoped endpoint and renders results", async ({ page }) => {
+test("⌘K search is backed by a real scoped endpoint and renders results", async ({ page }) => {
   await realLogin(page);
 
-  // The endpoint exists (was 404) and is shaped for the palette.
+  // The endpoint exists and is shaped for the palette.
   const res = await apiJson(page, "/api/v1/search?q=a");
   expect(res.status).toBe(200);
   expect(res.body).toHaveProperty("tools");

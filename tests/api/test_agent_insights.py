@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F046: per-agent tool-usage + trust-history aggregate real audit_log rows (no fabricated widgets).
+"""Per-agent tool-usage + trust-history aggregate real audit_log rows (no fabricated widgets).
 
 Covers happy (counts/buckets), empty (no rows -> []), and auth. The greedy /agents/{spiffe_id:path}
 GET must NOT swallow the /tool-usage and /trust-history suffixes."""
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -44,7 +45,11 @@ def _client(rows: list[tuple]) -> TestClient:
 
 
 def _token() -> str:
-    return jwt.encode({"sub": "u", "role": "admin"}, settings.api_secret_key, algorithm="HS256")
+    return jwt.encode(
+        {"sub": "u", "role": "admin", "exp": int(time.time()) + 3600},
+        settings.api_secret_key,
+        algorithm="HS256",
+    )
 
 
 def test_tool_usage_aggregates_counts() -> None:
@@ -54,7 +59,7 @@ def test_tool_usage_aggregates_counts() -> None:
     assert resp.status_code == 200
     body = resp.json()
     by_tool = {r["tool"]: r for r in body}
-    # CAP-2: each tool is tagged with its TOOL_RISK_MAP risk tier — "execute_sql" classifies as critical
+    # Each tool is tagged with its TOOL_RISK_MAP risk tier — "execute_sql" classifies as critical
     # (destruction/exec default, see classify_tool) — see norviq/api/routers/agents.py agent_tool_usage.
     assert by_tool["execute_sql"] == {"tool": "execute_sql", "count": 2, "blocked": 1, "risk": "critical"}
     assert by_tool["search_kb"]["count"] == 1

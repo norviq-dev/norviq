@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F047 sector starter policy packs — manifest loading + rego combination.
+"""Sector starter policy packs — manifest loading + rego combination.
 
 The catalog and the enable/disable backend read the bundled manifest (policies/sector/packs.json)
 and the referenced rego. Enabling a pack materializes the COMBINED rego of a namespace's enabled
@@ -95,7 +95,7 @@ def _read_rego(pack_id: str) -> str:
 
 
 def read_rego(pack_id: str) -> str:
-    """F-54: public accessor for a pack's rego source (read-only view in the console)."""
+    """Public accessor for a pack's rego source (read-only view in the console)."""
     return _read_rego(pack_id)
 
 

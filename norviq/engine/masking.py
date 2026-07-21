@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F-19: mask sensitive tool_params for audit capture (PCI 10.3 event reconstruction without raw PII/PAN)."""
+"""Mask sensitive tool_params for audit capture (PCI 10.3 event reconstruction without raw PII/PAN)."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def mask_params(params: dict | None) -> dict:
 
 
 def mask_text(value: str) -> str:
-    """F-22: mask PAN then SSN inside a free string (for opt-in output-DLP on tool return values)."""
+    """Mask PAN then SSN inside a free string (for opt-in output-DLP on tool return values)."""
     if not isinstance(value, str):
         return value
     return _mask_string(value)

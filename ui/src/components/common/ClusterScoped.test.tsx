@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// F-69 Stage 2 — the per-cluster page gate renders the real page only when local; when a remote cluster is selected
+// The per-cluster page gate renders the real page only when local; when a remote cluster is selected
 // it renders the honest deep-link page instead (so the page never mounts → no local fetch, no controls).
 
 import { render, screen } from "@testing-library/react";
@@ -12,7 +12,7 @@ vi.mock("../../store/AppContext", () => ({ useApp: () => mockUseApp() }));
 
 import { ClusterScoped } from "./ClusterScoped";
 
-describe("ClusterScoped (F-69 Stage 2)", () => {
+describe("ClusterScoped", () => {
   it("renders children for a local selection", () => {
     mockUseApp.mockReturnValue({ isRemote: false, scopeCluster: "fleet-a", selectedClusterConsoleUrl: "" });
     render(

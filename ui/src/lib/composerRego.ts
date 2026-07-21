@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Q2: the "New Policy" composer creates an ENFORCING agent-class policy for a MANUALLY-entered class
+// The "New Policy" composer creates an ENFORCING agent-class policy for a MANUALLY-entered class
 // (one with no running labeled deployment). The composer sheet has no rego editor, so it generates a
 // small, valid, self-contained keyword-block policy here. The backend `apply` path requires a
 // pre-saved policy (404 "save it first"), so for a brand-new class the composer CREATEs first

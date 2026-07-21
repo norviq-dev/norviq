@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
-"""F-39: /mitre/coverage overlays per-technique observed-attempt + blocked counts from audit (best-effort)."""
+"""/mitre/coverage overlays per-technique observed-attempt + blocked counts from audit (best-effort)."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ class _Session:
 
 
 class _Loader:
-    # rego that "covers" the prompt-injection technique (B0 corrected: llm01_prompt_injection -> AML.T0051)
+    # rego that "covers" the prompt-injection technique (corrected: llm01_prompt_injection -> AML.T0051)
     _policies = {"default:__baseline__": {"rego": 'blocks["llm01_prompt_injection"] { x }', "priority": 100}}
 
 
@@ -65,7 +65,7 @@ def _client(rows):
 
 def test_mitre_overlay_counts_attempts_and_blocked():
     # 7 prompt-injection blocks + 2 escalates + 1 allow = 10 observed, 9 blocked for AML.T0051
-    # (B0: llm01_prompt_injection is officially "LLM Prompt Injection" = AML.T0051, not AML.T0048).
+    # (llm01_prompt_injection is officially "LLM Prompt Injection" = AML.T0051, not AML.T0048).
     rows = [("llm01_prompt_injection", "block", 7), ("llm01_prompt_injection", "escalate", 2),
             ("llm01_prompt_injection", "allow", 1)]
     resp = _client(rows).get("/api/v1/mitre/coverage?namespace=default&range=24h")

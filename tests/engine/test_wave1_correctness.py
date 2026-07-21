@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Wave-1 console correctness fixes (UI-AUDIT round 3).
+"""Wave-1 console correctness fixes.
 
-FIX-1: the console's global picker sends ``namespace="all"``. The resolver used to treat it as a literal
-namespace (which owns no policy) and fall through to ``no_policy_loaded`` even when a policy IS loaded. It now
-resolves the UNION across every namespace that holds a policy for the class, so ``/evaluate`` and
+The console's global picker sends ``namespace="all"``. Treating it as a literal namespace (which owns no
+policy) falls through to ``no_policy_loaded`` even when a policy IS loaded. The resolver instead resolves
+the UNION across every namespace that holds a policy for the class, so ``/evaluate`` and
 ``/policies/effective`` report the real winning rule — while a concrete-namespace evaluation stays byte-identical
 (decision parity) and a genuinely-empty case still fails closed.
 
-FIX-3: a TRANSIENT OPA-eval failure (e.g. the server-mode module lazy-load race right after an apply) used to
-fall straight through to a fail-closed ``evaluator_error`` — so a clean input could be recorded as an engine
-error and mistaken for a policy decision. The evaluator now retries once (self-heals a transient error); only a
+A TRANSIENT OPA-eval failure (e.g. the server-mode module lazy-load race right after an apply) that falls
+straight through to a fail-closed ``evaluator_error`` can record a clean input as an engine error and
+mistake it for a policy decision. The evaluator retries once (self-heals a transient error); only a
 PERSISTENT engine error stays fail-closed, with a distinct reason and a counted, observable health signal.
 """
 
@@ -96,7 +96,7 @@ def evaluator(monkeypatch: pytest.MonkeyPatch) -> OPAEvaluator:
     engine = OPAEvaluator(_CacheStub())  # type: ignore[arg-type]
     engine.bind_loader(_UnionLoaderStub({}))
 
-    # CFG-SETTINGS-INERT-01: _compute_trust grew a `trust_threshold` param (per-namespace posture override,
+    # _compute_trust grew a `trust_threshold` param (per-namespace posture override,
     # None when unset) — evaluate() now always calls it positionally as
     # self._compute_trust(event, trust, posture["trust_threshold"]). A 2-arg stub raises TypeError on that
     # 3rd arg, which evaluate()'s top-level except then reports as the generic "evaluator_fallback" —

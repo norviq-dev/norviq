@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""R5: the shared spoke->hub service bearer is OIDC-preferring — it uses OIDC client-credentials when
+"""The shared spoke->hub service bearer is OIDC-preferring — it uses OIDC client-credentials when
 `fleet_oidc_token_url` is set (so a hardened hub with legacy_hs256_enabled=false accepts the enrollment claim),
 falls back to a self-minted HS256 service token only when legacy HS256 is enabled, else returns ""."""
 

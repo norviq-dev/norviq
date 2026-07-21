@@ -30,7 +30,7 @@ git clone https://github.com/norviq-dev/norviq.git
 cd norviq
 
 # CRDs first (NrvqPolicy / NrvqClass / NrvqConfig)
-kubectl apply -f crds/
+kubectl apply -f helm/norviq/crds/
 
 kubectl create namespace norviq
 
@@ -50,8 +50,8 @@ A few things worth knowing about this install:
 - **`config.dbSslMode`** — the API's DB connection mode. The chart default is `require` (correct
   for a managed/TLS-terminating Postgres in production — see `helm/norviq/values-prod.yaml`), but
   the bundled Postgres StatefulSet doesn't enable TLS, so a **local install must set
-  `config.dbSslMode=disable`** as shown above (this is exactly what `helm/norviq/values-aks-dev.yaml`
-  and `scripts/eval/values-local.yaml` do for their dev/eval clusters). Skipping this on kind will
+  `config.dbSslMode=disable`** as shown above (this is exactly what a single-node dev/eval overlay
+  like `scripts/eval/values-local.yaml` sets for its cluster). Skipping this on kind will
   leave the API pod failing to connect to its own database.
 - Wait for the rollout before continuing:
 

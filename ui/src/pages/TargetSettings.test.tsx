@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// C2-2/C2-3/C2-4b: Target Settings is now namespace-GOVERNANCE only — the "effective policy" resolved-stack view
+// Target Settings is now namespace-GOVERNANCE only — the "effective policy" resolved-stack view
 // was folded into the Catalog hierarchy (covered by PolicyHierarchy.test). Here we pin: no effective-policy table;
 // the "See how this resolves →" link; packs-applied APPLIED/NONE; the subtitle bound to the working scope.
 import type { ReactNode } from "react";
@@ -31,7 +31,7 @@ function renderPage() {
   return render(<MemoryRouter><TargetSettings /></MemoryRouter>);
 }
 
-describe("TargetSettings — governance only (C2-2/C2-3/C2-4b)", () => {
+describe("TargetSettings — governance only", () => {
   it("does NOT render the effective-policy resolved-stack table (folded into Catalog)", async () => {
     handlers();
     renderPage();
@@ -44,14 +44,14 @@ describe("TargetSettings — governance only (C2-2/C2-3/C2-4b)", () => {
     expect(link).toHaveAttribute("href", "/policies/catalog?tab=catalog");
   });
 
-  it("C2-4b: the subtitle binds to the working scope (concrete ns, not 'all')", async () => {
+  it("the subtitle binds to the working scope (concrete ns, not 'all')", async () => {
     handlers();
     renderPage();
     expect(await screen.findByText("Namespace: default")).toBeInTheDocument();
     expect(screen.queryByText(/Namespace: all/i)).not.toBeInTheDocument();
   });
 
-  it("C2-4b: an aggregate scope shows 'All namespaces', never 'Namespace: all'", async () => {
+  it("an aggregate scope shows 'All namespaces', never 'Namespace: all'", async () => {
     mockApp.namespace = "all";
     handlers();
     renderPage();
@@ -59,7 +59,7 @@ describe("TargetSettings — governance only (C2-2/C2-3/C2-4b)", () => {
     expect(screen.queryByText("Namespace: all")).not.toBeInTheDocument();
   });
 
-  it("C2-3: packs-applied shows the APPLIED set for the concrete namespace", async () => {
+  it("packs-applied shows the APPLIED set for the concrete namespace", async () => {
     handlers([{ id: "ecommerce", title: "E-commerce", enabled: true }, { id: "pci", title: "PCI", enabled: true }, { id: "off", title: "Off", enabled: false }]);
     renderPage();
     await waitFor(() => expect(screen.getByTestId("packs-applied-state")).toHaveAttribute("data-count", "2"));
@@ -68,7 +68,7 @@ describe("TargetSettings — governance only (C2-2/C2-3/C2-4b)", () => {
     expect(screen.getByText("PCI")).toBeInTheDocument();
   });
 
-  it("C2-3: packs-applied shows NONE when no packs are enabled", async () => {
+  it("packs-applied shows NONE when no packs are enabled", async () => {
     handlers([{ id: "off", title: "Off", enabled: false }]);
     renderPage();
     await waitFor(() => expect(screen.getByTestId("packs-applied-state")).toHaveAttribute("data-count", "0"));

@@ -50,7 +50,6 @@ To view logs:
 Production reminder:
   Override api.secretKey, redis.password, and postgresql.password before production deployment.
   Set values.policyQuotaNamespaces to include every tenant namespace (for example: default, chatbot-prod, analytics); quotas and baseline policies render from this list.
-  A baseline high-priority policy is installed by default (values.baselineClusterPolicy.*); keep it enabled to preserve fail-closed posture.
+  A baseline high-priority policy is installed for EACH namespace in policyQuotaNamespaces (values.baselineClusterPolicy.*); keep it enabled to preserve fail-closed posture. NOTE: with baselineClusterPolicy.enabled=true, an EMPTY policyQuotaNamespaces now FAILS the install (it would otherwise render no baseline and silently drop fail-closed posture) — list your tenant namespaces, or set enabled=false to opt out explicitly.
   Bind ClusterRoles to your tenant/admin groups (this chart ships roles but not subject-specific bindings).
   Policies with permissive preset and/or enforcementMode=audit provide visibility only and do not enforce blocks.
-  ValidatingAdmissionPolicy requires Kubernetes 1.30+; disable with values.validatingAdmissionPolicyEnabled=false on older clusters.

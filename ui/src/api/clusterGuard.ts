@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// F-69 Stage 1 — the P1 mutation BACKSTOP. The console can have a REMOTE cluster selected (a cluster other than the
+// The mutation BACKSTOP. The console can have a REMOTE cluster selected (a cluster other than the
 // one this console's API actually serves, `servedCluster`). In that state a cluster-scoped WRITE to the LOCAL API
 // would silently mutate the served cluster under the remote cluster's label. This module is the single source of
 // truth the otherwise-stateless api client checks before sending any mutating request — independent of whatever the
@@ -16,12 +16,12 @@ export function setRemoteClusterContext(isRemote: boolean): void {
 }
 
 /** AppContext keeps the operator's currently-selected cluster here so mutations can declare their intended target
- *  to the server (R2 backstop). "all"/empty means "no explicit target" → treated as local by the server. */
+ *  to the server (backstop). "all"/empty means "no explicit target" → treated as local by the server. */
 export function setSelectedClusterId(id: string): void {
   selectedClusterId = id === "all" ? "" : id;
 }
 
-/** The X-Nrvq-Target-Cluster header value the client sends on cluster-scoped mutations (R2). */
+/** The X-Nrvq-Target-Cluster header value the client sends on cluster-scoped mutations. */
 export function targetClusterHeader(): string {
   return selectedClusterId;
 }
@@ -38,7 +38,7 @@ const GUARDED: RegExp[] = [
   /^\/api\/v1\/policies\/dry-run(\?|$)/, // dry-run that writes
   /^\/api\/v1\/policies\/[^/]+\/[^/]+\/apply(\?|$)/, // apply a policy to a target
   /^\/api\/v1\/policies\/[^/]+\/[^/]+\/rollback(\?|$)/, // restore a version
-  /^\/api\/v1\/policy-packs\//, // enable / disable / F-54 override (POST/DELETE/PUT)
+  /^\/api\/v1\/policy-packs\//, // enable / disable / override (POST/DELETE/PUT)
   /^\/api\/v1\/settings(\?|$)/, // apply-mode + other namespace-scoped settings
   /^\/api\/v1\/agents\/[^/]+\/trust(\?|$)/, // trust override
   /^\/api\/v1\/attack-paths\/compute(\?|$)/, // recompute (writes)

@@ -1,3 +1,6 @@
+// Connection Settings — a live readiness view of the platform's real dependencies (API, Database,
+// Redis, OPA) sourced from the /readyz probe.
+
 import { useCallback, useEffect, useState } from "react";
 import { fetchReadiness, Readiness } from "../api/client";
 import { KitButton } from "../components/common/KitButton";

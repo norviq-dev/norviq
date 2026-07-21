@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 #
-# Batch B (COMP-GEN-01) — the compliance "Generate enforcing policy" is now CONTROL-SPECIFIC. San found
-# that generating for two different controls (AML.T0049 SQL Injection vs AML.T0051 Prompt Injection)
-# returned BYTE-IDENTICAL rego (both `package norviq.intent.<class>`, empty allowlist) — the control never
-# entered the policy. These are the fail-on-bug proofs that generate_remediation_rego():
+# The compliance "Generate enforcing policy" is CONTROL-SPECIFIC. Generating for two different controls
+# (AML.T0049 SQL Injection vs AML.T0051 Prompt Injection) returned BYTE-IDENTICAL rego (both
+# `package norviq.intent.<class>`, empty allowlist) — the control never entered the policy. These are the
+# fail-on-bug proofs that generate_remediation_rego():
 #   1. produces DIFFERENT, control-specific rego per control (fails on the parent generate_intent_rego),
 #   2. ENFORCES the control's own risky call (blocks it), stays scoped to the class, and does NOT block an
 #      unrelated attack (control-specific, not a generic deny-all), and
@@ -57,7 +57,7 @@ def _inp(tool_name: str, params: dict, cls: str = CLS) -> dict:
     }
 
 
-# COMP-GEN-01 package names (framework.control token) for the controls under test.
+# Package names (framework.control token) for the controls under test.
 _SQL = ("norviq.remediation.owasp.llm05_2025",
         generate_remediation_rego("owasp", "LLM05:2025", "Improper Output Handling", CLS,
                                   ["deny_sql_injection", "base64_decoded_threat"]))
@@ -67,7 +67,7 @@ _INJ = ("norviq.remediation.owasp.llm01_2025",
 
 
 def test_two_controls_produce_different_rego():
-    """The COMP-GEN-01 bug: two different controls used to yield byte-identical rego. They must now differ."""
+    """Two different controls must produce DIFFERENT rego, never byte-identical output."""
     assert _SQL[1] != _INJ[1]
     assert "package norviq.remediation.owasp.llm05_2025" in _SQL[1]
     assert "package norviq.remediation.owasp.llm01_2025" in _INJ[1]

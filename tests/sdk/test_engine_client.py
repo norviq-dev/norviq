@@ -120,8 +120,8 @@ async def test_circuit_breaker_short_circuits_after_failures() -> None:
 async def test_evaluate_posts_api_v1_path_with_bearer_token() -> None:
     """Client must hit the real central-API route (/api/v1/evaluate) and present its token.
 
-    Regression: the client used to post /v1/evaluate with no Authorization header — a
-    guaranteed 404/401 against norviq-api, so every SDK call fell back to the fallback mode.
+    Regression: a client that posts to /v1/evaluate with no Authorization header is a
+    guaranteed 404/401 against norviq-api, so every SDK call falls back to the fallback mode.
     """
     seen: dict[str, str] = {}
 

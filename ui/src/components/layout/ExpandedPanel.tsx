@@ -55,17 +55,17 @@ const PANEL_CONFIG: Record<Section, { title: string; groups: Group[] }> = {
         label: "TESTING",
         items: [
           { to: "/test", label: "Policy Tester", icon: Beaker },
-          // F1: Red Team ships — attack-suite efficacy (proven-blocking scorecard + per-technique + history).
+          // Red Team — attack-suite efficacy (proven-blocking scorecard + per-technique + history).
           { to: "/redteam", label: "Red Team", icon: Swords }
         ]
       },
-      // Compliance is a top-level page (framework coverage / MITRE ATLAS) — moved out of Threat Intel.
+      // Compliance is a top-level page (framework coverage / MITRE ATLAS).
       {
         id: "compliance",
         label: "COMPLIANCE",
         items: [{ to: "/compliance", label: "Compliance", icon: BadgeCheck }]
       },
-      // F-64: Fleet is multi-cluster MANAGEMENT (opt-in) — it belongs in Security Operations, not Analytics. Only
+      // Fleet is multi-cluster MANAGEMENT (opt-in) — it belongs in Security Operations, not Analytics. Only
       // shown when a fleet-api hub is configured.
       ...(fleetEnabled
         ? [{ id: "fleet", label: "MANAGEMENT", items: [{ to: "/fleet", label: "Fleet", icon: Network }] }]
@@ -73,7 +73,7 @@ const PANEL_CONFIG: Record<Section, { title: string; groups: Group[] }> = {
     ]
   },
   intelligence: {
-    // F-64: the home Overview is no longer buried under "Intelligence" — this section reads as the home/analytics.
+    // The home Overview: this section reads as the home/analytics.
     title: "OVERVIEW",
     groups: [
       {

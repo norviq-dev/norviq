@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""R7: OPA-as-server must produce decisions IDENTICAL to the legacy subprocess `opa eval` path."""
+"""OPA-as-server must produce decisions IDENTICAL to the legacy subprocess `opa eval` path."""
 
 from __future__ import annotations
 

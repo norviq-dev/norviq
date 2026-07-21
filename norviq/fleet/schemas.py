@@ -22,15 +22,15 @@ class HeartbeatBody(BaseModel):
     name: str = ""
     endpoint: str = ""
     region: str = ""
-    labels: dict[str, str] = {}     # P2: target_selector matching
-    residency: bool = False         # P4: this spoke keeps raw audit in-cluster
-    spiffe_id: str = ""             # S3: the spoke's attested SPIFFE identity (workload-api mode)
-    console_url: str = ""           # F-69: the spoke's own console URL (drives the hub deep-link)
+    labels: dict[str, str] = {}     # target_selector matching
+    residency: bool = False         # this spoke keeps raw audit in-cluster
+    spiffe_id: str = ""             # the spoke's attested SPIFFE identity (workload-api mode)
+    console_url: str = ""           # the spoke's own console URL (drives the hub deep-link)
 
     @field_validator("endpoint")
     @classmethod
     def _safe_endpoint_scheme(cls, v: str) -> str:
-        # SSRF-01 (CRITICAL): a spoke SELF-REPORTS endpoint; the hub later DIALS it (e.g. the audit
+        # A spoke SELF-REPORTS endpoint; the hub later DIALS it (e.g. the audit
         # drill-down route) WITH A MINTED ADMIN BEARER — an unvalidated value is SSRF + admin-token
         # exfil. Mirror console_url's shape check here (blank anything not http(s), don't 422 — a bad
         # value shouldn't drop the whole heartbeat). The full host-range reject (loopback/link-local/
@@ -47,7 +47,7 @@ class HeartbeatBody(BaseModel):
     @field_validator("console_url")
     @classmethod
     def _safe_console_url(cls, v: str) -> str:
-        # R1 (P1): a spoke SELF-REPORTS console_url; the hub later renders it as a link a hub admin can click. Only
+        # A spoke SELF-REPORTS console_url; the hub later renders it as a link a hub admin can click. Only
         # http(s) is safe — BLANK anything else (javascript:, data:, vbscript: …) so a malicious spoke can never
         # store a stored-XSS vector across the spoke->hub-admin trust boundary. Strip (don't 422) so a bad URL
         # doesn't drop the whole heartbeat/rollup.
@@ -68,7 +68,7 @@ class PolicyAuthorBody(BaseModel):
     priority: int = 100
     enforcement_mode: str = "block"
     target_selector: dict[str, str] = {}   # {"env":"prod"} or {"cluster_id":"cluster-a"} (override)
-    # F-40: a fleet-wide push (no cluster_id in the selector -> matches >1 cluster) must set this explicitly.
+    # A fleet-wide push (no cluster_id in the selector -> matches >1 cluster) must set this explicitly.
     confirm_fleet_wide: bool = False
 
 

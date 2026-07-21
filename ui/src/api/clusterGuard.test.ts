@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// F-69 Stage 1 — the mutation backstop. A cluster-scoped write to the LOCAL api must be refused while a REMOTE
+// The mutation backstop. A cluster-scoped write to the LOCAL api must be refused while a REMOTE
 // cluster is the active context; reads, non-cluster writes, and the local context are unaffected.
 
 import { describe, it, expect, beforeEach } from "vitest";
 import { setRemoteClusterContext, blockedByRemoteCluster, isRemoteClusterActive } from "./clusterGuard";
 
-describe("clusterGuard (F-69 Stage 1)", () => {
+describe("clusterGuard", () => {
   beforeEach(() => setRemoteClusterContext(false));
 
   it("blocks every cluster-scoped mutation when a remote cluster is active", () => {

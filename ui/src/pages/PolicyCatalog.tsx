@@ -1,4 +1,8 @@
-import "../lib/monaco"; // SLIM-MONACO: bundle Monaco locally (no cdn.jsdelivr fetch) — must precede <Editor>
+// Policy Catalog — browse the resolved policy stack, author/edit rego policies in Monaco with a
+// dry-run preview + apply-result transparency, and triage AI-generated policy drafts. Reserved scopes
+// (baseline / pack / guardrail) are read-only; author-created scopes are editable and deletable.
+
+import "../lib/monaco"; // Bundle Monaco locally (no cdn.jsdelivr fetch) — must precede <Editor>
 import Editor from "@monaco-editor/react";
 import { registerRego } from "../lib/monaco-rego";
 import { composerRego } from "../lib/composerRego";
@@ -59,9 +63,9 @@ type Policy = {
   current_version?: number;
   rego_length?: number;
   mode?: "block" | "audit" | "escalate";
-  enforcement_mode?: "block" | "audit" | "escalate"; // M4: the real API field — `mode` was never populated
+  enforcement_mode?: "block" | "audit" | "escalate"; // The real API field — `mode` is not populated
   matches?: number;
-  last_applied?: string | null;  // FIX-2: last time a version was applied (ISO) — card shows "applied {ago}"
+  last_applied?: string | null;  // Last time a version was applied (ISO) — card shows "applied {ago}"
 };
 
 type PolicyDetail = {
@@ -75,7 +79,7 @@ type PolicyVersion = {
   version: number;
   saved_by?: string;
   saved_at: string;
-  rego_source?: string; // MUT-VERSION: the version's own rego, for read-only historical inspection
+  rego_source?: string; // The version's own rego, for read-only historical inspection
 };
 
 type Deployment = {
@@ -101,9 +105,9 @@ type DryRunResult = {
   recommendation?: string;
 };
 
-// feat/attack-graph: a non-enforcing intent-policy DRAFT surfaced for review/hand-off.
+// A non-enforcing intent-policy DRAFT surfaced for review/hand-off.
 // This surface is READ + hand-off ONLY — it never applies/creates. The operator applies
-// via the EXISTING gated create/apply flow (PolicySheet → applyPolicy, F-40/F-51/R2 server-enforced).
+// via the EXISTING gated create/apply flow (PolicySheet → applyPolicy, server-enforced).
 type DraftSource = {
   source_framework?: string | null;
   source_control_id?: string | null;
@@ -114,7 +118,7 @@ type IntentDraftSummary = DraftSource & {
   draft_id: string;
   ns: string;
   cls: string;
-  // COMP-GEN-01: for a compliance-remediation draft, `cls` is the compound persistence overlay key
+  // For a compliance-remediation draft, `cls` is the compound persistence overlay key
   // ("<class>__remediation__") — `affected_class` carries the real class for display.
   affected_class?: string | null;
   enabled: string[];
@@ -136,13 +140,13 @@ type IntentDraftDetail = DraftSource & {
   enforcement: string;
 };
 
-// COMP-GEN-01: the class name to SHOW the operator for a draft row — the real affected class (never the
+// The class name to SHOW the operator for a draft row — the real affected class (never the
 // compound "<class>__remediation__" persistence key) for a compliance-remediation draft, else `cls` unchanged.
 function draftDisplayClass(d: { cls: string; affected_class?: string | null }): string {
   return d.affected_class || baseClassOfOverlay(d.cls);
 }
 
-// F2: human label for a generated draft's provenance — "OWASP LLM · LLM07 System Prompt Leakage" or,
+// Human label for a generated draft's provenance — "OWASP LLM · LLM07 System Prompt Leakage" or,
 // for a capability defense, "Source Capability · write/delete on Elasticsearch".
 const FRAMEWORK_LABEL: Record<string, string> = { atlas: "MITRE ATLAS", owasp: "OWASP LLM", capability: "Source Capability" };
 function draftSourceLabel(d: DraftSource): string | null {
@@ -155,12 +159,12 @@ function draftSourceLabel(d: DraftSource): string | null {
   return `from ${fw} · ${d.source_control_id}${d.source_control_name ? ` ${d.source_control_name}` : ""}`;
 }
 
-// ---- Part A: drafts triage-inbox helpers -----------------------------------------------------------------
-// A3: mirror synthetic.py's naming so test/e2e drafts are default-hidden (server keeps them for the 24h test TTL).
+// ---- Drafts triage-inbox helpers -----------------------------------------------------------------
+// Mirror synthetic.py's naming so test/e2e drafts are default-hidden (server keeps them for the 24h test TTL).
 const TEST_DRAFT_RE = /^(wave\d+e2e|e2e-intent|effecttest|smoke-|canary-|probe-|evtrace-|allowlist-probe|policy-tester|scorer)/i;
 const isTestDraft = (cls: string): boolean => TEST_DRAFT_RE.test(cls);
 
-// A1: which lifecycle source produced the draft — compliance gaps carry a control tag; everything else is the
+// Which lifecycle source produced the draft — compliance gaps carry a control tag; everything else is the
 // Attack-Graph intent builder (a "manual/other" bucket is reserved for future hand-authored drafts).
 type DraftSourceKind = "attack-graph" | "compliance" | "capability" | "manual";
 function draftSourceKind(d: DraftSource): DraftSourceKind {
@@ -174,7 +178,7 @@ const SOURCE_GROUPS: Array<{ kind: DraftSourceKind; title: string; sub: string }
   { kind: "manual", title: "Manual / other", sub: "Hand-authored drafts" }
 ];
 
-// A2: lifecycle status pill. Superseded = an enforcing policy already exists for the class (applying = change-to-
+// Lifecycle status pill. Superseded = an enforcing policy already exists for the class (applying = change-to-
 // live, not new). Stale = expiring within a day. Reviewed = the operator has opened it this session. Else New.
 type DraftStatus = "New" | "Reviewed" | "Superseded" | "Stale";
 const STATUS_STYLE: Record<DraftStatus, { bg: string; color: string }> = {
@@ -321,12 +325,12 @@ function PolicyTarget({
 }: {
   policy: Policy;
   deployments: Deployment[];
-  // Q2: lift the typed class to the parent's `selected` so Apply/create target the manually-entered class.
+  // Lift the typed class to the parent's `selected` so Apply/create target the manually-entered class.
   onAgentClassChange?: (cls: string) => void;
 }) {
   const initial = policy.target_type ?? "class";
   const [mode, setMode] = useState<TargetType>(initial);
-  // Q2: the class field is now CONTROLLED by the parent (`policy.agent_class`) — no local copy to drift.
+  // The class field is CONTROLLED by the parent (`policy.agent_class`) — no local copy to drift.
   const agentClass = policy.agent_class ?? "";
 
   useEffect(() => {
@@ -340,7 +344,7 @@ function PolicyTarget({
       <div className="section-label">Target by</div>
       <div className="tabs-kit" style={{ marginBottom: 16 }}>
         <RadioPill active={mode === "class"} label="Agent Class" onClick={() => setMode("class")} />
-        {/* MUT-WORKLOAD: the guided composer's keyword-block model matches on `input.agent.agent_class`,
+        {/* The guided composer's keyword-block model matches on `input.agent.agent_class`,
             so it can only author AGENT-CLASS policies. Workload/namespace targets are real (the resolver
             + raw editor support them) but the guided rego would never match them — offering them here
             (with a dead Name input) produced a policy that silently didn't enforce. Gate them to the raw
@@ -365,7 +369,7 @@ function PolicyTarget({
         <div>
           <div className="field-row">
             <label className="field-label">Agent Class · recommended</label>
-            {/* Q2: a REAL free-text input — you can author a policy for ANY class name, including one with no running
+            {/* A REAL free-text input — you can author a policy for ANY class name, including one with no running
                 labeled deployment yet (the fake select-trigger dead-ended when nothing was auto-discovered). */}
             <input
               className="input"
@@ -455,7 +459,7 @@ function PolicyTarget({
           </div>
           <div className="field-row">
             <label className="field-label">Name</label>
-            {/* Read-only context for an existing workload policy — the guided sheet no longer CREATES
+            {/* Read-only context for an existing workload policy — the guided sheet does not CREATE
                 workload targets (see the gated radio), so this is never an authoring input. */}
             <div className="input select-trigger">
               <span>{policy.target ?? "—"}</span>
@@ -531,7 +535,7 @@ export function PolicySheet({
   deployments: Deployment[];
   applyMode?: "enforce" | "dry_run_only";
   onClose: () => void;
-  // Q2: `create` carries a generated rego for a brand-new class (apply requires a pre-saved policy).
+  // `create` carries a generated rego for a brand-new class (apply requires a pre-saved policy).
   onApply: (mode: Policy["mode"], create?: { rego: string }) => void;
   onAgentClassChange?: (cls: string) => void;
   // UX-CREATE bridge: hand the composer's GENERATED rego to the raw editor so a guided draft can graduate
@@ -541,9 +545,9 @@ export function PolicySheet({
   const [enforcement, setEnforcement] = useState<NonNullable<Policy["mode"]>>(policy.mode ?? policy.enforcement_mode ?? "block");
   const [paramsOpen, setParamsOpen] = useState(false);
   const [dryRun, setDryRun] = useState(false);
-  const [reviewing, setReviewing] = useState(false); // F-50: confirm + diff step before the write
+  const [reviewing, setReviewing] = useState(false); // Confirm + diff step before the write
   const dryRunOnly = applyMode === "dry_run_only";
-  // F-50: a brand-new policy has no prior version to overwrite; an existing one shows a diff of what changes.
+  // A brand-new policy has no prior version to overwrite; an existing one shows a diff of what changes.
   const isNew = policy.current_version == null;
   const currentMode = policy.mode ?? policy.enforcement_mode ?? "block";
   const enforcementChanged = !isNew && currentMode !== enforcement;
@@ -648,7 +652,7 @@ spec:
           </div>
         )}
 
-        {/* F-51: a dry-run-only namespace disables Apply (the API also rejects it). */}
+        {/* A dry-run-only namespace disables Apply (the API also rejects it). */}
         {dryRunOnly && (
           <div
             style={{
@@ -661,7 +665,7 @@ spec:
           </div>
         )}
 
-        {/* F-50: review + confirm the change before the write — no silent one-click overwrite of a live policy. */}
+        {/* Review + confirm the change before the write — no silent one-click overwrite of a live policy. */}
         {reviewing && !dryRunOnly && (
           <div
             data-testid="apply-review"
@@ -707,7 +711,7 @@ spec:
                 onClick={() =>
                   onApply(
                     enforcement,
-                    // Q2: a brand-new manual class has no saved policy for `apply` to stamp — generate an
+                    // A brand-new manual class has no saved policy for `apply` to stamp — generate an
                     // enforcing keyword-block rego and CREATE it (create() enforces on the read path).
                     isNew
                       ? { rego: composerRego(policy.agent_class ?? policy.target ?? "", enforcement, keywordList) }
@@ -811,7 +815,7 @@ function Chip({ label }: { label: string }) {
 }
 
 /**
- * feat/attack-graph — Intent DRAFTS surface.
+ * Intent DRAFTS surface.
  * READ + hand-off ONLY. Lists non-enforcing dry-run drafts and, for a deep-linked draft,
  * shows the generated rego read-only with a "Review & apply" that hands the draft into the
  * EXISTING gated create/apply flow (onReview). Nothing here applies or creates on its own.
@@ -872,14 +876,14 @@ function IntentDraftsPanel({
   const statusOf = (d: IntentDraftSummary): DraftStatus =>
     draftStatus(d, enforcingByClass[`${d.ns}/${d.cls}`], reviewedIds.has(d.draft_id));
   const visible = all
-    .filter((d) => showTest || !isTestDraft(d.cls))                        // A3: default-hide test drafts
-    .filter((d) => filter === "All" || statusOf(d) === filter);           // A5: status filter
-  // A1: group by lifecycle source (compliance gaps / attack graph / manual), newest-first within each.
+    .filter((d) => showTest || !isTestDraft(d.cls))                        // Default-hide test drafts
+    .filter((d) => filter === "All" || statusOf(d) === filter);           // Status filter
+  // Group by lifecycle source (compliance gaps / attack graph / manual), newest-first within each.
   const groups = SOURCE_GROUPS.map((g) => ({
     ...g,
     items: visible.filter((d) => draftSourceKind(d) === g.kind)
   })).filter((g) => g.items.length > 0);
-  const remaining = Math.max(0, page.total - page.returned);              // B6: undisplayed count
+  const remaining = Math.max(0, page.total - page.returned);              // Undisplayed count
 
   const renderRow = (d: IntentDraftSummary) => {
     const isActive = d.draft_id === highlightId;
@@ -900,7 +904,7 @@ function IntentDraftsPanel({
               }}
             >
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              {/* P1: the row header is a real button — click (or Enter/Space) opens the draft's review inline. */}
+              {/* The row header is a real button — click (or Enter/Space) opens the draft's review inline. */}
               <button
                 type="button"
                 onClick={() => onSelect(d.draft_id)}
@@ -909,14 +913,14 @@ function IntentDraftsPanel({
                 style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", flex: 1, background: "transparent", border: 0, padding: 0, margin: 0, cursor: "pointer", color: "inherit", font: "inherit", textAlign: "left" }}
               >
                 <ChevronRight size={14} style={{ color: "var(--text-muted)", transform: isActive ? "rotate(90deg)" : "none", transition: "transform 0.15s", flex: "none" }} />
-                {/* COMP-GEN-01: show the REAL affected class, never the "<class>__remediation__" persistence key. */}
+                {/* Show the REAL affected class, never the "<class>__remediation__" persistence key. */}
                 <span className="mono" style={{ fontWeight: 600 }} title={d.cls}>
                   {draftDisplayClass(d)}
                 </span>
                 <span className="mono muted" style={{ fontSize: 11.5 }}>
                   {d.ns}
                 </span>
-                {/* A2: lifecycle status pill */}
+                {/* Lifecycle status pill */}
                 <span data-testid={`intent-draft-status-${d.draft_id}`} style={{ fontSize: 9.5, fontWeight: 800, letterSpacing: "0.04em", padding: "2px 8px", borderRadius: 999, background: st.bg, color: st.color, textTransform: "uppercase" }}>
                   {status}
                 </span>
@@ -929,13 +933,13 @@ function IntentDraftsPanel({
                 </span>
                 <span className="muted" style={{ fontSize: 11, color: "var(--accent, #00e5a0)" }}>{isActive ? "Hide" : "Review"}</span>
               </button>
-              {/* B7: per-draft dismiss (non-enforcing only) */}
+              {/* Per-draft dismiss (non-enforcing only) */}
               <button className="icon-btn" aria-label={`Dismiss draft ${draftDisplayClass(d)}`} data-testid={`intent-draft-dismiss-${d.draft_id}`} onClick={() => onDismissOne(d.draft_id)} style={{ flex: "none" }}>
                 <X size={14} />
               </button>
               </div>
 
-              {/* A2: target linkage — new-policy vs change-to-live. COMP-GEN-01: a remediation draft applies
+              {/* Target linkage — new-policy vs change-to-live. A remediation draft applies
                   as an ADDITIVE overlay ON the real class, never a replacement of its base policy. */}
               <div data-testid={`intent-draft-target-${d.draft_id}`} style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>
                 {d.cls !== draftDisplayClass(d)
@@ -945,7 +949,7 @@ function IntentDraftsPanel({
                   : `would apply to agent-class ${d.cls} — no live policy yet (new)`}
               </div>
 
-              {/* F2: compliance provenance — traceable back to the originating framework + control. */}
+              {/* Compliance provenance — traceable back to the originating framework + control. */}
               {draftSourceLabel(d) && (
                 <div
                   data-testid={`intent-draft-source-${d.draft_id}`}
@@ -972,7 +976,7 @@ function IntentDraftsPanel({
                   )}
                   {detail && (
                     <>
-                      {/* F2: provenance in the review header — traceable to the originating control. */}
+                      {/* Provenance in the review header — traceable to the originating control. */}
                       {draftSourceLabel(detail) && (
                         <div
                           data-testid="intent-draft-source-header"
@@ -1058,13 +1062,13 @@ function IntentDraftsPanel({
           <X size={16} />
         </button>
       </div>
-      {/* A4: subtitle reflects ALL real sources (Attack Graph + Compliance), not just the Attack Graph. */}
+      {/* Subtitle reflects ALL real sources (Attack Graph + Compliance), not just the Attack Graph. */}
       <div className="panel-sub" style={{ marginBottom: 10 }}>
         Proposed policies from the Attack Graph and Compliance gaps — DRY-RUN DRAFTS, nothing here enforces. Review
         a draft and apply it explicitly through the standard policy flow.
       </div>
 
-      {/* A5: status filter chips (newest-first order comes from the API). */}
+      {/* Status filter chips (newest-first order comes from the API). */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10, alignItems: "center" }}>
         {FILTERS.map((f) => (
           <button
@@ -1081,7 +1085,7 @@ function IntentDraftsPanel({
           </button>
         ))}
         <div style={{ flex: 1 }} />
-        {/* A3: default-hide test/e2e drafts with a reveal toggle. */}
+        {/* Default-hide test/e2e drafts with a reveal toggle. */}
         {hiddenTestCount > 0 && (
           <button
             type="button"
@@ -1094,7 +1098,7 @@ function IntentDraftsPanel({
         )}
       </div>
 
-      {/* A1: grouped by lifecycle source. */}
+      {/* Grouped by lifecycle source. */}
       <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
         {groups.map((g) => (
           <div key={g.kind} data-testid={`draft-group-${g.kind}`}>
@@ -1114,7 +1118,7 @@ function IntentDraftsPanel({
         )}
       </div>
 
-      {/* B6: bounded — the section shows a page, not the whole list; "view all" loads the rest. */}
+      {/* Bounded — the section shows a page, not the whole list; "view all" loads the rest. */}
       {remaining > 0 && (
         <div style={{ marginTop: 12, textAlign: "center" }}>
           <button
@@ -1131,7 +1135,7 @@ function IntentDraftsPanel({
   );
 }
 
-// B-1: starter rego for a brand-new policy — a minimal, VALID block policy (the create validator requires a
+// Starter rego for a brand-new policy — a minimal, VALID block policy (the create validator requires a
 // reachable block/escalate decision plus decision/rule_id/reason). The author edits it freely; it is not a
 // template the way the composer's keyword-block generator is — the whole rego is hand-editable in Monaco.
 const NEW_POLICY_REGO = `package norviq.custom
@@ -1149,7 +1153,7 @@ decision = "block" {
 
 export function PolicyCatalog() {
   const { namespace, posture } = useApp();
-  // MUT-2: in Monitor mode the engine EVALUATES policies but does not block live traffic, so the
+  // In Monitor mode the engine EVALUATES policies but does not block live traffic, so the
   // headline "ENFORCING" is a misrepresentation. Downgrade the badge to "MONITOR · would-block" so the
   // Catalog can't claim enforcement the namespace isn't doing. Only trust a definite monitor posture for
   // a concrete namespace (the "all" aggregate carries only the cluster default; per-ns overrides vary).
@@ -1161,30 +1165,35 @@ export function PolicyCatalog() {
     color: "#2DDAB8"
   } as const;
   // Land on the editor so the seeded class policy opens with Monaco + Dry-Run immediately
-  // (the Catalog tab remains a click away for the grouped tier view). C2-2: `?tab=catalog` (the "See how this
+  // (the Catalog tab remains a click away for the grouped tier view). `?tab=catalog` (the "See how this
   // resolves →" link from Target Settings) opens the resolution hierarchy directly.
   const [tab, setTab] = useState<"catalog" | "editor" | "versions">(
     searchParams.get("tab") === "catalog" ? "catalog" : "editor"
   );
   const [selected, setSelected] = useState<Policy | null>(null);
   const [restoreV, setRestoreV] = useState<number | null>(null);
-  const [viewV, setViewV] = useState<number | null>(null); // MUT-VERSION: version whose rego is expanded read-only
+  const [viewV, setViewV] = useState<number | null>(null); // Version whose rego is expanded read-only
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [regoDraft, setRegoDraft] = useState("");
   const [editorStatus, setEditorStatus] = useState<"saved" | "unsaved" | `syntax:${number}`>("saved");
   const [dryRunResult, setDryRunResult] = useState<DryRunResult | null>(null);
-  // MUT-DRYRUN: the exact rego a dry-run was computed against. If the buffer diverges afterward, the
+  // The exact rego a dry-run was computed against. If the buffer diverges afterward, the
   // stat block below is STALE next to the live "changes vs loaded" diff — we badge it instead of
   // silently showing outdated numbers as if they still described the current draft.
   const [dryRunRego, setDryRunRego] = useState<string | null>(null);
   const [dryRunLoading, setDryRunLoading] = useState(false);
-  const [applyResult, setApplyResult] = useState<ApplyResult | null>(null);  // Stage 1: apply-result transparency
-  // B-1: authoring a brand-new policy from raw rego for a chosen ns+class in the editor (null = editing existing).
+  // A dry-run that failed to evaluate. A swallowed error MUST NOT masquerade as an all-zero
+  // "safe" preview (green "0 newly blocked") — surface a degraded/error state instead so the operator
+  // never reads a network/engine failure as a validated zero-impact result. Travels WITH dryRunResult:
+  // set on catch (result nulled), cleared whenever a fresh run starts or the dry-run panel is reset.
+  const [dryRunError, setDryRunError] = useState<string | null>(null);
+  const [applyResult, setApplyResult] = useState<ApplyResult | null>(null);  // Apply-result transparency
+  // Authoring a brand-new policy from raw rego for a chosen ns+class in the editor (null = editing existing).
   const [newPolicy, setNewPolicy] = useState<{ namespace: string; agent_class: string; mode: NonNullable<Policy["mode"]> } | null>(null);
-  // B-2: the policy pending a confirmed delete (drives the confirm modal). Null = no delete in flight.
+  // The policy pending a confirmed delete (drives the confirm modal). Null = no delete in flight.
   const [deleteTarget, setDeleteTarget] = useState<Policy | null>(null);
-  // FIX A: an existing (already-saved) policy's mode is read-only from `editorPolicy` — there was no way to
-  // change JUST the enforcement mode from the editor. This holds the in-progress override for the currently
+  // An existing (already-saved) policy's mode is read-only from `editorPolicy`; this holds the in-progress
+  // override that lets the operator change JUST the enforcement mode from the editor for the currently
   // loaded existing policy; null = no override yet (falls back to the loaded policy's persisted mode).
   const [existingModeOverride, setExistingModeOverride] = useState<NonNullable<Policy["mode"]> | null>(null);
 
@@ -1201,21 +1210,21 @@ export function PolicyCatalog() {
     () => apiGet<Deployment[]>(`/api/v1/deployments?namespace=${encodeURIComponent(namespace)}`),
     [namespace]
   );
-  // F-51: a dry-run-only namespace disables Apply in the sheet (the API also rejects it — defence in depth).
+  // A dry-run-only namespace disables Apply in the sheet (the API also rejects it — defence in depth).
   const settings = useApi(() => fetchSettings(namespace), [namespace], { cacheKey: `policy-settings:${namespace}`, staleTimeMs: 30_000 });
   const applyMode = settings.data?.apply_mode === "dry_run_only" ? "dry_run_only" : "enforce";
 
-  // feat/attack-graph — Intent DRAFTS (READ + hand-off ONLY; never auto-enforces).
+  // Intent DRAFTS (READ + hand-off ONLY; never auto-enforces).
   const intentDraftId = searchParams.get("intent_draft");
   const [draftsDismissed, setDraftsDismissed] = useState(false);
   const [draftDetail, setDraftDetail] = useState<IntentDraftDetail | null>(null);
   const [draftDetailLoading, setDraftDetailLoading] = useState(false);
-  // Part A/B triage state.
+  // Triage state.
   const [draftFilter, setDraftFilter] = useState<DraftStatus | "All">("All");
   const [showTestDrafts, setShowTestDrafts] = useState<boolean>(() => localStorage.getItem("nrvq_show_test_drafts") === "1");
-  const [showAllDrafts, setShowAllDrafts] = useState(false);  // B6: "view all" bumps the page limit
+  const [showAllDrafts, setShowAllDrafts] = useState(false);  // "view all" bumps the page limit
   const [reviewedDraftIds, setReviewedDraftIds] = useState<Set<string>>(new Set());
-  // A6/B2: the draft being applied — carries ns+cls so the retire-on-save only fires for a save that
+  // The draft being applied — carries ns+cls so the retire-on-save only fires for a save that
   // actually realises THIS draft (a later, unrelated save must never dismiss an abandoned draft).
   const [pendingDraft, setPendingDraft] = useState<{ id: string; ns: string; cls: string } | null>(null);
   const [justLoadedDraft, setJustLoadedDraft] = useState(false);  // show the "draft loaded → Create to apply" banner
@@ -1231,7 +1240,7 @@ export function PolicyCatalog() {
   );
   const emptyPage: IntentDraftPage = { drafts: [], total: 0, returned: 0, offset: 0, limit: 0 };
   const draftPage = drafts.data ?? emptyPage;
-  // A2: enforcing version per agent-class, keyed by NAMESPACE/class — in the "all" view two namespaces can
+  // Enforcing version per agent-class, keyed by NAMESPACE/class — in the "all" view two namespaces can
   // share a class name, and keying by class alone made a draft's "Superseded" status / "currently v{n}"
   // linkage reflect a policy enforcing in a DIFFERENT namespace than the draft's.
   const enforcingByClass = ((): Record<string, number> => {
@@ -1290,14 +1299,14 @@ export function PolicyCatalog() {
   // "Review & apply": route the draft into the EXISTING gated create/apply UI, pre-filled.
   // This opens the standard PolicySheet + seeds the editor rego — it does NOT apply.
   const reviewDraft = (d: IntentDraftDetail) => {
-    // STALE-1: a reviewed intent draft carries its OWN generated rego (d.rego). Route it into the raw
+    // A reviewed intent draft carries its OWN generated rego (d.rego). Route it into the raw
     // editor's NEW-POLICY flow — which authors exactly `regoDraft` at the draft's ns/class — NOT the
     // composer sheet (whose Confirm-Apply regenerates a generic keyword rego from its own local
     // keywordList, silently discarding the reviewed draft). saveEditorPolicy() then creates the policy
     // from the draft's actual rego and retires the draft (pendingDraftId) on success.
     setSelected(null);            // never open the generic composer sheet for a reviewed draft
     setActiveFile(null);
-    // COMP-GEN-01: for a compliance-remediation draft, `d.cls` is ALREADY the compound overlay persistence
+    // For a compliance-remediation draft, `d.cls` is ALREADY the compound overlay persistence
     // key ("<real class>__remediation__") the backend generated the draft at — saving here therefore lands
     // on the additive overlay scope, never the real class's own (ns, class) key, so Create can never replace
     // that class's existing comprehensive policy. `draftDisplayClass(d)` is used wherever this is SHOWN to
@@ -1306,6 +1315,7 @@ export function PolicyCatalog() {
     setRegoDraft(d.rego);
     setEditorStatus("unsaved");
     setDryRunResult(null);
+    setDryRunError(null);  // Reset the dry-run panel — no stale error banner on the loaded draft
     setPendingDraft({ id: d.draft_id, ns: d.ns, cls: d.cls });  // retire it only on a save that realises IT
     setTab("editor");
     // The editor lives ABOVE the drafts panel the user clicked from, so a silent tab-switch read as
@@ -1321,10 +1331,10 @@ export function PolicyCatalog() {
     setSearchParams(next, { replace: true });
   };
 
-  // P1: clicking a draft row opens its review (rego + coverage + apply) by setting the intent_draft param —
+  // Clicking a draft row opens its review (rego + coverage + apply) by setting the intent_draft param —
   // the SAME machinery a deep-link uses (detail fetch + inline expansion). Clicking the open row collapses it.
   const selectIntentDraft = (draftId: string) => {
-    // A2: opening a draft marks it Reviewed (this session).
+    // Opening a draft marks it Reviewed (this session).
     if (intentDraftId !== draftId) setReviewedDraftIds((prev) => new Set(prev).add(draftId));
     const next = new URLSearchParams(searchParams);
     if (intentDraftId === draftId) next.delete("intent_draft");
@@ -1363,9 +1373,9 @@ export function PolicyCatalog() {
   );
 
   const refreshPolicies = async () => {
-    // C2-5: a policy create/apply/delete changes the resolved stack — bust the hierarchy caches so the Catalog
+    // A policy create/apply/delete changes the resolved stack — bust the hierarchy caches so the Catalog
     // hierarchy (and the `hier-classes:` list) reflect it with no reload.
-    // STALE-5: also bust `policy-catalog:` — the active-policies list is cached with an effectively-infinite
+    // Also bust `policy-catalog:` — the active-policies list is cached with an effectively-infinite
     // TTL, and setData() below only updates React state (never the module cache). Without this, a remount
     // (navigate away + back) served the pre-mutation list, resurrecting deleted policies / hiding new ones.
     for (const p of ["effective:", "hier-classes:", "policy-catalog:"]) invalidateApiCache(p);
@@ -1377,7 +1387,7 @@ export function PolicyCatalog() {
     }
   };
 
-  // B-1: enter raw-rego new-policy mode in the editor — the author picks ns+class and edits the whole rego.
+  // Enter raw-rego new-policy mode in the editor — the author picks ns+class and edits the whole rego.
   const startNewPolicy = () => {
     setTab("editor");
     setActiveFile(null);
@@ -1387,6 +1397,7 @@ export function PolicyCatalog() {
     setRegoDraft(NEW_POLICY_REGO);
     setEditorStatus("unsaved");
     setDryRunResult(null);
+    setDryRunError(null);  // Reset the dry-run panel for the fresh policy
     setApplyResult(null);
   };
 
@@ -1394,13 +1405,13 @@ export function PolicyCatalog() {
     setNewPolicy(null);
     setEditorStatus("saved");
     setDryRunResult(null);
+    setDryRunError(null);  // Reset the dry-run panel
     resetDraftFlow();
   };
 
-  // MUT-ROLLBACK: restore a prior version. Previously this swallowed errors (catch{//ignore}) and never
-  // refetched — the editor buffer, "current" badge, versions table and catalog card all kept showing the
-  // pre-restore state with zero feedback either way. Now it surfaces an ApplyResult (success/failure) like
-  // every other mutation on this page and reconciles policies + versions + the editor detail.
+  // Restore a prior version. Surfaces an ApplyResult (success/failure) like every other mutation on this
+  // page and reconciles policies + versions + the editor detail, so the editor buffer, "current" badge,
+  // versions table and catalog card all reflect the restore.
   const confirmRestoreVersion = async () => {
     const ns = editorPolicy?.namespace;
     const ac = editorPolicy?.agent_class;
@@ -1427,7 +1438,7 @@ export function PolicyCatalog() {
         ok: true,
         outcome: `Version ${target} was re-applied as ${newVer ? `v${newVer}` : "a new version"} and loaded into this cluster's policy engine — enforcing "${editorPolicy?.mode ?? editorPolicy?.enforcement_mode ?? "block"}". Effective on the next tool call; the editor and Active-policies card now show the restored rego.`,
         manifest: { namespace: ns, agent_class: ac, enforcement_mode: editorPolicy?.mode ?? editorPolicy?.enforcement_mode ?? "block" },
-        // FIX B: don't just trust the 200 — poll for the restored version to actually be the one loaded.
+        // Don't just trust the 200 — poll for the restored version to actually be the one loaded.
         expectedVersion: newVer
       });
     } catch (e) {
@@ -1446,7 +1457,7 @@ export function PolicyCatalog() {
     }
   };
 
-  // B-2: run the confirmed delete — removes the policy across every layer, then reconciles the editor + list.
+  // Run the confirmed delete — removes the policy across every layer, then reconciles the editor + list.
   const confirmDeletePolicy = async () => {
     if (!deleteTarget?.namespace || !deleteTarget?.agent_class) {
       setDeleteTarget(null);
@@ -1455,7 +1466,7 @@ export function PolicyCatalog() {
     const ns = deleteTarget.namespace;
     const ac = deleteTarget.agent_class;
     const ver = deleteTarget.current_version;
-    // COMP-GEN-01/POLICY-RESERVED-01: a remediation overlay is an operator-authored reserved scope — the
+    // A remediation overlay is an operator-authored reserved scope — the
     // server refuses a raw delete of it (422) and requires the explicit confirm_managed admin-gated revert,
     // exactly like `__guardrail__`. Deleting it only removes the overlay row; the base class policy is untouched.
     const overlay = isRemediationOverlayClass(ac);
@@ -1493,7 +1504,7 @@ export function PolicyCatalog() {
     if (!selected) return;
     const ns = selected.namespace ?? namespace;
     const ac = selected.agent_class ?? "";
-    // Q2: a brand-new manual class has no saved policy for `apply` to stamp — CREATE it first with the
+    // A brand-new manual class has no saved policy for `apply` to stamp — CREATE it first with the
     // composer-generated enforcing rego. create() loads into the read path, so it enforces immediately.
     if (create) {
       // "all" is the union VIEW, not a real namespace: a policy stored under "all:<class>" only matches an
@@ -1516,7 +1527,7 @@ export function PolicyCatalog() {
           ok: true,
           outcome: `Policy authored for agent class "${ac}" (no labeled deployment required) in namespace "${createNs}" and loaded into this cluster's policy engine — enforcing "${mode ?? "block"}". Effective on the next tool call for this class; it appears in the editor and the Active-policies card.`,
           manifest: { namespace: createNs, agent_class: ac, enforcement_mode: mode ?? "block" },
-          // FIX B: verify the version actually converged before badging this ENFORCING.
+          // Verify the version actually converged before badging this ENFORCING.
           expectedVersion: ver,
           expectedMode: mode ?? "block"
         });
@@ -1546,7 +1557,7 @@ export function PolicyCatalog() {
         enforcement_mode: mode ?? "block"
       });
       await refreshPolicies();
-      // A6/B2: the applied draft is now enforcing → retire it — ONLY when this apply is for the SAME
+      // The applied draft is now enforcing → retire it — ONLY when this apply is for the SAME
       // ns/class the draft targets (guards against an unrelated policy's apply deleting an abandoned draft).
       if (pendingDraft && ns === pendingDraft.ns && ac === pendingDraft.cls) {
         await dismissIntentDraft(pendingDraft.id).catch(() => {});
@@ -1554,7 +1565,7 @@ export function PolicyCatalog() {
         clearIntentDraftParam();
         drafts.refetch();
       }
-      // C1: explicit success confirmation — name the applied version so the operator always gets feedback (not a
+      // Explicit success confirmation — name the applied version so the operator always gets feedback (not a
       // silent close). The card also re-stamps "applied {ago}" via the backend mark_applied + refreshPolicies.
       const ver = (res as { version?: number }).version;
       setApplyResult({
@@ -1563,7 +1574,7 @@ export function PolicyCatalog() {
         ok: true,
         outcome: `Loaded into this cluster's policy engine — enforcement "${res.enforcement_mode ?? mode}"${ver ? ` (version ${ver} now enforcing → the draft moved to enforcing)` : ""}. Effective immediately on the next tool call; the Active-policies card shows "applied just now".`,
         manifest: { namespace: ns, agent_class: ac, enforcement_mode: res.enforcement_mode ?? mode ?? "block" },
-        // FIX B: apply's 200 can lie (FIX A) — verify the version AND the persisted mode actually converged.
+        // Apply's 200 can lie — verify the version AND the persisted mode actually converged.
         expectedVersion: ver,
         expectedMode: res.enforcement_mode ?? mode ?? "block"
       });
@@ -1586,7 +1597,7 @@ export function PolicyCatalog() {
   const editorFiles = (policies.data ?? []).filter((p) => p.target_type === "class");
   const activePolicyName = activeFile ?? editorFiles[0]?.target ?? editorFiles[0]?.agent_class ?? null;
 
-  // MUT-1: the STABLE identity of the loaded policy. The buffer-reset effect below keyed on
+  // The STABLE identity of the loaded policy. The buffer-reset effect below keyed on
   // `editorPolicy?.id` (the policies API returns no id → always undefined) plus the raw rego string —
   // so switching between two policies with BYTE-IDENTICAL source (all the seeded classes share one
   // canonical rego) never re-fired the reset, and policy A's unsaved edits silently became the buffer
@@ -1604,10 +1615,11 @@ export function PolicyCatalog() {
     setRegoDraft(detail.data?.rego_source ?? "");
     setEditorStatus("saved");
     setDryRunResult(null);
+    setDryRunError(null);  // Switching the loaded policy resets the dry-run panel — no leaked error banner
   }, [editorIdentity, detail.data?.rego_source, newPolicy]);
 
-  // MUT-1: switching the loaded policy while the buffer has unsaved edits would discard them silently
-  // (or, with the reset bug, carry them onto the next policy). Guard every file switch: if the buffer is
+  // Switching the loaded policy while the buffer has unsaved edits would discard them silently
+  // (or carry them onto the next policy). Guard every file switch: if the buffer is
   // dirty and the switch targets a DIFFERENT policy, confirm first. Returns true if the switch may proceed.
   const confirmDiscardIfDirty = (nextName: string | null): boolean => {
     if (editorStatus !== "unsaved") return true;
@@ -1617,7 +1629,19 @@ export function PolicyCatalog() {
     );
   };
 
-  // B-1: the ns/class/mode the editor is authoring against — the new-policy scope when creating, else the loaded
+  // On tab close, confirmDiscardIfDirty only guards in-app switches — closing/reloading the tab with
+  // unsaved edits would still lose them silently. Registered only while the buffer is dirty; removed on save/unmount.
+  useEffect(() => {
+    if (editorStatus !== "unsaved") return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [editorStatus]);
+
+  // The ns/class/mode the editor is authoring against — the new-policy scope when creating, else the loaded
   // policy. saveEditorPolicy + runDryRun both read this so create and edit share one code path.
   const editorTarget = newPolicy
     ? newPolicy
@@ -1625,15 +1649,15 @@ export function PolicyCatalog() {
     ? {
         namespace: editorPolicy.namespace,
         agent_class: editorPolicy.agent_class,
-        // FIX A: prefer the in-progress override (user changed the Enforcement dropdown) over the
+        // Prefer the in-progress override (user changed the Enforcement dropdown) over the
         // persisted mode, so saveEditorPolicy actually submits the changed mode instead of re-echoing
-        // the stale one — this is the bug: the mode select existed only for `newPolicy`, so an existing
-        // policy's mode could never be changed from the editor.
+        // the stale one — this override is what lets an existing policy's mode be changed from the editor
+        // (the mode select otherwise binds only to `newPolicy`).
         mode: existingModeOverride ?? editorPolicy.mode ?? editorPolicy.enforcement_mode ?? "block"
       }
     : null;
 
-  // FIX A: reset the mode override whenever the loaded existing policy changes (switch files, reload after
+  // Reset the mode override whenever the loaded existing policy changes (switch files, reload after
   // save) so a stale override from a PREVIOUS policy never leaks onto the next one.
   useEffect(() => {
     setExistingModeOverride(null);
@@ -1652,7 +1676,7 @@ export function PolicyCatalog() {
       });
       setEditorStatus("saved");
       await refreshPolicies();
-      // STALE-1: this save realised a reviewed intent draft — retire it now that its rego is enforcing —
+      // This save realised a reviewed intent draft — retire it now that its rego is enforcing —
       // ONLY when the save targets the SAME ns/class as the loaded draft (a later save of an unrelated
       // policy must never delete an abandoned draft).
       if (pendingDraft && editorTarget?.namespace === pendingDraft.ns && editorTarget?.agent_class === pendingDraft.cls) {
@@ -1662,11 +1686,11 @@ export function PolicyCatalog() {
         drafts.refetch();
       }
       if (newPolicy) {
-        // B-1: created a brand-new class — leave new-policy mode and open the freshly-created policy in the editor.
+        // Created a brand-new class — leave new-policy mode and open the freshly-created policy in the editor.
         setActiveFile(newPolicy.agent_class);
         setNewPolicy(null);
         setJustLoadedDraft(false);
-        // COMP-GEN-01: `editorTarget.agent_class` may be the compound "<class>__remediation__" overlay key —
+        // `editorTarget.agent_class` may be the compound "<class>__remediation__" overlay key —
         // show the real class + "compliance overlay" tag to the operator; the raw key stays in `manifest`.
         const displayClass = overlayDisplayLabel(editorTarget.agent_class);
         setApplyResult({
@@ -1677,15 +1701,14 @@ export function PolicyCatalog() {
             ? `Compliance remediation overlay authored for "${displayClass}" in namespace "${editorTarget.namespace}" and loaded into this cluster's policy engine — enforcing "${editorTarget.mode ?? "block"}". It ADDS a block on top of the class's existing policy (never replaces it); effective on the next tool call for this class.`
             : `New policy authored for "${editorTarget.agent_class}" in namespace "${editorTarget.namespace}" and loaded into this cluster's policy engine — enforcing "${editorTarget.mode ?? "block"}". Effective on the next tool call for this class; it appears in the editor and the Active-policies card.`,
           manifest: { namespace: editorTarget.namespace, agent_class: editorTarget.agent_class, enforcement_mode: editorTarget.mode ?? "block" },
-          // FIX B: verify the created/mode-changed version actually converged before badging ENFORCING.
+          // Verify the created/mode-changed version actually converged before badging ENFORCING.
           expectedVersion: res?.version,
           expectedMode: editorTarget.mode ?? "block"
         });
       } else {
-        // FIX-3: an existing-policy Save (e.g. the editor's "Enforcement -> audit" flow, Bug #2's own repro)
-        // previously fell straight through here with only the small "Saved ✓" badge above — no verify-poll,
-        // so the operator got no Bug #4-style convergence feedback on the exact save path that motivated it.
-        // Show the same local ApplyResultPanel + verify-poll as the create/apply paths.
+        // An existing-policy Save (e.g. the editor's "Enforcement -> audit" flow) shows the same local
+        // ApplyResultPanel + verify-poll as the create/apply paths, so the operator gets convergence
+        // feedback on this save path instead of just the small "Saved ✓" badge above.
         const displayClass = overlayDisplayLabel(editorTarget.agent_class);
         setApplyResult({
           kind: "local",
@@ -1714,6 +1737,7 @@ export function PolicyCatalog() {
   const runDryRun = async () => {
     if (!editorTarget?.namespace || !editorTarget?.agent_class) return;
     setDryRunLoading(true);
+    setDryRunError(null);  // A fresh run clears any prior degraded/error state
     try {
       const ran = regoDraft || detail.data?.rego_source || "";
       const result = await dryRunPolicy({
@@ -1724,19 +1748,17 @@ export function PolicyCatalog() {
       setDryRunResult(result);
       setDryRunRego(ran);
     } catch {
-      setDryRunResult({
-        total_records_checked: 0,
-        would_block: 0,
-        would_allow: 0,
-        block_rate_pct: 0,
-        recommendation: "Unable to evaluate right now"
-      });
+      // DO NOT fabricate an all-zero DryRunResult — a swallowed failure rendered as a green
+      // "0 newly blocked / would block 0" preview reads as a validated zero-impact result. Null the
+      // result and surface an explicit error so the operator knows the run did not evaluate.
+      setDryRunResult(null);
+      setDryRunError("Dry-run could not evaluate — no result (retry).");
     } finally {
       setDryRunLoading(false);
     }
   };
 
-  // Stage 1: a real current-vs-new diff for Dry-Run — what the edit actually changes vs the loaded policy.
+  // A real current-vs-new diff for Dry-Run — what the edit actually changes vs the loaded policy.
   const regoDiff = useMemo(() => {
     // A brand-new policy has no current source — diff against empty so the review shows the whole rego as added.
     const cur = (newPolicy ? "" : detail.data?.rego_source ?? "").split("\n");
@@ -1770,7 +1792,7 @@ export function PolicyCatalog() {
                 target_type: "class",
                 target: "",
                 agent_class: "",
-                // Q2: no `current_version` → the sheet treats this as a NEW policy (isNew) and the manual
+                // No `current_version` → the sheet treats this as a NEW policy (isNew) and the manual
                 // class is created (not a stamp of a non-existent saved policy).
                 mode: "block"
               })
@@ -1781,10 +1803,10 @@ export function PolicyCatalog() {
         }
       />
 
-      {/* Stage 1: apply-result transparency — the exact resource configured + honest outcome (policy-store + engine load). */}
+      {/* Apply-result transparency — the exact resource configured + honest outcome (policy-store + engine load). */}
       <ApplyResultPanel result={applyResult} onClose={() => setApplyResult(null)} />
 
-      {/* feat/attack-graph — non-enforcing intent drafts (hidden when empty; READ + hand-off only). */}
+      {/* Non-enforcing intent drafts (hidden when empty; READ + hand-off only). */}
       {!draftsDismissed && draftPage.total > 0 && (
         <div style={{ marginBottom: 16 }}>
           <IntentDraftsPanel
@@ -1814,7 +1836,7 @@ export function PolicyCatalog() {
       )}
 
       <div className="stack">
-        {/* F-61: "Policy Coverage by Category" lives on Overview only (was duplicated here). */}
+        {/* "Policy Coverage by Category" lives on Overview only. */}
         <div className="tabs-kit" style={{ alignSelf: "flex-start" }}>
           {(["catalog", "editor", "versions"] as const).map((t) => (
             <button
@@ -1829,7 +1851,7 @@ export function PolicyCatalog() {
 
         {tab === "catalog" && (
           <div className="stack">
-            {/* C2-1/C2-2: the resolution HIERARCHY is the headline of the catalog view — the ordered layer stack the
+            {/* The resolution HIERARCHY is the headline of the catalog view — the ordered layer stack the
                 evaluator actually resolves for a class (folded in from Target Settings). The grouped "Active
                 policies" list stays below it as the flat inventory + delete surface. */}
             <PolicyHierarchy namespace={namespace} />
@@ -1847,8 +1869,8 @@ export function PolicyCatalog() {
                 }}
               >
                 Active policies
-                {/* Quiet border-only status chip, anchored top-RIGHT of the section (was a loud filled pill
-                    glued to the title). The Monitor detail lives in the caption below + the header pill. */}
+                {/* Quiet border-only status chip, anchored top-RIGHT of the section. The Monitor detail
+                    lives in the caption below + the header pill. */}
                 <span
                   data-testid="active-policies-mode"
                   style={{
@@ -1910,11 +1932,15 @@ export function PolicyCatalog() {
                                 display: "flex",
                                 justifyContent: "space-between",
                                 alignItems: "center",
-                                gap: 8
+                                gap: 8,
+                                // Reserve room on the right for the absolutely-positioned delete button (top:8/right:8,
+                                // 36px .icon-btn) so the mode badge doesn't collide with the trash icon. Only when the
+                                // delete control is actually rendered (reserved/managed scopes have none → no gap).
+                                paddingRight: !isReservedScope(p.agent_class, p.namespace) ? 36 : 0
                               }}
                             >
                               <span className="policy-name mono" style={{ display: "flex", alignItems: "center", gap: 6 }} title={p.target ?? p.agent_class ?? undefined}>
-                                {/* FIX-2: health dot — a listed policy IS loaded in this cluster's engine & enforcing. */}
+                                {/* Health dot — a listed policy IS loaded in this cluster's engine & enforcing. */}
                                 <span
                                   aria-label="Loaded & enforcing"
                                   title="Loaded in the policy engine & enforcing"
@@ -1923,7 +1949,7 @@ export function PolicyCatalog() {
                                     background: "var(--good, #2ecc71)", boxShadow: "0 0 0 2px var(--good-dim, #2ecc7126)"
                                   }}
                                 />
-                                {/* COMP-GEN-01: a "<class>__remediation__" row is a distinct, ADDITIVE overlay
+                                {/* A "<class>__remediation__" row is a distinct, ADDITIVE overlay
                                     on that class — shown as "<class> · compliance overlay" so the base class
                                     row (unaffected) and the overlay row are both visible, but never confused. */}
                                 {overlayDisplayLabel(p.target ?? p.agent_class) || "—"}
@@ -1937,7 +1963,7 @@ export function PolicyCatalog() {
                               {p.last_applied ? <> · applied {timeAgo(p.last_applied)}</> : null}
                             </div>
                           </button>
-                          {/* B-2: per-row delete — never offered for reserved/managed scopes (baseline/pack/guardrail). */}
+                          {/* Per-row delete — never offered for reserved/managed scopes (baseline/pack/guardrail). */}
                           {!isReservedScope(p.agent_class, p.namespace) && (
                             <button
                               type="button"
@@ -2007,7 +2033,7 @@ export function PolicyCatalog() {
                 <div className="section-label" style={{ padding: "4px 8px" }}>
                   Policies
                 </div>
-                {/* B-1: author a brand-new policy from raw rego for a chosen ns+class (distinct from the header
+                {/* Author a brand-new policy from raw rego for a chosen ns+class (distinct from the header
                     composer, which only generates templated keyword-block rego). */}
                 <button
                   type="button"
@@ -2046,7 +2072,7 @@ export function PolicyCatalog() {
               </div>
               <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
                 {newPolicy && (
-                  // B-1: new-policy scope selector — the author types the namespace + agent class + enforcement mode
+                  // New-policy scope selector — the author types the namespace + agent class + enforcement mode
                   // the raw rego below will be created for (POST /api/v1/policies).
                   <div
                     data-testid="new-policy-fields"
@@ -2099,10 +2125,10 @@ export function PolicyCatalog() {
                     <KitButton variant="ghost" size="sm" icon={X} onClick={cancelNewPolicy}>Cancel</KitButton>
                   </div>
                 )}
-                {/* FIX A: an EXISTING loaded policy's mode was read-only (no onChange anywhere), so "Save" could
-                    never change enforcement mode — the editor's "Enforcement -> audit" change was silently
-                    dropped. Mirrors the new-policy Enforcement select above, bound to editorTarget via
-                    existingModeOverride so saveEditorPolicy (which already POSTs editorTarget.mode) submits it. */}
+                {/* Binds an EXISTING loaded policy's mode to editorTarget so "Save" can change enforcement
+                    mode (e.g. the editor's "Enforcement -> audit" change). Mirrors the new-policy Enforcement
+                    select above, via existingModeOverride so saveEditorPolicy (which already POSTs
+                    editorTarget.mode) submits it. */}
                 {!newPolicy && editorPolicy && (
                   <div
                     data-testid="existing-policy-fields"
@@ -2135,7 +2161,7 @@ export function PolicyCatalog() {
                     <FileCode size={14} />{" "}
                     {newPolicy
                       ? `${newPolicy.namespace || "namespace"}/${newPolicy.agent_class || "new-policy"}.rego`
-                      : /* MUT-1: on first load activeFile is null but a policy IS loaded (editorFiles[0]) —
+                      : /* On first load activeFile is null but a policy IS loaded (editorFiles[0]) —
                            show its real name, not a generic "policy.rego" that disagrees with the highlighted
                            sidebar row. activePolicyName resolves the same fallback the sidebar uses. */
                         (activePolicyName ?? "policy") + ".rego"}
@@ -2202,7 +2228,7 @@ export function PolicyCatalog() {
                     )}
                   </span>
                   <div style={{ flex: 1 }} />
-                  {/* B-2: delete the loaded existing policy (never a reserved scope, never during new-policy mode). */}
+                  {/* Delete the loaded existing policy (never a reserved scope, never during new-policy mode). */}
                   {!newPolicy && editorPolicy && !isReservedScope(editorPolicy.agent_class, editorPolicy.namespace) && (
                     <KitButton
                       variant="destructive"
@@ -2255,7 +2281,7 @@ export function PolicyCatalog() {
                   >
                     <div style={{ fontWeight: 600, marginBottom: 6, display: "flex", alignItems: "center", gap: 8 }}>
                       Dry-Run Results
-                      {/* MUT-DRYRUN: the buffer changed since these numbers were computed — they no longer
+                      {/* The buffer changed since these numbers were computed — they no longer
                           describe the current draft. Badge it (don't silently show stale stats). */}
                       {dryRunRego != null && regoDraft !== dryRunRego && (
                         <span
@@ -2340,6 +2366,27 @@ export function PolicyCatalog() {
                     })()}
                   </div>
                 )}
+                {/* A failed dry-run renders as an explicit degraded/error state — NEVER a green
+                    all-zero "safe" preview. Independent of the stale-badge guard so it shows on a first-ever
+                    failed run (dryRunRego still null) and a no-edit re-run alike. */}
+                {dryRunError != null && (
+                  <div
+                    data-testid="dryrun-error"
+                    role="alert"
+                    style={{
+                      padding: "10px 14px",
+                      borderTop: "1px solid var(--border)",
+                      fontSize: 12.5,
+                      color: "var(--block)",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8
+                    }}
+                  >
+                    <AlertCircle size={14} style={{ flex: "none" }} />
+                    <span>{dryRunError}</span>
+                  </div>
+                )}
               </div>
             </div>
           </Panel>
@@ -2366,7 +2413,7 @@ export function PolicyCatalog() {
                 <tbody>
                   {(() => {
                     const vlist = versions.data ?? [];
-                    // P6: the ACTIVE/enforcing version is the highest one (history is oldest→newest), not the
+                    // The ACTIVE/enforcing version is the highest one (history is oldest→newest), not the
                     // first row — put CURRENT there so it matches the Catalog card + apply panel (e.g. v8, not v1).
                     const activeVersion = vlist.reduce((mx, v) => Math.max(mx, v.version), 0);
                     return vlist.flatMap((v) => {
@@ -2389,8 +2436,7 @@ export function PolicyCatalog() {
                       <td className="muted">{fmtDateTime(v.saved_at)}</td>
                       <td>
                         <div style={{ display: "flex", gap: 8 }}>
-                          {/* MUT-VERSION: "View rego" reveals THIS version's actual source read-only (the
-                              old "Load in Editor" loaded the current policy for every row — it lied). The
+                          {/* "View rego" reveals THIS version's actual source read-only. The
                               current row also offers a real "Load in Editor" (it IS the current policy). */}
                           <KitButton
                             variant="outline"
@@ -2488,6 +2534,7 @@ export function PolicyCatalog() {
             setRegoDraft(seed.rego);
             setEditorStatus("unsaved");
             setDryRunResult(null);
+            setDryRunError(null);  // Reset the dry-run panel for the seeded raw editor
             setApplyResult(null);
           }}
         />

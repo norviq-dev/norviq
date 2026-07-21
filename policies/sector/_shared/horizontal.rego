@@ -16,7 +16,7 @@ package norviq.sector.shared
 # PCI — PAN by field name or Luhn-valid value (mirrors comprehensive.rego).
 pci_keys = {"cc_number", "card_number", "credit_card"}
 
-# F-15: a PAN-named key at ANY depth (last path element is the immediate key).
+# A PAN-named key at ANY depth (last path element is the immediate key).
 blocks["pci_card_numbers"] {
     walk(input.tool_params, [path, _])
     count(path) > 0
@@ -63,7 +63,7 @@ shared_luhn_digit(d, parity) = sub {
 # >>> END SHARED-RULE pci
 
 # >>> SHARED-RULE pii
-# PII — SSN shapes in params (mirrors comprehensive.rego). F-15: walk() recurses nested objects/arrays.
+# PII — SSN shapes in params (mirrors comprehensive.rego). walk() recurses nested objects/arrays.
 blocks["pii_detection"] {
     walk(input.tool_params, [_, val])
     is_string(val)

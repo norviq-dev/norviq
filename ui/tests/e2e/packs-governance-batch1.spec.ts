@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// BATCH-1 Policy-Packs / Governance — REAL form login (not token injection). Proves the three fixes on the served
+// Policy-Packs / Governance — REAL form login (not token injection). Proves the three fixes on the served
 // build with EFFECT, not a 200:
-//   B1-2: under "All namespaces" (the default aggregate scope) every pack/override/apply-mode mutation is DISABLED
+//   Under "All namespaces" (the default aggregate scope) every pack/override/apply-mode mutation is DISABLED
 //         with an inline "Select a namespace" prompt, and NO ?namespace=all write is ever sent.
-//   B1-1: under a CONCRETE namespace, Enable flips the card to Enabled with no reload and Disable flips it back —
+//   Under a CONCRETE namespace, Enable flips the card to Enabled with no reload and Disable flips it back —
 //         3× — and the write targets the concrete namespace; the Target-Settings "packs applied" chip updates.
-//   B1-3: a dry-run-only namespace surfaces the reason inline and disables pack applies up-front.
+//   A dry-run-only namespace surfaces the reason inline and disables pack applies up-front.
 import { test, expect, type Page } from "@playwright/test";
 
 const PW = process.env.NRVQ_E2E_PASSWORD || "CHANGE_ME-e2e-pw";
@@ -38,7 +38,7 @@ async function selectNamespace(page: Page, ns: string) {
   await expect(page.locator("button.cluster-sel")).toContainText(ns, { timeout: 8000 });
 }
 
-test.describe("BATCH-1 Packs/Governance — real login", () => {
+test.describe("Packs/Governance — real login", () => {
   test.beforeEach(async ({ page }) => {
     await realLogin(page);
     // clean slate: disable the throwaway packs under both default and the phantom "all".
@@ -48,7 +48,7 @@ test.describe("BATCH-1 Packs/Governance — real login", () => {
     await apiRaw(page, `/api/v1/settings`, "PUT", { namespace: NS, apply_mode: "enforce" });
   });
 
-  test("B1-2: All-namespaces disables every mutation + prompts, and sends NO ?namespace=all write", async ({ page }) => {
+  test("All-namespaces disables every mutation + prompts, and sends NO ?namespace=all write", async ({ page }) => {
     const allWrites: string[] = [];
     page.on("request", (r) => {
       if (["POST", "PUT", "DELETE"].includes(r.method()) && r.url().includes("/policy-packs")) {
@@ -70,7 +70,7 @@ test.describe("BATCH-1 Packs/Governance — real login", () => {
     expect(allWrites, `no ?namespace=all write may ever be sent: ${allWrites.join(" | ")}`).toEqual([]);
   });
 
-  test("B1-1: concrete-ns Enable flips the card 3× (no reload) + writes the concrete ns + Target chip updates", async ({ page }) => {
+  test("concrete-ns Enable flips the card 3× (no reload) + writes the concrete ns + Target chip updates", async ({ page }) => {
     const enableBodies: string[] = [];
     page.on("request", (r) => {
       if (r.method() === "POST" && /\/policy-packs\/[^/]+\/enable/.test(r.url())) enableBodies.push(r.postData() || "");
@@ -104,7 +104,7 @@ test.describe("BATCH-1 Packs/Governance — real login", () => {
     await apiRaw(page, `/api/v1/policy-packs/ecommerce/disable`, "POST", { namespace: NS });
   });
 
-  test("B1-3: a dry-run-only namespace surfaces the reason and disables pack applies", async ({ page }) => {
+  test("a dry-run-only namespace surfaces the reason and disables pack applies", async ({ page }) => {
     await realLogin(page);
     await apiRaw(page, `/api/v1/settings`, "PUT", { namespace: NS, apply_mode: "dry_run_only" });
     try {

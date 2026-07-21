@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Wave-2 UI-wiring unit tests (UI-AUDIT round 3).
+"""Wave-2 UI-wiring unit tests.
 
-A1 — synthetic/probe classification + graph filtering (default-hide seeded test identities).
-B4 — parse namespace + agent_class from a SPIFFE id for the Agents table.
-C1 — an apply re-stamps the last-applied time (even for unchanged content).
+- Synthetic/probe classification + graph filtering (default-hide seeded test identities).
+- Parse namespace + agent_class from a SPIFFE id for the Agents table.
+- An apply re-stamps the last-applied time (even for unchanged content).
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from norviq.api.synthetic import is_synthetic_identity
 
 
 # ---------------------------------------------------------------------------------------------
-# A1 — synthetic classification
+# Synthetic classification
 # ---------------------------------------------------------------------------------------------
 
 def test_probe_naming_is_synthetic():
@@ -43,7 +43,7 @@ def test_explicit_synthetic_marker_wins():
 
 
 # ---------------------------------------------------------------------------------------------
-# A1 — graph node/edge filtering
+# Graph node/edge filtering
 # ---------------------------------------------------------------------------------------------
 
 def _agent(nid: str, cls: str) -> AssetNode:
@@ -95,7 +95,7 @@ def test_filter_noop_when_no_synthetics():
 
 
 # ---------------------------------------------------------------------------------------------
-# B4 — SPIFFE parsing for the Agents table
+# SPIFFE parsing for the Agents table
 # ---------------------------------------------------------------------------------------------
 
 def test_spiffe_namespace_and_class_parse():
@@ -110,7 +110,7 @@ def test_spiffe_parse_is_defensive():
 
 
 # ---------------------------------------------------------------------------------------------
-# C1 — apply re-stamps the last-applied time
+# Apply re-stamps the last-applied time
 # ---------------------------------------------------------------------------------------------
 
 class _CacheStub:

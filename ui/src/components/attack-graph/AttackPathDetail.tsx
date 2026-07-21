@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Attack Graph inspector (design_handoff_attackgraph): severity, MITRE, ns/class chips, hops, min-trust,
+// Attack Graph inspector: severity, MITRE, ns/class chips, hops, min-trust,
 // blast radius, chokepoint tool, the step-by-step kill chain with decision dots + per-hop what-if block
 // toggle, the recommended fix (scope, not remove) with "Define intended behaviour", the live verdict, a
 // "Simulate" action (REAL /evaluate per step — labeled PREVIEW), and — when a what-if is active — a
@@ -19,16 +19,16 @@ export type SimResult = { blocked: boolean; label: string; monitor?: boolean } |
 interface Props {
   path: ThreatPath;
   /** REAL status (sim result or baseline). A what-if does NOT change this — it is surfaced via
-   *  whatIfIndex + the amber hypothetical verdict below (MUT-4). */
+   *  whatIfIndex + the amber hypothetical verdict below. */
   status: PathStatus;
   /** Which hop is what-if blocked on this path (-1 = none). */
   whatIfIndex: number;
   simResult: SimResult;
   simulating: boolean;
   drafted: boolean;
-  /** AG-DRAFT-01: the persisted draft's deep-link (/policies/catalog?intent_draft=<id>), once created. */
+  /** The persisted draft's deep-link (/policies/catalog?intent_draft=<id>), once created. */
   draftLink?: string;
-  /** AG-DRAFT-01: a draft-creation error to surface (never a fake success). */
+  /** A draft-creation error to surface (never a fake success). */
   draftError?: string;
   onToggleWhatIf: (index: number) => void;
   onDefineIntent: () => void;
@@ -58,13 +58,13 @@ export function AttackPathDetail({
   const sev = SEVERITY_COLORS[path.sev];
   const naturalBlock = path.steps.some((st) => st.dec === "block");
   const trustColor = path.trust >= 0.8 ? "#34d399" : path.trust >= 0.6 ? "#fbbf24" : "#ff8fa3";
-  // MUT-4: an active what-if gets its OWN amber verdict — it must never borrow the green "blocked"
+  // An active what-if gets its OWN amber verdict — it must never borrow the green "blocked"
   // styling of a real block. It is a hypothetical, and the copy says so ("WOULD flip to blocked").
   const verdictStyle =
     whatIfIndex >= 0 ? { bg: "rgba(58,42,10,0.6)", color: "var(--escalate)", icon: "◑" }
     : status === "blocked" ? { bg: "rgba(13,42,28,0.6)", color: "#6ee7b7", icon: "✓" }
     : status === "exploitable" ? { bg: "rgba(42,15,22,0.6)", color: "#ff8fa3", icon: "⚠" }
-    : { bg: "rgba(38,38,38,0.6)", color: "#9aa4b2", icon: "○" };  /* A6: navy→neutral grey */
+    : { bg: "rgba(38,38,38,0.6)", color: "#9aa4b2", icon: "○" };  /* navy→neutral grey */
   const verdict = whatIfIndex >= 0
     ? `What-if (hypothetical): blocking ${path.steps[whatIfIndex].to} at step ${whatIfIndex + 1} WOULD neutralize this path — it would flip to blocked. Nothing is enforced until you apply a policy.`
     : path.verdict;
@@ -217,7 +217,7 @@ export function AttackPathDetail({
                 <div style={{ flex: 1, minWidth: 0, paddingBottom: 14 }}>
                   <div style={{ fontSize: 12.5, color: "#d3dae6", lineHeight: 1.45, wordBreak: "break-word" }}>
                     <b style={{ color: "#e8edf5" }}>{st.from}</b> {st.verb} <b style={{ color: "#e8edf5" }}>{st.to}</b>
-                    {/* CAP-2 + lifecycle: the ACTUAL operation on the hop, coloured by its verb risk — a
+                    {/* The ACTUAL operation on the hop, coloured by its verb risk — a
                         destructive DELETE hop reads differently from a benign READ. On a TOOL hop the
                         classifier lifecycle shows through: "✓" when the verb was admin-promoted (learned),
                         or the observation state ("observing · delete 12/14") while the verb is unproven. */}
@@ -273,7 +273,7 @@ export function AttackPathDetail({
           <>
             <button
               type="button"
-              // AG-DRAFT-01: once the draft persists, the confirmation deep-links to it in Policy Catalog (no fake label).
+              // Once the draft persists, the confirmation deep-links to it in Policy Catalog (no fake label).
               onClick={() => (drafted && draftLink ? navigate(draftLink) : onDraft())}
               disabled={drafted && !draftLink}
               data-testid="ag-draft-button"

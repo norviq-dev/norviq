@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F047: GET /policy-packs catalog + admin-only enable/disable. Covers list (with/without enabled),
+"""GET /policy-packs catalog + admin-only enable/disable. Covers list (with/without enabled),
 enable materializes the combined rego via the loader, non-admin 403, unknown pack 404, idempotency,
 and disable re-materialize/delete."""
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 import jwt
@@ -85,7 +86,11 @@ def _client(rows: list | None = None) -> tuple[TestClient, _FakeSession, _FakeLo
 
 
 def _token(role: str = "admin", namespace: str = "default") -> str:
-    return jwt.encode({"sub": "u", "role": role, "namespace": namespace}, settings.api_secret_key, algorithm="HS256")
+    return jwt.encode(
+        {"sub": "u", "role": role, "namespace": namespace, "exp": int(time.time()) + 3600},
+        settings.api_secret_key,
+        algorithm="HS256",
+    )
 
 
 def _h(role: str = "admin") -> dict:
@@ -175,7 +180,7 @@ def test_packs_requires_auth() -> None:
 
 
 def test_enable_rejects_target_cluster_mismatch() -> None:
-    # R2 (P1) server backstop: a cluster-scoped mutation whose X-Nrvq-Target-Cluster != the served cluster is
+    # Server backstop: a cluster-scoped mutation whose X-Nrvq-Target-Cluster != the served cluster is
     # refused (409) and NOTHING is written — even with a valid admin token (direct-API bypass of the UI guard).
     client, session, loader = _client(rows=[])
     resp = client.post(

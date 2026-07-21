@@ -60,7 +60,7 @@ describe("logout (#8)", () => {
     localStorage.clear();
   });
 
-  it("AUTH-01: revokes the session server-side (POST /auth/logout with bearer) BEFORE clearing", async () => {
+  it("revokes the session server-side (POST /auth/logout with bearer) BEFORE clearing", async () => {
     localStorage.setItem("nrvq_token", "tok");
     Object.defineProperty(window, "location", {
       value: { href: "http://localhost/agents" },
@@ -78,7 +78,7 @@ describe("logout (#8)", () => {
     expect(window.location.href).toBe("/");
   });
 
-  it("AUTH-01: a dead API never traps logout — still clears + redirects on fetch failure", async () => {
+  it("a dead API never traps logout — still clears + redirects on fetch failure", async () => {
     localStorage.setItem("nrvq_token", "tok");
     Object.defineProperty(window, "location", {
       value: { href: "http://localhost/agents" },
@@ -104,7 +104,7 @@ describe("logout (#8)", () => {
   });
 });
 
-describe("fetchSearch — P2-2 scoped ⌘K search", () => {
+describe("fetchSearch — scoped ⌘K search", () => {
   beforeEach(() => {
     localStorage.clear();
     vi.restoreAllMocks();

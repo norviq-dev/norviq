@@ -40,7 +40,7 @@ describe("color-consistency guard", () => {
     expect(offenders, `off-palette chrome must use tokens (teal accent / grey / semantic):\n${offenders.join("\n")}`).toEqual([]);
   });
 
-  it("L1: the shared BrandLoader's green is the --accent token — no raw brand/off-palette hex", () => {
+  it("the shared BrandLoader's green is the --accent token — no raw brand/off-palette hex", () => {
     const loader = Object.entries(sources).find(([p]) => p.endsWith("components/common/BrandLoader.tsx"))?.[1] ?? "";
     expect(loader, "BrandLoader.tsx must exist").not.toBe("");
     // the mark's stroke + halo are token-based (teal accent)
@@ -59,7 +59,7 @@ describe("color-consistency guard", () => {
     expect(login).not.toMatch(/stroke="#00e5a0"/);
   });
 
-  it("A4: the ScoreGauge descriptive caption is a NEUTRAL token, not the score's block-red risk band", () => {
+  it("the ScoreGauge descriptive caption is a NEUTRAL token, not the score's block-red risk band", () => {
     const gauge = Object.entries(sources).find(([p]) => p.endsWith("components/common/ScoreGauge.tsx"))?.[1] ?? "";
     expect(gauge, "ScoreGauge.tsx must exist").not.toBe("");
     // a caller-supplied caption (sub) is tinted with the neutral --text-muted token, never the risk color

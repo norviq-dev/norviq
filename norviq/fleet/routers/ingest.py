@@ -38,7 +38,7 @@ async def heartbeat(
     require_admin_or_service(user)
     scoped_cluster(user, cluster_id)
     now = _utcnow()
-    # S3: bind the cluster to its attested SPIFFE identity (defense-in-depth atop the bearer). Warn on a
+    # Bind the cluster to its attested SPIFFE identity (defense-in-depth atop the bearer). Warn on a
     # change of a previously-bound SVID — the bearer remains the authoritative transport auth.
     existing = (await session.execute(select(Cluster).where(Cluster.id == cluster_id))).scalar_one_or_none()
     if existing is not None and existing.spiffe_id and body.spiffe_id and existing.spiffe_id != body.spiffe_id:

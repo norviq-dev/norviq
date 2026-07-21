@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Per-framework emblems for the Compliance page (nominative recreations of the design_handoff_compliance
+// Per-framework emblems for the Compliance page (nominative recreations of the framework
 // ICONS: ATLAS mountain-in-circle, OWASP dragon, NIST/ISO text marks, EU stars). All tinted with `currentColor`
-// so they inherit the portal palette (teal/grey per the palette law) — no hardcoded off-palette colors.
+// so they inherit the portal palette (teal/grey) — no hardcoded off-palette colors.
 
 type FrameworkId = "atlas" | "owasp" | "nist" | "iso" | "eu";
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// L1 — BrandLoader: the ONE canonical Norviq loading mark. The brand "Y" with a green EDGE glow that animates
+// BrandLoader: the ONE canonical Norviq loading mark. The brand "Y" with a green EDGE glow that animates
 // as it loads (a light travelling along the mark's edge over a soft halo). Used for every full-page / route /
 // Suspense / refresh load and for the login in-flight state, so the brand moment is identical everywhere and
 // the mark never jumps between screens.
@@ -102,7 +102,7 @@ export function BrandLoader({ size = 64, label = "Loading", inline = false }: Br
 }
 
 interface OverlayProps extends BrandLoaderProps {
-  /** B2: full-VIEWPORT centering (position:fixed, default) so the logo sits at innerWidth/2 × innerHeight/2,
+  /** Full-VIEWPORT centering (position:fixed, default) so the logo sits at innerWidth/2 × innerHeight/2,
    * independent of any offset ancestor. Set false to scope the overlay to the nearest positioned ancestor. */
   fullscreen?: boolean;
 }

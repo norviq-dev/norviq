@@ -23,13 +23,13 @@ config:
   enforcementMode: block
   logLevel: INFO
   dbSslMode: disable
-  # B2: real workload identity. CSI volume mounted on api/engine; resolver fails closed.
+  # Real workload identity. CSI volume mounted on api/engine; resolver fails closed.
   spiffeMode: workload-api
   spiffeSocket: /spiffe-workload-api/spire-agent.sock
   spiffeCsi:
     enabled: true
 
-# A1/A2/A4: OIDC ON (validate real RS256 from Keycloak alongside legacy HS256). The issuer host must be
+# OIDC ON (validate real RS256 from Keycloak alongside legacy HS256). The issuer host must be
 # byte-identical for the browser and the in-cluster API (CoreDNS rewrite makes keycloak.localtest.me
 # resolve to the in-cluster Keycloak). groupMappings: IdP groups -> Norviq (role, namespace).
 oidc:
@@ -51,10 +51,10 @@ webhook:
     enabled: false
   injection:
     enabled: true
-  # B3: inject the SPIFFE Workload API socket + workload-api mode into injected workloads.
+  # Inject the SPIFFE Workload API socket + workload-api mode into injected workloads.
   spiffe:
     inject: true
-  # B4: controller mints its API bearer via OIDC client-credentials (Keycloak norviq-webhook client).
+  # Controller mints its API bearer via OIDC client-credentials (Keycloak norviq-webhook client).
   oidc:
     enabled: true
     tokenUrl: "http://keycloak.localtest.me:8080/realms/norviq/protocol/openid-connect/token"

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Unit tests for evaluator Day 8 regression patterns."""
+"""Unit tests for evaluator regression patterns."""
 
 from __future__ import annotations
 
@@ -222,8 +222,8 @@ async def test_no_policy_path_still_calls_opa_entrypoint(evaluator: OPAEvaluator
 
 
 def test_reload_policy_is_copy_on_write_and_preserves_priority() -> None:
-    """M5: reload_policy must use COW (atomic dict swap, no in-place mutation) so a concurrent candidate
-    iteration can't see a torn read, and must PRESERVE the existing priority (was reset to 100)."""
+    """reload_policy must use COW (atomic dict swap, no in-place mutation) so a concurrent candidate
+    iteration can't see a torn read, and must PRESERVE the existing priority."""
     engine = OPAEvaluator(_CacheStub())  # type: ignore[arg-type]
     engine.load_policy("default", "svc", "package a\n", priority=800)
     before = engine._policies                       # capture the map identity
@@ -245,7 +245,7 @@ def test_reload_policy_is_copy_on_write_and_preserves_priority() -> None:
 
 @pytest.mark.asyncio
 async def test_collect_candidates_includes_namespace_and_workload_tiers(evaluator: OPAEvaluator) -> None:
-    """H3: the WORKLOAD (deployment:<name>) and NAMESPACE (namespace:<ns>) tiers the catalog advertises are
+    """The WORKLOAD (deployment:<name>) and NAMESPACE (namespace:<ns>) tiers the catalog advertises are
     now actually COLLECTED for evaluation (they were minted/listed/versioned but never enforced)."""
     loader = evaluator._loader  # type: ignore[attr-defined]
     loader._policies = {

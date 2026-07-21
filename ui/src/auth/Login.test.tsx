@@ -97,14 +97,14 @@ describe("default login view", () => {
     expect(JSON.parse(call[1]!.body as string)).toEqual({ username: "admin", password: "norviq" });
   });
 
-  it("L4: the brand lockup is CENTERED (not left-aligned)", () => {
+  it("the brand lockup is CENTERED (not left-aligned)", () => {
     render(<Login />);
     const wordmark = screen.getByText("norviq");
     const lockup = wordmark.parentElement as HTMLElement; // the flex row wrapping the mark + wordmark
     expect(lockup).toHaveStyle({ justifyContent: "center" });
   });
 
-  it("L2: the Sign in button shows the shared BrandLoader (aria-busy), replacing the 'Signing in…' text", async () => {
+  it("the Sign in button shows the shared BrandLoader (aria-busy), replacing the 'Signing in…' text", async () => {
     // hang the /auth/login request so the signing state persists long enough to assert
     let release!: () => void;
     const pending = new Promise<Response>((r) => (release = () => r({ ok: true, json: () => Promise.resolve({ access_token: "a.b.c", must_change: false }) } as Response)));
@@ -134,7 +134,7 @@ describe("default login view", () => {
     release();
   });
 
-  it("B1: the token/CLI submit ALSO shows the shared BrandLoader (same in-flight path, aria-busy)", async () => {
+  it("the token/CLI submit ALSO shows the shared BrandLoader (same in-flight path, aria-busy)", async () => {
     // the token path validates against /me; hang it so the signing state persists
     let release!: () => void;
     const pending = new Promise<Response>((r) => (release = () => r({ ok: true, json: () => Promise.resolve({ sub: "x", role: "admin" }) } as Response)));
@@ -164,7 +164,7 @@ describe("default login view", () => {
     release();
   });
 
-  it("A1: signIn holds the loader for the MIN even when auth resolves instantly (fake timers)", async () => {
+  it("signIn holds the loader for the MIN even when auth resolves instantly (fake timers)", async () => {
     vi.useFakeTimers();
     // both /readyz (boot) and /auth/login resolve INSTANTLY — the only thing that keeps the loader up is the min
     vi.spyOn(globalThis, "fetch").mockImplementation((input: RequestInfo | URL) => {
@@ -268,8 +268,32 @@ describe("default login view", () => {
     fireEvent.click(screen.getByRole("button", { name: /^sign in$/i }));
     await screen.findByText(/set a new password/i);
     expect(localStorage.getItem("nrvq_must_change")).toBe("1");
-    // current password is prefilled from the login they just completed
-    expect(screen.getByLabelText(/current password/i)).toHaveValue("norviq");
+    // current password is prefilled from the login they just completed…
+    const cur = screen.getByLabelText(/current password/i);
+    expect(cur).toHaveValue("norviq");
+    // …and LOCKED (readOnly) so a browser password-manager can't autofill-over it or trap backspace.
+    expect(cur).toHaveAttribute("readonly");
+    expect(cur).toHaveAttribute("autocomplete", "off");
+  });
+
+  it("forced-change: submitting sends the PREFILLED current password (autofill can't corrupt the locked field)", async () => {
+    const f = mockFetch(200, { access_token: "a.b.c", must_change: true, default_password_in_use: true });
+    render(<Login />);
+    fillCreds(); // signs in with the default "norviq" → must_change → prefilled+locked current field
+    fireEvent.click(screen.getByRole("button", { name: /^sign in$/i }));
+    await screen.findByText(/set a new password/i);
+    // Fill only the NEW + confirm (the user never touches the locked current field).
+    fireEvent.change(screen.getByLabelText(/^new password$/i), { target: { value: "NorviqKind#2026x" } });
+    fireEvent.change(screen.getByLabelText(/confirm new password/i), { target: { value: "NorviqKind#2026x" } });
+    fireEvent.click(screen.getByRole("button", { name: /save & continue/i }));
+    await waitFor(() => {
+      const call = f.mock.calls.find((c) => String(c[0]).includes("/auth/change-password"));
+      expect(call).toBeTruthy();
+      expect(JSON.parse(String((call![1] as RequestInit).body))).toMatchObject({
+        current_password: "norviq",
+        new_password: "NorviqKind#2026x"
+      });
+    });
   });
 
   it("shows a generic error on 401 and a lockout message on 429", async () => {

@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
+//
+// controller.go is the CRD controller: it watches NrvqPolicy / NrvqClass / NrvqConfig
+// custom resources and syncs them to the central API, validating rego and targets,
+// managing deletion finalizers, and keeping resource status up to date.
 package main
 
 import (
@@ -73,7 +77,7 @@ type Controller struct {
 	tokenMu      sync.Mutex
 	cachedJWT    string
 	cachedJWTExp time.Time
-	// B4: when configured, the controller authenticates to the API with an OIDC client-credentials
+	// When configured, the controller authenticates to the API with an OIDC client-credentials
 	// access token (validated by the API's existing OIDC path) instead of the HS256 service JWT.
 	// nil -> HS256 path. The TokenSource caches + auto-refreshes.
 	oidcTokenSource      oauth2.TokenSource
@@ -718,7 +722,7 @@ func validateRego(rego string) error {
 			return fmt.Errorf("policy must define %s", name)
 		}
 	}
-	// FIX 5 (enforcement-correctness parity): without a `default decision` a policy whose sole
+	// Without a `default decision` a policy whose sole
 	// `decision = "block" { ... }` rule never fires (e.g. an unreachable condition, or simply no
 	// matching input) evaluates `decision` as undefined, which the engine's evaluator treats as
 	// allow. Every legitimate/shipped policy already declares a default, so require it here too.
@@ -1079,7 +1083,7 @@ func (c *Controller) listCachedPolicies() []*unstructured.Unstructured {
 // here so the controller authenticates to the API (which validates JWTs, not the raw secret). Returns
 // "" when no secret is configured (the request then goes unauthenticated, as before).
 func (c *Controller) bearerToken() string {
-	// B4: prefer the OIDC client-credentials access token (the TokenSource caches + auto-refreshes).
+	// Prefer the OIDC client-credentials access token (the TokenSource caches + auto-refreshes).
 	// Fall back to the HS256 service JWT on any error so policy sync never breaks mid-migration.
 	if c.oidcTokenSource != nil {
 		if tok, err := c.oidcTokenSource.Token(); err == nil && tok.AccessToken != "" {

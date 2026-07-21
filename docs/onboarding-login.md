@@ -67,7 +67,7 @@ oidc:
   enabled: true
   issuer: "https://<tenant>/"              # the token `iss`
   audience: "<api-client-or-audience-id>"  # the API's expected `aud`
-  consoleClientId: "<spa-public-client-id>" # LOGIN-1: the browser client the console signs in with
+  consoleClientId: "<spa-public-client-id>" # the browser client the console signs in with
   jwksUrl: "https://<tenant>/.well-known/jwks.json"
   groupClaim: groups
   groupMappings:

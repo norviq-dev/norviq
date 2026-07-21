@@ -8,6 +8,7 @@ computation. Scope splits techniques into runtime-enforceable (counted) vs out-o
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -25,7 +26,7 @@ from norviq.api.auth import get_current_user, read_namespace, require_admin, req
 from norviq.api.db.models import AuditLogEntry, IntentDraft, MitreCoverageSnapshot
 from norviq.api.db.session import get_session
 from norviq.api.retention import draft_expiry, enforce_draft_cap
-from norviq.api.synthetic import is_synthetic_identity  # A1: the ONE shared classifier (do not fork)
+from norviq.api.synthetic import is_synthetic_identity  # the ONE shared classifier (do not fork)
 from norviq.api.threat_intent import generate_remediation_rego, remediation_generatable_rules
 
 log = structlog.get_logger()
@@ -67,14 +68,14 @@ async def _activity_by_rule(
     """Per-rule_id observed-attempt + blocked counts from audit, EXCLUDING synthetic/simulated events, plus
     the count of events excluded (best-effort; ({}, 0) if the DB is unavailable).
 
-    COMP-EVIDENCE (San decision b): an audit-evidence pack is an attestation to an auditor — it must count
-    REAL traffic only. Synthetic/probe/eval identities (A1 classifier) and red-team framework events
+    COMP-EVIDENCE (product decision): an audit-evidence pack is an attestation to an auditor — it must count
+    REAL traffic only. Synthetic/probe/eval identities (the synthetic-identity classifier) and red-team framework events
     (efficacy tooling, not live enforcement) are excluded from the observed/blocked headline so the pack
     can't be read as real enforcement evidence. Red-team efficacy still lives in its own clearly-labelled
     'proven-blocking' surface (RedTeam page), never merged into these counts. The excluded count is
     surfaced so the pack states the exclusion explicitly."""
     since = datetime.now(timezone.utc) - timedelta(hours=_RANGE_HOURS.get(range_token, 24))
-    # Group by agent_class + framework too, so the Python-side A1 classifier can drop synthetic identities
+    # Group by agent_class + framework too, so the Python-side classifier can drop synthetic identities
     # (it is not expressible in SQL) and red-team events before aggregating.
     stmt = (
         select(
@@ -107,8 +108,8 @@ async def _activity_by_rule(
 
 
 async def _blocked_by_rule_class(session: AsyncSession, namespace: str | None, range_token: str) -> dict[str, dict[str, int]]:
-    """B1.2: {rule_id: {agent_class: blocked_count}} over `range` — the REAL rule×audit join behind the
-    per-technique affected-agent-class chips. Synthetic/test classes are excluded via the A1 classifier."""
+    """{rule_id: {agent_class: blocked_count}} over `range` — the REAL rule×audit join behind the
+    per-technique affected-agent-class chips. Synthetic/test classes are excluded via the classifier."""
     since = datetime.now(timezone.utc) - timedelta(hours=_RANGE_HOURS.get(range_token, 24))
     stmt = (
         select(AuditLogEntry.rule_id, AuditLogEntry.agent_class, func.count(AuditLogEntry.id))
@@ -121,7 +122,7 @@ async def _blocked_by_rule_class(session: AsyncSession, namespace: str | None, r
     try:
         for rid, cls, count in (await session.execute(stmt)).all():
             cls = str(cls or "")
-            if not cls or is_synthetic_identity(cls):  # A1: never list a probe/test class as "affected"
+            if not cls or is_synthetic_identity(cls):  # never list a probe/test class as "affected"
                 continue
             out.setdefault(str(rid), {})[cls] = out.setdefault(str(rid), {}).get(cls, 0) + int(count)
     except Exception as exc:  # noqa: BLE001
@@ -164,8 +165,18 @@ async def _compute_coverage(request: Request, session: AsyncSession, namespace: 
             status = "enforced"
         else:
             status = "gap"
+        # Is this control auto-generatable, or does it need a bespoke (non-tool-call) control?
+        # A gap with no runtime-expressible rule (bespoke, or empty `policies`) ESCALATES on generate — the UI
+        # must know up front so it doesn't offer a "Generate" checkbox that only ever dead-ends.
+        generatable = (
+            status == "gap" and not _control_is_bespoke(info) and bool(remediation_generatable_rules(policies))
+        )
         observed = sum(by_rule.get(p, {}).get("observed", 0) for p in policies)
         blocked = sum(by_rule.get(p, {}).get("blocked", 0) for p in policies)
+        # PER-RULE blocked counts (rule_id → blocked), so an evidence row attributes blocks to the
+        # RIGHT rule instead of repeating the technique-wide `blocked` total on every covered-rule row. Keyed
+        # over the technique's mapped policies (a mapped-but-inactive rule reads 0).
+        blocked_by_rule = {p: by_rule.get(p, {}).get("blocked", 0) for p in policies}
         # Affected agent-classes: aggregate blocked-by-class across this technique's covered rules (synthetic
         # already excluded in _blocked_by_rule_class), sort worst-first, cap.
         agg: dict[str, int] = {}
@@ -179,6 +190,7 @@ async def _compute_coverage(request: Request, session: AsyncSession, namespace: 
             "description": info.get("description", ""),
             "scope": scope,
             "status": status,
+            "generatable": generatable,
             "priority": info.get("priority"),
             "also": info.get("also"),
             "policies": policies,
@@ -186,6 +198,7 @@ async def _compute_coverage(request: Request, session: AsyncSession, namespace: 
             "covered": covered,
             "observed": observed,
             "blocked": blocked,
+            "blocked_by_rule": blocked_by_rule,
             "affected_classes": affected,
         })
     techniques.sort(key=lambda t: t["technique_id"])
@@ -195,9 +208,9 @@ async def _compute_coverage(request: Request, session: AsyncSession, namespace: 
     gap = sum(1 for t in techniques if t["status"] == "gap")
     oos = sum(1 for t in techniques if t["scope"] == "out_of_scope")
     coverage_pct = round(enforced / enforceable_total * 100) if enforceable_total else 0
-    # F1: the headline observed/blocked/agent-classes are attributable to THIS framework — sum over the
+    # The headline observed/blocked/agent-classes are attributable to THIS framework — sum over the
     # framework's DISTINCT mapped rule_ids (a rule mapped to several techniques counts once), NOT the global
-    # audit total. ATLAS and OWASP therefore show different, correct numbers. (Was: sum over all by_rule.)
+    # audit total. ATLAS and OWASP therefore show different, correct numbers.
     framework_rules = {p for info in mapping.values() for p in info.get("policies", []) if p}
     total_observed = sum(by_rule.get(r, {}).get("observed", 0) for r in framework_rules)
     total_blocked = sum(by_rule.get(r, {}).get("blocked", 0) for r in framework_rules)
@@ -209,7 +222,7 @@ async def _compute_coverage(request: Request, session: AsyncSession, namespace: 
         # back-compat headline fields (old page)
         "covered": enforced, "total": enforceable_total,
         "observed": total_observed, "blocked": total_blocked, "agent_classes": agent_classes,
-        # COMP-EVIDENCE (San decision b): the count of synthetic/simulated + red-team events excluded from
+        # COMP-EVIDENCE (product decision): the count of synthetic/simulated + red-team events excluded from
         # observed/blocked, so the console + evidence pack can state the exclusion explicitly.
         "synthetic_excluded": synthetic_excluded,
         "techniques": techniques,
@@ -220,11 +233,57 @@ def _ns_key(namespace: str | None) -> str:
     return namespace or "__all__"
 
 
+async def _coverage_cached(
+    request: Request, session: AsyncSession, namespace: str | None, range_token: str, framework: str = "atlas"
+) -> dict:
+    """Request-scoped memoization of _compute_coverage. The coverage aggregation runs two audit
+    GROUP BY scans (_activity_by_rule + _blocked_by_rule_class) that are LOOP-INVARIANT within one request —
+    (namespace, range, framework) don't change across a batch's techniques. Batch generate must therefore
+    compute coverage ONCE, not 2*N times. The cache lives on request.state so it never leaks across requests
+    (a fresh request recomputes)."""
+    cache = getattr(request.state, "_coverage_cache", None)
+    if cache is None:
+        cache = {}
+        request.state._coverage_cache = cache
+    key = (_ns_key(namespace), range_token, framework)
+    hit = cache.get(key)
+    if hit is None:
+        hit = await _compute_coverage(request, session, namespace, range_token, framework)
+        cache[key] = hit
+    return hit
+
+
+def _snapshot_lock_key(namespace: str, framework: str, hour_start: datetime) -> int:
+    """A stable signed-64-bit key for pg_advisory_xact_lock so concurrent same-hour snapshot writers
+    serialize on the SAME lock (the second reads the first's committed row and short-circuits). sha256 keeps it
+    seed-independent across replicas; usedforsecurity=False — this is a lock key, not a credential."""
+    raw = "|".join((namespace, framework, hour_start.isoformat()))
+    return int.from_bytes(hashlib.sha256(raw.encode(), usedforsecurity=False).digest()[:8], "big", signed=True)
+
+
+def _stable_draft_id(framework: str, technique_id: str, namespace: str, target: str) -> str:
+    """The dedup id for a compliance-remediation draft, as a SEED-INDEPENDENT pure function of its
+    (framework, control, namespace, class) content. sha256 (not Python's PYTHONHASHSEED-salted builtin hash())
+    so the same inputs mint the same id on every replica — a deeplink minted on one replica resolves after a
+    regenerate lands on another. usedforsecurity=False: this is a display/dedup id token, not a credential."""
+    digest = hashlib.sha256("|".join((framework, technique_id, namespace, target)).encode(),
+                            usedforsecurity=False).hexdigest()
+    return f"dmitre{digest[:11]}"
+
+
 async def _record_snapshot(session: AsyncSession, namespace: str | None, cov: dict, framework: str) -> None:
-    """B1.3: upsert at most ONE coverage snapshot per (namespace, framework, hour) so the trend accumulates a
+    """Upsert at most ONE coverage snapshot per (namespace, framework, hour) so the trend accumulates a
     real series with no scheduler. Best-effort — never fails the coverage read."""
     try:
         hour_start = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        # Serialize concurrent same-hour writers before the read-then-insert. A transaction-scoped
+        # advisory lock keyed on (namespace, framework, hour) makes the throttle single-writer even under READ
+        # COMMITTED and across replicas — the second writer blocks until the first commits, then reads the row
+        # and returns without inserting. (The partial UNIQUE index on mitre_coverage_snapshots is the
+        # structural backstop on a fresh DB.)
+        await session.execute(
+            select(func.pg_advisory_xact_lock(_snapshot_lock_key(_ns_key(namespace), framework, hour_start)))
+        )
         existing = await session.scalar(
             select(func.count(MitreCoverageSnapshot.id)).where(
                 MitreCoverageSnapshot.namespace == _ns_key(namespace),
@@ -246,7 +305,7 @@ async def _record_snapshot(session: AsyncSession, namespace: str | None, cov: di
 
 
 async def _top_active_classes(session: AsyncSession, namespace: str | None, range_token: str) -> list[str]:
-    """F2: the real, non-synthetic agent classes with the most audit activity in ns/range — the classes a gap
+    """The real, non-synthetic agent classes with the most audit activity in ns/range — the classes a gap
     control (no block-by-rule data of its own) would plausibly need remediation for. Worst/most-active first."""
     since = datetime.now(timezone.utc) - timedelta(hours=_RANGE_HOURS.get(range_token, 24))
     stmt = (
@@ -267,7 +326,7 @@ async def _top_active_classes(session: AsyncSession, namespace: str | None, rang
     return [c for c, _ in sorted(ranked, key=lambda kv: -kv[1])]
 
 
-# COMP-GEN-01: a control is REMEDIABLE when at least one of its mapped rule_ids (the `policies` list in the
+# A control is REMEDIABLE when at least one of its mapped rule_ids (the `policies` list in the
 # framework mapping) has a runtime remediation template (remediation_generatable_rules). A control with no
 # such rule — an empty `policies`, or a mapping explicitly flagged `remediation: bespoke` — is ESCALATED,
 # never faked with a generic per-class deny-all.
@@ -323,7 +382,7 @@ async def mitre_trend(
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """B1.3: the REAL coverage-trend series for a framework from the persisted snapshot table (accumulates over
+    """The REAL coverage-trend series for a framework from the persisted snapshot table (accumulates over
     time; empty until the first snapshot). No fabricated points."""
     framework = _valid_framework(framework)
     namespace = read_namespace(user, namespace)
@@ -355,7 +414,7 @@ async def mitre_export(
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> StreamingResponse:
-    """B1.4: stream a REAL in-cluster evidence pack for a framework (per-technique id/name/scope/status, mapped +
+    """Stream a REAL in-cluster evidence pack for a framework (per-technique id/name/scope/status, mapped +
     covered policies, per-rule blocked counts, generated-at). No egress. Records the export time."""
     framework = _valid_framework(framework)
     namespace = read_namespace(user, namespace)
@@ -379,11 +438,17 @@ async def mitre_export(
         "coverage_pct": cov["coverage_pct"], "enforced": cov["enforced"],
         "enforceable_total": cov["enforceable_total"], "gap": cov["gap"], "out_of_scope": cov["oos"],
         "blocked_over_range": cov["blocked"],
+        # COMP-EVIDENCE (product decision): carry the synthetic/simulated + red-team exclusion count into the
+        # pack so the JSON export and the PDF can state "real traffic only" honestly.
+        "synthetic_excluded": cov["synthetic_excluded"],
         "controls": [
             {
                 "technique_id": t["technique_id"], "name": t["name"], "scope": t["scope"], "status": t["status"],
                 "mapped_policies": t["policies"], "enforcing_policies": t["covered_policies"],
                 "blocked": t["blocked"], "observed": t["observed"],
+                # PER-RULE blocked counts (the docstring above promises this) so the exported evidence
+                # pack attributes blocks to each enforcing rule instead of repeating the technique-wide total.
+                "blocked_by_rule": t["blocked_by_rule"],
                 "affected_classes": t["affected_classes"],
             }
             for t in cov["techniques"]
@@ -411,7 +476,7 @@ async def mitre_export(
 class GenerateRequest(BaseModel):
     technique_id: str
     namespace: str = "default"
-    agent_class: str | None = None  # F2: optional — the backend derives the real affected/active class when absent
+    agent_class: str | None = None  # optional — the backend derives the real affected/active class when absent
     range: str = "24h"
     framework: str = "atlas"
 
@@ -420,13 +485,13 @@ async def _resolve_target_class(
     request: Request, session: AsyncSession, namespace: str | None, range_token: str, framework: str,
     technique_id: str, requested: str | None,
 ) -> str | None:
-    """F2: pick a REAL agent class to scope the draft to. Preference: an explicit, non-synthetic caller class →
+    """Pick a REAL agent class to scope the draft to. Preference: an explicit, non-synthetic caller class →
     the control's own top affected class (blocked-by-rule) → the namespace's top active non-synthetic class.
     Returns None when there is genuinely no real class to remediate (→ caller emits 'nothing to remediate')."""
     requested = (requested or "").strip()
     if requested and requested.lower() != "default" and not is_synthetic_identity(requested):
         return requested
-    cov = await _compute_coverage(request, session, namespace, range_token, framework)
+    cov = await _coverage_cached(request, session, namespace, range_token, framework)  # memoized per request
     tech = next((t for t in cov["techniques"] if t["technique_id"] == technique_id), None)
     if tech:
         for chip in tech.get("affected_classes", []):
@@ -445,7 +510,7 @@ async def _affected_real_classes(
     """Every REAL (non-synthetic) agent class the control affects in range — the fan-out set for the batch
     "all affected classes" mode. Falls back to the namespace's top active class when the technique has no
     recorded affected class yet, so "all" still remediates something real rather than nothing."""
-    cov = await _compute_coverage(request, session, namespace, range_token, framework)
+    cov = await _coverage_cached(request, session, namespace, range_token, framework)  # memoized per request
     tech = next((t for t in cov["techniques"] if t["technique_id"] == technique_id), None)
     out: list[str] = []
     for chip in (tech or {}).get("affected_classes", []) if tech else []:
@@ -463,7 +528,7 @@ async def _generate_remediation_draft(
     request: Request, session: AsyncSession, user: dict, framework: str, technique_id: str,
     namespace: str, agent_class: str | None, range_token: str,
 ) -> dict:
-    """COMP-GEN-01 core: validate + build a CONTROL-SPECIFIC tighten-only DRY-RUN remediation draft for one
+    """Validate + build a CONTROL-SPECIFIC tighten-only DRY-RUN remediation draft for one
     (framework, control, class). Shared by the single-generate + batch endpoints. Returns a status dict
     (draft / escalate / no_affected_classes); never raises for the escalate/no-class cases so a batch item's
     outcome is reported rather than aborting the whole batch. Callers do the admin + target-cluster gating."""
@@ -479,15 +544,17 @@ async def _generate_remediation_draft(
     control_name = str(info.get("name") or technique_id)
     rule_ids = list(info.get("policies") or [])
     usable = remediation_generatable_rules(rule_ids)
-    # COMP-GEN-01: a bespoke control OR one with no runtime-expressible mapped rule is ESCALATED — never faked
+    # A bespoke control OR one with no runtime-expressible mapped rule is ESCALATED — never faked
     # with a vacuous per-class deny-all.
     if _control_is_bespoke(info) or not usable:
         log.info("nrvq.api.mitre.generate_escalate", technique=technique_id, framework=framework,
                  code="NRVQ-API-7079")
         return {"status": "escalate", "draft_id": None, "technique_id": technique_id,
                 "control_name": control_name, "framework": framework,
-                "message": f"{technique_id} {control_name} has no runtime-expressible rule the policy model "
-                           f"can encode — escalate to San rather than generating a generic deny-all."}
+                "message": f"{technique_id} {control_name} can't be auto-generated as a runtime policy — this "
+                           f"risk doesn't show up in agent tool-call traffic, so there is no signal a policy "
+                           f"rule could match at enforcement time. Address it with a bespoke control in "
+                           f"configuration or process (outside runtime enforcement)."}
 
     # Scope to a REAL class; never invent a 'default' deny-all when there's nothing to remediate.
     target = await _resolve_target_class(request, session, namespace, range_token, framework,
@@ -499,10 +566,10 @@ async def _generate_remediation_draft(
                 "control_name": control_name, "framework": framework, "ns": namespace,
                 "message": "No affected agent classes in range — nothing to remediate yet."}
 
-    # COMP-GEN-01: CONTROL-SPECIFIC rego assembled from the technique's mapped rule_ids (package
-    # norviq.remediation.<fw>.<control>) — two different controls now differ. Tighten-only, dry-run.
+    # CONTROL-SPECIFIC rego assembled from the technique's mapped rule_ids (package
+    # norviq.remediation.<fw>.<control>) — two different controls differ. Tighten-only, dry-run.
     rego = generate_remediation_rego(framework, technique_id, control_name, target, rule_ids)
-    # F2/COMP-GEN-01 DATA-LOSS FIX: a compliance control is inherently ADDITIVE — "tighten-only draft that
+    # DATA-LOSS GUARD: a compliance control is inherently ADDITIVE — "tighten-only draft that
     # denies this one control" — never a replacement for the class's existing comprehensive policy. Reviewing
     # + applying a draft POSTs its (namespace, agent_class) straight into `loader.create()`'s full-replace
     # UPSERT (`ON CONFLICT ... DO UPDATE SET rego_source = EXCLUDED.rego_source`); persisting the draft at the
@@ -514,11 +581,15 @@ async def _generate_remediation_draft(
     # for `target` — the base `(namespace, target)` policy is left byte-identical. The real affected class is
     # retained separately (`affected_class`) for UI display/traceability.
     overlay_class = f"{target}__remediation__"
-    # F4: dedup key = (framework, control_id, class) → same control twice updates ONE draft; two different
-    # controls for the same class stay as TWO distinct drafts (different control_id). Also clears any STALE
-    # pre-fix draft that was keyed directly on `target` (the old, destructive key) so it can never later be
+    # Dedup key = (framework, control_id, class) → same control twice updates ONE draft; two different
+    # controls for the same class stay as TWO distinct drafts (different control_id). Also clears any
+    # draft that was keyed directly on `target` (the legacy, destructive key) so it can never later be
     # "reviewed & applied" and destroy the base policy.
-    draft_id = f"dmitre{abs(hash((framework, technique_id, namespace, target))) % (10**11):011d}"
+    # The id MUST be a pure function of its content so a deeplink minted on replica A still resolves
+    # after a regenerate lands on replica B. Python's builtin hash() of a str/tuple is PYTHONHASHSEED-salted
+    # per process (no PYTHONHASHSEED pinning here + api.replicas>=2), so `abs(hash(...))` would produce a
+    # different id per replica and the deeplink would 404. sha256 is seed-independent across processes/replicas.
+    draft_id = _stable_draft_id(framework, technique_id, namespace, target)
     created_at = datetime.now(timezone.utc)
     await session.execute(
         text("DELETE FROM intent_drafts WHERE namespace = :ns AND agent_class IN (:cls, :legacy_cls) "
@@ -531,10 +602,10 @@ async def _generate_remediation_draft(
         covered_count=0, total=0, would_block=0, would_allow=0,
         created_by=str(user.get("sub") or ""), created_at=created_at,
         source_framework=framework, source_control_id=technique_id, source_control_name=control_name,
-        expires_at=draft_expiry(target, created_at),  # Part B: TTL (24h test / 14d real)
+        expires_at=draft_expiry(target, created_at),  # TTL (24h test / 14d real)
     ))
     await session.commit()
-    await enforce_draft_cap(session, namespace)  # Part B: per-namespace cap
+    await enforce_draft_cap(session, namespace)  # per-namespace cap
     log.info("nrvq.api.mitre.generate", technique=technique_id, ns=namespace, cls=target,
              overlay_cls=overlay_class, framework=framework, rules=usable, draft_id=draft_id,
              actor=user.get("sub"), code="NRVQ-API-7077")
@@ -552,7 +623,7 @@ async def mitre_generate(
     session: AsyncSession = Depends(get_session),
     _target: None = Depends(require_target_cluster),
 ) -> dict:
-    """B1.5 / COMP-GEN-01: GAP → generate a REAL tighten-only DRY-RUN remediation draft, CONTROL-SPECIFIC (its
+    """GAP → generate a REAL tighten-only DRY-RUN remediation draft, CONTROL-SPECIFIC (its
     mapped block rule(s), package norviq.remediation.<fw>.<control>), SCOPED to the control's affected (or the
     namespace's most-active) real agent class and TAGGED with its framework + control. A control with no
     runtime-expressible rule (empty mapping policies / remediation=bespoke) → status=escalate; no real class →
@@ -582,9 +653,9 @@ async def mitre_generate_batch(
     session: AsyncSession = Depends(get_session),
     _target: None = Depends(require_target_cluster),
 ) -> dict:
-    """COMP-GEN-01 multi-select: generate one CONTROL-SPECIFIC remediation draft per (technique × class). The
+    """Multi-select: generate one CONTROL-SPECIFIC remediation draft per (technique × class). The
     class fan-out is driven by class_mode ("affected" | "all" | a specific class). Same admin + target-cluster
-    gating + synthetic-class refusal as the single generate; each (technique × class) reuses the F4 dedup key so
+    gating + synthetic-class refusal as the single generate; each (technique × class) reuses the dedup key so
     re-running UPDATES rather than duplicates. Returns a per-item result list + a rollup summary; a bad technique
     id / out-of-scope / synthetic class is reported per item, never aborting the whole batch."""
     require_admin(user)
@@ -616,7 +687,7 @@ async def mitre_generate_batch(
 
 
 # --------------------------------------------------------------------------------------------------
-# F3: framework-neutral compliance routes — the correct surface name for a multi-framework feature. These
+# Framework-neutral compliance routes — the correct surface name for a multi-framework feature. These
 # DELEGATE to the /mitre/* handlers above with the framework taken from the path (no functional change; the
 # /mitre/* routes stay as ATLAS-default back-compat aliases). Same auth + gating (the delegates re-check).
 # --------------------------------------------------------------------------------------------------
@@ -693,14 +764,19 @@ async def compliance_generate_batch(
 def _evidence_pdf(pack: dict) -> bytes:
     """Render a minimal, VALID single-page PDF summary of the evidence pack — no external dependency, no egress.
     (The JSON export carries the full machine-readable pack; the PDF is the human-readable summary.)"""
+    excluded = int(pack.get("synthetic_excluded") or 0)
     lines = [
-        "Norviq — MITRE ATLAS Evidence Pack",
+        f"Norviq — {pack['framework']} Evidence Pack",
         f"Namespace: {pack['namespace'] or 'all'}   Range: {pack['range']}",
         f"Generated: {pack['generated_at']}",
         f"Coverage: {pack['coverage_pct']}%  (enforced {pack['enforced']} / {pack['enforceable_total']} enforceable)",
         f"Gaps: {pack['gap']}   Out-of-scope: {pack['out_of_scope']}   Blocked over range: {pack['blocked_over_range']}",
-        "",
     ]
+    # COMP-EVIDENCE: real-traffic-only promise — synthetic/simulated + red-team events are excluded from the
+    # counts above; state how many, matching the console line.
+    if excluded > 0:
+        lines.append(f"Real traffic only · {excluded} synthetic/simulated event{'' if excluded == 1 else 's'} excluded")
+    lines.append("")
     for c in pack["controls"]:
         lines.append(f"{c['technique_id']}  {c['name']}  [{c['status']}]  blocked={c['blocked']}")
         if c["enforcing_policies"]:

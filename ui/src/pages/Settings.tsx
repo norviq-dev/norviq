@@ -1,7 +1,11 @@
+// Settings — per-namespace TUNING defaults (trust threshold, rate limit, sector) plus a read-only view
+// of the cluster-wide data-retention limits. Namespace governance (enforcement mode / change control)
+// lives in Target Settings, which this page links to.
+
 import { Check, ArrowRight } from "lucide-react";
 import { ReactNode, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { fetchSettings, saveSettings } from "../api/client";
+import { fetchRetentionSettings, fetchSettings, saveSettings, type RetentionSettings } from "../api/client";
 import { KitButton } from "../components/common/KitButton";
 import { PageHead } from "../components/common/PageHead";
 import { Panel } from "../components/common/Panel";
@@ -24,6 +28,20 @@ function SettingsSection({ label, children }: { label: string; children: ReactNo
       </div>
       {children}
     </div>
+  );
+}
+
+// Read-only value formatters for the Data-retention card: 0/negative means the limit is disabled.
+const FOREVER = "keep forever / disabled";
+const fmtDays = (n: number) => (n > 0 ? `${n} day${n === 1 ? "" : "s"}` : FOREVER);
+const fmtHours = (n: number) => (n > 0 ? `${n} hour${n === 1 ? "" : "s"}` : FOREVER);
+const fmtRuns = (n: number) => (n > 0 ? `last ${n} run${n === 1 ? "" : "s"}` : FOREVER);
+
+function RetentionRow({ label, value }: { label: string; value: string }) {
+  return (
+    <Field label={label}>
+      <span className="mono" style={{ fontSize: 13, color: "var(--text-primary)" }}>{value}</span>
+    </Field>
   );
 }
 
@@ -59,17 +77,18 @@ function Field({
 export function Settings() {
   const { namespace } = useApp();
   const navigate = useNavigate();
-  // GOV-IA (San decision a): namespace-keyed GOVERNANCE (Block⇄Monitor enforcement + Live⇄Frozen change
+  // (product decision): namespace-keyed GOVERNANCE (Block⇄Monitor enforcement + Live⇄Frozen change
   // control) lives ONLY in Target Settings now — the duplicate toggles here mutated the same server object
   // from two places. This page keeps the per-namespace TUNING defaults (trust/penalty/rate/sector) and
   // links to Target Settings for governance.
   const [trustThreshold, setTrustThreshold] = useState("");
-  const [violationPenalty, setViolationPenalty] = useState("");
   const [rateLimit, setRateLimit] = useState("");
   const [sector, setSector] = useState("");
   const [loading, setLoading] = useState(true);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Cluster-wide retention limits (read-only). null = not loaded / fetch failed → the card is hidden.
+  const [retention, setRetention] = useState<RetentionSettings | null>(null);
   const outlineTealButtonStyle = {
     background: "transparent",
     border: "1px solid #2DDAB8",
@@ -84,7 +103,6 @@ export function Settings() {
       .then((s) => {
         if (!active) return;
         setTrustThreshold(String(s.trust_threshold));
-        setViolationPenalty(String(s.violation_penalty));
         setRateLimit(String(s.rate_limit));
         setSector(s.sector ?? "");
         setError(null);
@@ -96,14 +114,23 @@ export function Settings() {
     };
   }, [namespace]);
 
-  // SET-VALIDATE (audit #14): reject non-numeric / out-of-range tuning values client-side instead of
-  // shipping NaN to the server. trust threshold + violation penalty are 0..1; rate limit is a non-negative int.
+  // Retention limits are cluster-wide (not per-namespace) — fetch once; on failure keep the card hidden.
+  useEffect(() => {
+    let active = true;
+    fetchRetentionSettings()
+      .then((r) => active && setRetention(r))
+      .catch(() => active && setRetention(null));
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // Reject non-numeric / out-of-range tuning values client-side instead of
+  // shipping NaN to the server. trust threshold is 0..1; rate limit is a non-negative int.
   const validateTuning = (): string | null => {
     const t = Number(trustThreshold);
-    const v = Number(violationPenalty);
     const r = Number(rateLimit);
     if (!Number.isFinite(t) || t < 0 || t > 1) return "Trust Threshold must be a number between 0 and 1.";
-    if (!Number.isFinite(v) || v < 0 || v > 1) return "Violation Penalty must be a number between 0 and 1.";
     if (!Number.isInteger(r) || r < 0) return "Rate Limit must be a non-negative whole number.";
     return null;
   };
@@ -118,7 +145,6 @@ export function Settings() {
     try {
       await saveSettings(namespace, {
         trust_threshold: Number(trustThreshold),
-        violation_penalty: Number(violationPenalty),
         rate_limit: Number(rateLimit),
         sector
       });
@@ -135,7 +161,7 @@ export function Settings() {
       <div className="stack">
         <Panel pad>
           <SettingsSection label="Tuning defaults">
-            {/* GOV-IA: governance (enforcement mode + change control) is per-namespace and owned by Target
+            {/* Governance (enforcement mode + change control) is per-namespace and owned by Target
                 Settings — this callout is the one pointer, replacing the duplicate toggles. */}
             <button
               type="button"
@@ -176,14 +202,6 @@ export function Settings() {
                 style={{ width: 90, textAlign: "right" }}
               />
             </Field>
-            <Field label="Violation Penalty" hint="Trust deducted per blocked call">
-              <input
-                className="input mono"
-                value={violationPenalty}
-                onChange={(e) => setViolationPenalty(e.target.value)}
-                style={{ width: 90, textAlign: "right" }}
-              />
-            </Field>
             <Field label="Rate Limit" hint="Max tool calls per agent per minute">
               <input
                 className="input mono"
@@ -209,6 +227,59 @@ export function Settings() {
             </Field>
           </SettingsSection>
         </Panel>
+
+        {/* Read-only, cluster-wide data-retention limits. Hidden entirely when the fetch fails. */}
+        {retention && (
+          <Panel pad>
+            <SettingsSection label="Data retention">
+              <RetentionRow label="Audit log" value={fmtDays(retention.audit_retention_days)} />
+              <RetentionRow label="Coverage snapshots" value={fmtDays(retention.coverage_snapshot_retention_days)} />
+              <RetentionRow
+                label="Asset-graph snapshots"
+                value={
+                  retention.graph_snapshot_keep_per_namespace > 0
+                    ? `newest ${retention.graph_snapshot_keep_per_namespace} per namespace`
+                    : FOREVER
+                }
+              />
+              <RetentionRow label="Agent registry" value={fmtDays(retention.agent_registry_retention_days)} />
+              <RetentionRow
+                label="API keys"
+                value={
+                  retention.api_key_default_ttl_days > 0
+                    ? `new keys expire after ${retention.api_key_default_ttl_days} days`
+                    : FOREVER
+                }
+              />
+              <RetentionRow label="Policy drafts" value={fmtDays(retention.draft_ttl_days)} />
+              <RetentionRow label="Test policy drafts" value={fmtHours(retention.draft_ttl_test_hours)} />
+              <RetentionRow
+                label="Draft cap"
+                value={
+                  retention.draft_cap_per_namespace > 0
+                    ? `max ${retention.draft_cap_per_namespace} per namespace`
+                    : FOREVER
+                }
+              />
+              <RetentionRow
+                label="Policy versions kept"
+                value={
+                  retention.policy_version_keep_count > 0
+                    ? `newest ${retention.policy_version_keep_count}`
+                    : FOREVER
+                }
+              />
+              <RetentionRow label="Policy versions age limit" value={fmtDays(retention.policy_version_keep_days)} />
+              <RetentionRow label="Red-team run details" value={fmtRuns(retention.redteam_detail_keep_runs)} />
+              <RetentionRow label="Red-team run details age limit" value={fmtDays(retention.redteam_detail_keep_days)} />
+              <RetentionRow label="Red-team summaries" value={fmtRuns(retention.redteam_summary_keep_runs)} />
+              <RetentionRow label="Red-team summaries age limit" value={fmtDays(retention.redteam_summary_keep_days)} />
+              <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 10 }}>
+                Adjust via Helm values (config.*) — 0 disables a limit (keep forever).
+              </div>
+            </SettingsSection>
+          </Panel>
+        )}
       </div>
 
       <div

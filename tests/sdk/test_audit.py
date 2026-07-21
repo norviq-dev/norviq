@@ -114,7 +114,7 @@ def test_model_dump_works() -> None:
 
 
 def test_obs2_audit_record_carries_framework() -> None:
-    """OBS-2: the decision source (event.framework) is persisted on the audit record."""
+    """The decision source (event.framework) is persisted on the audit record."""
     from norviq.sdk.core.audit import AuditRecord
     from norviq.sdk.core.decisions import PolicyDecision
     from norviq.sdk.core.events import AgentIdentity, ToolCallEvent

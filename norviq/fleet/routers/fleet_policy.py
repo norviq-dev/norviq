@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Hub fleet policy distribution (F045 P2): author policies (admin), build+sign a per-cluster bundle for
+"""Hub fleet policy distribution: author policies (admin), build+sign a per-cluster bundle for
 the relay to pull, and track per-cluster rollout state. Authoring is admin-only — the source of allow/deny
 rules is privileged; the spoke/relay only PULLS (it never authors)."""
 
@@ -30,9 +30,9 @@ from norviq.fleet.ssrf_guard import SSRFBlockedError
 log = structlog.get_logger()
 router = APIRouter()
 
-# F-40: scopes a fleet push must NEVER replace — a cluster's baseline (comprehensive) and its materialized sector
+# Scopes a fleet push must NEVER replace — a cluster's baseline (comprehensive) and its materialized sector
 # pack are managed PER-CLUSTER (the seed / packs-enable path), not by fleet distribution. A push that targeted
-# __baseline__ once wiped comprehensive across all three prod clusters.
+# __baseline__ would otherwise wipe comprehensive across every cluster.
 _RESERVED_SCOPES = {"__baseline__", "__pack__"}
 
 
@@ -48,7 +48,7 @@ async def author_policy(
 ) -> dict:
     """Create/update a fleet policy (admin only). Re-authoring the same name bumps its version."""
     require_admin(user)  # authoring allow/deny rules is admin-only (service/viewer -> 403)
-    # F-40 (1): a fleet push must not replace a managed per-cluster scope (baseline/pack) fleet-wide.
+    # A fleet push must not replace a managed per-cluster scope (baseline/pack) fleet-wide.
     if body.agent_class in _RESERVED_SCOPES:
         log.warning("nrvq.fleet.policy.reserved_scope", name=body.name, agent_class=body.agent_class,
                     actor=user.get("sub"), code="NRVQ-FLT-15023")
@@ -57,7 +57,7 @@ async def author_policy(
             detail=f"'{body.agent_class}' is a managed per-cluster scope and cannot be fleet-pushed — change a "
                    "cluster's baseline via its seed and sector packs via the packs API (POST /policy-packs/{id}/enable).",
         )
-    # F-40 (2): a fleet-WIDE push (no cluster_id -> matches >1 cluster) needs an explicit confirm.
+    # A fleet-WIDE push (no cluster_id -> matches >1 cluster) needs an explicit confirm.
     if not body.target_selector.get("cluster_id") and not body.confirm_fleet_wide:
         log.warning("nrvq.fleet.policy.confirm_required", name=body.name, selector=body.target_selector,
                     actor=user.get("sub"), code="NRVQ-FLT-15027")
@@ -111,7 +111,7 @@ async def retract_policy(
     session: AsyncSession = Depends(fleet_get_session),
     user: dict = Depends(get_current_user),
 ) -> dict:
-    """F-52: RETRACT a fleet policy — delete the row so it leaves every cluster's bundle. On the next pull each
+    """RETRACT a fleet policy — delete the row so it leaves every cluster's bundle. On the next pull each
     affected spoke RECONCILES (deletes the dropped key), so a push is fully reversible. Admin only."""
     require_admin(user)
     existing = (await session.execute(select(FleetPolicy).where(FleetPolicy.name == name))).scalar_one_or_none()
@@ -130,7 +130,7 @@ def _resolve_for_cluster(policies: list[FleetPolicy], cluster: Cluster) -> list[
     labels = cluster.labels or {}
     chosen: dict[tuple[str, str], tuple[bool, FleetPolicy]] = {}  # (ns,class) -> (is_override, policy)
     for p in policies:
-        # F-40 defense-in-depth: a reserved-scope policy already in the DB (e.g. a pre-guard or neutralized row)
+        # Defense-in-depth: a reserved-scope policy already in the DB (e.g. a pre-guard or neutralized row)
         # must never be distributed in a bundle — baseline/pack are per-cluster managed, never fleet-pushed.
         if p.agent_class in _RESERVED_SCOPES:
             continue
@@ -240,17 +240,16 @@ async def drilldown(
     session: AsyncSession = Depends(fleet_get_session),
     user: dict = Depends(get_current_user),
 ) -> dict:
-    """P3 drill-down: live-query ONE cluster's raw audit (Option-B). P4 residency BLOCKS it (raw logs
+    """Drill-down: live-query ONE cluster's raw audit (Option-B). Residency BLOCKS it (raw logs
     never leave). The hot aggregate path stays on the hub rollups; this is on-demand only.
 
-    SSRF-01 (CRITICAL): this route dials `cluster.endpoint` — a value a SPOKE self-reported on
-    heartbeat — with a MINTED ADMIN BEARER attached. Unlike the sibling admin routes in this file it
-    was previously gated by `scoped_cluster` alone (no `require_admin`), and the endpoint was never
-    range-checked before being dialed: a malicious/compromised spoke could point `endpoint` at an
-    internal service (or attacker host) and have the hub hand it a hub-valid admin token. Fixed with
-    `require_admin` below.
+    This route dials `cluster.endpoint` — a value a SPOKE self-reported on
+    heartbeat — with a MINTED ADMIN BEARER attached. It must be gated by `require_admin` AND the
+    endpoint range-checked before being dialed: otherwise a malicious/compromised spoke could point
+    `endpoint` at an internal service (or attacker host) and have the hub hand it a hub-valid admin
+    token. `require_admin` is enforced below.
 
-    SSRF-02 (CRITICAL, DNS-rebind): `assert_safe_url_async` alone validates the RESOLVED addresses, but
+    DNS-rebind guard: `assert_safe_url_async` alone validates the RESOLVED addresses, but
     handing the raw hostname to `httpx` afterward lets httpx re-resolve INDEPENDENTLY at connect time —
     a rebinding DNS server can answer the guard's lookup with a public IP and httpx's later lookup with
     169.254.169.254/an internal address for the same hostname, capturing the admin bearer. Fixed via
@@ -264,7 +263,7 @@ async def drilldown(
     if cluster is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="cluster not registered")
     if cluster.residency:
-        # P4: this cluster keeps raw logs in-cluster -> the hub must NOT pull them.
+        # This cluster keeps raw logs in-cluster -> the hub must NOT pull them.
         log.info("nrvq.fleet.drilldown_residency_blocked", cluster_id=cluster_id, code="NRVQ-FLT-15026")
         return {"cluster_id": cluster_id, "records": [], "residency_blocked": True}
     if not cluster.endpoint:
@@ -289,7 +288,7 @@ async def drilldown(
         # follow_redirects=False: a validated host must not be allowed to 302 an authenticated request
         # (with the admin bearer attached) onward to a blocked address (e.g. the metadata IP) — that
         # would bypass the SSRF guard above via a redirect hop it never re-checks. transport=pinned_transport
-        # pins the socket target to the already-validated IP (SSRF-02) so httpx cannot re-resolve the
+        # pins the socket target to the already-validated IP so httpx cannot re-resolve the
         # hostname independently at connect time.
         async with httpx.AsyncClient(timeout=8.0, follow_redirects=False, transport=pinned_transport) as client:
             resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})

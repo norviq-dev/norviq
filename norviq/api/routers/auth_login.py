@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""LOGIN-2: local username/password login — the PRIMARY no-IdP path.
+"""Local username/password login — the PRIMARY no-IdP path.
 
-Replaces the CLI/paste-token quick-start as the default first-login experience. On success ``/auth/login``
+On success ``/auth/login``
 returns a SHORT-TTL HS256 session token (role/namespace claims, signed with the existing api_secret_key).
 Passwords are verified with a constant-time bcrypt compare against a stored hash — never in the clear, never
 logged. A per-username Redis counter provides rate-limiting + lockout (backoff) after repeated failures. The
@@ -53,15 +53,19 @@ _INVALID_CREDS = "Invalid username or password"
 class LoginRequest(BaseModel):
     """Username/password login body."""
 
-    username: str = Field(min_length=1, max_length=255)
-    password: str = Field(min_length=1, max_length=1024)
+    # Tight caps = the authoritative control (the UI maxLength is client-side and trivially bypassed).
+    # 64/128 comfortably fits any real credential (NIST 800-63B: permit >=64-char passwords) while shrinking
+    # the attack surface — no oversized body to log, buffer, or probe. Body-size 413 + bcrypt-sha256 prehash
+    # already blunt the long-password hashing DoS; these bounds close the rest.
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=128)
 
 
 class ChangePasswordRequest(BaseModel):
     """Authenticated password change (re-checks the current password)."""
 
-    current_password: str = Field(min_length=1, max_length=1024)
-    new_password: str = Field(min_length=1, max_length=1024)
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=1, max_length=128)
 
 
 def _cache(request: Request):
@@ -147,7 +151,7 @@ async def logout(
     request: Request,
     creds: HTTPAuthorizationCredentials = Depends(security),
 ) -> dict:
-    """AUTH-01: log out — revoke the presented session token server-side until its own expiry.
+    """Log out — revoke the presented session token server-side until its own expiry.
 
     JWT-only by design: the raw credential is validated directly (not via get_current_user) so an
     ``nrvq_`` API key gets a 401 here — key lifecycle is ``DELETE /keys/{id}``, not logout. An
@@ -163,7 +167,9 @@ async def logout(
     cache = _cache(request)
     if await is_revoked(cache, creds.credentials):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session has been logged out")
-    exp = int(claims.get("exp") or 0) or int(time.time()) + 1  # a JWT without exp dies immediately
+    # exp is guaranteed present: _validate_token now requires it (auth._validate_token, options require exp),
+    # so a no-exp token 401s above and never reaches here. The +1 fallback is defensive belt-and-suspenders.
+    exp = int(claims.get("exp") or 0) or int(time.time()) + 1
     await revoke(cache, creds.credentials, exp)
     log.info(
         "nrvq.auth.logout_ok",

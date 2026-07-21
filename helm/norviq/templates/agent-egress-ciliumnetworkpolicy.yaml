@@ -1,0 +1,92 @@
+{{- if and .Values.agentEgressPolicy.enabled (eq .Values.agentEgressPolicy.engine "cilium") }}
+{{- /* Defense-in-depth (engine=cilium): default-deny egress for agent-workload namespaces with
+       HOSTNAME (FQDN) allowlisting via Cilium's DNS-aware toFQDNs — so a SaaS tool behind rotating/CDN IPs
+       can be allowed by name instead of chasing CIDRs. Requires the Cilium CNI. The DNS-visibility rule
+       below (rules.dns) is MANDATORY: Cilium's DNS proxy must observe the pod's lookups to learn the
+       FQDN→IP mapping, otherwise toFQDNs matches nothing and the tool call is (correctly) denied. */}}
+{{- $root := . }}
+{{- $ep := .Values.agentEgressPolicy }}
+{{- $nsList := $ep.namespaces }}
+{{- if not $nsList }}{{- $nsList = .Values.policyQuotaNamespaces }}{{- end }}
+{{- if not $nsList }}
+{{-   fail "agentEgressPolicy.enabled=true but no namespaces to lock down — set agentEgressPolicy.namespaces or policyQuotaNamespaces (empty would silently protect nothing)." }}
+{{- end }}
+{{- range $ns := $nsList }}
+{{-   if eq $ns $root.Values.namespace }}{{- fail (printf "agentEgressPolicy must not target the norviq control-plane namespace %q — list only tenant/agent namespaces." $ns) }}{{- end }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: norviq-agent-egress-lockdown
+  namespace: {{ $ns }}
+  labels:
+    {{- include "norviq.labels" $root | nindent 4 }}
+spec:
+  # All pods in the tenant namespace (the agent + its injected sidecar).
+  endpointSelector: {}
+  egress:
+    {{- if $ep.allowDNS }}
+    # DNS + DNS visibility: forward lookups to kube-dns AND let Cilium's DNS proxy learn the FQDN→IP map
+    # (required for toFQDNs to resolve). matchPattern "*" observes all names but grants egress to none.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s:k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+          rules:
+            dns:
+              - matchPattern: "*"
+    {{- end }}
+    # Norviq control plane: the sidecar (proxy mode) calls the norviq API for every decision.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ $root.Values.namespace }}
+            app: norviq-api
+    {{- if $ep.embeddedDatastores }}
+    # embedded sidecar mode: the sidecar runs its own engine off the cluster datastores.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ $root.Values.namespace }}
+            app: norviq-postgresql
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ $root.Values.namespace }}
+            app: norviq-redis
+    {{- end }}
+    {{- if or $ep.allowedFQDNs $ep.allowedFQDNPatterns }}
+    # Operator-approved tool endpoints BY HOSTNAME (resolved via the DNS-visibility rule above).
+    - toFQDNs:
+        {{- range $fqdn := $ep.allowedFQDNs }}
+        - matchName: {{ $fqdn | quote }}
+        {{- end }}
+        {{- range $pat := $ep.allowedFQDNPatterns }}
+        - matchPattern: {{ $pat | quote }}
+        {{- end }}
+      {{- with $ep.allowedPorts }}
+      toPorts:
+        - ports:
+            {{- range . }}
+            - port: {{ . | quote }}
+              protocol: TCP
+            {{- end }}
+      {{- end }}
+    {{- end }}
+    {{- if $ep.allowedCIDRs }}
+    # Operator-approved tool endpoints by CIDR (for IP-addressable / in-cluster tools).
+    - toCIDR:
+        {{- range $cidr := $ep.allowedCIDRs }}
+        - {{ $cidr | quote }}
+        {{- end }}
+      {{- with $ep.allowedPorts }}
+      toPorts:
+        - ports:
+            {{- range . }}
+            - port: {{ . | quote }}
+              protocol: TCP
+            {{- end }}
+      {{- end }}
+    {{- end }}
+{{- end }}
+{{- end }}

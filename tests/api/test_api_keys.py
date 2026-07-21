@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F046: /api/v1/keys issue/list/revoke (admin-only, hashed) + the api-key auth resolver.
+"""/api/v1/keys issue/list/revoke (admin-only, hashed) + the api-key auth resolver.
 
 Covers create (secret returned once, only hash stored), list (no secret), revoke, viewer 403,
 and that authenticate_api_key resolves a valid key to its scoped principal but rejects revoked/bogus."""
@@ -9,6 +9,7 @@ and that authenticate_api_key resolves a valid key to its scoped principal but r
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -55,7 +56,11 @@ def _client(rows: list) -> TestClient:
 
 
 def _token(role: str = "admin") -> str:
-    return jwt.encode({"sub": "u", "role": role}, settings.api_secret_key, algorithm="HS256")
+    return jwt.encode(
+        {"sub": "u", "role": role, "exp": int(time.time()) + 3600},
+        settings.api_secret_key,
+        algorithm="HS256",
+    )
 
 
 def test_create_returns_secret_once_and_stores_only_hash() -> None:
@@ -118,7 +123,7 @@ def test_authenticate_api_key_rejects_bogus_and_non_prefixed() -> None:
 
 
 class _FakeCache:
-    """F-03: minimal Redis-counter stub (per-key INCR with a window)."""
+    """Minimal Redis-counter stub (per-key INCR with a window)."""
 
     def __init__(self) -> None:
         self.counts: dict[str, int] = {}
@@ -129,7 +134,7 @@ class _FakeCache:
 
 
 def test_authfail_throttle_counts_per_prefix() -> None:
-    """F-03: each failed nrvq_ auth increments a per-prefix counter (keyed on the display prefix)."""
+    """Each failed nrvq_ auth increments a per-prefix counter (keyed on the display prefix)."""
     cache = _FakeCache()
 
     async def _empty():
@@ -143,7 +148,7 @@ def test_authfail_throttle_counts_per_prefix() -> None:
 
 
 def test_constant_time_compare_rejects_hash_mismatch() -> None:
-    """F-03: defense-in-depth — a row whose stored hash != the computed digest is rejected (compare_digest)."""
+    """Defense-in-depth — a row whose stored hash != the computed digest is rejected (compare_digest)."""
     full, prefix, _ = ak.generate_key()
     row = SimpleNamespace(id="1", prefix=prefix, key_hash="deadbeef" * 8, name="k",
                           namespace="default", role="viewer", revoked=False, last_used_at=None)
@@ -152,3 +157,66 @@ def test_constant_time_compare_rejects_hash_mismatch() -> None:
         yield _FakeSession([row])
 
     assert asyncio.run(ak.authenticate_api_key(full, session_factory=_factory)) is None
+
+
+# --- RETENTION: API-key expiry (expires_at; NULL = never — legacy keys keep working) ---------------
+
+
+def test_authenticate_rejects_expired_key() -> None:
+    from datetime import timedelta
+
+    full, prefix, key_hash = ak.generate_key()
+    row = SimpleNamespace(
+        id="1", prefix=prefix, key_hash=key_hash, name="k", namespace="team-a", role="viewer",
+        revoked=False, last_used_at=None,
+        expires_at=datetime.now(timezone.utc) - timedelta(seconds=5),
+    )
+
+    async def _factory():
+        yield _FakeSession([row])
+
+    assert asyncio.run(ak.authenticate_api_key(full, session_factory=_factory)) is None
+    assert row.last_used_at is None  # rejected BEFORE the last-used stamp — expired == unauthenticated
+
+
+def test_authenticate_allows_legacy_key_without_expiry() -> None:
+    # Keys issued before the expires_at column existed (attribute absent entirely) must keep working.
+    full, prefix, key_hash = ak.generate_key()
+    row = SimpleNamespace(
+        id="1", prefix=prefix, key_hash=key_hash, name="legacy", namespace="default", role="viewer",
+        revoked=False, last_used_at=None,
+    )
+
+    async def _factory():
+        yield _FakeSession([row])
+
+    principal = asyncio.run(ak.authenticate_api_key(full, session_factory=_factory))
+    assert principal is not None and principal["sub"] == f"apikey:{prefix}"
+
+
+def test_create_key_defaults_to_configured_ttl_and_zero_means_never() -> None:
+    from datetime import timedelta
+
+    rows: list = []
+    client = _client(rows)
+    # Omitted expires_in_days -> server default (api_key_default_ttl_days, 90).
+    body = client.post(
+        "/api/v1/keys", json={"name": "d"}, headers={"Authorization": f"Bearer {_token('admin')}"}
+    ).json()
+    assert body["expires_at"] is not None
+    got = datetime.fromisoformat(body["expires_at"])
+    expected = datetime.now(timezone.utc) + timedelta(days=settings.api_key_default_ttl_days)
+    assert abs((got - expected).total_seconds()) < 300
+    # Explicit 0 -> never expires (an intentional service-key choice).
+    body0 = client.post(
+        "/api/v1/keys", json={"name": "svc", "expires_in_days": 0},
+        headers={"Authorization": f"Bearer {_token('admin')}"},
+    ).json()
+    assert body0["expires_at"] is None
+    # Explicit N -> now + N days.
+    body7 = client.post(
+        "/api/v1/keys", json={"name": "wk", "expires_in_days": 7},
+        headers={"Authorization": f"Bearer {_token('admin')}"},
+    ).json()
+    got7 = datetime.fromisoformat(body7["expires_at"])
+    assert abs((got7 - (datetime.now(timezone.utc) + timedelta(days=7))).total_seconds()) < 300

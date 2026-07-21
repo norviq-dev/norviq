@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Asset Graph page (design_handoff_assetgraph): per-agent circular meshes in the overview, click an
+// Asset Graph page: per-agent circular meshes in the overview, click an
 // agent to focus its subgraph as a live force layout, floating inspector with blast radius, clickable
 // stat strip. Adapted to the EXISTING backend: /api/v1/asset-graph?namespace=all|<ns>&range=… (the
 // multi-namespace union endpoint) — the Namespace dropdown drives the server-side namespace param,
 // Range drives the API range param, everything else filters client-side (see model.ts for the
 // field mapping). The Cluster dropdown exists ONLY in a multi-cluster install (existing fleetEnabled
-// signal, F-59) and switches the global cluster context (ClusterScoped handles remote clusters).
+// signal) and switches the global cluster context (ClusterScoped handles remote clusters).
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { PageHead } from "../components/common/PageHead";
@@ -47,7 +47,7 @@ export default function AssetGraph() {
     timeRange, clusters, selectedCluster, servedCluster, setCluster,
     selectedNamespace, namespaces: appNamespaces, setNamespace
   } = useApp();
-  // P2-3: the graph's namespace scope IS the global selector — never a divergent page-local state. The
+  // The graph's namespace scope IS the global selector — never a divergent page-local state. The
   // in-panel Namespace dropdown below reflects it and drives it (same contract as the Attack Graph), so
   // changing the global selection re-fetches this graph scoped, and vice versa.
   const nsScope = selectedNamespace || "all";
@@ -64,9 +64,9 @@ export default function AssetGraph() {
   const [risks, setRisks] = useState<Record<RiskKey, boolean>>({ low: true, medium: true, high: true, critical: true });
   const [agentClass, setAgentClass] = useState("all");
   const [blockedOnly, setBlockedOnly] = useState(false);
-  // A1: default-hide synthetic/probe agents; the choice persists across visits (localStorage).
+  // Default-hide synthetic/probe agents; the choice persists across visits (localStorage).
   const [showSynthetic, setShowSynthetic] = useState<boolean>(() => localStorage.getItem("nrvq_show_synthetic") === "1");
-  // A2: default-hide real-but-awaiting (never-observed) agents; independent of showSynthetic (orthogonal flags).
+  // Default-hide real-but-awaiting (never-observed) agents; independent of showSynthetic (orthogonal flags).
   const [showAwaiting, setShowAwaiting] = useState<boolean>(() => localStorage.getItem("nrvq_show_awaiting") === "1");
   const [focus, setFocus] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -98,13 +98,13 @@ export default function AssetGraph() {
     return () => { alive = false; };
   }, [nsScope, range, showSynthetic, showAwaiting]);
 
-  // A1: flip the synthetic-agent visibility + persist the choice; the fetch effect re-runs on the state change.
+  // Flip the synthetic-agent visibility + persist the choice; the fetch effect re-runs on the state change.
   const toggleSynthetic = () => setShowSynthetic((v) => {
     const next = !v;
     localStorage.setItem("nrvq_show_synthetic", next ? "1" : "0");
     return next;
   });
-  // A2: flip awaiting-agent visibility + persist; the fetch effect re-runs (independent of synthetic).
+  // Flip awaiting-agent visibility + persist; the fetch effect re-runs (independent of synthetic).
   const toggleAwaiting = () => setShowAwaiting((v) => {
     const next = !v;
     localStorage.setItem("nrvq_show_awaiting", next ? "1" : "0");
@@ -328,7 +328,7 @@ export default function AssetGraph() {
           </div>
         )}
 
-        {/* A2: real-but-awaiting (registered, never-observed) agents are hidden by default — surface the count
+        {/* Real-but-awaiting (registered, never-observed) agents are hidden by default — surface the count
             + a Show/Hide toggle. When shown they render dimmed inline (same as before). */}
         {((data?.awaiting_hidden ?? 0) > 0 || showAwaiting) && (
           <div
@@ -350,7 +350,7 @@ export default function AssetGraph() {
           </div>
         )}
 
-        {/* A1: synthetic/probe agents are hidden by default — surface the count + a toggle to reveal them. */}
+        {/* Synthetic/probe agents are hidden by default — surface the count + a toggle to reveal them. */}
         {((data?.synthetic_hidden ?? 0) > 0 || showSynthetic) && (
           <div
             role="status"

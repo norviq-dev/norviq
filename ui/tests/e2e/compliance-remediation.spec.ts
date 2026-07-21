@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Batch B (COMP-GEN-01) — REAL form login, REAL controls + backend. Proves the Compliance detail view's
+// REAL form login, REAL controls + backend. Proves the Compliance detail view's
 // MULTI-SELECT + agent-class picker drives the real control-specific batch-generation endpoint:
 //   • checking a GAP control reveals the batch bar (count),
 //   • the class-scope picker + "Generate for selected" fire ONE POST /compliance/{fw}/generate-batch
@@ -35,7 +35,7 @@ async function openOwaspGaps(page: Page): Promise<void> {
   await page.waitForLoadState("networkidle");
 }
 
-test("COMP-GEN-01: multi-select + class picker fires one control-specific generate-batch with the checked controls", async ({ page }) => {
+test("multi-select + class picker fires one control-specific generate-batch with the checked controls", async ({ page }) => {
   await realLogin(page);
   await openOwaspGaps(page);
 

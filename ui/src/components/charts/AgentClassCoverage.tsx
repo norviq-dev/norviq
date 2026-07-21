@@ -9,6 +9,7 @@
 // allowlist, the refinement toggles, the admin-promoted (learned) verbs, the mode, and 30d efficacy.
 
 import { useState } from "react";
+import { createPortal } from "react-dom";
 import { Panel } from "../common/Panel";
 import type { AgentClassPolicy } from "../../api/client";
 
@@ -19,8 +20,16 @@ const KIND_LABEL: Record<string, string> = { intent: "Positive-security (default
 
 const COLLAPSED_LIMIT = 6; // cap the resting height; the rest fold behind a "+N more" toggle
 
+// The hover card is rendered through a portal to <body> (not as an in-card absolute element): the Overview
+// panels each set `backdrop-filter`, which makes every .panel its OWN stacking context, so a tooltip that
+// overflowed this card's bottom was painted UNDER the next panel (Tool Call Volume) and cut off. A portaled,
+// position:fixed card escapes that stacking context and floats above everything; it flips above the row when
+// there isn't room below.
+type HoverAnchor = { cls: string; left: number; top: number; below: boolean };
+const TOOLTIP_W = 320;
+
 export function AgentClassCoverage({ policies, namespaceMode, bare = false }: { policies: AgentClassPolicy[]; namespaceMode?: string; bare?: boolean }) {
-  const [hover, setHover] = useState<string | null>(null);
+  const [hover, setHover] = useState<HoverAnchor | null>(null);
   const [expanded, setExpanded] = useState(false);
   if (!policies.length) return null;
   const monitor = namespaceMode === "audit";
@@ -43,9 +52,19 @@ export function AgentClassCoverage({ policies, namespaceMode, bare = false }: { 
           <div
             key={p.cls}
             data-testid="agent-class-cov-row"
-            onMouseEnter={() => setHover(p.cls)}
-            onMouseLeave={() => setHover((h) => (h === p.cls ? null : h))}
-            style={{ position: "relative", display: "flex", alignItems: "center", gap: 12, cursor: "default" }}
+            onMouseEnter={(e) => {
+              // Anchor the portaled card to this row's viewport rect; flip above when there's little room below.
+              const b = e.currentTarget.getBoundingClientRect();
+              const below = window.innerHeight - b.bottom > 200;
+              setHover({
+                cls: p.cls,
+                left: Math.max(8, Math.min(b.left + 142, window.innerWidth - TOOLTIP_W - 12)),
+                top: below ? b.bottom + 4 : b.top - 4,
+                below
+              });
+            }}
+            onMouseLeave={() => setHover((h) => (h?.cls === p.cls ? null : h))}
+            style={{ display: "flex", alignItems: "center", gap: 12, cursor: "default" }}
           >
             <span style={{ flex: "none", width: 130, fontSize: 12, color: "var(--text-secondary)", fontFamily: "ui-monospace, monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "right" }}>{p.cls}</span>
             <div style={{ flex: 1, height: 13, borderRadius: 4, background: "rgba(255,255,255,0.05)", overflow: "hidden" }}>
@@ -53,10 +72,13 @@ export function AgentClassCoverage({ policies, namespaceMode, bare = false }: { 
               <div style={{ width: "100%", height: "100%", borderRadius: 4, background: color, opacity: p.enforcing ? 1 : 0.55 }} />
             </div>
 
-            {hover === p.cls && (
+            {hover?.cls === p.cls && createPortal(
               <div
                 role="tooltip"
-                style={{ position: "absolute", zIndex: 20, top: "100%", left: 142, marginTop: 4, minWidth: 260, maxWidth: 340, padding: "11px 13px", background: "#252525", border: "1px solid #3a3a3a", borderRadius: 10, boxShadow: "0 18px 40px -14px rgba(0,0,0,0.85)", fontSize: 11.5, lineHeight: 1.55, color: "#e8edf5" }}
+                // position:fixed + portal to <body> so the card floats above every panel's stacking context.
+                // pointer-events:none so it can't steal the
+                // mouseleave that dismisses it.
+                style={{ position: "fixed", zIndex: 1000, left: hover.left, top: hover.top, transform: hover.below ? undefined : "translateY(-100%)", width: TOOLTIP_W, maxWidth: "calc(100vw - 24px)", padding: "11px 13px", background: "#252525", border: "1px solid #3a3a3a", borderRadius: 10, boxShadow: "0 18px 40px -14px rgba(0,0,0,0.85)", fontSize: 11.5, lineHeight: 1.55, color: "#e8edf5", pointerEvents: "none" }}
               >
                 <div style={{ fontWeight: 700, marginBottom: 4 }}>{p.cls} · {KIND_LABEL[p.kind] ?? p.kind}</div>
                 <Row label="Intended tools">
@@ -79,7 +101,8 @@ export function AgentClassCoverage({ policies, namespaceMode, bare = false }: { 
                 {!p.effective && (
                   <div style={{ marginTop: 6, color: "#a0a0a0" }}>Loaded but no traffic has proven it blocking yet.</div>
                 )}
-              </div>
+              </div>,
+              document.body
             )}
           </div>
         );

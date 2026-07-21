@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""HIGH-1: HTTP-level rate limiting (pure ASGI middleware).
+"""HTTP-level rate limiting (pure ASGI middleware).
 
 ``settings.evaluator_rate_limit_per_window`` (norviq/engine/evaluator.py) is an OPA POLICY decision made
 INSIDE an already-authenticated ``/evaluate`` call — it says nothing about the HTTP layer in front of it.
@@ -26,7 +26,7 @@ Design:
   * FAIL-OPEN on any Redis error (availability > strictness — a Redis blip must never take the API down).
   * /healthz, /readyz, /metrics are always excluded — k8s probes and the Prometheus scrape must never 429.
 
-REPORT-AUDEXPORT-01 precedent (see body_limit.py): this MUST be pure ASGI, not ``BaseHTTPMiddleware`` —
+Following the body_limit.py precedent: this MUST be pure ASGI, not ``BaseHTTPMiddleware`` —
 the latter breaks ``StreamingResponse`` (the audit-export bug). A 429 short-circuit is easy to do safely
 in pure ASGI (send our own response, never touch ``receive``/the body); the pass-through path leaves
 ``receive``/``send`` completely untouched.

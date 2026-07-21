@@ -38,7 +38,7 @@ def _load_dotenv_if_present() -> None:
 
 @asynccontextmanager
 async def _session():
-    """Drive the get_session async-generator dependency (`await get_session()` is the P-15 bug)."""
+    """Drive the get_session async-generator dependency (`await get_session()` is the bug)."""
     gen = get_session()
     session = await gen.__anext__()
     try:

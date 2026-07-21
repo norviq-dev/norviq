@@ -74,7 +74,7 @@ def test_attack_paths_cross_tenant_is_403() -> None:
 
 
 def test_attack_paths_no_claim_viewer_is_403() -> None:
-    # F-06 floor: a non-admin with NO namespace claim gets no tenant data at all.
+    # No-claim floor: a non-admin with NO namespace claim gets no tenant data at all.
     client = _client_as({"role": "viewer", "namespace": ""})
     try:
         assert client.get("/api/v1/attack-paths?namespace=default").status_code == 403

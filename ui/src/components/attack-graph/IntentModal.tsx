@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Attack Graph intent modal (design_handoff_attackgraph): a usage-driven ALLOWLIST BUILDER.
+// Attack Graph intent modal: a usage-driven ALLOWLIST BUILDER.
 // role="dialog" aria-modal, Esc closes, Tab focus-trap, autofocus the first control.
 //
 // On open (and whenever the active class changes in global mode) we call fetchIntentSuggest(ns,cls) and
@@ -129,7 +129,7 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
   // self-contradictory generated policy — the tool is in the allowlist yet the refinement toggle ALWAYS
   // blocks it (proven via opa eval: in_allowlist:true, decision:"block"). This surfaces the contradiction
   // instead of silently letting the allowlist entry have no effect.
-  // FIX-2: the backend's `is_egress` (generate_intent_rego, norviq/api/threat_intent.py) only blocks a
+  // The backend's `is_egress` (generate_intent_rego, norviq/api/threat_intent.py) only blocks a
   // send-classified tool when it's EGRESS_TOOLS-lexicon-tagged (tag==="egress") OR an admin-PROMOTED verb
   // (op_src==="learned"). A registry-only send classification (op_src==="registry", e.g. forward_ticket) is
   // NOT blocked — it resolves to ALLOW — so warning on it told the operator to uncheck a correct, working

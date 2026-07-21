@@ -5,7 +5,7 @@
 "deployed, awaiting first tool call" state.
 
 Covers: the namespace resolver (admin/service unrestricted, viewer pinned to its claim, cross-tenant
-403, F-06 no-claim floor), the union response (per-namespace tagging, id qualification so tool ids
+403, no-claim floor), the union response (per-namespace tagging, id qualification so tool ids
 don't collide, namespaces field), awaiting-agent synthesis (silent namespaces + deployed-but-silent
 classes, reserved __baseline__/__pack__ scopes excluded), and unchanged single-namespace shape.
 """
@@ -122,7 +122,7 @@ def test_all_unions_namespaces_with_tags_prefixes_and_awaiting(stubbed) -> None:
     # hr has protection deployed but zero traffic (no snapshot) -> awaiting; support also has a second,
     # not-yet-observed class -> awaiting inside a traffic-bearing namespace.
     stubbed["deployed"] = {"hr": {"hr-bot"}, "support": {"support-bot", "escalation-bot"}}
-    # A2: awaiting (real-but-never-observed) agents are hidden by default — opt back in to exercise them.
+    # Awaiting (real-but-never-observed) agents are hidden by default — opt back in to exercise them.
     resp = _get(ADMIN, "namespace=all&include_awaiting=true")
     assert resp.status_code == 200
     body = resp.json()
@@ -155,7 +155,7 @@ def test_colliding_tool_ids_stay_distinct_across_namespaces(stubbed) -> None:
 def test_single_namespace_keeps_unprefixed_shape(stubbed) -> None:
     stubbed["snapshots"] = [("payments", _snapshot("payments", "spiffe://p/pay", "payments-bot", "execute_sql"))]
     stubbed["deployed"] = {"payments": {"payments-bot", "risk-bot"}}
-    # A2: awaiting agents are hidden by default — opt back in to exercise the single-namespace shape too.
+    # Awaiting agents are hidden by default — opt back in to exercise the single-namespace shape too.
     body = _get(ADMIN, "namespace=payments&include_awaiting=true").json()
     ids = {n["id"] for n in body["nodes"]}
     assert "spiffe://p/pay" in ids and "tool:execute_sql" in ids  # no ns:: prefix
@@ -193,7 +193,7 @@ def test_viewer_cannot_read_another_namespace_via_endpoint(stubbed) -> None:
 
 def test_empty_namespace_still_returns_valid_empty_response(stubbed) -> None:
     body = _get(ADMIN, "namespace=ghost").json()
-    # A1/A2: the response now also reports how many synthetic/awaiting nodes were filtered by default
+    # The response now also reports how many synthetic/awaiting nodes were filtered by default
     # (0 here — nothing to hide in an empty namespace) — see norviq/api/routers/graphs.py asset_graph.
     assert body == {"nodes": [], "edges": [], "namespaces": [], "synthetic_hidden": 0, "awaiting_hidden": 0}
 

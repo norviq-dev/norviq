@@ -167,7 +167,7 @@ class _SyncEvaluatorStub:
 
 async def test_apply_remote_event_delete_unloads_local_state() -> None:
     """HA: a delete published by a PEER replica must unload THIS replica's in-memory policy + evaluator index
-    (no DB read needed — the peer already deleted the row). This is the H2 propagation half."""
+    (no DB read needed — the peer already deleted the row). This is the propagation half."""
     loader = PolicyLoader(cache=_CacheStub(), evaluator=_SyncEvaluatorStub())  # type: ignore[arg-type]
     loader._policies = {"payments:billing": {"rego": "package x", "priority": 100}}
     loader._versions = {"payments:billing": []}
@@ -183,9 +183,9 @@ async def test_apply_remote_event_delete_unloads_local_state() -> None:
 async def test_apply_remote_event_upsert_refreshes_version_history(
     loader: PolicyLoader, db_engine: AsyncEngine
 ) -> None:
-    """FIX-5 regression: apply_remote_event's upsert branch previously called only `load_from_db` (refreshes
-    `_policies`, so GET /policies is correct cluster-wide) but never refreshed `_versions` — so the FIX-A
-    version-snapshot mode-patch (`apply_to_target`'s `history[-1].enforcement_mode = ...`) only ever landed
+    """Regression: an apply_remote_event upsert branch that calls only `load_from_db` (refreshes
+    `_policies`, so GET /policies is correct cluster-wide) but never refreshes `_versions` leaves the
+    version-snapshot mode-patch (`apply_to_target`'s `history[-1].enforcement_mode = ...`) landing only
     on the ORIGINATING replica. A peer serving a rollback-to-current request would read a stale
     `_versions[key][-1].enforcement_mode`. Simulate: loader A creates a policy then reapplies the same rego
     under a new enforcement_mode (mode-change branch: DB UPDATE + patches loader A's OWN `_versions[-1]` in
@@ -217,10 +217,68 @@ async def test_apply_remote_event_upsert_refreshes_version_history(
 
 
 @pytest.mark.asyncio
+async def test_rehydrate_versions_for_key_caps_to_max_versions(
+    loader: PolicyLoader, db_engine: AsyncEngine
+) -> None:
+    """RETENTION regression: `_rehydrate_versions_for_key` (apply_remote_event's upsert branch) must cap the
+    stored history to `_MAX_VERSIONS`, exactly like the append path (`create()`) and the full-rehydrate path
+    (`_rehydrate_versions`). The DB may retain more rows than `_MAX_VERSIONS` (policy_version_keep_count can
+    exceed it), and previously this single-key path stored the WHOLE DB history — so a peer replica that
+    received an upsert accumulated an unbounded version list the live append path would never build,
+    diverging rollback targets across replicas. Seed the DB with more rows than `_MAX_VERSIONS`, apply the
+    remote upsert on a fresh peer, and assert its in-memory history holds exactly `_MAX_VERSIONS` (the most
+    recent), not the full DB count."""
+    from norviq.engine.policy_loader import _MAX_VERSIONS
+
+    namespace = f"ns7-{uuid.uuid4().hex}"
+    agent_class = "class7"
+    rego = 'package retention\ndefault decision = "block"'
+    key = f"{namespace}:{agent_class}"
+    total_db_rows = _MAX_VERSIONS + 5  # keep_count > _MAX_VERSIONS: DB retains more than memory should hold
+
+    # create() writes version 1; seed the remaining rows directly so the DB history exceeds _MAX_VERSIONS.
+    await loader.create(namespace, agent_class, rego, "admin", 100, enforcement_mode="block")
+    async with db_engine.begin() as conn:
+        policy_id = (
+            await conn.execute(
+                text("SELECT id FROM policies WHERE namespace = :ns AND agent_class = :cls"),
+                {"ns": namespace, "cls": agent_class},
+            )
+        ).scalar_one()
+        for version in range(2, total_db_rows + 1):
+            await conn.execute(
+                text(
+                    "INSERT INTO policy_versions "
+                    "(id, policy_id, version, rego_source, saved_at, saved_by, priority, enforcement_mode) "
+                    "VALUES (:id, :policy_id, :version, :rego_source, NOW(), :saved_by, 100, 'block')"
+                ),
+                {
+                    "id": str(uuid.uuid4()),
+                    "policy_id": policy_id,
+                    "version": version,
+                    "rego_source": rego,
+                    "saved_by": "admin",
+                },
+            )
+
+    # A fresh peer replica applies the remote upsert -> rehydrates just this key from the durable table.
+    peer = PolicyLoader(cache=_CacheStub(), evaluator=_SyncEvaluatorStub())  # type: ignore[arg-type]
+    try:
+        await peer.apply_remote_event("upsert", namespace, agent_class)
+        # Pre-fix this held all `total_db_rows` snapshots; must be capped to _MAX_VERSIONS.
+        assert len(peer._versions[key]) == _MAX_VERSIONS
+        # The cap keeps the most recent versions (tail), matching create()/_rehydrate_versions.
+        assert peer._versions[key][-1].version == total_db_rows
+        assert peer._versions[key][0].version == total_db_rows - _MAX_VERSIONS + 1
+    finally:
+        await peer.close()
+
+
+@pytest.mark.asyncio
 async def test_apply_remote_event_upsert_converges_applied_at(
     loader: PolicyLoader, db_engine: AsyncEngine
 ) -> None:
-    """HA C1 regression: `_applied_at` was previously process-local only (never persisted/broadcast) — a
+    """HA regression: `_applied_at` was previously process-local only (never persisted/broadcast) — a
     replica pinned by an operator's session kept showing the pre-apply (or null) `last_applied` forever
     after a peer applied. `create()` and the mode-change branch of `apply_to_target()` now stamp
     `policies.applied_at` with the DB's own NOW() and hydrate this replica's `_applied_at` from that exact
@@ -273,8 +331,7 @@ def test_each_loader_has_a_distinct_origin() -> None:
 
 
 async def test_in_memory_entry_carries_enforcement_mode() -> None:
-    """M4: the in-memory entry now carries enforcement_mode so list_policies can report it (was absent →
-    the editor rewrote every saved policy to 'audit' on the next Save)."""
+    """The in-memory entry carries enforcement_mode so list_policies can report it."""
     loader = PolicyLoader(cache=_CacheStub(), evaluator=_SyncEvaluatorStub())  # type: ignore[arg-type]
     loader._update_memory("ns:cls", "package a", 100, "audit")
     assert loader._policies["ns:cls"]["enforcement_mode"] == "audit"

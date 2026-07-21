@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
-"""F-24: every block carries a correct named rule_id (never '' or default_allow). F-23: read-like tools are
+"""Every block carries a correct named rule_id (never '' or default_allow). Read-like tools are
 exempt from the per-identity rate limiter."""
 
 from norviq.config import settings
@@ -39,7 +39,7 @@ def test_invariant_no_block_keeps_bad_rule_id():
         assert out.rule_id not in ("", "default_allow")
 
 
-# --- F-23 read-exempt ---
+# --- Read-exempt ---
 def test_read_tools_are_rate_limit_exempt():
     assert settings.evaluator_rate_limit_read_exempt is True
     for t in ("get_account", "read_record", "list_tickets", "query_db", "fetch_x", "valve_status", "sensor_read"):

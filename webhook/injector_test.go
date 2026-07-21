@@ -123,7 +123,7 @@ func TestInjector_ValidateImage(t *testing.T) {
 	if !inj.validateImage("docker.io/norviq/norviq-engine:engine-latest") {
 		t.Fatal("expected docker.io official image to be allowed")
 	}
-	// D7 regression: the public release ships GHCR images; the chart injects
+	// Regression: the public release ships GHCR images; the chart injects
 	// ghcr.io/norviq-dev/norviq-engine, which the allowlist must accept (it was Docker-Hub-only,
 	// so every agent pod was rejected on a fresh public install).
 	if !inj.validateImage("ghcr.io/norviq-dev/norviq-engine:engine-latest") {
@@ -141,7 +141,7 @@ func TestInjector_ValidateImage(t *testing.T) {
 }
 
 func TestCreatePatchSpiffeInject(t *testing.T) {
-	// B3: with SpiffeInject on, injected pods also get the SPIFFE CSI volume + mount + env.
+	// With SpiffeInject on, injected pods also get the SPIFFE CSI volume + mount + env.
 	cfg := LoadConfig()
 	cfg.SpiffeInject = true
 	cfg.SpiffeMode = "workload-api"
@@ -176,7 +176,7 @@ func TestCreatePatchSpiffeInjectOffByDefault(t *testing.T) {
 	}
 }
 
-// FIX 4: the injector must stamp injectedAnnotation on every patch it produces so hasSidecar
+// The injector must stamp injectedAnnotation on every patch it produces so hasSidecar
 // (handler.go) can positively identify a real prior injection independent of the attacker-controllable
 // container name.
 func TestCreatePatchStampsInjectedAnnotation(t *testing.T) {
@@ -223,7 +223,7 @@ func testPodWithContainers(volumes []corev1.Volume, containers []corev1.Containe
 	}
 }
 
-// SIDE-2/SIDE-1/SIDE-4: proxy-mode sidecar env wiring (default). Asserts the thin-proxy sidecar gets
+// Proxy-mode sidecar env wiring (default). Asserts the thin-proxy sidecar gets
 // the central API URL, a minted service token, the pod namespace, proxy mode, and NO embedded datastore
 // wiring — and that embedded mode instead wires Redis/PG/OPA.
 func TestSidecarEnvProxyModeWiring(t *testing.T) {
@@ -240,7 +240,7 @@ func TestSidecarEnvProxyModeWiring(t *testing.T) {
 		t.Fatalf("expected proxy mode, got %q", got["NRVQ_SIDECAR_MODE"])
 	}
 	if got["NRVQ_NAMESPACE"] != "tenant-b" {
-		t.Fatalf("SIDE-4: expected pod namespace tenant-b, got %q", got["NRVQ_NAMESPACE"])
+		t.Fatalf("expected pod namespace tenant-b, got %q", got["NRVQ_NAMESPACE"])
 	}
 	if got["NRVQ_API_URL"] != "http://norviq-api:8080" {
 		t.Fatalf("expected central API URL, got %q", got["NRVQ_API_URL"])

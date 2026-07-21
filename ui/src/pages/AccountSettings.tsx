@@ -1,3 +1,6 @@
+// Account Settings — a read-only profile card (the identity the server resolved for the session) plus
+// a change-password form.
+
 import { useState } from "react";
 import { changePassword, fetchMe } from "../api/client";
 import { useApi } from "../hooks/useApi";
@@ -41,7 +44,7 @@ export function AccountSettings() {
         )}
       </Panel>
 
-      {/* POLISH: self-service password change (was only reachable via the forced first-login flow). */}
+      {/* Self-service password change, reachable outside the forced first-login flow. */}
       <ChangePasswordPanel />
     </div>
   );

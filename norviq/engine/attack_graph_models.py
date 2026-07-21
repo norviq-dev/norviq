@@ -12,6 +12,8 @@ Severity = Literal["low", "medium", "high", "critical"]
 
 @dataclass
 class AttackStep:
+    """One hop in a computed attack path: a node reached and how policy would rule on it."""
+
     step_num: int
     node_id: str
     node_name: str
@@ -23,6 +25,8 @@ class AttackStep:
 
 @dataclass
 class AttackPath:
+    """An ordered chain of steps from a source agent to a target asset, scored and MITRE-tagged."""
+
     path_id: str  # UUID
     namespace: str
     source_id: str  # agent node

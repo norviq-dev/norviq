@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""SSRF-01 (MEDIUM half): POST /fleet/clusters/join-token (hub-side mint, admin-only) took an
+"""POST /fleet/clusters/join-token (hub-side mint, admin-only) took an
 unvalidated `hub_url` straight from the request body and embedded it into a signed join token that an
 enrolling spoke later dials. A malicious/careless hub_url must be rejected at MINT TIME, before it is
 ever signed into a token or written to the join-token row."""

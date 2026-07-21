@@ -8,7 +8,10 @@ metadata:
 spec:
   target:
     agentClass: data-analyst
-  enforcementMode: audit
+  # enforcementMode is intent metadata — the evaluator does NOT read it, so the moderate preset
+  # escalates/blocks the moment this is applied. To observe a preset before it enforces, put the
+  # whole namespace in audit posture (PUT /api/v1/settings?namespace=<ns> {"enforcement_mode":"audit"}).
+  enforcementMode: block
   preset: moderate
   # Canonical rule_ids enforced by the bundled comprehensive policy (informational).
   rules:

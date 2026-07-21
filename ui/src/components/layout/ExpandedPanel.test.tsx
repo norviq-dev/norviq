@@ -13,7 +13,7 @@ function ForceSecurity({ children }: { children: React.ReactNode }) {
 }
 
 describe("ExpandedPanel navigation", () => {
-  it("shows Policy Tester and the Red Team view (F1: it ships) under TESTING", () => {
+  it("shows Policy Tester and the Red Team view (it ships) under TESTING", () => {
     render(
       <MemoryRouter>
         <AppProvider>

@@ -42,7 +42,7 @@ blocks["phi_identifier_egress"] {
 }
 reasons["phi_identifier_egress"] = "Healthcare: PHI identifier on an egress tool blocked (HIPAA §164.312)"
 
-# F-21: destination-based egress guard (complements phi_identifier_egress, which keys on a PHI field name). An
+# Destination-based egress guard (complements phi_identifier_egress, which keys on a PHI field name). An
 # export tool to an EXTERNAL destination is PHI exfil even when no PHI field is in the params (the record body
 # carries it) → block; to no/internal destination → escalate. Block precedence means a PHI-key egress still blocks.
 hc_dest_keys = {"destination", "dest", "target", "url", "endpoint", "bucket", "recipient", "to", "sink", "upload_url", "callback", "webhook"}

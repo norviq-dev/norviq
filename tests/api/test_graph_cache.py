@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F-05: graph analysis results are cached per (namespace, graph-version) — a repeated call computes once and
+"""Graph analysis results are cached per (namespace, graph-version) — a repeated call computes once and
 is served from cache, and the cache invalidates when the graph snapshot changes."""
 
 from __future__ import annotations

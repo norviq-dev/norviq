@@ -30,7 +30,7 @@ class ThreatStep(BaseModel):
     deny: int = 0
     allow: int = 0
     would_block: int = 0  # Monitor-mode would-block count on this hop (logged, not enforced)
-    # CAP-2: the ACTUAL data operation this hop performs (read/write/delete/send) + its risk, from the
+    # The ACTUAL data operation this hop performs (read/write/delete/send) + its risk, from the
     # source-capability registry — so a destructive hop reads differently from a read hop instead of a
     # generic "reaches". Populated only when the operation resolves against a known source type; None
     # otherwise (unknown source / generic tool name), so the UI falls back to the plain relationship word.
@@ -75,7 +75,7 @@ class ThreatPath(BaseModel):
 class ThreatPathsResponse(BaseModel):
     paths: list[ThreatPath] = []
     namespaces: list[str] = []
-    # A1: number of paths hidden because their source agent is synthetic/probe (drives the "N hidden — Show" chip).
+    # Number of paths hidden because their source agent is synthetic/probe (drives the "N hidden — Show" chip).
     synthetic_hidden: int = 0
 
 
@@ -158,7 +158,7 @@ class IntentDraftSummary(BaseModel):
     draft_id: str
     ns: str
     cls: str
-    # COMP-GEN-01 fix: for a compliance-remediation draft, `cls` (== agent_class) is the compound
+    # For a compliance-remediation draft, `cls` (== agent_class) is the compound
     # persistence overlay key ("<class>__remediation__"); `affected_class` carries the real class the
     # draft affects, for UI display. NULL for non-remediation drafts (where `cls` already is the real class).
     affected_class: str | None = None
@@ -168,16 +168,16 @@ class IntentDraftSummary(BaseModel):
     total: int = 0
     created_by: str = ""
     created_at: str = ""
-    # F2: compliance-draft provenance (None for Attack-Graph intent drafts).
+    # Compliance-draft provenance (None for Attack-Graph intent drafts).
     source_framework: str | None = None
     source_control_id: str | None = None
     source_control_name: str | None = None
-    # Part B: TTL — when this non-enforcing draft auto-expires (ISO; "" = never).
+    # TTL — when this non-enforcing draft auto-expires (ISO; "" = never).
     expires_at: str = ""
 
 
 class IntentDraftPage(BaseModel):
-    """Part B (B6): a BOUNDED page of drafts + the total count, so the Policy Catalog never renders the whole
+    """A BOUNDED page of drafts + the total count, so the Policy Catalog never renders the whole
     list at once ("N more · view all")."""
 
     drafts: list[IntentDraftSummary] = []

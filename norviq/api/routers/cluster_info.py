@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Cluster-info route (F046) — the console's LIVE source for this deployment's identity + namespaces.
+"""Cluster-info route — the console's LIVE source for this deployment's identity + namespaces.
 
-Replaces the console's hardcoded CLUSTERS / NS_BY_CLUSTER. The cluster id/name come from config; the
+The cluster id/name come from config; the
 namespace list is the REAL set observed across policies, agents, and audit — never a fabricated list.
 When a fleet hub is configured the console lists clusters from /fleet/clusters instead; this endpoint
 backs the single-cluster (fleet-off) path and the namespace selector in both.
@@ -50,10 +50,10 @@ async def cluster_info(
     role = str(user.get("role", "")).lower()
     claim_ns = str(user.get("namespace", "") or "")
     if role != "admin" and not claim_ns:
-        # M1 / F-06 floor: a non-admin with NO namespace claim (the unmapped-viewer least-privilege floor)
+        # A non-admin with NO namespace claim (the unmapped-viewer least-privilege floor)
         # has no tenant scope at all — every other scoped route (audit/agents/policies) 403s this case via
-        # scoped_namespace/read_namespace. This route previously fell through to the "return everything
-        # observed" branch below, leaking the full cross-tenant namespace list to a no-scope viewer.
+        # scoped_namespace/read_namespace. Without this guard the route would fall through to the "return
+        # everything observed" branch below, leaking the full cross-tenant namespace list to a no-scope viewer.
         raise HTTPException(status_code=403, detail="No namespace scope")
     if role != "admin":
         namespaces = [claim_ns]

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Unit tests for the red-team catalog mapping (B1) + efficacy roll-up (B3) — pure, no DB."""
+"""Unit tests for the red-team catalog mapping + efficacy roll-up — pure, no DB."""
 
 from __future__ import annotations
 

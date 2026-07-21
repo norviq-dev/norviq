@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 #
-# R10 — Playwright END-TO-END gate. Drives the REAL console + backend on kind (never AKS) and asserts
+# Playwright END-TO-END gate. Drives the REAL console + backend on kind (never AKS) and asserts
 # UI + backend TOGETHER (not just 200s): every route renders with zero console errors / zero API
 # failures, every interactive control produces its effect + the right API call, plus the Attack Graph
 # and Asset Graph regression suite (horizontal on-screen kill-chain, normal-weight labels, no inner
@@ -14,7 +14,7 @@
 #   printf '%s' "$NRVQ_ADMIN_JWT" > /tmp/nrvq-signin-token.txt   # admin HS256 token (role=admin, ns=*)
 #   PLAYWRIGHT_BASE_URL=http://localhost:3400 bash scripts/e2e.sh
 #
-# CI (R10 job): after `helm install` on the ephemeral kind cluster + a healthz gate, port-forward the
+# CI job: after `helm install` on the ephemeral kind cluster + a healthz gate, port-forward the
 # UI, mint an admin token into $NRVQ_TOKEN_FILE, then run this. Fails closed on any spec failure.
 set -euo pipefail
 

@@ -1,3 +1,8 @@
+// useApi — the shared data-fetching hook: runs a loader when its deps change, exposing loading/error/
+// data with an in-memory response cache (cacheKey + staleTimeMs) and optional polling (refetchIntervalMs).
+// The module-level cache helpers (prime / peek / readFresh / invalidate / clear) let callers seed and
+// bust that shared cache across components.
+
 import { useCallback, useEffect, useRef, useState } from "react";
 
 type UseApiOptions<T = unknown> = {
@@ -5,15 +10,15 @@ type UseApiOptions<T = unknown> = {
   staleTimeMs?: number;
   refetchIntervalMs?: number;
   /**
-   * K1: treat a resolved value as "not yet real". An empty value is NEVER written to the module cache (so a
+   * Treat a resolved value as "not yet real". An empty value is NEVER written to the module cache (so a
    * transient/warm-up `{total:0}` can't poison the staleTime window and short-circuit later loads), and — if
    * attempts remain — it triggers a bounded retry so the real value replaces it once it resolves. The empty value
    * is still applied to state so the UI shows the current truth immediately (a genuinely-empty range stays 0).
    */
   isEmpty?: (data: T) => boolean;
-  /** K1: max bounded retries when a resolved value is empty, per deps cycle (default 0 = off). */
+  /** Max bounded retries when a resolved value is empty, per deps cycle (default 0 = off). */
   emptyRetries?: number;
-  /** K1: delay before an empty-triggered retry (default 1000ms). */
+  /** Delay before an empty-triggered retry (default 1000ms). */
   emptyRetryMs?: number;
 };
 
@@ -60,7 +65,7 @@ export function useApi<T>(loader: () => Promise<T>, deps: unknown[] = [], option
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const refetchRef = useRef<() => Promise<void>>(async () => {});
-  // K1: each load gets a monotonically-increasing id (`seqRef`); `appliedRef` is the id of the newest load whose
+  // Each load gets a monotonically-increasing id (`seqRef`); `appliedRef` is the id of the newest load whose
   // result was applied to state. A load applies its result UNLESS a strictly-NEWER load has ALREADY applied one
   // (mySeq < appliedRef) or its cycle was torn down (active=false). This is MONOTONIC — it never permanently drops
   // a response that is newer-than-applied. The prior `mySeq === seqRef.current` was the stuck-at-0 bug: it dropped

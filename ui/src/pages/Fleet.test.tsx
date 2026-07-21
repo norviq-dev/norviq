@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// UI-1 smoke test: Fleet page mounts without React #130 (crashed identically pre-fix).
+// Smoke test: Fleet page mounts without React #130 (crashed identically pre-fix).
 import { render, waitFor } from "@testing-library/react";
 import { setupServer } from "msw/node";
 import { MemoryRouter } from "react-router-dom";
@@ -15,7 +15,7 @@ beforeAll(() => server.listen({ onUnhandledRequest: "bypass" }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 
-describe("UI-1: Fleet mounts", () => {
+describe("Fleet mounts", () => {
   it("mounts without a React #130 crash", async () => {
     const errors: string[] = [];
     const spy = vi.spyOn(console, "error").mockImplementation((m) => errors.push(String(m)));

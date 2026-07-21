@@ -4,7 +4,40 @@ namespace: norviq
 # namespaces you want protected — each must already exist. Empty by default so a fresh install never
 # fails on a namespace that hasn't been created yet. Example: [prod-agents, analytics].
 policyQuotaNamespaces: []
-validatingAdmissionPolicyEnabled: true
+
+# Mandatory-interception (defense-in-depth): Norviq's tool-call PEP is COOPERATIVE — the agent's
+# SDK asks the sidecar for a forward/drop decision and the AGENT executes the tool itself. A pod that
+# ignores the SDK can therefore reach tools directly (runtime bypass). This opt-in default-deny egress
+# NetworkPolicy bounds that at the NETWORK layer: an agent pod may egress ONLY to the norviq API, DNS, and
+# an operator-approved tool allowlist — arbitrary data-exfiltration egress is denied. It does NOT replace
+# the PEP (per-call param policy still needs the SDK) and REQUIRES a NetworkPolicy-enforcing CNI
+# (Calico/Cilium; kindnet ignores NetworkPolicy). Full non-cooperative enforcement (the sidecar executing
+# tools) is a separate roadmap item.
+agentEgressPolicy:
+  enabled: false
+  # Policy engine:
+  #   networkpolicy (default) — a portable Kubernetes NetworkPolicy. Allowlist is IP/CIDR-based only.
+  #   cilium                  — a CiliumNetworkPolicy that ALSO supports FQDN (hostname) allowlisting
+  #                             (allowedFQDNs / allowedFQDNPatterns). Requires the Cilium CNI.
+  engine: networkpolicy
+  # Namespaces to lock down. Empty => reuse policyQuotaNamespaces (the tenant namespaces).
+  namespaces: []
+  allowDNS: true
+  # Operator-approved tool endpoints the agent may reach (CIDRs). EVERYTHING ELSE (incl. the internet) is
+  # denied. Leave empty ONLY if the agent's tools all live in the norviq namespace — otherwise its tool
+  # calls will fail. Example: ["10.0.0.0/8"] for in-cluster tool services, or a SaaS API's egress CIDR.
+  allowedCIDRs: []
+  # engine=cilium ONLY: allow egress by HOSTNAME (Cilium's DNS-aware toFQDNs). Cleaner than chasing a SaaS
+  # tool's rotating/CDN IPs. Exact names in allowedFQDNs, wildcards in allowedFQDNPatterns.
+  #   allowedFQDNs:        ["api.openai.com", "api.anthropic.com"]
+  #   allowedFQDNPatterns: ["*.googleapis.com"]
+  allowedFQDNs: []
+  allowedFQDNPatterns: []
+  # Restrict the allowlisted CIDRs/FQDNs to these TCP ports (empty => all ports).
+  allowedPorts: []
+  # embedded sidecar mode reaches Redis/Postgres directly (not the API) — set true to also permit egress
+  # to the norviq datastores. Leave false for the default proxy mode (sidecar → API only).
+  embeddedDatastores: false
 baselineClusterPolicy:
   enabled: true
   name: baseline-cluster-guard
@@ -52,6 +85,25 @@ imagePullSecrets: []
 gracefulShutdown:
   preStopSleepSeconds: 3
 
+# Hardened container securityContext for the primary app containers (defense-in-depth). The
+# chart sets it inline rather than relying on an external PSA/Kyverno restricted-profile mutation
+# ("injected by cluster policy"), which need not exist on the target cluster.
+# This restricted profile matches the opa/tls-proxy sidecars: non-root, no privilege escalation, all caps
+# dropped, seccomp RuntimeDefault, read-only root FS. Consumers whose container writes its root FS must
+# provide a writable emptyDir mount (the api/engine/webhook images already run as a non-root USER, and the
+# webhook writes nothing to its rootfs). The UI (nginx) is NOT covered by this default — it runs as root
+# and binds :80, so it needs a component-specific uid/port/emptyDir treatment. Set enabled:false to defer
+# entirely to a cluster-level PodSecurity/Kyverno policy.
+securityContext:
+  enabled: true
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+  seccompProfile:
+    type: RuntimeDefault
+
 engine:
   replicas: 1
   pdb:
@@ -96,7 +148,7 @@ api:
       cpu: 500m
       memory: 256Mi
   port: 8080
-  # HIGH-3: leave this at the sentinel default and the chart AUTO-GENERATES a strong random secret on
+  # Leave this at the sentinel default and the chart AUTO-GENERATES a strong random secret on
   # first install (templates/secret.yaml), persisting it across `helm upgrade` (a live cluster lookup)
   # so upgrades never invalidate existing sessions/JWTs. Set an explicit value here to pin your own
   # secret instead (e.g. rotation, multi-cluster fleet trust) — it always wins over auto-generation.
@@ -113,7 +165,7 @@ api:
 
 ui:
   replicas: 1
-  # F-25: set to "/fleet-api" on the HUB cluster so the console shows the multi-cluster Fleet view (same-origin,
+  # Set to "/fleet-api" on the HUB cluster so the console shows the multi-cluster Fleet view (same-origin,
   # proxied by nginx to norviq-fleet-api). Empty on spokes/single-cluster → Fleet view stays gated off.
   fleetApiUrl: ""
   rollout:
@@ -126,12 +178,13 @@ ui:
     limits:
       cpu: 200m
       memory: 128Mi
-  port: 80
+  # The console runs on the unprivileged nginx image (uid 101) which binds an unprivileged
+  # port, so the container does not run as root. 8080 needs no NET_BIND_SERVICE, letting the pod drop
+  # ALL caps. The Service + probes reference the named "http" port, so this cascades automatically.
+  port: 8080
 
 webhook:
   enabled: true
-  validating:
-    enabled: false
   # Turnkey sidecar injection: render the MutatingWebhookConfiguration from the chart and
   # auto-bootstrap TLS via a pre/post-install hook Job (self-signs a cert, writes the
   # norviq-webhook-tls secret, patches the webhook caBundle). No cert-manager required.
@@ -139,7 +192,7 @@ webhook:
   #   kubectl label ns <ns> norviq-injection=enabled
   injection:
     enabled: false
-    # SIDE-2: injected-sidecar evaluation mode. "proxy" (DEFAULT) = the sidecar POSTs each tool call to
+    # Injected-sidecar evaluation mode. "proxy" (DEFAULT) = the sidecar POSTs each tool call to
     # the central norviq-api /evaluate with a namespace-scoped service JWT (DB/OPA stay centralized,
     # nothing per-pod). "embedded" = the sidecar runs its own RedisCache+OPA(subprocess)+PolicyLoader
     # for air-gapped/edge (the chart then wires NRVQ_REDIS_URL/NRVQ_PG_URL through to the injector).
@@ -151,6 +204,11 @@ webhook:
     # deadlocks). Set "Ignore" (fail-open) only for a dev/eval cluster where an un-injected pod is
     # acceptable.
     failurePolicy: Fail
+    # Honor the per-pod injection opt-out (norviq-injection=disabled label / norviq.io/skip-injection
+    # annotation)? Default true (backward-compatible). Set false to make injection namespace-uniform — a
+    # pod author in an injection-enabled namespace cannot self-exempt their workload from
+    # enforcement (a real bypass otherwise). Pair with RBAC on pod label/annotation writes.
+    allowPodOptOut: true
     # Image with kubectl + openssl for the cert-bootstrap hook Job. alpine/k8s ships both and is
     # publicly pullable (bitnami/kubectl tags were removed from Docker Hub in the 2025 Bitnami change).
     certJobImage: "alpine/k8s:1.30.0"
@@ -176,11 +234,11 @@ webhook:
     limits:
       cpu: 200m
       memory: 128Mi
-  # B3: inject the SPIFFE Workload API socket + workload-api mode into injected workloads. OFF by default
+  # Inject the SPIFFE Workload API socket + workload-api mode into injected workloads. OFF by default
   # (needs SPIRE + the SPIFFE CSI driver). Uses config.spiffeMode/spiffeSocket for the injected env.
   spiffe:
     inject: false
-  # B4: the controller mints its API bearer via OIDC client-credentials (Keycloak service client) instead
+  # The controller mints its API bearer via OIDC client-credentials (Keycloak service client) instead
   # of the HS256 service token. OFF by default (HS256 fallback). Set the client secret in api.oidcClientSecret.
   oidc:
     enabled: false
@@ -278,10 +336,10 @@ config:
     proxyImage: "nginx:1.27-alpine"
   logLevel: INFO
   enforcementMode: block
-  noPolicyDecision: deny   # F-04: no-policy namespace -> deny in block mode ("allow" restores fail-open)
+  noPolicyDecision: deny   # No-policy namespace -> deny in block mode ("allow" restores fail-open)
   # OPA evaluation runtime: "server" (HTTP to the sidecar) or "subprocess" (per-call fork, rollback).
   opaMode: server
-  # HIGH-3: refuse to start (fail-closed) on a weak/default/short JWT secret or the default admin
+  # Refuse to start (fail-closed) on a weak/default/short JWT secret or the default admin
   # password. Defaults true — pairs with api.secretKey's auto-generation above, so a stock install is
   # secure without any operator action. Set false only for a throwaway/dev cluster.
   requireStrongSecret: true
@@ -292,16 +350,26 @@ config:
   dbPoolMaxOverflow: 10
   dbPoolTimeout: 10
   dbCommandTimeout: 10
-  # Part B — Policy-Catalog draft + version retention (keeps the store + UI bounded). NONE of these ever
-  # touch an enforcing policy or the current-enforcing version — retention is decoupled from enforcement.
+  # Data retention (keeps the store + UI bounded). NONE of these ever touch an enforcing policy or the
+  # current-enforcing version — retention is decoupled from enforcement, and enforcing policies never
+  # expire. One hourly background pruner applies every window; 0 (or negative) on any window disables
+  # that window (keep forever).
   retention:
+    # Audit log — 30d default: the console never displays a window longer than 30d, so anything older
+    # serves only external compliance horizons. SOC2/ISO users: raise to 90-365; use the audit-evidence
+    # export packs for durable long-term evidence.
+    auditRetentionDays: 30
+    coverageSnapshotRetentionDays: 30   # compliance trend points + export events (covers the 30d trend view)
+    graphSnapshotKeepPerNamespace: 10   # asset-graph snapshots: keep newest N per namespace (readers use only the newest)
+    agentRegistryRetentionDays: 90      # remove agent identities unseen for N days (0 = keep forever)
+    apiKeyDefaultTtlDays: 90            # NEW API keys default to N-day expiry (per-key override at creation; 0 = never)
     draftTtlDays: 14           # real intent drafts auto-expire after N days
     draftTtlTestHours: 24      # test/e2e (synthetic-class) drafts expire fast
     draftCapPerNamespace: 50   # hard ceiling of real drafts per namespace (evict oldest beyond it)
     draftsPageSize: 15         # bounded drafts endpoint page size (top-N newest + total)
     policyVersionKeepCount: 20 # keep at least the last N versions per policy
     policyVersionKeepDays: 90  # ...and any version within this window; prune older EXCEPT the current
-    # D3 — red-team run retention (read-only evidence; the latest run per namespace is never pruned).
+    # Red-team run retention (read-only evidence; the latest run per namespace is never pruned).
     redteamDetailKeepRuns: 1   # keep full per-attack DETAIL for the newest N runs / namespace (last-run-only default; raise for more history)
     redteamDetailKeepDays: 7   # ...or any run within N days; older runs are detail-pruned (summary kept)
     redteamSummaryKeepRuns: 20 # keep SUMMARIES (no detail) for the newest N runs / namespace
@@ -318,17 +386,17 @@ config:
   spiffeCsi:
     enabled: false
 
-# OIDC / SSO (IDENTITY epic A1/A2). Default-off: the API keeps validating legacy HS256 tokens until
+# OIDC / SSO. Default-off: the API keeps validating legacy HS256 tokens until
 # an IdP is wired. Enabling adds RS256/ES256 validation ALONGSIDE HS256 (set legacyHs256Enabled:false
 # at cutover). Map IdP groups -> Norviq (role, namespace) via groupMappings (GitOps).
-# LOGIN-2: local username/password login — the PRIMARY no-IdP path. On a fresh install you sign in with
+# Local username/password login — the PRIMARY no-IdP path. On a fresh install you sign in with
 # adminUsername/adminPassword and are FORCED to change the password on first login. The password is stored
 # hashed (bcrypt) in the API's DB; only the seed lives in norviq-secrets. Keep it strong for real installs —
 # with api.requireStrongSecret=true the API refuses to start while adminPassword is still the default "norviq".
 auth:
   enabled: true            # set false to disable local login (SSO/CLI-only)
   adminUsername: "admin"
-  # HIGH-3: leave this at the sentinel default and the chart AUTO-GENERATES a strong random first
+  # Leave this at the sentinel default and the chart AUTO-GENERATES a strong random first
   # password (templates/secret.yaml), persisted across `helm upgrade` like api.secretKey. Retrieve it
   # with `kubectl get secret norviq-secrets -o jsonpath='{.data.NRVQ_AUTH_ADMIN_PASSWORD}' | base64 -d`.
   # You are forced to change it on first login either way. Set an explicit value here to pin your own.
@@ -343,11 +411,11 @@ oidc:
   enabled: false
   issuer: ""              # https://<tenant>/  (the token `iss`)
   audience: ""            # the API's client/audience id (the token `aud`)
-  # LOGIN-1: the PUBLIC (browser/SPA) OIDC client id the console uses for Auth Code + PKCE sign-in.
+  # The PUBLIC (browser/SPA) OIDC client id the console uses for Auth Code + PKCE sign-in.
   # Register a SPA/public client in your IdP with redirect URI <console>/auth/callback. When set (and
   # oidc.enabled), the UI renders "Sign in with SSO" — no UI rebuild needed (injected at runtime).
   consoleClientId: ""
-  providerName: ""        # LOGIN-2: human-readable IdP name shown in login copy (e.g. "Okta"); optional
+  providerName: ""        # Human-readable IdP name shown in login copy (e.g. "Okta"); optional
   jwksUrl: ""             # the IdP JWKS endpoint
   groupClaim: groups      # claim holding the user's group list
   legacyHs256Enabled: true
@@ -379,7 +447,7 @@ siem:
   format: ndjson           # ndjson | syslog
   pollIntervalSeconds: 30
 
-# Multi-cluster fleet (F045), MVP P1 read-only. EVERYTHING off by default -> a single-cluster install
+# Multi-cluster fleet (read-only). EVERYTHING off by default -> a single-cluster install
 # renders ZERO fleet resources and behaves exactly as today. `enabled` turns on the SPOKE relay env
 # (the api pushes rollups to the hub); `hub.enabled` renders the fleet-api + its dedicated postgres
 # (only on the cluster that hosts the control plane). Fire-and-forget: a hub outage never affects
@@ -391,10 +459,10 @@ fleet:
   region: ""
   apiUrl: ""                  # hub base URL the relay posts to (e.g. http://fleet-api.norviq.svc:8080)
   relayIntervalSeconds: 60
-  pullIntervalSeconds: 60     # P2: how often the spoke pulls + verifies + applies the signed bundle
+  pullIntervalSeconds: 60     # How often the spoke pulls + verifies + applies the signed bundle
   staleAfterSeconds: 180      # hub: heartbeat older than this -> cluster status "stale"
-  residency: false            # P4: this spoke keeps raw audit in-cluster (rollups still leave; drill-down blocked)
-  bundlePubkey: ""            # P2: the fleet signing PUBLIC key (trust root). Empty -> spoke applies NO bundle.
+  residency: false            # This spoke keeps raw audit in-cluster (rollups still leave; drill-down blocked)
+  bundlePubkey: ""            # The fleet signing PUBLIC key (trust root). Empty -> spoke applies NO bundle.
   oidc:                       # relay->hub auth (OIDC client-credentials; HS256 break-glass fallback)
     tokenUrl: ""
     clientId: ""
@@ -402,8 +470,8 @@ fleet:
   hub:
     enabled: false            # render the fleet-api control plane + dedicated fleet-postgresql
     pgUrl: "postgresql://norviq:norviq_dev@fleet-postgresql:5432/norviq_fleet"
-    signingKey: ""            # P2: the fleet signing PRIVATE key PEM (hub only; distinct from api.secretKey)
-    signingKeySecretName: ""  # P2: instead of inlining signingKey, read NRVQ_FLEET_SIGNING_KEY from this pre-created Secret
+    signingKey: ""            # The fleet signing PRIVATE key PEM (hub only; distinct from api.secretKey)
+    signingKeySecretName: ""  # Instead of inlining signingKey, read NRVQ_FLEET_SIGNING_KEY from this pre-created Secret
     bundleTtlSeconds: 900
     replicas: 1
     storage: 5Gi

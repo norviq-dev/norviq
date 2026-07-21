@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Attack Graph ranked path list (design_handoff_attackgraph): the PRIMARY nav. Rows come pre-sorted
+// Attack Graph ranked path list: the PRIMARY nav. Rows come pre-sorted
 // worst-first from the server (exploitable → unsimulated → blocked, severity tiebreak) — we keep that
 // order stable. Each row: severity chip + src→tgt + status chip + hops/blast/MITRE. Clicking a row
 // selects the path (drives the canvas + inspector).
@@ -33,7 +33,7 @@ interface Props {
   selectedId?: string;
   /** REAL status per path (sim result or baseline) — a what-if never changes this. */
   statusOf: (p: ThreatPath) => PathStatus;
-  /** Path ids that currently carry a HYPOTHETICAL what-if block — badged distinctly (MUT-4). */
+  /** Path ids that currently carry a HYPOTHETICAL what-if block — badged distinctly. */
   whatIfIds?: Set<string>;
   onSelect: (path: ThreatPath) => void;
 }
@@ -81,7 +81,7 @@ export function AttackPathList({ paths, selectedId, statusOf, whatIfIds, onSelec
                   defended
                 </span>
               )}
-              {/* MUT-4: a hypothetical block is a DISTINCT, dashed amber chip — never the solid green
+              {/* A hypothetical block is a DISTINCT, dashed amber chip — never the solid green
                   BLOCKED chip a real block earns. */}
               {whatIf && (
                 <span

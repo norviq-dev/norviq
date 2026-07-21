@@ -4,7 +4,7 @@
 import { describe, it, expect } from "vitest";
 import { csvCell, toCsv } from "./csv";
 
-describe("csv (F-46)", () => {
+describe("csv", () => {
   it("quotes cells containing comma, quote, or newline", () => {
     expect(csvCell("plain")).toBe("plain");
     expect(csvCell("a,b")).toBe('"a,b"');
@@ -29,7 +29,7 @@ describe("csv (F-46)", () => {
     expect(toCsv([], ["a", "b"])).toBe("a,b");
   });
 
-  it("SEC-CSV-INJECTION: neutralizes formula/DDE-leading cells with a single-quote prefix", () => {
+  it("neutralizes formula/DDE-leading cells with a single-quote prefix", () => {
     expect(csvCell("=cmd()")).toBe("'=cmd()");
     expect(csvCell("+cmd()")).toBe("'+cmd()");
     expect(csvCell("-cmd()")).toBe("'-cmd()");
@@ -40,14 +40,14 @@ describe("csv (F-46)", () => {
     expect(csvCell("total=5")).toBe("total=5");
   });
 
-  it("SEC-CSV-INJECTION: composes with RFC-4180 quoting — the prefix is applied first, then quoted if needed", () => {
+  it("composes with RFC-4180 quoting — the prefix is applied first, then quoted if needed", () => {
     // still needs RFC quoting because it contains a comma, AND is formula-neutralized because it leads with '='.
     expect(csvCell("=SUM(A1,A2)")).toBe('"\'=SUM(A1,A2)"');
     // leads with '=' but no comma/quote/newline -> prefixed, no RFC quoting needed.
     expect(csvCell("=1+1")).toBe("'=1+1");
   });
 
-  it("SEC-CSV-INJECTION: normal values (including non-leading special chars, numbers) are unaffected", () => {
+  it("normal values (including non-leading special chars, numbers) are unaffected", () => {
     expect(csvCell("send_email")).toBe("send_email");
     expect(csvCell("exfil attempt, blocked")).toBe('"exfil attempt, blocked"');
     expect(csvCell(42)).toBe("42");

@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
-"""FIX-6: `_FORBIDDEN_REGO_TOKENS` banned the bare word `\\btrace\\b`, which also rejected a legitimate rule/
+"""`_FORBIDDEN_REGO_TOKENS` banned the bare word `\\btrace\\b`, which also rejected a legitimate rule/
 var named `trace` (not just the OPA `trace()` builtin). Narrowed to the builtin CALL form `\\btrace\\s*\\(` —
-this proves the narrowing is real (an identifier named `trace` is now legal) without weakening any of the
-other network/env escapes `_reject_forbidden_rego` guards against (S1, from c18dd8a)."""
+this proves the narrowing is real (an identifier named `trace` is legal) without weakening any of the
+other network/env escapes `_reject_forbidden_rego` guards against."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from norviq.api.routers.policies import _reject_forbidden_rego
 
 
 def test_bare_trace_identifier_is_no_longer_rejected() -> None:
-    """A rule/var legitimately named `trace` (not the builtin call) must be allowed post-FIX-6."""
+    """A rule/var legitimately named `trace` (not the builtin call) must be allowed."""
     rego = 'package norviq.x\ntrace := "audit-note"\ndecision = "block" { trace == "audit-note" }\n'
     _reject_forbidden_rego(rego)  # must not raise
 
@@ -38,13 +38,13 @@ def test_trace_builtin_call_is_still_rejected() -> None:
     ],
 )
 def test_other_forbidden_builtins_still_rejected(rego: str) -> None:
-    """FIX-6 must not weaken any of the other S1 bans (http.send/opa.runtime/net.*/io.*/rego.parse_module)."""
+    """The narrowing must not weaken any of the other bans (http.send/opa.runtime/net.*/io.*/rego.parse_module)."""
     with pytest.raises(HTTPException) as exc:
         _reject_forbidden_rego(rego)
     assert exc.value.status_code == 422
 
 
-# --- FIX-1 (CRITICAL): cross-tenant OPA policy read via forged package self-reference ---------------
+# --- CRITICAL: cross-tenant OPA policy read via forged package self-reference ----------------------
 #
 # `opa_client.rewrite_package` replaces a submitted module's declared `package` line with the
 # SERVER-COMPUTED `managed_package(f"{ns}:{class}")` at push time — but it does not touch `data.`

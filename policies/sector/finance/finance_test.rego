@@ -36,7 +36,7 @@ test_benign_balance_read_allowed {
     d == "allow"
 }
 
-# === F-10 regression: SoD bypass by case, empty approver, homoglyph ===
+# === Regression: SoD bypass by case, empty approver, homoglyph ===
 
 # case variance (AD vs app casing) must still block
 test_sod_case_variance_blocked {
@@ -74,7 +74,7 @@ test_sod_distinct_case_insensitive_allowed {
     d == "allow"
 }
 
-# === F-21 export-egress (the 4 live infiltration repros) ===
+# === Export-egress (4 export-exfil cases) ===
 test_export_statement_external_blocked {
     inp := {"tool_name": "export_statement", "tool_params": {"destination": "s3://exfil-bucket.attacker.io"}}
     finance.decision == "block" with input as inp

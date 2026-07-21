@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Attack Graph shared palette + copy (design_handoff_attackgraph). Severity + decision colors match
+// Attack Graph shared palette + copy. Severity + decision colors match
 // the handoff verbatim; decision reuses DECISION_COLORS from d3-helpers (allow/mixed/blocked).
 
 import { DECISION_COLORS } from "../../lib/d3-helpers";

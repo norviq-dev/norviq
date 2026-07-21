@@ -1,1 +1,1 @@
-2026-07-01: expected full-suite baseline captured by CI; attacks target 78/78 with two expected xfails.
+Full-suite test baseline marker (updated by CI when the known-green baseline changes).

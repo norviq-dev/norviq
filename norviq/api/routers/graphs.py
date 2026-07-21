@@ -48,7 +48,7 @@ def _resolve_namespaces(user: dict, requested: str) -> list[str] | None:
         namespace; "all" -> None (unrestricted).
       - a scoped caller reading "all" gets exactly its own namespace — never everyone else's.
       - a scoped caller naming any namespace outside its claim is refused (403, fail-closed), and the
-        F-06 floor holds: a non-admin human with NO namespace claim gets no tenant data at all.
+        least-privilege floor holds: a non-admin human with NO namespace claim gets no tenant data at all.
     """
     role = str(user.get("role", "")).lower()
     claim = str(user.get("namespace", "") or "")
@@ -303,7 +303,7 @@ def _filter_synthetic_assets(nodes: list[AssetNode], edges: list[AssetEdge]) -> 
 
 
 def _attach_source_capability(nodes: list[AssetNode], edges: list[AssetEdge]) -> None:
-    """CAP-1: annotate each DATA node with the verb surface its source EXPOSES, classified against the
+    """Annotate each DATA node with the verb surface its source EXPOSES, classified against the
     REAL signals already in the graph. The observed/defended signal for a tool lives on the AGENT→TOOL
     ``calls`` edge (which carries the decision history), NOT the TOOL→DATA ``accesses`` edge (which has
     none), so we attribute a tool's traffic from its incoming calls edges and map it onto the source via
@@ -437,8 +437,8 @@ async def remove_asset_graph_node(
 async def get_asset_graph(
     namespace: str = Query("default"),
     range: str = Query("24h"),
-    include_synthetic: bool = Query(False),  # A1: default-hide seeded probe/test identities
-    include_awaiting: bool = Query(False),   # A2: default-hide real-but-never-observed (awaiting) agents
+    include_synthetic: bool = Query(False),  # default-hide seeded probe/test identities
+    include_awaiting: bool = Query(False),   # default-hide real-but-never-observed (awaiting) agents
     session: AsyncSession = Depends(get_session),
     user: dict = Depends(get_current_user),
 ):
@@ -476,11 +476,11 @@ async def get_asset_graph(
             if ns not in seen_namespaces:
                 nodes.extend(_awaiting_nodes(ns, classes, prefix_ids=multi))
                 seen_namespaces.add(ns)
-        # A1: hide synthetic/probe agents by default; ?include_synthetic=true brings them back (the UI toggle).
+        # Hide synthetic/probe agents by default; ?include_synthetic=true brings them back (the UI toggle).
         synthetic_hidden = 0
         if not include_synthetic:
             nodes, edges, synthetic_hidden = _filter_synthetic_assets(nodes, edges)
-        # A2: hide real-but-awaiting agents by default (registered, never observed — noisy inline);
+        # Hide real-but-awaiting agents by default (registered, never observed — noisy inline);
         # ?include_awaiting=true reveals them. Orthogonal to include_synthetic (composes independently).
         awaiting_hidden = 0
         if not include_awaiting:
@@ -489,7 +489,7 @@ async def get_asset_graph(
                 nodes = [n for n in nodes if n.id not in awaiting_ids]
                 edges = [e for e in edges if e.source not in awaiting_ids and e.target not in awaiting_ids]
                 awaiting_hidden = len(awaiting_ids)
-        # CAP-1: enrich the (now filtered) data nodes with their source's verb-capability posture.
+        # Enrich the (now filtered) data nodes with their source's verb-capability posture.
         _attach_source_capability(nodes, edges)
         log.info(
             "nrvq.api.asset_graph.served",

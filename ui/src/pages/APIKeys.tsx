@@ -1,3 +1,6 @@
+// API Keys — issue, list, and revoke namespace-scoped API keys (viewer/service/admin roles, optional
+// expiry). A key must bind to a concrete tenant namespace; the full secret is shown once, at creation.
+
 import { useState } from "react";
 import { createApiKey, fetchApiKeys, revokeApiKey } from "../api/client";
 import { useApi } from "../hooks/useApi";
@@ -13,18 +16,37 @@ export function APIKeys() {
   const keys = useApi(() => fetchApiKeys(), []);
   const [name, setName] = useState("");
   const [role, setRole] = useState<(typeof ROLES)[number]>("viewer");
+  // Optional expiry override; "" = untouched → OMIT expires_in_days so the server default TTL applies.
+  const [expiresIn, setExpiresIn] = useState("");
   const [created, setCreated] = useState<{ prefix: string; key: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // A key must bind to a REAL tenant namespace. Under the "All namespaces" aggregate scope the value is
+  // the literal "all" — no tenant is named "all", so a key issued here would be scoped to a phantom
+  // namespace that grants nothing. Mirror the pack/policy write guards: block and prompt for a concrete ns.
+  const scopeIsAll = namespace === "all";
+
   const onCreate = async () => {
     if (!name.trim()) return;
+    if (scopeIsAll) {
+      setError("Pick a concrete namespace (top-left) before issuing a key — a key can't be scoped to \"All namespaces\".");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
-      const k = await createApiKey({ name: name.trim(), namespace, role });
+      const expiresTyped = expiresIn.trim();
+      const k = await createApiKey({
+        name: name.trim(),
+        namespace,
+        role,
+        // Only send the field when the user typed a valid number — otherwise the server default applies.
+        ...(expiresTyped !== "" && Number.isFinite(Number(expiresTyped)) ? { expires_in_days: Number(expiresTyped) } : {})
+      });
       setCreated({ prefix: k.prefix, key: k.key });
       setName("");
+      setExpiresIn("");
       keys.refetch();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not create key");
@@ -64,10 +86,26 @@ export function APIKeys() {
               </option>
             ))}
           </select>
-          <KitButton variant="outline" size="sm" onClick={onCreate} disabled={busy || !name.trim()}>
+          <input
+            className="input mono"
+            type="number"
+            min={0}
+            value={expiresIn}
+            onChange={(e) => setExpiresIn(e.target.value)}
+            placeholder="default 90 (0 = never)"
+            title="Expires in (days)"
+            aria-label="Expires in (days)"
+            style={{ width: 170 }}
+          />
+          <KitButton variant="outline" size="sm" onClick={onCreate} disabled={busy || !name.trim() || scopeIsAll}>
             {busy ? "Creating…" : "Create key"}
           </KitButton>
         </div>
+        {scopeIsAll && (
+          <div data-testid="apikey-scope-prompt" style={{ color: "var(--text-secondary)", fontSize: 13, marginTop: 10 }}>
+            Select a concrete namespace (top-left) to issue a key — keys can't be scoped to "All namespaces".
+          </div>
+        )}
         {error && <div style={{ color: "var(--block)", fontSize: 13, marginTop: 10 }}>{error}</div>}
         {created && (
           <div
@@ -99,28 +137,62 @@ export function APIKeys() {
                 <th>Role</th>
                 <th>Namespace</th>
                 <th>Last used</th>
+                <th>Expires</th>
                 <th>Status</th>
                 <th />
               </tr>
             </thead>
             <tbody>
-              {rows.map((k) => (
+              {rows.map((k) => {
+                // Derive Status from BOTH revoked AND expiry. An expired-not-revoked key is
+                // already inert server-side (api_keys.authenticate returns None once expires_at <= now),
+                // so it must never read the green "Active" that contradicts its EXPIRED badge. Reuse the
+                // exact expiry test the Expires column uses (below) so the two columns stay consistent.
+                const isExpired = !!k.expires_at && new Date(k.expires_at).getTime() < Date.now();
+                const status = k.revoked ? "Revoked" : isExpired ? "Expired" : "Active";
+                const inert = k.revoked || isExpired;
+                return (
                 <tr key={k.id}>
                   <td className="mono">{k.prefix}…</td>
                   <td>{k.name || "—"}</td>
                   <td className="mono">{k.role}</td>
                   <td className="mono muted">{k.namespace}</td>
                   <td className="mono muted">{k.last_used_at ? new Date(k.last_used_at).toLocaleString() : "never"}</td>
-                  <td style={{ color: k.revoked ? "var(--block)" : "#00e5a0" }}>{k.revoked ? "Revoked" : "Active"}</td>
+                  <td className="mono muted">
+                    {/* expires_at may be absent while the backend rollout is in flight — render defensively. */}
+                    {k.expires_at ? (
+                      new Date(k.expires_at).getTime() < Date.now() ? (
+                        <span
+                          style={{
+                            color: "var(--block)",
+                            border: "1px solid var(--block)",
+                            borderRadius: 4,
+                            padding: "1px 6px",
+                            fontSize: 11,
+                            fontWeight: 700
+                          }}
+                        >
+                          EXPIRED
+                        </span>
+                      ) : (
+                        `expires ${new Date(k.expires_at).toLocaleDateString()}`
+                      )
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                  <td style={{ color: inert ? "var(--block)" : "#00e5a0" }}>{status}</td>
                   <td>
-                    {!k.revoked && (
+                    {/* An expired key is already inert server-side, so only a live key exposes Revoke. */}
+                    {!inert && (
                       <KitButton variant="outline" size="sm" onClick={() => onRevoke(k.id)}>
                         Revoke
                       </KitButton>
                     )}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         )}

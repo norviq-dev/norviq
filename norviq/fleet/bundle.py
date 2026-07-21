@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Signed fleet policy bundle (F045 P2). THE single shared module imported by BOTH the hub (sign) and the
+"""Signed fleet policy bundle. THE single shared module imported by BOTH the hub (sign) and the
 spoke (verify) so the canonical signed bytes are byte-identical on both sides — canonicalization drift is
 the #1 way to silently break (or weaken) signature verification.
 

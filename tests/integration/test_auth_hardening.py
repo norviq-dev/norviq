@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Remediation A1/A3: data endpoints require auth, are namespace-scoped, and policy writes are admin-only.
+"""Remediation: data endpoints require auth, are namespace-scoped, and policy writes are admin-only.
 
 Hits the real local API. These guard the customer-eval P0s (unauth audit/policy/graph exposure,
 viewer privilege-escalation, unauthenticated /ws/audit).
@@ -10,6 +10,7 @@ viewer privilege-escalation, unauthenticated /ws/audit).
 from __future__ import annotations
 
 import asyncio
+import time
 
 import httpx
 import jwt
@@ -22,7 +23,9 @@ from norviq.config import settings
 
 def _viewer_headers() -> dict[str, str]:
     token = jwt.encode(
-        {"sub": "viewer", "role": "viewer", "namespace": "default"}, settings.api_secret_key, algorithm="HS256"
+        {"sub": "viewer", "role": "viewer", "namespace": "default", "exp": int(time.time()) + 3600},
+        settings.api_secret_key,
+        algorithm="HS256",
     )
     return {"Authorization": f"Bearer {token}"}
 
@@ -43,7 +46,7 @@ _PROTECTED = [
 @pytest.mark.parametrize("path", _PROTECTED)
 @pytest.mark.asyncio
 async def test_data_endpoint_requires_auth(api_client: httpx.AsyncClient, path: str) -> None:
-    """No token → 401 (was leaking data with no auth)."""
+    """No token → 401."""
     resp = await api_client.get(path)
     assert resp.status_code == 401, f"{path} returned {resp.status_code}, expected 401"
 
@@ -59,7 +62,7 @@ async def test_viewer_cannot_read_other_namespace(api_client: httpx.AsyncClient)
 async def test_viewer_cannot_write_or_delete_policy(
     api_client: httpx.AsyncClient, auth_headers: dict[str, str]
 ) -> None:
-    """Policy writes are admin-only; a viewer token must get 403 (was 200 — privilege escalation)."""
+    """Policy writes are admin-only; a viewer token must get 403 (privilege-escalation guard)."""
     rego = (
         "package norviq.strict\n"
         'default decision = "allow"\n'
@@ -78,7 +81,7 @@ async def test_viewer_cannot_write_or_delete_policy(
 
 @pytest.mark.asyncio
 async def test_ws_audit_rejects_missing_token(api_client: httpx.AsyncClient, api_url: str) -> None:
-    """/ws/audit must reject a handshake with no token (was accepting before any check)."""
+    """/ws/audit must reject a handshake with no token."""
     ws_url = api_url.replace("https://", "wss://").replace("http://", "ws://") + "/ws/audit?namespace=default"
     with pytest.raises((websockets.exceptions.InvalidStatus, websockets.exceptions.ConnectionClosed, OSError, asyncio.TimeoutError)):
         async with websockets.connect(ws_url, open_timeout=5) as ws:

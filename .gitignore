@@ -98,3 +98,7 @@ scripts/verify.sh
 scripts/gate-*.sh
 docs/engineering/test-baseline-discipline.md
 .github/workflows/deploy.yml
+
+# internal dev/QA artifacts (not for public repo)
+helm/norviq/values-aks-dev.yaml
+ui/tests/e2e/COVERAGE-MATRIX.md

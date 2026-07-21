@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Asset Graph overview layout math — pure and unit-testable (feat/asset-graph-quality).
+// Asset Graph overview layout math — pure and unit-testable.
 // The overview must stay LEGIBLE at real data volume: the fit never zooms below MIN_FIT_SCALE
 // (11.5px labels stay >= ~9.4px rendered); when everything can't fit at the floor, the canvas
 // pans instead of shrinking. Columns adapt to the canvas aspect so ~8 agent circles use the

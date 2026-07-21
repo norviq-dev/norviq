@@ -32,7 +32,7 @@ log = structlog.get_logger()
 _PACKAGE_RE = re.compile(r"(?m)^\s*package\s+[A-Za-z0-9_.]+\s*$")
 _SANITIZE_RE = re.compile(r"[^A-Za-z0-9]+")
 
-# Part B (Wave 1 engine lockdown): `opa run --server` has NO `--capabilities` flag (only `opa build`/`opa
+# `opa run --server` has NO `--capabilities` flag (only `opa build`/`opa
 # check`/`opa eval` accept one) — a locked-down capabilities.json cannot be handed to the long-lived server
 # directly. This is engine-layer defense-in-depth for the API-layer reject in
 # norviq/api/routers/policies.py::_FORBIDDEN_REGO_TOKENS: EVERY push (create/dry-run/pack-override) is
@@ -77,7 +77,7 @@ def sanitize_key(key: str) -> str:
     so push/query/delete stay consistent).
     """
     cleaned = _SANITIZE_RE.sub("_", key).strip("_") or "default"
-    suffix = hashlib.sha1(key.encode("utf-8")).hexdigest()[:8]
+    suffix = hashlib.sha1(key.encode("utf-8"), usedforsecurity=False).hexdigest()[:8]  # non-crypto: a deterministic cache-id suffix, not a security digest
     return f"{cleaned}_{suffix}"
 
 
@@ -188,8 +188,8 @@ class OpaClient:
 
         Uses a larger per-request timeout than a query: OPA recompiles its full module store on every
         PUT, so a push legitimately takes longer than a hot-path query — sharing the tight query timeout
-        made the first eval of a freshly-pushed policy fail closed (P1-2). Push is off the hot path."""
-        await _check_capabilities(rego_source, module_id)  # Part B: engine-layer forbidden-builtin recheck
+        made the first eval of a freshly-pushed policy fail closed. Push is off the hot path."""
+        await _check_capabilities(rego_source, module_id)  # Engine-layer forbidden-builtin recheck
         client = await self._ensure()
         resp = await client.put(f"/v1/policies/{module_id}", content=rego_source.encode("utf-8"),
                                 headers={"Content-Type": "text/plain"},

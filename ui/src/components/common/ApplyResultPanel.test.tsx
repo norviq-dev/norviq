@@ -111,9 +111,9 @@ it("local verify-by-poll: shows VERIFYING then ENFORCING vN once the polled vers
   expect(screen.queryByText(/loaded on every pod/i)).not.toBeInTheDocument();
 });
 
-// FIX-4: a caller-driven verify with NO expectedVersion (e.g. the PolicyPacks toggle, which verifies via its
+// A caller-driven verify with NO expectedVersion (e.g. the PolicyPacks toggle, which verifies via its
 // own bespoke poll) must not show a green APPLIED badge while the body still says "Verifying…" underneath.
-it("FIX-4: pendingVerify=true shows the VERIFYING badge even with no expectedVersion set", () => {
+it("pendingVerify=true shows the VERIFYING badge even with no expectedVersion set", () => {
   const result: ApplyResult = {
     kind: "local",
     title: 'Enabled "finops" — default',
@@ -128,7 +128,7 @@ it("FIX-4: pendingVerify=true shows the VERIFYING badge even with no expectedVer
   expect(verifyPolicyApplied).not.toHaveBeenCalled(); // no expectedVersion -> the version-poll never starts
 });
 
-it("FIX-4: pendingVerify='stalled' shows the STALLED badge (not a green APPLIED) when the caller's own verify gave up", () => {
+it("pendingVerify='stalled' shows the STALLED badge (not a green APPLIED) when the caller's own verify gave up", () => {
   const result: ApplyResult = {
     kind: "local",
     title: 'Enabled "finops" — default',
@@ -142,7 +142,7 @@ it("FIX-4: pendingVerify='stalled' shows the STALLED badge (not a green APPLIED)
   expect(screen.queryByText("APPLIED")).not.toBeInTheDocument();
 });
 
-it("FIX-4: pendingVerify=false (resolved/converged) falls through to the normal APPLIED badge", () => {
+it("pendingVerify=false (resolved/converged) falls through to the normal APPLIED badge", () => {
   const result: ApplyResult = {
     kind: "local",
     title: 'Enabled "finops" — default',

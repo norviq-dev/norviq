@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Attack Graph (feat/attack-graph) — the enriched kill-chain contract the backend serves at
+// Attack Graph — the enriched kill-chain contract the backend serves at
 // GET /api/v1/threats/attack-paths. Every field is real data derived server-side from the asset-graph
 // snapshot + audit decision history (see norviq/api/routers/threats.py). No mock.
 
@@ -27,7 +27,7 @@ export interface ThreatStep {
   deny: number;
   allow: number;
   would_block?: number; // Monitor-mode would-block count on this hop (logged, not enforced)
-  // CAP-2: the actual data operation on a tool→data hop (read/write/delete/send) + its risk, from the
+  // The actual data operation on a tool→data hop (read/write/delete/send) + its risk, from the
   // source-capability registry. Absent (null) when the source/verb isn't in the registry.
   op?: "read" | "write" | "delete" | "send" | null;
   op_risk?: Severity | null;
@@ -64,7 +64,7 @@ export interface ThreatPath {
 export interface ThreatPathsResponse {
   paths: ThreatPath[];
   namespaces: string[];
-  // A1: count of probe-rooted kill-chains hidden (drives the "N test/probe hidden — Show" chip).
+  // Count of probe-rooted kill-chains hidden (drives the "N test/probe hidden — Show" chip).
   synthetic_hidden?: number;
 }
 

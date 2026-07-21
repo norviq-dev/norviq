@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
-"""F-19: masked tool_params capture."""
+"""Masked tool_params capture."""
 
 from norviq.engine.masking import mask_params
 

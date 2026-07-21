@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// C2-1: the resolution hierarchy renders GET /policies/effective VERBATIM — same order, scopes, priorities, overlay
+// The resolution hierarchy renders GET /policies/effective VERBATIM — same order, scopes, priorities, overlay
 // flags — never re-derived. Plus the reserved static Mode column, the presence template, and (fleet on) the cluster
 // dimension.
 import type { ReactNode } from "react";
@@ -39,7 +39,7 @@ function handlers(layers: unknown[] = LAYERS, enforcementMode: "block" | "audit"
   );
 }
 
-describe("PolicyHierarchy (C2-1)", () => {
+describe("PolicyHierarchy", () => {
   it("renders /policies/effective VERBATIM — order, scope, priority, overlay flag", async () => {
     handlers();
     render(<PolicyHierarchy namespace="default" />);
@@ -113,11 +113,11 @@ describe("PolicyHierarchy (C2-1)", () => {
     mockApp.scopeCluster = "kind-nrvq";
   });
 
-  // SEED-DURABNS-01 (user-reported): a pack-only namespace has a `__pack__` overlay row but NO agent-class
+  // (user-reported): a pack-only namespace has a `__pack__` overlay row but NO agent-class
   // policy. The overlay is correctly excluded from the class picker (it's a LAYER), but that left the picker
   // empty and the hierarchy rendered nothing — hiding a pack that IS enforcing. The fix offers a namespace-wide
   // "*" view so the enforcing overlays still show.
-  it("SEED-DURABNS-01: a pack-only namespace still shows its enforcing pack overlay (namespace-wide view)", async () => {
+  it("a pack-only namespace still shows its enforcing pack overlay (namespace-wide view)", async () => {
     const packLayers = [{ scope: "durab-ns:__pack__", label: "sector pack (overlay)", priority: 800, overlay: true }];
     server.use(
       // pack-only ns: /policies returns ONLY the __pack__ overlay row (no class policy)

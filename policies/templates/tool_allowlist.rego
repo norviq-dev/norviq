@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 #
-# F-14: OPT-IN, DEFAULT-OFF per-namespace tool allowlist (deny-by-default tool scope).
+# OPT-IN, DEFAULT-OFF per-namespace tool allowlist (deny-by-default tool scope).
 # Load this for a namespace as the additive guardrail target (ns, "__guardrail__") via the policy API.
 # It is ABSENT by default — no namespace, the single-cluster path, or the attack suite is affected unless
 # an operator explicitly materializes it. Resolved as an additive/tighten-only overlay (like sector packs):

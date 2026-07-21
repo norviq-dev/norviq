@@ -1,3 +1,4 @@
+// Tests for the AttackPathDetail inspector — the side panel that shows a selected attack path's steps and actions.
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
@@ -18,7 +19,7 @@ const path: ThreatPath = {
 
 function renderDetail(over: Partial<React.ComponentProps<typeof AttackPathDetail>> = {}) {
   return render(
-    // AG-DRAFT-01: the confirmation deep-links via useNavigate, so the inspector needs a Router context.
+    // The confirmation deep-links via useNavigate, so the inspector needs a Router context.
     <MemoryRouter>
       <AttackPathDetail
         path={path}

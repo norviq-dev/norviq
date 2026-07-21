@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F047: a sector pack is an ADDITIVE-ONLY overlay — it can only TIGHTEN the base decision
-(block < escalate < audit < allow), never loosen it, regardless of priority (the F-07 trap)."""
+"""A sector pack is an ADDITIVE-ONLY overlay — it can only TIGHTEN the base decision
+(block < escalate < audit < allow), never loosen it, regardless of priority."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ _ev = OPAEvaluator.__new__(OPAEvaluator)
 
 
 def _r(key: str, decision: str, priority: int, overlay: bool | None = None) -> dict:
-    # FIX-H6-2: _resolve_with_packs now partitions on the "overlay" PROVENANCE flag (set at candidate
+    # _resolve_with_packs now partitions on the "overlay" PROVENANCE flag (set at candidate
     # construction in production), not a key-suffix guess. Default to the key-suffix heuristic here (matches
     # how these fixed overlay names — __pack__/__guardrail__/__pack_override__/__pack_weaken__ — are always
     # tagged in production) so existing key-driven test cases below need no changes; pass `overlay=` explicitly
@@ -61,7 +61,7 @@ def test_non_pack_precedence_unchanged() -> None:
     assert _winner([_r("ns:cs", "block", 100), _r("ns:__baseline__", "allow", 900)]) == "allow"
 
 
-# --- F-54: the per-namespace pack override is the SAME tighten-only overlay class ---
+# --- the per-namespace pack override is the SAME tighten-only overlay class ---
 
 def test_pack_override_is_overlay() -> None:
     assert _ev._is_overlay("ns:__pack_override__") is True

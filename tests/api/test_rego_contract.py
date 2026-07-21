@@ -1,20 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""P1-2 REGO-CONTRACT-MISMATCH regression (fail-on-bug).
+"""Rego contract-mismatch regression (fail-on-bug).
 
-Two real defects, proven live on b227d8c, are fixed here:
+Two real defects are fixed here:
 
-- Defect 1 (validation form): `validate_policy_create` rejected the BARE partial-set idiom
+- Validation form: `validate_policy_create` rejected the BARE partial-set idiom
   (`blocks[...]`/`escalates[...]`/`audits[...]` with no resolver) with a generic, unhelpful error, so a
   guardrail/pack-style policy could not be authored. It now emits a SPECIFIC, actionable error naming the
   missing resolver — while STILL requiring a decision (a partial-set with no resolver would silently allow).
-- Defect 2 (push timeout / silent-allow): the module PUSH shared the tight query timeout, and a
+- Push timeout / silent-allow: the module PUSH shared the tight query timeout, and a
   decision-less module defaulted to ALLOW while a block rule fired. Push now has its own larger timeout, and
   the engine fail-closes (`evaluator_invalid_payload`) when a partial-set rule fired but no `decision` was
   produced — without regressing a complete-rule policy whose condition simply didn't match.
 
-These tests fail on the pre-fix code and pass on the fix.
+These tests fail on buggy code and pass on the correct code.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ def _policy(rego: str) -> PolicyCreate:
     )
 
 
-# --- Defect 1: validator contract ----------------------------------------------------------------
+# --- Validator contract ---------------------------------------------------------------------------
 
 
 def test_bare_partial_set_gets_specific_resolver_error() -> None:
@@ -81,7 +81,7 @@ def test_all_sector_packs_validate() -> None:
         validate_policy_create(_policy(combine([pid])))  # must not raise
 
 
-# --- Defect 2a: engine fail-closes a decision-less fired result (silent-allow hole) ----------------
+# --- Engine fail-closes a decision-less fired result (silent-allow hole) ---------------------------
 
 
 def test_fired_partial_set_without_decision_fails_closed() -> None:
@@ -98,7 +98,7 @@ def test_complete_rule_no_match_is_not_fail_closed() -> None:
     assert OPAEvaluator._fired_without_decision({"decision": "allow"}) is False  # decision present wins
 
 
-# --- Defect 2b: push has its own (larger) timeout, distinct from the hot-path query ---------------
+# --- Push has its own (larger) timeout, distinct from the hot-path query ---------------------------
 
 
 def test_push_timeout_is_larger_than_query_timeout() -> None:
@@ -132,7 +132,7 @@ async def _fake_ensure(c):
     return c
 
 
-# --- Defect 2c: override PUT rejects a decision-less overlay at save time (no silent no-op) ---------
+# --- Override PUT rejects a decision-less overlay at save time (no silent no-op) --------------------
 
 
 def test_override_decisionless_rejected_by_static_guard() -> None:
@@ -150,7 +150,7 @@ def test_override_with_resolver_passes_static_guard() -> None:
     assert_decision_resolver('package norviq.pack\nblocks["o"] { input.tool_name == "x" }\n' + _RESOLVER)
 
 
-# --- FIX-3 (CRITICAL, silent-allow): a "block" policy whose condition never matches real input ------
+# --- CRITICAL, silent-allow: a "block" policy whose condition never matches real input -------------
 #
 # `str(result.get("decision", "allow"))` (evaluator.py) defaults to "allow" when a module produces NO
 # `decision` binding at all. A complete-rule `decision = "block" { <condition> }` policy with no

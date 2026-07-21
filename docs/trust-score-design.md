@@ -367,15 +367,17 @@ norviq.trust.dominant_signal: time_decay
 
 ## 9. Performance
 
-| Operation | Target | Actual |
-|-----------|--------|--------|
-| Trust calculation (all 7 signals) | < 2ms p99 | TBD (benchmark Day 10) |
-| Redis history fetch (ZRANGEBYSCORE) | < 1ms | TBD |
-| Redis profile fetch (HGETALL) | < 1ms | TBD |
-| Signal computation (pure math) | < 0.5ms | TBD |
-| Total added latency per tool call | < 5ms | TBD |
+Design targets for the trust computation on the policy-evaluation hot path:
 
-Trust computation is designed to add minimal overhead to the policy evaluation hot path. All signals are computed from data already in Redis — no database queries, no network calls beyond the local Redis instance.
+| Operation | Target |
+|-----------|--------|
+| Trust calculation (all 7 signals) | < 2ms p99 |
+| Redis history fetch (ZRANGEBYSCORE) | < 1ms |
+| Redis profile fetch (HGETALL) | < 1ms |
+| Signal computation (pure math) | < 0.5ms |
+| Total added latency per tool call | < 5ms |
+
+Measured benchmarks will be published once collected. Trust computation is designed to add minimal overhead to the policy evaluation hot path. All signals are computed from data already in Redis — no database queries, no network calls beyond the local Redis instance.
 
 ---
 
@@ -401,7 +403,7 @@ Trust computation is designed to add minimal overhead to the policy evaluation h
 
 ---
 
-## 11b. `trust_threshold` semantics — ADVISORY, not a hard gate (F-18)
+## 11b. `trust_threshold` semantics — ADVISORY, not a hard gate
 
 A company-simulation buyer observed that a call with a caller-supplied `trust_score=0.1` against
 `settings.trust_threshold=0.7` was still **allowed** on a benign tool, and asked whether the threshold is

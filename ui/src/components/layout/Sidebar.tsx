@@ -1,3 +1,6 @@
+// Sidebar — the left navigation: the always-visible icon rail plus the expandable section panel,
+// kept in sync with the current route.
+
 import { useEffect, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { sectionFromPath, useApp } from "../../store/AppContext";

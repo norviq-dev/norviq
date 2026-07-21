@@ -10,7 +10,7 @@
 // (`echarts`, `option`, `style`, `className`) with a native `ResizeObserver` instead of size-sensor.
 //
 // Kept as a plain function component with a default export named `ReactEChartsCore` so the four chart
-// callers are unchanged, and so the UI-1 interop regression guard (`typeof === "function"`) holds.
+// callers are unchanged, and so the interop regression guard (`typeof === "function"`) holds.
 import { useEffect, useRef } from "react";
 import type * as EChartsCore from "echarts/core";
 

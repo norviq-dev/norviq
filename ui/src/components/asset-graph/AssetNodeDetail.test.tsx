@@ -65,7 +65,7 @@ describe("AssetNodeDetail (inspector redesign)", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  // CAP-1: a data node carrying a source-capability payload renders the verb surface + worst open verb.
+  // A data node carrying a source-capability payload renders the verb surface + worst open verb.
   it("renders the source capability surface on a data node", () => {
     const dataNode = model.nodes.find((n) => n.id === "data:smtp")!;
     dataNode.capability = {

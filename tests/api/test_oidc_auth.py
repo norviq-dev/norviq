@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""OIDC dual-mode auth (IDENTITY epic A1/A2): RS256 validation against a SYNTHETIC in-process JWKS.
+"""OIDC dual-mode auth: RS256 validation against a SYNTHETIC in-process JWKS.
 
 No live IdP: a test-generated RSA keypair signs tokens and its public JWK is served via a stubbed
 JWKS client. Covers the good path, group->role/namespace mapping, claim rejections (iss/aud/exp/kid),
@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import json
 import time
+from types import SimpleNamespace
 
 import httpx
 import jwt
@@ -144,7 +145,7 @@ async def test_admin_group_wins_over_viewer(oidc_on) -> None:
     assert user["role"] == "admin" and user["namespace"] == ""
 
 
-# --- F045 fleet: cluster dimension in the group mapping + scoped_cluster ---
+# --- Fleet: cluster dimension in the group mapping + scoped_cluster ---
 
 
 @pytest.mark.asyncio
@@ -197,6 +198,42 @@ async def test_bad_iss_aud_exp_rejected(oidc_on, bad) -> None:
     assert getattr(exc.value, "status_code", None) == 401
 
 
+# --- must_change lockdown is an EXACT-path allowlist, not a URL-suffix test ---
+
+
+def _req(path: str) -> SimpleNamespace:
+    """Minimal Request double: get_current_user reads only ``request.url.path`` (+ app.state.cache,
+    which is None-safe here)."""
+    return SimpleNamespace(url=SimpleNamespace(path=path), app=None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/api/v1/auth/change-password", "/api/v1/auth/logout", "/api/v1/me"])
+async def test_must_change_token_allowed_on_exact_flag_clearing_paths(oidc_on, path) -> None:
+    token = _mint(oidc_on["priv_pem"], {"groups": ["norviq-admins"], "must_change": True})
+    user = await auth_mod.get_current_user(_creds(token), _req(path))
+    assert user["role"] == "admin" and user["must_change"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/policies",                       # a real, non-allowed route
+        "/api/v1/policies/x/auth/change-password",  # crafted to END WITH an allowed suffix
+        "/api/v1/agents/spoof/auth/logout",         # crafted to END WITH an allowed suffix
+        "/api/v1/audit/frame/me",                   # crafted to END WITH `/me`
+    ],
+)
+async def test_must_change_token_blocked_on_suffix_crafted_paths(oidc_on, path) -> None:
+    # FAIL-ON-BUG: the old `path.endswith((...))` gate let the last three through (403 never raised).
+    # With the exact-equality allowlist, every real route other than the three exact ones is 403.
+    token = _mint(oidc_on["priv_pem"], {"groups": ["norviq-admins"], "must_change": True})
+    with pytest.raises(Exception) as exc:
+        await auth_mod.get_current_user(_creds(token), _req(path))
+    assert getattr(exc.value, "status_code", None) == 403
+
+
 @pytest.mark.asyncio
 async def test_unknown_kid_rejected(oidc_on) -> None:
     token = _mint(oidc_on["priv_pem"], {"groups": ["norviq-admins"]}, kid="rotated-away")
@@ -234,7 +271,11 @@ async def test_alg_confusion_hs256_with_public_key_rejected(oidc_on) -> None:
 @pytest.mark.asyncio
 async def test_legacy_hs256_still_accepted_during_migration(oidc_on) -> None:
     """With oidc_enabled AND legacy_hs256_enabled, a real api_secret_key HS256 token still works."""
-    token = jwt.encode({"sub": "svc", "role": "admin"}, settings.api_secret_key, algorithm="HS256")
+    token = jwt.encode(
+        {"sub": "svc", "role": "admin", "exp": int(time.time()) + 3600},
+        settings.api_secret_key,
+        algorithm="HS256",
+    )
     user = await auth_mod.get_current_user(_creds(token))
     assert user["role"] == "admin"
 
