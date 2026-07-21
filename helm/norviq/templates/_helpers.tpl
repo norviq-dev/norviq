@@ -15,6 +15,25 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 }}
 {{- end }}
 
+{{/*
+Fully-qualified image reference for one Norviq component.
+  Usage: {{ include "norviq.image" (dict "root" $ "component" .Values.images.api) }}
+
+A `digest` wins over `tag` when set. That is what makes a RELEASED chart reproducible: the release
+workflow rewrites images.<c>.digest to the immutable sha256 of the image it just built, so
+`helm install --version X` deploys exactly the binaries that were built, scanned and signed for X —
+not whatever a floating tag points at today. Installing from a source checkout leaves digest empty
+and falls back to the readable tag, which is what you want while developing.
+*/}}
+{{- define "norviq.image" -}}
+{{- $ref := printf "%s%s" .root.Values.images.registry .component.repository -}}
+{{- if .component.digest -}}
+{{- printf "%s@%s" $ref .component.digest -}}
+{{- else -}}
+{{- printf "%s:%s" $ref .component.tag -}}
+{{- end -}}
+{{- end }}
+
 {{/* imagePullSecrets block (empty when .Values.imagePullSecrets is []). Usage: indent under spec. */}}
 {{- define "norviq.imagePullSecrets" -}}
 {{- with .Values.imagePullSecrets }}

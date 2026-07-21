@@ -27,7 +27,7 @@ spec:
       # at runtime), so no initContainer is needed.
       containers:
         - name: ui
-          image: "{{ .Values.images.registry }}{{ .Values.images.ui.repository }}:{{ .Values.images.ui.tag }}"
+          image: "{{ include "norviq.image" (dict "root" $ "component" .Values.images.ui) }}"
           imagePullPolicy: {{ .Values.images.ui.pullPolicy }}
           {{- /* With the unprivileged nginx image (uid 101, port 8080) the console runs non-root
                  and needs no NET_BIND_SERVICE, so the pod drops ALL caps. readOnlyRootFilesystem is NOT set

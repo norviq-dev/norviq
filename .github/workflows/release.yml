@@ -1,49 +1,167 @@
 # SPDX-License-Identifier: Apache-2.0
-# Release the Helm chart as an OCI artifact to GHCR on a version tag, then sign
-# it with cosign (keyless / Sigstore) so consumers can verify provenance.
+# Cut a Norviq release from a `v*.*.*` tag: build the four images at that tag, then publish a Helm
+# chart that pins them BY DIGEST, and cosign-sign the chart.
+#
+# Why the chart pins digests. A chart that says `api-latest` is not a release: `helm install
+# --version 0.1.0` a year from now would deploy whatever is on main today, two people installing
+# "the same version" get different binaries, and a pod reschedule silently upgrades a running
+# install. It also hollows out the signature below — signing a chart whose only image reference is
+# the string "api-latest" attests ~50 KB of YAML and says nothing about the binaries that enforce
+# policy. So the chart is rewritten at package time to reference immutable sha256 digests.
+#
+# Why the images are built HERE rather than in build.yml on its own. The chart must not be published
+# before the images it pins exist. `needs:` expresses that, but ONLY between jobs of a single
+# workflow run — there is no cross-workflow `needs:`. So build.yml is invoked as a REUSABLE workflow
+# (workflow_call) and becomes a job in this run that `chart` can depend on.
 #
 # Consumers then:
 #   helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version <x.y.z>
 #   cosign verify ghcr.io/norviq-dev/charts/norviq:<x.y.z> \
 #     --certificate-identity-regexp '^https://github.com/norviq-dev/norviq/.github/workflows/release.yml@.*' \
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
-name: Release Chart
+name: Release
 
 on:
   push:
     tags: ["v*.*.*"]
-  workflow_dispatch:
+  workflow_dispatch: {}   # REHEARSAL ONLY — builds, renders and validates; publishes nothing. See `publish`.
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_REPOSITORY: ghcr.io/norviq-dev/norviq-engine
+  CHART_REGISTRY: oci://ghcr.io/norviq-dev/charts
 
 jobs:
-  chart:
+  # ---------------------------------------------------------------------------------------------
+  # Gate 0: the tag IS the version. Four numbers must agree before anything is built or published:
+  # the git tag, Chart.yaml version, Chart.yaml appVersion, and the pyproject version — otherwise a
+  # `v0.2.0` tag silently publishes a chart labelled 0.1.0 and a wheel labelled 0.1.0.
+  # ---------------------------------------------------------------------------------------------
+  version:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      publish: ${{ steps.v.outputs.publish }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - id: v
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            publish=true
+          else
+            # Rehearsal: derive the version from Chart.yaml so every later step runs for real.
+            version="$(python3 -c 'import re,sys;print(re.search(r"^version:\s*(\S+)",open("helm/norviq/Chart.yaml").read(),re.M).group(1))')"
+            publish=false
+            echo "::notice::Rehearsal run (no tag). Building and validating v${version}; NOTHING will be published."
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "publish=${publish}" >> "$GITHUB_OUTPUT"
+          python3 scripts/check_release_versions.py "${version}"
+
+  # ---------------------------------------------------------------------------------------------
+  # The four multi-arch images, at this tag, scanned fail-closed, cosign-signed, SBOM-attested.
+  # Reusable call so that `chart` can `needs:` it — see the header note on ordering.
+  # ---------------------------------------------------------------------------------------------
+  images:
+    needs: version
+    uses: ./.github/workflows/build.yml
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    with:
+      version: ${{ needs.version.outputs.version }}
+
+  chart:
+    needs: [version, images]        # <-- the ordering guarantee: images exist before the chart pins them
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: write        # push the OCI chart to GHCR with the built-in token
       id-token: write        # keyless cosign signing via the workflow's OIDC identity
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      PUBLISH: ${{ needs.version.outputs.publish }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-      - name: Lint
-        run: helm lint helm/norviq
+
+      # Log in first: resolving digests reads the registry, and on a rehearsal the images are
+      # published by `images` above, so they are always resolvable by the time we get here.
       - name: Log in to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
-      - name: Package
-        run: helm package helm/norviq -d dist/
-      - name: Push chart to GHCR (OCI)
-        id: push
+
+      # Resolves each just-built `<component>-<version>` tag to its immutable index digest and writes
+      # it into images.<component>.digest, which the chart's `norviq.image` helper prefers over tag.
+      # Logic lives in scripts/release_stamp.py (unit-tested in tests/release/) rather than inline
+      # here, because a bug in it publishes a chart pointing at the wrong binaries — permanently.
+      - name: Stamp the chart version and pin every image to an immutable digest
         run: |
           set -euo pipefail
-          helm push dist/norviq-*.tgz oci://ghcr.io/norviq-dev/charts 2>&1 | tee push.log
-          digest="$(grep -oE 'sha256:[0-9a-f]{64}' push.log | head -n1)"
+          python3 scripts/release_stamp.py "$VERSION" --resolve
+          echo "--- Chart.yaml ---"; grep -E '^(version|appVersion):' helm/norviq/Chart.yaml
+
+      - name: Lint and render the chart that will actually ship
+        run: |
+          set -euo pipefail
+          helm lint helm/norviq
+          # `helm lint` does NOT execute the fail-closed baseline guard, so lint alone can pass on a
+          # chart no consumer can install. Render the real thing, the way the docs tell users to.
+          helm template norviq helm/norviq \
+            --set-json 'policyQuotaNamespaces=["default"]' > /tmp/rendered.yaml
+          test -s /tmp/rendered.yaml
+          # Every Norviq image reference in the shipped chart must be digest-pinned.
+          if grep -E 'image: "?ghcr\.io/norviq-dev/norviq-engine' /tmp/rendered.yaml | grep -v '@sha256:'; then
+            echo "::error::a Norviq image in the rendered chart is not digest-pinned" >&2
+            exit 1
+          fi
+          grep -c '@sha256:' /tmp/rendered.yaml | xargs echo "digest-pinned image refs:"
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          helm package helm/norviq -d dist/
+          ls -l dist/
+          # The packaged tgz — not the working tree — is what consumers get. Prove it renders.
+          helm template norviq dist/norviq-"$VERSION".tgz \
+            --set-json 'policyQuotaNamespaces=["default"]' > /dev/null
+          echo "packaged chart renders from the .tgz"
+
+      - name: Push chart to GHCR (OCI)
+        id: push
+        if: needs.version.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          # `set -o pipefail` makes the pipeline fail if `helm push` fails; `tee` keeps the log.
+          helm push dist/norviq-"$VERSION".tgz "$CHART_REGISTRY" 2>&1 | tee push.log
+          # Parse the digest from the "Digest: sha256:..." line specifically. A bare grep for the
+          # first sha256 in the whole log could match an unrelated line and sign the wrong thing.
+          digest="$(sed -n 's/^Digest:[[:space:]]*\(sha256:[0-9a-f]\{64\}\).*/\1/p' push.log | head -n1)"
           if [ -z "$digest" ]; then
-            echo "::error::could not parse chart digest from helm push output" >&2
+            echo "::error::could not parse the chart digest from 'helm push' output — refusing to sign" >&2
+            echo "--- helm push output ---" >&2; cat push.log >&2
             exit 1
           fi
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
       - name: Sign chart (keyless, Sigstore)
+        if: needs.version.outputs.publish == 'true'
         env:
           COSIGN_YES: "true"
         run: cosign sign "ghcr.io/norviq-dev/charts/norviq@${{ steps.push.outputs.digest }}"
+
+      - name: Rehearsal summary
+        if: needs.version.outputs.publish != 'true'
+        run: |
+          echo "::notice::Rehearsal complete — images built and scanned, chart version-stamped, \
+          digest-pinned, linted, rendered and packaged. Nothing was published. Push a v*.*.* tag to release."

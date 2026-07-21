@@ -2,7 +2,9 @@
 name = "norviq"
 version = "0.1.0"
 description = "Runtime policy enforcement for LLM agent tool calls on Kubernetes."
-readme = "README.md"
+# PyPI-specific long description: pypi.org cannot resolve README.md's relative links/images, and the
+# pypi.org audience wants the Python SDK rather than README.md's `git clone` + `helm install` opener.
+readme = "PYPI-README.md"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Norviq" }]
 keywords = ["llm", "agents", "security", "policy-enforcement", "opa", "kubernetes", "ai-safety"]
@@ -98,3 +100,12 @@ pythonpath = ["."]
 
 [tool.setuptools.packages.find]
 include = ["norviq*"]
+
+# Ship the non-.py runtime assets. Without this setuptools packages only *.py, so the wheel silently
+# dropped norviq/engine/opa-capabilities.json — the locked-down OPA capability set that
+# norviq/engine/opa_client.py loads (relative to __file__) to re-compile every submitted rego against
+# a compiler that has no http.send/net.*/io.* builtins. That check no-ops when the file is missing
+# (opa_client.py: `if not _CAPABILITIES_PATH.exists() ... return`), so its absence is silent.
+# Verified by tests/release/test_package_contents.py and asserted again in the publish workflow.
+[tool.setuptools.package-data]
+"norviq.engine" = ["opa-capabilities.json"]

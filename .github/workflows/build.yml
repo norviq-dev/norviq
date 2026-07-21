@@ -14,6 +14,17 @@ on:
       - '.trivyignore'                 # the image-scan gate baseline — re-run the scan when it changes
       - '.github/workflows/build.yml'
   workflow_dispatch:
+  # Reusable entry point. release.yml calls this on a v*.*.* tag and then gates its chart job on
+  # `needs:` — which is ONLY expressible between jobs of a single workflow run, so a called workflow
+  # is the one way to guarantee the version-tagged images exist BEFORE the chart that pins them is
+  # published. Without that ordering the chart would reference images that do not exist yet.
+  workflow_call:
+    inputs:
+      version:
+        description: "Release version WITHOUT the leading v (e.g. 0.1.0). Empty = ordinary main build."
+        type: string
+        required: false
+        default: ""
 
 concurrency:
   group: build-${{ github.ref }}
@@ -30,6 +41,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write          # keyless cosign signing of the image digest (Sigstore OIDC)
     strategy:
       matrix:
         include:
@@ -57,7 +69,8 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
+      - id: build
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.context }}/${{ matrix.dockerfile }}
@@ -65,12 +78,17 @@ jobs:
           platforms: linux/amd64,linux/arm64
           # Keep the pushed index to exactly the two OS/arch images — no extra unknown/unknown
           # attestation manifest, which some kubelets/tools misread as a missing platform match.
+          # Provenance/SBOM are therefore attached OUT-OF-BAND with cosign below (separate
+          # `sha256-<digest>.sig`/`.sbom` registry tags), which leaves the image index untouched.
           provenance: false
           build-args: |
             NRVQ_GIT_SHA=${{ github.sha }}
+          # Exactly two tags in either mode. A RELEASE build (version set) publishes the immutable
+          # `<component>-<version>` that the released chart pins, and deliberately does NOT move
+          # `-latest`: tagging an older commit would otherwise drag `latest` backwards for everyone.
           tags: |
             ${{ env.REPOSITORY }}:${{ matrix.component }}-${{ github.sha }}
-            ${{ env.REPOSITORY }}:${{ matrix.component }}-latest
+            ${{ inputs.version == '' && format('{0}:{1}-latest', env.REPOSITORY, matrix.component) || format('{0}:{1}-{2}', env.REPOSITORY, matrix.component, inputs.version) }}
           cache-from: type=gha,scope=${{ matrix.component }}
           cache-to: type=gha,mode=max,scope=${{ matrix.component }}
 
@@ -85,9 +103,35 @@ jobs:
       - name: trivy image scan (${{ matrix.component }}) — fail-closed
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
-          image-ref: ${{ env.REPOSITORY }}:${{ matrix.component }}-${{ github.sha }}
+          # Scan BY DIGEST, not by tag: the digest is exactly what was just built and what gets
+          # signed and pinned, so the scan cannot race a concurrent push that moves the tag.
+          image-ref: ${{ env.REPOSITORY }}@${{ steps.build.outputs.digest }}
           format: table
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           trivyignores: .trivyignore
           exit-code: "1"
+
+      # Supply chain: bind this exact digest to this repo+workflow identity, and publish an SBOM.
+      # Runs only AFTER the fail-closed Trivy gate, so a vulnerable image is never signed.
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: cosign sign image (keyless)
+        env:
+          COSIGN_YES: "true"
+        run: cosign sign "${{ env.REPOSITORY }}@${{ steps.build.outputs.digest }}"
+      # Generate the SBOM with the same pinned action (the trivy CLI is not guaranteed to be on PATH
+      # afterwards — trivy-action runs it in a container), then attest the file with cosign.
+      - name: Generate SBOM (SPDX)
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+        with:
+          image-ref: ${{ env.REPOSITORY }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output: sbom-${{ matrix.component }}.json
+      - name: Attest the SBOM to the image digest
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          test -s "sbom-${{ matrix.component }}.json"   # fail loudly rather than attest an empty file
+          cosign attest --predicate "sbom-${{ matrix.component }}.json" --type spdxjson \
+            "${{ env.REPOSITORY }}@${{ steps.build.outputs.digest }}"

@@ -67,7 +67,7 @@ spec:
         {{- include "norviq.waitFor" (dict "name" "wait-for-fleet-postgres" "host" "fleet-postgresql" "port" 5432) | nindent 8 }}
       containers:
         - name: fleet-api
-          image: "{{ .Values.images.registry }}{{ .Values.images.api.repository }}:{{ .Values.images.api.tag }}"
+          image: "{{ include "norviq.image" (dict "root" $ "component" .Values.images.api) }}"
           imagePullPolicy: {{ .Values.images.api.pullPolicy }}
           command: ["python", "-m", "uvicorn", "norviq.fleet.main:app", "--host", "0.0.0.0", "--port", "8080"]
           # Same baseline profile as every other app container. The fleet hub shipped with NO

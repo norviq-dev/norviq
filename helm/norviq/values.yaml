@@ -53,21 +53,28 @@ images:
   #   ACR:                      "<acct>.azurecr.io/"
   #   Docker Hub:               "" (+ set repository to "<user>/norviq-engine")
   registry: "ghcr.io/norviq-dev/"
+  # `digest` is empty here and is STAMPED BY THE RELEASE WORKFLOW (.github/workflows/release.yml).
+  # When set it wins over `tag`, making a released chart reproducible: `--version X` always pulls the
+  # exact image built, scanned and signed for X. Leave it empty to track the readable tag instead.
   engine:
     repository: norviq-engine
     tag: engine-latest
+    digest: ""
     pullPolicy: Always
   api:
     repository: norviq-engine
     tag: api-latest
+    digest: ""
     pullPolicy: Always
   ui:
     repository: norviq-engine
     tag: ui-latest
+    digest: ""
     pullPolicy: Always
   webhook:
     repository: norviq-engine
     tag: webhook-latest
+    digest: ""
     pullPolicy: Always
   redis:
     repository: redis

@@ -42,7 +42,7 @@ spec:
         {{- include "norviq.waitFor" (dict "name" "wait-for-api" "host" "norviq-api" "port" .Values.api.port) | nindent 8 }}
       containers:
         - name: webhook
-          image: "{{ .Values.images.registry }}{{ .Values.images.webhook.repository }}:{{ .Values.images.webhook.tag }}"
+          image: "{{ include "norviq.image" (dict "root" $ "component" .Values.images.webhook) }}"
           imagePullPolicy: {{ .Values.images.webhook.pullPolicy }}
           {{- /* Hardened container securityContext (defense-in-depth; do not rely on an external
                  PSA/Kyverno mutation). The webhook image runs as USER 65534 and writes nothing to its
@@ -62,7 +62,7 @@ spec:
               value: "{{ .Values.webhook.port }}"
             # Pinned (-sha on CI) sidecar image. The controller refuses a mutable-tag CRD override.
             - name: NRVQ_SIDECAR_IMAGE
-              value: "{{ .Values.images.registry }}{{ .Values.images.engine.repository }}:{{ .Values.images.engine.tag }}"
+              value: "{{ include "norviq.image" (dict "root" $ "component" .Values.images.engine) }}"
             - name: NRVQ_CONTROLLER_ENABLED
               value: "true"
             # FQDN (namespace-qualified) so the value is resolvable BOTH from the controller (in this

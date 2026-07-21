@@ -37,7 +37,7 @@ spec:
         {{- include "norviq.waitFor" (dict "name" "wait-for-redis" "host" "norviq-redis" "port" 6379) | nindent 8 }}
       containers:
         - name: engine
-          image: "{{ .Values.images.registry }}{{ .Values.images.engine.repository }}:{{ .Values.images.engine.tag }}"
+          image: "{{ include "norviq.image" (dict "root" $ "component" .Values.images.engine) }}"
           imagePullPolicy: {{ .Values.images.engine.pullPolicy }}
           {{- /* Hardened securityContext on the primary container (image runs as USER norviq).
                  readOnlyRootFilesystem is not forced on the Python app; the CIS-critical controls are. */}}
