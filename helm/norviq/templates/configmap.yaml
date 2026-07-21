@@ -46,6 +46,11 @@ data:
   NRVQ_TRUST_THRESHOLD: {{ .Values.config.trustThreshold | quote }}
   NRVQ_VIOLATION_PENALTY: {{ .Values.config.violationPenalty | quote }}
   NRVQ_RATE_LIMIT: {{ .Values.config.rateLimit | quote }}
+  # Per-pod in-process L1 for the enforcement hot path (posture/trust inputs). Caches inputs only — the
+  # admin freeze/cap is always read fresh. 0 disables (fresh reads every call). See values.yaml.
+  # `dig` (not `| default`) so an explicit 0 disables it — sprig's `default` treats 0 as empty and would
+  # silently re-enable the cache.
+  NRVQ_EVALUATOR_INPROC_CACHE_TTL_S: {{ dig "inprocCacheTtlS" 5 .Values.config | quote }}
   NRVQ_DB_SSL_MODE: {{ .Values.config.dbSslMode | quote }}
   NRVQ_DB_POOL_MAX_OVERFLOW: {{ .Values.config.dbPoolMaxOverflow | quote }}
   NRVQ_DB_POOL_TIMEOUT: {{ .Values.config.dbPoolTimeout | quote }}

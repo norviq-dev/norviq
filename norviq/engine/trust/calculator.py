@@ -11,7 +11,9 @@ import json
 
 import structlog
 
+from norviq.config import settings
 from norviq.engine.cache import RedisCache
+from norviq.engine.inproc_cache import _MISS, TTLCache
 from norviq.engine.trust.history import AgentHistoryStore
 from norviq.engine.trust.models import TrustInput, TrustResult
 from norviq.engine.trust.profile import AgentProfileStore
@@ -41,11 +43,28 @@ class TrustCalculator:
         "session_velocity": 0.05,
     }
 
-    def __init__(self, cache: RedisCache, history: AgentHistoryStore, profile: AgentProfileStore) -> None:
-        """Bind cache and data stores for trust calculations."""
+    def __init__(
+        self,
+        cache: RedisCache,
+        history: AgentHistoryStore,
+        profile: AgentProfileStore,
+        inproc_ttl_s: float | None = None,
+    ) -> None:
+        """Bind cache and data stores for trust calculations.
+
+        `inproc_ttl_s` (default: read from settings) sizes the per-pod L1 cache for the two expensive,
+        slowly-changing input reads — the agent's decision history and its profile/class constraints.
+        The admin freeze and trust-cap are deliberately NOT cached (they stay fresh every call), so the
+        kill-switch keeps propagating cluster-wide immediately. TTL <= 0 disables the L1 and `calculate`
+        takes the byte-identical fresh-read path.
+        """
         self._cache = cache
         self._history = history
         self._profile = profile
+        ttl = settings.evaluator_inproc_cache_ttl_s if inproc_ttl_s is None else inproc_ttl_s
+        self._inproc_ttl = float(ttl)
+        self._history_cache = TTLCache(self._inproc_ttl, settings.evaluator_inproc_cache_max)
+        self._profile_cache = TTLCache(self._inproc_ttl, settings.evaluator_inproc_cache_max)
         self._signals = {
             "violation_rate": ViolationRateSignal(),
             "tool_novelty": ToolNoveltySignal(),
@@ -65,12 +84,24 @@ class TrustCalculator:
         `effective = min(computed, cap)` — so an admin can force an agent toward escalate/frozen but never RAISE its
         trust above what behavior justifies. Both feed the SINGLE categorize below."""
         log.debug("nrvq.engine.trust.started", spiffe_id=input_data.spiffe_id, code="NRVQ-ENG-2040")
-        history, profile_and_frozen, override = await asyncio.gather(
-            self._safe_history(input_data.spiffe_id),
-            self._safe_profile_and_frozen(input_data),
-            self._safe_override_only(input_data.spiffe_id),
-        )
-        profile, is_frozen = profile_and_frozen
+        if self._inproc_enabled():
+            # L1 path: serve the two slow, per-identity reads (history, profile) from local memory when
+            # warm, but ALWAYS fetch the freeze flag and the admin cap fresh — an incident-response
+            # freeze must take effect this call, not up to a TTL later. `_safe_frozen_only` fails CLOSED
+            # (freeze on Redis error) and `_safe_override_only` fails OPEN, exactly as the bundled path.
+            history, profile, is_frozen, override = await asyncio.gather(
+                self._history_cached(input_data.spiffe_id),
+                self._profile_cached(input_data),
+                self._safe_frozen_only(input_data.spiffe_id),
+                self._safe_override_only(input_data.spiffe_id),
+            )
+        else:
+            history, profile_and_frozen, override = await asyncio.gather(
+                self._safe_history(input_data.spiffe_id),
+                self._safe_profile_and_frozen(input_data),
+                self._safe_override_only(input_data.spiffe_id),
+            )
+            profile, is_frozen = profile_and_frozen
         signals = await self._compute_signals(input_data, history, profile)
         computed = 0.0 if is_frozen else self._weighted_sum(signals)
         # tighten-only cap: an admin override can only LOWER effective trust, never raise it.
@@ -104,6 +135,41 @@ class TrustCalculator:
                 log.warning("nrvq.engine.trust.signal_failed", signal=name, error=str(exc), code="NRVQ-ENG-2042")
                 values[name] = 0.5
         return values
+
+    def _inproc_enabled(self) -> bool:
+        """True when the per-pod trust-input L1 is active. Defensive `getattr` so a test double that
+        bypasses `__init__` (no cache attribute) transparently takes the legacy fresh-read path."""
+        cache = getattr(self, "_history_cache", None)
+        return cache is not None and cache.enabled
+
+    async def _history_cached(self, spiffe_id: str) -> list[dict]:
+        """Return the agent's decision history from the per-pod L1, falling back to the store on a miss.
+
+        History drives the behavioral signals and is identical across every tool call an agent makes
+        inside the TTL window, so caching it removes the slowest hot-path read (the `ZRANGEBYSCORE`)
+        without changing any single call's decision beyond a bounded, self-healing staleness.
+        """
+        hit = self._history_cache.get(spiffe_id)
+        if hit is not _MISS:
+            return hit
+        history = await self._safe_history(spiffe_id)
+        self._history_cache.set(spiffe_id, history)
+        return history
+
+    async def _profile_cached(self, input_data: TrustInput) -> dict:
+        """Return the profile/class constraints from the per-pod L1, falling back to the store on a miss.
+
+        Keyed by (spiffe, agent_class) because the resolved profile merges class-level constraints. The
+        freeze flag returned alongside the profile by `_safe_profile_and_frozen` is intentionally
+        discarded here — the L1 path re-reads freeze fresh so the kill-switch never rides the cache.
+        """
+        key = (input_data.spiffe_id, input_data.agent_class or "")
+        hit = self._profile_cache.get(key)
+        if hit is not _MISS:
+            return hit
+        profile, _frozen = await self._safe_profile_and_frozen(input_data)
+        self._profile_cache.set(key, profile)
+        return profile
 
     async def _safe_history(self, spiffe_id: str) -> list[dict]:
         """Fetch history while preserving calculator availability."""

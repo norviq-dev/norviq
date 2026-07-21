@@ -77,6 +77,7 @@
         "trustThreshold": { "type": "number", "minimum": 0, "maximum": 1 },
         "violationPenalty": { "type": "number", "minimum": 0, "maximum": 1 },
         "rateLimit": { "type": "integer", "minimum": 0 },
+        "inprocCacheTtlS": { "type": "number", "minimum": 0, "description": "Per-pod in-process L1 TTL (seconds) for the enforcement hot path's posture/trust input reads. Caches inputs only (freeze/cap stay fresh). 0 disables." },
         "dbSslMode": { "enum": ["disable", "allow", "prefer", "require", "verify-ca", "verify-full"] },
         "internalTls": {
           "type": "object",

@@ -23,6 +23,7 @@ import structlog
 from norviq.config import settings
 from norviq.engine.cache import RedisCache
 from norviq.engine.confusables import skeleton
+from norviq.engine.inproc_cache import _MISS, TTLCache
 from norviq.engine.masking import mask_params
 from norviq.engine.graph.asset_graph import AssetGraphBuilder
 from norviq.engine.graph.store import GraphStore
@@ -66,6 +67,13 @@ class OPAEvaluator:
         self._history = AgentHistoryStore(cache)
         self._profile = AgentProfileStore(cache)
         self._trust_calculator = TrustCalculator(cache, self._history, self._profile)
+        # Per-pod L1 for the hot path's slowly-changing input reads: namespace posture (keyed by ns)
+        # and the stored trust score (keyed by spiffe). Both are safe to serve slightly stale (bounded
+        # by the TTL); the admin freeze/cap kill-switch is read fresh inside the trust calculator and is
+        # never cached here. TTL <= 0 makes these pass-throughs (see inproc_cache.TTLCache).
+        _ttl = settings.evaluator_inproc_cache_ttl_s
+        self._posture_cache = TTLCache(_ttl, settings.evaluator_inproc_cache_max)
+        self._trust_score_cache = TTLCache(_ttl, settings.evaluator_inproc_cache_max)
         self._semaphore = asyncio.Semaphore(settings.evaluator_max_concurrency)
         # OPA-server client + per-key pushed-rego digests (server mode); unused in subprocess mode.
         self.opa = OpaClient()
@@ -295,7 +303,13 @@ class OPAEvaluator:
         to the global config. `monitor` is True ONLY when the namespace explicitly overrides enforcement_mode to
         'audit' — a null/global mode does NO softening (parity with today's weak global audit semantics, which only
         affect the no-policy default, never a real policy block). `trust_threshold` is None when unset so the trust
-        calculator keeps its bit-identical literal 0.7/0.4 tiers. `rate_limit` never falls back to 0."""
+        calculator keeps its bit-identical literal 0.7/0.4 tiers. `rate_limit` never falls back to 0.
+
+        Served from the per-pod posture L1 when warm: a posture change updates the Redis mirror and
+        converges on every pod within the L1 TTL (the same bounded window as the eval cache)."""
+        cached = self._posture_cache.get(namespace)
+        if cached is not _MISS:
+            return cached
         raw = None
         try:
             raw = await self._cache.get_ns_settings(namespace)
@@ -305,11 +319,13 @@ class OPAEvaluator:
         mode = raw.get("enforcement_mode") if raw else None
         thr = raw.get("trust_threshold") if raw else None
         rl = raw.get("rate_limit") if raw else None
-        return {
+        posture = {
             "monitor": mode == "audit",
             "trust_threshold": float(thr) if thr is not None else None,
             "rate_limit": int(rl) if rl is not None else settings.evaluator_rate_limit_per_window,
         }
+        self._posture_cache.set(namespace, posture)
+        return posture
 
     def _apply_posture(self, decision: PolicyDecision, posture: dict, event_id: str) -> PolicyDecision:
         """Namespace monitor mode softens a would-block/escalate to an allow-but-log `audit`
@@ -354,12 +370,20 @@ class OPAEvaluator:
         return decision
 
     async def _trust(self, spiffe_id: str) -> TrustScore:
-        """Return trust score from cache, initializing when absent."""
+        """Return trust score from cache, initializing when absent.
+
+        Fronted by the per-pod trust-score L1 to skip the Redis GET on warm calls. This is the STORED
+        score only (a status/display value that the per-call `TrustCalculator.calculate` recomputes
+        fresh); serving it slightly stale never relaxes enforcement, and the freeze/cap kill-switch is
+        read fresh inside the calculator regardless."""
+        cached = self._trust_score_cache.get(spiffe_id)
+        if cached is not _MISS:
+            return cached
         trust = await self._cache.get_trust(spiffe_id)
-        if trust is not None:
-            return trust
-        trust = TrustScore()
-        await self._cache.set_trust(spiffe_id, trust)
+        if trust is None:
+            trust = TrustScore()
+            await self._cache.set_trust(spiffe_id, trust)
+        self._trust_score_cache.set(spiffe_id, trust)
         return trust
 
     async def _compute_trust(

@@ -79,6 +79,16 @@ class NorviqSettings(BaseSettings):
     redis_ttl_policy_s: int = 60
     redis_ttl_eval_s: int = 5
     redis_ttl_trust_s: int = 30
+    # Per-pod in-process L1 cache for the hot path's behavioral-input reads (namespace posture, the
+    # stored trust score, and the trust calculator's history/profile). Collapses several sequential
+    # cross-pod Redis round trips into local-memory hits, cutting the cross-pod p99 tail that
+    # dominates per-call latency. It caches ONLY slowly-changing inputs — the admin freeze/cap
+    # kill-switch stays fresh on every call — so the only staleness introduced is that a posture /
+    # threshold / behavior change converges within this TTL (matching the existing 5s eval-cache
+    # window). 0.0 disables it entirely (byte-identical fresh-read behavior). NRVQ_EVALUATOR_INPROC_CACHE_TTL_S.
+    evaluator_inproc_cache_ttl_s: float = 0.0
+    # Hard per-cache entry cap (bounds per-pod memory under identity/namespace churn). NRVQ_EVALUATOR_INPROC_CACHE_MAX.
+    evaluator_inproc_cache_max: int = 8192
     trust_threshold: float = 0.7
     trust_violation_penalty: float = 0.05
     evaluator_max_concurrency: int = 10

@@ -408,6 +408,13 @@ config:
   trustThreshold: 0.7
   violationPenalty: 0.05
   rateLimit: 60
+  # Per-pod in-process L1 cache (seconds) for the enforcement hot path's slowly-changing input reads
+  # (namespace posture, stored trust score, trust history/profile). Collapses several sequential
+  # cross-pod Redis round trips into local-memory hits — the largest lever on per-call p99. Caches ONLY
+  # inputs; the admin freeze/cap kill-switch is always read fresh, so a freeze still takes effect
+  # immediately. The only staleness introduced is that a posture/threshold/behavior change converges
+  # within this TTL (matching the 5s eval-cache window). Set 0 to disable (fresh reads every call).
+  inprocCacheTtlS: 5
   dbSslMode: require
   dbPoolMaxOverflow: 10
   dbPoolTimeout: 10
