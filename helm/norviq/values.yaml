@@ -116,6 +116,16 @@ engine:
   pdb:
     enabled: false     # multi-node prod: keep >=1 engine available during disruptions
     minAvailable: 1
+  # HPA (multi-node prod): off by default (single node can't autoscale). Needs metrics-server.
+  # When enabled the Deployment drops its static `replicas` and the HPA owns the count (min..max),
+  # scaling on CPU and/or memory. The standalone engine is on the enforcement hot path, so give it
+  # the same elasticity as the API in a prod profile (see values-prod.yaml).
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: ""   # "" = do not scale on memory; set e.g. 75 to add it
   spread:
     enabled: false
   rollout:
@@ -136,11 +146,14 @@ api:
     enabled: true      # keep >=1 API pod available during voluntary disruptions (node drain/upgrade)
     minAvailable: 1
   # HPA (multi-node prod): off by default (single node can't autoscale). Needs metrics-server.
+  # When enabled the Deployment drops its static `replicas` and the HPA owns the count, scaling
+  # between minReplicas and maxReplicas on CPU and/or memory utilization.
   autoscaling:
     enabled: false
     minReplicas: 2
     maxReplicas: 6
     targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: ""   # "" = do not scale on memory; set e.g. 75 to add it
   # Spread replicas across nodes (multi-node prod): podAntiAffinity + topologySpreadConstraints.
   spread:
     enabled: false
@@ -228,6 +241,7 @@ webhook:
     minReplicas: 2
     maxReplicas: 4
     targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: ""   # "" = do not scale on memory; set e.g. 75 to add it
   spread:
     enabled: false
   rollout:

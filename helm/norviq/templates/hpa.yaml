@@ -1,50 +1,66 @@
-{{- /* HorizontalPodAutoscalers (multi-node prod). Gated off by default — a single-node dev cluster
-       can't autoscale, and HPA needs metrics-server installed. KEDA/Prometheus-driven scaling is a
-       future enhancement. */ -}}
-{{- if .Values.api.autoscaling.enabled }}
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: norviq-api-hpa
-  namespace: {{ .Values.namespace }}
-  labels:
-    {{- include "norviq.labels" . | nindent 4 }}
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: norviq-api
-  minReplicas: {{ .Values.api.autoscaling.minReplicas }}
-  maxReplicas: {{ .Values.api.autoscaling.maxReplicas }}
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: {{ .Values.api.autoscaling.targetCPUUtilizationPercentage }}
+{{- /*
+HorizontalPodAutoscalers for the scalable control-plane components (multi-node prod).
+
+Gated per-component and OFF by default: a single-node dev cluster can't meaningfully autoscale, and
+HPA needs metrics-server installed. When a component's autoscaling.enabled is true, its Deployment
+drops the static `replicas` (see *-deployment.yaml) and the HPA owns the count between minReplicas
+and maxReplicas.
+
+Scales on CPU and/or memory: each target is rendered only when set, so a profile can scale on CPU
+alone (default), memory alone, or both. `targetMemoryUtilizationPercentage: ""` means "do not scale
+on memory". An HPA with no metric is invalid, so we fail the render with a clear message rather than
+ship a broken object.
+
+One loop over the three components keeps the CPU/memory logic in exactly one place — the old file
+hand-wrote api and webhook (CPU only) and omitted the engine entirely, so the standalone engine
+could never scale. */ -}}
+{{- $components := list
+    (dict "name" "norviq-api"     "cfg" .Values.api.autoscaling)
+    (dict "name" "norviq-engine"  "cfg" .Values.engine.autoscaling)
+    (dict "name" "norviq-webhook" "cfg" .Values.webhook.autoscaling) -}}
+{{- range $c := $components }}
+{{- if $c.cfg.enabled }}
+{{- $cpu := $c.cfg.targetCPUUtilizationPercentage -}}
+{{- $mem := $c.cfg.targetMemoryUtilizationPercentage -}}
+{{- if and (not $cpu) (not $mem) }}
+{{- fail (printf "%s.autoscaling is enabled but neither targetCPUUtilizationPercentage nor targetMemoryUtilizationPercentage is set — an HPA needs at least one metric" $c.name) }}
 {{- end }}
-{{- if .Values.webhook.autoscaling.enabled }}
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: norviq-webhook-hpa
-  namespace: {{ .Values.namespace }}
+  name: {{ $c.name }}-hpa
+  namespace: {{ $.Values.namespace }}
   labels:
-    {{- include "norviq.labels" . | nindent 4 }}
+    {{- include "norviq.labels" $ | nindent 4 }}
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: norviq-webhook
-  minReplicas: {{ .Values.webhook.autoscaling.minReplicas }}
-  maxReplicas: {{ .Values.webhook.autoscaling.maxReplicas }}
+    name: {{ $c.name }}
+  minReplicas: {{ $c.cfg.minReplicas }}
+  maxReplicas: {{ $c.cfg.maxReplicas }}
   metrics:
+    {{- if $cpu }}
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: {{ .Values.webhook.autoscaling.targetCPUUtilizationPercentage }}
+          averageUtilization: {{ $cpu }}
+    {{- end }}
+    {{- if $mem }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ $mem }}
+    {{- end }}
+  {{- with $c.cfg.behavior }}
+  # Optional scale-up/down tuning (stabilizationWindowSeconds, policies) to avoid thrashing.
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
 {{- end }}

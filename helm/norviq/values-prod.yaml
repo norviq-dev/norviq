@@ -16,16 +16,21 @@ images:
   webhook: { pullPolicy: IfNotPresent }
 imagePullSecrets: []        # public registry -> no pull secret (or set your GHCR/ACR secret)
 
+# Scaling model: set a MINIMUM that gives HA (survive one pod/node loss) and let the HPA grow each
+# component toward its maximum on CPU/memory load — the pod count tracks traffic, not a hardcoded
+# number. Combine with cluster-autoscaler on the node pool so NODES grow to hold the pods (see
+# docs/engineering/deploy-runbook.md). `replicas` here is only the fallback for autoscaling.enabled=false.
 api:
-  replicas: 3
+  replicas: 2
   pdb:
     enabled: true
     minAvailable: 2
   autoscaling:
     enabled: true
-    minReplicas: 3
+    minReplicas: 2          # HA floor — fits a modest cluster; scales up on load, not pinned high
     maxReplicas: 10
     targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 75   # also scale on memory (large policy sets / audit bursts)
   spread:
     enabled: true           # podAntiAffinity + topologySpread across nodes
   rollout:
@@ -36,10 +41,16 @@ api:
     limits: { cpu: "1", memory: 512Mi }
 
 engine:
-  replicas: 2               # restore the standalone engine in prod
+  replicas: 2               # fallback only; the HPA below owns the count in prod
   pdb:
     enabled: true
     minAvailable: 1
+  autoscaling:
+    enabled: true           # the standalone engine is on the enforcement hot path — scale it too
+    minReplicas: 2
+    maxReplicas: 8
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 75
   spread:
     enabled: true
 
@@ -55,6 +66,7 @@ webhook:
     minReplicas: 2
     maxReplicas: 4
     targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 75
   spread:
     enabled: true
 
