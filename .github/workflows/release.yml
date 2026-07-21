@@ -181,5 +181,7 @@ jobs:
       - name: Rehearsal summary
         if: needs.version.outputs.publish != 'true'
         run: |
-          echo "::notice::Rehearsal complete — images built and scanned, chart version-stamped, \
-          digest-pinned, linted, rendered and packaged. Nothing was published. Push a v*.*.* tag to release."
+          echo "::notice::Rehearsal complete — versions reconciled, chart version-stamped, images \
+          digest-pinned from -latest, linted, rendered, packaged, and the .tgz re-rendered. \
+          NOT exercised (tag-only): the image build/scan/sign job, the chart push, the chart \
+          signature. Nothing was published. Push a v*.*.* tag to run those for real."
