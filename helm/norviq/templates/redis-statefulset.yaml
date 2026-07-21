@@ -21,6 +21,16 @@ spec:
       containers:
         - name: redis
           image: "{{ .Values.images.redis.repository }}:{{ .Values.images.redis.tag }}"
+          # Partial hardening only. These bundled single-node datastores are a dev convenience —
+          # values-prod.yaml replaces them with the operator-managed HA variants (asserted by
+          # test_prod_profile_drops_the_unhardened_bundled_datastores). runAsNonRoot / drop-ALL are
+          # deliberately NOT set: the official postgres/redis entrypoints start as root to chown the
+          # data dir and then drop privileges, so forcing them breaks startup. These two controls are
+          # free and do not.
+          securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - containerPort: {{ .Values.redis.port }}
               name: redis

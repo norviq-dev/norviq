@@ -19,8 +19,12 @@ func TestCreatePatchWithVolumes(t *testing.T) {
 	}
 	var ops []patchOp
 	_ = json.Unmarshal(patch, &ops)
-	if len(ops) != 5 || ops[1].Path != "/spec/volumes/-" || ops[2].Path != "/spec/containers/0/volumeMounts/-" || ops[3].Path != "/spec/containers/0/env/-" {
-		t.Fatal("expected append volume patch when volumes exist")
+	// Two volumes are added (shared socket + the sidecar's private tmpfs), then the app container is
+	// wired. Assert by path rather than by index so adding a volume later doesn't fail this spuriously.
+	if len(ops) != 6 || countPath(ops, "/spec/volumes/-") != 2 ||
+		countPath(ops, "/spec/containers/0/volumeMounts/-") != 1 ||
+		countPath(ops, "/spec/containers/0/env/-") != 1 {
+		t.Fatalf("expected append volume patches when volumes exist, got %d ops: %v", len(ops), paths(ops))
 	}
 }
 
@@ -33,8 +37,10 @@ func TestCreatePatchWithoutVolumes(t *testing.T) {
 	}
 	var ops []patchOp
 	_ = json.Unmarshal(patch, &ops)
-	if len(ops) != 5 || ops[1].Path != "/spec/volumes" || ops[2].Path != "/spec/containers/0/volumeMounts" || ops[3].Path != "/spec/containers/0/env" {
-		t.Fatal("expected volumes initialization patch when no volumes exist")
+	// First volume initializes /spec/volumes; the sidecar tmpfs then appends to it.
+	if len(ops) != 6 || countPath(ops, "/spec/volumes") != 1 || countPath(ops, "/spec/volumes/-") != 1 ||
+		countPath(ops, "/spec/containers/0/volumeMounts") != 1 || countPath(ops, "/spec/containers/0/env") != 1 {
+		t.Fatalf("expected volumes initialization patch when no volumes exist, got %d ops: %v", len(ops), paths(ops))
 	}
 }
 
@@ -51,9 +57,29 @@ func TestCreatePatchSkipsDuplicateMountAndEnv(t *testing.T) {
 	}
 	var ops []patchOp
 	_ = json.Unmarshal(patch, &ops)
-	if len(ops) != 3 {
-		t.Fatalf("expected only sidecar+volume+annotation ops, got %d", len(ops))
+	// sidecar + shared-socket volume + sidecar tmpfs volume + annotation (mount/env are already present).
+	if len(ops) != 4 {
+		t.Fatalf("expected only sidecar+2 volumes+annotation ops, got %d: %v", len(ops), paths(ops))
 	}
+}
+
+// countPath / paths keep the patch assertions order-independent.
+func countPath(ops []patchOp, path string) int {
+	n := 0
+	for _, op := range ops {
+		if op.Path == path {
+			n++
+		}
+	}
+	return n
+}
+
+func paths(ops []patchOp) []string {
+	out := make([]string, 0, len(ops))
+	for _, op := range ops {
+		out = append(out, op.Path)
+	}
+	return out
 }
 
 func TestMutate_EmptyVolumes(t *testing.T) {

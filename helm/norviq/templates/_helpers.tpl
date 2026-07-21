@@ -53,3 +53,38 @@ topologySpreadConstraints:
       matchLabels:
         app: {{ .app }}
 {{- end }}
+
+{{/*
+Hardened dependency wait-loop init container.
+
+Every workload used to inline its own `busybox nc -z` loop with NO securityContext and NO resources —
+so the one container that runs BEFORE the hardened app container was the least hardened thing in the
+pod, and an unbounded one could drag the enforcement pod's QoS class down. The webhook's wait-for-api
+was the only one done correctly; this makes that shape the single definition.
+
+`nc -z` opens a TCP socket and nothing else: it needs no root, no capabilities, and no filesystem
+writes, so the strict profile below is free.
+
+Usage: {{- include "norviq.waitFor" (dict "name" "wait-for-postgres" "host" "norviq-postgresql" "port" 5432) | nindent 8 }}
+*/}}
+{{- define "norviq.waitFor" -}}
+- name: {{ .name }}
+  image: busybox:1.36
+  command: ['sh','-c','until nc -z {{ .host }} {{ .port }}; do echo waiting for {{ .host }}; sleep 2; done']
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+    seccompProfile:
+      type: RuntimeDefault
+  resources:
+    requests:
+      cpu: 10m
+      memory: 16Mi
+    limits:
+      cpu: 50m
+      memory: 32Mi
+{{- end -}}

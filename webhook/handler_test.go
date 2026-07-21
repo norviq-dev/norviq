@@ -70,8 +70,9 @@ func TestMutateWithLabel(t *testing.T) {
 	if err := json.Unmarshal(resp.Response.Patch, &patches); err != nil {
 		t.Fatalf("patch unmarshal failed: %v", err)
 	}
-	if len(patches) != 5 {
-		t.Fatalf("expected 5 patch ops, got %d", len(patches))
+	// sidecar + 2 volumes (shared socket, sidecar-private tmpfs) + app mount + app env + annotation.
+	if len(patches) != 6 {
+		t.Fatalf("expected 6 patch ops, got %d", len(patches))
 	}
 	sidecarEnv := patches[0].Value.(map[string]interface{})["env"].([]interface{})
 	found := false

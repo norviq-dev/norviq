@@ -37,12 +37,8 @@ spec:
       {{- end }}
       terminationGracePeriodSeconds: 30
       initContainers:
-        - name: wait-for-postgres
-          image: busybox:1.36
-          command: ['sh','-c','until nc -z norviq-postgresql 5432; do echo waiting for postgres; sleep 2; done']
-        - name: wait-for-redis
-          image: busybox:1.36
-          command: ['sh','-c','until nc -z norviq-redis 6379; do echo waiting for redis; sleep 2; done']
+        {{- include "norviq.waitFor" (dict "name" "wait-for-postgres" "host" "norviq-postgresql" "port" 5432) | nindent 8 }}
+        {{- include "norviq.waitFor" (dict "name" "wait-for-redis" "host" "norviq-redis" "port" 6379) | nindent 8 }}
       containers:
         - name: api
           image: "{{ .Values.images.registry }}{{ .Values.images.api.repository }}:{{ .Values.images.api.tag }}"
@@ -113,24 +109,25 @@ spec:
             - "run"
             - "--server"
             - "--v0-compatible"
-            - "--addr=0.0.0.0:{{ .Values.opa.port }}"
+            # Bind LOOPBACK ONLY. OPA's admin API (/v1/policies) is unauthenticated by default and is
+            # read-WRITE: anything that can reach it can rewrite or delete the enforcement policy, i.e.
+            # disable the PDP. It is a same-pod sidecar and the app reaches it via NRVQ_OPA_URL
+            # (http://localhost:<port>), so 0.0.0.0 bought nothing and exposed the decision point to
+            # every pod on the cluster network. Do NOT change this back without adding OPA authn/authz.
+            - "--addr=127.0.0.1:{{ .Values.opa.port }}"
             - "--log-level=error"
           ports:
             - containerPort: {{ .Values.opa.port }}
               name: opa
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: opa
-            periodSeconds: 30
-            failureThreshold: 5
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: opa
-            initialDelaySeconds: 3
-            periodSeconds: 10
-            failureThreshold: 3
+          # NO kubelet probes on this container — deliberate, and load-bearing.
+          # A kubelet httpGet/tcpSocket probe dials the POD IP, never loopback, so any probe here would
+          # be refused the moment OPA binds 127.0.0.1 and would hold the whole pod NotReady forever.
+          # An exec probe is not an option either: openpolicyagent/opa:*-static is distroless (no shell).
+          # OPA's health is still gated, and more meaningfully: the api container's own /readyz calls
+          # evaluator.opa.health() over localhost and ANDs it into readiness (norviq/api/routers/health.py),
+          # so a dead OPA still takes this replica out of the Service endpoints — and it proves the real
+          # consumer can reach OPA, which a kubelet probe never did.
+          # Trade-off accepted: a wedged-but-listening OPA is not auto-restarted; it is drained instead.
           resources:
             {{- toYaml .Values.opa.resources | nindent 12 }}
           securityContext:
