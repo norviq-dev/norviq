@@ -34,6 +34,12 @@ const socketMountPath = "/var/run/norviq"
 const socketFilePath = "/var/run/norviq/norviq-proxy.sock"
 const spiffeMountPath = "/spiffe-workload-api"
 
+// Sidecar-private scratch space. readOnlyRootFilesystem leaves the sidecar with no writable path, but
+// the internal-mTLS client must briefly materialize its cert/key as files. Mounted into the sidecar
+// ONLY — never the app container — so the workload can never read the key.
+const tmpVolumeName = "norviq-tmp"
+const tmpMountPath = "/tmp"
+
 type patchOp struct {
 	Op    string      `json:"op"`
 	Path  string      `json:"path"`
@@ -67,6 +73,13 @@ func (inj *Injector) CreatePatch(pod *corev1.Pod, agentClass string, namespace s
 	patches := make([]patchOp, 0, 8)
 	patches = append(patches, patchOp{Op: "add", Path: "/spec/containers/-", Value: inj.buildSidecar(agentClass, namespace)})
 	patches = append(patches, volumePatch(len(pod.Spec.Volumes) > 0, inj.sharedVolume))
+	// The sidecar runs with readOnlyRootFilesystem, but the internal-mTLS path must materialize the
+	// client cert/key on disk (stdlib load_cert_chain reads files only — see remote_evaluator.py).
+	// Without a writable temp dir the sidecar dies at start with "No usable temporary directory",
+	// so every injected pod crash-loops. This tmpfs is mounted into the SIDECAR ONLY (never the app
+	// container) so the private key is never readable by the workload, and never lands on real disk.
+	// After the first volume add, /spec/volumes always exists -> append.
+	patches = append(patches, volumePatch(true, tmpVolumeTemplate()))
 	if inj.cfg.SpiffeInject {
 		// After the first volume add, /spec/volumes always exists -> append the SPIFFE CSI volume.
 		patches = append(patches, volumePatch(true, spiffeVolumeTemplate()))
@@ -198,7 +211,11 @@ func (inj *Injector) buildSidecar(agentClass string, namespace string) map[strin
 }
 
 func newSidecarTemplate(cfg Config) map[string]interface{} {
-	mounts := []map[string]interface{}{{"name": "norviq-socket", "mountPath": socketMountPath}}
+	mounts := []map[string]interface{}{
+		{"name": "norviq-socket", "mountPath": socketMountPath},
+		// Writable scratch for the mTLS cert/key materialization; see tmpVolumeTemplate.
+		{"name": tmpVolumeName, "mountPath": tmpMountPath},
+	}
 	if cfg.SpiffeInject {
 		mounts = append(mounts, map[string]interface{}{"name": "spiffe-workload-api", "mountPath": spiffeMountPath, "readOnly": true})
 	}
@@ -464,6 +481,16 @@ func sidecarReadinessProbe(sidecarPort int) map[string]interface{} {
 
 func volumeTemplate() map[string]interface{} {
 	return map[string]interface{}{"name": "norviq-socket", "emptyDir": map[string]interface{}{"sizeLimit": "10Mi"}}
+}
+
+// tmpVolumeTemplate is the sidecar's private scratch space. `medium: Memory` keeps it a tmpfs so the
+// short-lived mTLS client key (written 0600 and unlinked immediately) never touches a real disk. It is
+// deliberately NOT the shared norviq-socket volume, which the app container also mounts.
+func tmpVolumeTemplate() map[string]interface{} {
+	return map[string]interface{}{
+		"name":     tmpVolumeName,
+		"emptyDir": map[string]interface{}{"medium": "Memory", "sizeLimit": "16Mi"},
+	}
 }
 
 // spiffeVolumeTemplate is the SPIFFE Workload API socket, published by the SPIFFE CSI driver.

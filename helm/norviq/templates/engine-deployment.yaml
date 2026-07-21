@@ -106,7 +106,9 @@ spec:
             - "run"
             - "--server"
             - "--v0-compatible"
-            - "--addr=0.0.0.0:{{ .Values.opa.port }}"
+            # Bind LOOPBACK ONLY — see the identical note in api-deployment.yaml. OPA's unauthenticated
+            # read-WRITE admin API must never be reachable from another pod.
+            - "--addr=127.0.0.1:{{ .Values.opa.port }}"
             - "--log-level=error"
           ports:
             - containerPort: {{ .Values.opa.port }}

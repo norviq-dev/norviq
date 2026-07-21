@@ -113,7 +113,12 @@ spec:
             - "run"
             - "--server"
             - "--v0-compatible"
-            - "--addr=0.0.0.0:{{ .Values.opa.port }}"
+            # Bind LOOPBACK ONLY. OPA's admin API (/v1/policies) is unauthenticated by default and is
+            # read-WRITE: anything that can reach it can rewrite or delete the enforcement policy, i.e.
+            # disable the PDP. It is a same-pod sidecar and the app reaches it via NRVQ_OPA_URL
+            # (http://localhost:<port>), so 0.0.0.0 bought nothing and exposed the decision point to
+            # every pod on the cluster network. Do NOT change this back without adding OPA authn/authz.
+            - "--addr=127.0.0.1:{{ .Values.opa.port }}"
             - "--log-level=error"
           ports:
             - containerPort: {{ .Values.opa.port }}
