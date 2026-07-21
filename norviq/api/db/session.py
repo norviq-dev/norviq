@@ -156,20 +156,37 @@ async def create_tables() -> None:
             # Provision a ROLLING WINDOW of monthly audit partitions (current + look-ahead), not just
             # the current month — see PARTITION_LOOKAHEAD_MONTHS. Names/bounds are derived from the
             # clock here, never from user input.
+            # Each CREATE runs in its own SAVEPOINT. Postgres aborts the ENTIRE transaction on any failed
+            # statement, so a bare try/except here would poison every statement that follows (and the
+            # final COMMIT); begin_nested() rolls back just the failing statement and leaves the outer
+            # transaction usable.
             for part, start, end in _partition_months():
-                await conn.execute(
-                    text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
-                        f"CREATE TABLE IF NOT EXISTS {part} PARTITION OF audit_log "
-                        f"FOR VALUES FROM ('{start}') TO ('{end}')"
+                try:
+                    async with conn.begin_nested():
+                        await conn.execute(
+                            text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+                                f"CREATE TABLE IF NOT EXISTS {part} PARTITION OF audit_log "
+                                f"FOR VALUES FROM ('{start}') TO ('{end}')"
+                            )
+                        )
+                except Exception as exc:
+                    # The one way this legitimately fails: rows for `part` already landed in DEFAULT
+                    # (look-ahead lapsed), and Postgres refuses to split them out — "updated partition
+                    # constraint for default partition would be violated by some row". Startup must NOT
+                    # brick over it: writes keep landing in DEFAULT, so nothing is lost. Loud, not fatal —
+                    # the operator has to move those rows and re-create the partition.
+                    log.error(
+                        "nrvq.db.partition_create_failed", partition=part, start=start, end=end,
+                        error=str(exc), code="NRVQ-DB-9003",
                     )
-                )
             # Hard backstop: even if look-ahead maintenance ever lapses, a write past the last
             # provisioned month lands in DEFAULT instead of raising. Best-effort — a failure here must
             # not break startup, and it must not mask the loud failure of the monthly creates above.
             try:
-                await conn.execute(
-                    text("CREATE TABLE IF NOT EXISTS audit_log_default PARTITION OF audit_log DEFAULT")
-                )
+                async with conn.begin_nested():
+                    await conn.execute(
+                        text("CREATE TABLE IF NOT EXISTS audit_log_default PARTITION OF audit_log DEFAULT")
+                    )
             except Exception as exc:  # pragma: no cover - backstop only
                 log.warning("nrvq.db.default_partition_skipped", error=str(exc), code="NRVQ-DB-9002")
         log.info("nrvq.startup.create_tables.complete", code="NRVQ-DB-DEBUG-2D")

@@ -113,19 +113,9 @@ spec:
           ports:
             - containerPort: {{ .Values.opa.port }}
               name: opa
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: opa
-            periodSeconds: 30
-            failureThreshold: 5
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: opa
-            initialDelaySeconds: 3
-            periodSeconds: 10
-            failureThreshold: 3
+          # NO kubelet probes — see the identical note in api-deployment.yaml. A kubelet probe dials the
+          # POD IP, so it cannot reach a loopback-bound OPA and would pin this pod NotReady forever; the
+          # engine's own readiness asserts OPA health over localhost instead.
           resources:
             {{- toYaml .Values.opa.resources | nindent 12 }}
           securityContext:

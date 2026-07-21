@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 
 from norviq.engine.audit_emitter import AuditEmitter
 from norviq.engine.identity import SPIFFEResolver
@@ -69,8 +69,27 @@ def create_http_fallback(
         return {"status": "ok"}
 
     @app.get("/readyz")
-    async def ready() -> dict[str, str]:
-        """Readiness: the interceptor is wired and the sidecar can serve enforcement decisions."""
-        return {"status": "ready"}
+    async def ready(response: Response) -> dict[str, Any]:
+        """Readiness: the interceptor is wired AND the PDP is actually reachable.
+
+        This used to return a constant ``{"status": "ready"}`` — a readiness probe that can never fail,
+        which is the same silent-green trap that let a dead data plane look healthy for hours.
+
+        It is now load-bearing: the OPA sidecar binds loopback (its admin API is unauthenticated and
+        read-write, so it must not be reachable from another pod), and a kubelet probe dials the POD IP,
+        so the kubelet CANNOT health-check OPA directly. This endpoint is where that gating lives for
+        this component — reached over localhost, from inside the pod, by the actual consumer. A replica
+        that cannot reach its own PDP leaves the Service endpoints instead of advertising an enforcement
+        capability it does not have.
+        """
+        evaluator = getattr(interceptor, "_evaluator", None)
+        opa = getattr(evaluator, "opa", None)
+        # No OPA handle (subprocess/eval mode) => nothing to gate on; do not invent a failure.
+        opa_ok = True if opa is None else bool(await opa.health())
+        if not opa_ok:
+            response.status_code = 503
+            log.error("nrvq.sidecar.readyz.opa_unreachable", code="NRVQ-SDC-3013")
+            return {"status": "degraded", "opa": False}
+        return {"status": "ready", "opa": True}
 
     return app

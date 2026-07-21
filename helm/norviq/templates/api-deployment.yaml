@@ -123,19 +123,15 @@ spec:
           ports:
             - containerPort: {{ .Values.opa.port }}
               name: opa
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: opa
-            periodSeconds: 30
-            failureThreshold: 5
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: opa
-            initialDelaySeconds: 3
-            periodSeconds: 10
-            failureThreshold: 3
+          # NO kubelet probes on this container — deliberate, and load-bearing.
+          # A kubelet httpGet/tcpSocket probe dials the POD IP, never loopback, so any probe here would
+          # be refused the moment OPA binds 127.0.0.1 and would hold the whole pod NotReady forever.
+          # An exec probe is not an option either: openpolicyagent/opa:*-static is distroless (no shell).
+          # OPA's health is still gated, and more meaningfully: the api container's own /readyz calls
+          # evaluator.opa.health() over localhost and ANDs it into readiness (norviq/api/routers/health.py),
+          # so a dead OPA still takes this replica out of the Service endpoints — and it proves the real
+          # consumer can reach OPA, which a kubelet probe never did.
+          # Trade-off accepted: a wedged-but-listening OPA is not auto-restarted; it is drained instead.
           resources:
             {{- toYaml .Values.opa.resources | nindent 12 }}
           securityContext:
