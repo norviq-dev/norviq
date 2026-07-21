@@ -4,6 +4,38 @@
   "description": "Structural + enum validation for the norviq chart. Helm checks this on install/upgrade/template/lint and rejects bad input with a path + message before anything is applied. Intentionally permissive (additionalProperties allowed) so `--set` of any leaf keeps working; only the load-bearing types, enums and ranges are constrained — a typo in an enforcement-critical enum must fail loudly, not silently weaken policy.",
   "type": "object",
   "properties": {
+    "global": {
+      "type": "object",
+      "properties": {
+        "imageRegistry": { "type": "string", "description": "Mirror host prepended to third-party images (air-gapped)." }
+      }
+    },
+    "tests": {
+      "type": "object",
+      "properties": { "image": { "type": "string" } }
+    },
+    "otel": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "endpoint": { "type": "string" },
+        "metrics": {
+          "type": "object",
+          "properties": {
+            "scrapeAnnotations": { "type": "boolean" },
+            "serviceMonitor": {
+              "type": "object",
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "interval": { "type": "string" },
+                "scrapeTimeout": { "type": "string" },
+                "additionalLabels": { "type": "object" }
+              }
+            }
+          }
+        }
+      }
+    },
     "policyQuotaNamespaces": {
       "type": "array",
       "items": { "type": "string" },
@@ -148,7 +180,6 @@
     "redis": { "type": "object" },
     "postgresql": { "type": "object" },
     "opa": { "type": "object" },
-    "otel": { "type": "object" },
     "oidc": { "type": "object" },
     "rbac": { "type": "object" },
     "siem": { "type": "object" },

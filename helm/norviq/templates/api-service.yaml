@@ -5,7 +5,14 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     app: norviq-api
-    {{- include "norviq.labels" . | nindent 4 }}
+    {{- include "norviq.componentLabels" (dict "root" $ "component" "api") | nindent 4 }}
+  {{- if .Values.otel.metrics.scrapeAnnotations }}
+  annotations:
+    # Annotation-based Prometheus discovery of the /metrics endpoint (served on api.port).
+    prometheus.io/scrape: "true"
+    prometheus.io/port: {{ .Values.api.port | quote }}
+    prometheus.io/path: /metrics
+  {{- end }}
 spec:
   selector:
     app: norviq-api

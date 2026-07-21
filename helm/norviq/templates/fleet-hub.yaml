@@ -161,7 +161,7 @@ spec:
     spec:
       containers:
         - name: postgresql
-          image: "{{ .Values.images.postgresql.repository }}:{{ .Values.images.postgresql.tag }}"
+          image: "{{ include "norviq.thirdPartyImage" (dict "root" $ "image" (printf "%s:%s" .Values.images.postgresql.repository (.Values.images.postgresql.tag | toString))) }}"
           # Partial hardening only. These bundled single-node datastores are a dev convenience —
           # values-prod.yaml replaces them with the operator-managed HA variants (asserted by
           # test_prod_profile_drops_the_unhardened_bundled_datastores). runAsNonRoot / drop-ALL are
@@ -238,7 +238,7 @@ metadata:
     {{- include "norviq.labels" . | nindent 4 }}
 spec:
   instances: {{ .Values.fleet.hub.postgresql.ha.instances }}
-  imageName: "{{ .Values.images.postgresql.repository }}:{{ .Values.images.postgresql.tag }}"
+  imageName: "{{ include "norviq.thirdPartyImage" (dict "root" $ "image" (printf "%s:%s" .Values.images.postgresql.repository (.Values.images.postgresql.tag | toString))) }}"
   bootstrap:
     initdb:
       database: {{ .Values.fleet.hub.postgresql.database }}

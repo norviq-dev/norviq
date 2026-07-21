@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
         - name: redis
-          image: "{{ .Values.images.redis.repository }}:{{ .Values.images.redis.tag }}"
+          image: "{{ include "norviq.thirdPartyImage" (dict "root" $ "image" (printf "%s:%s" .Values.images.redis.repository (.Values.images.redis.tag | toString))) }}"
           # Partial hardening only. These bundled single-node datastores are a dev convenience —
           # values-prod.yaml replaces them with the operator-managed HA variants (asserted by
           # test_prod_profile_drops_the_unhardened_bundled_datastores). runAsNonRoot / drop-ALL are

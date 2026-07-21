@@ -1,0 +1,31 @@
+{{- /*
+Prometheus Operator ServiceMonitor for the norviq-api /metrics endpoint. Off by default; enable when
+you run kube-prometheus-stack (the monitoring.coreos.com CRDs must already exist). The Grafana
+dashboard shipped in templates/grafana-dashboard-configmap.yaml (auto-imported by the Grafana
+sidecar) reads the metrics this scrapes — together they close the "produce -> collect -> visualize"
+path that otherwise showed "No data".
+*/ -}}
+{{- if .Values.otel.metrics.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "norviq.fullname" . }}-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "norviq.componentLabels" (dict "root" $ "component" "api") | nindent 4 }}
+    {{- with .Values.otel.metrics.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      app: norviq-api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.otel.metrics.serviceMonitor.interval | default "30s" }}
+      scrapeTimeout: {{ .Values.otel.metrics.serviceMonitor.scrapeTimeout | default "10s" }}
+{{- end }}

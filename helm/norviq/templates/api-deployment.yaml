@@ -111,7 +111,7 @@ spec:
         # with `opa check --capabilities=<the same file>` (baked into the api/engine image) BEFORE it ever
         # reaches this server — see helm/norviq/files/opa-capabilities.json / scripts/gen-opa-capabilities.py.
         - name: opa
-          image: "{{ .Values.opa.image }}"
+          image: "{{ include "norviq.thirdPartyImage" (dict "root" $ "image" .Values.opa.image) }}"
           args:
             - "run"
             - "--server"
@@ -149,7 +149,7 @@ spec:
         # Auto-mTLS terminator: serves TLS (+optional client-cert mTLS) on :8443 and proxies to the app
         # on loopback. The app itself stays HTTP (probes/tests unaffected); nothing is plaintext on the wire.
         - name: tls-proxy
-          image: {{ .Values.config.internalTls.proxyImage | default "nginx:1.27-alpine" | quote }}
+          image: {{ include "norviq.thirdPartyImage" (dict "root" $ "image" (.Values.config.internalTls.proxyImage | default "nginx:1.27-alpine")) | quote }}
           command: ["nginx", "-c", "/etc/nginx/nginx.conf", "-g", "daemon off;"]
           ports:
             - containerPort: 8443
@@ -168,8 +168,7 @@ spec:
               subPath: nginx.conf
               readOnly: true
           resources:
-            requests: { cpu: 10m, memory: 24Mi }
-            limits: { memory: 64Mi }
+            {{- toYaml .Values.config.internalTls.proxyResources | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false
             runAsNonRoot: true

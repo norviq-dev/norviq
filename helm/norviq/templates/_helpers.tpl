@@ -59,6 +59,18 @@ and falls back to the readable tag, which is what you want while developing.
 {{- end -}}
 {{- end }}
 
+{{/*
+Third-party (upstream) image ref, with the optional global.imageRegistry mirror host prepended for
+air-gapped installs. Norviq's own images go through norviq.image (images.registry); this covers the
+images with no registry field of their own — opa, redis, postgres, the tls-proxy nginx, the
+cert-bootstrap job, the helm-test curl. Empty global => the upstream ref is unchanged.
+  Usage: {{ include "norviq.thirdPartyImage" (dict "root" $ "image" "redis:7-alpine") }}
+*/}}
+{{- define "norviq.thirdPartyImage" -}}
+{{- $g := .root.Values.global.imageRegistry | default "" -}}
+{{- if $g -}}{{ printf "%s/%s" (trimSuffix "/" $g) .image }}{{- else -}}{{ .image }}{{- end -}}
+{{- end }}
+
 {{/* imagePullSecrets block (empty when .Values.imagePullSecrets is []). Usage: indent under spec. */}}
 {{- define "norviq.imagePullSecrets" -}}
 {{- with .Values.imagePullSecrets }}

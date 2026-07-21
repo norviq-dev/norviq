@@ -16,7 +16,7 @@ spec:
     replicas: {{ .Values.redis.ha.replicas }}
   redis:
     replicas: {{ .Values.redis.ha.replicas }}
-    image: "{{ .Values.images.redis.repository }}:{{ .Values.images.redis.tag }}"
+    image: "{{ include "norviq.thirdPartyImage" (dict "root" $ "image" (printf "%s:%s" .Values.images.redis.repository (.Values.images.redis.tag | toString))) }}"
     customConfig:
       - "requirepass {{ .Values.redis.password }}"
       - "masterauth {{ .Values.redis.password }}"

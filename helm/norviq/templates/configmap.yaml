@@ -1,3 +1,11 @@
+{{- /* Fail LOUDLY at render time on an OIDC config that can't work, rather than shipping a console
+       that shows a broken "Sign in with SSO" and fails token validation at runtime. Mirrors the
+       chart's existing requireStrongSecret guards. */}}
+{{- if .Values.oidc.enabled }}
+{{- if not .Values.oidc.issuer }}{{ fail "oidc.enabled=true but oidc.issuer is empty — set your IdP issuer URL (--set oidc.issuer=https://<tenant>/)." }}{{- end }}
+{{- if not .Values.oidc.jwksUrl }}{{ fail "oidc.enabled=true but oidc.jwksUrl is empty — set your IdP JWKS endpoint (--set oidc.jwksUrl=...)." }}{{- end }}
+{{- if not .Values.oidc.audience }}{{ fail "oidc.enabled=true but oidc.audience is empty — set the API client/audience id (--set oidc.audience=...)." }}{{- end }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

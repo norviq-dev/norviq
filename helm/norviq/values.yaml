@@ -5,6 +5,15 @@
 # Per-tenant NrvqPolicy quota (ResourceQuota count/nrvqpolicies.norviq.io). OPT-IN: list the tenant
 # namespaces you want protected — each must already exist. Empty by default so a fresh install never
 # fails on a namespace that hasn't been created yet. Example: [prod-agents, analytics].
+# Global settings shared across the chart.
+global:
+  # Air-gapped / private-mirror host prepended to the THIRD-PARTY images (opa, redis, postgres, the
+  # internal-tls nginx proxy, the cert-bootstrap job, the helm-test curl). Empty = pull from their
+  # public upstreams. Norviq's own images use images.registry (below) instead. Example:
+  #   --set global.imageRegistry=myregistry.example.com
+  # then mirror e.g. openpolicyagent/opa, redis, postgres into that registry preserving the path.
+  imageRegistry: ""
+
 policyQuotaNamespaces: []
 
 # Mandatory-interception (defense-in-depth): Norviq's tool-call PEP is COOPERATIVE — the agent's
@@ -317,8 +326,27 @@ postgresql:
   storage: 5Gi
 
 otel:
+  # OTLP trace export to a collector (gRPC), gated by this flag.
   enabled: false
   endpoint: "http://otel-collector:4317"
+  # Prometheus metrics are ALWAYS served at /metrics on the norviq-api Service port (api.port),
+  # regardless of otel.enabled. The knobs below only control how your Prometheus DISCOVERS that
+  # endpoint — nothing here changes whether metrics are produced.
+  metrics:
+    # Annotation-based discovery: add prometheus.io/scrape + port + path to the norviq-api Service,
+    # for a Prometheus configured to scrape by pod/service annotations.
+    scrapeAnnotations: false
+    # Prometheus Operator (kube-prometheus-stack) ServiceMonitor. Requires the monitoring.coreos.com
+    # CRDs to be installed (they ship with the operator); enable only when you run it.
+    serviceMonitor:
+      enabled: false
+      interval: 30s
+      scrapeTimeout: 10s
+      # Extra labels so your Prometheus's serviceMonitorSelector picks this up
+      # (e.g. {release: kube-prometheus-stack}).
+      additionalLabels: {}
+  # Reserved: the /metrics endpoint is ASGI-mounted on api.port, NOT on a separate port. This value
+  # is passed through to the app but the scrape target is <norviq-api>:<api.port>/metrics.
   prometheusPort: 9090
 
 # Long-lived OPA policy engine, run as a sidecar in the api and engine pods (localhost:8181).
@@ -361,6 +389,10 @@ config:
   internalTls:
     enabled: true
     proxyImage: "nginx:1.27-alpine"
+    # Resources for the api tls-proxy sidecar (nginx terminating internal TLS on :8443).
+    proxyResources:
+      requests: { cpu: 10m, memory: 24Mi }
+      limits: { memory: 64Mi }
   logLevel: INFO
   enforcementMode: block
   noPolicyDecision: deny   # No-policy namespace -> deny in block mode ("allow" restores fail-open)

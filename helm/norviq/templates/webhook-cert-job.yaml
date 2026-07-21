@@ -116,7 +116,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: cert-bootstrap
-          image: {{ .Values.webhook.injection.certJobImage | quote }}
+          image: {{ include "norviq.thirdPartyImage" (dict "root" $ "image" .Values.webhook.injection.certJobImage) | quote }}
           # Bounded so a pre-install bootstrap hook cannot compete for CPU/memory with the
           # enforcement pods it runs ahead of. Root is still required here for the apk/openssl
           # bootstrap (narrowly exempted); being unbounded was not.

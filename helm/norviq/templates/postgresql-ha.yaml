@@ -12,7 +12,7 @@ metadata:
     {{- include "norviq.labels" . | nindent 4 }}
 spec:
   instances: {{ .Values.postgresql.ha.instances }}
-  imageName: "{{ .Values.images.postgresql.repository }}:{{ .Values.images.postgresql.tag }}"
+  imageName: "{{ include "norviq.thirdPartyImage" (dict "root" $ "image" (printf "%s:%s" .Values.images.postgresql.repository (.Values.images.postgresql.tag | toString))) }}"
   bootstrap:
     initdb:
       database: {{ .Values.postgresql.database }}

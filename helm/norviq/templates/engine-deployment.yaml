@@ -123,7 +123,7 @@ spec:
         # with `opa check --capabilities=<the same file>` (baked into the api/engine image) BEFORE it ever
         # reaches this server — see helm/norviq/files/opa-capabilities.json / scripts/gen-opa-capabilities.py.
         - name: opa
-          image: "{{ .Values.opa.image }}"
+          image: "{{ include "norviq.thirdPartyImage" (dict "root" $ "image" .Values.opa.image) }}"
           args:
             - "run"
             - "--server"

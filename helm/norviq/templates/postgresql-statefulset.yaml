@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
         - name: postgresql
-          image: "{{ .Values.images.postgresql.repository }}:{{ .Values.images.postgresql.tag }}"
+          image: "{{ include "norviq.thirdPartyImage" (dict "root" $ "image" (printf "%s:%s" .Values.images.postgresql.repository (.Values.images.postgresql.tag | toString))) }}"
           # Partial hardening only. This bundled single-node Postgres is a dev convenience —
           # values-prod.yaml replaces it with CloudNativePG (asserted by
           # test_prod_profile_drops_the_unhardened_bundled_datastores). runAsNonRoot / drop-ALL are
