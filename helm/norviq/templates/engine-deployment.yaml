@@ -33,12 +33,8 @@ spec:
       {{- end }}
       terminationGracePeriodSeconds: 30
       initContainers:
-        - name: wait-for-postgres
-          image: busybox:1.36
-          command: ['sh','-c','until nc -z norviq-postgresql 5432; do echo waiting for postgres; sleep 2; done']
-        - name: wait-for-redis
-          image: busybox:1.36
-          command: ['sh','-c','until nc -z norviq-redis 6379; do echo waiting for redis; sleep 2; done']
+        {{- include "norviq.waitFor" (dict "name" "wait-for-postgres" "host" "norviq-postgresql" "port" 5432) | nindent 8 }}
+        {{- include "norviq.waitFor" (dict "name" "wait-for-redis" "host" "norviq-redis" "port" 6379) | nindent 8 }}
       containers:
         - name: engine
           image: "{{ .Values.images.registry }}{{ .Values.images.engine.repository }}:{{ .Values.images.engine.tag }}"
@@ -58,6 +54,17 @@ spec:
           ports:
             - containerPort: {{ .Values.engine.port }}
               name: http
+          env:
+            # Run the EMBEDDED evaluator, not the default thin proxy.
+            # settings.sidecar_mode defaults to "proxy", which makes this workload forward every decision
+            # to the central API — but nothing ever gives this Deployment an NRVQ_API_TOKEN (only the
+            # webhook mints one, for the pods it injects), so the central API answered 401 and the
+            # RemoteEvaluator failed CLOSED on every call, including benign ones. That is an outage
+            # wearing enforcement's clothes: it looks like blocking, but no policy is consulted.
+            # This workload is built for embedded evaluation — it carries its own OPA sidecar and waits
+            # for Postgres AND Redis, none of which a thin proxy uses.
+            - name: NRVQ_SIDECAR_MODE
+              value: "embedded"
           envFrom:
             - secretRef:
                 name: norviq-secrets
@@ -81,7 +88,13 @@ spec:
             failureThreshold: 5
           readinessProbe:
             httpGet:
-              path: /healthz      # engine (sidecar) exposes /healthz only — no /readyz
+              # /readyz, NOT /healthz: /healthz is a liveness-shaped constant, while /readyz asserts the
+              # PDP is actually reachable over localhost (http_fallback.py). That gating is load-bearing
+              # here because the OPA sidecar binds loopback and therefore CANNOT be probed by the kubelet
+              # directly — this is the only place OPA health reaches readiness for this workload.
+              # Liveness deliberately stays on /healthz: an OPA outage should DRAIN this replica, not
+              # restart-loop the engine.
+              path: /readyz
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10

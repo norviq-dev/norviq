@@ -117,11 +117,23 @@ spec:
       containers:
         - name: cert-bootstrap
           image: {{ .Values.webhook.injection.certJobImage | quote }}
+          # Bounded so a pre-install bootstrap hook cannot compete for CPU/memory with the
+          # enforcement pods it runs ahead of. Root is still required here for the apk/openssl
+          # bootstrap (narrowly exempted); being unbounded was not.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false
             capabilities:
               drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           command: ["/bin/sh", "-c"]
           args:
             - |

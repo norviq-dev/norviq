@@ -21,6 +21,15 @@ spec:
       containers:
         - name: postgresql
           image: "{{ .Values.images.postgresql.repository }}:{{ .Values.images.postgresql.tag }}"
+          # Partial hardening only. This bundled single-node Postgres is a dev convenience —
+          # values-prod.yaml replaces it with CloudNativePG (asserted by
+          # test_prod_profile_drops_the_unhardened_bundled_datastores). runAsNonRoot / drop-ALL are
+          # deliberately NOT set: the official postgres entrypoint starts as root to chown the data dir
+          # and then drops privileges, so forcing them breaks startup. These two controls are free.
+          securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - containerPort: {{ .Values.postgresql.port }}
               name: postgres

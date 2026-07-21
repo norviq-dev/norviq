@@ -64,14 +64,22 @@ spec:
       {{- include "norviq.spread" (dict "app" "norviq-fleet-api" "ctx" $) | nindent 6 }}
       {{- end }}
       initContainers:
-        - name: wait-for-fleet-postgres
-          image: busybox:1.36
-          command: ['sh','-c','until nc -z fleet-postgresql 5432; do echo waiting for fleet-postgresql; sleep 2; done']
+        {{- include "norviq.waitFor" (dict "name" "wait-for-fleet-postgres" "host" "fleet-postgresql" "port" 5432) | nindent 8 }}
       containers:
         - name: fleet-api
           image: "{{ .Values.images.registry }}{{ .Values.images.api.repository }}:{{ .Values.images.api.tag }}"
           imagePullPolicy: {{ .Values.images.api.pullPolicy }}
           command: ["python", "-m", "uvicorn", "norviq.fleet.main:app", "--host", "0.0.0.0", "--port", "8080"]
+          # Same baseline profile as every other app container. The fleet hub shipped with NO
+          # securityContext at all; it is gated off today but is the multi-cluster surface intended to
+          # go public post-GA, so it must not be the one workload that skips the baseline.
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - containerPort: 8080
               name: http
@@ -150,6 +158,16 @@ spec:
       containers:
         - name: postgresql
           image: "{{ .Values.images.postgresql.repository }}:{{ .Values.images.postgresql.tag }}"
+          # Partial hardening only. These bundled single-node datastores are a dev convenience —
+          # values-prod.yaml replaces them with the operator-managed HA variants (asserted by
+          # test_prod_profile_drops_the_unhardened_bundled_datastores). runAsNonRoot / drop-ALL are
+          # deliberately NOT set: the official postgres/redis entrypoints start as root to chown the
+          # data dir and then drop privileges, so forcing them breaks startup. These two controls are
+          # free and do not.
+          securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
           ports:
             - containerPort: {{ .Values.fleet.hub.postgresql.port }}
               name: postgres

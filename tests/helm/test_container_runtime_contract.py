@@ -212,6 +212,16 @@ _ROOTFS_NO_SCRATCH_OK: dict[str, str] = {
     "norviq-webhook/wait-for-api": (
         "busybox `nc -z` poll loop; opens a TCP socket and nothing else. No temp files, no state."
     ),
+    # Every dependency wait-loop now renders from the shared norviq.waitFor helper, which applies the
+    # same hardened profile the webhook's wait-for-api pioneered. `nc -z` needs no writable path, so a
+    # read-only rootfs with no scratch mount is correct here rather than merely tolerated.
+    "norviq-api/wait-for-postgres": ("shared norviq.waitFor helper: busybox `nc -z`, writes nothing."),
+    "norviq-api/wait-for-redis": ("shared norviq.waitFor helper: busybox `nc -z`, writes nothing."),
+    "norviq-engine/wait-for-postgres": ("shared norviq.waitFor helper: busybox `nc -z`, writes nothing."),
+    "norviq-engine/wait-for-redis": ("shared norviq.waitFor helper: busybox `nc -z`, writes nothing."),
+    "norviq-fleet-api/wait-for-fleet-postgres": (
+        "shared norviq.waitFor helper: busybox `nc -z`, writes nothing."
+    ),
 }
 
 
@@ -425,14 +435,6 @@ _RESOURCE_EXEMPTIONS: dict[str, tuple[frozenset[str], str]] = {
     # --- KNOWN GAP: short-lived containers currently ship with no resources at all. -----------------
     # They are not long-running, but they DO count toward the pod's QoS class, so this list should
     # shrink rather than grow.
-    "norviq-api/wait-for-postgres": (frozenset(_REQUIRED_RESOURCES), "KNOWN GAP: busybox wait-loop init container ships unbounded"),
-    "norviq-api/wait-for-redis": (frozenset(_REQUIRED_RESOURCES), "KNOWN GAP: busybox wait-loop init container ships unbounded"),
-    "norviq-engine/wait-for-postgres": (frozenset(_REQUIRED_RESOURCES), "KNOWN GAP: busybox wait-loop init container ships unbounded"),
-    "norviq-engine/wait-for-redis": (frozenset(_REQUIRED_RESOURCES), "KNOWN GAP: busybox wait-loop init container ships unbounded"),
-    "norviq-webhook/wait-for-api": (frozenset(_REQUIRED_RESOURCES), "KNOWN GAP: busybox wait-loop init container ships unbounded"),
-    "norviq-fleet-api/wait-for-fleet-postgres": (frozenset(_REQUIRED_RESOURCES), "KNOWN GAP: busybox wait-loop init container ships unbounded"),
-    "norviq-internal-tls/tls-bootstrap": (frozenset(_REQUIRED_RESOURCES), "KNOWN GAP: pre-install hook Job ships unbounded"),
-    "norviq-webhook-cert/cert-bootstrap": (frozenset(_REQUIRED_RESOURCES), "KNOWN GAP: pre-install hook Job ships unbounded"),
 }
 
 
@@ -499,18 +501,11 @@ _SECURITY_EXEMPTIONS: dict[str, tuple[frozenset[str], str]] = {
     # --- KNOWN GAP: busybox wait-loop init containers on the app workloads. ------------------------
     # The webhook's own wait-for-api init container IS hardened, which is the shape the others should
     # copy; keeping these listed (rather than relaxing the rule) is what makes that visible.
-    "norviq-api/wait-for-postgres": (frozenset(_SECURITY_CONTROLS), "KNOWN GAP: no securityContext on the busybox wait-loop"),
-    "norviq-api/wait-for-redis": (frozenset(_SECURITY_CONTROLS), "KNOWN GAP: no securityContext on the busybox wait-loop"),
-    "norviq-engine/wait-for-postgres": (frozenset(_SECURITY_CONTROLS), "KNOWN GAP: no securityContext on the busybox wait-loop"),
-    "norviq-engine/wait-for-redis": (frozenset(_SECURITY_CONTROLS), "KNOWN GAP: no securityContext on the busybox wait-loop"),
-    # --- KNOWN GAP: the gated multi-cluster fleet hub (fleet.hub.enabled=false by default). ---------
-    "norviq-fleet-api/fleet-api": (
+    "fleet-postgresql/postgresql": (
         frozenset(_SECURITY_CONTROLS),
-        "KNOWN GAP: gated post-GA fleet hub ships with no securityContext; must be hardened before "
-        "fleet.hub is enabled by default",
+        "KNOWN GAP: bundled dev-convenience Postgres for the gated fleet hub; same shape (and same "
+        "prod-replacement argument) as norviq-postgresql above",
     ),
-    "norviq-fleet-api/wait-for-fleet-postgres": (frozenset(_SECURITY_CONTROLS), "KNOWN GAP: gated fleet hub, busybox wait-loop"),
-    "fleet-postgresql/postgresql": (frozenset(_SECURITY_CONTROLS), "KNOWN GAP: gated fleet hub, bundled dev Postgres"),
 }
 
 
