@@ -70,7 +70,7 @@ class SidecarProxy:
         # own (different) uid, so the app must be able to connect() to the shared unix socket. Make the
         # socket world-connectable (it lives on a pod-private emptyDir, not exposed outside the pod).
         try:
-            os.chmod(self._socket_path, 0o777)
+            os.chmod(self._socket_path, 0o777)  # nosec B103 - unix socket on a pod-private emptyDir; the app container runs as a different uid and MUST connect(), so the socket has to be world-connectable within the pod (not exposed outside it)
         except OSError as exc:  # pragma: no cover - non-fatal; log and continue
             log.warning("nrvq.sidecar.socket_chmod_failed", error=str(exc), code="NRVQ-SDC-3006")
         log.info("nrvq.sidecar.started", socket=self._socket_path, code="NRVQ-SDC-3000")

@@ -71,6 +71,13 @@ frameworks = [
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
+[tool.uv]
+# Security floor for a transitive dependency. werkzeug is pulled only by the optional
+# semantic-kernel framework extra (via openapi-core) — never by the shipped `.[spiffe]` runtime image.
+# 3.1.6 fixes CVE-2025-66221 / CVE-2026-21860 / CVE-2026-27199 (Windows safe_join device-name
+# path-traversal / DoS in send_from_directory); resolves to the latest 3.1.x (3.1.8). See SECURITY.md.
+constraint-dependencies = ["werkzeug>=3.1.6"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py311"

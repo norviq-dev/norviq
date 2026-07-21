@@ -66,7 +66,7 @@ class NorviqSettings(BaseSettings):
     sdk_circuit_reset_after_ms: int = 2000
     sdk_http_max_connections: int = 20
     sdk_http_max_keepalive_connections: int = 10
-    spiffe_socket: str = "/tmp/spiffe-mock.sock"
+    spiffe_socket: str = "/tmp/spiffe-mock.sock"  # nosec B108 - Settings default (dev/test mock path), overridden by NRVQ_SPIFFE_SOCKET in prod
     spiffe_cache_ttl_s: int = 300
     # Workload-identity resolution mode. "mock" = env-var identity (default;
     # local/tests/attack-suite). "workload-api" = real SPIFFE Workload API SVID, FAIL-CLOSED on
@@ -210,7 +210,7 @@ class NorviqSettings(BaseSettings):
     prometheus_port: int = 9090
     log_level: str = "INFO"
     log_format: str = "json"
-    socket_path: str = "/tmp/norviq-proxy.sock"
+    socket_path: str = "/tmp/norviq-proxy.sock"  # nosec B108 - Settings default; the sidecar's socket lives on a pod-private emptyDir, path overridable via NRVQ_SOCKET_PATH
     http_fallback_port: int = 8282
     api_port: int = 8080
     # Reject over-large request bodies (defense against the base64 fan-out DoS amplifier and

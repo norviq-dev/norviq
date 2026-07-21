@@ -77,7 +77,7 @@ def sanitize_key(key: str) -> str:
     so push/query/delete stay consistent).
     """
     cleaned = _SANITIZE_RE.sub("_", key).strip("_") or "default"
-    suffix = hashlib.sha1(key.encode("utf-8")).hexdigest()[:8]
+    suffix = hashlib.sha1(key.encode("utf-8"), usedforsecurity=False).hexdigest()[:8]  # non-crypto: a deterministic cache-id suffix, not a security digest
     return f"{cleaned}_{suffix}"
 
 

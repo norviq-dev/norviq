@@ -356,7 +356,7 @@ async def _governing_policies(session: AsyncSession, namespaces: list[str] | Non
         params["nss"] = namespaces
     try:
         rows = (await session.execute(
-            text(f"SELECT DISTINCT ON (namespace, agent_class) agent_class, rego_source FROM policies "
+            text(f"SELECT DISTINCT ON (namespace, agent_class) agent_class, rego_source FROM policies "  # nosec B608 - {where} is constant fragments only; namespaces bound via :nss param
                  f"WHERE {where} ORDER BY namespace, agent_class, version DESC"),
             params,
         )).mappings().all()
@@ -787,9 +787,9 @@ async def list_intent_drafts(
     if namespaces is not None:
         where = " WHERE namespace = ANY(:nslist)"
         params["nslist"] = namespaces
-    total = int((await session.execute(text(f"SELECT COUNT(*) FROM intent_drafts{where}"), params)).scalar() or 0)
+    total = int((await session.execute(text(f"SELECT COUNT(*) FROM intent_drafts{where}"), params)).scalar() or 0)  # nosec B608 - {where} is a constant fragment; namespaces bound via :nslist param
     rows = (await session.execute(
-        text("SELECT id, namespace, agent_class, affected_class, allow_tools, toggles, covered_count, total, "
+        text("SELECT id, namespace, agent_class, affected_class, allow_tools, toggles, covered_count, total, "  # nosec B608 - {where} is a constant fragment; namespaces/offset/limit all bound (:nslist/:off/:lim)
              "created_by, created_at, source_framework, source_control_id, source_control_name, expires_at "
              f"FROM intent_drafts{where} ORDER BY created_at DESC OFFSET :off LIMIT :lim"),
         {**params, "off": int(offset), "lim": page},
@@ -923,7 +923,7 @@ async def _verb_evidence(session: AsyncSession, namespaces: list[str] | None) ->
         params["nss"] = namespaces
     rows = (await session.execute(
         text(
-            "SELECT tool_name, payload->>'op' AS op, count(*) AS n FROM audit_log "
+            "SELECT tool_name, payload->>'op' AS op, count(*) AS n FROM audit_log "  # nosec B608 - ns_filter is a constant fragment; cutoff/namespaces bound via :cutoff/:nss params
             "WHERE timestamp_utc >= :cutoff AND payload->>'op_src' = 'params' "
             + ns_filter
             + "GROUP BY tool_name, payload->>'op'"

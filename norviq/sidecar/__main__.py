@@ -16,7 +16,7 @@ async def main() -> None:
     proxy = SidecarProxy()
     await proxy.start()
     app = create_http_fallback(proxy._interceptor, proxy._emitter, proxy._resolver)
-    config = uvicorn.Config(app, host="0.0.0.0", port=settings.http_fallback_port, log_level="error")
+    config = uvicorn.Config(app, host="0.0.0.0", port=settings.http_fallback_port, log_level="error")  # nosec B104 - HTTP fallback for the injected sidecar; binds within the pod's own network namespace (the app container reaches it on 127.0.0.1), never exposed as a Service
     server = uvicorn.Server(config)
 
     try:
