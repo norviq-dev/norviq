@@ -399,7 +399,7 @@ config:
 # Local username/password login — the PRIMARY no-IdP path. On a fresh install you sign in with
 # adminUsername/adminPassword and are FORCED to change the password on first login. The password is stored
 # hashed (bcrypt) in the API's DB; only the seed lives in norviq-secrets. Keep it strong for real installs —
-# with api.requireStrongSecret=true the API refuses to start while adminPassword is still the default "norviq".
+# with config.requireStrongSecret=true the API refuses to start while adminPassword is still the default "norviq".
 auth:
   enabled: true            # set false to disable local login (SSO/CLI-only)
   adminUsername: "admin"
