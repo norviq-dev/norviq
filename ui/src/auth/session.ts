@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// LOGIN-2: single place the session token lives. "Keep me signed in" picks the storage:
+// Single place the session token lives. "Keep me signed in" picks the storage:
 //   remember=true  -> localStorage   (survives the browser restart)
 //   remember=false -> sessionStorage (cleared when the tab/browser closes)
 // getToken() checks both so every consumer (fetch headers, WS urls, the App gate) works for either

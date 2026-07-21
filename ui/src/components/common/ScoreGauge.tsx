@@ -20,10 +20,10 @@ export const ScoreGauge = memo(function ScoreGauge({
   sub?: React.ReactNode;
 }) {
   const bounded = Math.max(0, Math.min(100, score));
-  // F-63: the caption is supplied by the caller (the gauge is honest about WHAT it measures); default coloring.
+  // The caption is supplied by the caller (the gauge is honest about WHAT it measures); default coloring.
   const color = bounded > 75 ? "#00e5a0" : bounded > 50 ? "#ffb020" : "#ff3b5c";
   const caption = sub ?? (bounded > 75 ? "Low Risk" : bounded > 50 ? "Medium Risk" : "High Risk");
-  // A4: a caller-supplied descriptive caption is NEUTRAL grey — the score's risk-band color (#ff3b5c at low
+  // A caller-supplied descriptive caption is NEUTRAL grey — the score's risk-band color (#ff3b5c at low
   // coverage) is reserved for real block/risk decisions and must not tint a "rules present" description. Only
   // the built-in risk labels (Low/Medium/High Risk, when no `sub` is given) keep the risk color.
   const captionColor = sub != null ? "var(--text-muted)" : color;
@@ -82,8 +82,8 @@ export const ScoreGauge = memo(function ScoreGauge({
           <div style={{ fontSize: 40, fontWeight: 700, letterSpacing: "-.02em", lineHeight: 1 }} data-testid="score-gauge-value">{bounded}{unit}</div>
         </div>
       </div>
-      {/* C1: the caption moved OUT of the in-arc overlay to sit BELOW the gauge — the long "rules present · N%
-          proven-blocking (last run)" no longer overlaps the arc/number. Marker + text + A4 neutral color kept. */}
+      {/* The caption sits BELOW the gauge, not in the in-arc overlay, so the long "rules present · N%
+          proven-blocking (last run)" doesn't overlap the arc/number. Marker + text + neutral color. */}
       <div style={{ textAlign: "center", fontSize: 13, color: captionColor, marginTop: 44 }} data-testid="score-gauge-caption">{caption}</div>
     </Panel>
   );

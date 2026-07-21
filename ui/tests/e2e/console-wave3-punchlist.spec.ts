@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// UI-AUDIT round 3 — Wave 3 (punch-list) E2E. Drives the REAL SPA on the live kind cluster and asserts the
-// visible EFFECT of each punch-list fix (P1–P5). P6/P7 are covered by vitest + the token test.
+// Punch-list E2E. Drives the REAL SPA on the live kind cluster and asserts the
+// visible EFFECT of each punch-list fix. The remaining items are covered by vitest + the token test.
 
 import { test, expect, waitForApp } from "./fixtures";
 import { type Page } from "@playwright/test";
@@ -21,14 +21,14 @@ async function seedDraft(page: Page) {
   return cls;
 }
 
-test.describe("UI-AUDIT r3 Wave-3 punch-list — EFFECT proofs on the live console", () => {
+test.describe("punch-list — EFFECT proofs on the live console", () => {
   test.beforeEach(async ({ page }) => {
     await page.goto("/");
     await waitForApp(page);
     await page.evaluate(() => localStorage.setItem("nrvq_show_synthetic", "0"));
   });
 
-  test("P1: an intent draft row opens its review (generated rego) on click", async ({ page }) => {
+  test("an intent draft row opens its review (generated rego) on click", async ({ page }) => {
     await seedDraft(page);
     await page.goto("/policies/catalog");
     await waitForApp(page);
@@ -40,7 +40,7 @@ test.describe("UI-AUDIT r3 Wave-3 punch-list — EFFECT proofs on the live conso
     await expect(page.getByTestId("intent-draft-rego").first()).toBeVisible(); // review (rego) opens
   });
 
-  test("P2: the selected attack-path row background is neutral grey, not indigo", async ({ page }) => {
+  test("the selected attack-path row background is neutral grey, not indigo", async ({ page }) => {
     await page.goto("/threats/graph");
     await waitForApp(page);
     // The selected PATH row is the only element with the purple selection accent (inset box-shadow #c084fc /
@@ -59,7 +59,7 @@ test.describe("UI-AUDIT r3 Wave-3 punch-list — EFFECT proofs on the live conso
     expect(Math.abs(r - g)).toBeLessThanOrEqual(4);
   });
 
-  test("P3: the Trust Distribution donut legend lists every category with counts (incl 0)", async ({ page }) => {
+  test("the Trust Distribution donut legend lists every category with counts (incl 0)", async ({ page }) => {
     await page.goto("/");
     await waitForApp(page);
     const legend = page.getByRole("list", { name: /Trust Distribution legend/i }).first();
@@ -70,14 +70,14 @@ test.describe("UI-AUDIT r3 Wave-3 punch-list — EFFECT proofs on the live conso
     }
   });
 
-  test("P4: the Overview has exactly one export control (Report ▾, no standalone Export)", async ({ page }) => {
+  test("the Overview has exactly one export control (Report ▾, no standalone Export)", async ({ page }) => {
     await page.goto("/");
     await waitForApp(page);
     await expect(page.getByText(/Report ▼/)).toBeVisible();
     await expect(page.getByRole("button", { name: /^Export$/ })).toHaveCount(0);
   });
 
-  test("P5: clicking an agent row opens the detail panel in view (freeze/trust actions)", async ({ page }) => {
+  test("clicking an agent row opens the detail panel in view (freeze/trust actions)", async ({ page }) => {
     await page.goto("/agents");
     await waitForApp(page);
     await page.locator("table tbody tr").first().click();

@@ -40,10 +40,8 @@ func TestReadyz(t *testing.T) {
 	}
 }
 
-// SIDE-3: the namespace opts in via the MutatingWebhookConfiguration namespaceSelector (not exercised
-// in this unit test), so a pod that reaches the handler with no opt-out label IS injected. Previously an
-// unlabeled pod was silently skipped even in a selected namespace, which made the documented
-// "label the namespace" workflow a no-op.
+// The namespace opts in via the MutatingWebhookConfiguration namespaceSelector (not exercised
+// in this unit test), so a pod that reaches the handler with no opt-out label IS injected.
 func TestMutateNoLabelStillInjects(t *testing.T) {
 	h := NewHandler(LoadConfig())
 	resp := sendReview(t, h, createReview(map[string]string{}, nil))
@@ -136,41 +134,93 @@ func TestMutate_NoAgentClassStillInjects(t *testing.T) {
 	}
 }
 
-// FIX 4: hasSidecar must identify the real sidecar by the injector-controlled IMAGE (or the
-// injectedAnnotation it stamps), never by the attacker-controllable container NAME. A pod already
-// carrying the REAL sidecar image is skipped (idempotency preserved).
+// Idempotency: a pod that is ALREADY FULLY injected (the norviq-socket volume + the real sidecar image
+// with no command override + every app container wired to the socket with the correct NRVQ_SOCKET_PATH) is
+// skipped. A sidecar container ALONE does not suffice — that hardened contract closes the bypass where a
+// bare sidecar-image container suppresses injection while the app runs unwired (see the bypass tests).
+func fullyInjectedContainer(name, image string) corev1.Container {
+	return corev1.Container{
+		Name:         name,
+		Image:        image,
+		VolumeMounts: []corev1.VolumeMount{{Name: "norviq-socket", MountPath: socketMountPath}},
+		Env:          []corev1.EnvVar{{Name: "NRVQ_SOCKET_PATH", Value: socketFilePath}},
+	}
+}
+
+// trustedSidecar is a sidecar container carrying the injector's real routing env (proxy mode pointed at
+// the configured engine), as the skip path now requires. extraMounts lets the drift test add the socket.
+func trustedSidecar(name, image string, cfg Config, mounts ...corev1.VolumeMount) corev1.Container {
+	return corev1.Container{
+		Name:         name,
+		Image:        image,
+		VolumeMounts: mounts,
+		Env: []corev1.EnvVar{
+			{Name: "NRVQ_SIDECAR_MODE", Value: "proxy"},
+			{Name: "NRVQ_API_URL", Value: cfg.ApiURL},
+		},
+	}
+}
+
 func TestMutateAlreadyInjected(t *testing.T) {
 	cfg := LoadConfig()
 	h := NewHandler(cfg)
 	pod := corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "test", Labels: map[string]string{"norviq": "enabled"}},
-		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}, {Name: "norviq-sidecar", Image: cfg.SidecarImage}}},
+		Spec: corev1.PodSpec{
+			Volumes:    []corev1.Volume{{Name: "norviq-socket"}},
+			Containers: []corev1.Container{fullyInjectedContainer("app", "nginx"), trustedSidecar("norviq-sidecar", cfg.SidecarImage, cfg)},
+		},
 	}
 	resp := sendReview(t, h, makeReviewFromPod(pod, metav1.GroupVersionKind{Kind: "Pod"}, "default"))
 	if !resp.Response.Allowed || resp.Response.Patch != nil {
-		t.Fatal("expected no patch for pod already carrying the real sidecar image")
+		t.Fatal("expected no patch for a pod already FULLY injected (volume + wired app + real sidecar)")
 	}
 }
 
-// A pod already stamped with injectedAnnotation is also treated as injected, even if the configured
-// sidecar image has since rotated (NrvqConfig image update) and no container image matches anymore.
-func TestMutateAlreadyInjectedByAnnotation(t *testing.T) {
+// SECURITY (self-stamp bypass): a tenant who self-stamps norviq.io/injected=true on a pod
+// that carries NO real sidecar structure must NOT be treated as injected — the annotation is attacker-
+// controllable on an unadmitted CREATE, and trusting it lets the pod run UNPOLICED. The real sidecar MUST
+// still be injected (patch present). FAIL-ON-BUG: fails on the pre-fix code (annotation → skip → no patch).
+func TestMutateSelfStampAnnotationDoesNotBypassInjection(t *testing.T) {
 	h := NewHandler(LoadConfig())
 	pod := corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        "test",
+			Name:        "attacker",
 			Labels:      map[string]string{"norviq": "enabled"},
-			Annotations: map[string]string{injectedAnnotation: "true"},
+			Annotations: map[string]string{injectedAnnotation: "true"}, // self-stamped, no real sidecar
 		},
-		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app"}, {Name: "norviq-sidecar", Image: "norviq/norviq-engine:some-old-sha"}}},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "busybox"}}},
 	}
 	resp := sendReview(t, h, makeReviewFromPod(pod, metav1.GroupVersionKind{Kind: "Pod"}, "default"))
-	if !resp.Response.Allowed || resp.Response.Patch != nil {
-		t.Fatal("expected no patch for pod already stamped with the injected annotation")
+	if !resp.Response.Allowed || resp.Response.Patch == nil {
+		t.Fatal("self-stamped norviq.io/injected annotation must be IGNORED and the real sidecar injected (patch expected) — else the pod runs unpoliced")
 	}
 }
 
-// H6-style decoy: an attacker-controlled container merely NAMED "norviq-sidecar" but running a
+// Idempotency after an NrvqConfig image rotation: an already-injected pod is recognized by the injector's
+// structural signature (the norviq enforcement-socket mount on its sidecar) even when the container image
+// no longer matches the current default — WITHOUT trusting the attacker-controllable annotation.
+func TestMutateAlreadyInjectedAfterImageDrift(t *testing.T) {
+	h := NewHandler(LoadConfig())
+	pod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test", Labels: map[string]string{"norviq": "enabled"}},
+		Spec: corev1.PodSpec{
+			Volumes: []corev1.Volume{{Name: "norviq-socket"}},
+			Containers: []corev1.Container{
+				fullyInjectedContainer("app", "nginx"),
+				// drifted image (old tag) but same name "norviq-engine" + socket mount + trusted routing → recognized.
+				trustedSidecar("norviq-sidecar", "norviq/norviq-engine:some-old-sha", h.cfg,
+					corev1.VolumeMount{Name: "norviq-socket", MountPath: socketMountPath}),
+			},
+		},
+	}
+	resp := sendReview(t, h, makeReviewFromPod(pod, metav1.GroupVersionKind{Kind: "Pod"}, "default"))
+	if !resp.Response.Allowed || resp.Response.Patch != nil {
+		t.Fatal("expected no patch for a fully-injected pod whose sidecar image drifted (same name + socket mount)")
+	}
+}
+
+// Decoy: an attacker-controlled container merely NAMED "norviq-sidecar" but running a
 // different image must NOT suppress injection of the real sidecar — otherwise the pod runs unpoliced.
 func TestMutateDecoySidecarNameStillInjectsRealSidecar(t *testing.T) {
 	h := NewHandler(LoadConfig())
@@ -197,7 +247,7 @@ func TestMutateDecoySidecarNameStillInjectsRealSidecar(t *testing.T) {
 
 func TestMutate_DisabledLabel(t *testing.T) {
 	h := NewHandler(LoadConfig())
-	// SIDE-3: opt out with the unified norviq-injection=disabled label (the default EnableLabel).
+	// Opt out with the unified norviq-injection=disabled label (the default EnableLabel).
 	labels := map[string]string{"norviq-injection": "disabled", "norviq.io/agent-class": "sales"}
 	resp := sendReview(t, h, createReview(labels, nil))
 	if !resp.Response.Allowed || resp.Response.Patch != nil {
@@ -211,6 +261,28 @@ func TestMutate_SkipAnnotation(t *testing.T) {
 	resp := sendReview(t, h, createReviewWithAnnotations(labels, map[string]string{"norviq.io/skip-injection": "true"}, nil, "default"))
 	if !resp.Response.Allowed || resp.Response.Patch != nil {
 		t.Fatal("expected allowed response without patch")
+	}
+}
+
+// When allowPodOptOut=false, the per-pod opt-out (skip-injection annotation / disabled label)
+// is IGNORED so a pod author cannot self-exempt from enforcement — the pod is injected anyway.
+func TestMutate_OptOutIgnoredWhenDisabled_Annotation(t *testing.T) {
+	t.Setenv("NRVQ_ALLOW_POD_OPT_OUT", "false")
+	h := NewHandler(LoadConfig())
+	labels := map[string]string{"norviq": "enabled", "norviq.io/agent-class": "sales"}
+	resp := sendReview(t, h, createReviewWithAnnotations(labels, map[string]string{"norviq.io/skip-injection": "true"}, nil, "default"))
+	if !resp.Response.Allowed || resp.Response.Patch == nil {
+		t.Fatal("with allowPodOptOut=false, skip-injection annotation must be ignored and the pod injected (patch expected)")
+	}
+}
+
+func TestMutate_OptOutIgnoredWhenDisabled_Label(t *testing.T) {
+	t.Setenv("NRVQ_ALLOW_POD_OPT_OUT", "false")
+	h := NewHandler(LoadConfig())
+	labels := map[string]string{"norviq-injection": "disabled", "norviq.io/agent-class": "sales"}
+	resp := sendReview(t, h, createReviewWithAnnotations(labels, nil, nil, "default"))
+	if !resp.Response.Allowed || resp.Response.Patch == nil {
+		t.Fatal("with allowPodOptOut=false, norviq-injection=disabled must be ignored and the pod injected (patch expected)")
 	}
 }
 

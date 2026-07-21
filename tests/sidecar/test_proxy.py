@@ -71,7 +71,7 @@ async def proxy(
     """Create and run sidecar proxy with isolated resources."""
     if not HAS_UNIX_SOCKETS:
         pytest.skip("Unix sockets are not supported on this platform")
-    # SIDE-2: settings.sidecar_mode now defaults to "proxy" (thin proxy to the central engine, no local
+    # settings.sidecar_mode defaults to "proxy" (thin proxy to the central engine, no local
     # Redis/OPA/emitter — see norviq/sidecar/proxy.py start()). This fixture exercises the full LOCAL
     # pipeline (its own RedisCache/emitter wiring below only applies in embedded mode), so pin it explicitly.
     monkeypatch.setattr(settings, "sidecar_mode", "embedded")
@@ -220,7 +220,7 @@ async def test_graceful_shutdown_closes_server(socket_path: str, monkeypatch: py
     """Proxy should stop cleanly and close socket listener."""
     if not HAS_UNIX_SOCKETS:
         pytest.skip("Unix sockets are not supported on this platform")
-    # SIDE-2: pin embedded mode explicitly — see the `proxy` fixture above for why.
+    # Pin embedded mode explicitly — see the `proxy` fixture above for why.
     monkeypatch.setattr(settings, "sidecar_mode", "embedded")
     cache = RedisCache(url=redis_url)
     monkeypatch.setattr("norviq.sidecar.proxy.RedisCache", lambda: cache)
@@ -324,3 +324,37 @@ async def test_http_fallback_malformed_json_fails_closed() -> None:
     assert response.status_code == 200
     assert response.json()["action"] == "drop"
     assert response.json()["error"] == "invalid_json_body"
+
+
+async def test_http_fallback_interceptor_error_fails_closed() -> None:
+    """An interceptor/validation exception must fail CLOSED (drop), never forward the tool call.
+
+    Regression: the intercept/validate path was unguarded, so any exception propagated instead of
+    dropping — a fail-OPEN bypass that let the tool call through unpoliced.
+    """
+
+    class RaisingInterceptor:
+        async def intercept(self, *_: object, **__: object) -> object:
+            raise RuntimeError("evaluator exploded")
+
+    class StubResolver:
+        async def resolve(self) -> object:
+            class _Identity:
+                trust_domain = "example.org"
+                namespace = "default"
+                service_account = "sa"
+
+            return _Identity()
+
+    class StubEmitter:
+        def emit(self, *_: object, **__: object) -> None:
+            return None
+
+    app = create_http_fallback(RaisingInterceptor(), StubEmitter(), StubResolver())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/v1/evaluate", json=_event_payload("hello"))
+    assert response.status_code == 200
+    body = response.json()
+    assert body["action"] == "drop"
+    assert body["error"] == "request_processing_failed"

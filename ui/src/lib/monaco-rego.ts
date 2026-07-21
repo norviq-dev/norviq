@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// F-55: register a real Rego language + Monarch tokenizer with Monaco. The policy editors set
+// Register a real Rego language + Monarch tokenizer with Monaco. The policy editors set
 // defaultLanguage="rego", but Rego is not a built-in Monaco language, so highlighting was plaintext.
 // This adds keywords, builtins, strings, comments, numbers and brackets so authored policy is readable.
 

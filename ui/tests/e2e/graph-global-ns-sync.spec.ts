@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// P2-3 GRAPH-GLOBAL-NS-SYNC — REAL form login, REAL controls. Proves both graphs FOLLOW the top-level
+// GRAPH-GLOBAL-NS-SYNC — REAL form login, REAL controls. Proves both graphs FOLLOW the top-level
 // (global) namespace selector, which is the surface the defect was filed against:
 //   * Asset Graph: pick a concrete ns in the GLOBAL header selector → the page's "Showing:" text, its
 //     in-panel Namespace dropdown, and the issued /asset-graph request all scope to that ns; switch to a
@@ -45,7 +45,7 @@ async function twoNamespaces(page: Page): Promise<string[]> {
   return (info.namespaces ?? []).filter((n) => n && n !== "all").slice(0, 2);
 }
 
-test("P2-3: the Asset Graph follows the GLOBAL namespace selector", async ({ page }) => {
+test("the Asset Graph follows the GLOBAL namespace selector", async ({ page }) => {
   await realLogin(page);
   await page.goto("/asset-graph");
   await expect(page.getByRole("button", { name: /^namespace$/i })).toBeVisible({ timeout: 20000 });
@@ -84,7 +84,7 @@ test("P2-3: the Asset Graph follows the GLOBAL namespace selector", async ({ pag
   await expect(page.getByText(/Showing:\s*All namespaces/)).toBeVisible({ timeout: 15000 });
 });
 
-test("P2-3: the Attack Graph follows the GLOBAL namespace selector", async ({ page }) => {
+test("the Attack Graph follows the GLOBAL namespace selector", async ({ page }) => {
   await realLogin(page);
   await page.goto("/threats/graph");
   await expect(page.getByTestId("attack-graph-canvas")).toBeVisible({ timeout: 20000 });
@@ -118,7 +118,7 @@ test("P2-3: the Attack Graph follows the GLOBAL namespace selector", async ({ pa
   await expect(page.getByText(/Showing:\s*All namespaces/)).toBeVisible({ timeout: 15000 });
 });
 
-test("P2-3: the Attack Graph's page-local Reset does not clobber the global namespace", async ({ page }) => {
+test("the Attack Graph's page-local Reset does not clobber the global namespace", async ({ page }) => {
   await realLogin(page);
   await page.goto("/threats/graph");
   await expect(page.getByTestId("attack-graph-canvas")).toBeVisible({ timeout: 20000 });

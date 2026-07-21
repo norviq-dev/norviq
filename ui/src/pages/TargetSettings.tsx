@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// F-58 / C2-2: "Namespace Governance" — the namespace-scoped governance KNOBS (enforcement mode, the F-51
-// apply-mode, and which sector packs are applied). The "effective policy" resolved-stack view was folded OUT into
+// "Namespace Governance" — the namespace-scoped governance KNOBS (enforcement mode, the
+// apply-mode, and which sector packs are applied). The "effective policy" resolved-stack view lives in
 // the Policy Catalog hierarchy (the one place that answers "how does this resolve") — a link is provided here with
-// the namespace preserved. No data was lost.
+// the namespace preserved.
 
 import {
   fetchMe,
@@ -32,23 +32,23 @@ export function TargetSettings() {
   // TGT-POSTURE-01: the enforcement axis (Block ⇄ Monitor). Wire value stays block|audit; "audit" is DISPLAYED
   // as "Monitor" so it doesn't collide with the `audit` decision or the Audit Log.
   const enforcementMode = settings.data?.enforcement_mode === "audit" ? "audit" : "block";
-  // B1-2: the toggles are namespace-scoped mutations — never let them target the phantom aggregate ("all").
+  // The toggles are namespace-scoped mutations — never let them target the phantom aggregate ("all").
   const { canMutate, blockedReason } = useMutationScope();
   const [savingMode, setSavingMode] = useState(false);
   const [modeMsg, setModeMsg] = useState<string | null>(null);
   const invalidatePostureCaches = () => {
-    // STALE-10: include `policy-settings:` — Policy Catalog reads apply_mode/enforcement under that key to
+    // Include `policy-settings:` — Policy Catalog reads apply_mode/enforcement under that key to
     // gate its Apply button; without it a freeze/mode-flip here left the catalog stale for up to 30s.
     for (const p of ["settings:", "tgt-settings:", "policy-settings:", "policy-packs:", "tgt-packs:", "effective:", "hier-posture:"]) invalidateApiCache(p);
   };
   const setApply = async (m: "enforce" | "dry_run_only") => {
-    if (!canMutate) { setModeMsg(blockedReason); return; }  // B1-2 belt-and-braces
+    if (!canMutate) { setModeMsg(blockedReason); return; }  // Belt-and-braces
     setSavingMode(true); setModeMsg(null);
     try {
       await saveSettings(namespace, { apply_mode: m });
-      invalidatePostureCaches();  // B1-1 + C2-5
+      invalidatePostureCaches();
       await settings.refetch();
-      refreshPosture();  // STALE-2: refresh the GLOBAL posture (header chip + catalog badge), not just this page
+      refreshPosture();  // Refresh the GLOBAL posture (header chip + catalog badge), not just this page
       setModeMsg(`Change control: ${m === "enforce" ? "Live" : "Frozen"}`);
     }
     catch (e) { setModeMsg(`Failed: ${(e instanceof Error ? e.message : String(e)).replace(/^Error:\s*/, "")}`); }
@@ -61,7 +61,7 @@ export function TargetSettings() {
       await saveSettings(namespace, { enforcement_mode: m });
       invalidatePostureCaches();
       await settings.refetch();
-      refreshPosture();  // STALE-2: the Monitor↔Block flip must update the global "MONITOR·not blocking" chip live
+      refreshPosture();  // The Monitor↔Block flip must update the global "MONITOR·not blocking" chip live
       setModeMsg(`Enforcement mode: ${m === "audit" ? "Monitor" : "Block"}`);
     }
     catch (e) { setModeMsg(`Failed: ${(e instanceof Error ? e.message : String(e)).replace(/^Error:\s*/, "")}`); }
@@ -69,7 +69,7 @@ export function TargetSettings() {
   };
 
   const enabledPacks = (packs.data ?? []).filter((p) => p.enabled);
-  // C2-4b: bind the subtitle/working-scope label to the ACTUAL working scope — never "Namespace: all" over data.
+  // Bind the subtitle/working-scope label to the ACTUAL working scope — never "Namespace: all" over data.
   const scopeLabel = namespace === "all" ? "All namespaces" : `Namespace: ${namespace}`;
   const concrete = namespace !== "all";
 
@@ -115,9 +115,9 @@ export function TargetSettings() {
               ))}
             </div>
             {modeMsg && <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4 }}>{modeMsg}</div>}
-            {/* B1-2: prompt for a concrete scope when an aggregate is selected. */}
+            {/* Prompt for a concrete scope when an aggregate is selected. */}
             {isAdmin && blockedReason && <div data-testid="apply-mode-scope-prompt" style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4 }}>{blockedReason}</div>}
-            {/* B1-3: make the frozen consequence explicit at the control that sets it. */}
+            {/* Make the frozen consequence explicit at the control that sets it. */}
             {isAdmin && !blockedReason && applyMode === "dry_run_only" && (
               <div data-testid="apply-mode-dryrun-note" title="Frozen freezes POLICY EDITS for this namespace; the live policy still enforces."
                 style={{ fontSize: 11, color: "var(--block, #ff5c7c)", marginTop: 4 }}>
@@ -128,7 +128,7 @@ export function TargetSettings() {
           </div>
           <div>
             <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>Sector packs applied</div>
-            {/* C2-3: explicit APPLIED/NONE state tied to the concrete namespace, updates after enable/disable. */}
+            {/* Explicit APPLIED/NONE state tied to the concrete namespace, updates after enable/disable. */}
             {!concrete ? (
               <div data-testid="packs-applied-state" style={{ marginTop: 4, fontSize: 13, color: "var(--text-muted)" }}>Select a namespace to see applied packs</div>
             ) : enabledPacks.length === 0 ? (
@@ -145,7 +145,7 @@ export function TargetSettings() {
             )}
           </div>
         </div>
-        {/* C2-2: the resolved-stack view lives in the Catalog hierarchy now — link with the namespace preserved. */}
+        {/* The resolved-stack view lives in the Catalog hierarchy — link with the namespace preserved. */}
         <div style={{ marginTop: 14 }}>
           <Link data-testid="see-how-resolves" to="/policies/catalog?tab=catalog"
             style={{ fontSize: 13, color: "var(--accent)", textDecoration: "none", fontWeight: 600 }}>

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// MUT-1: the editor buffer must reset to the LOADED policy's source on every file switch — even when
+// The editor buffer must reset to the LOADED policy's source on every file switch — even when
 // two policies have byte-identical rego (all seeded classes share one canonical policy). The old reset
 // effect keyed on `editorPolicy?.id` (always undefined — the list API returns no id) plus the raw rego
 // string, so switching between identical-source policies never re-fired: policy A's unsaved edits
@@ -68,7 +68,7 @@ function betaRowEl(): HTMLElement {
   return el!.closest("[role=row]") as HTMLElement;
 }
 
-describe("PolicyCatalog editor buffer isolation (MUT-1)", () => {
+describe("PolicyCatalog editor buffer isolation", () => {
   it("switching to an identical-source policy discards the prior edit (buffer is not contaminated)", async () => {
     seedTwoIdenticalPolicies();
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);

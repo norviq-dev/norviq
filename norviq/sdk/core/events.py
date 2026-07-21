@@ -19,7 +19,7 @@ class AgentIdentity(BaseModel):
     framework: str = ""
     pod_name: str = ""
     cluster_id: str = ""
-    # H3: the workload (Deployment) this agent runs as, so a WORKLOAD-tier policy (target deployment:<name>)
+    # The workload (Deployment) this agent runs as, so a WORKLOAD-tier policy (target deployment:<name>)
     # can match it. Optional — populated by the sidecar/SDK from the Deployment name; when empty, the
     # workload tier simply doesn't apply (we never guess a workload from the pod name).
     workload: str = ""

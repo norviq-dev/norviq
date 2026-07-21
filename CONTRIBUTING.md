@@ -22,7 +22,7 @@ Norviq is a small polyglot monorepo:
 | Enforcement engine + API | Python 3.12, FastAPI, OPA/Rego | `norviq/` |
 | Console UI | React 18 + Vite, TypeScript | `ui/` |
 | Admission webhook | Go | `webhook/` |
-| Deployment | Helm, Kubernetes CRDs | `helm/`, `crds/` |
+| Deployment | Helm, Kubernetes CRDs | `helm/` (chart + CRDs) |
 | Policies | Rego | `comprehensive.rego`, `policies/` |
 
 ## Development setup

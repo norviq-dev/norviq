@@ -8,24 +8,32 @@ RUN npm ci
 COPY ui/ .
 RUN npm run build
 
-FROM nginx:alpine
+# The unprivileged nginx image runs as uid 101 (non-root) and binds :8080, so the console
+# container no longer runs as root and the pod can drop ALL Linux caps (no NET_BIND_SERVICE needed).
+FROM nginxinc/nginx-unprivileged:1.27-alpine
+# apk upgrade + the file COPY/chown steps need root; we drop back to uid 101 (the image default) at the end.
+USER root
 # Patch fixable OS-package CVEs in the base at build time (e.g. curl/libcurl HIGHs) so the shipped
 # image isn't stale relative to the alpine security repo — keeps the fail-closed Trivy image gate green
-# without ignoring genuinely-fixable vulns.
-# NRVQ_GIT_SHA changes every commit, so this layer is NEVER served stale from the CI docker layer
-# cache (cache-to gha,mode=max): `apk upgrade` re-runs each build and pulls the latest patched
-# packages, instead of a cached pre-CVE layer (the cause of curl 8.19.0-r0 shipping after 8.20.0-r0
-# was published). This is the durable fix — future OS CVEs are picked up automatically.
+# without ignoring genuinely-fixable vulns. NRVQ_GIT_SHA changes every commit, so this layer is NEVER
+# served stale from the CI docker layer cache: `apk upgrade` re-runs each build.
 ARG NRVQ_GIT_SHA=dev
+# Carry the SHA as a runtime env + OCI revision label (broadcast by CI) so the UI image is
+# NO-STALE-checkable like api/engine/webhook.
+ENV NRVQ_BUILD_GIT_SHA=${NRVQ_GIT_SHA}
+LABEL org.opencontainers.image.revision=${NRVQ_GIT_SHA}
 RUN apk update && apk upgrade --no-cache && echo "os-patched @ ${NRVQ_GIT_SHA}"
 COPY --from=builder /build/dist /usr/share/nginx/html
 COPY ui/nginx.conf /etc/nginx/conf.d/default.conf
 COPY ui/docker-entrypoint.sh /docker-entrypoint.d/99-nrvq-config.sh
-RUN chmod +x /docker-entrypoint.d/99-nrvq-config.sh
-# Single-cluster default: an empty fleet-proxy include so nginx starts with no fleet-api dependency; the entrypoint
-# overwrites it with the real proxy block only when FLEET_API_URL is set (the hub).
-RUN touch /etc/nginx/fleet-proxy.conf
-
-EXPOSE 80
-# F-25: the entrypoint writes /config.js from FLEET_API_URL, then runs nginx.
+# The entrypoint writes config.js (html dir) + fleet-proxy.conf (/etc/nginx) at runtime as uid 101, so
+# those paths must be group-writable and owned by the nginx group. Single-cluster default: an empty
+# fleet-proxy include so nginx starts with no fleet-api dependency.
+RUN chmod +x /docker-entrypoint.d/99-nrvq-config.sh \
+    && touch /etc/nginx/fleet-proxy.conf \
+    && chown -R 101:0 /usr/share/nginx/html /etc/nginx/fleet-proxy.conf /etc/nginx/conf.d \
+    && chmod -R g+w /usr/share/nginx/html /etc/nginx/fleet-proxy.conf
+USER 101
+EXPOSE 8080
+# The entrypoint writes /config.js from FLEET_API_URL, then execs nginx.
 CMD ["/docker-entrypoint.d/99-nrvq-config.sh"]

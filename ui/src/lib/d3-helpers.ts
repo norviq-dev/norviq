@@ -16,9 +16,8 @@ export const NODE_RADIUS = {
   namespace: 16
 } as const;
 
-// Asset Graph redesign palette. Distinct 4-step risk gradient: slate → yellow → amber → red. High is
-// AMBER, clearly different from the red Critical (the previous #FF7A45 salmon read the same as Critical
-// at chip/dot size).
+// Asset Graph palette. Distinct 4-step risk gradient: slate → yellow → amber → red. High is
+// AMBER, clearly different from the red Critical.
 export const RISK_COLORS = {
   low: "#6e6e6e",
   medium: "#FFCC33",

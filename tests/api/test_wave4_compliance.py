@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Wave-4 (Part A: graph classifier) + Compliance (Part B: MITRE ATLAS) unit/integration tests.
+"""Wave-4 (graph classifier) + Compliance (MITRE ATLAS) unit/integration tests.
 
-A1: the synthetic classifier catches the leaked identities (evtrace/scorer/…) and never a real class.
-B0: the ATLAS mapping names are correct (verified against atlas.mitre.org) + every technique has a scope.
-B1: coverage math derives enforced/gap/out_of_scope + the enforced/(enforceable) headline; the evidence PDF is
-    valid; the GAP→generate endpoint validates (admin, enforceable, non-synthetic) before creating a draft.
+- The synthetic classifier catches the leaked identities (evtrace/scorer/…) and never a real class.
+- The ATLAS mapping names are correct (verified against atlas.mitre.org) + every technique has a scope.
+- Coverage math derives enforced/gap/out_of_scope + the enforced/(enforceable) headline; the evidence PDF is
+  valid; the GAP→generate endpoint validates (admin, enforceable, non-synthetic) before creating a draft.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from norviq.api.synthetic import is_synthetic_identity
 
 
 # --------------------------------------------------------------------------------------------------
-# A1 — synthetic classifier completeness
+# Synthetic classifier completeness
 # --------------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("cls", [
@@ -52,7 +52,7 @@ def test_classifier_parses_class_from_spiffe():
 
 
 # --------------------------------------------------------------------------------------------------
-# B0 — ATLAS mapping correctness (names verified against atlas.mitre.org / MISP ATLAS galaxy)
+# ATLAS mapping correctness (names verified against atlas.mitre.org / MISP ATLAS galaxy)
 # --------------------------------------------------------------------------------------------------
 
 # Ground-truth official ATLAS names for the IDs we map (source: atlas.mitre.org + MISP misp-galaxy).
@@ -103,16 +103,17 @@ def test_mapping_has_all_three_states():
 
 
 # --------------------------------------------------------------------------------------------------
-# B1 — coverage math + status derivation + evidence PDF + generate validation
+# Coverage math + status derivation + evidence PDF + generate validation
 # --------------------------------------------------------------------------------------------------
 
 def test_evidence_pdf_is_valid():
     from norviq.api.routers.mitre import _evidence_pdf
 
     pack = {
+        "framework": "MITRE ATLAS", "framework_id": "atlas",
         "namespace": None, "range": "24h", "generated_at": "2026-07-05T00:00:00+00:00",
         "coverage_pct": 70, "enforced": 7, "enforceable_total": 10, "gap": 3, "out_of_scope": 5,
-        "blocked_over_range": 1240,
+        "blocked_over_range": 1240, "synthetic_excluded": 0,
         "controls": [{"technique_id": "AML.T0051", "name": "LLM Prompt Injection", "status": "enforced",
                       "blocked": 842, "enforcing_policies": ["llm01_prompt_injection"]}],
     }
@@ -120,6 +121,32 @@ def test_evidence_pdf_is_valid():
     assert pdf.startswith(b"%PDF-1.4")
     assert pdf.rstrip().endswith(b"%%EOF")
     assert b"AML.T0051" in pdf
+    # P4(a): the title reflects the pack's framework, not a hardcoded ATLAS.
+    assert b"MITRE ATLAS Evidence Pack" in pdf
+    # P4(b): no exclusion line when nothing was excluded.
+    assert b"excluded" not in pdf
+
+
+def test_evidence_pdf_titles_owasp_and_states_exclusion():
+    """The OWASP export must be titled for OWASP (not mis-titled 'MITRE ATLAS'), and — matching the console's
+    'real traffic only' promise — the PDF must state how many synthetic/simulated events were excluded."""
+    from norviq.api.routers.mitre import _evidence_pdf
+
+    pack = {
+        "framework": "OWASP LLM Top 10 (2025)", "framework_id": "owasp",
+        "namespace": None, "range": "24h", "generated_at": "2026-07-05T00:00:00+00:00",
+        "coverage_pct": 60, "enforced": 6, "enforceable_total": 10, "gap": 4, "out_of_scope": 0,
+        "blocked_over_range": 12, "synthetic_excluded": 7,
+        "controls": [{"technique_id": "LLM01", "name": "Prompt Injection", "status": "enforced",
+                      "blocked": 12, "enforcing_policies": ["llm01_prompt_injection"]}],
+    }
+    pdf = _evidence_pdf(pack)
+    # the PDF content stream escapes '(' and ')', so match the paren-free segments of the title.
+    assert b"OWASP LLM Top 10" in pdf
+    assert b"Evidence Pack" in pdf
+    assert b"MITRE ATLAS" not in pdf
+    # · is U+00B7 → survives the latin-1 PDF encoding as a single byte 0xB7.
+    assert "Real traffic only · 7 synthetic/simulated events excluded".encode("latin-1") in pdf
 
 
 class _StubResult:
@@ -173,8 +200,11 @@ def test_coverage_scope_status_and_headline():
     # enforced (rule in the blob)
     assert by_id["AML.T0051"]["status"] == "enforced" and by_id["AML.T0051"]["scope"] == "enforceable"
     assert by_id["AML.T0057"]["status"] == "enforced"
+    # T0055 now maps llm02_data_leakage (secret-read block — the rule its description always named), so the
+    # blob covers it too; AML.T0049 (deny_sql_injection, not in the blob) is the gap example instead.
+    assert by_id["AML.T0055"]["status"] == "enforced"
     # gap (enforceable but no rule in the blob)
-    assert by_id["AML.T0055"]["status"] == "gap" and by_id["AML.T0055"]["scope"] == "enforceable"
+    assert by_id["AML.T0049"]["status"] == "gap" and by_id["AML.T0049"]["scope"] == "enforceable"
     # out-of-scope (never counted)
     assert by_id["AML.T0024"]["status"] == "out_of_scope" and by_id["AML.T0024"]["scope"] == "out_of_scope"
     # headline: enforced / enforceable, OOS not counted
@@ -188,7 +218,7 @@ def test_coverage_scope_status_and_headline():
 
 
 class _ActivityStubSession:
-    """Stub session that returns per-rule audit activity so the F1 per-framework blocked math can be exercised.
+    """Stub session that returns per-rule audit activity so the per-framework blocked math can be exercised.
     Distinguishes the two coverage queries by their SQL: the affected-class query selects `agent_class`."""
 
     def __init__(self, blocked_by_rule: dict[str, int], cls: str = "customer-support"):
@@ -197,7 +227,7 @@ class _ActivityStubSession:
 
     async def execute(self, stmt, *a, **k):
         sql = str(stmt)
-        # COMP-EVIDENCE: _activity_by_rule now also selects framework (to drop redteam/synthetic events),
+        # _activity_by_rule also selects framework (to drop redteam/synthetic events),
         # so distinguish the two queries by "framework" — only the activity query references it.
         if "framework" in sql:  # _activity_by_rule → (rule_id, decision, agent_class, framework, count)
             rows = [(rid, "block", self._cls, "", n) for rid, n in self._blocked.items()]
@@ -240,7 +270,7 @@ def _framework_rules(mapping: dict) -> set[str]:
 
 
 def test_f1_blocked_is_per_framework_distinct_rules_not_global():
-    """F1: each framework's headline `blocked` = sum over ITS distinct mapped rule_ids (deduped), NOT the global
+    """Each framework's headline `blocked` = sum over ITS distinct mapped rule_ids (deduped), NOT the global
     audit total. ATLAS and OWASP show different, correct numbers; a rule in neither framework never leaks in; a
     rule mapped to several techniques of one framework is counted once."""
     atlas = _mapping()
@@ -352,12 +382,12 @@ def test_atlas_still_works_and_unknown_framework_404():
 
 def test_generate_works_for_owasp_gap():
     client = _coverage_client("package norviq.strict")
-    # COMP-GEN-01: LLM01 is enforceable AND maps to a runtime rule (llm01_prompt_injection) → generate emits a
+    # LLM01 is enforceable AND maps to a runtime rule (llm01_prompt_injection) → generate emits a
     # control-specific draft. (LLM07 is enforceable but maps to NO runtime rule → escalate, see below.)
     ok = client.post("/api/v1/mitre/coverage/generate",
                      json={"technique_id": "LLM01:2025", "namespace": "default", "agent_class": "customer-support", "framework": "owasp"})
     assert ok.status_code == 200 and ok.json()["draft_id"].startswith("dmitre")
-    # COMP-GEN-01: a control with no runtime-expressible rule (empty mapping policies) ESCALATES — it is NOT
+    # a control with no runtime-expressible rule (empty mapping policies) ESCALATES — it is NOT
     # faked with a vacuous per-class deny-all.
     esc = client.post("/api/v1/mitre/coverage/generate",
                       json={"technique_id": "LLM07:2025", "namespace": "default", "agent_class": "customer-support", "framework": "owasp"})
@@ -369,7 +399,7 @@ def test_generate_works_for_owasp_gap():
 
 
 def test_f3_framework_neutral_routes_match_mitre_and_alias_holds():
-    """F3: /api/v1/compliance/{framework}/* returns the same data as /mitre?framework=…; /mitre stays ATLAS-default
+    """/api/v1/compliance/{framework}/* returns the same data as /mitre?framework=…; /mitre stays ATLAS-default
     (back-compat alias); an unknown framework in the path 404s."""
     rego = "package p\n llm01_prompt_injection deny_shell_execution llm02_data_leakage base64_decoded_threat"
     client = _coverage_client(rego)
@@ -402,7 +432,7 @@ def test_f3_framework_neutral_routes_match_mitre_and_alias_holds():
 
 
 def test_f2_generate_is_control_scoped_and_traceable():
-    """F2/COMP-GEN-01: a generated draft is TAGGED with its framework + control and SCOPED to the given real
+    """A generated draft is TAGGED with its framework + control and SCOPED to the given real
     class (LLM06 maps to real runtime rules → a control-specific draft)."""
     client = _coverage_client("package norviq.strict")
     r = client.post("/api/v1/mitre/coverage/generate",
@@ -416,12 +446,12 @@ def test_f2_generate_is_control_scoped_and_traceable():
     assert b["technique_id"] == "LLM06:2025"
     assert b["control_name"] == "Excessive Agency"              # traceable to the originating control
     assert b["draft_id"].startswith("dmitre")
-    # COMP-GEN-01: the draft carries the CONTROL's mapped rule_ids (traceability), not a generic toggle set.
+    # The draft carries the CONTROL's mapped rule_ids (traceability), not a generic toggle set.
     assert "llm06_excessive_agency" in b["mapped_rules"]
 
 
 def test_f2_no_real_class_creates_no_vacuous_default_draft():
-    """F2: when there is genuinely no real affected/active class (empty audit, no explicit class), the endpoint
+    """When there is genuinely no real affected/active class (empty audit, no explicit class), the endpoint
     refuses to emit a 'default' deny-all — it returns no_affected_classes and creates NOTHING."""
     client = _coverage_client("package norviq.strict")  # _StubSession → zero audit activity
     # LLM01 maps to a runtime rule, so generation reaches the class-resolution step (where, with no real
@@ -436,8 +466,8 @@ def test_f2_no_real_class_creates_no_vacuous_default_draft():
 
 
 def test_comp_gen_01_two_controls_yield_different_control_specific_rego():
-    """COMP-GEN-01 (the San-found bug): two DIFFERENT controls for the SAME class produce DIFFERENT,
-    control-specific rego — not the old byte-identical per-class deny-all. Proven at the generator level +
+    """Two DIFFERENT controls for the SAME class produce DIFFERENT,
+    control-specific rego — not a byte-identical per-class deny-all. Proven at the generator level +
     that each names its own control in a distinct remediation package."""
     from norviq.api.threat_intent import generate_remediation_rego
 
@@ -445,7 +475,7 @@ def test_comp_gen_01_two_controls_yield_different_control_specific_rego():
                                     ["deny_sql_injection", "base64_decoded_threat"])
     inj = generate_remediation_rego("owasp", "LLM01:2025", "Prompt Injection", "customer-support",
                                     ["llm01_prompt_injection"])
-    assert sql != inj, "two different controls must NOT produce byte-identical rego (the COMP-GEN-01 bug)"
+    assert sql != inj, "two different controls must NOT produce byte-identical rego"
     # Distinct per-control packages so drafts never collide, and the mapped rule appears in each.
     assert "package norviq.remediation.owasp.llm05_2025" in sql
     assert "package norviq.remediation.owasp.llm01_2025" in inj
@@ -453,8 +483,52 @@ def test_comp_gen_01_two_controls_yield_different_control_specific_rego():
     assert "llm01_prompt_injection" in inj and "llm01_prompt_injection" not in sql
 
 
+def test_comp_gen_02_overlay_accumulates_controls_never_overwrites():
+    """The per-class remediation overlay holds the UNION of EVERY applied
+    control. A full-replace of the single "<class>__remediation__" key would drop earlier controls —
+    flipping control B to 'enforced' while silently reverting control A to 'gap' (false coverage).
+    Proven at the parse/union/render level: a manifest round-trips, and merging a second control keeps the
+    first's rule (incl. an OWASP control id with a ':' — "LLM05:2025" — the manifest, not block-key parsing,
+    is the source of truth)."""
+    from norviq.api.threat_intent import (generate_remediation_rego, generate_remediation_overlay_rego,
+                                          parse_remediation_controls, union_remediation_controls)
+
+    draft_a = generate_remediation_rego("atlas", "AML.T0049", "Exploit Public-Facing Application", "data-analyst",
+                                        ["deny_sql_injection"])
+    draft_b = generate_remediation_rego("owasp", "LLM05:2025", "Improper Output Handling", "data-analyst",
+                                        ["llm01_prompt_injection"])
+    # each per-control draft carries a parseable manifest naming exactly its own control
+    ca, cb = parse_remediation_controls(draft_a), parse_remediation_controls(draft_b)
+    assert [c["control_id"] for c in ca] == ["AML.T0049"]
+    assert [c["control_id"] for c in cb] == ["LLM05:2025"]  # colon id survives the manifest round-trip
+
+    # apply A -> overlay {A}; then apply B ON TOP -> UNION {A, B}, not a replace
+    overlay_a = generate_remediation_overlay_rego("data-analyst", ca)
+    merged = union_remediation_controls(parse_remediation_controls(overlay_a), cb)
+    overlay_ab = generate_remediation_overlay_rego("data-analyst", merged)
+
+    assert {c["control_id"] for c in parse_remediation_controls(overlay_ab)} == {"AML.T0049", "LLM05:2025"}
+    assert "deny_sql_injection" in overlay_ab, "control A's rule must SURVIVE control B being applied"
+    assert "llm01_prompt_injection" in overlay_ab, "control B's rule must be present"
+    # re-applying an already-present control is idempotent (union keyed by (framework, control_id))
+    twice = union_remediation_controls(merged, ca)
+    assert len(twice) == 2, "re-applying a control must not duplicate it"
+
+
+def test_comp_gen_02_non_remediation_rego_is_left_untouched():
+    """Safety: the accumulate path only recognizes regos carrying the compliance-remediation
+    manifest. An arbitrary operator/guardrail rego parses to NO controls, so the apply path leaves it
+    byte-identical (never rewrites a manual __remediation__-suffixed load into an empty overlay)."""
+    from norviq.api.threat_intent import parse_remediation_controls
+
+    assert parse_remediation_controls("package norviq.strict\n\ndefault decision = \"allow\"\n") == []
+    assert parse_remediation_controls("") == []
+    # a corrupt manifest line degrades to 'unrecognized' rather than raising
+    assert parse_remediation_controls("# nrvq:remediation-manifest {not json") == []
+
+
 def test_comp_gen_01_no_runtime_rule_escalates_not_faked():
-    """COMP-GEN-01: a control whose mapping has NO runtime-expressible rule (empty policies) ESCALATES instead
+    """A control whose mapping has NO runtime-expressible rule (empty policies) ESCALATES instead
     of emitting a generic deny-all — via the real endpoint (LLM07 = System Prompt Leakage, policies=[])."""
     client = _coverage_client("package norviq.strict")
     r = client.post("/api/v1/mitre/coverage/generate",
@@ -463,11 +537,11 @@ def test_comp_gen_01_no_runtime_rule_escalates_not_faked():
     assert r.status_code == 200
     b = r.json()
     assert b["status"] == "escalate" and b["draft_id"] is None
-    assert "escalate" in b["message"].lower()
+    assert "bespoke" in b["message"].lower()  # message explains it needs a bespoke (non-auto-generatable) control
 
 
 def test_f4_dedup_key_is_framework_control_class():
-    """F4: re-generating the same control for the same class is idempotent (ONE draft id); two DIFFERENT controls
+    """Re-generating the same control for the same class is idempotent (ONE draft id); two DIFFERENT controls
     for the same class produce TWO distinct drafts."""
     client = _coverage_client("package norviq.strict")
 
@@ -485,7 +559,7 @@ def test_f4_dedup_key_is_framework_control_class():
 
 
 def test_comp_gen_01_batch_fans_out_over_techniques_and_reports_escalations():
-    """COMP-GEN-01 multi-select: generate-batch creates ONE control-specific draft per (technique × class),
+    """Multi-select: generate-batch creates ONE control-specific draft per (technique × class),
     reuses the dedup key, and reports a no-rule control as an ESCALATION (not a draft) rather than aborting."""
     client = _coverage_client("package norviq.strict")
     # class_mode = a specific real class so the stub session (no audit activity) still scopes deterministically.
@@ -506,7 +580,7 @@ def test_comp_gen_01_batch_fans_out_over_techniques_and_reports_escalations():
 
 
 def test_comp_gen_01_batch_all_mode_never_fabricates_a_default_draft():
-    """COMP-GEN-01 multi-select: class_mode="all" with no real affected/active class does NOT invent a vacuous
+    """Multi-select: class_mode="all" with no real affected/active class does NOT invent a vacuous
     'default' draft — each item honestly reports no_affected_classes, and nothing is created."""
     client = _coverage_client("package norviq.strict")  # _StubSession → no audit activity, no affected class
     r = client.post("/api/v1/mitre/coverage/generate-batch",
@@ -520,7 +594,7 @@ def test_comp_gen_01_batch_all_mode_never_fabricates_a_default_draft():
 
 class _MixedActivitySession:
     """Session returning a MIX of real + synthetic + red-team activity for one rule, so the evidence
-    exclusion (San decision b) can be proven: only real events count toward observed/blocked, and the
+    exclusion can be proven: only real events count toward observed/blocked, and the
     excluded total is reported."""
 
     def __init__(self, rule_id: str) -> None:
@@ -549,7 +623,7 @@ class _MixedActivitySession:
 
 
 def test_evidence_excludes_synthetic_and_redteam_events_and_reports_the_count():
-    """COMP-EVIDENCE (San decision b): an audit-evidence pack counts REAL traffic only. Synthetic/probe
+    """An audit-evidence pack counts REAL traffic only. Synthetic/probe
     identities and red-team framework events are excluded from observed/blocked, and the excluded count is
     surfaced so the pack can state the exclusion explicitly."""
     from norviq.api.db.session import get_session

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// D2 — the results table must stay BOUNDED at the view on a LARGE run. This drives a full-namespace suite
+// The results table must stay BOUNDED at the view on a LARGE run. This drives a full-namespace suite
 // (≥300 result rows) and asserts the SERVED DOM: the number of mounted <tr data-testid=redteam-attack-row>
 // is ≤ 50 regardless of run size, the pager reports multiple pages and advances, and the got-through filter
 // narrows the mounted rows. Playwright's locator .count() counts REAL DOM nodes, so this proves the mount is
@@ -20,7 +20,7 @@ async function apiJson(page: Page, path: string, method = "GET"): Promise<any> {
     return r.json();
   }, { path, method });
 }
-// POST /redteam/suite, retrying if the per-namespace D1 concurrent guard returns 409 (another run in flight).
+// POST /redteam/suite, retrying if the per-namespace concurrent guard returns 409 (another run in flight).
 async function postSuite(page: Page, query: string): Promise<any> {
   for (let i = 0; i < 20; i++) {
     const r = await apiJson(page, `/api/v1/redteam/suite?${query}`, "POST");
@@ -32,7 +32,7 @@ async function postSuite(page: Page, query: string): Promise<any> {
 
 // Serial: these tests mutate the shared results/latest for ns=default; they must not run concurrently.
 test.describe.configure({ mode: "serial" });
-test.describe("D2 — results table bounded at the VIEW on a large run (served DOM)", () => {
+test.describe("results table bounded at the VIEW on a large run (served DOM)", () => {
   test("≥300-result run mounts ≤50 <tr>, pager pages, filter filters", async ({ page }) => {
     test.setTimeout(180000);
     await page.goto("/redteam");

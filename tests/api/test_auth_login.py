@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""LOGIN-2: local username/password login + forced first-login change.
+"""Local username/password login + forced first-login change.
 
 Covers: successful login (short-TTL token + must_change/default-password signals), wrong-password and
 unknown-user both returning the SAME generic 401, rate-limit lockout (429 after N failures), the
@@ -12,6 +12,7 @@ current, weak/same/default new), the first-login force flag flipping, and the bo
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 
 import jwt
@@ -49,7 +50,7 @@ class _FakeSession:
 
 
 class _FakeCache:
-    """Windowed per-key counter (INCR/peek/reset) matching the RedisCache surface LOGIN-2 uses."""
+    """Windowed per-key counter (INCR/peek/reset) matching the RedisCache surface the login path uses."""
 
     def __init__(self) -> None:
         self.counts: dict[str, int] = {}
@@ -84,7 +85,11 @@ def _client(rows: list, cache: _FakeCache | None = None) -> TestClient:
 
 
 def _bearer(sub: str = "admin", role: str = "admin") -> dict:
-    token = jwt.encode({"sub": sub, "role": role}, settings.api_secret_key, algorithm="HS256")
+    token = jwt.encode(
+        {"sub": sub, "role": role, "exp": int(time.time()) + 3600},
+        settings.api_secret_key,
+        algorithm="HS256",
+    )
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -182,7 +187,7 @@ def test_change_password_success_sets_new_hash_and_clears_must_change() -> None:
     assert resp.status_code == 200 and resp.json() == {"changed": True, "must_change": False}
     assert row.must_change is False
     assert pw.verify_password("brand-new-passphrase", row.password_hash)  # new hash at rest
-    assert not pw.verify_password(_DEFAULT, row.password_hash)  # old password no longer works
+    assert not pw.verify_password(_DEFAULT, row.password_hash)  # old password is rejected
 
 
 def test_change_password_wrong_current_rejected() -> None:

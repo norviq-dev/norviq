@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""API endpoint tests for F017."""
+"""API endpoint tests."""
 
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import uuid4
@@ -27,7 +28,7 @@ def _override_session(client: "TestClient", session_obj: object) -> None:
 
     Do NOT monkeypatch get_session: `Depends(get_session)` captures the original at
     route-definition time, so monkeypatching the module attribute is a no-op AND masks
-    the P-15 async-generator bug (see docs/engineering/bug-patterns.md). Use
+    the async-generator bug (see docs/engineering/bug-patterns.md). Use
     dependency_overrides so the real session lifecycle is exercised.
     """
 
@@ -114,12 +115,12 @@ class FakeCache:
         return {f"policy:{key}": value for key, value in self.policy.items()}
 
     async def set_trust_override(self, spiffe_id: str, score: float) -> None:
-        """AGT-TRUST-02: durable admin trust cap — mirrors RedisCache.set_trust_override's
+        """Durable admin trust cap — mirrors RedisCache.set_trust_override's
         agent_trust_override:{spiffe} key via the generic set()/get()/delete() this fake already backs."""
         await self.set(f"agent_trust_override:{spiffe_id}", str(float(score)))
 
     async def clear_trust_override(self, spiffe_id: str) -> None:
-        """AGT-TRUST-02: remove the admin trust cap."""
+        """Remove the admin trust cap."""
         await self.delete(f"agent_trust_override:{spiffe_id}")
 
 
@@ -150,6 +151,18 @@ class FakeSession:
     async def execute(self, stmt):
         """Return canned scalar and grouped results."""
         sql = str(stmt)
+        # audit_stats' real-traffic-only aggregation groups by framework/agent_class/rule_id too and reads the
+        # rows positionally in Python — yield one grouped tuple PER seeded row (count 1 each) so the router does
+        # its own redteam/synthetic exclusion, exactly as it does against Postgres.
+        if "GROUP BY" in sql and "audit_log.framework" in sql:
+            return SimpleNamespace(all=lambda: [
+                (
+                    r.tool_name, r.decision, getattr(r, "agent_class", ""), getattr(r, "framework", ""),
+                    getattr(r, "rule_id", ""), 1, getattr(r, "latency_ms", 0.0),
+                    1 if getattr(r, "latency_ms", None) is not None else 0,
+                )
+                for r in self.rows
+            ])
         if "GROUP BY" in sql:
             return SimpleNamespace(all=lambda: [SimpleNamespace(tool_name="tool.alpha", count=2)])
         if "count(audit_log.id)" in sql and "decision" in sql:
@@ -164,7 +177,7 @@ class FakeSession:
         """Return scalar query results."""
         sql = str(stmt)
         if "avg(audit_log.latency_ms)" in sql:
-            # K2: real avg-latency KPI — return the seeded rows' own latency_ms (float), not a row object.
+            # Real avg-latency KPI — return the seeded rows' own latency_ms (float), not a row object.
             return self.rows[0].latency_ms if self.rows else None
         if "count(audit_log.id)" in sql and "decision" in sql:
             return 1
@@ -192,7 +205,7 @@ def _client() -> TestClient:
     # see norviq/api/routers/health.py) — these unit tests aren't exercising the warm-cache mechanic itself,
     # so start "warm" like a live pod would be, matching what /readyz assumes.
     app.state.loader._warmed = True
-    # H2/F-52: PolicyLoader.create()/delete() are DB-authoritative — they always hit Postgres via the
+    # PolicyLoader.create()/delete() are DB-authoritative — they always hit Postgres via the
     # loader's own lazily-created pooled engine (_db_engine()), independent of Depends(get_session).
     # starlette's TestClient dispatches each request through its own (short-lived) background-thread event
     # loop, so a QueuePool-cached connection from one request is dead by the next — a multi-request test
@@ -269,7 +282,7 @@ async def real_db() -> None:
 
 def _auth_headers(role: str = "admin", sub: str = "test-user", namespace: str | None = None) -> dict[str, str]:
     """Build valid auth header for protected endpoints."""
-    claims: dict[str, object] = {"sub": sub, "role": role}
+    claims: dict[str, object] = {"sub": sub, "role": role, "exp": int(time.time()) + 3600}
     if namespace is not None:
         claims["namespace"] = namespace
     token = jwt.encode(claims, settings.api_secret_key, algorithm="HS256")
@@ -277,7 +290,7 @@ def _auth_headers(role: str = "admin", sub: str = "test-user", namespace: str | 
 
 
 def test_me_returns_normalized_claims() -> None:
-    """A3: /api/v1/me returns the server's view of the caller (sub/role/namespace); unauth -> 401."""
+    """/api/v1/me returns the server's view of the caller (sub/role/namespace); unauth -> 401."""
     client = _client()
     try:
         resp = client.get("/api/v1/me", headers=_auth_headers(role="admin"))
@@ -327,14 +340,14 @@ def test_readyz_db_failure_returns_503(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_policy_write_accepts_service_role_rejects_viewer() -> None:
-    """C1: only the allowlisted control-plane controller (sub=norviq-webhook) writes cross-namespace; a
-    viewer is rejected, and a GENERIC service token (not on the allowlist, no ns claim) is now floored to
-    its namespace claim — it can no longer write an arbitrary namespace just by holding role=service."""
+    """Only the allowlisted control-plane controller (sub=norviq-webhook) writes cross-namespace; a
+    viewer is rejected, and a GENERIC service token (not on the allowlist, no ns claim) is floored to
+    its namespace claim — it cannot write an arbitrary namespace just by holding role=service."""
     client = _client()
     try:
         # viewer is rejected at the auth gate
         assert client.delete("/api/v1/policies/x/y", headers=_auth_headers(role="viewer")).status_code == 403
-        # a generic (non-controller) service token no longer gets blanket cross-ns write — floored → 403
+        # a generic (non-controller) service token does not get blanket cross-ns write — floored → 403
         assert client.delete("/api/v1/policies/x/y", headers=_auth_headers(role="service")).status_code == 403
         # the allowlisted webhook controller passes the write-scope gate (404 = not found, NOT 403)
         assert client.delete(
@@ -550,6 +563,35 @@ def test_audit_stats_with_range() -> None:
         client.close()
 
 
+def test_audit_stats_excludes_redteam_and_synthetic() -> None:
+    """RECONCILE: /audit/stats is REAL-traffic-only — a red-team (framework=='redteam') row and a synthetic/probe
+    identity (A1 is_synthetic_identity, e.g. class 'policy-tester') must NOT be counted, so the Overview KPIs +
+    top-tools reconcile with the Compliance/MITRE + RedTeam governance surfaces (which exclude the same rows).
+    Only the one real row is counted. Fails on the old pure-SQL COUNT() code, which counted all three."""
+    def _row(tool: str, cls: str, framework: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=uuid4(), event_id=uuid4(), tool_name=tool, decision="block",
+            agent_id=f"spiffe://example/ns/default/sa/{cls}", agent_class=cls, framework=framework,
+            namespace="default", rule_id="deny", reason="test", trust_score=0.5, latency_ms=12.3,
+            timestamp_utc=datetime.now(timezone.utc), payload={"ok": True},
+        )
+
+    rows = [
+        _row("tool.real", "customer-support", "sidecar"),   # real traffic → counted
+        _row("tool.rt", "customer-support", "redteam"),     # red-team efficacy tooling → excluded
+        _row("tool.syn", "policy-tester", "sidecar"),       # synthetic/probe identity → excluded
+    ]
+    client = _client()
+    _override_session(client, FakeSession(rows))
+    try:
+        stats = client.get("/api/v1/audit/stats", headers=_auth_headers()).json()
+        assert stats["total"] == 1, f"redteam/synthetic leaked into total: {stats}"
+        assert stats["blocked"] == 1
+        assert [t["tool_name"] for t in stats["top_tools"]] == ["tool.real"], stats["top_tools"]
+    finally:
+        client.close()
+
+
 def test_top_blocked() -> None:
     """Return top blocked tools."""
     row = SimpleNamespace(
@@ -610,7 +652,7 @@ def test_dry_run() -> None:
         tool_name="tool.alpha",
         decision="block",
         agent_id="spiffe://example/ns/default/sa/a",
-        agent_class="planner",  # M3: _replay_recent's synthetic-identity filter reads rec.agent_class
+        agent_class="planner",  # _replay_recent's synthetic-identity filter reads rec.agent_class
         namespace="default",
         rule_id="deny",
         reason="test",

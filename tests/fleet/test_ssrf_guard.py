@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""SSRF-01 (CRITICAL): the guard the hub/spoke must run before dialing ANY peer-reported URL
+"""The guard the hub/spoke must run before dialing ANY peer-reported URL
 (a spoke's self-reported `endpoint`, a join token's `hub_url`) — a spoke self-reports `endpoint`,
 the hub later dials it with a minted ADMIN bearer (drill-down), so an unguarded URL is SSRF + an
 admin-token-exfil chain. Every case here uses an IP literal (or `localhost`, which every platform
@@ -67,7 +67,7 @@ def test_unresolvable_host_is_rejected() -> None:
 
 
 def test_heartbeat_endpoint_rejects_non_http_scheme() -> None:
-    # SSRF-01: the write-time shape check on HeartbeatBody.endpoint mirrors console_url's pattern —
+    # The write-time shape check on HeartbeatBody.endpoint mirrors console_url's pattern —
     # blank (don't 422) anything not http(s). The full host-range reject (this module's job) runs at
     # DIAL TIME, not here — a pydantic validator must not do blocking DNS I/O on the request hot path.
     from norviq.fleet.schemas import HeartbeatBody

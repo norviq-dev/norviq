@@ -27,10 +27,10 @@ class AssetGraphResponse(BaseModel):
     # Namespaces represented in this response (multi-namespace union support; additive — [] for legacy
     # single-namespace responses with no data).
     namespaces: list[str] = []
-    # A1: number of synthetic/probe agents excluded from this response (drives the "N test/probe agents
+    # Number of synthetic/probe agents excluded from this response (drives the "N test/probe agents
     # hidden — Show" chip). 0 when none were hidden or when include_synthetic=true.
     synthetic_hidden: int = 0
-    # A2: number of real-but-awaiting (registered, never observed) agents excluded by default (drives the
+    # Number of real-but-awaiting (registered, never observed) agents excluded by default (drives the
     # "Awaiting (N) — Show" chip). 0 when none or when include_awaiting=true.
     awaiting_hidden: int = 0
 

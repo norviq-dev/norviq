@@ -26,7 +26,7 @@ def test_mint_verify_roundtrip() -> None:
 def test_tampered_payload_rejected() -> None:
     token, _ = mint_join_token(**_KW)
     body, sig = token.split(".", 1)
-    # flip a character in the signed body -> signature no longer matches
+    # flip a character in the signed body -> signature does not match
     bad = (body[:-1] + ("A" if body[-1] != "A" else "B")) + "." + sig
     with pytest.raises(ValueError, match="signature"):
         verify_join_token(bad, _SECRET)

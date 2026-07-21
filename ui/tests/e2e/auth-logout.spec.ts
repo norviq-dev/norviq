@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// AUTH-01 (P1 security) regression — REAL form login, REAL logout control. Proves the layered effect,
+// Security regression — REAL form login, REAL logout control. Proves the layered effect,
 // not a 200: clicking Logout (1) returns the user to the login screen, (2) revokes the token
 // SERVER-SIDE (the captured pre-logout token gets 401 on /api/v1/me via a page-independent request),
 // and (3) the browser back-button cannot restore an authenticated view.
@@ -48,7 +48,7 @@ test("logout returns to the login screen and the token is rejected server-side",
   await expect(loginForm(page)).toBeVisible({ timeout: 15000 });
   expect(await storedToken(page)).toEqual("");
 
-  // (2) THE defect: the same token must now be dead server-side (was 200 pre-fix).
+  // (2) THE defect: the same token must be dead server-side.
   await expect
     .poll(
       async () =>

@@ -47,6 +47,20 @@ spec:
         - name: api
           image: "{{ .Values.images.registry }}{{ .Values.images.api.repository }}:{{ .Values.images.api.tag }}"
           imagePullPolicy: {{ .Values.images.api.pullPolicy }}
+          {{- /* Hardened securityContext on the PRIMARY container (set inline rather than relying
+                 on an external PSA/Kyverno mutation that need not exist). The api image runs as USER norviq
+                 (non-root). readOnlyRootFilesystem is intentionally NOT forced on the Python app container
+                 (it writes tmp at runtime); the CIS-critical controls (non-root, no priv-esc, drop ALL caps,
+                 seccomp RuntimeDefault) are applied. */}}
+          {{- if .Values.securityContext.enabled }}
+          securityContext:
+            runAsNonRoot: {{ .Values.securityContext.runAsNonRoot }}
+            allowPrivilegeEscalation: {{ .Values.securityContext.allowPrivilegeEscalation }}
+            capabilities:
+              {{- toYaml .Values.securityContext.capabilities | nindent 14 }}
+            seccompProfile:
+              {{- toYaml .Values.securityContext.seccompProfile | nindent 14 }}
+          {{- end }}
           {{- include "norviq.preStop" . | nindent 10 }}
           ports:
             - containerPort: {{ .Values.api.port }}
@@ -87,7 +101,7 @@ spec:
           {{- end }}
 {{- if .Values.opa.enabled }}
         # Long-lived OPA policy engine (per-replica sidecar). The API queries it at localhost:8181.
-        # NOTE (Wave 1 engine lockdown): `opa run --server` has NO `--capabilities` flag (only `opa
+        # NOTE (engine lockdown): `opa run --server` has NO `--capabilities` flag (only `opa
         # build`/`opa check`/`opa eval` accept one — verified against the pinned opa.image version above), so
         # a locked-down builtin set cannot be handed to this long-lived server directly. The real control is
         # norviq/engine/opa_client.py::_check_capabilities, which independently re-compiles every pushed rego

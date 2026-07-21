@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// CAP-1 (source capability model): what verbs a data SOURCE exposes, classified server-side against
+// Source capability model: what verbs a data SOURCE exposes, classified server-side against
 // the join of grants / observed traffic / policy coverage. See norviq/engine/capability.
 export type CapabilityVerb = "read" | "write" | "delete" | "send" | "unknown";
 export type CapabilityStatus = "undefended" | "dormant_grant" | "defended" | "latent" | "not_exposed";
@@ -15,7 +15,7 @@ export interface CapabilityFinding {
   observed: boolean;
   defended: boolean;
   recommendation: string;
-  // CAP→POLICY: the agent-classes exercising this verb — the targets a one-click "Defend" policy applies to.
+  // The agent-classes exercising this verb — the targets a one-click "Defend" policy applies to.
   agent_classes?: string[];
 }
 
@@ -45,7 +45,7 @@ export interface AssetNode {
     // plus one sub-node per class. spiffe_id carries the shared identity; agent_classes lists all classes.
     is_identity?: boolean;
     agent_classes?: string[];
-    // CAP-1: present on DATA nodes whose source type is in the registry (ES/Postgres wave 1).
+    // Present on DATA nodes whose source type is in the registry (ES/Postgres wave 1).
     capability?: SourceCapability;
   };
 }
@@ -58,7 +58,7 @@ export interface AssetEdge {
   properties: {
     last_call?: string;
     decision_history?: { allow: number; block: number; escalate: number; would_block?: number };
-    // CAP-1: the resolved operation of an accesses-edge (tool → data), from the capability registry.
+    // The resolved operation of an accesses-edge (tool → data), from the capability registry.
     verb?: CapabilityVerb;
   };
 }
@@ -68,8 +68,8 @@ export interface AssetGraphResponse {
   edges: AssetEdge[];
   // Namespaces represented in the response (multi-namespace union); may be absent on older servers.
   namespaces?: string[];
-  // A1: count of synthetic/probe agents hidden from this response (drives the "N test/probe hidden — Show" chip).
+  // Count of synthetic/probe agents hidden from this response (drives the "N test/probe hidden — Show" chip).
   synthetic_hidden?: number;
-  // A2: count of real-but-awaiting agents hidden by default (drives the "Awaiting (N) — Show" chip).
+  // Count of real-but-awaiting agents hidden by default (drives the "Awaiting (N) — Show" chip).
   awaiting_hidden?: number;
 }

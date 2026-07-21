@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// View-model derivation (design_handoff_assetgraph mapping table): grouping by agent chains,
+// View-model derivation (mapping table): grouping by agent chains,
 // verdict buckets from decision_history, awaiting derivation, risk mapping (sensitivity for data),
 // belongs_to structural handling, and computeSets (filters, blocked-only, focus, reach BFS).
 import { describe, expect, it } from "vitest";

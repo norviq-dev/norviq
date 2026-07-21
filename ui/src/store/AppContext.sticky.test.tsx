@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// C2-4a: the selected namespace is STICKY — persisted to localStorage so it survives navigation / remount instead
+// The selected namespace is STICKY — persisted to localStorage so it survives navigation / remount instead
 // of resetting to the aggregate "All namespaces".
 import { render, screen, act } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -26,7 +26,7 @@ function Probe() {
   );
 }
 
-// P1-2: AppProvider now syncs ?ns= with the router, so it needs a Router in tests too.
+// AppProvider now syncs ?ns= with the router, so it needs a Router in tests too.
 function mount() {
   return render(
     <MemoryRouter>
@@ -40,7 +40,7 @@ function mount() {
 beforeEach(() => localStorage.clear());
 afterEach(() => localStorage.clear());
 
-describe("AppContext sticky namespace (C2-4a)", () => {
+describe("AppContext sticky namespace", () => {
   it("defaults to the aggregate 'all' when nothing is stored (no silent auto-default)", () => {
     mount();
     expect(screen.getByTestId("ns")).toHaveTextContent("all");

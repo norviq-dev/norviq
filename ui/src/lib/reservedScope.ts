@@ -6,7 +6,7 @@
 // per-namespace baseline (`__baseline__`), the pack overlays (`__pack__` / `__pack_override__` / `__pack_weaken__`)
 // and operator guardrails (`__guardrail__`) — every managed agent-class is prefixed `__`. The `__cluster__`
 // namespace is the cluster-wide baseline and is likewise reserved. This mirrors the server-side DELETE guard
-// (B-3, norviq/api/routers/policies.py `_RESERVED_DELETE_CLASSES` / `_RESERVED_NAMESPACES`).
+// (norviq/api/routers/policies.py `_RESERVED_DELETE_CLASSES` / `_RESERVED_NAMESPACES`).
 
 /** True when the given policy scope is a reserved/managed one that must not be deleted or authored via the
  * generic policy UI. Any agent-class starting with `__`, or the reserved `__cluster__` namespace, is reserved. */
@@ -15,7 +15,7 @@ export function isReservedScope(agentClass?: string | null, namespace?: string |
   return !!agentClass && agentClass.startsWith("__");
 }
 
-// COMP-GEN-01: a per-class compliance remediation overlay lands at the compound key "<real_class>__remediation__"
+// A per-class compliance remediation overlay lands at the compound key "<real_class>__remediation__"
 // (norviq/engine/evaluator.py `_collect_candidates`/`_is_overlay`) — NOT a `__`-prefixed name, so it is
 // intentionally NOT caught by `isReservedScope` above: it follows the `__guardrail__` precedent and stays
 // directly authorable/deletable via the generic policy UI (server-side revert still requires confirm_managed).

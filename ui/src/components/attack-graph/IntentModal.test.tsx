@@ -1,3 +1,4 @@
+// Tests for the IntentModal allowlist builder — drafting an intent/allowlist policy from an attack path.
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
@@ -175,7 +176,7 @@ describe("IntentModal — allowlist builder", () => {
     await waitFor(() => expect(screen.queryByTestId("egress-conflict-warning")).not.toBeInTheDocument());
   });
 
-  it("FIX-2: does NOT warn on a registry-classified send tool (not EGRESS_TOOLS-tagged) — the backend's " +
+  it("does NOT warn on a registry-classified send tool (not EGRESS_TOOLS-tagged) — the backend's " +
     "is_egress never blocks it, so it resolves to ALLOW and the warning would be a false positive", async () => {
     server.use(
       http.get("/api/v1/threats/intent-suggest", () => HttpResponse.json({
@@ -195,7 +196,7 @@ describe("IntentModal — allowlist builder", () => {
     expect(screen.queryByTestId("egress-conflict-warning")).not.toBeInTheDocument();
   });
 
-  it("FIX-2: still warns on an admin-PROMOTED (learned) send tool that isn't EGRESS_TOOLS-tagged — the backend " +
+  it("still warns on an admin-PROMOTED (learned) send tool that isn't EGRESS_TOOLS-tagged — the backend " +
     "blocks it via is_learned_mutating/learned_egress regardless of name", async () => {
     server.use(
       http.get("/api/v1/threats/intent-suggest", () => HttpResponse.json({

@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// F-69 Stage 1 — the api client itself refuses a cluster-scoped mutation while a remote cluster is active, BEFORE
+// The api client itself refuses a cluster-scoped mutation while a remote cluster is active, BEFORE
 // any network call (the hard backstop behind the per-page deep-link gate).
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { apiSend } from "./client";
 import { setRemoteClusterContext, setSelectedClusterId } from "./clusterGuard";
 
-describe("apiSend remote-cluster backstop (F-69 Stage 1)", () => {
+describe("apiSend remote-cluster backstop", () => {
   beforeEach(() => {
     setRemoteClusterContext(false);
     setSelectedClusterId("");
@@ -35,7 +35,7 @@ describe("apiSend remote-cluster backstop (F-69 Stage 1)", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("R2: sends X-Nrvq-Target-Cluster with the selected cluster on a mutation", async () => {
+  it("sends X-Nrvq-Target-Cluster with the selected cluster on a mutation", async () => {
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
@@ -46,7 +46,7 @@ describe("apiSend remote-cluster backstop (F-69 Stage 1)", () => {
     expect(headers["X-Nrvq-Target-Cluster"]).toBe("fleet-a");
   });
 
-  it("R2: omits the header when no concrete cluster is selected (local intent)", async () => {
+  it("omits the header when no concrete cluster is selected (local intent)", async () => {
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));

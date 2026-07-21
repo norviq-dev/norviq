@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// MASTER (Wave 4 + Compliance) E2E. Drives the REAL SPA + API on the live kind cluster and asserts the EFFECT.
+// Compliance E2E. Drives the REAL SPA + API on the live kind cluster and asserts the EFFECT.
 // Part A: the graph excludes the newly-classified synthetics + awaiting agents by default (toggles reveal them),
 // and the Attack Graph load fires no 4xx. Part B: the Compliance page renders EVERY value from the API — the
 // no-mock guard asserts the displayed coverage % equals a DIRECT /mitre/coverage call.
@@ -24,14 +24,14 @@ async function apiPost(page: Page, path: string, payload: unknown) {
   }, { path, payload });
 }
 
-test.describe("MASTER Wave-4 + Compliance — EFFECT proofs on the live console", () => {
+test.describe("Compliance — EFFECT proofs on the live console", () => {
   test.beforeEach(async ({ page }) => {
     await page.goto("/");
     await waitForApp(page);
     await page.evaluate(() => { localStorage.setItem("nrvq_show_synthetic", "0"); localStorage.setItem("nrvq_show_awaiting", "0"); });
   });
 
-  test("A1: default graph excludes evtrace/scorer; include_synthetic reveals them", async ({ page }) => {
+  test("default graph excludes evtrace/scorer; include_synthetic reveals them", async ({ page }) => {
     const hidden = await api(page, "/api/v1/asset-graph?namespace=all&include_awaiting=true&include_synthetic=false");
     const shown = await api(page, "/api/v1/asset-graph?namespace=all&include_awaiting=true&include_synthetic=true");
     const classes = (b: any) => (b.nodes as any[]).filter((n) => n.type === "agent").map((n) => n.properties?.agent_class ?? "");
@@ -41,7 +41,7 @@ test.describe("MASTER Wave-4 + Compliance — EFFECT proofs on the live console"
     expect(classes(shown.body).some((c) => /evtrace|scorer/.test(c))).toBeTruthy(); // toggle reveals
   });
 
-  test("A2: awaiting agents hidden by default; include_awaiting reveals report-runner/hr-chatbot", async ({ page }) => {
+  test("awaiting agents hidden by default; include_awaiting reveals report-runner/hr-chatbot", async ({ page }) => {
     const hidden = await api(page, "/api/v1/asset-graph?namespace=all&include_awaiting=false");
     const shown = await api(page, "/api/v1/asset-graph?namespace=all&include_awaiting=true");
     expect((hidden.body.nodes as any[]).some((n) => n.properties?.awaiting)).toBeFalsy();
@@ -49,7 +49,7 @@ test.describe("MASTER Wave-4 + Compliance — EFFECT proofs on the live console"
     expect((shown.body.nodes as any[]).some((n) => n.properties?.awaiting)).toBeTruthy();
   });
 
-  test("A3: an Attack Graph load fires no 4xx (no dead /threats/summary)", async ({ page }) => {
+  test("an Attack Graph load fires no 4xx (no dead /threats/summary)", async ({ page }) => {
     const bad: string[] = [];
     page.on("response", (r) => { if (r.status() >= 400 && r.url().includes("/api/")) bad.push(`${r.status()} ${r.url()}`); });
     await page.goto("/threats/graph");
@@ -58,7 +58,7 @@ test.describe("MASTER Wave-4 + Compliance — EFFECT proofs on the live console"
     expect(bad, `unexpected 4xx/5xx: ${bad.join(", ")}`).toEqual([]);
   });
 
-  test("B no-mock: the Compliance page renders the coverage % from the API (not a fabricated value)", async ({ page }) => {
+  test("no-mock: the Compliance page renders the coverage % from the API (not a fabricated value)", async ({ page }) => {
     const cov = await api(page, "/api/v1/mitre/coverage?range=24h");
     expect(cov.status).toBe(200);
     const pct = cov.body.coverage_pct as number;
@@ -82,7 +82,7 @@ test.describe("MASTER Wave-4 + Compliance — EFFECT proofs on the live console"
     }
   });
 
-  test("B: trend is a real persisted series + evidence-pack export streams a real file", async ({ page }) => {
+  test("trend is a real persisted series + evidence-pack export streams a real file", async ({ page }) => {
     const trend = await api(page, "/api/v1/mitre/coverage/trend?range=30d");
     expect(trend.status).toBe(200);
     expect(Array.isArray(trend.body.points)).toBeTruthy(); // real series (>=0 points, no fabricated line)
@@ -99,7 +99,7 @@ test.describe("MASTER Wave-4 + Compliance — EFFECT proofs on the live console"
     expect(exp.bytes).toBeGreaterThan(100);
   });
 
-  test("B: GAP→generate creates a real dry-run draft, and the evidence deep-link filters the Audit Log", async ({ page }) => {
+  test("GAP→generate creates a real dry-run draft, and the evidence deep-link filters the Audit Log", async ({ page }) => {
     // GAP → generate a real tighten-only dry-run draft (never enforces).
     const gen = await apiPost(page, "/api/v1/mitre/coverage/generate", { technique_id: "AML.T0055", namespace: "default", agent_class: "customer-support" });
     expect(gen.status).toBe(200);

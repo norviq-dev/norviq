@@ -33,7 +33,7 @@ _CASES = [
     ({"tool_name": "note", "tool_params": {"body": "his ssn is 123-45-6789 ok"}}, "pii_freetext_ssn"),
     ({"tool_name": "x", "tool_params": {"acct": "1990-01-01"}}, "pii_date_shape"),
     ({"tool_name": "search_kb", "tool_params": {"q": "shipping status"}}, "benign_allow"),
-    # F-15: nested objects/arrays must be scanned identically by both policies.
+    # Nested objects/arrays must be scanned identically by both policies.
     ({"tool_name": "api_post", "tool_params": {"payload": {"ssn": "123-45-6789"}}}, "nested_ssn"),
     ({"tool_name": "api_post", "tool_params": {"payload": {"data": {"v": "4111111111111111"}}}}, "nested_pan_value"),
     ({"tool_name": "api_post", "tool_params": {"body": {"card_number": "x"}}}, "nested_pan_field"),

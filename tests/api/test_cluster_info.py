@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F046: GET /api/v1/cluster-info returns this deployment's id/name + REAL observed namespaces.
+"""GET /api/v1/cluster-info returns this deployment's id/name + REAL observed namespaces.
 
 Covers happy (distinct namespaces deduped+sorted), empty (fresh install -> ["default"]), and the
 non-admin scope (a namespace-claimed token sees only its own namespace).
@@ -9,6 +9,7 @@ non-admin scope (a namespace-claimed token sees only its own namespace).
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 
 import jwt
@@ -44,7 +45,7 @@ def _client(namespaces: list[str]) -> TestClient:
 
 
 def _token(role: str = "admin", namespace: str = "") -> str:
-    claims = {"sub": "u", "role": role}
+    claims = {"sub": "u", "role": role, "exp": int(time.time()) + 3600}
     if namespace:
         claims["namespace"] = namespace
     return jwt.encode(claims, settings.api_secret_key, algorithm="HS256")

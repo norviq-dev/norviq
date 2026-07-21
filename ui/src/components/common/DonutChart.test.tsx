@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// P3: the Trust Distribution donut must show ALL categories (incl value 0) in the legend with their counts,
+// The Trust Distribution donut must show ALL categories (incl value 0) in the legend with their counts,
 // and must NOT draw a degenerate 0-width arc. The echarts canvas is stubbed; the legend is plain React.
 import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
@@ -8,7 +8,7 @@ vi.mock("./EChart", () => ({ default: () => <div data-testid="echart-stub" /> })
 
 import { DonutChart } from "./DonutChart";
 
-describe("DonutChart (P3)", () => {
+describe("DonutChart", () => {
   it("shows all four categories with counts including zero", () => {
     render(
       <DonutChart

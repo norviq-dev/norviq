@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Asset Graph canvas (design_handoff_assetgraph): two layouts driven by context —
+// Asset Graph canvas: two layouts driven by context —
 //   overview = one circular mesh per agent (agent centered, tools+data on one ring, dashed hull,
 //              namespace-colored label above); focus = live force layout of one agent's subgraph.
 // Ported from the handoff mock's d3 code: init-once simulation, restyle on state change, cluster
@@ -86,7 +86,7 @@ export const AssetGraphCanvas = forwardRef<CanvasHandle, Props>(function AssetGr
     }
   }));
 
-  // L5: the SVG can be measured before it is attached/laid out (imperative-handle calls, the pre-mount effect
+  // The SVG can be measured before it is attached/laid out (imperative-handle calls, the pre-mount effect
   // pass, an offscreen route). Null-guard the ref and fall back to sane dims so a stray call never throws
   // "Cannot read properties of null (reading 'clientWidth')".
   function dims() {
@@ -95,7 +95,7 @@ export const AssetGraphCanvas = forwardRef<CanvasHandle, Props>(function AssetGr
     return { W: el.clientWidth || 1000, H: el.clientHeight || 620 };
   }
 
-  // L5: track whether the container has a RESOLVED non-zero size. d3 must not run its sizing (rects with
+  // Track whether the container has a RESOLVED non-zero size. d3 must not run its sizing (rects with
   // width="100%", scales over W/H) until the SVG viewport actually resolves — otherwise the browser throws
   // "SVGLength: Could not resolve relative length". A ResizeObserver flips this true once the box has size,
   // which re-runs the init effect below.
@@ -281,7 +281,7 @@ export const AssetGraphCanvas = forwardRef<CanvasHandle, Props>(function AssetGr
       .attr("y2", (d) => { const dx = (d.target.x ?? 0) - (d.source.x ?? 0), dy = (d.target.y ?? 0) - (d.source.y ?? 0), l = Math.hypot(dx, dy) || 1; return (d.target.y ?? 0) - (dy / l) * (rOf(d.target) + 9); });
     w.node.attr("transform", (d) => `translate(${d.x},${d.y})`);
 
-    // AG-FLICKER: tick() runs every physics frame — it must ONLY rewrite POSITIONAL attributes (path
+    // tick() runs every physics frame — it must ONLY rewrite POSITIONAL attributes (path
     // geometry + transforms). The hull's fill-opacity / stroke-opacity / stroke-dasharray and the label
     // opacity are constant per view mode and were previously re-set here every frame (measured ~240×3
     // redundant attribute writes per drag → the "line flicker"). They now live in styleHulls(), run only
@@ -418,7 +418,7 @@ export const AssetGraphCanvas = forwardRef<CanvasHandle, Props>(function AssetGr
     tick();
   }
 
-  // AG-FLICKER: the hull's constant, view-mode-dependent styling — set on model/filter change, NOT per
+  // The hull's constant, view-mode-dependent styling — set on model/filter change, NOT per
   // physics frame. (Geometry — the hull `d` path + label transforms — stays in tick().)
   function styleHulls() {
     const w = world.current;
@@ -444,7 +444,7 @@ export const AssetGraphCanvas = forwardRef<CanvasHandle, Props>(function AssetGr
   useEffect(() => {
     const el = svgRef.current;
     if (!el) return;
-    // L5: do NOT run d3 sizing until the container has a resolved non-zero size (else rects with width="100%"
+    // Do NOT run d3 sizing until the container has a resolved non-zero size (else rects with width="100%"
     // throw "SVGLength: Could not resolve relative length"). When it resolves, `sized` flips and re-runs this.
     if (el.clientWidth === 0 || el.clientHeight === 0) return;
     const w = world.current;
@@ -455,7 +455,7 @@ export const AssetGraphCanvas = forwardRef<CanvasHandle, Props>(function AssetGr
     // defs: glow, arrowheads (no grid — the panel background is a clean dark radial)
     const defs = svg.append("defs");
     const flt = defs.append("filter").attr("id", "agGlow").attr("x", "-80%").attr("y", "-80%").attr("width", "260%").attr("height", "260%");
-    // Softer glow so node cores + labels stay sharp (was 5 → nodes looked hazy at real data volume).
+    // Softer glow so node cores + labels stay sharp.
     flt.append("feGaussianBlur").attr("stdDeviation", 3.5).attr("result", "b");
     const mrg = flt.append("feMerge");
     mrg.append("feMergeNode").attr("in", "b");
@@ -511,7 +511,7 @@ export const AssetGraphCanvas = forwardRef<CanvasHandle, Props>(function AssetGr
         if (w.dragCluster) {
           let dx = ev.x - w.dragStart!.x;
           let dy = ev.y - w.dragStart!.y;
-          // AG-CLAMP: keep the dragged cluster inside the canvas — clamp the translation so the ring
+          // Keep the dragged cluster inside the canvas — clamp the translation so the ring
           // (center + radius) never leaves [pad, W-pad] × [pad, H-pad]. Previously a cluster could be
           // dragged half-off-canvas and clip. Clamp dx/dy once (not per-node) so the cluster keeps shape.
           const ring = w.rings?.find((x) => x.key === w.dragCluster);

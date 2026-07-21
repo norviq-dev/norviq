@@ -1,11 +1,32 @@
 {{- if and .Values.webhook.enabled .Values.webhook.injection.enabled }}
-# Sidecar-injector admission webhook. caBundle is left empty here and patched at install time by
-# the webhook-cert-job hook (self-signed cert acts as its own CA). failurePolicy defaults to Fail
-# (fail-closed — an agent pod can't start un-guarded); override via webhook.injection.failurePolicy.
+# Sidecar-injector admission webhook. caBundle is patched at install time by the webhook-cert-job hook
+# (self-signed cert acts as its own CA). failurePolicy defaults to Fail (fail-closed — an agent pod can't
+# start un-guarded); override via webhook.injection.failurePolicy.
+{{- /* PRESERVE the cert-job-patched caBundle across `helm upgrade`. The hook owns this field (kubectl
+       field-manager); if we re-render the literal "" here, server-side apply sees a value DIVERGENT from
+       the hook's and fails the whole release with a caBundle field-manager conflict. Re-emitting the
+       EXISTING value (via lookup) means helm's desired state matches the live one, so SSA co-owns the
+       field with no conflict. Empty on first install (object absent) -> the hook patches it as before. */}}
+{{- $existingCaBundle := "" }}
+{{- $existingWebhookCfg := lookup "admissionregistration.k8s.io/v1" "MutatingWebhookConfiguration" "" "norviq-sidecar-injector" }}
+{{- if $existingWebhookCfg }}
+  {{- range $existingWebhookCfg.webhooks }}
+    {{- if eq .name "sidecar-injector.norviq.io" }}{{- $existingCaBundle = (.clientConfig.caBundle | default "") }}{{- end }}
+  {{- end }}
+{{- end }}
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:
   name: norviq-sidecar-injector
+  annotations:
+    # AKS / Azure-Policy ships an "admissions-enforcer" controller that co-owns this object's
+    # namespaceSelector (it auto-appends its own system-namespace exclusions). That collides with Helm's
+    # server-side apply — every `helm upgrade` then fails with "conflicts with admissionsenforcer" and the
+    # release is left in a FAILED state even though the webhook itself is fine. Opt out so Helm fully owns
+    # the config. Safe: the selector below already excludes every system namespace itself, AND the positive
+    # `norviq-injection In [enabled]` match means this webhook only ever fires on explicitly opted-in tenant
+    # namespaces. No-op on non-AKS clusters (the annotation is simply ignored). See docs/norviq-ops-guide.md.
+    admissions.enforcer/disabled: "true"
   labels:
     app: norviq-webhook
     {{- include "norviq.labels" . | nindent 4 }}
@@ -14,7 +35,7 @@ webhooks:
     admissionReviewVersions: ["v1"]
     sideEffects: None
     clientConfig:
-      caBundle: ""
+      caBundle: {{ $existingCaBundle | quote }}
       service:
         name: norviq-webhook
         namespace: {{ .Values.namespace }}
@@ -32,6 +53,15 @@ webhooks:
         - key: kubernetes.io/metadata.name
           operator: NotIn
           values: ["kube-system", "kube-public", "kube-node-lease", {{ .Values.namespace | quote }}]
+        # AKS system/control-plane namespaces carry these labels; exclude them in-chart so the config is
+        # self-sufficient (matches what the Azure admissions-enforcer would otherwise add). The keys don't
+        # exist on non-AKS clusters, so `NotIn` trivially matches everything there — no behaviour change.
+        - key: control-plane
+          operator: NotIn
+          values: ["true"]
+        - key: kubernetes.azure.com/managedby
+          operator: NotIn
+          values: ["aks"]
     failurePolicy: {{ .Values.webhook.injection.failurePolicy | default "Fail" }}
     reinvocationPolicy: Never
     timeoutSeconds: 5

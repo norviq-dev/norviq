@@ -24,12 +24,12 @@ gettok() {
     | $PY -c "import sys,json;print(json.load(sys.stdin).get('access_token',''))"
 }
 
-# --- B1: SPIRE registration entries ---
+# --- SPIRE registration entries ---
 log "B1 SPIRE entries"
 $K -n spire-system exec deploy/spire-server -c spire-server -- \
   /opt/spire/bin/spire-server entry show 2>/dev/null | tee "$OUT/spire-entries.txt" | grep -E "SPIFFE ID|Selector" || true
 
-# --- B2: resolver attests real SVID (spoof-proof) + fail-closed ---
+# --- Resolver attests real SVID (spoof-proof) + fail-closed ---
 log "B2 proof Jobs (spoof-resistant + fail-closed)"
 $K delete -f "$HERE/b2-proof.yaml" --ignore-not-found >/dev/null 2>&1
 $K apply -f "$HERE/b2-proof.yaml"
@@ -62,7 +62,7 @@ curl -s -X POST -H "Authorization: Bearer $ALICE" -H "Content-Type: application/
   "$API/api/v1/policies" -d "{\"namespace\":\"default\",\"agent_class\":\"idtest\",\"rego_source\":$($PY -c "import json,sys;print(json.dumps(sys.argv[1]))" "$REGO")}" >/dev/null
 $K -n "$NS" logs deploy/norviq-api --tail=200 | grep "NRVQ-API-7011" | tail -2 | tee "$OUT/oidc-peruser-audit.txt"
 
-# --- B4: controller -> API via OIDC client-credentials (HS256 fallback kept) ---
+# --- Controller -> API via OIDC client-credentials (HS256 fallback kept) ---
 log "B4 controller identity (OIDC client-credentials active)"
 $K -n "$NS" logs deploy/norviq-webhook --tail=200 | grep -E "NRVQ-WHK-4042|NRVQ-WHK-4026|client-credentials" | tail -3 | tee "$OUT/b4-controller.txt" || true
 

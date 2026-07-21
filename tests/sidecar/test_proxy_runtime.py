@@ -52,7 +52,7 @@ class _FakeResolver:
 
 @pytest.mark.asyncio
 async def test_sidecar_start_binds_loader_and_hydrates(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    # SIDE-2: this exercises the EMBEDDED path (local loader/cache); pin the mode since proxy is now default.
+    # This exercises the EMBEDDED path (local loader/cache); pin the mode since proxy is the default.
     monkeypatch.setattr("norviq.sidecar.proxy.settings.sidecar_mode", "embedded")
     fake_cache = _FakeCache()
 
@@ -65,7 +65,7 @@ async def test_sidecar_start_binds_loader_and_hydrates(monkeypatch: pytest.Monke
 
     monkeypatch.setattr("norviq.sidecar.proxy.asyncio.start_unix_server", _fake_start_unix_server, raising=False)
 
-    # H2/HA: PolicyLoader.warm_cache() is now DB-authoritative (reads the real `policies` table via its own
+    # HA: PolicyLoader.warm_cache() is now DB-authoritative (reads the real `policies` table via its own
     # Postgres engine) rather than hydrating from cache.list_policy_entries() — _FakeCache's canned single
     # entry above is therefore never read by warm_cache() itself, and the row count on a real (shared, long-
     # lived local dev) Postgres is not something this pure-unit test controls or should depend on. Stub
@@ -95,7 +95,7 @@ async def test_sidecar_start_binds_loader_and_hydrates(monkeypatch: pytest.Monke
 
 @pytest.mark.asyncio
 async def test_sidecar_start_proxy_mode_uses_remote_evaluator(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    # SIDE-2 default: proxy mode wires a RemoteEvaluator and NO local Redis/loader/emitter.
+    # Proxy mode (the default) wires a RemoteEvaluator and NO local Redis/loader/emitter.
     from norviq.sidecar.remote_evaluator import RemoteEvaluator
 
     monkeypatch.setattr("norviq.sidecar.proxy.settings.sidecar_mode", "proxy")

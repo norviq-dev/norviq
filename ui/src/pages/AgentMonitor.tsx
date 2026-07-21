@@ -1,4 +1,8 @@
-import { RotateCcw, Snowflake } from "lucide-react";
+// Agent Monitor — the governed fleet's per-agent trust view: a sortable roster with trust scores,
+// behavior signals and recommendations, plus a per-agent drill-down (tool usage by risk tier, trust
+// history, and freeze/unfreeze controls). Namespace-scoped.
+
+import { ArrowLeft, RefreshCw, RotateCcw, Snowflake, Sun } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { apiGet, apiSend, fetchAgentToolUsage, fetchAgentTrustHistory } from "../api/client";
@@ -15,7 +19,7 @@ import { TrustBadge, trustCategory } from "../components/common/TrustBadge";
 import { useApi, invalidateApiCache } from "../hooks/useApi";
 import { useApp } from "../store/AppContext";
 
-// CAP-2: tool risk-tier → bar colour (matches the graph RISK palette). Used to colour the Tool Usage
+// Tool risk-tier → bar colour (matches the graph RISK palette). Used to colour the Tool Usage
 // bars by risk instead of by call volume.
 const RISK_TIER_COLORS: Record<"low" | "medium" | "high" | "critical", string> = {
   low: "#00E5A0",
@@ -41,7 +45,10 @@ type AgentRow = {
 export function AgentMonitor() {
   const { namespace, timeRange } = useApp();
   const [selected, setSelected] = useState<AgentRow | null>(null);
-  // P5: the detail renders below a potentially long table — scroll it into view on select so clicking a row
+  // A freeze/reset that fails (e.g. 403 for a non-admin viewer, network, 5xx) must NOT be
+  // swallowed — surface the reason near the action buttons so the control isn't a silent dead no-op.
+  const [actionError, setActionError] = useState<string | null>(null);
+  // The detail renders below a potentially long table — scroll it into view on select so clicking a row
   // visibly OPENS the detail (trust history + freeze/adjust) instead of silently rendering off-screen.
   const detailRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -51,11 +58,15 @@ export function AgentMonitor() {
   }, [selected?.spiffe_id]);
   const agents = useApi<AgentRow[]>(
     () => apiGet(`/api/v1/agents?namespace=${encodeURIComponent(namespace)}`),
+    // Fetch on mount / namespace change only. NO auto-refetch: an admin action here is deliberate (freeze
+    // stays frozen until explicitly unfrozen — it's persisted in agent_registry), so the view must be stable.
+    // A background poll (a) surprised the operator by mutating the list mid-interaction, and (b) racing the
+    // optimistic freeze update collapsed the list to just the mutated agent on Back. Refresh is user-driven
+    // (the Refresh button below); mutations update the row optimistically without a reload.
     [namespace],
     {
       cacheKey: `agent-monitor:${namespace}`,
-      staleTimeMs: 60_000,
-      refetchIntervalMs: 60_000
+      staleTimeMs: 60_000
     }
   );
 
@@ -77,27 +88,35 @@ export function AgentMonitor() {
   );
 
   const updateTrust = async (id: string, score: number) => {
+    setActionError(null);
     try {
       await apiSend(`/api/v1/agents/${encodeURIComponent(id)}/trust`, "PUT", { score });
-      const next = rows.map((a) =>
+      // Read-modify-write the FULL fleet (agents.data), not `rows` — which is a strict subset
+      // when a ?class= deep-link filter is active. setData below fully REPLACES agents.data, so building
+      // `next` from the filtered `rows` would drop every other agent until the 60s refetch (clearing the
+      // filter would then show only the one class and the StatTiles would undercount). The
+      // (a.spiffe_id === id) predicate still mutates only the frozen/reset agent.
+      const next = (agents.data ?? []).map((a) =>
         a.spiffe_id === id
           ? { ...a, score, category: score === 0 ? "frozen" : trustCategory(score) }
           : a
       );
       agents.setData(next);
-      // STALE-8: setData only updates React state — the module cache (60s TTL) still holds the pre-freeze
+      // setData only updates React state — the module cache (60s TTL) still holds the pre-freeze
       // score, so an unmount/remount within the window served the stale list (freeze looked reverted). Bust it.
       invalidateApiCache("agent-monitor:");
       if (selected?.spiffe_id === id) {
         setSelected({ ...selected, score, category: score === 0 ? "frozen" : trustCategory(score) });
       }
-    } catch {
-      // ignore
+    } catch (e) {
+      // Surface the failure instead of swallowing it (backend requires admin — apiSend throws on
+      // a 403 !ok — plus network/5xx). Without this the Freeze/Reset buttons look like dead controls.
+      setActionError((e as Error).message || "Trust update failed");
     }
   };
 
-  // Real per-agent insights from audit_log (F046), fetched when an agent is selected. Honor the header's
-  // time range (was silently pinned to 7d, diverging from the range the user picked).
+  // Real per-agent insights from audit_log, fetched when an agent is selected. Honor the header's
+  // time range so the insights match the range the user picked.
   const trustHistoryApi = useApi(
     () => (selected ? fetchAgentTrustHistory(selected.spiffe_id, namespace, timeRange) : Promise.resolve([])),
     [selected?.spiffe_id, namespace, timeRange]
@@ -113,7 +132,7 @@ export function AgentMonitor() {
   );
 
   // Tool-call counts, shown as relative usage (busiest tool = 100%) so the shared bar chart stays 0–100.
-  // CAP-2: colour each bar by the tool's RISK tier (server-provided), not by usage volume — so a heavy
+  // Colour each bar by the tool's RISK tier (server-provided), not by usage volume — so a heavy
   // destructive tool stands out red instead of looking identical to a heavy benign search.
   const toolUsage = useMemo(() => {
     const rows = toolUsageApi.data ?? [];
@@ -160,14 +179,23 @@ export function AgentMonitor() {
     {
       key: "last_seen",
       title: "Last Seen",
-      // B4: humanize the ISO last-observation timestamp (was raw/"–").
+      // Humanize the ISO last-observation timestamp.
       render: (v) => <span className="mono muted">{v ? timeAgo(String(v)) : "—"}</span>
     }
   ];
 
   return (
     <div className="page-enter">
-      <PageHead title="Agent Monitor" subtitle={`Showing: ${namespace}`} />
+      <PageHead
+        title="Agent Monitor"
+        subtitle={`Showing: ${namespace}`}
+        actions={
+          // Refresh is user-driven now (no background poll) — pull the latest trust/violation state on demand.
+          <KitButton variant="ghost" icon={RefreshCw} onClick={() => void agents.refetch()} disabled={agents.loading}>
+            Refresh
+          </KitButton>
+        }
+      />
       <div className="stack">
         <div className="grid-kit g3">
           <div style={{ gridColumn: "span 1" }}>
@@ -255,22 +283,50 @@ export function AgentMonitor() {
                   </div>
                 ))}
               </div>
-              <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
-                <KitButton
-                  variant="primary"
-                  icon={RotateCcw}
-                  onClick={() => updateTrust(selected.spiffe_id, 0.8)}
-                >
-                  Reset Trust
+              <div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
+                {/* Explicit way back to the full list — the detail renders below the table with no other exit. */}
+                <KitButton variant="ghost" icon={ArrowLeft} onClick={() => setSelected(null)}>
+                  Back to all agents
                 </KitButton>
-                <KitButton
-                  variant="destructive"
-                  icon={Snowflake}
-                  onClick={() => updateTrust(selected.spiffe_id, 0)}
-                >
-                  Freeze Agent
-                </KitButton>
+                {selected.category === "frozen" || selected.score === 0 ? (
+                  // A frozen agent's one meaningful action is to UNFREEZE (restore trust) — resetting the score
+                  // of a frozen agent is a no-op-looking dead end, so swap the Freeze control for an explicit
+                  // Unfreeze rather than leaving the operator with only "Reset Trust" to guess at.
+                  <KitButton
+                    variant="primary"
+                    icon={Sun}
+                    onClick={() => updateTrust(selected.spiffe_id, 0.8)}
+                  >
+                    Unfreeze Agent
+                  </KitButton>
+                ) : (
+                  <>
+                    <KitButton
+                      variant="primary"
+                      icon={RotateCcw}
+                      onClick={() => updateTrust(selected.spiffe_id, 0.8)}
+                    >
+                      Reset Trust
+                    </KitButton>
+                    <KitButton
+                      variant="destructive"
+                      icon={Snowflake}
+                      onClick={() => updateTrust(selected.spiffe_id, 0)}
+                    >
+                      Freeze Agent
+                    </KitButton>
+                  </>
+                )}
               </div>
+              {actionError && (
+                // Failed freeze/reset feedback — the control surfaces 403/network/5xx errors near the buttons.
+                <div
+                  role="alert"
+                  style={{ marginTop: 12, fontSize: 12.5, color: "var(--block)", wordBreak: "break-word" }}
+                >
+                  {actionError}
+                </div>
+              )}
             </Panel>
           </div>
         )}

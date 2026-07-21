@@ -8,7 +8,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import PolicyPacks from "./PolicyPacks";
 import { clearApiCache } from "../hooks/useApi";
 
-// B1-2: the mutation guard reads the selected scope from useApp() — mock it so each test controls the namespace
+// The mutation guard reads the selected scope from useApp() — mock it so each test controls the namespace
 // (the real AppProvider defaults to the aggregate "all", under which every mutation is correctly disabled).
 const mockApp = { namespace: "default", selectedCluster: "local", isRemote: false, namespaces: ["default", "payments"] };
 vi.mock("../store/AppContext", () => ({
@@ -77,7 +77,7 @@ function renderPage() {
   );
 }
 
-describe("PolicyPacks page (F047)", () => {
+describe("PolicyPacks page", () => {
   it("renders packs grouped by sector with enabled state and suggested-sector highlight", async () => {
     server.use(...handlers("admin", new Set(["finance-money-movement"])));
     renderPage();
@@ -96,16 +96,16 @@ describe("PolicyPacks page (F047)", () => {
     const enableBtn = await screen.findAllByRole("button", { name: "Enable" });
     expect(enableBtn.length).toBe(2);
     fireEvent.click(enableBtn[0]);
-    // PACK-CONFIRM: enabling now confirms first (names the namespace); the POST only fires on confirm.
+    // Enabling now confirms first (names the namespace); the POST only fires on confirm.
     const confirm = await screen.findByTestId("pack-confirm-apply");
     fireEvent.click(confirm);
     await waitFor(() => expect(screen.getByText("Enabled")).toBeInTheDocument());
-    // B1-2: the write targeted the concrete namespace, never the phantom "all".
+    // The write targeted the concrete namespace, never the phantom "all".
     expect(sentNs).toContain("default");
     expect(sentNs).not.toContain("all");
   });
 
-  it("FIX-4: the apply-result badge never shows APPLIED while its own outcome text still says Verifying, " +
+  it("the apply-result badge never shows APPLIED while its own outcome text still says Verifying, " +
     "and converges to a matching APPLIED + 'Confirmed via a live read' once the toggle's poll resolves", async () => {
     server.use(...handlers("admin", new Set()));
     renderPage();
@@ -120,7 +120,7 @@ describe("PolicyPacks page (F047)", () => {
     expect(screen.getByText("APPLIED")).toBeInTheDocument();
   });
 
-  it("PACK-CONFIRM: cancelling the confirm dialog fires no network POST", async () => {
+  it("cancelling the confirm dialog fires no network POST", async () => {
     const sentNs: string[] = [];
     server.use(...handlers("admin", new Set(), { onEnable: (ns) => sentNs.push(ns) }));
     renderPage();
@@ -131,7 +131,7 @@ describe("PolicyPacks page (F047)", () => {
     expect(sentNs).toHaveLength(0);
   });
 
-  it("B1-2: under All-namespaces (aggregate) every pack mutation is DISABLED and prompts for a concrete namespace", async () => {
+  it("under All-namespaces (aggregate) every pack mutation is DISABLED and prompts for a concrete namespace", async () => {
     mockApp.namespace = "all";
     server.use(...handlers("admin", new Set()));
     renderPage();
@@ -145,7 +145,7 @@ describe("PolicyPacks page (F047)", () => {
     expect(screen.getByTestId("override-dryrun")).toBeDisabled();
   });
 
-  it("B1-2: a disabled aggregate mutation never fires a network POST", async () => {
+  it("a disabled aggregate mutation never fires a network POST", async () => {
     mockApp.namespace = "all";
     const sentNs: string[] = [];
     server.use(...handlers("admin", new Set(), { onEnable: (ns) => sentNs.push(ns) }));
@@ -156,7 +156,7 @@ describe("PolicyPacks page (F047)", () => {
     expect(sentNs).toEqual([]); // nothing sent; certainly no ?namespace=all write
   });
 
-  it("B1-3: a dry-run-only namespace shows the reason and disables pack enable up-front", async () => {
+  it("a dry-run-only namespace shows the reason and disables pack enable up-front", async () => {
     server.use(...handlers("admin", new Set(), { applyMode: "dry_run_only" }));
     renderPage();
     await screen.findByText("Energy OT/IT Segmentation");
@@ -172,7 +172,7 @@ describe("PolicyPacks page (F047)", () => {
     expect(screen.getAllByText("Admin only").length).toBeGreaterThan(0);
   });
 
-  it("C2: ALL packs lay out in ONE flat side-by-side grid (not one stack per sector)", async () => {
+  it("ALL packs lay out in ONE flat side-by-side grid (not one stack per sector)", async () => {
     server.use(...handlers("admin", new Set(["finance-money-movement"])));
     renderPage();
     await screen.findByText("Energy OT/IT Segmentation");

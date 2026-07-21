@@ -9,7 +9,7 @@
 # Public/managed registry recommended for prod (GHCR has no Docker Hub anonymous pull-rate limit at
 # scale). Drop-in: set registry + repository, or point at your ACR. Empty imagePullSecrets = public.
 images:
-  registry: ""              # e.g. "ghcr.io/" (then repository: norviq-dev/norviq-engine) or "<acct>.azurecr.io/"
+  registry: "ghcr.io/norviq-dev/"   # public default (copy-paste-clean). Override with your mirror, e.g. "<acct>.azurecr.io/" + repository, for supply-chain control.
   api: { pullPolicy: IfNotPresent }
   engine: { pullPolicy: IfNotPresent }
   ui: { pullPolicy: IfNotPresent }
@@ -70,10 +70,16 @@ postgresql:
     enabled: true
     instances: 3
   storage: 20Gi
+  # Do NOT ship the well-known default DB password in a prod overlay. Blank here so the operator
+  # MUST supply a strong credential (--set postgresql.password=... or a sealed secret); with
+  # config.requireStrongSecret an install left empty fails loudly at render (secret.yaml gate).
+  password: ""
 redis:
   ha:
     enabled: true
     replicas: 3
+  # Same for the cache credential — no shipped default in prod; the operator supplies a strong one.
+  password: ""
 
 config:
   requireStrongSecret: true
@@ -82,7 +88,7 @@ config:
 gracefulShutdown:
   preStopSleepSeconds: 5
 
-# Fleet plane prod-readiness (F045 P2 S3). STILL gated by fleet.hub.enabled / fleet.enabled (so a
+# Fleet plane prod-readiness. STILL gated by fleet.hub.enabled / fleet.enabled (so a
 # values-prod install WITHOUT fleet renders zero fleet resources). When the hub is enabled on a prod
 # cluster, these turn on HA: >=2 fleet-api replicas + PDB + HPA + spread, and CloudNativePG fleet store.
 fleet:
@@ -101,5 +107,12 @@ fleet:
       ha:
         enabled: true
         instances: 3
-    # When HA postgres is on, point the hub at the CNPG read-write service.
-    pgUrl: "postgresql://norviq:norviq_dev@fleet-postgresql-ha-rw:5432/norviq_fleet"
+      # HIGH: do NOT ship the well-known default fleet DB password in a prod overlay. Blank here so the
+      # operator MUST supply a strong credential (--set fleet.hub.postgresql.password=... or a sealed secret);
+      # config.requireStrongSecret makes an install with the empty/default value fail loudly (fleet-hub.yaml).
+      password: ""
+    # When HA postgres is on, point the hub at the CNPG read-write service. Blank by default so the shipped
+    # default password never leaks into the fleet-config; the operator supplies the full URL (with the strong
+    # credential above) at install time, e.g.:
+    #   --set fleet.hub.pgUrl="postgresql://norviq:<STRONG>@fleet-postgresql-ha-rw:5432/norviq_fleet"
+    pgUrl: ""

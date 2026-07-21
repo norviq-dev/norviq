@@ -104,7 +104,7 @@ async def test_rate_limit_blocks(evaluator: OPAEvaluator) -> None:
     cache-hits and increments the counter until it exceeds the window limit.
     """
     suffix = _suffix()
-    # F-23: read-like tool names (get_/read_/list_/query_/fetch_/describe_/view_/monitor_/poll_/report_/
+    # Read-like tool names (get_/read_/list_/query_/fetch_/describe_/view_/monitor_/poll_/report_/
     # search_) are exempt from the per-identity rate limiter — a "search_*" tool would never trip it. Use a
     # non-exempt (write-ish) name so the limiter actually engages. See norviq/config.py
     # evaluator_rate_limit_read_prefixes.

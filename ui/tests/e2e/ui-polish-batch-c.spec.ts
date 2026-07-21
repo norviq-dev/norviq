@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// BATCH-C UI polish — four visual outcomes proven on the live build:
-//  C1 the Overview coverage caption sits BELOW the gauge arc (no overlap with the number/arc).
-//  C2 Policy Packs lay out as a horizontal rail (overflow-x auto, cards side-by-side), actions intact.
-//  C3 the RedTeam scorecard metric cluster is UNBOXED (no --bg-surface/--border) + nudged right; values==latest.
-//  C4 Compliance framework cards carry no "coverage steady" trend line.
+// UI polish — four visual outcomes proven on the live build:
+//  The Overview coverage caption sits BELOW the gauge arc (no overlap with the number/arc).
+//  Policy Packs lay out as a horizontal rail (overflow-x auto, cards side-by-side), actions intact.
+//  The RedTeam scorecard metric cluster is UNBOXED (no --bg-surface/--border) + nudged right; values==latest.
+//  Compliance framework cards carry no "coverage steady" trend line.
 
 import { test, expect, waitForApp } from "./fixtures";
 import { type Page } from "@playwright/test";
@@ -23,7 +23,7 @@ async function postSuite(page: Page, query: string): Promise<any> {
   throw new Error("suite stayed busy");
 }
 
-test.describe("C1 — Overview coverage caption sits below the gauge (no overlap)", () => {
+test.describe("Overview coverage caption sits below the gauge (no overlap)", () => {
   test("the score-gauge-caption is below the number and out of the arc; text preserved", async ({ page, recorder }) => {
     await page.goto("/");
     await waitForApp(page);
@@ -48,7 +48,7 @@ test.describe("C1 — Overview coverage caption sits below the gauge (no overlap
   });
 });
 
-test.describe("C2 — Policy Packs flat side-by-side grid", () => {
+test.describe("Policy Packs flat side-by-side grid", () => {
   test("all packs render in ONE flat grid (~4 per row, side-by-side), actions intact, no page clip", async ({ page, recorder }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/policies/packs");
@@ -89,7 +89,7 @@ test.describe("C2 — Policy Packs flat side-by-side grid", () => {
 });
 
 test.describe.configure({ mode: "serial" });
-test.describe("C3 — RedTeam scorecard metric cluster is unboxed + nudged right", () => {
+test.describe("RedTeam scorecard metric cluster is unboxed + nudged right", () => {
   test("cluster has no box (transparent bg, no border) + positive left margin; values==latest; no overlap/clip", async ({ page }) => {
     test.setTimeout(120000);
     await page.setViewportSize({ width: 1440, height: 900 });
@@ -136,7 +136,7 @@ test.describe("C3 — RedTeam scorecard metric cluster is unboxed + nudged right
   });
 });
 
-test.describe("C4 — Compliance framework cards have no 'coverage steady' line", () => {
+test.describe("Compliance framework cards have no 'coverage steady' line", () => {
   test("no 'coverage steady' text on the framework cards; counts + donut intact", async ({ page, recorder }) => {
     await page.goto("/compliance");
     await waitForApp(page);

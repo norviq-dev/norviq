@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""LOGIN-2: password hashing + brute-force lockout for the local username/password login.
+"""Password hashing + brute-force lockout for the local username/password login.
 
 Standalone (no auth/db imports) so the router and the boot-time seeder can both use it without a
 circular import. Hashing is **bcrypt with a SHA-256 pre-hash** (the Django ``bcrypt_sha256`` pattern):

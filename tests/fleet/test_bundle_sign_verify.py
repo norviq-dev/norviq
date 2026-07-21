@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Signed bundle core (F045 P2 S1): the trust-root signature verification. The most security-critical unit
+"""Signed bundle core: the trust-root signature verification. The most security-critical unit
 tests — a regression here would let a compromised hub or MITM inject an allow-all policy."""
 
 from __future__ import annotations

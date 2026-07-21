@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F017 #6: Attack-graph "Simulate" derives blocked/allowed from a REAL evaluation of the
+"""Attack-graph "Simulate" derives blocked/allowed from a REAL evaluation of the
 selected path's steps (not the precomputed blocked_by_policy flag). This guards the backend
 decision the UI calls — allow on a safe step, block on a dangerous one, with provenance.
 
 Each test uses a fresh spiffe (unique pod) so trust history from other tests cannot drift the
-allow-path decision into an escalate (per test-baseline-discipline).
+allow-path decision into an escalate.
 """
 
 from __future__ import annotations

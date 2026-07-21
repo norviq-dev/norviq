@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Attack Graph (feat/attack-graph) — kill-chain triage. The backend precomputes every attack path
+// Attack Graph — kill-chain triage. The backend precomputes every attack path
 // (agent → tool → sensitive data) at GET /api/v1/threats/attack-paths, pre-sorted worst-first. The
 // operator triages the ranked list, proves a fix with a what-if block, and turns intent into a
 // default-deny policy draft. Three columns inside a Panel: ranked path list · kill-chain canvas ·
@@ -74,8 +74,8 @@ export function AttackGraph() {
   const [simResult, setSimResult] = useState<Record<string, SimResult>>({});
   const [simulating, setSimulating] = useState(false);
   const [drafted, setDrafted] = useState<Record<string, boolean>>({});
-  // AG-DRAFT-01: the what-if "Draft blocking policy" now persists a REAL dry-run draft and captures its deeplink
-  // (was a fabricated local-only "✓ Draft created" with no draft). draftLinks[pathId] = /policies/catalog?intent_draft=<id>.
+  // The what-if "Draft blocking policy" persists a REAL dry-run draft and captures its deeplink.
+  // draftLinks[pathId] = /policies/catalog?intent_draft=<id>.
   const [draftLinks, setDraftLinks] = useState<Record<string, string>>({});
   const [draftError, setDraftError] = useState<Record<string, string>>({});
   const [intentOpen, setIntentOpen] = useState(false);
@@ -86,11 +86,16 @@ export function AttackGraph() {
   const [lifecycleTick, setLifecycleTick] = useState(0);
   const me = useApi(() => fetchMe(), []);
   const isAdmin = me.data?.role === "admin";
-  // A1: default-hide probe-rooted kill-chains; shares the one preference key with the Asset graph (localStorage).
+  // Default-hide probe-rooted kill-chains; shares the one preference key with the Asset graph (localStorage).
   const [showSynthetic, setShowSynthetic] = useState<boolean>(() => localStorage.getItem("nrvq_show_synthetic") === "1");
   const [syntheticHidden, setSyntheticHidden] = useState(0);
 
   const canvasRef = useRef<AttackCanvasHandle>(null);
+  // A failed recompute POST raises `degraded`, but the finally re-triggers the display-fetch
+  // effect (recomputing in deps) and a successful READ GET would unconditionally clear it — clobbering
+  // the banner the instant stale paths re-render as fresh. Persist the recompute-failure across that
+  // refetch: set true on a non-2xx compute POST, cleared only when a compute POST returns ok.
+  const recomputeFailedRef = useRef(false);
 
   // ── fetch ────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -102,7 +107,9 @@ export function AttackGraph() {
         setPaths(res.paths ?? []);
         setApiNamespaces(res.namespaces ?? []);
         setSyntheticHidden(res.synthetic_hidden ?? 0);
-        setDegraded(false);
+        // A successful GET does NOT clear a still-outstanding recompute failure — the paths it
+        // returned are the STALE precompute the failed recompute couldn't refresh, so keep the banner up.
+        setDegraded(recomputeFailedRef.current);
       })
       .catch(() => {
         // Degraded: keep whatever we already have; the banner surfaces the fetch failure.
@@ -112,7 +119,7 @@ export function AttackGraph() {
     return () => { alive = false; };
   }, [selectedNamespace, range, agentClass, recomputing, showSynthetic, lifecycleTick]);
 
-  // A1: flip synthetic-agent visibility + persist (shared with the Asset graph); the fetch effect re-runs.
+  // Flip synthetic-agent visibility + persist (shared with the Asset graph); the fetch effect re-runs.
   const toggleSynthetic = () => setShowSynthetic((v) => {
     const next = !v;
     localStorage.setItem("nrvq_show_synthetic", next ? "1" : "0");
@@ -120,7 +127,7 @@ export function AttackGraph() {
   });
 
   // ── REAL status: a stored sim result (real /evaluate), else the baseline. A what-if is a
-  //    HYPOTHETICAL overlay and is deliberately EXCLUDED here — MUT-4: folding it in made a
+  //    HYPOTHETICAL overlay and is deliberately EXCLUDED here — folding it in made a
   //    hypothetical "Block this step" inflate the headline BLOCKED stat (0→1) and re-order the list
   //    (which auto-switched the selected path). Real status drives stats, ordering, and the filter;
   //    the what-if is surfaced separately via isWhatIf + the canvas/detail overlay. ──
@@ -163,7 +170,7 @@ export function AttackGraph() {
     const high = visible.filter((p) => p.sev === "high").length;
     const exploitable = visible.filter((p) => statusOf(p) === "exploitable").length;
     const blocked = visible.filter((p) => statusOf(p) === "blocked").length;
-    // MUT-4: how many VISIBLE paths carry a hypothetical block right now — shown as a separate
+    // How many VISIBLE paths carry a hypothetical block right now — shown as a separate
     // annotation, never merged into `blocked`.
     const whatIfCount = visible.filter((p) => isWhatIf(p)).length;
     const maxBlast = visible.reduce((m, p) => Math.max(m, p.blast), 0);
@@ -180,7 +187,7 @@ export function AttackGraph() {
     setSeverities({ critical: keys.includes("critical"), high: keys.includes("high"), medium: keys.includes("medium"), low: keys.includes("low") });
   const toggleSeverity = (k: Severity) => setSeverities((s) => ({ ...s, [k]: !s[k] }));
   const toggleStatusFilter = (k: "exploitable" | "blocked") => setStatusFilter((s) => (s === k ? null : k));
-  // P2-3: resets THIS page's filters only. Namespace is the GLOBAL console scope (the header selector) —
+  // Resets THIS page's filters only. Namespace is the GLOBAL console scope (the header selector) —
   // a page-local reset must not silently rescope every other surface back to "All namespaces".
   const resetFilters = () => {
     setSeverities({ critical: true, high: true, medium: true, low: true });
@@ -258,18 +265,25 @@ export function AttackGraph() {
     setSimResult({});
     try {
       const token = getToken();
-      await fetch(apiUrl(`/api/v1/attack-paths/compute?namespace=${encodeURIComponent(selectedNamespace)}`), {
+      const res = await fetch(apiUrl(`/api/v1/attack-paths/compute?namespace=${encodeURIComponent(selectedNamespace)}`), {
         method: "POST",
         headers: token ? { Authorization: `Bearer ${token}` } : {}
       });
+      // A non-2xx (500 / 403 / …) does NOT throw from fetch — check res.ok explicitly so a failed
+      // recompute surfaces the degraded banner instead of silently claiming success and refetching.
+      // Latch the outcome so the follow-on refetch (below) can't clear the banner on a
+      // successful READ of the stale paths — only a compute POST that returns ok clears the latch.
+      if (!res.ok) { recomputeFailedRef.current = true; setDegraded(true); }
+      else recomputeFailedRef.current = false;
     } catch {
+      recomputeFailedRef.current = true;
       setDegraded(true);
     } finally {
       setRecomputing(false); // flips the fetch effect to refetch
     }
   };
 
-  // AG-DRAFT-01: persist a REAL dry-run intent draft for the path's class (a tighten-only default-deny with the
+  // Persist a REAL dry-run intent draft for the path's class (a tighten-only default-deny with the
   // readonly refinement — non-enforcing until reviewed + applied in Policies) and capture its deeplink, so the
   // confirmation becomes a live link to the draft instead of a fabricated static label.
   const draftBlocking = async () => {
@@ -340,7 +354,7 @@ export function AttackGraph() {
     { label: "Chokepoints", value: stats.chokepoints, sub: "tools", color: "#e8edf5" },
     { label: "Max blast radius", value: stats.maxBlast, sub: "assets", color: "#FFB020" },
     { label: "Exploitable", value: stats.exploitable, color: "#FF3B5C", onClick: () => toggleStatusFilter("exploitable"), active: statusFilter === "exploitable" },
-    // MUT-4: BLOCKED counts REAL blocks only. A live what-if preview is annotated separately (sub) so the
+    // BLOCKED counts REAL blocks only. A live what-if preview is annotated separately (sub) so the
     // headline can never be read as enforced blocks that don't exist.
     {
       label: "Blocked",
@@ -368,7 +382,7 @@ export function AttackGraph() {
         </div>
       )}
 
-      {/* A1: probe-rooted kill-chains hidden by default — surface the count + a reveal toggle. */}
+      {/* Probe-rooted kill-chains hidden by default — surface the count + a reveal toggle. */}
       {(syntheticHidden > 0 || showSynthetic) && (
         <div role="status" style={{ margin: "14px 0", display: "flex", alignItems: "center", gap: 9, padding: "9px 14px", background: "var(--bg-graph-panel, #141414)", border: "1px solid var(--graph-border, #2a2a2a)", borderRadius: 10, fontSize: 12, color: "var(--text-secondary, #9aa4b2)" }}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7c8a9a" strokeWidth="1.8" style={{ flex: "none" }}><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></svg>

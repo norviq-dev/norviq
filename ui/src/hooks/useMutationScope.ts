@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// B1-2: a namespace-scoped (and, under fleet, cluster-scoped) mutation must never target a phantom AGGREGATE scope.
+// A namespace-scoped (and, under fleet, cluster-scoped) mutation must never target a phantom AGGREGATE scope.
 // The console defaults the view to "All namespaces" (and, with fleet on, can select "All clusters") — writing a
 // pack enable / override / apply-mode toggle under that aggregate stores a row literally namespaced "all", which
 // enforces NOTHING (a concrete namespace's read never sees it). This hook is the single source of truth for
@@ -34,7 +34,7 @@ export function useMutationScope(): MutationScope {
   else if (isAggregateNamespace) blockedReason = "Select a namespace to apply changes.";
   else if (isAggregateCluster) blockedReason = "Select a cluster to apply changes.";
 
-  // A remote (non-served) cluster already blocks local mutations (F-69); fold it in so the control stays disabled.
+  // A remote (non-served) cluster already blocks local mutations; fold it in so the control stays disabled.
   const canMutate = !isAggregateNamespace && !isAggregateCluster && !isRemote;
   return { canMutate, blockedReason, isAggregateNamespace, isAggregateCluster };
 }

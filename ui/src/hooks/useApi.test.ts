@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// B1-1: a mutation-triggered read must ALWAYS reflect the new state — the same-page consumer via refetch() (force),
+// A mutation-triggered read must ALWAYS reflect the new state — the same-page consumer via refetch() (force),
 // and every OTHER consumer (a remount, or a different page under its own cacheKey) because the mutation drops the
 // stale cache entry. These tests pin both halves.
 import { renderHook, waitFor, act } from "@testing-library/react";
@@ -8,7 +8,7 @@ import { useApi, clearApiCache, peekApiCache, invalidateApiCache } from "./useAp
 
 afterEach(() => clearApiCache());
 
-describe("useApi refetch + cache invalidation (B1-1)", () => {
+describe("useApi refetch + cache invalidation", () => {
   it("refetch() fetches FRESH within staleTimeMs (force skips the cache) and applies the latest value", async () => {
     let current = "v1";
     const { result } = renderHook(() =>

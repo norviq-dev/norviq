@@ -42,7 +42,7 @@ _looks_like_namespace_key(k) { lower(k) == "namespace" }
 _looks_like_namespace_key(k) { lower(k) == "ns" }
 _looks_like_namespace_key(k) { lower(k) == "tenant" }
 
-# rate_within: advisory only — a stateless policy cannot count calls/min; the real limiter is the F-03 layer.
+# rate_within: advisory only — a stateless policy cannot count calls/min; the real limiter is the stateful rate-limiter layer.
 rate_within { input.call_depth <= 8 }
 
 

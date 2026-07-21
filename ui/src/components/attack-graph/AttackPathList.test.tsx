@@ -1,3 +1,4 @@
+// Tests for the AttackPathList component — the selectable list of discovered attack paths.
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { AttackPathList } from "./AttackPathList";
@@ -39,7 +40,7 @@ describe("AttackPathList", () => {
     expect(chips).toEqual(["✓ delete · learned", "delete", "observing 10/12", "unclassified"]);
   });
 
-  it("P2: the selected-row background is neutral grey, not blue/indigo", () => {
+  it("the selected-row background is neutral grey, not blue/indigo", () => {
     const { getByRole } = render(
       <AttackPathList paths={paths} selectedId="p2" statusOf={(p) => p.status} onSelect={() => {}} />
     );

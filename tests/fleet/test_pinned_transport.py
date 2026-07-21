@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""SSRF-02 (CRITICAL, DNS-rebind) regression: `ssrf_guard.assert_safe_url_async` only validates the
+"""DNS-rebind regression: `ssrf_guard.assert_safe_url_async` only validates the
 addresses a hostname resolves to AT VALIDATION TIME. Handing the raw hostname to `httpx` afterward lets
 httpx re-resolve INDEPENDENTLY at connect time — a rebinding DNS server can answer the first (guard)
 lookup with a public/allowed address and a SECOND (dial-time) lookup with a blocked address

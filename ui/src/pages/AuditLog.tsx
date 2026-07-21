@@ -1,3 +1,7 @@
+// Audit Log — the live decision ledger: every allow/block/escalate/audit decision with its agent, tool,
+// rule, trust score and captured params. Backed by a paged fetch plus a WebSocket tail for new records,
+// with client-side filtering and a row-detail drawer.
+
 import { X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
@@ -27,8 +31,8 @@ type AuditRecord = {
   session_id?: string;
   trust_score?: number;
   latency_ms?: number;
-  tool_params?: Record<string, unknown> | null; // E2(b): request args captured with the decision (may be absent)
-  framework?: string; // OBS-2: decision source (sidecar / sidecar-http / sdk / redteam / ...)
+  tool_params?: Record<string, unknown> | null; // request args captured with the decision (may be absent)
+  framework?: string; // decision source (sidecar / sidecar-http / sdk / redteam / ...)
   _live?: boolean;
 };
 
@@ -64,8 +68,8 @@ export function AuditLog() {
   const initialDecision = (searchParams.get("decision") as DecisionFilter | null) ?? "all";
   const [decision, setDecision] = useState<DecisionFilter>(DEC.includes(initialDecision) ? initialDecision : "all");
   const [tool, setTool] = useState(searchParams.get("tool_name") ?? "");
-  // F-35: debounce the tool-name filter — the input stays responsive but only ONE request fires after typing
-  // settles (was one request per keystroke). The filter is already server-side over the selected range.
+  // Debounce the tool-name filter — the input stays responsive but only ONE request fires after typing
+  // settles. The filter is already server-side over the selected range.
   const [debouncedTool, setDebouncedTool] = useState(tool);
   useEffect(() => {
     const t = setTimeout(() => setDebouncedTool(tool), 400);
@@ -73,8 +77,8 @@ export function AuditLog() {
   }, [tool]);
   // Seed from the deep-link's `agent` (or legacy `spiffe_id`) param so the SPIFFE filter is pre-applied.
   const [agentFilter, setAgentFilter] = useState(searchParams.get("agent") ?? searchParams.get("spiffe_id") ?? "");
-  // F-53: the SPIFFE filter is now SERVER-SIDE over the whole range (was a client-side filter of the current page,
-  // so it silently missed matches off-page). Debounced like the tool filter.
+  // The SPIFFE filter is SERVER-SIDE over the whole range, so it never misses matches off-page.
+  // Debounced like the tool filter.
   const [debouncedAgent, setDebouncedAgent] = useState(agentFilter);
   useEffect(() => {
     const t = setTimeout(() => setDebouncedAgent(agentFilter), 400);
@@ -86,8 +90,11 @@ export function AuditLog() {
   const pageSize = 50;
   // Compliance deep-link: an evidence row opens the Audit Log pre-filtered by the enforcing rule (?rule=<rule_id>).
   const [rule, setRule] = useState(searchParams.get("rule") ?? "");
+  // Real-traffic-only (default ON) hides red-team + synthetic/probe rows so this log's population matches the
+  // Overview headline (which counts real traffic only). Toggle OFF to see the full ledger incl. test/eval rows.
+  const [realOnly, setRealOnly] = useState(true);
 
-  // STALE-6: the /audit route stays MOUNTED across query-string changes (React Router doesn't remount it),
+  // The /audit route stays MOUNTED across query-string changes (React Router doesn't remount it),
   // so a SECOND deep-link fired while already on the page — e.g. the Header Inbox's
   // navigate("/audit?decision=block") from the audit page itself — never applied (filters were seeded once
   // via useState at mount). Re-apply each filter when ITS url param actually changes, so a genuine new
@@ -123,10 +130,11 @@ export function AuditLog() {
         tool_name: debouncedTool || undefined,
         agent: debouncedAgent || undefined,
         rule_id: rule || undefined,
+        exclude_synthetic: realOnly || undefined,
         limit: pageSize,
         offset: page * pageSize
       }),
-    [timeRange, selectedNamespace, decision, debouncedTool, debouncedAgent, rule, page]
+    [timeRange, selectedNamespace, decision, debouncedTool, debouncedAgent, rule, realOnly, page]
   );
   const totalRecords = useApi<AuditRecord[]>(
     () =>
@@ -137,19 +145,24 @@ export function AuditLog() {
         tool_name: debouncedTool || undefined,
         agent: debouncedAgent || undefined,
         rule_id: rule || undefined,
+        exclude_synthetic: realOnly || undefined,
         limit: 500,
         offset: 0
       }),
-    [timeRange, selectedNamespace, decision, debouncedTool, debouncedAgent, rule]
+    [timeRange, selectedNamespace, decision, debouncedTool, debouncedAgent, rule, realOnly]
   );
 
-  // The /ws/audit socket authenticates before accepting — pass the bearer token as a query param
-  // (browsers can't set Authorization headers on WebSocket handshakes).
+  // The /ws/audit socket authenticates before accepting. Browsers can't set Authorization headers on a
+  // WebSocket handshake, so the bearer token rides in the Sec-WebSocket-Protocol header as
+  // ["nrvq-audit-jwt", token] — NOT a `?token=` query string, which would leak the credential into
+  // access logs / browser history / Referer. The server reads it from the subprotocol (main.py).
   const wsToken = getToken() ?? "";
-  const wsUrl = buildWsUrl(
-    `/ws/audit?namespace=${encodeURIComponent(selectedNamespace)}&token=${encodeURIComponent(wsToken)}`
+  const wsUrl = buildWsUrl(`/ws/audit?namespace=${encodeURIComponent(selectedNamespace)}`);
+  const wsProtocols = useMemo(
+    () => (wsToken ? ["nrvq-audit-jwt", wsToken] : undefined),
+    [wsToken]
   );
-  const ws = useWebSocket<AuditRecord>(wsUrl, live);
+  const ws = useWebSocket<AuditRecord>(wsUrl, live, wsProtocols);
 
   // Fallback: when the socket isn't connected but Live is on, poll recent records on an
   // interval and merge them in (deduped by id) so the Live feed still updates.
@@ -168,6 +181,7 @@ export function AuditLog() {
           namespace: selectedNamespace,
           decision: decision === "all" ? undefined : decision,
           tool_name: debouncedTool || undefined,
+          exclude_synthetic: realOnly || undefined,
           limit: 10,
           offset: 0
         });
@@ -187,7 +201,7 @@ export function AuditLog() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [live, ws.connected, timeRange, selectedNamespace, decision, debouncedTool]);
+  }, [live, ws.connected, timeRange, selectedNamespace, decision, debouncedTool, realOnly]);
 
   const streamed = useMemo(() => {
     const merged = [...ws.messages, ...polled];
@@ -203,20 +217,32 @@ export function AuditLog() {
   }, [ws.messages, polled]);
 
   const rows = useMemo(() => {
-    // F-53: filtering is server-side now (tool + agent); the live stream is only merged on page 0.
+    // Filtering is server-side (tool + agent + real-only); the live stream is only merged on page 0.
     const liveIds = new Set(streamed.map((r) => r.id).filter(Boolean));
-    return [...(page === 0 ? streamed : []), ...(base.data ?? []).filter((r) => !liveIds.has(r.id))];
-  }, [streamed, base.data, page]);
+    // In real-only mode the server already hides red-team/synthetic rows — mirror that for the live tail
+    // (drop red-team-source rows) so a streamed test row can't reappear above the filtered page.
+    const live = realOnly ? streamed.filter((r) => r.framework !== "redteam") : streamed;
+    return [...(page === 0 ? live : []), ...(base.data ?? []).filter((r) => !liveIds.has(r.id))];
+  }, [streamed, base.data, page, realOnly]);
 
   const totalCount = totalRecords.data?.length ?? 0;
-  const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  // The total-count probe is server-capped at limit=500 (audit/records enforces le=500), so records
+  // past offset 500 aren't visible to it — without a fallback totalPages maxes at 10 and Next is disabled at page 10 even
+  // though the server offset has no upper bound. When the probe comes back full there are likely more rows
+  // than it can see, so fall back to "there IS a next page iff the current page returned a full pageSize"
+  // and keep the page/record totals honest (show a trailing "+") once we're past what the probe can count.
+  const countCapped = totalCount >= 500;
+  const pageFull = (base.data?.length ?? 0) === pageSize;
+  const knownPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const totalPages = Math.max(knownPages, page + 1);
+  const canNext = page < knownPages - 1 || (countCapped && pageFull);
   const loading = base.loading || totalRecords.loading;
   const hasFilter = Boolean(debouncedTool || debouncedAgent || decision !== "all");
   const noResults = !loading && rows.length === 0;
 
   useEffect(() => {
     setPage(0);
-  }, [timeRange, selectedNamespace, decision, debouncedTool, debouncedAgent]);
+  }, [timeRange, selectedNamespace, decision, debouncedTool, debouncedAgent, realOnly]);
 
   const columns: Array<Column<AuditRecord>> = [
     {
@@ -240,7 +266,7 @@ export function AuditLog() {
       return <span className="mono muted">{rid || "—"}</span>;
     } },
     { key: "agent_class", title: "Agent Class" },
-    // OBS-2: decision source so sidecar-enforced calls are distinguishable from API/console-originated ones.
+    // Decision source so sidecar-enforced calls are distinguishable from API/console-originated ones.
     { key: "framework", title: "Source", render: (v) => <span className="mono muted">{(v as string) || "—"}</span> },
     {
       key: "trust_score",
@@ -288,15 +314,25 @@ export function AuditLog() {
             value={agentFilter}
             onChange={(e) => setAgentFilter(e.target.value)}
           />
+          <button
+            className={`tab-kit${realOnly ? " active" : ""}`}
+            onClick={() => setRealOnly((v) => !v)}
+            title="Real traffic only hides red-team + synthetic/probe rows so this log matches the Overview totals. Toggle off to see the full ledger."
+            style={{ marginLeft: "auto" }}
+          >
+            {realOnly ? "✓ Real traffic only" : "Showing all (incl. test)"}
+          </button>
         </div>
 
-        {/* F-36 + F-53: visible count + an explicit no-results state (was: an empty table with no explanation). */}
+        {/* Visible count + an explicit no-results state. */}
         <div className="muted" style={{ fontSize: 12, minHeight: 16 }}>
           {loading
             ? "Loading…"
-            : `Showing ${rows.length} of ${totalCount} record${totalCount === 1 ? "" : "s"} in range (${timeRange})${
+            : `Showing ${rows.length} of ${totalCount}${countCapped ? "+" : ""} record${totalCount === 1 ? "" : "s"} in range (${timeRange})${
                 debouncedTool ? ` · tool contains “${debouncedTool}”` : ""
-              }${debouncedAgent ? ` · agent contains “${debouncedAgent}”` : ""}`}
+              }${debouncedAgent ? ` · agent contains “${debouncedAgent}”` : ""}${
+                realOnly ? " · real traffic only — red-team & synthetic/probe rows hidden (matches the Overview total)" : " · showing all rows incl. red-team & synthetic (excluded from the Overview total)"
+              }`}
         </div>
 
         {noResults ? (
@@ -330,13 +366,14 @@ export function AuditLog() {
             ← Prev
           </KitButton>
           <span className="muted" style={{ fontSize: 12 }}>
-            Page {Math.min(page + 1, totalPages)} of {totalPages}
+            Page {page + 1} of {totalPages}
+            {canNext && page + 1 >= totalPages ? "+" : ""}
           </span>
           <KitButton
             variant="outline"
             size="sm"
-            onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
-            disabled={page >= totalPages - 1}
+            onClick={() => setPage((p) => p + 1)}
+            disabled={!canNext}
           >
             Next →
           </KitButton>
@@ -356,7 +393,7 @@ export function AuditLog() {
               const spf = parseSpiffe(selected.agent_id);
               // Prefer the parsed SPIFFE namespace; fall back to the flat record field.
               const ns = spf.ns ?? selected.namespace;
-              // MUT-3: the record's agent_class is AUTHORITATIVE for the class — it is what the table
+              // The record's agent_class is AUTHORITATIVE for the class — it is what the table
               // column and every filter use. The SPIFFE SA segment is the service-account identity and can
               // differ from the class (e.g. sa/etl-loader running as class report-gen), so parsing it here
               // made the detail panel disagree with its own table row. Use the record field first; the full

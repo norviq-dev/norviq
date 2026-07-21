@@ -15,7 +15,7 @@ multi-node HA (§2), a real fleet (§4), and real SPIFFE identity (§5) — thos
 stacks, covered below.
 
 ```bash
-kubectl apply -f crds/
+kubectl apply -f helm/norviq/crds/
 kubectl create namespace norviq
 helm install norviq ./helm/norviq -n norviq
 kubectl -n norviq port-forward svc/norviq-ui 8080:80   # http://localhost:8080
@@ -122,16 +122,15 @@ The chart is cloud-agnostic — there's nothing AKS-specific in the templates �
 dev/staging cluster runs into the same CPU-saturation problem any tight node does, and the repo ships a
 pattern for it plus a recovery playbook, both generalizable to any cloud:
 
-- **`values-aks-dev.yaml`** is a *single-node* overlay: `replace-in-place` rollouts
+- **A single-node overlay** is the pattern here: `replace-in-place` rollouts
   (`maxSurge:0/maxUnavailable:1` — a surge pod can never schedule when the node has no CPU headroom),
   `engine.replicas: 0` (the API evaluates in-process), a trimmed OPA sidecar request, and
   `config.dbSslMode: disable` for an in-cluster Postgres with no TLS. Apply it as an additional
   `-f` overlay in CI/CD; drop it once the node pool has headroom (the base `values.yaml` defaults give
-  zero-downtime surge rollouts and real HA on their own). See
-  `docs/engineering/aks-operations.md` for the full startup-race/rollout background this overlay fixes.
-- **CRDs first, same as any cluster**: `kubectl apply -f crds/` before `helm install`.
+  zero-downtime surge rollouts and real HA on their own).
+- **CRDs first, same as any cluster**: `kubectl apply -f helm/norviq/crds/` before `helm install`.
 - **Secrets**: for a dev/staging AKS cluster it's reasonable to pass secrets via `--set` from CI
-  secrets/repo secrets (as `values-aks-dev.yaml` + a CI workflow does); for a production AKS cluster,
+  secrets/repo secrets (as a CI-driven single-node overlay + workflow does); for a production AKS cluster,
   source `api.secretKey`, DB credentials, and (if enabled) the fleet signing key from **Azure Key
   Vault** — either via the [Secrets Store CSI driver](https://learn.microsoft.com/azure/aks/csi-secrets-store-driver)
   mounted into a pre-created Kubernetes `Secret` the chart reads, or by setting `fleet.hub.signingKeySecretName`
@@ -140,8 +139,7 @@ pattern for it plus a recovery playbook, both generalizable to any cloud:
 - **Recovery**: if a rollout wedges (all app deployments crash-looping on a bad/partial roll), scale
   everything to 0 and bring dependencies up in order — Postgres, then Redis, then api, then engine,
   then webhook/ui — the `initContainers`/`startupProbe` combination above is what normally prevents
-  needing this at all (`docs/engineering/aks-operations.md` has the exact recovery sequence and
-  `kubectl` commands).
+  needing this at all.
 - **Verify the deploy actually applied**: compare the running pods' image SHA against `git rev-parse
   HEAD` — an old pod serving stale traffic behind a "successful" rollout is the most common false
   positive after a cloud deploy.

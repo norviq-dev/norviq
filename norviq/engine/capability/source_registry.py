@@ -2,8 +2,8 @@
 # Copyright 2026 Norviq Contributors
 """Source capability registry.
 
-The asset graph tells you an agent *calls a tool* that *reaches a data source*. That is (as San put
-it) "already known info." The value this module adds is a model of what a SOURCE can *do* — the verb
+The asset graph tells you an agent *calls a tool* that *reaches a data source*. That is
+already-known info. The value this module adds is a model of what a SOURCE can *do* — the verb
 surface a datastore / egress / object-store exposes — so the console can distinguish a read hop from a
 destructive one, flag verbs that are reachable-but-unguarded (undefended), and flag grants that are
 never exercised (dormant, a least-privilege gap).

@@ -57,21 +57,21 @@ def test_settings_singleton_import() -> None:
 
 
 def test_api_secret_key_reads_nrvq_prefixed_env(monkeypatch) -> None:
-    """A2: the chart sets NRVQ_API_SECRET_KEY — it must actually populate api_secret_key."""
+    """The chart sets NRVQ_API_SECRET_KEY — it must actually populate api_secret_key."""
     monkeypatch.setenv("NRVQ_API_SECRET_KEY", "rotated-prod-secret-123")
     loaded = NorviqSettings(_env_file=None)
     assert loaded.api_secret_key == "rotated-prod-secret-123"
 
 
 def test_db_ssl_mode_reads_nrvq_prefixed_env(monkeypatch) -> None:
-    """A2: NRVQ_DB_SSL_MODE from the chart configmap must populate db_ssl_mode."""
+    """NRVQ_DB_SSL_MODE from the chart configmap must populate db_ssl_mode."""
     monkeypatch.setenv("NRVQ_DB_SSL_MODE", "verify-full")
     loaded = NorviqSettings(_env_file=None)
     assert loaded.db_ssl_mode == "verify-full"
 
 
 def test_require_strong_secret_defaults_true(monkeypatch) -> None:
-    """HIGH-3: fail-closed by default — a forgeable default JWT secret is a fleet-wide trust-root
+    """Fail-closed by default — a forgeable default JWT secret is a fleet-wide trust-root
     compromise, so the boot-time refusal is ON unless explicitly disabled (NRVQ_REQUIRE_STRONG_SECRET=false)
     or a real secret is configured. Dev/tests set an explicit strong NRVQ_API_SECRET_KEY (see
     tests/conftest.py) rather than disabling the guard, so the guard itself stays covered."""

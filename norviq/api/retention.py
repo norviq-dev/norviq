@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Part B — draft retention/GC helpers (keeps the intent_drafts store + the Policy Catalog UI bounded).
+"""Draft retention/GC helpers (keeps the intent_drafts store + the Policy Catalog UI bounded).
 
 SAFETY INVARIANT: everything here operates ONLY on the dedicated ``intent_drafts`` table, which the evaluator
 NEVER reads (``_collect_candidates`` only queries ``policies``). So expiring/evicting/dismissing a draft can never

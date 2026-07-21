@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Batch A (TGT-POSTURE-01 / CATHIER-MODE-01) — REAL form login, REAL controls. Proves the Namespace
+// REAL form login, REAL controls. Proves the Namespace
 // Governance card's Block ⇄ Monitor toggle drives the LIVE enforcement effect end-to-end, the hierarchy
 // Mode column agrees, and the apply-mode is relabelled Live/Frozen.
 import { test, expect, type Page } from "@playwright/test";
@@ -65,7 +65,7 @@ test.afterAll(async ({ request, baseURL }) => {
   await request.put(`${baseURL}/api/v1/settings?namespace=${NS}`, { headers: { ...h, "Content-Type": "application/json" }, data: { enforcement_mode: "block" } });
 });
 
-test("TGT-POSTURE-01: the Governance Block⇄Monitor toggle drives the live enforcement effect", async ({ page }) => {
+test("the Governance Block⇄Monitor toggle drives the live enforcement effect", async ({ page }) => {
   await realLogin(page);
   expect(await evalTool(page, "delete_record")).toBe("block/gov_block");   // seed enforces
 

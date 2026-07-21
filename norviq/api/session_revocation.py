@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""AUTH-01: server-side session revocation (logout) for stateless JWTs.
+"""Server-side session revocation (logout) for stateless JWTs.
 
 Sessions are stateless HS256/OIDC JWTs with no ``jti``, so logout is implemented as a denylist keyed
 by the SHA-256 of the RAW presented token (unique per token via the signature; covers login-, CLI- and

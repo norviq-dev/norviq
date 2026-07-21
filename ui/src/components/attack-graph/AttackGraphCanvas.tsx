@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Attack Graph kill-chain canvas (design_handoff_attackgraph): d3 v7 HORIZONTAL kill-chain of the
+// Attack Graph kill-chain canvas: d3 v7 HORIZONTAL kill-chain of the
 // SELECTED path — agent → tool(s) → data crown-jewel, with a blast-radius fan of reach[] satellites
 // around the crown jewel (sensitive s=1 as bright-red diamonds). Per-hop edges are colored by the
 // live decision (DECISION_COLORS allow/mixed/block) and carry a "<deny> denied · <allow> ok" count.
@@ -355,7 +355,7 @@ export const AttackGraphCanvas = forwardRef<AttackCanvasHandle, Props>(function 
     const cColor = (e: Edge) => (effDec(e) === "block" ? "#ff7089" : effDec(e) === "would_block" || e.dec === "mixed" ? "#f5b544" : "#5fd6ab");
     const bEnter = w.badgeG.selectAll<SVGGElement, Edge>("g.bd").data(edges).enter().append("g").attr("class", "bd").style("pointer-events", "none")
       .each(function (d) { d._label = cText(d); });
-    // K3: the edge count label ("N allowed" / "N denied" / mixed) renders REGULAR weight with NO stroke halo —
+    // The edge count label ("N allowed" / "N denied" / mixed) renders REGULAR weight with NO stroke halo —
     // the previous 700 weight + dark outline read as a heavy bordered badge. Just the colored text, matching the
     // node-label treatment. (Applies to every attack-graph edge label; the asset graph has no such label.)
     bEnter.append("text").attr("text-anchor", "middle").attr("dy", "0.34em").attr("font-size", 10.5).attr("font-weight", 450).attr("font-family", "'Outfit', sans-serif")

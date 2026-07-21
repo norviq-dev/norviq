@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Coverage-by-category route (F046) — policy coverage across risk categories.
+"""Coverage-by-category route — policy coverage across risk categories.
 
-Replaces the console's fabricated category scores (magic coefficients on the block rate). A category's
+A category's
 `score` is **rules-present**: how many of its mapped rule_ids appear in the rego actually loaded for the
-namespace (or the cluster baseline). F-44/F-45: "present" is NOT "effective" — a rule can be loaded yet never
+namespace (or the cluster baseline). "present" is NOT "effective" — a rule can be loaded yet never
 fire — so this route ALSO overlays real audit efficacy (`observed`/`blocked` per category from traffic) and an
 `effective` flag, and the response declares `basis: "rules_present"` so the number can't be read as a
 protection guarantee. The category -> rule_id taxonomy lives in policies/category_mapping.json (a documented
@@ -87,11 +87,16 @@ def _parse_agent_policy(agent_class: str, rego: str, priority: int, mode: str) -
 
 async def _agent_class_policies(
     session: AsyncSession, namespace: str | None, ns_mode: str
-) -> list[dict]:
+) -> tuple[list[dict], bool]:
     """Per-agent-class positive-security / custom policies APPLIED in this namespace, with what each
     enforces + real 30d audit efficacy (blocked / would-blocked / observed) for the class. This is the
     dimension the risk-category chart can't show: an intent policy governs the WHOLE class (default-deny),
-    keyed on the class, not on a risk taxonomy's rule_ids."""
+    keyed on the class, not on a risk taxonomy's rule_ids.
+
+    Returns ``(policies, degraded)``. ``degraded`` is True when a DB read failed so the caller can surface
+    an honest "section unavailable" signal — a swallowed fault must NOT be indistinguishable from a
+    genuinely empty namespace (a statement timeout / serialization failure would otherwise read as
+    "no agent-class policies applied")."""
     where = "agent_class !~ '^__.*__$'"
     params: dict = {}
     if namespace is not None:
@@ -99,14 +104,17 @@ async def _agent_class_policies(
         params["ns"] = namespace
     try:
         rows = (await session.execute(
-            text(f"SELECT DISTINCT ON (namespace, agent_class) namespace, agent_class, rego_source, priority, "
+            text(f"SELECT DISTINCT ON (namespace, agent_class) namespace, agent_class, rego_source, priority, "  # nosec B608 (constant WHERE fragments; sole user value bound as :ns) # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
                  f"enforcement_mode FROM policies WHERE {where} ORDER BY namespace, agent_class, version DESC"),
             params,
         )).mappings().all()
-    except Exception:  # best-effort: a DB hiccup must not 500 the dashboard — omit the section instead
-        return []
+    except Exception as exc:  # best-effort: a DB hiccup must not 500 the dashboard — but it must be OBSERVABLE,
+        # not silently read as "no agent-class policies applied" (NRVQ-API-7081-ERR).
+        log.warning("nrvq.api.coverage.agent_class_query_failed", error=str(exc),
+                    namespace=namespace, code="NRVQ-API-7081-ERR")
+        return [], True
     if not rows:
-        return []
+        return [], False
 
     # 30d audit efficacy per class: real block / monitor would-block / total governed calls.
     since = datetime.now(timezone.utc) - timedelta(days=30)
@@ -116,6 +124,7 @@ async def _agent_class_policies(
         stmt = stmt.where(AuditLogEntry.namespace == namespace)
     stmt = stmt.group_by(AuditLogEntry.agent_class, AuditLogEntry.decision, AuditLogEntry.rule_id)
     eff: dict[str, dict[str, int]] = {}
+    degraded = False
     try:
         for cls, decision, rule_id, n in (await session.execute(stmt)).all():
             d = eff.setdefault(str(cls), {"observed": 0, "blocked": 0, "would_block": 0})
@@ -125,8 +134,12 @@ async def _agent_class_policies(
             # Monitor-mode would-block: decision softened to audit with a would-block rule marker.
             elif str(decision) == "audit" and str(rule_id or "").startswith("monitor_would_block:"):
                 d["would_block"] += int(n)
-    except Exception:  # best-effort; efficacy overlay is optional
+    except Exception as exc:  # best-effort; efficacy overlay is optional — but a fault still leaves the
+        # efficacy numbers wrong/zeroed, so flag the section degraded rather than showing them as real.
+        log.warning("nrvq.api.coverage.agent_class_efficacy_failed", error=str(exc),
+                    namespace=namespace, code="NRVQ-API-7081-ERR")
         eff = {}
+        degraded = True
 
     out = []
     for r in rows:
@@ -142,7 +155,7 @@ async def _agent_class_policies(
         summary["effective"] = e.get("blocked", 0) > 0 or e.get("would_block", 0) > 0
         out.append(summary)
     out.sort(key=lambda s: (not s["effective"], s["cls"]))
-    return out
+    return out, degraded
 
 
 async def _namespace_mode(session: AsyncSession, namespace: str | None) -> str:
@@ -169,7 +182,7 @@ async def coverage_by_category(
 ) -> dict:
     """Per risk category: `score` = how many mapped rules are PRESENT in this namespace's loaded rego (not a
     proof of efficacy); `observed`/`blocked` = real audit activity for those rules; `effective` = at least one
-    rule in the category has actually blocked/escalated traffic. F-44/F-45: present != effective."""
+    rule in the category has actually blocked/escalated traffic. Present != effective."""
     namespace = read_namespace(user, namespace)  # None => all namespaces
     mapping = _load_mapping()
     loader = getattr(request.app.state, "loader", None)
@@ -214,7 +227,7 @@ async def coverage_by_category(
     # represent a per-class positive-security policy (report-gen's default-deny allowlist). Surface those
     # separately so an APPLIED agent-class policy is visible on the Overview, with what it enforces.
     ns_mode = await _namespace_mode(session, namespace)
-    agent_policies = await _agent_class_policies(session, namespace, ns_mode)
+    agent_policies, agent_policies_degraded = await _agent_class_policies(session, namespace, ns_mode)
 
     log.info(
         "nrvq.api.coverage.served",
@@ -223,12 +236,16 @@ async def coverage_by_category(
         in_scope=len(categories) - available,
         available=available,
         agent_policies=len(agent_policies),
+        agent_policies_degraded=agent_policies_degraded,
         code="NRVQ-API-7081",
     )
     # basis: the score is rules-present (loaded), not efficacy — efficacy is the audit overlay + the red-team suite.
     # `available` = sector categories NOT enabled for this namespace (surfaced as "add a pack", never as a gap).
+    # `agent_class_policies_degraded`: a DB read for the agent-class section failed — the empty/partial list is
+    # an infra hiccup, NOT a genuinely empty namespace, so the UI can say so instead of "no policies applied".
     return {
         "namespace": namespace, "coverage_pct": coverage_pct, "basis": "rules_present",
         "available": available, "categories": categories,
         "namespace_mode": ns_mode, "agent_class_policies": agent_policies,
+        "agent_class_policies_degraded": agent_policies_degraded,
     }

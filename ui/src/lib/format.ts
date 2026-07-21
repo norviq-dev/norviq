@@ -1,3 +1,6 @@
+// Shared date/time formatting helpers. Both return an em-dash ("—") for missing or invalid input so
+// tables and cards never render "Invalid Date".
+
 export function fmtTime(value: string | number | Date): string {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return "—";

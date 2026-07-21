@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Fleet hub data model (F045). A SEPARATE DeclarativeBase from the spoke `Base` so fleet tables are
+"""Fleet hub data model. A SEPARATE DeclarativeBase from the spoke `Base` so fleet tables are
 NEVER created in a spoke's norviq DB (and the spoke's tables are never created in the fleet DB)."""
 
 from __future__ import annotations
@@ -28,13 +28,13 @@ class Cluster(FleetBase):
     id: Mapped[str] = mapped_column(String(255), primary_key=True)
     name: Mapped[str] = mapped_column(String(255), default="")
     endpoint: Mapped[str] = mapped_column(String(512), default="")
-    console_url: Mapped[str] = mapped_column(String(512), default="")  # F-69: the spoke's own console URL (deep-link)
+    console_url: Mapped[str] = mapped_column(String(512), default="")  # the spoke's own console URL (deep-link)
     region: Mapped[str] = mapped_column(String(128), default="")
     status: Mapped[str] = mapped_column(String(20), default="healthy")  # advisory; recomputed on read
-    labels: Mapped[dict] = mapped_column(JSONB, default=dict)        # P2: policy target_selector matching
-    bundle_version: Mapped[int] = mapped_column(Integer, default=0)  # P2: monotonic, bump-on-change per cluster
-    residency: Mapped[bool] = mapped_column(Boolean, default=False)  # P4: raw logs stay in-cluster
-    spiffe_id: Mapped[str] = mapped_column(String(512), default="")  # S3: the spoke's attested SPIFFE identity
+    labels: Mapped[dict] = mapped_column(JSONB, default=dict)        # policy target_selector matching
+    bundle_version: Mapped[int] = mapped_column(Integer, default=0)  # monotonic, bump-on-change per cluster
+    residency: Mapped[bool] = mapped_column(Boolean, default=False)  # raw logs stay in-cluster
+    spiffe_id: Mapped[str] = mapped_column(String(512), default="")  # the spoke's attested SPIFFE identity
     last_heartbeat: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 

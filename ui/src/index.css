@@ -222,9 +222,8 @@ body {
   scrollbar-width: none;
 }
 .time-range-wrap::-webkit-scrollbar { display: none; }
-/* C2: Policy Packs horizontal layout — a flat, side-by-side grid (~4 cards per row) that wraps to the next row
-   and collapses responsively at narrow widths (Zscaler-style shelf of cards). Sector is shown per-card, so the
-   packs no longer stack one-per-sector. Tokens only. */
+/* Policy Packs horizontal layout — a flat, side-by-side grid (~4 cards per row) that wraps to the next row
+   and collapses responsively at narrow widths (a shelf of cards). Sector is shown per-card. Tokens only. */
 .pack-rail {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -437,7 +436,7 @@ body {
 }
 @keyframes slideIn { from { transform: translateX(40px); opacity: .4; } to { transform: translateX(0); opacity: 1; } }
 
-/* Attack Graph (design_handoff_attackgraph) animations — names match the handoff verbatim. */
+/* Attack Graph animations — names match the handoff verbatim. */
 @keyframes agFade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 @keyframes agSlide { from { opacity: 0; transform: translateX(16px); } to { opacity: 1; transform: none; } }
 @keyframes akDash { to { stroke-dashoffset: -24; } }
@@ -666,7 +665,7 @@ body {
   }
 }
 
-/* B1: loading skeletons — a subtle pulsing neutral bar shown on first paint so the Overview never flashes
+/* Loading skeletons — a subtle pulsing neutral bar shown on first paint so the Overview never flashes
    0/0/0 stat values or a half-drawn donut before data resolves. */
 .skeleton-line {
   display: block;

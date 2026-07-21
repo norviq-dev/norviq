@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""C4: SIEM AuditForwarder pushes audit rows to a webhook when enabled; no-op when disabled."""
+"""SIEM AuditForwarder pushes audit rows to a webhook when enabled; no-op when disabled."""
 
 from __future__ import annotations
 

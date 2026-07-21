@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Fleet overview (F045): P1 per-cluster status + aggregated agents/audit; P2 signed policy-push authoring +
-// per-cluster rollout status; P3 live drill-down into one cluster's audit (P4 residency may block it).
+// Fleet overview: per-cluster status + aggregated agents/audit; signed policy-push authoring +
+// per-cluster rollout status; live drill-down into one cluster's audit (residency may block it).
 // Gated by VITE_FLEET_API_URL — single-cluster installs never see it.
 
-import "../lib/monaco"; // SLIM-MONACO: bundle Monaco locally (no cdn.jsdelivr fetch) — must precede <Editor>
+import "../lib/monaco"; // Bundle Monaco locally (no cdn.jsdelivr fetch) — must precede <Editor>
 import Editor from "@monaco-editor/react";
 import { useEffect, useState } from "react";
 import { registerRego } from "../lib/monaco-rego";
@@ -58,11 +58,11 @@ export function Fleet() {
   const [name, setName] = useState("");
   const [ns, setNs] = useState("default");
   const [agentClass, setAgentClass] = useState("");
-  const [selector, setSelector] = useState('{"env":"prod"}');  // F-33: sane default target (was empty -> 422)
-  const [confirmFleetWide, setConfirmFleetWide] = useState(false);  // F-40: explicit confirm for a fleet-wide push
+  const [selector, setSelector] = useState('{"env":"prod"}');  // Sane default target (an empty selector 422s)
+  const [confirmFleetWide, setConfirmFleetWide] = useState(false);  // Explicit confirm for a fleet-wide push
   const [pushMsg, setPushMsg] = useState<string | null>(null);
-  const [applyResult, setApplyResult] = useState<ApplyResult | null>(null);  // Stage 1: apply-result transparency panel
-  const [policies, setPolicies] = useState<FleetPolicyRow[]>([]);  // F-52: pushed policies (retractable)
+  const [applyResult, setApplyResult] = useState<ApplyResult | null>(null);  // Apply-result transparency panel
+  const [policies, setPolicies] = useState<FleetPolicyRow[]>([]);  // Pushed policies (retractable)
   // Single-cluster-first enrollment: add (mint join token) + remove cluster.
   const [addOpen, setAddOpen] = useState(false);
   const [joinCid, setJoinCid] = useState("");
@@ -95,12 +95,12 @@ export function Fleet() {
       .catch((e) => setError(String(e)));
   };
 
-  // F-52: retract a pushed policy — it leaves every cluster's bundle and each spoke reconciles on next pull.
+  // Retract a pushed policy — it leaves every cluster's bundle and each spoke reconciles on next pull.
   const retract = async (pname: string) => {
     setPushMsg(null);
     try {
       await retractFleetPolicy(pname);
-      // Stage 1: show the retract outcome + watch each spoke reconcile (F-52) back via the rollout poll.
+      // Show the retract outcome + watch each spoke reconcile back via the rollout poll.
       setApplyResult({
         kind: "fleet",
         title: `Retracted "${pname}"`,
@@ -116,7 +116,7 @@ export function Fleet() {
   };
   useEffect(() => { if (fleetEnabled) reload(); /* eslint-disable-next-line */ }, [cluster]);
 
-  // F-56: close the drilldown with Esc (in addition to the ✕ button and the backdrop click).
+  // Close the drilldown with Esc (in addition to the ✕ button and the backdrop click).
   useEffect(() => {
     if (!drill) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setDrill(null); };
@@ -137,10 +137,10 @@ export function Fleet() {
 
   const push = async () => {
     setPushMsg(null);
-    // F-33: client-side validation — no request fires on an empty/invalid form; surface the server's detail otherwise.
+    // Client-side validation — no request fires on an empty/invalid form; surface the server's detail otherwise.
     if (!name.trim()) { setPushMsg("policy name required"); return; }
     if (!agentClass.trim()) { setPushMsg("agent_class required (a specific class, not a managed scope)"); return; }
-    // F-40: baseline/pack scopes are managed per-cluster — never fleet-pushed (fail fast; the server also 422s).
+    // Baseline/pack scopes are managed per-cluster — never fleet-pushed (fail fast; the server also 422s).
     if (agentClass === "__baseline__" || agentClass === "__pack__") {
       setPushMsg(`'${agentClass}' is managed per-cluster — change a baseline via its seed and packs via the packs API, not fleet push.`);
       return;
@@ -150,13 +150,13 @@ export function Fleet() {
       try { target = JSON.parse(selector); } catch { setPushMsg("target must be JSON, e.g. {\"env\":\"prod\"}"); return; }
     }
     if (Object.keys(target).length === 0) { setPushMsg("target required, e.g. {\"env\":\"prod\"} or {\"cluster_id\":\"fleet-a\"}"); return; }
-    // F-40: a fleet-wide target (no cluster_id) requires explicit confirmation.
+    // A fleet-wide target (no cluster_id) requires explicit confirmation.
     const fleetWide = !target.cluster_id;
     if (fleetWide && !confirmFleetWide) { setPushMsg("this target matches more than one cluster — tick “Confirm fleet-wide push”."); return; }
     try {
       const res = await authorFleetPolicy({ name, namespace: ns, agent_class: agentClass, rego_source: rego, target_selector: target, confirm_fleet_wide: confirmFleetWide });
       setPushMsg(null);
-      // Stage 1: the apply-result panel shows the exact manifest + honest outcome + LIVE propagation (rollout poll).
+      // The apply-result panel shows the exact manifest + honest outcome + LIVE propagation (rollout poll).
       setApplyResult({
         kind: "fleet",
         title: `Fleet policy "${res.name}" v${res.version} published`,
@@ -194,7 +194,7 @@ export function Fleet() {
   return (
     <div style={{ padding: 24 }}>
       <h1 style={{ fontSize: 20, marginBottom: 4 }}>Fleet</h1>
-      {/* F-59: the ONE cluster selector is the global nav dropdown (top-left) — switching it repoints this view. */}
+      {/* The ONE cluster selector is the global nav dropdown (top-left) — switching it repoints this view. */}
       <p style={{ color: "var(--text-secondary)", marginBottom: 16 }}>
         Cross-cluster management (read + signed policy push). {clusters.length} cluster(s).
         {" "}Showing: <strong>{cluster === "all" ? "all clusters" : cluster}</strong> — switch via the cluster menu (top-left).
@@ -274,7 +274,7 @@ export function Fleet() {
       <p style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 8 }}>
         Authored on the hub, signed, distributed to matching clusters; each spoke verifies the signature before applying. Admin only.
       </p>
-      {/* F-60: real, visible form — labels ABOVE each field, themed `.input` (borders/background/focus). */}
+      {/* Real, visible form — labels ABOVE each field, themed `.input` (borders/background/focus). */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12, marginBottom: 12 }}>
         {([
           { lab: "Policy name", v: name, set: setName, ph: "block-drop-table" },
@@ -288,7 +288,7 @@ export function Fleet() {
           </label>
         ))}
       </div>
-      {/* F-40: confirm a fleet-wide push (a target with no cluster_id matches more than one cluster). */}
+      {/* Confirm a fleet-wide push (a target with no cluster_id matches more than one cluster). */}
       <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-secondary)", marginBottom: 8 }}>
         <input type="checkbox" checked={confirmFleetWide} onChange={(e) => setConfirmFleetWide(e.target.checked)} />
         Confirm fleet-wide push (target matches more than one cluster). Not needed for a single <code>cluster_id</code> target.
@@ -302,10 +302,10 @@ export function Fleet() {
         <button className="btn btn-primary" onClick={push}>Push signed policy</button>
         {pushMsg && <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>{pushMsg}</span>}
       </div>
-      {/* Stage 1: the apply-result panel — exact manifest + honest outcome + live propagation (push AND retract). */}
+      {/* The apply-result panel — exact manifest + honest outcome + live propagation (push AND retract). */}
       <ApplyResultPanel result={applyResult} onClose={() => setApplyResult(null)} />
 
-      {/* F-52: pushed policies are retractable — retract removes it from every cluster's bundle; spokes reconcile. */}
+      {/* Pushed policies are retractable — retract removes it from every cluster's bundle; spokes reconcile. */}
       <h2 style={{ fontSize: 15, margin: "24px 0 8px" }}>Pushed policies</h2>
       <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13, marginBottom: 24 }}>
         <thead>
@@ -342,7 +342,7 @@ export function Fleet() {
         const stat: React.CSSProperties = { padding: "8px 10px", border: "1px solid var(--border,#2a2a2a)", borderRadius: 8, flex: 1, minWidth: 100 };
         return (
         <>
-          {/* F-56: backdrop — click outside closes the panel. */}
+          {/* Backdrop — click outside closes the panel. */}
           <div onClick={() => setDrill(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 30 }} />
           <div style={{ position: "fixed", right: 0, top: 0, bottom: 0, width: 520, maxWidth: "94vw", background: "var(--bg, #111)", borderLeft: "1px solid var(--border,#2a2a2a)", padding: 16, overflow: "auto", zIndex: 31 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -356,7 +356,7 @@ export function Fleet() {
             <p style={{ color: "var(--warning,#f5a623)", fontSize: 13 }}>Residency: this cluster keeps raw logs in-cluster. Drill-down is disabled.</p>
           ) : (
             <>
-              {/* F-56: decision-grade summary — block rate, bundle/rollout, recent denials (not just the table row). */}
+              {/* Decision-grade summary — block rate, bundle/rollout, recent denials (not just the table row). */}
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "12px 0", fontSize: 12 }}>
                 <div style={stat}><div style={{ color: "var(--text-secondary)" }}>Block rate 24h</div><div style={{ fontSize: 18, fontWeight: 600 }}>{blockRate}%</div><div style={{ color: "var(--text-muted)" }}>{blk}/{total}</div></div>
                 <div style={stat}><div style={{ color: "var(--text-secondary)" }}>Bundle</div><div style={{ fontSize: 18, fontWeight: 600 }}>v{ro?.bundle_version ?? 0}</div><div style={{ color: STATE_COLOR[ro?.state ?? "pending"] }}>{ro?.state ?? "—"}</div></div>

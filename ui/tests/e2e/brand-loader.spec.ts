@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// L1–L4 — the shared BrandLoader end-to-end on the live kind build:
+// The shared BrandLoader end-to-end on the live kind build:
 //  • login boot + in-flight sign-in show the loader (not a "Signing in…" text/spinner);
 //  • the loader's green is the --accent teal (computed rgb), never blue;
 //  • the login brand lockup is CENTERED;
@@ -83,7 +83,7 @@ test.describe("BrandLoader — login + route loaders, accent green, centered loc
     expect(justify).toBe("center");
   });
 
-  test("B2: on reload, the boot/refresh loader logo is centered on the FULL viewport (both axes)", async ({ page }) => {
+  test("on reload, the boot/refresh loader logo is centered on the FULL viewport (both axes)", async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/login");
     const loader = page.getByTestId("brand-loader").first();
@@ -93,12 +93,12 @@ test.describe("BrandLoader — login + route loaders, accent green, centered loc
     const vh = await page.evaluate(() => window.innerHeight);
     const cx = box!.x + box!.width / 2;
     const cy = box!.y + box!.height / 2;
-    // within a few px of the viewport center on BOTH axes (was ~115px left before the fix)
+    // within a few px of the viewport center on BOTH axes
     expect(Math.abs(cx - vw / 2), `logo cx=${Math.round(cx)} vs center ${vw / 2}`).toBeLessThanOrEqual(8);
     expect(Math.abs(cy - vh / 2), `logo cy=${Math.round(cy)} vs center ${vh / 2}`).toBeLessThanOrEqual(8);
   });
 
-  test("B1: the token/CLI submit ALSO shows the BrandLoader (aria-busy), not 'Sign in' text", async ({ page }) => {
+  test("the token/CLI submit ALSO shows the BrandLoader (aria-busy), not 'Sign in' text", async ({ page }) => {
     await page.goto("/login");
     await expect(page.getByRole("button", { name: /Use a token \/ CLI/i })).toBeVisible({ timeout: 8000 });
     // hold /me so the token-path signing state is observable
@@ -146,10 +146,10 @@ test.describe("BrandLoader — login + route loaders, accent green, centered loc
     await assertLogoOnlyWhileSigning(page);
   });
 
-  test("A1: even with INSTANT token auth, the loader is held ≥~400ms (no 1-frame flash)", async ({ page }) => {
+  test("even with INSTANT token auth, the loader is held ≥~400ms (no 1-frame flash)", async ({ page }) => {
     await page.goto("/login");
     await expect(page.getByRole("button", { name: /Use a token \/ CLI/i })).toBeVisible({ timeout: 8000 });
-    // token auth resolves INSTANTLY (401, no artificial delay) — only the A1 min keeps the loader up
+    // token auth resolves INSTANTLY (401, no artificial delay) — only the min-hold keeps the loader up
     await page.route("**/api/v1/me", async (route) => {
       await route.fulfill({ status: 401, contentType: "application/json", body: JSON.stringify({ detail: "x" }) });
     });

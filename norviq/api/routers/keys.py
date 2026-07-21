@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""API-key management routes (F046) — issue / list / revoke. Admin-only, audited. The secret is
-returned exactly once (on create); the store only ever holds its hash. Replaces the API Keys stub."""
+"""API-key management routes — issue / list / revoke. Admin-only, audited. The secret is
+returned exactly once (on create); the store only ever holds its hash."""
+
+from datetime import datetime, timedelta, timezone
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
@@ -14,21 +16,37 @@ from norviq.api.api_keys import generate_key, new_id
 from norviq.api.auth import get_current_user, require_admin
 from norviq.api.db.models import ApiKey
 from norviq.api.db.session import get_session
+from norviq.config import settings
 
 log = structlog.get_logger()
 router = APIRouter()
 
 
 class KeyCreate(BaseModel):
-    """Request to issue a new API key with a scoped role + namespace."""
+    """Request to issue a new API key with a scoped role + namespace.
+
+    RETENTION: ``expires_in_days`` — omitted -> the server default (``api_key_default_ttl_days``,
+    default 90); ``0`` -> never expires (an explicit creator choice, e.g. a service key); ``N`` ->
+    now + N days. Pre-existing keys (issued before expiry shipped) have no ``expires_at`` and keep
+    working — unchanged behavior."""
 
     name: str = Field(min_length=1, max_length=255)
     namespace: str = Field(default="default", max_length=255)
     role: str = Field(default="viewer", pattern="^(admin|service|viewer)$")
+    expires_in_days: int | None = Field(default=None, ge=0, le=3650)
+
+
+def _resolve_expiry(expires_in_days: int | None) -> datetime | None:
+    """The key's expires_at per the request + server default; None = never expires."""
+    days = expires_in_days if expires_in_days is not None else int(settings.api_key_default_ttl_days)
+    if days <= 0:
+        return None
+    return datetime.now(timezone.utc) + timedelta(days=days)
 
 
 def _public(row: ApiKey) -> dict:
     """Serialize a key WITHOUT its hash/secret."""
+    expires_at = getattr(row, "expires_at", None)
     return {
         "id": row.id,
         "prefix": row.prefix,
@@ -38,6 +56,7 @@ def _public(row: ApiKey) -> dict:
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "last_used_at": row.last_used_at.isoformat() if row.last_used_at else None,
         "revoked": row.revoked,
+        "expires_at": expires_at.isoformat() if expires_at else None,
     }
 
 
@@ -62,6 +81,7 @@ async def create_key(
     """Issue a new API key. Returns the secret ONCE; only its hash is stored. Admin-only, audited."""
     require_admin(user)
     full, prefix, key_hash = generate_key()
+    expires_at = _resolve_expiry(body.expires_in_days)
     row = ApiKey(
         id=new_id(),
         prefix=prefix,
@@ -70,6 +90,7 @@ async def create_key(
         namespace=body.namespace,
         role=body.role,
         created_by=str(user.get("sub") or ""),
+        expires_at=expires_at,
     )
     session.add(row)
     await session.commit()
@@ -78,6 +99,7 @@ async def create_key(
         prefix=prefix,
         role=body.role,
         namespace=body.namespace,
+        expires_at=expires_at.isoformat() if expires_at else "never",
         actor=user.get("sub"),
         code="NRVQ-API-7092",
     )

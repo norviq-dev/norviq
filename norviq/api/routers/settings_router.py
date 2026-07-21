@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Runtime settings routes (F046) — GET returns the REAL effective settings (config defaults merged
+"""Runtime settings routes — GET returns the REAL effective settings (config defaults merged
 with persisted per-namespace overrides); PUT persists overrides (admin-only, validated, audited).
-
-Replaces the console's hardcoded settings defaults + localStorage-only persistence.
 """
 
 import structlog
@@ -21,7 +19,7 @@ from norviq.config import settings as app_settings
 log = structlog.get_logger()
 router = APIRouter()
 
-# CFG-SETTINGS-INERT-01: the RAW per-ns fields the engine hot path consumes for posture. Mirrored into Redis
+# The RAW per-ns fields the engine hot path consumes for posture. Mirrored into Redis
 # (nulls preserved) so the evaluator resolves per-ns enforcement_mode / trust_threshold / rate_limit with per-field
 # fallback to the global config. apply_mode is API-side only (assert_apply_allowed) and not needed by the engine.
 _ENGINE_POSTURE_FIELDS = ("enforcement_mode", "trust_threshold", "rate_limit")
@@ -53,14 +51,17 @@ class SettingsUpdate(BaseModel):
 
     enforcement_mode: str | None = Field(default=None, pattern="^(block|audit)$")
     trust_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
-    violation_penalty: float | None = Field(default=None, ge=0.0, le=1.0)
+    # NOTE: no per-namespace violation_penalty — it never reached the engine (_ENGINE_POSTURE_FIELDS
+    # carries only enforcement_mode/trust_threshold/rate_limit) so a value set here was inert. The knob
+    # was removed from the settings surface; the SDK's in-process decay still uses the global
+    # settings.trust_violation_penalty.
     rate_limit: int | None = Field(default=None, ge=1, le=100000)
-    sector: str | None = Field(default=None, max_length=64)  # F047: org sector hint (pack suggestions)
-    apply_mode: str | None = Field(default=None, pattern="^(enforce|dry_run_only)$")  # F-51: apply governance
+    sector: str | None = Field(default=None, max_length=64)  # org sector hint (pack suggestions)
+    apply_mode: str | None = Field(default=None, pattern="^(enforce|dry_run_only)$")  # apply governance
 
 
 async def assert_apply_allowed(session: AsyncSession, namespace: str) -> None:
-    """F-51: raise 409 if the namespace is in dry_run_only mode (the API must reject policy applies for it).
+    """Raise 409 if the namespace is in dry_run_only mode (the API must reject policy applies for it).
     Server-enforced so a direct API call is gated, not just the console. dry-run + drafts stay allowed."""
     row = (
         await session.execute(select(NamespaceSettings).where(NamespaceSettings.namespace == namespace))
@@ -82,15 +83,33 @@ def _effective(row: NamespaceSettings | None) -> dict:
         "trust_threshold": (
             row.trust_threshold if row and row.trust_threshold is not None else app_settings.trust_threshold
         ),
-        "violation_penalty": (
-            row.violation_penalty
-            if row and row.violation_penalty is not None
-            else app_settings.trust_violation_penalty
-        ),
         "rate_limit": (
             row.rate_limit if row and row.rate_limit is not None else app_settings.evaluator_rate_limit_per_window
         ),
         "sector": (getattr(row, "sector", None) if row else None),
+    }
+
+
+@router.get("/settings/retention")
+async def get_retention_settings(user: dict = Depends(get_current_user)) -> dict:
+    """RETENTION: the cluster's effective data-retention windows, read-only (adjust via Helm/env — a
+    UI write here could silently shorten audit evidence, so mutation stays operator-only). Non-secret
+    config values; any authenticated user may read them. Drives the Settings page's retention card."""
+    return {
+        "audit_retention_days": int(app_settings.audit_retention_days),
+        "coverage_snapshot_retention_days": int(app_settings.coverage_snapshot_retention_days),
+        "graph_snapshot_keep_per_namespace": int(app_settings.graph_snapshot_keep_per_namespace),
+        "agent_registry_retention_days": int(app_settings.agent_registry_retention_days),
+        "api_key_default_ttl_days": int(app_settings.api_key_default_ttl_days),
+        "draft_ttl_days": int(app_settings.draft_ttl_days),
+        "draft_ttl_test_hours": int(app_settings.draft_ttl_test_hours),
+        "draft_cap_per_namespace": int(app_settings.draft_cap_per_namespace),
+        "policy_version_keep_count": int(app_settings.policy_version_keep_count),
+        "policy_version_keep_days": int(app_settings.policy_version_keep_days),
+        "redteam_detail_keep_runs": int(app_settings.redteam_detail_keep_runs),
+        "redteam_detail_keep_days": int(app_settings.redteam_detail_keep_days),
+        "redteam_summary_keep_runs": int(app_settings.redteam_summary_keep_runs),
+        "redteam_summary_keep_days": int(app_settings.redteam_summary_keep_days),
     }
 
 
@@ -133,7 +152,7 @@ async def put_settings(
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(row, field, value)
     await session.commit()
-    # CFG-SETTINGS-INERT-01: mirror the RAW engine-facing posture into Redis so the evaluator enforces it live
+    # Mirror the RAW engine-facing posture into Redis so the evaluator enforces it live
     # (source of truth remains the DB row above). Best-effort — a mirror failure just means the engine keeps the
     # prior/global posture until the next warm/PUT; it never fails the save.
     cache = getattr(getattr(request.app, "state", None), "cache", None)

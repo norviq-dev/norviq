@@ -12,7 +12,7 @@ vi.mock("../api/fleet", () => ({
     return fleetEnabledValue;
   }
 }));
-// P2-3: the graph's namespace scope IS the global selector, so each test controls useApp() directly.
+// The graph's namespace scope IS the global selector, so each test controls useApp() directly.
 // The spy mutates the context the way the real AppContext does (setNamespace updates the shared value and
 // consumers re-render), so a dropdown pick still drives a scoped re-fetch — now via the GLOBAL selector.
 const setNamespaceSpy = vi.fn((ns: string) => {
@@ -109,7 +109,7 @@ describe("AssetGraph page (redesign)", () => {
     expect(screen.getByText(/paths/)).toBeInTheDocument();
   });
 
-  it("A2: awaiting agents are hidden by default behind an 'Awaiting (N) — Show' chip (in document flow)", async () => {
+  it("awaiting agents are hidden by default behind an 'Awaiting (N) — Show' chip (in document flow)", async () => {
     // The real default response hides awaiting agents server-side (include_awaiting=false) and reports the count.
     mockFetch({ nodes: [GRAPH.nodes[0], GRAPH.nodes[1]], edges: GRAPH.edges, namespaces: ["hr", "payments"], awaiting_hidden: 1 });
     renderPage();
@@ -210,7 +210,7 @@ describe("AssetGraph page (redesign)", () => {
     fireEvent.click(await screen.findByRole("option", { name: /^payments$/i }));
     await waitFor(() => expect(String(f.mock.calls[f.mock.calls.length - 1][0])).toContain("namespace=payments"));
     // re-open: the dropdown STILL lists every namespace + the correct "(2)" count, not "(1)".
-    // P2-3: the universe is now the GLOBAL one (useApp().namespaces, i.e. /cluster-info — what the header
+    // The universe is now the GLOBAL one (useApp().namespaces, i.e. /cluster-info — what the header
     // lists), not whatever the scoped graph response happened to return. That is what keeps the in-panel
     // dropdown a faithful view of the global selector.
     fireEvent.click(screen.getByRole("button", { name: /^namespace$/i }));
@@ -235,11 +235,11 @@ describe("AssetGraph page (redesign)", () => {
   });
 });
 
-// ── P2-3 GRAPH-GLOBAL-NS-SYNC: the graph follows the GLOBAL namespace selector ──────────────────
+// ── GRAPH-GLOBAL-NS-SYNC: the graph follows the GLOBAL namespace selector ──────────────────
 // Pre-fix the page held its own `nsScope` state initialised to "all" and never read useApp(), so the
 // global selector was ignored: the fetch always carried namespace=all and the header always read
 // "All namespaces", no matter what the console was scoped to.
-describe("P2-3: Asset Graph namespace follows the global selector", () => {
+describe("Asset Graph namespace follows the global selector", () => {
   it("fetches the GLOBAL namespace, not 'all', when the console is scoped", async () => {
     mockApp = { ...APP_DEFAULTS, selectedNamespace: "payments", namespace: "payments" };
     const f = mockFetch();

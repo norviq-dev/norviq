@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import time
 
 import httpx
 import jwt
@@ -32,7 +33,9 @@ def auth_token() -> str:
     if env_token:
         return env_token
     secret = os.environ.get("NRVQ_JWT_SECRET", "change-me-in-production")
-    return jwt.encode({"sub": "test", "role": "admin"}, secret, algorithm="HS256")
+    return jwt.encode(
+        {"sub": "test", "role": "admin", "exp": int(time.time()) + 3600}, secret, algorithm="HS256"
+    )
 
 
 @pytest.fixture(scope="session")

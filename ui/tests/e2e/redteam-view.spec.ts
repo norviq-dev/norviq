@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// F1 — Red Team view, end-to-end on the REAL app + engine. Drives the nav → runs the attack suite against
+// Red Team view, end-to-end on the REAL app + engine. Drives the nav → runs the attack suite against
 // the deployed posture → proves the scorecard, per-attack rows, per-technique breakdown, and run HISTORY all
-// render from the durable backend (B2/B3). Reloading the page keeps the results (durable, not in-memory), and
+// render from the durable backend. Reloading the page keeps the results (durable, not in-memory), and
 // the run's proven-blocking % matches what /api/v1/redteam/results/latest reports (no fabricated number).
 
 import { test, expect, waitForApp } from "./fixtures";
@@ -17,7 +17,7 @@ async function apiJson(page: Page, path: string): Promise<any> {
   }, path);
 }
 
-test.describe("F1 — Red Team view runs the suite + renders durable efficacy (real engine)", () => {
+test.describe("Red Team view runs the suite + renders durable efficacy (real engine)", () => {
   test("nav → run suite → scorecard/attacks/history render and survive a reload", async ({ page }) => {
     // reach the view via the TESTING nav (proves the route + nav item ship)
     await page.goto("/redteam");

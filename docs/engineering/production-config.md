@@ -2,7 +2,7 @@
 # Norviq Production Configuration Checklist
 
 Run through this before promoting a Norviq install to production. Each item names the exact value /
-env var and how to verify it. Companion to [`docs/norviq-ops-guide.md`](../norviq-ops-guide.md).
+env var and how to verify it.
 
 ## 1. JWT secret rotation (REQUIRED)
 The API signs/validates tokens with `api_secret_key`; the shipped default
@@ -16,9 +16,9 @@ The API signs/validates tokens with `api_secret_key`; the shipped default
   ```
 - `config.requireStrongSecret=true` makes the API **refuse to start** on the default secret
   (logs `NRVQ-API-7099` and raises). Leave it `false` only in dev/test.
-- **Alias note:** `NRVQ_API_SECRET_KEY` / `NRVQ_DB_SSL_MODE` now bind correctly (the Tier-A pass
-  fixed a pydantic alias bug where the chart's `NRVQ_`-prefixed env was ignored and the secret was
-  pinned to the default). Verify rotation took effect:
+- **Alias note:** `NRVQ_API_SECRET_KEY` / `NRVQ_DB_SSL_MODE` bind correctly — the chart's
+  `NRVQ_`-prefixed env is honored (an earlier pydantic alias bug that ignored it and pinned the
+  secret to the default is fixed). Verify rotation took effect:
   ```bash
   # A token signed with the OLD/default secret must now be rejected (401).
   curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer <old-token>" \

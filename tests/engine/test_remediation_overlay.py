@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""COMP-GEN-01 data-loss fix: a compliance-remediation draft ("Generate enforcing policy" for a gap
+"""Data-loss fix: a compliance-remediation draft ("Generate enforcing policy" for a gap
 technique) must be an ADDITIVE, per-class, tighten-only OVERLAY — never a replacement for the class's
 existing comprehensive policy. It is applied at the dedicated key ``(ns, "<class>__remediation__")``,
 resolved by the evaluator as an overlay candidate (mirrors ``__pack__``/``__guardrail__``), so the base
@@ -25,10 +25,10 @@ _ev = OPAEvaluator.__new__(OPAEvaluator)
 
 
 def _r(key: str, decision: str, priority: int, overlay: bool | None = None) -> dict:
-    # FIX-H6-2: _resolve_with_packs now partitions on the "overlay" PROVENANCE flag (set at candidate
+    # _resolve_with_packs now partitions on the "overlay" PROVENANCE flag (set at candidate
     # construction in production), not a key-suffix guess. Default to the key-suffix heuristic here so existing
     # key-driven cases below need no changes; pass `overlay=` explicitly to simulate a real base class whose
-    # name happens to collide with the reserved "__remediation__" suffix (FIX-H6-2's own regression case).
+    # name happens to collide with the reserved "__remediation__" suffix (this overlay-provenance regression case).
     if overlay is None:
         overlay = _ev._is_overlay(key)
     return {"key": key, "decision": SimpleNamespace(decision=decision), "priority": priority, "overlay": overlay}
@@ -89,14 +89,14 @@ def test_two_classes_remediation_overlays_do_not_cross_apply() -> None:
     assert "default:report-gen__remediation__" != "default:billing-agent__remediation__"
 
 
-# --- H6 fix: __pack_weaken__ may relax a PACK'S OWN block, but must NEVER relax a HARD tighten-only overlay
+# --- __pack_weaken__ may relax a PACK'S OWN block, but must NEVER relax a HARD tighten-only overlay
 # (__guardrail__ / *__remediation__). Before the fix, _resolve_overlay's weaken exception unconditionally
 # returned the weaken candidate whenever ANY __pack_weaken__ existed, discarding every other overlay — including
 # a guardrail or remediation block that has nothing to do with the pack the weaken was meant to relax. -------
 
 def test_pack_weaken_cannot_neutralize_a_remediation_block() -> None:
     # base ALLOWS + remediation BLOCKS + an unrelated pack_weaken (default-allow) present -> BLOCK must survive.
-    # This is the exact H6 regression: pre-fix this resolved to "allow" (compliance gap silently reopened).
+    # This is the exact regression: pre-fix this resolved to "allow" (compliance gap silently reopened).
     assert _winner([
         _r("default:report-gen", "allow", 700),
         _r("default:report-gen__remediation__", "block", 1),
@@ -105,7 +105,7 @@ def test_pack_weaken_cannot_neutralize_a_remediation_block() -> None:
 
 
 def test_pack_weaken_cannot_neutralize_a_guardrail_block() -> None:
-    # same regression, for the F-14 operator guardrail instead of a remediation overlay.
+    # same regression, for the operator guardrail instead of a remediation overlay.
     assert _winner([
         _r("default:report-gen", "allow", 700),
         _r("default:__guardrail__", "block", 500),
@@ -151,7 +151,7 @@ def test_guardrail_and_remediation_block_combine_most_restrictive_with_pack_fami
     ]) == "block"
 
 
-# --- FIX-H6-2: overlay-ness comes from provenance, not a key-string suffix. A real agent_class whose OWN name
+# --- Overlay-ness comes from provenance, not a key-string suffix. A real agent_class whose OWN name
 # happens to end in the reserved "__remediation__" suffix must keep its normal priority-based precedence — its
 # base policy must never be misclassified as an overlay and lose to a lower-priority baseline. ------------------
 
@@ -246,7 +246,7 @@ async def test_collect_candidates_union_includes_remediation_overlay() -> None:
     assert "prod:report-gen__remediation__" in keys
 
 
-# --- FIX-H6-2 end-to-end at the construction layer: _collect_candidates must tag "overlay" by PROVENANCE, so a
+# --- End-to-end at the construction layer: _collect_candidates must tag "overlay" by PROVENANCE, so a
 # real agent_class literally named "<x>__remediation__" gets its OWN base policy tagged overlay=False, while an
 # actual per-class remediation overlay for a DIFFERENT class is tagged overlay=True. -------------------------
 

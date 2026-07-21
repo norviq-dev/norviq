@@ -36,7 +36,7 @@ escalates["new_beneficiary_escalate"] {
 }
 reasons["new_beneficiary_escalate"] = "Finance: transfer to a new/unverified beneficiary — hold for review"
 
-# F-10: SoD must not be bypassable by case (Alice/alice), homoglyph (Cyrillic аlice), or an empty/missing
+# SoD must not be bypassable by case (Alice/alice), homoglyph (Cyrillic аlice), or an empty/missing
 # approver. Compare the engine's confusable-skeleton fold (tool_params_normalized — homoglyph + case folded)
 # AND a plain lower() of the raw values (fallback when normalized is absent). Empty/missing approver = violation
 # (can't demonstrate a second, distinct approving party).
@@ -74,7 +74,7 @@ blocks["sod_violation"] {
 }
 reasons["sod_violation"] = "Finance: segregation-of-duties — the same identity must not initiate AND approve (case/homoglyph-insensitive; a distinct, non-empty approver is required)"
 
-# F-21: export/egress guard (mirrors telecom F-17). A data-export tool (export_statement/send/upload/…) routed to an
+# Export/egress guard (mirrors the telecom CPNI export guard). A data-export tool (export_statement/send/upload/…) routed to an
 # EXTERNAL destination is exfil → block; to no/internal destination → escalate for review. Param-semantic, so a
 # renamed export tool or a clean-param "export everything by id" call is caught (the live FN: export_statement →
 # s3://exfil). Money-movement verbs are excluded (handled by the wire/SoD rules).

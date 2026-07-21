@@ -76,13 +76,38 @@ jobs:
         run: |
           python3 - <<'PY'
           import json, sys
+          # Documented, accepted dependency exceptions. Each is an UNFIXABLE-by-version-bump CVE in an
+          # OPTIONAL SDK framework-adapter extra that is NOT part of the shipped container images (the
+          # images install only `.[spiffe]`; these deps arrive solely via norviq[frameworks] / [crewai] /
+          # [semantic-kernel], which a deployment must opt into). Full rationale + review dates live in
+          # SECURITY.md ("Accepted dependency exceptions"). Keep this list in lockstep with that table:
+          # a CVE that a bump CAN fix must be bumped (see werkzeug>=3.1.6 in pyproject), never listed here.
+          ACCEPTED_CVES = {
+              "CVE-2026-45829",  # chromadb (via crewai): Python-SERVER pre-auth RCE; no fixed release exists
+                                 #   (latest still affected); crewai uses chromadb as an embedded client, not
+                                 #   an exposed server, so the pre-auth server path is not reachable here.
+              "CVE-2026-26030",  # semantic-kernel: InMemoryVectorStore filter-lambda RCE; the fix (1.39.4+)
+                                 #   requires a PRE-RELEASE azure-ai-agents dep, and the vulnerable vector-store
+                                 #   path is not used by the norviq semantic-kernel adapter.
+              "CVE-2026-25592",  # semantic-kernel: a .NET CVE (fix = .NET Core 1.71.0) that FOSSA maps onto
+                                 #   the pip package; no Python semantic-kernel release clears it.
+          }
           d = json.load(open("fossa-issues.json"))
           sec = [i for i in d.get("issues", []) if i.get("type") in ("vulnerability", "malware")]
-          if sec:
-              print(f"FOSSA security gate FAILED — {len(sec)} dependency vuln/malware issue(s):")
-              for i in sec:
+          def accepted_cve(i):
+              blob = json.dumps(i)
+              return next((c for c in ACCEPTED_CVES if c in blob), None)
+          accepted = [i for i in sec if accepted_cve(i)]
+          gated    = [i for i in sec if not accepted_cve(i)]
+          if accepted:
+              print(f"NOTE: {len(accepted)} accepted dependency exception(s) (documented in SECURITY.md):")
+              for i in accepted:
+                  print(f"  - {accepted_cve(i)}: {i.get('revisionId','')}")
+          if gated:
+              print(f"FOSSA security gate FAILED — {len(gated)} dependency vuln/malware issue(s):")
+              for i in gated:
                   print(f"  - {i.get('type')}: {i.get('revisionId','')} {i.get('cve') or ''}")
               sys.exit(1)
-          print("FOSSA security gate PASSED — 0 dependency vuln/malware issues "
-                "(license/outdated are informational, not gated on the free tier).")
+          print(f"FOSSA security gate PASSED — 0 non-excepted dependency vuln/malware issues "
+                f"({len(accepted)} documented exception(s); license/outdated are informational).")
           PY

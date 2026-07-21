@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// F-46: small CSV export helper. The Dashboard "Export" button and the Report ▼ "Export CSV" item were both dead
-// (no handler, and no CSV logic existed anywhere). This builds a CSV from a list of row objects and triggers a
-// browser download — no dependency, RFC-4180 quoting.
+// Small CSV export helper for the Dashboard "Export" button and the Report ▼ "Export CSV" item.
+// This builds a CSV from a list of row objects and triggers a browser download — no dependency,
+// RFC-4180 quoting.
 //
-// SEC-CSV-INJECTION: exported columns include attacker-influenceable strings (tool names, policy
+// Exported columns include attacker-influenceable strings (tool names, policy
 // reason/rule_id, agent classes). A cell starting with = + - @ (or a leading tab/CR) is interpreted as
 // a formula by Excel/Sheets when the file is opened — the standard mitigation is to prefix such cells
 // with a single quote so the spreadsheet app treats them as literal text, applied BEFORE the existing

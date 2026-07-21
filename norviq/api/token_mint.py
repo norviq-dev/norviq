@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""LOGIN-2: mint a short-lived admin session token FROM the in-cluster secret.
+"""Mint a short-lived admin session token FROM the in-cluster secret.
 
 Runs INSIDE the api pod (which holds ``NRVQ_API_SECRET_KEY`` in its environment), invoked by the
 ``norviq login`` CLI via ``kubectl exec`` — so an operator gets a first-login token WITHOUT ever seeing
 the signing key and WITHOUT hand-crafting a JWT. Prints ONLY the token to stdout (nothing else), so the
 CLI can capture it cleanly. This is the legacy-HS256 human-login path; it is deliberately separate from
-the workload service token the webhook mints for injected sidecars (SIDE-2).
+the workload service token the webhook mints for injected sidecars.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def mint_admin_token(ttl_seconds: int = 3600, sub: str = "cli-admin", role: str 
 def mint_session_token(
     *, sub: str, role: str, namespace: str, must_change: bool = False, ttl_seconds: int = 3600
 ) -> str:
-    """LOGIN-2: sign a short-lived HS256 session token for a username/password login.
+    """Sign a short-lived HS256 session token for a username/password login.
 
     Same signer/shape as ``mint_admin_token`` (so every existing consumer validates it identically),
     plus a ``must_change`` claim carrying the force-password-change state the console gates on.

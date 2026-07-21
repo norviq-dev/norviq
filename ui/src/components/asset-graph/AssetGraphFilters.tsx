@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// Asset Graph filter bar (design_handoff_assetgraph): custom dark dropdown menus (Namespace,
+// Asset Graph filter bar: custom dark dropdown menus (Namespace,
 // Agent class, Cluster — the Cluster menu exists ONLY in a multi-cluster install via the existing
 // fleetEnabled signal — and Range), a node-name search, and Type / Risk chips. Single-select menus
 // that close on outside click (the page renders the click-away overlay via onCloseMenus).

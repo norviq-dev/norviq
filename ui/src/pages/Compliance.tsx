@@ -3,10 +3,9 @@
 //
 // Compliance / AI-attack-framework coverage page.
 //
-// ABSOLUTE RULE — NO MOCK DATA. Every number, chip, evidence row, chart point and export on this page
-// is derived from a live backend response (fetchMitreCoverage / fetchMitreTrend / mitreExportPath /
-// generateMitrePolicy). There is no hardcoded technique list, no fabricated count/trend, and no fake
-// export. MITRE ATLAS and OWASP LLM Top 10 (2025) are BOTH live frameworks — each drives its own card
+// ABSOLUTE RULE — NO MOCK DATA. Every number, chip, evidence row and export on this page is derived
+// from a live backend response (fetchMitreCoverage / mitreExportPath / generateMitrePolicy). There is
+// no hardcoded technique list, no fabricated count, and no fake export. MITRE ATLAS and OWASP LLM Top 10 (2025) are BOTH live frameworks — each drives its own card
 // (overview) and the whole detail view (when selected) off its OWN backend coverage, fetched with the
 // SAME client methods and a trailing `framework` argument. Every OTHER framework renders as an inert
 // "coming soon" roadmap row with NO coverage numbers.
@@ -19,7 +18,6 @@ import { useNavigate } from "react-router-dom";
 import {
   apiUrl,
   fetchMitreCoverage,
-  fetchMitreTrend,
   fetchRedteamLatest,
   generateMitrePolicy,
   generateMitrePolicyBatch,
@@ -28,7 +26,6 @@ import {
   type GenerateResult,
   type MitreCoverage,
   type MitreTechnique,
-  type MitreTrend,
   type RedteamLatest
 } from "../api/client";
 import { getToken } from "../auth/session";
@@ -46,7 +43,7 @@ const OOS_DOT = "#3a3a40";
 const MUTED = "#8b8d93";
 const FAINT = "#5c5e66";
 
-// Q3: Compliance is driven by the GLOBAL header time-range (routeMeta timeScoped:true) — so the window widens to
+// Compliance is driven by the GLOBAL header time-range (routeMeta timeScoped:true) — so the window widens to
 // the full header set (1h/6h/24h/7d/30d). No in-page picker; the header is the single source of truth.
 type Range = "1h" | "6h" | "24h" | "7d" | "30d";
 type StatusFilter = "all" | "gap" | "enforced" | "oos";
@@ -165,7 +162,7 @@ function techStatus(t: MitreTechnique): keyof typeof ST {
   return t.status; // "enforced" | "gap" | "out_of_scope" — from the API, never inferred client-side
 }
 
-// F2: efficacy overlay. When a Red Team run exists it shows the REAL proven-blocking %; before any run it
+// Efficacy overlay. When a Red Team run exists it shows the REAL proven-blocking %; before any run it
 // keeps the honest "not efficacy-tested" caption with a call to action. Coverage (rules present) ≠ efficacy.
 function ComplianceEfficacyBanner({ efficacy, onView }: { efficacy?: RedteamLatest; onView: () => void }) {
   const hasRun = !!efficacy?.has_run;
@@ -211,7 +208,7 @@ export function Compliance() {
 
   const [view, setView] = useState<"overview" | "detail">("overview");
   const [tab, setTab] = useState<"frameworks" | "custom">("frameworks");
-  // Q3: the range is the GLOBAL header time-range (reactive) — no local state, no in-page picker. Changing the
+  // The range is the GLOBAL header time-range (reactive) — no local state, no in-page picker. Changing the
   // header chip refetches coverage/evidence (keyed on `range` below), on BOTH the overview cards and the detail.
   const range: Range = timeRange;
   // The framework the DETAIL view is bound to (switcher-driven). Overview always shows both live cards.
@@ -223,16 +220,16 @@ export function Compliance() {
   const [fwMenuOpen, setFwMenuOpen] = useState(false);
   const [drafted, setDrafted] = useState<Record<string, boolean>>({});
   const [toast, setToast] = useState<{ msg: string; link?: string } | null>(null);
-  // COMP-GEN-01 multi-select: the set of GAP technique_ids checked for batch generation + the class-scope mode
+  // Multi-select: the set of GAP technique_ids checked for batch generation + the class-scope mode
   // for that batch ("affected" = each control's top affected class · "all" = every real affected class · a
   // specific class name).
   const [selectedGaps, setSelectedGaps] = useState<Set<string>>(new Set());
   const [genClassMode, setGenClassMode] = useState<string>("affected");
-  // H3: non-draft outcomes of the last batch generate (escalate / no class / error) — rendered as a
+  // Non-draft outcomes of the last batch generate (escalate / no class / error) — rendered as a
   // dismissible panel with the FULL per-control server message, so a zero-draft batch can't pass silently.
   const [batchOutcome, setBatchOutcome] = useState<GenerateResult[] | null>(null);
 
-  // STALE-3: `drafted` and `selectedGaps` are session hints keyed only by technique_id — with no
+  // `drafted` and `selectedGaps` are session hints keyed only by technique_id — with no
   // namespace/framework component. Without this, a draft made in ns-A/atlas would wrongly disable
   // "Generate" for the same technique id in ns-B (or in owasp), and a batch-generate could fire the ids
   // selected while viewing ns-A/atlas against a different scope. Reset both whenever the scope changes.
@@ -240,6 +237,11 @@ export function Compliance() {
     setDrafted({});
     setSelectedGaps(new Set());
     setBatchOutcome(null);
+    // Revert the batch class-scope to the safe default on any scope change too. A specific class
+    // picked in ns-A (from ns-A's affected classes) won't exist in ns-B; left stale, the controlled <select>
+    // holds an off-list value and onGenerateBatch submits it verbatim → a zero-draft "no_affected_classes"
+    // batch in ns-B. Resetting here matches how drafted/selectedGaps/batchOutcome are already cleared.
+    setGenClassMode("affected");
   }, [namespace, framework]);
 
   // ---- REAL data. Both live frameworks fetch their OWN coverage — the overview renders TWO cards,
@@ -252,37 +254,22 @@ export function Compliance() {
     cacheKey: `mitre-coverage:owasp:${namespace}:${range}`,
     staleTimeMs: 30_000
   });
-  // F2: the last Red Team run's efficacy. Coverage answers "which controls have rules"; efficacy answers
-  // "how many are PROVEN-blocking". We surface it as a banner that coexists with the Q3 header range selector.
-  // STALE-4: scope efficacy to the selected namespace so "N% proven-blocking" describes THIS scope's last
+  // The last Red Team run's efficacy. Coverage answers "which controls have rules"; efficacy answers
+  // "how many are PROVEN-blocking". We surface it as a banner that coexists with the header range selector.
+  // Scope efficacy to the selected namespace so "N% proven-blocking" describes THIS scope's last
   // run, not whatever cluster-wide run was newest. Cache key includes the namespace so scopes don't share.
   const efficacy = useApi<RedteamLatest>(() => fetchRedteamLatest(namespace), [namespace], {
     cacheKey: `compliance-redteam-latest:${namespace}`,
     staleTimeMs: 30_000
   });
-  const atlasTrend = useApi<MitreTrend>(() => fetchMitreTrend(namespace, "30d", "atlas"), [namespace], {
-    cacheKey: `mitre-trend:atlas:${namespace}`,
-    staleTimeMs: 60_000
-  });
-  const owaspTrend = useApi<MitreTrend>(() => fetchMitreTrend(namespace, "30d", "owasp"), [namespace], {
-    cacheKey: `mitre-trend:owasp:${namespace}`,
-    staleTimeMs: 60_000
-  });
-
   const covByFw: Record<ComplianceFramework, ReturnType<typeof useApi<MitreCoverage>>> = {
     atlas: atlasCoverage,
     owasp: owaspCoverage
   };
-  const trendByFw: Record<ComplianceFramework, ReturnType<typeof useApi<MitreTrend>>> = {
-    atlas: atlasTrend,
-    owasp: owaspTrend
-  };
 
-  // The detail view's active framework selects which coverage/trend drive it.
+  // The detail view's active framework selects which coverage drives it.
   const activeCoverage = covByFw[framework];
-  const activeTrend = trendByFw[framework];
   const data = activeCoverage.data;
-  const trend = activeTrend.data;
   // Degraded when the selected framework's coverage errored (detail) — or, on overview, when either did.
   const apiDegraded =
     view === "detail" ? !!activeCoverage.error : !!atlasCoverage.error && !!owaspCoverage.error;
@@ -338,7 +325,7 @@ export function Compliance() {
   // ---- gap remediation: create a NON-enforcing dry-run draft (for the SELECTED framework), then
   //      deep-link to Policies. -----------------------------------------------------------------
   async function onGenerate(t: MitreTechnique) {
-    // F2: don't force a "default" class — pass the control's top affected class if we have one, else let the
+    // Don't force a "default" class — pass the control's top affected class if we have one, else let the
     // backend derive the real active class (or honestly report there's nothing to remediate).
     const cls = t.affected_classes?.[0]?.class;
     try {
@@ -348,7 +335,7 @@ export function Compliance() {
         return;
       }
       if (res.status === "escalate") {
-        showToast(res.message ?? "This control needs a bespoke rule — escalate to San.");
+        showToast(res.message ?? "This control can't be auto-generated — the risk doesn't show up in tool-call traffic, so it needs a manual (configuration/process) control.");
         return;
       }
       setDrafted((d) => ({ ...d, [t.technique_id]: true }));
@@ -367,11 +354,12 @@ export function Compliance() {
     });
   }
 
-  // COMP-GEN-01 multi-select: generate one CONTROL-SPECIFIC draft per (selected control × class) in ONE batch
+  // Multi-select: generate one CONTROL-SPECIFIC draft per (selected control × class) in ONE batch
   // call, honouring the class-scope mode. Marks each drafted control + surfaces a rollup toast that deep-links
   // to the first draft (all land in the Policy Catalog inbox).
-  async function onGenerateBatch() {
-    const ids = [...selectedGaps];
+  // `ids` is the caller-supplied set of controls to generate — the DetailView passes only the
+  // currently-VISIBLE generatable gaps (selected ∩ visible), never hidden selections the user can't see.
+  async function onGenerateBatch(ids: string[]) {
     if (!ids.length) return;
     try {
       const res = await generateMitrePolicyBatch(ids, namespace ?? "default", genClassMode, framework);
@@ -383,7 +371,7 @@ export function Compliance() {
       });
       setSelectedGaps(new Set());
       const firstLink = drafts.find((r) => r.deeplink)?.deeplink;
-      // H3: a 3.5s toast is NOT enough for a partial/zero outcome — the per-control escalation
+      // A 3.5s toast is NOT enough for a partial/zero outcome — the per-control escalation
       // reasons were dropped and "pending in Policies" was claimed even when nothing was created.
       // Every non-draft outcome now lands in a DISMISSIBLE panel (sticky, full server message);
       // the toast only carries the honest rollup.
@@ -434,8 +422,8 @@ export function Compliance() {
         </div>
       )}
 
-      {/* F2: proven-blocking efficacy overlay from the last Red Team run — coverage is "rules present",
-          this is the honest "how much is PROVEN blocking". Coexists with the Q3 header range selector. */}
+      {/* Proven-blocking efficacy overlay from the last Red Team run — coverage is "rules present",
+          this is the honest "how much is PROVEN blocking". Coexists with the header range selector. */}
       <ComplianceEfficacyBanner efficacy={efficacy.data ?? undefined} onView={() => navigate("/redteam")} />
 
       {view === "overview" ? (
@@ -445,7 +433,6 @@ export function Compliance() {
           scopeOpen={scopeOpen}
           setScopeOpen={setScopeOpen}
           covByFw={covByFw}
-          trendByFw={trendByFw}
           loading={overviewLoading}
           range={range}
           onOpen={(fw) => openDetail(fw, "all")}
@@ -456,7 +443,6 @@ export function Compliance() {
         <DetailView
           framework={framework}
           data={data}
-          trend={trend}
           loading={detailLoading}
           range={range}
           namespace={namespace}
@@ -531,15 +517,12 @@ export function Compliance() {
 // OVERVIEW
 // ================================================================================================
 type CoverageApi = ReturnType<typeof useApi<MitreCoverage>>;
-type TrendApi = ReturnType<typeof useApi<MitreTrend>>;
-
 function OverviewView({
   tab,
   setTab,
   scopeOpen,
   setScopeOpen,
   covByFw,
-  trendByFw,
   loading,
   range,
   onOpen,
@@ -551,7 +534,6 @@ function OverviewView({
   scopeOpen: boolean;
   setScopeOpen: (v: boolean) => void;
   covByFw: Record<ComplianceFramework, CoverageApi>;
-  trendByFw: Record<ComplianceFramework, TrendApi>;
   loading: boolean;
   range: Range;
   onOpen: (fw: ComplianceFramework) => void;
@@ -634,7 +616,6 @@ function OverviewView({
                   key={meta.id}
                   meta={meta}
                   data={covByFw[meta.id].data}
-                  trend={trendByFw[meta.id].data}
                   range={range}
                   onOpen={() => onOpen(meta.id)}
                   onGaps={() => onGaps(meta.id)}
@@ -693,7 +674,6 @@ function OverviewView({
 function FrameworkOverviewCard({
   meta,
   data,
-  trend,
   range,
   onOpen,
   onGaps,
@@ -701,7 +681,6 @@ function FrameworkOverviewCard({
 }: {
   meta: (typeof LIVE_FRAMEWORKS)[number];
   data: MitreCoverage | null;
-  trend: MitreTrend | null;
   range: Range;
   onOpen: () => void;
   onGaps: () => void;
@@ -759,8 +738,6 @@ function FrameworkOverviewCard({
             <span style={{ color: FAINT }}>·</span>
             <span><b style={{ color: "#ededf0" }}>{fmt(data.blocked)}</b> blocked · {RANGE_LABEL[range]}</span>
           </div>
-          {/* C4: the trend sparkline + "coverage steady" line is removed from the framework CARD (noise). The
-              TrendText/MiniSpark components + the trend fetch stay — they still render in the detail drill-in. */}
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 14, flex: "none", minWidth: 200 }}>
@@ -801,57 +778,12 @@ function FrameworkOverviewCard({
   );
 }
 
-// Real trend text — honest minimal/empty state when 0 or 1 snapshots exist (NO fabricated line).
-function TrendText({ trend }: { trend: MitreTrend | null }) {
-  const points = trend?.points ?? [];
-  if (points.length <= 1) {
-    return (
-      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 600, color: "#7a7a82", marginTop: 10 }}>
-        <span style={{ width: 7, height: 7, borderRadius: "50%", background: OOS_DOT }} />
-        Trend builds as snapshots accumulate
-      </div>
-    );
-  }
-  const first = points[0];
-  const last = points[points.length - 1];
-  const dEnf = last.enforced - first.enforced;
-  const dPct = Math.round(last.coverage_pct - first.coverage_pct);
-  const enfPart = dEnf === 0 ? "coverage steady" : `${dEnf > 0 ? "+" : ""}${dEnf} technique${Math.abs(dEnf) === 1 ? "" : "s"} enforced`;
-  const pctPart = dPct === 0 ? "" : ` · ${dPct > 0 ? "+" : ""}${dPct}% coverage`;
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 600, color: "#6ee7b7", marginTop: 10 }}>
-      <MiniSpark points={points.map((p) => p.coverage_pct)} />
-      {enfPart}
-      {pctPart}
-    </div>
-  );
-}
-
-// Real sparkline from the fetched coverage_pct series (only rendered for >= 2 points).
-function MiniSpark({ points }: { points: number[] }) {
-  if (points.length < 2) return null;
-  const w = 66;
-  const h = 16;
-  const min = Math.min(...points);
-  const max = Math.max(...points);
-  const span = max - min || 1;
-  const d = points
-    .map((v, i) => `${((i / (points.length - 1)) * w).toFixed(1)},${(h - ((v - min) / span) * h + 1).toFixed(1)}`)
-    .join(" ");
-  return (
-    <svg width={w} height={h + 2} style={{ flex: "none" }} aria-hidden="true">
-      <polyline points={d} fill="none" stroke="#6ee7b7" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
 // ================================================================================================
 // DETAIL
 // ================================================================================================
 function DetailView(props: {
   framework: ComplianceFramework;
   data: MitreCoverage | null;
-  trend: MitreTrend | null;
   loading: boolean;
   range: Range;
   namespace: string;
@@ -875,7 +807,7 @@ function DetailView(props: {
   onClearGapSelect: () => void;
   genClassMode: string;
   setGenClassMode: (v: string) => void;
-  onGenerateBatch: () => void;
+  onGenerateBatch: (ids: string[]) => void;
   batchOutcome: GenerateResult[] | null;
   onDismissBatchOutcome: () => void;
   onOpenRule: (ruleId: string) => void;
@@ -884,7 +816,6 @@ function DetailView(props: {
   const {
     framework,
     data,
-    trend,
     loading,
     range,
     techniques,
@@ -953,9 +884,10 @@ function DetailView(props: {
   }
   const treeEmpty = groups.every((g) => g.techs.length === 0);
 
-  // COMP-GEN-01 multi-select: only GAP techniques are generatable; the real (non-synthetic) affected classes
-  // across the visible techniques populate the "specific class" options in the class-scope picker.
-  const gapIdSet = new Set(gapList.map((t) => t.technique_id));
+  // Multi-select: only GENERATABLE gap techniques are selectable (a bespoke gap escalates on
+  // generate → never gets a checkbox). The real (non-synthetic) affected classes across the visible techniques
+  // populate the "specific class" options in the class-scope picker.
+  const gapIdSet = new Set(gapList.filter((t) => t.generatable).map((t) => t.technique_id));
   const selectedGapIds = [...selectedGaps].filter((id) => gapIdSet.has(id));
   const realClassOptions = [...new Set(
     techniques.flatMap((t) => (t.affected_classes ?? []).map((c) => c.class)).filter(Boolean)
@@ -1039,7 +971,7 @@ function DetailView(props: {
             <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "0.01em" }}>{fwName}</div>
             <div style={{ fontSize: 11.5, color: MUTED, marginTop: 1 }}>{fwMeta?.subtitle ?? "framework"}</div>
           </div>
-          {/* Q3: the range is driven by the GLOBAL header selector now (no duplicate in-page picker). The header
+          {/* The range is driven by the GLOBAL header selector (no duplicate in-page picker). The header
               shows the current window (RANGE_LABEL[range]) so the detail still reads it. */}
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 12, flex: "none" }}>
             <span style={{ fontSize: 10.5, color: MUTED }}>range · <b style={{ color: ACCENT }}>{RANGE_LABEL[range]}</b></span>
@@ -1068,9 +1000,6 @@ function DetailView(props: {
               <span style={{ width: 10, height: 10, borderRadius: 3, background: OOS_TRACK }} />
               Out-of-scope · {oos} <span style={{ color: FAINT }}>(not counted)</span>
             </span>
-            <div style={{ marginTop: 5, paddingTop: 8, borderTop: "1px solid #26262a" }}>
-              <TrendText trend={trend} />
-            </div>
           </div>
         </div>
 
@@ -1102,7 +1031,7 @@ function DetailView(props: {
           <div style={{ fontSize: 10.5, color: FAINT, textAlign: "right" }}>
             {data?.last_exported ? `Last exported ${data.last_exported}` : "Not exported yet"}
           </div>
-          {/* COMP-EVIDENCE (San decision b): the pack is real-traffic only — state how many synthetic/
+          {/* The pack is real-traffic only — state how many synthetic/
               simulated + red-team events were excluded, so it can't be read as understating enforcement. */}
           {!!data?.synthetic_excluded && data.synthetic_excluded > 0 && (
             <div data-testid="evidence-synthetic-excluded" style={{ fontSize: 10.5, color: FAINT, textAlign: "right", maxWidth: 220 }}>
@@ -1163,8 +1092,9 @@ function DetailView(props: {
                         onClick={() => setSelectedId(t.technique_id)}
                         style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 16px", fontSize: 13, color: "#ededf0", cursor: "pointer", background: on ? "#132320" : "transparent", boxShadow: on ? "inset 3px 0 0 #2ddab8" : "none" }}
                       >
-                        {/* COMP-GEN-01 multi-select: only GAP controls are generatable → only they get a checkbox. */}
-                        {isGap ? (
+                        {/* Only GENERATABLE gaps get a checkbox. A bespoke gap (no runtime rule)
+                            would only escalate, so it is shown but not selectable for auto-generation. */}
+                        {isGap && t.generatable ? (
                           <input
                             type="checkbox"
                             aria-label={`Select ${t.name} for remediation`}
@@ -1184,6 +1114,14 @@ function DetailView(props: {
                             {t.priority === "high" ? "HIGH" : t.priority === "medium" ? "MED" : "LOW"}
                           </span>
                         )}
+                        {isGap && !t.generatable && (
+                          <span
+                            title="No runtime-detectable signal — enforce this via configuration or process, not a tool-call policy. It can't be auto-generated."
+                            style={{ flex: "none", fontSize: 8.5, fontWeight: 800, letterSpacing: "0.04em", color: "var(--escalate)", border: "1px solid var(--escalate)", borderRadius: 4, padding: "1px 5px" }}
+                          >
+                            BESPOKE
+                          </span>
+                        )}
                       </div>
                     );
                   })}
@@ -1192,7 +1130,7 @@ function DetailView(props: {
             )}
           </div>
 
-          {/* COMP-GEN-01 multi-select action bar — visible once ≥1 gap is checked. The class-scope picker
+          {/* Multi-select action bar — visible once ≥1 gap is checked. The class-scope picker
               governs how each selected control is scoped (its top affected class · all affected classes · a
               specific class); "Generate for selected" fans out one control-specific draft per (control × class). */}
           {selectedGapIds.length > 0 && (
@@ -1226,7 +1164,7 @@ function DetailView(props: {
               <button
                 type="button"
                 data-testid="gap-batch-generate"
-                onClick={onGenerateBatch}
+                onClick={() => onGenerateBatch(selectedGapIds)}
                 style={{ fontSize: 11.5, fontWeight: 700, padding: "6px 12px", borderRadius: 7, background: "linear-gradient(180deg, #2ddab8, #22c4a4)", color: "#0d0d0d", border: "none", cursor: "pointer" }}
               >
                 Generate for selected
@@ -1234,7 +1172,7 @@ function DetailView(props: {
             </div>
           )}
 
-          {/* H3: non-draft outcomes of the last batch — sticky until dismissed, full server reason per
+          {/* Non-draft outcomes of the last batch — sticky until dismissed, full server reason per
               control. A "0 drafts created" batch previously vanished into a 3.5s toast with the
               escalation message dropped; the operator believed the gap was remediated. */}
           {batchOutcome && batchOutcome.length > 0 && (
@@ -1261,7 +1199,7 @@ function DetailView(props: {
                     {r.technique_id}
                     {r.control_name ? ` · ${r.control_name}` : ""}
                     <span style={{ marginLeft: 8, fontSize: 10.5, fontWeight: 700, color: r.status === "error" ? "var(--block)" : "var(--escalate)" }}>
-                      {r.status === "escalate" ? "NEEDS BESPOKE RULE" : r.status === "no_affected_classes" ? "NO AFFECTED CLASS" : "FAILED"}
+                      {r.status === "escalate" ? "NEEDS MANUAL CONTROL" : r.status === "no_affected_classes" ? "NO AFFECTED CLASS" : "FAILED"}
                     </span>
                   </div>
                   {r.message && (
@@ -1363,23 +1301,33 @@ function TechniqueDetail({
           </div>
           {evidence.length > 0 ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {evidence.map((rule) => (
-                <div
-                  key={rule}
-                  onClick={() => onOpenRule(rule)}
-                  style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, background: "#131316", border: "1px solid #2a2a2e", borderRadius: 9, padding: "10px 13px", cursor: "pointer" }}
-                >
-                  <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 12, color: "#d6d6da", minWidth: 0, overflowWrap: "anywhere" }}>
-                    {rule}
-                  </span>
-                  <span style={{ display: "flex", alignItems: "center", gap: 7, whiteSpace: "nowrap" }}>
-                    <span style={{ fontSize: 11.5, fontWeight: 600, color: (t.blocked ?? 0) > 0 ? ENFORCED : "#6e6e76" }}>
-                      {fmt(t.blocked)} blocked · {RANGE_LABEL[range]}
+              {evidence.map((rule) => {
+                // Render THIS rule's own blocked count, not the technique-wide `t.blocked` total.
+                // `t.blocked` sums over every covered policy, so a technique enforced by >1 rule repeated the
+                // same total on each row and over-attributed all blocks to each rule. Consume the per-rule
+                // `blocked_by_rule` map shipped by the backend; if it is momentarily absent, a single-rule
+                // technique's total IS that rule's count (safe fallback), a multi-rule one shows 0 rather
+                // than the misleading total.
+                const ruleBlocked =
+                  t.blocked_by_rule?.[rule] ?? (evidence.length === 1 ? (t.blocked ?? 0) : 0);
+                return (
+                  <div
+                    key={rule}
+                    onClick={() => onOpenRule(rule)}
+                    style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, background: "#131316", border: "1px solid #2a2a2e", borderRadius: 9, padding: "10px 13px", cursor: "pointer" }}
+                  >
+                    <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 12, color: "#d6d6da", minWidth: 0, overflowWrap: "anywhere" }}>
+                      {rule}
                     </span>
-                    <span style={{ color: "#5f5f67" }}>↗</span>
-                  </span>
-                </div>
-              ))}
+                    <span style={{ display: "flex", alignItems: "center", gap: 7, whiteSpace: "nowrap" }}>
+                      <span style={{ fontSize: 11.5, fontWeight: 600, color: ruleBlocked > 0 ? ENFORCED : "#6e6e76" }}>
+                        {fmt(ruleBlocked)} blocked · {RANGE_LABEL[range]}
+                      </span>
+                      <span style={{ color: "#5f5f67" }}>↗</span>
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           ) : (
             <div style={{ padding: "12px 14px", background: "#17171a", border: "1px solid #2a2a2e", borderRadius: 9, fontSize: 12.5, color: "#a2a2aa", lineHeight: 1.55 }}>
@@ -1411,32 +1359,43 @@ function TechniqueDetail({
               <div style={{ fontSize: 10.5, fontWeight: 800, letterSpacing: "0.05em", textTransform: "uppercase", color: FAINT, margin: "18px 0 9px" }}>
                 Remediation
               </div>
-              <button
-                type="button"
-                onClick={() => !drafted && onGenerate(t)}
-                disabled={drafted}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 8,
-                  height: 36,
-                  padding: "0 15px",
-                  border: drafted ? "1px solid #1f4635" : "1px solid transparent",
-                  borderRadius: 9,
-                  background: drafted ? "transparent" : "linear-gradient(180deg, #5ae8cc, #2ddab8)",
-                  color: drafted ? "#6ee7b7" : "#04211d",
-                  fontFamily: "inherit",
-                  fontSize: 13,
-                  fontWeight: 700,
-                  cursor: drafted ? "default" : "pointer"
-                }}
-              >
-                {drafted ? "✓ Draft created · pending in Policies" : "Generate enforcing policy"}
-              </button>
-              <div style={{ fontSize: 11.5, color: MUTED, marginTop: 9, lineHeight: 1.5 }}>
-                Creates a <b style={{ color: "#d6d6da" }}>tighten-only dry-run draft</b> in Policies that denies this
-                control for the affected agent classes — review &amp; apply from Policies.
-              </div>
+              {t.generatable ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => !drafted && onGenerate(t)}
+                    disabled={drafted}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 8,
+                      height: 36,
+                      padding: "0 15px",
+                      border: drafted ? "1px solid #1f4635" : "1px solid transparent",
+                      borderRadius: 9,
+                      background: drafted ? "transparent" : "linear-gradient(180deg, #5ae8cc, #2ddab8)",
+                      color: drafted ? "#6ee7b7" : "#04211d",
+                      fontFamily: "inherit",
+                      fontSize: 13,
+                      fontWeight: 700,
+                      cursor: drafted ? "default" : "pointer"
+                    }}
+                  >
+                    {drafted ? "✓ Draft created · pending in Policies" : "Generate enforcing policy"}
+                  </button>
+                  <div style={{ fontSize: 11.5, color: MUTED, marginTop: 9, lineHeight: 1.5 }}>
+                    Creates a <b style={{ color: "#d6d6da" }}>tighten-only dry-run draft</b> in Policies that denies this
+                    control for the affected agent classes — review &amp; apply from Policies.
+                  </div>
+                </>
+              ) : (
+                <div style={{ padding: "12px 14px", background: "#1a1712", border: "1px solid #3a2f1a", borderRadius: 9, fontSize: 12.5, color: "var(--escalate)", lineHeight: 1.55 }}>
+                  <b>Needs a manual control.</b> This risk doesn&apos;t show up in agent tool-call traffic, so no
+                  runtime policy can detect or block it — there is nothing for a generated rule to match. Address
+                  it in configuration or process (secret management, access reviews, prompt hardening), and track
+                  it outside runtime enforcement.
+                </div>
+              )}
             </>
           )}
         </>

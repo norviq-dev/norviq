@@ -7,7 +7,7 @@
 // NOT proof. This drives the SAME apply the Policy Catalog's Confirm-Apply issues (POST /policies/{ns}/{cls}/apply
 // with the target scope) and INDEPENDENTLY verifies the EFFECT via a before/after /evaluate decision-flip: the
 // applied policy's own rule_id fires at the target (NOT `no_policy_loaded`). This is the exact regression that
-// fails if apply stops reaching the engine (it did before the fix — apply wrote the evaluator's unread dict). A
+// fails if apply stops reaching the engine (e.g. apply writing to the evaluator's unread dict). A
 // THROWAWAY class is used and cleaned up — never customer-support (the attack-suite class), which a default-deny
 // would break.
 
@@ -92,17 +92,17 @@ test.describe("Policy Catalog — drafts lifecycle, retention & the apply→clus
     const gen = await api(page, "/api/v1/compliance/owasp/generate", "POST", { technique_id: "LLM07:2025", namespace: "default" });
     const draftId = gen.body.draft_id as string;
 
-    // B6: the endpoint returns a BOUNDED page + a total count — not the whole list.
+    // The endpoint returns a BOUNDED page + a total count — not the whole list.
     const list = await api(page, "/api/v1/threats/intent-drafts?ns=default");
     expect(Array.isArray(list.body.drafts)).toBe(true);
     expect(typeof list.body.total).toBe("number");
     expect(list.body.limit).toBeGreaterThan(0);
-    // B1: the draft carries a TTL expiry (real window = future date).
+    // The draft carries a TTL expiry (real window = future date).
     const mine = (list.body.drafts as any[]).find((d) => d.draft_id === draftId);
     expect(mine?.expires_at).toBeTruthy();
     expect(Date.parse(mine.expires_at)).toBeGreaterThan(Date.now());
 
-    // B7: dismiss removes it; GET then 404.
+    // Dismiss removes it; GET then 404.
     expect((await api(page, `/api/v1/threats/intent-drafts/${draftId}`, "DELETE")).body.dismissed).toBe(true);
     expect((await api(page, `/api/v1/threats/intent-drafts/${draftId}`)).status).toBe(404);
     // GC endpoint responds with a cleared count.
@@ -120,14 +120,14 @@ test.describe("Policy Catalog — drafts lifecycle, retention & the apply→clus
     await waitForApp(page);
     await page.waitForTimeout(1200);
 
-    // A1: the compliance draft is grouped under "From Compliance gaps".
+    // The compliance draft is grouped under "From Compliance gaps".
     await expect(page.getByTestId("draft-group-compliance")).toBeVisible({ timeout: 8000 });
-    // A4: the subtitle reflects BOTH sources, not just the Attack Graph.
+    // The subtitle reflects BOTH sources, not just the Attack Graph.
     await expect(page.getByText(/Attack Graph and Compliance gaps/i)).toBeVisible();
-    // A2: the draft row shows a lifecycle status pill + a target-linkage line.
+    // The draft row shows a lifecycle status pill + a target-linkage line.
     await expect(page.getByTestId(`intent-draft-status-${draftId}`)).toBeVisible();
     await expect(page.getByTestId(`intent-draft-target-${draftId}`)).toContainText("would apply to agent-class");
-    // F2 provenance still renders; A5 filter chips present; B7 per-draft dismiss present.
+    // Provenance still renders; filter chips present; per-draft dismiss present.
     await expect(page.getByTestId(`intent-draft-source-${draftId}`)).toContainText("LLM07:2025");
     await expect(page.getByTestId("draft-filter-new")).toBeVisible();
     await expect(page.getByTestId(`intent-draft-dismiss-${draftId}`)).toBeVisible();

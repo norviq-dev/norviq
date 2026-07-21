@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
  * (newest first, capped) plus a `connected` flag so callers can fall back to polling when the
  * socket is down.
  */
-export function useWebSocket<T>(url: string, enabled: boolean) {
+export function useWebSocket<T>(url: string, enabled: boolean, protocols?: string | string[]) {
   const [messages, setMessages] = useState<T[]>([]);
   const [connected, setConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
@@ -33,7 +33,9 @@ export function useWebSocket<T>(url: string, enabled: boolean) {
       if (closed) return;
       let ws: WebSocket;
       try {
-        ws = new WebSocket(url);
+        // `protocols` carries the auth token in the Sec-WebSocket-Protocol handshake header instead of
+        // a `?token=` query string, keeping the credential out of URLs/logs (see AuditLog).
+        ws = protocols !== undefined ? new WebSocket(url, protocols) : new WebSocket(url);
       } catch {
         scheduleReconnect();
         return;
@@ -70,7 +72,7 @@ export function useWebSocket<T>(url: string, enabled: boolean) {
       wsRef.current?.close();
       wsRef.current = null;
     };
-  }, [enabled, url]);
+  }, [enabled, url, protocols]);
 
   return { messages, connected, clear: () => setMessages([]) };
 }

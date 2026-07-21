@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// L5 — /asset-graph must render + reload with ZERO uncaught console exceptions. Guards against the live
+// /asset-graph must render + reload with ZERO uncaught console exceptions. Guards against the live
 // render-timing bugs on 39a2019: "Cannot read properties of null (reading 'clientWidth')" (AssetGraph) and
 // "SVGLength: Could not resolve relative length" (d3 sizing before the container resolved a size). Asserts
 // no pageerror / console error / 4xx on first load AND on reload, and that the graph actually renders.
@@ -24,7 +24,7 @@ function watch(page: Page) {
 const IGNORE = [/Download the React DevTools/i, /React Router Future Flag/i, /\[vite\]/i, /favicon/i, /ResizeObserver loop/i];
 const real = (xs: string[]) => xs.filter((m) => !IGNORE.some((re) => re.test(m)));
 
-test.describe("L5 — /asset-graph renders + reloads with zero uncaught exceptions", () => {
+test.describe("/asset-graph renders + reloads with zero uncaught exceptions", () => {
   test("first load + reload → 0 pageerror, 0 console error, 0 4xx; graph renders", async ({ page }) => {
     const w = watch(page);
 

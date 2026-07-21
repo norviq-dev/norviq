@@ -36,7 +36,7 @@ async def _graph_from_request(request: Request, namespace: str) -> AssetGraphBui
 async def _cached_analysis(
     request: Request, namespace: str, analysis_type: str, params: str, compute: Callable[[AssetGraphBuilder], object]
 ) -> object:
-    """F-05: serve a graph analysis from the per-(namespace, graph-version) cache, computing on miss.
+    """Serve a graph analysis from the per-(namespace, graph-version) cache, computing on miss.
     The graph snapshot is loaded once; the expensive analysis is memoized and auto-invalidated on graph change."""
     graph = await _graph_from_request(request, namespace)
     cache = getattr(request.app.state, "cache", None)

@@ -31,13 +31,13 @@ export const DonutChart = memo(function DonutChart({
   title?: string;
 }) {
   const colorFor = (name: string, i: number) => COLORS[name] ?? FALLBACK[i % 4];
-  // P3: only NON-ZERO categories become arcs — a 0-value slice would otherwise draw a degenerate sliver.
+  // Only NON-ZERO categories become arcs — a 0-value slice would otherwise draw a degenerate sliver.
   const arcs = data
     .map((item, i) => ({ ...item, itemStyle: { color: colorFor(item.name, i) } }))
     .filter((item) => item.value > 0);
   const option = {
     tooltip: { trigger: "item", ...baseTooltip },
-    // P3: echarts legend replaced by a custom one below so EVERY category (incl value 0) is listed with its count.
+    // echarts legend replaced by a custom one below so EVERY category (incl value 0) is listed with its count.
     legend: { show: false },
     series: [
       {
@@ -60,7 +60,7 @@ export const DonutChart = memo(function DonutChart({
         style={{ height: 196, width: "100%" }}
         className="chart-box"
       />
-      {/* P3: full legend — all categories with counts INCLUDING zero (was hover-only), consistent Overview+Agents. */}
+      {/* Full legend — all categories with counts INCLUDING zero, consistent Overview+Agents. */}
       <div
         role="list"
         aria-label={`${title} legend`}

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""F047 sector starter policy packs — catalog + enable/disable.
+"""Sector starter policy packs — catalog + enable/disable.
 
 GET  /policy-packs            -> the bundled catalog (from policies/sector/packs.json) with per-namespace
                                  enabled state.
@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from norviq.api import packs as pack_lib
 from norviq.api.auth import get_current_user, require_admin, require_target_cluster, scoped_namespace
 from norviq.api.routers.policies import validate_rego_source
-from norviq.api.routers.settings_router import assert_apply_allowed  # F-51: shared dry-run-only gate
+from norviq.api.routers.settings_router import assert_apply_allowed  # shared dry-run-only gate
 from norviq.api.db.models import NamespacePack
 from norviq.api.db.session import get_session
 
@@ -102,7 +102,7 @@ async def enable_pack(
         log.warning("nrvq.api.pack.error", pack_id=pack_id, reason="unknown", code="NRVQ-API-7097")
         raise HTTPException(status_code=404, detail="Unknown pack id")
     namespace = scoped_namespace(user, body.namespace) or "default"
-    await assert_apply_allowed(session, namespace)  # F-51: a dry-run-only namespace rejects pack applies too
+    await assert_apply_allowed(session, namespace)  # a dry-run-only namespace rejects pack applies too
     existing = (
         await session.execute(
             select(NamespacePack).where(NamespacePack.namespace == namespace, NamespacePack.pack_id == pack_id)
@@ -129,8 +129,8 @@ async def disable_pack(
     """Disable a sector pack for a namespace (admin-only, idempotent, audited)."""
     require_admin(user)
     namespace = scoped_namespace(user, body.namespace) or "default"
-    # L1: disabling a pack REMOVES its blocks — an enforcement-posture change — so it must respect the
-    # dry-run-only gate exactly like enable/override (was ungated: a dry-run-only ns could still relax).
+    # Disabling a pack REMOVES its blocks — an enforcement-posture change — so it must respect the
+    # dry-run-only gate exactly like enable/override.
     await assert_apply_allowed(session, namespace)
     await session.execute(
         sql_delete(NamespacePack).where(NamespacePack.namespace == namespace, NamespacePack.pack_id == pack_id)
@@ -142,7 +142,7 @@ async def disable_pack(
     return {"namespace": namespace, "pack_id": pack_id, "enabled": False, "enabled_packs": ids}
 
 
-# --- F-54: view a pack's rego + author a per-namespace tighten-only OVERRIDE (revertable) ---
+# --- view a pack's rego + author a per-namespace tighten-only OVERRIDE (revertable) ---
 
 _OVERRIDE_KEY = "__pack_override__"
 _WEAKEN_KEY = "__pack_weaken__"
@@ -160,7 +160,7 @@ class PackOverrideBody(BaseModel):
 
 @router.get("/policy-packs/{pack_id}/rego")
 async def get_pack_rego(pack_id: str, user: dict = Depends(get_current_user)) -> dict:
-    """F-54: the pack's actual rego source (read-only) so an operator can see what they're customizing."""
+    """The pack's actual rego source (read-only) so an operator can see what they're customizing."""
     _ = user
     if not pack_lib.is_known(pack_id):
         raise HTTPException(status_code=404, detail="Unknown pack id")
@@ -173,7 +173,7 @@ async def get_pack_override(
     request: Request = None,
     user: dict = Depends(get_current_user),
 ) -> dict:
-    """F-54: the namespace's current pack override/weaken (empty string if none)."""
+    """The namespace's current pack override/weaken (empty string if none)."""
     # Scope the read: a non-admin naming another tenant's namespace is refused (403) — the override rego is a
     # tenant's authored policy and must not leak cross-tenant. Parity with the PUT/DELETE override routes, which
     # already scope. (Admin / '*' claim / service-no-claim resolve to the requested namespace unchanged.)
@@ -192,15 +192,15 @@ async def put_pack_override(
     session: AsyncSession = Depends(get_session),
     _target: None = Depends(require_target_cluster),
 ) -> dict:
-    """F-54: author/replace the namespace's pack override. It is a TIGHTEN-ONLY overlay (the evaluator caps it so
-    it can only make a decision stricter, never weaken/remove a pack's block). Admin; honors the F-51 apply gate;
+    """Author/replace the namespace's pack override. It is a TIGHTEN-ONLY overlay (the evaluator caps it so
+    it can only make a decision stricter, never weaken/remove a pack's block). Admin; honors the apply gate;
     validated by compiling against OPA before it goes live."""
     require_admin(user)
     namespace = scoped_namespace(user, body.namespace) or "default"
-    await assert_apply_allowed(session, namespace)  # F-51: a dry-run-only namespace rejects override applies too
-    # S1/S12: an override is caller-authored rego that reaches the SAME shared OPA server dry-run/create do —
-    # it must pass the same size/line/regex caps and forbidden-builtin/cross-package reject (S1), which this
-    # endpoint previously skipped entirely. Also covers P1-2 (the decision-resolver shape check): a bare
+    await assert_apply_allowed(session, namespace)  # a dry-run-only namespace rejects override applies too
+    # An override is caller-authored rego that reaches the SAME shared OPA server dry-run/create do —
+    # it must pass the same size/line/regex caps and forbidden-builtin/cross-package reject, which this
+    # endpoint must not skip. Also covers the decision-resolver shape check: a bare
     # partial-set (no resolver) is rejected here with a specific message instead of silently no-op'ing at
     # runtime — the probe below only fires the override's rules on a matching input.
     validate_rego_source(body.rego_source or "", "block")
@@ -214,12 +214,12 @@ async def put_pack_override(
     try:
         res = await evaluator._evaluate_opa(f"override-validate:{namespace}", namespace, key, probe, body.rego_source)
         if res.get("rule_id") == "evaluator_invalid_payload":
-            # The engine now fail-closes a decision-less module here (P1-2 Q6) — surface it as a specific,
+            # The engine fail-closes a decision-less module here — surface it as a specific,
             # actionable error instead of silently accepting an override that would never enforce.
             raise ValueError("rego produced no `decision` (append the canonical resolver, or author a "
                              "complete `decision = \"block\" { ... }` rule)")
     except Exception as exc:
-        # httpx timeouts stringify to "" — never surface the empty "override rego is invalid: " (P1-2).
+        # httpx timeouts stringify to "" — never surface the empty "override rego is invalid: ".
         detail = str(exc)[:160] or f"{type(exc).__name__}: OPA request timed out"
         raise HTTPException(status_code=422, detail=f"override rego is invalid: {detail}") from exc
     await request.app.state.loader.delete(namespace, other)
@@ -246,7 +246,7 @@ async def delete_pack_override(
     user: dict = Depends(get_current_user),
     _target: None = Depends(require_target_cluster),
 ) -> dict:
-    """F-54: REVERT — delete the override so the original pack is cleanly restored (no 'permanent' trap)."""
+    """REVERT — delete the override so the original pack is cleanly restored (no 'permanent' trap)."""
     require_admin(user)
     namespace = scoped_namespace(user, namespace) or "default"
     # Revert clears BOTH the tighten-only override and the weaken overlay — the shipped pack is cleanly restored.

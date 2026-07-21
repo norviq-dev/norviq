@@ -164,7 +164,7 @@ test.describe("Attack Graph", () => {
     await expect(page.getByText("What-if block active · path neutralized")).toBeVisible();
   });
 
-  // Fix 3 (console-fixes-batch2): DENY-ALL default. The allowlist opens EMPTY — EVERY observed-tool checkbox
+  // DENY-ALL default. The allowlist opens EMPTY — EVERY observed-tool checkbox
   // starts UNCHECKED (positive security: the operator explicitly opts each intended tool in), and the generated
   // policy denies everything for the class (empty allow_names). Rewritten from the OLD normal-tool=CHECKED default.
   test("intent ALLOWLIST BUILDER: opening fires intent-suggest → renders a DENY-ALL checklist (every checkbox unchecked)", async ({ page }) => {
@@ -192,7 +192,7 @@ test.describe("Attack Graph", () => {
     test.skip(n === 0, "intent-suggest returned no observed tools for the active class — checklist is empty (default-deny explainer shown). BEST-EFFORT.");
     expect(n).toBeGreaterThanOrEqual(1);
 
-    // DENY-ALL default (Fix 3): EVERY tool checkbox defaults UNCHECKED — no tool (normal, chokepoint, or egress)
+    // DENY-ALL default: EVERY tool checkbox defaults UNCHECKED — no tool (normal, chokepoint, or egress)
     // is pre-allowed. Assert ALL of them are unchecked, not just the chokepoint rows.
     for (let i = 0; i < n; i++) {
       await expect(checkboxes.nth(i)).not.toBeChecked();
@@ -213,7 +213,7 @@ test.describe("Attack Graph", () => {
     expect(regoText).toMatch(/allow_names\s*:?=?\s*(\{\s*\}|set\(\s*\))/);
   });
 
-  // Fix 3 (console-fixes-batch2): from the DENY-ALL empty default, CHECKING a tool must ADD it to the next
+  // From the DENY-ALL empty default, CHECKING a tool must ADD it to the next
   // intent-coverage POST's allow_tools AND surface it in the generated rego's allow_names. Rewritten from the
   // OLD "flip whatever-default" test (which assumed some tools start checked).
   test("intent ALLOWLIST BUILDER: checking a tool ADDS it to allow_tools + allow_names (from the empty default)", async ({ page }) => {
@@ -255,12 +255,12 @@ test.describe("Attack Graph", () => {
     );
     expect([...(body.allow_tools ?? [])].sort()).toEqual([...checkedNames].sort());
 
-    // The generated-rego panel now names the checked tool in allow_names (was empty {} at the deny-all default).
+    // The generated-rego panel now names the checked tool in allow_names.
     await expect(modal.getByText(/default decision = "block"/)).toBeVisible();
     await expect(modal.locator("pre")).toContainText(toolName);
   });
 
-  // Fix 2 (console-fixes-batch2): coverage denominator is PER-CLASS, not over ALL classes' paths. The modal's
+  // Coverage denominator is PER-CLASS, not over ALL classes' paths. The modal's
   // grouped class selector shows "<N> paths" for the SELECTED class; the coverage total must equal THAT N (the
   // backend returns the class's path count), NOT the global total. Rewritten from the OLD "denom == total
   // visible paths" behaviour. Also asserts the per-class note ("Other classes each need their own intent policy").
@@ -283,7 +283,7 @@ test.describe("Attack Graph", () => {
     const classPaths = parseInt((clsCountText.match(/(\d+)/) || [])[1] ?? "0", 10);
     test.skip(classPaths === 0, "Selected class reported 0 paths in the grouped selector. BEST-EFFORT.");
 
-    // The coverage read-out (covered/total). Fix 2: the denominator is the SELECTED class's path count.
+    // The coverage read-out (covered/total). The denominator is the SELECTED class's path count.
     const readout = modal.locator("text=/^\\d+\\/\\d+$/").first();
     await expect(readout).toBeVisible();
     // Wait for the coverage round-trip to reflect the per-class total (it may briefly seed from paths.length).
@@ -296,7 +296,7 @@ test.describe("Attack Graph", () => {
     // there's only one class — hence <=, not <).
     expect(denom).toBeLessThanOrEqual(globalTotal);
 
-    // The per-class scoping note is present (Fix 2): other classes each need their own intent policy.
+    // The per-class scoping note is present: other classes each need their own intent policy.
     await expect(modal.getByText(/Other classes each need their own intent policy/)).toBeVisible();
 
     // Changing the allowlist re-runs coverage: flip a refinement toggle (always present) and confirm a POST.

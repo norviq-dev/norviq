@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Part B — draft/version retention unit tests, incl. the SAFETY INVARIANT: version-prune NEVER deletes the
+"""Draft/version retention unit tests, incl. the SAFETY INVARIANT: version-prune NEVER deletes the
 current-enforcing version, and draft GC only ever touches the dedicated (non-enforcing) intent_drafts table."""
 
 from __future__ import annotations
@@ -135,3 +135,111 @@ async def test_prune_versions_never_touches_the_current_enforcing_version():
     assert "version <> :current" in sql            # ← the safety guard
     assert params["current"] == 42                 # ← equals the current-enforcing version, so it is NEVER deleted
     assert params["keep"] == settings.policy_version_keep_count
+
+
+# --- RETENTION: the unified background pruner's new table sweeps (SQL scoping + knob gating) --------
+
+
+class _PrunerSession(_RecordingSession):
+    async def rollback(self):
+        pass
+
+
+def _factory_for(sess):
+    async def _factory():
+        yield sess
+    return _factory
+
+
+async def test_pruner_asset_graph_keeps_newest_n_and_fk_referenced_rows(monkeypatch):
+    from norviq.api.audit_retention import RetentionPruner
+
+    sess = _PrunerSession()
+    n = await RetentionPruner(_factory_for(sess))._prune_asset_graph(sess)
+    assert n == 1
+    sql, params = sess.calls[0]
+    # newest-N per namespace, and NEVER a row attack_paths still references (FK has no cascade).
+    assert "DELETE FROM asset_graph" in sql
+    assert "PARTITION BY namespace ORDER BY built_at DESC" in sql
+    assert "rn > :keep" in sql
+    assert "NOT IN (SELECT DISTINCT graph_id FROM attack_paths)" in sql
+    assert params["keep"] == settings.graph_snapshot_keep_per_namespace
+
+
+async def test_pruner_registry_and_coverage_scoped_and_disable_knobs(monkeypatch):
+    from norviq.api.audit_retention import RetentionPruner
+
+    p = RetentionPruner(_factory_for(_PrunerSession()))
+    sess = _PrunerSession()
+    assert await p._prune_agent_registry(sess) == 1
+    assert "DELETE FROM agent_registry WHERE last_seen < :cutoff" in sess.calls[0][0]
+    sess2 = _PrunerSession()
+    assert await p._prune_coverage_snapshots(sess2) == 1
+    cov_sql = sess2.calls[0][0]
+    assert "DELETE FROM mitre_coverage_snapshots WHERE timestamp_utc < :cutoff" in cov_sql
+    # ONLY the trend series is pruned — kind='export' provenance markers are audit evidence, kept forever.
+    assert "kind = 'snapshot'" in cov_sql
+    # <=0 disables each window: no SQL executed at all.
+    monkeypatch.setattr(settings, "agent_registry_retention_days", 0)
+    monkeypatch.setattr(settings, "coverage_snapshot_retention_days", 0)
+    monkeypatch.setattr(settings, "graph_snapshot_keep_per_namespace", 0)
+    for fn in (p._prune_agent_registry, p._prune_coverage_snapshots, p._prune_asset_graph):
+        quiet = _PrunerSession()
+        assert await fn(quiet) == 0 and quiet.calls == []
+
+
+class _CoverageRowSession(_PrunerSession):
+    """A tiny in-memory model of mitre_coverage_snapshots: applies the DELETE's WHERE clause to real rows so
+    we can assert WHAT SURVIVES, not just the SQL text. Rows are (kind, timestamp_utc)."""
+
+    def __init__(self, rows):
+        super().__init__()
+        self.rows = list(rows)
+
+    async def execute(self, stmt, params=None):
+        sql = str(stmt)
+        params = dict(params or {})
+        cutoff = params["cutoff"]
+        # Model the DELETE: age gate always applies; the kind gate only if the query is scoped to it.
+        kind_scoped = "kind = 'snapshot'" in sql
+        survivors = [
+            (k, ts) for (k, ts) in self.rows
+            if not (ts < cutoff and (not kind_scoped or k == "snapshot"))
+        ]
+        deleted = len(self.rows) - len(survivors)
+        self.rows = survivors
+        return _Result(rowcount=deleted)
+
+
+async def test_coverage_prune_keeps_old_export_provenance_deletes_old_snapshot():
+    """FAIL-ON-BUG: the coverage retention window must prune only kind='snapshot' trend points. An old
+    kind='export' row (evidence-pack export provenance backing the "last exported" indicator) MUST survive
+    the same prune that removes an equally-old kind='snapshot' row — losing it erases audit evidence. On the
+    pre-fix (kind-blind) DELETE the export row is wrongly deleted and this test fails."""
+    from norviq.api.audit_retention import RetentionPruner
+
+    old = datetime.now(timezone.utc) - timedelta(days=settings.coverage_snapshot_retention_days + 5)
+    sess = _CoverageRowSession([("snapshot", old), ("export", old)])
+    n = await RetentionPruner(_factory_for(sess))._prune_coverage_snapshots(sess)
+    assert n == 1                                              # only the trend snapshot was pruned
+    kinds = {k for (k, _ts) in sess.rows}
+    assert kinds == {"export"}                                # the export provenance marker survives
+    assert ("snapshot", old) not in sess.rows                 # the old trend point is gone
+
+
+async def test_prune_once_isolates_a_failing_step(monkeypatch):
+    """One table's prune blowing up must not stop the others (per-step session + error isolation)."""
+    from norviq.api.audit_retention import RetentionPruner
+
+    p = RetentionPruner(_factory_for(_PrunerSession()))
+
+    async def _boom(_session):
+        raise RuntimeError("table on fire")
+
+    # Sabotage one step; every OTHER step still runs and reports its count.
+    monkeypatch.setattr(p, "_prune_audit", _boom)
+    counts = await p.prune_once()
+    assert counts["audit_log"] == 0                    # isolated failure -> 0, not an exception
+    assert counts["intent_drafts"] == 1                # drafts GC still ran
+    assert counts["agent_registry"] == 1               # registry sweep still ran
+    assert counts["asset_graph"] == 1                  # graph prune still ran

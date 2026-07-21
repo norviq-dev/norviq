@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""SSRF-01 (CRITICAL, MEDIUM-severity half of the same root cause): fleet_join (spoke enrollment) and
+"""fleet_join (spoke enrollment) and
 mint_cluster_join_token (hub join-token mint) both took an unvalidated hub_url and dialed/persisted it.
 This locks in the fleet_join half: a join token whose (HMAC-verified, so this ISN'T about token
 forgery) embedded hub_url points at a blocked address must be rejected BEFORE the spoke ever dials it

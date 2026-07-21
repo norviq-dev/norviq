@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""LOGIN-2: the in-pod token minter emits a valid short-lived admin session token, and only the token."""
+"""The in-pod token minter emits a valid short-lived admin session token, and only the token."""
 
 from __future__ import annotations
 

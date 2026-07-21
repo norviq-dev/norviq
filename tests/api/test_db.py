@@ -31,8 +31,8 @@ from norviq.config import settings
 async def _session():
     """Drive the get_session async-generator dependency for direct DB tests.
 
-    get_session is an async generator — `await get_session()` raises TypeError (the P-15
-    bug). See docs/engineering/bug-patterns.md (async session lifecycle).
+    get_session is an async generator — `await get_session()` raises TypeError.
+    See docs/engineering/bug-patterns.md (async session lifecycle).
     """
     gen = get_session()
     session = await gen.__anext__()
@@ -61,7 +61,7 @@ async def db_ready() -> None:
         yield
     finally:
         # Clean up the ns-*/planner rows these tests insert so they don't pollute the shared
-        # dev DB (test-hygiene, P-16). FK order: policy_versions before policies.
+        # dev DB (test-hygiene). FK order: policy_versions before policies.
         async with _session() as session:
             await session.execute(
                 text("DELETE FROM policy_versions WHERE policy_id IN (SELECT id FROM policies WHERE namespace LIKE 'ns-%')")

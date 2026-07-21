@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// D3 — run lifecycle / retention, end-to-end on the REAL app + engine.
+// Run lifecycle / retention, end-to-end on the REAL app + engine.
 //  • History view + endpoint return SUMMARIES ONLY — zero per-attack rows in the history panel; the
 //    /redteam/results list carries no `results` field per run.
 //  • Retention SAFETY: after K+1 runs (K=3 detail window), an OLD run is detail-pruned (detail_pruned=true,
@@ -17,7 +17,7 @@ async function apiJson(page: Page, path: string, method = "GET"): Promise<any> {
     return r.json();
   }, { path, method });
 }
-// POST /redteam/suite, retrying past the per-namespace D1 concurrent guard (409 → run already in flight).
+// POST /redteam/suite, retrying past the per-namespace concurrent guard (409 → run already in flight).
 async function postSuite(page: Page, query: string): Promise<any> {
   for (let i = 0; i < 20; i++) {
     const r = await apiJson(page, `/api/v1/redteam/suite?${query}`, "POST");
@@ -29,7 +29,7 @@ async function postSuite(page: Page, query: string): Promise<any> {
 
 // Serial: these tests mutate the shared results/latest + run history for ns=default.
 test.describe.configure({ mode: "serial" });
-test.describe("D3 — run retention (summary-only history + detail-prune safety)", () => {
+test.describe("run retention (summary-only history + detail-prune safety)", () => {
   test("history view + endpoint are summary-only (no per-attack detail rows)", async ({ page }) => {
     await page.goto("/redteam");
     await waitForApp(page);
@@ -77,7 +77,7 @@ test.describe("D3 — run retention (summary-only history + detail-prune safety)
     expect((latest.results ?? []).length).toBeGreaterThan(0);
   });
 
-  test("C: DETAIL_KEEP=1 → after just 2 runs the immediately-PRIOR run is detail-pruned (only latest full)", async ({ page }) => {
+  test("DETAIL_KEEP=1 → after just 2 runs the immediately-PRIOR run is detail-pruned (only latest full)", async ({ page }) => {
     test.setTimeout(90000);
     await page.goto("/redteam");
     await waitForApp(page);

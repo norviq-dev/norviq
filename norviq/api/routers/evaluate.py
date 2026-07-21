@@ -46,15 +46,15 @@ async def evaluate_tool_call(
     user: dict = Depends(get_current_user),
 ) -> EvaluateResponse:
     """Evaluate one tool call against active policies."""
-    # F-01: bind the evaluated namespace to the CALLER, not the client-supplied body. scoped_namespace()
+    # Bind the evaluated namespace to the CALLER, not the client-supplied body. scoped_namespace()
     # already gives a service credential (sidecar/SDK/break-glass) the trusted hot path: an EMPTY namespace
     # claim on a service token is treated as authorized for any requested namespace, while a NON-empty
     # claim must match. A HUMAN token (admin/viewer) must be authorized for the namespace it asks to
-    # evaluate — admin = any, non-admin → 403 on mismatch (matches every other tenant-scoped route). C2:
-    # calling this unconditionally (instead of skipping it for role=service) closes a cross-tenant hole
+    # evaluate — admin = any, non-admin → 403 on mismatch (matches every other tenant-scoped route).
+    # Calling this unconditionally (instead of skipping it for role=service) closes a cross-tenant hole
     # where a sidecar token scoped to namespace A could evaluate as namespace B.
     scoped_namespace(user, (payload.agent_identity or {}).get("namespace"))
-    # OBS-1: a malformed agent_identity (e.g. missing the required spiffe_id) is a client error — return
+    # A malformed agent_identity (e.g. missing the required spiffe_id) is a client error — return
     # 422, not a raw 500 from the downstream model validation.
     try:
         event = ToolCallEvent.model_validate(payload.model_dump(exclude={"trust_score"}))
@@ -67,7 +67,7 @@ async def evaluate_tool_call(
     # event.agent_identity.namespace, so audit data is tenant-scoped like everything else.
     emitter = getattr(request.app.state, "emitter", None)
     if emitter is not None:
-        # F-19 (opt-in, default OFF): persist MASKED tool_params for event reconstruction (PCI 10.3) without
+        # Opt-in (default OFF): persist MASKED tool_params for event reconstruction (PCI 10.3) without
         # storing raw PAN/PII. Off by default so the audit payload is unchanged for everyone who hasn't opted in.
         audit_payload = None
         if settings.audit_capture_masked_params:

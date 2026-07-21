@@ -8,7 +8,11 @@ metadata:
     app: norviq-webhook
     {{- include "norviq.labels" . | nindent 4 }}
 spec:
+  {{- /* When the HPA owns the replica count, the Deployment must NOT also set `replicas` — otherwise every
+         reconcile resets it and fights the autoscaler (scale-up flapping). Omit it when autoscaling is on. */}}
+  {{- if not .Values.webhook.autoscaling.enabled }}
   replicas: {{ .Values.webhook.replicas }}
+  {{- end }}
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -31,8 +35,10 @@ spec:
       terminationGracePeriodSeconds: 30
       initContainers:
         # Controller reconciles NrvqPolicy CRs by POSTing to the API — wait for it.
-        # Safe: the sidecar-injector webhook is failurePolicy=Ignore and excludes the
-        # control-plane namespace, so a not-yet-ready webhook never blocks pod creation.
+        # Safe: the sidecar-injector's namespaceSelector excludes the control-plane namespace
+        # (.Values.namespace; see webhook-config.yaml:27-34), so a not-yet-ready webhook never
+        # blocks creation of these control-plane pods — even though failurePolicy defaults to Fail
+        # (fail-closed) for injection-enabled tenant namespaces.
         - name: wait-for-api
           image: busybox:1.36
           command: ['sh','-c','until nc -z norviq-api {{ .Values.api.port }}; do echo waiting for api; sleep 2; done']
@@ -52,6 +58,15 @@ spec:
         - name: webhook
           image: "{{ .Values.images.registry }}{{ .Values.images.webhook.repository }}:{{ .Values.images.webhook.tag }}"
           imagePullPolicy: {{ .Values.images.webhook.pullPolicy }}
+          {{- /* Hardened container securityContext (defense-in-depth; do not rely on an external
+                 PSA/Kyverno mutation). The webhook image runs as USER 65534 and writes nothing to its
+                 rootfs, so read-only root FS is safe here. */}}
+          {{- with .Values.securityContext }}
+          {{- if .enabled }}
+          securityContext:
+            {{- omit . "enabled" | toYaml | nindent 12 }}
+          {{- end }}
+          {{- end }}
           {{- include "norviq.preStop" . | nindent 10 }}
           ports:
             - containerPort: {{ .Values.webhook.port }}
@@ -65,7 +80,7 @@ spec:
             - name: NRVQ_CONTROLLER_ENABLED
               value: "true"
             # FQDN (namespace-qualified) so the value is resolvable BOTH from the controller (in this
-            # namespace) AND from thin-proxy sidecars injected into OTHER tenant namespaces (SIDE-2).
+            # namespace) AND from thin-proxy sidecars injected into OTHER tenant namespaces.
             - name: NRVQ_API_URL
               {{- if .Values.config.internalTls.enabled }}
               value: "https://norviq-api.{{ .Values.namespace }}.svc:8443"
@@ -84,7 +99,7 @@ spec:
             {{- end }}
             - name: NRVQ_ADMIN_POLICY_NAMESPACE
               value: "{{ .Values.namespace }}"
-            # SIDE-2: mode injected into sidecars. "proxy" (default) = thin sidecar POSTs to the central
+            # Mode injected into sidecars. "proxy" (default) = thin sidecar POSTs to the central
             # /evaluate with a minted namespace-scoped service JWT (nothing per-pod); "embedded" = full
             # local engine for air-gapped/edge (needs the datastore wiring below).
             - name: NRVQ_SIDECAR_MODE
@@ -117,8 +132,13 @@ spec:
               value: /etc/webhook/certs/tls.crt
             - name: NRVQ_TLS_KEY
               value: /etc/webhook/certs/tls.key
+            {{- if not .Values.webhook.injection.allowPodOptOut }}
+            # Pod-level opt-out disabled — the injector ignores norviq-injection=disabled / skip-injection.
+            - name: NRVQ_ALLOW_POD_OPT_OUT
+              value: "false"
+            {{- end }}
             {{- if .Values.webhook.spiffe.inject }}
-            # B3: injected workloads also get the SPIFFE Workload API socket + workload-api mode.
+            # Injected workloads also get the SPIFFE Workload API socket + workload-api mode.
             - name: NRVQ_SPIFFE_INJECT
               value: "true"
             - name: NRVQ_SPIFFE_MODE
@@ -127,7 +147,7 @@ spec:
               value: {{ .Values.config.spiffeSocket | default "/spiffe-workload-api/spire-agent.sock" | quote }}
             {{- end }}
             {{- if .Values.webhook.oidc.enabled }}
-            # B4: mint the controller's API bearer via OIDC client-credentials (Keycloak); HS256 fallback kept.
+            # Mint the controller's API bearer via OIDC client-credentials (Keycloak); HS256 fallback kept.
             - name: NRVQ_OIDC_TOKEN_URL
               value: {{ .Values.webhook.oidc.tokenUrl | quote }}
             - name: NRVQ_OIDC_CLIENT_ID

@@ -33,21 +33,32 @@ def create_http_fallback(
             # Fail CLOSED: an undecodable body must DROP, not forward (no bypass on the error path).
             log.error("nrvq.sidecar.http.decode_error", error=str(exc), code="NRVQ-SDC-3011")
             return {"action": "drop", "error": "invalid_json_body"}
+        # Fail CLOSED: valid JSON that is not an object (list/str/number/null) has no .get, so the
+        # coercion below would raise AttributeError -> bare 500 (a bypass on the error path). DROP it.
+        if not isinstance(data, dict):
+            log.error("nrvq.sidecar.http.decode_error", error="non_object_json_body", code="NRVQ-SDC-3011")
+            return {"action": "drop", "error": "invalid_json_body"}
         tool_name = str(data.get("tool_name", ""))
         tool_params = data.get("tool_params", {})
         session_id = str(data.get("session_id", ""))
-        decision = await interceptor.intercept(tool_name, tool_params, session_id, framework="sidecar-http")
-        identity = await resolver.resolve()
-        event = ToolCallEvent(
-            tool_name=tool_name,
-            tool_params=tool_params if isinstance(tool_params, dict) else {},
-            agent_identity=identity,
-            session_id=session_id,
-            framework="sidecar-http",
-        )
-        # Proxy mode has no local emitter (the central /evaluate persisted the record); embedded emits here.
-        if emitter is not None:
-            emitter.emit(event, decision)
+        try:
+            decision = await interceptor.intercept(tool_name, tool_params, session_id, framework="sidecar-http")
+            identity = await resolver.resolve()
+            event = ToolCallEvent(
+                tool_name=tool_name,
+                tool_params=tool_params if isinstance(tool_params, dict) else {},
+                agent_identity=identity,
+                session_id=session_id,
+                framework="sidecar-http",
+            )
+            # Proxy mode has no local emitter (the central /evaluate persisted the record); embedded emits here.
+            if emitter is not None:
+                emitter.emit(event, decision)
+        except Exception as exc:
+            # Fail CLOSED: an interceptor / identity / validation error must DROP the tool call, never
+            # forward it (forwarding here would bypass enforcement on the error path).
+            log.error("nrvq.sidecar.http.process_error", error=str(exc), code="NRVQ-SDC-3012")
+            return {"action": "drop", "error": "request_processing_failed"}
         action = "forward" if decision.is_allowed() else "drop"
         log.info("nrvq.sidecar.http.processed", tool=tool_name, action=action, code="NRVQ-SDC-3010")
         return {"action": action, "decision": decision.model_dump(mode="json")}

@@ -124,7 +124,7 @@ git clone https://github.com/norviq-dev/norviq.git
 cd norviq
 
 # 1. Install the CRDs
-kubectl apply -f crds/
+kubectl apply -f helm/norviq/crds/
 
 # 2. Install Norviq (pulls the public images from ghcr.io/norviq-dev by default)
 kubectl create namespace norviq

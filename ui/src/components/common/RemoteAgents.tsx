@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// fleet-mgmt Stage 3 — the Agents page for a REMOTE cluster, rendered at the hub from the relayed AgentRollup
+// fleet-mgmt — the Agents page for a REMOTE cluster, rendered at the hub from the relayed AgentRollup
 // (GET /fleet/agents). Read-only (trust mutations stay on the spoke's own console). Labeled with freshness.
 
 import { useEffect, useState } from "react";

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""D3 — unit tests for the pure two-tier retention planner (no DB). SAFETY-critical: the latest run is never
+"""Unit tests for the pure two-tier retention planner (no DB). SAFETY-critical: the latest run is never
 pruned, detail is bounded by count AND age, summaries by count AND age."""
 
 from __future__ import annotations

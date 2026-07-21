@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// L1 — BrandLoader: renders the Norviq mark with an accent-animated edge, exposes an accessible status,
+// BrandLoader: renders the Norviq mark with an accent-animated edge, exposes an accessible status,
 // supports an inline (button) variant + an overlay, and uses ONLY tokens (var(--accent)) for the green — no
 // raw off-palette hex. Reduced-motion is handled by CSS (asserted structurally + by the palette guard).
 
@@ -55,7 +55,7 @@ describe("BrandLoader", () => {
     expect(status.querySelectorAll("svg path").length).toBe(4); // logo still rendered
   });
 
-  it("overlay is full-VIEWPORT (position:fixed) by default and centers the loader over a scrim (B2)", () => {
+  it("overlay is full-VIEWPORT (position:fixed) by default and centers the loader over a scrim", () => {
     render(<BrandLoaderOverlay />);
     const overlay = screen.getByTestId("brand-loader-overlay");
     expect(overlay).toHaveStyle({ position: "fixed" });

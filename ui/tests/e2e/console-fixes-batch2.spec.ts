@@ -29,9 +29,9 @@ function loadToken(): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Fix 1 — ASSET GRAPH: the dashed cluster hull encloses EVERY ring node.
+// ASSET GRAPH: the dashed cluster hull encloses EVERY ring node.
 // ─────────────────────────────────────────────────────────────────────────────
-test.describe("Fix 1 · Asset Graph hull encloses every ring node", () => {
+test.describe("Asset Graph hull encloses every ring node", () => {
   test("every g.ag-node center sits inside its nearest cluster hull circle", async ({ page }) => {
     await page.goto("/asset-graph");
     await waitForApp(page);
@@ -114,7 +114,7 @@ test.describe("Fix 1 · Asset Graph hull encloses every ring node", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Fix 5 — THEME: no navy anywhere; one neutral-grey palette.
+// THEME: no navy anywhere; one neutral-grey palette.
 // ─────────────────────────────────────────────────────────────────────────────
 const THEME_ROUTES = ["/", "/asset-graph", "/threats/graph", "/policies/catalog"];
 
@@ -131,7 +131,7 @@ const NAVY_HEXES = [
   "#141b2e"
 ].map((h) => h.toLowerCase());
 
-test.describe("Fix 5 · Theme — no navy panels (one neutral-grey palette)", () => {
+test.describe("Theme — no navy panels (one neutral-grey palette)", () => {
   for (const route of THEME_ROUTES) {
     test(`no main panel/card resolves to navy on ${route}`, async ({ page }) => {
       await page.goto(route);
@@ -212,9 +212,9 @@ test.describe("Fix 5 · Theme — no navy panels (one neutral-grey palette)", ()
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Fix 6 — SPLASH: /login boot splash is the branded text-free BrandSplash, then auto-dismisses to the form.
+// SPLASH: /login boot splash is the branded text-free BrandSplash, then auto-dismisses to the form.
 // ─────────────────────────────────────────────────────────────────────────────
-test.describe("Fix 6 · Boot splash is the branded BrandSplash (text-free), auto-dismisses to the form", () => {
+test.describe("Boot splash is the branded BrandSplash (text-free), auto-dismisses to the form", () => {
   test("/login with NO token: branded role=status splash, no status copy, resolves to input#nv-user", async ({
     browser
   }) => {
@@ -241,7 +241,7 @@ test.describe("Fix 6 · Boot splash is the branded BrandSplash (text-free), auto
       // require it when it is observed.
       const sawSplash = await splash.first().isVisible().catch(() => false);
       if (sawSplash) {
-        // NO backend-status copy on the boot splash (the whole point of Fix 6 — text-free brand moment).
+        // NO backend-status copy on the boot splash (the whole point — text-free brand moment).
         await expect(page.getByText(/Starting Norviq/i)).toHaveCount(0);
         await expect(page.getByText(/Connecting to the security backend/i)).toHaveCount(0);
       }
@@ -278,10 +278,10 @@ test.describe("Fix 6 · Boot splash is the branded BrandSplash (text-free), auto
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Fix 4 — LOGIN: real username/password form. Valid admin/norviq advances (to change-password, since
+// LOGIN: real username/password form. Valid admin/norviq advances (to change-password, since
 //         must_change); a wrong password shows a visible error and does NOT clear the username field.
 // ─────────────────────────────────────────────────────────────────────────────
-test.describe("Fix 4 · Login form — valid admin advances; wrong password shows error + keeps username", () => {
+test.describe("Login form — valid admin advances; wrong password shows error + keeps username", () => {
   /** A clean, token-free context so the login gate actually renders the form. */
   async function openLogin(browser: import("@playwright/test").Browser) {
     // A manually-created context does NOT inherit the project's baseURL — set it so a relative goto works.
@@ -357,7 +357,7 @@ test.describe("Fix 4 · Login form — valid admin advances; wrong password show
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Fix 7 — POLICY APPLY FEEDBACK: enforcing "Active policies" heading distinct from dry-run drafts,
+// POLICY APPLY FEEDBACK: enforcing "Active policies" heading distinct from dry-run drafts,
 //         + an API-through-page EFFECT PROOF that an applied policy actually BLOCKs an un-allowed call.
 // ─────────────────────────────────────────────────────────────────────────────
 const NS = "default";
@@ -411,7 +411,7 @@ async function evaluate(page: Page, tool: string): Promise<{ status: number; dec
   );
 }
 
-test.describe("Fix 7 · Policy apply feedback — enforcing heading distinct + real block effect", () => {
+test.describe("Policy apply feedback — enforcing heading distinct + real block effect", () => {
   test("Catalog tab: 'Active policies' + ENFORCING label renders ABOVE the tier panels, distinct from drafts", async ({
     page
   }) => {
