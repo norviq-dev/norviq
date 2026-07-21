@@ -37,7 +37,7 @@ a **change-password screen** (with a loud "default admin password in use" banner
 `POST /api/v1/auth/change-password` re-checks the current password and requires a new one of at least
 `auth.minPasswordLength` characters that is neither the current nor the default password.
 
-**Production:** with `api.requireStrongSecret=true` (the chart default) the API **refuses to start**
+**Production:** with `config.requireStrongSecret=true` (the chart default) the API **refuses to start**
 while the admin password is the literal shipped default — which is exactly why the chart generates a
 random one rather than shipping `norviq`. Setting `auth.adminPassword` yourself is still the clearest
 option when you manage secrets externally.
