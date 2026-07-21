@@ -74,6 +74,15 @@ class OPAEvaluator:
         _ttl = settings.evaluator_inproc_cache_ttl_s
         self._posture_cache = TTLCache(_ttl, settings.evaluator_inproc_cache_max)
         self._trust_score_cache = TTLCache(_ttl, settings.evaluator_inproc_cache_max)
+        # Per-pod L1 for the base POLICY DECISION (pre-override), so a warm hit skips the get_eval Redis GET
+        # and the whole warm path collapses to one pipelined round trip (the fresh freeze+cap). TTL is CLAMPED
+        # to redis_ttl_eval_s: a dropped policy-invalidation pub/sub event must never leave a stale decision
+        # cached LONGER than the Redis eval cache's own 5s self-heal bound. Invalidated eagerly on every policy
+        # event via the cache's invalidation hook (below) — freeze/cap are NOT cached here, always read fresh.
+        _eval_ttl = min(_ttl, settings.redis_ttl_eval_s) if _ttl > 0 else 0
+        self._inproc_eval_cache = TTLCache(_eval_ttl, settings.evaluator_inproc_cache_max)
+        if hasattr(cache, "register_eval_invalidation_hook"):
+            cache.register_eval_invalidation_hook(self._on_eval_invalidated)
         self._semaphore = asyncio.Semaphore(settings.evaluator_max_concurrency)
         # OPA-server client + per-key pushed-rego digests (server mode); unused in subprocess mode.
         self.opa = OpaClient()
@@ -131,9 +140,33 @@ class OPAEvaluator:
             # controls (rate_limit) and the post-resolution softening (monitor mode).
             posture = await self._resolve_posture(event.agent_identity.namespace)
             trust = await self._trust(event.agent_identity.spiffe_id)
-            trust_result = await self._compute_trust(event, trust, posture["trust_threshold"])
             cache_tool = self._cache_tool_key(event)
-            cached = await self._cache.get_eval(event.agent_identity.namespace, event.agent_identity.agent_class, cache_tool)
+            ns = event.agent_identity.namespace
+            agent_class = event.agent_identity.agent_class
+            spiffe = event.agent_identity.spiffe_id
+            if self._inproc_eval_cache.enabled:
+                # L1+L2 warm path: check the per-pod eval L1 first, then issue exactly ONE pipelined Redis
+                # round trip for the rest. On an in-proc HIT that is just the fresh freeze+cap; on a miss it is
+                # the eval GET bundled with the fresh freeze+cap. The freeze/cap are read fresh every call and
+                # threaded into trust as prefetched_flags — never cached — so a freeze still flips a stale
+                # in-proc allow to a block via _apply_trust_overrides on the very next call.
+                inproc = self._inproc_eval_cache.get((ns, agent_class, cache_tool))
+                if inproc is not _MISS:
+                    is_frozen, cap = await self._cache.get_agent_flags(spiffe)
+                    cached = inproc
+                else:
+                    cached, is_frozen, cap = await self._cache.get_eval_and_agent_flags(
+                        ns, agent_class, cache_tool, spiffe
+                    )
+                    if cached is not None:
+                        # Populate the L1 from the shared Redis decision (both hold the PRE-override base decision).
+                        self._inproc_eval_cache.set((ns, agent_class, cache_tool), cached)
+                trust_result = await self._compute_trust(
+                    event, trust, posture["trust_threshold"], prefetched_flags=(is_frozen, cap)
+                )
+            else:
+                trust_result = await self._compute_trust(event, trust, posture["trust_threshold"])
+                cached = await self._cache.get_eval(ns, agent_class, cache_tool)
             if cached is not None:
                 cache_hit = True
                 decision = await self._handle_cache_hit(event, cached, start, trust_result, posture)
@@ -195,6 +228,13 @@ class OPAEvaluator:
                 base_decision = winner["decision"]
             if base_decision.rule_id not in settings.evaluator_non_cacheable_rules:
                 await self._cache.set_eval(event.agent_identity.namespace, event.agent_identity.agent_class, cache_tool, base_decision)
+                # Mirror the shared decision into the per-pod L1 under the SAME non-cacheable guard, so warm
+                # replays skip the get_eval round trip. Caches only the PRE-override base decision — the fresh
+                # freeze/cap + posture overrides are re-applied per call in _handle_cache_hit.
+                if self._inproc_eval_cache.enabled:
+                    self._inproc_eval_cache.set(
+                        (event.agent_identity.namespace, event.agent_identity.agent_class, cache_tool), base_decision
+                    )
             # Run the per-ns rate-limit throttle on the FRESH path too — otherwise call #1 (a cache
             # MISS) and non-cacheable allows never count against the window, and the ns-wide backstop only
             # ever engages on cache-hit replays. Same allow-only footing as the cache-hit path.
@@ -386,14 +426,35 @@ class OPAEvaluator:
         self._trust_score_cache.set(spiffe_id, trust)
         return trust
 
+    def _on_eval_invalidated(self, namespace: str | None = None, agent_class: str | None = None) -> None:
+        """Clear the WHOLE per-pod in-proc eval L1 on any eval-cache invalidation.
+
+        Registered on the RedisCache, so it fires for every invalidation path — the loader chokepoint
+        (origin-inline mutations AND peer pub/sub events) and packs.py's direct calls — with no call site able
+        to miss it. Clearing the whole (small, per-pod) cache rather than a scoped subset is deliberate: it
+        structurally cannot leak a stale decision across an overlay/base/pack scope mismatch, and policy events
+        are rare enough that the re-warm cost is negligible."""
+        _ = namespace, agent_class
+        self._inproc_eval_cache.clear()
+
+    def clear_inproc_eval(self) -> None:
+        """Public hook to drop the in-proc eval L1 (used by tests + the embedded sidecar's invalidation)."""
+        self._inproc_eval_cache.clear()
+
     async def _compute_trust(
-        self, event: ToolCallEvent, trust: TrustScore, trust_threshold: float | None = None
+        self,
+        event: ToolCallEvent,
+        trust: TrustScore,
+        trust_threshold: float | None = None,
+        prefetched_flags: tuple[bool, float | None] | None = None,
     ) -> TrustResult:
         """Compute trust from seven behavioral signals.
 
         `trust_threshold` (per-ns override, else None) moves the category tiers. The calculator also reads
         the durable admin trust CAP for this identity and applies it tighten-only. Both are
-        threaded into the single categorize inside `calculate()` so there is exactly one recategorization site."""
+        threaded into the single categorize inside `calculate()` so there is exactly one recategorization site.
+        `prefetched_flags = (is_frozen, cap)` forwards a freeze/cap the evaluator already read FRESH in the
+        collapsed hot-path pipeline, so the calculator does not re-read them (still fresh, never cached)."""
         trust_input = TrustInput(
             spiffe_id=event.agent_identity.spiffe_id,
             namespace=event.agent_identity.namespace,
@@ -404,7 +465,9 @@ class OPAEvaluator:
             chain_depth=event.call_depth,
             timestamp=datetime.now(timezone.utc),
         )
-        return await self._trust_calculator.calculate(trust_input, trust_threshold=trust_threshold)
+        return await self._trust_calculator.calculate(
+            trust_input, trust_threshold=trust_threshold, prefetched_flags=prefetched_flags
+        )
 
     def _apply_trust_overrides(self, decision: PolicyDecision, trust_result: TrustResult, event_id: str) -> PolicyDecision:
         """Apply low/frozen trust overrides to policy decision."""

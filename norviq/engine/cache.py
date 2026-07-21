@@ -60,6 +60,23 @@ class RedisCache:
         self._url = url or settings.redis_url
         self._redis: aioredis.Redis | None = None
         self._trust_decr_sha: str | None = None
+        # Best-effort listeners fired whenever the Redis eval cache is invalidated (scope or all). The
+        # evaluator registers its per-pod in-process eval-decision L1 here so EVERY invalidation path — the
+        # loader chokepoint (origin-inline AND peer-via-pubsub) and packs.py's direct calls — clears the
+        # in-proc mirror too, with no call site able to miss it. See OPAEvaluator._on_eval_invalidated.
+        self._eval_invalidation_hooks: list = []
+
+    def register_eval_invalidation_hook(self, callback) -> None:
+        """Register callback(namespace|None, agent_class|None), invoked after any eval-cache invalidation."""
+        self._eval_invalidation_hooks.append(callback)
+
+    def _fire_eval_invalidation(self, namespace: str | None, agent_class: str | None) -> None:
+        """Notify registered in-proc eval caches. Never let a hook error affect the Redis invalidation."""
+        for hook in self._eval_invalidation_hooks:
+            try:
+                hook(namespace, agent_class)
+            except Exception as exc:  # noqa: BLE001 — a hook must never break cache invalidation
+                log.warning("nrvq.cache.eval.hook_failed", error=str(exc), code="NRVQ-DB-9023")
 
     async def connect(self) -> None:
         """Initialize the Redis client and Lua scripts."""
@@ -258,8 +275,68 @@ class RedisCache:
         await self._pool.set(key, decision.model_dump_json(), ex=settings.redis_ttl_eval_s)
         log.debug("nrvq.cache.eval.set", key=key, ttl=settings.redis_ttl_eval_s, code="NRVQ-DB-9018")
 
+    @staticmethod
+    def _parse_override(raw) -> float | None:
+        """Parse a trust-cap value; None (no cap) on absent/malformed — matches _safe_override_only's fail-OPEN.
+        A malformed value is logged (not silent): it means an admin cap isn't being applied, worth surfacing."""
+        if raw is None:
+            return None
+        try:
+            return float(raw)
+        except (ValueError, TypeError) as exc:
+            log.warning("nrvq.cache.override_parse_failed", value=str(raw)[:64], error=str(exc), code="NRVQ-DB-9026")
+            return None
+
+    async def get_agent_flags(self, spiffe_id: str) -> tuple[bool, float | None]:
+        """Read the admin freeze + trust cap for one identity in ONE pipelined round trip.
+
+        This is the hot-path kill-switch read: it is NEVER cached — the caller fetches it fresh every eval so a
+        freeze/cap propagates cluster-wide on the next call. Fails CLOSED: on any Redis error return
+        (frozen=True, cap=None), the same fail-direction as the per-key _safe_frozen_only (closed) +
+        _safe_override_only (open) it replaces, so a Redis outage blocks rather than silently unfreezing."""
+        try:
+            client = self._client()
+            async with client.pipeline(transaction=False) as pipe:
+                await pipe.get(f"agent_frozen:{spiffe_id}")
+                await pipe.get(f"agent_trust_override:{spiffe_id}")
+                frozen_raw, override_raw = await pipe.execute()
+            return bool(frozen_raw), self._parse_override(override_raw)
+        except Exception as exc:  # noqa: BLE001 — fail CLOSED (frozen) so a Redis loss cannot unfreeze an agent
+            log.error("nrvq.cache.agent_flags_failed", error=str(exc), code="NRVQ-DB-9024")
+            return True, None
+
+    async def get_eval_and_agent_flags(
+        self, namespace: str, agent_class: str, tool_name: str, spiffe_id: str
+    ) -> tuple[PolicyDecision | None, bool, float | None]:
+        """Collapse the warm path's two Redis stages into ONE pipelined round trip: the cached base decision
+        + the fresh freeze + the fresh cap. Returns (decision|None, is_frozen, cap). Fails CLOSED: on any Redis
+        error return (None, True, None) — is_frozen=True forces a block downstream (via _apply_trust_overrides),
+        so a Redis outage never serves a stale allow or an unfrozen agent."""
+        try:
+            client = self._client()
+            eval_key = self._eval_key(namespace, agent_class, tool_name)
+            async with client.pipeline(transaction=False) as pipe:
+                await pipe.get(eval_key)
+                await pipe.get(f"agent_frozen:{spiffe_id}")
+                await pipe.get(f"agent_trust_override:{spiffe_id}")
+                eval_raw, frozen_raw, override_raw = await pipe.execute()
+            if eval_raw is None:
+                record_cache_miss("eval")
+                decision = None
+            else:
+                record_cache_hit("eval")
+                decision = PolicyDecision.model_validate_json(eval_raw)
+            return decision, bool(frozen_raw), self._parse_override(override_raw)
+        except Exception as exc:  # noqa: BLE001 — fail CLOSED (frozen) on any error
+            log.error("nrvq.cache.eval_and_flags_failed", error=str(exc), code="NRVQ-DB-9025")
+            return None, True, None
+
     async def invalidate_eval_scope(self, namespace: str, agent_class: str | None = None) -> int:
         """Invalidate cached eval decisions for a namespace/class scope."""
+        # Fire the in-proc hook UNCONDITIONALLY (before the early return): the per-pod in-proc eval L1 can
+        # still hold an entry for this scope even when the Redis scan finds nothing (Redis TTL'd it, or a
+        # race), so the local mirror must be cleared regardless of the Redis key count.
+        self._fire_eval_invalidation(namespace, agent_class)
         pattern = self._eval_scope_pattern(namespace, agent_class)
         client = self._client()
         keys = []
@@ -273,6 +350,7 @@ class RedisCache:
 
     async def invalidate_all_eval(self) -> int:
         """Invalidate all cached eval decisions across namespaces."""
+        self._fire_eval_invalidation(None, None)  # clear every in-proc eval mirror too
         client = self._client()
         keys = []
         async for key in client.scan_iter(match="eval:*"):

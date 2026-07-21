@@ -76,25 +76,43 @@ class TrustCalculator:
         }
         self._tasks: set[asyncio.Task[None]] = set()
 
-    async def calculate(self, input_data: TrustInput, trust_threshold: float | None = None) -> TrustResult:
+    async def calculate(
+        self,
+        input_data: TrustInput,
+        trust_threshold: float | None = None,
+        prefetched_flags: tuple[bool, float | None] | None = None,
+    ) -> TrustResult:
         """Calculate trust score and persist short-lived breakdown.
 
         `trust_threshold` (per-ns override, else None) moves the high/low tier boundaries.
         A durable admin trust CAP (`agent_trust_override:{spiffe}`) is applied tighten-only —
         `effective = min(computed, cap)` — so an admin can force an agent toward escalate/frozen but never RAISE its
-        trust above what behavior justifies. Both feed the SINGLE categorize below."""
+        trust above what behavior justifies. Both feed the SINGLE categorize below.
+
+        `prefetched_flags = (is_frozen, cap)` lets the caller supply the freeze/cap it just read FRESH in the
+        same pipelined round trip as the eval cache (the L1-collapse optimization), so this method skips its own
+        frozen/override GETs. It is used ONLY on the in-proc-enabled hot path; the freeze is still fresh (the
+        caller read it this call), never cached. When None, frozen/cap are read here exactly as before."""
         log.debug("nrvq.engine.trust.started", spiffe_id=input_data.spiffe_id, code="NRVQ-ENG-2040")
         if self._inproc_enabled():
             # L1 path: serve the two slow, per-identity reads (history, profile) from local memory when
-            # warm, but ALWAYS fetch the freeze flag and the admin cap fresh — an incident-response
-            # freeze must take effect this call, not up to a TTL later. `_safe_frozen_only` fails CLOSED
-            # (freeze on Redis error) and `_safe_override_only` fails OPEN, exactly as the bundled path.
-            history, profile, is_frozen, override = await asyncio.gather(
-                self._history_cached(input_data.spiffe_id),
-                self._profile_cached(input_data),
-                self._safe_frozen_only(input_data.spiffe_id),
-                self._safe_override_only(input_data.spiffe_id),
-            )
+            # warm, but ALWAYS use a FRESH freeze flag + admin cap — an incident-response freeze must take
+            # effect this call, not up to a TTL later. Either the caller pipelined them fresh
+            # (prefetched_flags) or we fetch them here: `_safe_frozen_only` fails CLOSED, `_safe_override_only`
+            # fails OPEN.
+            if prefetched_flags is not None:
+                is_frozen, override = prefetched_flags
+                history, profile = await asyncio.gather(
+                    self._history_cached(input_data.spiffe_id),
+                    self._profile_cached(input_data),
+                )
+            else:
+                history, profile, is_frozen, override = await asyncio.gather(
+                    self._history_cached(input_data.spiffe_id),
+                    self._profile_cached(input_data),
+                    self._safe_frozen_only(input_data.spiffe_id),
+                    self._safe_override_only(input_data.spiffe_id),
+                )
         else:
             history, profile_and_frozen, override = await asyncio.gather(
                 self._safe_history(input_data.spiffe_id),
