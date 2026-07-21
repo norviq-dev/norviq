@@ -72,6 +72,12 @@ jobs:
   # ---------------------------------------------------------------------------------------------
   images:
     needs: version
+    # SKIPPED on a rehearsal. A rehearsal must publish nothing, and this job pushes
+    # `<component>-<version>` to a public registry — which would mint the GA image tags early. On a
+    # rehearsal the chart job instead pins the CURRENT commit's `<component>-<sha>` images, which
+    # already exist from the main build, so the whole stamp/pin/render/package path is still
+    # exercised against real digests.
+    if: needs.version.outputs.publish == 'true'
     uses: ./.github/workflows/build.yml
     permissions:
       contents: read
@@ -82,6 +88,8 @@ jobs:
 
   chart:
     needs: [version, images]        # <-- the ordering guarantee: images exist before the chart pins them
+    # `needs` on a skipped job would skip this one too, so accept skipped-but-not-failed explicitly.
+    if: ${{ !cancelled() && needs.version.result == 'success' && needs.images.result != 'failure' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -108,7 +116,14 @@ jobs:
       - name: Stamp the chart version and pin every image to an immutable digest
         run: |
           set -euo pipefail
-          python3 scripts/release_stamp.py "$VERSION" --resolve
+          if [ "$PUBLISH" = "true" ]; then
+            # Release: pin the version-tagged images the `images` job just published.
+            python3 scripts/release_stamp.py "$VERSION" --resolve
+          else
+            # Rehearsal: no version-tagged images were published, so pin this commit's images
+            # (built by build.yml on the main push). Same code path, real digests, nothing minted.
+            python3 scripts/release_stamp.py "$VERSION" --resolve --resolve-suffix "$GITHUB_SHA"
+          fi
           echo "--- Chart.yaml ---"; grep -E '^(version|appVersion):' helm/norviq/Chart.yaml
 
       - name: Lint and render the chart that will actually ship

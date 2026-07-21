@@ -73,6 +73,12 @@ def main() -> None:
     ap.add_argument("--repo", default="ghcr.io/norviq-dev/norviq-engine")
     ap.add_argument("--resolve", action="store_true", help="look digests up from the registry")
     ap.add_argument("--digests", default="", help="comp=sha256:... comma-separated (tests/rehearsal)")
+    ap.add_argument(
+        "--resolve-suffix", default="",
+        help="Resolve digests from `<comp>-<suffix>` instead of `<comp>-<version>`. Used by the "
+             "rehearsal, which must not publish version-tagged images and so pins the current "
+             "commit's `<comp>-<sha>` images instead.",
+    )
     args = ap.parse_args()
 
     version = args.version.lstrip("v")
@@ -80,7 +86,8 @@ def main() -> None:
         sys.exit(f"refusing to release {version!r}: not a semantic version (expected e.g. 0.1.0)")
 
     if args.resolve:
-        digests = {c: resolve_digest(args.repo, f"{c}-{version}") for c in COMPONENTS}
+        suffix = args.resolve_suffix or version
+        digests = {c: resolve_digest(args.repo, f"{c}-{suffix}") for c in COMPONENTS}
     else:
         digests = dict(p.split("=", 1) for p in args.digests.split(",") if p)
         missing = [c for c in COMPONENTS if c not in digests]
