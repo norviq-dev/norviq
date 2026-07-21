@@ -74,6 +74,11 @@ DESTRUCTIVE_PARAMS = {"command": "rm -rf /"}
 # A read-only tool the baseline is expected to permit — the control that proves the plane is LIVE
 # rather than uniformly failing closed. Overridable for deployments with a narrower baseline.
 BENIGN_TOOL = os.environ.get("NRVQ_E2E_BENIGN_TOOL", "search_kb")
+# The probe pod must adopt an agent class the target namespace actually GOVERNS. Labelling it with an
+# unknown class (this hardcoded "probe") makes EVERY call fail closed with `no_policy_loaded` — and then
+# "the destructive call was dropped" proves nothing, because a completely dead sidecar drops that too.
+# Override per cluster to a class that has a policy loaded.
+AGENT_CLASS = os.environ.get("NRVQ_E2E_AGENT_CLASS", "customer-support")
 BENIGN_PARAMS = {"query": "norviq data-plane probe"}
 # RemoteEvaluator stamps this rule id when it cannot reach the central engine (fail-closed). A "drop"
 # carrying it is NOT enforcement — it is an outage wearing enforcement's clothes.
@@ -327,7 +332,7 @@ def _pod_manifest(name: str, image: str) -> dict:
         "kind": "Pod",
         "metadata": {
             "name": name,
-            "labels": {"app": "norviq-dataplane-probe", AGENT_CLASS_LABEL: "probe"},
+            "labels": {"app": "norviq-dataplane-probe", AGENT_CLASS_LABEL: AGENT_CLASS},
         },
         "spec": {
             "restartPolicy": "Never",
@@ -514,6 +519,15 @@ def test_benign_tool_call_is_forwarded_through_the_socket(data_plane_probe: dict
         f"the sidecar could not reach the central policy engine (rule_id={rule_id}); every decision it "
         f"returns right now is an outage, not a policy result"
     )
+    if rule_id == "no_policy_loaded":
+        # Distinguish an UNGOVERNED CLASS (environment) from a DEAD PLANE (defect). With no policy for
+        # this class every call fail-closes, which is correct behaviour but makes benign-vs-destructive
+        # prove nothing — so skip loudly rather than report a green or a misleading red.
+        pytest.skip(
+            f"agent class {AGENT_CLASS!r} has no policy loaded in this namespace, so every call "
+            f"fail-closes and the benign/destructive discrimination is vacuous. Point "
+            f"NRVQ_E2E_AGENT_CLASS at a governed class to make this assertion meaningful."
+        )
     assert is_forwarded(response), (
         f"benign tool {BENIGN_TOOL!r} was not forwarded: {response}. If your baseline policy genuinely "
         f"denies it, set NRVQ_E2E_BENIGN_TOOL to a read-only tool the baseline permits."
