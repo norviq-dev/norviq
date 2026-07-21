@@ -4,7 +4,7 @@ apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: norviq-fleet-api-pdb
-  namespace: {{ .Values.namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "norviq.labels" . | nindent 4 }}
 spec:
@@ -20,7 +20,7 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: norviq-fleet-api-hpa
-  namespace: {{ .Values.namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "norviq.labels" . | nindent 4 }}
 spec:

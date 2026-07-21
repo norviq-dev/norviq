@@ -13,7 +13,7 @@ subjects:
   - kind: {{ $b.kind }}
     name: {{ $b.name | quote }}
     {{- if eq $b.kind "ServiceAccount" }}
-    namespace: {{ $b.namespace | default $.Values.namespace }}
+    namespace: {{ $b.namespace | default $.Release.Namespace }}
     {{- else }}
     apiGroup: rbac.authorization.k8s.io
     {{- end }}

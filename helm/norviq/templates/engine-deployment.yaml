@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: norviq-engine
-  namespace: {{ .Values.namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     app: norviq-engine
     {{- include "norviq.labels" . | nindent 4 }}
@@ -23,8 +23,12 @@ spec:
       app: norviq-engine
   template:
     metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
       labels:
         app: norviq-engine
+        {{- include "norviq.componentLabels" (dict "root" $ "component" "engine") | nindent 8 }}
         {{- if .Values.config.spiffeCsi.enabled }}
         norviq.io/svid: "true"        # opt-in to a SPIRE SVID (ClusterSPIFFEID podSelector)
         {{- end }}

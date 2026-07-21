@@ -3,7 +3,7 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: norviq-postgresql
-  namespace: {{ .Values.namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     app: norviq-postgresql
     {{- include "norviq.labels" . | nindent 4 }}

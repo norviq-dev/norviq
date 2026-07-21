@@ -3,7 +3,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: norviq-webhook
-  namespace: {{ .Values.namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     app: norviq-webhook
     {{- include "norviq.labels" . | nindent 4 }}
@@ -25,7 +25,7 @@ spec:
     metadata:
       labels:
         app: norviq-webhook
-        app.kubernetes.io/component: webhook
+        {{- include "norviq.componentLabels" (dict "root" $ "component" "webhook") | nindent 8 }}
     spec:
       serviceAccountName: norviq-controller
       {{- include "norviq.imagePullSecrets" . | nindent 6 }}
@@ -36,7 +36,7 @@ spec:
       initContainers:
         # Controller reconciles NrvqPolicy CRs by POSTing to the API — wait for it.
         # Safe: the sidecar-injector's namespaceSelector excludes the control-plane namespace
-        # (.Values.namespace; see webhook-config.yaml:27-34), so a not-yet-ready webhook never
+        # (.Release.Namespace; see webhook-config.yaml:27-34), so a not-yet-ready webhook never
         # blocks creation of these control-plane pods — even though failurePolicy defaults to Fail
         # (fail-closed) for injection-enabled tenant namespaces.
         {{- include "norviq.waitFor" (dict "name" "wait-for-api" "host" "norviq-api" "port" .Values.api.port) | nindent 8 }}
@@ -69,9 +69,9 @@ spec:
             # namespace) AND from thin-proxy sidecars injected into OTHER tenant namespaces.
             - name: NRVQ_API_URL
               {{- if .Values.config.internalTls.enabled }}
-              value: "https://norviq-api.{{ .Values.namespace }}.svc:8443"
+              value: "https://norviq-api.{{ .Release.Namespace }}.svc:8443"
               {{- else }}
-              value: "http://norviq-api.{{ .Values.namespace }}.svc:{{ .Values.api.port }}"
+              value: "http://norviq-api.{{ .Release.Namespace }}.svc:{{ .Values.api.port }}"
               {{- end }}
             {{- if .Values.config.internalTls.enabled }}
             # Auto-mTLS: controller verifies the API cert against the internal CA; injector signs a
@@ -84,7 +84,7 @@ spec:
               value: /etc/norviq/ca/ca.key
             {{- end }}
             - name: NRVQ_ADMIN_POLICY_NAMESPACE
-              value: "{{ .Values.namespace }}"
+              value: "{{ .Release.Namespace }}"
             # Mode injected into sidecars. "proxy" (default) = thin sidecar POSTs to the central
             # /evaluate with a minted namespace-scoped service JWT (nothing per-pod); "embedded" = full
             # local engine for air-gapped/edge (needs the datastore wiring below).

@@ -8,7 +8,7 @@ apiVersion: databases.spotahome.com/v1
 kind: RedisFailover
 metadata:
   name: norviq-redis-ha
-  namespace: {{ .Values.namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "norviq.labels" . | nindent 4 }}
 spec:

@@ -5,6 +5,9 @@ description: Runtime security for LLM agent tool calls
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
+# Minimum Kubernetes the chart is tested against. The `-0` suffix lets pre-release/distro-suffixed
+# server versions (e.g. v1.30.1-eks-...) satisfy the constraint. helm install refuses on older.
+kubeVersion: ">=1.30.0-0"
 home: https://norviq.dev
 icon: https://raw.githubusercontent.com/norviq-dev/norviq/main/.github/assets/norviq-mark.svg
 sources:

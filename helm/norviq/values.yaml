@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-namespace: norviq
+# The install namespace is taken from `helm -n/--namespace` (.Release.Namespace), the
+# standard Helm contract — there is no `namespace:` value. Install with:
+#   helm install norviq ./helm/norviq -n <namespace> --create-namespace
 # Per-tenant NrvqPolicy quota (ResourceQuota count/nrvqpolicies.norviq.io). OPT-IN: list the tenant
 # namespaces you want protected — each must already exist. Empty by default so a fresh install never
 # fails on a namespace that hasn't been created yet. Example: [prod-agents, analytics].
@@ -89,6 +91,10 @@ imagePullSecrets: []
 
 # Graceful shutdown: a preStop sleep lets the Service deregister the endpoint before SIGTERM so
 # in-flight requests drain during a rolling upgrade. Applied to api/engine/webhook. 0 = no hook.
+# `helm test` connection-probe pod image (curl). Override for an air-gapped mirror.
+tests:
+  image: "curlimages/curl:8.10.1"
+
 gracefulShutdown:
   preStopSleepSeconds: 3
 

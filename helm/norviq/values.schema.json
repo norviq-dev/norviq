@@ -1,0 +1,216 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Norviq Helm values",
+  "description": "Structural + enum validation for the norviq chart. Helm checks this on install/upgrade/template/lint and rejects bad input with a path + message before anything is applied. Intentionally permissive (additionalProperties allowed) so `--set` of any leaf keeps working; only the load-bearing types, enums and ranges are constrained — a typo in an enforcement-critical enum must fail loudly, not silently weaken policy.",
+  "type": "object",
+  "properties": {
+    "policyQuotaNamespaces": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Tenant namespaces to protect with a per-namespace NrvqPolicy ResourceQuota + baseline policy."
+    },
+    "imagePullSecrets": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "images": {
+      "type": "object",
+      "properties": {
+        "registry": { "type": "string" },
+        "engine": { "$ref": "#/definitions/componentImage" },
+        "api": { "$ref": "#/definitions/componentImage" },
+        "ui": { "$ref": "#/definitions/componentImage" },
+        "webhook": { "$ref": "#/definitions/componentImage" },
+        "redis": { "$ref": "#/definitions/simpleImage" },
+        "postgresql": { "$ref": "#/definitions/simpleImage" }
+      }
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "enforcementMode": {
+          "enum": ["block", "audit"],
+          "description": "block = enforce (deny/escalate). audit = visibility only, never blocks. There is no 'allow'/'monitor' value."
+        },
+        "noPolicyDecision": {
+          "enum": ["allow", "deny"],
+          "description": "Decision when no policy is loaded for a namespace. deny = fail-closed (PEP default)."
+        },
+        "opaMode": {
+          "enum": ["server", "subprocess"],
+          "description": "OPA evaluation runtime. server = HTTP to the per-replica OPA sidecar; subprocess = per-call `opa eval` fork."
+        },
+        "logLevel": { "type": "string" },
+        "requireStrongSecret": { "type": "boolean" },
+        "trustThreshold": { "type": "number", "minimum": 0, "maximum": 1 },
+        "violationPenalty": { "type": "number", "minimum": 0, "maximum": 1 },
+        "rateLimit": { "type": "integer", "minimum": 0 },
+        "dbSslMode": { "enum": ["disable", "allow", "prefer", "require", "verify-ca", "verify-full"] },
+        "internalTls": {
+          "type": "object",
+          "properties": { "enabled": { "type": "boolean" }, "proxyImage": { "type": "string" } }
+        },
+        "retention": {
+          "type": "object",
+          "properties": {
+            "auditRetentionDays": { "type": "integer", "minimum": 0 },
+            "coverageSnapshotRetentionDays": { "type": "integer", "minimum": 0 },
+            "graphSnapshotKeepPerNamespace": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "webhook": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "replicas": { "type": "integer", "minimum": 0 },
+        "port": { "$ref": "#/definitions/port" },
+        "autoscaling": { "$ref": "#/definitions/autoscaling" },
+        "injection": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "sidecarMode": {
+              "enum": ["proxy", "embedded"],
+              "description": "proxy = injected sidecar POSTs decisions to the central API; embedded = self-contained OPA+cache per sidecar."
+            },
+            "failurePolicy": {
+              "enum": ["Fail", "Ignore"],
+              "description": "Admission failure posture. Fail = fail-closed (an agent pod cannot start un-guarded)."
+            },
+            "allowPodOptOut": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "agentEgressPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "engine": {
+          "enum": ["networkpolicy", "cilium"],
+          "description": "networkpolicy = portable K8s NetworkPolicy (CIDR only); cilium = CiliumNetworkPolicy (also FQDN)."
+        },
+        "namespaces": { "type": "array", "items": { "type": "string" } },
+        "allowDNS": { "type": "boolean" },
+        "allowedCIDRs": { "type": "array", "items": { "type": "string" } },
+        "allowedFQDNs": { "type": "array", "items": { "type": "string" } },
+        "allowedFQDNPatterns": { "type": "array", "items": { "type": "string" } },
+        "allowedPorts": { "type": "array" },
+        "embeddedDatastores": { "type": "boolean" }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "className": { "type": "string" },
+        "host": { "type": "string" },
+        "tls": { "type": "boolean" },
+        "tlsSecretName": { "type": "string" },
+        "annotations": { "type": "object" }
+      }
+    },
+    "baselineClusterPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "name": { "type": "string" },
+        "clusterPriority": { "type": "integer" },
+        "preset": { "enum": ["strict", "moderate", "permissive"] }
+      }
+    },
+    "securityContext": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "runAsNonRoot": { "type": "boolean" },
+        "allowPrivilegeEscalation": { "type": "boolean" },
+        "readOnlyRootFilesystem": { "type": "boolean" }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "adminUsername": { "type": "string" },
+        "adminPassword": { "type": "string" },
+        "sessionTtlSeconds": { "type": "integer", "minimum": 1 },
+        "loginMaxAttempts": { "type": "integer", "minimum": 1 },
+        "loginWindowSeconds": { "type": "integer", "minimum": 1 },
+        "minPasswordLength": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "engine": { "$ref": "#/definitions/workload" },
+    "api": { "$ref": "#/definitions/workload" },
+    "ui": { "type": "object" },
+    "redis": { "type": "object" },
+    "postgresql": { "type": "object" },
+    "opa": { "type": "object" },
+    "otel": { "type": "object" },
+    "oidc": { "type": "object" },
+    "rbac": { "type": "object" },
+    "siem": { "type": "object" },
+    "fleet": { "type": "object" },
+    "gracefulShutdown": {
+      "type": "object",
+      "properties": { "preStopSleepSeconds": { "type": "integer", "minimum": 0 } }
+    }
+  },
+  "definitions": {
+    "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] },
+    "componentImage": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string" },
+        "tag": { "type": "string" },
+        "digest": { "type": "string" },
+        "pullPolicy": { "$ref": "#/definitions/pullPolicy" }
+      }
+    },
+    "simpleImage": {
+      "type": "object",
+      "properties": {
+        "repository": { "type": "string" },
+        "tag": { "type": "string" }
+      }
+    },
+    "autoscaling": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "minReplicas": { "type": "integer", "minimum": 1 },
+        "maxReplicas": { "type": "integer", "minimum": 1 },
+        "targetCPUUtilizationPercentage": {
+          "type": ["integer", "string"],
+          "description": "1..100, or \"\" to not scale on CPU."
+        },
+        "targetMemoryUtilizationPercentage": {
+          "type": ["integer", "string"],
+          "description": "1..100, or \"\" to not scale on memory."
+        }
+      }
+    },
+    "workload": {
+      "type": "object",
+      "properties": {
+        "replicas": { "type": "integer", "minimum": 0 },
+        "port": { "$ref": "#/definitions/port" },
+        "autoscaling": { "$ref": "#/definitions/autoscaling" },
+        "pdb": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "minAvailable": { "type": ["integer", "string"] }
+          }
+        },
+        "spread": {
+          "type": "object",
+          "properties": { "enabled": { "type": "boolean" } }
+        }
+      }
+    }
+  }
+}

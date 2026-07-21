@@ -11,8 +11,33 @@
 app.kubernetes.io/name: {{ include "norviq.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+app.kubernetes.io/part-of: norviq
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 }}
+{{- end }}
+
+{{/*
+Selector labels — a STABLE subset that never changes across releases, so it is safe in
+spec.selector.matchLabels (selector labels are IMMUTABLE on a live Deployment/StatefulSet). Kept
+separate from norviq.labels precisely because that set includes app.kubernetes.io/version +
+helm.sh/chart, which change every release and must NEVER go in a selector.
+
+NOTE: the existing workloads select on `app: norviq-<component>` (immutable, cannot be changed on
+the live release). This helper is used on Service selectors and is the intended matchLabels for any
+NEW workload / a future chart major that re-creates the Deployments.
+*/}}
+{{- define "norviq.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "norviq.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{/*
+Full label set for one component: norviq.labels + app.kubernetes.io/component. Additive to metadata
+(never selectors). Usage: {{ include "norviq.componentLabels" (dict "root" $ "component" "api") | nindent N }}
+*/}}
+{{- define "norviq.componentLabels" -}}
+{{ include "norviq.labels" .root }}
+app.kubernetes.io/component: {{ .component }}
 {{- end }}
 
 {{/*

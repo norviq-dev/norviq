@@ -60,8 +60,12 @@ def test_egress_policy_fails_when_no_namespaces() -> None:
 
 
 def test_egress_policy_refuses_control_plane_namespace() -> None:
-    """Targeting the norviq control-plane namespace would break the control plane → render must fail."""
+    """Targeting the norviq control-plane namespace would break the control plane → render must fail.
+
+    The guard is release-namespace-aware (`eq $ns .Release.Namespace`), so the control-plane
+    namespace is whatever `-n` selects — here `norviq`."""
     res = _template(
+        "-n", "norviq",
         "--set", "agentEgressPolicy.enabled=true",
         "--set", "agentEgressPolicy.namespaces={norviq}",
     )
@@ -101,4 +105,6 @@ def test_invalid_engine_fails() -> None:
         "--set", "agentEgressPolicy.engine=bogus",
     )
     assert res.returncode != 0
-    assert "engine must be" in res.stderr
+    # values.schema.json now rejects the bad enum before the chart's own runtime `fail` — either
+    # gate is acceptable, both name the valid values.
+    assert "networkpolicy" in res.stderr and "cilium" in res.stderr

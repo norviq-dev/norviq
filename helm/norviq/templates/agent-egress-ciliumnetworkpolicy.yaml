@@ -12,7 +12,7 @@
 {{-   fail "agentEgressPolicy.enabled=true but no namespaces to lock down — set agentEgressPolicy.namespaces or policyQuotaNamespaces (empty would silently protect nothing)." }}
 {{- end }}
 {{- range $ns := $nsList }}
-{{-   if eq $ns $root.Values.namespace }}{{- fail (printf "agentEgressPolicy must not target the norviq control-plane namespace %q — list only tenant/agent namespaces." $ns) }}{{- end }}
+{{-   if eq $ns $root.Release.Namespace }}{{- fail (printf "agentEgressPolicy must not target the norviq control-plane namespace %q — list only tenant/agent namespaces." $ns) }}{{- end }}
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
@@ -43,16 +43,16 @@ spec:
     # Norviq control plane: the sidecar (proxy mode) calls the norviq API for every decision.
     - toEndpoints:
         - matchLabels:
-            k8s:io.kubernetes.pod.namespace: {{ $root.Values.namespace }}
+            k8s:io.kubernetes.pod.namespace: {{ $root.Release.Namespace }}
             app: norviq-api
     {{- if $ep.embeddedDatastores }}
     # embedded sidecar mode: the sidecar runs its own engine off the cluster datastores.
     - toEndpoints:
         - matchLabels:
-            k8s:io.kubernetes.pod.namespace: {{ $root.Values.namespace }}
+            k8s:io.kubernetes.pod.namespace: {{ $root.Release.Namespace }}
             app: norviq-postgresql
         - matchLabels:
-            k8s:io.kubernetes.pod.namespace: {{ $root.Values.namespace }}
+            k8s:io.kubernetes.pod.namespace: {{ $root.Release.Namespace }}
             app: norviq-redis
     {{- end }}
     {{- if or $ep.allowedFQDNs $ep.allowedFQDNPatterns }}

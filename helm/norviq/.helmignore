@@ -1,0 +1,23 @@
+# Patterns to exclude from the packaged chart (.tgz). Mirrors Helm's default set plus repo hygiene.
+# Version control
+.git/
+.gitignore
+.bzr/
+.hg/
+.svn/
+# CI / scratch — root-anchored (leading /) so they do NOT clobber templates/tests/, which holds the
+# `helm test` hook and MUST ship. A bare `tests/` would match templates/tests/ at any depth.
+/.github/
+/ci/
+*.test
+# Backups / editor / OS cruft
+*.tmpl.bak
+*.bak
+*.orig
+*.tmp
+*.swp
+*.swo
+*~
+.DS_Store
+.idea/
+.vscode/

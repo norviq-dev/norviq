@@ -38,7 +38,7 @@ webhooks:
       caBundle: {{ $existingCaBundle | quote }}
       service:
         name: norviq-webhook
-        namespace: {{ .Values.namespace }}
+        namespace: {{ .Release.Namespace }}
         path: /mutate
     rules:
       - operations: ["CREATE"]
@@ -52,7 +52,7 @@ webhooks:
           values: ["enabled"]
         - key: kubernetes.io/metadata.name
           operator: NotIn
-          values: ["kube-system", "kube-public", "kube-node-lease", {{ .Values.namespace | quote }}]
+          values: ["kube-system", "kube-public", "kube-node-lease", {{ .Release.Namespace | quote }}]
         # AKS system/control-plane namespaces carry these labels; exclude them in-chart so the config is
         # self-sufficient (matches what the Azure admissions-enforcer would otherwise add). The keys don't
         # exist on non-AKS clusters, so `NotIn` trivially matches everything there — no behaviour change.

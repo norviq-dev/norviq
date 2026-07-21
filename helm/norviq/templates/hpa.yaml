@@ -30,7 +30,7 @@ apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
   name: {{ $c.name }}-hpa
-  namespace: {{ $.Values.namespace }}
+  namespace: {{ $.Release.Namespace }}
   labels:
     {{- include "norviq.labels" $ | nindent 4 }}
 spec:

@@ -1,0 +1,45 @@
+{{- /*
+`helm test norviq` hook: proves the just-installed/upgraded release actually serves traffic before
+an operator trusts it. A short-lived pod curls the API's /healthz (liveness-shaped) and /readyz
+(asserts the PDP is reachable) through the in-cluster Service. Deleted after it runs.
+
+Standard chart convention (helm.sh/hook: test) — `helm test` runs it on demand, it is never part of
+a normal install.
+*/ -}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "norviq.fullname" . }}-test-connection
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "norviq.componentLabels" (dict "root" $ "component" "test") | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  {{- include "norviq.imagePullSecrets" . | nindent 2 }}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: curl
+      image: {{ .Values.tests.image | default "curlimages/curl:8.10.1" | quote }}
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -eu
+          api="http://norviq-api:{{ .Values.api.port }}"
+          echo "GET $api/healthz"; curl -fsS -m 10 "$api/healthz" >/dev/null
+          echo "GET $api/readyz";  curl -fsS -m 10 "$api/readyz"  >/dev/null
+          echo "norviq API is serving and ready"
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { cpu: 100m, memory: 32Mi }

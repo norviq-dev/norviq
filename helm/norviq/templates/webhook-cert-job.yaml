@@ -7,11 +7,11 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: norviq-webhook-cert
-  namespace: {{ .Values.namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "norviq.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": pre-install,pre-upgrade,post-install,post-upgrade
+    "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-weight": "-5"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 ---
@@ -19,11 +19,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: norviq-webhook-cert
-  namespace: {{ .Values.namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "norviq.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": pre-install,pre-upgrade,post-install,post-upgrade
+    "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-weight": "-5"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 rules:
@@ -35,17 +35,17 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: norviq-webhook-cert
-  namespace: {{ .Values.namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "norviq.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": pre-install,pre-upgrade,post-install,post-upgrade
+    "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-weight": "-5"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 subjects:
   - kind: ServiceAccount
     name: norviq-webhook-cert
-    namespace: {{ .Values.namespace }}
+    namespace: {{ .Release.Namespace }}
 roleRef:
   kind: Role
   name: norviq-webhook-cert
@@ -58,7 +58,7 @@ metadata:
   labels:
     {{- include "norviq.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": pre-install,pre-upgrade,post-install,post-upgrade
+    "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-weight": "-5"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 rules:
@@ -73,13 +73,13 @@ metadata:
   labels:
     {{- include "norviq.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": pre-install,pre-upgrade,post-install,post-upgrade
+    "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-weight": "-5"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 subjects:
   - kind: ServiceAccount
     name: norviq-webhook-cert
-    namespace: {{ .Values.namespace }}
+    namespace: {{ .Release.Namespace }}
 roleRef:
   kind: ClusterRole
   name: norviq-webhook-cert
@@ -89,7 +89,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: norviq-webhook-cert
-  namespace: {{ .Values.namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     app: norviq-webhook
     {{- include "norviq.labels" . | nindent 4 }}
@@ -140,7 +140,7 @@ spec:
               set -eu
               # Ensure openssl is present (alpine/k8s ships kubectl but not openssl).
               command -v openssl >/dev/null 2>&1 || apk add --no-cache openssl >/dev/null 2>&1
-              NS={{ .Values.namespace }}
+              NS={{ .Release.Namespace }}
               SVC=norviq-webhook
               SECRET=norviq-webhook-tls
               WEBHOOK=norviq-sidecar-injector

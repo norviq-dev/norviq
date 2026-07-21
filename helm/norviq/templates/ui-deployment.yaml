@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: norviq-ui
-  namespace: {{ .Values.namespace }}
+  namespace: {{ .Release.Namespace }}
   labels:
     app: norviq-ui
     {{- include "norviq.labels" . | nindent 4 }}
@@ -20,6 +20,7 @@ spec:
     metadata:
       labels:
         app: norviq-ui
+        {{- include "norviq.componentLabels" (dict "root" $ "component" "ui") | nindent 8 }}
     spec:
       {{- include "norviq.imagePullSecrets" . | nindent 6 }}
       terminationGracePeriodSeconds: 30

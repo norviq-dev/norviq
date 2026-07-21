@@ -16,7 +16,7 @@
 {{-   fail "agentEgressPolicy.enabled=true but no namespaces to lock down — set agentEgressPolicy.namespaces or policyQuotaNamespaces (empty would silently protect nothing)." }}
 {{- end }}
 {{- range $ns := $nsList }}
-{{-   if eq $ns $root.Values.namespace }}{{- fail (printf "agentEgressPolicy must not target the norviq control-plane namespace %q — list only tenant/agent namespaces." $ns) }}{{- end }}
+{{-   if eq $ns $root.Release.Namespace }}{{- fail (printf "agentEgressPolicy must not target the norviq control-plane namespace %q — list only tenant/agent namespaces." $ns) }}{{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -48,7 +48,7 @@ spec:
     - to:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: {{ $root.Values.namespace }}
+              kubernetes.io/metadata.name: {{ $root.Release.Namespace }}
           podSelector:
             matchLabels:
               app: norviq-api
@@ -57,13 +57,13 @@ spec:
     - to:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: {{ $root.Values.namespace }}
+              kubernetes.io/metadata.name: {{ $root.Release.Namespace }}
           podSelector:
             matchLabels:
               app: norviq-postgresql
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: {{ $root.Values.namespace }}
+              kubernetes.io/metadata.name: {{ $root.Release.Namespace }}
           podSelector:
             matchLabels:
               app: norviq-redis
