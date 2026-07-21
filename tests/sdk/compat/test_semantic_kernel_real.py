@@ -86,7 +86,9 @@ async def test_allowed_tool_call_executes_through_real_kernel() -> None:
 
     assert str(result) == "echo:hello"
     assert executed == ["hello"]
-    assert interceptor.calls == [("test.echo", {"query": "hello"}, "semantic-kernel")]
+    # BARE function name, not plugin-qualified 'test.echo' — a framework-agnostic policy must match
+    # under SK exactly as it does under the other adapters (see adapter._extract_tool_name).
+    assert interceptor.calls == [("echo", {"query": "hello"}, "semantic-kernel")]
 
 
 async def test_blocked_tool_call_raises_and_never_executes_through_real_kernel() -> None:
@@ -98,7 +100,9 @@ async def test_blocked_tool_call_raises_and_never_executes_through_real_kernel()
     executed: list[str] = []
     kernel = Kernel()
     kernel.add_plugin(_EchoPlugin(executed), plugin_name="test")
-    interceptor = _FakeInterceptor(blocked={"test.echo"})
+    # a policy written for the bare tool name 'echo' must block the SK-hosted function (it would NOT
+    # if the adapter still sent the plugin-qualified 'test.echo' — the cross-framework bypass this guards)
+    interceptor = _FakeInterceptor(blocked={"echo"})
     kernel.add_filter("function_invocation", policy_filter(interceptor, session_id="compat-sk"))
 
     raised: BaseException | None = None

@@ -12,10 +12,16 @@ executes. See [docs/guides/integrating-agents.md](../../docs/guides/integrating-
 
 | File | What it is |
 |---|---|
-| `agent.py` | The integration: `PolicyEngineClient` → `ToolInterceptor` → `protect(tools, ...)` → `create_react_agent` |
-| `tools.py` | Six fake tools (`search_kb`, `get_customer`, `get_order`, `execute_sql`, `delete_record`, `send_email`). All simulated — nothing touches a real system |
-| `app.py` | FastAPI front end: `POST /chat`, `GET /tools`, `GET /health`. Catches `NorviqBlockError`/`NorviqEscalateError` and returns them as a reply, not a 500 |
-| `requirements.txt` | Demo-only deps; the SDK itself is installed from this checkout |
+| `tools.py` | Six fake tools (`search_kb`, `get_customer`, `get_order`, `execute_sql`, `delete_record`, `send_email`), shared by every framework variant. All simulated — nothing touches a real system |
+| `agent.py` | **LangChain** integration: `PolicyEngineClient` → `ToolInterceptor` → `protect(tools, ...)` → `create_react_agent` |
+| `agent_langgraph.py` | **LangGraph** variant: a hand-assembled ReAct graph with `GuardedToolNode` as the tools node |
+| `agent_crewai.py` | **CrewAI** variant: Agent + Task + Crew on the Groq LLM (via LiteLLM); `protect()` wraps each `BaseTool._run` |
+| `agent_autogen.py` | **AutoGen** variant: `AssistantAgent` + `FunctionTool` on a Groq OpenAI-compatible client; `protect()` wraps each async `run()` |
+| `agent_semantic_kernel.py` | **Semantic Kernel / Azure** variant: `@kernel_function` tools on a Groq-backed kernel with the `policy_filter` function-invocation filter |
+| `serve.py` | Framework-switchable FastAPI server. `NRVQ_CHATBOT_FRAMEWORK` (`langchain`\|`langgraph`\|`crewai`\|`autogen`\|`semantic_kernel`) selects which agent to serve behind the shared chat page |
+| `chat_ui.py` | The shared browser chat page (used by `app.py` and `serve.py`) |
+| `app.py` | Minimal LangChain-only FastAPI front end: `POST /chat`, `GET /tools`, `GET /health` |
+| `requirements.txt` | Demo-only deps; the SDK itself is installed from this checkout. The per-framework LLM bridges (`langchain-groq`, `crewai[litellm]`, `autogen-agentchat`/`autogen-ext[openai]`, `semantic-kernel`+`openai`) are only needed for the variant you run |
 | `Dockerfile` | Built from the **repo root** (needs both `norviq/` and `examples/chatbot/`) |
 | `k8s/` | `namespace.yaml`, `deployment.yaml`, `service.yaml` for the `chatbot-prod` namespace |
 | `.env.example` | Reference list of every environment variable the demo reads. Nothing auto-loads it — export the values, or feed it to your own loader |

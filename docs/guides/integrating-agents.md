@@ -168,10 +168,29 @@ integration point too — Microsoft Agent Framework middleware can call the same
 ## 5. End-to-end example
 
 The complete runnable version of this lives in the repo, not in this page:
-**[`examples/chatbot/`](../../examples/chatbot/)** — a LangGraph customer-support agent where a real
-LLM (Groq) picks the tool and Norviq decides whether the call may run, wrapped in a FastAPI service
-with Kubernetes manifests. [`examples/README.md`](../../examples/README.md) is the index and tells you
-how to run it and what it proves.
+**[`examples/chatbot/`](../../examples/chatbot/)** — a Groq-backed customer-support agent where a real
+LLM picks the tool and Norviq decides whether the call may run, wrapped in a FastAPI service with
+Kubernetes manifests. [`examples/README.md`](../../examples/README.md) is the index and tells you how to
+run it and what it proves.
+
+**The same agent is wired for every supported framework** — one toolset, one persona, five adapters:
+[`agent.py`](../../examples/chatbot/agent.py) (LangChain),
+[`agent_langgraph.py`](../../examples/chatbot/agent_langgraph.py),
+[`agent_crewai.py`](../../examples/chatbot/agent_crewai.py),
+[`agent_autogen.py`](../../examples/chatbot/agent_autogen.py),
+[`agent_semantic_kernel.py`](../../examples/chatbot/agent_semantic_kernel.py). Run any one with the
+switchable server (`NRVQ_CHATBOT_FRAMEWORK=<fw> uvicorn serve:app`). The point of shipping all five is
+that the *same* `delete_record` policy blocks the destructive call whichever framework the model runs
+in — enforcement lives at the tool boundary, not in any one framework's plumbing.
+
+Two things worth knowing when you run them: (1) **tool names are framework-agnostic** — a policy on
+`delete_record` matches whether it is a LangChain `BaseTool`, a CrewAI tool, an AutoGen `FunctionTool`,
+or a Semantic Kernel `@kernel_function` (SK sends the *bare* function name, never plugin-qualified, so
+policies enforce identically). (2) **frameworks differ in how a block surfaces**: LangChain/LangGraph
+raise `NorviqBlockError` to the caller; CrewAI/AutoGen/Semantic Kernel catch the tool's raised exception
+and hand it back to the model as a tool-error observation (the model then declines). Either way the
+tool body never runs and the block is recorded in the audit log — the audit trail is the authoritative
+record of enforcement, not the framework's own error surface.
 
 The integration itself is small enough to read inline — three lines of wiring plus one denial
 handler, which is exactly the shape `examples/chatbot/agent.py` and `app.py` have:

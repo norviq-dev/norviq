@@ -5,9 +5,29 @@
 Runnable code that puts Norviq in front of a real agent. The docs under `docs/guides/` explain the
 model and show excerpts; the full working versions live here.
 
-| Example | Enforcement path | What it demonstrates |
+The `chatbot/` example is the **same** Groq-backed customer-support agent (six tools in
+[`chatbot/tools.py`](chatbot/tools.py)) wired for **every supported framework** — proving the block
+is enforced at the tool boundary regardless of which framework picks the tool. Each `agent_*.py`
+mirrors the LangChain [`agent.py`](chatbot/agent.py) with that framework's Norviq adapter:
+
+| Framework module | Adapter / interception point | What it demonstrates |
 |---|---|---|
-| [`chatbot/`](chatbot/) | In-process **SDK** (`norviq.sdk.langchain.adapter.protect`) | A Groq-backed LangGraph customer-support agent behind FastAPI. The LLM picks the tool; Norviq blocks the dangerous ones before the tool body runs |
+| [`chatbot/agent.py`](chatbot/agent.py) | LangChain — `langchain.adapter.protect` wraps `BaseTool._run`/`_arun` | The default agent behind FastAPI ([`app.py`](chatbot/app.py)); the LLM picks the tool, Norviq blocks the dangerous ones before the body runs |
+| [`chatbot/agent_langgraph.py`](chatbot/agent_langgraph.py) | LangGraph — `langgraph.adapter.GuardedToolNode` (drop-in for `ToolNode`) | The same agent as a hand-assembled ReAct graph; the guarded tool node blocks before running any call in the batch |
+| [`chatbot/agent_crewai.py`](chatbot/agent_crewai.py) | CrewAI — `crewai.adapter.protect` wraps the sync `BaseTool._run` | An Agent + Task + Crew on the Groq LLM (via LiteLLM); a blocked tool is refused before its body runs |
+| [`chatbot/agent_autogen.py`](chatbot/agent_autogen.py) | AutoGen — `autogen.adapter.protect` wraps `FunctionTool.run()` | An `AssistantAgent` on a Groq OpenAI-compatible client; the wrapped async `run()` is stopped before execution |
+| [`chatbot/agent_semantic_kernel.py`](chatbot/agent_semantic_kernel.py) | Semantic Kernel / Azure — `semantic_kernel.adapter.policy_filter` (a function-invocation filter) | `@kernel_function` tools on a Groq-backed kernel; the filter runs on every invocation and blocks before the function body |
+
+Run any of them with the framework-switchable server: `NRVQ_CHATBOT_FRAMEWORK=crewai uvicorn serve:app`
+(one of `langchain`, `langgraph`, `crewai`, `autogen`, `semantic_kernel`) serves that framework's
+protected agent behind the same chat page. See [`chatbot/README.md`](chatbot/README.md).
+
+> **Note on framework behavior when a tool is blocked.** LangChain/LangGraph propagate the block as a
+> `NorviqBlockError` the caller sees directly. CrewAI, AutoGen, and Semantic Kernel instead *catch* a
+> tool's raised exception and feed it back to the model as a tool-error observation (the model then
+> declines) — the destructive tool body still never runs, and the **block is recorded in the audit log
+> either way** (the evaluate call happens before the framework catches the raise). The audit trail, not
+> the framework's own error surface, is the authoritative record of enforcement.
 
 ## Prerequisites (all examples)
 

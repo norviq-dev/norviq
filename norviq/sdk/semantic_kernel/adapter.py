@@ -34,14 +34,19 @@ _FilterFunc = Callable[[Any, Callable[[Any], Awaitable[None]]], Awaitable[None]]
 
 
 def _extract_tool_name(context: Any) -> str:
-    """Best-effort plugin-qualified function name; never crashes on unexpected shapes."""
+    """The BARE Semantic Kernel function name, never plugin-qualified.
+
+    Norviq policies match on a framework-agnostic tool name: a `delete_record` rule must enforce
+    identically whether the tool is a LangChain `BaseTool`, a CrewAI tool, an AutoGen `FunctionTool`,
+    or an SK `@kernel_function`. SK addresses functions plugin-qualified (`support.delete_record`), so
+    sending that qualified name here made the SAME policy silently NOT match under SK — a cross-framework
+    enforcement bypass (the call was allowed because `support.delete_record != delete_record`). We send
+    the bare function name to stay consistent with every other adapter; plugin scoping is an SK addressing
+    detail, not part of the policy identity. Never crashes on unexpected shapes."""
     try:
         function = getattr(context, "function", None)
         name = getattr(function, "name", None)
-        if not name:
-            return "unknown"
-        plugin_name = getattr(function, "plugin_name", None)
-        return f"{plugin_name}.{name}" if plugin_name else str(name)
+        return str(name) if name else "unknown"
     except Exception:  # noqa: BLE001 - name extraction must never block evaluation
         return "unknown"
 

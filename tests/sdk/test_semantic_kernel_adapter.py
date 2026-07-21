@@ -117,8 +117,13 @@ async def test_filter_name_extraction_failure_still_evaluates() -> None:
     assert next_calls == [context]
 
 
-async def test_filter_uses_plugin_qualified_name() -> None:
-    """A function with a plugin_name should produce 'plugin.func' as the tool name."""
+async def test_filter_sends_bare_name_not_plugin_qualified() -> None:
+    """The tool name evaluated must be the BARE function name, never plugin-qualified.
+
+    Norviq policies match on a framework-agnostic tool name. Sending SK's plugin-qualified
+    'email.send' made a 'send' policy silently not match under Semantic Kernel while it enforced fine
+    under LangChain/CrewAI/AutoGen — a cross-framework enforcement bypass. The bare name keeps SK
+    consistent with every other adapter."""
     interceptor = _FakeInterceptor()
     context = _FakeContext(function=_FakeFunction("send", plugin_name="email"), arguments={})
 
@@ -127,7 +132,7 @@ async def test_filter_uses_plugin_qualified_name() -> None:
 
     filt = policy_filter(interceptor)  # type: ignore[arg-type]
     await filt(context, next_fn)
-    assert interceptor.calls == [("email.send", {}, "semantic-kernel")]
+    assert interceptor.calls == [("send", {}, "semantic-kernel")]
 
 
 async def test_filter_params_extraction_failure_still_evaluates() -> None:
