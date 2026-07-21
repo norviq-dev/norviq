@@ -115,8 +115,22 @@ class SidecarProxy:
         except Exception as exc:
             log.error("nrvq.sidecar.connection_error", error=str(exc), code="NRVQ-SDC-3001")
         finally:
-            writer.close()
-            await writer.wait_closed()
+            # Teardown must not raise. A client that goes away mid-response (crash, timeout, a
+            # fuzzer, or just an abrupt close) makes close()/wait_closed() raise BrokenPipeError or
+            # ConnectionResetError — and because this is the asyncio client_connected_cb, an escape
+            # here surfaces as an "Unhandled exception in client_connected_cb" traceback per
+            # connection. That is log spam an unauthenticated local peer can generate at will, and it
+            # buries the real NRVQ-SDC-3001 line above. The decision path is unaffected either way:
+            # nothing is forwarded without an allow, so this is robustness, not enforcement.
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception as exc:  # never let teardown escape the connection callback
+                # Debug, not error: a peer vanishing after its decision is ordinary, and the
+                # decision itself already succeeded. Still logged rather than swallowed, so a
+                # teardown failure is never invisible (tests/engine/test_failures_are_loud.py).
+                log.debug("nrvq.sidecar.close_failed", error=str(exc),
+                          error_type=type(exc).__name__, code="NRVQ-SDC-3001")
 
     async def _process_request(self, raw: str) -> str:
         """Evaluate one JSON request and return JSON response."""
