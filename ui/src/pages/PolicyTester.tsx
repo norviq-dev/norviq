@@ -248,7 +248,12 @@ export function PolicyTester() {
         tool_name: resolvedTool,
         tool_params: parsedParams,
         agent_identity: {
-          spiffe_id: `spiffe://norviq/ns/${resolvedNamespace}/sa/policy-tester`,
+          // Per-session ephemeral identity, not a single shared `policy-tester`. The old constant
+          // accumulated the "should-block" test scenarios' block-rate forever on one name, tanking its
+          // trust into "low" so an operator reviewing Agent Monitor might reflexively freeze it — after
+          // which trust_frozen masked the real rule in EVERY future simulation. sessionId is
+          // `policy-tester-<rand>` (line ~119), still classified synthetic via the `policy-tester-` prefix.
+          spiffe_id: `spiffe://norviq/ns/${resolvedNamespace}/sa/${sessionId}`,
           namespace: resolvedNamespace,
           agent_class: resolvedAgentClass
         },

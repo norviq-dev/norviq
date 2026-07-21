@@ -234,8 +234,19 @@ class TrustCalculator:
         return "high" if score >= high else "medium" if score >= low else "low"
 
     def _find_dominant_signal(self, signals: dict[str, float]) -> str:
-        """Return signal that reduced trust the most."""
-        return max(signals, key=lambda name: self.WEIGHTS.get(name, 0.0) * (1.0 - signals[name]), default="violation_rate")
+        """Return the signal that reduced trust the most, or "" when nothing did.
+
+        Signals are goodness values in [0,1]; a signal's distrust contribution is
+        weight * (1 - value). When every signal sits at its most-trusted value (or `signals` is
+        empty) every contribution is 0, and naming an arbitrary first-inserted key "dominant" (or the
+        old hardcoded default="violation_rate") falsely tells the operator that a clean agent's trust
+        was driven by a signal that in fact contributed nothing. Return "" in that case; agents.py and
+        AgentMonitor.tsx already treat "" as the no-dominant-signal state.
+        """
+        if not signals:
+            return ""
+        name = max(signals, key=lambda n: self.WEIGHTS.get(n, 0.0) * (1.0 - signals[n]))
+        return name if self.WEIGHTS.get(name, 0.0) * (1.0 - signals[name]) > 0 else ""
 
     def _recommend(self, score: float, category: str) -> str:
         """Return enforcement recommendation from score."""

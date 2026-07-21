@@ -200,6 +200,21 @@ def test_dominant_signal_uses_weighted_contribution() -> None:
     assert calc._find_dominant_signal(signals) == "violation_rate"
 
 
+def test_dominant_signal_is_empty_when_nothing_reduced_trust() -> None:
+    """A clean agent has no dominant signal. The old max(..., default="violation_rate") named
+    violation_rate (or an arbitrary first key) even when every signal contributed 0 to distrust,
+    telling the operator a spotless agent's trust was driven by a signal worth nothing."""
+    calc = TrustCalculator(_CacheStub(), _HistoryStub(), _ProfileStub())
+    # every signal at its most-trusted value 1.0 -> contribution weight*(1-1)=0 for all
+    all_clean = {name: 1.0 for name in calc.WEIGHTS}
+    assert calc._find_dominant_signal(all_clean) == ""
+    # no signals computed yet -> "" not the hardcoded default
+    assert calc._find_dominant_signal({}) == ""
+    # but a single genuine deficit is still reported
+    one_bad = {**all_clean, "scope_drift": 0.0}
+    assert calc._find_dominant_signal(one_bad) == "scope_drift"
+
+
 def test_weights_sum_to_one() -> None:
     calc = TrustCalculator(_CacheStub(), _HistoryStub(), _ProfileStub())
     assert round(sum(calc.WEIGHTS.values()), 6) == 1.0

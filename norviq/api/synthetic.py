@@ -28,7 +28,11 @@ import re
 # like "customer-support", "billing-assistant") never collide.
 SYNTHETIC_CLASS_PREFIXES: tuple[str, ...] = (
     "allowlist-probe",   # intent-allowlist e2e probes
-    "e2e-intent",        # attack-graph intent e2e
+    "e2e-",              # all e2e-spec throwaway classes (e2e-intent-*, e2e-probe, e2e-123, e2e-bot, …).
+                         # Was "e2e-intent" alone, which missed siblings minted by other e2e specs and
+                         # leaked them into the Asset/Attack graphs. No real product class starts "e2e-".
+    "policy-tester-",    # Policy Tester's per-session ephemeral identity (policy-tester-<rand>); the bare
+                         # "policy-tester" is in SYNTHETIC_CLASS_EXACT below, this covers the disposable form.
     "probe-",            # generic probes
     "evtrace-",          # /evaluate trace harness
     "effecttest",        # effect-proof harness

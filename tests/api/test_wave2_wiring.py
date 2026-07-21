@@ -29,6 +29,24 @@ def test_probe_naming_is_synthetic():
     assert is_synthetic_identity(None, "spiffe://norviq/ns/default/sa/allowlist-probe-abc")
 
 
+def test_all_e2e_siblings_are_synthetic():
+    """The prefix was "e2e-intent" alone and leaked sibling e2e-* classes into the graphs. Now any
+    e2e-spec throwaway class is hidden — verified against the classes the repo actually mints."""
+    for cls in ("e2e-123", "e2e-probe", "e2e-bot", "e2e-tool", "e2e-cf2-1783299999999"):
+        assert is_synthetic_identity(cls), cls
+    # ...without over-broadening: a real class that merely starts with the letters "e2e" is kept.
+    assert not is_synthetic_identity("e2ebank")
+
+
+def test_policy_tester_ephemeral_identity_is_synthetic():
+    """Policy Tester now mints a per-session `policy-tester-<rand>` identity (fixes the trust-freeze
+    feedback loop); the bare exact name and the disposable form must BOTH classify as synthetic, or
+    the ephemeral testers would pollute the Asset/Attack graphs."""
+    assert is_synthetic_identity("policy-tester")
+    assert is_synthetic_identity("policy-tester-a1b2c3d4")
+    assert is_synthetic_identity(None, "spiffe://norviq/ns/default/sa/policy-tester-a1b2c3d4")
+
+
 def test_real_agents_are_not_synthetic():
     for real in ("customer-support", "deploy-bot", "report-runner", "brand-new-agent"):
         assert not is_synthetic_identity(real), real
