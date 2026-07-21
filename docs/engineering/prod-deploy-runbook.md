@@ -3,7 +3,19 @@
 
 The chart ships **base `values.yaml` defaults** (single-node lean) plus a **`values-prod.yaml`**
 overlay (multi-node). Everything prod-specific is **values-gated and off by default**, so
-the dev cluster is unaffected. Companion: [`production-config.md`](production-config.md) (secrets/RBAC).
+the dev cluster is unaffected. Companion: [`production-config.md`](production-config.md) (secrets/RBAC);
+chart reference: [`helm/norviq/README.md`](../../helm/norviq/README.md); publishing:
+[`release-runbook.md`](release-runbook.md).
+
+This runbook is cloud-agnostic — the same steps stand up Norviq in any conformant cluster (AKS, EKS,
+GKE, kind). Only the LoadBalancer/ingress annotations differ by provider, noted inline.
+
+Two chart-wide behaviors to know up front:
+- **Install namespace comes from `helm -n/--namespace`** (`.Release.Namespace`, the standard Helm
+  contract) — there is no `namespace` value.
+- **Values are validated against `values.schema.json`** on install/upgrade/template: a bad enum
+  (e.g. `config.enforcementMode`) or type is rejected with a path + message before anything applies.
+  Run `helm lint ./helm/norviq` to check a values file.
 
 ## Prerequisites (multi-node)
 - **≥3 nodes** (so podAntiAffinity / topologySpread actually spread replicas).
@@ -20,11 +32,11 @@ the dev cluster is unaffected. Companion: [`production-config.md`](production-co
 ## What `values-prod.yaml` turns on
 | Area | Dev (base `values.yaml`) | Prod overlay |
 |---|---|---|
-| api replicas / PDB | 2 / minAvailable 1 | 3 / minAvailable 2 |
-| HPA (api, webhook) | off | on (CPU 70%) — needs metrics-server |
+| api replicas / PDB | 2 / minAvailable 1 | HA floor 2 / minAvailable 2 |
+| HPA | off | **api, engine, webhook** on — CPU 70% **+ memory 75%** (needs metrics-server). Sets a min floor and scales up on load; the Deployment drops its static `replicas` and the HPA owns the count (min→max: api 2→10, engine 2→8, webhook 2→4). |
 | podAntiAffinity + topologySpread | off | on (spread across nodes) |
-| engine replicas / PDB | 1 / off | 2 / minAvailable 1 + spread |
-| webhook | 2, injection **off** | 2 + PDB + HPA + spread + injection **on** |
+| engine replicas / PDB | 1 / off | HA floor 2 / minAvailable 1 + HPA + spread |
+| webhook | 2, injection **off** | HA floor 2 + PDB + HPA + spread + injection **on** |
 | Postgres | single StatefulSet | CloudNativePG `Cluster` (3) — operator required |
 | Redis | single StatefulSet | `RedisFailover` (Sentinel, 3) — operator required |
 | DB / Redis password | shipped dev defaults | **blank — you must supply them** (see below) |
@@ -77,6 +89,85 @@ registry; setting it to a bare `ghcr.io/` would resolve to a non-existent `ghcr.
 
 The HA StatefulSets are auto-disabled when `*.ha.enabled` (the operators own the datastores); the API's
 `NRVQ_PG_URL`/`NRVQ_REDIS_URL` auto-retarget the HA services (`*-rw` / failover service).
+
+**Node scaling.** The HPAs scale *pods*; for the cluster to grow *nodes* to hold them, enable your
+cloud's cluster-autoscaler on the node pool (e.g. AKS `az aks nodepool update
+--enable-cluster-autoscaler --min-count N --max-count M`). Size the pool to hold at least the HA
+floor (2× api+engine+webhook + the data tier).
+
+## Reach the console (ingress + TLS)
+
+Every Service is `ClusterIP`; the chart does not pick a hostname or mint a certificate — **host and
+TLS are operator-supplied**. Two ways in:
+
+**Port-forward (no ingress).** Fine for a bastion/VPN or a quick look. The console's nginx also
+proxies `/api`, so one forward serves both UI and API:
+```bash
+kubectl -n norviq port-forward svc/norviq-ui 3000:80   # then http://localhost:3000
+```
+
+**Ingress (the product path).** Needs an ingress controller (the chart installs none):
+```bash
+# 1) install a controller. For an INTERNAL (private VNet) LB on AKS:
+helm install ingress-nginx ingress-nginx/ingress-nginx -n ingress-nginx --create-namespace \
+  --set controller.service.annotations."service\.beta\.kubernetes\.io/azure-load-balancer-internal"=true
+# (EKS: service.beta.kubernetes.io/aws-load-balancer-internal="true"; GKE: cloud.google.com/load-balancer-type=Internal.
+#  Omit the annotation for a public LB.)
+
+# 2) get the LB IP, then supply your own host + TLS. Self-signed for a lab (a real deploy uses your
+#    own cert or a cert-manager.io/cluster-issuer annotation via ingress.annotations):
+LBIP=$(kubectl -n ingress-nginx get svc ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+HOST=${LBIP}.nip.io   # nip.io resolves the embedded IP anywhere; or use a real DNS name you own
+openssl req -x509 -nodes -newkey rsa:2048 -days 825 -keyout tls.key -out tls.crt \
+  -subj "/CN=${HOST}" -addext "subjectAltName=DNS:${HOST}"
+kubectl -n norviq create secret tls norviq-ingress-tls --cert=tls.crt --key=tls.key
+
+# 3) turn on the chart's ingress
+helm upgrade norviq ./helm/norviq -n norviq --reuse-values \
+  --set ingress.enabled=true --set ingress.host=$HOST --set ingress.tls=true
+```
+First-login credential: the chart auto-generates a strong admin password on first install (`admin` /
+random, forced change on first login). Read it — `NOTES.txt` prints the exact command:
+```bash
+kubectl -n norviq get secret norviq-secrets -o jsonpath='{.data.NRVQ_AUTH_ADMIN_PASSWORD}' | base64 -d
+```
+
+## Observability (Prometheus + Grafana)
+
+The API always serves Prometheus metrics at **`/metrics` on its Service port**, and the chart ships a
+Grafana dashboard ConfigMap (`grafana_dashboard: "1"` — auto-imported by the Grafana sidecar). You
+wire the *collection*:
+```bash
+# Prometheus Operator (kube-prometheus-stack) — a ServiceMonitor scoped to norviq-api:
+--set otel.metrics.serviceMonitor.enabled=true \
+--set otel.metrics.serviceMonitor.additionalLabels.release=kube-prometheus-stack   # match your Prometheus selector
+# OR annotation-based Prometheus:
+--set otel.metrics.scrapeAnnotations=true
+# OPTIONAL: OTLP trace export to a collector:
+--set otel.enabled=true --set otel.endpoint=http://otel-collector:4317
+```
+Without one of the two scrape paths, Prometheus never scrapes `/metrics` and the Grafana dashboard
+shows "No data".
+
+## Air-gapped / private registry
+
+Norviq's own images use `images.registry` (default `ghcr.io/norviq-dev/`). The third-party images
+(opa, redis, postgres, the tls-proxy nginx, the cert-bootstrap job, the helm-test curl) are mirrored
+with `global.imageRegistry`:
+```bash
+--set images.registry="myregistry.example.com/norviq/" \
+--set global.imageRegistry="myregistry.example.com"     # prepended to the six upstream images
+```
+Mirror the upstreams into your registry preserving their path (`.../openpolicyagent/opa`, `.../redis`, …).
+
+## Verify the deploy
+```bash
+helm test norviq -n norviq            # a pod curls the API /healthz + /readyz through the Service
+kubectl -n norviq get pods            # all Running/Ready
+# enforcement, end-to-end, through an injected sidecar's unix socket (NDJSON, one JSON per line):
+#   {"tool_name":"execute_sql","tool_params":{"query":"DROP TABLE x"},"session_id":"s"}  -> action=drop
+#   {"tool_name":"search_kb","tool_params":{"q":"hi"},"session_id":"s"}                  -> action=forward
+```
 
 ## Runtime guarantees (live on dev too)
 - **Startup ordering** is enforced at *runtime*, not by Helm apply order: initContainers gate
