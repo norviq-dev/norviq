@@ -104,7 +104,7 @@ async def _agent_class_policies(
         params["ns"] = namespace
     try:
         rows = (await session.execute(
-            text(f"SELECT DISTINCT ON (namespace, agent_class) namespace, agent_class, rego_source, priority, "  # nosec B608 - {where} is built from constant fragments only; the sole user value (namespace) is a bound :ns param
+            text(f"SELECT DISTINCT ON (namespace, agent_class) namespace, agent_class, rego_source, priority, "  # nosec B608 (constant WHERE fragments; sole user value bound as :ns) # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
                  f"enforcement_mode FROM policies WHERE {where} ORDER BY namespace, agent_class, version DESC"),
             params,
         )).mappings().all()
