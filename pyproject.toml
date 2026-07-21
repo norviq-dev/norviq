@@ -86,7 +86,7 @@ target-version = "py311"
 # intentionally contain injection strings). Baseline exclusions are triaged in
 # docs/engineering/security-baseline.md; do not broaden `skips` without a recorded rationale.
 [tool.bandit]
-exclude_dirs = ["tests", "norviq/redteam", "norviq/sdk/attacks", ".venv"]
+exclude_dirs = ["tests", "norviq/redteam", ".venv"]
 skips = []
 
 [tool.pytest.ini_options]

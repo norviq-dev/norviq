@@ -18,26 +18,63 @@ the dev cluster is unaffected. Companion: [`production-config.md`](production-co
   registry's pull secret.
 
 ## What `values-prod.yaml` turns on
-| Area | Dev (default) | Prod overlay |
+| Area | Dev (base `values.yaml`) | Prod overlay |
 |---|---|---|
-| api replicas / PDB | 1 / off | 3 / minAvailable 2 |
+| api replicas / PDB | 2 / minAvailable 1 | 3 / minAvailable 2 |
 | HPA (api, webhook) | off | on (CPU 70%) — needs metrics-server |
 | podAntiAffinity + topologySpread | off | on (spread across nodes) |
-| engine | 0 replicas | 2 replicas + PDB + spread |
-| webhook | 1 | 2 + PDB + HPA + spread + injection on |
+| engine replicas / PDB | 1 / off | 2 / minAvailable 1 + spread |
+| webhook | 2, injection **off** | 2 + PDB + HPA + spread + injection **on** |
 | Postgres | single StatefulSet | CloudNativePG `Cluster` (3) — operator required |
 | Redis | single StatefulSet | `RedisFailover` (Sentinel, 3) — operator required |
-| rollout | replace-in-place (maxSurge 0) | surge (maxSurge 1, zero-downtime) |
-| strong-secret guard / DB TLS | off / disable | on / require |
+| DB / Redis password | shipped dev defaults | **blank — you must supply them** (see below) |
+| strong-secret guard / DB TLS | already on / already `require` | unchanged (on / `require`) |
+
+Note what is *not* a prod-only setting: `config.requireStrongSecret` is **`true` by default** and
+`config.dbSslMode` is already `require` in the base values. The overlay's real security delta is that
+it **blanks `postgresql.password` / `redis.password`** so a prod install cannot silently ship the
+well-known dev credentials — the render fails until you supply your own.
+
+## Three values the chart REFUSES to guess
+
+The chart fails the **render** (not the rollout) rather than install something quietly insecure. Each
+`fail` names the missing value, so you find out at `helm template` time, not in production:
+
+| Missing | Guard | Why it fails closed |
+|---|---|---|
+| `policyQuotaNamespaces` | `templates/baseline-cluster-policy.yaml` | `baselineClusterPolicy.enabled` is `true` by default and renders **one baseline per listed namespace**. With the list empty it would render ZERO baselines — every agent class silently loses the fail-closed cluster baseline. Set your tenant namespaces, or set `baselineClusterPolicy.enabled=false` to opt out explicitly. |
+| `postgresql.password` | `templates/secret.yaml` | With `config.requireStrongSecret=true` (the default), an empty password would put a blank credential into `NRVQ_PG_URL`. |
+| `redis.password` | `templates/secret.yaml` | Same, for `NRVQ_REDIS_URL`. |
+
+Dry-run the render before you install — it costs nothing and catches all three at once:
+
+```bash
+helm template norviq ./helm/norviq -f helm/norviq/values-prod.yaml \
+  --set-json 'policyQuotaNamespaces=["prod-agents","analytics"]' \
+  --set postgresql.password="$PG_PASSWORD" --set redis.password="$REDIS_PASSWORD" >/dev/null
+```
+
+You do **not** need to pass `api.secretKey`: left at its sentinel default the chart auto-generates a
+strong random JWT secret on first install and reuses the live one across upgrades (so upgrades never
+invalidate sessions). Pass it explicitly only to pin your own — rotation, or a multi-cluster fleet
+trust root.
 
 ## Deploy
 ```bash
 # install operators first (CloudNativePG, redis-operator, metrics-server) per their docs, then:
 helm upgrade --install norviq ./helm/norviq -n norviq --create-namespace \
   -f helm/norviq/values-prod.yaml \
-  --set api.secretKey="$NRVQ_API_SECRET_KEY" \
-  --set images.registry="ghcr.io/" --set images.api.tag=api-<sha> ...   # pin -sha tags
+  --set-json 'policyQuotaNamespaces=["prod-agents","analytics"]' \
+  --set postgresql.password="$PG_PASSWORD" \
+  --set redis.password="$REDIS_PASSWORD" \
+  --set images.api.tag=api-<sha> --set images.engine.tag=engine-<sha> \
+  --set images.ui.tag=ui-<sha> --set images.webhook.tag=webhook-<sha>   # pin -sha tags
 ```
+`images.registry` already defaults to `ghcr.io/norviq-dev/` (all four components share the
+`norviq-engine` repository, distinguished by tag prefix). Override the whole prefix — e.g.
+`--set images.registry="us-docker.pkg.dev/<PROJECT_ID>/<REPO>/"` — only when mirroring to your own
+registry; setting it to a bare `ghcr.io/` would resolve to a non-existent `ghcr.io/norviq-engine`.
+
 The HA StatefulSets are auto-disabled when `*.ha.enabled` (the operators own the datastores); the API's
 `NRVQ_PG_URL`/`NRVQ_REDIS_URL` auto-retarget the HA services (`*-rw` / failover service).
 
@@ -49,7 +86,21 @@ The HA StatefulSets are auto-disabled when `*.ha.enabled` (the operators own the
   the pod goes NotReady (drains traffic) while liveness (`/healthz`, process-up) keeps it alive (no
   CrashLoop). On recovery, `pool_pre_ping` reconnects Postgres, redis-py reconnects, and OPA re-push
   self-heals → `/readyz` 200 → Ready. **No manual restart.** Test: `kubectl delete pod
-  norviq-postgresql-0` → api NotReady → Ready (RESTARTS stays 0); repeat for redis / the OPA sidecar.
+  norviq-postgresql-0` → api NotReady → Ready (RESTARTS stays 0); repeat for redis. (OPA is a sidecar
+  *container*, not a pod — see the next bullet for how its health is asserted.)
+- **OPA health has no kubelet probe — by design.** Both OPA sidecars (api and engine) bind
+  **`127.0.0.1` only**, because `opa run --server`'s admin API (`/v1/policies`) is unauthenticated and
+  read-**write**: anything that could reach it could rewrite or delete the enforcement policy. A
+  kubelet probe dials the *pod IP*, never loopback, so any probe on that container would be refused
+  forever and pin the pod NotReady; an exec probe is impossible too (the `-static` OPA image is
+  distroless). Instead the **app's own `/readyz` calls `opa.health()` over localhost and ANDs it into
+  readiness** — a dead OPA still removes the replica from the Service, and it proves the real consumer
+  can reach OPA. Accepted trade-off: a wedged-but-listening OPA is **drained, not auto-restarted**.
+  If you are debugging "is OPA up", read the app's `/readyz`; do not add a probe to the OPA container.
+- **The engine evaluates locally.** The engine Deployment pins `NRVQ_SIDECAR_MODE=embedded`. The
+  setting's own default is `proxy` (a thin forwarder to the central API), which is wrong for this
+  workload: nothing issues it an `NRVQ_API_TOKEN`, so every call would 401 and fail closed — an outage
+  that looks like enforcement. It runs its own OPA sidecar and waits on Postgres **and** Redis.
 - **Graceful rollout:** `preStop` sleep + `terminationGracePeriodSeconds: 30` drain in-flight requests
   before SIGTERM.
 - **Webhook → API:** the controller mints a short-lived **service-role HS256 JWT** from the API secret
@@ -60,7 +111,17 @@ The HA StatefulSets are auto-disabled when `*.ha.enabled` (the operators own the
 - HPA on custom/Prometheus metrics (KEDA) instead of CPU.
 - Replace the shared-secret service JWT with a k8s **TokenReview/ServiceAccount** path.
 
-## Not live-validated on the 1-node dev cluster
-HPA, podAntiAffinity/topologySpread, and the CloudNativePG/RedisFailover HA datastores are
-**template-validated** (`helm template -f values-prod.yaml` renders them) and documented here, but have
-**not** been exercised on a live multi-node cluster.
+## What is asserted by tests vs only template-validated
+The chart's runtime contract is covered by tests you can run without a cluster:
+
+| Suite | Asserts |
+|---|---|
+| `tests/helm/test_container_runtime_contract.py` | every container's securityContext / probe / writable-path contract |
+| `tests/helm/test_network_exposure_matrix.py` | what each component actually binds and exposes (this is what pins the OPA loopback bind) |
+| `tests/integration/test_data_plane_enforcement.py` | the enforcement path end-to-end |
+| `tests/integration/test_injected_sidecar_health.py` | an injected sidecar comes up healthy |
+| `tests/engine/test_failures_are_loud.py` | failures surface instead of silently degrading to allow |
+
+Still only **template-validated**: HPA, podAntiAffinity/topologySpread, and the
+CloudNativePG/RedisFailover HA datastores render from `helm template -f values-prod.yaml`, but the
+multi-node behavior they buy has not been exercised on a live multi-node cluster.

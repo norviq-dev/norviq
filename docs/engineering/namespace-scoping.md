@@ -16,8 +16,14 @@ role and JWT namespace claim allow:
   namespaces" (`namespace=all`, or an omitted param) returns the whole cluster.
 - **A tenant-scoped token** is pinned to the namespace in its claim. A request for a different
   namespace — or for `namespace=all` — resolves to its own namespace; it can never read another
-  tenant's data through the query param.
-- **A non-admin token with no namespace claim** (the least-privilege floor) receives **403**, not data.
+  tenant's data through the query param. A request for a *different* explicit namespace is **403**.
+- **A non-admin HUMAN token with no namespace claim** (the least-privilege floor — an unmapped
+  viewer) receives **403**, not data. Without this guard it would fall through to the requested
+  namespace and reach any tenant's rows.
+- **Machine principals (`role=service`) with an empty namespace claim are the one exemption** — they
+  are cluster-wide by design (the webhook controller and the fleet relay have no single tenant). A
+  `service` token that *does* carry a namespace claim is pinned to it like any tenant token. Treat
+  the service role as a cluster-scoped credential and issue it only to control-plane components.
 
 So an omitted or forgotten `namespace` param is fail-safe: it never widens a caller's reach beyond
 what its role and claim already permit.

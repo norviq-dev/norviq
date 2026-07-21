@@ -4,7 +4,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: demo-chatbot
-  namespace: chatbot-demo
+  namespace: chatbot-prod
 spec:
   selector:
     app: demo-chatbot

@@ -1,7 +1,19 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Copyright 2026 Norviq Contributors -->
+
 # Fleet architecture — the hub as a monitor + manage plane
 
-**Status:** decision doc (the model the fleet code is built to). Companion to `fleet-enrollment.md` (join-token flow)
-and `fleet-mgmt` (apply transparency, pack customization, centralized monitoring).
+**Status:** decision doc — the model the fleet code is built to. Companion to
+[`fleet-enrollment.md`](fleet-enrollment.md) (join-token flow).
+
+> **Multi-cluster is OFF by default and is not part of the GA surface.** `fleet.enabled` and
+> `fleet.hub.enabled` are both `false` in `helm/norviq/values.yaml`, so a normal install renders
+> **zero** fleet resources and the console shows no fleet vocabulary at all. Everything below
+> describes an opt-in mode: read it as the design the code implements, not as a supported product
+> surface you should turn on in production yet. The hub workload carries the same container
+> securityContext baseline as every other Norviq workload (`runAsNonRoot`, `allowPrivilegeEscalation:
+> false`, all capabilities dropped, `RuntimeDefault` seccomp) precisely so that gating it off never
+> means skipping the baseline.
 
 ## The model
 A **hub** centrally **monitors** and **manages** any number of **spoke** clusters. Each spoke is a normal

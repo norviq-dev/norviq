@@ -3,7 +3,6 @@
 # this just keeps noise down. Triage promotions/removals: docs/engineering/security-baseline.md
 tests/
 norviq/redteam/
-norviq/sdk/attacks/
 ui/node_modules/
 ui/dist/
 .venv/

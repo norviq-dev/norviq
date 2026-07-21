@@ -6,7 +6,7 @@ This directory holds the rego that Norviq actually ships and loads.
 
 | Artifact | Path | Loaded by |
 |---|---|---|
-| **Default bundled policy** | `../comprehensive.rego` | seeded as a namespace policy (`scripts/seed-local-policies.py`, `scripts/test-campaign/seed_campaign.py`, `scripts/eval/00-bootstrap-local.sh`). This is the canonical horizontal ruleset that runs by default. |
+| **Default bundled policy** | `../comprehensive.rego` | seeded as a namespace policy by `scripts/seed-local-policies.py`. This is the canonical horizontal ruleset that runs by default. |
 | **Cluster/namespace baselines** | `../webhook/presets/{strict,moderate,permissive}.rego` | the webhook controller (read from `/app/presets`); materialized as `<ns>:__baseline__`. |
 | **Sector starter packs (F047)** | `sector/<sector>/*.rego` + `sector/packs.json` | enabled per-namespace via `POST /api/v1/policy-packs/{id}/enable` → materialized as `<ns>:__pack__`. |
 | **Shared horizontal rules** | `sector/_shared/horizontal.rego` | composed into a pack's materialized module when its `requires` lists them (e.g. finance→pci, healthcare→pii). One canonical definition, mirrored against `comprehensive.rego`. |

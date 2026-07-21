@@ -1,7 +1,14 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Copyright 2026 Norviq Contributors -->
+
 # Single-cluster-first + fleet enrollment
 
 Norviq installs **single-cluster by default** — install-and-go, no fleet/hub/spoke concepts. Multi-cluster is an
 **opt-in** mode whose onboarding is a **join-token** flow, not per-spoke Helm wiring.
+
+> **Not a GA surface.** Fleet mode is gated off (`fleet.enabled: false`, `fleet.hub.enabled: false`) and is
+> documented here as design + reference, not as a supported production path. See
+> [`fleet-architecture.md`](fleet-architecture.md) for the model it implements.
 
 ## Single-cluster (default)
 - `fleet.enabled: false` (chart default). The console shows **no cluster selector, no Fleet nav, no hub/spoke
@@ -12,7 +19,24 @@ Norviq installs **single-cluster by default** — install-and-go, no fleet/hub/s
 
 ## Enabling a fleet (opt-in)
 1. **Hub** — install once with `fleet.hub.enabled=true` (provisions the RS256 **private** signing key; it never
-   leaves the hub). The hub runs the `norviq-fleet-api` deployment.
+   leaves the hub). The hub runs the `norviq-fleet-api` deployment over its own dedicated Postgres.
+
+   `fleet.hub.enabled=true` alone **fails the render**. With `config.requireStrongSecret=true` (the
+   chart default) `templates/fleet-hub.yaml` refuses to deploy the fleet store on the shipped
+   `norviq_dev` credential — and it checks **two** places, so you must override both
+   `fleet.hub.postgresql.password` *and* `fleet.hub.pgUrl` (whose default embeds the same password):
+
+   ```bash
+   helm upgrade --install norviq ./helm/norviq -n norviq \
+     --set-json 'policyQuotaNamespaces=["prod-agents"]' \
+     --set postgresql.password="$PG_PASSWORD" --set redis.password="$REDIS_PASSWORD" \
+     --set fleet.hub.enabled=true \
+     --set fleet.hub.postgresql.password="$FLEET_PG_PASSWORD" \
+     --set fleet.hub.pgUrl="postgresql://norviq:$FLEET_PG_PASSWORD@fleet-postgresql:5432/norviq_fleet"
+   ```
+
+   The signing key can be inlined (`fleet.hub.signingKey`) or read from a pre-created Secret
+   (`fleet.hub.signingKeySecretName`) — prefer the Secret so the PEM never sits in a values file.
 2. **Spokes** — install **plain** (single-cluster default). Enroll each with **one action**, no per-spoke Helm
    `--set apiUrl/bundlePubkey`:
    - In the console (hub): **Fleet → Add cluster** → enter the new cluster id + the spoke-reachable hub URL →

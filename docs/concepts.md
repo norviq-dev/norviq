@@ -119,12 +119,16 @@ same call.
 For a given tool call, the engine doesn't evaluate just one policy — it collects every candidate
 policy that could apply and resolves them together:
 
-1. **Agent-class policy** — `(namespace, agent_class)`, the most specific tier.
-2. **Namespace baseline** — `(namespace, __baseline__)`, a floor for every agent in that namespace
-   regardless of class.
-3. **Cluster baseline** — `(__cluster__, __baseline__)`, a floor for the whole cluster.
+1. **Workload policy** — `(namespace, deployment:<workload>)`, collected only when the caller actually
+   reports its workload (Norviq never guesses one from a pod name).
+2. **Agent-class policy** — `(namespace, agent_class)`.
+3. **Namespace baseline** — `(namespace, __baseline__)`, a floor for every agent in that namespace
+   regardless of class. (A `namespace`-targeted `NrvqPolicy` lands here — which is also where the Helm
+   chart installs its per-namespace `baseline-cluster-guard-<ns>`, so a hand-applied namespace policy
+   replaces that guard rather than layering under it.)
+4. **Cluster baseline** — `(__cluster__, __baseline__)`, a floor for the whole cluster.
 
-These three are resolved by **highest priority wins**, with the most restrictive decision
+These are resolved by **highest priority wins**, with the most restrictive decision
 (`block < escalate < audit < allow`) breaking ties. A namespace or cluster baseline is a *floor*, not
 a default: if it has a higher priority than the class policy, its stricter decision wins even though
 the class policy is more specific.
@@ -147,6 +151,7 @@ pack's own added restriction — but a weaken can never reach outside the pack f
 ```mermaid
 flowchart TB
     subgraph base["Base tiers — highest priority wins, most-restrictive on ties"]
+        wl["Workload policy<br/>(deployment:&lt;name&gt;)"]
         cls["Agent-class policy"]
         nsb["Namespace baseline<br/>(__baseline__) — floor"]
         clb["Cluster baseline<br/>(__cluster__) — floor"]
@@ -169,8 +174,8 @@ overlays only ever tighten.
 
 ## Enforcement modes
 
-A matching policy resolves to one of three enforcement outcomes — the `decision` its Rego emits for
-that call:
+A matching policy emits a `decision` for the call. Besides a plain `allow`, there are three
+enforcement outcomes:
 
 - **`block`** — a violating call is denied outright; the agent receives a deny + `reason`.
 - **`escalate`** — the call is flagged for human/out-of-band review rather than auto-denied or
@@ -186,11 +191,14 @@ not a separate switch the engine applies at evaluation time.
 **Namespace monitor mode.** To roll out enforcement observably across a *whole namespace* without
 editing individual policies, put the namespace into monitor mode
 (`PUT /api/v1/settings {"enforcement_mode":"audit"}`). The engine then softens every would-be
-`block`/`escalate` to a logged `audit` (`rule_id` prefixed `monitor_would_block:`) for that namespace —
-except a small set of decisions that stay hard regardless of posture (an admin trust freeze, an
-engine-not-ready block, and the rate limiter), because those are safety/health signals, not policy
-calls to be monitored away. See also the `/policies/dry-run` replay for testing a policy against real
-recent traffic before applying it.
+`block`/`escalate` to a logged `audit` (`rule_id` prefixed `monitor_would_block:`) for that namespace.
+Monitor mode only ever *softens*; it never turns an `allow` into a block.
+
+A fixed set of `rule_id`s stays hard regardless of posture — `trust_frozen` (the admin kill switch),
+`policy_load_pending` and `evaluator_error` / `evaluator_invalid_payload` (engine health), and
+`rate_limit_exceeded` — because those are safety/health signals, not policy calls to be monitored
+away. See also the `POST /api/v1/policies/dry-run` replay for testing a policy against real recent
+traffic before applying it.
 
 ## Decisions
 

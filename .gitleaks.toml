@@ -9,7 +9,6 @@ description = "Norviq allowlist — test fixtures, attack payloads, and example 
 paths = [
   '''tests/.*''',
   '''norviq/redteam/.*''',
-  '''norviq/sdk/attacks/.*''',
   '''.*\.md$''',                 # docs/specs use example tokens
   '''specs/prompts/.*''',
   '''scripts/live-pentest/.*''',        # local-kind E2E / release-exit overlays: dummy secretKeys for throwaway clusters

@@ -12,7 +12,19 @@ The console shows a real login screen on a fresh install. With no IdP configured
 seeded admin account:
 
 - **username:** `admin` (Helm `auth.adminUsername`)
-- **password:** `norviq` (Helm `auth.adminPassword`)
+- **password:** **auto-generated at install** — the chart does *not* ship a usable default.
+
+`auth.adminPassword` defaults to the sentinel `"norviq"`, and the chart treats that sentinel as
+"generate one for me": `templates/secret.yaml` substitutes a random 20-character password into
+`norviq-secrets`, and re-uses it across `helm upgrade` (it only re-generates while the stored value is
+still the sentinel). Read your install's password with:
+
+```bash
+kubectl get secret norviq-secrets -n <release-namespace> \
+  -o jsonpath='{.data.NRVQ_AUTH_ADMIN_PASSWORD}' | base64 -d
+```
+
+Set `auth.adminPassword` to an explicit non-default value and it is used verbatim instead.
 
 `POST /api/v1/auth/login` verifies the password with a constant-time bcrypt compare against a hash stored
 in the API database (the plaintext seed is hashed at first boot and never logged), and returns a
@@ -25,27 +37,35 @@ a **change-password screen** (with a loud "default admin password in use" banner
 `POST /api/v1/auth/change-password` re-checks the current password and requires a new one of at least
 `auth.minPasswordLength` characters that is neither the current nor the default password.
 
-**Production:** set `auth.adminPassword` (rendered into `norviq-secrets`) before deploying. With
-`api.requireStrongSecret=true` the API **refuses to start** while the admin password is still the shipped
-default — so a production install can never ship on `norviq`.
+**Production:** with `api.requireStrongSecret=true` (the chart default) the API **refuses to start**
+while the admin password is the literal shipped default — which is exactly why the chart generates a
+random one rather than shipping `norviq`. Setting `auth.adminPassword` yourself is still the clearest
+option when you manage secrets externally.
 
 ```yaml
 auth:
   enabled: true            # set false for SSO/CLI-only (no local login)
   adminUsername: "admin"
-  adminPassword: "<a strong password>"
+  adminPassword: "norviq"  # sentinel => chart generates a random first password (see above);
+                           # set an explicit strong value to pin your own
+  sessionTtlSeconds: 3600  # session-token lifetime
   loginMaxAttempts: 5
   loginWindowSeconds: 300
-  minPasswordLength: 12
+  minPasswordLength: 12    # enforced on the NEW password at change-time
 ```
 
 ### Automation / CI — CLI token (no password)
-For scripts and pipelines, mint a short-lived admin token in-cluster (the signing key never leaves the
-cluster); it prints a sign-in deep-link, or paste the token under the console login's **Advanced** section:
+For scripts and pipelines, mint a short-lived admin token in-cluster (`kubectl exec` runs an in-pod
+minter, so the signing key never leaves the cluster and is never printed). It prints a ready-to-use
+deep-link `<console>/login#access_token=…`, or you can paste the token under the login screen's
+**"Use a token / CLI"** control:
 
 ```
-norviq login -n <release-namespace> --console-url http://localhost:3000
+norviq login -n <release-namespace> --console-url http://localhost:8080
 ```
+
+Defaults: `--namespace/-n norviq`, `--ttl 3600`, `--console-url http://localhost:8080` (match it to
+your port-forward or ingress).
 
 ---
 
@@ -57,7 +77,7 @@ OIDC IdP — Entra ID, Okta, Auth0, Keycloak, Google — by configuration, not c
 
 ### 2a. Register a public (SPA) client in your IdP
 - App type: **SPA / public client** (Authorization Code + PKCE, no client secret).
-- **Redirect URI:** `https://<your-console-host>/auth/callback` (for a local port-forward: `http://localhost:3000/auth/callback`).
+- **Redirect URI:** `https://<your-console-host>/auth/callback` (for a local port-forward: `http://localhost:8080/auth/callback`). The console derives it from `window.location.origin`, so it must match the host you actually browse to.
 - Note the **issuer** URL and the **client id**.
 - Add the user's groups to the token (a `groups` claim, or set `oidc.groupClaim`).
 
@@ -68,6 +88,7 @@ oidc:
   issuer: "https://<tenant>/"              # the token `iss`
   audience: "<api-client-or-audience-id>"  # the API's expected `aud`
   consoleClientId: "<spa-public-client-id>" # the browser client the console signs in with
+  providerName: "Okta"                     # optional: IdP name shown in the login copy
   jwksUrl: "https://<tenant>/.well-known/jwks.json"
   groupClaim: groups
   groupMappings:
@@ -80,8 +101,10 @@ needed**. Once enabled, the console shows **"Sign in with SSO"**; after sign-in,
 resolved **role + namespace** (from `/api/v1/me`).
 
 ### 2c. Group → role/namespace mapping semantics
-- **admin** wins over viewer if a user is in multiple groups; an admin is namespace-agnostic (`*`).
-- A viewer maps to exactly one namespace; **conflicting** non-admin namespace mappings **fail closed**.
+- **admin** wins over viewer if a user is in multiple groups; an admin is namespace-agnostic (no
+  namespace claim at all) and, on a fleet install, spans all clusters (`cluster: "*"`).
+- A viewer maps to exactly one namespace; **conflicting** non-admin namespace mappings **fail closed**
+  (the token is rejected, not silently narrowed). The same rule applies to the `cluster` dimension.
 - An authenticated but **unmapped** user gets the least-privilege floor: `viewer`, no namespace.
 
 ### 2d. IdP-specific notes

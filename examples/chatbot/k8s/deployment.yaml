@@ -4,10 +4,12 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: demo-chatbot
-  namespace: chatbot-demo
+  namespace: chatbot-prod
   labels:
     app: demo-chatbot
-    norviq: enabled
+    # Matches crds/examples/policy-strict-chatbot.yaml (target agentClass: customer-support).
+    # Also the label the webhook reads for the agent class if you enable sidecar injection
+    # (NRVQ_AGENT_CLASS_LABEL, webhook/config.go).
     norviq.io/agent-class: customer-support
 spec:
   replicas: 1
@@ -18,14 +20,15 @@ spec:
     metadata:
       labels:
         app: demo-chatbot
-        norviq: enabled
         norviq.io/agent-class: customer-support
     spec:
-      imagePullSecrets:
-        - name: dockerhub-secret
       containers:
         - name: chatbot
-          image: norviq/norviq-engine:chatbot-latest
+          # No image is published for this example -- build it yourself and push to a registry your
+          # cluster can pull from:
+          #   docker build -f examples/chatbot/Dockerfile -t <registry>/norviq-demo-chatbot:dev .
+          image: norviq-demo-chatbot:dev
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
           env:
@@ -34,8 +37,25 @@ spec:
                 secretKeyRef:
                   name: chatbot-secrets
                   key: GROQ_API_KEY
-            - name: NRVQ_API_URL
+            # Where the in-process SDK sends every tool call (POST <url>/api/v1/evaluate).
+            # NRVQ_API_URL is a different knob -- that one belongs to the injected sidecar.
+            - name: NRVQ_POLICY_ENGINE_URL
               value: "http://norviq-api.norviq:8080"
+            # /api/v1/evaluate requires a bearer token; without one the client fails closed.
+            - name: NRVQ_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: chatbot-secrets
+                  key: NRVQ_API_TOKEN
+            # The identity the decision is made against (mock SPIFFE mode reads these).
+            - name: NRVQ_NAMESPACE
+              value: chatbot-prod
+            - name: NRVQ_AGENT_CLASS
+              value: customer-support
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
           resources:
             requests:
               cpu: 100m

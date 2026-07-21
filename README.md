@@ -40,7 +40,7 @@ sequenceDiagram
     autonumber
     participant Agent as Agent (LangGraph / SDK)
     participant PEP as Norviq sidecar / SDK
-    participant Engine
+    participant Engine as Norviq API / engine
     participant OPA as OPA / Rego
     Agent->>PEP: tool call — {tool, params, identity}
     PEP->>Engine: POST /evaluate
@@ -68,22 +68,29 @@ flowchart LR
         pod["Agent pod<br/>+ Norviq sidecar (PEP)"]
     end
     subgraph norviq["norviq namespace"]
-        api["API"]
-        engine["Engine"]
-        opa["OPA<br/>(per replica)"]
+        api["API<br/>+ OPA sidecar"]
+        engine["Engine<br/>+ OPA sidecar"]
         pg[("PostgreSQL")]
         redis[("Redis")]
         ui["Console UI"]
         webhook["Admission<br/>webhook"]
     end
-    pod -->|POST /evaluate| api
-    api --> engine
-    engine --> opa
+    pod -->|POST /api/v1/evaluate| api
+    api --> pg
+    api --> redis
     engine --> pg
     engine --> redis
     webhook -. injects sidecar .-> pod
+    webhook -. syncs NrvqPolicy/NrvqClass .-> api
     ui --> api
 ```
+
+Both the API and the Engine evaluate **in-process** against their own OPA sidecar (one OPA per replica,
+bound to `127.0.0.1`) — neither proxies to the other. In the default injection mode
+(`webhook.injection.sidecarMode: proxy`) the injected sidecar POSTs every tool call to the central API,
+so Postgres, Redis, and policy loading stay centralized and nothing is evaluated per-pod. The Engine
+Deployment runs that same evaluator as a standalone cluster workload (`NRVQ_SIDECAR_MODE=embedded`,
+exposed as `norviq-engine:8282`) for callers that want to evaluate without going through the API.
 
 ## Works with your agent framework
 
@@ -98,7 +105,9 @@ block/escalate decision raises before the tool ever runs. See
 - **AutoGen** — `norviq.sdk.autogen.adapter.protect(tools, interceptor)`
 - **Azure / Semantic Kernel** — `norviq.sdk.semantic_kernel.adapter.policy_filter(interceptor)`
 
-The guide includes a runnable **[LLM chatbot example](docs/guides/integrating-agents.md#5-end-to-end-example-a-groq-powered-chatbot)** (Groq + LangGraph) where the model decides the tool calls and Norviq blocks the dangerous ones before they run.
+**[`examples/chatbot/`](examples/chatbot/)** is a runnable LangChain/LangGraph chatbot (Groq) where a
+real model decides the tool calls and Norviq blocks the dangerous ones before they run — with a
+`Dockerfile` and `k8s/` manifests for running it in-cluster behind the injected sidecar.
 
 ## Features
 
@@ -129,23 +138,41 @@ kubectl apply -f helm/norviq/crds/
 # 2. Install Norviq (pulls the public images from ghcr.io/norviq-dev by default)
 kubectl create namespace norviq
 helm install norviq ./helm/norviq -n norviq \
+  --set 'policyQuotaNamespaces={default}' \
   --set config.dbSslMode=disable   # the bundled Postgres has no TLS; omit if you point at an external TLS DB
 ```
 
+`policyQuotaNamespaces` is the list of tenant namespaces that will run agents — it is **required**, not
+optional. The chart installs a fail-closed `strict` namespace baseline for each entry, so an empty list
+fails the install by design rather than shipping a cluster with no baseline. Add every agent namespace
+you plan to use.
+
 The chart deploys the API, engine, console UI, mutating webhook, and bundled PostgreSQL + Redis + OPA.
-Port-forward the console and sign in with the seeded admin account (you'll be prompted to change the
-password on first login):
+Port-forward the console:
 
 ```bash
 kubectl -n norviq port-forward svc/norviq-ui 8080:80
 # open http://localhost:8080
 ```
 
-To label a namespace for automatic sidecar injection:
+Sign in as `admin`. The chart generates a random first password on install (it only uses a literal
+password if you set `auth.adminPassword` yourself) — read it back, then change it when the console
+prompts you:
 
 ```bash
+kubectl get secret norviq-secrets -n norviq -o jsonpath='{.data.NRVQ_AUTH_ADMIN_PASSWORD}' | base64 -d
+```
+
+Sidecar injection ships **off** (`webhook.injection.enabled: false`). Turn it on, then label the same
+namespaces you listed in `policyQuotaNamespaces` — the label alone does nothing until the webhook is
+enabled:
+
+```bash
+helm upgrade norviq ./helm/norviq -n norviq --reuse-values --set webhook.injection.enabled=true
 kubectl label namespace <your-agent-namespace> norviq-injection=enabled
 ```
+
+Every new pod in a labeled namespace then gets the enforcement sidecar injected.
 
 > Trying it locally? A single-node [kind](https://kind.sigs.k8s.io/) cluster is enough to evaluate
 > everything except multi-node HA. See **[docs/getting-started.md](docs/getting-started.md)**.
@@ -166,14 +193,22 @@ Full documentation is at **[docs.norviq.dev](https://docs.norviq.dev)**:
 - **[Deployment](https://docs.norviq.dev/deployment/)** — production HA, cloud (AKS / EKS / GKE), and multi-cluster fleet
 - **[Security model](https://docs.norviq.dev/security-model/)** — trust boundaries and the threat model
 
-Engineering references live under [`docs/engineering/`](docs/engineering/).
+Runnable examples live under [`examples/`](examples/); engineering references under
+[`docs/engineering/`](docs/engineering/).
 
 ## Development
 
 ```bash
-pip install -e ".[dev]"   # backend + tooling
-make test                 # ruff + pytest + vitest + opa
-make lint
+pip install -e ".[dev]"   # backend + test tooling
+make test                 # pytest tests/
+make lint                 # ruff check norviq/ tests/
+```
+
+The console suite runs from `ui/` with `npm test` (vitest). The shipped Rego is v0-syntax, so its suite
+needs the compatibility flag:
+
+```bash
+opa test --v0-compatible webhook/presets/ comprehensive.rego
 ```
 
 The stack is Python (FastAPI) + OPA/Rego for the engine, React + Vite (TypeScript) for the console, and

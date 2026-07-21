@@ -22,7 +22,7 @@ repos:
     hooks:
       - id: bandit # fast python SAST, high severity only
         args: ["-ll", "-q"]
-        exclude: ^(tests/|norviq/redteam/|norviq/sdk/attacks/)
+        exclude: ^(tests/|norviq/redteam/)
 
   - repo: local
     hooks:

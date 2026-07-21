@@ -1,8 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
+#
+# Same namespace docs/getting-started.md uses, so crds/examples/policy-strict-chatbot.yaml
+# (target agentClass: customer-support, preset strict) covers this demo verbatim.
+#
+# If you already created and labelled chatbot-prod by following getting-started, SKIP this file --
+# applying it would strip the norviq-injection label you set there.
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: chatbot-demo
+  name: chatbot-prod
   labels:
-    norviq-injection: enabled
+    app.kubernetes.io/part-of: norviq-examples
+    # Uncomment to have the mutating webhook inject the enforcement sidecar into every pod here
+    # (helm/norviq/templates/webhook-config.yaml selects namespaces on norviq-injection=enabled).
+    # This demo does not need it -- it enforces in-process via the SDK, so an injected sidecar
+    # would sit idle. Enable it only to compare the sidecar path; see
+    # docs/guides/integrating-agents.md section 1.
+    # norviq-injection: enabled

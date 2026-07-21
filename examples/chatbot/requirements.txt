@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
-langchain>=0.3.0
+#
+# Demo-only dependencies. The Norviq SDK itself comes from this checkout — run from the repo root:
+#   pip install -e ".[langchain,langgraph]"
+# (those extras are declared in pyproject.toml and pull langchain-core + langgraph).
 langchain-groq>=0.2.0
-langgraph>=0.2.0
 fastapi>=0.111.0
 uvicorn>=0.30.0

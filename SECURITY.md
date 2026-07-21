@@ -64,12 +64,14 @@ sidecar-injection trust model) in [`docs/configuration.md`](docs/configuration.m
 
 Our FOSSA dependency-vulnerability gate (`.github/workflows/fossa.yml`) fails CI on any known dependency
 CVE. The exceptions below are the only vulnerabilities we knowingly carry. **None of them are present in
-the shipped container images** — the `engine`, `api`, `ui`, and `webhook` images install only the core
-runtime (`.[spiffe]`). All three live exclusively in the **optional SDK framework-adapter extras**
-(`norviq[frameworks]` / `[crewai]` / `[semantic-kernel]`), which a deployment must explicitly opt into,
-and each cannot be closed by a version bump today. The allow-list in the gate is kept in lockstep with
-this table; a CVE a bump *can* fix is bumped, not listed here (e.g. `werkzeug>=3.1.6` in `pyproject.toml`
-closes CVE-2025-66221 / CVE-2026-21860 / CVE-2026-27199).
+the shipped container images** — `Dockerfile.api` and `Dockerfile.engine` install `.[spiffe]` and nothing
+else, `Dockerfile.ui` is an nginx image built from the JS bundle, and `webhook/Dockerfile` is a Go binary
+on `distroless/static` with no Python at all. All three CVEs live exclusively in the **optional SDK
+framework-adapter extras** (`norviq[frameworks]` / `[crewai]` / `[semantic-kernel]` in `pyproject.toml`),
+which a deployment must explicitly opt into, and each cannot be closed by a version bump today. The
+allow-list in the gate is kept in lockstep with this table; a CVE a bump *can* fix is bumped, not listed
+here (e.g. the `werkzeug>=3.1.6` constraint in `pyproject.toml` — which resolves to 3.1.8 — closes
+CVE-2025-66221 / CVE-2026-21860 / CVE-2026-27199).
 
 | CVE | Package (source) | Why unfixable-by-bump | Why not exploitable here |
 |-----|------------------|-----------------------|--------------------------|

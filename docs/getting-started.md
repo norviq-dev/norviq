@@ -34,12 +34,26 @@ kubectl apply -f helm/norviq/crds/
 
 kubectl create namespace norviq
 
+# The namespace that will run your agents. Create it BEFORE installing: it has to be listed at
+# install time so the chart can render its baseline — see policyQuotaNamespaces below.
+kubectl create namespace chatbot-prod
+
 # On a local/kind cluster the bundled Postgres has no TLS listener, so the default
 # config.dbSslMode=require will fail to connect — disable it for local eval:
-helm install norviq ./helm/norviq -n norviq --set config.dbSslMode=disable
+helm install norviq ./helm/norviq -n norviq \
+  --set 'policyQuotaNamespaces={chatbot-prod}' \
+  --set config.dbSslMode=disable
 ```
 
 A few things worth knowing about this install:
+
+- **`policyQuotaNamespaces` is required.** It lists your *tenant* namespaces — the ones that will run
+  agent workloads, not the `norviq` control-plane namespace. The chart renders one fail-closed
+  `strict` namespace baseline (`baseline-cluster-guard-<ns>`, `clusterPriority: 900`) per entry, plus
+  the optional per-namespace `NrvqPolicy` quota. Leaving it empty **fails the install by design**
+  (`helm/norviq/templates/baseline-cluster-policy.yaml`) rather than silently shipping a cluster with
+  no baseline. To install deliberately without a baseline, set `baselineClusterPolicy.enabled=false`
+  instead.
 
 - **Images** — `helm/norviq/values.yaml` defaults `images.registry` to `ghcr.io/norviq-dev/`, so
   this pulls the public `norviq-engine` images (api/engine/ui/webhook tags) straight from GHCR —
@@ -50,9 +64,8 @@ A few things worth knowing about this install:
 - **`config.dbSslMode`** — the API's DB connection mode. The chart default is `require` (correct
   for a managed/TLS-terminating Postgres in production — see `helm/norviq/values-prod.yaml`), but
   the bundled Postgres StatefulSet doesn't enable TLS, so a **local install must set
-  `config.dbSslMode=disable`** as shown above (this is exactly what a single-node dev/eval overlay
-  like `scripts/eval/values-local.yaml` sets for its cluster). Skipping this on kind will
-  leave the API pod failing to connect to its own database.
+  `config.dbSslMode=disable`** as shown above. Skipping this on kind will leave the API pod failing to
+  connect to its own database.
 - Wait for the rollout before continuing:
 
   ```bash
@@ -101,7 +114,6 @@ workloads — the webhook's namespace selector matches the key `norviq-injection
 (`webhook/handler.go`'s `NRVQ_ENABLE_LABEL`, default `norviq-injection`):
 
 ```bash
-kubectl create namespace chatbot-prod
 kubectl label namespace chatbot-prod norviq-injection=enabled
 ```
 
@@ -109,18 +121,18 @@ Every new pod created in `chatbot-prod` from now on gets the Norviq sidecar inje
 automatically (a pod can opt out individually with the label
 `norviq-injection=disabled` or the annotation `norviq.io/skip-injection: "true"`). By default the
 sidecar runs in `sidecarMode: proxy` — it forwards each tool call to the central API's
-`/evaluate` over a namespace-scoped service token; nothing is evaluated per-pod. Tag your agent's
-pod spec with `norviq.io/agent-class: <class>` so class-tier policy (below) actually matches it.
+`/api/v1/evaluate` over a namespace-scoped service token; nothing is evaluated per-pod. Give your
+agent's **pod** the label `norviq.io/agent-class: <class>` (the injector reads it as
+`NRVQ_AGENT_CLASS_LABEL`, `webhook/config.go`) so class-tier policy (below) actually matches it.
 
 ## 5. Apply your first policy
 
-The repo ships ready-to-use examples under `crds/examples/`. Apply an agent class and two
-policies that target it:
+The repo ships ready-to-use examples under `crds/examples/`. Apply an agent class and the policy
+that targets it:
 
 ```bash
 kubectl apply -f crds/examples/class-customer-support.yaml
 kubectl apply -f crds/examples/policy-strict-chatbot.yaml
-kubectl apply -f crds/examples/policy-namespace-baseline.yaml
 ```
 
 What these do:
@@ -134,9 +146,14 @@ What these do:
   The `strict` preset blocks high-risk tool calls outright (`execute_sql`, anything named
   `delete_*`/`drop_*`/`truncate_*`/`destroy_*`) plus prompt-injection, SQL/shell-injection,
   PII/PCI, and data-exfiltration patterns in the params — see `webhook/presets/strict.rego`.
-- **`policy-namespace-baseline.yaml`** (`NrvqPolicy`, namespace `chatbot-prod`) — a whole-namespace
-  fallback (`preset: permissive`, `enforcementMode: audit`, `priority: 50`). Priority is lower than
-  the class policy above, so it only decides when nothing more specific matches.
+
+`crds/examples/` also ships `policy-namespace-baseline.yaml` — a whole-namespace fallback for
+`chatbot-prod` (`preset: permissive`, `enforcementMode: audit`, `priority: 50`). **Don't apply it on
+top of this install.** A namespace-targeted `NrvqPolicy` is stored at the scope
+`<namespace>:__baseline__`, which is the *same* scope the chart's `baseline-cluster-guard-chatbot-prod`
+already occupies, and the newest version of a scope wins. Applying the permissive example would
+replace the strict, fail-closed baseline the chart installed in step 2 and silently weaken the
+namespace floor. Use it only on a namespace you installed *without* a chart baseline.
 
 The webhook's CRD controller watches these objects and syncs them to the API
 (`POST /api/v1/policies`) automatically — nothing else to run. Confirm they synced:
@@ -149,8 +166,14 @@ kubectl get nrvqpolicy -n chatbot-prod
 ### See a decision flip
 
 You can watch this from the console's audit stream, or drive it directly against
-`POST /api/v1/evaluate` (the exact request shape is `norviq/sdk/core/events.py`'s
-`ToolCallEvent`: `tool_name`, `tool_params`, `agent_identity{spiffe_id, namespace, agent_class}`).
+`POST /api/v1/evaluate`. The request shape is `EvaluateRequest` in
+`norviq/api/routers/evaluate.py` — required fields `tool_name`, `tool_params`, and
+`agent_identity` (which must at least carry `spiffe_id` and `namespace`; see `AgentIdentity` in
+`norviq/sdk/core/events.py`). The response is `{"decision", "rule_id", "trust_score"}`; the full
+`reason` text lands in the audit log, not in this response body.
+
+The namespace in `agent_identity` is authorization-checked against the caller's token, so an admin
+token can evaluate any namespace but a namespace-scoped token cannot evaluate someone else's.
 
 Get a session token (using the password you changed in step 3):
 
@@ -174,7 +197,7 @@ curl -s -X POST http://localhost:8080/api/v1/evaluate \
           "agent_class": "customer-support"
         }
       }'
-# {"decision":"block","rule_id":"strict_default_block", ...}
+# {"decision":"block","rule_id":"strict_default_block","trust_score":...}
 ```
 
 The same shape with an allowed tool:
@@ -201,5 +224,10 @@ these calls is also written to the audit log, which the console streams live.
 
 - **[Concepts](concepts.md)** — agent classes, policy tiers, enforcement modes, SPIFFE identity
 - **[Writing Policies](guides/writing-policies.md)** — authoring Rego, the intent generator, red-team
+- **[Integrating agents](guides/integrating-agents.md)** — the SDK, for in-process interception
+  without a sidecar (LangChain, LangGraph, CrewAI, AutoGen, Semantic Kernel)
+- **[`examples/chatbot/`](../examples/chatbot/)** — a runnable LangGraph chatbot where a real LLM
+  picks the tool calls and Norviq blocks the dangerous ones. It runs locally, or in-cluster via its
+  `k8s/` manifests, which deploy into the same `chatbot-prod` namespace you set up above
 - **[Configuration](configuration.md)** — the full Helm `values.yaml` reference
 - **[Deployment](deployment.md)** — kind, cloud/AKS, HA, and multi-cluster fleet
