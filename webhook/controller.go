@@ -22,6 +22,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/open-policy-agent/opa/v1/ast"
@@ -111,6 +112,8 @@ type Controller struct {
 	runtime              *RuntimeConfig
 	defaultSidecarImage  string
 	policyStore          cache.Store
+	classStore           cache.Store
+	configStore          cache.Store
 	classQueue           chan *unstructured.Unstructured
 	configQueue          chan *unstructured.Unstructured
 	wg                   sync.WaitGroup
@@ -119,6 +122,10 @@ type Controller struct {
 	// malformed CR becomes an unbounded status-write loop, per replica, forever.
 	failedGenMu  sync.Mutex
 	failedGenMap map[string]int64
+	// Set whenever the cached policy set may have changed (add/update/delete). processClass and
+	// processConfig derive policyCount/activeNamespaces/totalPolicies from that cache, but nothing
+	// re-drives them when it's a POLICY that changed — see refreshDerivedStatusIfStale for why.
+	derivedStatusStale atomic.Bool
 }
 
 func NewController(apiURL, apiToken string) (*Controller, error) {
@@ -205,6 +212,8 @@ func (c *Controller) Start(ctx context.Context) error {
 	classInformer := factory.ForResource(classGVR).Informer()
 	configInformer := factory.ForResource(configGVR).Informer()
 	c.policyStore = policyInformer.GetStore()
+	c.classStore = classInformer.GetStore()
+	c.configStore = configInformer.GetStore()
 
 	policyInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
@@ -280,7 +289,63 @@ func (c *Controller) policyRetryWorker(ctx context.Context) {
 			return
 		case <-ticker.C:
 			c.retryUnsyncedPolicies()
+			c.refreshDerivedStatusIfStale()
 		}
+	}
+}
+
+// refreshDerivedStatusIfStale re-enqueues every cached NrvqClass/NrvqConfig so their derived status
+// (policyCount, activeNamespaces, totalPolicies) is recomputed against the current policy cache.
+//
+// processClass/processConfig are ONLY reachable through the NrvqClass/NrvqConfig informer handlers —
+// creating, updating, or deleting an NrvqPolicy never enqueues a class or config, so those derived
+// counts go stale the moment the policy set changes. The 30s informer resync can't rescue this either:
+// resync doesn't bump Generation, and the class/config UpdateFuncs are gated on shouldProcessUpdate's
+// Generation check, exactly like the policy retry case above. Piggybacking on this same ticker avoids
+// running a second timer for what is the same bug class.
+//
+// Gated on derivedStatusStale (rather than refreshing unconditionally every tick) because
+// processConfig always stamps a fresh appliedAt, so an unconditional refresh would churn the config's
+// resourceVersion forever even when nothing actually changed. A no-op class re-enqueue is cheap (the
+// apiserver treats an identical status write as a no-op), but there's no reason to pay even that when
+// the cache hasn't moved.
+func (c *Controller) refreshDerivedStatusIfStale() {
+	if !c.derivedStatusStale.Swap(false) {
+		return
+	}
+	queueFull := false
+	if c.classStore != nil {
+		for _, obj := range c.classStore.List() {
+			u, ok := obj.(*unstructured.Unstructured)
+			if !ok {
+				continue
+			}
+			select {
+			case c.classQueue <- u.DeepCopy():
+			default:
+				slog.Warn("NRVQ-WHK-4028: class queue full, skipping", "class", u.GetName())
+				queueFull = true
+			}
+		}
+	}
+	if c.configStore != nil {
+		for _, obj := range c.configStore.List() {
+			u, ok := obj.(*unstructured.Unstructured)
+			if !ok {
+				continue
+			}
+			select {
+			case c.configQueue <- u.DeepCopy():
+			default:
+				slog.Warn("NRVQ-WHK-4028: config queue full, skipping", "config", u.GetName())
+				queueFull = true
+			}
+		}
+	}
+	if queueFull {
+		// At least one enqueue was dropped: re-arm the flag so the next tick retries, instead of
+		// silently losing the refresh for good.
+		c.derivedStatusStale.Store(true)
 	}
 }
 
@@ -355,6 +420,10 @@ func (c *Controller) failedGeneration(u *unstructured.Unstructured) (int64, bool
 }
 
 func (c *Controller) handlePolicy(obj interface{}, action string) {
+	// The cached policy set may have just changed (add or update). Mark class/config derived status
+	// stale unconditionally — cheap, and correctness beats precision here (see
+	// refreshDerivedStatusIfStale for why nothing else re-drives it).
+	c.derivedStatusStale.Store(true)
 	u, ok := obj.(*unstructured.Unstructured)
 	if !ok {
 		slog.Error("NRVQ-WHK-4024: unexpected object type in handler")
@@ -676,6 +745,9 @@ func (c *Controller) forceFinalizeAfterTimeout(ctx context.Context, u *unstructu
 }
 
 func (c *Controller) handlePolicyDelete(obj interface{}) {
+	// Same as handlePolicy: the cached policy set is about to shrink, so class/config derived status
+	// is stale.
+	c.derivedStatusStale.Store(true)
 	u, ok := obj.(*unstructured.Unstructured)
 	if !ok {
 		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)

@@ -248,3 +248,142 @@ func TestRetryUnsyncedPolicies_SkipsDeterministicFailureUntilSpecChanges(t *test
 		t.Fatalf("a new generation must be retried once, got %d POSTs", got)
 	}
 }
+
+// --- derived class/config status refresh: a policy change never re-drives class/config status via the
+// informer (see refreshDerivedStatusIfStale), so the retry sweep's dirty-flag-gated refresh is the
+// only thing that converges policyCount/activeNamespaces/totalPolicies. ---
+
+// retryClassObj builds a minimal NrvqClass.
+func retryClassObj(name string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "norviq.io/v1alpha1",
+		"kind":       "NrvqClass",
+		"metadata": map[string]interface{}{
+			"name": name,
+		},
+	}}
+}
+
+// retryConfigObj builds a minimal NrvqConfig.
+func retryConfigObj(name string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "norviq.io/v1alpha1",
+		"kind":       "NrvqConfig",
+		"metadata": map[string]interface{}{
+			"name": name,
+		},
+	}}
+}
+
+// A policy add marks derived status stale, and the sweep re-enqueues the cached classes and configs.
+func TestRefreshDerivedStatusIfStale_PolicyAddTriggersSweep(t *testing.T) {
+	c, _ := retryTestController(t)
+	classStore := cache.NewStore(cache.MetaNamespaceKeyFunc)
+	if err := classStore.Add(retryClassObj("customer-support")); err != nil {
+		t.Fatalf("classStore.Add: %v", err)
+	}
+	configStore := cache.NewStore(cache.MetaNamespaceKeyFunc)
+	if err := configStore.Add(retryConfigObj("default")); err != nil {
+		t.Fatalf("configStore.Add: %v", err)
+	}
+	c.classStore = classStore
+	c.configStore = configStore
+	c.classQueue = make(chan *unstructured.Unstructured, 4)
+	c.configQueue = make(chan *unstructured.Unstructured, 4)
+	c.derivedStatusStale.Store(false) // start clean, as if a prior sweep already consumed it
+
+	c.handlePolicy(retryPolicyObj("new-policy", ""), "created")
+	c.wg.Wait()
+	if !c.derivedStatusStale.Load() {
+		t.Fatalf("expected handlePolicy to mark derived status stale")
+	}
+
+	c.refreshDerivedStatusIfStale()
+
+	select {
+	case u := <-c.classQueue:
+		if u.GetName() != "customer-support" {
+			t.Fatalf("unexpected class enqueued: %s", u.GetName())
+		}
+	default:
+		t.Fatalf("expected the cached class to be re-enqueued")
+	}
+	select {
+	case u := <-c.configQueue:
+		if u.GetName() != "default" {
+			t.Fatalf("unexpected config enqueued: %s", u.GetName())
+		}
+	default:
+		t.Fatalf("expected the cached config to be re-enqueued")
+	}
+	if c.derivedStatusStale.Load() {
+		t.Fatalf("expected the dirty flag to be cleared after a successful sweep")
+	}
+}
+
+// Control test: with no policy change, the sweep must NOT enqueue anything — proves the dirty-flag
+// gate actually prevents churn (processConfig's appliedAt would otherwise rewrite resourceVersion
+// forever on an unconditional refresh).
+func TestRefreshDerivedStatusIfStale_NoChangeDoesNotEnqueue(t *testing.T) {
+	c, _ := retryTestController(t)
+	classStore := cache.NewStore(cache.MetaNamespaceKeyFunc)
+	if err := classStore.Add(retryClassObj("customer-support")); err != nil {
+		t.Fatalf("classStore.Add: %v", err)
+	}
+	configStore := cache.NewStore(cache.MetaNamespaceKeyFunc)
+	if err := configStore.Add(retryConfigObj("default")); err != nil {
+		t.Fatalf("configStore.Add: %v", err)
+	}
+	c.classStore = classStore
+	c.configStore = configStore
+	c.classQueue = make(chan *unstructured.Unstructured, 4)
+	c.configQueue = make(chan *unstructured.Unstructured, 4)
+	c.derivedStatusStale.Store(false) // nothing changed since the last sweep
+
+	c.refreshDerivedStatusIfStale()
+
+	select {
+	case u := <-c.classQueue:
+		t.Fatalf("expected no class enqueue when nothing changed, got %q", u.GetName())
+	default:
+	}
+	select {
+	case u := <-c.configQueue:
+		t.Fatalf("expected no config enqueue when nothing changed, got %q", u.GetName())
+	default:
+	}
+}
+
+// Queue-full: if the class queue is full, the dirty flag must be left SET so the next sweep retries
+// instead of silently dropping the refresh forever.
+func TestRefreshDerivedStatusIfStale_QueueFullKeepsFlagSet(t *testing.T) {
+	c, _ := retryTestController(t)
+	classStore := cache.NewStore(cache.MetaNamespaceKeyFunc)
+	if err := classStore.Add(retryClassObj("customer-support")); err != nil {
+		t.Fatalf("classStore.Add: %v", err)
+	}
+	c.classStore = classStore
+	c.configStore = cache.NewStore(cache.MetaNamespaceKeyFunc) // empty, keeps this test isolated to the class queue
+	c.classQueue = make(chan *unstructured.Unstructured)       // unbuffered + nobody reading -> the send always hits default
+	c.configQueue = make(chan *unstructured.Unstructured, 4)
+	c.derivedStatusStale.Store(true)
+
+	c.refreshDerivedStatusIfStale()
+
+	if !c.derivedStatusStale.Load() {
+		t.Fatalf("expected the dirty flag to remain set when the class queue is full")
+	}
+}
+
+// Policy delete also marks derived status stale.
+func TestRefreshDerivedStatusIfStale_PolicyDeleteMarksStale(t *testing.T) {
+	c, _ := retryTestController(t)
+	c.derivedStatusStale.Store(false)
+
+	c.handlePolicyDelete(retryPolicyObj("deleted-policy", ""))
+	c.wg.Wait()
+
+	if !c.derivedStatusStale.Load() {
+		t.Fatalf("expected handlePolicyDelete to mark derived status stale")
+	}
+}
