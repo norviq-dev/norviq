@@ -410,11 +410,18 @@ config:
   rateLimit: 60
   # Per-pod in-process L1 cache (seconds) for the enforcement hot path's slowly-changing input reads
   # (namespace posture, stored trust score, trust history/profile). Collapses several sequential
-  # cross-pod Redis round trips into local-memory hits — the largest lever on per-call p99. Caches ONLY
-  # inputs; the admin freeze/cap kill-switch is always read fresh, so a freeze still takes effect
-  # immediately. The only staleness introduced is that a posture/threshold/behavior change converges
-  # within this TTL (matching the 5s eval-cache window). Set 0 to disable (fresh reads every call).
-  inprocCacheTtlS: 5
+  # cross-pod Redis round trips into local-memory hits — the largest lever on per-call latency.
+  # Measured on a 2-node AKS cluster: warm read p50 21.9ms -> 3.2ms (-84%), floor 14.5ms -> 1.4ms.
+  #
+  # OPT-IN (default 0 = disabled, fresh reads every call). It caches ONLY behavioural INPUTS — the admin
+  # freeze/cap kill-switch is always read fresh, so an incident-response freeze still takes effect on the
+  # very next call regardless of this setting. What the TTL does bound is convergence: a posture /
+  # threshold / trust-input change made OUT OF BAND (written straight to Redis rather than through the
+  # engine) is not observed until it expires. That is why this ships off by default — enable it
+  # deliberately, and expect up to this many seconds of convergence on such changes.
+  #
+  # Recommended production value: 5 (matches the Redis eval-cache window, which the code clamps to).
+  inprocCacheTtlS: 0
   dbSslMode: require
   dbPoolMaxOverflow: 10
   dbPoolTimeout: 10

@@ -706,6 +706,9 @@ async def test_apply_policy(real_db: None) -> None:
 def test_agents_list_and_update_trust() -> None:
     """Update trust score and list agent."""
     client = _client()
+    # PUT /agents/{id}/trust durably persists the freeze/cap (the trust fail-open fix), so the route
+    # depends on get_session; without an override the dependency raises before the handler runs.
+    _override_session(client, FakeSession([]))
     try:
         spiffe = "spiffe://example/ns/default/sa/agent-one"
         updated = client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.61}, headers=_auth_headers())
@@ -719,6 +722,7 @@ def test_agents_list_and_update_trust() -> None:
 def test_invalid_trust_score_returns_422() -> None:
     """Reject out-of-range trust score with 422."""
     client = _client()
+    _override_session(client, FakeSession([]))  # route depends on get_session
     try:
         spiffe = "spiffe://example/ns/default/sa/agent-one"
         response = client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 2.5}, headers=_auth_headers())
@@ -730,6 +734,7 @@ def test_invalid_trust_score_returns_422() -> None:
 def test_update_trust_requires_admin_role() -> None:
     """Reject trust updates for non-admin users."""
     client = _client()
+    _override_session(client, FakeSession([]))  # route depends on get_session
     try:
         spiffe = "spiffe://example/ns/default/sa/agent-one"
         response = client.put(f"/api/v1/agents/{spiffe}/trust", json={"score": 0.4}, headers=_auth_headers(role="viewer"))

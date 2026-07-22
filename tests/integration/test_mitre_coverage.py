@@ -27,9 +27,12 @@ async def test_mitre_coverage_returns_atlas_mapping(
     assert 0 <= body["covered"] <= body["total"]
 
     techs = {t["technique_id"]: t for t in body["techniques"]}
-    # a known technique from policies/mitre_mapping.json
-    assert "AML.T0048" in techs, f"ATLAS mapping not served: {list(techs)[:5]}"
-    t = techs["AML.T0048"]
+    # A known ENFORCEABLE technique from policies/mitre_mapping.json. Deliberately not AML.T0048
+    # ("External Harms"), which that mapping scopes out_of_scope with policies: [] — it is an
+    # impact/governance concern, not a tool-call vector a runtime PEP enforces, so asserting a
+    # policy mapping on it encoded a technique id that can never carry one.
+    assert "AML.T0051" in techs, f"ATLAS mapping not served: {list(techs)[:5]}"
+    t = techs["AML.T0051"]
     assert "llm01_prompt_injection" in t["policies"]
     # covered flag must be consistent with covered_policies (real cross-reference, not hardcoded)
     assert isinstance(t["covered"], bool)

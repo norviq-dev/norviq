@@ -49,7 +49,8 @@ async def test_abrupt_disconnect_does_not_escape_the_callback(proxy_module, capl
     """Client closes without reading the response -> teardown must swallow the broken pipe."""
     # NOT pytest's tmp_path: sockaddr_un caps the path near 104 bytes on macOS and pytest's
     # per-test temp dirs blow through that ("AF_UNIX path too long").
-    import tempfile, uuid
+    import tempfile
+    import uuid
     sock_dir = tempfile.mkdtemp(prefix="nq", dir="/tmp")
     sock_path = Path(sock_dir) / f"{uuid.uuid4().hex[:6]}.sock"
     escaped: list[BaseException] = []

@@ -146,6 +146,20 @@ def frozen_agent(redis_client):
         client.delete(key)
 
 
+# The engine MAY run a per-pod in-process L1 over exactly the trust inputs the fixtures below seed
+# (agent_history / agent_profile / agent_class), bounded by NRVQ_EVALUATOR_INPROC_CACHE_TTL_S. Those
+# fixtures mutate Redis OUT OF BAND — behind the engine's back — so their writes are not observed
+# until that window expires. The engine's own admin controls (freeze / trust cap) are read fresh on
+# every call and need no wait; only this out-of-band shortcut does. 0 (the default) = no cache, no wait.
+INPROC_TTL_S = float(os.getenv("NRVQ_EVALUATOR_INPROC_CACHE_TTL_S", "0") or 0)
+
+
+def _await_inproc_convergence() -> None:
+    """Let the engine's in-proc trust-input cache expire after seeding/clearing Redis directly."""
+    if INPROC_TTL_S > 0:
+        time.sleep(INPROC_TTL_S + 0.5)
+
+
 @pytest.fixture
 def low_trust_agent(redis_client):
     """Seed history + profile so the default agent recomputes to low trust (<0.4).
@@ -189,7 +203,10 @@ def low_trust_agent(redis_client):
     client.hset(class_key, mapping={"blocked_tools": json.dumps(["search_kb"])})
     for key in (hist_key, prof_key, class_key):
         client.expire(key, 120)
+    _await_inproc_convergence()  # let the engine observe the seeded low-trust state
     try:
         yield DEFAULT_SPIFFE
     finally:
         client.delete(hist_key, prof_key, class_key)
+        # ...and let it observe the CLEARED state too, or the next test inherits low trust.
+        _await_inproc_convergence()
