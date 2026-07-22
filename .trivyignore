@@ -11,3 +11,16 @@
 # API with no untrusted-filesystem/symlink surface, and the webhook does no os.Root traversal. Revisit
 # and drop this line when an OPA release built with Go >=1.26.5 is pinned (see security-baseline.md).
 CVE-2026-39822
+
+# GHSA-hrxh-6v49-42gf (HIGH, grpc-go xDS RBAC + HTTP/2 transport, fixed in grpc-go 1.82.1).
+# Present via google.golang.org/grpc v1.81.1 statically linked into the PINNED OPA binary
+# (opa 1.18.0-static) in the api/engine images. ACCEPTED: all three sub-issues require a running
+# grpc-go SERVER — the xDS RBAC authorization bypass and the crafted-NOT-rule panic need the xDS RBAC
+# engine fed by an xDS control plane; the Rapid Reset bypass needs grpc-go's HTTP/2 server transport.
+# Norviq starts neither. The in-image binary is only forked as `opa eval` / `opa check` (subprocess
+# rollback path), and the sidecar runs `opa run --server` — OPA's server is HTTP REST, bound to
+# 127.0.0.1, with no Envoy ext_authz plugin (we ship `-static`, not `-envoy`) and no OPA distributed
+# tracing configured, so no gRPC listener and no xDS client is ever created. Linked-but-unreachable.
+# No OPA release (through v1.18.2) has adopted grpc-go >= 1.82.1, so a version bump cannot close this
+# today. Revisit when one does (see security-baseline.md).
+GHSA-hrxh-6v49-42gf

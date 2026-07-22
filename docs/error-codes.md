@@ -177,6 +177,7 @@ pod starts **without** a sidecar, or when a CRD write doesn't reach the console.
 | NRVQ-WHK-4043 | OIDC client-credentials token failed; falling back to HS256 |
 | NRVQ-WHK-4044 / 4045 | internal CA cert unreadable / contained no valid PEM certificates |
 | NRVQ-WHK-4046 | internal-TLS API client build failed; using the fail-closed client |
+| NRVQ-WHK-4059 | retrying an unsynced policy — the 60s retry sweep found an `NrvqPolicy` left in `Error`/`Pending` (a sync that failed against a transiently-down API) and is re-queueing it. Informational: one line per policy per sweep until it reaches `Active`. Deterministic failures (invalid rego, deleted class) are **not** retried and do not log this. |
 
 **Sidecar mTLS cert minting** — `webhook/injector.go`
 
@@ -371,7 +372,8 @@ NRVQ-WHK-4025, NRVQ-WHK-4026, NRVQ-WHK-4027, NRVQ-WHK-4028, NRVQ-WHK-4029, NRVQ-
 NRVQ-WHK-4032, NRVQ-WHK-4033, NRVQ-WHK-4034, NRVQ-WHK-4035, NRVQ-WHK-4036, NRVQ-WHK-4037, NRVQ-WHK-4038,
 NRVQ-WHK-4039, NRVQ-WHK-4040, NRVQ-WHK-4041, NRVQ-WHK-4042, NRVQ-WHK-4043, NRVQ-WHK-4044, NRVQ-WHK-4045,
 NRVQ-WHK-4046, NRVQ-WHK-4047, NRVQ-WHK-4048, NRVQ-WHK-4049, NRVQ-WHK-4050, NRVQ-WHK-4051, NRVQ-WHK-4052,
-NRVQ-WHK-4053, NRVQ-WHK-4054, NRVQ-WHK-4055, NRVQ-WHK-4056, NRVQ-WHK-4057, NRVQ-WHK-4058
+NRVQ-WHK-4053, NRVQ-WHK-4054, NRVQ-WHK-4055, NRVQ-WHK-4056, NRVQ-WHK-4057, NRVQ-WHK-4058,
+NRVQ-WHK-4059
 
 NRVQ-ENG-DEBUG-1, NRVQ-ENG-DEBUG-2, NRVQ-ENG-DEBUG-3, NRVQ-ENG-DEBUG-4, NRVQ-ENG-DEBUG-5, NRVQ-ENG-2000,
 NRVQ-ENG-2001, NRVQ-ENG-2002, NRVQ-ENG-2003, NRVQ-ENG-2004, NRVQ-ENG-2005, NRVQ-ENG-2006, NRVQ-ENG-2010,
