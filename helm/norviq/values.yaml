@@ -408,20 +408,24 @@ config:
   trustThreshold: 0.7
   violationPenalty: 0.05
   rateLimit: 60
-  # Per-pod in-process L1 cache (seconds) for the enforcement hot path's slowly-changing input reads
-  # (namespace posture, stored trust score, trust history/profile). Collapses several sequential
-  # cross-pod Redis round trips into local-memory hits — the largest lever on per-call latency.
+  # Per-pod in-process L1 cache (seconds) for the enforcement hot path. OPT-IN: 0 = disabled.
   # Measured on a 2-node AKS cluster: warm read p50 21.9ms -> 3.2ms (-84%), floor 14.5ms -> 1.4ms.
   #
-  # OPT-IN (default 0 = disabled, fresh reads every call). It caches ONLY behavioural INPUTS — the admin
-  # freeze/cap kill-switch is always read fresh, so an incident-response freeze still takes effect on the
-  # very next call regardless of this setting. What the TTL does bound is convergence: a posture /
-  # threshold / trust-input change made OUT OF BAND (written straight to Redis rather than through the
-  # engine) is not observed until it expires. That is why this ships off by default — enable it
-  # deliberately, and expect up to this many seconds of convergence on such changes.
+  # WHAT IT CACHES, precisely:
+  #   * namespace posture, the stored trust score, and the trust calculator's history/profile reads
+  #     — these use this TTL as-is, so this value IS their convergence bound;
+  #   * the PRE-OVERRIDE base policy decision — additionally clamped to redis_ttl_eval_s (5s) and
+  #     cleared eagerly on any policy change, so it can never be staler than the Redis eval cache.
+  # NEVER cached: the admin freeze (agent_frozen) and trust cap (agent_trust_override). Those are read
+  # fresh on EVERY call, so an incident-response freeze still takes effect on the very next call
+  # regardless of this setting — the kill switch is not on the caching path.
   #
-  # Recommended production value: 5 (matches the Redis eval-cache window, which the code clamps to).
+  # WHAT THE TTL COSTS YOU: a posture/threshold change from the console, and any trust-input change,
+  # is not observed by an already-warm pod until the entry expires. Enable deliberately.
+  # Recommended production value: 5.
   inprocCacheTtlS: 0
+  # Hard per-cache entry cap for those L1s (bounds per-pod memory under identity/namespace churn).
+  inprocCacheMax: 8192
   dbSslMode: require
   dbPoolMaxOverflow: 10
   dbPoolTimeout: 10

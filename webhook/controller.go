@@ -58,9 +58,15 @@ const deleteSyncedAnnotation = "norviq.io/delete-synced"
 // Policy status phases. `policyPhaseActive` is the ONLY terminal-success phase: the retry sweep
 // re-drives every policy that is not in it (Error, or an empty phase that never synced at all).
 const (
-	policyPhaseActive = "Active"
-	policyPhaseError  = "Error"
+	policyPhaseActive  = "Active"
+	policyPhaseError   = "Error"
+	policyPhasePending = "Pending"
 )
+
+// msgClassDeleted is a DELIBERATE terminal latch, not a transient failure: the policy's NrvqClass is
+// gone, so re-syncing it would resurrect an orphaned policy against a class that no longer exists.
+// The retry sweep must recognise and preserve it. Compared by value, so keep set and check in sync.
+const msgClassDeleted = "referenced class deleted"
 
 // How often the retry sweep re-drives policies that are not Active.
 //
@@ -108,6 +114,11 @@ type Controller struct {
 	classQueue           chan *unstructured.Unstructured
 	configQueue          chan *unstructured.Unstructured
 	wg                   sync.WaitGroup
+	// Generations whose sync failed DETERMINISTICALLY (invalid rego/target/priority/payload). Such a
+	// policy cannot succeed on retry, so the sweep skips it until its spec changes — otherwise one
+	// malformed CR becomes an unbounded status-write loop, per replica, forever.
+	failedGenMu  sync.Mutex
+	failedGenMap map[string]int64
 }
 
 func NewController(apiURL, apiToken string) (*Controller, error) {
@@ -160,6 +171,7 @@ func NewControllerWithClient(client dynamic.Interface, apiURL, apiSecret string)
 		defaultSidecarImage:  defaultSidecar,
 		classQueue:           make(chan *unstructured.Unstructured, 64),
 		configQueue:          make(chan *unstructured.Unstructured, 64),
+		failedGenMap:         make(map[string]int64),
 	}
 }
 
@@ -288,14 +300,58 @@ func (c *Controller) retryUnsyncedPolicies() {
 		if phase == policyPhaseActive {
 			continue // already synced; nothing to converge
 		}
+		msg, _, _ := unstructured.NestedString(u.Object, "status", "message")
+		if msg == msgClassDeleted {
+			// DELIBERATE terminal latch, not a transient failure — re-syncing would resurrect a policy
+			// whose NrvqClass is gone. Nothing downstream re-rejects it (handlePolicy does no
+			// class-existence check and the API does not validate agent_class), so the retry would
+			// silently flip it back to Active.
+			continue
+		}
+		// Deterministic failures (bad rego, bad target, bad priority) cannot succeed on retry: re-driving
+		// them every tick would be an unbounded status-write loop that any namespace user could trigger by
+		// applying one malformed CR. Only re-attempt once the spec actually changes.
+		if gen, seen := c.failedGeneration(u); seen && gen == u.GetGeneration() {
+			continue
+		}
 		slog.Info(
-			"NRVQ-WHK-4041: retrying unsynced policy",
+			"NRVQ-WHK-4059: retrying unsynced policy",
 			"policy", u.GetName(),
 			"namespace", u.GetNamespace(),
 			"phase", phase,
 		)
 		c.handlePolicy(u, "retry")
 	}
+}
+
+// genKey identifies one CR across sweeps (UID would be ideal but the fake clients in tests omit it).
+func genKey(u *unstructured.Unstructured) string {
+	return u.GetNamespace() + "/" + u.GetName()
+}
+
+// markDeterministicFailure records that THIS generation cannot succeed on retry.
+func (c *Controller) markDeterministicFailure(u *unstructured.Unstructured) {
+	c.failedGenMu.Lock()
+	defer c.failedGenMu.Unlock()
+	if c.failedGenMap == nil {
+		c.failedGenMap = make(map[string]int64)
+	}
+	c.failedGenMap[genKey(u)] = u.GetGeneration()
+}
+
+// clearDeterministicFailure forgets a prior deterministic failure (the spec changed, or it synced).
+func (c *Controller) clearDeterministicFailure(u *unstructured.Unstructured) {
+	c.failedGenMu.Lock()
+	defer c.failedGenMu.Unlock()
+	delete(c.failedGenMap, genKey(u))
+}
+
+// failedGeneration returns the generation last recorded as a deterministic failure for this CR.
+func (c *Controller) failedGeneration(u *unstructured.Unstructured) (int64, bool) {
+	c.failedGenMu.Lock()
+	defer c.failedGenMu.Unlock()
+	gen, ok := c.failedGenMap[genKey(u)]
+	return gen, ok
 }
 
 func (c *Controller) handlePolicy(obj interface{}, action string) {
@@ -322,21 +378,28 @@ func (c *Controller) handlePolicy(obj interface{}, action string) {
 		} else {
 			slog.Error("NRVQ-WHK-4025: API sync failed for policy", "policy", name, "error", err)
 		}
+		c.markDeterministicFailure(u)
+		c.updatePolicyStatus(context.Background(), u, policyPhaseError, err.Error())
 		return
 	}
 	spec, _, _ := unstructured.NestedMap(u.Object, "spec")
 	if err := validateClusterPriority(namespace, spec, c.adminPolicyNamespace); err != nil {
 		slog.Warn("NRVQ-WHK-4037: invalid cluster priority rejected", "policy", name, "error", err)
+		c.markDeterministicFailure(u)
+		c.updatePolicyStatus(context.Background(), u, policyPhaseError, err.Error())
 		return
 	}
 	_, hasClusterPriority := spec["clusterPriority"]
 	if err := validateTarget(namespace, c.adminPolicyNamespace, body.Target, hasClusterPriority); err != nil {
 		slog.Warn("NRVQ-WHK-4034: cross-namespace policy rejected", "policy", name, "error", err)
+		c.markDeterministicFailure(u)
+		c.updatePolicyStatus(context.Background(), u, policyPhaseError, err.Error())
 		return
 	}
 	if rego, found, _ := unstructured.NestedString(u.Object, "spec", "rego"); found && rego != "" {
 		if err := validateRego(rego); err != nil {
 			slog.Warn("NRVQ-WHK-4032: invalid rego rejected", "policy", name, "error", err)
+			c.markDeterministicFailure(u)
 			c.updatePolicyStatus(context.Background(), u, policyPhaseError, err.Error())
 			return
 		}
@@ -359,6 +422,7 @@ func (c *Controller) handlePolicy(obj interface{}, action string) {
 				c.updatePolicyStatus(context.Background(), u, policyPhaseError, err.Error())
 				return
 			}
+			c.clearDeterministicFailure(u)
 			c.updatePolicyStatus(context.Background(), u, policyPhaseActive, "policy synced")
 			slog.Info(
 				"NRVQ-WHK-4026: Policy synced to API successfully",
@@ -368,7 +432,11 @@ func (c *Controller) handlePolicy(obj interface{}, action string) {
 			)
 		}()
 	default:
-		slog.Warn("NRVQ-WHK-4028: sync queue full, skipping", "policy", name)
+		// Mark Pending (not Error) so the retry sweep re-drives it: a full queue is transient back-pressure,
+		// and leaving the status untouched made this the one divergence class the retry worker still missed
+		// (the engine keeps enforcing the old rego while the CR looks fine).
+		slog.Warn("NRVQ-WHK-4028: sync queue full, queued for retry", "policy", name)
+		c.updatePolicyStatus(context.Background(), u, policyPhasePending, "sync queue full; queued for retry")
 	}
 }
 
@@ -501,7 +569,7 @@ func (c *Controller) handleClassDelete(obj interface{}) {
 		if agentClass != deletedClass {
 			continue
 		}
-		c.updatePolicyStatus(context.Background(), policy, policyPhaseError, "referenced class deleted")
+		c.updatePolicyStatus(context.Background(), policy, policyPhaseError, msgClassDeleted)
 	}
 }
 

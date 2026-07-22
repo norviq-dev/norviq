@@ -102,8 +102,10 @@ class SupportPlugin:
 # invocation before the function body, so all six are guarded at once — there is no per-tool wrapper
 # to forget and no allow_unwrapped escape hatch. A block/escalate decision raises and `next(context)`
 # is never called, so the tool body never runs (fail-closed). Semantic Kernel reports tool names
-# plugin-qualified, so the policy engine evaluates these calls as `support.<tool>` (e.g.
-# support.execute_sql, support.delete_record).
+# plugin-qualified (`support.execute_sql`), but the adapter deliberately sends the BARE name
+# (`execute_sql`) — plugin scoping is an SK addressing detail, not part of policy identity. Sending
+# the qualified name made a framework-agnostic `delete_record` policy silently NOT match, so the same
+# call that was blocked under LangChain was allowed under SK. See norviq/sdk/semantic_kernel/adapter.py.
 kernel = Kernel()
 kernel.add_service(llm)
 kernel.add_plugin(SupportPlugin(), plugin_name="support")

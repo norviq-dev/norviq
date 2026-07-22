@@ -153,3 +153,28 @@ def test_helm_test_hook_present() -> None:
 def test_kubeversion_is_declared() -> None:
     chart = yaml.safe_load((_CHART / "Chart.yaml").read_text())
     assert chart.get("kubeVersion", "").startswith(">=1.30")
+
+
+def test_inproc_cache_configmap_defaults_match_values_and_settings() -> None:
+    """The ConfigMap `dig` fallbacks must match values.yaml, or a custom values file that omits the
+    key silently gets DIFFERENT behaviour than the documented default.
+
+    Written for a real bug: the fallback said 5 while values.yaml said 0, so any user whose values
+    file left the key out would have silently enabled the in-process cache.
+    """
+    from norviq.config import NorviqSettings
+
+    out = _render()
+    # Shipped default is OFF — the cache is opt-in.
+    assert 'NRVQ_EVALUATOR_INPROC_CACHE_TTL_S: "0"' in out, "chart default must render the cache DISABLED"
+    # And the entry cap must agree with the pydantic default rather than drifting from it.
+    expected_max = str(NorviqSettings(_env_file=None).evaluator_inproc_cache_max)
+    assert f'NRVQ_EVALUATOR_INPROC_CACHE_MAX: "{expected_max}"' in out
+
+
+@pytest.mark.parametrize("value", ["5", "0"])
+def test_inproc_cache_opt_in_is_honoured(value: str) -> None:
+    """An explicit value must survive templating. `| default` would swallow an explicit 0 (sprig
+    treats 0 as empty), which is why the template uses `dig` — this pins that."""
+    out = _render("--set", f"config.inprocCacheTtlS={value}")
+    assert f'NRVQ_EVALUATOR_INPROC_CACHE_TTL_S: "{value}"' in out, f"--set {value} not honoured"

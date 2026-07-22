@@ -198,3 +198,53 @@ func TestRetryUnsyncedPolicies_NilStoreIsNoop(t *testing.T) {
 	c.policyStore = nil
 	c.retryUnsyncedPolicies()
 }
+
+// --- audit follow-ups: the sweep must not undo deliberate state, and must not spin forever ---
+
+// The "referenced class deleted" latch is deliberate terminal state (the NrvqClass is gone). Before
+// this guard the sweep re-POSTed the orphaned policy and flipped it back to Active — nothing
+// downstream re-rejects it, since handlePolicy does no class-existence check.
+func TestRetryUnsyncedPolicies_PreservesClassDeletedLatch(t *testing.T) {
+	obj := retryPolicyObj("orphaned", policyPhaseError)
+	_ = unstructured.SetNestedField(obj.Object, msgClassDeleted, "status", "message")
+	c, posts := retryTestController(t, obj)
+	c.retryUnsyncedPolicies()
+	c.wg.Wait()
+	if got := atomic.LoadInt32(posts); got != 0 {
+		t.Fatalf("class-deleted latch must NOT be re-synced, got %d POSTs", got)
+	}
+}
+
+// A sync dropped because the semaphore was full is transient back-pressure: it must land in Pending
+// so the sweep re-drives it. Leaving the status untouched was the one divergence class the retry
+// worker still missed.
+func TestRetryUnsyncedPolicies_RetriesPendingPhase(t *testing.T) {
+	c, posts := retryTestController(t, retryPolicyObj("queued", policyPhasePending))
+	c.retryUnsyncedPolicies()
+	c.wg.Wait()
+	if got := atomic.LoadInt32(posts); got != 1 {
+		t.Fatalf("expected a Pending policy to be retried once, got %d POSTs", got)
+	}
+}
+
+// A deterministically-invalid policy cannot succeed on retry. Re-driving it every tick would be an
+// unbounded status-write loop any namespace user could trigger with one malformed CR.
+func TestRetryUnsyncedPolicies_SkipsDeterministicFailureUntilSpecChanges(t *testing.T) {
+	obj := retryPolicyObj("bad-rego", policyPhaseError)
+	obj.SetGeneration(3)
+	c, posts := retryTestController(t, obj)
+	c.markDeterministicFailure(obj)
+
+	c.retryUnsyncedPolicies()
+	c.wg.Wait()
+	if got := atomic.LoadInt32(posts); got != 0 {
+		t.Fatalf("same generation must not be re-driven, got %d POSTs", got)
+	}
+
+	obj.SetGeneration(4) // the author fixed the spec
+	c.retryUnsyncedPolicies()
+	c.wg.Wait()
+	if got := atomic.LoadInt32(posts); got != 1 {
+		t.Fatalf("a new generation must be retried once, got %d POSTs", got)
+	}
+}

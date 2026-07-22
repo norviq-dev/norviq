@@ -59,13 +59,15 @@ spiffe = ["spiffe>=0.2"]
 langchain = ["langchain-core>=0.2"]
 langgraph = ["langgraph>=0.2"]
 crewai = ["crewai>=0.80"]
-autogen = ["autogen-core>=0.4"]
+autogen = ["autogen-core>=0.4", "autogen-agentchat>=0.4", "autogen-ext[openai]>=0.4"]
 semantic-kernel = ["semantic-kernel>=1.0"]
 frameworks = [
     "langchain-core>=0.2",
     "langgraph>=0.2",
     "crewai>=0.80",
     "autogen-core>=0.4",
+    "autogen-agentchat>=0.4",
+    "autogen-ext[openai]>=0.4",
     "semantic-kernel>=1.0",
 ]
 

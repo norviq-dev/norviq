@@ -46,11 +46,16 @@ data:
   NRVQ_TRUST_THRESHOLD: {{ .Values.config.trustThreshold | quote }}
   NRVQ_VIOLATION_PENALTY: {{ .Values.config.violationPenalty | quote }}
   NRVQ_RATE_LIMIT: {{ .Values.config.rateLimit | quote }}
-  # Per-pod in-process L1 for the enforcement hot path (posture/trust inputs). Caches inputs only — the
-  # admin freeze/cap is always read fresh. 0 disables (fresh reads every call). See values.yaml.
+  # Per-pod in-process L1 for the enforcement hot path: posture, stored trust score, trust
+  # history/profile AND the pre-override base decision (that one additionally clamped to
+  # redis_ttl_eval_s + cleared on policy change). The admin freeze/cap are NEVER cached — always read
+  # fresh, so the kill switch is off the caching path. 0 disables. See values.yaml.
   # `dig` (not `| default`) so an explicit 0 disables it — sprig's `default` treats 0 as empty and would
-  # silently re-enable the cache.
-  NRVQ_EVALUATOR_INPROC_CACHE_TTL_S: {{ dig "inprocCacheTtlS" 5 .Values.config | quote }}
+  # silently re-enable the cache. The fallback MUST match values.yaml's default (0 = off): a custom values
+  # file that omits the key would otherwise silently turn the cache ON, contradicting the documented default.
+  NRVQ_EVALUATOR_INPROC_CACHE_TTL_S: {{ dig "inprocCacheTtlS" 0 .Values.config | quote }}
+  # Per-cache entry cap for the same in-process L1 (bounds per-pod memory under identity/namespace churn).
+  NRVQ_EVALUATOR_INPROC_CACHE_MAX: {{ dig "inprocCacheMax" 8192 .Values.config | quote }}
   NRVQ_DB_SSL_MODE: {{ .Values.config.dbSslMode | quote }}
   NRVQ_DB_POOL_MAX_OVERFLOW: {{ .Values.config.dbPoolMaxOverflow | quote }}
   NRVQ_DB_POOL_TIMEOUT: {{ .Values.config.dbPoolTimeout | quote }}
