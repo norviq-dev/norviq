@@ -55,6 +55,23 @@ var configGVR = schema.GroupVersionResource{
 
 const deleteSyncedAnnotation = "norviq.io/delete-synced"
 
+// Policy status phases. `policyPhaseActive` is the ONLY terminal-success phase: the retry sweep
+// re-drives every policy that is not in it (Error, or an empty phase that never synced at all).
+const (
+	policyPhaseActive = "Active"
+	policyPhaseError  = "Error"
+)
+
+// How often the retry sweep re-drives policies that are not Active.
+//
+// Why a ticker-driven sweep instead of re-processing on the informer's resync: a failed sync calls
+// updatePolicyStatus, which stamps a fresh `lastApplied` timestamp on every write. That always bumps
+// resourceVersion and fires another UpdateFunc — so widening shouldProcessUpdate to re-process
+// non-Active objects would spin a tight feedback loop (fail -> status write -> event -> fail ...)
+// hammering both the API server and the Norviq API. A ticker decouples retry from status writes, so
+// the retry rate is bounded no matter how many policies are failing or how fast statuses churn.
+var policyRetryInterval = 60 * time.Second
+
 var finalizerMaxAge = 15 * time.Minute
 var allowedSidecarImagePattern = regexp.MustCompile(`^(norviq/norviq-engine|docker\.io/norviq/norviq-engine|ghcr\.io/norviq-dev/norviq-engine):[a-zA-Z0-9._-]+$`)
 
@@ -224,13 +241,61 @@ func (c *Controller) Start(ctx context.Context) error {
 	factory.Start(ctx.Done())
 	factory.WaitForCacheSync(ctx.Done())
 	slog.Info("NRVQ-WHK-4023: CRD controller cache synced")
-	c.wg.Add(2)
+	c.wg.Add(3)
 	go c.classWorker(ctx)
 	go c.configWorker(ctx)
+	go c.policyRetryWorker(ctx)
 
 	<-ctx.Done()
 	c.wg.Wait()
 	return nil
+}
+
+// policyRetryWorker periodically re-drives policies whose sync to the API did not succeed.
+//
+// Without this, a sync that fails transiently (an API rollout/restart, a network blip — exactly what
+// a cluster cold start or a helm upgrade produces) is NEVER retried: the error path latches
+// phase=Error and returns, and the informer's resync cannot re-drive it because shouldProcessUpdate
+// compares Generation, which a resync does not change. The declared policy in the CR would then
+// silently diverge from what the engine actually enforces, with only a log line to show for it.
+func (c *Controller) policyRetryWorker(ctx context.Context) {
+	defer c.wg.Done()
+	ticker := time.NewTicker(policyRetryInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.retryUnsyncedPolicies()
+		}
+	}
+}
+
+// retryUnsyncedPolicies re-submits every cached policy that is not in the Active phase. Reuses the
+// normal handlePolicy path, so retries inherit the same validation and the same syncSemaphore
+// concurrency bound as event-driven syncs.
+func (c *Controller) retryUnsyncedPolicies() {
+	if c.policyStore == nil {
+		return
+	}
+	for _, obj := range c.policyStore.List() {
+		u, ok := obj.(*unstructured.Unstructured)
+		if !ok || u.GetDeletionTimestamp() != nil {
+			continue // deletions are driven by the delete handler + finalizer, not this sweep
+		}
+		phase, _, _ := unstructured.NestedString(u.Object, "status", "phase")
+		if phase == policyPhaseActive {
+			continue // already synced; nothing to converge
+		}
+		slog.Info(
+			"NRVQ-WHK-4041: retrying unsynced policy",
+			"policy", u.GetName(),
+			"namespace", u.GetNamespace(),
+			"phase", phase,
+		)
+		c.handlePolicy(u, "retry")
+	}
 }
 
 func (c *Controller) handlePolicy(obj interface{}, action string) {
@@ -272,7 +337,7 @@ func (c *Controller) handlePolicy(obj interface{}, action string) {
 	if rego, found, _ := unstructured.NestedString(u.Object, "spec", "rego"); found && rego != "" {
 		if err := validateRego(rego); err != nil {
 			slog.Warn("NRVQ-WHK-4032: invalid rego rejected", "policy", name, "error", err)
-			c.updatePolicyStatus(context.Background(), u, "Error", err.Error())
+			c.updatePolicyStatus(context.Background(), u, policyPhaseError, err.Error())
 			return
 		}
 	}
@@ -291,10 +356,10 @@ func (c *Controller) handlePolicy(obj interface{}, action string) {
 			defer func() { <-c.syncSemaphore }()
 			if err := c.syncPolicy(context.Background(), body); err != nil {
 				slog.Error("NRVQ-WHK-4025: API sync failed for policy", "policy", name, "error", err)
-				c.updatePolicyStatus(context.Background(), u, "Error", err.Error())
+				c.updatePolicyStatus(context.Background(), u, policyPhaseError, err.Error())
 				return
 			}
-			c.updatePolicyStatus(context.Background(), u, "Active", "policy synced")
+			c.updatePolicyStatus(context.Background(), u, policyPhaseActive, "policy synced")
 			slog.Info(
 				"NRVQ-WHK-4026: Policy synced to API successfully",
 				"policy", name,
@@ -436,7 +501,7 @@ func (c *Controller) handleClassDelete(obj interface{}) {
 		if agentClass != deletedClass {
 			continue
 		}
-		c.updatePolicyStatus(context.Background(), policy, "Error", "referenced class deleted")
+		c.updatePolicyStatus(context.Background(), policy, policyPhaseError, "referenced class deleted")
 	}
 }
 
