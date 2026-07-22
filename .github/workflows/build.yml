@@ -115,10 +115,32 @@ jobs:
       # Supply chain: bind this exact digest to this repo+workflow identity, and publish an SBOM.
       # Runs only AFTER the fail-closed Trivy gate, so a vulnerable image is never signed.
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      # Both cosign steps below RETRY. Keyless signing needs two external services on every call:
+      # GitHub's ambient OIDC token endpoint, and Sigstore (Fulcio/Rekor). Those fail transiently —
+      # observed repeatedly as `fetching ambient OIDC credentials: invalid character 'u' looking for
+      # beginning of value`, i.e. a non-JSON "unauthorized" body from the token endpoint, hitting
+      # exactly one of the four parallel matrix jobs per run (all four request a token at once).
+      # A blip there says nothing about the image, but without a retry it red-lights main and can
+      # break a GA release, since release.yml calls this workflow on the version tag.
+      # Still FAIL-CLOSED: if every attempt fails we exit 1 and publish nothing, so a genuine
+      # identity/permission failure is never masked as a flake.
       - name: cosign sign image (keyless)
         env:
           COSIGN_YES: "true"
-        run: cosign sign "${{ env.REPOSITORY }}@${{ steps.build.outputs.digest }}"
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            if cosign sign "${{ env.REPOSITORY }}@${{ steps.build.outputs.digest }}"; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 5 ]; then
+              delay=$(( attempt * 15 ))
+              echo "::warning::cosign sign attempt ${attempt}/5 failed; retrying in ${delay}s"
+              sleep "${delay}"
+            fi
+          done
+          echo "::error::cosign sign failed after 5 attempts — refusing to publish an unsigned image"
+          exit 1
       # Generate the SBOM with the same pinned action (the trivy CLI is not guaranteed to be on PATH
       # afterwards — trivy-action runs it in a container), then attest the file with cosign.
       - name: Generate SBOM (SPDX)
@@ -133,5 +155,16 @@ jobs:
         run: |
           set -euo pipefail
           test -s "sbom-${{ matrix.component }}.json"   # fail loudly rather than attest an empty file
-          cosign attest --predicate "sbom-${{ matrix.component }}.json" --type spdxjson \
-            "${{ env.REPOSITORY }}@${{ steps.build.outputs.digest }}"
+          for attempt in 1 2 3 4 5; do
+            if cosign attest --predicate "sbom-${{ matrix.component }}.json" --type spdxjson \
+                 "${{ env.REPOSITORY }}@${{ steps.build.outputs.digest }}"; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 5 ]; then
+              delay=$(( attempt * 15 ))
+              echo "::warning::cosign attest attempt ${attempt}/5 failed; retrying in ${delay}s"
+              sleep "${delay}"
+            fi
+          done
+          echo "::error::cosign attest failed after 5 attempts — image is signed but has no SBOM attestation"
+          exit 1
