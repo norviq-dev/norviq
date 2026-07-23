@@ -10,8 +10,8 @@ Norviq's enforcement point (PEP) intercepts a tool call and evaluates its **inpu
 
 It does **not**, by default, evaluate the tool's **output** (return value). An *allowed* tool whose return payload
 happens to carry sensitive data can therefore surface that data to the agent/LLM even though the call itself was
-benign on its inputs. The live-pentest demonstrated this: a finance `export_statement` called with clean params
-(no PAN/SSN in the params) was allowed, and its simulated body emitted a canary — the input-PEP had nothing to match
+benign on its inputs. As a concrete example, a finance `export_statement` called with clean params
+(no PAN/SSN in the params) is allowed, and its body can emit sensitive data — the input-PEP has nothing to match
 on. The primary mitigation is **policy coverage on the inputs** (an export/egress tool to an external
 destination is blocked regardless of params), which stops the *action*. The output itself is out of the input-PEP's
 view.
