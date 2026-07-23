@@ -373,11 +373,18 @@ opa:
       memory: 128Mi
 
 ingress:
+  # Console exposure. DEFAULT OFF, following the Grafana / Istio convention: the out-of-the-box access
+  # path is `kubectl port-forward svc/norviq-ui` (see NOTES.txt) — no ingress controller or certificate
+  # required to get started. Turn this on for a persistent URL in production.
   enabled: false
   className: nginx
   host: norviq.example.com
-  # TLS for the enterprise HTTPS path. Set true and either pre-create the secret named below or use a
-  # cert-manager issuer annotation (see `annotations`). Leaving false serves plaintext (dev only).
+  # TLS for the enterprise HTTPS path. The chart deliberately does NOT generate an ingress certificate
+  # (a self-signed cert is useless for real HTTPS and hides a false "TLS works") — this matches Grafana
+  # and Istio, which leave the ingress/gateway cert to the operator. Set tls=true and EITHER pre-create
+  # the secret named below OR issue one via a cert-manager annotation (see `annotations`). With tls=true
+  # and no such cert, the ingress falls back to the controller's default self-signed cert. tls=false
+  # serves plaintext (dev only).
   tls: false
   tlsSecretName: norviq-ingress-tls
   # Extra ingress annotations (e.g. cert-manager.io/cluster-issuer, body-size, timeouts). The console

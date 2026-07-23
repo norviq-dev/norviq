@@ -1,8 +1,19 @@
 Norviq has been deployed.
 
-To access the UI:
+To access the UI (default access — the Grafana/Istio convention: port-forward, no ingress required):
   kubectl port-forward svc/norviq-ui 3000:80 -n {{ .Release.Namespace }}
   Then open: http://localhost:3000
+{{- if .Values.ingress.enabled }}
+
+  Ingress is ENABLED — the console is also reachable at {{ if .Values.ingress.tls }}https{{ else }}http{{ end }}://{{ .Values.ingress.host }}
+  (requires an ingress controller for class "{{ .Values.ingress.className | default "nginx" }}" in the cluster).
+  {{- if .Values.ingress.tls }}
+  TLS is BRING-YOUR-OWN — the chart does NOT generate an ingress certificate (same as Grafana/Istio).
+  Ensure the secret "{{ .Values.ingress.tlsSecretName | default "norviq-ingress-tls" }}" exists (pre-created,
+  or issued by a cert-manager annotation in ingress.annotations), or the ingress serves the controller's
+  default self-signed certificate — not a trusted one.
+  {{- end }}
+{{- end }}
 
 FIRST LOGIN
 {{- if .Values.auth.enabled }}
