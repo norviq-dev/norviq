@@ -81,3 +81,9 @@ CVE-2025-66221 / CVE-2026-21860 / CVE-2026-27199).
 
 These are reviewed each release; we will drop an exception and bump the moment upstream ships a fixed
 release reachable without a pre-release dependency.
+
+The same three are also marked **Ignored** in the FOSSA project UI (reason: *vulnerable code not in
+execute path*, scoped to this project and the current dependency versions), so FOSSA's own
+"Security Analysis" check reflects this acceptance rather than a bare red. Because that ignore is
+version-scoped, a future bump of `chromadb` or `semantic-kernel` re-surfaces the CVE for review —
+matching the exit condition above.
