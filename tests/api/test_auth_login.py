@@ -176,7 +176,7 @@ def test_login_disabled_returns_403(monkeypatch) -> None:
 # --- /auth/change-password ---------------------------------------------------------------------
 
 
-def test_change_password_success_sets_new_hash_and_clears_must_change() -> None:
+def test_change_password_success_sets_new_hash_and_returns_fresh_token() -> None:
     row = _admin_row()
     client = _client([row])
     resp = client.post(
@@ -184,10 +184,20 @@ def test_change_password_success_sets_new_hash_and_clears_must_change() -> None:
         json={"current_password": _DEFAULT, "new_password": "brand-new-passphrase"},
         headers=_bearer(),
     )
-    assert resp.status_code == 200 and resp.json() == {"changed": True, "must_change": False}
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["changed"] is True and body["must_change"] is False
     assert row.must_change is False
     assert pw.verify_password("brand-new-passphrase", row.password_hash)  # new hash at rest
     assert not pw.verify_password(_DEFAULT, row.password_hash)  # old password is rejected
+    # Regression (fresh-install admin lockout): change-password MUST return a fresh session token with
+    # must_change cleared. The gate (auth._validate_token, NRVQ-AUTH-14018) reads the TOKEN claim, so
+    # without a new token the client keeps its must_change=True JWT and is 403'd on every gated route
+    # despite the successful change — forcing a manual sign-out/in.
+    assert body["access_token"] and body["token_type"] == "bearer"
+    claims = jwt.decode(body["access_token"], settings.api_secret_key, algorithms=["HS256"])
+    assert not claims.get("must_change")  # cleared in the new token
+    assert claims["sub"] == "admin" and claims["role"] == "admin"
 
 
 def test_change_password_wrong_current_rejected() -> None:

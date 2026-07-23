@@ -219,7 +219,27 @@ async def change_password(
     row.must_change = False
     await session.commit()
     log.info("nrvq.auth.password_changed", user=username, code="NRVQ-AUTH-14011")
-    return {"changed": True, "must_change": False}
+    # Mint a FRESH session token with must_change cleared and return it, so the caller can swap off the
+    # login-time token immediately. The must_change gate (auth._validate_token, NRVQ-AUTH-14018) reads the
+    # TOKEN CLAIM, not the DB row — so without a new token the client keeps a must_change=True JWT and is
+    # 403'd on every gated route despite a successful change, until a full re-login. Mirrors /auth/login.
+    role = str(row.role or "viewer").lower()
+    namespace = _namespace_for(role)
+    token = mint_session_token(
+        sub=username,
+        role=role,
+        namespace=namespace,
+        must_change=False,
+        ttl_seconds=settings.auth_session_ttl_s,
+    )
+    return {
+        "changed": True,
+        "must_change": False,
+        "access_token": token,
+        "token_type": "bearer",
+        "role": role,
+        "namespace": namespace,
+    }
 
 
 async def ensure_default_admin(session_factory=get_session) -> None:

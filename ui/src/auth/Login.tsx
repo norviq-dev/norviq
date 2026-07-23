@@ -296,7 +296,13 @@ export function Login() {
         else setError(detail || "Could not change the password. Check your current password.");
         return;
       }
+      // Adopt the fresh token the server issues with must_change cleared. Without this the console keeps
+      // the old must_change=True JWT and every admin route returns 403 (NRVQ-AUTH-14018) despite the
+      // successful change, forcing a manual sign-out/in. Fall back to clearing the flag if an older API
+      // build returns no token.
+      const body = (await resp.json().catch(() => ({}))) as { access_token?: string };
       setMustChange(false);
+      if (body.access_token) setToken(body.access_token, remember);
       finish("done_save");
     } catch {
       setPhase("idle");
