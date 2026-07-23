@@ -25,7 +25,7 @@ live, so nothing is silently ignored.
 | eslint-security | changed `ui/src` | Yes (per eslint config) | ui eslint config |
 | pip-audit / npm audit | whole repo | **No — report-only** | remove `continue-on-error` on `deps-audit` |
 | checkov / kube-linter / trivy-config | whole `helm/` (chart + CRDs) | **No — report-only** | `.checkov.yaml soft-fail:false`; set `iac` job `exit-code:1`; drop `continue-on-error` |
-| trivy **image** (engine/api/ui/webhook) | post-build on `main` (`build.yml`) | **No — report-only** (`exit-code:"0"`) | capture `.trivyignore` baseline from first scan, then set `exit-code:"1"` |
+| trivy **image** (engine/api/ui/webhook) | post-build on `main` (`build.yml`) | **Yes — blocking** (`exit-code:"1"`, fail-closed) | already blocking; new fixable HIGH/CRITICAL findings fail the build; accepted findings are triaged into `.trivyignore` with a rationale (baselined findings log below) |
 | FOSSA dependency gate | whole dependency graph (`fossa.yml`) | **Yes** — any dependency `vulnerability` or `malware` issue fails | already blocking; exceptions are an explicit `ACCEPTED_CVES` allow-list in the job |
 
 Diff-aware jobs are green by construction — only NEW code is judged. The whole-repo jobs are the
@@ -68,10 +68,11 @@ Pin actions by **immutable commit SHA**, not a mutable tag — a compromised tag
 malicious code (trivy-action itself had a March-2026 compromise; we use it AS our security gate).
 - **Done:** `aquasecurity/trivy-action` pinned to `57a97c7e7821a5776cebc9bb87c984fa69cba8f1` # v0.35.0,
   plus `actions/checkout`, `actions/setup-python`, and `actions/setup-node` across `build.yml` and
-  `security.yml`.
+  `security.yml`; `fossas/fossa-action` pinned to `3ebcea1862c6ffbd5cf1b4d0bd6b3fe7bd6f2cac` # v1.7.0
+  in `fossa.yml` (the tag is annotated; SHA resolved by dereferencing the tag object to its commit).
 - **Remaining tag pins** (residual supply-chain risk — pin these next):
   - `bridgecrewio/checkov-action@v12` — `security.yml`
-  - `fossas/fossa-action@v1.7.0` and `actions/upload-artifact@v4` — `fossa.yml`
+  - `actions/upload-artifact@v4` — `fossa.yml`
 
   Verify the current state rather than trusting this list:
   ```bash

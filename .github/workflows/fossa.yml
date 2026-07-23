@@ -29,8 +29,9 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       # Installs the fossa CLI and runs `fossa analyze` (upload only; we run `fossa test` ourselves below
-      # so we can capture its JSON regardless of exit code). SHA-pin once the release SHA is confirmed.
-      - uses: fossas/fossa-action@v1.7.0
+      # so we can capture its JSON regardless of exit code). SHA-pinned (v1.7.0 tag dereferenced via
+      # `gh api repos/fossas/fossa-action/git/ref/tags/v1.7.0` -> annotated tag object -> commit).
+      - uses: fossas/fossa-action@3ebcea1862c6ffbd5cf1b4d0bd6b3fe7bd6f2cac # v1.7.0
         with:
           api-key: ${{ secrets.FOSSA_API_KEY }}
           run-tests: false
