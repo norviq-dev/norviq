@@ -70,9 +70,9 @@ malicious code (trivy-action itself had a March-2026 compromise; we use it AS ou
   plus `actions/checkout`, `actions/setup-python`, and `actions/setup-node` across `build.yml` and
   `security.yml`; `fossas/fossa-action` pinned to `3ebcea1862c6ffbd5cf1b4d0bd6b3fe7bd6f2cac` # v1.7.0
   in `fossa.yml` (the tag is annotated; SHA resolved by dereferencing the tag object to its commit).
-- **Remaining tag pins** (residual supply-chain risk — pin these next):
-  - `bridgecrewio/checkov-action@v12` — `security.yml`
-  - `actions/upload-artifact@v4` — `fossa.yml`
+- **Done (cont.):** `bridgecrewio/checkov-action` pinned to `7b972723c44fb3d256283fac96fae5d7c1894bb7` # v12
+  (`security.yml`) and `actions/upload-artifact` pinned to `ea165f8d65b6e75b540449e92b4886f43607fa02` # v4
+  (`fossa.yml`). **Every `uses:` in `.github/workflows/` is now SHA-pinned** — no mutable tag pins remain.
 
   Verify the current state rather than trusting this list:
   ```bash

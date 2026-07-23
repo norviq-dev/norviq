@@ -102,7 +102,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: checkov (helm + crds)
-        uses: bridgecrewio/checkov-action@v12
+        uses: bridgecrewio/checkov-action@7b972723c44fb3d256283fac96fae5d7c1894bb7 # v12
         with:
           directory: .
           soft_fail: true
