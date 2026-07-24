@@ -325,10 +325,14 @@ enabled: 3 replicas, PDB `minAvailable: 2`, HPA 3–6 @ 70%, spread on, plus HA 
 
 ## Telemetry (`otel.*`)
 
-Off by default. `otel.enabled` (`false`), `otel.endpoint` (`http://otel-collector:4317`, OTLP gRPC),
-`otel.prometheusPort` (`9090`). These render `NRVQ_OTEL_ENABLED` / `NRVQ_OTEL_ENDPOINT` /
-`NRVQ_PROMETHEUS_PORT`. `NRVQ_OTEL_DISABLED=true` is a hard kill-switch that wins over
-`NRVQ_OTEL_ENABLED` and has no chart key. The chart also ships a Grafana dashboard ConfigMap
+Off by default. `otel.enabled` (`false`) and `otel.endpoint` (`""`, OTLP gRPC). Enabling trace
+export requires pointing `otel.endpoint` at a real collector (`--set otel.endpoint=http://<collector>:4317`);
+the chart fails the render if `enabled: true` with an empty endpoint. These render `NRVQ_OTEL_ENABLED` /
+`NRVQ_OTEL_ENDPOINT`. `NRVQ_OTEL_DISABLED=true` is a hard kill-switch that wins over
+`NRVQ_OTEL_ENABLED` and has no chart key. Prometheus `/metrics` is always served on the api
+Service port (`api.port`) regardless of `otel.enabled` — there is no separate metrics port;
+`otel.metrics.scrapeAnnotations` and `otel.metrics.serviceMonitor.*` only control how Prometheus
+discovers that endpoint. The chart also ships a Grafana dashboard ConfigMap
 (`helm/norviq/dashboards/`).
 
 ## Ingress (`ingress.*`)

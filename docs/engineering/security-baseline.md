@@ -22,7 +22,7 @@ live, so nothing is silently ignored.
 | gitleaks | PR commit **range** only (not history) | **Yes** — new secrets fail | already blocking; allowlist in `.gitleaks.toml` |
 | bandit | **changed** `norviq/**/*.py`, `-ll` | **Yes** — new high fails | config `[tool.bandit]` in `pyproject.toml` |
 | semgrep | diff-aware `--baseline-commit <base>` | **Yes** — new findings fail | ignores in `.semgrepignore` |
-| eslint-security | changed `ui/src` | Yes (per eslint config) | ui eslint config |
+| eslint-security | whole `ui/src` — **no-op today**: no eslint config is wired into `ui/`, so the CI step errors on the missing config and the error is swallowed by `\|\| echo` | **No — not a live gate** (JS/TS is covered fail-closed by the semgrep row above, which scans `ui/src`) | add an eslint flat config + `eslint-plugin-security`, pin the deps, then drop the `\|\| echo` |
 | pip-audit / npm audit | whole repo | **No — report-only** | remove `continue-on-error` on `deps-audit` |
 | checkov / kube-linter / trivy-config | whole `helm/` (chart + CRDs) | **No — report-only** | `.checkov.yaml soft-fail:false`; set `iac` job `exit-code:1`; drop `continue-on-error` |
 | trivy **image** (engine/api/ui/webhook) | post-build on `main` (`build.yml`) | **Yes — blocking** (`exit-code:"1"`, fail-closed) | already blocking; new fixable HIGH/CRITICAL findings fail the build; accepted findings are triaged into `.trivyignore` with a rationale (baselined findings log below) |
