@@ -19,6 +19,7 @@ from typing import Any
 
 __all__ = [
     "AgentIdentity",
+    "DecisionRecorder",
     "NorviqBlockError",
     "NorviqEscalateError",
     "PolicyDecision",
@@ -26,6 +27,7 @@ __all__ = [
     "SupportsEvaluate",
     "ToolCallEvent",
     "ToolInterceptor",
+    "capture_decisions",
 ]
 
 # name -> (module to import from, attribute name). Resolved lazily via module __getattr__
@@ -37,6 +39,7 @@ __all__ = [
 # re-export is actually used, after both modules have finished initializing.
 _EXPORTS: dict[str, tuple[str, str]] = {
     "AgentIdentity": ("norviq.sdk.core.events", "AgentIdentity"),
+    "DecisionRecorder": ("norviq.sdk.core.recorder", "DecisionRecorder"),
     "NorviqBlockError": ("norviq.exceptions", "NorviqBlockError"),
     "NorviqEscalateError": ("norviq.exceptions", "NorviqEscalateError"),
     "PolicyDecision": ("norviq.sdk.core.decisions", "PolicyDecision"),
@@ -44,6 +47,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "SupportsEvaluate": ("norviq.sdk.core.interceptor", "SupportsEvaluate"),
     "ToolCallEvent": ("norviq.sdk.core.events", "ToolCallEvent"),
     "ToolInterceptor": ("norviq.sdk.core.interceptor", "ToolInterceptor"),
+    "capture_decisions": ("norviq.sdk.core.recorder", "capture_decisions"),
 }
 
 

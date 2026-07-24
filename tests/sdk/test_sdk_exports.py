@@ -12,6 +12,7 @@ def test_all_declares_expected_names() -> None:
     """__all__ should list exactly the intended public re-exports."""
     assert set(sdk.__all__) == {
         "AgentIdentity",
+        "DecisionRecorder",
         "NorviqBlockError",
         "NorviqEscalateError",
         "PolicyDecision",
@@ -19,6 +20,7 @@ def test_all_declares_expected_names() -> None:
         "SupportsEvaluate",
         "ToolCallEvent",
         "ToolInterceptor",
+        "capture_decisions",
     }
 
 
@@ -69,6 +71,15 @@ def test_exception_identities() -> None:
 
     assert sdk.NorviqBlockError is DeepNorviqBlockError
     assert sdk.NorviqEscalateError is DeepNorviqEscalateError
+
+
+def test_recorder_identities() -> None:
+    """norviq.sdk recorder re-exports must be the same objects as the deep import."""
+    from norviq.sdk.core.recorder import DecisionRecorder as DeepDecisionRecorder
+    from norviq.sdk.core.recorder import capture_decisions as deep_capture
+
+    assert sdk.DecisionRecorder is DeepDecisionRecorder
+    assert sdk.capture_decisions is deep_capture
 
 
 def test_framework_adapters_not_imported_at_package_level() -> None:

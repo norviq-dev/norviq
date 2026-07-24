@@ -11,6 +11,7 @@ from norviq.engine.identity import SPIFFEResolver
 from norviq.exceptions import NorviqBlockError, NorviqEscalateError
 from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
+from norviq.sdk.core.recorder import record_decision
 
 log = structlog.get_logger()
 
@@ -56,6 +57,11 @@ class ToolInterceptor:
             call_depth=call_depth,
         )
         decision = await self._evaluator.evaluate(event)
+        # Record every evaluated call on the active capture scope (if any). This is what lets a host
+        # report a block that a framework's own agent loop swallows before it can propagate — and gives
+        # an honest tools_called for frameworks whose message objects don't expose the calls. No-op
+        # (one ContextVar.get) when nothing opted in, so the in-cluster hot path is untouched.
+        record_decision(tool_name, decision)
         log.info("nrvq.intercept.result", tool=tool_name, decision=decision.decision, code="NRVQ-SDK-1020")
         return decision
 
