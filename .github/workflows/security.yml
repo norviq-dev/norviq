@@ -6,8 +6,11 @@ name: Security (SAST)
 # This workflow does code / deps / secrets / IaC (filesystem + config) analysis only.
 #
 # Start-green, then ratchet (see docs/engineering/security-baseline.md):
-#   - Diff-aware jobs (secrets, python-sast, ts-sast) fail-closed on NEW high/critical only —
-#     pre-existing findings never fail a PR because only the PR range / changed files are scanned.
+#   - Diff-aware jobs (secrets, python-sast) fail-closed on NEW high/critical only — pre-existing
+#     findings never fail a PR because only the PR range / changed files are scanned. python-sast's
+#     semgrep step also scans ui/src.
+#   - ts-sast (eslint-security) scans the WHOLE ui/src fail-closed (any finding fails the build); it
+#     starts green today. Rules live in ui/eslint.config.js (eslint-plugin-security).
 #   - Whole-repo jobs (deps-audit, iac) start REPORT-ONLY (soft-fail) until the baseline is triaged
 #     into the allowlist files, then flip `soft_fail`/`continue-on-error` to blocking.
 
@@ -63,7 +66,9 @@ jobs:
           semgrep scan --config=auto --error --severity=ERROR \
             --baseline-commit "${{ github.event.pull_request.base.sha }}" norviq/ ui/src
 
-  # ── TS/JS SAST: eslint security plugin on changed files, fail-closed. ──
+  # ── TS/JS SAST: eslint-plugin-security over the whole ui/src, FAIL-CLOSED (any finding fails the
+  #    build). Rules in ui/eslint.config.js. Complements the semgrep step above (which also scans
+  #    ui/src) with JS/TS-specific security rules (eval, unsafe-regex, child_process, bidi, …). ──
   ts-sast:
     runs-on: ubuntu-latest
     steps:
@@ -71,11 +76,11 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
-      - name: eslint (security, ui changed)
+      - name: eslint (security, whole ui/src, fail-closed)
         working-directory: ui
         run: |
           npm ci --no-audit --no-fund
-          npx eslint --no-error-on-unmatched-pattern src || echo "eslint config governs severity"
+          npx eslint --no-error-on-unmatched-pattern src
 
   # ── Dependency audits: REPORT-ONLY until the baseline is triaged, then flip to blocking. ──
   deps-audit:

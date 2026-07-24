@@ -260,10 +260,13 @@ were missed:
 
 - **OPA binary** is pinned and checksummed in the build, not pulled loose at runtime.
 - **Container images** are gated by Trivy (`build.yml` post-build scan on `main`); the SAST gate
-  (`.github/workflows/security.yml` + `.pre-commit-config.yaml`) runs gitleaks, bandit, semgrep, and
-  eslint-security diff-aware against every PR — new HIGH/CRITICAL findings fail the build,
-  never backlogged (see [`security-baseline.md`](engineering/security-baseline.md) for the full triage
-  rule and the whole-repo-scan ratchet plan).
+  (`.github/workflows/security.yml` + `.pre-commit-config.yaml`) runs gitleaks, bandit, and semgrep
+  diff-aware against every PR — new HIGH/CRITICAL findings fail the build, never backlogged.
+  **eslint-security** (eslint-plugin-security) additionally scans the whole `ui/src` fail-closed — any
+  finding fails the build — adding JS/TS-specific security rules (eval, unsafe-regex, child_process,
+  bidi-characters, …) on top of semgrep's `ui/src` pass (see
+  [`security-baseline.md`](engineering/security-baseline.md) for the full triage rule and the
+  whole-repo-scan ratchet plan).
 - **FOSSA** dependency scanning covers open-source license/security posture (badge on the repo
   README).
 - **Third-party GitHub Actions are SHA-pinned**, not tag-pinned, so a compromised upstream tag can't

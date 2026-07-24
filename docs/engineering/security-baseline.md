@@ -22,7 +22,7 @@ live, so nothing is silently ignored.
 | gitleaks | PR commit **range** only (not history) | **Yes** — new secrets fail | already blocking; allowlist in `.gitleaks.toml` |
 | bandit | **changed** `norviq/**/*.py`, `-ll` | **Yes** — new high fails | config `[tool.bandit]` in `pyproject.toml` |
 | semgrep | diff-aware `--baseline-commit <base>` | **Yes** — new findings fail | ignores in `.semgrepignore` |
-| eslint-security | changed `ui/src` | Yes (per eslint config) | ui eslint config |
+| eslint-security | whole `ui/src` (eslint-plugin-security rules) | **Yes** — any finding fails, fail-closed (starts green today) | already blocking; rules in `ui/eslint.config.js` (`detect-object-injection` off as too noisy; confirmed false positives suppressed inline with a rationale) |
 | pip-audit / npm audit | whole repo | **No — report-only** | remove `continue-on-error` on `deps-audit` |
 | checkov / kube-linter / trivy-config | whole `helm/` (chart + CRDs) | **No — report-only** | `.checkov.yaml soft-fail:false`; set `iac` job `exit-code:1`; drop `continue-on-error` |
 | trivy **image** (engine/api/ui/webhook) | post-build on `main` (`build.yml`) | **Yes — blocking** (`exit-code:"1"`, fail-closed) | already blocking; new fixable HIGH/CRITICAL findings fail the build; accepted findings are triaged into `.trivyignore` with a rationale (baselined findings log below) |

@@ -40,7 +40,7 @@ FIRST LOGIN
 
   Automation/CI: mint a short-lived admin token in-cluster (no password, key never leaves the cluster):
       norviq login -n {{ .Release.Namespace }} --console-url http://localhost:3000
-  It prints a sign-in link (or paste the printed token under the console login's "Advanced" section).
+  It prints a sign-in link (or paste the printed token under the console login's "Use a token / CLI" field).
 
 To access the API:
   kubectl port-forward svc/norviq-api 8080:{{ .Values.api.port }} -n {{ .Release.Namespace }}

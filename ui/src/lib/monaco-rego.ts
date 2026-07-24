@@ -54,6 +54,7 @@ export function registerRego(monaco: Monaco): void {
         [/"([^"\\]|\\.)*$/, "string.invalid"],
         [/"/, { token: "string.quote", next: "@string" }],
         [/`/, { token: "string.quote", next: "@rawstring" }],
+        // eslint-disable-next-line security/detect-unsafe-regex -- false positive: linear pattern (two \d+ split by a literal '.', optional linear exponent; no nested quantifier → no ReDoS), and it only tokenizes the user's own editor text
         [/\d+\.\d+([eE][-+]?\d+)?/, "number.float"],
         [/\d+/, "number"],
         [/[{}()[\]]/, "@brackets"],
