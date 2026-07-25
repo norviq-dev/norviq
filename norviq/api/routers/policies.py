@@ -20,6 +20,7 @@ from norviq.api.synthetic import is_synthetic_identity  # exclude probe/test tra
 from norviq.api.threat_intent import (  # accumulate remediation controls in the single overlay
     generate_remediation_overlay_rego, parse_remediation_controls, union_remediation_controls)
 from norviq.config import settings
+from norviq.exceptions import NorviqError
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -789,7 +790,10 @@ async def rollback_policy(
         raise reserved
     try:
         rego = await request.app.state.loader.rollback(namespace, agent_class, body.target_version)
-    except Exception as exc:
+    except NorviqError as exc:
+        # NorviqError here is the loader's deliberate, caller-facing "version N not found" (NRVQ-REG-5004),
+        # so echoing it is the useful 404. Anything else (a DB/driver failure) is NOT a 404 and its text is
+        # not for the caller — let it surface as a normal 500 instead of leaking internals under a 404.
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     log.info("nrvq.api.policy.rolled_back", namespace=namespace, version=body.target_version,
              actor=user.get("sub"), actor_role=user.get("role"), code="NRVQ-API-7013")

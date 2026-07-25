@@ -519,7 +519,10 @@ async def get_asset_graph(
             traceback=tb,
             code="NRVQ-API-7050-ERR",
         )
-        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}")
+        # Do NOT echo the exception text to the caller (CWE-209): a driver/ORM error can carry table and
+        # column names, query fragments or connection details. The full type + message + traceback is
+        # already logged above with its NRVQ code, which is where an operator should read it.
+        raise HTTPException(status_code=500, detail="internal error building the graph") from exc
 
 
 @router.get("/attack-paths", response_model=AttackPathsResponse)
@@ -609,4 +612,7 @@ async def get_attack_paths(
             traceback=tb,
             code="NRVQ-API-7051-ERR",
         )
-        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {exc}")
+        # Do NOT echo the exception text to the caller (CWE-209): a driver/ORM error can carry table and
+        # column names, query fragments or connection details. The full type + message + traceback is
+        # already logged above with its NRVQ code, which is where an operator should read it.
+        raise HTTPException(status_code=500, detail="internal error building the graph") from exc
