@@ -49,4 +49,7 @@ async def trigger_attack_graph_computation(
             error=str(exc),
             code="NRVQ-API-7060-ERR",
         )
-        raise HTTPException(status_code=500, detail=f"Compute failed: {exc}") from exc
+        # Generic detail on purpose (CWE-209): the compute path touches the DB and the graph store, and
+        # a driver error can carry table/column names or connection details. Full text + traceback is in
+        # the log line above under NRVQ-API-7060-ERR.
+        raise HTTPException(status_code=500, detail="attack-graph compute failed") from exc

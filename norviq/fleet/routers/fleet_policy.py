@@ -91,12 +91,26 @@ async def author_policy(
 
 @router.get("/fleet/policies")
 async def list_policies(
+    cluster: str | None = Query(default=None),
     session: AsyncSession = Depends(fleet_get_session),
     user: dict = Depends(get_current_user),
 ) -> list[dict]:
-    """List authored fleet policies (so the console can show what's pushed + offer Retract). Admin/service."""
+    """List authored fleet policies (so the console can show what's pushed + offer Retract). Admin/service.
+
+    Cluster-scoped like every other fleet read: this used to return EVERY row to any admin-or-service
+    caller, so a spoke's cluster-scoped service token could enumerate other clusters' policy names,
+    namespaces, agent classes and selectors — while the POST sibling right above already enforces
+    scope on `target_selector.cluster_id`. The filter mirrors that rule exactly: a per-cluster OVERRIDE
+    belongs to its target cluster and is hidden from everyone else. Fleet-wide / label-selector rows
+    (no `cluster_id`) stay visible because they may well apply to the caller's own cluster — narrowing
+    those further would need the caller's Cluster labels (see `_resolve_for_cluster`) and would hide
+    policies the caller is genuinely subject to.
+    """
     require_admin_or_service(user)
+    cluster = scoped_cluster(user, cluster)
     rows = list((await session.execute(select(FleetPolicy))).scalars().all())
+    if cluster not in (None, "", "*"):
+        rows = [p for p in rows if (p.target_selector or {}).get("cluster_id", cluster) == cluster]
     return [{
         "name": p.name, "namespace": p.namespace, "agent_class": p.agent_class,
         "target_selector": p.target_selector, "enforcement_mode": p.enforcement_mode,

@@ -30,6 +30,7 @@ import subprocess
 
 import pytest
 import yaml
+from tests.conftest import HELM_STRONG_DATASTORES
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 _CHART = _REPO_ROOT / "helm" / "norviq"
@@ -42,11 +43,19 @@ _BASELINE_OFF = ["--set", "baselineClusterPolicy.enabled=false"]
 requires_helm = pytest.mark.skipif(shutil.which("helm") is None, reason="helm binary not on PATH")
 
 
-def _template(*extra: str, show_only: str | None = None) -> subprocess.CompletedProcess[str]:
+def _template_raw(*extra: str, show_only: str | None = None) -> subprocess.CompletedProcess[str]:
+    """Render WITHOUT supplying datastore credentials — for the tests that assert the guard fires.
+    (`--set` beats `--values`, so injecting credentials here would override the prod overlay's blanks
+    and the guard under test would never fire.)"""
     cmd = ["helm", "template", "norviq", str(_CHART), *_BASELINE_OFF, *extra]
     if show_only is not None:
         cmd += ["--show-only", show_only]
     return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def _template(*extra: str, show_only: str | None = None) -> subprocess.CompletedProcess[str]:
+    """Render with strong datastore credentials supplied (the normal, non-guard case)."""
+    return _template_raw(*HELM_STRONG_DATASTORES, *extra, show_only=show_only)
 
 
 def _docs(manifest: str) -> list[dict]:
@@ -72,7 +81,7 @@ def test_def004_prod_overlay_blank_db_password_fails_render() -> None:
     Pre-fix: values-prod did not blank the passwords and secret.yaml had no gate, so this render
     succeeded and NRVQ_PG_URL embedded `norviq-pg-password` (the whole defect). Post-fix it aborts.
     """
-    res = _template("--values", str(_PROD_VALUES))
+    res = _template_raw("--values", str(_PROD_VALUES))
     assert res.returncode != 0, "prod overlay must refuse to render without a supplied DB password"
     assert "postgresql.password" in res.stderr
     assert "requireStrongSecret" in res.stderr
@@ -81,7 +90,7 @@ def test_def004_prod_overlay_blank_db_password_fails_render() -> None:
 @requires_helm
 def test_def004_prod_overlay_blank_redis_password_fails_render() -> None:
     """With a strong PG password supplied but redis still blank, the redis gate fires."""
-    res = _template(
+    res = _template_raw(
         "--values", str(_PROD_VALUES),
         "--set", "postgresql.password=Str0ngPgPw",
     )

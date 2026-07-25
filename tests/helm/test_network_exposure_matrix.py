@@ -43,6 +43,7 @@ from typing import Any, Iterator
 
 import pytest
 import yaml
+from tests.conftest import HELM_STRONG_DATASTORES
 
 _CHART = pathlib.Path(__file__).resolve().parents[2] / "helm" / "norviq"
 
@@ -202,7 +203,7 @@ _OPA_ADMIN_PORT = 8181
 
 @functools.lru_cache(maxsize=None)
 def _render(profile: str) -> str:
-    cmd = ["helm", "template", "norviq", str(_CHART), *_NAMESPACES, *_PROFILES[profile]]
+    cmd = ["helm", "template", "norviq", str(_CHART), *HELM_STRONG_DATASTORES, *_NAMESPACES, *_PROFILES[profile]]
     res = subprocess.run(cmd, capture_output=True, text=True)
     assert res.returncode == 0, f"profile {profile!r} failed to render:\n{res.stderr}"
     return res.stdout

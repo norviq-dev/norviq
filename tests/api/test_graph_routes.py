@@ -80,3 +80,47 @@ def test_attack_paths_no_claim_viewer_is_403() -> None:
         assert client.get("/api/v1/attack-paths?namespace=default").status_code == 403
     finally:
         client.close()
+
+
+# --- error responses must not echo the exception text (CWE-209) ------------------------------------
+
+
+def _client_with_failing_db(boom: Exception) -> TestClient:
+    """Client whose DB session yields OK but raises on query, so the failure happens INSIDE the route
+    body and actually reaches its `except Exception` handler. (A dependency that raises on yield is
+    caught by FastAPI itself and returns a generic 500 without ever entering the route — a test built
+    that way passes against the vulnerable code too, i.e. proves nothing.)"""
+    app = create_app()
+    app.state.evaluator = _FakeEvaluator()
+    app.dependency_overrides[get_current_user] = lambda: {"role": "admin", "namespace": "default"}
+
+    class _ExplodingSession:
+        async def execute(self, *a, **kw):
+            raise boom
+
+        async def close(self):
+            return None
+
+    async def _session():
+        yield _ExplodingSession()
+
+    app.dependency_overrides[get_session] = _session
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_graph_500_does_not_leak_exception_text() -> None:
+    """A driver/ORM error can carry table names, query fragments or connection details — the response
+    must stay generic (the full type + message + traceback is logged server-side instead)."""
+    # No quotes/backslashes: JSON-escaping must not be what makes this assertion pass.
+    secret = "relation api_keys does not exist at 10.0.0.5:5432 user=norviq"
+    for path in ("/api/v1/asset-graph", "/api/v1/attack-paths"):
+        client = _client_with_failing_db(RuntimeError(secret))
+        try:
+            resp = client.get(path)
+            assert resp.status_code == 500, f"{path} -> {resp.status_code}"
+            body = resp.text
+            assert secret not in body, f"{path} leaked the exception message"
+            assert "RuntimeError" not in body, f"{path} leaked the exception type"
+            assert "api_keys" not in body
+        finally:
+            client.close()
