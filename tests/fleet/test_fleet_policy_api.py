@@ -153,3 +153,62 @@ def test_rollout_state_machine() -> None:
     assert _run({"bundle_version": 5, "state": "applied", "applied_version": 5}, 5) == "applied"
     assert _run({"bundle_version": 5, "state": "applied", "applied_version": 4}, 5) == "diverged"
     assert _run({"bundle_version": 5, "state": "failed", "applied_version": 0}, 5) == "failed"
+
+
+# --- GET /fleet/policies must be cluster-scoped like every other fleet read ------------------------
+# Regression: the list returned EVERY authored policy to any admin-or-service caller, so a spoke's
+# cluster-scoped service token could enumerate other clusters' policy names, namespaces, agent classes
+# and selectors — while POST /fleet/policies right above it already enforces scope on
+# target_selector.cluster_id.
+
+
+def _policy_row(name: str, selector: dict):
+    return SimpleNamespace(
+        name=name, namespace="default", agent_class="bot", target_selector=selector,
+        enforcement_mode="block", priority=100, version=1, updated_at=None,
+    )
+
+
+_ROWS = [
+    _policy_row("override-a", {"cluster_id": "fleet-a"}),  # belongs to fleet-a
+    _policy_row("override-b", {"cluster_id": "fleet-b"}),  # belongs to fleet-b
+    _policy_row("fleet-wide", {}),                          # applies everywhere
+    _policy_row("by-label", {"env": "prod"}),               # cohort selector, no cluster_id
+]
+
+
+def test_list_policies_hides_other_clusters_overrides() -> None:
+    """A fleet-a service token must not see fleet-b's per-cluster override."""
+    c = _client(FakeFleetSession([list(_ROWS)]))
+    try:
+        r = c.get("/api/v1/fleet/policies", headers=_headers(role="service", cluster="fleet-a"))
+        assert r.status_code == 200
+        names = {p["name"] for p in r.json()}
+        assert "override-b" not in names  # the leak
+        assert "override-a" in names  # its own override
+        # Rows with no cluster_id may apply to this cluster too, so they stay visible.
+        assert {"fleet-wide", "by-label"} <= names
+    finally:
+        c.close()
+
+
+def test_list_policies_admin_still_sees_every_cluster() -> None:
+    """Admin (and cluster='*') keeps the fleet-wide view the console needs."""
+    for headers in (_headers(role="admin", cluster=""), _headers(role="service", cluster="*")):
+        c = _client(FakeFleetSession([list(_ROWS)]))
+        try:
+            r = c.get("/api/v1/fleet/policies", headers=headers)
+            assert r.status_code == 200
+            assert {p["name"] for p in r.json()} == {"override-a", "override-b", "fleet-wide", "by-label"}
+        finally:
+            c.close()
+
+
+def test_list_policies_cross_cluster_query_denied() -> None:
+    """Asking for another cluster explicitly is a 403, exactly like the sibling reads."""
+    c = _client(FakeFleetSession([list(_ROWS)]))
+    try:
+        r = c.get("/api/v1/fleet/policies?cluster=fleet-b", headers=_headers(role="service", cluster="fleet-a"))
+        assert r.status_code == 403
+    finally:
+        c.close()
