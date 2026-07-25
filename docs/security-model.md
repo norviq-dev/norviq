@@ -100,10 +100,27 @@ not traverse the sidecar.
   client private key is never readable by the workload and never lands on a real disk. Asserted by
   `webhook/injector_writable_tmp_test.go`, which fails if anyone "fixes" a temp-dir crash by turning
   `readOnlyRootFilesystem` off.
-- **The central API/engine** — validates the caller's service JWT, resolves the caller's SPIFFE
-  identity to `(namespace, agent_class)`, collects candidate policies, computes the trust score
+- **The central API/engine** — validates the caller's service JWT, resolves the caller's
+  `(namespace, agent_class, spiffe_id)`, collects candidate policies, computes the trust score
   server-side, and queries OPA. This is where the actual allow/block decision is made — the sidecar
   and the SDK never decide locally.
+
+  **Identity is bound to the credential, not taken from the request body.** All three fields are
+  authorization inputs, not labels: `namespace` scopes the tenant, `agent_class` *selects which Rego
+  program is enforced*, and `spiffe_id` keys the trust score **and** the `agent_frozen:` kill-switch.
+  `/evaluate` therefore pins each of them to the caller (`auth.scoped_namespace` +
+  `auth.scoped_identity`): a credential that carries an `agent_class`/`spiffe_id` claim may only ever be
+  evaluated as that identity — asserting a sibling class (to run its looser policy) or another SPIFFE id
+  (to shed a freeze) is a 403 (`NRVQ-AUTH-14019`). Bindings are issued at provisioning time: the
+  admission webhook stamps `agent_class` into each injected sidecar's token from the pod's
+  `norviq.io/agent-class` label, and API keys take `agent_class`/`spiffe_id` at creation.
+
+  A credential carrying **no** binding (a sidecar token minted before this shipped, or an operator/CI
+  key issued without one) is still accepted by default, so an upgrade does not fail-closed every
+  in-flight sidecar mid-rollout. That is a deliberate ratchet, not the end state — set
+  `auth.requireBoundAgentIdentity=true` once sidecars have been re-admitted and workload keys re-issued,
+  and every non-admin caller must then present a bound credential (`NRVQ-AUTH-14020`). Admin keeps the
+  cross-identity latitude it already has across namespaces (console what-if, red-team simulation).
 - **OPA** — evaluates Rego against the input document `_build_input` constructs (see
   [`opa-input-schema.md`](engineering/opa-input-schema.md)). Each deployment runs OPA per-replica (the
   in-pod sidecar model, `NRVQ_OPA_URL` pointing at `localhost:8181`, or a per-process managed server in

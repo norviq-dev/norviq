@@ -46,6 +46,10 @@ data:
   NRVQ_TRUST_THRESHOLD: {{ .Values.config.trustThreshold | quote }}
   NRVQ_VIOLATION_PENALTY: {{ .Values.config.violationPenalty | quote }}
   NRVQ_RATE_LIMIT: {{ .Values.config.rateLimit | quote }}
+  # X-Forwarded-For trust for rate-limit bucketing: believed only from a trusted PEER (default loopback =
+  # the in-pod tls-proxy nginx, which replaces the header), taking the Nth entry from the right.
+  NRVQ_HTTP_RATE_LIMIT_TRUSTED_PROXY_HOPS: {{ .Values.config.httpRateLimitTrustedProxyHops | default 1 | quote }}
+  NRVQ_HTTP_RATE_LIMIT_TRUSTED_PROXY_CIDRS: {{ .Values.config.httpRateLimitTrustedProxyCidrs | default (list "127.0.0.0/8" "::1/128") | toJson | quote }}
   # Per-pod in-process L1 for the enforcement hot path: posture, stored trust score, trust
   # history/profile AND the pre-override base decision (that one additionally clamped to
   # redis_ttl_eval_s + cleared on policy change). The admin freeze/cap are NEVER cached — always read
@@ -88,6 +92,10 @@ data:
   NRVQ_AUTH_LOGIN_MAX_ATTEMPTS: {{ .Values.auth.loginMaxAttempts | default 5 | quote }}
   NRVQ_AUTH_LOGIN_WINDOW_S: {{ .Values.auth.loginWindowSeconds | default 300 | quote }}
   NRVQ_AUTH_MIN_PASSWORD_LENGTH: {{ .Values.auth.minPasswordLength | default 12 | quote }}
+  # Ratchet for /evaluate identity binding: when true, a non-admin caller whose credential carries NO
+  # agent_class/spiffe_id binding is refused (403). A credential that DOES carry one is always pinned
+  # to it regardless. See auth.scoped_identity.
+  NRVQ_AUTH_REQUIRE_BOUND_AGENT_IDENTITY: {{ .Values.auth.requireBoundAgentIdentity | default false | quote }}
   # --- OIDC + workload-identity mode. Default-off; legacy HS256 stays on. ---
   NRVQ_OIDC_ENABLED: {{ .Values.oidc.enabled | default false | quote }}
   NRVQ_OIDC_ISSUER: {{ .Values.oidc.issuer | default "" | quote }}
