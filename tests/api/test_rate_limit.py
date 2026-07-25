@@ -89,6 +89,85 @@ def test_redis_down_fails_open(monkeypatch) -> None:
         assert resp.status_code == 200
 
 
+# --- X-Forwarded-For trust (throttle-bypass regression) --------------------------------------------
+# XFF is client-writable, so bucketing on its left-most entry let a caller rotate the header and never
+# fill a bucket. It is now believed only when the TCP PEER is a trusted proxy AND the chain is long
+# enough, taking the Nth entry from the RIGHT. _client_ip is unit-tested directly against an ASGI scope
+# because TestClient's peer is the fixed literal "testclient", which is not an IP and so is never trusted.
+
+from norviq.api.rate_limit import _client_ip  # noqa: E402 - grouped with the XFF cases below
+
+_TRUSTED_PEER = ("127.0.0.1", 51000)  # the in-pod nginx
+_UNTRUSTED_PEER = ("10.42.0.9", 51000)  # another pod hitting the API port directly
+
+
+def _scope(peer, *xff_headers):
+    return {"client": peer, "headers": [(b"x-forwarded-for", v.encode()) for v in xff_headers]}
+
+
+def test_rotating_xff_cannot_evade_the_throttle(monkeypatch) -> None:
+    """THE BYPASS: from an UNTRUSTED peer a fresh XFF per request must not mint a fresh bucket."""
+    monkeypatch.setattr(settings, "http_rate_limit_enabled", True)
+    monkeypatch.setattr(settings, "http_rate_limit_default_per_window", 2)
+    client = TestClient(_app(_FakeCache()))
+    codes = [
+        client.get("/api/v1/whatever", headers={"X-Forwarded-For": f"203.0.113.{i}"}).status_code for i in range(1, 6)
+    ]
+    assert codes[:2] == [200, 200]
+    assert codes[2:] == [429, 429, 429]  # every rotated value collapses to the one peer bucket
+
+
+def test_xff_from_untrusted_peer_is_ignored(monkeypatch) -> None:
+    """A workload hitting the API port directly cannot reach the forgeable path at all."""
+    monkeypatch.setattr(settings, "http_rate_limit_trusted_proxy_hops", 1)
+    assert _client_ip(_scope(_UNTRUSTED_PEER, "203.0.113.9")) == "10.42.0.9"
+
+
+def test_xff_from_trusted_proxy_yields_the_real_client(monkeypatch) -> None:
+    """Through the in-pod nginx (which REPLACES the header) each caller keeps its own bucket."""
+    monkeypatch.setattr(settings, "http_rate_limit_trusted_proxy_hops", 1)
+    assert _client_ip(_scope(_TRUSTED_PEER, "203.0.113.9")) == "203.0.113.9"
+
+
+def test_trusted_proxy_uses_nth_entry_from_the_right(monkeypatch) -> None:
+    """Forged left-hand entries are ignored; only what our own proxy appended is used."""
+    monkeypatch.setattr(settings, "http_rate_limit_trusted_proxy_hops", 1)
+    assert _client_ip(_scope(_TRUSTED_PEER, "1.2.3.4, 5.6.7.8, 198.51.100.23")) == "198.51.100.23"
+
+
+def test_duplicate_xff_headers_cannot_hand_the_attacker_the_value(monkeypatch) -> None:
+    """A proxy that ADDS its own header line must not leave the attacker's line first."""
+    monkeypatch.setattr(settings, "http_rate_limit_trusted_proxy_hops", 1)
+    # First header is the caller's own; the second was added by our proxy.
+    assert _client_ip(_scope(_TRUSTED_PEER, "1.2.3.4", "198.51.100.23")) == "198.51.100.23"
+
+
+def test_short_xff_chain_falls_back_to_peer(monkeypatch) -> None:
+    """Fewer entries than trusted hops = it didn't traverse the expected chain -> use the peer."""
+    monkeypatch.setattr(settings, "http_rate_limit_trusted_proxy_hops", 2)
+    assert _client_ip(_scope(_TRUSTED_PEER, "203.0.113.9")) == "127.0.0.1"
+
+
+def test_hops_zero_always_uses_the_peer(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "http_rate_limit_trusted_proxy_hops", 0)
+    assert _client_ip(_scope(_TRUSTED_PEER, "203.0.113.9")) == "127.0.0.1"
+
+
+def test_port_and_ipv6_forms_normalize_to_one_bucket(monkeypatch) -> None:
+    """A rotating source port (or a bracketed/odd IPv6 spelling) must not mint a fresh bucket."""
+    monkeypatch.setattr(settings, "http_rate_limit_trusted_proxy_hops", 1)
+    assert _client_ip(_scope(_TRUSTED_PEER, "203.0.113.7:41022")) == "203.0.113.7"
+    assert _client_ip(_scope(_TRUSTED_PEER, "203.0.113.7:41999")) == "203.0.113.7"  # same bucket
+    assert _client_ip(_scope(_TRUSTED_PEER, "[2001:db8::1]:41022")) == "2001:db8::1"
+    assert _client_ip(_scope(_TRUSTED_PEER, "2001:0db8:0000::1")) == "2001:db8::1"  # canonicalized
+
+
+def test_garbage_xff_entry_falls_back_to_peer(monkeypatch) -> None:
+    """A non-IP string must never become a bucket key."""
+    monkeypatch.setattr(settings, "http_rate_limit_trusted_proxy_hops", 1)
+    assert _client_ip(_scope(_TRUSTED_PEER, "not-an-ip")) == "127.0.0.1"
+
+
 def test_disabled_short_circuits(monkeypatch) -> None:
     """http_rate_limit_enabled=False bypasses the limiter entirely (operator kill switch)."""
     monkeypatch.setattr(settings, "http_rate_limit_enabled", False)

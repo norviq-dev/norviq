@@ -34,8 +34,10 @@ in pure ASGI (send our own response, never touch ``receive``/the body); the pass
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import time
+from functools import lru_cache
 
 import jwt
 import structlog
@@ -73,14 +75,98 @@ def _limit_for(route_class: str) -> int:
     }.get(route_class, settings.http_rate_limit_default_per_window)
 
 
-def _client_ip(scope) -> str:
-    """Best-effort caller IP: honor X-Forwarded-For (ingress/proxy) first, else the raw ASGI client."""
-    for name, value in scope.get("headers") or ():
-        if name == b"x-forwarded-for":
-            # Left-most entry is the original client (standard XFF convention).
-            return value.decode(errors="replace").split(",")[0].strip()
+def _peer_ip(scope) -> str:
+    """The real TCP peer address — the only value a caller cannot forge."""
     client = scope.get("client")
     return client[0] if client else "unknown"
+
+
+@lru_cache(maxsize=8)
+def _trusted_networks(cidrs: tuple[str, ...]) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    """Parse the trusted-proxy CIDRs ONCE per distinct config value.
+
+    Off the hot path (every request would otherwise re-parse), and it gives a malformed entry one LOUD
+    log instead of a silent per-request skip: a CIDR that doesn't parse is dropped, which can only ever
+    NARROW trust (the peer then fails the check and we fall back to its unforgeable address).
+    """
+    nets = []
+    for raw in cidrs:
+        try:
+            nets.append(ipaddress.ip_network(raw.strip(), strict=False))
+        except ValueError:
+            log.error(
+                "nrvq.api.rate_limit.bad_trusted_cidr",
+                cidr=raw,
+                detail="ignored — XFF from peers in this range will NOT be trusted",
+                code="NRVQ-API-7131",
+            )
+    return tuple(nets)
+
+
+def _peer_is_trusted(peer: str) -> bool:
+    """Is the TCP peer one of the reverse proxies we're willing to believe an XFF header from?"""
+    try:
+        addr = ipaddress.ip_address(peer)
+    except ValueError:
+        # Not an IP at all (e.g. a unix-socket peer, or TestClient's "testclient") — never trusted.
+        return False
+    return any(addr in net for net in _trusted_networks(tuple(settings.http_rate_limit_trusted_proxy_cidrs)))
+
+
+def _normalize_ip(raw: str) -> str:
+    """Return a canonical bare IP for use as a bucket key, or "" when it isn't one.
+
+    Guards three ways an XFF entry splits one caller across many buckets (each a free throttle reset):
+    a ``host:port`` suffix with a rotating source port, the bracketed ``[v6]:port`` form, and
+    non-canonical IPv6 spellings of the same address. A non-IP string is rejected outright so it can
+    never become a bucket key (or a log field).
+    """
+    value = raw.strip()
+    if value.startswith("["):  # [2001:db8::1] or [2001:db8::1]:41022
+        value = value[1:].split("]", 1)[0]
+    elif value.count(":") == 1:  # host:port — never split a bare IPv6, which has multiple colons
+        value = value.split(":", 1)[0]
+    try:
+        return str(ipaddress.ip_address(value))
+    except ValueError:
+        return ""
+
+
+def _client_ip(scope) -> str:
+    """Caller IP for rate-limit bucketing, derived only from data we actually trust.
+
+    ``X-Forwarded-For`` is client-WRITABLE, so its left-most entry is whatever the caller typed. Keying a
+    throttle on that means an attacker rotates the header and every request lands in a fresh bucket — the
+    ceiling is never reached (throttle bypass, worst on the pre-auth ``/auth/login`` route, which is
+    always IP-keyed). But ignoring XFF outright is not the answer either: behind a proxy every caller
+    would then share the proxy's single bucket, so one abuser throttles everyone (self-DoS).
+
+    So the header is believed only when BOTH hold:
+
+    * the TCP **peer** is a trusted proxy (``http_rate_limit_trusted_proxy_cidrs``, default loopback —
+      exactly the in-pod nginx the chart runs in front of the API). This is the load-bearing check: a pod
+      hitting the API's plaintext port directly is not loopback, so its XFF is ignored and it cannot
+      reach the forgeable path at all; and
+    * the chain is at least ``http_rate_limit_trusted_proxy_hops`` long, in which case the Nth entry
+      FROM THE RIGHT is used — the address our outermost trusted proxy observed, which the caller cannot
+      control by prepending entries.
+
+    Anything else falls back to the unforgeable TCP peer.
+    """
+    peer = _peer_ip(scope)
+    hops = int(settings.http_rate_limit_trusted_proxy_hops or 0)
+    if hops <= 0 or not _peer_is_trusted(peer):
+        return peer
+    # RFC 7239 treats repeated headers as equivalent to one comma-joined chain; join ALL of them so a
+    # proxy that ADDS its own header line can't leave the attacker's line first (returning on the first
+    # header would hand the attacker the value).
+    chain = b",".join(v for n, v in (scope.get("headers") or ()) if n == b"x-forwarded-for")
+    if not chain:
+        return peer
+    parts = [p.strip() for p in chain.decode(errors="replace").split(",") if p.strip()]
+    if len(parts) < hops:
+        return peer  # didn't traverse the expected chain — don't trust a short/forged one
+    return _normalize_ip(parts[-hops]) or peer
 
 
 def _unverified_sub(scope) -> str | None:
