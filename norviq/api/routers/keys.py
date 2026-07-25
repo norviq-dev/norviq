@@ -34,6 +34,12 @@ class KeyCreate(BaseModel):
     namespace: str = Field(default="default", max_length=255)
     role: str = Field(default="viewer", pattern="^(admin|service|viewer)$")
     expires_in_days: int | None = Field(default=None, ge=0, le=3650)
+    # Identity BINDING for a workload key (auth.scoped_identity). Set these when issuing a key to an
+    # agent: /evaluate then pins the key to exactly this class/SPIFFE id, so it cannot be evaluated
+    # under a different (looser) agent_class or shed its agent_frozen: kill-switch. Omit for
+    # operator/CI keys — empty stays unbound, exactly as before.
+    agent_class: str = Field(default="", max_length=255)
+    spiffe_id: str = Field(default="", max_length=512)
 
 
 def _resolve_expiry(expires_in_days: int | None) -> datetime | None:
@@ -53,6 +59,9 @@ def _public(row: ApiKey) -> dict:
         "name": row.name,
         "namespace": row.namespace,
         "role": row.role,
+        # Surfaced so an operator can SEE which keys are identity-bound (empty = unbound).
+        "agent_class": getattr(row, "agent_class", "") or "",
+        "spiffe_id": getattr(row, "spiffe_id", "") or "",
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "last_used_at": row.last_used_at.isoformat() if row.last_used_at else None,
         "revoked": row.revoked,
@@ -89,6 +98,8 @@ async def create_key(
         name=body.name,
         namespace=body.namespace,
         role=body.role,
+        agent_class=body.agent_class,
+        spiffe_id=body.spiffe_id,
         created_by=str(user.get("sub") or ""),
         expires_at=expires_at,
     )

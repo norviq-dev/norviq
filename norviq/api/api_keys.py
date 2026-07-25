@@ -107,6 +107,15 @@ async def authenticate_api_key(raw: str, session_factory=get_session, cache=None
         row.last_used_at = datetime.now(timezone.utc)
         await session.commit()
         log.info("nrvq.api.apikey.authenticated", prefix=row.prefix, code="NRVQ-API-7090")
-        return {"sub": f"apikey:{row.prefix}", "role": row.role, "namespace": row.namespace, "name": row.name}
+        # agent_class/spiffe_id are the identity BINDING (auth.scoped_identity) — empty = unbound.
+        # getattr keeps a principal resolvable against a DB row predating the columns.
+        return {
+            "sub": f"apikey:{row.prefix}",
+            "role": row.role,
+            "namespace": row.namespace,
+            "name": row.name,
+            "agent_class": getattr(row, "agent_class", "") or "",
+            "spiffe_id": getattr(row, "spiffe_id", "") or "",
+        }
     finally:
         await provider.aclose()

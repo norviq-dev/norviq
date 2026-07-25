@@ -260,6 +260,105 @@ def scoped_namespace(user: dict, requested: str | None) -> str | None:
     return claim_ns or requested
 
 
+# The identity fields that SELECT ENFORCEMENT and must therefore come from the credential, never from
+# the request body. `agent_class` picks the Rego program (evaluator._collect_candidates:
+# f"{namespace}:{agent_class}"), `spiffe_id` keys the trust score + the agent_frozen: kill-switch +
+# the per-agent rate limit, and `workload` pulls in the f"{namespace}:deployment:{workload}" tier.
+_BOUND_IDENTITY_FIELDS = ("agent_class", "spiffe_id", "workload")
+# What the strict ratchet demands of a MACHINE principal. Per-field on purpose: a token bound on
+# agent_class but not spiffe_id would otherwise satisfy an "is it bound at all?" test while leaving the
+# kill-switch evadable. `workload` is excluded because no issuer mints it for the sidecar path.
+_REQUIRED_BOUND_FIELDS = ("agent_class", "spiffe_id")
+# Fields that only ADD a policy candidate. For these, "unclaimed" resolves to empty (drop the tier)
+# rather than to the body's value — clearing an additive tier can only ever be more restrictive.
+_ADDITIVE_TIER_FIELDS = ("workload",)
+
+
+def scoped_identity(user: dict, agent_identity: dict | None) -> dict:
+    """Return ``agent_identity`` with every credential-claimed field FORCED to the claim.
+
+    Companion to ``scoped_namespace``: ``namespace`` is not the only authorization-relevant field in an
+    ``agent_identity``. Each of ``_BOUND_IDENTITY_FIELDS`` selects what gets enforced, so all of them are
+    resolved from the caller's credential rather than trusted from the body.
+
+    **The claim is authoritative, not merely validated.** Checking "body matches claim" is not enough,
+    because dropping a field is as powerful as substituting one: an omitted/empty ``agent_class`` skips
+    the class program while ``__baseline__`` and ``__cluster__:__baseline__`` REMAIN candidates
+    (evaluator._collect_candidates), so the caller silently falls back to the looser baseline, loses its
+    tighten-only ``__remediation__`` overlay, and gets a neutral scope-drift trust signal instead of a
+    penalised one. An omitted ``workload`` likewise drops a workload-tier policy written for it. So a
+    claimed field is written back over whatever the body said (or didn't say).
+
+    An explicit MISMATCH is still a loud 403 (``NRVQ-AUTH-14019``) rather than a silent correction — it is
+    an attempted spoof and operators should see it. A merely absent value is corrected silently, since
+    legitimate clients routinely omit optional fields.
+
+    * ``admin`` — unrestricted (console what-if / red-team simulation evaluate as other identities, the
+      same latitude admin already has across namespaces).
+    * claim ABSENT for a field — that field stays unbound (nothing to resolve it against).
+    * ``auth_require_bound_agent_identity`` — the ratchet, applied to MACHINE principals (``role=service``)
+      only: they must carry every field in ``_REQUIRED_BOUND_FIELDS``. Human sessions have no agent
+      identity to bind and are already tenant-pinned by ``scoped_namespace``, so holding them to it would
+      only break the console's Policy Tester / Attack Graph simulate for non-admins.
+    """
+    identity = dict(agent_identity or {})
+    role = str(user.get("role", "")).lower()
+    if role == "admin":
+        return identity
+    bound: list[str] = []
+    for field in _BOUND_IDENTITY_FIELDS:
+        claim = str(user.get(field, "") or "")
+        if not claim:
+            continue
+        bound.append(field)
+        asked = str(identity.get(field) or "")
+        if asked and asked != claim:
+            log.warning(
+                "nrvq.auth.identity_binding_denied",
+                sub=user.get("sub"),
+                field=field,
+                claim=claim,
+                requested=asked,
+                code="NRVQ-AUTH-14019",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Not authorized for this {field}",
+            )
+        # Claim wins — including when the body omitted the field or sent it empty.
+        identity[field] = claim
+    # A provisioned (bound) credential may not self-select an ADDITIVE policy tier it was not issued for.
+    # `workload` only ever ADDS the f"{namespace}:deployment:{workload}" candidate, so clearing it is
+    # always the safe direction (the tier simply doesn't apply) — unlike agent_class, where clearing would
+    # DOWNGRADE to the baseline. No issuer mints a workload claim today, so without this a bound sidecar
+    # could still name any deployment and pull in that tier's program.
+    if bound:
+        for field in _ADDITIVE_TIER_FIELDS:
+            if field not in bound and identity.get(field):
+                log.info(
+                    "nrvq.auth.identity_tier_dropped",
+                    sub=user.get("sub"),
+                    field=field,
+                    requested=str(identity.get(field)),
+                    code="NRVQ-AUTH-14021",
+                )
+                identity[field] = ""
+    if role == "service":
+        missing = [f for f in _REQUIRED_BOUND_FIELDS if f not in bound]
+        if missing and settings.auth_require_bound_agent_identity:
+            log.warning(
+                "nrvq.auth.identity_unbound_denied",
+                sub=user.get("sub"),
+                missing=",".join(missing),
+                code="NRVQ-AUTH-14020",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Credential is not bound to an agent identity",
+            )
+    return identity
+
+
 def read_namespace(user: dict, requested: str | None) -> str | None:
     """Namespace filter for cross-namespace READ endpoints (Audit / Agents / MITRE / Coverage / …).
 

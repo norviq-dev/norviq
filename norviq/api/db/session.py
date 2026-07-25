@@ -138,6 +138,15 @@ async def create_tables() -> None:
             await conn.execute(
                 text("ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change BOOLEAN NOT NULL DEFAULT true")
             )
+            # Identity binding on issued API keys (auth.scoped_identity): pins a workload key to one
+            # agent_class / spiffe_id so it can't be evaluated as a looser class or dodge a freeze.
+            # Existing rows default to '' = unbound, i.e. byte-identical behavior until keys are re-issued.
+            await conn.execute(
+                text("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS agent_class VARCHAR(255) NOT NULL DEFAULT ''")
+            )
+            await conn.execute(
+                text("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS spiffe_id VARCHAR(512) NOT NULL DEFAULT ''")
+            )
             # redteam_runs.results is nullable (NULL = detail-pruned). create_all never ALTERs an
             # existing table, so drop the NOT NULL idempotently — else a retention prune (UPDATE results=NULL)
             # is rejected on a DB provisioned before D3. (No-op on a fresh DB where it's already nullable.)
