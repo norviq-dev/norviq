@@ -24,6 +24,7 @@ import subprocess
 
 import pytest
 import yaml
+from tests.conftest import HELM_STRONG_DATASTORES
 
 _CHART = pathlib.Path(__file__).resolve().parents[2] / "helm" / "norviq"
 
@@ -32,7 +33,7 @@ pytestmark = pytest.mark.skipif(shutil.which("helm") is None, reason="helm binar
 
 def _render(*extra: str) -> str:
     res = subprocess.run(
-        ["helm", "template", "norviq", str(_CHART),
+        ["helm", "template", "norviq", str(_CHART), *HELM_STRONG_DATASTORES,
          "--set", "policyQuotaNamespaces={default,chatbot-prod}", *extra],
         capture_output=True, text=True,
     )

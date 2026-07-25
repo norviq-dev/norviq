@@ -11,6 +11,11 @@ Three chart-level defects, all rendered via `helm template`:
 2. With `config.requireStrongSecret` on, enabling the fleet hub with the shipped default fleet DB
    password (`norviq_dev`) — or an empty one — must fail the render loudly, so a prod install can
    never silently ship the well-known credential.
+3. The same guard for the PRIMARY datastores: `postgresql.password` / `redis.password` must reject the
+   shipped defaults (`norviq-pg-password` / `norviq-redis-password`), not just an empty value. Checking
+   only for empty was an incomplete guard — values.yaml ships NON-empty literals, so a stock install
+   with the hardened default posture rendered a published credential straight into NRVQ_PG_URL /
+   NRVQ_REDIS_URL, for datastores that hold the policy store, the audit log and the bcrypt admin hash.
 
 Skipped (not failed) when the `helm` binary isn't on PATH, so the suite still runs in minimal envs.
 """
@@ -22,6 +27,7 @@ import shutil
 import subprocess
 
 import pytest
+from tests.conftest import HELM_STRONG_DATASTORES
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 _CHART = _REPO_ROOT / "helm" / "norviq"
@@ -31,14 +37,25 @@ _PROD_VALUES = _CHART / "values-prod.yaml"
 # `helm template` renderable without wiring policyQuotaNamespaces.
 _BASELINE_OFF = ["--set", "baselineClusterPolicy.enabled=false"]
 
+# requireStrongSecret (on by default) now refuses to render the SHIPPED-DEFAULT primary datastore
+# credentials, not just empty ones — so every test that isn't specifically exercising that guard has to
+# supply real ones, exactly as a real install must. `_template_raw` skips them for the guard tests below.
+_STRONG_DATASTORES = HELM_STRONG_DATASTORES
+
 pytestmark = pytest.mark.skipif(shutil.which("helm") is None, reason="helm binary not on PATH")
 
 
-def _template(*extra: str, show_only: str | None = None) -> subprocess.CompletedProcess[str]:
+def _template_raw(*extra: str, show_only: str | None = None) -> subprocess.CompletedProcess[str]:
+    """Render with NO datastore credentials supplied — i.e. exactly what a stock `helm install` does."""
     cmd = ["helm", "template", "norviq", str(_CHART), *_BASELINE_OFF, *extra]
     if show_only is not None:
         cmd += ["--show-only", show_only]
     return subprocess.run(cmd, capture_output=True, text=True)
+
+
+def _template(*extra: str, show_only: str | None = None) -> subprocess.CompletedProcess[str]:
+    """Render with strong datastore credentials supplied (the normal, non-guard case)."""
+    return _template_raw(*_STRONG_DATASTORES, *extra, show_only=show_only)
 
 
 def _deployment_has_replicas(manifest: str) -> bool:
@@ -125,3 +142,45 @@ def test_fleet_hub_strong_credential_renders() -> None:
     """A supplied strong fleet credential renders cleanly (guard doesn't false-positive)."""
     res = _template(*_STRONG_FLEET, "--set", "config.requireStrongSecret=true")
     assert res.returncode == 0, res.stderr
+
+
+# --- (3) requireStrongSecret must reject the shipped-default PRIMARY datastore credentials ---------
+# Regression for the published-default-credential finding. The fleet store already had this guard
+# (section 2); the primary store checked only for an empty value, so the shipped literal sailed through.
+
+
+def test_stock_install_with_shipped_default_pg_password_fails_render() -> None:
+    """The default values + the DEFAULT requireStrongSecret=true must NOT render a known credential."""
+    res = _template_raw()
+    assert res.returncode != 0, "stock render must fail rather than ship the published default DB password"
+    assert "norviq-pg-password" in res.stderr
+
+
+def test_shipped_default_redis_password_fails_render() -> None:
+    """Same for the cache: supplying a strong DB password must not let the default redis one through."""
+    res = _template_raw("--set", "postgresql.password=S7r0ng-Pg-Passw0rd")
+    assert res.returncode != 0
+    assert "norviq-redis-password" in res.stderr
+
+
+def test_empty_datastore_password_still_fails_render() -> None:
+    """The pre-existing empty-password guard must not regress (values-prod blanks both)."""
+    res = _template_raw("--set", "postgresql.password=")
+    assert res.returncode != 0
+    assert "postgresql.password is empty" in res.stderr
+
+
+def test_strong_datastore_credentials_render_cleanly() -> None:
+    """Supplying real credentials renders, and the published defaults appear nowhere in the output."""
+    res = _template_raw(*_STRONG_DATASTORES)
+    assert res.returncode == 0, res.stderr
+    assert "norviq-pg-password" not in res.stdout
+    assert "norviq-redis-password" not in res.stdout
+    assert "S7r0ng-Pg-Passw0rd" in res.stdout  # the operator's credential IS what gets wired
+
+
+def test_dev_escape_hatch_still_renders_with_defaults() -> None:
+    """requireStrongSecret=false remains the documented throwaway-cluster path (unchanged behaviour)."""
+    res = _template_raw("--set", "config.requireStrongSecret=false")
+    assert res.returncode == 0, res.stderr
+    assert "norviq-pg-password" in res.stdout  # explicitly opted out of the guard

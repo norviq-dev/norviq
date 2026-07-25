@@ -299,6 +299,11 @@ redis:
       cpu: 300m
       memory: 256Mi
   port: 6379
+  # DEV/EVAL DEFAULT ONLY — this literal is published in this repo. With config.requireStrongSecret
+  # (default true) the chart REFUSES to render while it is still set, so a real install must supply its
+  # own: --set redis.password=$(openssl rand -base64 24). It is not auto-generated because the value is
+  # also baked into the redis StatefulSet (--requirepass), so rotating it under an existing PVC would
+  # lock the API out of a live cache. Set config.requireStrongSecret=false for a throwaway cluster.
   password: "norviq-redis-password"
   storage: 1Gi
 
@@ -322,6 +327,13 @@ postgresql:
   port: 5432
   database: norviq
   username: norviq
+  # DEV/EVAL DEFAULT ONLY — this literal is published in this repo, and this datastore holds the policy
+  # store, the audit log and the bcrypt admin hash. With config.requireStrongSecret (default true) the
+  # chart REFUSES to render while it is still set: supply your own with
+  # --set postgresql.password=$(openssl rand -base64 24) (or a sealed secret). It is not auto-generated
+  # because the value is also baked into the postgres StatefulSet (POSTGRES_PASSWORD is only honoured at
+  # initdb), so rotating it under an existing PVC would leave the DB on its old password and lock the API
+  # out. Set config.requireStrongSecret=false for a throwaway dev cluster.
   password: "norviq-pg-password"
   storage: 5Gi
 
