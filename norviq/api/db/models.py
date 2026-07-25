@@ -161,6 +161,12 @@ class ApiKey(Base):
     name: Mapped[str] = mapped_column(String(255), default="")
     namespace: Mapped[str] = mapped_column(String(255), default="default")
     role: Mapped[str] = mapped_column(String(20), default="viewer")
+    # Identity binding (see auth.scoped_identity). Empty = unbound (the pre-existing behavior). When set,
+    # /evaluate pins the key to exactly this agent_class / spiffe_id, so a workload key cannot be
+    # evaluated as a different (looser) class or shed its agent_frozen: kill-switch by asserting another
+    # spiffe_id. Issue workload keys WITH these set; leave them empty only for operator/CI keys.
+    agent_class: Mapped[str] = mapped_column(String(255), default="")
+    spiffe_id: Mapped[str] = mapped_column(String(512), default="")
     created_by: Mapped[str] = mapped_column(String(255), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -210,6 +210,8 @@ OIDC / JWKS token validation. Distinct prefix from `NRVQ-SIEM-14xxx`.
 | NRVQ-AUTH-14016 | `nrvq.auth.revoked_token_rejected` (a logged-out token was presented — 401 / ws close 1008) | `norviq/api/auth.py` |
 | NRVQ-AUTH-14017 | `nrvq.auth.revocation_store_degraded` (Redis denylist write ERROR / read WARNING — in-process mirror still holds the revocation) | `norviq/api/session_revocation.py` |
 | NRVQ-AUTH-14018 | `nrvq.auth.must_change_blocked` (a must_change=true token — still on a default/reset password — was refused off the change-password/logout/me paths, 403) | `norviq/api/auth.py` |
+| NRVQ-AUTH-14019 | `nrvq.auth.identity_binding_denied` (a bound credential asserted a DIFFERENT `agent_class`/`spiffe_id` on /evaluate — 403; agent_class selects the enforced policy, spiffe_id keys trust + the freeze kill-switch) | `norviq/api/auth.py` |
+| NRVQ-AUTH-14020 | `nrvq.auth.identity_unbound_denied` (strict mode `auth_require_bound_agent_identity`: a non-admin credential carrying NO identity binding was refused — 403) | `norviq/api/auth.py` |
 
 ## FLT
 
@@ -415,7 +417,7 @@ NRVQ-SDC-3023, NRVQ-SDC-3030, NRVQ-SDC-3031, NRVQ-SDC-3032, NRVQ-SDC-3033
 
 NRVQ-AUTH-14000, NRVQ-AUTH-14001, NRVQ-AUTH-14002, NRVQ-AUTH-14003, NRVQ-AUTH-14004, NRVQ-AUTH-14005,
 NRVQ-AUTH-14006, NRVQ-AUTH-14007, NRVQ-AUTH-14010, NRVQ-AUTH-14011, NRVQ-AUTH-14012, NRVQ-AUTH-14013,
-NRVQ-AUTH-14014, NRVQ-AUTH-14015, NRVQ-AUTH-14016, NRVQ-AUTH-14017, NRVQ-AUTH-14018
+NRVQ-AUTH-14014, NRVQ-AUTH-14015, NRVQ-AUTH-14016, NRVQ-AUTH-14017, NRVQ-AUTH-14018, NRVQ-AUTH-14019, NRVQ-AUTH-14020
 
 NRVQ-AUD-6000, NRVQ-AUD-6001, NRVQ-AUD-6002, NRVQ-AUD-6003, NRVQ-AUD-6004, NRVQ-AUD-6005, NRVQ-AUD-6006,
 NRVQ-AUD-6007, NRVQ-AUD-6008, NRVQ-AUD-6009, NRVQ-AUD-6010, NRVQ-AUD-6012, NRVQ-AUD-6013

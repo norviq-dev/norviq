@@ -415,6 +415,22 @@ config:
   trustThreshold: 0.7
   violationPenalty: 0.05
   rateLimit: 60
+  # X-Forwarded-For handling for HTTP rate-limit bucketing. XFF is client-WRITABLE, so trusting its
+  # left-most entry lets a caller rotate the header and never fill a bucket (throttle bypass, worst on
+  # the pre-auth /auth/login route) — but ignoring it entirely collapses every caller behind a proxy into
+  # ONE bucket, so a single abuser throttles everyone. The header is believed only when BOTH the TCP peer
+  # is a trusted proxy AND the chain is long enough (see norviq/api/rate_limit.py:_client_ip).
+  #
+  # The defaults match the SHIPPED topology: config.internalTls puts an nginx in the api pod that sets
+  # `X-Forwarded-For $remote_addr` (it REPLACES the header), so the API sees loopback as the peer and
+  # exactly one unforgeable entry. A workload that bypasses that proxy and hits the API port directly is
+  # not loopback, so its XFF is ignored — it cannot reach the forgeable path at all.
+  #   trustedProxyHops:  Nth entry FROM THE RIGHT to use. Raise only if you add more APPENDING proxies
+  #                      in front (and widen trustedProxyCidrs to match). 0 = never trust XFF.
+  #   trustedProxyCidrs: which PEERS may be believed. Widen only to proxies you actually operate —
+  #                      anything in this list can set any client's rate-limit identity.
+  httpRateLimitTrustedProxyHops: 1
+  httpRateLimitTrustedProxyCidrs: ["127.0.0.0/8", "::1/128"]
   # Per-pod in-process L1 cache (seconds) for the enforcement hot path. OPT-IN: 0 = disabled.
   # Measured on a 2-node AKS cluster: warm read p50 21.9ms -> 3.2ms (-84%), floor 14.5ms -> 1.4ms.
   #
@@ -493,6 +509,16 @@ auth:
   loginMaxAttempts: 5
   loginWindowSeconds: 300
   minPasswordLength: 12    # enforced on a NEW password at change-time
+  # Identity binding on /evaluate. `agent_class` selects which Rego program is enforced and `spiffe_id`
+  # keys the trust score + the agent_frozen: kill-switch, so a credential that CARRIES either claim is
+  # ALWAYS pinned to it (never spoofable) regardless of this flag. This governs credentials that carry
+  # NO binding — pre-upgrade sidecar tokens and API keys issued without an agentClass:
+  #   false (default) — they may still assert an identity, so an upgrade doesn't fail-closed every
+  #                     in-flight sidecar mid-rollout.
+  #   true            — every non-admin caller must present a bound credential (403 otherwise).
+  # RATCHET: flip to true once sidecars have been re-admitted (the webhook stamps agent_class from the
+  # pod's norviq.io/agent-class label) and workload API keys re-issued with an agent_class.
+  requireBoundAgentIdentity: false
 
 oidc:
   enabled: false

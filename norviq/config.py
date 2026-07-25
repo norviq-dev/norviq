@@ -145,6 +145,21 @@ class NorviqSettings(BaseSettings):
     http_rate_limit_dry_run_per_window: int = 20
     http_rate_limit_redteam_per_window: int = 15
     http_rate_limit_default_per_window: int = 300     # everything else
+    # X-Forwarded-For handling for rate-limit bucketing. XFF is client-WRITABLE, so its left-most entry is
+    # attacker-chosen: trusting it lets a caller rotate the header per request and never fill a bucket
+    # (throttle bypass). But ignoring it outright collapses every caller behind a proxy into ONE bucket, so
+    # a single abuser throttles everyone. The header is therefore believed only when the TCP PEER is a
+    # trusted proxy AND the chain is long enough; see api/rate_limit.py:_client_ip.
+    #   *_cidrs — peers whose XFF we believe. Default loopback = exactly the in-pod nginx the chart runs in
+    #             front of the API (internalTls). A workload hitting the API's plaintext port directly is
+    #             NOT loopback, so its XFF is ignored and the forgeable path is unreachable for it.
+    #   *_hops  — how many trusted hops: the Nth entry FROM THE RIGHT is used (what our outermost trusted
+    #             proxy observed). 1 matches the shipped tls-proxy, which REPLACES the header
+    #             (`proxy_set_header X-Forwarded-For $remote_addr`), leaving exactly one unforgeable entry.
+    #             Raise it only if you add more APPENDING proxies, and widen *_cidrs to include them.
+    #             0 disables XFF entirely (always bucket on the TCP peer).
+    http_rate_limit_trusted_proxy_cidrs: tuple[str, ...] = ("127.0.0.0/8", "::1/128")
+    http_rate_limit_trusted_proxy_hops: int = 1
     # OPT-IN, default-OFF output-DLP. Norviq's PEP is INPUT-only; when enabled the SDK adapter scans an
     # allowed tool's RETURN value and redacts PAN/SSN before it propagates (minimal; full output-DLP is roadmap).
     sdk_output_dlp_enabled: bool = False
@@ -293,6 +308,16 @@ class NorviqSettings(BaseSettings):
     auth_login_window_s: int = 300
     # Minimum length enforced on a NEW password at change-time (defense-in-depth; not applied to the seed).
     auth_min_password_length: int = 12
+    # Identity binding for /evaluate (see auth.scoped_identity). `agent_class` selects which Rego program
+    # is enforced and `spiffe_id` keys the trust score + the agent_frozen: kill-switch, so both are
+    # authorization inputs, not labels: a credential that CARRIES the claim is always pinned to it.
+    # This flag governs the credentials that DON'T carry one (pre-upgrade sidecar tokens, legacy API keys):
+    #   False (default) — unbound credentials may still assert an identity, so an in-flight upgrade doesn't
+    #                     fail-closed every existing sidecar mid-rollout. Ratchet, not a permanent state.
+    #   True            — every non-admin caller MUST present a bound credential (403 otherwise). Flip this
+    #                     once all sidecar tokens have been re-minted (webhook stamps agent_class from the
+    #                     pod's norviq.io/agent-class label) and API keys re-issued with an agent_class.
+    auth_require_bound_agent_identity: bool = False
     # --- OIDC (SSO). All default-off so legacy HS256 stays the only
     # path until an IdP is wired; flipping oidc_enabled adds RS256/ES256 validation ALONGSIDE HS256.
     oidc_enabled: bool = False

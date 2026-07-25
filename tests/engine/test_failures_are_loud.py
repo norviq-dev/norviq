@@ -96,6 +96,19 @@ _JUSTIFIED_SILENT_HANDLERS: dict[tuple[str, str], str] = {
         "Reads the same best-effort counter and fails OPEN by design: a cache outage must never lock "
         "legitimate API keys out of the platform. Documented in the function's own docstring."
     ),
+    ("api/rate_limit.py", "_peer_is_trusted"): (
+        "A peer address that is not parseable as an IP (unix socket, test client, exotic transport) is "
+        "simply NOT a trusted proxy — returning False is the fail-CLOSED answer: the caller's "
+        "X-Forwarded-For is then ignored and the unforgeable peer is used as the bucket key. Logging "
+        "here would be attacker-triggerable per-request log spam, i.e. its own DoS vector. A malformed "
+        "CIDR in the trusted list IS logged loudly, once, in _trusted_networks."
+    ),
+    ("api/rate_limit.py", "_normalize_ip"): (
+        "An X-Forwarded-For entry that is not a valid IP must never become a rate-limit bucket key (or a "
+        "log field); returning '' makes the caller fall back to the unforgeable TCP peer, which is the "
+        "fail-CLOSED answer. The value is fully attacker-controlled, so logging it per request would be "
+        "attacker-triggerable log spam."
+    ),
     ("api/passwords.py", "verify_password"): (
         "bcrypt.checkpw raises on malformed/non-ascii stored hashes; returning False is the correct "
         "security answer (deny), not a swallowed failure. The caller logs the failed login."

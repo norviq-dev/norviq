@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
 from norviq.api.audit_hub import audit_record
-from norviq.api.auth import get_current_user, scoped_namespace
+from norviq.api.auth import get_current_user, scoped_identity, scoped_namespace
 from norviq.config import settings
 from norviq.engine.capability import Verb, classify_tool
 from norviq.engine.masking import mask_params
@@ -53,11 +53,22 @@ async def evaluate_tool_call(
     # evaluate — admin = any, non-admin → 403 on mismatch (matches every other tenant-scoped route).
     # Calling this unconditionally (instead of skipping it for role=service) closes a cross-tenant hole
     # where a sidecar token scoped to namespace A could evaluate as namespace B.
-    scoped_namespace(user, (payload.agent_identity or {}).get("namespace"))
+    effective_ns = scoped_namespace(user, (payload.agent_identity or {}).get("namespace"))
+    # ...and resolve the SIBLING identity fields in the same dict from the credential too. `agent_class`
+    # selects which Rego program is enforced, `spiffe_id` keys the trust score + the agent_frozen:
+    # kill-switch, and `workload` pulls in the workload tier — so binding only `namespace` left an
+    # intra-namespace escalation. Note this REWRITES the identity rather than just validating it: an
+    # omitted/empty field is as powerful as a substituted one (dropping agent_class silently falls back
+    # to the looser __baseline__), so the credential's value is written back over the body's.
+    identity = scoped_identity(user, payload.agent_identity)
+    if effective_ns:
+        identity["namespace"] = effective_ns
     # A malformed agent_identity (e.g. missing the required spiffe_id) is a client error — return
     # 422, not a raw 500 from the downstream model validation.
     try:
-        event = ToolCallEvent.model_validate(payload.model_dump(exclude={"trust_score"}))
+        event = ToolCallEvent.model_validate(
+            {**payload.model_dump(exclude={"trust_score"}), "agent_identity": identity}
+        )
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=f"invalid agent_identity / tool call: {exc.errors()}") from exc
     decision: PolicyDecision = await request.app.state.evaluator.evaluate(event)

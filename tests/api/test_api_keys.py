@@ -110,8 +110,34 @@ def test_authenticate_api_key_resolves_scoped_principal() -> None:
         yield _FakeSession([row])
 
     principal = asyncio.run(ak.authenticate_api_key(full, session_factory=_factory))
-    assert principal == {"sub": f"apikey:{prefix}", "role": "viewer", "namespace": "team-a", "name": "k"}
+    # A row predating the identity-binding columns resolves as UNBOUND ('' agent_class/spiffe_id),
+    # which auth.scoped_identity treats as "not pinned" — i.e. unchanged behavior for legacy keys.
+    assert principal == {
+        "sub": f"apikey:{prefix}",
+        "role": "viewer",
+        "namespace": "team-a",
+        "name": "k",
+        "agent_class": "",
+        "spiffe_id": "",
+    }
     assert isinstance(row.last_used_at, datetime) and row.last_used_at.tzinfo == timezone.utc
+
+
+def test_authenticate_api_key_surfaces_identity_binding() -> None:
+    """A workload key issued WITH a binding must carry it into the principal, or /evaluate can't pin it."""
+    full, prefix, key_hash = ak.generate_key()
+    row = SimpleNamespace(
+        id="1", prefix=prefix, key_hash=key_hash, name="agent-key", namespace="team-a", role="service",
+        agent_class="restrictive", spiffe_id="spiffe://norviq/ns/team-a/sa/agent",
+        revoked=False, last_used_at=None,
+    )
+
+    async def _factory():
+        yield _FakeSession([row])
+
+    principal = asyncio.run(ak.authenticate_api_key(full, session_factory=_factory))
+    assert principal["agent_class"] == "restrictive"
+    assert principal["spiffe_id"] == "spiffe://norviq/ns/team-a/sa/agent"
 
 
 def test_authenticate_api_key_rejects_bogus_and_non_prefixed() -> None:

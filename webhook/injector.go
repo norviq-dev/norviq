@@ -261,7 +261,7 @@ func sidecarEnv(agentClass string, namespace string, cfg Config) []map[string]in
 		apiURL := cfg.ApiURL
 		tlsEnv, tlsOn := buildSidecarTLSEnv(cfg, namespace, &apiURL)
 		env = append(env, map[string]interface{}{"name": "NRVQ_API_URL", "value": apiURL})
-		if tok := mintSidecarToken(cfg, namespace); tok != "" {
+		if tok := mintSidecarToken(cfg, namespace, agentClass); tok != "" {
 			env = append(env, map[string]interface{}{"name": "NRVQ_API_TOKEN", "value": tok})
 		} else {
 			slog.Warn("NRVQ-WHK-4037: no API secret to mint sidecar token; thin-proxy sidecar will fail closed",
@@ -298,7 +298,7 @@ func appendIfSet(env []map[string]interface{}, name, value string) []map[string]
 // mintSidecarToken issues the namespace-scoped role=service JWT the thin-proxy sidecar presents to
 // /evaluate. The token is baked into the pod env (cannot self-refresh), hence the long TTL; mTLS +
 // short-lived tokens are the documented fast-follow. Returns "" if no signing secret is set.
-func mintSidecarToken(cfg Config, namespace string) string {
+func mintSidecarToken(cfg Config, namespace string, agentClass string) string {
 	if cfg.ApiSecret == "" {
 		return ""
 	}
@@ -311,8 +311,23 @@ func mintSidecarToken(cfg Config, namespace string) string {
 		"sub":       "norviq-sidecar",
 		"role":      "service",
 		"namespace": namespace,
-		"iat":       now.Unix(),
-		"exp":       now.Add(ttl).Unix(),
+		// Identity BINDING (api/auth.py scoped_identity): pin this sidecar's token to the identity the pod
+		// was actually admitted with. `agent_class` (from the norviq.io/agent-class label) selects which
+		// Rego program /evaluate enforces; `spiffe_id` keys the trust score, the per-agent rate limit and
+		// the agent_frozen: kill-switch. Without these claims a namespace-scoped sidecar token could assert
+		// a sibling class (running its looser policy) or another SPIFFE id (shedding an operator's freeze).
+		"agent_class": agentClass,
+		"iat":         now.Unix(),
+		"exp":         now.Add(ttl).Unix(),
+	}
+	// Bind spiffe_id ONLY when we can predict it byte-for-byte. In the default "mock" resolver the
+	// sidecar builds spiffe://norviq/ns/<ns>/sa/<NRVQ_SERVICE_ACCOUNT|default> (engine/identity.py
+	// _mock_resolve) and the webhook never injects NRVQ_SERVICE_ACCOUNT, so the id is deterministic and
+	// TestSidecarTokenSpiffeClaimMatchesMockResolver locks the formula. In workload-api mode the id comes
+	// from a SPIRE-issued SVID whose trust domain we do not control here — minting a guess would 403 every
+	// tool call, so the field is left unbound (the SVID is separately attested at the source).
+	if cfg.SpiffeMode == "mock" {
+		claims["spiffe_id"] = fmt.Sprintf("spiffe://norviq/ns/%s/sa/default", namespace)
 	}
 	tok, err := signHS256JWT(cfg.ApiSecret, claims)
 	if err != nil {
