@@ -16,7 +16,6 @@ import shutil
 import subprocess
 
 import pytest
-from tests.conftest import HELM_STRONG_DATASTORES
 
 _CHART = pathlib.Path(__file__).resolve().parents[2] / "helm" / "norviq"
 _BASE = ["--set", "baselineClusterPolicy.enabled=false"]
@@ -25,8 +24,7 @@ pytestmark = pytest.mark.skipif(shutil.which("helm") is None, reason="helm binar
 
 
 def _template(*extra: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["helm", "template", "norviq", str(_CHART), *HELM_STRONG_DATASTORES, *_BASE, *extra],
-                          capture_output=True, text=True)
+    return subprocess.run(["helm", "template", "norviq", str(_CHART), *_BASE, *extra], capture_output=True, text=True)
 
 
 def test_egress_policy_absent_by_default() -> None:

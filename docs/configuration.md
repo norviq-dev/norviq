@@ -7,9 +7,9 @@ reading directly if you want the full rationale for a given default.
 Three ready-made overlays ship alongside the defaults:
 
 - `helm/norviq/values-prod.yaml` — multi-node production posture (HA replicas, autoscaling, spread,
-  TLS-required DB). Not live-validated on a single-node cluster; template-validated only. It
-  deliberately blanks `postgresql.password`/`redis.password`, so it only renders once you supply them
-  (see [deployment.md](deployment.md)).
+  TLS-required DB). Not live-validated on a single-node cluster; template-validated only. It turns HA
+  on for both datastores, which requires you to supply `postgresql.password`/`redis.password`
+  explicitly — an HA cluster manages its own credential material (see [deployment.md](deployment.md)).
 - `helm/norviq/values-dev.yaml` — fixed dev secrets (`api.secretKey`, DB/Redis passwords),
   `logLevel: DEBUG`, and `enforcementMode: audit` so a fresh dev install logs decisions instead of
   enforcing them.
@@ -27,12 +27,32 @@ silently-insecure cluster. These are the first thing a new operator hits:
 | Guard | Fails when | Fix |
 |---|---|---|
 | `baselineClusterPolicy.enabled` (`true`) | `policyQuotaNamespaces` is empty | Set `policyQuotaNamespaces` to your tenant namespaces (one baseline `NrvqPolicy` renders per namespace), or set `baselineClusterPolicy.enabled=false` to run without a cluster baseline. |
-| `config.requireStrongSecret` (`true`) | `postgresql.password` is empty | `--set postgresql.password=...` |
-| `config.requireStrongSecret` (`true`) | `redis.password` is empty | `--set redis.password=...` |
+| `postgresql.ha.enabled` | `postgresql.password` is empty | `--set postgresql.password=...` (an HA cluster manages its own credential secret, so it cannot use the chart-generated one) |
+| `redis.ha.enabled` | `redis.password` is empty | `--set redis.password=...` (same reason — the sentinel cluster takes its password through `customConfig`) |
 | `config.requireStrongSecret` (`true`) + `fleet.hub.enabled` | `fleet.hub.postgresql.password` is empty or the shipped `norviq_dev`, or `fleet.hub.pgUrl` embeds it | `--set fleet.hub.postgresql.password=...` and point `fleet.hub.pgUrl` at a strong credential. |
 
 `agentEgressPolicy.enabled=true` adds two more render-time refusals: no namespaces to lock down, and
 targeting the Norviq control-plane namespace itself.
+
+### Datastore credentials are generated, not shipped
+
+`postgresql.password` / `redis.password` default to **empty, meaning "manage it for me"**: on the first
+install the chart generates a strong random password, stores it in the `norviq-secrets` Secret
+(`NRVQ_PG_PASSWORD` / `NRVQ_REDIS_PASSWORD`), and both the API's connection URL and the datastore
+StatefulSets read that same key. On every later upgrade the existing value is **reused, never rotated** —
+postgres only honours `POSTGRES_PASSWORD` when initdb runs on an empty data directory, so rotating it
+would strand the live database. A plain `helm install` therefore needs no credential flags and still
+publishes no known credential. Read the generated value with:
+
+```
+kubectl get secret norviq-secrets -n <ns> -o jsonpath='{.data.NRVQ_PG_PASSWORD}' | base64 -d
+```
+
+Set the value explicitly (or point at a sealed secret) to bring your own — required when
+`postgresql.ha.enabled` / `redis.ha.enabled` is on, since those clusters manage their own credential
+material. One caveat inherited from every chart that does this: if you `helm uninstall` but keep the
+PersistentVolumeClaims and then reinstall, the chart generates a NEW password while the old data
+directory still has the old one — supply the previous password explicitly in that case.
 
 `config.requireStrongSecret` also acts at **boot**, not just at render: the API refuses to start on a
 weak/default/short JWT secret (`NRVQ-API-7099`) or the shipped default admin password
@@ -180,7 +200,7 @@ both Postgres and Redis, which is exactly the embedded shape.
 | `redis.ha.enabled` | `false` | **Gated, not live-validated on 1 node.** When true, renders a Spotahome `RedisFailover` (`databases.spotahome.com/v1`, Sentinel) instead of the single StatefulSet — requires that operator pre-installed. Swap `templates/redis-ha.yaml` + `redis.ha.serviceName` for a different Redis HA stack. `redis.ha.replicas` (`3`), `redis.ha.serviceName` (`norviq-redis-ha`). |
 | `redis.resources` | `100m/128Mi` req, `300m/256Mi` limit | Per-pod CPU/memory. |
 | `redis.port` | `6379` | |
-| `redis.password` | `norviq-redis-password` | Bundled Redis auth password — change for any non-throwaway install. |
+| `redis.password` | `""` (generated) | Empty = the chart generates a strong password on first install and reuses it on upgrade (see "Datastore credentials are generated, not shipped"). Set a value to bring your own; required when `redis.ha.enabled`. |
 | `redis.storage` | `1Gi` | PVC size. |
 
 ## PostgreSQL (`postgresql.*`)
@@ -192,7 +212,7 @@ both Postgres and Redis, which is exactly the embedded shape.
 | `postgresql.ha.enabled` | `false` | **Gated, not live-validated on 1 node.** When true, renders a CloudNativePG `Cluster` (3 instances) instead of the single StatefulSet, and points the API's PG URL at its service — requires the CloudNativePG operator pre-installed. `postgresql.ha.instances` (`3`), `postgresql.ha.serviceName` (`norviq-postgresql-ha-rw`). |
 | `postgresql.resources` | `200m/256Mi` req, `500m/512Mi` limit | Per-pod CPU/memory. |
 | `postgresql.port` | `5432` | |
-| `postgresql.database`/`username`/`password` | `norviq` / `norviq` / `norviq-pg-password` | Bundled DB credentials — change the password for any non-throwaway install. |
+| `postgresql.database`/`username`/`password` | `norviq` / `norviq` / `""` (generated) | Empty password = the chart generates a strong one on first install and reuses it on upgrade. Set a value to bring your own; required when `postgresql.ha.enabled`. |
 | `postgresql.storage` | `5Gi` | PVC size. |
 
 ## OPA (`opa.*`)

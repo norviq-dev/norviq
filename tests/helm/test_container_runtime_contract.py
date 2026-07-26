@@ -58,7 +58,6 @@ from dataclasses import dataclass
 
 import pytest
 import yaml
-from tests.conftest import HELM_STRONG_DATASTORES
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _CHART = _REPO_ROOT / "helm" / "norviq"
@@ -100,7 +99,7 @@ _WRITABLE_VOLUME_SOURCES = {"emptyDir", "persistentVolumeClaim", "ephemeral", "h
 @functools.lru_cache(maxsize=None)
 def _render(args: tuple[str, ...]) -> str:
     res = subprocess.run(
-        ["helm", "template", "norviq", str(_CHART), *HELM_STRONG_DATASTORES, *args], capture_output=True, text=True
+        ["helm", "template", "norviq", str(_CHART), *args], capture_output=True, text=True
     )
     assert res.returncode == 0, f"helm template failed:\n{res.stderr}"
     return res.stdout

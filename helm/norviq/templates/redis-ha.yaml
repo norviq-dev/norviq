@@ -17,6 +17,12 @@ spec:
   redis:
     replicas: {{ .Values.redis.ha.replicas }}
     image: "{{ include "norviq.thirdPartyImage" (dict "root" $ "image" (printf "%s:%s" .Values.images.redis.repository (.Values.images.redis.tag | toString))) }}"
+    {{- /* Same as the postgres HA path: the sentinel cluster takes its password through customConfig,
+           which cannot reference the chart-generated value, so HA requires an explicit credential. The
+           default single-node redis auto-generates. */}}
+    {{- if eq (.Values.redis.password | default "") "" }}
+    {{- fail "redis.ha.enabled=true requires an explicit redis.password (--set redis.password=... or a sealed secret) — the sentinel cluster takes its password through customConfig and cannot use the chart-generated one." }}
+    {{- end }}
     customConfig:
       - "requirepass {{ .Values.redis.password }}"
       - "masterauth {{ .Values.redis.password }}"
