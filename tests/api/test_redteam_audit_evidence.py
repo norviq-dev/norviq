@@ -21,8 +21,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
-
 from norviq.api.routers.redteam import _build_event, _emit_redteam_audit
 
 
