@@ -39,7 +39,13 @@ spec:
             - name: POSTGRES_USER
               value: {{ .Values.postgresql.username }}
             - name: POSTGRES_PASSWORD
-              value: {{ .Values.postgresql.password }}
+              # From the managed Secret, not .Values — that is what lets the chart GENERATE a strong
+              # password on first install (templates/secret.yaml) instead of shipping a literal default.
+              # Same key the API's NRVQ_PG_URL is built from, so the two can never drift.
+              valueFrom:
+                secretKeyRef:
+                  name: norviq-secrets
+                  key: NRVQ_PG_PASSWORD
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
           resources:

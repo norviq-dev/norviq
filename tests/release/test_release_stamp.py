@@ -21,7 +21,6 @@ import sys
 from pathlib import Path
 
 import pytest
-from tests.conftest import HELM_STRONG_DATASTORES
 
 ROOT = Path(__file__).resolve().parents[2]
 STAMP = ROOT / "scripts" / "release_stamp.py"
@@ -55,8 +54,7 @@ def stamped(tmp_path: Path) -> Path:
 
 def _render(chart: Path) -> str:
     res = subprocess.run(
-        ["helm", "template", "norviq", str(chart), *HELM_STRONG_DATASTORES,
-         "--set-json", 'policyQuotaNamespaces=["default"]'],
+        ["helm", "template", "norviq", str(chart), "--set-json", 'policyQuotaNamespaces=["default"]'],
         capture_output=True, text=True,
     )
     assert res.returncode == 0, f"render failed: {res.stderr[:800]}"

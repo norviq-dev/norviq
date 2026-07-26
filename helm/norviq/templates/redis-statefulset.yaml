@@ -34,7 +34,15 @@ spec:
           ports:
             - containerPort: {{ .Values.redis.port }}
               name: redis
-          command: ["redis-server", "--requirepass", "{{ .Values.redis.password }}"]
+          # The password comes from the managed Secret (so the chart can generate it) and is passed via
+          # env rather than argv — an argv password is readable by anything that can see /proc on the node.
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: norviq-secrets
+                  key: NRVQ_REDIS_PASSWORD
+          command: ["sh", "-c", 'exec redis-server --requirepass "$REDIS_PASSWORD"']
           resources:
             {{- toYaml .Values.redis.resources | nindent 12 }}
           volumeMounts:

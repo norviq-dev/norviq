@@ -11,11 +11,10 @@ Three chart-level defects, all rendered via `helm template`:
 2. With `config.requireStrongSecret` on, enabling the fleet hub with the shipped default fleet DB
    password (`norviq_dev`) — or an empty one — must fail the render loudly, so a prod install can
    never silently ship the well-known credential.
-3. The same guard for the PRIMARY datastores: `postgresql.password` / `redis.password` must reject the
-   shipped defaults (`norviq-pg-password` / `norviq-redis-password`), not just an empty value. Checking
-   only for empty was an incomplete guard — values.yaml ships NON-empty literals, so a stock install
-   with the hardened default posture rendered a published credential straight into NRVQ_PG_URL /
-   NRVQ_REDIS_URL, for datastores that hold the policy store, the audit log and the bcrypt admin hash.
+3. The PRIMARY datastore credentials are MANAGED, not shipped: the chart used to ship literal defaults
+   (`norviq-pg-password` / `norviq-redis-password`) that a stock install wired straight into
+   NRVQ_PG_URL / NRVQ_REDIS_URL. They are now generated on first install and reused on upgrade, so a
+   default `helm install` needs no flags AND publishes no known credential.
 
 Skipped (not failed) when the `helm` binary isn't on PATH, so the suite still runs in minimal envs.
 """
@@ -26,8 +25,9 @@ import pathlib
 import shutil
 import subprocess
 
+import yaml
+
 import pytest
-from tests.conftest import HELM_STRONG_DATASTORES
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 _CHART = _REPO_ROOT / "helm" / "norviq"
@@ -37,25 +37,14 @@ _PROD_VALUES = _CHART / "values-prod.yaml"
 # `helm template` renderable without wiring policyQuotaNamespaces.
 _BASELINE_OFF = ["--set", "baselineClusterPolicy.enabled=false"]
 
-# requireStrongSecret (on by default) now refuses to render the SHIPPED-DEFAULT primary datastore
-# credentials, not just empty ones — so every test that isn't specifically exercising that guard has to
-# supply real ones, exactly as a real install must. `_template_raw` skips them for the guard tests below.
-_STRONG_DATASTORES = HELM_STRONG_DATASTORES
-
 pytestmark = pytest.mark.skipif(shutil.which("helm") is None, reason="helm binary not on PATH")
 
 
-def _template_raw(*extra: str, show_only: str | None = None) -> subprocess.CompletedProcess[str]:
-    """Render with NO datastore credentials supplied — i.e. exactly what a stock `helm install` does."""
+def _template(*extra: str, show_only: str | None = None) -> subprocess.CompletedProcess[str]:
     cmd = ["helm", "template", "norviq", str(_CHART), *_BASELINE_OFF, *extra]
     if show_only is not None:
         cmd += ["--show-only", show_only]
     return subprocess.run(cmd, capture_output=True, text=True)
-
-
-def _template(*extra: str, show_only: str | None = None) -> subprocess.CompletedProcess[str]:
-    """Render with strong datastore credentials supplied (the normal, non-guard case)."""
-    return _template_raw(*_STRONG_DATASTORES, *extra, show_only=show_only)
 
 
 def _deployment_has_replicas(manifest: str) -> bool:
@@ -129,9 +118,14 @@ def test_fleet_hub_shipped_default_password_fails_render() -> None:
 
 
 def test_prod_overlay_fleet_hub_empty_credential_fails_render() -> None:
-    """values-prod blanks the fleet credential → enabling the hub without supplying one FAILS."""
+    """values-prod blanks the fleet credential → enabling the hub without supplying one FAILS.
+
+    The prod overlay also turns HA on and blanks the primary datastore passwords (a prod install
+    supplies its own), so those are provided here to isolate the FLEET guard under test."""
     res = _template(
         "--values", str(_PROD_VALUES),
+        "--set", "postgresql.password=S7r0ng-Pg-Passw0rd",
+        "--set", "redis.password=S7r0ng-Redis-Passw0rd",
         "--set", "fleet.hub.enabled=true",
     )
     assert res.returncode != 0
@@ -144,43 +138,72 @@ def test_fleet_hub_strong_credential_renders() -> None:
     assert res.returncode == 0, res.stderr
 
 
-# --- (3) requireStrongSecret must reject the shipped-default PRIMARY datastore credentials ---------
-# Regression for the published-default-credential finding. The fleet store already had this guard
-# (section 2); the primary store checked only for an empty value, so the shipped literal sailed through.
+# --- (3) primary datastore credentials are generated, never shipped -------------------------------
 
 
-def test_stock_install_with_shipped_default_pg_password_fails_render() -> None:
-    """The default values + the DEFAULT requireStrongSecret=true must NOT render a known credential."""
-    res = _template_raw()
-    assert res.returncode != 0, "stock render must fail rather than ship the published default DB password"
-    assert "norviq-pg-password" in res.stderr
+def _secret_data(manifest: str) -> dict:
+    for doc in yaml.safe_load_all(manifest):
+        if doc and doc.get("kind") == "Secret" and doc["metadata"]["name"] == "norviq-secrets":
+            return doc.get("stringData") or {}
+    raise AssertionError("norviq-secrets not rendered")
 
 
-def test_shipped_default_redis_password_fails_render() -> None:
-    """Same for the cache: supplying a strong DB password must not let the default redis one through."""
-    res = _template_raw("--set", "postgresql.password=S7r0ng-Pg-Passw0rd")
-    assert res.returncode != 0
-    assert "norviq-redis-password" in res.stderr
+def test_stock_install_needs_no_credential_flags() -> None:
+    """A default `helm install` must just work — breaking that is not how a chart bundling its own
+    datastores behaves (and was the regression this section replaced)."""
+    res = _template()
+    assert res.returncode == 0, res.stderr
 
 
-def test_empty_datastore_password_still_fails_render() -> None:
-    """The pre-existing empty-password guard must not regress (values-prod blanks both)."""
-    res = _template_raw("--set", "postgresql.password=")
-    assert res.returncode != 0
-    assert "postgresql.password is empty" in res.stderr
-
-
-def test_strong_datastore_credentials_render_cleanly() -> None:
-    """Supplying real credentials renders, and the published defaults appear nowhere in the output."""
-    res = _template_raw(*_STRONG_DATASTORES)
+def test_no_published_default_credential_is_ever_rendered() -> None:
+    """The historical literals must not appear anywhere in a default render."""
+    res = _template()
     assert res.returncode == 0, res.stderr
     assert "norviq-pg-password" not in res.stdout
     assert "norviq-redis-password" not in res.stdout
-    assert "S7r0ng-Pg-Passw0rd" in res.stdout  # the operator's credential IS what gets wired
 
 
-def test_dev_escape_hatch_still_renders_with_defaults() -> None:
-    """requireStrongSecret=false remains the documented throwaway-cluster path (unchanged behaviour)."""
-    res = _template_raw("--set", "config.requireStrongSecret=false")
-    assert res.returncode == 0, res.stderr
-    assert "norviq-pg-password" in res.stdout  # explicitly opted out of the guard
+def test_generated_credentials_are_strong_and_shared_with_the_statefulsets() -> None:
+    """The generated value must be strong AND the same one the datastore pods are started with —
+    if the URL and the StatefulSet ever drifted, the API could not reach its own database."""
+    res = _template()
+    data = _secret_data(res.stdout)
+    pg, redis = data["NRVQ_PG_PASSWORD"], data["NRVQ_REDIS_PASSWORD"]
+    assert len(pg) >= 24 and len(redis) >= 24
+    assert pg != redis
+    assert pg in data["NRVQ_PG_URL"]
+    assert redis in data["NRVQ_REDIS_URL"]
+    # Both StatefulSets take it from that same Secret key, never from a literal.
+    for doc in yaml.safe_load_all(res.stdout):
+        if not doc or doc.get("kind") != "StatefulSet":
+            continue
+        for c in doc["spec"]["template"]["spec"]["containers"]:
+            for env in c.get("env") or []:
+                if env["name"] in ("POSTGRES_PASSWORD", "REDIS_PASSWORD"):
+                    ref = env.get("valueFrom", {}).get("secretKeyRef", {})
+                    assert ref.get("name") == "norviq-secrets", f"{env['name']} not from the Secret"
+                    assert "value" not in env, f"{env['name']} still inlines a literal"
+
+
+def test_explicit_credentials_win_over_generation() -> None:
+    """An operator-supplied credential (or a sealed secret) is always used verbatim."""
+    res = _template("--set", "postgresql.password=MyOwnPgPw", "--set", "redis.password=MyOwnRedisPw")
+    data = _secret_data(res.stdout)
+    assert data["NRVQ_PG_PASSWORD"] == "MyOwnPgPw"
+    assert data["NRVQ_REDIS_PASSWORD"] == "MyOwnRedisPw"
+
+
+def test_generated_credentials_differ_between_releases() -> None:
+    """Two fresh installs must not get the same password (i.e. it is random, not derived)."""
+    a = _secret_data(_template().stdout)["NRVQ_PG_PASSWORD"]
+    b = _secret_data(_template().stdout)["NRVQ_PG_PASSWORD"]
+    assert a != b
+
+
+def test_ha_requires_an_explicit_credential() -> None:
+    """HA manages its own credential material and cannot use the chart-generated value, so it must say
+    so loudly rather than silently rendering an empty password."""
+    pg = _template("--set", "postgresql.ha.enabled=true")
+    assert pg.returncode != 0 and "postgresql.password" in pg.stderr
+    rd = _template("--set", "redis.ha.enabled=true")
+    assert rd.returncode != 0 and "redis.password" in rd.stderr

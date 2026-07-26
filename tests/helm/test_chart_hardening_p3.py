@@ -30,7 +30,6 @@ import subprocess
 
 import pytest
 import yaml
-from tests.conftest import HELM_STRONG_DATASTORES
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 _CHART = _REPO_ROOT / "helm" / "norviq"
@@ -43,19 +42,11 @@ _BASELINE_OFF = ["--set", "baselineClusterPolicy.enabled=false"]
 requires_helm = pytest.mark.skipif(shutil.which("helm") is None, reason="helm binary not on PATH")
 
 
-def _template_raw(*extra: str, show_only: str | None = None) -> subprocess.CompletedProcess[str]:
-    """Render WITHOUT supplying datastore credentials — for the tests that assert the guard fires.
-    (`--set` beats `--values`, so injecting credentials here would override the prod overlay's blanks
-    and the guard under test would never fire.)"""
+def _template(*extra: str, show_only: str | None = None) -> subprocess.CompletedProcess[str]:
     cmd = ["helm", "template", "norviq", str(_CHART), *_BASELINE_OFF, *extra]
     if show_only is not None:
         cmd += ["--show-only", show_only]
     return subprocess.run(cmd, capture_output=True, text=True)
-
-
-def _template(*extra: str, show_only: str | None = None) -> subprocess.CompletedProcess[str]:
-    """Render with strong datastore credentials supplied (the normal, non-guard case)."""
-    return _template_raw(*HELM_STRONG_DATASTORES, *extra, show_only=show_only)
 
 
 def _docs(manifest: str) -> list[dict]:
@@ -76,21 +67,27 @@ def _primary_container(manifest: str, deployment: str, container: str) -> dict:
 
 @requires_helm
 def test_def004_prod_overlay_blank_db_password_fails_render() -> None:
-    """PROD overlay blanks postgresql/redis.password → requireStrongSecret gate must FAIL the render.
+    """PROD overlay blanks postgresql/redis.password → the render must FAIL without a supplied one.
 
     Pre-fix: values-prod did not blank the passwords and secret.yaml had no gate, so this render
-    succeeded and NRVQ_PG_URL embedded `norviq-pg-password` (the whole defect). Post-fix it aborts.
+    succeeded and NRVQ_PG_URL embedded `norviq-pg-password` (the whole defect).
+
+    Note the guard that fires here is the HA one: values-prod also enables postgresql.ha/redis.ha, and
+    an HA cluster manages its own credential material so it cannot use the chart-generated value. The
+    non-HA default path deliberately does NOT fail — it generates a strong password on first install, so
+    a plain `helm install` needs no flags (see test_chart_hardening.py section 3).
     """
-    res = _template_raw("--values", str(_PROD_VALUES))
+    # redis is supplied so the POSTGRES guard is the one under test here (the redis half is covered by
+    # the next test); without either, whichever template renders first would mask the other.
+    res = _template("--values", str(_PROD_VALUES), "--set", "redis.password=Str0ngRedisPw")
     assert res.returncode != 0, "prod overlay must refuse to render without a supplied DB password"
     assert "postgresql.password" in res.stderr
-    assert "requireStrongSecret" in res.stderr
 
 
 @requires_helm
 def test_def004_prod_overlay_blank_redis_password_fails_render() -> None:
     """With a strong PG password supplied but redis still blank, the redis gate fires."""
-    res = _template_raw(
+    res = _template(
         "--values", str(_PROD_VALUES),
         "--set", "postgresql.password=Str0ngPgPw",
     )

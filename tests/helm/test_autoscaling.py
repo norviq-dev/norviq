@@ -25,7 +25,6 @@ import subprocess
 
 import pytest
 import yaml
-from tests.conftest import HELM_STRONG_DATASTORES
 
 _CHART = pathlib.Path(__file__).resolve().parents[2] / "helm" / "norviq"
 _PROD = _CHART / "values-prod.yaml"
@@ -41,7 +40,7 @@ pytestmark = pytest.mark.skipif(shutil.which("helm") is None, reason="helm binar
 
 def _run(*extra: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["helm", "template", "norviq", str(_CHART), *HELM_STRONG_DATASTORES,
+        ["helm", "template", "norviq", str(_CHART),
          "--set", "policyQuotaNamespaces={default}", *extra],
         capture_output=True, text=True,
     )

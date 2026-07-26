@@ -101,12 +101,3 @@ def comprehensive_rego() -> str:
 def seeded_loader(comprehensive_rego: str) -> SeededClusterLoader:
     """A loader pre-seeded with comprehensive.rego as the cluster baseline."""
     return SeededClusterLoader(comprehensive_rego)
-
-
-# `config.requireStrongSecret` (on by default) refuses to render the chart while the PUBLISHED default
-# datastore credentials are still in place — a real install must supply its own. Every helm-render test
-# therefore has to pass these, exactly like `_STRONG_FLEET` does for the fleet store's identical guard.
-HELM_STRONG_DATASTORES = [
-    "--set", "postgresql.password=S7r0ng-Pg-Passw0rd",
-    "--set", "redis.password=S7r0ng-Redis-Passw0rd",
-]

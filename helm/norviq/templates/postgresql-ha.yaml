@@ -35,5 +35,13 @@ metadata:
 type: kubernetes.io/basic-auth
 stringData:
   username: {{ .Values.postgresql.username | quote }}
+  {{- /* HA is an opt-in production path with its OWN CloudNativePG-managed secret, and a Helm template
+         cannot borrow the value templates/secret.yaml generated (per-file scope; a shared helper would
+         mint a DIFFERENT random per call site). So HA requires an explicit credential — which a prod
+         deployment supplies anyway. The default single-node path still auto-generates, so `helm install`
+         needs no flags. */}}
+  {{- if eq (.Values.postgresql.password | default "") "" }}
+  {{- fail "postgresql.ha.enabled=true requires an explicit postgresql.password (--set postgresql.password=... or a sealed secret) — the HA cluster manages its own credential secret and cannot use the chart-generated one." }}
+  {{- end }}
   password: {{ .Values.postgresql.password | quote }}
 {{- end }}
