@@ -500,6 +500,7 @@ audits["scope_violation_dangerous_tool"] { scope_violation_dangerous_tool }
 reasons = {
     "llm01_prompt_injection": "Prompt injection pattern detected (OWASP LLM01)",
     "deny_sql_injection": "SQL injection pattern in tool parameters",
+    "deny_sql_multi_statement": "Multi-statement or metacharacter SQL rejected on execute_sql",
     "deny_shell_execution": "Shell / command-execution pattern detected",
     "llm06_excessive_agency": "Excessive agency — destructive or elevated tool (OWASP LLM06)",
     "llm02_data_leakage": "Sensitive data sent to an external tool (OWASP LLM02)",
@@ -529,7 +530,39 @@ decision = "audit" { audit_fired; not block_fired; not escalate_fired }
 # LABEL change ONLY — the block SET (and thus the decision) is unchanged, and `deny_shell_execution` still wins for
 # genuine shell payloads (no SQL). Other overlaps (base64/cross_tenant/chain_depth still sort before deny_sql) are
 # untouched. Baselines that pinned deny_shell_execution for a SQL input are updated in lockstep (documented).
+# `;` and `|` are ORDINARY SQL SYNTAX — a statement separator and concatenation/bitwise-or — so on
+# execute_sql their presence is not evidence of shell execution. A blocked multi-statement query was
+# therefore reported as "deny_shell_execution": the audit log showed a shell-execution attempt that
+# never happened, and the real reason (SQL) was hidden from whoever triaged it.
+#
+# Shadowing the shell label alone would be wrong: when shell is the ONLY block, removing it from the
+# candidate list leaves `rule_id` UNDEFINED on a decision that is still "block" — a block with no rule.
+# So this names the case explicitly and adds it to the block set, keeping a label available always.
+# Genuine shell markers ("$(", backtick, rm -rf, /etc/passwd) still win: those are a real shell payload
+# smuggled through a SQL parameter, not SQL syntax.
+sql_genuine_shell_markers = ["$(", "`", "rm -rf", "/etc/passwd", "/etc/shadow", "nc -e"]
+
+_genuine_shell_marker_present {
+    val := security_scan_texts_raw[_]
+    pattern := sql_genuine_shell_markers[_]
+    contains(val, pattern)
+}
+_genuine_shell_marker_present {
+    val := lower(security_scan_decoded_raw[_])
+    pattern := sql_genuine_shell_markers[_]
+    contains(val, pattern)
+}
+
+# execute_sql blocked purely on SQL metacharacters — same decision, honest attribution.
+_sql_metachar_only_block {
+    input.tool_name == "execute_sql"
+    shell_injection_detected
+    not _genuine_shell_marker_present
+}
+blocks["deny_sql_multi_statement"] { _sql_metachar_only_block }
+
 _shell_shadowed_by_sql(id) { id == "deny_shell_execution"; sql_injection_detected }
+_shell_shadowed_by_sql(id) { id == "deny_shell_execution"; _sql_metachar_only_block }
 rule_id = sort([id | blocks[id]; not _shell_shadowed_by_sql(id)])[0] { block_fired }
 rule_id = sort([id | escalates[id]])[0] { escalate_fired; not block_fired }
 rule_id = sort([id | audits[id]])[0] { audit_fired; not block_fired; not escalate_fired }

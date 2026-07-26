@@ -140,10 +140,16 @@ describe("PolicyCatalog (#3 / #4)", () => {
     );
     renderPage();
     fireEvent.click(screen.getByRole("button", { name: /^catalog$/i }));
-    // health dot (a listed policy IS loaded & enforcing) + the version + a "applied … ago" timestamp
-    expect(await screen.findByLabelText(/loaded & enforcing/i)).toBeInTheDocument();
+    // This fixture reports NO matching workloads, so the dot must not claim the policy is enforcing —
+    // a green "enforcing" dot on a policy nothing matches reads as healthy while it is inert, and the
+    // operator believes a class is covered when no workload is subject to it.
+    expect(await screen.findByTestId("policy-health-unmatched")).toBeInTheDocument();
+    expect(screen.queryByTestId("policy-health-enforcing")).not.toBeInTheDocument();
+    expect(screen.getByLabelText(/no matching workload/i)).toBeInTheDocument();
     expect(screen.getByText(/applied .*ago/i)).toBeInTheDocument();
-    expect(screen.getByText(/v3 ·/i)).toBeInTheDocument();
+    // Namespace is shown on every row so same-named class policies are tellable apart.
+    expect(screen.getByTestId("policy-ns-default")).toBeInTheDocument();
+    expect(screen.getByText(/v3 ·/i, { exact: false })).toBeInTheDocument();
   });
 
   it("defaults a target_type-less policy to class (UI defense-in-depth)", async () => {
@@ -527,8 +533,10 @@ describe("PolicyCatalog — create (raw rego) / delete (guardrails)", () => {
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: /^catalog$/i }));
     // The normal class has a delete affordance; the reserved __baseline__ does not.
-    expect(await screen.findByTestId("catalog-delete-finance-agent")).toBeInTheDocument();
-    expect(screen.queryByTestId("catalog-delete-__baseline__")).not.toBeInTheDocument();
+    // Namespace-qualified: with several same-named class policies listed, an unqualified testid
+    // named every row equally — exactly the mis-delete hazard this guards against.
+    expect(await screen.findByTestId("catalog-delete-finance-agent-default")).toBeInTheDocument();
+    expect(screen.queryByTestId("catalog-delete-__baseline__-default")).not.toBeInTheDocument();
   });
 
   // FIX A: an EXISTING (already-saved) policy's mode was read-only in the editor — no <select> with an

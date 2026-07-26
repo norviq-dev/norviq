@@ -1939,16 +1939,32 @@ export function PolicyCatalog() {
                                 paddingRight: !isReservedScope(p.agent_class, p.namespace) ? 36 : 0
                               }}
                             >
-                              <span className="policy-name mono" style={{ display: "flex", alignItems: "center", gap: 6 }} title={p.target ?? p.agent_class ?? undefined}>
-                                {/* Health dot — a listed policy IS loaded in this cluster's engine & enforcing. */}
-                                <span
-                                  aria-label="Loaded & enforcing"
-                                  title="Loaded in the policy engine & enforcing"
-                                  style={{
-                                    width: 7, height: 7, borderRadius: "50%", flex: "none",
-                                    background: "var(--good, #2ecc71)", boxShadow: "0 0 0 2px var(--good-dim, #2ecc7126)"
-                                  }}
-                                />
+                              <span className="policy-name mono" style={{ display: "flex", alignItems: "center", gap: 6 }} title={`${p.target ?? p.agent_class ?? ""}${p.namespace ? ` · ${p.namespace}` : ""}`}>
+                                {/* Health dot. A green "enforcing" dot on a policy that matches NOTHING reads as
+                                    healthy when it is inert — the operator believes a class is covered while no
+                                    workload is subject to it. Green means loaded AND matching a live workload;
+                                    amber means loaded but currently matching nothing. Both are legitimate (a
+                                    policy authored ahead of its workload is normal and enforces the moment one
+                                    appears) — the point is that they must not look identical. */}
+                                {(() => {
+                                  const live = (p.matches ?? 0) > 0;
+                                  return (
+                                    <span
+                                      data-testid={`policy-health-${live ? "enforcing" : "unmatched"}`}
+                                      aria-label={live ? "Loaded & enforcing" : "Loaded — no matching workload"}
+                                      title={
+                                        live
+                                          ? "Loaded in the policy engine & enforcing on matching workloads"
+                                          : "Loaded in the policy engine, but nothing currently matches it. It enforces as soon as a workload of this class appears."
+                                      }
+                                      style={{
+                                        width: 7, height: 7, borderRadius: "50%", flex: "none",
+                                        background: live ? "var(--good, #2ecc71)" : "var(--warning, #f5a623)",
+                                        boxShadow: live ? "0 0 0 2px var(--good-dim, #2ecc7126)" : "0 0 0 2px #f5a62326"
+                                      }}
+                                    />
+                                  );
+                                })()}
                                 {/* A "<class>__remediation__" row is a distinct, ADDITIVE overlay
                                     on that class — shown as "<class> · compliance overlay" so the base class
                                     row (unaffected) and the overlay row are both visible, but never confused. */}
@@ -1957,7 +1973,14 @@ export function PolicyCatalog() {
                               {(p.mode ?? p.enforcement_mode) && <DecisionBadge decision={MODE_DECISION[(p.mode ?? p.enforcement_mode)!]} />}
                             </div>
                             <div className="policy-meta">
-                              v{p.current_version ?? 1} ·{" "}
+                              {/* Namespace FIRST and always. The same agent class legitimately holds a policy in
+                                  several namespaces, and those rows were previously identical down to the delete
+                                  button's label — the only way to tell which one you were about to delete was the
+                                  order they happened to render in. */}
+                              <span className="mono" data-testid={`policy-ns-${p.namespace ?? "none"}`}>
+                                {p.namespace ?? "—"}
+                              </span>{" "}
+                              · v{p.current_version ?? 1} ·{" "}
                               {(p.rego_length ?? 0).toLocaleString()} chars ·{" "}
                               {p.matches ?? 0} match{p.matches === 1 ? "" : "es"}
                               {p.last_applied ? <> · applied {timeAgo(p.last_applied)}</> : null}
@@ -1968,9 +1991,12 @@ export function PolicyCatalog() {
                             <button
                               type="button"
                               className="icon-btn"
-                              data-testid={`catalog-delete-${p.agent_class ?? p.target ?? "policy"}`}
-                              aria-label={`Delete policy ${p.agent_class ?? p.target ?? ""}`}
-                              title="Delete policy"
+                              // Namespace-qualified so the control names the ONE policy it deletes — with
+                              // several same-named class policies listed, the old label was identical on
+                              // every row and a screen-reader user had no way to tell them apart at all.
+                              data-testid={`catalog-delete-${p.agent_class ?? p.target ?? "policy"}-${p.namespace ?? "none"}`}
+                              aria-label={`Delete policy ${p.agent_class ?? p.target ?? ""} in namespace ${p.namespace ?? "unknown"}`}
+                              title={`Delete policy · ${p.namespace ?? "unknown namespace"}`}
                               onClick={(e) => { e.stopPropagation(); setDeleteTarget(p); }}
                               style={{ position: "absolute", top: 8, right: 8, color: "#ff6b81" }}
                             >

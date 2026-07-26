@@ -20,7 +20,7 @@ from norviq.api.rate_limit import RateLimitMiddleware
 from norviq.api.siem import AuditForwarder
 from norviq.fleet_relay import FleetRelayForwarder
 from norviq.fleet_puller import FleetPolicyPuller
-from norviq.api.routers import attack_graph_compute, agents, audit, auth_login, cluster_info, coverage, deployments, evaluate, fleet_enroll, graph, graphs, health, keys, me, mitre, packs, policies, redteam, search, settings_router, threats, version
+from norviq.api.routers import attack_graph_compute, agents, audit, auth_login, cluster_info, coverage, deployments, evaluate, fleet_enroll, graph, graphs, health, keys, me, mitre, packs, policies, redteam, search, settings_router, system_health, threats, version
 from norviq.config import settings
 from norviq.engine.audit_emitter import AuditEmitter
 from norviq.engine.cache import RedisCache
@@ -239,6 +239,7 @@ def create_app() -> FastAPI:
     app.include_router(me.router, prefix="/api/v1", tags=["me"])
     app.include_router(auth_login.router, prefix="/api/v1", tags=["auth"])  # local username/password login
     app.include_router(cluster_info.router, prefix="/api/v1", tags=["cluster-info"])
+    app.include_router(system_health.router, prefix="/api/v1", tags=["system-health"])
     app.include_router(deployments.router, prefix="/api/v1", tags=["deployments"])
     app.include_router(mitre.router, prefix="/api/v1", tags=["mitre"])
     app.include_router(coverage.router, prefix="/api/v1", tags=["coverage"])

@@ -117,6 +117,31 @@ export async function fetchClusterInfo(): Promise<ClusterInfo> {
   return apiGet<ClusterInfo>("/api/v1/cluster-info");
 }
 
+export type SystemIssue = {
+  id: string;
+  severity: "critical" | "warning";
+  title: string;
+  detail: string;
+  remediation: string;
+  affected_calls: number;
+  namespaces: string[];
+  last_seen: string | null;
+  window_minutes: number;
+};
+
+export type SystemHealth = {
+  status: "ok" | "degraded";
+  issues: SystemIssue[];
+  window_minutes: number;
+};
+
+/** Infrastructure-caused enforcement problems happening right now (engine outage, rejected sidecars,
+ *  ungoverned fail-open traffic). Reported from recorded decisions, so it never claims an unprovable
+ *  outage. Backs the global banner — without it, a Norviq failure is silent to the operator. */
+export async function fetchSystemHealth(): Promise<SystemHealth> {
+  return apiGet<SystemHealth>("/api/v1/system-health");
+}
+
 export type RuntimeSettings = {
   namespace: string;
   enforcement_mode: "block" | "audit";

@@ -254,6 +254,22 @@ webhook:
     # Before reaching for "allow": both data-plane paths already retry with backoff, which covers the
     # common cases (rolling restarts, brief blips). "allow" is for tolerating a SUSTAINED outage.
     fallbackMode: block
+    # Gate admission on the pod's agent-class label instead of the whole namespace (DEFAULT true).
+    # Without this, `norviq-injection=enabled` on a namespace routes EVERY pod created there through the
+    # injector — the namespace's database, ingress controller, batch jobs — so with failurePolicy: Fail a
+    # Norviq outage blocks pod creation for workloads Norviq does not even govern. Gating on the label
+    # keeps the fail-closed guarantee where it matters (an agent pod still cannot start un-injected) and
+    # makes Norviq invisible to everything else.
+    #
+    # OPT-IN CONTRACT: a pod is governed when its namespace has `norviq-injection=enabled` AND the pod
+    # carries `norviq.io/agent-class=<class>`. Running pods are never touched — the rule is CREATE-only,
+    # so this takes effect as pods are recreated.
+    #
+    # UPGRADE CARE: if you have agent pods relying on namespace-wide injection WITHOUT an agent-class
+    # label, they stop being injected on their next restart. That is silent by nature, so the console
+    # raises an "ungoverned agent pods" warning for exactly this case — or set this to false to keep the
+    # previous namespace-wide behaviour.
+    gateOnlyAgentPods: true
     # Admission failure posture for the injector. "Fail" (DEFAULT) = fail-CLOSED: if the injector is
     # unavailable, pod creation in an injection-enabled namespace is REJECTED so an agent pod can never
     # start un-guarded (correct for a policy-enforcement product; the webhook is HA — 2 replicas + PDB,

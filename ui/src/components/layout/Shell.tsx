@@ -5,6 +5,7 @@ import { ReactNode, useEffect, useState } from "react";
 import { Header } from "./Header";
 import { Sidebar } from "./Sidebar";
 import { ToastProvider } from "../common/Toast";
+import { SystemHealthBanner } from "../common/SystemHealthBanner";
 
 export function Shell({ children }: { children: ReactNode }) {
   const [isTablet, setIsTablet] = useState(() => window.innerWidth <= 1023);
@@ -31,6 +32,9 @@ export function Shell({ children }: { children: ReactNode }) {
             tabletMenuOpen={tabletMenuOpen}
             showMenuButton={false}
           />
+          {/* Above the routed page, not inside it: an enforcement outage affects every screen, and a
+              banner that only appeared on one of them would be missed for exactly as long as it matters. */}
+          <SystemHealthBanner />
           <main className="content">{children}</main>
         </div>
       </div>
