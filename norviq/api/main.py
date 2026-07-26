@@ -183,6 +183,21 @@ async def lifespan(app: FastAPI):
         await warm_agent_overrides(app.state.cache)
     except Exception as exc:  # noqa: BLE001 — advisory warm; never block startup
         log.error("nrvq.startup.agent_overrides_warm_failed", error=str(exc), code="NRVQ-API-7035")
+    # Seed the evaluator's promoted-verb map. `_derived_input` is synchronous (it runs inside the hot
+    # path's _build_input), so it can never await a DB read — the map has to be warmed out-of-band here
+    # and re-seeded on promote. Without this warm, every promotion silently reverts to `unknown` on the
+    # next restart and verb-gated policies quietly change behaviour.
+    try:
+        from norviq.api.routers.threats import warm_verb_overrides
+
+        _vprovider = get_session()
+        _vsess = await _vprovider.__anext__()
+        try:
+            await warm_verb_overrides(app.state.evaluator, _vsess)
+        finally:
+            await _vprovider.aclose()
+    except Exception as exc:  # noqa: BLE001 — advisory warm; never block startup
+        log.error("nrvq.startup.verb_overrides_warm_failed", error=str(exc), code="NRVQ-API-7094")
     app.state.siem_forwarder = AuditForwarder()
     await app.state.siem_forwarder.start()  # no-op unless settings.siem_enabled
     # Single-cluster-first: a token-joined spoke persists its enrollment in FleetJoinState; re-apply it over env

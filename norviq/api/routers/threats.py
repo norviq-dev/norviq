@@ -1254,15 +1254,42 @@ class PromoteToolVerbRequest(BaseModel):
     verb: str  # read | write | delete | send
 
 
+async def warm_verb_overrides(evaluator, session) -> int:
+    """Seed the evaluator's in-proc promoted-verb map from `tool_verb_overrides`.
+
+    Called at startup and after each promotion. Without it a promotion is CONSOLE-ONLY: the Threats
+    screen shows the tool classified, and `input.derived.verb` in a policy still reads `unknown`, so
+    promoting looks effective and changes nothing about enforcement.
+
+    Best-effort — a DB hiccup must not block startup or fail an admin's promote. The consequence of a
+    miss is that the map stays as it was (stale, never wrong-by-invention), and the next promote or
+    restart re-seeds it.
+    """
+    try:
+        rows = (await session.execute(
+            text("SELECT namespace, tool_name, verb FROM tool_verb_overrides")
+        )).mappings().all()
+        return await evaluator.refresh_verb_overrides(rows)
+    except Exception as exc:  # noqa: BLE001 - warm is best-effort; never block startup or a promote
+        log.warning("nrvq.api.verb_overrides.warm_failed", error=str(exc), code="NRVQ-API-7093")
+        return 0
+
+
 @router.post("/threats/tool-verbs/promote")
 async def promote_tool_verb(
     body: PromoteToolVerbRequest,
+    request: Request,
     session: AsyncSession = Depends(get_session),
     user: dict = Depends(get_current_user),
 ) -> dict:
     """PROMOTE an observed tool to a defined verb (admin): persists the override with the evidence that
     justified it. Risk follows the canonical verb→risk map (delete=critical, write/send=high, read=low) so
-    a promotion can never under-declare. Classification-only — the evaluator never reads this table."""
+    a promotion can never under-declare.
+
+    The promotion also reaches ENFORCEMENT: the evaluator's in-proc map is re-seeded here so
+    `input.derived.verb` reports the promoted verb on the very next call. Before this it did not, and a
+    promotion was console-only — the Threats screen showed the tool classified while a verb-gated policy
+    still saw `unknown`, so promoting looked effective and changed nothing."""
     require_admin(user)
     ns_val = body.ns.strip()
     tool = body.tool_name.strip()
@@ -1298,6 +1325,12 @@ async def promote_tool_verb(
         calls=(evidence or {}).get("calls", 0),
         code="NRVQ-API-7110",
     )
+    # Re-seed the enforcement map so the promotion takes effect immediately rather than at the next
+    # restart. Best-effort by construction: a failure here leaves the map stale, never wrong, and
+    # must not fail a promotion that is already durably committed above.
+    evaluator = getattr(getattr(request.app, "state", None), "evaluator", None)
+    if evaluator is not None:
+        await warm_verb_overrides(evaluator, session)
     return {"promoted": True, "ns": ns_val, "tool_name": tool, "verb": verb, "risk": risk.value if risk else "low"}
 
 
