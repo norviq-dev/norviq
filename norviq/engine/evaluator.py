@@ -22,6 +22,7 @@ import structlog
 
 from norviq.config import settings
 from norviq.engine.cache import RedisCache
+from norviq.engine.capability import classify_tool
 from norviq.engine.confusables import skeleton
 from norviq.engine.inproc_cache import _MISS, TTLCache
 from norviq.engine.masking import mask_params
@@ -560,7 +561,23 @@ class OPAEvaluator:
         """Flattened/normalized views of the call, for policies that must not depend on param naming."""
         values = [v for v in self._walk_values(event.tool_params) if isinstance(v, str)]
         sql_like = self._sql_candidate(values)
+        # The abstract operation this call performs — read / write / delete / send / unknown. Already
+        # computed for the console's capability surfaces but never reachable from Rego, so "allow reads
+        # on the vector store, block deletes" had to be written as an enumeration of tool names. That
+        # enumeration is brittle in the dangerous direction under deny-by-default: a missed alias
+        # (milvus_hybrid_search) does not leak, it locks out legitimate traffic.
+        #
+        # `unknown` is deliberately a FIRST-CLASS value a policy can match on, not a hidden default —
+        # a policy that states what happens to unclassified tools beats one where it is implicit.
+        # SECURITY: classification keys on the tool NAME, which the agent side controls, so
+        # `allow { verb == "unknown" }` is a universal bypass for anything named unrecognisably.
+        # Escalate (human review) is the intended handling; see the shipped template.
+        verb, _risk = classify_tool(event.tool_name, event.tool_params)
         return {
+            # Risk is deliberately NOT exposed: it is a JUDGEMENT that shifts as the registry is
+            # updated, so a policy pinned to it could change behaviour on an upgrade without the
+            # policy changing. Verb is a stable fact about the call.
+            "verb": verb.value,
             # Every string value anywhere in tool_params, nesting included.
             "param_values": values,
             "param_values_lower": [v.lower() for v in values],

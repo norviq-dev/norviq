@@ -115,9 +115,36 @@ def test_derived_keys_are_stable() -> None:
     """User policies bind to these names; dropping or renaming one silently breaks every policy that
     reads it (a missing key makes the rule body undefined rather than raising)."""
     assert set(_derived("execute_sql", {"query": "SELECT 1"})) == {
+        "verb",
         "param_values",
         "param_values_lower",
         "tool_kind",
         "sql_normalized",
         "sql_statements",
     }
+
+
+def test_risk_is_deliberately_not_exposed() -> None:
+    """Verb is a FACT about the call; risk is a JUDGEMENT that shifts as the registry is updated. A
+    policy pinned to risk could change behaviour on an upgrade without the policy changing, so risk
+    stays a console-only signal and out of the enforcement input."""
+    assert "risk" not in _derived("milvus_delete", {})
+
+
+def test_verb_classifies_by_operation_across_vendors() -> None:
+    """The point of verb gating: express "reads only" without enumerating every vendor's tool names."""
+    for tool, expected in (
+        ("milvus_search", "read"),
+        ("milvus_query", "read"),
+        ("milvus_insert", "write"),
+        ("milvus_delete", "delete"),
+        ("milvus_drop_collection", "delete"),
+        ("send_email", "send"),
+    ):
+        assert _derived(tool, {})["verb"] == expected, tool
+
+
+def test_unclassified_tool_is_unknown_not_guessed_safe() -> None:
+    """An unrecognised name must surface as `unknown` — a first-class value a policy can match on —
+    rather than being guessed into a benign verb. Guessing safe is how a novel name gets through."""
+    assert _derived("some_unknown_vendor_tool", {})["verb"] == "unknown"
