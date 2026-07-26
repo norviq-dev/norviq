@@ -70,6 +70,17 @@ To view logs:
   kubectl logs -f deployment/norviq-api -n {{ .Release.Namespace }}
   kubectl logs -f deployment/norviq-engine -n {{ .Release.Namespace }}
 
+UPGRADING
+  Use `-f your-values.yaml` (or `--reset-then-reuse-values` on Helm >= 3.14) rather than
+  `--reuse-values`. `--reuse-values` replays only the values YOU supplied last time and does not merge
+  in values a newer chart added, so a chart that gains a value can fail the upgrade outright.
+
+  A partial image upgrade does NOT fully upgrade Norviq. The bundled Rego baselines are materialized
+  into the database by the WEBHOOK image, and enforcement reads what is in the database — so pinning
+  only images.api/images.engine to a new tag leaves the OLD policy enforcing while every version
+  string reports the new one. Move all four image tags together (api, engine, ui, webhook) unless you
+  have a specific reason not to.
+
 Production reminder:
   api.secretKey and the datastore passwords are AUTO-GENERATED on first install and reused on upgrade —
   nothing to override for them. Read the admin password with:

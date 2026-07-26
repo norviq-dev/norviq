@@ -1,4 +1,11 @@
-{{- if .Values.crdFinalizerCleanup.enabled }}
+{{- /* `dig` supplies a default for a MISSING path. A bare .Values.crdFinalizerCleanup.enabled
+     hard-fails with "nil pointer evaluating interface {}.enabled" on `helm upgrade --reuse-values`
+     from a release predating this value, because --reuse-values does not merge in values the newer
+     chart added. That is the command operators reach for, and the failure is total: the upgrade
+     aborts. Defaulting to TRUE (not false) matters — silently dropping this pre-delete hook would
+     bring back the stuck-finalizer bug it exists to prevent, leaving an un-uninstallable release. */}}
+{{- $cfc := .Values.crdFinalizerCleanup | default dict }}
+{{- if ternary $cfc.enabled true (hasKey $cfc "enabled") }}
 # `helm uninstall` cleanup. NrvqPolicy CRs carry the `norviq.io/policy-protection` finalizer, which only
 # the controller (webhook Deployment) clears — and Helm deletes that controller as part of the same
 # uninstall. Whichever goes first, the CRs are left in Terminating forever: the uninstall blocks until it
@@ -90,7 +97,7 @@ spec:
         runAsUser: 65532
       containers:
         - name: cleanup
-          image: {{ include "norviq.thirdPartyImage" (dict "root" $ "image" (.Values.crdFinalizerCleanup.image | default "bitnami/kubectl:1.31")) | quote }}
+          image: {{ include "norviq.thirdPartyImage" (dict "root" $ "image" ($cfc.image | default "bitnami/kubectl:1.31")) | quote }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

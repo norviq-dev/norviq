@@ -260,11 +260,22 @@ class TestDefaultRiskOfVerb:
 
 
 class TestPromotionEvidenceSelection:
-    """_top_verb picks the verb the observed params suggest most often; risk breaks count ties upward."""
+    """_top_verb picks the MOST DESTRUCTIVE verb the observed params revealed; frequency only breaks
+    ties between equally-destructive verbs.
 
-    def test_majority_verb_wins(self):
+    This class previously asserted the opposite ordering (frequency first, risk as the tie-break).
+    That under-stated a tool's capability exactly where it matters most: the suggestion an admin sees
+    and promotes. Observed live during pre-GA validation — zx9_vector_op, {read: 4, delete: 2}, headlined
+    as "read" / risk "low", so promoting the suggestion would have registered a destructive tool as
+    harmless. The principle was already stated in test_tie_breaks_to_higher_risk below ("must NEVER
+    suggest the benign verb"); it just was not carried past the tie case."""
+
+    def test_rare_destructive_verb_outranks_a_frequent_benign_one(self):
+        # Formerly test_majority_verb_wins, which asserted ("read", 12). For an AUTHORIZATION decision
+        # the question is what the tool CAN do, not what it usually does — two observed sends make it a
+        # sending tool. The full histogram still travels alongside, so the frequency split is not hidden.
         from norviq.api.routers.threats import _top_verb
-        assert _top_verb({"calls": 14, "verbs": {"read": 12, "send": 2}}) == ("read", 12)
+        assert _top_verb({"calls": 14, "verbs": {"read": 12, "send": 2}}) == ("send", 2)
 
     def test_tie_breaks_to_higher_risk(self):
         # equal evidence for read and delete must NEVER suggest the benign verb.

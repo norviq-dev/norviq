@@ -1156,12 +1156,21 @@ _VERB_RANK = {"read": 0, "write": 1, "send": 2, "delete": 3}
 
 
 def _top_verb(evidence: dict | None) -> tuple[str | None, int]:
-    """The verb the observed params suggest most often; an evidence-count tie breaks to the MORE
-    destructive verb, so a promotion suggestion never under-states what the tool can do."""
+    """The MOST DESTRUCTIVE verb the observed params revealed, with its evidence count.
+
+    Ranked by destructiveness first, frequency only as a tie-break. This used to sort by count first,
+    which under-stated a tool's capability exactly when it mattered: a tool observed doing 4 reads and
+    2 deletes was suggested to an admin as `read` / risk `low`, and promoting that suggestion would
+    register a destructive tool as a harmless one. For an authorization decision the question is what
+    the tool CAN do, not what it usually does — one observed delete makes it a delete tool.
+
+    The full histogram travels alongside as `verbs`, so the admin still sees the frequency split; the
+    headline just no longer rounds it toward safe.
+    """
     verbs = (evidence or {}).get("verbs") or {}
     if not verbs:
         return None, 0
-    verb, count = max(verbs.items(), key=lambda kv: (kv[1], _VERB_RANK.get(kv[0], 0)))
+    verb, count = max(verbs.items(), key=lambda kv: (_VERB_RANK.get(kv[0], 0), kv[1]))
     return verb, count
 
 

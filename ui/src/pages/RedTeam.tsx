@@ -338,7 +338,7 @@ const RedTeam = () => {
                         </td>
                         <td style={tdStyle} className="mono">{r.expected}</td>
                         <td style={tdStyle}><DecisionBadge decision={(r.actual as Decision) ?? "allow"} /></td>
-                        <td style={tdStyle}>
+                        <td style={{ ...tdStyle, whiteSpace: "nowrap" }}>
                           {r.passed ? (
                             <span style={{ color: ACCENT, display: "inline-flex", alignItems: "center", gap: 4 }}>
                               <CheckCircle2 size={14} /> caught
@@ -355,7 +355,13 @@ const RedTeam = () => {
                           )}
                         </td>
                         <td style={tdStyle}>
-                          <Link to={`/audit?rule=${encodeURIComponent(r.rule_id)}`} style={{ color: ACCENT }}>Audit</Link>
+                          <Link
+                            to={`/audit?rule=${encodeURIComponent(r.rule_id)}&framework=redteam`}
+                            title="Audit rows for this rule, scoped to red-team traffic"
+                            style={{ color: ACCENT }}
+                          >
+                            Audit
+                          </Link>
                         </td>
                       </tr>
                     ))
