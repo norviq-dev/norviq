@@ -222,11 +222,15 @@ class OPAEvaluator:
                             # Propagate the provenance flag set at candidate construction — the resolver
                             # must never re-derive overlay-ness from the key string.
                             "overlay": bool(candidate.get("overlay", False)),
+                            # The WINNING policy's own mode. A policy saved as enforcement_mode="audit"
+                            # renders an AUDIT badge in the Catalog; without carrying it here the engine
+                            # still hard-blocked, so the badge asserted something it did not do.
+                            "enforcement_mode": str(candidate.get("enforcement_mode", "block")),
                         }
                     )
                 winner = self._resolve_with_packs(results)
                 log.info("nrvq.eval.winner", winner=str(winner)[:200], code="NRVQ-ENG-DEBUG-5")
-                base_decision = winner["decision"]
+                base_decision = self._apply_policy_mode(winner, event.event_id)
             if base_decision.rule_id not in settings.evaluator_non_cacheable_rules:
                 await self._cache.set_eval(event.agent_identity.namespace, event.agent_identity.agent_class, cache_tool, base_decision)
                 # Mirror the shared decision into the per-pod L1 under the SAME non-cacheable guard, so warm
@@ -367,6 +371,46 @@ class OPAEvaluator:
         }
         self._posture_cache.set(namespace, posture)
         return posture
+
+    def _apply_policy_mode(self, winner: dict, event_id: str) -> PolicyDecision:
+        """Soften the winning policy's block/escalate to `audit` when THAT policy is saved in audit mode.
+
+        Distinct from `_apply_posture`, which is the NAMESPACE-wide monitor switch. This is the per-policy
+        mode the Catalog already renders as a badge: a policy saved with enforcement_mode="audit" showed
+        an AUDIT chip and still hard-blocked, so the badge asserted something the engine did not do — the
+        damaging kind of UI lie, because the operator believes they are trialling a rule safely.
+
+        Applied BEFORE the eval-cache write, which is safe here even though posture deliberately is not:
+        a policy write calls `_invalidate_eval_for_policy_scope` and publishes `norviq:policy:invalidated`
+        to peer replicas, so flipping a policy's mode clears exactly the decisions it affected. Namespace
+        posture has no such write hook, which is why it must stay a per-call override.
+
+        Only BASE/FLOOR candidates carry a mode (see _collect_candidates) — overlays are excluded by
+        construction, because an overlay may only TIGHTEN and honouring its mode would let an overlay
+        weaken the base policy it sits on.
+
+        Exempt rules stay hard, matching `_apply_posture`: an admin trust freeze is an incident-response
+        kill switch that must outrank a policy's own mode, and engine-health / rate-limit blocks are not
+        policy decisions to be monitored away.
+        """
+        decision = winner["decision"]
+        if str(winner.get("enforcement_mode", "block")) != "audit":
+            return decision
+        if decision.decision not in ("block", "escalate"):
+            return decision
+        if decision.rule_id in _POSTURE_EXEMPT_RULES:
+            return decision
+        log.info(
+            "nrvq.engine.policy_mode.audit_softened",
+            event_id=event_id,
+            orig_decision=decision.decision,
+            orig_rule=decision.rule_id,
+            code="NRVQ-ENG-2060",
+        )
+        return decision.model_copy(update={
+            "decision": "audit",
+            "rule_id": f"policy_audit_would_block:{decision.rule_id}",
+        })
 
     def _apply_posture(self, decision: PolicyDecision, posture: dict, event_id: str) -> PolicyDecision:
         """Namespace monitor mode softens a would-block/escalate to an allow-but-log `audit`
@@ -1055,11 +1099,13 @@ class OPAEvaluator:
             key = f"{target_namespace}:{target_agent_class}"
             if key in self._loader._policies:
                 entry = self._loader._policies[key]
-                candidates.append({"key": key, "rego": entry["rego"], "priority": entry["priority"]})
+                candidates.append({"key": key, "rego": entry["rego"], "priority": entry["priority"],
+                                   "enforcement_mode": entry.get("enforcement_mode", "block")})
                 return
             loaded = await self._loader.load_from_db(target_namespace, target_agent_class)
             if loaded:
-                candidates.append({"key": key, "rego": loaded["rego"], "priority": loaded["priority"]})
+                candidates.append({"key": key, "rego": loaded["rego"], "priority": loaded["priority"],
+                                   "enforcement_mode": loaded.get("enforcement_mode", "block")})
 
         await _append_policy(namespace, agent_class)
         await _append_policy(namespace, "__baseline__")
@@ -1073,13 +1119,15 @@ class OPAEvaluator:
         ns_tier_key = f"{namespace}:namespace:{namespace}"
         if ns_tier_key in self._loader._policies:
             entry = self._loader._policies[ns_tier_key]
-            candidates.append({"key": ns_tier_key, "rego": entry["rego"], "priority": entry["priority"]})
+            candidates.append({"key": ns_tier_key, "rego": entry["rego"], "priority": entry["priority"],
+                               "enforcement_mode": entry.get("enforcement_mode", "block")})
         workload = getattr(event.agent_identity, "workload", "") or ""
         if workload:
             wl_key = f"{namespace}:deployment:{workload}"
             if wl_key in self._loader._policies:
                 entry = self._loader._policies[wl_key]
-                candidates.append({"key": wl_key, "rego": entry["rego"], "priority": entry["priority"]})
+                candidates.append({"key": wl_key, "rego": entry["rego"], "priority": entry["priority"],
+                                   "enforcement_mode": entry.get("enforcement_mode", "block")})
         # Additive sector-pack candidate. In-memory ONLY (no load_from_db) so it costs nothing
         # on the hot path for namespaces with no pack enabled — and is simply absent by default, so the
         # single-cluster path / attack namespaces are unchanged unless a pack is materialized here.
@@ -1146,12 +1194,14 @@ class OPAEvaluator:
                 return
             if key in self._loader._policies:
                 entry = self._loader._policies[key]
-                candidates.append({"key": key, "rego": entry["rego"], "priority": entry["priority"]})
+                candidates.append({"key": key, "rego": entry["rego"], "priority": entry["priority"],
+                                   "enforcement_mode": entry.get("enforcement_mode", "block")})
                 seen.add(key)
                 return
             loaded = await self._loader.load_from_db(target_namespace, target_agent_class)
             if loaded:
-                candidates.append({"key": key, "rego": loaded["rego"], "priority": loaded["priority"]})
+                candidates.append({"key": key, "rego": loaded["rego"], "priority": loaded["priority"],
+                                   "enforcement_mode": loaded.get("enforcement_mode", "block")})
                 seen.add(key)
 
         def _append_overlay(key: str) -> None:
