@@ -21,7 +21,7 @@ Apply an overlay with `helm install norviq ./helm/norviq -n norviq -f helm/norvi
 
 ## Install-blocking guards (read this first)
 
-Four settings can make `helm template`/`helm install` **fail on purpose** rather than render a
+A few settings can make `helm template`/`helm install` **fail on purpose** rather than render a
 silently-insecure cluster. These are the first thing a new operator hits:
 
 | Guard | Fails when | Fix |
@@ -30,9 +30,46 @@ silently-insecure cluster. These are the first thing a new operator hits:
 | `postgresql.ha.enabled` | `postgresql.password` is empty | `--set postgresql.password=...` (an HA cluster manages its own credential secret, so it cannot use the chart-generated one) |
 | `redis.ha.enabled` | `redis.password` is empty | `--set redis.password=...` (same reason — the sentinel cluster takes its password through `customConfig`) |
 | `config.requireStrongSecret` (`true`) + `fleet.hub.enabled` | `fleet.hub.postgresql.password` is empty or the shipped `norviq_dev`, or `fleet.hub.pgUrl` embeds it | `--set fleet.hub.postgresql.password=...` and point `fleet.hub.pgUrl` at a strong credential. |
+| `postgresql.enabled=false` / `redis.enabled=false` (external store) | neither `host` nor `existingSecret` is set | `--set postgresql.host=<your-db-host>` (or `--set postgresql.existingSecret=<secret>`). Without an address the chart would emit the bundled service name and the API would dial a Service that does not exist. |
 
 `agentEgressPolicy.enabled=true` adds two more render-time refusals: no namespaces to lock down, and
 targeting the Norviq control-plane namespace itself.
+
+### Bundled or bring-your-own datastores
+
+Two supported shapes:
+
+| | `postgresql.enabled` / `redis.enabled` | What happens |
+|---|---|---|
+| **Bundled** (default) | `true` | The chart deploys Postgres + Redis and generates their credentials. `helm install` needs no flags. Good for evaluation, dev, and small self-contained installs. |
+| **Bring your own** | `false` | Nothing is deployed. Set `postgresql.host` / `redis.host` (or an `existingSecret`) and Norviq connects to your managed store — the usual production shape, where the database has its own backups, HA and patching. |
+
+With `enabled: false` the chart **refuses to render** unless you give it an address — previously it
+silently emitted the bundled service name and the API dialled a Service that did not exist.
+
+```
+helm install norviq ./helm/norviq -n norviq --create-namespace \
+  --set postgresql.enabled=false --set postgresql.host=mydb.postgres.database.azure.com \
+  --set redis.enabled=false      --set redis.host=mycache.redis.cache.windows.net \
+  --set postgresql.password=... --set redis.password=...
+```
+
+**Prefer `existingSecret` in production.** A password passed with `--set` is recorded in
+`helm history` (and your shell history). Instead put the full connection URL in a Secret you manage —
+the api/engine pods (and the webhook in embedded sidecar mode) read it directly, so no datastore
+credential ever passes through values or the chart's own Secret:
+
+```
+kubectl -n norviq create secret generic my-pg \
+  --from-literal=url='postgresql://user:PW@mydb.example.com:5432/norviq'
+
+helm install norviq ./helm/norviq -n norviq \
+  --set postgresql.enabled=false --set postgresql.existingSecret=my-pg \
+  --set redis.enabled=false      --set redis.existingSecret=my-redis
+```
+
+`existingSecretKey` defaults to `url`. Keep `config.dbSslMode=require` (the default) for a managed
+database; the bundled Postgres has no TLS listener, which is why a local install overrides it.
 
 ### Datastore credentials are generated, not shipped
 
@@ -200,6 +237,7 @@ both Postgres and Redis, which is exactly the embedded shape.
 | `redis.ha.enabled` | `false` | **Gated, not live-validated on 1 node.** When true, renders a Spotahome `RedisFailover` (`databases.spotahome.com/v1`, Sentinel) instead of the single StatefulSet — requires that operator pre-installed. Swap `templates/redis-ha.yaml` + `redis.ha.serviceName` for a different Redis HA stack. `redis.ha.replicas` (`3`), `redis.ha.serviceName` (`norviq-redis-ha`). |
 | `redis.resources` | `100m/128Mi` req, `300m/256Mi` limit | Per-pod CPU/memory. |
 | `redis.port` | `6379` | |
+| `redis.enabled` / `redis.host` / `redis.existingSecret` | `true` / `""` / `""` | `false` = bring your own cache; then `host` (or `existingSecret`, holding the full URL under `existingSecretKey`, default `url`) is required. |
 | `redis.password` | `""` (generated) | Empty = the chart generates a strong password on first install and reuses it on upgrade (see "Datastore credentials are generated, not shipped"). Set a value to bring your own; required when `redis.ha.enabled`. |
 | `redis.storage` | `1Gi` | PVC size. |
 
@@ -212,6 +250,7 @@ both Postgres and Redis, which is exactly the embedded shape.
 | `postgresql.ha.enabled` | `false` | **Gated, not live-validated on 1 node.** When true, renders a CloudNativePG `Cluster` (3 instances) instead of the single StatefulSet, and points the API's PG URL at its service — requires the CloudNativePG operator pre-installed. `postgresql.ha.instances` (`3`), `postgresql.ha.serviceName` (`norviq-postgresql-ha-rw`). |
 | `postgresql.resources` | `200m/256Mi` req, `500m/512Mi` limit | Per-pod CPU/memory. |
 | `postgresql.port` | `5432` | |
+| `postgresql.enabled` / `postgresql.host` / `postgresql.existingSecret` | `true` / `""` / `""` | `false` = bring your own database (the usual production shape); then `host` (or `existingSecret`, holding the full URL) is required. |
 | `postgresql.database`/`username`/`password` | `norviq` / `norviq` / `""` (generated) | Empty password = the chart generates a strong one on first install and reuses it on upgrade. Set a value to bring your own; required when `postgresql.ha.enabled`. |
 | `postgresql.storage` | `5Gi` | PVC size. |
 

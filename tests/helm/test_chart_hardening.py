@@ -207,3 +207,91 @@ def test_ha_requires_an_explicit_credential() -> None:
     assert pg.returncode != 0 and "postgresql.password" in pg.stderr
     rd = _template("--set", "redis.ha.enabled=true")
     assert rd.returncode != 0 and "redis.password" in rd.stderr
+
+
+# --- (4) bring-your-own datastores --------------------------------------------------------------
+# Production usually points Norviq at a managed Postgres/Redis. `enabled: false` used to render the
+# BUNDLED service name anyway, so the API dialled a Service that did not exist; and there was no way to
+# supply credentials without putting them in values/--set (which land in `helm history`).
+
+
+def _urls(manifest: str) -> dict:
+    return {k: v for k, v in _secret_data(manifest).items() if k.endswith("_URL")}
+
+
+def _env_refs(manifest: str) -> dict:
+    """{(deployment, env_name): (secretName, key)} for the datastore URL envs."""
+    out = {}
+    for doc in yaml.safe_load_all(manifest):
+        if not doc or doc.get("kind") != "Deployment":
+            continue
+        for c in doc["spec"]["template"]["spec"]["containers"]:
+            for env in c.get("env") or []:
+                if env["name"] in ("NRVQ_PG_URL", "NRVQ_REDIS_URL"):
+                    ref = env.get("valueFrom", {}).get("secretKeyRef", {})
+                    out[(doc["metadata"]["name"], env["name"])] = (ref.get("name"), ref.get("key"))
+    return out
+
+
+def test_external_datastores_use_the_supplied_host() -> None:
+    """enabled=false + host → the URLs target the operator's store and nothing is deployed for it."""
+    res = _template(
+        "--set", "postgresql.enabled=false", "--set", "redis.enabled=false",
+        "--set", "postgresql.host=db.example.com", "--set", "redis.host=cache.example.com",
+        "--set", "postgresql.password=ExtPg", "--set", "redis.password=ExtRd",
+    )
+    assert res.returncode == 0, res.stderr
+    urls = _urls(res.stdout)
+    assert "db.example.com" in urls["NRVQ_PG_URL"] and "norviq-postgresql" not in urls["NRVQ_PG_URL"]
+    assert "cache.example.com" in urls["NRVQ_REDIS_URL"] and "norviq-redis" not in urls["NRVQ_REDIS_URL"]
+    assert "kind: StatefulSet" not in res.stdout  # nothing bundled is deployed
+
+
+def test_external_without_a_host_fails_instead_of_dialling_a_dead_service() -> None:
+    """The old silent footgun: enabled=false still emitted the bundled service name."""
+    for store in ("postgresql", "redis"):
+        res = _template("--set", f"{store}.enabled=false")
+        assert res.returncode != 0, f"{store}: must refuse to guess an address"
+        assert f"{store}.host" in res.stderr
+
+
+def test_existing_secret_keeps_the_credential_out_of_the_chart() -> None:
+    """The production credential path: the operator's own Secret is read by the pods directly, so no
+    datastore credential is rendered into values, --set, or the chart's Secret."""
+    res = _template(
+        "--set", "postgresql.enabled=false", "--set", "redis.enabled=false",
+        "--set", "postgresql.existingSecret=my-pg", "--set", "postgresql.existingSecretKey=dsn",
+        "--set", "redis.existingSecret=my-redis",
+    )
+    assert res.returncode == 0, res.stderr
+    # The chart's Secret carries NO datastore credential at all.
+    data = _secret_data(res.stdout)
+    assert not [k for k in data if "PG_" in k or "REDIS_" in k]
+    # ...and every pod that needs a datastore reads the operator's Secret (custom key honoured).
+    refs = _env_refs(res.stdout)
+    for dep in ("norviq-api", "norviq-engine"):
+        assert refs[(dep, "NRVQ_PG_URL")] == ("my-pg", "dsn"), dep
+        assert refs[(dep, "NRVQ_REDIS_URL")] == ("my-redis", "url"), dep
+    # The webhook only carries datastore wiring in EMBEDDED sidecar mode (it propagates it to injected
+    # sidecars that run their own engine); the thin-proxy default needs none, so it has no such env.
+    assert ("norviq-webhook", "NRVQ_PG_URL") not in refs
+    embedded = _template(
+        "--set", "postgresql.enabled=false", "--set", "redis.enabled=false",
+        "--set", "postgresql.existingSecret=my-pg", "--set", "postgresql.existingSecretKey=dsn",
+        "--set", "redis.existingSecret=my-redis",
+        "--set", "webhook.injection.sidecarMode=embedded",
+    )
+    assert embedded.returncode == 0, embedded.stderr
+    eref = _env_refs(embedded.stdout)
+    assert eref[("norviq-webhook", "NRVQ_PG_URL")] == ("my-pg", "dsn")
+    assert eref[("norviq-webhook", "NRVQ_REDIS_URL")] == ("my-redis", "url")
+
+
+def test_bundled_default_is_unchanged_by_the_byo_plumbing() -> None:
+    """The default path must not grow a pod-level URL override — it still comes from envFrom."""
+    res = _template()
+    assert res.returncode == 0, res.stderr
+    assert _env_refs(res.stdout) == {}
+    urls = _urls(res.stdout)
+    assert "norviq-postgresql" in urls["NRVQ_PG_URL"]
+    assert "norviq-redis" in urls["NRVQ_REDIS_URL"]

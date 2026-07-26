@@ -96,13 +96,23 @@ spec:
             - name: NRVQ_REDIS_URL
               valueFrom:
                 secretKeyRef:
+                  {{- if ne (.Values.redis.existingSecret | default "") "" }}
+                  name: {{ .Values.redis.existingSecret | quote }}
+                  key: {{ .Values.redis.existingSecretKey | default "url" | quote }}
+                  {{- else }}
                   name: norviq-secrets
                   key: NRVQ_REDIS_URL
+                  {{- end }}
             - name: NRVQ_PG_URL
               valueFrom:
                 secretKeyRef:
+                  {{- if ne (.Values.postgresql.existingSecret | default "") "" }}
+                  name: {{ .Values.postgresql.existingSecret | quote }}
+                  key: {{ .Values.postgresql.existingSecretKey | default "url" | quote }}
+                  {{- else }}
                   name: norviq-secrets
                   key: NRVQ_PG_URL
+                  {{- end }}
             - name: NRVQ_DB_SSL_MODE
               value: {{ .Values.config.dbSslMode | quote }}
             - name: NRVQ_SIDECAR_OPA_MODE

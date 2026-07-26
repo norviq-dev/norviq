@@ -144,3 +144,28 @@ Usage: {{- include "norviq.waitFor" (dict "name" "wait-for-postgres" "host" "nor
       cpu: 50m
       memory: 32Mi
 {{- end -}}
+
+{{/*
+Datastore URL env for BYO (existingSecret) stores.
+
+An explicit `env:` entry WINS over `envFrom`, so when the operator owns the credential we simply
+override NRVQ_PG_URL / NRVQ_REDIS_URL on the pod from THEIR Secret. The value never touches values,
+`--set` or the chart's own Secret — kubelet resolves it at pod start. Renders nothing when both stores
+are chart-managed, so the default path is byte-identical to before.
+*/}}
+{{- define "norviq.datastoreUrlEnv" -}}
+{{- if ne (.Values.postgresql.existingSecret | default "") "" }}
+- name: NRVQ_PG_URL
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.postgresql.existingSecret | quote }}
+      key: {{ .Values.postgresql.existingSecretKey | default "url" | quote }}
+{{- end }}
+{{- if ne (.Values.redis.existingSecret | default "") "" }}
+- name: NRVQ_REDIS_URL
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.redis.existingSecret | quote }}
+      key: {{ .Values.redis.existingSecretKey | default "url" | quote }}
+{{- end }}
+{{- end -}}

@@ -68,6 +68,10 @@ spec:
           ports:
             - containerPort: {{ .Values.api.port }}
               name: http
+          {{- with (include "norviq.datastoreUrlEnv" . | trim) }}
+          env:
+            {{- . | nindent 12 }}
+          {{- end }}
           envFrom:
             - secretRef:
                 name: norviq-secrets

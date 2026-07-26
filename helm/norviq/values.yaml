@@ -283,7 +283,21 @@ webhook:
     clientSecret: ""    # the Keycloak confidential client secret (rendered into norviq-secrets when enabled)
 
 redis:
+  # true  = the chart runs a bundled Redis for you (single StatefulSet, or Sentinel when ha.enabled).
+  # false = BRING YOUR OWN (ElastiCache, Azure Cache, Memorystore, an existing in-cluster Redis). Nothing
+  #         is deployed; set `host` (and usually `existingSecret`) to point Norviq at it.
   enabled: true
+  # External Redis hostname. EMPTY = the bundled service (`norviq-redis`, or ha.serviceName under HA).
+  # REQUIRED when enabled=false — the chart refuses to render an address it would only guess wrong.
+  #   --set redis.enabled=false --set redis.host=mycache.redis.cache.windows.net
+  host: ""
+  # PRODUCTION credential path: name of a Secret YOU manage holding the full Redis URL. When set, the
+  # chart never renders or generates a Redis credential — the pods read the URL straight from your
+  # Secret, so it never passes through values, `--set` (which lands in `helm history` and your shell
+  # history) or the chart's own Secret. Create it with e.g.:
+  #   kubectl create secret generic my-redis --from-literal=url='rediss://:PW@host:6380/0'
+  existingSecret: ""
+  existingSecretKey: "url"
   replicas: 1
   # HA (multi-node prod, GATED, not live-validated on 1 node): when true, render a Redis HA topology
   # (Sentinel) instead of the single StatefulSet. Requires the operator/Sentinel chart pre-installed.
@@ -309,7 +323,23 @@ redis:
   storage: 1Gi
 
 postgresql:
+  # true  = the chart runs a bundled Postgres for you (single StatefulSet, or CloudNativePG under HA).
+  # false = BRING YOUR OWN (RDS, Cloud SQL, Azure Database, an existing in-cluster Postgres). Nothing is
+  #         deployed; set `host` (and usually `existingSecret`) to point Norviq at it. This is the usual
+  #         production shape — a managed database with its own backups, HA and patching.
   enabled: true
+  # External Postgres hostname. EMPTY = the bundled service (`norviq-postgresql`, or ha.serviceName under
+  # HA). REQUIRED when enabled=false — the chart refuses to render an address it would only guess wrong.
+  #   --set postgresql.enabled=false --set postgresql.host=mydb.postgres.database.azure.com
+  # Keep config.dbSslMode=require (the default) for a managed database.
+  host: ""
+  # PRODUCTION credential path: name of a Secret YOU manage holding the full Postgres URL. When set, the
+  # chart never renders or generates a DB credential — the pods read the URL straight from your Secret,
+  # so it never passes through values or `--set` (which lands in `helm history` and your shell history).
+  # The URL carries user/password/host/port/database, so those keys below are then unused. Create it with:
+  #   kubectl create secret generic my-pg --from-literal=url='postgresql://user:PW@host:5432/norviq'
+  existingSecret: ""
+  existingSecretKey: "url"
   replicas: 1
   # HA (multi-node prod, GATED, not live-validated on 1 node): when true, render a CloudNativePG
   # `Cluster` (3 instances) instead of the single StatefulSet, and point the API's PG URL at its
