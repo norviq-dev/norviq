@@ -71,7 +71,13 @@ To view logs:
   kubectl logs -f deployment/norviq-engine -n {{ .Release.Namespace }}
 
 Production reminder:
-  Override api.secretKey, redis.password, and postgresql.password before production deployment.
+  api.secretKey and the datastore passwords are AUTO-GENERATED on first install and reused on upgrade —
+  nothing to override for them. Read the admin password with:
+      kubectl get secret norviq-secrets -n {{ .Release.Namespace }} -o jsonpath='{.data.NRVQ_AUTH_ADMIN_PASSWORD}' | base64 -d
+  Set postgresql/redis.password explicitly only to bring your own credential (required when
+  postgresql.ha.enabled / redis.ha.enabled), or point postgresql/redis.existingSecret at a Secret you
+  manage — the production path, since a --set password lands in `helm history`. For an EXTERNAL managed
+  datastore set postgresql.enabled=false + postgresql.host=<host> (same for redis).
   Set values.policyQuotaNamespaces to include every tenant namespace (for example: default, chatbot-prod, analytics); quotas and baseline policies render from this list.
   A baseline high-priority policy is installed for EACH namespace in policyQuotaNamespaces (values.baselineClusterPolicy.*); keep it enabled to preserve fail-closed posture. NOTE: with baselineClusterPolicy.enabled=true, an EMPTY policyQuotaNamespaces now FAILS the install (it would otherwise render no baseline and silently drop fail-closed posture) — list your tenant namespaces, or set enabled=false to opt out explicitly.
   Bind ClusterRoles to your tenant/admin groups (this chart ships roles but not subject-specific bindings).
