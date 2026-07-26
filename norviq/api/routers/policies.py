@@ -34,6 +34,16 @@ router = APIRouter()
 # `__cluster__` namespace (the cluster-wide baseline) is likewise undeletable.
 _RESERVED_DELETE_CLASSES = ("__baseline__", "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__")
 _RESERVED_NAMESPACES = ("__cluster__",)
+# CONSOLE VIEW SENTINELS — not namespaces. The console's global picker sends `namespace="all"` to mean
+# "aggregate every namespace" (see evaluator._collect_candidates / policy_loader.namespaces_for_class, which
+# both resolve it for READS and explicitly exclude it from the real-namespace set). No agent ever carries it,
+# so a policy PERSISTED at this key can never be selected by an evaluation: `_append_policy` looks up
+# f"{caller_namespace}:{agent_class}" and the caller's namespace is always concrete.
+# Writing one therefore produces a permanently DEAD policy while every status surface reports it as enforcing
+# — the worst failure mode for a security control, and reachable through the documented flow (the Attack Graph
+# opens on "All namespaces", so an intent draft carries ns="all" straight into Review & apply). Reject at the
+# write boundary. Reads and DELETE still accept it so an operator can list and clean up any row already stored.
+_VIEW_SENTINEL_NAMESPACES = ("all",)
 # Operator-authored reserved scopes an admin MAY remove via the explicit confirm-gated path.
 # `__baseline__` and `__guardrail__` are authored through POST /policies (create ALLOWS them), so without a
 # revert path there is a create/delete asymmetry — a high-priority `__baseline__` could shadow every class policy and
@@ -366,6 +376,17 @@ async def create_policy(body: PolicyCreate, request: Request, user: dict = Depen
     # Parity with delete: the `__cluster__` cluster-wide baseline is a managed scope (seeded by the loader, not the
     # generic policy endpoint) — a direct write here would move the whole-cluster fallback floor. Delete already
     # rejects it; create must too (no legitimate API caller POSTs to `__cluster__`).
+    if body.namespace in _VIEW_SENTINEL_NAMESPACES:
+        log.warning("nrvq.api.policy.view_sentinel_namespace", namespace=body.namespace,
+                    agent_class=body.agent_class, actor=user.get("sub"), actor_role=user.get("role"),
+                    code="NRVQ-API-7018")
+        raise HTTPException(
+            status_code=422,
+            detail=f"'{body.namespace}' is the console's aggregate VIEW, not a namespace — no agent ever reports "
+                   f"namespace='{body.namespace}', so a policy stored there can never be evaluated and would show "
+                   "as enforcing while protecting nothing. Pick the concrete namespace the agent class runs in "
+                   "(switch the namespace selector off 'All namespaces'), then apply again.",
+        )
     if body.namespace in _RESERVED_NAMESPACES:
         log.warning("nrvq.api.policy.reserved_scope", namespace=body.namespace, actor=user.get("sub"),
                     actor_role=user.get("role"), code="NRVQ-API-7016")

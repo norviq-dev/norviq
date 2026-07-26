@@ -242,6 +242,18 @@ webhook:
     # nothing per-pod). "embedded" = the sidecar runs its own RedisCache+OPA(subprocess)+PolicyLoader
     # for air-gapped/edge (the chart then wires NRVQ_REDIS_URL/NRVQ_PG_URL through to the injector).
     sidecarMode: proxy
+    # DATA-PLANE posture: what a GOVERNED AGENT does when the central engine is unreachable. Distinct
+    # from failurePolicy below, which is the ADMISSION posture (whether a pod may be created at all).
+    #   "block" (DEFAULT) = fail-CLOSED. The agent keeps talking, but every tool call is refused for as
+    #     long as the engine is down. Correct for an enforcement product: no ungoverned tool calls, ever.
+    #   "allow"           = fail-OPEN. Tool calls are forwarded UNGOVERNED during an outage, so the agent
+    #     keeps working. Each one is audited as rule_id=thin_proxy_fail_open — never as a policy allow.
+    # This applies ONLY to a genuine outage (5xx / timeout / connection error). A 4xx is the engine
+    # ANSWERING with a refusal — an expired token, a malformed request — and ALWAYS blocks regardless of
+    # this setting, so choosing "allow" cannot turn a revoked credential into a silent bypass.
+    # Before reaching for "allow": both data-plane paths already retry with backoff, which covers the
+    # common cases (rolling restarts, brief blips). "allow" is for tolerating a SUSTAINED outage.
+    fallbackMode: block
     # Admission failure posture for the injector. "Fail" (DEFAULT) = fail-CLOSED: if the injector is
     # unavailable, pod creation in an injection-enabled namespace is REJECTED so an agent pod can never
     # start un-guarded (correct for a policy-enforcement product; the webhook is HA — 2 replicas + PDB,
@@ -249,6 +261,10 @@ webhook:
     # deadlocks). Set "Ignore" (fail-open) only for a dev/eval cluster where an un-injected pod is
     # acceptable.
     failurePolicy: Fail
+    # NOTE ON THE HA THIS DEFAULT ASSUMES: 2 replicas + topology spread (above) are ON, but webhook.pdb is
+    # OFF by default (a PDB blocks node drains on a single-node cluster). On a MULTI-NODE cluster set
+    # webhook.pdb.enabled=true, otherwise one drain can evict both replicas and reject pod creation in
+    # every governed namespace until they reschedule.
     # Honor the per-pod injection opt-out (norviq-injection=disabled label / norviq.io/skip-injection
     # annotation)? Default true (backward-compatible). Set false to make injection namespace-uniform — a
     # pod author in an injection-enabled namespace cannot self-exempt their workload from
@@ -268,7 +284,13 @@ webhook:
     targetCPUUtilizationPercentage: 70
     targetMemoryUtilizationPercentage: ""   # "" = do not scale on memory; set e.g. 75 to add it
   spread:
-    enabled: false
+    # ON by default, unlike the other components: the injector is the ONLY workload whose unavailability
+    # REJECTS pod creation in every injection-enabled namespace (failurePolicy: Fail). Both replicas landing
+    # on one node turns a routine node drain into a pod-creation outage across every governed namespace —
+    # observed exactly that on a 2-node cluster during an outage drill. The constraint is SOFT
+    # (whenUnsatisfiable: ScheduleAnyway, see _helpers.tpl), so a single-node cluster still schedules both
+    # replicas: enabling it costs nothing and removes the co-location failure mode.
+    enabled: true
   rollout:
     maxSurge: 1        # production default: zero-downtime (needs node headroom for a surge pod)
     maxUnavailable: 0

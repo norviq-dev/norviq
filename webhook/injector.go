@@ -277,6 +277,9 @@ func sidecarEnv(agentClass string, namespace string, cfg Config) []map[string]in
 			map[string]interface{}{"name": "NRVQ_SPIFFE_SOCKET", "value": cfg.SpiffeSocket},
 		)
 	}
+	// Give the injected sidecar the same outage posture the operator configured for the SDK, so the
+	// zero-code-change path and the in-process path behave identically during an engine outage.
+	env = appendIfSet(env, "NRVQ_SDK_FALLBACK_MODE", cfg.FallbackMode)
 	return env
 }
 
