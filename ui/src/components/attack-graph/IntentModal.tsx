@@ -17,7 +17,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { createIntentDraft, demoteToolVerb, fetchIntentCoverage, fetchIntentSuggest, fetchMe, promoteToolVerb } from "../../api/client";
+import { createIntentDraft, demoteToolVerb, fetchCoverageByCategory, fetchIntentCoverage, fetchIntentSuggest, fetchMe, promoteToolVerb } from "../../api/client";
 import { useApi } from "../../hooks/useApi";
 import { INTENT_CONTROLS, SEVERITY_COLORS } from "./constants";
 import type { IntentCoverage, IntentDraft, IntentSuggestTool, IntentToggles, ThreatPath } from "./types";
@@ -67,6 +67,17 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
   // params suggest — reloadKey re-fetches the suggest list so the row flips to a classified chip.
   const me = useApi(() => fetchMe(), []);
   const isAdmin = me.data?.role === "admin";
+  // Which classes ALREADY have an intent policy applied. An intent policy is one class's allowlist, so after
+  // doing one class the operator's next question is "which classes still have none?" — answer it in the
+  // picker instead of leaving it to the footer prose. `agent_class_policies` is already on this response.
+  const applied = useApi(() => fetchCoverageByCategory(ns), [ns]);
+  const intentByClass = useMemo(() => {
+    const m: Record<string, { enforcing: boolean; effective: boolean }> = {};
+    for (const p of applied.data?.agent_class_policies ?? []) {
+      if (p.kind === "intent") m[p.cls] = { enforcing: p.enforcing, effective: p.effective };
+    }
+    return m;
+  }, [applied.data]);
   const [promoting, setPromoting] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   // The concrete namespace behind the suggest scope — promotion must name ONE namespace even when the
@@ -260,6 +271,9 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
               >
                 <span style={{ flex: 1, textAlign: "left" }}>{activeCls}</span>
                 <span style={{ fontSize: 11, color: "#a0a0a0" }}>{classOptions.find((c) => c.cls === activeCls)?.count ?? 0} paths</span>
+                <span style={{ fontSize: 10.5, fontWeight: 700, color: intentByClass[activeCls] ? "#2ddab8" : "#c9a227" }}>
+                  {intentByClass[activeCls] ? "intent set" : "no intent"}
+                </span>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#5b6577" strokeWidth="2"><path d="M6 9l6 6 6-6" /></svg>
               </button>
               {clsMenu && (
@@ -271,7 +285,12 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
                       style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "8px 10px", borderRadius: 7, fontSize: 13, color: c.cls === activeCls ? "#e8edf5" : "#a0a0a0", cursor: "pointer" }}
                     >
                       <span>{c.cls}</span>
-                      <span style={{ fontSize: 11, color: "#a0a0a0" }}>{c.count}{c.cls === activeCls ? " ✓" : ""}</span>
+                      <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ fontSize: 10.5, fontWeight: 700, color: intentByClass[c.cls] ? "#2ddab8" : "#c9a227" }}>
+                          {intentByClass[c.cls] ? "intent set" : "no intent"}
+                        </span>
+                        <span style={{ fontSize: 11, color: "#a0a0a0" }}>{c.count}{c.cls === activeCls ? " ✓" : ""}</span>
+                      </span>
                     </div>
                   ))}
                 </div>
