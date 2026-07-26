@@ -421,11 +421,15 @@ export function AttackGraph() {
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 2v6h-6" /><path d="M3 12a9 9 0 0 1 15-6.7L21 8" /><path d="M3 22v-6h6" /><path d="M21 12a9 9 0 0 1-15 6.7L3 16" /></svg>
               Recompute
             </button>
-            {/* GLOBAL positive-security intent across ALL classes. The per-path "Define intended behaviour" +
-                "Simulate" live in the inspector (scoped to the selected path) — this one is the bulk entry. */}
+            {/* Bulk entry to the intent builder: NOT pre-filtered to one path, so you pick the class inside.
+                An intent policy is always ONE class's allowlist (norviq.intent.<class>) — never a blanket
+                across classes, which for a positive-security allowlist would be actively dangerous. The label
+                therefore names the ACTION ("by class"), not the graph filter it opens from: "· all classes"
+                read as "apply to every class at once" and alarmed operators. The per-path variant lives in the
+                inspector, scoped to the selected path's class. */}
             <button type="button" onClick={() => { setIntentGlobal(true); setIntentOpen(true); }} disabled={!visible.length} style={{ height: 32, padding: "0 14px", display: "flex", alignItems: "center", gap: 7, border: "1px solid var(--accent, #2ddab8)", borderRadius: 9, background: "rgba(45,218,184,0.12)", color: "var(--accent, #2ddab8)", fontFamily: "inherit", fontSize: 12.5, fontWeight: 700, cursor: visible.length ? "pointer" : "default" }}>
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /><path d="m9 12 2 2 4-4" /></svg>
-              Define intended behaviour · all classes
+              Define intended behaviour · by class
             </button>
             {/* Tool-classification lifecycle home: observing candidates (evidence + promote) and learned
                 overrides (audit trail + demote). The per-card stage tags link the eye here. */}

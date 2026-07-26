@@ -74,9 +74,9 @@ describe("color-consistency guard", () => {
   it("the Attack Graph primary CTAs resolve to the teal accent (not purple/indigo)", () => {
     const attackGraph = Object.entries(sources).find(([p]) => p.endsWith("pages/AttackGraph.tsx"))?.[1] ?? "";
     const detail = Object.entries(sources).find(([p]) => p.endsWith("attack-graph/AttackPathDetail.tsx"))?.[1] ?? "";
-    // Toolbar global "Define intended behaviour · all classes" = teal-accent secondary; the per-path
+    // Toolbar bulk "Define intended behaviour · by class" = teal-accent secondary; the per-path
     // Simulate lives in the inspector (redundant toolbar Simulate was removed).
-    expect(attackGraph).toContain("Define intended behaviour · all classes");
+    expect(attackGraph).toContain("Define intended behaviour · by class");
     expect(attackGraph).toMatch(/border: "1px solid var\(--accent/); // Define-intent secondary
     expect(detail).toContain("Simulate (preview)");
     expect(attackGraph).not.toContain("#c084fc"); // no purple gradient CTA
