@@ -74,6 +74,7 @@ spec:
             # for Postgres AND Redis, none of which a thin proxy uses.
             - name: NRVQ_SIDECAR_MODE
               value: "embedded"
+            {{- include "norviq.datastoreUrlEnv" . | nindent 12 }}
           envFrom:
             - secretRef:
                 name: norviq-secrets
