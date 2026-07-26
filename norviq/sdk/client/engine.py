@@ -126,11 +126,39 @@ class PolicyEngineClient:
         return self._fallback_decision(event)
 
     def _handle_http_error(self, event: ToolCallEvent, exc: httpx.HTTPStatusError) -> PolicyDecision:
-        """Handle HTTP error path and return fallback decision."""
+        """Handle HTTP error path.
+
+        A 4xx is NOT an outage: the engine answered, and it refused the request. Treating it as one is
+        both a bad diagnostic (operators chase healthy engine pods when the real cause is an expired
+        token) and a bypass: with ``sdk_fallback_mode=allow`` — the setting an operator reaches for to
+        keep agents running through an outage — every 401/403 would become an ALLOW, so a revoked
+        credential silently turns into a total governance bypass. A 4xx an attacker can *provoke* is
+        worse still: influence a tool param into a 422 and the same fallback allows the call.
+
+        So 4xx always blocks, whatever the fallback mode. Only 5xx/timeout/connect errors — the engine
+        genuinely not answering — honour the operator's configured posture.
+        """
+        status = exc.response.status_code
+        if 400 <= status < 500:
+            log.error(
+                "nrvq.sdk.evaluate.rejected",
+                event_id=event.event_id,
+                status=status,
+                code="NRVQ-SDK-1014",
+            )
+            return PolicyDecision(
+                decision="block",
+                rule_id="engine_rejected_request",
+                reason=(
+                    f"Policy engine rejected the request (HTTP {status}) — this is a credential or "
+                    "request error, not an engine outage; fail-open does not apply."
+                ),
+                event_id=event.event_id,
+            )
         log.error(
             "nrvq.sdk.evaluate.http_error",
             event_id=event.event_id,
-            status=exc.response.status_code,
+            status=status,
             code="NRVQ-SDK-1012",
         )
         return self._fallback_decision(event)
@@ -157,8 +185,22 @@ class PolicyEngineClient:
             return self._handle_unknown_error(event, exc)
 
     def _fallback_decision(self, event: ToolCallEvent) -> PolicyDecision:
-        """Return fallback decision when engine is unavailable."""
+        """Return the configured fallback decision when the engine is genuinely unavailable.
+
+        An unrecognised mode is coerced to ``block`` rather than passed through: ``PolicyDecision``
+        constrains ``decision`` to a Literal, so a typo'd ``NRVQ_SDK_FALLBACK_MODE`` would raise a
+        ValidationError *inside this handler* — the one path that only executes while the engine is
+        already down. Failing safe beats crashing the data plane during an outage.
+        """
         mode = settings.sdk_fallback_mode
+        if mode not in ("allow", "block"):
+            log.error(
+                "nrvq.sdk.fallback.invalid_mode",
+                event_id=event.event_id,
+                configured=mode,
+                code="NRVQ-SDK-1015",
+            )
+            mode = "block"
         log.warning("nrvq.sdk.fallback", event_id=event.event_id, mode=mode, code="NRVQ-SDK-1013")
         return PolicyDecision(
             decision=mode,

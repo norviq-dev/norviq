@@ -13,14 +13,14 @@ import (
 )
 
 type Config struct {
-	Port                 int
-	CertFile             string
-	KeyFile              string
-	SidecarImage         string
-	SidecarPort          int
-	EnableLabel          string
-	EnableValue          string
-	AgentClassLabel      string
+	Port            int
+	CertFile        string
+	KeyFile         string
+	SidecarImage    string
+	SidecarPort     int
+	EnableLabel     string
+	EnableValue     string
+	AgentClassLabel string
 	// When false, the injector IGNORES the per-pod opt-out (norviq-injection=disabled label /
 	// norviq.io/skip-injection annotation) so a pod author in an injection-enabled namespace cannot
 	// self-exempt their workload from enforcement — the namespace-uniform guarantee holds. Default
@@ -38,6 +38,10 @@ type Config struct {
 	// Mode injected into sidecars. "proxy" (default) = thin sidecar POSTs to the central
 	// norviq-api /evaluate with a namespace-scoped service JWT; "embedded" = full local engine.
 	SidecarMode string
+	// Data-plane posture when the central engine is UNREACHABLE (5xx/timeout/connect). "block"
+	// (default) fails closed; "allow" keeps agents running ungoverned through an outage. A 4xx is
+	// never covered by this — the engine answered and refused, so it always blocks.
+	FallbackMode string
 	// Central API URL + HS256 signing secret. In proxy mode the injector wires ApiURL and mints a
 	// per-workload service token from ApiSecret (reused from the controller's env).
 	ApiURL    string
@@ -88,6 +92,7 @@ func LoadConfig() Config {
 		SpiffeMode:           envStr("NRVQ_SPIFFE_MODE", "mock"),
 		SpiffeSocket:         envStr("NRVQ_SPIFFE_SOCKET", "/spiffe-workload-api/spire-agent.sock"),
 		SidecarMode:          envStr("NRVQ_SIDECAR_MODE", "proxy"),
+		FallbackMode:         envStr("NRVQ_SDK_FALLBACK_MODE", "block"),
 		ApiURL:               envStr("NRVQ_API_URL", "http://norviq-api:8080"),
 		ApiSecret:            envStr("NRVQ_API_SECRET_KEY", envStr("NRVQ_API_TOKEN", "")),
 		SidecarTokenTTLHours: envInt("NRVQ_SIDECAR_TOKEN_TTL_HOURS", 720),

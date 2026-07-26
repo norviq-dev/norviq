@@ -90,6 +90,10 @@ spec:
             # local engine for air-gapped/edge (needs the datastore wiring below).
             - name: NRVQ_SIDECAR_MODE
               value: {{ .Values.webhook.injection.sidecarMode | default "proxy" | quote }}
+            # Outage posture stamped into every injected sidecar (see values.yaml for the full contract).
+            # Only applies when the engine is genuinely unreachable; a 4xx always blocks.
+            - name: NRVQ_SDK_FALLBACK_MODE
+              value: {{ .Values.webhook.injection.fallbackMode | default "block" | quote }}
             {{- if eq (.Values.webhook.injection.sidecarMode | default "proxy") "embedded" }}
             # Embedded sidecars run their own RedisCache + OPA(subprocess) + PolicyLoader, so the injector
             # must propagate the datastore wiring. The thin-proxy default needs none of this.

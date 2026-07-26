@@ -62,6 +62,22 @@ webhooks:
         - key: kubernetes.azure.com/managedby
           operator: NotIn
           values: ["aks"]
+    {{- if .Values.webhook.injection.gateOnlyAgentPods }}
+    # Bound the blast radius of a Norviq outage to AGENT pods only.
+    #
+    # namespaceSelector alone means every pod in a governed namespace is admitted through this webhook
+    # — the namespace's database, ingress controller, batch jobs, none of which are ever injected. With
+    # failurePolicy: Fail that makes Norviq's availability a precondition for creating ANY pod there, so
+    # a Norviq outage becomes a cluster-functionality outage for workloads it does not even govern.
+    #
+    # Gating on the agent-class label keeps the fail-closed guarantee exactly where it matters (an agent
+    # pod still cannot start un-injected) while making Norviq invisible to everything else. The pod is
+    # the only place the true answer lives — "is this an agent?" is not a namespace-level property.
+    objectSelector:
+      matchExpressions:
+        - key: norviq.io/agent-class
+          operator: Exists
+    {{- end }}
     failurePolicy: {{ .Values.webhook.injection.failurePolicy | default "Fail" }}
     reinvocationPolicy: Never
     timeoutSeconds: 5

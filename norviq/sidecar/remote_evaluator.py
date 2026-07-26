@@ -12,6 +12,7 @@ sidecar drops the tool call rather than forwarding it.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import ssl
 import tempfile
@@ -27,6 +28,16 @@ log = structlog.get_logger()
 
 # Reason surfaced when the central API is unreachable/unhealthy — distinct from a policy block.
 _FAIL_CLOSED_REASON = "Thin-proxy sidecar could not reach the central policy engine (fail-closed)"
+# The engine ANSWERED and refused us: a credential/request problem, not an outage. Kept separate so
+# operators are not sent to debug healthy engine pods, and so it is auditable as distinct from an outage.
+_ENGINE_REFUSED_REASON = (
+    "Central policy engine rejected the sidecar's request (credential or request error, not an outage)"
+)
+# Only reachable when the operator has explicitly chosen availability over enforcement.
+_FAIL_OPEN_REASON = (
+    "Thin-proxy sidecar could not reach the central policy engine; forwarding UNGOVERNED because "
+    "the configured fallback posture is allow"
+)
 
 
 def _build_mtls_context(ca_pem: str, cert_pem: str, key_pem: str) -> ssl.SSLContext:
@@ -72,6 +83,9 @@ class RemoteEvaluator:
         self._api_url = (api_url or settings.api_url).rstrip("/")
         self._api_token = api_token if api_token is not None else settings.api_token
         self._client: httpx.AsyncClient | None = None
+        # Shared with the SDK client so both data-plane paths retry identically.
+        self._max_retries = settings.sdk_retry_max_attempts
+        self._backoff_base_ms = settings.sdk_retry_backoff_base_ms
 
     async def connect(self) -> None:
         """Open the shared keep-alive HTTP client (a small bounded pool, hot-path safe).
@@ -119,21 +133,67 @@ class RemoteEvaluator:
             # Preserve the decision source so the central audit record is attributed to the sidecar.
             "framework": event.framework or "sidecar",
         }
-        try:
-            resp = await self._client.post("/api/v1/evaluate", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            return PolicyDecision(
-                decision=data.get("decision", "block"),
-                rule_id=data.get("rule_id", "remote_eval"),
-                trust_score=float(data.get("trust_score", 0.0)),
-                reason=data.get("reason", ""),
+        # Retry transient failures before giving up. Without this a single dropped connection — a
+        # rolling norviq-api restart, a node's conntrack entry expiring, one 503 from a terminating
+        # pod — blocks a live agent's tool call outright. The SDK client has always retried with
+        # backoff; the injected sidecar is the zero-code-change path and must be no less resilient.
+        # Only transport errors and 5xx are retried: a 4xx is the engine answering with a refusal,
+        # so retrying it just delays the same block.
+        last_exc: Exception | None = None
+        for attempt in range(self._max_retries + 1):
+            try:
+                resp = await self._client.post("/api/v1/evaluate", json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+                return PolicyDecision(
+                    decision=data.get("decision", "block"),
+                    rule_id=data.get("rule_id", "remote_eval"),
+                    trust_score=float(data.get("trust_score", 0.0)),
+                    reason=data.get("reason", ""),
+                )
+            except httpx.HTTPStatusError as exc:
+                last_exc = exc
+                if exc.response.status_code < 500:
+                    break  # the engine refused us (auth/bad request) — not retryable
+            except (httpx.TimeoutException, httpx.RequestError) as exc:
+                last_exc = exc
+            except Exception as exc:  # bad body / unexpected — not retryable
+                # Announce at the handler site with a stable code: this is the one arm that catches an
+                # unanticipated failure, and the shared fail-closed log below cannot say which arm we
+                # came from. Operators alert on the code, so a silent swallow here would be invisible.
+                log.error(
+                    "nrvq.sidecar.remote_evaluator.unexpected_error",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                    code="NRVQ-SDC-3033",
+                )
+                last_exc = exc
+                break
+            if attempt < self._max_retries:
+                await asyncio.sleep((self._backoff_base_ms * (2**attempt)) / 1000)
+
+        # Every attempt failed. A 4xx means the engine ANSWERED and refused us (bad/expired token,
+        # malformed request) — that is never an outage and must never fail open, or a revoked
+        # credential silently becomes a governance bypass. Only genuine unreachability (5xx, timeout,
+        # connect error) honours the operator's configured posture, which defaults to block.
+        refused = isinstance(last_exc, httpx.HTTPStatusError) and last_exc.response.status_code < 500
+        mode = "block" if refused else settings.sdk_fallback_mode
+        if mode == "allow":
+            log.warning(
+                "nrvq.sidecar.remote_evaluator.fail_open",
+                error=str(last_exc),
+                code="NRVQ-SDC-3032",
             )
-        except Exception as exc:  # network / non-2xx / bad body — never forward on error
-            log.error("nrvq.sidecar.remote_evaluator.fail_closed", error=str(exc), code="NRVQ-SDC-3031")
             return PolicyDecision(
-                decision="block",
-                rule_id="thin_proxy_fail_closed",
-                reason=_FAIL_CLOSED_REASON,
+                decision="allow",
+                rule_id="thin_proxy_fail_open",
+                reason=_FAIL_OPEN_REASON,
                 trust_score=0.0,
             )
+        log.error("nrvq.sidecar.remote_evaluator.fail_closed", error=str(last_exc), code="NRVQ-SDC-3031")
+        return PolicyDecision(
+            decision="block",
+            rule_id="thin_proxy_fail_closed",
+            reason=_ENGINE_REFUSED_REASON if refused else _FAIL_CLOSED_REASON,
+            trust_score=0.0,
+        )

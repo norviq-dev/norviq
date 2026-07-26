@@ -6,6 +6,11 @@ export const handlers = [
   http.get("/api/v1/cluster-info", () =>
     HttpResponse.json({ cluster_id: "local", cluster_name: "local", namespaces: ["default"] })
   ),
+  // Healthy by default — the Shell-level banner polls this on every page, so without a handler every
+  // test would log an unhandled request.
+  http.get("/api/v1/system-health", () =>
+    HttpResponse.json({ status: "ok", issues: [], window_minutes: 15 })
+  ),
   http.get("/api/v1/me", () =>
     HttpResponse.json({ sub: "tester", role: "admin", namespace: "", email: null, name: "Test User" })
   ),

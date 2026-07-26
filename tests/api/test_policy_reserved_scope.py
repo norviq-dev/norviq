@@ -438,3 +438,36 @@ def test_webhook_controller_may_sync_cluster_priority_band():
                                                  "rego_source": _VALID_REGO, "priority": 800})
     assert resp.status_code == 200
     assert ("tenant-b", "finance-agent") in loader.created
+
+
+# --- the "all" console VIEW must never become a persisted policy ------------------------------------
+# Found in pre-release validation, through the documented flow: the Attack Graph opens on "All namespaces",
+# so an intent draft carried ns="all" into Review & apply. POST /policies stored it verbatim and the console
+# reported "ENFORCING v1 — confirmed via a live read" — but the engine treats "all" as a console-only
+# sentinel (evaluator._collect_candidates resolves it for READS; policy_loader.namespaces_for_class excludes
+# it from the real-namespace set), and an evaluation only looks up f"{caller_namespace}:{agent_class}" with a
+# CONCRETE namespace. The row was permanently dead: a default-deny allowlist that enforced NOTHING while
+# every status surface said otherwise. Reproduced live — get_customer/get_order kept returning allow.
+
+
+def test_all_view_sentinel_write_is_rejected():
+    """A policy at the aggregate view can never be evaluated, so refuse it at the write boundary."""
+    client, loader = _client()
+    resp = client.post("/api/v1/policies", json={"namespace": "all", "agent_class": "customer-support",
+                                                 "rego_source": _VALID_REGO, "priority": 100})
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    # Must explain WHY and name the fix — a bare refusal would leave the operator stuck on this exact path.
+    assert "all" in detail
+    assert "never be evaluated" in detail
+    assert "concrete namespace" in detail
+    assert loader.created == []  # never reached the loader
+
+
+def test_concrete_namespace_is_still_accepted_after_the_sentinel_guard():
+    """The guard must not narrow the normal apply path."""
+    client, loader = _client()
+    resp = client.post("/api/v1/policies", json={"namespace": "nrvq-inject-e2e", "agent_class": "customer-support",
+                                                 "rego_source": _VALID_REGO, "priority": 100})
+    assert resp.status_code == 200
+    assert ("nrvq-inject-e2e", "customer-support") in loader.created
