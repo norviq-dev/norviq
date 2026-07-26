@@ -80,6 +80,7 @@ async def run_attack(
         raise HTTPException(status_code=404, detail=f"Attack {attack_id} not found")
     event = _build_event(attack, target_agent, target_namespace)
     decision = await request.app.state.evaluator.evaluate(event)
+    _emit_redteam_audit(request, event, decision)
     row = _result_row(attack, target_agent, target_namespace, decision.decision, decision.rule_id, decision.latency_ms)
     return {**row, "trust_score": decision.trust_score}
 
@@ -131,6 +132,7 @@ async def run_suite(
                     applicable = _attack_applicable(attack, ns_rego)
                     try:
                         decision = await request.app.state.evaluator.evaluate(event)
+                        _emit_redteam_audit(request, event, decision)
                         results.append(_result_row(attack, agent_class, target_namespace, decision.decision, decision.rule_id, decision.latency_ms, applicable))
                     except Exception as exc:
                         results.append(_error_row(attack, agent_class, target_namespace, str(exc)))
@@ -386,6 +388,29 @@ def _run_to_dict(row: RedTeamRun) -> dict[str, Any]:
     }
 
 
+def _emit_redteam_audit(request: Request, event: ToolCallEvent, decision: Any) -> None:
+    """Write the attack's decision to the audit log, tagged framework="redteam".
+
+    The engine's own _emit_audit only LOGS ("minimal non-blocking emission until dedicated pipeline
+    integration") — the DB row is written by the /api/v1/evaluate ROUTE via the emitter. Red team calls
+    evaluator.evaluate() directly, so its decisions never reached the audit log at all, while the
+    Overview told operators red-team rows were "excluded from counts but visible in the Audit Log" and
+    each result linked to Audit as its evidence. That link resolved to unrelated production traffic
+    that happened to share a rule_id.
+
+    Safe to write: framework="redteam" is already excluded from real-traffic counts by the same
+    is_synthetic/framework filters the Overview uses, so this adds evidence without moving any metric.
+    Best-effort — a red-team run must never fail because audit is unavailable.
+    """
+    emitter = getattr(request.app.state, "emitter", None)
+    if emitter is None:
+        return
+    try:
+        emitter.emit(event, decision)
+    except Exception as exc:  # noqa: BLE001 - evidence is best-effort; the run's own result store is authoritative
+        log.warning("nrvq.api.redteam.audit_emit_failed", error=str(exc), code="NRVQ-API-7092")
+
+
 def _build_event(attack: Any, target_agent: str, target_namespace: str) -> ToolCallEvent:
     """Build a tool-call event for one attack as a target identity. Each class gets its own SVID so it picks
     up its own trust history; thread a chained-call `depth` param into the event's call_depth so chain-depth
@@ -399,6 +424,10 @@ def _build_event(attack: Any, target_agent: str, target_namespace: str) -> ToolC
             namespace=target_namespace,
             agent_class=target_agent,
         ),
+        # Tag the decision source so the audit row is EXCLUDED from real-traffic counts by the same
+        # framework filter the Overview uses. Without this the row lands untagged and synthetic
+        # attack volume would inflate the operator's live metrics.
+        framework="redteam",
         session_id=f"redteam-{attack.id}",
         call_depth=int(depth) if isinstance(depth, (int, str)) and str(depth).isdigit() else 0,
     )
