@@ -49,6 +49,16 @@ agentEgressPolicy:
   # embedded sidecar mode reaches Redis/Postgres directly (not the API) — set true to also permit egress
   # to the norviq datastores. Leave false for the default proxy mode (sidecar → API only).
   embeddedDatastores: false
+# `helm uninstall` cleanup. NrvqPolicy CRs carry the norviq.io/policy-protection finalizer, and only the
+# controller clears it — but Helm removes that controller in the same uninstall, so the CRs get stranded in
+# Terminating: the uninstall blocks until it times out, the release is left half-removed, and the operator
+# must hand-patch every CR before reinstalling. This pre-delete hook Job releases the finalizers first,
+# while the API is still up. Best-effort by design (it never fails the uninstall). Disable only if your
+# cluster forbids hook Jobs — then strip the finalizers yourself before `helm uninstall`.
+crdFinalizerCleanup:
+  enabled: true
+  image: "bitnami/kubectl:1.31"
+
 baselineClusterPolicy:
   enabled: true
   name: baseline-cluster-guard

@@ -166,10 +166,15 @@ async def chat(req: ChatRequest) -> ChatResponse:
     1. It propagates as ``NorviqBlockError``/``NorviqEscalateError`` (LangChain, LangGraph).
     2. It arrives wrapped in another exception (Semantic Kernel's filter pipeline re-raises) —
        recovered from the exception chain by ``_find_norviq_error``.
-    3. The framework's own agent loop CATCHES the raise, treats it as a recoverable tool error, and
-       returns a normal reply (CrewAI, AutoGen, Semantic Kernel's auto function-calling). Nothing
-       propagates, so we recover it from the context-local recorder (``capture_decisions``), which
-       the interceptor populated the instant it evaluated the call.
+    3. The framework's own agent loop CATCHES the raise and treats it as a recoverable tool error
+       (CrewAI, AutoGen, Semantic Kernel's auto function-calling). Nothing Norviq-shaped propagates, so
+       we recover the decision from the context-local recorder (``capture_decisions``), which the
+       interceptor populated the instant it evaluated the call. This happens in BOTH shapes:
+         3a. the loop then returns a normal reply (the model paraphrases an apology); and
+         3b. the loop then fails with its OWN unrelated exception — e.g. CrewAI retries the blocked
+             tool, exhausts its budget and raises a ValueError. Observed live: enforcement was real and
+             in the audit trail, but the response came back with empty denied_by/decision because this
+             branch only looked at the exception chain. The recorder is checked here too now.
 
     ``capture_decisions`` also gives an honest ``tools_called`` for frameworks whose message objects
     don't expose the calls they made — the interceptor saw every one. A real (non-Norviq) error still
@@ -180,13 +185,19 @@ async def chat(req: ChatRequest) -> ChatResponse:
             reply, tools = await _run(req.message)
         except (NorviqBlockError, NorviqEscalateError) as exc:  # case 1
             return _denied_response(exc.decision, rec.tools_called)
-        except Exception as exc:  # noqa: BLE001 — case 2, or a genuine agent error
+        except Exception as exc:  # noqa: BLE001 — case 2/3b, or a genuine agent error
             nrvq = _find_norviq_error(exc)
-            if nrvq is not None:
+            if nrvq is not None:  # case 2 — wrapped, so the raised decision is the authoritative one
                 return _denied_response(nrvq.decision, rec.tools_called)
+            # case 3b — what propagated is NOT ours, but the interceptor still recorded a real denial.
+            # Report the policy decision rather than the framework's incidental error: the block is the
+            # true, security-relevant outcome, and the error is a downstream symptom of it.
+            denial = rec.last_denial
+            if denial is not None:
+                return _denied_response(denial, rec.tools_called)
             return ChatResponse(reply=f"(agent error: {type(exc).__name__}: {exc})", tools_called=rec.tools_called)
         # _run returned normally.
         denial = rec.last_denial
-        if denial is not None:  # case 3 — the framework swallowed the raise; report it anyway
+        if denial is not None:  # case 3a — the framework swallowed the raise; report it anyway
             return _denied_response(denial, rec.tools_called)
         return ChatResponse(reply=str(reply), tools_called=tools or rec.tools_called)

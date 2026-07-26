@@ -1,0 +1,135 @@
+{{- if .Values.crdFinalizerCleanup.enabled }}
+# `helm uninstall` cleanup. NrvqPolicy CRs carry the `norviq.io/policy-protection` finalizer, which only
+# the controller (webhook Deployment) clears — and Helm deletes that controller as part of the same
+# uninstall. Whichever goes first, the CRs are left in Terminating forever: the uninstall blocks until it
+# times out ("resource NrvqPolicy/... still exists ... context deadline exceeded"), the release is left
+# half-removed, and the operator has to hand-patch every CR before they can reinstall.
+#
+# This pre-delete hook releases the finalizers FIRST, while the API is still up, so the CRs delete
+# cleanly and the uninstall completes. It is deliberately best-effort: `|| true` on the patch and a
+# non-blocking exit, because a cleanup hook must never be the reason an uninstall fails — a stuck
+# finalizer is recoverable by hand, an un-uninstallable release is worse.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: norviq-crd-cleanup
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-crd-cleanup
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  # Cluster-scoped list: policies may live in any tenant namespace, not just the release namespace.
+  - apiGroups: ["norviq.io"]
+    resources: ["nrvqpolicies", "nrvqclasses", "nrvqconfigs"]
+    verbs: ["get", "list", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-crd-cleanup
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Name }}-crd-cleanup
+subjects:
+  - kind: ServiceAccount
+    name: norviq-crd-cleanup
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-crd-cleanup
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 120
+  template:
+    metadata:
+      labels:
+        {{- include "norviq.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: crd-cleanup
+    spec:
+      serviceAccountName: norviq-crd-cleanup
+      restartPolicy: Never
+      volumes:
+        # kubectl writes a discovery/HTTP cache and would fail to start against a read-only rootfs.
+        # tmpfs (never the node disk) for a throwaway cleanup Job — see the chart's rootfs contract test.
+        - name: scratch
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: cleanup
+          image: {{ include "norviq.thirdPartyImage" (dict "root" $ "image" (.Values.crdFinalizerCleanup.image | default "bitnami/kubectl:1.31")) | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          volumeMounts:
+            - name: scratch
+              mountPath: /tmp
+          env:
+            # Point kubectl's HOME + caches at the tmpfs scratch mount, not the read-only rootfs.
+            - name: HOME
+              value: /tmp
+            - name: KUBECACHEDIR
+              value: /tmp/.kube/cache
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -u
+              echo "NRVQ-HOOK-CLEANUP: releasing norviq.io finalizers before the controller is removed"
+              for kind in nrvqpolicies nrvqclasses nrvqconfigs; do
+                # `|| true` twice over: the CRD may not exist (never installed) and an individual patch may
+                # race the controller finishing its own cleanup. Neither is a reason to fail an uninstall.
+                for row in $(kubectl get "$kind" -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}' 2>/dev/null || true); do
+                  ns="${row%%/*}"; name="${row##*/}"
+                  [ -n "$name" ] || continue
+                  echo "  patching $kind $ns/$name"
+                  kubectl -n "$ns" patch "$kind" "$name" --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1 || true
+                done
+              done
+              echo "NRVQ-HOOK-CLEANUP: done"
+              exit 0
+{{- end }}

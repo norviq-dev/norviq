@@ -137,3 +137,32 @@ async def test_records_across_sync_bridge_even_when_framework_swallows() -> None
     assert rec.last_denial.decision == "block"
     assert rec.last_denial.rule_id == "rule_block"
     assert rec.tools_called == ["delete_record"]
+
+
+async def test_recorder_survives_a_framework_that_swallows_then_raises_its_own_error() -> None:
+    """The shape that slipped through: a framework catches the block, RETRIES, exhausts its budget and
+    then fails with its OWN unrelated exception (observed live with CrewAI). Nothing Norviq-shaped
+    propagates, so a host that only walks the exception chain reports NO denial even though enforcement
+    was real. The recorder must still hold the decision — that is what lets examples/chatbot/serve.py
+    report the block instead of the framework's incidental error."""
+    itc = _interceptor()
+
+    def framework_loop() -> str:
+        for _ in range(3):  # the agent loop retries the blocked tool...
+            try:
+                _run_sync(itc.intercept_or_raise("delete_record", {"id": 1}, framework="crewai", identity=_identity()))
+            except NorviqBlockError:
+                continue  # ...swallowing our error each time
+        raise ValueError("Invalid response from LLM call - None or empty")  # ...then dies its own way
+
+    with capture_decisions() as rec:
+        try:
+            await asyncio.to_thread(framework_loop)
+        except ValueError:
+            pass  # the host's generic `except Exception` branch
+
+    # Nothing Norviq-shaped propagated, yet the denial is recoverable — and every attempt was recorded.
+    assert rec.last_denial is not None
+    assert rec.last_denial.decision == "block"
+    assert rec.last_denial.rule_id == "rule_block"
+    assert rec.tools_called == ["delete_record"] * 3
