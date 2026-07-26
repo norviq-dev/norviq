@@ -74,6 +74,12 @@ class OPAEvaluator:
         # never cached here. TTL <= 0 makes these pass-throughs (see inproc_cache.TTLCache).
         _ttl = settings.evaluator_inproc_cache_ttl_s
         self._posture_cache = TTLCache(_ttl, settings.evaluator_inproc_cache_max)
+        # Admin-PROMOTED tool verbs, keyed (namespace, tool_name) -> verb. Plain dict, not a
+        # TTLCache: _derived_input is SYNCHRONOUS (it runs inside _build_input on the hot path),
+        # so it cannot await a Redis or Postgres read. The map is refreshed out-of-band —
+        # warmed at startup and re-pulled when an admin promotes — and read synchronously here.
+        # Mirrors warm_agent_overrides, which exists for the same reason on the freeze kill-switch.
+        self._verb_overrides: dict[tuple[str, str], str] = {}
         self._trust_score_cache = TTLCache(_ttl, settings.evaluator_inproc_cache_max)
         # Per-pod L1 for the base POLICY DECISION (pre-override), so a warm hit skips the get_eval Redis GET
         # and the whole warm path collapses to one pipelined round trip (the fresh freeze+cap). TTL is CLAMPED
@@ -372,6 +378,28 @@ class OPAEvaluator:
         self._posture_cache.set(namespace, posture)
         return posture
 
+    async def refresh_verb_overrides(self, rows) -> int:
+        """Replace the in-proc promoted-verb map from `tool_verb_overrides` rows.
+
+        Called at startup and after an admin promotes, NOT on the hot path — `_derived_input` is
+        synchronous and must never await. Rows are (namespace, tool_name, verb) mappings; the caller owns
+        the query so the engine keeps no DB dependency.
+
+        Swapped whole rather than mutated in place: a partially-rebuilt map would briefly report the WRONG
+        verb for a promoted tool, and a verb-gated deny-by-default policy would deny live traffic for the
+        duration. Assignment is atomic under the GIL, so readers see either the old map or the new one.
+        """
+        rebuilt: dict[tuple[str, str], str] = {}
+        for r in rows:
+            ns = str(r["namespace"] if not hasattr(r, "namespace") else r.namespace)
+            tool = str(r["tool_name"] if not hasattr(r, "tool_name") else r.tool_name)
+            verb = str(r["verb"] if not hasattr(r, "verb") else r.verb)
+            if ns and tool and verb:
+                rebuilt[(ns, tool)] = verb
+        self._verb_overrides = rebuilt
+        log.info("nrvq.engine.verb_overrides.refreshed", count=len(rebuilt), code="NRVQ-ENG-2061")
+        return len(rebuilt)
+
     def _apply_policy_mode(self, winner: dict, event_id: str) -> PolicyDecision:
         """Soften the winning policy's block/escalate to `audit` when THAT policy is saved in audit mode.
 
@@ -616,12 +644,29 @@ class OPAEvaluator:
         # SECURITY: classification keys on the tool NAME, which the agent side controls, so
         # `allow { verb == "unknown" }` is a universal bypass for anything named unrecognisably.
         # Escalate (human review) is the intended handling; see the shipped template.
-        verb, _risk = classify_tool(event.tool_name, event.tool_params)
+        # A PROMOTED verb is an admin's explicit, evidence-backed decision about what this tool does,
+        # so it outranks the name/param classifier — which by construction returned UNKNOWN for anything
+        # that reached the promotion queue in the first place. Without this the promotion is
+        # console-only: the Threats screen shows the tool as `delete`, and a verb-gated policy still
+        # sees `unknown`, so promoting looks effective and changes nothing.
+        # getattr-guarded on BOTH sides: if the override map is not initialised, or the event carries no
+        # identity, fall through to the classifier rather than raising. Degrading to classification is the
+        # safe direction — the worst case is the pre-existing behaviour (an `unknown` verb, which a
+        # deny-by-default policy denies), never an invented verb that could grant access.
+        overrides = getattr(self, "_verb_overrides", None) or {}
+        identity = getattr(event, "agent_identity", None)
+        namespace = getattr(identity, "namespace", "") if identity is not None else ""
+        promoted = overrides.get((namespace, event.tool_name))
+        if promoted:
+            verb_value = promoted
+        else:
+            verb, _risk = classify_tool(event.tool_name, event.tool_params)
+            verb_value = verb.value
         return {
             # Risk is deliberately NOT exposed: it is a JUDGEMENT that shifts as the registry is
             # updated, so a policy pinned to it could change behaviour on an upgrade without the
             # policy changing. Verb is a stable fact about the call.
-            "verb": verb.value,
+            "verb": verb_value,
             # Every string value anywhere in tool_params, nesting included.
             "param_values": values,
             "param_values_lower": [v.lower() for v in values],
