@@ -295,3 +295,43 @@ def test_bundled_default_is_unchanged_by_the_byo_plumbing() -> None:
     urls = _urls(res.stdout)
     assert "norviq-postgresql" in urls["NRVQ_PG_URL"]
     assert "norviq-redis" in urls["NRVQ_REDIS_URL"]
+
+
+# --- (5) `helm uninstall` must not strand finalizer-protected CRs -----------------------------------
+# NrvqPolicy CRs carry norviq.io/policy-protection, cleared only by the controller — which Helm deletes
+# in the same uninstall. Observed live: the uninstall blocked until timeout ("resource NrvqPolicy/... still
+# exists ... context deadline exceeded"), the release was left half-removed, and every CR had to be
+# hand-patched before a reinstall. A pre-delete hook now releases the finalizers while the API is still up.
+
+
+def _hook_docs() -> list[dict]:
+    res = _template("-n", "norviq", show_only="templates/uninstall-finalizer-job.yaml")
+    assert res.returncode == 0, res.stderr
+    return [d for d in yaml.safe_load_all(res.stdout) if d]
+
+
+def test_uninstall_finalizer_hook_is_a_pre_delete_hook() -> None:
+    docs = _hook_docs()
+    kinds = {d["kind"] for d in docs}
+    assert {"ServiceAccount", "ClusterRole", "ClusterRoleBinding", "Job"} <= kinds
+    for d in docs:
+        ann = d["metadata"].get("annotations") or {}
+        assert ann.get("helm.sh/hook") == "pre-delete", f"{d['kind']} must run BEFORE the controller is deleted"
+        # Cleaned up after it succeeds, and recreated on the next uninstall.
+        assert "hook-succeeded" in ann.get("helm.sh/hook-delete-policy", "")
+
+
+def test_uninstall_hook_can_reach_policies_in_any_namespace() -> None:
+    """Policies live in tenant namespaces, not just the release namespace — so the grant is cluster-scoped
+    and must cover patch (to drop the finalizer) on every norviq CRD."""
+    role = next(d for d in _hook_docs() if d["kind"] == "ClusterRole")
+    rule = next(r for r in role["rules"] if "norviq.io" in r["apiGroups"])
+    assert {"nrvqpolicies", "nrvqclasses", "nrvqconfigs"} <= set(rule["resources"])
+    assert "patch" in rule["verbs"]
+
+
+def test_uninstall_hook_can_be_disabled() -> None:
+    """Clusters that forbid hook Jobs must still be able to render the chart."""
+    res = _template("-n", "norviq", "--set", "crdFinalizerCleanup.enabled=false")
+    assert res.returncode == 0, res.stderr
+    assert "crd-cleanup" not in res.stdout
