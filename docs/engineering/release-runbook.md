@@ -43,6 +43,36 @@ entry point: the publish step still runs inside that file, and PyPI matches the 
 - **Sigstore/Rekor entries are append-only.** A signature over a bad artifact is permanent public
   record.
 - Image tags and OCI chart tags can be overwritten, but anyone who already pulled has the old bytes.
+  Do not do this to a released version: re-pushing `0.1.2` means two people who both ran
+  `helm pull --version 0.1.2` hold different bytes, and the existing cosign signature covers the old
+  digest. That defeats the digest-pinning the whole pipeline is built around. Ship a new version.
+
+## One version number, deliberately
+
+`Chart.yaml version`, `Chart.yaml appVersion` and `pyproject.toml version` are held identical, and
+`scripts/check_release_versions.py` fails the build if they drift. Helm permits `version` (the
+chart's packaging version) and `appVersion` (the app it installs) to move independently, so this is
+a deliberate choice rather than an oversight.
+
+The cost is real and worth naming: a chart-only change — an Artifact Hub annotation, a docs link, a
+template tweak — cannot ship without bumping the application version too, which also publishes a
+wheel. Such changes therefore **accumulate on `main` and ride the next application release**, which
+is why `main` can carry chart edits that are not yet visible on the Artifact Hub listing (annotations
+reach it only via a published chart artifact).
+
+That trade was taken over decoupling because:
+
+- Extra PyPI versions are cheap. Patch versions are normal and nobody minds `0.1.3`. What actually
+  hurt during 0.1.0–0.1.2 was **failed** releases consuming versions — the wheel uploading before the
+  chart push failed. That is fixed by ordering (`pypi` now runs last), not by decoupling.
+- One number is simpler for users, and matches how cert-manager and Istio ship their in-tree charts.
+- A second release path is more surface on a pipeline that took three attempts to stabilise, and it
+  would need its own rehearsal to be trustworthy.
+
+If chart-only fixes ever become frequent enough that waiting is genuinely painful, the two
+established ways out are a `chart-v*` tag path that skips the image and PyPI jobs, or moving the
+chart to its own repository (what prometheus-community and grafana do). Neither is warranted for a
+single chart with one maintainer.
 
 ## Rehearse first (nothing consumers can reach)
 
