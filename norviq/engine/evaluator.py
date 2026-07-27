@@ -127,7 +127,7 @@ class OPAEvaluator:
         """Evaluate tool call against all matching policies."""
         start = time.monotonic()
         cache_hit = False
-        log.info(
+        log.debug(
             "nrvq.eval.start",
             tool_name=event.tool_name,
             namespace=event.agent_identity.namespace,
@@ -183,7 +183,7 @@ class OPAEvaluator:
                 self._record_telemetry(event, decision, start, cache_hit, span)
                 return decision
             candidates = await self._collect_candidates(event)
-            log.info(
+            log.debug(
                 "nrvq.eval.candidates",
                 count=len(candidates),
                 keys=[str(c["key"]) for c in candidates],
@@ -203,7 +203,7 @@ class OPAEvaluator:
             else:
                 results = []
                 for candidate in candidates:
-                    log.info(
+                    log.debug(
                         "nrvq.eval.opa_call",
                         key=str(candidate["key"]),
                         rego_len=len(str(candidate["rego"])),
@@ -214,7 +214,7 @@ class OPAEvaluator:
                             self._evaluate_single(event, str(candidate["key"]), str(candidate["rego"]), trust_result),
                             timeout=2.0,
                         )
-                    log.info(
+                    log.debug(
                         "nrvq.eval.opa_result",
                         key=str(candidate["key"]),
                         result=str(result)[:200],
@@ -235,7 +235,7 @@ class OPAEvaluator:
                         }
                     )
                 winner = self._resolve_with_packs(results)
-                log.info("nrvq.eval.winner", winner=str(winner)[:200], code="NRVQ-ENG-DEBUG-5")
+                log.debug("nrvq.eval.winner", winner=str(winner)[:200], code="NRVQ-ENG-DEBUG-5")
                 base_decision = self._apply_policy_mode(winner, event.event_id)
             if base_decision.rule_id not in settings.evaluator_non_cacheable_rules:
                 await self._cache.set_eval(event.agent_identity.namespace, event.agent_identity.agent_class, cache_tool, base_decision)
@@ -964,7 +964,7 @@ class OPAEvaluator:
         if package_name is None:
             package_name = self._extract_package_name(rego)
         query = self._opa_query_for_package(package_name)
-        log.info(
+        log.debug(
             "nrvq.opa.query.resolved",
             package_name=package_name or "(none)",
             query=query,
@@ -982,7 +982,7 @@ class OPAEvaluator:
                 json.dump(opa_input, input_file)
 
             if settings.debug_opa_logging:
-                log.info(
+                log.debug(
                     "nrvq.opa.input",
                     rego_preview=rego[:200],
                     input_doc=str(self._redacted_input(opa_input))[:500],  # masked even when debug on
@@ -1006,7 +1006,7 @@ class OPAEvaluator:
             )
             stdout, stderr = await proc.communicate()
             if settings.debug_opa_logging:
-                log.info(
+                log.debug(
                     "nrvq.opa.subprocess_done",
                     returncode=proc.returncode,
                     stdout_len=len(stdout),
@@ -1078,7 +1078,7 @@ class OPAEvaluator:
                 input_doc = self._build_input(event, trust_result)
                 # Gated AND masked — raw tool_params never logged, so SSN/PAN/PHI cannot leak to an INFO line.
                 if settings.debug_opa_logging and attempt == 1:
-                    log.info("nrvq.eval.opa_input", input_doc=str(self._redacted_input(input_doc))[:500],
+                    log.debug("nrvq.eval.opa_input", input_doc=str(self._redacted_input(input_doc))[:500],
                              code="NRVQ-ENG-DEBUG-INPUT")
                 result = await self._evaluate_opa(
                     key, event.agent_identity.namespace, event.agent_identity.agent_class, input_doc, rego_source
@@ -1089,7 +1089,7 @@ class OPAEvaluator:
             except Exception as exc:  # noqa: BLE001 — fail-closed engine-error path
                 last_exc = exc
                 log.warning("nrvq.eval.opa_retry" if attempt == 1 else "nrvq.eval.opa_failed",
-                            key=key, attempt=attempt, error=str(exc), code="NRVQ-ENG-DEBUG-ERR")
+                            key=key, attempt=attempt, error=str(exc), code="NRVQ-ENG-2062")
         # Persistent engine error → fail closed with a DISTINCT reason + a counted, observable engine-health
         # signal so it is never mistaken for a policy decision (a real policy block carries a policy rule_id).
         self._engine_error_count += 1
