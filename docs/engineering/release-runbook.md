@@ -27,7 +27,7 @@ invoked as a reusable workflow rather than triggered separately.
 
 ## Irreversible, so get it right before tagging
 
-- **PyPI will not let you re-upload a version.** A bad `0.1.0` is burned; the next fix must be
+- **PyPI will not let you re-upload a version.** A bad version is burned; the next fix must be
   `0.1.1`.
 - **Sigstore/Rekor entries are append-only.** A signature over a bad artifact is permanent public
   record.
@@ -52,7 +52,7 @@ gh workflow run pypi-publish.yml --ref main    # builds + twine check + wheel ga
 Locally you can check the same invariants:
 
 ```bash
-python3 scripts/check_release_versions.py 0.1.0   # tag vs Chart.yaml vs pyproject
+python3 scripts/check_release_versions.py 0.1.2   # tag vs Chart.yaml vs pyproject
 python -m build && python3 scripts/check_wheel_contents.py dist
 pytest tests/release/ -q
 ```
@@ -79,11 +79,11 @@ CI cannot do these — they need an account login.
 
 ```bash
 # 1. versions agree (this is also gate 0 in CI, but fail locally first)
-python3 scripts/check_release_versions.py 0.1.0
+python3 scripts/check_release_versions.py 0.1.2
 
 # 2. tag and push
-git tag -a v0.1.0 -m "Norviq v0.1.0"
-git push origin v0.1.0
+git tag -a v0.1.2 -m "Norviq v0.1.2"
+git push origin v0.1.2
 
 # 3. watch both workflows
 gh run list --limit 5
@@ -96,27 +96,27 @@ To bump the version, change `helm/norviq/Chart.yaml` (`version` **and** `appVers
 
 ```bash
 # chart
-helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.0 --dry-run
-cosign verify ghcr.io/norviq-dev/charts/norviq:0.1.0 \
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.2 --dry-run
+cosign verify ghcr.io/norviq-dev/charts/norviq:0.1.2 \
   --certificate-identity-regexp '^https://github.com/norviq-dev/norviq/.github/workflows/release.yml@.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
 # images (signed by build.yml, so the identity regexp names build.yml)
-cosign verify ghcr.io/norviq-dev/norviq-engine:api-0.1.0 \
+cosign verify ghcr.io/norviq-dev/norviq-engine:api-0.1.2 \
   --certificate-identity-regexp '^https://github.com/norviq-dev/norviq/.github/workflows/build.yml@.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
 # the released chart must pin digests, never floating tags
-helm template norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.0 \
+helm template norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.2 \
   --set-json 'policyQuotaNamespaces=["default"]' | grep 'image:' | grep norviq-engine
 # every line should read ...norviq-engine@sha256:...
 
 # package
-pip download norviq==0.1.0 --no-deps -d /tmp/nrvq && unzip -l /tmp/nrvq/*.whl | grep opa-capabilities
+pip download norviq==0.1.2 --no-deps -d /tmp/nrvq && unzip -l /tmp/nrvq/*.whl | grep opa-capabilities
 ```
 
 ## After GA
 
 Swap the README quick start from the local-clone `helm install ./helm/norviq` to
-`helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.0`. Keep the from-source
+`helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.2`. Keep the from-source
 path documented for contributors.
