@@ -94,7 +94,12 @@ spec:
             sizeLimit: 16Mi
       securityContext:
         runAsNonRoot: true
+        {{- if not .Values.openshift.enabled }}
+        # Omitted under OpenShift, which allocates a per-namespace UID range and rejects any pinned
+        # value outside it. This is a PRE-DELETE hook, so a rejection here would not fail the install —
+        # it would fail the UNINSTALL, stranding the very CRD finalizers this Job exists to release.
         runAsUser: 65532
+        {{- end }}
       containers:
         - name: cleanup
           image: {{ include "norviq.thirdPartyImage" (dict "root" $ "image" ($cfc.image | default "bitnami/kubectl:1.31")) | quote }}

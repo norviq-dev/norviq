@@ -76,13 +76,21 @@ spec:
       serviceAccountName: norviq-internal-tls
       restartPolicy: Never
       securityContext:
-        runAsNonRoot: false
-        runAsUser: 0
+        # The bootstrap image ships kubectl AND openssl, so this hook no longer `apk add`s at runtime
+        # and no longer needs root. That matters beyond tidiness: `runAsUser: 0` is rejected outright
+        # by OpenShift's default restricted-v2 SCC, which killed `helm install` at this very hook.
+        runAsNonRoot: true
+        {{- if not .Values.openshift.enabled }}
+        # Pinned on vanilla/AKS/EKS/GKE, where nothing assigns a UID for you. OMITTED under OpenShift,
+        # which allocates a per-namespace UID range (~1000650000+) and rejects any pinned value outside
+        # it — the image is built to run under an arbitrary UID in GID 0.
+        runAsUser: 65532
+        {{- end }}
         seccompProfile:
           type: RuntimeDefault
       containers:
         - name: tls-bootstrap
-          image: {{ include "norviq.thirdPartyImage" (dict "root" $ "image" .Values.webhook.injection.certJobImage) | quote }}
+          image: "{{ include "norviq.image" (dict "root" $ "component" .Values.images.bootstrap) }}"
           # Bounded so a pre-install bootstrap hook cannot compete for CPU/memory with the
           # enforcement pods it runs ahead of. Root is still required here for the apk/openssl
           # bootstrap (narrowly exempted); being unbounded was not.
@@ -104,7 +112,6 @@ spec:
           args:
             - |
               set -eu
-              command -v openssl >/dev/null 2>&1 || apk add --no-cache openssl >/dev/null 2>&1
               NS={{ .Release.Namespace }}
               CA_SECRET=norviq-internal-ca
               API_SECRET=norviq-api-tls

@@ -26,7 +26,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-COMPONENTS = ("engine", "api", "ui", "webhook")
+# "bootstrap" is the chart's TLS-hook image (kubectl + openssl). It is FIRST-PARTY and therefore
+# digest-pinned like the rest: a hook that patches a webhook's caBundle must not resolve a mutable
+# tag at install time.
+COMPONENTS = ("engine", "api", "ui", "webhook", "bootstrap")
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$")
 

@@ -57,6 +57,12 @@ jobs:
           - component: webhook
             dockerfile: Dockerfile
             context: webhook
+          # Bootstrap image for the chart's TLS hooks (kubectl + openssl). Published like any other
+          # component so the chart can pin it by digest — the hooks that patch a webhook's caBundle
+          # must not pull an unpinned third-party image.
+          - component: bootstrap
+            dockerfile: Dockerfile.bootstrap
+            context: .
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       # QEMU registers arm64 emulation so buildx can build the linux/arm64 variant on the amd64

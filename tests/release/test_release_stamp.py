@@ -33,6 +33,9 @@ DIGESTS = {
     "api": "sha256:" + "b2" * 32,
     "ui": "sha256:" + "c3" * 32,
     "webhook": "sha256:" + "d4" * 32,
+    # The chart's TLS-hook image (kubectl + openssl). First-party, so it is digest-pinned like the
+    # rest — a hook that patches a webhook's caBundle must not resolve a mutable tag at install time.
+    "bootstrap": "sha256:" + "e5" * 32,
 }
 
 pytestmark = pytest.mark.skipif(shutil.which("helm") is None, reason="helm not on PATH")

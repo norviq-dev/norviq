@@ -68,7 +68,7 @@ spec:
       {{- include "norviq.spread" (dict "app" "norviq-fleet-api" "ctx" $) | nindent 6 }}
       {{- end }}
       initContainers:
-        {{- include "norviq.waitFor" (dict "name" "wait-for-fleet-postgres" "host" "fleet-postgresql" "port" 5432) | nindent 8 }}
+        {{- include "norviq.waitFor" (dict "root" $ "name" "wait-for-fleet-postgres" "host" "fleet-postgresql" "port" 5432) | nindent 8 }}
       containers:
         - name: fleet-api
           image: "{{ include "norviq.image" (dict "root" $ "component" .Values.images.api) }}"

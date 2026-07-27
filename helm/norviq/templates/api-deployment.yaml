@@ -44,8 +44,8 @@ spec:
       {{- end }}
       terminationGracePeriodSeconds: 30
       initContainers:
-        {{- include "norviq.waitFor" (dict "name" "wait-for-postgres" "host" "norviq-postgresql" "port" 5432) | nindent 8 }}
-        {{- include "norviq.waitFor" (dict "name" "wait-for-redis" "host" "norviq-redis" "port" 6379) | nindent 8 }}
+        {{- include "norviq.waitFor" (dict "root" $ "name" "wait-for-postgres" "host" "norviq-postgresql" "port" 5432) | nindent 8 }}
+        {{- include "norviq.waitFor" (dict "root" $ "name" "wait-for-redis" "host" "norviq-redis" "port" 6379) | nindent 8 }}
       containers:
         - name: api
           image: "{{ include "norviq.image" (dict "root" $ "component" .Values.images.api) }}"
@@ -176,7 +176,9 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             runAsNonRoot: true
+            {{- if not .Values.openshift.enabled }}
             runAsUser: 101
+            {{- end }}
             capabilities:
               drop: ["ALL"]
             seccompProfile:

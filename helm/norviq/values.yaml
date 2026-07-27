@@ -97,6 +97,14 @@ images:
     tag: webhook-latest
     digest: ""
     pullPolicy: Always
+  # Bootstrap image for the chart's TLS hooks: carries kubectl + openssl so the hooks need neither a
+  # runtime `apk add` nor root. First-party so the release workflow can pin it by digest — a hook that
+  # patches a webhook's caBundle must not pull an unpinned image.
+  bootstrap:
+    repository: norviq-engine
+    tag: bootstrap-latest
+    digest: ""
+    pullPolicy: Always
   redis:
     repository: redis
     tag: "7-alpine"
@@ -310,7 +318,6 @@ webhook:
     # root, which OpenShift's restricted-v2 SCC rejects outright, killing `helm install` at the
     # pre-install hook. Baking both in also drops a network dependency from the install path, so the
     # hooks work air-gapped.
-    certJobImage: "alpine/k8s:1.30.0"
   replicas: 2
   pdb:
     enabled: false     # multi-node prod
