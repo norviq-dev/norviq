@@ -144,7 +144,23 @@ spec:
           args:
             - |
               set -eu
-              # Ensure openssl is present (alpine/k8s ships kubectl but not openssl).
+              # Talks to the API with curl + the pod's service-account token — no kubectl in the image.
+              # kubectl was removed because it vendors a golang.org/x/net with fixable HIGH/CRITICAL
+              # CVEs, which the fail-closed trivy gate in build.yml correctly refused to publish; the
+              # three calls below were the only reason it was ever here.
+              API=https://kubernetes.default.svc
+              SA=/var/run/secrets/kubernetes.io/serviceaccount
+              TOKEN="$(cat ${SA}/token)"
+              k() {  # k <method> <path> [body] -> prints body, exits non-zero on >=400
+                _m="$1"; _p="$2"; _b="${3:-}"; _ct="${4:-application/json}"
+                if [ -n "$_b" ]; then
+                  curl -sS --fail-with-body --cacert "${SA}/ca.crt" -H "Authorization: Bearer ${TOKEN}" \
+                    -H "Content-Type: ${_ct}" -X "$_m" --data-binary "$_b" "${API}${_p}"
+                else
+                  curl -sS --fail-with-body --cacert "${SA}/ca.crt" -H "Authorization: Bearer ${TOKEN}" \
+                    -X "$_m" "${API}${_p}"
+                fi
+              }
               NS={{ .Release.Namespace }}
               SVC=norviq-webhook
               SECRET=norviq-webhook-tls
@@ -156,9 +172,11 @@ spec:
               # while the webhook Deployment keeps serving the one it loaded at startup would make the
               # MutatingWebhookConfiguration caBundle and the served cert diverge -> API-server TLS
               # handshake failures -> injection silently skipped (failurePolicy). Only generate when absent.
-              if kubectl -n "${NS}" get secret "${SECRET}" >/dev/null 2>&1; then
+              if k GET "/api/v1/namespaces/${NS}/secrets/${SECRET}" > "${TMP}/sec.json" 2>/dev/null; then
                 echo "reusing existing serving cert from secret ${SECRET}"
-                kubectl -n "${NS}" get secret "${SECRET}" -o jsonpath='{.data.tls\.crt}' | base64 -d > "${TMP}/tls.crt"
+                # pull .data["tls.crt"] without a JSON parser: the value is a single base64 token
+                sed -n 's/.*"tls\.crt"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${TMP}/sec.json" \
+                  | head -1 | base64 -d > "${TMP}/tls.crt"
               else
                 echo "generating self-signed serving cert for ${CN}"
                 openssl req -x509 -newkey rsa:2048 -nodes \
@@ -166,18 +184,21 @@ spec:
                   -subj "/CN=${CN}" \
                   -addext "subjectAltName=DNS:${SVC},DNS:${SVC}.${NS},DNS:${SVC}.${NS}.svc,DNS:${SVC}.${NS}.svc.cluster.local"
                 echo "creating secret ${SECRET}"
-                kubectl -n "${NS}" create secret tls "${SECRET}" \
-                  --cert="${TMP}/tls.crt" --key="${TMP}/tls.key" \
-                  --dry-run=client -o yaml | kubectl apply -f -
+                B_CRT="$(base64 < "${TMP}/tls.crt" | tr -d '\n')"
+                B_KEY="$(base64 < "${TMP}/tls.key" | tr -d '\n')"
+                printf '{"apiVersion":"v1","kind":"Secret","type":"kubernetes.io/tls","metadata":{"name":"%s","namespace":"%s"},"data":{"tls.crt":"%s","tls.key":"%s"}}' \
+                  "${SECRET}" "${NS}" "${B_CRT}" "${B_KEY}" > "${TMP}/sec-new.json"
+                k POST "/api/v1/namespaces/${NS}/secrets" "@${TMP}/sec-new.json" >/dev/null
               fi
               CA="$(base64 < "${TMP}/tls.crt" | tr -d '\n')"
               # The MutatingWebhookConfiguration only exists when injection is enabled; patch its
               # caBundle when present, otherwise skip (the webhook/controller pod still needs the
               # serving cert above so it can start and run the CRD controller).
-              if kubectl get mutatingwebhookconfiguration "${WEBHOOK}" >/dev/null 2>&1; then
+              MWC=/apis/admissionregistration.k8s.io/v1/mutatingwebhookconfigurations/${WEBHOOK}
+              if k GET "${MWC}" >/dev/null 2>&1; then
                 echo "patching ${WEBHOOK} caBundle"
-                kubectl patch mutatingwebhookconfiguration "${WEBHOOK}" --type=json \
-                  -p "[{\"op\":\"replace\",\"path\":\"/webhooks/0/clientConfig/caBundle\",\"value\":\"${CA}\"}]"
+                printf '[{"op":"replace","path":"/webhooks/0/clientConfig/caBundle","value":"%s"}]' "${CA}" > "${TMP}/patch.json"
+                k PATCH "${MWC}" "@${TMP}/patch.json" "application/json-patch+json" >/dev/null
               else
                 echo "MutatingWebhookConfiguration ${WEBHOOK} absent (injection disabled) — skipping caBundle patch"
               fi

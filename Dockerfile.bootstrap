@@ -29,27 +29,22 @@ FROM alpine:${ALPINE_VERSION}
 
 # kubectl is fetched rather than apk-installed: Alpine's community repo lags upstream, and the hooks
 # talk to whatever API server the chart is installed against. Pinned + checksum-verified below.
-ARG KUBECTL_VERSION=v1.31.4
-ARG TARGETARCH
 
-# ca-certificates: kubectl must verify the API server's serving cert.
-# openssl: the entire reason this image exists.
-RUN apk add --no-cache ca-certificates openssl \
+# openssl: self-signs the internal CA. curl + ca-certificates: talks to the Kubernetes API directly.
+#
+# NO kubectl. It was here originally, and the fail-closed trivy gate in build.yml refused to publish
+# the image because kubectl vendors a golang.org/x/net with fixable HIGH/CRITICAL CVEs — and bumping
+# v1.31.4 -> v1.36.3 did not clear them, because upstream ships what it ships. Baking a third-party Go
+# binary we cannot patch into a FIRST-PARTY image pulled it into scope of our own scanner (the runtime
+# `bitnami/kubectl` reference used elsewhere was never scanned by us, which is why this had not bitten
+# before).
+#
+# The hooks only ever did three things — GET/PATCH a MutatingWebhookConfiguration and apply a Secret —
+# all plain authenticated REST calls. curl with the pod's service-account token does them with no Go
+# runtime in the image at all, so there is nothing here for the scanner to find.
+RUN apk add --no-cache ca-certificates openssl curl \
     && rm -rf /var/cache/apk/*
 
-# Download kubectl for the BUILD's target architecture (buildx sets TARGETARCH per platform, so the
-# same Dockerfile produces correct amd64 and arm64 variants) and verify it against the checksum
-# published alongside it. An unverified curl|install into a cluster-admin-capable hook would be a
-# supply-chain hole in the one component that patches a webhook's caBundle.
-RUN set -eu; \
-    arch="${TARGETARCH:-amd64}"; \
-    base="https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${arch}"; \
-    wget -q -O /tmp/kubectl "${base}/kubectl"; \
-    wget -q -O /tmp/kubectl.sha256 "${base}/kubectl.sha256"; \
-    echo "$(cat /tmp/kubectl.sha256)  /tmp/kubectl" | sha256sum -c -; \
-    install -m 0755 /tmp/kubectl /usr/local/bin/kubectl; \
-    rm -f /tmp/kubectl /tmp/kubectl.sha256; \
-    kubectl version --client=true --output=yaml >/dev/null
 
 # kubectl writes a discovery/HTTP cache and needs a HOME it can write to. Under OpenShift the runtime
 # UID is unpredictable but GID is always 0, so make these group-writable rather than owned by a user.

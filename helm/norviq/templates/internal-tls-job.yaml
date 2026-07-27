@@ -117,24 +117,51 @@ spec:
               API_SECRET=norviq-api-tls
               SVC=norviq-api
               TMP="$(mktemp -d)"
+              # curl + the pod's service-account token instead of kubectl — see Dockerfile.bootstrap
+              # for why kubectl was removed (vendored golang.org/x/net CVEs failing the trivy gate).
+              API=https://kubernetes.default.svc
+              SA=/var/run/secrets/kubernetes.io/serviceaccount
+              TOKEN="$(cat ${SA}/token)"
+              k() {
+                _m="$1"; _p="$2"; _b="${3:-}"
+                if [ -n "$_b" ]; then
+                  curl -sS --fail-with-body --cacert "${SA}/ca.crt" -H "Authorization: Bearer ${TOKEN}" \
+                    -H "Content-Type: application/json" -X "$_m" --data-binary "$_b" "${API}${_p}"
+                else
+                  curl -sS --fail-with-body --cacert "${SA}/ca.crt" -H "Authorization: Bearer ${TOKEN}" \
+                    -X "$_m" "${API}${_p}"
+                fi
+              }
+              # read one base64 value out of a Secret JSON body without a JSON parser
+              val() { sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$1" | head -1; }
+              mkgeneric() {  # mkgeneric <name> <k1> <f1> [<k2> <f2>] [<k3> <f3>]
+                _n="$1"; shift; _d=""
+                while [ $# -ge 2 ]; do
+                  _v="$(base64 < "$2" | tr -d '\n')"
+                  [ -n "$_d" ] && _d="${_d},"
+                  _d="${_d}\"$1\":\"${_v}\""
+                  shift 2
+                done
+                printf '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"%s","namespace":"%s"},"data":{%s}}' \
+                  "${_n}" "${NS}" "${_d}" > "${TMP}/mk.json"
+                k POST "/api/v1/namespaces/${NS}/secrets" "@${TMP}/mk.json" >/dev/null
+              }
 
               # ---- 1. CA (idempotent: reuse if present) ----
-              if kubectl -n "${NS}" get secret "${CA_SECRET}" >/dev/null 2>&1; then
+              if k GET "/api/v1/namespaces/${NS}/secrets/${CA_SECRET}" > "${TMP}/ca.json" 2>/dev/null; then
                 echo "reusing existing internal CA ${CA_SECRET}"
-                kubectl -n "${NS}" get secret "${CA_SECRET}" -o jsonpath='{.data.ca\.crt}' | base64 -d > "${TMP}/ca.crt"
-                kubectl -n "${NS}" get secret "${CA_SECRET}" -o jsonpath='{.data.ca\.key}' | base64 -d > "${TMP}/ca.key"
+                val "${TMP}/ca.json" "ca.crt" | base64 -d > "${TMP}/ca.crt"
+                val "${TMP}/ca.json" "ca.key" | base64 -d > "${TMP}/ca.key"
               else
                 echo "generating Norviq internal CA"
                 openssl req -x509 -newkey rsa:2048 -nodes -keyout "${TMP}/ca.key" -out "${TMP}/ca.crt" \
                   -days 3650 -subj "/CN=Norviq Internal CA/O=norviq" \
                   -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign"
-                kubectl -n "${NS}" create secret generic "${CA_SECRET}" \
-                  --from-file=ca.crt="${TMP}/ca.crt" --from-file=ca.key="${TMP}/ca.key" \
-                  --dry-run=client -o yaml | kubectl apply -f -
+                mkgeneric "${CA_SECRET}" ca.crt "${TMP}/ca.crt" ca.key "${TMP}/ca.key"
               fi
 
               # ---- 2. API serving cert (idempotent) signed by the CA ----
-              if kubectl -n "${NS}" get secret "${API_SECRET}" >/dev/null 2>&1; then
+              if k GET "/api/v1/namespaces/${NS}/secrets/${API_SECRET}" >/dev/null 2>&1; then
                 echo "reusing existing API serving cert ${API_SECRET}"
               else
                 echo "issuing API serving cert for ${SVC}"
@@ -144,10 +171,7 @@ spec:
                   -subj "/CN=${SVC}.${NS}.svc/O=norviq"
                 openssl x509 -req -in "${TMP}/tls.csr" -CA "${TMP}/ca.crt" -CAkey "${TMP}/ca.key" \
                   -CAcreateserial -days 3650 -extfile "${TMP}/san.cnf" -out "${TMP}/tls.crt"
-                kubectl -n "${NS}" create secret generic "${API_SECRET}" \
-                  --from-file=tls.crt="${TMP}/tls.crt" --from-file=tls.key="${TMP}/tls.key" \
-                  --from-file=ca.crt="${TMP}/ca.crt" \
-                  --dry-run=client -o yaml | kubectl apply -f -
+                mkgeneric "${API_SECRET}" tls.crt "${TMP}/tls.crt" tls.key "${TMP}/tls.key" ca.crt "${TMP}/ca.crt"
               fi
               echo "internal-tls bootstrap done"
 {{- end }}
