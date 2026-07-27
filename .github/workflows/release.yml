@@ -82,7 +82,9 @@ jobs:
             # Rehearsal: derive the version from Chart.yaml so every later step runs for real.
             version="$(python3 -c 'import re,sys;print(re.search(r"^version:\s*(\S+)",open("helm/norviq/Chart.yaml").read(),re.M).group(1))')"
             publish=false
-            echo "::notice::Rehearsal run (no tag). Building and validating v${version}; NOTHING will be published."
+            echo "::notice::Rehearsal run (no tag). Building and validating v${version}. The chart \
+            IS pushed and signed for real, into charts-rehearsal/ — nothing reachable by consumers \
+            is published: no version-tagged images, no chart in charts/, no PyPI upload."
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "publish=${publish}" >> "$GITHUB_OUTPUT"
