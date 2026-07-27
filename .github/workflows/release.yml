@@ -14,6 +14,23 @@
 # workflow run — there is no cross-workflow `needs:`. So build.yml is invoked as a REUSABLE workflow
 # (workflow_call) and becomes a job in this run that `chart` can depend on.
 #
+# Why the rehearsal pushes to a SEPARATE chart repo rather than skipping the push. Releases v0.1.0
+# and v0.1.1 both failed in steps a "publishes nothing" rehearsal could not reach: v0.1.0 published a
+# wheel and no chart at all, v0.1.1 published the chart UNSIGNED because `helm registry login` writes
+# Helm's own credential file while cosign reads the DOCKER credential store, so the signature push
+# went out unauthenticated. A rehearsal that skips push and sign is green in both cases — it reports
+# success for exactly the two steps that break. So the rehearsal now performs a real authenticated
+# push and a real keyless signature against ghcr.io, into `charts-rehearsal/` instead of `charts/`.
+# Same registry host, same token, same OIDC identity, same code path; nothing lands in the repo
+# consumers install from. A local throwaway registry would NOT do: it needs no auth, so it cannot
+# catch the credential-store split that actually broke v0.1.1.
+#
+# Why PyPI is a job HERE rather than its own tag-triggered workflow. pypi-publish.yml used to fire on
+# the same `v*.*.*` tag independently, so a Release that died at the chart step still uploaded the
+# wheel — and PyPI versions cannot be re-uploaded or reused, only yanked. That is how 0.1.0 and 0.1.1
+# became permanently burnt versions. It is now a `workflow_call` invoked as the LAST job, gated on
+# images AND chart succeeding, so the irreversible action happens only once everything reversible has.
+#
 # Consumers then:
 #   helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version <x.y.z>
 #   cosign verify ghcr.io/norviq-dev/charts/norviq:<x.y.z> \
@@ -24,7 +41,10 @@ name: Release
 on:
   push:
     tags: ["v*.*.*"]
-  workflow_dispatch: {}   # REHEARSAL ONLY — builds, renders and validates; publishes nothing. See `publish`.
+  # REHEARSAL. Builds, renders, validates, and performs a REAL push + signature into the
+  # `charts-rehearsal/` repo. Publishes nothing consumers can reach: no version-tagged images, no
+  # chart in `charts/`, no PyPI upload. See the header note above for why it is not a no-op.
+  workflow_dispatch: {}
 
 concurrency:
   group: release-${{ github.ref }}
@@ -32,7 +52,9 @@ concurrency:
 
 env:
   IMAGE_REPOSITORY: ghcr.io/norviq-dev/norviq-engine
-  CHART_REGISTRY: oci://ghcr.io/norviq-dev/charts
+  # No `oci://` prefix: helm push needs it, cosign must NOT have it, so each consumer adds its own.
+  CHART_REPO: ghcr.io/norviq-dev/charts
+  CHART_REPO_REHEARSAL: ghcr.io/norviq-dev/charts-rehearsal
 
 jobs:
   # ---------------------------------------------------------------------------------------------
@@ -60,7 +82,9 @@ jobs:
             # Rehearsal: derive the version from Chart.yaml so every later step runs for real.
             version="$(python3 -c 'import re,sys;print(re.search(r"^version:\s*(\S+)",open("helm/norviq/Chart.yaml").read(),re.M).group(1))')"
             publish=false
-            echo "::notice::Rehearsal run (no tag). Building and validating v${version}; NOTHING will be published."
+            echo "::notice::Rehearsal run (no tag). Building and validating v${version}. The chart \
+            IS pushed and signed for real, into charts-rehearsal/ — nothing reachable by consumers \
+            is published: no version-tagged images, no chart in charts/, no PyPI upload."
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "publish=${publish}" >> "$GITHUB_OUTPUT"
@@ -166,13 +190,18 @@ jobs:
             --set-json 'policyQuotaNamespaces=["default"]' > /dev/null
           echo "packaged chart renders from the .tgz"
 
-      - name: Push chart to GHCR (OCI)
+      # Runs on BOTH paths. On a tag it publishes to `charts/`; on a rehearsal to
+      # `charts-rehearsal/`. Deliberately NOT gated on `publish` — see the header note: skipping this
+      # on a rehearsal is what let v0.1.0 and v0.1.1 fail here after a green dry run.
+      - name: Push chart (release -> charts/, rehearsal -> charts-rehearsal/)
         id: push
-        if: needs.version.outputs.publish == 'true'
         run: |
           set -euo pipefail
+          if [ "$PUBLISH" = "true" ]; then repo="$CHART_REPO"; else repo="$CHART_REPO_REHEARSAL"; fi
+          echo "repo=${repo}" >> "$GITHUB_OUTPUT"
+          echo "pushing to oci://${repo}"
           # `set -o pipefail` makes the pipeline fail if `helm push` fails; `tee` keeps the log.
-          helm push dist/norviq-"$VERSION".tgz "$CHART_REGISTRY" 2>&1 | tee push.log
+          helm push dist/norviq-"$VERSION".tgz "oci://${repo}" 2>&1 | tee push.log
           # Parse the digest from the "Digest: sha256:..." line specifically. A bare grep for the
           # first sha256 in the whole log could match an unrelated line and sign the wrong thing.
           digest="$(sed -n 's/^Digest:[[:space:]]*\(sha256:[0-9a-f]\{64\}\).*/\1/p' push.log | head -n1)"
@@ -184,15 +213,51 @@ jobs:
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Sign chart (keyless, Sigstore)
-        if: needs.version.outputs.publish == 'true'
         env:
           COSIGN_YES: "true"
-        run: cosign sign "ghcr.io/norviq-dev/charts/norviq@${{ steps.push.outputs.digest }}"
+        run: cosign sign "${{ steps.push.outputs.repo }}/norviq@${{ steps.push.outputs.digest }}"
+
+      # `cosign sign` exiting 0 is not proof a consumer can verify: v0.1.1's signature push failed
+      # only at the registry, after the chart was already public. Verify with the SAME command the
+      # header and the runbook hand to users, so a signature that cannot be checked fails the release
+      # instead of shipping. On a rehearsal the signing identity is release.yml@refs/heads/<branch>,
+      # which the identity regexp below matches just as it does a tag.
+      - name: Verify the signature we just produced
+        run: |
+          set -euo pipefail
+          cosign verify "${{ steps.push.outputs.repo }}/norviq@${{ steps.push.outputs.digest }}" \
+            --certificate-identity-regexp '^https://github.com/norviq-dev/norviq/.github/workflows/release.yml@.*' \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
+          echo "signature verifies against the documented cosign command"
 
       - name: Rehearsal summary
         if: needs.version.outputs.publish != 'true'
         run: |
           echo "::notice::Rehearsal complete — versions reconciled, chart version-stamped, images \
-          digest-pinned from -latest, linted, rendered, packaged, and the .tgz re-rendered. \
-          NOT exercised (tag-only): the image build/scan/sign job, the chart push, the chart \
-          signature. Nothing was published. Push a v*.*.* tag to run those for real."
+          digest-pinned from -latest, linted, rendered, packaged, the .tgz re-rendered, and the \
+          chart PUSHED AND SIGNED for real into ${CHART_REPO_REHEARSAL} (signature verified). \
+          Not exercised (tag-only): the image build/scan/sign job, and the PyPI upload. Nothing \
+          reachable by consumers was published. Push a v*.*.* tag to run those for real."
+
+  # ---------------------------------------------------------------------------------------------
+  # LAST, and only on a tag. A PyPI version is the one artifact in this release that cannot be
+  # withdrawn — `pip install norviq==x.y.z` keeps working after a yank, and the number can never be
+  # reused. So it goes after everything that CAN be retried: if the images fail to build or the chart
+  # fails to push or sign, the wheel is simply never uploaded and the same version can be re-tagged.
+  #
+  # The publish step still lives inside pypi-publish.yml, so the OIDC `job_workflow_ref` claim
+  # PyPI matches its Trusted Publisher against is unchanged — the existing publisher configured for
+  # `pypi-publish.yml` keeps working without a PyPI-side edit. If that assumption is ever wrong the
+  # failure is closed, not silent: Trusted Publishing rejects the token and nothing is uploaded.
+  # ---------------------------------------------------------------------------------------------
+  pypi:
+    needs: [version, images, chart]
+    if: >-
+      ${{ !cancelled()
+          && needs.version.outputs.publish == 'true'
+          && needs.images.result == 'success'
+          && needs.chart.result == 'success' }}
+    uses: ./.github/workflows/pypi-publish.yml
+    permissions:
+      contents: read
+      id-token: write        # OIDC token for Trusted Publishing (no stored secret)

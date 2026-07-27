@@ -1,20 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # Build the `norviq` sdist + wheel and publish to PyPI via Trusted Publishing (OIDC — no API token).
 #
-# DORMANT by design — this cannot release accidentally:
-#   * The publish step runs ONLY on a pushed v*.*.* tag (workflow_dispatch builds + validates only).
-#   * Trusted Publishing requires a matching "pending publisher" configured on PyPI first
-#     (PyPI → your project/account → Publishing → add a GitHub publisher:
-#      owner: norviq-dev, repo: norviq, workflow: pypi-publish.yml). Until that exists the publish
-#      step fails WITHOUT uploading anything.
+# NOT triggered by the release tag directly. release.yml calls this as its LAST job, gated on the
+# image and chart jobs succeeding.
 #
-# To release once ready: configure the PyPI trusted publisher, then push a tag (e.g. `git tag v0.1.0
-# && git push origin v0.1.0`). Consumers then: pip install "norviq[langchain]"
+# It used to fire on `v*.*.*` independently, which meant the two workflows raced: a Release that died
+# at the chart push had already uploaded the wheel. That is not a recoverable mistake — PyPI never
+# lets a version be re-uploaded or reused, only yanked — and it is exactly how 0.1.0 and 0.1.1 became
+# permanently burnt version numbers for failures that had nothing to do with the wheel. Being called
+# by release.yml gives the ordering that no cross-workflow `needs:` can express.
+#
+# DORMANT by design — this cannot release accidentally:
+#   * The publish step runs ONLY on a pushed v*.*.* tag; workflow_dispatch builds + validates only.
+#   * Trusted Publishing requires a matching publisher configured on PyPI
+#     (PyPI → project → Publishing → GitHub publisher: owner norviq-dev, repo norviq,
+#      workflow pypi-publish.yml). Until that exists the publish step fails WITHOUT uploading.
+#     The configured workflow filename stays `pypi-publish.yml` even though release.yml is now the
+#     entry point: the publish step still RUNS here, and PyPI matches the OIDC `job_workflow_ref`
+#     claim, which names the workflow containing the job — not the caller.
+#
+# To release: push a tag (e.g. `git tag v0.1.3 && git push origin v0.1.3`) — release.yml drives the
+# whole sequence. Consumers then: pip install "norviq[langchain]"
 name: Publish to PyPI
 
 on:
-  push:
-    tags: ["v*.*.*"]
+  workflow_call: {}     # release.yml, after images + chart have succeeded
   workflow_dispatch: {} # build + `twine check` only — never publishes
 
 jobs:
