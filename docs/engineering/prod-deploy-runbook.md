@@ -123,7 +123,7 @@ openssl req -x509 -nodes -newkey rsa:2048 -days 825 -keyout tls.key -out tls.crt
 kubectl -n norviq create secret tls norviq-ingress-tls --cert=tls.crt --key=tls.key
 
 # 3) turn on the chart's ingress
-helm upgrade norviq ./helm/norviq -n norviq --reuse-values \
+helm upgrade norviq ./helm/norviq -n norviq --reset-then-reuse-values \
   --set ingress.enabled=true --set ingress.host=$HOST --set ingress.tls=true
 ```
 First-login credential: the chart auto-generates a strong admin password on first install (`admin` /
