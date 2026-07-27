@@ -474,17 +474,13 @@ _SECURITY_CONTROLS = ("runAsNonRoot", "allowPrivilegeEscalation", "capabilities.
 
 # id -> (exempt controls, reason)
 _SECURITY_EXEMPTIONS: dict[str, tuple[frozenset[str], str]] = {
-    # Hook Jobs run kubectl+openssl as uid 0 to mint the internal CA. They still drop ALL caps and
-    # forbid privilege escalation, and those controls stay enforced by the exemption being narrow.
-    "norviq-internal-tls/tls-bootstrap": (
-        frozenset({"runAsNonRoot"}),
-        "pre-install hook Job: runs as uid 0 for the openssl/apk bootstrap; short-lived, hook-deleted, "
-        "and still allowPrivilegeEscalation:false + drop ALL",
-    ),
-    "norviq-webhook-cert/cert-bootstrap": (
-        frozenset({"runAsNonRoot"}),
-        "pre-install hook Job: same bootstrap shape as norviq-internal-tls",
-    ),
+    # REMOVED (was: norviq-internal-tls/tls-bootstrap needs uid 0 for the openssl/apk bootstrap).
+    # The first-party bootstrap image now ships kubectl AND openssl, so the hook no longer `apk add`s at
+    # runtime and no longer needs root — which is what unblocked OpenShift, whose restricted-v2 SCC
+    # rejects runAsUser: 0 outright and killed `helm install` at this very hook. Deliberately deleted
+    # rather than left in place: this suite fails a stale exemption, and that is how the fix stays fixed.
+    # REMOVED (was: norviq-webhook-cert/cert-bootstrap needs uid 0). Same story as tls-bootstrap
+    # above — the bootstrap image carries openssl, so the hook runs non-root and OpenShift admits it.
     # --- KNOWN GAP: bundled single-node datastores ship with no securityContext at all. -------------
     # Justified only because production does not run them: values-prod.yaml turns on the operator-
     # managed HA variants and the plain StatefulSets stop rendering entirely. That claim is asserted

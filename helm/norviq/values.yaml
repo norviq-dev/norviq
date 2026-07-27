@@ -97,6 +97,14 @@ images:
     tag: webhook-latest
     digest: ""
     pullPolicy: Always
+  # Bootstrap image for the chart's TLS hooks: carries kubectl + openssl so the hooks need neither a
+  # runtime `apk add` nor root. First-party so the release workflow can pin it by digest — a hook that
+  # patches a webhook's caBundle must not pull an unpinned image.
+  bootstrap:
+    repository: norviq-engine
+    tag: bootstrap-latest
+    digest: ""
+    pullPolicy: Always
   redis:
     repository: redis
     tag: "7-alpine"
@@ -228,6 +236,22 @@ ui:
   # ALL caps. The Service + probes reference the named "http" port, so this cascades automatically.
   port: 8080
 
+# OpenShift / restricted-SCC compatibility.
+#
+# OpenShift assigns each namespace a UID RANGE (typically ~1000650000+) and admits pods with a UID
+# from that range and GID 0. A chart that pins `runAsUser` is rejected by the default restricted-v2
+# SCC no matter which UID it pins, because the pinned value is almost never inside the namespace's
+# allocated range.
+#
+# With this ON the chart OMITS runAsUser/runAsGroup/fsGroup entirely and lets the platform assign,
+# while keeping `runAsNonRoot: true` so the security guarantee is unchanged — the platform enforces
+# non-root, we just stop dictating WHICH non-root user.
+#
+# Leave OFF for vanilla Kubernetes / AKS / EKS / GKE, where pinning an explicit non-root UID is the
+# stronger posture (nothing assigns one for you there).
+openshift:
+  enabled: false
+
 webhook:
   enabled: true
   # Turnkey sidecar injection: render the MutatingWebhookConfiguration from the chart and
@@ -288,7 +312,12 @@ webhook:
     allowPodOptOut: true
     # Image with kubectl + openssl for the cert-bootstrap hook Job. alpine/k8s ships both and is
     # publicly pullable (bitnami/kubectl tags were removed from Docker Hub in the 2025 Bitnami change).
-    certJobImage: "alpine/k8s:1.30.0"
+    # First-party bootstrap image for the TLS hooks: carries BOTH kubectl (patch the webhook
+    # caBundle / write the Secret) and openssl (self-sign the internal CA). The old alpine/k8s image
+    # had kubectl but NOT openssl, so the hooks ran `apk add openssl` at install time — which needs
+    # root, which OpenShift's restricted-v2 SCC rejects outright, killing `helm install` at the
+    # pre-install hook. Baking both in also drops a network dependency from the install path, so the
+    # hooks work air-gapped.
   replicas: 2
   pdb:
     enabled: false     # multi-node prod

@@ -39,7 +39,7 @@ spec:
         # (.Release.Namespace; see webhook-config.yaml:27-34), so a not-yet-ready webhook never
         # blocks creation of these control-plane pods — even though failurePolicy defaults to Fail
         # (fail-closed) for injection-enabled tenant namespaces.
-        {{- include "norviq.waitFor" (dict "name" "wait-for-api" "host" "norviq-api" "port" .Values.api.port) | nindent 8 }}
+        {{- include "norviq.waitFor" (dict "root" $ "name" "wait-for-api" "host" "norviq-api" "port" .Values.api.port) | nindent 8 }}
       containers:
         - name: webhook
           image: "{{ include "norviq.image" (dict "root" $ "component" .Values.images.webhook) }}"

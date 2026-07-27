@@ -129,7 +129,11 @@ Usage: {{- include "norviq.waitFor" (dict "name" "wait-for-postgres" "host" "nor
   command: ['sh','-c','until nc -z {{ .host }} {{ .port }}; do echo waiting for {{ .host }}; sleep 2; done']
   securityContext:
     runAsNonRoot: true
+    {{- if not (and .root .root.Values.openshift.enabled) }}
+    {{- /* Omitted under OpenShift, which assigns a UID from the namespace range and rejects any
+           pinned value. `and .root` keeps this safe if a call site forgets to thread the root ctx. */}}
     runAsUser: 65534
+    {{- end }}
     allowPrivilegeEscalation: false
     readOnlyRootFilesystem: true
     capabilities:

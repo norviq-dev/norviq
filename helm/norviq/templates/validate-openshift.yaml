@@ -1,0 +1,32 @@
+{{- /*
+OpenShift pre-flight: the BUNDLED datastores cannot run under a restricted SCC.
+
+Norviq's own workloads are restricted-compatible (verified: install under enforced PodSecurity
+`restricted` completes and the TLS hooks generate certs non-root). The bundled Postgres/Redis are not,
+and deliberately so — the official entrypoints start as ROOT to chown the data dir before dropping to
+postgres(70)/redis(999). Forcing `runAsNonRoot: true` on them skips that chown and the container dies
+on its own data directory; under OpenShift it is worse still, because the arbitrary UID assigned from
+the namespace range cannot own PGDATA at all. See the KNOWN GAP entries in
+tests/helm/test_container_runtime_contract.py, which are kept honest by
+test_prod_profile_drops_the_unhardened_bundled_datastores.
+
+So this is not a chart defect to paper over — those StatefulSets are dev convenience, and every
+production profile already replaces them (values-prod.yaml runs CloudNativePG + a Redis operator).
+OpenShift simply makes that mandatory rather than recommended.
+
+Failing the render is the point. Without this the install "succeeds", Helm reports deployed, and the
+operator discovers two StatefulSets stuck in a PodSecurity rejection loop with nothing pointing at the
+cause — the failure surfaces far from its reason. Better to refuse up front and say what to do.
+*/}}
+{{- if .Values.openshift.enabled }}
+  {{- $bundled := list }}
+  {{- if and .Values.postgresql.enabled (not .Values.postgresql.host) }}
+    {{- $bundled = append $bundled "postgresql" }}
+  {{- end }}
+  {{- if and .Values.redis.enabled (not .Values.redis.host) }}
+    {{- $bundled = append $bundled "redis" }}
+  {{- end }}
+  {{- if $bundled }}
+    {{- fail (printf "\n\nopenshift.enabled=true but the BUNDLED datastore(s) are still on: %s\n\nThe official postgres/redis images start as root to chown their data directory, so they cannot run\nunder OpenShift's restricted SCC (nor under PodSecurity `restricted`). Norviq's own components are\nrestricted-compatible; only these bundled dev-convenience datastores are not.\n\nPoint the chart at datastores you manage — the same thing values-prod.yaml already does:\n\n  --set postgresql.enabled=false --set postgresql.host=<host> \\\n  --set redis.enabled=false      --set redis.host=<host>\n\nOr supply credentials via postgresql.existingSecret / redis.existingSecret. See values-prod.yaml for a\nworked profile (CloudNativePG + a Redis operator).\n" (join ", " $bundled))}}
+  {{- end }}
+{{- end }}
