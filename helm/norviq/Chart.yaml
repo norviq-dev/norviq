@@ -26,13 +26,12 @@ annotations:
   # Inert unless the repo is registered on Artifact Hub; safe to carry pre-launch.
   artifacthub.io/category: security
   artifacthub.io/license: Apache-2.0
+  # Only links that have NO first-class Chart.yaml field belong here. Artifact Hub renders
+  # `home:` and `sources:` as links in their own right, so repeating them below produced a
+  # visibly duplicated "Homepage" entry on the published listing.
   artifacthub.io/links: |
-    - name: Homepage
-      url: https://norviq.dev
-    - name: Source
-      url: https://github.com/norviq-dev/norviq
     - name: Documentation
-      url: https://github.com/norviq-dev/norviq/tree/main/docs
+      url: https://docs.norviq.dev
     - name: Security policy
       url: https://github.com/norviq-dev/norviq/blob/main/SECURITY.md
   artifacthub.io/operator: "false"

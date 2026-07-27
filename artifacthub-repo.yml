@@ -5,19 +5,32 @@
 # on its own — it only takes effect once you (a) register the OCI repo on Artifact
 # Hub and (b) publish this file to the registry so the ownership claim can be verified.
 #
-# Activation (do this at public launch, after the first `v*.*.*` tag has published
-# the chart to ghcr.io/norviq-dev/charts/norviq):
+# Activation status (registered 2026-07-27, at the v0.1.2 release):
 #
-#   1. Add the repository on Artifact Hub (Control Panel > Repositories > Add):
-#        Kind: Helm charts   URL: oci://ghcr.io/norviq-dev/charts/norviq
-#   2. Copy the Repository ID it assigns and paste it into `repositoryID` below.
-#   3. Publish this metadata to the registry so Artifact Hub can verify ownership:
-#        oras push ghcr.io/norviq-dev/charts/norviq:artifacthub.io \
-#          --config /dev/null:application/vnd.cncf.artifacthub.config.v1+yaml \
-#          artifacthub-repo.yml:application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml
-#   4. Trigger a refresh on Artifact Hub; the repo shows as verified + owned.
+#   [x] 1. Repository registered on Artifact Hub under the `norviq` ORGANISATION
+#          (not a personal account, so the public listing reads "Norviq"):
+#            Kind: Helm charts   Name: norviq   URL: oci://ghcr.io/norviq-dev/charts/norviq
+#          Public page: https://artifacthub.io/packages/helm/norviq/norviq
+#   [x] 2. Repository ID recorded below.
+#   [ ] 3. Publish this metadata to the registry so Artifact Hub can verify ownership:
+#            oras push ghcr.io/norviq-dev/charts/norviq:artifacthub.io \
+#              --config /dev/null:application/vnd.cncf.artifacthub.config.v1+yaml \
+#              artifacthub-repo.yml:application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml
+#          Note this pushes a NEW tag (`artifacthub.io`) alongside the chart versions; it does
+#          not touch them. Needs a GHCR login with write scope.
+#   [ ] 4. Trigger a refresh on Artifact Hub; the repo shows as verified + owned.
+#
+# WHAT EACH FIELD ACTUALLY DOES — they are not the same mechanism:
+#   `repositoryID` drives the VERIFIED PUBLISHER badge. Artifact Hub pulls this file from the
+#     registry and checks the ID matches the repo it registered, proving whoever controls the
+#     registry is whoever registered the listing.
+#   `owners` drives the OWNERSHIP CLAIM flow — a different feature, used to transfer the listing
+#     to another Artifact Hub account. The email must belong to a REGISTERED Artifact Hub user
+#     for a claim to succeed, so opensource@norviq.dev has to be a real, deliverable mailbox
+#     that has signed up. It is inert until someone attempts a claim; it does NOT affect the
+#     verified badge, and a wrong address here fails silently at claim time, not at publish time.
 
-repositoryID: ""   # fill in from Artifact Hub after registering the repo
+repositoryID: daa2d73c-25ae-4f22-ad6c-2bac7d42ca30
 owners:
   - name: Norviq
     email: opensource@norviq.dev
