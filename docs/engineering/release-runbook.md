@@ -11,19 +11,30 @@ publishes anything.
 
 ```
 push tag vX.Y.Z
-  ├── release.yml
-  │     ├── version   reconcile the tag against Chart.yaml + pyproject.toml (gate 0)
-  │     ├── images    build 4 multi-arch images -> Trivy (fail-closed) -> cosign sign -> SBOM attest
-  │     └── chart     needs: images
-  │                   stamp Chart.yaml, resolve each image digest, pin images.<c>.digest,
-  │                   lint, render, package, push OCI, cosign sign the chart
-  └── pypi-publish.yml
-        version gate -> build -> twine check -> wheel-contents gate -> PyPI (Trusted Publishing)
+  └── release.yml
+        ├── version   reconcile the tag against Chart.yaml + pyproject.toml (gate 0)
+        ├── images    build 4 multi-arch images -> Trivy (fail-closed) -> cosign sign -> SBOM attest
+        ├── chart     needs: images
+        │             stamp Chart.yaml, resolve each image digest, pin images.<c>.digest,
+        │             lint, render, package, push OCI, cosign sign, VERIFY the signature
+        └── pypi      needs: images + chart   (calls pypi-publish.yml)
+                      version gate -> build -> twine check -> wheel gate -> PyPI (Trusted Publishing)
 ```
 
 `chart` depends on `images` so the chart can never be published referencing images that do not
 exist. That ordering is only expressible between jobs of one workflow, which is why `build.yml` is
 invoked as a reusable workflow rather than triggered separately.
+
+`pypi` runs **last** for the same reason, and it is the one ordering that matters most: a PyPI
+version cannot be re-uploaded or reused, only yanked. When `pypi-publish.yml` fired on the tag
+independently, a Release that died at the chart step had already uploaded the wheel — which is how
+`0.1.0` and `0.1.1` became permanently burnt version numbers for failures that had nothing to do
+with the wheel. It is now a `workflow_call`, so the irreversible step happens only after every
+retryable one has succeeded.
+
+The PyPI Trusted Publisher stays configured as `pypi-publish.yml` even though `release.yml` is the
+entry point: the publish step still runs inside that file, and PyPI matches the OIDC
+`job_workflow_ref` claim, which names the workflow containing the job rather than its caller.
 
 ## Irreversible, so get it right before tagging
 
@@ -33,21 +44,38 @@ invoked as a reusable workflow rather than triggered separately.
   record.
 - Image tags and OCI chart tags can be overwritten, but anyone who already pulled has the old bytes.
 
-## Rehearse first (publishes nothing)
+## Rehearse first (nothing consumers can reach)
 
 ```bash
 gh workflow run release.yml --ref main
 ```
 
 This runs the version gate, stamps the chart, pins digests (from `-latest`), lints, renders,
-packages, and re-renders the packaged `.tgz`. The `images` job, the chart push and the chart
-signature are all skipped — confirm that in the run's job list.
+packages, re-renders the packaged `.tgz`, and then **really pushes and really signs** — into
+`ghcr.io/norviq-dev/charts-rehearsal/` rather than `charts/`, finishing with a `cosign verify` using
+the same command this runbook gives consumers.
+
+That push and signature are the point of the rehearsal. The earlier version skipped both, so it
+reported success for precisely the two steps that broke `v0.1.0` (no chart published at all) and
+`v0.1.1` (chart published **unsigned**, because `helm registry login` writes Helm's credential file
+while cosign reads the Docker credential store). A rehearsal that cannot fail where releases fail is
+not a rehearsal. A throwaway local registry would not close this either — it needs no auth, so it
+cannot catch a credential-store mistake.
+
+Still tag-only, so still unexercised by a rehearsal: the image build/scan/sign job, and the PyPI
+upload. Confirm in the run's job list that `images` and `pypi` are skipped and `chart` is green.
+
+`charts-rehearsal/` accumulates a chart and signature per rehearsal. It is never referenced by any
+install path or doc; prune it whenever you like.
 
 For the Python side:
 
 ```bash
 gh workflow run pypi-publish.yml --ref main    # builds + twine check + wheel gate; never uploads
 ```
+
+That still works directly — `workflow_dispatch` is retained precisely so the Python side can be
+validated on its own. Only the **tag** trigger was removed.
 
 Locally you can check the same invariants:
 
