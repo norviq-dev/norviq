@@ -105,8 +105,18 @@ password. After changing it, sign in again to get a session token that isn't fla
 Sidecar injection is off by default (`webhook.injection.enabled: false`). Turn it on:
 
 ```bash
-helm upgrade norviq ./helm/norviq -n norviq --reuse-values --set webhook.injection.enabled=true
+helm upgrade norviq ./helm/norviq -n norviq --reset-then-reuse-values --set webhook.injection.enabled=true
 ```
+
+> **Use `--reset-then-reuse-values`, not `--reuse-values`.** `--reuse-values` replays only the values
+> *you* supplied last time and does **not** merge in values a newer chart added — so upgrading across a
+> release that introduced a new value fails outright with `nil pointer evaluating interface {}`. On
+> Helm older than 3.14, pass your own `-f values.yaml` instead.
+>
+> **Move all four image tags together.** The bundled Rego baselines are materialised into the database
+> by the **webhook** image, and enforcement reads the database — so upgrading only `images.api`/
+> `images.engine` leaves the *old policy* enforcing while every version string reports the new one.
+
 
 This renders the `MutatingWebhookConfiguration` and a one-shot Job that self-signs a TLS cert for
 the webhook (no cert-manager required). Once it's up, label the namespace that runs your agent

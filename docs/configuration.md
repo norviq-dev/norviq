@@ -138,6 +138,44 @@ still needs the SDK) and requires a NetworkPolicy-enforcing CNI — kindnet igno
 | `agentEgressPolicy.allowedPorts` | `[]` | Restrict the allowlist to these TCP ports (empty = all ports). |
 | `agentEgressPolicy.embeddedDatastores` | `false` | Also permit egress to Redis/Postgres — needed only for `sidecarMode: embedded`, where the sidecar talks to the datastores directly instead of to the API. |
 
+## OpenShift / restricted SCC (`openshift.*`)
+
+| Key | Default | What it does |
+|---|---|---|
+| `openshift.enabled` | `false` | Omit every pinned `runAsUser`/`fsGroup` so OpenShift assigns a UID from the namespace's allocated range, while keeping `runAsNonRoot: true`. |
+
+OpenShift gives each namespace a **UID range** (typically ~`1000650000`+) and admits pods running as a
+UID from that range with GID 0. A chart that *pins* `runAsUser` is rejected by the default
+`restricted-v2` SCC whatever value it pins, because the pinned UID is essentially never inside the
+namespace's range. Turning this on doesn't weaken anything — the platform still enforces non-root; the
+chart just stops dictating *which* non-root user.
+
+Leave it **off** for vanilla Kubernetes / AKS / EKS / GKE, where pinning an explicit non-root UID is
+the stronger posture because nothing assigns one for you.
+
+### The bundled datastores must be replaced
+
+`openshift.enabled=true` **fails the render** if the bundled Postgres/Redis are still on. That's
+deliberate. Their official entrypoints start as **root** to `chown` the data directory before dropping
+to `postgres(70)`/`redis(999)`; forcing `runAsNonRoot` on them breaks startup, and an arbitrary
+OpenShift UID cannot own `PGDATA` at all. Failing early beats an install that reports *deployed* while
+two StatefulSets sit in an admission-rejection loop with nothing pointing at the cause.
+
+Use datastores you manage — the same thing `values-prod.yaml` already does:
+
+```bash
+helm install norviq ./helm/norviq -n norviq \
+  --set openshift.enabled=true \
+  --set postgresql.enabled=false --set postgresql.host=<host> \
+  --set redis.enabled=false      --set redis.host=<host>
+```
+
+> **Support status.** The chart's own workloads are verified restricted-compatible: installing under
+> enforced PodSecurity `restricted` completes and the TLS hooks generate their certs non-root. That was
+> validated on **kind**, which has no `SecurityContextConstraints` — so it proves the hooks work
+> non-root, *not* that `restricted-v2` admits them. Treat OpenShift as **untested** until someone
+> installs on real OpenShift/CRC.
+
 ## Container hardening (`securityContext.*`)
 
 Applied inline by the chart to the api/engine/webhook containers rather than relying on a
@@ -217,11 +255,14 @@ both Postgres and Redis, which is exactly the embedded shape.
 | `webhook.validating.enabled` | `false` | Separate validating-admission path (distinct from injection). |
 | `webhook.injection.enabled` | `false` | Turnkey sidecar injection: renders the `MutatingWebhookConfiguration` plus a pre/post-install hook Job that self-signs a TLS cert and patches the webhook's `caBundle` — no cert-manager required. Enable with `--set webhook.injection.enabled=true`, then label target namespaces `norviq-injection=enabled`. |
 | `webhook.injection.sidecarMode` | `proxy` | `proxy` — the injected sidecar POSTs each tool call to the central `norviq-api` `/evaluate` with a namespace-scoped service JWT (DB/OPA stay centralized, nothing per-pod). `embedded` — the sidecar runs its own `RedisCache` + OPA (subprocess) + `PolicyLoader` for air-gapped/edge deployments (the chart then wires `NRVQ_REDIS_URL`/`NRVQ_PG_URL` through to the injector). |
-| `webhook.injection.failurePolicy` | `Fail` | Admission posture for the injector. `Fail` is **fail-closed**: if the injector is unavailable, pod creation in an injection-enabled namespace is rejected, so an agent pod can never start un-guarded. Set `Ignore` (fail-open) only on a dev/eval cluster. The webhook is HA (2 replicas + PDB) and the control-plane/kube-system namespaces are excluded from the selector, so this doesn't self-deadlock. |
+| `webhook.injection.failurePolicy` | `Fail` | Admission posture for the injector. `Fail` is **fail-closed**: if the injector is unavailable, pod creation in an injection-enabled namespace is rejected, so an agent pod can never start un-guarded. Set `Ignore` (fail-open) only on a dev/eval cluster. The control-plane/kube-system namespaces are excluded from the selector, so this can't self-deadlock. **Note:** `webhook.pdb` is OFF by default — on a multi-node cluster enable it, or a single drain can evict both replicas. `webhook.spread` is on by default and is a soft (`ScheduleAnyway`) constraint, so single-node installs still schedule. |
+| `webhook.injection.gateOnlyAgentPods` | `true` | Gate admission on the pod's own `norviq.io/agent-class` label instead of the whole namespace. Without it, `norviq-injection=enabled` routes **every** pod created in that namespace through the injector — databases, ingress controllers, batch jobs — so with `failurePolicy: Fail` a Norviq outage blocks pod creation for workloads Norviq doesn't even govern. The rule is CREATE-only, so running pods are never touched. **Upgrade care:** agent pods relying on namespace-wide injection *without* an agent-class label stop being injected on their next restart; the console raises an "ungoverned agent pods" warning for exactly that case. |
+| `webhook.injection.fallbackMode` | `block` | **Data-plane** posture — what a governed agent does when the engine is unreachable (distinct from `failurePolicy`, which is the *admission* posture). `block` fails closed: the agent keeps talking but every tool call is refused while the engine is down. `allow` fails open: calls are forwarded **ungoverned**, audited as `rule_id=thin_proxy_fail_open` — never as a policy allow. Applies **only** to a genuine outage (5xx/timeout/connect). A 4xx is the engine *answering* with a refusal — an expired token, a malformed request — and always blocks regardless, so choosing `allow` cannot turn a revoked credential into a silent bypass. Both data-plane paths already retry with backoff, which covers rolling restarts; `allow` is for tolerating a *sustained* outage. |
 | `webhook.injection.allowPodOptOut` | `true` | Honour the per-pod opt-out (`norviq-injection=disabled` label / `norviq.io/skip-injection` annotation). Set `false` to make injection namespace-uniform so a pod author can't self-exempt their workload from enforcement — pair that with RBAC on pod label/annotation writes. |
-| `webhook.injection.certJobImage` | `alpine/k8s:1.30.0` | Image with `kubectl` + `openssl` used by the cert-bootstrap hook Job; publicly pullable. |
+| `images.bootstrap` | `norviq-engine:bootstrap-*` | First-party image for the cert-bootstrap hook Jobs, carrying **both** `kubectl` and `openssl`. Replaces the previous `alpine/k8s`, which shipped kubectl but not openssl and so had to `apk add` at runtime — that needed root, and root is rejected outright by OpenShift's `restricted-v2` SCC. Baking both in also means the hooks need no network at install time, so they work air-gapped. |
 | `webhook.replicas` | `2` | Webhook server pod count. |
-| `webhook.pdb`/`autoscaling`/`spread` | off by default | Same HA pattern as api/engine — turn on for multi-node prod (`autoscaling`: `2`–`4` replicas, 70% CPU target). |
+| `webhook.pdb`/`autoscaling` | off by default | Same HA pattern as api/engine — turn on for multi-node prod (`autoscaling`: `2`–`4` replicas, 70% CPU target). |
+| `webhook.spread.enabled` | `true` | Spreads the webhook replicas across nodes. The injector is the only workload whose outage *rejects pod creation*, so co-locating both replicas means one node drain blocks pod creation across every governed namespace. Soft constraint (`ScheduleAnyway`), so single-node clusters are unaffected. |
 | `webhook.rollout.maxSurge`/`maxUnavailable` | `1` / `0` | Zero-downtime rollout. |
 | `webhook.port` | `8443` | Admission server port. |
 | `webhook.resources` | `50m/64Mi` req, `200m/128Mi` limit | Per-pod CPU/memory. |
