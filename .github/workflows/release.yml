@@ -107,7 +107,18 @@ jobs:
       # Log in first: resolving digests reads the registry, and on a rehearsal the images are
       # published by `images` above, so they are always resolvable by the time we get here.
       - name: Log in to GHCR
+        # TWO logins, deliberately. `helm registry login` writes Helm's OWN config and is what
+        # `helm push` uses. cosign does not read that — it reads the Docker credential store, so
+        # without the docker/login-action below it pushes the signature layer UNAUTHENTICATED and
+        # fails with `UNAUTHORIZED: unauthenticated` *after* the chart has already published. That
+        # split is why v0.1.1 shipped an unsigned chart: helm push succeeded, cosign did not.
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+      - name: Log in to GHCR for cosign (Docker credential store)
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       # Resolves each just-built `<component>-<version>` tag to its immutable index digest and writes
       # it into images.<component>.digest, which the chart's `norviq.image` helper prefers over tag.
