@@ -57,7 +57,12 @@ agentEgressPolicy:
 # cluster forbids hook Jobs — then strip the finalizers yourself before `helm uninstall`.
 crdFinalizerCleanup:
   enabled: true
-  image: "bitnami/kubectl:1.31"
+  # EMPTY = use the first-party bootstrap image (openssl + curl + jq), which is what you want.
+  # This defaulted to "bitnami/kubectl:1.31" until Bitnami removed those tags from Docker Hub:
+  # the pull 404s, the hook never runs, `helm uninstall` fails on a deadline, and every CR is
+  # left stranded in Terminating with its norviq.io finalizer intact. Set this only to pin an
+  # image you mirror yourself; it must provide /bin/sh, curl and jq.
+  image: ""
 
 baselineClusterPolicy:
   enabled: true
