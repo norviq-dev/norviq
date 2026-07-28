@@ -34,9 +34,17 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
+      # v8.18.4 -> v8.30.1. The old build's `square-access-token` rule matches a bare 64-char hex
+      # string, so every sha256 package hash in uv.lock is a candidate false positive. It fired the
+      # first time a dependency bump touched the lockfile and hard-failed a PR whose only change was
+      # re-locking. Allow-listing uv.lock instead would have been worse than the bug: a private index
+      # URL with embedded credentials is exactly the kind of real secret that CAN land in a lockfile,
+      # and excluding the file wholesale would hide it. Bumping fixes the rule and keeps the file
+      # scanned. Verified before bumping: 8.30.1 reports 0 findings across this PR and the previous
+      # two, while 8.18.4 reports 1 here and 0 there — i.e. it is this rule, not new content.
       - name: gitleaks (PR range, fail-closed)
         run: |
-          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz \
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
             | tar -xz -C /usr/local/bin gitleaks
           BASE="${{ github.event.pull_request.base.sha }}"
           HEAD="${{ github.event.pull_request.head.sha }}"
