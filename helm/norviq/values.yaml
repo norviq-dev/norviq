@@ -97,9 +97,9 @@ images:
     tag: webhook-latest
     digest: ""
     pullPolicy: Always
-  # Bootstrap image for the chart's TLS hooks: carries kubectl + openssl so the hooks need neither a
-  # runtime `apk add` nor root. First-party so the release workflow can pin it by digest — a hook that
-  # patches a webhook's caBundle must not pull an unpinned image.
+  # Bootstrap image for the chart's TLS hooks: carries openssl + curl (NOT kubectl) so the hooks
+  # need neither a runtime `apk add` nor root. First-party so the release workflow can pin it by
+  # digest — a hook that patches a webhook's caBundle must not pull an unpinned image.
   bootstrap:
     repository: norviq-engine
     tag: bootstrap-latest
@@ -310,14 +310,15 @@ webhook:
     # pod author in an injection-enabled namespace cannot self-exempt their workload from
     # enforcement (a real bypass otherwise). Pair with RBAC on pod label/annotation writes.
     allowPodOptOut: true
-    # Image with kubectl + openssl for the cert-bootstrap hook Job. alpine/k8s ships both and is
-    # publicly pullable (bitnami/kubectl tags were removed from Docker Hub in the 2025 Bitnami change).
-    # First-party bootstrap image for the TLS hooks: carries BOTH kubectl (patch the webhook
-    # caBundle / write the Secret) and openssl (self-sign the internal CA). The old alpine/k8s image
-    # had kubectl but NOT openssl, so the hooks ran `apk add openssl` at install time — which needs
-    # root, which OpenShift's restricted-v2 SCC rejects outright, killing `helm install` at the
-    # pre-install hook. Baking both in also drops a network dependency from the install path, so the
-    # hooks work air-gapped.
+    # First-party bootstrap image for the TLS hooks. It carries openssl (self-sign the internal CA)
+    # and curl (talk to the API server with the pod's service-account token). It deliberately does
+    # NOT carry kubectl: vendoring that Go binary pulled its CVEs into our own fail-closed trivy
+    # gate, which then refused to publish the image. The hooks only ever GET/PATCH a
+    # MutatingWebhookConfiguration and apply a Secret — plain authenticated REST calls.
+    # The old alpine/k8s image had kubectl but NOT openssl, so the hooks ran `apk add openssl` at
+    # install time — which needs root, which OpenShift's restricted-v2 SCC rejects outright, killing
+    # `helm install` at the pre-install hook. Baking openssl in also drops a network dependency from
+    # the install path, so the hooks work air-gapped.
   replicas: 2
   pdb:
     enabled: false     # multi-node prod

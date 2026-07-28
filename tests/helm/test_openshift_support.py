@@ -31,18 +31,32 @@ import yaml
 
 
 def _pod_specs(rendered: str):
-    """Every podSpec in the render — Deployments, StatefulSets and hook Jobs alike.
+    """Every podSpec in the render — Deployments, StatefulSets, hook Jobs AND bare Pods.
 
     Parsed, not grepped: the templates legitimately DISCUSS `runAsUser: 0` in comments explaining why
     it was removed, and a ConfigMap embeds a pod template as text. A raw grep matches both and reports
     failures that are really prose.
+
+    A bare `Pod` carries its podSpec at `.spec`, NOT `.spec.template.spec` — only workload controllers
+    wrap it in a template. Walking just the wrapped shape silently skipped the `helm test` hook Pod,
+    which kept a pinned `runAsUser` through openshift.enabled=true and was still reported as passing.
+    That is the worst kind of test gap: it made a real hole look covered. `helm test norviq` is the
+    command the README and the release runbook tell operators to run to confirm a release serves
+    traffic, so the one pod left broken on OpenShift was the verification step itself.
     """
     for doc in yaml.safe_load_all(rendered):
         if not isinstance(doc, dict):
             continue
+        kind = doc.get("kind")
+        name = doc.get("metadata", {}).get("name", "?")
+        if kind == "Pod":
+            spec = doc.get("spec")
+            if isinstance(spec, dict):
+                yield kind, name, spec
+            continue
         spec = (doc.get("spec", {}).get("template", {}) or {}).get("spec")
         if isinstance(spec, dict):
-            yield doc.get("kind"), doc.get("metadata", {}).get("name", "?"), spec
+            yield kind, name, spec
 
 
 def _pinned_uids(rendered: str):

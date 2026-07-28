@@ -56,9 +56,14 @@ helm test norviq -n norviq
 Upgrade / uninstall:
 
 ```bash
-helm upgrade norviq ./helm/norviq -n norviq --reuse-values
+helm upgrade norviq ./helm/norviq -n norviq --reset-then-reuse-values
 helm uninstall norviq -n norviq
 ```
+
+`--reset-then-reuse-values` needs Helm ≥ 3.14. Do not use `--reuse-values`: it replays only the
+values *you* supplied last time and does not merge in values a newer chart added, so upgrading
+across a release that introduced one fails with `nil pointer evaluating interface {}`. On older
+Helm, pass your own `-f values.yaml` instead.
 
 ## Expose the console (optional)
 

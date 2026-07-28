@@ -21,7 +21,15 @@ spec:
   {{- include "norviq.imagePullSecrets" . | nindent 2 }}
   securityContext:
     runAsNonRoot: true
+    {{- if not .Values.openshift.enabled }}
+    {{- /* Omitted under OpenShift for the same reason as every other pod in this chart: the platform
+           assigns a UID from the namespace's allocated range (~1000650000+) and `restricted-v2`
+           rejects any pinned value. This one is easy to miss because it is a `helm test` hook rather
+           than part of the install — but `helm test norviq` is exactly what the README and the
+           release runbook tell an operator to run to confirm a release serves traffic, so leaving it
+           pinned means the documented verification step is the one thing that fails on OpenShift. */}}
     runAsUser: 65534
+    {{- end }}
     seccompProfile:
       type: RuntimeDefault
   containers:
