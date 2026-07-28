@@ -130,10 +130,17 @@ not in execute path*, scoped to this project and the current dependency versions
 version-scoped, a future bump of `chromadb` or `semantic-kernel` re-surfaces the CVE for review —
 matching the exit condition above.
 
-**`GHSA-337j-9hxr-rhxg` has not been marked Ignored yet**, which is why "Security Analysis" currently
-reports `1 vulnerabilities found` on pull requests while the `fossa` CI gate passes. The two disagree by
-design: the gate honours this repo's allow-list, the badge reflects the FOSSA project UI, and only a
-maintainer with FOSSA access can reconcile them. Until someone records the ignore there with the
-justification above, treat that single red badge as *this known entry* rather than as an unreviewed
-finding — and re-check that it is still only this one before assuming so, since a genuinely new CVE would
-look identical from the outside.
+**`GHSA-337j-9hxr-rhxg` is not what the "Security Analysis" badge reports, and it is worth being precise
+about that, because assuming otherwise wasted real time.** `npm audit` and FOSSA do not draw from the
+same advisory database, so the same lockfile yields different findings. React Router shows up in
+`npm audit`; the FOSSA badge was reporting **`GHSA-mh99-v99m-4gvg` in `brace-expansion` 5.0.7** (HIGH,
+CVSS 7.5 — DoS via unbounded expansion), a transitive dependency of `minimatch`. That one had a patch
+fix and was simply bumped to 5.0.8, not accepted. Two lessons: reading one scanner's output tells you
+nothing about another's, and a red badge should be opened and read rather than attributed to whichever
+known issue is nearest to hand.
+
+The remaining divergence is structural: the `fossa` CI gate honours this repo's allow-list while the
+badge reflects the FOSSA project UI, and only a maintainer with FOSSA access can reconcile them. Treat a
+red badge as **unreviewed until opened**. A genuinely new CVE and a known accepted one look identical
+from the outside, so the finding has to be read in the FOSSA UI — the per-revision view at
+`Projects → norviq → <branch>/<sha> → Issues → Vulnerability` names the package and the advisory.
