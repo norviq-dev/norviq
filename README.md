@@ -168,9 +168,14 @@ namespaces you listed in `policyQuotaNamespaces` — the label alone does nothin
 enabled:
 
 ```bash
-helm upgrade norviq ./helm/norviq -n norviq --reuse-values --set webhook.injection.enabled=true
+helm upgrade norviq ./helm/norviq -n norviq --reset-then-reuse-values --set webhook.injection.enabled=true
 kubectl label namespace <your-agent-namespace> norviq-injection=enabled
 ```
+
+`--reset-then-reuse-values` (Helm ≥ 3.14), not `--reuse-values`: the latter replays only the values
+*you* supplied last time and does not merge in values a newer chart added, so an upgrade across a
+release that introduced one fails with `nil pointer evaluating interface {}`. On older Helm, pass
+your own `-f values.yaml`.
 
 Every new pod in a labeled namespace then gets the enforcement sidecar injected.
 

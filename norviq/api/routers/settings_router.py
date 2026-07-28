@@ -7,7 +7,7 @@ with persisted per-namespace overrides); PUT persists overrides (admin-only, val
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -47,7 +47,17 @@ async def warm_ns_settings(cache, session_factory=get_session) -> None:
 
 
 class SettingsUpdate(BaseModel):
-    """Per-namespace settings override. Every field optional; omitted fields keep their current value."""
+    """Per-namespace settings override. Every field optional; omitted fields keep their current value.
+
+    `extra="forbid"` is load-bearing, not tidiness. The target namespace comes from the QUERY string
+    (`?namespace=`), so a caller who reasonably puts `{"namespace": "prod", ...}` in the BODY used to
+    get a 200 while the write silently landed in `default` — the posture of the namespace they named
+    was never touched, and the posture of one they did not name was changed. For an object that
+    carries `enforcement_mode`, misdirecting the write is a security-relevant outcome, and it
+    reported success. It now 422s and names the offending field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     enforcement_mode: str | None = Field(default=None, pattern="^(block|audit)$")
     trust_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
