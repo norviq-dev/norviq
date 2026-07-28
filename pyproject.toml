@@ -69,13 +69,19 @@ spiffe = ["spiffe>=0.3"]
 # any of these in; pick the extra(s) matching the agent framework(s) you actually use.
 langchain = ["langchain-core>=0.2"]
 langgraph = ["langgraph>=0.2"]
-crewai = ["crewai>=0.80"]
+# `mcp` is crewai's own dependency (crewai requires mcp>=1.16.0, uncapped). The floor is
+# declared HERE, in the extra, and not only in [tool.uv] constraint-dependencies, because
+# `pip install '.[crewai]'` reads neither uv.lock nor uv's constraints. 1.28.1 fixes
+# CVE-2026-59950 (WebSocket server transport accepts any Host/Origin). Capped below the 2.0
+# major, which crewai does not yet declare support for. See SECURITY.md.
+crewai = ["crewai>=0.80", "mcp>=1.28.1,<2"]
 autogen = ["autogen-core>=0.4", "autogen-agentchat>=0.4", "autogen-ext[openai]>=0.4"]
 semantic-kernel = ["semantic-kernel>=1.0"]
 frameworks = [
     "langchain-core>=0.2",
     "langgraph>=0.2",
     "crewai>=0.80",
+    "mcp>=1.28.1,<2",  # CVE-2026-59950 — see the crewai extra above
     "autogen-core>=0.4",
     "autogen-agentchat>=0.4",
     "autogen-ext[openai]>=0.4",
@@ -92,6 +98,16 @@ build-backend = "setuptools.build_meta"
 # 3.1.6 fixes CVE-2025-66221 / CVE-2026-21860 / CVE-2026-27199 (Windows safe_join device-name
 # path-traversal / DoS in send_from_directory); resolves to the latest 3.1.x (3.1.8). See SECURITY.md.
 constraint-dependencies = ["werkzeug>=3.1.6"]
+
+# Lock only for the interpreters this project actually claims (see `classifiers`: 3.11, 3.12 —
+# both images are python:3.12-slim and CI runs 3.12). Without this, `requires-python = ">=3.11"`
+# has no ceiling, so uv also resolves a python 3.14 FORK of the optional framework extras. No one
+# builds or tests that fork, and because upstreams do not support 3.14 yet the resolver walks them
+# BACKWARDS to find something installable there — pinning instructor 1.12 and semantic-kernel 1.8,
+# and dragging in `diskcache` (CVE-2025-69872, no fixed release) purely as an artifact of it.
+# The dependency-vulnerability gate then scores us on packages that ship nowhere. Widen this the
+# day 3.13/3.14 are supported for real — tested and in `classifiers` — not before.
+environments = ["python_version < '3.14'"]
 
 # spiffe and the agent-framework extras CANNOT co-resolve, and that is a property of their upstreams
 # rather than a choice: spiffe>=0.3 requires protobuf>=6.31.1,<8, while every autogen-core>=0.4

@@ -2,10 +2,12 @@ version = 1
 revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
-    "python_full_version >= '3.14'",
     "python_full_version == '3.13.*'",
     "python_full_version == '3.12.*'",
     "python_full_version < '3.12'",
+]
+supported-markers = [
+    "python_full_version < '3.14'",
 ]
 conflicts = [[
     { package = "norviq", extra = "autogen" },
@@ -47,7 +49,7 @@ dependencies = [
     { name = "frozenlist" },
     { name = "multidict" },
     { name = "propcache" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
+    { name = "typing-extensions", marker = "python_full_version != '3.13.*' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
     { name = "yarl" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/82/78/8ea7308cac6934de8c74a14f3d5f65d1c89287426688be79538d0e5c013d/aiohttp-3.14.1.tar.gz", hash = "sha256:307f2cff90a764d329e77040603fa032db89c5c24fdad50c4c15334cba744035", size = 7955794, upload-time = "2026-06-07T21:09:35.529Z" }
@@ -191,7 +193,7 @@ version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "frozenlist" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
+    { name = "typing-extensions", marker = "python_full_version != '3.13.*' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/61/62/06741b579156360248d1ec624842ad0edf697050bbaf7c3e46394e106ad1/aiosignal-1.4.0.tar.gz", hash = "sha256:f47eecd9468083c2029cc99945502cb7708b082c232f9aca65da147157b251c7", size = 25007, upload-time = "2025-07-03T22:54:43.528Z" }
 wheels = [
@@ -236,7 +238,7 @@ version = "4.14.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "idna" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
+    { name = "typing-extensions", marker = "python_full_version != '3.13.*' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/3b/72/5562aabb8dd7181e8e860622a38bea08d17842b99ecd4c91f84ac95251b0/anyio-4.14.1.tar.gz", hash = "sha256:8d648a3544c1a700e3ff78615cd679e4c5c3f149904287e73687b2596963629e", size = 254831, upload-time = "2026-06-24T20:56:06.017Z" }
 wheels = [
@@ -793,8 +795,8 @@ dependencies = [
     { name = "jsonschema" },
     { name = "kubernetes" },
     { name = "mmh3" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or python_full_version >= '3.14' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and python_full_version < '3.14') or (python_full_version < '3.12' and extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (python_full_version < '3.12' and extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe') or (python_full_version >= '3.14' and extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (python_full_version >= '3.14' and extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
     { name = "onnxruntime" },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp-proto-grpc" },
@@ -1999,7 +2001,7 @@ wheels = [
 
 [[package]]
 name = "mcp"
-version = "1.27.2"
+version = "1.29.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -2017,9 +2019,9 @@ dependencies = [
     { name = "typing-inspection" },
     { name = "uvicorn", marker = "sys_platform != 'emscripten' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/27/3c/347cf965d313f5d41764e7d46bea6ffe7d9ef13b983cc429b0340962a082/mcp-1.27.2.tar.gz", hash = "sha256:8e02db104096d1c25b28e64bde29a5c32b31bc241710213e12fd4d84985bdfef", size = 621116, upload-time = "2026-05-29T17:16:04.039Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/30/d3/f9acc21dfc886e4f78e2add1a47db46ce16884346afde53f8a064c02c891/mcp-1.29.0.tar.gz", hash = "sha256:52d01f334de1868cc3bb2d6604931126a67631f99a6c5d3b82ba47290315ec36", size = 643148, upload-time = "2026-07-28T13:41:41.939Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c9/11/252c6f971dc4f16af1d98a1c469d8ba523aab00d1bb76b4d3bc1ff32eacc/mcp-1.27.2-py3-none-any.whl", hash = "sha256:d6ff5160c6ca65d93013626efb3fc249de683c30b2d8570755ceddd490344de5", size = 220498, upload-time = "2026-05-29T17:16:02.442Z" },
+    { url = "https://files.pythonhosted.org/packages/01/c8/248b201f6d753d69fd5d6506011abbb35a946d9142b2ae311a948fd0be3d/mcp-1.29.0-py3-none-any.whl", hash = "sha256:f5a075bb611f23d6f4d080c6a1699fa62772eebc562ba9e66b306ddde1c755f7", size = 223436, upload-time = "2026-07-28T13:41:40.337Z" },
 ]
 
 [[package]]
@@ -2335,6 +2337,7 @@ autogen = [
 ]
 crewai = [
     { name = "crewai" },
+    { name = "mcp" },
 ]
 dev = [
     { name = "httpx" },
@@ -2349,6 +2352,7 @@ frameworks = [
     { name = "crewai" },
     { name = "langchain-core" },
     { name = "langgraph" },
+    { name = "mcp" },
     { name = "semantic-kernel" },
 ]
 langchain = [
@@ -2385,6 +2389,8 @@ requires-dist = [
     { name = "langchain-core", marker = "extra == 'langchain'", specifier = ">=0.2" },
     { name = "langgraph", marker = "extra == 'frameworks'", specifier = ">=0.2" },
     { name = "langgraph", marker = "extra == 'langgraph'", specifier = ">=0.2" },
+    { name = "mcp", marker = "extra == 'crewai'", specifier = ">=1.28.1,<2" },
+    { name = "mcp", marker = "extra == 'frameworks'", specifier = ">=1.28.1,<2" },
     { name = "networkx", specifier = ">=3.0" },
     { name = "opentelemetry-api", specifier = ">=1.20" },
     { name = "opentelemetry-exporter-otlp", specifier = ">=1.20" },
@@ -2496,7 +2502,6 @@ name = "numpy"
 version = "2.5.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.14'",
     "python_full_version == '3.13.*'",
     "python_full_version == '3.12.*'",
 ]
@@ -2562,8 +2567,8 @@ version = "1.27.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "flatbuffers" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or python_full_version >= '3.14' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and python_full_version < '3.14') or (python_full_version < '3.12' and extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (python_full_version < '3.12' and extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe') or (python_full_version >= '3.14' and extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (python_full_version >= '3.14' and extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
     { name = "packaging" },
     { name = "protobuf", version = "5.29.6", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-6-norviq-autogen' or extra == 'extra-6-norviq-frameworks' or extra != 'extra-6-norviq-spiffe'" },
     { name = "protobuf", version = "7.35.1", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-6-norviq-spiffe'" },
@@ -3265,7 +3270,6 @@ name = "protobuf"
 version = "5.29.6"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.14'",
     "python_full_version == '3.13.*'",
     "python_full_version == '3.12.*'",
     "python_full_version < '3.12'",
@@ -3285,7 +3289,6 @@ name = "protobuf"
 version = "7.35.1"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.14'",
     "python_full_version == '3.13.*'",
     "python_full_version == '3.12.*'",
     "python_full_version < '3.12'",
@@ -3651,7 +3654,7 @@ version = "26.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
+    { name = "typing-extensions", marker = "python_full_version != '3.13.*' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/74/b7/da07bae88f5a9506b4def6f2f4903cf4c3b8831e560dba8fa18ca08f758f/pyopenssl-26.3.0.tar.gz", hash = "sha256:589de7fae1c9ea670d18422ed00fc04da787bbde8e1454aea872aa57b49ad341", size = 182024, upload-time = "2026-06-12T20:28:07.458Z" }
 wheels = [
@@ -3727,7 +3730,7 @@ version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pytest" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
+    { name = "typing-extensions", marker = "python_full_version != '3.13.*' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/43/7c/d36d04db312ecf4298932ef77e6e4a9e8ad017906e24e34f0b0c361a2473/pytest_asyncio-1.4.0.tar.gz", hash = "sha256:c6c0d2259945122819f171a32ecea2c349ead889ee28176caaf492143424be42", size = 58514, upload-time = "2026-05-26T09:56:04.083Z" }
 wheels = [
@@ -3846,7 +3849,7 @@ name = "redis"
 version = "8.0.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "async-timeout", marker = "python_full_version < '3.11.3' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
+    { name = "async-timeout", marker = "python_full_version < '3.11.3' or python_full_version >= '3.14' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/cc/c3/928b290c2c0ca99ab96eea5b4ff8f30be8112b075301a7d3ba214a3c8c12/redis-8.0.1.tar.gz", hash = "sha256:afc5a7a2f5a084f5b1880dec548dd45be17db7e43c82a30d84f952aefb05cfb0", size = 5114170, upload-time = "2026-06-23T14:52:37.728Z" }
 wheels = [
@@ -3860,7 +3863,7 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
     { name = "rpds-py" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
+    { name = "typing-extensions", marker = "python_full_version != '3.13.*' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/2f/db/98b5c277be99dd18bfd91dd04e1b759cad18d1a338188c936e92f921c7e2/referencing-0.36.2.tar.gz", hash = "sha256:df2e89862cd09deabbdba16944cc3f10feb6b3e6f18e902f7cc25609a34775aa", size = 74744, upload-time = "2025-01-25T08:48:16.138Z" }
 wheels = [
@@ -4201,7 +4204,7 @@ resolution-markers = [
     "python_full_version < '3.12'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or python_full_version >= '3.14' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/7a/97/5a3609c4f8d58b039179648e62dd220f89864f56f7357f5d4f45c29eb2cc/scipy-1.17.1.tar.gz", hash = "sha256:95d8e012d8cb8816c226aef832200b1d45109ed4464303e997c5b13122b297c0", size = 30573822, upload-time = "2026-02-23T00:26:24.851Z" }
 wheels = [
@@ -4272,12 +4275,11 @@ name = "scipy"
 version = "1.18.0"
 source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
-    "python_full_version >= '3.14'",
     "python_full_version == '3.13.*'",
     "python_full_version == '3.12.*'",
 ]
 dependencies = [
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and python_full_version < '3.14') or (python_full_version < '3.12' and extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (python_full_version < '3.12' and extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe') or (python_full_version >= '3.14' and extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (python_full_version >= '3.14' and extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a7/25/c2700dfaf6442b4effaa91af24ebce5dc9d31bb4a69706313aae70d72cd0/scipy-1.18.0.tar.gz", hash = "sha256:67b2ad2ad54c72ca6d04975a9b2df8c3638c34ddd5b28738e94fc2b57929d378", size = 30774447, upload-time = "2026-06-19T15:01:43.456Z" }
 wheels = [
@@ -4337,8 +4339,8 @@ dependencies = [
     { name = "defusedxml" },
     { name = "jinja2" },
     { name = "nest-asyncio" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
-    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or python_full_version >= '3.14' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
+    { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and python_full_version < '3.14') or (python_full_version < '3.12' and extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (python_full_version < '3.12' and extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe') or (python_full_version >= '3.14' and extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (python_full_version >= '3.14' and extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
     { name = "openai" },
     { name = "openapi-core" },
     { name = "opentelemetry-api" },
@@ -4349,8 +4351,8 @@ dependencies = [
     { name = "pybars4" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
-    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' or python_full_version >= '3.14' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
+    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.12' and python_full_version < '3.14') or (python_full_version < '3.12' and extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (python_full_version < '3.12' and extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe') or (python_full_version >= '3.14' and extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (python_full_version >= '3.14' and extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
     { name = "typing-extensions" },
     { name = "websockets" },
 ]
@@ -4476,7 +4478,7 @@ version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
+    { name = "typing-extensions", marker = "python_full_version != '3.13.*' or (extra == 'extra-6-norviq-autogen' and extra == 'extra-6-norviq-spiffe') or (extra == 'extra-6-norviq-frameworks' and extra == 'extra-6-norviq-spiffe')" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/eb/e3/7c1dc7381d9f8ab7d854328ebfa884e62cb3f3d8549ddfd37c7814f42afa/starlette-1.3.1.tar.gz", hash = "sha256:05d0213193f2fbaae60e2ecb593b4add4262ad4e46536b54abe36f11a71724e0", size = 2703240, upload-time = "2026-06-12T09:23:11.602Z" }
 wheels = [
