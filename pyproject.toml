@@ -18,6 +18,17 @@ classifiers = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    # SECURITY FLOOR, declared directly even though nothing here imports it as a first-class
+    # dependency. cryptography arrives transitively via pyjwt / spiffe / azure-identity / pyopenssl,
+    # and its PyPI wheels STATICALLY LINK OpenSSL: every wheel below 48.0.1 bundles the OpenSSL
+    # vulnerable to GHSA-537c-gmf6-5ccf (HIGH, CVSS 7.5 — openssl-library.org/news/secadv/20260609).
+    #
+    # It has to live HERE, not only in [tool.uv] constraint-dependencies, because the shipped images
+    # install with PIP (`pip install '.[spiffe]'` in Dockerfile.api / Dockerfile.engine) and pip reads
+    # neither uv.lock nor uv's constraints. Without this line the image happens to get a fixed version
+    # only because spiffe>=0.3 requires cryptography>=46 and pip picks the newest match — incidental,
+    # not guaranteed, and it silently regresses the day any transitive cap pins it back.
+    "cryptography>=48.0.1",
     "click>=8.1",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
@@ -52,7 +63,7 @@ Repository = "https://github.com/norviq-dev/norviq"
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "httpx", "ruff>=0.2"]
 # Real SPIFFE workload identity (NRVQ_SPIFFE_MODE=workload-api). Optional + import-guarded so mock
 # mode (default) and CI/attack venvs install lean; only real SPIRE deployments need it.
-spiffe = ["spiffe>=0.2"]
+spiffe = ["spiffe>=0.3"]
 # SDK framework adapters (norviq/sdk/**). Each is import-guarded — the adapter module only
 # imports its framework lazily inside a loader function — so installing norviq alone never pulls
 # any of these in; pick the extra(s) matching the agent framework(s) you actually use.
@@ -81,6 +92,20 @@ build-backend = "setuptools.build_meta"
 # 3.1.6 fixes CVE-2025-66221 / CVE-2026-21860 / CVE-2026-27199 (Windows safe_join device-name
 # path-traversal / DoS in send_from_directory); resolves to the latest 3.1.x (3.1.8). See SECURITY.md.
 constraint-dependencies = ["werkzeug>=3.1.6"]
+
+# spiffe and the agent-framework extras CANNOT co-resolve, and that is a property of their upstreams
+# rather than a choice: spiffe>=0.3 requires protobuf>=6.31.1,<8, while every autogen-core>=0.4
+# requires protobuf 4.x or 5.x. Declaring the conflict lets uv resolve each extra in its own fork
+# instead of failing the whole lock, which is what unblocked the cryptography security floor above —
+# the old lock was pinned to spiffe 0.2.x, and spiffe 0.2.x caps cryptography<47.
+#
+# Nothing installs both: the shipped images take `.[spiffe]` (Dockerfile.api / Dockerfile.engine) and
+# framework-compat.yml installs one framework at a time in a matrix. `.[frameworks]` remains a valid
+# install for SDK users, who do not need SPIFFE.
+conflicts = [
+    [{ extra = "spiffe" }, { extra = "autogen" }],
+    [{ extra = "spiffe" }, { extra = "frameworks" }],
+]
 
 [tool.ruff]
 line-length = 120
