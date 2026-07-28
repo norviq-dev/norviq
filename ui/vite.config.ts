@@ -45,6 +45,13 @@ export default defineConfig({
     // must NOT be collected by vitest — its `test()` is a different runner and errors on import.
     include: ["src/**/*.{test,spec}.{ts,tsx}"],
     exclude: ["**/node_modules/**", "**/dist/**", "tests/e2e/**"],
+    // MUST stay well above the 5s `asyncUtilTimeout` in src/test/setup.ts. Vitest's default
+    // testTimeout is also 5000, so a test that awaits several `findBy*` calls hits the WHOLE-TEST
+    // wall clock before any single query gives up — on a loaded CI runner that reports a bare
+    // "Test timed out in 5000ms" instead of testing-library's useful "unable to find element" DOM
+    // dump. The headroom (4+ queries × 5s) only bites on a real hang; a healthy run is ~1s.
+    testTimeout: 30000,
+    hookTimeout: 30000,
     coverage: {
       provider: "v8",
       reporter: ["text", "html"],

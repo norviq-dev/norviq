@@ -66,11 +66,30 @@ Our FOSSA dependency-vulnerability gate (`.github/workflows/fossa.yml`) fails CI
 CVE. The exceptions below are the only vulnerabilities we knowingly carry, and each is listed because a
 version bump cannot close it today — a CVE a bump *can* fix is bumped, not listed here (e.g. the
 `werkzeug>=3.1.6` constraint in `pyproject.toml`, which resolves to 3.1.8 and closes CVE-2025-66221 /
-CVE-2026-21860 / CVE-2026-27199). The allow-list in the gate is kept in lockstep with this table.
+CVE-2026-21860 / CVE-2026-27199, and the `mcp>=1.28.1,<2` floor on the `crewai`/`frameworks` extras,
+which closes CVE-2026-59950 — a WebSocket server transport that validated neither `Host` nor `Origin`).
+The allow-list in the gate is kept in lockstep with this table.
+
+Where a floor is declared is a decision, not a formality: `mcp` is a **direct** dependency of an extra
+we declare, so its floor lives in `[project.optional-dependencies]` where `pip install '.[crewai]'`
+will honour it. `werkzeug` is reachable only transitively (semantic-kernel → openapi-core), with no
+extra of ours to attach it to, so it can only be a `[tool.uv]` constraint — which binds `uv.lock` and
+therefore the FOSSA scan, but *not* a pip install. See the `cryptography` note below for the case where
+that distinction decides whether a shipped image is actually patched.
 
 FOSSA scans **three** dependency graphs, and it is worth being explicit about which, because auditing
 only one gives false confidence: Python (`pyproject.toml` + `uv.lock`), Node (`ui/package.json`), and Go
 (`webhook/go.mod`). `pip-audit` alone covers the first.
+
+The Python graph is scoped by `[tool.uv] environments` to the interpreters this project claims (3.11 /
+3.12 — see `classifiers`; both images are `python:3.12-slim`). That is a security decision, not a
+packaging one. `requires-python = ">=3.11"` has no ceiling, so uv will otherwise also resolve a python
+**3.14 fork** of the optional framework extras; because those upstreams do not support 3.14 yet, the
+resolver satisfies it by walking them *backwards* — pinning `instructor` 1.12 and `semantic-kernel` 1.8
+and dragging in `diskcache` (CVE-2025-69872, pickle deserialization, **no fixed release exists**). None
+of it is installable by anyone, nothing builds or tests it, and yet the gate scores us on it. Auditing
+a dependency graph that ships nowhere is not extra rigour; it costs real attention and buys nothing.
+Widen the setting when 3.13/3.14 are supported for real — tested and in `classifiers` — not before.
 
 The first three entries below are **not in any shipped container image** — `Dockerfile.api` and
 `Dockerfile.engine` install `.[spiffe]` and nothing else, and `webhook/Dockerfile` is a Go binary on

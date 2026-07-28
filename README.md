@@ -129,18 +129,18 @@ real model decides the tool calls and Norviq blocks the dangerous ones before th
 **Prerequisites:** a Kubernetes cluster (1.30+), `kubectl`, and Helm 3.
 
 ```bash
-git clone https://github.com/norviq-dev/norviq.git
-cd norviq
-
-# 1. Install the CRDs
-kubectl apply -f helm/norviq/crds/
-
-# 2. Install Norviq (pulls the public images from ghcr.io/norviq-dev by default)
 kubectl create namespace norviq
-helm install norviq ./helm/norviq -n norviq \
+
+# Installs from the published, cosign-signed chart. CRDs ship inside it, and every Norviq image is
+# pinned by immutable digest — so this deploys exactly what 0.1.5 published.
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.5 -n norviq \
   --set 'policyQuotaNamespaces={default}' \
   --set config.dbSslMode=disable   # the bundled Postgres has no TLS; omit if you point at an external TLS DB
 ```
+
+Working on Norviq itself, or a modified chart? Install from a clone instead — apply
+`helm/norviq/crds/` first, then `helm install norviq ./helm/norviq`. See
+[getting-started](https://docs.norviq.dev/getting-started/) for that path.
 
 `policyQuotaNamespaces` is the list of tenant namespaces that will run agents — it is **required**, not
 optional. The chart installs a fail-closed `strict` namespace baseline for each entry, so an empty list
@@ -168,7 +168,7 @@ namespaces you listed in `policyQuotaNamespaces` — the label alone does nothin
 enabled:
 
 ```bash
-helm upgrade norviq ./helm/norviq -n norviq --reset-then-reuse-values --set webhook.injection.enabled=true
+helm upgrade norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.5 -n norviq --reset-then-reuse-values --set webhook.injection.enabled=true
 kubectl label namespace <your-agent-namespace> norviq-injection=enabled
 ```
 
