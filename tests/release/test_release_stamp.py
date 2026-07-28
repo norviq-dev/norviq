@@ -25,6 +25,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 STAMP = ROOT / "scripts" / "release_stamp.py"
 CHECK = ROOT / "scripts" / "check_release_versions.py"
+sys.path.insert(0, str(CHECK.parent))  # release scripts are not a package; import them by path
 COMPONENTS = ("engine", "api", "ui", "webhook")
 
 # distinct per component so a copy/paste bug that pins them all to one digest fails loudly
@@ -142,3 +143,24 @@ def test_version_guard_rejects_a_mismatched_tag() -> None:
     """The guard must actually fail — a guard that always passes is worse than none."""
     res = subprocess.run([sys.executable, str(CHECK), "99.99.99"], capture_output=True, text=True)
     assert res.returncode != 0, "version guard passed a tag that disagrees with the repo"
+
+
+def test_version_guard_covers_the_docs_install_command() -> None:
+    """The docs pin a chart version too, and a stale one is a command that fails for every reader.
+
+    Since the install instructions moved from a local clone to
+    `helm install ... oci://.../charts/norviq --version <x.y.z>`, the docs stopped being prose about
+    the release and became the release's user interface — there is no repo to fall back to when the
+    version does not exist. So the guard has to see them, and it has to still catch this specific
+    drift (docs bumped, Chart.yaml forgotten, or the reverse) rather than only whole-repo mismatches.
+    """
+    import check_release_versions as chk  # noqa: PLC0415 — see the sys.path insert at module top
+
+    docs = chk.collect_docs()
+    assert docs, "the guard found no chart version in any doc — the reference pattern has rotted"
+
+    chart_version = chk.collect()["helm/norviq/Chart.yaml:version"]
+    assert set(docs.values()) == {chart_version}, f"docs pin {sorted(set(docs.values()))}, chart is {chart_version}"
+
+    # Placeholders must NOT be compared: the release runbook uses "$VERSION" and "<x.y.z>" on purpose.
+    assert not any(v.startswith(("$", "<")) for v in docs.values())
