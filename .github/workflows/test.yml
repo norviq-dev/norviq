@@ -9,13 +9,19 @@
 # CPU load), verified green over 5 consecutive parallel runs before this job was added — wiring up a
 # gate that fails three runs in four would just train everyone to ignore it.
 #
-# STILL NOT GATED: the ~1575 Python tests. `pytest` appears in exactly one workflow,
-# framework-compat.yml, which runs only the per-framework SDK adapter tests on a weekly cron and on
-# path-filtered PRs. The main suite runs nowhere in CI. That is deliberately NOT fixed here rather
-# than silently bundled in: it needs Postgres/Redis service containers for the integration and attack
-# suites (they fail environmentally without them — 131 failures on a bare runner), so it is a real
-# piece of work, not another twelve lines. Adding a `python-tests` job beside `ui-tests` is the
-# obvious next step once those services are wired.
+# The Python suite is now gated too (`python-tests`). An earlier version of this comment said it was
+# blocked on "Postgres/Redis service containers for the integration and attack suites" — that was
+# wrong on both halves and is corrected here, because getting it wrong sends the next person down the
+# wrong path:
+#
+#   * It is the CORE suite that needs Postgres and Redis, not just the excluded ones. Pointed at dead
+#     ports it gives 7 failures and 55 errors; it needs the `opa` BINARY as well (17 failures without
+#     it, because norviq/engine/opa_client.py shells out to `opa check` / `opa run`).
+#   * tests/integration and tests/attacks do NOT merely want datastores — their conftests target a
+#     RUNNING API (`NRVQ_API_URL`, default 127.0.0.1:8080). They are end-to-end suites against a live
+#     deployment, so they belong in a kind-based e2e job, not a PR gate. They stay excluded.
+#
+# STILL NOT GATED, accurately this time: tests/integration and tests/attacks, for the reason above.
 name: Tests
 
 on:
@@ -53,3 +59,91 @@ jobs:
         working-directory: ui
         # `--run` disables watch mode, which would otherwise hang the runner until the timeout.
         run: npm run test -- --run
+
+  python-tests:
+    name: pytest (engine, api, sdk, helm, rego)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    # The CORE suite genuinely needs both datastores — this is not belt-and-braces. Pointed at dead
+    # ports it produces 7 failures and 55 errors. Ephemeral containers also make every run start from
+    # an EMPTY database, which is stricter than a developer's long-lived local one and is exactly how
+    # a first-run ordering bug in tests/api/test_api.py was found: a test asserted a 404 from a DELETE
+    # that queries `policy_versions` without requesting the fixture that creates the schema, so it
+    # passed only when an earlier test had already made the tables.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: norviq
+          POSTGRES_PASSWORD: norviq_local_dev
+          POSTGRES_DB: norviq
+        # 5433, not 5432: the test defaults hard-code 5433 (matching the local dev compose), so the
+        # host port must match or every DB-backed test silently falls back and fails.
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      # opa is a hard dependency of the suite, not an optional extra: opa_client.py shells out to
+      # `opa check` and `opa run --server`, and guards on `shutil.which("opa") is None`, so a missing
+      # binary degrades into 17 failures rather than a clear "opa not installed" error. Pinned, and
+      # the same v0-compatible OPA the policies target.
+      - name: Install OPA
+        run: |
+          set -euo pipefail
+          curl -sSfL -o /usr/local/bin/opa \
+            https://openpolicyagent.org/downloads/v1.18.0/opa_linux_amd64_static
+          chmod +x /usr/local/bin/opa
+          opa version
+
+      - uses: astral-sh/setup-uv@e92bafb6253dcd438e0484186d7669ea7a8ca1cc # v6.4.3
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # --frozen: install exactly uv.lock and fail if pyproject and the lock disagree, so a
+      # hand-edited dependency cannot pass CI while breaking a fresh clone. `frameworks` rather than
+      # `spiffe` because the SDK adapter tests import the framework packages — and the two extras are
+      # declared as conflicting (their protobuf ranges cannot co-resolve), so only one is installable.
+      - name: Install (locked)
+        run: uv sync --frozen --extra dev --extra frameworks
+
+      # tests/integration and tests/attacks are EXCLUDED by design — their conftests target a running
+      # API at NRVQ_API_URL, so they are e2e-against-a-deployment, not unit tests. Running them here
+      # would gate every PR on a deployment this job does not stand up.
+      - name: pytest
+        env:
+          NRVQ_PG_URL: postgresql://norviq:norviq_local_dev@127.0.0.1:5433/norviq?sslmode=disable
+          NRVQ_REDIS_URL: redis://127.0.0.1:6379/0
+        run: |
+          uv run --frozen --extra dev --extra frameworks \
+            pytest tests/ -q --ignore=tests/integration --ignore=tests/attacks
+
+      # The rego policies are a shipped artifact and their drift guard is the only thing keeping
+      # comprehensive.rego and the Helm-enforced webhook preset in agreement. Cheap, and it was
+      # previously run only by hand.
+      - name: opa test (policy drift guard)
+        run: |
+          opa test --v0-compatible \
+            comprehensive.rego webhook/presets/strict.rego webhook/presets/strict_parity_test.rego
