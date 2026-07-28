@@ -202,8 +202,14 @@ helm template norviq oci://ghcr.io/norviq-dev/charts/norviq --version "$VERSION"
 pip download "norviq==$VERSION" --no-deps -d /tmp/nrvq && unzip -l /tmp/nrvq/*.whl | grep opa-capabilities
 ```
 
-## After GA
+## The docs pin a version too
 
-Swap the README quick start from the local-clone `helm install ./helm/norviq` to
-`helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version <x.y.z>`. Keep the from-source
-path documented for contributors.
+Done as of 0.1.5: the README, `getting-started`, `configuration`, `deployment`, the chart README and
+the prod runbook all install from `oci://ghcr.io/norviq-dev/charts/norviq --version <x.y.z>` rather
+than a local clone, because a clone tracks main and is therefore not the artifact we signed. The
+from-source path stays documented, marked as the contributor path.
+
+The cost of that is a **fourth place carrying the version number**, spread over six files. Move it in
+the same commit as `Chart.yaml` and `pyproject.toml` — a doc that tells a user to install a version
+that was never published is a worse failure than a version that is merely stale, since it fails at
+`helm install` with nothing to fall back to.
