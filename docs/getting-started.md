@@ -25,13 +25,10 @@ kubectl version   # confirm the server is 1.30+
 
 ## 2. Install
 
+Install from the published chart — no clone required. The CRDs ship inside it, so Helm installs them
+for you on first install:
+
 ```bash
-git clone https://github.com/norviq-dev/norviq.git
-cd norviq
-
-# CRDs first (NrvqPolicy / NrvqClass / NrvqConfig)
-kubectl apply -f helm/norviq/crds/
-
 kubectl create namespace norviq
 
 # The namespace that will run your agents. Create it BEFORE installing: it has to be listed at
@@ -40,10 +37,43 @@ kubectl create namespace chatbot-prod
 
 # On a local/kind cluster the bundled Postgres has no TLS listener, so the default
 # config.dbSslMode=require will fail to connect — disable it for local eval:
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.5 -n norviq \
+  --set 'policyQuotaNamespaces={chatbot-prod}' \
+  --set config.dbSslMode=disable
+```
+
+The chart is **cosign-signed** and pins every Norviq image by immutable digest, so `--version 0.1.5`
+deploys exactly the bytes that release published — not whatever `latest` happens to be today. Verify
+the signature before installing if you want to:
+
+```bash
+cosign verify ghcr.io/norviq-dev/charts/norviq:0.1.5 \
+  --certificate-identity-regexp '^https://github.com/norviq-dev/norviq/.github/workflows/release.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+<details>
+<summary>Installing from a clone instead (contributors, or a modified chart)</summary>
+
+```bash
+git clone https://github.com/norviq-dev/norviq.git
+cd norviq
+
+# From a clone the CRDs are NOT auto-installed the same way — apply them first.
+kubectl apply -f helm/norviq/crds/
+
+kubectl create namespace norviq
+kubectl create namespace chatbot-prod
+
 helm install norviq ./helm/norviq -n norviq \
   --set 'policyQuotaNamespaces={chatbot-prod}' \
   --set config.dbSslMode=disable
 ```
+
+This tracks whatever is on your checkout, which is what you want when changing the chart and what you
+do **not** want when evaluating a release.
+
+</details>
 
 A few things worth knowing about this install:
 
@@ -105,7 +135,7 @@ password. After changing it, sign in again to get a session token that isn't fla
 Sidecar injection is off by default (`webhook.injection.enabled: false`). Turn it on:
 
 ```bash
-helm upgrade norviq ./helm/norviq -n norviq --reset-then-reuse-values --set webhook.injection.enabled=true
+helm upgrade norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.5 -n norviq --reset-then-reuse-values --set webhook.injection.enabled=true
 ```
 
 > **Use `--reset-then-reuse-values`, not `--reuse-values`.** `--reuse-values` replays only the values
