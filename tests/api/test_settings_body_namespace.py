@@ -15,10 +15,18 @@ during pre-GA testing and briefly polluted `default`.
 """
 from __future__ import annotations
 
+import time
+from types import SimpleNamespace
+
+import jwt
 import pytest
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from norviq.api.db.session import get_session
+from norviq.api.main import create_app
 from norviq.api.routers.settings_router import SettingsUpdate
+from norviq.config import settings
 
 
 def test_body_namespace_is_rejected_not_ignored() -> None:
@@ -65,3 +73,68 @@ def test_validation_still_applies_to_known_fields() -> None:
         SettingsUpdate(trust_threshold=1.5)             # ge=0.0 le=1.0
     with pytest.raises(ValidationError):
         SettingsUpdate(apply_mode="whenever")           # ^(enforce|dry_run_only)$
+
+
+# --- endpoint level -------------------------------------------------------------------------
+# The model tests above prove SettingsUpdate rejects the field. They do NOT prove the API returns
+# 422 rather than, say, swallowing the error into a 500 — and "the endpoint 422s" is the actual
+# claim being made to callers. Assert it against the real app.
+
+
+class _NoRow:
+    """Session stub: no persisted override for the namespace, writes are no-ops."""
+
+    async def execute(self, stmt):  # noqa: ANN001
+        _ = stmt
+        return SimpleNamespace(scalar_one_or_none=lambda: None)
+
+    def add(self, obj) -> None:  # noqa: ANN001
+        return None
+
+    async def commit(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+
+def _client() -> TestClient:
+    app = create_app()
+
+    async def _override():
+        yield _NoRow()
+
+    app.dependency_overrides[get_session] = _override
+    return TestClient(app)
+
+
+def _admin() -> dict:
+    token = jwt.encode(
+        {"sub": "a", "role": "admin", "exp": int(time.time()) + 3600},
+        settings.api_secret_key,
+        algorithm="HS256",
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_endpoint_rejects_body_namespace_with_422() -> None:
+    """The shape that used to 200 while writing to the wrong namespace."""
+    resp = _client().put(
+        "/api/v1/settings?namespace=default",
+        json={"namespace": "prod", "enforcement_mode": "audit"},
+        headers=_admin(),
+    )
+    assert resp.status_code == 422, resp.text
+    # The response must identify the field, or the caller is left guessing why a valid-looking
+    # payload was refused.
+    assert "namespace" in str(resp.json().get("detail", ""))
+
+
+def test_endpoint_still_accepts_a_legitimate_body() -> None:
+    """Forbidding extras must not break the console's normal save path."""
+    resp = _client().put(
+        "/api/v1/settings?namespace=default",
+        json={"enforcement_mode": "audit"},
+        headers=_admin(),
+    )
+    assert resp.status_code == 200, resp.text

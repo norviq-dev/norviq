@@ -110,7 +110,10 @@ validated on its own. Only the **tag** trigger was removed.
 Locally you can check the same invariants:
 
 ```bash
-python3 scripts/check_release_versions.py 0.1.2   # tag vs Chart.yaml vs pyproject
+# No argument: assert Chart.yaml version, appVersion and pyproject agree with EACH OTHER. That is
+# the right check before a tag exists — passing a literal here just re-checks whatever version you
+# happened to type, and a stale one silently "passes" against the release you already shipped.
+python3 scripts/check_release_versions.py
 python -m build && python3 scripts/check_wheel_contents.py dist
 pytest tests/release/ -q
 ```
@@ -135,46 +138,56 @@ CI cannot do these — they need an account login.
 
 ## Cutting the release
 
+Set this once and every command below follows. It is a variable rather than a literal on purpose:
+these blocks previously hardcoded the version, so each release meant hand-editing ~10 lines across
+this file — and a stale one is not cosmetic, it makes you verify the version you *last* shipped and
+conclude the new release is fine. That already happened once.
+
+```bash
+export VERSION=0.1.3          # the version you are cutting
+```
+
 ```bash
 # 1. versions agree (this is also gate 0 in CI, but fail locally first)
-python3 scripts/check_release_versions.py 0.1.2
+python3 scripts/check_release_versions.py "$VERSION"
 
 # 2. tag and push
-git tag -a v0.1.2 -m "Norviq v0.1.2"
-git push origin v0.1.2
+git tag -a "v$VERSION" -m "Norviq v$VERSION"
+git push origin "v$VERSION"
 
-# 3. watch both workflows
+# 3. watch the workflow — Release drives everything, including the PyPI job
 gh run list --limit 5
 ```
 
 To bump the version, change `helm/norviq/Chart.yaml` (`version` **and** `appVersion`) and
-`pyproject.toml` in one commit — the gate fails otherwise.
+`pyproject.toml` in one commit — the gate fails otherwise. See "One version number, deliberately"
+above for why all three move together.
 
 ## Verify after publishing
 
 ```bash
 # chart
-helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.2 --dry-run
-cosign verify ghcr.io/norviq-dev/charts/norviq:0.1.2 \
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version "$VERSION" --dry-run
+cosign verify "ghcr.io/norviq-dev/charts/norviq:$VERSION" \
   --certificate-identity-regexp '^https://github.com/norviq-dev/norviq/.github/workflows/release.yml@.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
 # images (signed by build.yml, so the identity regexp names build.yml)
-cosign verify ghcr.io/norviq-dev/norviq-engine:api-0.1.2 \
+cosign verify "ghcr.io/norviq-dev/norviq-engine:api-$VERSION" \
   --certificate-identity-regexp '^https://github.com/norviq-dev/norviq/.github/workflows/build.yml@.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
 # the released chart must pin digests, never floating tags
-helm template norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.2 \
+helm template norviq oci://ghcr.io/norviq-dev/charts/norviq --version "$VERSION" \
   --set-json 'policyQuotaNamespaces=["default"]' | grep 'image:' | grep norviq-engine
 # every line should read ...norviq-engine@sha256:...
 
 # package
-pip download norviq==0.1.2 --no-deps -d /tmp/nrvq && unzip -l /tmp/nrvq/*.whl | grep opa-capabilities
+pip download "norviq==$VERSION" --no-deps -d /tmp/nrvq && unzip -l /tmp/nrvq/*.whl | grep opa-capabilities
 ```
 
 ## After GA
 
 Swap the README quick start from the local-clone `helm install ./helm/norviq` to
-`helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.2`. Keep the from-source
+`helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version <x.y.z>`. Keep the from-source
 path documented for contributors.
