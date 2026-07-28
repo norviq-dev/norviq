@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: Apache-2.0
+# Unit tests as a merge gate.
+#
+# WHY THIS FILE EXISTS. Nothing ran the console's 344 vitest tests. Not one workflow referenced
+# `vitest` or `npm test`, so the suite could — and did — sit at a ~75% failure rate in parallel runs
+# without anyone noticing. A test suite nobody runs is not a safety net; it is a directory of files
+# that happen to compile. The flake it was hiding is fixed in ui/src/test/setup.ts (testing-library's
+# `asyncUtilTimeout` defaults to 1000ms, which the Dashboard's ECharts renders exceed under parallel
+# CPU load), verified green over 5 consecutive parallel runs before this job was added — wiring up a
+# gate that fails three runs in four would just train everyone to ignore it.
+#
+# STILL NOT GATED: the ~1575 Python tests. `pytest` appears in exactly one workflow,
+# framework-compat.yml, which runs only the per-framework SDK adapter tests on a weekly cron and on
+# path-filtered PRs. The main suite runs nowhere in CI. That is deliberately NOT fixed here rather
+# than silently bundled in: it needs Postgres/Redis service containers for the integration and attack
+# suites (they fail environmentally without them — 131 failures on a bare runner), so it is a real
+# piece of work, not another twelve lines. Adding a `python-tests` job beside `ui-tests` is the
+# obvious next step once those services are wired.
+name: Tests
+
+on:
+  pull_request:
+  workflow_dispatch: {}
+
+# A newer push to the same PR supersedes the old run; tests are pure so cancelling is safe.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ui-tests:
+    name: vitest (console)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    # Deliberately NOT path-filtered to `ui/**`. A filtered job reports "skipped" rather than
+    # "passed", which is indistinguishable from "did not run" once this becomes a required check —
+    # and the suite takes ~10s, so there is nothing to save.
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install (locked)
+        working-directory: ui
+        # `npm ci` not `npm install`: it installs exactly the lockfile and fails if package.json and
+        # the lock disagree, so a hand-edited dependency cannot pass CI while breaking a fresh clone.
+        run: npm ci --no-audit --no-fund
+      - name: vitest
+        working-directory: ui
+        # `--run` disables watch mode, which would otherwise hang the runner until the timeout.
+        run: npm run test -- --run
