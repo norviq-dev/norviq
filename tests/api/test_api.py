@@ -339,10 +339,17 @@ def test_readyz_db_failure_returns_503(monkeypatch: pytest.MonkeyPatch) -> None:
         client.close()
 
 
-def test_policy_write_accepts_service_role_rejects_viewer() -> None:
+async def test_policy_write_accepts_service_role_rejects_viewer(real_db: None) -> None:
     """Only the allowlisted control-plane controller (sub=norviq-webhook) writes cross-namespace; a
     viewer is rejected, and a GENERIC service token (not on the allowlist, no ns claim) is floored to
-    its namespace claim — it cannot write an arbitrary namespace just by holding role=service."""
+    its namespace claim — it cannot write an arbitrary namespace just by holding role=service.
+
+    Takes `real_db` because the LAST assertion goes past the auth gate: the allowlisted controller
+    reaches the handler, which deletes from `policy_versions` before returning 404. Without the
+    fixture there is no schema, and that DELETE raises UndefinedTableError instead — so the test only
+    passed when some earlier test had already created the tables. On a fresh database (which is what
+    CI gets on every run) it failed deterministically. The two 403 assertions above stop at auth and
+    never touch the DB; it is only the 404 path that needs it."""
     client = _client()
     try:
         # viewer is rejected at the auth gate
