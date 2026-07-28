@@ -175,9 +175,15 @@ git push origin "v$VERSION"
 gh run list --limit 5
 ```
 
-To bump the version, change `helm/norviq/Chart.yaml` (`version` **and** `appVersion`) and
-`pyproject.toml` in one commit — the gate fails otherwise. See "One version number, deliberately"
-above for why all three move together.
+To bump the version, change `helm/norviq/Chart.yaml` (`version` **and** `appVersion`),
+`pyproject.toml`, and the `--version` pinned by the install docs, in one commit — the gate fails
+otherwise. `uv lock` picks up the `pyproject.toml` change; commit the one-line `uv.lock` diff with it.
+See "One version number, deliberately" above for why they all move together.
+
+`scripts/check_release_versions.py` enforces this and reports every disagreeing file with its line
+number, so the bump is a mechanical follow-the-errors loop rather than a search you can half-finish.
+It runs as gate 0 of the release *and* as a unit test on every PR, so drift is caught by the PR that
+introduces it — not by a tag you cannot take back.
 
 ## Verify after publishing
 
