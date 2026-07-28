@@ -17,7 +17,7 @@ push tag vX.Y.Z
         ├── chart     needs: images
         │             stamp Chart.yaml, resolve each image digest, pin images.<c>.digest,
         │             lint, render, package, push OCI, cosign sign, VERIFY the signature
-        └── pypi      needs: images + chart   (calls pypi-publish.yml)
+        └── pypi      needs: images + chart   (inline — see the note below)
                       version gate -> build -> twine check -> wheel gate -> PyPI (Trusted Publishing)
 ```
 
@@ -29,12 +29,26 @@ invoked as a reusable workflow rather than triggered separately.
 version cannot be re-uploaded or reused, only yanked. When `pypi-publish.yml` fired on the tag
 independently, a Release that died at the chart step had already uploaded the wheel — which is how
 `0.1.0` and `0.1.1` became permanently burnt version numbers for failures that had nothing to do
-with the wheel. It is now a `workflow_call`, so the irreversible step happens only after every
+with the wheel. It is now a job of `release.yml`, so the irreversible step happens only after every
 retryable one has succeeded.
 
-The PyPI Trusted Publisher stays configured as `pypi-publish.yml` even though `release.yml` is the
-entry point: the publish step still runs inside that file, and PyPI matches the OIDC
-`job_workflow_ref` claim, which names the workflow containing the job rather than its caller.
+**The PyPI Trusted Publisher must name `release.yml`, and the upload steps are INLINE in that file
+rather than a call to `pypi-publish.yml`.** That is a PyPI constraint, not a preference — from their
+[troubleshooting docs](https://docs.pypi.org/trusted-publishers/troubleshooting/): *"Reusable
+workflows cannot currently be used as the workflow in a Trusted Publisher"* (warehouse#11096).
+
+`v0.1.3` is the worked example. With the publish step in a called workflow, one run carries two
+different workflow identities: the OIDC token quotes `job_workflow_ref` (the workflow containing the
+job) while the PEP 740 attestation is signed with a certificate naming the **top-level** workflow.
+PyPI accepted the token and then rejected the upload:
+
+```
+Certificate's Build Config URI (.../release.yml@refs/tags/v0.1.3) does not
+match expected Trusted Publisher (pypi-publish.yml @ norviq-dev/norviq)
+```
+
+It failed closed — nothing uploaded, `0.1.3` still free — which is exactly what the ordering above
+exists to guarantee. Inlining makes both claims name `release.yml`, so one publisher satisfies both.
 
 ## Irreversible, so get it right before tagging
 
@@ -101,7 +115,7 @@ install path or doc; prune it whenever you like.
 For the Python side:
 
 ```bash
-gh workflow run pypi-publish.yml --ref main    # builds + twine check + wheel gate; never uploads
+gh workflow run pypi-publish.yml --ref main    # builds + twine check + wheel gate; CANNOT upload
 ```
 
 That still works directly — `workflow_dispatch` is retained precisely so the Python side can be
@@ -125,9 +139,11 @@ CI cannot do these — they need an account login.
 1. **PyPI Trusted Publishing.** On pypi.org → *Your projects* → *Publishing* → add a **pending
    publisher**:
    - PyPI project name: `norviq`  (currently unclaimed — verify before relying on it)
-   - Owner: `norviq-dev`  ·  Repository: `norviq`  ·  Workflow: `pypi-publish.yml`
-   - Environment: **leave blank**. `pypi-publish.yml` declares no `environment:`, and a publisher
+   - Owner: `norviq-dev`  ·  Repository: `norviq`  ·  Workflow: **`release.yml`**
+   - Environment: **leave blank**. `release.yml` declares no `environment:`, and a publisher
      configured *with* one will reject a workflow that has none.
+   - It must be `release.yml`, NOT `pypi-publish.yml`: a reusable workflow cannot be a Trusted
+     Publisher, and the attestation certificate names the top-level workflow. See the note above.
 
    Until this exists the publish step fails **without uploading anything**, so a premature tag is
    survivable on the PyPI side.
