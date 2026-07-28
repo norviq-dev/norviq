@@ -148,3 +148,59 @@ def test_external_datastores_are_the_supported_openshift_path() -> None:
 def test_guard_is_inert_when_openshift_is_off() -> None:
     """The bundled datastores stay perfectly valid for dev/vanilla installs."""
     assert _render().returncode == 0
+
+
+# --- uninstall hook image ------------------------------------------------------------------------
+# `helm uninstall` was BROKEN for every 0.1.4 user: the pre-delete hook defaulted to
+# `bitnami/kubectl:1.31`, and Bitnami removed those tags from Docker Hub in 2025. The pull 404s, the
+# pod sits in ImagePullBackOff, and the uninstall dies on a deadline. That hook is what releases the
+# norviq.io finalizers, so its failure strands every CR in Terminating — and a later reinstall adopts
+# the tombstones, leaving the cluster blocking every tool call on `no_policy_loaded` while looking
+# healthy. Found by deploying the published chart on AKS as a user would.
+#
+# The rule these tests encode: NO install- or uninstall-blocking hook may default to a third-party
+# image. A first-party image cannot be deleted out from under us by an upstream.
+
+def _hook_images(rendered: str, hook_substr: str) -> list[str]:
+    out = []
+    for doc in yaml.safe_load_all(rendered):
+        if not isinstance(doc, dict):
+            continue
+        ann = (doc.get("metadata", {}) or {}).get("annotations") or {}
+        if hook_substr not in (ann.get("helm.sh/hook") or ""):
+            continue
+        spec = doc.get("spec", {})
+        ps = spec.get("template", {}).get("spec") if "template" in spec else spec
+        if not isinstance(ps, dict):
+            continue
+        for c in (ps.get("containers") or []) + (ps.get("initContainers") or []):
+            out.append(c["image"])
+    return out
+
+
+def test_uninstall_hook_does_not_default_to_a_third_party_image() -> None:
+    """The exact regression: a vanished upstream tag must not be able to break `helm uninstall`."""
+    res = _render("--set", "crdFinalizerCleanup.enabled=true")
+    assert res.returncode == 0, res.stderr
+    images = _hook_images(res.stdout, "pre-delete")
+    assert images, "the crd-cleanup pre-delete hook did not render"
+    for img in images:
+        assert "bitnami/kubectl" not in img, f"uninstall hook is back on the removed image: {img}"
+        assert "norviq-engine" in img, f"uninstall hook must default to the first-party image, got {img}"
+
+
+def test_no_lifecycle_hook_defaults_to_a_third_party_image() -> None:
+    """Same rule for every hook that can block install or upgrade, not just the one that bit us."""
+    res = _render("--set", "crdFinalizerCleanup.enabled=true", "--set", "webhook.injection.enabled=true")
+    assert res.returncode == 0, res.stderr
+    for hook in ("pre-install", "post-install", "pre-delete"):
+        for img in _hook_images(res.stdout, hook):
+            assert "norviq-engine" in img, f"{hook} hook uses a third-party image: {img}"
+
+
+def test_operator_can_still_pin_their_own_cleanup_image() -> None:
+    """Defaulting to first-party must not remove the escape hatch for an air-gapped mirror."""
+    res = _render("--set", "crdFinalizerCleanup.enabled=true",
+                  "--set", "crdFinalizerCleanup.image=myco/kubectl:1.30")
+    assert res.returncode == 0, res.stderr
+    assert any("myco/kubectl:1.30" in i for i in _hook_images(res.stdout, "pre-delete"))

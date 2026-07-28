@@ -42,7 +42,20 @@ FROM alpine:${ALPINE_VERSION}
 # The hooks only ever did three things — GET/PATCH a MutatingWebhookConfiguration and apply a Secret —
 # all plain authenticated REST calls. curl with the pod's service-account token does them with no Go
 # runtime in the image at all, so there is nothing here for the scanner to find.
-RUN apk add --no-cache ca-certificates openssl curl \
+# jq: the uninstall finalizer hook lists NrvqPolicy/NrvqClass/NrvqConfig and strips their finalizers,
+# which means reading namespace/name out of a Kubernetes list response. That hook previously used
+# `bitnami/kubectl:1.31`, and Bitnami REMOVED those tags from Docker Hub in 2025 — the image 404s, the
+# pod sits in ImagePullBackOff, and `helm uninstall` fails on a deadline. Worse, that hook is what
+# releases the `norviq.io/policy-protection` finalizers, so its failure strands every CR in
+# Terminating; a later REINSTALL then adopts the tombstones and the controller loops on a delete the
+# API rejects, leaving the cluster blocking every tool call on `no_policy_loaded`.
+#
+# Moving the hook onto this first-party image removes the whole failure class: no third-party tag that
+# can vanish, and the same digest-pinned, scanned image the TLS hooks already use. jq is ~1MB from
+# Alpine main — a C binary, so unlike kubectl it brings no vendored Go module tree for the trivy gate
+# to reject. Parsing with sed/grep instead was the alternative and is exactly the kind of fragile
+# string-matching that breaks silently on an unexpected field.
+RUN apk add --no-cache ca-certificates openssl curl jq \
     && rm -rf /var/cache/apk/*
 
 

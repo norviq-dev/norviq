@@ -101,8 +101,23 @@ spec:
         runAsUser: 65532
         {{- end }}
       containers:
+        # FIRST-PARTY image, not bitnami/kubectl. `bitnami/kubectl:1.31` was the default here and
+        # Bitnami REMOVED those tags from Docker Hub in 2025 — the pull 404s, the pod sits in
+        # ImagePullBackOff, and `helm uninstall` dies on a deadline. That is not a cosmetic failure:
+        # this Job is what releases the norviq.io finalizers, so when it cannot start, every CR is
+        # stranded in Terminating. A later reinstall then ADOPTS those tombstones, the controller
+        # loops on a delete the API answers 422, no policy ever loads, and the cluster blocks every
+        # tool call on `no_policy_loaded` while looking perfectly healthy. Verified end-to-end on AKS.
+        #
+        # `$cfc.image` is still honoured for operators who must pin their own, but the default is now
+        # an image we build, scan and digest-pin, so no upstream can delete it out from under an
+        # uninstall.
         - name: cleanup
-          image: {{ include "norviq.thirdPartyImage" (dict "root" $ "image" ($cfc.image | default "bitnami/kubectl:1.31")) | quote }}
+          {{- if $cfc.image }}
+          image: {{ include "norviq.thirdPartyImage" (dict "root" $ "image" $cfc.image) | quote }}
+          {{- else }}
+          image: "{{ include "norviq.image" (dict "root" $ "component" .Values.images.bootstrap) }}"
+          {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -121,26 +136,51 @@ spec:
             - name: scratch
               mountPath: /tmp
           env:
-            # Point kubectl's HOME + caches at the tmpfs scratch mount, not the read-only rootfs.
+            # A writable HOME on the tmpfs scratch mount — the rootfs is read-only.
             - name: HOME
               value: /tmp
-            - name: KUBECACHEDIR
-              value: /tmp/.kube/cache
           command:
             - /bin/sh
             - -c
             - |
               set -u
               echo "NRVQ-HOOK-CLEANUP: releasing norviq.io finalizers before the controller is removed"
+
+              # curl + the pod's service-account token instead of kubectl. This Job only ever LISTS the
+              # three CRs and PATCHes their finalizers away — plain authenticated REST — so it needs no
+              # third-party CLI, and depending on one is what broke it (see the image note above).
+              API=https://kubernetes.default.svc
+              SA=/var/run/secrets/kubernetes.io/serviceaccount
+              TOKEN="$(cat ${SA}/token)"
+              GV=/apis/norviq.io/v1alpha1
+
+              # nrvqpolicies is Namespaced; nrvqclasses and nrvqconfigs are Cluster-scoped, so their
+              # patch paths carry no /namespaces/<ns> segment. Getting that wrong 404s and silently
+              # leaves the finalizer in place, which is the failure this Job exists to prevent.
+              patch_one() {  # patch_one <plural> <ns-or-empty> <name>
+                _p="$1"; _ns="$2"; _n="$3"
+                if [ -n "$_ns" ] && [ "$_ns" != "null" ]; then
+                  _path="${GV}/namespaces/${_ns}/${_p}/${_n}"
+                else
+                  _path="${GV}/${_p}/${_n}"
+                fi
+                # || true: a patch can legitimately race the controller finishing its own cleanup, and a
+                # 404 there is success, not failure. An uninstall must not fail on it.
+                curl -sS --cacert "${SA}/ca.crt" -H "Authorization: Bearer ${TOKEN}" \
+                  -H 'Content-Type: application/merge-patch+json' \
+                  -X PATCH "${API}${_path}" -d '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1 || true
+              }
+
               for kind in nrvqpolicies nrvqclasses nrvqconfigs; do
-                # `|| true` twice over: the CRD may not exist (never installed) and an individual patch may
-                # race the controller finishing its own cleanup. Neither is a reason to fail an uninstall.
-                for row in $(kubectl get "$kind" -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}' 2>/dev/null || true); do
-                  ns="${row%%/*}"; name="${row##*/}"
-                  [ -n "$name" ] || continue
-                  echo "  patching $kind $ns/$name"
-                  kubectl -n "$ns" patch "$kind" "$name" --type=merge -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1 || true
-                done
+                # The CRD may never have been installed — an empty/absent list is not an error.
+                body="$(curl -sS --cacert "${SA}/ca.crt" -H "Authorization: Bearer ${TOKEN}" \
+                          "${API}${GV}/${kind}" 2>/dev/null || true)"
+                echo "$body" | jq -r '.items[]? | "\(.metadata.namespace // "")\t\(.metadata.name)"' 2>/dev/null \
+                | while IFS="$(printf '\t')" read -r ns name; do
+                    [ -n "$name" ] || continue
+                    echo "  patching ${kind} ${ns:-<cluster>}/${name}"
+                    patch_one "$kind" "$ns" "$name"
+                  done
               done
               echo "NRVQ-HOOK-CLEANUP: done"
               exit 0
