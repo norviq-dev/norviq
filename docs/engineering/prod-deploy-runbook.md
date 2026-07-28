@@ -15,7 +15,21 @@ Two chart-wide behaviors to know up front:
   contract) — there is no `namespace` value.
 - **Values are validated against `values.schema.json`** on install/upgrade/template: a bad enum
   (e.g. `config.enforcementMode`) or type is rejected with a path + message before anything applies.
-  Run `helm lint ./helm/norviq` to check a values file.
+  Run `helm lint norviq/` (against the pulled chart, below) to check a values file.
+
+## Get the chart
+
+Install from the published OCI chart, not a git clone — it is cosign-signed and pins every Norviq
+image by immutable digest, so what you deploy is exactly what the release published. The prod overlay
+lives *inside* the chart, so pull and untar once to get `values-prod.yaml` on disk:
+
+```bash
+helm pull oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.5 --untar
+# -> ./norviq/{Chart.yaml,values.yaml,values-prod.yaml,...}
+```
+
+Every `./norviq` path below refers to that untarred chart. To install without the overlay you can skip
+the pull entirely and reference `oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.5` directly.
 
 ## Prerequisites (multi-node)
 - **≥3 nodes** (so podAntiAffinity / topologySpread actually spread replicas).
@@ -61,7 +75,7 @@ The chart fails the **render** (not the rollout) rather than install something q
 Dry-run the render before you install — it costs nothing and catches all three at once:
 
 ```bash
-helm template norviq ./helm/norviq -f helm/norviq/values-prod.yaml \
+helm template norviq ./norviq -f norviq/values-prod.yaml \
   --set-json 'policyQuotaNamespaces=["prod-agents","analytics"]' \
   --set postgresql.password="$PG_PASSWORD" --set redis.password="$REDIS_PASSWORD" >/dev/null
 ```
@@ -74,8 +88,8 @@ trust root.
 ## Deploy
 ```bash
 # install operators first (CloudNativePG, redis-operator, metrics-server) per their docs, then:
-helm upgrade --install norviq ./helm/norviq -n norviq --create-namespace \
-  -f helm/norviq/values-prod.yaml \
+helm upgrade --install norviq ./norviq -n norviq --create-namespace \
+  -f norviq/values-prod.yaml \
   --set-json 'policyQuotaNamespaces=["prod-agents","analytics"]' \
   --set postgresql.password="$PG_PASSWORD" \
   --set redis.password="$REDIS_PASSWORD" \
@@ -123,7 +137,7 @@ openssl req -x509 -nodes -newkey rsa:2048 -days 825 -keyout tls.key -out tls.crt
 kubectl -n norviq create secret tls norviq-ingress-tls --cert=tls.crt --key=tls.key
 
 # 3) turn on the chart's ingress
-helm upgrade norviq ./helm/norviq -n norviq --reset-then-reuse-values \
+helm upgrade norviq ./norviq -n norviq --reset-then-reuse-values \
   --set ingress.enabled=true --set ingress.host=$HOST --set ingress.tls=true
 ```
 First-login credential: the chart auto-generates a strong admin password on first install (`admin` /
