@@ -63,15 +63,26 @@ sidecar-injection trust model) in [`docs/configuration.md`](docs/configuration.m
 ## Accepted dependency exceptions
 
 Our FOSSA dependency-vulnerability gate (`.github/workflows/fossa.yml`) fails CI on any known dependency
-CVE. The exceptions below are the only vulnerabilities we knowingly carry. **None of them are present in
-the shipped container images** — `Dockerfile.api` and `Dockerfile.engine` install `.[spiffe]` and nothing
-else, `Dockerfile.ui` is an nginx image built from the JS bundle, and `webhook/Dockerfile` is a Go binary
-on `distroless/static` with no Python at all. All three CVEs live exclusively in the **optional SDK
-framework-adapter extras** (`norviq[frameworks]` / `[crewai]` / `[semantic-kernel]` in `pyproject.toml`),
-which a deployment must explicitly opt into, and each cannot be closed by a version bump today. The
-allow-list in the gate is kept in lockstep with this table; a CVE a bump *can* fix is bumped, not listed
-here (e.g. the `werkzeug>=3.1.6` constraint in `pyproject.toml` — which resolves to 3.1.8 — closes
-CVE-2025-66221 / CVE-2026-21860 / CVE-2026-27199).
+CVE. The exceptions below are the only vulnerabilities we knowingly carry, and each is listed because a
+version bump cannot close it today — a CVE a bump *can* fix is bumped, not listed here (e.g. the
+`werkzeug>=3.1.6` constraint in `pyproject.toml`, which resolves to 3.1.8 and closes CVE-2025-66221 /
+CVE-2026-21860 / CVE-2026-27199). The allow-list in the gate is kept in lockstep with this table.
+
+FOSSA scans **three** dependency graphs, and it is worth being explicit about which, because auditing
+only one gives false confidence: Python (`pyproject.toml` + `uv.lock`), Node (`ui/package.json`), and Go
+(`webhook/go.mod`). `pip-audit` alone covers the first.
+
+The first three entries below are **not in any shipped container image** — `Dockerfile.api` and
+`Dockerfile.engine` install `.[spiffe]` and nothing else, and `webhook/Dockerfile` is a Go binary on
+`distroless/static` with no Python at all — because they live exclusively in the **optional SDK
+framework-adapter extras** (`norviq[frameworks]` / `[crewai]` / `[semantic-kernel]`), which a deployment
+must explicitly opt into.
+
+The React Router entry is different and should not be read as one of those: it **is** in a shipped image,
+the console bundle built by `Dockerfile.ui`. It is carried because the vulnerable code path does not
+exist in this application, not because the dependency is absent. That is a weaker form of "not
+exploitable" than the other three, so it is scheduled for a real fix (see the note under the table)
+rather than treated as permanently accepted.
 
 **`cryptography>=48.0.1`** is the other such floor, and unlike `werkzeug` it *is* in the shipped image —
 so it is declared in `[project] dependencies`, not in `[tool.uv] constraint-dependencies`. The images
@@ -94,12 +105,35 @@ take `.[spiffe]`, and `framework-compat.yml` installs one framework at a time.
 | CVE-2026-45829 | `chromadb` (via `crewai`) | No fixed release exists — the latest version is still affected. | It is a pre-auth RCE in the **ChromaDB HTTP server**; CrewAI uses chromadb as an **embedded client**, so the vulnerable server path is never started. |
 | CVE-2026-26030 | `semantic-kernel` | The fix (`>=1.39.4`) pulls a **pre-release** `azure-ai-agents` dependency, which we will not ship in a lockfile. | RCE is in the `InMemoryVectorStore` filter-lambda path, which the Norviq semantic-kernel adapter does not use. |
 | CVE-2026-25592 | `semantic-kernel` | This is a **.NET** CVE (fixed in .NET Core `1.71.0`); FOSSA maps it onto the pip package, where no release clears it. | The affected `[KernelFunction] DownloadFileAsync` helper exists only in the .NET SDK, not the Python package we depend on. |
+| GHSA-337j-9hxr-rhxg | `react-router` / `react-router-dom` (console UI) | Fixed only in **7.18.0**. There is no patched 6.x — we are on 6.30.4, already the latest 6.x — so closing it means a **major-version migration** of the router. | The flaw is arbitrary constructor injection in `deserializeErrors()` during **SSR hydration**. The console does no SSR: [`ui/src/main.tsx`](ui/src/main.tsx) renders with `ReactDOM.createRoot`, there is no `renderToString` / `hydrateRoot` / `StaticRouter` / Remix server entry anywhere in `ui/src`, and `Dockerfile.ui` builds a static bundle served by nginx. The vulnerable path is never executed. |
 
 These are reviewed each release; we will drop an exception and bump the moment upstream ships a fixed
 release reachable without a pre-release dependency.
 
-The same three are also marked **Ignored** in the FOSSA project UI (reason: *vulnerable code not in
-execute path*, scoped to this project and the current dependency versions), so FOSSA's own
+**React Router is a scheduled fix, not a permanent exception.** The other three entries are blocked on
+upstream; this one is blocked only on our own migration effort, which is a different kind of reason and
+should not be allowed to age quietly into "accepted". Two things would change the calculus immediately
+and should be treated as a trigger to prioritise the v7 migration:
+
+- the console gaining **any** server-side rendering or prerendering step, which would put the
+  `deserializeErrors()` path into the executed code — the reason for the exception disappears the moment
+  that changes, and it is the kind of change that arrives as a performance or SEO improvement rather than
+  as a security decision;
+- a `react-router` 6.x backport appearing, which removes the migration cost entirely.
+
+Until then the residual risk is bounded: the console is authenticated, served as static assets, and the
+advisory requires an SSR hydration payload that no code path here produces.
+
+The three Python entries are also marked **Ignored** in the FOSSA project UI (reason: *vulnerable code
+not in execute path*, scoped to this project and the current dependency versions), so FOSSA's own
 "Security Analysis" check reflects this acceptance rather than a bare red. Because that ignore is
 version-scoped, a future bump of `chromadb` or `semantic-kernel` re-surfaces the CVE for review —
 matching the exit condition above.
+
+**`GHSA-337j-9hxr-rhxg` has not been marked Ignored yet**, which is why "Security Analysis" currently
+reports `1 vulnerabilities found` on pull requests while the `fossa` CI gate passes. The two disagree by
+design: the gate honours this repo's allow-list, the badge reflects the FOSSA project UI, and only a
+maintainer with FOSSA access can reconcile them. Until someone records the ignore there with the
+justification above, treat that single red badge as *this known entry* rather than as an unreviewed
+finding — and re-check that it is still only this one before assuming so, since a genuinely new CVE would
+look identical from the outside.
