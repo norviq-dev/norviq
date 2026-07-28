@@ -73,6 +73,22 @@ allow-list in the gate is kept in lockstep with this table; a CVE a bump *can* f
 here (e.g. the `werkzeug>=3.1.6` constraint in `pyproject.toml` — which resolves to 3.1.8 — closes
 CVE-2025-66221 / CVE-2026-21860 / CVE-2026-27199).
 
+**`cryptography>=48.0.1`** is the other such floor, and unlike `werkzeug` it *is* in the shipped image —
+so it is declared in `[project] dependencies`, not in `[tool.uv] constraint-dependencies`. The images
+install with **pip**, which reads neither `uv.lock` nor uv's constraints; a floor kept only in the uv
+config would have left the published images on a vulnerable version while every local check looked green.
+It closes **GHSA-537c-gmf6-5ccf** (HIGH, CVSS 7.5): `cryptography` wheels statically link OpenSSL, and
+every wheel below 48.0.1 bundles the OpenSSL affected by the
+[2026-06-09 advisory](https://openssl-library.org/news/secadv/20260609.txt). `cryptography` reaches us
+transitively through `pyjwt`, `spiffe`, `azure-identity` and `pyopenssl`, so it is on the JWT-verification
+and SPIFFE paths rather than in an optional extra.
+
+Reaching that floor required declaring `spiffe` and the framework extras as **conflicting** (see
+`[tool.uv] conflicts`). The old lock pinned `spiffe 0.2.x`, which caps `cryptography<47`; `spiffe>=0.3`
+lifts the cap but needs `protobuf>=6.31.1`, while every `autogen-core>=0.4` needs protobuf 4.x/5.x. The
+two cannot co-resolve — a property of their upstreams, not a choice. Nothing installs both: the images
+take `.[spiffe]`, and `framework-compat.yml` installs one framework at a time.
+
 | CVE | Package (source) | Why unfixable-by-bump | Why not exploitable here |
 |-----|------------------|-----------------------|--------------------------|
 | CVE-2026-45829 | `chromadb` (via `crewai`) | No fixed release exists — the latest version is still affected. | It is a pre-auth RCE in the **ChromaDB HTTP server**; CrewAI uses chromadb as an **embedded client**, so the vulnerable server path is never started. |
