@@ -3,9 +3,9 @@
 #
 # First-party bootstrap image for the chart's TLS hooks (internal-tls-job, webhook-cert-job).
 #
-# WHY THIS EXISTS. Those hooks need BOTH `kubectl` (to patch the webhook caBundle / write the TLS
-# Secret) and `openssl` (to self-sign the internal CA). The previous image, alpine/k8s, ships kubectl
-# but NOT openssl — verified, not assumed:
+# WHY THIS EXISTS. Those hooks do two things: self-sign an internal CA (needs `openssl`) and talk to
+# the Kubernetes API to patch the webhook caBundle / write the TLS Secret. The previous image,
+# alpine/k8s, ships kubectl but NOT openssl — verified, not assumed:
 #
 #     docker run --entrypoint /bin/sh alpine/k8s:1.30.0 -c 'which openssl'   ->  not found
 #
@@ -13,10 +13,13 @@
 # package DB, which requires root. That `runAsUser: 0` is rejected outright by OpenShift's default
 # restricted-v2 SCC, so `helm install` died at the pre-install hook — nothing deployed at all.
 #
-# Baking both tools in removes the runtime `apk add`, and with it the only reason these hooks needed
+# Baking openssl in removes the runtime `apk add`, and with it the only reason these hooks needed
 # root. It also removes a network dependency from the install path: a hook that apk-adds at runtime
 # fails in an air-gapped or egress-restricted cluster, which is a common posture for the sort of
 # environment that runs a policy-enforcement product.
+#
+# THIS IMAGE DOES NOT CONTAIN kubectl — see the NO-kubectl note below before writing a hook that
+# assumes it does. The API calls are made with `curl` and the pod's service-account token.
 #
 # OPENSHIFT / ARBITRARY UID. OpenShift assigns a random UID from the namespace's allocated range
 # (typically ~1000650000+) with GID 0. An image that only works as one specific UID breaks there. So:
@@ -26,9 +29,6 @@
 
 ARG ALPINE_VERSION=3.21
 FROM alpine:${ALPINE_VERSION}
-
-# kubectl is fetched rather than apk-installed: Alpine's community repo lags upstream, and the hooks
-# talk to whatever API server the chart is installed against. Pinned + checksum-verified below.
 
 # openssl: self-signs the internal CA. curl + ca-certificates: talks to the Kubernetes API directly.
 #
@@ -46,16 +46,20 @@ RUN apk add --no-cache ca-certificates openssl curl \
     && rm -rf /var/cache/apk/*
 
 
-# kubectl writes a discovery/HTTP cache and needs a HOME it can write to. Under OpenShift the runtime
-# UID is unpredictable but GID is always 0, so make these group-writable rather than owned by a user.
-# Callers still point HOME/KUBECACHEDIR at a tmpfs mount (see the chart's read-only-rootfs contract);
-# this is the fallback that keeps the image usable if they don't.
+# A writable HOME and working directory. openssl writes the CA key/cert here, and the hooks run
+# against a read-only root filesystem, so this must be somewhere the runtime user can write. Under
+# OpenShift the runtime UID is unpredictable but the GID is always 0, so these are group-writable
+# rather than owned by any particular user. Callers still mount a tmpfs over it (the chart's
+# read-only-rootfs contract); this is the fallback that keeps the image usable if they don't.
+#
+# No KUBECACHEDIR: that existed only for kubectl's discovery cache, and kubectl is not in this image
+# (see above). The chart's uninstall-finalizer Job still sets it, but that Job runs a THIRD-PARTY
+# bitnami/kubectl image, not this one.
 RUN mkdir -p /workspace \
     && chgrp -R 0 /workspace \
     && chmod -R g=u /workspace
 WORKDIR /workspace
-ENV HOME=/workspace \
-    KUBECACHEDIR=/workspace/.kube/cache
+ENV HOME=/workspace
 
 # Numeric so `runAsNonRoot: true` can enforce it without resolving a name. OpenShift overrides this
 # with its own allocated UID, which still lands in GID 0 and so retains access to /workspace.

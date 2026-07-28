@@ -76,8 +76,8 @@ spec:
       serviceAccountName: norviq-internal-tls
       restartPolicy: Never
       securityContext:
-        # The bootstrap image ships kubectl AND openssl, so this hook no longer `apk add`s at runtime
-        # and no longer needs root. That matters beyond tidiness: `runAsUser: 0` is rejected outright
+        # The bootstrap image ships openssl (and curl, which replaces kubectl here), so this hook
+        # no longer `apk add`s at runtime and no longer needs root.
         # by OpenShift's default restricted-v2 SCC, which killed `helm install` at this very hook.
         runAsNonRoot: true
         {{- if not .Values.openshift.enabled }}
