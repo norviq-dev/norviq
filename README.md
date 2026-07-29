@@ -162,6 +162,10 @@ prompts you:
 ```bash
 kubectl get secret norviq-secrets -n norviq -o jsonpath='{.data.NRVQ_AUTH_ADMIN_PASSWORD}' | base64 -d
 ```
+> **This is the FIRST password only.** The Secret is written at install and never updated
+> again, so once you complete the forced change it is stale — the live password lives hashed
+> in Postgres. If it is rejected, you already changed it; the Secret is not a recovery path.
+
 
 Sidecar injection ships **off** (`webhook.injection.enabled: false`). Turn it on, then label the same
 namespaces you listed in `policyQuotaNamespaces` — the label alone does nothing until the webhook is

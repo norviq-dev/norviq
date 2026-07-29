@@ -145,6 +145,10 @@ random, forced change on first login). Read it — `NOTES.txt` prints the exact 
 ```bash
 kubectl -n norviq get secret norviq-secrets -o jsonpath='{.data.NRVQ_AUTH_ADMIN_PASSWORD}' | base64 -d
 ```
+> **This is the FIRST password only.** The Secret is written at install and never updated
+> again, so once you complete the forced change it is stale — the live password lives hashed
+> in Postgres. If it is rejected, you already changed it; the Secret is not a recovery path.
+
 
 ## Observability (Prometheus + Grafana)
 

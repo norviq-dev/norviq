@@ -365,7 +365,7 @@ The primary no-IdP login path: username/password against a local, bcrypt-hashed 
 |---|---|---|
 | `auth.enabled` | `true` | Set `false` to disable local login entirely (SSO/CLI-only). |
 | `auth.adminUsername` | `admin` | Seeded admin username. |
-| `auth.adminPassword` | `norviq` (sentinel) | Leave at the sentinel and the chart auto-generates a strong random first password (retrieve via `kubectl get secret norviq-secrets -o jsonpath='{.data.NRVQ_AUTH_ADMIN_PASSWORD}' | base64 -d`). You're forced to change it on first login either way. Set an explicit value to pin your own. With `config.requireStrongSecret: true`, the API refuses to start while the password is still the literal default `"norviq"`. |
+| `auth.adminPassword` | `norviq` (sentinel) | Leave at the sentinel and the chart auto-generates a strong random first password (retrieve via `kubectl get secret norviq-secrets -o jsonpath='{.data.NRVQ_AUTH_ADMIN_PASSWORD}' | base64 -d`). You're forced to change it on first login either way — and the Secret is **not** updated when you do, so it holds the install-time password forever and is not a recovery path for the current one. Set an explicit value to pin your own. With `config.requireStrongSecret: true`, the API refuses to start while the password is still the literal default `"norviq"`. |
 | `auth.sessionTtlSeconds` | `3600` | Session token TTL. |
 | `auth.loginMaxAttempts`/`loginWindowSeconds` | `5` / `300` | Brute-force lockout: after `loginMaxAttempts` failed logins for a username within `loginWindowSeconds`, further attempts 429 until the window passes. |
 | `auth.minPasswordLength` | `12` | Enforced on a **new** password at change-time. |
