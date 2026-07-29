@@ -227,6 +227,7 @@ func newSidecarTemplate(cfg Config) map[string]interface{} {
 		},
 		"resources":       sidecarResources(),
 		"securityContext": sidecarSecurityContext(),
+		"startupProbe":    sidecarStartupProbe(cfg.SidecarPort),
 		"livenessProbe":   sidecarLivenessProbe(cfg.SidecarPort),
 		"readinessProbe":  sidecarReadinessProbe(cfg.SidecarPort),
 		"volumeMounts":    mounts,
@@ -477,12 +478,39 @@ func sidecarSecurityContext() map[string]interface{} {
 	}
 }
 
+// sidecarStartupProbe holds liveness off until the sidecar is actually serving.
+//
+// The entrypoint runs `await proxy.start()` BEFORE uvicorn binds the port. In `proxy` mode that is
+// near-instant. In `embedded` mode the sidecar builds a whole engine first — Postgres, Redis, policy
+// warm, an OPA subprocess — and liveness was probing from 5s with a 3x15s budget, so the kubelet
+// killed the container while the HTTP server had not been created yet:
+//
+//	Readiness probe failed: dial tcp ...:8282: connect: connection refused
+//	Container norviq-sidecar failed liveness probe, will be restarted
+//
+// …forever. A startupProbe is the primitive for exactly this: liveness and readiness do not begin
+// until it first succeeds, so the slow path gets 90s to come up WITHOUT loosening the steady-state
+// liveness check. Costs proxy mode nothing — it passes on the first probe.
+func sidecarStartupProbe(sidecarPort int) map[string]interface{} {
+	return map[string]interface{}{
+		"httpGet":             map[string]interface{}{"path": "/healthz", "port": sidecarPort},
+		"initialDelaySeconds": 2,
+		"periodSeconds":       3,
+		"timeoutSeconds":      2,
+		"failureThreshold":    30,
+	}
+}
+
 func sidecarLivenessProbe(sidecarPort int) map[string]interface{} {
 	return map[string]interface{}{
 		"httpGet":             map[string]interface{}{"path": "/healthz", "port": sidecarPort},
 		"initialDelaySeconds": 5,
 		"periodSeconds":       15,
-		"failureThreshold":    3,
+		// /healthz is a constant response, so 2s is generous; set it EXPLICITLY rather than
+		// inheriting Kubernetes' 1s default, which is the kind of implicit budget that only shows up
+		// as a mystery restart under load.
+		"timeoutSeconds":   2,
+		"failureThreshold": 3,
 	}
 }
 
@@ -493,7 +521,11 @@ func sidecarReadinessProbe(sidecarPort int) map[string]interface{} {
 		"httpGet":             map[string]interface{}{"path": "/readyz", "port": sidecarPort},
 		"initialDelaySeconds": 3,
 		"periodSeconds":       10,
-		"failureThreshold":    3,
+		// Unset meant Kubernetes' 1s default, and /readyz does real work: it proves the PDP is
+		// reachable. Under NRVQ_OPA_MODE=subprocess (what embedded mode uses) that forks `opa`, which
+		// does not answer inside a second — so the check timed out on a sidecar that was fine.
+		"timeoutSeconds":   5,
+		"failureThreshold": 3,
 	}
 }
 
