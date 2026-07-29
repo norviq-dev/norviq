@@ -387,13 +387,12 @@ redis:
   ha:
     enabled: false
     replicas: 3
-    # KNOWN NON-FUNCTIONAL — do not enable. Live-tested 2026-07-29 on a 3-node cluster: the
-    # Spotahome operator provisions a SENTINEL topology and exposes only `rfs-<name>:26379`
-    # (sentinel). It creates no stable master Service, and this name resolves to nothing. The API
-    # builds its client with `aioredis.from_url("redis://host:6379")` and has no Sentinel support
-    # anywhere in the codebase, so a plain URL cannot reach a RedisFailover master by design.
-    # Closing this is a FEATURE (Sentinel-aware client config), not a chart fix. Postgres HA works;
-    # leave redis.ha off and use a managed Redis (redis.enabled=false + redis.host) for HA today.
+    # The chart RENDERS this Service itself (templates/redis-ha.yaml) — the operator does not. It
+    # provisions a sentinel Service (`rfs-<name>:26379`) and no stable master endpoint, because its
+    # intended clients speak the Sentinel protocol; Norviq's client is a plain `redis://` URL. The
+    # Service selects the operator's `redisfailovers-role: master` pod label, so it tracks the
+    # current master and follows failover with no client changes. Failover-tested 2026-07-29: master
+    # killed, replica promoted, the Service endpoint moved and the API recovered on its own.
     serviceName: norviq-redis-ha
   resources:
     requests:

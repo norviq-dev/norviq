@@ -35,11 +35,13 @@ the pull entirely and reference `oci://ghcr.io/norviq-dev/charts/norviq --versio
 - **≥3 nodes** (so podAntiAffinity / topologySpread actually spread replicas).
 - **metrics-server** installed (HPA reads CPU/mem).
 - **CloudNativePG operator** installed (Postgres HA renders a `postgresql.cnpg.io/v1 Cluster`).
-- **Redis: use a managed instance, NOT `redis.ha.enabled`.** Set `redis.enabled=false` +
-  `redis.host=<your-managed-redis>`. `redis.ha.enabled=true` is **known non-functional** — verified
-  live on 2026-07-29: the Spotahome operator exposes only a sentinel Service (`rfs-<name>:26379`)
-  and no stable master endpoint, while the API speaks plain `redis://host:6379` with no Sentinel
-  support. Fixing it is a feature, not configuration. Postgres HA is unaffected and works.
+- **A Redis HA operator** — `values-prod` renders a Spotahome `RedisFailover`. The chart also
+  renders the **master Service** (`redis.ha.serviceName`) itself, selecting the operator's
+  `redisfailovers-role: master` pod label; the operator provisions only a sentinel Service, so
+  without that the HA hostname resolved to nothing. Failover-tested on a live cluster: master killed
+  -> replica promoted -> Service endpoint moved -> API recovered unaided. A managed Redis
+  (`redis.enabled=false` + `redis.host=...`) remains a perfectly good alternative and needs no
+  operator.
 - **The Spotahome operator's own chart is broken out of the box** if you do install it: it defaults
   to `quay.io/spotahome/redis-operator:v1.3.0`, a tag that does not exist on quay (only
   `v1.3.0-rc1`, `v1.2.4`, `latest`). `--set image.tag=v1.2.4` is the last real release.
@@ -58,7 +60,7 @@ the pull entirely and reference `oci://ghcr.io/norviq-dev/charts/norviq --versio
 | engine replicas / PDB | 1 / off | HA floor 2 / minAvailable 1 + HPA + spread |
 | webhook | 2, injection **off** | HA floor 2 + PDB + HPA + spread + injection **on** |
 | Postgres | single StatefulSet | CloudNativePG `Cluster` (3) — operator required |
-| Redis | single StatefulSet | `RedisFailover` — **non-functional, see Prerequisites; use a managed Redis** |
+| Redis | single StatefulSet | `RedisFailover` (Sentinel, 3) + a chart-rendered master Service — operator required |
 | DB / Redis password | shipped dev defaults | **blank — you must supply them** (see below) |
 | strong-secret guard / DB TLS | already on / already `require` | unchanged (on / `require`) |
 
