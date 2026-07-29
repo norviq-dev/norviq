@@ -12,6 +12,15 @@ metadata:
   labels:
     {{- include "norviq.labels" . | nindent 4 }}
 spec:
+  {{- /* customConfig sets `requirepass` INSIDE redis, but the operator only learns the password
+         from auth.secretPath — and that is what makes it inject REDIS_PASSWORD into the redis and
+         sentinel pods. Without it the operator's own readiness script runs `redis-cli info
+         replication` unauthenticated, gets NOAUTH, prints "unespected", and the pods never become
+         Ready even though replication is perfectly healthy. The sentinels also cannot authenticate
+         to the master, so failover monitoring is degraded. Both halves are required: requirepass
+         configures the server, secretPath tells the operator. */}}
+  auth:
+    secretPath: norviq-redis-ha-auth
   sentinel:
     replicas: {{ .Values.redis.ha.replicas }}
   redis:
@@ -37,4 +46,16 @@ spec:
               storage: {{ .Values.redis.storage }}
     resources:
       {{- toYaml .Values.redis.resources | nindent 6 }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: norviq-redis-ha-auth
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  # Key name is fixed by the operator's auth.secretPath contract.
+  password: {{ .Values.redis.password | quote }}
 {{- end }}

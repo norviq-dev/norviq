@@ -123,6 +123,29 @@ writes, so the strict profile below is free.
 
 Usage: {{- include "norviq.waitFor" (dict "name" "wait-for-postgres" "host" "norviq-postgresql" "port" 5432) | nindent 8 }}
 */}}
+{{/*
+The datastore hosts, resolved ONCE. Three configurations render three different names and every
+consumer must agree on which — the connection URL, the readiness gate, everything:
+
+  bundled (default)  -> norviq-postgresql / norviq-redis        (the in-chart StatefulSets)
+  HA operators       -> postgresql.ha.serviceName / redis.ha.serviceName
+  bring-your-own     -> postgresql.host / redis.host
+
+They did NOT agree. secret.yaml computed this correctly for NRVQ_PG_URL/NRVQ_REDIS_URL while the
+init containers hard-coded the BUNDLED names, so under HA those Services exist with no endpoints and
+under an external datastore they are not rendered at all. Either way `until nc -z norviq-postgresql`
+never returns and every api/engine pod sits in Init forever — with both datastores perfectly
+healthy. Only the bundled default worked. Deriving both from here is the fix; keeping the logic in
+one place is what stops it drifting apart again.
+*/}}
+{{- define "norviq.pgHost" -}}
+{{- .Values.postgresql.host | default (ternary .Values.postgresql.ha.serviceName "norviq-postgresql" .Values.postgresql.ha.enabled) -}}
+{{- end -}}
+
+{{- define "norviq.redisHost" -}}
+{{- .Values.redis.host | default (ternary .Values.redis.ha.serviceName "norviq-redis" .Values.redis.ha.enabled) -}}
+{{- end -}}
+
 {{- define "norviq.waitFor" -}}
 - name: {{ .name }}
   image: busybox:1.36
