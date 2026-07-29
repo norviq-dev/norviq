@@ -16,11 +16,21 @@ import { cleanup, configure } from "@testing-library/react";
 // 3/3 alone and 2/2 with --no-file-parallelism, which is what identified contention rather than
 // pollution: file isolation is on, and the affected test resets its own MSW handlers and API cache.
 //
-// 5s is a wall-clock allowance for a loaded machine, not a correctness change: a genuinely hung or
+// This is a wall-clock allowance for a loaded machine, not a correctness change: a genuinely hung or
 // never-rendering component still fails, just not a merely slow one. Raise this before reaching for
 // per-call timeouts — a value scattered across individual findBy* calls is the same fix, applied
 // inconsistently and re-litigated at every new flake.
-configure({ asyncUtilTimeout: 5000 });
+//
+// 5s was not enough. It held for AttackGraph and then TargetSettings fell over on a shared runner,
+// on a PR that changed no UI code at all: `expected null to deeply equal { enforcement_mode: 'audit' }`
+// is a waitFor that ran out of budget mid-poll, not a broken assertion. Both tests pass locally every
+// time. Chasing these one at a time treats each as its own bug when there is only one — CI machines
+// are slower and noisier than laptops — so the budget moves for everyone instead.
+//
+// Keep vite.config.ts's `testTimeout` at least ~2x this. They are separate budgets over the same wall
+// clock, and if the whole-test clock fires first you lose testing-library's "unable to find element"
+// DOM dump and get a bare "Test timed out" that says nothing about what was missing.
+configure({ asyncUtilTimeout: 15000 });
 
 // SLIM-MONACO: the lib/monaco side-effect (loader.config + a Vite ?worker import + monaco core) is a
 // production-only concern — no-op it in unit tests so pages that import it don't pull Monaco/workers into
