@@ -138,12 +138,28 @@ never returns and every api/engine pod sits in Init forever — with both datast
 healthy. Only the bundled default worked. Deriving both from here is the fix; keeping the logic in
 one place is what stops it drifting apart again.
 */}}
+{{- /* In-cluster names are FULLY QUALIFIED. NRVQ_PG_URL / NRVQ_REDIS_URL are not read only by
+       pods in the release namespace: the webhook hands them verbatim to every sidecar it injects in
+       `embedded` mode, and those pods live in TENANT namespaces where a bare `norviq-redis` does not
+       resolve. Embedded sidecars crash-looped on
+       `Error -2 connecting to norviq-redis:6379. Name or service not known`. An FQDN resolves
+       identically from inside the release namespace, so qualifying costs nothing and fixes the
+       cross-namespace case. A user-supplied .host is passed through untouched — it is already
+       absolute and may be outside the cluster entirely. */}}
 {{- define "norviq.pgHost" -}}
-{{- .Values.postgresql.host | default (ternary .Values.postgresql.ha.serviceName "norviq-postgresql" .Values.postgresql.ha.enabled) -}}
+{{- if .Values.postgresql.host -}}
+{{- .Values.postgresql.host -}}
+{{- else -}}
+{{- printf "%s.%s.svc.cluster.local" (ternary .Values.postgresql.ha.serviceName "norviq-postgresql" .Values.postgresql.ha.enabled) .Release.Namespace -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "norviq.redisHost" -}}
-{{- .Values.redis.host | default (ternary .Values.redis.ha.serviceName "norviq-redis" .Values.redis.ha.enabled) -}}
+{{- if .Values.redis.host -}}
+{{- .Values.redis.host -}}
+{{- else -}}
+{{- printf "%s.%s.svc.cluster.local" (ternary .Values.redis.ha.serviceName "norviq-redis" .Values.redis.ha.enabled) .Release.Namespace -}}
+{{- end -}}
 {{- end -}}
 
 {{- define "norviq.waitFor" -}}
