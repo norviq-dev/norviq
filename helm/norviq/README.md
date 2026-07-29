@@ -48,6 +48,12 @@ helm install norviq ./norviq -n norviq --create-namespace \
   --set-json 'policyQuotaNamespaces=["team-a","team-b"]'
 ```
 
+`--wait` / `--atomic` are supported on a fresh cluster. They did not used to be: the webhook mounts
+its serving-cert Secret non-optionally and that Secret was minted by a **post-install** hook, which
+Helm runs only after `--wait` returns — so the install blocked on a pod waiting for a Secret that the
+blocked install was supposed to create. The cert hook now runs pre- *and* post-install (mint first,
+patch the webhook `caBundle` after), so a scripted install completes.
+
 Verify the release actually serves traffic:
 
 ```bash
