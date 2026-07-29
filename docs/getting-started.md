@@ -175,6 +175,15 @@ kubectl apply -f crds/examples/class-customer-support.yaml
 kubectl apply -f crds/examples/policy-strict-chatbot.yaml
 ```
 
+> **In the first few minutes after install this can fail — retry, don't debug.** You may see
+> `nrvqpolicies.norviq.io "..." is forbidden: status unknown for quota: norviq-crd-quota`. That is
+> Kubernetes, not Norviq: each tenant namespace gets a ResourceQuota counting
+> `count/nrvqpolicies.norviq.io`, and the API server refuses creates of a quota-tracked resource
+> until the quota controller has computed usage for it. On a fresh install the CRD and the quota are
+> created together, so the controller has to discover a brand-new resource type first. Measured at
+> up to ~4 minutes on a fresh single-node cluster. `kubectl apply` again until it takes; nothing is
+> misconfigured and no value needs changing.
+
 What these do:
 
 - **`class-customer-support.yaml`** (`NrvqClass`) — registers the `customer-support` agent class
