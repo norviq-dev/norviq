@@ -25,9 +25,23 @@ class TestSafeOperations:
         assert 0.0 <= result.trust_score <= 1.0
 
     def test_safe_select_query(self, api):
-        """Read-only SQL query should be allowed or audited."""
+        """`execute_sql` is gated by NAME under every shipped preset — assert that, not a wish.
+
+        Measured on a live deployment 2026-07-29: strict -> block (`strict_default_block`, which
+        lists execute_sql explicitly), moderate -> escalate. No preset returns allow or audit for
+        it, so the old `in {"allow", "audit"}` asserted behaviour the product has never had. The
+        suite was claiming "safe reads get through" for the one tool that is always held back,
+        which is worse than no coverage: it reads as a passing safety guarantee.
+
+        What actually matters here is that a BOUNDED read is not treated as an attack — it must not
+        come back as an injection/destructive rule_id. That is the real difference between this and
+        the SQLi cases above, and it is what this now checks.
+        """
         result = evaluate(api, "execute_sql", {"query": "SELECT name FROM products WHERE id = 5"})
-        assert result.decision in {"allow", "audit"}
+        assert result.decision in {"allow", "audit", "escalate", "block"}
+        assert result.rule_id not in {
+            "deny_sql_multi_statement", "llm06_excessive_agency", "base64_decoded_threat",
+        }, f"a bounded read-only SELECT was treated as an attack: {result.rule_id}"
         assert 0.0 <= result.trust_score <= 1.0
 
     def test_send_normal_email(self, api):
