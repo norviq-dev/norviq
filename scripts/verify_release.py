@@ -41,7 +41,9 @@ ROOT = Path(__file__).resolve().parent.parent
 CHART = ROOT / "helm" / "norviq"
 STAMP = ROOT / "scripts" / "release_stamp.py"
 REPO = "ghcr.io/norviq-dev/norviq-engine"
+CHART_REPO = "ghcr.io/norviq-dev/charts/norviq"
 NS, TENANT = "norviq", "agents"
+POLICY = "nrvq-verify-guard"
 # Only ever used against a throwaway kind cluster this script created and deletes.
 VERIFY_PASSWORD = "verify-release-not-a-real-secret-9137"
 
@@ -287,10 +289,23 @@ def check_uninstall(ctx: str) -> None:
     A tenant policy is created first ON PURPOSE: an uninstall with nothing to clean up proves
     nothing, and the finalizers are exactly what wedged it.
     """
-    manifest = f"""apiVersion: norviq.io/v1alpha1
+    if not create_tenant_policy(ctx):
+        return
+
+    def finalized() -> bool:
+        r = kubectl(ctx, "get", "nrvqpolicy", POLICY, "-n", TENANT,
+                    "-o", "jsonpath={.metadata.finalizers}")
+        return "policy-protection" in r.stdout
+
+    check("controller finalizes the policy", wait_until(finalized, 90))
+    _uninstall_and_assert_clean(ctx)
+
+
+def _tenant_policy_manifest() -> str:
+    return f"""apiVersion: norviq.io/v1alpha1
 kind: NrvqPolicy
 metadata:
-  name: nrvq-verify-guard
+  name: {POLICY}
   namespace: {TENANT}
 spec:
   preset: strict
@@ -300,13 +315,18 @@ spec:
     namespace: {TENANT}
 """
 
-    # RETRIED, and the wait is reported rather than hidden. Each tenant namespace gets a
-    # ResourceQuota counting count/nrvqpolicies.norviq.io, and Kubernetes REFUSES creates of a
-    # quota-tracked resource until the quota controller has computed usage for it — "status unknown
-    # for quota". On a fresh install the CRD and the quota land together, so the controller has to
-    # discover a brand-new resource type first. If that clears quickly it is a startup race worth
-    # documenting; if it never clears, tenants can never write a policy and this is the loudest bug
-    # in the product. Timing it is what tells the two apart, so the elapsed time is the result.
+
+def create_tenant_policy(ctx: str) -> bool:
+    """Create the tenant policy, RETRIED, with the wait reported rather than hidden. Each tenant namespace gets a
+    Each tenant namespace gets a ResourceQuota counting count/nrvqpolicies.norviq.io, and Kubernetes
+    REFUSES creates of a quota-tracked resource until the quota controller has computed usage for it
+    — "status unknown for quota". On a fresh install the CRD and the quota land together, so the
+    controller has to discover a brand-new resource type first. If that clears quickly it is a
+    startup race worth documenting; if it never clears, tenants can never write a policy and this is
+    the loudest bug in the product. Timing it is what tells the two apart, so the elapsed time is the
+    result rather than something the retry hides.
+    """
+    manifest = _tenant_policy_manifest()
     t0 = time.monotonic()
     err = ""
 
@@ -319,18 +339,11 @@ spec:
 
     ok = wait_until(created, 420, interval=10)
     waited = int(time.monotonic() - t0)
-    check("a tenant can create a policy after install", ok,
-          f"took {waited}s" if ok else f"still failing after {waited}s — {err[-200:]}")
-    if not ok:
-        return
+    return check("a tenant can create a policy after install", ok,
+                 f"took {waited}s" if ok else f"still failing after {waited}s — {err[-200:]}")
 
-    def finalized() -> bool:
-        r = kubectl(ctx, "get", "nrvqpolicy", "nrvq-verify-guard", "-n", TENANT,
-                    "-o", "jsonpath={.metadata.finalizers}")
-        return "policy-protection" in r.stdout
 
-    check("controller finalizes the policy", wait_until(finalized, 90))
-
+def _uninstall_and_assert_clean(ctx: str) -> None:
     t0 = time.monotonic()
     res = helm(ctx, "uninstall", "norviq", "-n", NS, "--wait", "--timeout", "6m", timeout=420)
     elapsed = int(time.monotonic() - t0)
@@ -372,6 +385,111 @@ spec:
 
 
 # ---------------------------------------------------------------------------------------------
+# stage 2u — the operation every EXISTING user performs
+# ---------------------------------------------------------------------------------------------
+def previous_published_version(current: str) -> str:
+    """The highest released tag below `current`, from git.
+
+    Not from the registry: `helm` cannot list OCI tags, and the git tags are what the releases were
+    cut from, so they cannot disagree with what was published without something already being wrong.
+    """
+    res = run("git", "-C", str(ROOT), "tag", "--list", "v*", "--sort=-v:refname")
+    for tag in (ln.strip().lstrip("v") for ln in res.stdout.splitlines() if ln.strip()):
+        if tag != current:
+            return tag
+    return ""
+
+
+def install_published(ctx: str, version: str) -> bool:
+    """Install the PREVIOUS release from OCI — the cluster a user is upgrading from."""
+    for ns in (NS, TENANT):
+        kubectl(ctx, "create", "namespace", ns)
+    kubectl(ctx, "label", "namespace", TENANT, "norviq-injection=enabled", "--overwrite")
+
+    res = helm(ctx, "install", "norviq", f"oci://{CHART_REPO}", "--version", version, "-n", NS,
+               "--set-json", f'policyQuotaNamespaces=["{TENANT}"]',
+               "--set", "config.dbSslMode=disable",
+               "--set", "webhook.injection.enabled=true",
+               "--wait", "--timeout", "12m", timeout=900)
+    ok = res.returncode == 0 and "STATUS: deployed" in res.stdout
+    return check(f"install the previous release ({version}) from OCI", ok,
+                 "" if ok else (res.stderr or res.stdout)[-400:])
+
+
+def snapshot(ctx: str) -> dict[str, str]:
+    """State that MUST survive the upgrade, captured before it.
+
+    The two secrets are the sharp ones. values.yaml promises they are generated once and then
+    "reused, never rotated", and that is not a nicety: postgres only honours POSTGRES_PASSWORD when
+    initdb runs on an empty data directory, so a regenerated password on upgrade leaves the API
+    unable to open its own database — with the data still sitting there, intact and unreachable. The
+    JWT secret is the same shape of problem for sessions. A template edit can break either silently,
+    because a fresh install would still look perfect.
+    """
+    def secret(key: str) -> str:
+        return kubectl(ctx, "get", "secret", "norviq-secrets", "-n", NS,
+                       "-o", f"jsonpath={{.data.{key}}}").stdout.strip()
+
+    def pvc_uids() -> str:
+        return kubectl(ctx, "get", "pvc", "-n", NS, "-o",
+                       "jsonpath={range .items[*]}{.metadata.name}:{.metadata.uid} {end}").stdout.strip()
+
+    return {
+        "pg_password": secret("NRVQ_PG_PASSWORD"),
+        "api_secret": secret("NRVQ_API_SECRET_KEY"),
+        "admin_password": secret("NRVQ_AUTH_ADMIN_PASSWORD"),
+        "pvcs": pvc_uids(),
+    }
+
+
+def upgrade_to_candidate(ctx: str, chart: Path, webhook_image: str = "") -> bool:
+    """--reset-then-reuse-values: the command the README and both runbooks tell operators to use."""
+    extra: list[str] = []
+    if webhook_image:
+        tag = webhook_image.rpartition(":")[2]
+        extra = ["--set", f"images.webhook.tag={tag}", "--set", "images.webhook.digest=",
+                 "--set", "images.webhook.pullPolicy=IfNotPresent"]
+
+    t0 = time.monotonic()
+    res = helm(ctx, "upgrade", "norviq", str(chart), "-n", NS, "--reset-then-reuse-values",
+               *extra, "--wait", "--timeout", "12m", timeout=900)
+    ok = res.returncode == 0 and "STATUS: deployed" in res.stdout
+    return check("helm upgrade --reset-then-reuse-values completes", ok,
+                 f"{int(time.monotonic() - t0)}s" if ok else (res.stderr or res.stdout)[-400:])
+
+
+def check_upgrade_preserved(ctx: str, chart: Path, before: dict[str, str]) -> None:
+    after = snapshot(ctx)
+
+    # Rotating either of these strands a working install: see snapshot()'s note. Compared by value,
+    # never printed — these are live credentials even on a throwaway cluster.
+    for key, what in [("pg_password", "the database password"),
+                      ("api_secret", "the JWT signing secret"),
+                      ("admin_password", "the admin password")]:
+        check(f"upgrade reuses {what}", bool(before[key]) and before[key] == after[key],
+              "" if before[key] == after[key] else "REGENERATED by the upgrade")
+
+    check("datastore PVCs are the same volumes", bool(before["pvcs"]) and before["pvcs"] == after["pvcs"],
+          "" if before["pvcs"] == after["pvcs"] else f"{before['pvcs']} -> {after['pvcs']}")
+
+    # "Move all four image tags together" is a warning in getting-started because a partial upgrade
+    # leaves the OLD policy enforcing while every version string reports the new one. Assert it
+    # instead of warning about it: nothing may still be running an image the candidate does not pin.
+    rendered = run("helm", "template", "norviq", str(chart), "--set-json",
+                   f'policyQuotaNamespaces=["{TENANT}"]', "--set", "webhook.injection.enabled=true").stdout
+    expected = set(re.findall(rf"{re.escape(REPO)}@sha256:[0-9a-f]{{64}}", rendered))
+    running = set(re.findall(rf"{re.escape(REPO)}@sha256:[0-9a-f]{{64}}",
+                             kubectl(ctx, "get", "pods", "-n", NS, "-o",
+                                     "jsonpath={range .items[*]}{range .spec.containers[*]}{.image} {end}{end}").stdout))
+    stale = running - expected
+    check("no pod is left on a pre-upgrade image", not stale, f"{sorted(stale)[:2]}")
+
+    r = kubectl(ctx, "get", "nrvqpolicy", POLICY, "-n", TENANT, "-o",
+                "jsonpath={.metadata.name} {.metadata.finalizers}")
+    check("the tenant policy survives the upgrade", POLICY in r.stdout, r.stdout.strip() or "GONE")
+
+
+# ---------------------------------------------------------------------------------------------
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cluster", default="nrvq-verify")
@@ -380,6 +498,11 @@ def main() -> int:
                     help="a locally built webhook image (already `kind load`ed) to run INSTEAD of the "
                          "pinned one. The rest of the chart stays digest-pinned, so this tests a "
                          "candidate webhook against the sidecar image a real release would inject.")
+    ap.add_argument("--upgrade-from", default="auto", metavar="VERSION",
+                    help="Verify the UPGRADE path instead of a fresh install: install this published "
+                         "version from OCI, seed state, then upgrade to the candidate. 'auto' (the "
+                         "default) picks the highest released tag below the candidate; 'none' runs "
+                         "the fresh-install path only.")
     ap.add_argument("--keep", action="store_true", help="leave the cluster up for debugging")
     ap.add_argument("--skip-create", action="store_true", help="reuse an existing cluster")
     args = ap.parse_args()
@@ -412,8 +535,34 @@ def main() -> int:
             chart = stamp(version, Path(td))
             check_stamped_shape(ctx, chart)
 
-            print("\nstage 2 — install it the way automation does")
-            if install(ctx, chart, args.webhook_image):
+            from_version = args.upgrade_from
+            if from_version == "auto":
+                from_version = previous_published_version(version)
+                if not from_version:
+                    print("  (no earlier release to upgrade from — running the fresh-install path)")
+            elif from_version == "none":
+                from_version = ""
+
+            if from_version:
+                # The upgrade path REPLACES the fresh install rather than running after it: a release
+                # is installed fresh by new users and upgraded into by every existing one, and the
+                # second is the larger population the moment a version ships. Fresh install is still
+                # covered on demand with --upgrade-from none, and by the N-1 install below, which is
+                # itself a fresh install of a published chart.
+                print(f"\nstage 2 — install {from_version}, the release users are upgrading FROM")
+                started = install_published(ctx, from_version)
+                if started:
+                    create_tenant_policy(ctx)
+                    before = snapshot(ctx)
+                    print(f"\nstage 2u — upgrade {from_version} -> {version}")
+                    started = upgrade_to_candidate(ctx, chart, args.webhook_image)
+                    if started:
+                        check_upgrade_preserved(ctx, chart, before)
+            else:
+                print("\nstage 2 — install it the way automation does")
+                started = install(ctx, chart, args.webhook_image)
+
+            if started:
                 print("\nstage 3 — use it")
                 check_injection(ctx)
                 check_enforcement(ctx)

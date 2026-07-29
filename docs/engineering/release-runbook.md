@@ -167,10 +167,17 @@ export VERSION=0.1.3          # the version you are cutting
 # 1. versions agree (this is also gate 0 in CI, but fail locally first)
 python3 scripts/check_release_versions.py "$VERSION"
 
-# 2. exercise the ARTIFACT, not the source. ~15 min, throwaway kind cluster: stamps the chart by
-#    digest exactly as release.yml does, installs it with --wait --atomic, injects a sidecar,
-#    evaluates a tool call, then uninstalls and checks nothing is stranded.
-python3 scripts/verify_release.py            # or: gh workflow run verify-release.yml
+# 2. exercise the ARTIFACT, not the source. Throwaway kind cluster: stamps the chart by digest
+#    exactly as release.yml does, then installs, uses (sidecar injection + a real allow and block),
+#    and uninstalls it, checking nothing is stranded.
+#    Default is the UPGRADE path — install the previous release from OCI, seed a tenant policy, then
+#    upgrade in and assert the generated credentials and PVCs survived and nothing is still running a
+#    pre-upgrade image. That is what existing users do; a fresh install is what new ones do, and the
+#    two break differently, so run both. CI runs them as a matrix.
+python3 scripts/verify_release.py                      # upgrade path (auto-detects N-1)
+python3 scripts/verify_release.py --upgrade-from none  # fresh install
+# or, both in parallel on a runner:
+gh workflow run verify-release.yml
 # every check must pass before you tag
 
 # 3. tag and push
