@@ -24,12 +24,12 @@ image by immutable digest, so what you deploy is exactly what the release publis
 lives *inside* the chart, so pull and untar once to get `values-prod.yaml` on disk:
 
 ```bash
-helm pull oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.5 --untar
+helm pull oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.6 --untar
 # -> ./norviq/{Chart.yaml,values.yaml,values-prod.yaml,...}
 ```
 
 Every `./norviq` path below refers to that untarred chart. To install without the overlay you can skip
-the pull entirely and reference `oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.5` directly.
+the pull entirely and reference `oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.6` directly.
 
 ## Prerequisites (multi-node)
 - **≥3 nodes** (so podAntiAffinity / topologySpread actually spread replicas).
