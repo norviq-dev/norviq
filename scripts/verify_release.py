@@ -200,8 +200,9 @@ def check_injection(ctx: str) -> None:
     kubectl(ctx, "delete", "pod", "nrvq-verify-probe", "-n", TENANT, "--wait=false")
 
 
-def _api(port: int, path: str, token: str = "", body: dict | None = None) -> dict:
-    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method="POST" if body else "GET")
+def _api(port: int, path: str, token: str = "", body: dict | None = None, method: str = "") -> dict:
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}",
+                                 method=method or ("POST" if body else "GET"))
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     data = None
@@ -212,13 +213,13 @@ def _api(port: int, path: str, token: str = "", body: dict | None = None) -> dic
         return json.loads(r.read().decode())
 
 
-def check_enforcement(ctx: str) -> None:
+def check_enforcement(ctx: str) -> str:
     """A policy decision end to end: the product's actual job, on the released artifact."""
     r = kubectl(ctx, "get", "secret", "norviq-secrets", "-n", NS,
                 "-o", "jsonpath={.data.NRVQ_AUTH_ADMIN_PASSWORD}")
     if not r.stdout.strip():
         check("enforcement probes", False, "admin password secret not readable")
-        return
+        return ""
     password = base64.b64decode(r.stdout.strip()).decode()
 
     port = 18099
@@ -228,7 +229,7 @@ def check_enforcement(ctx: str) -> None:
     try:
         if not wait_until(lambda: _reachable(port), 60):
             check("enforcement probes", False, "console port-forward never came up")
-            return
+            return ""
         # The seeded admin lands `must_change`, and while that flag is set the API rejects every
         # authenticated call except change-password/logout/me — so a probe that just logs in gets a
         # 403 on /evaluate and looks like an enforcement failure. Clear it the way a human would,
@@ -245,10 +246,10 @@ def check_enforcement(ctx: str) -> None:
                 token = tok.get("access_token") or tok.get("token") or ""
         except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
             check("enforcement probes", False, f"login failed: {exc}")
-            return
+            return ""
         if not token:
             check("enforcement probes", False, "login returned no token")
-            return
+            return ""
 
         identity = {"namespace": TENANT, "agent_class": "chatbot",
                     "spiffe_id": f"spiffe://norviq/ns/{TENANT}/sa/chatbot", "workload": "chatbot"}
@@ -263,16 +264,121 @@ def check_enforcement(ctx: str) -> None:
                 check(f"evaluate {tool} -> {want}", got == want, f"got {got} ({d.get('rule_id')})")
             except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
                 check(f"evaluate {tool} -> {want}", False, str(exc))
+        return token
     finally:
         pf.terminate()
 
 
-def _reachable(port: int) -> bool:
+def _reachable(port: int, path: str = "/") -> bool:
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=3):  # noqa: S310
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=3):  # noqa: S310
             return True
     except Exception:
         return False
+
+
+class _PortForward:
+    """Port-forward to ONE pod. Addressing the Service would load-balance and defeat the point."""
+
+    def __init__(self, ctx: str, pod: str, port: int, target: int = 8080) -> None:
+        self.port = port
+        self._p = subprocess.Popen(
+            ["kubectl", "--context", ctx, "-n", NS, "port-forward", f"pod/{pod}", f"{port}:{target}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def __enter__(self) -> "_PortForward":
+        wait_until(lambda: _reachable(self.port, "/readyz"), 60)
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._p.terminate()
+
+
+def check_replica_propagation(ctx: str, token: str) -> None:
+    """A policy written to ONE replica must be enforced by the OTHER, and unloaded from both.
+
+    This is the HA claim the chart makes by defaulting api.replicas to 2, and it is invisible to
+    every other check here: with one replica, or by talking to the Service (which load-balances),
+    a broken propagation path looks identical to a working one. Each replica evaluates from its own
+    in-process policy set, so without cross-replica invalidation a create/delete routed to replica A
+    leaves replica B enforcing the old rules — and which answer a caller gets depends on which pod
+    the load balancer picked. That is worse than a clean failure: enforcement becomes a coin flip.
+
+    The API container listens plaintext on 8080 inside the pod (the tls-proxy sidecar terminates TLS
+    on 8443 for in-cluster callers), so a per-POD forward reaches one replica directly.
+    """
+    pods = kubectl(ctx, "get", "pods", "-n", NS, "-l", "app.kubernetes.io/component=api",
+                   "-o", "jsonpath={range .items[*]}{.metadata.name} {end}").stdout.split()
+    if not check("two API replicas are serving", len(pods) >= 2, f"{len(pods)} replica(s): {pods}"):
+        return
+    a, b = pods[0], pods[1]
+
+    identity = {"namespace": TENANT, "agent_class": "chatbot",
+                "spiffe_id": f"spiffe://norviq/ns/{TENANT}/sa/chatbot", "workload": "chatbot"}
+
+    def decision(port: int) -> str:
+        try:
+            d = _api(port, "/api/v1/evaluate", token,
+                     {"tool_name": "search_kb", "tool_params": {"q": "x"}, "agent_identity": identity})
+            return str(d.get("decision", "?"))
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+            return f"error: {exc}"
+
+    with _PortForward(ctx, a, 18101) as pa, _PortForward(ctx, b, 18102) as pb:
+        base_a, base_b = decision(pa.port), decision(pb.port)
+        if not check("baseline: both replicas allow search_kb", base_a == base_b == "allow",
+                     f"A={base_a} B={base_b}"):
+            return
+
+        # A policy that CHANGES an observable decision. Asserting on the decision rather than on a
+        # cache counter is the point: it proves the peer re-evaluates, not merely that it got a
+        # message.
+        rego = ('package norviq\n'
+                'default decision = "allow"\n'
+                'rule_id = "nrvq_verify_propagation"\n'
+                'reason = "propagation probe"\n'
+                'decision = "block" { input.tool_name == "search_kb" }\n')
+        try:
+            _api(pa.port, "/api/v1/policies", token, {
+                "namespace": TENANT, "agent_class": "chatbot", "rego_source": rego,
+                "enforcement_mode": "block", "priority": 200,
+                "policy_name": "nrvq-verify-propagation", "saved_by": "verify_release",
+            })
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+            check("create a policy on replica A", False, str(exc))
+            return
+        check("create a policy on replica A", True)
+
+        ok = wait_until(lambda: decision(pb.port) == "block", 60, interval=2)
+        check("replica B enforces a policy written to replica A", ok, f"B={decision(pb.port)}")
+
+        # Deleted from the NON-owning replica on purpose: the historical bug was a delete routed to
+        # a replica that did not hold the key returning 404 while the row survived, so the policy
+        # came back on restart.
+        try:
+            _api(pb.port, f"/api/v1/policies/{TENANT}/chatbot", token, method="DELETE")
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+            check("delete the policy on replica B (the non-owner)", False, str(exc))
+            return
+        check("delete the policy on replica B (the non-owner)", True)
+
+        ok = wait_until(lambda: decision(pa.port) == "allow", 60, interval=2)
+        check("replica A stops enforcing a policy deleted on replica B", ok, f"A={decision(pa.port)}")
+
+    # These are what make the decisions above non-vacuous. `remote_reloaded` / `remote_unloaded` fire
+    # ONLY on the peer path: each loader stamps its own uuid origin on the event it publishes and
+    # skips its own echo, so a pod never logs these for a write it performed itself. Seeing the
+    # reload in B's log and the unload in A's is therefore proof the two forwards addressed
+    # DIFFERENT pods — without them, a bug that pointed both at one replica would pass every
+    # decision check above.
+    logs_b = kubectl(ctx, "logs", b, "-n", NS, "-c", "api", "--tail=400").stdout
+    logs_a = kubectl(ctx, "logs", a, "-n", NS, "-c", "api", "--tail=400").stdout
+    reloaded = "remote_reloaded" in logs_b
+    unloaded = "remote_unloaded" in logs_a
+    check("the peer applied the create as a REMOTE event", reloaded,
+          "" if reloaded else "NRVQ-REG-5017 absent from replica B")
+    check("the peer applied the delete as a REMOTE event", unloaded,
+          "" if unloaded else "NRVQ-REG-5016 absent from replica A")
 
 
 def check_helm_test(ctx: str) -> None:
@@ -565,7 +671,9 @@ def main() -> int:
             if started:
                 print("\nstage 3 — use it")
                 check_injection(ctx)
-                check_enforcement(ctx)
+                token = check_enforcement(ctx)
+                if token:
+                    check_replica_propagation(ctx, token)
                 check_helm_test(ctx)
 
                 print("\nstage 4 — remove it")
