@@ -130,6 +130,17 @@ at least `auth.minPasswordLength` characters (12 by default) and can't be the cu
 password. After changing it, sign in again to get a session token that isn't flagged
 `must_change`.
 
+> **Once you change it, that `kubectl get secret` command is stale — permanently.** The Secret holds
+> the password the chart *generated at install*; nothing writes your new one back to it. The account
+> password lives hashed in Postgres from then on, so the Secret and the real password disagree for
+> the entire life of the install. Coming back to a cluster weeks later and pasting the Secret value
+> gets you `invalid username or password`, which reads like a broken login rather than a stale
+> lookup. **Store the password you set** — there is no command that reads it back, by design. If it
+> is lost, reset it from the API with an admin token, or reinstall.
+>
+> Two smaller ways the same paste fails: the value has no trailing newline but your shell may add
+> one (`| tr -d '\n' | pbcopy`), and a wrapped terminal can split a long password across lines.
+
 ## 4. Enable sidecar injection for an agent namespace
 
 Sidecar injection is off by default (`webhook.injection.enabled: false`). Turn it on:

@@ -141,6 +141,7 @@ export function Login() {
   const formRef = useRef<HTMLDivElement>(null);
 
   const provider = (typeof window !== "undefined" && window.__NRVQ_CONFIG__?.oidcProviderName) || "SSO";
+  const deployedVersion = (typeof window !== "undefined" && window.__NRVQ_CONFIG__?.version) || "";
   const booting = phase === "boot";
   const busy = phase === "signing" || phase === "sso" || phase === "saving";
   const done = phase === "done_sign" || phase === "done_save";
@@ -558,7 +559,15 @@ export function Login() {
 
           {/* shared footer */}
           <div style={{ marginTop: 20, textAlign: "center", color: "#55606f", fontSize: 11, lineHeight: 1.5 }}>
-            <div><b style={{ color: "#8a94a6" }}>Norviq</b> · v0.1.0</div>
+            {/* The deployed version, not a literal. This read `v0.1.0` from 0.1.0 through 0.1.7 —
+                every release shipped a login screen claiming to be the first one. It is the first
+                thing anyone sees, and it was the only version string in the app that was asserted
+                rather than sourced (the in-app footer already reads /api/v1/version). Omitted
+                entirely when unknown: no version beats a wrong one. */}
+            <div>
+              <b style={{ color: "#8a94a6" }}>Norviq</b>
+              {deployedVersion ? ` · v${deployedVersion}` : ""}
+            </div>
           </div>
         </div>
       </div>
