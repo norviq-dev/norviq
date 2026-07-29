@@ -164,3 +164,40 @@ def test_version_guard_covers_the_docs_install_command() -> None:
 
     # Placeholders must NOT be compared: the release runbook uses "$VERSION" and "<x.y.z>" on purpose.
     assert not any(v.startswith(("$", "<")) for v in docs.values())
+
+
+def _webhook_sidecar_allowlist() -> "re.Pattern[str]":
+    """The webhook's own allow-list, read out of controller.go rather than restated here.
+
+    Restating it would let the copy drift from the code it is supposed to mirror, which is the same
+    class of mistake this test exists to catch — two sides of one contract, edited independently.
+    """
+    src = (ROOT / "webhook" / "controller.go").read_text()
+    m = re.search(r"allowedSidecarImagePattern\s*=\s*regexp\.MustCompile\((.*?)\)\n", src, re.S)
+    assert m, "allowedSidecarImagePattern not found in webhook/controller.go"
+    parts = re.findall(r"`([^`]*)`", m.group(1))
+    assert parts, "expected backtick-quoted pattern literal(s)"
+    return re.compile("".join(parts))
+
+
+def test_released_sidecar_image_passes_the_webhook_allowlist(stamped: Path) -> None:
+    """The bug this exists for: the chart pinned a digest the webhook refused to inject.
+
+    `release_stamp.py` writes NRVQ_SIDECAR_IMAGE as `...@sha256:<64 hex>` — that is the whole point
+    of stamping. The webhook then validates that value against its own allow-list before building a
+    patch, and the allow-list accepted only `:tag`. So every PUBLISHED release rejected its own
+    sidecar, while every local run passed because the checked-in chart carries `-latest`.
+
+    With `failurePolicy: Fail` the consequence was not a skipped injection: the agent pod was DENIED
+    admission. Enabling the flagship feature stopped tenant workloads from starting.
+
+    Neither side was wrong alone, which is why neither side's tests caught it. This asserts the two
+    agree, using the real stamped output and the real regex.
+    """
+    m = re.search(r"NRVQ_SIDECAR_IMAGE\s*\n\s*value:\s*\"([^\"]+)\"", _render(stamped))
+    assert m, "NRVQ_SIDECAR_IMAGE not found in the rendered chart"
+    image = m.group(1)
+    assert "@sha256:" in image, f"a released chart must pin the sidecar by digest, got {image}"
+    assert _webhook_sidecar_allowlist().match(image), (
+        f"the webhook would REFUSE the sidecar image the release pins: {image}"
+    )

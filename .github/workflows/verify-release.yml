@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Exercise the RELEASE ARTIFACT in a throwaway cluster — BEFORE a tag exists.
+#
+# Everything else in CI tests the source tree: 15 `helm template` calls, zero `helm install`, and no
+# job that creates a cluster. So the first thing to ever run a stamped, digest-pinned chart was the
+# release itself — the most expensive and least reversible place to find a bug, and it burns a
+# version number per attempt. Three shipped defects came out of exactly that hole: an uninstall hook
+# pinned to a deleted image, a `--wait` deadlock, and a sidecar the webhook refused to inject
+# because release-stamping pins it by digest.
+#
+# Not on every PR: it builds images and stands up a cluster, so it costs minutes, and most PRs
+# cannot affect the artifact. Run it on demand before a cut (the release runbook makes it a step),
+# and on any change to the chart, the webhook, or the release scripts.
+name: Verify release artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to stamp (default: the repo's own Chart.yaml version)"
+        required: false
+        default: ""
+  pull_request:
+    paths:
+      - 'helm/**'
+      - 'webhook/**'
+      - 'scripts/release_stamp.py'
+      - 'scripts/verify_release.py'
+      - '.github/workflows/verify-release.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v5.0.1
+
+      - uses: actions/setup-python@e9d6f990972a57673cdb72ec29e19d42ba28880f # v6.0.0
+        with:
+          python-version: "3.12"
+
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+
+      - uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0
+        with:
+          cluster_name: nrvq-verify
+          # The script manages install/uninstall itself; it only needs the cluster to exist.
+          wait: 120s
+
+      # The candidate webhook, not main's published one. Without this the run would validate the
+      # LAST release's binary against this PR's chart and report green on a webhook nobody is
+      # shipping — which is the same mistake, one level up, as testing the unstamped chart.
+      - name: Build the webhook under test and load it into kind
+        run: |
+          docker build -f webhook/Dockerfile -t ghcr.io/norviq-dev/norviq-engine:webhook-verify webhook/
+          kind load docker-image ghcr.io/norviq-dev/norviq-engine:webhook-verify --name nrvq-verify
+
+      - name: Verify the artifact (stamp -> install -> use -> uninstall)
+        run: |
+          python scripts/verify_release.py \
+            --cluster nrvq-verify --skip-create --keep \
+            --webhook-image ghcr.io/norviq-dev/norviq-engine:webhook-verify \
+            ${{ inputs.version && format('--version {0}', inputs.version) || '' }}
+
+      # Runs even when the verification fails — a red run without the cluster state behind it is a
+      # guessing game, and re-running to reproduce costs another 15 minutes.
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get pods,jobs,secrets -A -o wide || true
+          kubectl get nrvqpolicies -A -o yaml || true
+          kubectl -n norviq logs -l app.kubernetes.io/component=webhook --tail=200 || true
+          kubectl -n norviq describe pods || true

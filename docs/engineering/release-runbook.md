@@ -167,11 +167,17 @@ export VERSION=0.1.3          # the version you are cutting
 # 1. versions agree (this is also gate 0 in CI, but fail locally first)
 python3 scripts/check_release_versions.py "$VERSION"
 
-# 2. tag and push
+# 2. exercise the ARTIFACT, not the source. ~15 min, throwaway kind cluster: stamps the chart by
+#    digest exactly as release.yml does, installs it with --wait --atomic, injects a sidecar,
+#    evaluates a tool call, then uninstalls and checks nothing is stranded.
+python3 scripts/verify_release.py            # or: gh workflow run verify-release.yml
+# every check must pass before you tag
+
+# 3. tag and push
 git tag -a "v$VERSION" -m "Norviq v$VERSION"
 git push origin "v$VERSION"
 
-# 3. watch the workflow — Release drives everything, including the PyPI job
+# 4. watch the workflow — Release drives everything, including the PyPI job
 gh run list --limit 5
 ```
 
