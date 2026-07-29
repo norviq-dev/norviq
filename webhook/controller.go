@@ -80,7 +80,17 @@ const msgClassDeleted = "referenced class deleted"
 var policyRetryInterval = 60 * time.Second
 
 var finalizerMaxAge = 15 * time.Minute
-var allowedSidecarImagePattern = regexp.MustCompile(`^(norviq/norviq-engine|docker\.io/norviq/norviq-engine|ghcr\.io/norviq-dev/norviq-engine):[a-zA-Z0-9._-]+$`)
+
+// The `@sha256:` alternative is not decoration — it is the form EVERY RELEASE USES. release_stamp.py
+// pins the injected sidecar to an immutable digest (tests/release asserts it, and isMutableTag below
+// exists to refuse anything less), so a tag-only allow-list rejected the chart's own sidecar on every
+// published release. With failurePolicy Fail that is not a skipped injection: the webhook refuses to
+// build a patch, and the pod is DENIED — enabling injection stopped tenant workloads from starting.
+// It stayed hidden because the checked-in chart carries `-latest` tags, which this pattern accepted,
+// so every render-based test and every local install passed.
+var allowedSidecarImagePattern = regexp.MustCompile(
+	`^(norviq/norviq-engine|docker\.io/norviq/norviq-engine|ghcr\.io/norviq-dev/norviq-engine)` +
+		`(?::[a-zA-Z0-9._-]+|@sha256:[0-9a-f]{64})$`)
 
 type policySyncRequest struct {
 	Namespace       string                 `json:"namespace"`
