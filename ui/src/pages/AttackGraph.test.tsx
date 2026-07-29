@@ -115,7 +115,14 @@ describe("AttackGraph page", () => {
       })
     );
     renderPage();
-    fireEvent.click(await screen.findByRole("button", { name: /define intended behaviour/i }));
+    // The button renders IMMEDIATELY but starts `disabled={!visible.length}` — there is nothing to
+    // define intent over until the paths fetch resolves. findByRole matches disabled elements, so
+    // clicking as soon as it is findable clicks a dead control: no modal, and the failure surfaces
+    // later as "unable to find role=dialog", pointing at the modal rather than at the click. Wait
+    // for ENABLED, which is also the only thing a real user can do.
+    const openBtn = await screen.findByRole("button", { name: /define intended behaviour/i });
+    await waitFor(() => expect(openBtn).toBeEnabled());
+    fireEvent.click(openBtn);
     const dialog = await screen.findByRole("dialog", { name: /define intended behaviour/i });
     // the observed tools render as a checklist
     expect(await within(dialog).findByLabelText(/Intended: read_ledger/i)).toBeInTheDocument();
