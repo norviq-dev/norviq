@@ -58,7 +58,20 @@ jobs:
       - name: vitest
         working-directory: ui
         # `--run` disables watch mode, which would otherwise hang the runner until the timeout.
-        run: npm run test -- --run
+        #
+        # `--no-file-parallelism` is the fix for a flake that cost three separate red runs in one
+        # afternoon, each in a DIFFERENT test and with a different symptom: a waitFor that ran out of
+        # budget, a `window is not defined` thrown after all 344 tests had already passed, and a
+        # findBy that dumped the DOM. Nothing tied them together except contention — 59 test files,
+        # each with its own jsdom, on a shared 2-4 vCPU runner. The suite is 344/344 in ~8s locally
+        # and passes here whenever the runner is quiet.
+        #
+        # Controlled earlier in the same session: `--no-file-parallelism` passes, `--testTimeout`
+        # alone does not. Raising the async budget (5s -> 15s, src/test/setup.ts) moved the symptom
+        # rather than removing it, because a starved worker is slow in ways no single timeout bounds.
+        # Serial costs wall-clock here and nothing locally, where parallel stays the default — a gate
+        # that goes red for reasons unrelated to the change under test is worse than a slow one.
+        run: npm run test -- --run --no-file-parallelism
 
   python-tests:
     name: pytest (engine, api, sdk, helm, rego)
