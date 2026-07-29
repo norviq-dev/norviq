@@ -11,7 +11,7 @@ on:
       - 'policies/**'
       - 'Dockerfile*'
       - 'pyproject.toml'
-      - '.trivyignore'                 # the image-scan gate baseline — re-run the scan when it changes
+      - '.trivyignore.yaml'            # the image-scan gate baseline — re-run the scan when it changes
       - '.github/workflows/build.yml'
   workflow_dispatch:
   # Reusable entry point. release.yml calls this on a v*.*.* tag and then gates its chart job on
@@ -103,9 +103,10 @@ jobs:
       # Trivy resolves the multi-arch index to the runner's platform (amd64) and scans that variant;
       # the arm64 variant ships identical OS/pip package versions, so the amd64 scan is representative.
       # FAIL-CLOSED (exit-code "1"): NEW fixable HIGH/CRITICAL vulns block the build. Accepted
-      # findings get triaged into .trivyignore WITH a rationale recorded in
+      # findings get triaged into .trivyignore.yaml WITH a rationale recorded in
       # docs/engineering/security-baseline.md — ignore-unfixed stays true so only actionable
-      # (patch-available) vulns gate.
+      # (patch-available) vulns gate. The YAML form is what lets an entry carry `paths`, so a CVE
+      # accepted in a vendored third-party binary stays BLOCKING in the binaries we build ourselves.
       - name: trivy image scan (${{ matrix.component }}) — fail-closed
         uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
@@ -115,7 +116,7 @@ jobs:
           format: table
           severity: HIGH,CRITICAL
           ignore-unfixed: true
-          trivyignores: .trivyignore
+          trivyignores: .trivyignore.yaml
           exit-code: "1"
 
       # Supply chain: bind this exact digest to this repo+workflow identity, and publish an SBOM.
