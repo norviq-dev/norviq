@@ -1,8 +1,25 @@
 {{- if .Values.webhook.enabled }}
-# TLS bootstrap for the sidecar-injector webhook. A post-install/post-upgrade Helm hook Job
-# self-signs a serving cert for norviq-webhook.<ns>.svc, writes the norviq-webhook-tls secret the
-# webhook Deployment mounts, and patches the MutatingWebhookConfiguration caBundle (the self-signed
-# cert is its own CA). Scoped RBAC: namespaced secret writes + cluster patch of the webhook config.
+# TLS bootstrap for the sidecar-injector webhook. A Helm hook Job self-signs a serving cert for
+# norviq-webhook.<ns>.svc, writes the norviq-webhook-tls secret the webhook Deployment mounts, and
+# patches the MutatingWebhookConfiguration caBundle (the self-signed cert is its own CA). Scoped
+# RBAC: namespaced secret writes + cluster patch of the webhook config.
+#
+# IT RUNS IN BOTH PHASES, PRE *AND* POST, because its two jobs have opposite ordering needs and one
+# of them used to deadlock `helm install --wait`:
+#
+#   * the SECRET must exist BEFORE the chart's resources are waited on. norviq-webhook mounts
+#     norviq-webhook-tls non-optionally, so with the Job only in post-install the webhook pods sat in
+#     Init with `secret "norviq-webhook-tls" not found`, --wait never succeeded, and the post-install
+#     hook that would have created the secret never ran. The install died at its --timeout leaving the
+#     release `pending-install`. Nothing about that was specific to a version; it needed --wait and a
+#     cluster where the secret did not already exist.
+#   * the CABUNDLE PATCH must happen AFTER, because the MutatingWebhookConfiguration it patches is an
+#     ordinary chart resource that does not exist yet at pre-install.
+#
+# Running twice is safe by construction, not by luck: the script reuses an existing serving cert
+# rather than reminting one (see the idempotency note below — reminting would diverge the caBundle
+# from the cert the running webhook already loaded), and it skips the caBundle patch when the
+# MutatingWebhookConfiguration is absent, which is exactly the pre-install case.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -11,7 +28,7 @@ metadata:
   labels:
     {{- include "norviq.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook": pre-install,post-install,pre-upgrade,post-upgrade
     "helm.sh/hook-weight": "-5"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 ---
@@ -23,7 +40,7 @@ metadata:
   labels:
     {{- include "norviq.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook": pre-install,post-install,pre-upgrade,post-upgrade
     "helm.sh/hook-weight": "-5"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 rules:
@@ -39,7 +56,7 @@ metadata:
   labels:
     {{- include "norviq.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook": pre-install,post-install,pre-upgrade,post-upgrade
     "helm.sh/hook-weight": "-5"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 subjects:
@@ -58,7 +75,7 @@ metadata:
   labels:
     {{- include "norviq.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook": pre-install,post-install,pre-upgrade,post-upgrade
     "helm.sh/hook-weight": "-5"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 rules:
@@ -73,7 +90,7 @@ metadata:
   labels:
     {{- include "norviq.labels" . | nindent 4 }}
   annotations:
-    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook": pre-install,post-install,pre-upgrade,post-upgrade
     "helm.sh/hook-weight": "-5"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 subjects:
@@ -94,8 +111,10 @@ metadata:
     app: norviq-webhook
     {{- include "norviq.labels" . | nindent 4 }}
   annotations:
-    # post-install/upgrade so the MutatingWebhookConfiguration already exists to patch.
-    "helm.sh/hook": post-install,post-upgrade
+    # PRE so the serving-cert secret exists before --wait blocks on the webhook Deployment that
+    # mounts it; POST so the MutatingWebhookConfiguration exists to have its caBundle patched.
+    # See the header comment — dropping either phase reintroduces a real failure.
+    "helm.sh/hook": pre-install,post-install,pre-upgrade,post-upgrade
     "helm.sh/hook-weight": "0"
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
