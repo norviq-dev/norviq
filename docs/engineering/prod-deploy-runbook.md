@@ -35,8 +35,14 @@ the pull entirely and reference `oci://ghcr.io/norviq-dev/charts/norviq --versio
 - **≥3 nodes** (so podAntiAffinity / topologySpread actually spread replicas).
 - **metrics-server** installed (HPA reads CPU/mem).
 - **CloudNativePG operator** installed (Postgres HA renders a `postgresql.cnpg.io/v1 Cluster`).
-- **A Redis HA operator** — `values-prod` renders a Spotahome `RedisFailover` CR; swap
-  `templates/redis-ha.yaml` + `redis.ha.serviceName` if you use a different stack (Bitnami, MemoryDB).
+- **Redis: use a managed instance, NOT `redis.ha.enabled`.** Set `redis.enabled=false` +
+  `redis.host=<your-managed-redis>`. `redis.ha.enabled=true` is **known non-functional** — verified
+  live on 2026-07-29: the Spotahome operator exposes only a sentinel Service (`rfs-<name>:26379`)
+  and no stable master endpoint, while the API speaks plain `redis://host:6379` with no Sentinel
+  support. Fixing it is a feature, not configuration. Postgres HA is unaffected and works.
+- **The Spotahome operator's own chart is broken out of the box** if you do install it: it defaults
+  to `quay.io/spotahome/redis-operator:v1.3.0`, a tag that does not exist on quay (only
+  `v1.3.0-rc1`, `v1.2.4`, `latest`). `--set image.tag=v1.2.4` is the last real release.
 - A **public or pull-secret'd registry**. Default images are public on GHCR
   (`ghcr.io/norviq-dev/norviq-engine`). For scale prefer **Google Artifact Registry**
   (`images.registry: us-docker.pkg.dev/<PROJECT_ID>/<REPO>/`) or **ACR** — no anonymous
@@ -52,7 +58,7 @@ the pull entirely and reference `oci://ghcr.io/norviq-dev/charts/norviq --versio
 | engine replicas / PDB | 1 / off | HA floor 2 / minAvailable 1 + HPA + spread |
 | webhook | 2, injection **off** | HA floor 2 + PDB + HPA + spread + injection **on** |
 | Postgres | single StatefulSet | CloudNativePG `Cluster` (3) — operator required |
-| Redis | single StatefulSet | `RedisFailover` (Sentinel, 3) — operator required |
+| Redis | single StatefulSet | `RedisFailover` — **non-functional, see Prerequisites; use a managed Redis** |
 | DB / Redis password | shipped dev defaults | **blank — you must supply them** (see below) |
 | strong-secret guard / DB TLS | already on / already `require` | unchanged (on / `require`) |
 
@@ -102,7 +108,11 @@ helm upgrade --install norviq ./norviq -n norviq --create-namespace \
 registry; setting it to a bare `ghcr.io/` would resolve to a non-existent `ghcr.io/norviq-engine`.
 
 The HA StatefulSets are auto-disabled when `*.ha.enabled` (the operators own the datastores); the API's
-`NRVQ_PG_URL`/`NRVQ_REDIS_URL` auto-retarget the HA services (`*-rw` / failover service).
+`NRVQ_PG_URL`/`NRVQ_REDIS_URL` auto-retarget the HA services (`*-rw` / failover service), and — since
+2026-07-29 — so do the readiness gates. They used to hard-code the BUNDLED service names, so under
+HA (Services with no endpoints) or an external datastore (no Service at all) every api/engine pod
+blocked in Init forever while the datastores were perfectly healthy. `tests/helm/
+test_datastore_host_agreement.py` now asserts the gate and the URL always name the same host.
 
 **Node scaling.** The HPAs scale *pods*; for the cluster to grow *nodes* to hold them, enable your
 cloud's cluster-autoscaler on the node pool (e.g. AKS `az aks nodepool update
