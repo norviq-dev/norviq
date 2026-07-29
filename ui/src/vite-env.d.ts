@@ -37,5 +37,10 @@ interface Window {
     oidcRedirectUri?: string;
     // Human-readable IdP name for login copy ("Redirecting to Okta…"). Optional; falls back to "SSO".
     oidcProviderName?: string;
+    // The DEPLOYED release, from the chart's appVersion. Runtime-injected rather than built in,
+    // because the image is built once and installed at many versions — and the login screen renders
+    // BEFORE any token exists, so it cannot ask /api/v1/version (401 unauthenticated, deliberately:
+    // handing an exact version to an unauthenticated caller is free fingerprinting).
+    version?: string;
   };
 }

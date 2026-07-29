@@ -50,6 +50,11 @@ spec:
           env:
             - name: FLEET_API_URL
               value: {{ .Values.ui.fleetApiUrl | default "" | quote }}
+            # The login screen renders before any token exists, so it cannot ask /api/v1/version
+            # (401 unauthenticated, deliberately). Inject the chart's appVersion instead — the image
+            # is built once and installed at many versions, so this is the only place that knows.
+            - name: NRVQ_VERSION
+              value: {{ .Chart.AppVersion | quote }}
             {{- if .Values.oidc.enabled }}
             # SSO config injected at runtime (config.js) so the console shows "Sign in with SSO"
             # without a UI rebuild. Register a public/SPA client with redirect URI <console>/auth/callback.
