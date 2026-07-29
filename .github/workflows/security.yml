@@ -130,6 +130,6 @@ jobs:
         with:
           scan-type: config
           scan-ref: .
-          trivyignores: .trivyignore
+          trivyignores: .trivyignore.yaml
           severity: HIGH,CRITICAL
           exit-code: "0" # RATCHET: set to "1" after baseline triage

@@ -1,0 +1,57 @@
+# Trivy ignore baseline — every entry is a HIGH/CRITICAL finding we knowingly carry, with the
+# rationale recorded here AND in docs/engineering/security-baseline.md. `ignore-unfixed: true` in
+# build.yml means only ACTIONABLE findings reach this file: anything listed here has a fixed version
+# upstream that we cannot adopt yet.
+#
+# This is the YAML form of what used to be a flat .trivyignore. The flat file can only suppress a CVE
+# *everywhere*, which is wrong when the same CVE is real in one artifact and unreachable in another —
+# see CVE-2026-56852 below, which we FIXED in our own Go binary and can only accept in a third-party
+# one. `paths` keeps the gate armed where the fix applies.
+#
+# Adding an entry is a security decision, not a build fix. Each needs: what the finding is, where it
+# comes from, why it is not exploitable in Norviq, and what would let us drop the line.
+
+vulnerabilities:
+  - id: CVE-2026-39822
+    statement: >-
+      HIGH, Go stdlib os.Root symlink-following, fixed in Go 1.25.12 / 1.26.5 / 1.27.0-rc.2. Present
+      via the embedded Go runtime of the PINNED OPA binary (opa 1.18.0-static, compiled with Go
+      1.26.4) in the api/engine images, and the webhook Go binary. ACCEPTED: os.Root filesystem-sandbox
+      symlink traversal is not on any Norviq code path — OPA is invoked as a policy evaluator over an
+      HTTP API with no untrusted-filesystem/symlink surface, and the webhook does no os.Root traversal.
+      Revisit and drop this line when an OPA release built with Go >=1.26.5 is pinned.
+
+  - id: GHSA-hrxh-6v49-42gf
+    statement: >-
+      HIGH, grpc-go xDS RBAC + HTTP/2 transport, fixed in grpc-go 1.82.1. Present via
+      google.golang.org/grpc v1.81.1 statically linked into the PINNED OPA binary (opa 1.18.0-static)
+      in the api/engine images. ACCEPTED: all three sub-issues require a running grpc-go SERVER — the
+      xDS RBAC authorization bypass and the crafted-NOT-rule panic need the xDS RBAC engine fed by an
+      xDS control plane; the Rapid Reset bypass needs grpc-go's HTTP/2 server transport. Norviq starts
+      neither. The in-image binary is only forked as `opa eval` / `opa check` (subprocess rollback
+      path), and the sidecar runs `opa run --server` — OPA's server is HTTP REST, bound to 127.0.0.1,
+      with no Envoy ext_authz plugin (we ship `-static`, not `-envoy`) and no OPA distributed tracing
+      configured, so no gRPC listener and no xDS client is ever created. Linked-but-unreachable. No
+      OPA release (through v1.18.2) has adopted grpc-go >= 1.82.1, so a version bump cannot close this
+      today. Revisit when one does.
+
+  # SCOPED ON PURPOSE — this CVE is real for a Go binary we build, and we fixed it there
+  # (webhook/go.mod pins golang.org/x/text v0.39.0). Without `paths` this entry would also disarm the
+  # gate on the webhook image and let that fix silently regress.
+  - id: CVE-2026-56852
+    paths:
+      - usr/local/bin/opa
+    statement: >-
+      HIGH, infinite loop in golang.org/x/text/unicode/norm on invalid input, fixed in x/text 0.39.0.
+      Present via x/text v0.38.0 statically linked into the PINNED OPA binary (opa 1.18.0-static) in
+      the api/engine images. NOT FIXABLE BY BUMP TODAY: x/text 0.39.0 was released 2026-06-30 and the
+      newest OPA release, v1.18.2 (2026-07-02), still requires v0.38.0; only OPA's unreleased main has
+      moved (to v0.40.0). ACCEPTED: OPA's source imports x/text in exactly one place —
+      `internal/presentation`, `var TitleCase = cases.Title(language.Und, cases.NoLower)` — and
+      `x/text/cases` is what links `unicode/norm`. Every call site is `generateTableWithKeys`, which
+      title-cases CLI TABLE HEADERS, and every argument is a compile-time literal ("Metric", "Value",
+      "Time", "Num Eval", the fixed statKeys slice, and `opa inspect`'s fixed column names). No
+      request, policy, or tool-call input reaches the vulnerable code, and the pretty-printed table
+      path belongs to CLI `--format=pretty` output, which neither `opa run --server` nor Norviq's
+      `opa check` / `opa eval` subprocess calls produce. Revisit when an OPA release requires x/text
+      >= 0.39.0.
