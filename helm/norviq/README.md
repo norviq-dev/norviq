@@ -33,7 +33,7 @@ The chart installs into the namespace from `helm -n/--namespace` (standard Helm)
 without an explicit tenant list — supply `policyQuotaNamespaces`:
 
 ```bash
-helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.6 \
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.7 \
   -n norviq --create-namespace \
   --set-json 'policyQuotaNamespaces=["default"]'
 ```
@@ -41,7 +41,7 @@ helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.6 \
 Production HA + autoscaling profile:
 
 ```bash
-helm pull oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.6 --untar   # for values-prod.yaml
+helm pull oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.7 --untar   # for values-prod.yaml
 helm install norviq ./norviq -n norviq --create-namespace \
   -f ./norviq/values-prod.yaml \
   --set postgresql.password=<strong> --set redis.password=<strong> \
@@ -63,7 +63,7 @@ helm test norviq -n norviq
 Upgrade / uninstall:
 
 ```bash
-helm upgrade norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.6 -n norviq --reset-then-reuse-values
+helm upgrade norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.7 -n norviq --reset-then-reuse-values
 helm uninstall norviq -n norviq
 ```
 
