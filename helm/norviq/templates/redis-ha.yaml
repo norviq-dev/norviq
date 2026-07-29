@@ -47,6 +47,42 @@ spec:
     resources:
       {{- toYaml .Values.redis.resources | nindent 6 }}
 ---
+{{- /* THE MASTER SERVICE — the reason redis.ha never worked.
+
+     redis.ha.serviceName named `norviq-redis-ha` and NRVQ_REDIS_URL pointed at it, but nothing
+     created it: the Spotahome operator provisions a StatefulSet (`rfr-<name>`) and a sentinel
+     Service (`rfs-<name>:26379`) and NO stable master endpoint, because its intended clients speak
+     the Sentinel protocol to discover the current master. Norviq's client is
+     `aioredis.from_url("redis://host:6379")` — a plain URL, no Sentinel support — so the whole HA
+     path resolved to a hostname that did not exist.
+     
+     The operator does maintain a `redisfailovers-role` label on every redis pod, flipping it to
+     `master` on the promoted one (verified live: 1 master / 2 slave, relabelled on failover). A
+     Service selecting that label therefore tracks the master with no client changes and no Sentinel
+     awareness — failover moves the label, the Service follows.
+     
+     Endpoints are ready-gated as normal, which is what we want: during the promotion window the
+     Service briefly has no endpoints and the client's own retry covers it. Routing to a
+     not-yet-ready master would be worse than a short refusal. */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.redis.ha.serviceName }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "norviq.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/component: redis
+    redisfailovers.databases.spotahome.com/name: norviq-redis-ha
+    redisfailovers-role: master
+  ports:
+    - name: redis
+      port: {{ .Values.redis.port }}
+      targetPort: 6379
+      protocol: TCP
+---
 apiVersion: v1
 kind: Secret
 metadata:

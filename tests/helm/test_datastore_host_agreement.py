@@ -29,6 +29,7 @@ import shutil
 import subprocess
 
 import pytest
+import yaml
 
 CHART = pathlib.Path(__file__).resolve().parents[2] / "helm" / "norviq"
 BASE = ["--set-json", 'policyQuotaNamespaces=["default"]']
@@ -114,3 +115,28 @@ def test_redis_ha_tells_the_operator_the_password() -> None:
         "RedisFailover has no auth.secretPath — the operator cannot authenticate to the cluster"
     )
     assert "name: norviq-redis-ha-auth" in rendered, "the Secret auth.secretPath names is not rendered"
+
+
+def test_redis_ha_renders_the_master_service_it_points_at() -> None:
+    """`redis.ha.serviceName` must be a Service that EXISTS, tracking the current master.
+
+    The Spotahome operator provisions a sentinel Service (`rfs-<name>:26379`) and no stable master
+    endpoint — its intended clients speak the Sentinel protocol to find the master. Norviq's client
+    is a plain `redis://host:6379`, so for the whole HA path the hostname in NRVQ_REDIS_URL resolved
+    to nothing at all and the control plane could never connect.
+
+    The chart therefore renders the master Service itself, selected on the operator's
+    `redisfailovers-role: master` pod label so it follows a promotion. Asserting the LABEL and not
+    just the Service's existence is the point: a selector without it would pin to one pod and quietly
+    stop being HA the first time that pod died.
+    """
+    rendered = _render(SHAPES["ha"])
+    svc = None
+    for doc in yaml.safe_load_all(rendered):
+        if doc and doc.get("kind") == "Service" and doc["metadata"]["name"] == "norviq-redis-ha":
+            svc = doc
+            break
+    assert svc, "redis.ha.serviceName names a Service the chart never renders"
+    assert svc["spec"]["selector"].get("redisfailovers-role") == "master", (
+        f"master Service must select the promoted pod, got {svc['spec']['selector']}"
+    )
