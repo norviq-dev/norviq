@@ -56,7 +56,7 @@ describe("password rules/strength (spec formulas)", () => {
     expect(passwordStrength("Str0ng-Passphrase!")).toBeGreaterThanOrEqual(70);
     expect(passwordRules("short")).toEqual([false, false, false]);
     expect(passwordRules("alllowercaseonly")).toEqual([true, false, false]);
-    expect(passwordRules("NewStr0ng-Pass")).toEqual([true, true, true]);
+    expect(passwordRules("Fixture-Not-A-Real-Password-1")).toEqual([true, true, true]);
   });
 });
 
@@ -283,15 +283,15 @@ describe("default login view", () => {
     fireEvent.click(screen.getByRole("button", { name: /^sign in$/i }));
     await screen.findByText(/set a new password/i);
     // Fill only the NEW + confirm (the user never touches the locked current field).
-    fireEvent.change(screen.getByLabelText(/^new password$/i), { target: { value: "NorviqKind#2026x" } });
-    fireEvent.change(screen.getByLabelText(/confirm new password/i), { target: { value: "NorviqKind#2026x" } });
+    fireEvent.change(screen.getByLabelText(/^new password$/i), { target: { value: "Fixture-Not-A-Real-Password-1" } });
+    fireEvent.change(screen.getByLabelText(/confirm new password/i), { target: { value: "Fixture-Not-A-Real-Password-1" } });
     fireEvent.click(screen.getByRole("button", { name: /save & continue/i }));
     await waitFor(() => {
       const call = f.mock.calls.find((c) => String(c[0]).includes("/auth/change-password"));
       expect(call).toBeTruthy();
       expect(JSON.parse(String((call![1] as RequestInit).body))).toMatchObject({
         current_password: "norviq",
-        new_password: "NorviqKind#2026x"
+        new_password: "Fixture-Not-A-Real-Password-1"
       });
     });
   });
@@ -384,10 +384,10 @@ describe("first login (forced change) view", () => {
     fireEvent.change(screen.getByLabelText(/current password/i), { target: { value: "norviq" } });
     fireEvent.change(screen.getByLabelText(/^new password$/i), { target: { value: "weak" } });
     expect(save).toBeDisabled();
-    fireEvent.change(screen.getByLabelText(/^new password$/i), { target: { value: "NewStr0ng-Passphrase" } });
+    fireEvent.change(screen.getByLabelText(/^new password$/i), { target: { value: "Fixture-Not-A-Real-Password-2" } });
     fireEvent.change(screen.getByLabelText(/confirm new password/i), { target: { value: "different" } });
     expect(save).toBeDisabled();
-    fireEvent.change(screen.getByLabelText(/confirm new password/i), { target: { value: "NewStr0ng-Passphrase" } });
+    fireEvent.change(screen.getByLabelText(/confirm new password/i), { target: { value: "Fixture-Not-A-Real-Password-2" } });
     expect(save).toBeEnabled();
   });
 
@@ -395,8 +395,8 @@ describe("first login (forced change) view", () => {
     const f = mockFetch(200, { changed: true, must_change: false });
     renderFirst();
     fireEvent.change(screen.getByLabelText(/current password/i), { target: { value: "norviq" } });
-    fireEvent.change(screen.getByLabelText(/^new password$/i), { target: { value: "NewStr0ng-Passphrase" } });
-    fireEvent.change(screen.getByLabelText(/confirm new password/i), { target: { value: "NewStr0ng-Passphrase" } });
+    fireEvent.change(screen.getByLabelText(/^new password$/i), { target: { value: "Fixture-Not-A-Real-Password-2" } });
+    fireEvent.change(screen.getByLabelText(/confirm new password/i), { target: { value: "Fixture-Not-A-Real-Password-2" } });
     fireEvent.click(screen.getByRole("button", { name: /save & continue/i }));
     await waitFor(() => expect(localStorage.getItem("nrvq_must_change")).toBeNull());
     const call = f.mock.calls.find((c) => String(c[0]).includes("/api/v1/auth/change-password"))!;
@@ -404,7 +404,7 @@ describe("first login (forced change) view", () => {
     expect((call[1]!.headers as Record<string, string>).Authorization).toBe("Bearer hdr.body.sig");
     expect(JSON.parse(call[1]!.body as string)).toEqual({
       current_password: "norviq",
-      new_password: "NewStr0ng-Passphrase"
+      new_password: "Fixture-Not-A-Real-Password-2"
     });
   });
 
@@ -412,8 +412,8 @@ describe("first login (forced change) view", () => {
     mockFetch(401, { detail: "Current password is incorrect" });
     renderFirst();
     fireEvent.change(screen.getByLabelText(/current password/i), { target: { value: "wrong" } });
-    fireEvent.change(screen.getByLabelText(/^new password$/i), { target: { value: "NewStr0ng-Passphrase" } });
-    fireEvent.change(screen.getByLabelText(/confirm new password/i), { target: { value: "NewStr0ng-Passphrase" } });
+    fireEvent.change(screen.getByLabelText(/^new password$/i), { target: { value: "Fixture-Not-A-Real-Password-2" } });
+    fireEvent.change(screen.getByLabelText(/confirm new password/i), { target: { value: "Fixture-Not-A-Real-Password-2" } });
     fireEvent.click(screen.getByRole("button", { name: /save & continue/i }));
     await screen.findByText(/current password is incorrect/i);
     expect(localStorage.getItem("nrvq_must_change")).toBe("1");
