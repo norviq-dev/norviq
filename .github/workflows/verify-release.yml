@@ -34,6 +34,19 @@ permissions:
 
 jobs:
   verify:
+    # BOTH paths, in parallel. They are not redundant and neither subsumes the other: the --wait
+    # deadlock only ever bit a FRESH install (the webhook's TLS secret already exists on an upgrade),
+    # while a rotated password or a half-moved image tag can only show up on an UPGRADE. Running one
+    # would have shipped the other.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: upgrade   # install the previous release from OCI, then upgrade into the candidate
+            from: auto
+          - mode: fresh     # install the candidate on an empty cluster
+            from: none
+    name: verify (${{ matrix.mode }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -47,7 +60,7 @@ jobs:
 
       - uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0
         with:
-          cluster_name: nrvq-verify
+          cluster_name: nrvq-verify-${{ matrix.mode }}
           # The script manages install/uninstall itself; it only needs the cluster to exist.
           wait: 120s
 
@@ -57,12 +70,13 @@ jobs:
       - name: Build the webhook under test and load it into kind
         run: |
           docker build -f webhook/Dockerfile -t ghcr.io/norviq-dev/norviq-engine:webhook-verify webhook/
-          kind load docker-image ghcr.io/norviq-dev/norviq-engine:webhook-verify --name nrvq-verify
+          kind load docker-image ghcr.io/norviq-dev/norviq-engine:webhook-verify --name nrvq-verify-${{ matrix.mode }}
 
       - name: Verify the artifact (stamp -> install -> use -> uninstall)
         run: |
           python scripts/verify_release.py \
-            --cluster nrvq-verify --skip-create --keep \
+            --cluster nrvq-verify-${{ matrix.mode }} --skip-create --keep \
+            --upgrade-from ${{ matrix.from }} \
             --webhook-image ghcr.io/norviq-dev/norviq-engine:webhook-verify \
             ${{ inputs.version && format('--version {0}', inputs.version) || '' }}
 
