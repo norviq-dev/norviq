@@ -303,11 +303,17 @@ webhook:
         # density here. The limit leaves ~79% headroom over peak for larger payloads and GC spikes.
         requests: { cpu: 200m, memory: 256Mi }
         # The CPU limit is 2000m, not 500m, and that is the difference between this mode helping and
-        # HURTING. Measured on AKS through a real injected sidecar, two runs each:
+        # HURTING. Measured on AKS through a real injected sidecar, two runs each, all three rows taken
+        # back-to-back in ONE session so they are directly comparable:
         #
-        #   proxy (for reference)   p50 59.0ms   p95 92.7ms
+        #   proxy (same session)    p50 59.0ms   p95 92.7ms
         #   embedded @ 500m         p50 72.0ms   p95 93.1ms    58.9% of CFS periods THROTTLED
         #   embedded @ 2000m        p50 30.7ms   p95 58.0ms    0% throttled
+        #
+        # The proxy row is a single-session reading; a later settled-cluster median of three runs put proxy
+        # at ~66ms p50 / ~121ms p95. So 59/92.7 is the OPTIMISTIC end of proxy's range, which means
+        # embedded's advantage here is understated rather than inflated. The two embedded rows remain a
+        # clean like-for-like A/B of the CPU limit alone.
         #
         # At 500m, embedded was SLOWER than the proxy default it exists to beat — so an operator who
         # enabled it got a worse result than leaving it off, with nothing to indicate why. One evaluation
