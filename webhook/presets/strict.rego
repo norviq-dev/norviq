@@ -318,6 +318,65 @@ secret_egress_detected {
     regex.match(secret_name_patterns[i], val)
 }
 
+# CREDENTIAL MATERIAL sent to an external sink.
+#
+# `secret_egress_detected` above fires ONLY for a secret-READ tool (read_env/get_secret/...). Its word
+# list is the right one, but nothing applies it to an egress tool — and the two credential rules that do
+# apply there both miss a credential carried as a FILE PATH: `sensitive_keys` is compared against the
+# param KEY name, and `secret_value_patterns` require an explicit `:` or `=`.
+#
+# Verified live against this shipped baseline. With an external `dest`, every one of
+#   /root/.ssh/id_rsa  /app/.env  /app/credentials.json  /var/secrets/private_key.pem  /etc/kubernetes/admin.conf
+# returned `default_allow`, while the regulated-data shape immediately above blocked. So the PII fix closed
+# the credential-FREE path and left the credential path open — the sharper of the two, since an SSH key or
+# a kubeconfig is a direct credential compromise, not a privacy incident. `private_key` is the clearest
+# illustration: it IS in `sensitive_keys`, but that set only ever sees key NAMES, so it never inspects
+# `path: "/var/secrets/private_key.pem"`.
+#
+# Structured like the regulated-data rule above, and for the same false-positive reason: either the value
+# is a credential file BY CONVENTION (a name that carries no other meaning), or it pairs a credential word
+# with a real file artifact. Deliberately UNLIKE that rule, a bare `/` is not an artifact here, because
+# "reset your password at https://app/reset" is ordinary prose and has to stay allowed while
+# "password_dump.txt" must not. security_scan_texts is already lowercased, so these match directly.
+# The API caps a policy at 25 `regex.*` operations (policies.py::validate_rego_source) and this
+# baseline already used 23, so each predicate below is written as ONE self-sufficient pattern and the
+# whole rule costs a SINGLE regex op. Splitting it into "word" + "shape" lists ANDed together read more
+# cleanly but cost three, which pushed the shipped preset to 26 and made the API reject it with a bare
+# `422 too many regex operations` — the controller then retried forever and the baseline silently kept
+# enforcing the OLD rego. tests/api/test_shipped_presets_validate.py now fails before that can ship again.
+credential_artifact_patterns = [
+    # (a) credential files BY CONVENTION — the filename alone is the signal, no second predicate needed.
+    `(^|[^a-z0-9])id_(rsa|dsa|ecdsa|ed25519)([^a-z0-9]|$)`,
+    `(^|[^a-z0-9])\.env([^a-z0-9]|$)`,
+    `(^|[^a-z0-9])\.(npmrc|pypirc|netrc|dockercfg)([^a-z0-9]|$)`,
+    `(^|[^a-z0-9])credentials?\.(json|ya?ml|ini|conf|cfg|csv)([^a-z0-9]|$)`,
+    `(^|[^a-z0-9])(kubeconfig|htpasswd)([^a-z0-9]|$)`,
+    `(^|[^a-z0-9])admin\.conf([^a-z0-9]|$)`,
+    `\.(pem|p12|pfx|jks|keystore|kdbx|ovpn)([^a-z0-9]|$)`,
+    `(^|/)shadow([^a-z0-9]|$)`,
+    # (b) a credential WORD joined to a real file artifact. Joined in one pattern rather than ANDed
+    #     across two lists, both for the regex budget above and because the join is the point: a bare
+    #     word is prose ("reset your password at https://app/reset" must stay allowed), a word attached
+    #     to a filename is an artifact ("password_dump.txt" must not).
+    `(private[_-]?key|secret[_-]?key|access[_-]?key|api[_-]?keys?|passwd|password|credential|auth[_-]?token|client[_-]?secret|service[_-]?account)[a-z0-9._/-]*\.(pem|key|p12|pfx|jks|json|ya?ml|conf|cfg|ini|txt|env|csv|log|bak|zip|gz|tar|sql|dump)([^a-z0-9]|$)`,
+]
+
+_credential_artifact(val) {
+    some i
+    regex.match(credential_artifact_patterns[i], val)
+}
+
+secret_egress_detected {
+    external_tools[input.tool_name]
+    val := security_scan_texts[_]
+    _credential_artifact(val)
+}
+secret_egress_detected {
+    egress_verb_tool
+    val := security_scan_texts[_]
+    _credential_artifact(val)
+}
+
 # Supply chain
 supply_chain_tools = {"load_plugin", "download_script", "eval", "install_package"}
 
