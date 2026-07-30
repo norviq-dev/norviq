@@ -19,8 +19,10 @@ from norviq.engine.audit_emitter import AuditEmitter
 from norviq.engine.cache import RedisCache
 from norviq.engine.evaluator import OPAEvaluator
 from norviq.engine.identity import SPIFFEResolver
+from norviq.engine.latency import PhaseTimer
 from norviq.engine.policy_loader import PolicyLoader
 from norviq.sdk.core.events import ToolCallEvent
+from norviq.telemetry.metrics import record_path_phase
 from norviq.sdk.core.interceptor import ToolInterceptor
 from norviq.sidecar.remote_evaluator import RemoteEvaluator
 
@@ -198,20 +200,37 @@ class SidecarProxy:
                           error_type=type(exc).__name__, code="NRVQ-SDC-3001")
 
     async def _process_request(self, raw: str) -> str:
-        """Evaluate one JSON request and return JSON response."""
+        """Evaluate one JSON request and return JSON response.
+
+        Split into phases because this process is ~50% of what the caller waits in proxy mode and none of
+        it was measured. `audit` is timed separately for a specific reason: it is awaited BEFORE the
+        response is returned, so in embedded mode (where an emitter exists) the caller pays for the audit
+        write. In proxy mode `_emit_audit` short-circuits, so the same phase should read ~0 — that
+        difference is the measurement, not an assumption.
+        """
+        timer = PhaseTimer()
         try:
-            data = json.loads(raw)
-            tool_name = str(data.get("tool_name", ""))
-            tool_params = self._tool_params(data)
-            session_id = str(data.get("session_id", ""))
-            decision = await self._interceptor.intercept(tool_name, tool_params, session_id, framework="sidecar")
-            action = "forward" if decision.is_allowed() else "drop"
-            response = json.dumps({"action": action, "decision": decision.model_dump(mode="json")})
+            with timer.phase("parse"):
+                data = json.loads(raw)
+                tool_name = str(data.get("tool_name", ""))
+                tool_params = self._tool_params(data)
+                session_id = str(data.get("session_id", ""))
+            with timer.phase("evaluate"):
+                decision = await self._interceptor.intercept(
+                    tool_name, tool_params, session_id, framework="sidecar"
+                )
+            with timer.phase("serialize"):
+                action = "forward" if decision.is_allowed() else "drop"
+                response = json.dumps({"action": action, "decision": decision.model_dump(mode="json")})
             try:
-                await self._emit_audit(tool_name, tool_params, session_id, decision)
+                with timer.phase("audit"):
+                    await self._emit_audit(tool_name, tool_params, session_id, decision)
             except Exception as exc:
                 log.error("nrvq.sidecar.audit_error", error=str(exc), code="NRVQ-SDC-3003")
             log.info("nrvq.sidecar.processed", tool=tool_name, action=action, code="NRVQ-SDC-3002")
+            for _phase, _ms in timer.phases_ms().items():
+                record_path_phase("sidecar", _phase, _ms)
+            record_path_phase("sidecar", "unattributed", timer.unattributed_ms())
             return response
         except Exception as exc:
             # Fail CLOSED: a malformed request / interceptor error must DROP the tool call, never

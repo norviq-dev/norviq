@@ -14,6 +14,7 @@ from norviq.engine.audit_emitter import AuditEmitter
 from norviq.engine.identity import SPIFFEResolver
 from norviq.sdk.core.events import ToolCallEvent
 from norviq.sdk.core.interceptor import ToolInterceptor
+from norviq.telemetry.exporter import mount_metrics_endpoint
 
 log = structlog.get_logger()
 
@@ -23,6 +24,10 @@ def create_http_fallback(
 ) -> FastAPI:
     """Create HTTP fallback app for non-Unix-socket runtimes."""
     app = FastAPI(title="Norviq Sidecar HTTP Fallback")
+    # The interceptor records what the CALLER waited, and that metric lives in THIS process — the sidecar,
+    # not the API. Without a scrape endpoint here it was recorded and unreachable, which is why the
+    # caller-observed number had to be derived arithmetically instead of measured.
+    mount_metrics_endpoint(app)
 
     @app.post("/v1/evaluate")
     async def evaluate(request: Request) -> dict[str, Any]:

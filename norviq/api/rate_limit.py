@@ -34,6 +34,8 @@ in pure ASGI (send our own response, never touch ``receive``/the body); the pass
 
 from __future__ import annotations
 
+from time import perf_counter
+
 import ipaddress
 import json
 import time
@@ -42,6 +44,7 @@ from functools import lru_cache
 import jwt
 import structlog
 
+from norviq.telemetry.metrics import record_path_phase
 from norviq.config import settings
 
 log = structlog.get_logger()
@@ -229,9 +232,18 @@ class RateLimitMiddleware:
         window_s = settings.http_rate_limit_window_s
         bucket_key = f"http:{route_class}:{identity}"
 
+        # Timed because this middleware runs a Redis INCR on EVERY request, including the enforcement hot
+        # path, and the API's HTTP layer measured ~35% of what a caller waits with none of it attributed.
+        # Only the limiter's own decision is timed — `self.app(...)` downstream is deliberately outside it,
+        # or this would just re-measure the whole request.
+        _rl_t0 = perf_counter()
         try:
             count = await cache.incr_call_count(bucket_key, window_s=window_s)
+            record_path_phase("api", "ratelimit", (perf_counter() - _rl_t0) * 1000.0)
         except Exception as exc:  # noqa: BLE001 - Redis down/unreachable: availability > strictness
+            # Recorded on the fail-open arm too: a Redis timeout here is SLOW, so excluding it would hide
+            # the worst case behind the label that looks healthy.
+            record_path_phase("api", "ratelimit", (perf_counter() - _rl_t0) * 1000.0)
             now = time.monotonic()
             if now - self._last_fail_open_log > 30:
                 log.warning(

@@ -55,6 +55,15 @@ try:
     # engine's own latency_ms and therefore excludes the sidecar->API round trip — in proxy mode that is the
     # term that dominates the tail, so it was the one number never measured. `mode` separates sdk (in-proc
     # interceptor), sidecar_proxy (UDS + cross-pod call) and sidecar_embedded (UDS + local evaluation).
+    # Generic attribution across the whole request path, not just the evaluator. The caller-observed total
+    # decomposes into components nothing measured: in proxy mode ~50% of it is the sidecar process and ~35%
+    # the API's HTTP layer (auth + middleware), while the evaluator — the only part previously instrumented
+    # — is the smallest share. Three wrong optimisation hypotheses (fork serialisation, per-call logging,
+    # CPU throttling) came from reasoning about that unmeasured 85%, so it gets measured.
+    _p_path_phase = Histogram(
+        "norviq_path_phase_ms", "Request-path latency by component and phase, in milliseconds",
+        ["component", "phase"], buckets=_PHASE_BUCKETS, registry=NRVQ_REGISTRY,
+    )
     _p_intercept_latency = Histogram(
         "norviq_interception_latency_ms", "Latency observed by the CALLER for one interception decision",
         ["mode", "phase"], buckets=_PHASE_BUCKETS, registry=NRVQ_REGISTRY,
@@ -63,7 +72,7 @@ except ModuleNotFoundError:  # pragma: no cover
     NRVQ_REGISTRY = None
     _p_tool_calls = _p_tool_blocked = _p_cache_hits = _p_cache_misses = None
     _p_eval_latency = _p_trust = _p_api_latency = None
-    _p_eval_phase = _p_intercept_latency = None
+    _p_eval_phase = _p_intercept_latency = _p_path_phase = None
 
 tool_call_total = None
 tool_call_blocked = None
@@ -73,6 +82,7 @@ policy_violations = None
 evaluation_latency = None
 evaluation_phase_latency = None
 interception_latency = None
+path_phase_latency = None
 trust_score_distribution = None
 api_request_latency = None
 active_agents = None
@@ -85,7 +95,7 @@ def init_metrics(meter: Meter | None = None) -> None:
     """Create all telemetry instruments."""
     global _meter, tool_call_total, tool_call_blocked, cache_hits, cache_misses
     global policy_violations, evaluation_latency, trust_score_distribution, api_request_latency
-    global evaluation_phase_latency, interception_latency
+    global evaluation_phase_latency, interception_latency, path_phase_latency
     global active_agents, block_rate, graph_nodes, graph_edges
     _meter = meter or metrics.get_meter("norviq")
     tool_call_total = _meter.create_counter("norviq_tool_calls_total", description="Total tool calls processed", unit="1")
@@ -102,6 +112,9 @@ def init_metrics(meter: Meter | None = None) -> None:
     )
     evaluation_phase_latency = _meter.create_histogram(
         "norviq_evaluation_phase_ms", description="Policy evaluation latency split by phase", unit="ms"
+    )
+    path_phase_latency = _meter.create_histogram(
+        "norviq_path_phase_ms", description="Request-path latency by component and phase", unit="ms"
     )
     interception_latency = _meter.create_histogram(
         "norviq_interception_latency_ms", description="Latency observed by the caller per interception", unit="ms"
@@ -137,6 +150,21 @@ def record_eval_phases(namespace: str, phases_ms: dict[str, float], unattributed
         if _p_eval_phase is not None:
             _p_eval_phase.labels(namespace, "unattributed").observe(unattributed_ms)
     except Exception as exc:  # pragma: no cover - telemetry is never load-bearing
+        log.error("nrvq.telemetry.metric_failed", error=str(exc), code="NRVQ-TEL-12005")
+
+
+def record_path_phase(component: str, phase: str, ms: float) -> None:
+    """Record one component/phase of the request path. Never raises — telemetry is not load-bearing.
+
+    Both labels are fixed vocabularies chosen by the call site, never user input, so cardinality stays
+    bounded on a shared Prometheus.
+    """
+    try:
+        if path_phase_latency is not None:
+            path_phase_latency.record(ms, {"component": component, "phase": phase})
+        if _p_path_phase is not None:
+            _p_path_phase.labels(component, phase).observe(ms)
+    except Exception as exc:  # pragma: no cover - telemetry must never fail a tool call
         log.error("nrvq.telemetry.metric_failed", error=str(exc), code="NRVQ-TEL-12005")
 
 
