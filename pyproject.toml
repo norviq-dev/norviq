@@ -1,6 +1,6 @@
 [project]
 name = "norviq"
-version = "0.1.8"
+version = "0.1.9"
 description = "Runtime policy enforcement for LLM agent tool calls on Kubernetes."
 # PyPI-specific long description: pypi.org cannot resolve README.md's relative links/images, and the
 # pypi.org audience wants the Python SDK rather than README.md's `git clone` + `helm install` opener.
