@@ -36,6 +36,16 @@ class _FakeSession:
         self.committed = 0
 
     async def execute(self, _stmt):
+        # The seeder writes via `INSERT ... ON CONFLICT (username) DO NOTHING` rather than session.add,
+        # because two API replicas booting at once both passed the SELECT and both inserted — one died
+        # on `users_username_key`. Model that here so `rowcount` means what it means in Postgres:
+        # 1 = this caller seeded the row, 0 = someone else already had.
+        if getattr(_stmt, "is_insert", False):
+            params = _stmt.compile().params
+            if any(getattr(r, "username", None) == params.get("username") for r in self.rows):
+                return SimpleNamespace(rowcount=0)
+            self.rows.append(SimpleNamespace(**params))
+            return SimpleNamespace(rowcount=1)
         rows = list(self.rows)
         return SimpleNamespace(scalar_one_or_none=lambda: rows[0] if rows else None)
 
@@ -256,6 +266,44 @@ def test_ensure_default_admin_seeds_hashed_admin_with_must_change() -> None:
     assert seeded.must_change is True
     assert seeded.password_hash != settings.auth_admin_password  # stored hashed, not in the clear
     assert pw.verify_password(settings.auth_admin_password, seeded.password_hash)
+
+
+def test_ensure_default_admin_survives_a_concurrent_replica_winning_the_race() -> None:
+    """Two replicas boot together: both pass the SELECT, only one row exists, NEITHER crashes.
+
+    The seeder used session.add after a SELECT, so on a fresh install both API replicas (the chart's
+    `api.replicas: 2` HA default) inserted and one died on `users_username_key` with
+    "Application startup failed. Exiting." It self-healed on restart, which is why it went unnoticed —
+    but a crash backoff can outlast `helm install --wait --atomic` and roll back a healthy install.
+    Reproduced against a real Postgres: 3 of 4 concurrent replicas crashed before this fix, 0 after.
+    """
+    rows: list = []
+    session = _FakeSession(rows)
+
+    async def _factory():
+        yield session
+
+    # Replica A seeds; replica B then runs the same code having already passed its own SELECT.
+    asyncio.run(auth_login.ensure_default_admin(session_factory=_factory))
+    assert len(rows) == 1
+    winner = rows[0]
+
+    # Simulate B: it saw an empty table, so force the insert path again against a now-populated store.
+    stale = _FakeSession(rows)
+    stale.rows = rows
+
+    async def _stale_factory():
+        class _SawNothing(_FakeSession):
+            async def execute(self, stmt):
+                if getattr(stmt, "is_insert", False):
+                    return await _FakeSession.execute(self, stmt)
+                return SimpleNamespace(scalar_one_or_none=lambda: None)  # its SELECT ran before A committed
+
+        yield _SawNothing(rows)
+
+    asyncio.run(auth_login.ensure_default_admin(session_factory=_stale_factory))
+    assert len(rows) == 1, "the losing replica duplicated the admin row"
+    assert rows[0] is winner, "the losing replica overwrote the winner's row"
 
 
 def test_ensure_default_admin_is_idempotent() -> None:

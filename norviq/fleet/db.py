@@ -56,6 +56,10 @@ async def fleet_init_db() -> None:
     log.info("nrvq.fleet.db_connected", code="NRVQ-FLT-15011")
 
 
+# Advisory-lock key for fleet schema init. Distinct from the spoke's _SCHEMA_INIT_LOCK on purpose.
+_FLEET_SCHEMA_INIT_LOCK = 0x4E52_5651_0002  # "NRVQ" + slot 2
+
+
 async def fleet_create_tables() -> None:
     """Create the fleet tables (FleetBase only — never the spoke schema)."""
     from norviq.fleet.models import FleetBase
@@ -63,6 +67,10 @@ async def fleet_create_tables() -> None:
     if _fleet_engine is None:
         raise RuntimeError("Fleet DB not initialized. Call fleet_init_db() first.")
     async with _fleet_engine.begin() as conn:
+        # Same check-then-create race as the spoke schema, same fix — see
+        # `norviq/api/db/session.py::create_tables`. A DISTINCT lock slot: the hub and a co-located spoke
+        # must not block each other, they own different schemas.
+        await conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _FLEET_SCHEMA_INIT_LOCK})
         await conn.run_sync(FleetBase.metadata.create_all)
         # Additive column on the pre-existing `cluster` table — create_all only creates missing TABLES, not
         # columns. Idempotent (ADD COLUMN IF NOT EXISTS) so an already-registered fleet upgrades cleanly in place.

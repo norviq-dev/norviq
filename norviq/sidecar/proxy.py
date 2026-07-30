@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,25 @@ from norviq.sidecar.remote_evaluator import RemoteEvaluator
 log = structlog.get_logger()
 
 
+
+def _is_missing_schema(exc: BaseException) -> bool:
+    """True when the failure is "the table isn't there yet", not a real error.
+
+    Matched on the message rather than by importing asyncpg's exception type: SQLAlchemy wraps the
+    driver error, the wrapper class differs by driver, and the sidecar must not hard-depend on asyncpg
+    being the driver. `UndefinedTable` is Postgres SQLSTATE 42P01.
+    """
+    for err in (exc, getattr(exc, "orig", None)):
+        if err is None:
+            continue
+        if getattr(err, "sqlstate", None) == "42P01" or type(err).__name__ == "UndefinedTableError":
+            return True
+        text_ = str(err).lower()
+        if "does not exist" in text_ and "relation" in text_:
+            return True
+    return False
+
+
 class SidecarProxy:
     """Unix socket proxy for tool call interception."""
 
@@ -41,6 +61,51 @@ class SidecarProxy:
         self._server: asyncio.AbstractServer | None = None
         self._policy_event_task: asyncio.Task | None = None
 
+    # How long an embedded engine waits for the API to create the schema before giving up. Comfortably
+    # inside the injected sidecar's startupProbe budget (30 × 3s = 90s, webhook/injector.go), so a pod
+    # that is merely waiting is never mistaken for a pod that is wedged.
+    _SCHEMA_WAIT_S = 60.0
+    _SCHEMA_POLL_S = 2.0
+
+    async def _warm_cache_once_the_schema_exists(self) -> None:
+        """Warm the policy cache, tolerating a schema the API has not created YET.
+
+        `warm_cache` SELECTs from `policies`, but only the API creates that table. Nothing orders the two:
+        the standalone engine's init containers gate on Postgres and Redis, not on the API. So on a fresh
+        install the engine reached the DB first and died:
+
+            asyncpg.exceptions.UndefinedTableError: relation "policies" does not exist
+
+        Kubernetes restarted it and by then the API had caught up, so it self-healed — which is why it
+        looked like noise. It is the same nondeterminism as the other fresh-install races: a crash backoff
+        can outlast `helm install --wait --atomic` and roll back a healthy install.
+
+        Waiting is strictly better than crashing, and it stays FAIL-CLOSED throughout: `_warmed` is only
+        set by a successful `warm_cache`, so until then the evaluator's no-policy path is
+        `policy_load_pending` → block, never "no policy matched → allow". If the schema never appears we
+        re-raise, preserving the old crash so a genuinely broken deployment is still loud.
+        """
+        deadline = time.monotonic() + self._SCHEMA_WAIT_S
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                await self._loader.warm_cache()
+                if attempt > 1:
+                    log.info(
+                        "nrvq.sidecar.schema_ready", attempts=attempt, code="NRVQ-SDC-3034",
+                    )
+                return
+            except Exception as exc:  # noqa: BLE001 — narrowed immediately below; anything else re-raises
+                if not _is_missing_schema(exc) or time.monotonic() >= deadline:
+                    raise
+                log.info(
+                    "nrvq.sidecar.waiting_for_schema",
+                    detail="the API has not created the policy schema yet; blocking fail-closed until it does",
+                    attempt=attempt, code="NRVQ-SDC-3035",
+                )
+                await asyncio.sleep(self._SCHEMA_POLL_S)
+
     async def start(self) -> None:
         """Initialize dependencies (by mode) and start the Unix socket listener."""
         self._resolver = SPIFFEResolver()
@@ -50,7 +115,7 @@ class SidecarProxy:
             await self._cache.connect()
             self._evaluator = OPAEvaluator(self._cache)
             self._loader = PolicyLoader(self._cache, self._evaluator)
-            await self._loader.warm_cache()
+            await self._warm_cache_once_the_schema_exists()
             self._emitter = AuditEmitter()
             await self._emitter.init()
             self._policy_event_task = asyncio.create_task(self._watch_policy_events())

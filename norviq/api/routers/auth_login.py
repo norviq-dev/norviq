@@ -25,6 +25,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from jwt import PyJWTError as JWTError
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from norviq.api.auth import _validate_token, get_current_user, security
@@ -245,8 +246,23 @@ async def change_password(
 async def ensure_default_admin(session_factory=get_session) -> None:
     """Boot-time seed: create the default admin (must_change=True) if no such user exists.
 
-    Idempotent — a restart never overwrites a changed password. Skipped when local login is disabled.
+    Idempotent across restarts AND across concurrent replicas — a restart never overwrites a changed
+    password, and two pods booting at once do not collide. Skipped when local login is disabled.
     `session_factory` is injectable for tests; it opens its own session like the api-key resolver.
+
+    The SELECT is only a fast path that avoids a bcrypt hash on every boot. It is NOT the guard: the
+    chart runs `api.replicas: 2` by default, so on a fresh install both pods ran this at once, both saw
+    no admin, and both inserted — one died on startup with
+
+        duplicate key value violates unique constraint "users_username_key"
+        DETAIL:  Key (username)=(admin) already exists.
+        ERROR:    Application startup failed. Exiting.
+
+    which self-heals on restart and so looked harmless, while actually making a fresh install
+    nondeterministic (a crash backoff can outlast `helm install --wait --atomic` and roll it back).
+    ON CONFLICT DO NOTHING makes the write itself the guard. DO NOTHING, never DO UPDATE: the loser must
+    not overwrite the winner's row, and on a later boot it must not clobber a password the operator has
+    since changed.
     """
     if not settings.auth_login_enabled:
         return
@@ -258,15 +274,24 @@ async def ensure_default_admin(session_factory=get_session) -> None:
         ).scalar_one_or_none()
         if existing is not None:
             return
-        session.add(
-            User(
+        result = await session.execute(
+            pg_insert(User.__table__)
+            .values(
                 username=settings.auth_admin_username,
                 password_hash=await hash_password_async(settings.auth_admin_password),
                 role="admin",
                 must_change=True,
             )
+            .on_conflict_do_nothing(index_elements=[User.__table__.c.username])
         )
         await session.commit()
-        log.info("nrvq.auth.default_admin_seeded", user=settings.auth_admin_username, code="NRVQ-AUTH-14013")
+        if result.rowcount:
+            log.info("nrvq.auth.default_admin_seeded", user=settings.auth_admin_username, code="NRVQ-AUTH-14013")
+        else:
+            # Another replica won the race. Not an error — the admin exists, which is the desired state.
+            log.info(
+                "nrvq.auth.default_admin_seed_conflict", user=settings.auth_admin_username,
+                code="NRVQ-AUTH-14014",
+            )
     finally:
         await provider.aclose()
