@@ -12,6 +12,8 @@ sidecar drops the tool call rather than forwarding it.
 
 from __future__ import annotations
 
+from time import perf_counter
+
 import asyncio
 import os
 import ssl
@@ -20,6 +22,7 @@ import tempfile
 import httpx
 import structlog
 
+from norviq.telemetry.metrics import record_interception_latency
 from norviq.config import settings
 from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.events import ToolCallEvent
@@ -121,6 +124,24 @@ class RemoteEvaluator:
             self._client = None
 
     async def evaluate(self, event: ToolCallEvent) -> PolicyDecision:
+        """Time the upstream call, then delegate. See `_evaluate_upstream` for the logic.
+
+        A thin wrapper rather than a timer inside the body on purpose: that body has three return sites
+        (success, fail-open, fail-closed) plus retry arms, so timing it inline would mean four call sites
+        to keep in sync and a future `return` would silently stop being measured. `finally` covers every
+        path including an exception, and it keeps this diff off the enforcement logic entirely.
+
+        `total - upstream` (from the interceptor's own metric) isolates the sidecar's local cost from the
+        cross-pod round trip — the whole question in proxy mode, where the engine reports single-digit ms
+        while the caller may wait far longer, and nothing said which side of the wire the tail was on.
+        """
+        _t0 = perf_counter()
+        try:
+            return await self._evaluate_upstream(event)
+        finally:
+            record_interception_latency("sidecar_proxy", "upstream", (perf_counter() - _t0) * 1000.0)
+
+    async def _evaluate_upstream(self, event: ToolCallEvent) -> PolicyDecision:
         """POST the event to the central engine; fail CLOSED (block) on any error."""
         if self._client is None:
             await self.connect()

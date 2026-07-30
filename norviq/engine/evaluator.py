@@ -21,6 +21,10 @@ from typing import Awaitable
 import structlog
 
 from norviq.config import settings
+from norviq.engine.latency import (
+    PHASE_CACHE, PHASE_CANDIDATES, PHASE_OPA, PHASE_OPA_WAIT, PHASE_PERSIST, PHASE_POSTURE,
+    PHASE_TRUST_COMPUTE, PHASE_TRUST_FETCH, PhaseTimer,
+)
 from norviq.engine.cache import RedisCache
 from norviq.engine.capability import classify_tool
 from norviq.engine.confusables import skeleton
@@ -29,7 +33,7 @@ from norviq.engine.masking import mask_params
 from norviq.engine.graph.asset_graph import AssetGraphBuilder
 from norviq.engine.graph.store import GraphStore
 from norviq.engine.opa_client import OpaClient, managed_package, rewrite_package, sanitize_key
-from norviq.telemetry.metrics import record_tool_call
+from norviq.telemetry.metrics import record_eval_phases, record_tool_call
 from norviq.telemetry.spans import create_tool_call_span, enrich_span
 from norviq.engine.trust import AgentHistoryStore, AgentProfileStore, TrustCalculator, TrustInput, TrustResult
 from norviq.engine.trust.signals.param_entropy import ParamEntropySignal
@@ -126,6 +130,9 @@ class OPAEvaluator:
     async def evaluate(self, event: ToolCallEvent) -> PolicyDecision:
         """Evaluate tool call against all matching policies."""
         start = time.monotonic()
+        # Phase attribution alongside the existing total. See norviq/engine/latency.py for why wall-clock
+        # and why this is cheap enough to leave on (sub-microsecond against a 1.4 ms floor).
+        timer = PhaseTimer()
         cache_hit = False
         log.debug(
             "nrvq.eval.start",
@@ -145,8 +152,10 @@ class OPAEvaluator:
             # rate_limit) ONCE per eval, per-field fallback to the global config. A namespace with no override
             # yields the global posture and byte-identical behavior. Threaded into trust (threshold), the cache-hit
             # controls (rate_limit) and the post-resolution softening (monitor mode).
-            posture = await self._resolve_posture(event.agent_identity.namespace)
-            trust = await self._trust(event.agent_identity.spiffe_id)
+            with timer.phase(PHASE_POSTURE):
+                posture = await self._resolve_posture(event.agent_identity.namespace)
+            with timer.phase(PHASE_TRUST_FETCH):
+                trust = await self._trust(event.agent_identity.spiffe_id)
             cache_tool = self._cache_tool_key(event)
             ns = event.agent_identity.namespace
             agent_class = event.agent_identity.agent_class
@@ -158,31 +167,37 @@ class OPAEvaluator:
                 # threaded into trust as prefetched_flags — never cached — so a freeze still flips a stale
                 # in-proc allow to a block via _apply_trust_overrides on the very next call.
                 inproc = self._inproc_eval_cache.get((ns, agent_class, cache_tool))
-                if inproc is not _MISS:
-                    is_frozen, cap = await self._cache.get_agent_flags(spiffe)
-                    cached = inproc
-                else:
-                    cached, is_frozen, cap = await self._cache.get_eval_and_agent_flags(
-                        ns, agent_class, cache_tool, spiffe
+                with timer.phase(PHASE_CACHE):
+                    if inproc is not _MISS:
+                        is_frozen, cap = await self._cache.get_agent_flags(spiffe)
+                        cached = inproc
+                    else:
+                        cached, is_frozen, cap = await self._cache.get_eval_and_agent_flags(
+                            ns, agent_class, cache_tool, spiffe
+                        )
+                        if cached is not None:
+                            # Populate the L1 from the shared Redis decision (both hold the PRE-override base decision).
+                            self._inproc_eval_cache.set((ns, agent_class, cache_tool), cached)
+                with timer.phase(PHASE_TRUST_COMPUTE):
+                    trust_result = await self._compute_trust(
+                        event, trust, posture["trust_threshold"], prefetched_flags=(is_frozen, cap)
                     )
-                    if cached is not None:
-                        # Populate the L1 from the shared Redis decision (both hold the PRE-override base decision).
-                        self._inproc_eval_cache.set((ns, agent_class, cache_tool), cached)
-                trust_result = await self._compute_trust(
-                    event, trust, posture["trust_threshold"], prefetched_flags=(is_frozen, cap)
-                )
             else:
-                trust_result = await self._compute_trust(event, trust, posture["trust_threshold"])
-                cached = await self._cache.get_eval(ns, agent_class, cache_tool)
+                with timer.phase(PHASE_TRUST_COMPUTE):
+                    trust_result = await self._compute_trust(event, trust, posture["trust_threshold"])
+                with timer.phase(PHASE_CACHE):
+                    cached = await self._cache.get_eval(ns, agent_class, cache_tool)
             if cached is not None:
                 cache_hit = True
                 decision = await self._handle_cache_hit(event, cached, start, trust_result, posture)
                 # Stamp the real measured end-to-end latency so the audit record reflects it (not 0.0).
                 decision = decision.model_copy(update={"latency_ms": round((time.monotonic() - start) * 1000, 2)})
-                await self._persist_behavior(event, decision, trust_result)
-                self._record_telemetry(event, decision, start, cache_hit, span)
+                with timer.phase(PHASE_PERSIST):
+                    await self._persist_behavior(event, decision, trust_result)
+                self._record_telemetry(event, decision, start, cache_hit, span, timer)
                 return decision
-            candidates = await self._collect_candidates(event)
+            with timer.phase(PHASE_CANDIDATES):
+                candidates = await self._collect_candidates(event)
             log.debug(
                 "nrvq.eval.candidates",
                 count=len(candidates),
@@ -192,13 +207,19 @@ class OPAEvaluator:
             if not candidates:
                 ns = event.agent_identity.namespace
                 agent_class = event.agent_identity.agent_class
-                async with self._eval_slot():
-                    result = await asyncio.wait_for(
-                        self._evaluate_opa(
-                            f"{ns}:{agent_class}", ns, agent_class, self._build_input(event, trust_result)
-                        ),
-                        timeout=2.0,
-                    )
+                # opa_wait is split from opa deliberately: in subprocess mode _eval_slot SERIALISES
+                # `opa eval` forks, so queueing there is a prime suspect for the tail and is invisible if
+                # both are lumped together. In server mode the gate is a nullcontext and this reads ~0.
+                async with contextlib.AsyncExitStack() as _stack:
+                    with timer.phase(PHASE_OPA_WAIT):
+                        await _stack.enter_async_context(self._eval_slot())
+                    with timer.phase(PHASE_OPA):
+                        result = await asyncio.wait_for(
+                            self._evaluate_opa(
+                                f"{ns}:{agent_class}", ns, agent_class, self._build_input(event, trust_result)
+                            ),
+                            timeout=2.0,
+                        )
                 base_decision = self._build_decision(result, event, trust_result, (time.monotonic() - start) * 1000)
             else:
                 results = []
@@ -209,11 +230,15 @@ class OPAEvaluator:
                         rego_len=len(str(candidate["rego"])),
                         code="NRVQ-ENG-DEBUG-3",
                     )
-                    async with self._eval_slot():
-                        result = await asyncio.wait_for(
-                            self._evaluate_single(event, str(candidate["key"]), str(candidate["rego"]), trust_result),
-                            timeout=2.0,
-                        )
+                    # Accumulates across candidates — the useful number is total OPA time for this call.
+                    async with contextlib.AsyncExitStack() as _stack:
+                        with timer.phase(PHASE_OPA_WAIT):
+                            await _stack.enter_async_context(self._eval_slot())
+                        with timer.phase(PHASE_OPA):
+                            result = await asyncio.wait_for(
+                                self._evaluate_single(event, str(candidate["key"]), str(candidate["rego"]), trust_result),
+                                timeout=2.0,
+                            )
                     log.debug(
                         "nrvq.eval.opa_result",
                         key=str(candidate["key"]),
@@ -259,26 +284,27 @@ class OPAEvaluator:
             # The multi-candidate path builds per-candidate decisions with latency_ms=0.0; stamp the real
             # measured end-to-end latency on the winning decision so every audit record carries it (AU-12/SLA).
             decision = decision.model_copy(update={"latency_ms": round((time.monotonic() - start) * 1000, 2)})
-            await self._persist_behavior(event, decision, trust_result)
-            self._record_telemetry(event, decision, start, cache_hit, span)
+            with timer.phase(PHASE_PERSIST):
+                await self._persist_behavior(event, decision, trust_result)
+            self._record_telemetry(event, decision, start, cache_hit, span, timer)
             return decision
         except asyncio.TimeoutError:
             elapsed_ms = (time.monotonic() - start) * 1000
             log.error("nrvq.engine.timeout", event_id=event.event_id, elapsed_ms=elapsed_ms, code="NRVQ-ENG-2020")
             decision = self._timeout_decision(event, elapsed_ms)
-            self._record_telemetry(event, decision, start, cache_hit, span)
+            self._record_telemetry(event, decision, start, cache_hit, span, timer)
             return decision
         except InvalidSpiffeIdentity:
             elapsed_ms = (time.monotonic() - start) * 1000
             log.warning("nrvq.engine.invalid_identity", event_id=event.event_id, code="NRVQ-ENG-2006")
             decision = self._invalid_identity_decision(event, elapsed_ms)
-            self._record_telemetry(event, decision, start, cache_hit, span)
+            self._record_telemetry(event, decision, start, cache_hit, span, timer)
             return decision
         except Exception as exc:
             elapsed_ms = (time.monotonic() - start) * 1000
             log.error("nrvq.engine.error", event_id=event.event_id, error=str(exc), code="NRVQ-ENG-2000")
             decision = self._ensure_block_attribution(self._fallback_decision(event, elapsed_ms), event.event_id)
-            self._record_telemetry(event, decision, start, cache_hit, span)
+            self._record_telemetry(event, decision, start, cache_hit, span, timer)
             return decision
         finally:
             span.end()
@@ -290,8 +316,14 @@ class OPAEvaluator:
         start: float,
         cache_hit: bool,
         span,
+        timer: PhaseTimer | None = None,
     ) -> None:
-        """Record metrics and enrich traces for one evaluated tool call."""
+        """Record metrics and enrich traces for one evaluated tool call.
+
+        `timer` is optional so every existing caller and test keeps working unchanged; when present the
+        per-phase split is emitted alongside the total, which on its own only ever said THAT a call was
+        slow and never which step it waited in.
+        """
         latency_ms = (time.monotonic() - start) * 1000
         labels = {
             "namespace": event.agent_identity.namespace,
@@ -300,6 +332,8 @@ class OPAEvaluator:
             "decision": decision.decision,
         }
         record_tool_call(labels, latency_ms, decision.trust_score, cache_hit)
+        if timer is not None:
+            record_eval_phases(event.agent_identity.namespace, timer.phases_ms(), timer.unattributed_ms())
         enrich_span(
             span,
             decision.decision,
