@@ -22,7 +22,8 @@ import tempfile
 import httpx
 import structlog
 
-from norviq.telemetry.metrics import record_interception_latency
+from norviq.engine.latency import PhaseTimer
+from norviq.telemetry.metrics import record_interception_latency, record_path_phase
 from norviq.config import settings
 from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.events import ToolCallEvent
@@ -145,15 +146,21 @@ class RemoteEvaluator:
         """POST the event to the central engine; fail CLOSED (block) on any error."""
         if self._client is None:
             await self.connect()
-        payload = {
-            "tool_name": event.tool_name,
-            "tool_params": event.tool_params,
-            "agent_identity": event.agent_identity.model_dump(),
-            "session_id": event.session_id,
-            "call_depth": event.call_depth,
-            # Preserve the decision source so the central audit record is attributed to the sidecar.
-            "framework": event.framework or "sidecar",
-        }
+        # Split payload / post / parse: the gap between what this client waits and what the API reports
+        # measuring was ~46 ms with nowhere to attribute it. pydantic model_dump and JSON coding are CPU
+        # work, and this container runs at 200m — where 8.1 ms of CPU is burned per call — so "the wire" and
+        # "serialising for the wire" have to be told apart before either is blamed.
+        _timer = PhaseTimer()
+        with _timer.phase("payload"):
+            payload = {
+                "tool_name": event.tool_name,
+                "tool_params": event.tool_params,
+                "agent_identity": event.agent_identity.model_dump(),
+                "session_id": event.session_id,
+                "call_depth": event.call_depth,
+                # Preserve the decision source so the central audit record is attributed to the sidecar.
+                "framework": event.framework or "sidecar",
+            }
         # Retry transient failures before giving up. Without this a single dropped connection — a
         # rolling norviq-api restart, a node's conntrack entry expiring, one 503 from a terminating
         # pod — blocks a live agent's tool call outright. The SDK client has always retried with
@@ -163,15 +170,21 @@ class RemoteEvaluator:
         last_exc: Exception | None = None
         for attempt in range(self._max_retries + 1):
             try:
-                resp = await self._client.post("/api/v1/evaluate", json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-                return PolicyDecision(
-                    decision=data.get("decision", "block"),
-                    rule_id=data.get("rule_id", "remote_eval"),
-                    trust_score=float(data.get("trust_score", 0.0)),
-                    reason=data.get("reason", ""),
-                )
+                with _timer.phase("post"):
+                    resp = await self._client.post("/api/v1/evaluate", json=payload)
+                    resp.raise_for_status()
+                with _timer.phase("parse"):
+                    data = resp.json()
+                    decision = PolicyDecision(
+                        decision=data.get("decision", "block"),
+                        rule_id=data.get("rule_id", "remote_eval"),
+                        trust_score=float(data.get("trust_score", 0.0)),
+                        reason=data.get("reason", ""),
+                    )
+                for _ph, _ms in _timer.phases_ms().items():
+                    record_path_phase("upstream", _ph, _ms)
+                record_path_phase("upstream", "unattributed", _timer.unattributed_ms())
+                return decision
             except httpx.HTTPStatusError as exc:
                 last_exc = exc
                 if exc.response.status_code < 500:

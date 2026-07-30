@@ -125,8 +125,20 @@ jobs:
       - name: Install OPA
         run: |
           set -euo pipefail
-          curl -sSfL -o /usr/local/bin/opa \
+          # Retried and time-boxed: this is an unauthenticated fetch from a third-party host that gates
+          # every test run, so a transient network blip presents as a test failure. One such blip
+          # (curl 56, "failure when receiving data from the peer") hung ~5m40s and failed the job before
+          # pytest ran at all. --max-time bounds the hang; --retry-all-errors is the load-bearing flag,
+          # because plain --retry ignores mid-transfer failures and 56 is exactly that.
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 \
+            --connect-timeout 15 --max-time 120 \
+            -o /usr/local/bin/opa \
             https://openpolicyagent.org/downloads/v1.18.0/opa_linux_amd64_static
+          # Pinned digest, matching framework-compat.yml, which already did this and explains why: a bad
+          # download should fail the job rather than silently run an unverified binary. This job lacked
+          # the check, so a truncated or substituted file would have become the policy engine that every
+          # rego test is evaluated against — and a partial file can still be executable.
+          echo "65d700b14b99b354982b61031b40bdc8e316ea93dadd61818f066d1d9a69dcce  /usr/local/bin/opa" | sha256sum -c -
           chmod +x /usr/local/bin/opa
           opa version
 
