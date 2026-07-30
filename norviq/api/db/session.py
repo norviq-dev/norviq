@@ -62,6 +62,11 @@ def _build_connect_args() -> dict:
 # runs across a boundary, or a cluster nobody redeploys for a while, keeps writing.
 PARTITION_LOOKAHEAD_MONTHS = 3
 
+# Advisory-lock key for schema init. Arbitrary but STABLE — every replica must pick the same number or
+# they don't serialize against each other. Namespaced to this one purpose so it can never collide with
+# another advisory lock in the codebase.
+_SCHEMA_INIT_LOCK = 0x4E52_5651_0001  # "NRVQ" + slot 1
+
 
 def _month_window(start: datetime) -> tuple[str, str, str]:
     """Return (partition_name, inclusive_start, exclusive_end) for the month containing `start`."""
@@ -118,6 +123,22 @@ async def create_tables() -> None:
     try:
         async with _engine.begin() as conn:
             log.info("nrvq.startup.create_tables.connection_acquired", code="NRVQ-DB-DEBUG-2B")
+            # Serialize schema init across replicas. `create_all` checks "does this table exist?" and
+            # then creates it, which is not atomic: the chart runs 2 API replicas by default, both boot
+            # at once on a fresh install, both see `policies` absent, and both issue CREATE TABLE. One
+            # loses on a system-catalog unique index and its STARTUP DIES:
+            #
+            #   duplicate key value violates unique constraint "pg_type_typname_nsp_index"
+            #   DETAIL:  Key (typname, typnamespace)=(policies, 2200) already exists.
+            #   ERROR:    Application startup failed. Exiting.
+            #
+            # It self-heals on restart (the table exists by then), so it read as a harmless blip — but it
+            # made a fresh install NONDETERMINISTIC: with unluckier timing or more replicas the crash
+            # backoff can outlast `helm install --wait --atomic`, which then rolls back a perfectly good
+            # install. A transaction-scoped advisory lock makes the check-then-create atomic across pods;
+            # the losers block briefly, then find every table present and no-op. Released automatically
+            # on commit or rollback, so a crashed replica cannot wedge the others.
+            await conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _SCHEMA_INIT_LOCK})
             await conn.run_sync(Base.metadata.create_all)
             log.info("nrvq.startup.create_tables.create_all_done", code="NRVQ-DB-DEBUG-2C")
             # create_all never ALTERs an existing table, so add new columns idempotently for
