@@ -439,3 +439,71 @@ def test_workload_api_mode_sidecars_are_unaffected() -> None:
 @pytest.mark.parametrize("svid", ["", "not-a-spiffe-id", "spiffe://norviq/ns//sa/x", "spiffe://norviq/x/y/z/w"])
 def test_unparseable_svids_attest_nothing(svid: str) -> None:
     assert auth_mod.attested_namespace({"role": "service", "spiffe_id": svid}, "payments") == ""
+
+
+# --- The bound-identity ratchet must be SATISFIABLE in every SPIFFE mode -----------------------------
+#
+# `auth_require_bound_agent_identity` is the flag that refuses an unbound machine credential, and it is
+# what closes the residual the attested-namespace tests above deliberately leave open. It required
+# `spiffe_id` unconditionally — but the webhook binds that claim ONLY in mock mode
+# (`webhook/injector.go::mintSidecarToken`; `injector_identity_binding_test.go` asserts it is absent under
+# workload-api, since a SPIRE-issued id has a trust domain the webhook cannot predict and a guess would
+# 403 every call).
+#
+# So on a workload-api install, turning the ratchet ON would have rejected EVERY sidecar evaluation on the
+# hot path. A security control that cannot be enabled is a trap, not a posture.
+
+
+def _svc(**claims) -> dict:
+    return {"role": "service", "sub": "sidecar", **claims}
+
+
+def test_ratchet_rejects_an_unbound_machine_credential(monkeypatch) -> None:
+    """The ratchet still does its job: no agent_class, no evaluation."""
+    monkeypatch.setattr(settings, "auth_require_bound_agent_identity", True)
+    monkeypatch.setattr(settings, "spiffe_mode", "mock")
+    with pytest.raises(HTTPException) as exc:
+        auth_mod.scoped_identity(_svc(), {"namespace": "team-a"})
+    assert exc.value.status_code == 403
+
+
+def test_ratchet_is_satisfiable_by_a_mock_mode_sidecar_token(monkeypatch) -> None:
+    """What the webhook actually mints in mock mode must pass."""
+    monkeypatch.setattr(settings, "auth_require_bound_agent_identity", True)
+    monkeypatch.setattr(settings, "spiffe_mode", "mock")
+    token_claims = _svc(agent_class="chatbot", spiffe_id="spiffe://norviq/ns/team-a/sa/default",
+                        namespace="team-a")
+    out = auth_mod.scoped_identity(token_claims, {"namespace": "team-a"})
+    assert out["agent_class"] == "chatbot"
+
+
+def test_ratchet_is_satisfiable_by_a_workload_api_sidecar_token(monkeypatch) -> None:
+    """THE trap. In workload-api mode the webhook omits spiffe_id, so requiring it 403s every call.
+
+    Without the mode-aware required set this raises 403 and every tool call on a workload-api install
+    fails the moment an operator turns the ratchet on.
+    """
+    monkeypatch.setattr(settings, "auth_require_bound_agent_identity", True)
+    monkeypatch.setattr(settings, "spiffe_mode", "workload-api")
+    token_claims = _svc(agent_class="chatbot", namespace="team-a")  # no spiffe_id — by design
+    out = auth_mod.scoped_identity(token_claims, {"namespace": "team-a"})
+    assert out["agent_class"] == "chatbot"
+
+
+def test_workload_api_mode_still_requires_agent_class(monkeypatch) -> None:
+    """Relaxing spiffe_id must not relax the field that selects the Rego program."""
+    monkeypatch.setattr(settings, "auth_require_bound_agent_identity", True)
+    monkeypatch.setattr(settings, "spiffe_mode", "workload-api")
+    with pytest.raises(HTTPException) as exc:
+        auth_mod.scoped_identity(_svc(namespace="team-a"), {"namespace": "team-a"})
+    assert exc.value.status_code == 403
+
+
+def test_mock_mode_still_requires_the_spiffe_claim(monkeypatch) -> None:
+    """The relaxation is scoped to the mode that cannot issue the claim — mock still demands it, since
+    that is what keys the trust score and the agent_frozen kill-switch."""
+    monkeypatch.setattr(settings, "auth_require_bound_agent_identity", True)
+    monkeypatch.setattr(settings, "spiffe_mode", "mock")
+    with pytest.raises(HTTPException) as exc:
+        auth_mod.scoped_identity(_svc(agent_class="chatbot"), {"namespace": "team-a"})
+    assert exc.value.status_code == 403
