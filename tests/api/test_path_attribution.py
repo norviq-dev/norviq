@@ -181,9 +181,12 @@ def test_path_timing_records_even_when_the_request_raises() -> None:
     path_timing.record_path_phase = lambda c, p, ms: recorded.append((c, p))
     try:
         with pytest.raises(RuntimeError):
-            asyncio.run(path_timing.PathTimingMiddleware(boom)({"type": "http"}, None, None))
+            asyncio.run(path_timing.PathTimingMiddleware(boom)(
+                {"type": "http", "path": "/api/v1/evaluate"}, None, None
+            ))
     finally:
         path_timing.record_path_phase = orig
+    # The hot-path bucket specifically: a failing enforcement call is the one whose cost matters most.
     assert ("api", "total_asgi") in recorded
 
 
@@ -201,3 +204,30 @@ def test_path_timing_ignores_non_http_scopes() -> None:
     asyncio.run(PathTimingMiddleware(downstream)({"type": "lifespan"}, None, None))
     asyncio.run(PathTimingMiddleware(downstream)({"type": "websocket"}, None, None))
     assert called == ["lifespan", "websocket"]
+
+
+def test_total_asgi_is_bucketed_so_it_stays_comparable() -> None:
+    """An unlabelled total is not comparable to a per-endpoint inner metric.
+
+    The first version aggregated every path, so /metrics scrapes (341 ms each) and /readyz inflated the mean
+    and subtracting the /evaluate-only inner metric produced a gap that was partly an aggregation artefact.
+    Two buckets: the hot path and everything else — comparable, and bounded against path-param cardinality.
+    """
+    import asyncio
+
+    from norviq.api import path_timing
+
+    seen: list = []
+
+    async def ok(scope, receive, send):
+        return None
+
+    orig = path_timing.record_path_phase
+    path_timing.record_path_phase = lambda c, p, ms: seen.append(p)
+    try:
+        asyncio.run(path_timing.PathTimingMiddleware(ok)({"type": "http", "path": "/api/v1/evaluate"}, None, None))
+        asyncio.run(path_timing.PathTimingMiddleware(ok)({"type": "http", "path": "/metrics"}, None, None))
+        asyncio.run(path_timing.PathTimingMiddleware(ok)({"type": "http", "path": "/api/v1/policies/a/b"}, None, None))
+    finally:
+        path_timing.record_path_phase = orig
+    assert seen == ["total_asgi", "total_asgi_other", "total_asgi_other"], seen
