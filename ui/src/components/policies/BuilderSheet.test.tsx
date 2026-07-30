@@ -474,7 +474,7 @@ describe("BuilderSheet — Intent Allowlist mode (Phase 2c)", () => {
 
     await waitFor(() => {
       const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
-      expect(rego).toContain('allow_names = {"search_docs"}');
+      expect(rego).toContain('allow_names := {"search_docs"}');
     });
 
     // Removing the tool via its chip's remove button brings the empty-allowlist warning back.

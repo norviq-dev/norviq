@@ -976,7 +976,12 @@ function buildAllowlistBody(graph: BuilderGraph, targetNamespace: string): strin
     `default reason = ${JSON.stringify(`Blocked: tool is not in the intended allowlist for ${reasonPhrase}`)}`
   ].join("\n");
 
-  const allowSetsBlock = [`allow_names = ${jsonSet(names)}`, `allow_skeletons = ${jsonSet(skels)}`].join("\n");
+  // `:=` (not `=`) deliberately: this mirrors the server generator's `_rego_quoted_set`
+  // (norviq/api/threat_intent.py), and coverage.py's `_ALLOW_NAMES_RE` — /allow_names\s*:=\s*\{/ —
+  // only parses the `:=` form. Emitting `=` compiled and enforced identically but made the Overview
+  // report an intent policy with an EMPTY allow_tools list, so the operator could not see what the
+  // policy actually permits. Keep both sets on `:=`.
+  const allowSetsBlock = [`allow_names := ${jsonSet(names)}`, `allow_skeletons := ${jsonSet(skels)}`].join("\n");
 
   const membershipBlock = [
     `in_allowlist { allow_names[lower(input.tool_name)] }`,

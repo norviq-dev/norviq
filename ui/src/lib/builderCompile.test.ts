@@ -734,8 +734,8 @@ describe("builderCompile — Intent Allowlist mode (Phase 2c) — shape", () => 
     expect(result.rego).toContain('default decision = "block"');
     expect(result.rego).toContain('default rule_id = "intent_default_deny"');
     expect(result.rego).toContain('default reason = "Blocked: tool is not in the intended allowlist for p2c-verify"');
-    expect(result.rego).toContain('allow_names = {"get_order", "search_docs"}');
-    expect(result.rego).toContain('allow_skeletons = {"get_order", "search_docs"}');
+    expect(result.rego).toContain('allow_names := {"get_order", "search_docs"}');
+    expect(result.rego).toContain('allow_skeletons := {"get_order", "search_docs"}');
     expect(result.rego).toContain("in_allowlist { allow_names[lower(input.tool_name)] }");
     expect(result.rego).toContain("in_allowlist { allow_skeletons[input.tool_name_normalized] }");
     expect(result.rego).toContain("allow_intent {");
@@ -790,7 +790,7 @@ describe("builderCompile — Intent Allowlist mode (Phase 2c) — shape", () => 
     const result = compileGraph(graph);
     expect(result.errors).toEqual([]);
     // Exactly the two distinct lower-cased names, sorted.
-    expect(result.rego).toContain('allow_names = {"get_order", "search_docs"}');
+    expect(result.rego).toContain('allow_names := {"get_order", "search_docs"}');
   });
 });
 
@@ -869,8 +869,8 @@ describe("builderCompile — Intent Allowlist empty allowlist (Phase 2c)", () =>
     const result = compileGraph(allowlistGraph("p2c-verify", []));
     expect(result.errors).toEqual([]);
     expect(result.rego).not.toBe("");
-    expect(result.rego).toContain("allow_names = {}");
-    expect(result.rego).toContain("allow_skeletons = {}");
+    expect(result.rego).toContain("allow_names := {}");
+    expect(result.rego).toContain("allow_skeletons := {}");
     expect(result.rego).toContain("(empty — denies every tool for this class)");
   });
 });
@@ -911,10 +911,10 @@ describe("builderCompile — Intent Allowlist detachment + mode back-compat (Pha
     const graph = allowlistGraph("p2c-verify", ["search_docs"]);
     const { rego, errors } = compileGraph(graph);
     expect(errors).toEqual([]);
-    const needle = 'allow_names = {"search_docs"}';
+    const needle = 'allow_names := {"search_docs"}';
     const idx = rego.indexOf(needle);
     expect(idx).toBeGreaterThan(-1);
-    const mutated = rego.slice(0, idx) + 'allow_names = {"search_DOCS"}' + rego.slice(idx + needle.length);
+    const mutated = rego.slice(0, idx) + 'allow_names := {"search_DOCS"}' + rego.slice(idx + needle.length);
     expect(detachmentStatusOf(mutated)).toBe("detached");
   });
 
