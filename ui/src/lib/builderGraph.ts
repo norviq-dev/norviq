@@ -107,10 +107,46 @@ export interface BuilderRule {
   conditions: BuilderCondition[][];
 }
 
-export interface BuilderScope {
+/** Agent-class tier (the original, MVP scope): the loader key POSTed to the server is the class name
+ *  verbatim (`agent_class = "<class>"`) and the compiled rego guards on `input.agent.agent_class`. */
+export interface BuilderScopeClass {
   kind: "class";
   agentClass: string;
 }
+
+/**
+ * Namespace tier (Phase 3): applies to EVERY call in the namespace, not just one class — the server's
+ * `_collect_candidates` always looks up `f"{namespace}:namespace:{namespace}"` regardless of the
+ * caller's own `agent_class`, so the compiled rego must NOT guard on `agent_class` (it would never
+ * fire); it guards on `input.agent.namespace` instead (defense-in-depth — the loader key already scopes
+ * lookup to this namespace, but the rego makes that scoping explicit too). The loader key POSTed is
+ * `agent_class = "namespace:<namespace>"` (see `resolve_policy_key`/builderCompile.ts's `loaderKeyFor`).
+ */
+export interface BuilderScopeNamespace {
+  kind: "namespace";
+  namespace: string;
+}
+
+/**
+ * Workload tier (Phase 3): scoped to one Deployment (deployment kind ONLY — `_collect_candidates` only
+ * ever looks up `deployment:<name>`; any other kind `resolve_policy_key` would happily mint, e.g.
+ * `statefulset:foo`, is created but SILENTLY NEVER ENFORCED, so this type intentionally has no `kind`
+ * field of its own — it is always a deployment). The OPA input has no workload/deployment field at all
+ * (`input.agent` is only `{spiffe_id, namespace, agent_class}`), so a workload policy cannot self-guard
+ * on the workload name — scoping is purely by loader key (`agent_class = "deployment:<workloadName>"`);
+ * the compiled rego's only guard is `input.agent.namespace == "<the target namespace>"` (the target
+ * namespace is not part of this scope object — it's supplied to the compiler separately, since it's the
+ * same "where does this policy live" value the caller already tracks for every tier's POST).
+ */
+export interface BuilderScopeWorkload {
+  kind: "workload";
+  workloadName: string;
+}
+
+/** Discriminated union of the three policy tiers (Phase 3). Back-compat is critical: an existing graph
+ *  with `kind: "class"` (every graph saved before Phase 3) must keep compiling byte-identically —
+ *  `BuilderScopeClass`'s shape is unchanged from the original single-member `BuilderScope`. */
+export type BuilderScope = BuilderScopeClass | BuilderScopeNamespace | BuilderScopeWorkload;
 
 export interface BuilderDefaults {
   decision: "allow" | "block";

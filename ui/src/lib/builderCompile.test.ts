@@ -10,8 +10,8 @@
 // + opa eval against this exact fixture, see the round-A execution report) — a passing compile is not
 // proof on its own, same doctrine as the rest of this repo's e2e checks.
 import { describe, it, expect } from "vitest";
-import { compileGraph, extractEmbeddedGraph, detachmentStatusOf, BUDGET_MAX_LINES } from "./builderCompile";
-import type { BuilderGraph, BuilderRule } from "./builderGraph";
+import { compileGraph, extractEmbeddedGraph, detachmentStatusOf, loaderKeyFor, scopeIdentifier, BUDGET_MAX_LINES } from "./builderCompile";
+import type { BuilderGraph, BuilderRule, BuilderScope } from "./builderGraph";
 
 function graphWith(rules: BuilderRule[], defaults: BuilderGraph["defaults"] = { decision: "allow", reason: "d" }): BuilderGraph {
   return { schemaVersion: 1, scope: { kind: "class", agentClass: "t" }, rules, defaults };
@@ -939,5 +939,227 @@ describe("builderCompile — Intent Allowlist detachment + mode back-compat (Pha
     // therefore the body hash) now includes the extra `mode` key. Compare the body ignoring the blob/hash.
     const stripHeader = (s: string) => s.replace(/^# nrvq-builder-graph\/v1: .*$/m, "").replace(/^# nrvq-builder-hash: .*$/m, "");
     expect(stripHeader(result.rego)).toBe(stripHeader(FIXTURE_GOLDEN_REGO));
+  });
+});
+
+// ==== Phase 3: namespace + workload tiers, and the reserved-scope guard (Item A, P1 fix) ============
+// Grounding (advisor-verified, not re-derived here): the server's `resolve_policy_key` mints
+// `namespace:<ns>` / `deployment:<name>` loader keys for the namespace/workload tiers, and
+// `_collect_candidates` collects the namespace-tier candidate for EVERY call in that namespace
+// (unconditional on agent_class) and the workload-tier candidate ONLY via the loader key (OPA's own
+// input carries no workload field to self-guard on) — see builderCompile.ts's own "scope / tier
+// helpers" section header comment for the full mapping this section's assertions pin.
+
+function nsGraphWith(
+  namespace: string,
+  rules: BuilderRule[],
+  defaults: BuilderGraph["defaults"] = { decision: "allow", reason: "d" }
+): BuilderGraph {
+  return { schemaVersion: 1, scope: { kind: "namespace", namespace }, rules, defaults };
+}
+
+function wlGraphWith(
+  workloadName: string,
+  rules: BuilderRule[],
+  defaults: BuilderGraph["defaults"] = { decision: "allow", reason: "d" }
+): BuilderGraph {
+  return { schemaVersion: 1, scope: { kind: "workload", workloadName }, rules, defaults };
+}
+
+const ONE_BLOCK_RULE: BuilderRule[] = [
+  { id: "r1", decision: "block", ruleId: "block_wipe", reason: "Blocked a destructive tool", conditions: [[{ type: "toolIn", tools: ["wipe_index"] }]] }
+];
+
+describe("builderCompile — loaderKeyFor / scopeIdentifier (Phase 3)", () => {
+  it("class tier: loader key is the class verbatim", () => {
+    const scope: BuilderScope = { kind: "class", agentClass: "report-gen" };
+    expect(loaderKeyFor(scope)).toBe("report-gen");
+    expect(scopeIdentifier(scope)).toBe("report-gen");
+  });
+  it("namespace tier: loader key is namespace:<ns>", () => {
+    const scope: BuilderScope = { kind: "namespace", namespace: "default" };
+    expect(loaderKeyFor(scope)).toBe("namespace:default");
+    expect(scopeIdentifier(scope)).toBe("default");
+  });
+  it("workload tier: loader key is deployment:<name> (deployment kind only)", () => {
+    const scope: BuilderScope = { kind: "workload", workloadName: "checkout" };
+    expect(loaderKeyFor(scope)).toBe("deployment:checkout");
+    expect(scopeIdentifier(scope)).toBe("checkout");
+  });
+});
+
+describe("builderCompile — namespace tier (Phase 3)", () => {
+  it("compiles with an input.agent.namespace guard and NO agent_class guard anywhere in the module", () => {
+    const result = compileGraph(nsGraphWith("default", ONE_BLOCK_RULE));
+    expect(result.errors).toEqual([]);
+    expect(result.rego).toContain('input.agent.namespace == "default"');
+    expect(result.rego).not.toMatch(/agent_class ==/);
+    expect(result.rego).toContain("package norviq.builder.ns_default");
+    expect(result.rego).toContain('default rule_id = "builder_default_ns_default"');
+  });
+
+  it("is deterministic and opa-safe (no data.*/http.send)", () => {
+    const a = compileGraph(nsGraphWith("default", ONE_BLOCK_RULE));
+    const b = compileGraph(nsGraphWith("default", ONE_BLOCK_RULE));
+    expect(a.rego).toBe(b.rego);
+    expect(a.rego.length).toBeGreaterThan(0);
+    expect(a.rego).not.toMatch(/\bdata\./);
+    expect(a.rego).not.toMatch(/http\.send/);
+  });
+
+  it('round-trips through the embedded graph blob and reports "attached" via detachmentStatusOf', () => {
+    const graph = nsGraphWith("default", ONE_BLOCK_RULE);
+    const { rego, errors } = compileGraph(graph);
+    expect(errors).toEqual([]);
+    expect(extractEmbeddedGraph(rego)).toEqual(graph);
+    expect(detachmentStatusOf(rego)).toBe("attached");
+  });
+
+  it("intent-allowlist mode: the allow_intent/denied guards use input.agent.namespace, not agent_class", () => {
+    const graph: BuilderGraph = {
+      schemaVersion: 1,
+      scope: { kind: "namespace", namespace: "default" },
+      mode: "allowlist",
+      rules: [],
+      defaults: { decision: "allow", reason: "n/a" },
+      allowlist: { tools: ["search_docs"], refinements: { readonly: false, egress: false, scope: false, rate: false } }
+    };
+    const result = compileGraph(graph);
+    expect(result.errors).toEqual([]);
+    expect(result.rego).toContain('input.agent.namespace == "default"');
+    expect(result.rego).not.toMatch(/agent_class ==/);
+    expect(result.rego).toContain("package norviq.builder.ns_default");
+  });
+});
+
+describe("builderCompile — workload tier (Phase 3)", () => {
+  it("compiles with an input.agent.namespace guard (sourced from the supplied targetNamespace) and NO agent_class guard", () => {
+    const result = compileGraph(wlGraphWith("checkout", ONE_BLOCK_RULE), "prod-ns");
+    expect(result.errors).toEqual([]);
+    expect(result.rego).toContain('input.agent.namespace == "prod-ns"');
+    expect(result.rego).not.toMatch(/agent_class ==/);
+    expect(result.rego).toContain("package norviq.builder.wl_checkout");
+    expect(result.rego).toContain('default rule_id = "builder_default_wl_checkout"');
+  });
+
+  it("with no targetNamespace supplied, the guard is against the empty string (still valid rego, just unconditionally false at runtime)", () => {
+    const result = compileGraph(wlGraphWith("checkout", ONE_BLOCK_RULE));
+    expect(result.errors).toEqual([]);
+    expect(result.rego).toContain('input.agent.namespace == ""');
+  });
+
+  it("is deterministic and opa-safe (no data.*/http.send)", () => {
+    const a = compileGraph(wlGraphWith("checkout", ONE_BLOCK_RULE), "prod-ns");
+    const b = compileGraph(wlGraphWith("checkout", ONE_BLOCK_RULE), "prod-ns");
+    expect(a.rego).toBe(b.rego);
+    expect(a.rego).not.toMatch(/\bdata\./);
+    expect(a.rego).not.toMatch(/http\.send/);
+  });
+
+  it('round-trips through the embedded graph blob and reports "attached" via detachmentStatusOf', () => {
+    const graph = wlGraphWith("checkout", ONE_BLOCK_RULE);
+    const { rego, errors } = compileGraph(graph, "prod-ns");
+    expect(errors).toEqual([]);
+    expect(extractEmbeddedGraph(rego)).toEqual(graph); // targetNamespace isn't part of the graph itself
+    expect(detachmentStatusOf(rego)).toBe("attached");
+  });
+
+  it("distinct package/default-rule-id from a same-named class or namespace tier (no collision)", () => {
+    const wl = compileGraph(wlGraphWith("checkout", ONE_BLOCK_RULE), "ns");
+    const ns = compileGraph(nsGraphWith("checkout", ONE_BLOCK_RULE));
+    const cls = compileGraph({ schemaVersion: 1, scope: { kind: "class", agentClass: "checkout" }, rules: ONE_BLOCK_RULE, defaults: { decision: "allow", reason: "d" } });
+    expect(wl.errors).toEqual([]);
+    expect(ns.errors).toEqual([]);
+    expect(cls.errors).toEqual([]);
+    expect(wl.rego).toContain("package norviq.builder.wl_checkout");
+    expect(ns.rego).toContain("package norviq.builder.ns_checkout");
+    expect(cls.rego).toContain("package norviq.builder.checkout");
+    const packages = [wl.rego, ns.rego, cls.rego].map((r) => r.match(/^package (\S+)$/m)![1]);
+    expect(new Set(packages).size).toBe(3);
+  });
+});
+
+describe("builderCompile — reserved-scope guard (Phase 3, Item A / P1 fix)", () => {
+  const RESERVED_CLASSES = ["__baseline__", "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__", "__anything__"];
+
+  RESERVED_CLASSES.forEach((reserved) => {
+    it(`rejects "${reserved}" as a class-tier agent class (reserved_scope), no rego emitted`, () => {
+      const graph: BuilderGraph = {
+        schemaVersion: 1,
+        scope: { kind: "class", agentClass: reserved },
+        rules: ONE_BLOCK_RULE,
+        defaults: { decision: "allow", reason: "d" }
+      };
+      const result = compileGraph(graph);
+      expect(result.rego).toBe("");
+      expect(result.errors.map((e) => e.code)).toContain("reserved_scope");
+    });
+  });
+
+  it("rejects a class agent class containing ':' (would collide with the namespace:/deployment: key scheme)", () => {
+    const graph: BuilderGraph = {
+      schemaVersion: 1,
+      scope: { kind: "class", agentClass: "namespace:default" },
+      rules: ONE_BLOCK_RULE,
+      defaults: { decision: "allow", reason: "d" }
+    };
+    const result = compileGraph(graph);
+    expect(result.rego).toBe("");
+    expect(result.errors.map((e) => e.code)).toContain("reserved_scope");
+  });
+
+  it('rejects "__cluster__" as a namespace-tier target namespace, no rego emitted', () => {
+    const result = compileGraph(nsGraphWith("__cluster__", ONE_BLOCK_RULE));
+    expect(result.rego).toBe("");
+    expect(result.errors.map((e) => e.code)).toEqual(["reserved_scope"]);
+  });
+
+  it('rejects "__cluster__" as the class tier\'s target namespace (2nd compileGraph argument)', () => {
+    const graph: BuilderGraph = {
+      schemaVersion: 1,
+      scope: { kind: "class", agentClass: "report-gen" },
+      rules: ONE_BLOCK_RULE,
+      defaults: { decision: "allow", reason: "d" }
+    };
+    const result = compileGraph(graph, "__cluster__");
+    expect(result.rego).toBe("");
+    expect(result.errors.map((e) => e.code)).toEqual(["reserved_scope"]);
+  });
+
+  it('rejects "__cluster__" as the workload tier\'s target namespace', () => {
+    const result = compileGraph(wlGraphWith("checkout", ONE_BLOCK_RULE), "__cluster__");
+    expect(result.rego).toBe("");
+    expect(result.errors.map((e) => e.code)).toEqual(["reserved_scope"]);
+  });
+
+  it("a normal, non-reserved class/namespace/workload compiles cleanly (no false positives)", () => {
+    expect(
+      compileGraph({ schemaVersion: 1, scope: { kind: "class", agentClass: "report-gen" }, rules: ONE_BLOCK_RULE, defaults: { decision: "allow", reason: "d" } })
+        .errors
+    ).toEqual([]);
+    expect(compileGraph(nsGraphWith("default", ONE_BLOCK_RULE)).errors).toEqual([]);
+    expect(compileGraph(wlGraphWith("checkout", ONE_BLOCK_RULE), "default").errors).toEqual([]);
+    // A remediation-overlay-shaped class ("<class>__remediation__") is NOT reserved (single leading
+    // underscore doctrine — isReservedScope only catches a DOUBLE leading underscore) — same doctrine
+    // reservedScope.ts's own isRemediationOverlayClass documents.
+    expect(
+      compileGraph({
+        schemaVersion: 1,
+        scope: { kind: "class", agentClass: "report-gen__remediation__" },
+        rules: ONE_BLOCK_RULE,
+        defaults: { decision: "allow", reason: "d" }
+      }).errors
+    ).toEqual([]);
+  });
+
+  it("the reserved-scope error is reachable even from a graph shape that never went through the UI's own field-level guard (compiler is the true backstop)", () => {
+    // Simulates a graph constructed programmatically (e.g. a saved-graph blob edited by hand, or a
+    // future alternate UI) rather than through BuilderSheet's input field.
+    const bypassGraph = JSON.parse(
+      JSON.stringify({ schemaVersion: 1, scope: { kind: "class", agentClass: "__baseline__" }, rules: [], defaults: { decision: "allow", reason: "d" } })
+    ) as BuilderGraph;
+    const result = compileGraph(bypassGraph);
+    expect(result.rego).toBe("");
+    expect(result.errors.some((e) => e.code === "reserved_scope")).toBe(true);
   });
 });

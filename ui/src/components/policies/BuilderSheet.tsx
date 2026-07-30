@@ -29,6 +29,8 @@ import {
 } from "../../api/client";
 import {
   compileGraph,
+  loaderKeyFor,
+  scopeIdentifier,
   type BuilderError
 } from "../../lib/builderCompile";
 import type {
@@ -41,7 +43,8 @@ import type {
   BuilderGraph,
   BuilderKeywordTarget,
   BuilderMode,
-  BuilderRule
+  BuilderRule,
+  BuilderScope
 } from "../../lib/builderGraph";
 import { CAPABILITY_SOURCE_ORDER, CAPABILITY_SOURCES, verbsForSource, type CapabilityVerb } from "../../lib/capabilitySources";
 import { ApplyResultPanel, type ApplyResult } from "../common/ApplyResultPanel";
@@ -62,6 +65,13 @@ const EMPTY_REFINEMENTS: BuilderAllowlistRefinements = { readonly: false, egress
 // form-based Visual Builder is now the ONLY visual builder, so this vocabulary has a single consumer.)
 export const DETECTORS: BuilderDetector[] = ["sql_injection", "shell_injection", "prompt_injection", "pii", "destructive_tool"];
 export const DECISIONS: BuilderDecision[] = ["block", "escalate", "audit"];
+// Policy tiers (Phase 3) — mirrors BuilderScope["kind"]. Order is the tier picker's own display order.
+export const SCOPE_TIERS: BuilderScope["kind"][] = ["class", "namespace", "workload"];
+export const SCOPE_TIER_LABEL: Record<BuilderScope["kind"], string> = {
+  class: "Agent class",
+  namespace: "Namespace",
+  workload: "Workload"
+};
 export const KEYWORD_TARGETS: BuilderKeywordTarget[] = ["tool", "params", "both"];
 // The condition-type dropdown's own options — deliberately excludes "not" (Phase 2b): NOT is a toggle
 // applied ON TOP of one of these types (see ConditionChip's NOT button below), not a selectable type of
@@ -634,6 +644,19 @@ export function BuilderSheet({
   const [ruleIdTouched, setRuleIdTouched] = useState<Record<string, boolean>>({});
   const [knownClasses, setKnownClasses] = useState<string[]>([]);
 
+  // Policy tier (Phase 3): "class" (unchanged MVP scope) | "namespace" | "workload" (deployment only —
+  // see builderGraph.ts's BuilderScopeWorkload doc comment for why no other workload kind is offered).
+  // The namespace tier deliberately has NO separate identifier state of its own: its identifier IS
+  // `targetNamespace` below (the same field every tier already POSTs as the `namespace` body field) —
+  // reusing it, rather than tracking a second value that could drift out of sync, is what guarantees
+  // the namespace-tier rego guard and the loader key (`namespace:<ns>`) always agree on which
+  // namespace. The workload tier gets its own `workloadName` identifier (a deployment name is not a
+  // namespace) alongside the still-required `targetNamespace` (which namespace that deployment lives
+  // in — needed both for the loader key `deployment:<name>` and the compiled guard, see
+  // builderCompile.ts's `scopeGuardLine`).
+  const [tier, setTier] = useState<BuilderScope["kind"]>("class");
+  const [workloadName, setWorkloadName] = useState("");
+
   // Namespace honesty (Phase 2f): `namespace` is now the RAW global-selector value — the caller no
   // longer silently resolves "all" to "default". `targetNamespace` is the operator's own choice, seeded
   // from the prop only when it's already concrete; when the selector is "all"/"" this starts empty and
@@ -759,18 +782,30 @@ export function BuilderSheet({
     };
   }, []);
 
+  // Scope (Phase 3): tier-dispatched. The namespace tier reuses `targetNamespace` directly as its own
+  // identifier (see the `tier`/`workloadName` state doc comment above for why) rather than tracking a
+  // second value that could drift out of sync with the loader key.
+  const scope: BuilderScope = useMemo(() => {
+    if (tier === "namespace") return { kind: "namespace", namespace: targetNamespace.trim() };
+    if (tier === "workload") return { kind: "workload", workloadName: workloadName.trim() };
+    return { kind: "class", agentClass: agentClass.trim() };
+  }, [tier, targetNamespace, agentClass, workloadName]);
+
   const graph: BuilderGraph = useMemo(
     () => ({
       schemaVersion: 1,
-      scope: { kind: "class", agentClass: agentClass.trim() },
+      scope,
       mode,
       rules,
       defaults,
       ...(mode === "allowlist" ? { allowlist: { tools: allowlistTools, refinements: allowlistRefinements } } : {})
     }),
-    [agentClass, rules, defaults, mode, allowlistTools, allowlistRefinements]
+    [scope, rules, defaults, mode, allowlistTools, allowlistRefinements]
   );
-  const compiled = useMemo(() => compileGraph(graph), [graph]);
+  // `targetNamespace` is passed as the compiler's 2nd argument for every tier (class/namespace tiers
+  // ignore it; the workload tier needs it for its `input.agent.namespace` guard — see
+  // builderCompile.ts's `compileGraph` doc comment).
+  const compiled = useMemo(() => compileGraph(graph, targetNamespace.trim()), [graph, targetNamespace]);
 
   // Any edit to the graph after a save re-arms the unsaved-changes guard (see the `saved` state above).
   useEffect(() => {
@@ -778,17 +813,27 @@ export function BuilderSheet({
   }, [graph]);
 
   const hasErrors = compiled.errors.length > 0;
-  const scopeReady = agentClass.trim().length > 0;
+  // Reserved-scope errors (Item A, P1 fix) surfaced right next to the identifier field that caused
+  // them — a subset of `compiled.errors`, so they ALSO already disable Save/Dry-run via `hasErrors`
+  // (this is only for the inline, field-adjacent message; it adds no separate gate of its own).
+  const scopeReservedErrors = useMemo(() => compiled.errors.filter((e) => e.code === "reserved_scope"), [compiled.errors]);
+  // Per-tier "an identifier has been entered" check. The namespace tier's identifier IS
+  // `targetNamespace` (see above), so its own readiness collapses to `namespaceReady` — the `&&
+  // namespaceReady` already ANDed into canDryRun/canSave below makes that redundant-but-correct rather
+  // than a second, possibly-inconsistent check.
+  const scopeReady = tier === "class" ? agentClass.trim().length > 0 : tier === "namespace" ? namespaceReady : workloadName.trim().length > 0;
   const dryRunStale = dryRunRego !== null && dryRunRego !== compiled.rego;
   // Both the dry-run and the save POST a concrete namespace to the server (dry-run replays that
   // namespace's real traffic) — neither may proceed while the target is still "all"/"" (see
-  // `namespaceReady` above, seeded from `targetNamespace`).
+  // `namespaceReady` above, seeded from `targetNamespace`). Every tier needs a concrete target
+  // namespace (class/namespace: it's where the row is written; workload: it's also baked into the
+  // guard and the loader key), so this ANDs in regardless of tier.
   const canDryRun = scopeReady && namespaceReady && !hasErrors && !dryRunLoading;
   const canSave = scopeReady && namespaceReady && !hasErrors && dryRunResult?.valid === true && !dryRunStale && !saving;
-  // Meaningful unsaved content (some scope/class typed, at least one rule added, or — in allowlist mode
-  // — at least one tool added) with no successful save since the last edit — this is what
-  // requestClose() checks before discarding the graph.
-  const hasUnsavedContent = agentClass.trim().length > 0 || rules.length > 0 || (mode === "allowlist" && allowlistTools.length > 0);
+  // Meaningful unsaved content (some scope identifier typed for whichever tier is selected, at least
+  // one rule added, or — in allowlist mode — at least one tool added) with no successful save since
+  // the last edit — this is what requestClose() checks before discarding the graph.
+  const hasUnsavedContent = scopeIdentifier(scope).trim().length > 0 || rules.length > 0 || (mode === "allowlist" && allowlistTools.length > 0);
   const isDirty = hasUnsavedContent && !saved;
 
   const primaryEnforcementMode = rules.some((r) => r.decision === "block")
@@ -807,7 +852,13 @@ export function BuilderSheet({
     try {
       const result = await dryRunPolicy({
         namespace: targetNamespace.trim(),
-        agent_class: agentClass.trim(),
+        // Dry-run's `agent_class` has a DIFFERENT meaning than Save's (below): the server's own
+        // `_replay_recent` filters REPLAYED audit records by `AuditLogEntry.agent_class == agent_class`
+        // when truthy, and its docstring says "a class-less (namespace/workload) policy replays the
+        // whole namespace" when it's falsy. Sending the namespace/workload tier's LOADER key here (e.g.
+        // "namespace:default") would filter for a literal agent_class no real record ever has —
+        // always zero replay — so those two tiers send "" instead, matching the server's own doctrine.
+        agent_class: tier === "class" ? agentClass.trim() : "",
         rego_source: ranAgainst
       });
       setDryRunResult(result);
@@ -825,26 +876,29 @@ export function BuilderSheet({
   const saveAndEnforce = async () => {
     if (!canSave) return;
     setSaving(true);
-    const cls = agentClass.trim();
+    // The REAL loader key this tier POSTs — `<class>` / `namespace:<ns>` / `deployment:<name>` — mirrors
+    // the server's own `resolve_policy_key` exactly (see builderCompile.ts's `loaderKeyFor`). This is
+    // NOT the same value dry-run sends as `agent_class` above (see runDryRun's comment for why).
+    const key = loaderKeyFor(scope);
     const ns = targetNamespace.trim(); // ALWAYS concrete here — canSave requires namespaceReady
     try {
       const res = await apiSend<{ version?: number }>("/api/v1/policies", "POST", {
         namespace: ns,
-        agent_class: cls,
+        agent_class: key,
         rego_source: compiled.rego,
         enforcement_mode: primaryEnforcementMode
       });
       const ver = res?.version;
       setApplyResult({
         kind: "local",
-        title: `Created ${ns}/${cls}${ver ? ` · v${ver}` : ""}`,
+        title: `Created ${ns}/${key}${ver ? ` · v${ver}` : ""}`,
         ok: true,
-        outcome: `Policy authored via the Visual Policy Builder for agent class "${cls}" in namespace "${ns}" and loaded into this cluster's policy engine — enforcing "${primaryEnforcementMode}". Effective on the next tool call for this class.`,
-        manifest: { namespace: ns, agent_class: cls, enforcement_mode: primaryEnforcementMode, rego: compiled.rego },
+        outcome: `Policy authored via the Visual Policy Builder for ${SCOPE_TIER_LABEL[tier].toLowerCase()} "${scopeIdentifier(scope)}" (loader key "${key}") in namespace "${ns}" and loaded into this cluster's policy engine — enforcing "${primaryEnforcementMode}". Effective on the next matching tool call.`,
+        manifest: { namespace: ns, agent_class: key, enforcement_mode: primaryEnforcementMode, rego: compiled.rego },
         expectedVersion: ver,
         expectedMode: primaryEnforcementMode
       });
-      onSaved?.({ namespace: ns, agentClass: cls, version: ver });
+      onSaved?.({ namespace: ns, agentClass: key, version: ver });
       // Successful save — clear the unsaved-changes guard so closing right after does not prompt.
       setSaved(true);
     } catch (e) {
@@ -856,7 +910,7 @@ export function BuilderSheet({
         ok: false,
         outcome: msg,
         code: codeMatch ? codeMatch[0] : undefined,
-        manifest: { namespace: ns, agent_class: cls, enforcement_mode: primaryEnforcementMode }
+        manifest: { namespace: ns, agent_class: key, enforcement_mode: primaryEnforcementMode }
       });
     } finally {
       setSaving(false);
@@ -896,7 +950,7 @@ export function BuilderSheet({
           <div>
             <div className="sheet-title">Visual Policy Builder</div>
             <div className="panel-sub mono" style={{ marginTop: 3 }}>
-              {agentClass.trim() || "new agent class"} · {targetNamespace.trim() || "no namespace set"}
+              {SCOPE_TIER_LABEL[tier]}: {scopeIdentifier(scope).trim() || `new ${tier}`} · {targetNamespace.trim() || "no namespace set"}
             </div>
           </div>
           <button className="icon-btn" data-testid="builder-close" onClick={requestClose}>
@@ -908,33 +962,97 @@ export function BuilderSheet({
           {/* LEFT: scope + rule rail + defaults */}
           <div style={{ flex: "1 1 480px", minWidth: 0, overflowY: "auto", maxHeight: "calc(100vh - 180px)", paddingRight: 4 }}>
             <div className="section-label">Scope</div>
-            <div className="field-row">
-              <label className="field-label">Agent class</label>
-              <input
-                data-testid="builder-agent-class"
-                className="input mono"
-                list="builder-known-classes"
-                placeholder="e.g. builder-spike"
-                value={agentClass}
-                onChange={(e) => setAgentClass(e.target.value)}
-                style={{ width: "100%" }}
-              />
-              <datalist id="builder-known-classes">
-                {knownClasses.map((c) => (
-                  <option key={c} value={c} />
-                ))}
-              </datalist>
+
+            {/* Tier picker (Phase 3): switches which identifier field(s) below are shown/required and
+                which loader key + rego guard the compiler emits (builderCompile.ts's scope helpers) —
+                see builderGraph.ts's BuilderScope doc comments for the full class/namespace/workload
+                semantics. Switching tiers does NOT clear the other tiers' typed-in state (agentClass /
+                workloadName each keep their own value), so flipping back and forth doesn't lose work. */}
+            <div data-testid="builder-tier-picker" style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+              {SCOPE_TIERS.map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  data-testid={`builder-tier-${t}`}
+                  aria-pressed={tier === t}
+                  className="sb-link"
+                  style={{
+                    fontSize: 12,
+                    padding: "5px 10px",
+                    borderRadius: 6,
+                    border: `1px solid ${tier === t ? "#2DDAB8" : "var(--border)"}`,
+                    background: tier === t ? "#2DDAB81e" : "transparent",
+                    color: tier === t ? "#2DDAB8" : "var(--text-muted)"
+                  }}
+                  onClick={() => setTier(t)}
+                >
+                  {SCOPE_TIER_LABEL[t]}
+                </button>
+              ))}
             </div>
+
+            {tier === "class" && (
+              <div className="field-row">
+                <label className="field-label">Agent class</label>
+                <input
+                  data-testid="builder-agent-class"
+                  className="input mono"
+                  list="builder-known-classes"
+                  placeholder="e.g. builder-spike"
+                  value={agentClass}
+                  onChange={(e) => setAgentClass(e.target.value)}
+                  style={{ width: "100%" }}
+                />
+                <datalist id="builder-known-classes">
+                  {knownClasses.map((c) => (
+                    <option key={c} value={c} />
+                  ))}
+                </datalist>
+              </div>
+            )}
+
+            {tier === "workload" && (
+              <div className="field-row">
+                <label className="field-label">Workload name (Deployment)</label>
+                <input
+                  data-testid="builder-scope-identifier"
+                  className="input mono"
+                  placeholder="e.g. checkout"
+                  value={workloadName}
+                  onChange={(e) => setWorkloadName(e.target.value)}
+                  style={{ width: "100%" }}
+                />
+                <div className="panel-sub" style={{ fontSize: 10.5, marginTop: 4 }}>
+                  Deployments only — other workload kinds (StatefulSet, DaemonSet, …) are never enforced
+                  by the policy engine, so this tier only ever targets a Deployment name.
+                </div>
+              </div>
+            )}
+
+            {scopeReservedErrors.length > 0 && (
+              <div
+                data-testid="builder-scope-reserved-error"
+                role="alert"
+                style={{ fontSize: 11.5, color: "var(--danger,#e5484d)", marginTop: 4 }}
+              >
+                {scopeReservedErrors.map((e, i) => (
+                  <div key={i}>{e.message}</div>
+                ))}
+              </div>
+            )}
 
             {/* Namespace honesty (Phase 2f): the global selector's raw value flows straight through as
                 the `namespace` prop — if it's "all"/"" there is no single concrete namespace to silently
                 pick for the operator, so this field REQUIRES an explicit choice before Save unlocks (see
                 `namespaceReady`/`canSave`). When the selector already had a concrete namespace, this is
-                pre-filled but stays editable — the operator can always see and, if they want, override it. */}
+                pre-filled but stays editable — the operator can always see and, if they want, override it.
+                Namespace tier (Phase 3): this SAME field doubles as the tier's own scope identifier —
+                see the `tier`/`workloadName` state doc comment above for why it's the one field, not two
+                that could drift apart — so its label/testid/helper text switch accordingly. */}
             <div className="field-row" style={{ marginTop: 8 }}>
-              <label className="field-label">Target namespace</label>
+              <label className="field-label">{tier === "namespace" ? "Namespace" : "Target namespace"}</label>
               <input
-                data-testid="builder-target-namespace"
+                data-testid={tier === "namespace" ? "builder-scope-identifier" : "builder-target-namespace"}
                 className="input mono"
                 list="builder-known-namespaces"
                 placeholder={isConcreteNamespace(namespace) ? namespace : "Pick a namespace — required (scope is All namespaces)"}
@@ -947,6 +1065,12 @@ export function BuilderSheet({
                   <option key={n} value={n} />
                 ))}
               </datalist>
+              {tier === "namespace" && (
+                <div className="panel-sub" style={{ fontSize: 10.5, marginTop: 4 }}>
+                  Namespace-tier policies apply to EVERY call in this namespace, regardless of the
+                  calling agent's class — like a namespace-scoped baseline.
+                </div>
+              )}
               {!namespaceReady && (
                 <div
                   data-testid="builder-namespace-required-warning"
@@ -1254,14 +1378,19 @@ export function BuilderSheet({
             )}
 
             {/* ALWAYS rendered (Phase 2f namespace honesty) — the operator sees exactly where Save will
-                write, even before either field is filled in (both show a placeholder dash then). */}
+                write, even before either field is filled in (both show a placeholder dash then).
+                Phase 3: "agent-class" here is the WIRE field name (POST /policies' `agent_class` body
+                key, for every tier) — its VALUE is the real per-tier loader key (`loaderKeyFor(scope)`:
+                `<class>` / `namespace:<ns>` / `deployment:<name>`), not a guess, so the operator always
+                sees exactly what gets written. For the class tier this is byte-identical to the
+                pre-Phase-3 behavior (the loader key IS the bare class name). */}
             <div
               data-testid="builder-create-target"
               className="mono"
               style={{ fontSize: 11.5, color: namespaceReady ? "var(--text-muted)" : "var(--escalate)", marginBottom: 8 }}
             >
               Will create in namespace: <strong>{targetNamespace.trim() || "—"}</strong> · agent-class:{" "}
-              <strong>{agentClass.trim() || "—"}</strong>
+              <strong>{scopeIdentifier(scope).trim() ? loaderKeyFor(scope) : "—"}</strong>
             </div>
 
             <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>

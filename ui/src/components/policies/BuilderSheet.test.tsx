@@ -669,3 +669,119 @@ describe("BuilderSheet — tool-name autocomplete + unknown-tool warning (Phase 
     expect(screen.queryByTestId("builder-unknown-tool-warning")).not.toBeInTheDocument();
   });
 });
+
+// --- Phase 3: tier picker (Agent class / Namespace / Workload) + reserved-scope guard --------------
+describe("BuilderSheet — policy tier picker (Phase 3)", () => {
+  it("defaults to the Agent class tier, and switching tiers swaps which identifier field(s) show", () => {
+    renderSheet();
+    expect(screen.getByTestId("builder-tier-class")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("builder-tier-namespace")).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByTestId("builder-tier-workload")).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByTestId("builder-agent-class")).toBeInTheDocument();
+    expect(screen.queryByTestId("builder-scope-identifier")).not.toBeInTheDocument();
+
+    // Namespace tier: the Agent class field disappears — the (relabeled) Target namespace field IS the
+    // scope identifier now (single field, testid swaps to builder-scope-identifier).
+    fireEvent.click(screen.getByTestId("builder-tier-namespace"));
+    expect(screen.getByTestId("builder-tier-namespace")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByTestId("builder-agent-class")).not.toBeInTheDocument();
+    expect(screen.getByTestId("builder-scope-identifier")).toBeInTheDocument();
+    expect(screen.queryByTestId("builder-target-namespace")).not.toBeInTheDocument();
+
+    // Workload tier: a NEW workload-name identifier field appears, AND the Target namespace field is
+    // still separately present (its own testid, unaffected) — a workload policy needs both.
+    fireEvent.click(screen.getByTestId("builder-tier-workload"));
+    expect(screen.getByTestId("builder-tier-workload")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("builder-scope-identifier")).toBeInTheDocument();
+    expect(screen.getByTestId("builder-target-namespace")).toBeInTheDocument();
+    expect(screen.getByText(/deployments only/i)).toBeInTheDocument();
+  });
+
+  it("namespace tier: the compiled rego guards on input.agent.namespace, not agent_class, and uses the ns_ package/rule-id token", async () => {
+    renderSheet(); // namespace prop = "default" -> targetNamespace pre-filled "default"
+    fireEvent.click(screen.getByTestId("builder-tier-namespace"));
+    // The identifier field IS the pre-filled target namespace already ("default").
+    expect(screen.getByTestId("builder-scope-identifier")).toHaveValue("default");
+
+    fireEvent.click(screen.getByTestId("builder-add-rule"));
+    fireEvent.change(screen.getByTestId("builder-rule-reason-0"), { target: { value: "Blocked a destructive tool" } });
+    fireEvent.click(screen.getByTestId("builder-add-condition-0-0"));
+
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain("package norviq.builder.ns_default");
+      expect(rego).toContain('input.agent.namespace == "default"');
+      expect(rego).not.toMatch(/agent_class ==/);
+    });
+    expect(screen.queryByTestId("builder-errors")).not.toBeInTheDocument();
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent(
+      "Will create in namespace: default · agent-class: namespace:default"
+    );
+  });
+
+  it("workload tier: the compiled rego guards on input.agent.namespace using the TARGET namespace field, and uses the wl_ package/rule-id token", async () => {
+    renderSheet(); // namespace prop = "default"
+    fireEvent.click(screen.getByTestId("builder-tier-workload"));
+    fireEvent.change(screen.getByTestId("builder-scope-identifier"), { target: { value: "checkout" } });
+    // Target namespace already pre-filled "default" from the sheet's namespace prop.
+    fireEvent.click(screen.getByTestId("builder-add-rule"));
+    fireEvent.change(screen.getByTestId("builder-rule-reason-0"), { target: { value: "Blocked a destructive tool" } });
+    fireEvent.click(screen.getByTestId("builder-add-condition-0-0"));
+
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain("package norviq.builder.wl_checkout");
+      expect(rego).toContain('input.agent.namespace == "default"');
+      expect(rego).not.toMatch(/agent_class ==/);
+    });
+    expect(screen.queryByTestId("builder-errors")).not.toBeInTheDocument();
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent(
+      "Will create in namespace: default · agent-class: deployment:checkout"
+    );
+  });
+
+  it("switching tiers preserves each tier's own typed identifier (no cross-tier data loss)", () => {
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-tier-workload"));
+    fireEvent.change(screen.getByTestId("builder-scope-identifier"), { target: { value: "checkout" } });
+    fireEvent.click(screen.getByTestId("builder-tier-class"));
+    expect(screen.getByTestId("builder-agent-class")).toHaveValue("builder-spike");
+    fireEvent.click(screen.getByTestId("builder-tier-workload"));
+    expect(screen.getByTestId("builder-scope-identifier")).toHaveValue("checkout");
+  });
+});
+
+describe("BuilderSheet — reserved-scope guard (Phase 3, Item A / P1 fix)", () => {
+  it('typing "__baseline__" as the agent class shows the reserved-scope error and disables Dry-run/Save, with no compiled rego', async () => {
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "__baseline__" } });
+    fireEvent.click(screen.getByTestId("builder-add-rule"));
+    fireEvent.change(screen.getByTestId("builder-rule-reason-0"), { target: { value: "x" } });
+    fireEvent.click(screen.getByTestId("builder-add-condition-0-0"));
+
+    await waitFor(() => expect(screen.getByTestId("builder-scope-reserved-error")).toBeInTheDocument());
+    expect(screen.getByTestId("builder-scope-reserved-error")).toHaveTextContent(/reserved\/managed scope/i);
+    expect(screen.getByTestId("builder-dryrun-btn")).toBeDisabled();
+    expect(screen.getByTestId("builder-save-btn")).toBeDisabled();
+    expect((screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value).not.toContain("package norviq.builder");
+  });
+
+  it('typing "__cluster__" as the namespace-tier identifier shows the reserved-scope error and disables Save', async () => {
+    renderSheet();
+    fireEvent.click(screen.getByTestId("builder-tier-namespace"));
+    fireEvent.change(screen.getByTestId("builder-scope-identifier"), { target: { value: "__cluster__" } });
+    fireEvent.click(screen.getByTestId("builder-add-rule"));
+    fireEvent.change(screen.getByTestId("builder-rule-reason-0"), { target: { value: "x" } });
+    fireEvent.click(screen.getByTestId("builder-add-condition-0-0"));
+
+    await waitFor(() => expect(screen.getByTestId("builder-scope-reserved-error")).toBeInTheDocument());
+    expect(screen.getByTestId("builder-save-btn")).toBeDisabled();
+  });
+
+  it("a normal agent class shows no reserved-scope error", () => {
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "report-gen" } });
+    expect(screen.queryByTestId("builder-scope-reserved-error")).not.toBeInTheDocument();
+  });
+});

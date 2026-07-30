@@ -40,12 +40,14 @@ import type {
   BuilderGraph,
   BuilderKeywordTarget,
   BuilderMode,
-  BuilderRule
+  BuilderRule,
+  BuilderScope
 } from "./builderGraph";
 import { normalizeKeywords, sanitizeClassToken } from "./composerRego";
 import { DETECTOR_BLOCKS, DETECTOR_HELPERS, DETECTOR_ORDER, DETECTOR_PREDICATE, HELPER_BLOCKS, HELPER_ORDER, type HelperKey } from "./builderTemplates";
 import { fragmentsFor, listCapabilitySourceVerbPairs, verbsForSource, type CapabilityVerb, type CapabilitySourceKey } from "./capabilitySources";
 import { skeleton } from "./skeleton";
+import { isReservedScope } from "./reservedScope";
 
 // --- server-side budget caps (norviq/api/routers/policies.py validate_rego_source L590) ---
 // The builder enforces the SAME caps client-side so a graph that would be rejected by the write
@@ -68,6 +70,7 @@ export type BuilderErrorCode =
   | "not_double_negation"
   | "invalid_allowlist"
   | "empty_allowlist_tool"
+  | "reserved_scope"
   | "budget_exceeded_bytes"
   | "budget_exceeded_lines"
   | "budget_exceeded_regex_ops";
@@ -191,6 +194,189 @@ const DECISION_SET: Record<BuilderRule["decision"], "blocks" | "escalates" | "au
   escalate: "escalates",
   audit: "audits"
 };
+
+// --- scope / tier helpers (Phase 3) ----------------------------------------------------------------
+//
+// Three policy tiers share one graph shape (`BuilderGraph.scope` is now a discriminated union — see
+// builderGraph.ts) but each compiles to a DIFFERENT rego guard, package token, and default rule_id,
+// per the grounding in `norviq/api/routers/policies.py resolve_policy_key` (loader key shape) and
+// `norviq/engine/evaluator.py _collect_candidates` (what's actually collected/enforced):
+//   - class:     loader key `<class>`             — guard `input.agent.agent_class == "<class>"`
+//   - namespace: loader key `namespace:<ns>`       — guard `input.agent.namespace == "<ns>"` (NOT
+//                agent_class — the namespace-tier candidate is looked up unconditionally for every
+//                call in that namespace, so an agent_class guard would just never fire)
+//   - workload:  loader key `deployment:<name>`    — guard `input.agent.namespace == "<ns>"` (OPA's
+//                input has no workload/deployment field at all, so this tier cannot self-guard on the
+//                workload name; `<ns>` here is the TARGET namespace the caller is compiling/saving
+//                into — supplied separately, since `BuilderScopeWorkload` itself carries no namespace).
+// Every helper below is a pure function of `graph.scope` (+ `targetNamespace` where the tier needs it),
+// so class-tier compiles are unaffected by any of this — `targetNamespace` is simply ignored.
+
+/** The tier's own raw identifier, exactly as authored (agent class / namespace / workload name),
+ *  untrimmed-caller's-responsibility (callers here always pass already-`.trim()`-ed graph state). */
+export function scopeIdentifier(scope: BuilderScope): string {
+  switch (scope.kind) {
+    case "class":
+      return scope.agentClass;
+    case "namespace":
+      return scope.namespace;
+    case "workload":
+      return scope.workloadName;
+    default: {
+      const _exhaustive: never = scope;
+      return _exhaustive;
+    }
+  }
+}
+
+/** Human phrase for header comments ("agent class" | "namespace" | "workload (deployment)"). */
+function scopeLabel(scope: BuilderScope): string {
+  switch (scope.kind) {
+    case "class":
+      return "agent class";
+    case "namespace":
+      return "namespace";
+    case "workload":
+      return "workload (deployment)";
+    default: {
+      const _exhaustive: never = scope;
+      return _exhaustive;
+    }
+  }
+}
+
+/** Phrase used inside emitted rego STRING literals (reasons) — bare identifier for class tier
+ *  (unchanged, byte-for-byte back-compat with every pre-Phase-3 reason string), tier-labeled for the
+ *  two new tiers so an operator reading the block reason knows which kind of scope fired. */
+function scopeReasonPhrase(scope: BuilderScope): string {
+  switch (scope.kind) {
+    case "class":
+      return scope.agentClass;
+    case "namespace":
+      return `namespace "${scope.namespace}"`;
+    case "workload":
+      return `workload "${scope.workloadName}"`;
+    default: {
+      const _exhaustive: never = scope;
+      return _exhaustive;
+    }
+  }
+}
+
+/** Package-name / default-rule-id token. Class tier is UNCHANGED (`sanitizeClassToken(agentClass)`,
+ *  no prefix) — this is what makes an existing class-tier graph compile byte-identically to before.
+ *  Namespace/workload get a distinct, collision-free, tier-prefixed token so e.g. a namespace called
+ *  "foo" and a class called "foo" never share a package or a default rule_id. */
+function scopeToken(scope: BuilderScope): string {
+  switch (scope.kind) {
+    case "class":
+      return sanitizeClassToken(scope.agentClass);
+    case "namespace":
+      return `ns_${sanitizeClassToken(scope.namespace)}`;
+    case "workload":
+      return `wl_${sanitizeClassToken(scope.workloadName)}`;
+    default: {
+      const _exhaustive: never = scope;
+      return _exhaustive;
+    }
+  }
+}
+
+/** The single rego guard line every emitted rule/allow_intent body opens with — the one place tier
+ *  dispatch actually changes the compiled LOGIC (everything else above is naming). `targetNamespace`
+ *  is used ONLY for the workload tier (see this section's header comment); it's ignored for class and
+ *  namespace tiers, which are fully self-contained in `scope`. */
+function scopeGuardLine(scope: BuilderScope, targetNamespace: string): string {
+  switch (scope.kind) {
+    case "class":
+      return `input.agent.agent_class == ${JSON.stringify(scope.agentClass)}`;
+    case "namespace":
+      return `input.agent.namespace == ${JSON.stringify(scope.namespace)}`;
+    case "workload":
+      return `input.agent.namespace == ${JSON.stringify(targetNamespace)}`;
+    default: {
+      const _exhaustive: never = scope;
+      return _exhaustive;
+    }
+  }
+}
+
+/**
+ * The loader key Save must POST as `agent_class` for this scope/tier (mirrors the server's
+ * `resolve_policy_key` exactly): the class tier posts the class name verbatim; namespace/workload post
+ * the `namespace:<ns>` / `deployment:<name>` compound key the server's loader (and
+ * `_collect_candidates`) expect. Exported for BuilderSheet's save path and its "will create" summary,
+ * so the operator always sees the REAL key that gets written, not a guess.
+ */
+export function loaderKeyFor(scope: BuilderScope): string {
+  switch (scope.kind) {
+    case "class":
+      return scope.agentClass.trim();
+    case "namespace":
+      return `namespace:${scope.namespace.trim()}`;
+    case "workload":
+      return `deployment:${scope.workloadName.trim()}`;
+    default: {
+      const _exhaustive: never = scope;
+      return _exhaustive;
+    }
+  }
+}
+
+/**
+ * Reserved-scope guard (Item A, P1 fix): the server is asymmetric — it ACCEPTS `__baseline__` /
+ * `__guardrail__` etc. as an agent_class on create (200) but REFUSES to delete them (422,
+ * `_RESERVED_DELETE_CLASSES`), so a class typed into the builder can be saved and then never removed
+ * through the product. It's also dead on arrival: these are loader/packs-router-owned scopes that no
+ * real agent's `agent_class` ever equals, so the class-shaped guard the builder would emit matches
+ * nothing. Refused here at COMPILE time (not just the UI field) so a graph that bypasses the UI can
+ * never reach this shape either — reuses the same `isReservedScope` predicate the rest of the console
+ * already uses for the catalog's delete-guard (`lib/reservedScope.ts`), so "reserved" means the same
+ * thing everywhere in this app. Also refuses a `:` in a class identifier (would collide with the
+ * namespace:/deployment: loader-key scheme) and `__cluster__` as whichever field is this tier's own
+ * "target namespace" (namespace tier: `scope.namespace` itself; class/workload tier: the separately
+ * supplied `targetNamespace`, since those tiers' scope object carries no namespace field of its own).
+ */
+function validateScope(scope: BuilderScope, targetNamespace: string): BuilderError[] {
+  const errors: BuilderError[] = [];
+  if (scope.kind === "class") {
+    const cls = scope.agentClass.trim();
+    if (cls !== "" && isReservedScope(cls, null)) {
+      errors.push({
+        code: "reserved_scope",
+        message: `"${cls}" is a reserved/managed scope owned by the loader/packs router (not a real agent class) — it can be created but the server refuses to ever delete it, and it matches no real agent's agent_class (this rule would never fire). Use the Namespace tier instead for a namespace-wide baseline.`
+      });
+    }
+    if (cls.includes(":")) {
+      errors.push({
+        code: "reserved_scope",
+        message: `Agent class "${cls}" cannot contain ":" — that would collide with the namespace:/deployment: loader-key scheme the Namespace/Workload tiers use. Pick the Namespace or Workload tier instead if you meant one of those.`
+      });
+    }
+    if (targetNamespace.trim() === "__cluster__") {
+      errors.push({
+        code: "reserved_scope",
+        message: `"__cluster__" is the reserved cluster-wide baseline namespace and cannot be used as this policy's target namespace.`
+      });
+    }
+  } else if (scope.kind === "namespace") {
+    const ns = scope.namespace.trim();
+    if (ns !== "" && isReservedScope(null, ns)) {
+      errors.push({
+        code: "reserved_scope",
+        message: `"${ns}" is the reserved cluster-wide baseline namespace and cannot be used as a policy target namespace.`
+      });
+    }
+  } else if (scope.kind === "workload") {
+    if (targetNamespace.trim() === "__cluster__") {
+      errors.push({
+        code: "reserved_scope",
+        message: `"__cluster__" is the reserved cluster-wide baseline namespace and cannot be used as this policy's target namespace.`
+      });
+    }
+  }
+  return errors;
+}
 
 // --- validation ---
 
@@ -355,7 +541,10 @@ function validateRulesGraph(graph: BuilderGraph): BuilderError[] {
   // (`builder_default_<token>`, see buildBody below) would make `reasons[rule_id]` and the resolver's
   // rule_id selection ambiguous between the user's rule and the fallback — reject it at compile time,
   // same doctrine as duplicate_rule_id, rather than emitting rego where the two silently collide.
-  const defaultRuleId = `builder_default_${sanitizeClassToken(graph.scope.agentClass)}`;
+  // `scopeToken` is tier-aware (Phase 3): class tier is unchanged (`sanitizeClassToken(agentClass)`,
+  // no prefix); namespace/workload get their own `ns_`/`wl_`-prefixed token, so e.g.
+  // `builder_default_ns_default` (namespace tier) and `builder_default_wl_checkout` (workload tier).
+  const defaultRuleId = `builder_default_${scopeToken(graph.scope)}`;
 
   graph.rules.forEach((rule, ruleIndex) => {
     if (rule.ruleId.trim() === "") {
@@ -406,12 +595,16 @@ function validateRulesGraph(graph: BuilderGraph): BuilderError[] {
   return errors;
 }
 
-/** Dispatch to the mode-appropriate validator. "rules"-mode graphs (the default — every graph with no
- *  `mode` field, i.e. every pre-Phase-2c fixture/graph) go through the unchanged `validateRulesGraph`;
- *  "allowlist"-mode graphs are validated structurally instead, and `rules[]` is not inspected at all
- *  (it is ignored by the allowlist emitter too — see `buildFullRego`). */
-function validateGraph(graph: BuilderGraph): BuilderError[] {
-  return modeOf(graph) === "allowlist" ? validateAllowlistGraph(graph) : validateRulesGraph(graph);
+/** Dispatch to the mode-appropriate validator (unchanged from Phase 2c), PLUS the tier-independent
+ *  `validateScope` reserved-scope check (Phase 3) that applies regardless of mode — a reserved class,
+ *  a colon-bearing class, or `__cluster__` as a target namespace is rejected whether the graph is in
+ *  "rules" or "allowlist" mode. "rules"-mode graphs (the default — every graph with no `mode` field,
+ *  i.e. every pre-Phase-2c fixture/graph) go through the unchanged `validateRulesGraph`; "allowlist"-mode
+ *  graphs are validated structurally instead, and `rules[]` is not inspected at all (it is ignored by
+ *  the allowlist emitter too — see `buildFullRego`). */
+function validateGraph(graph: BuilderGraph, targetNamespace: string): BuilderError[] {
+  const modeErrors = modeOf(graph) === "allowlist" ? validateAllowlistGraph(graph) : validateRulesGraph(graph);
+  return [...validateScope(graph.scope, targetNamespace), ...modeErrors];
 }
 
 // --- emission ---
@@ -554,9 +747,11 @@ function paramRegexBlock(index: number, cond: BuilderConditionParamRegex): strin
   )}, val)\n}`;
 }
 
-function buildBody(graph: BuilderGraph, cls: string): string {
-  const token = sanitizeClassToken(cls);
+function buildBody(graph: BuilderGraph, targetNamespace: string): string {
+  const scope = graph.scope;
+  const token = scopeToken(scope);
   const defaultRuleId = `builder_default_${token}`;
+  const guardLine = scopeGuardLine(scope, targetNamespace);
 
   const defaultTripleBlock = [
     `default decision = ${JSON.stringify(graph.defaults.decision)}`,
@@ -595,7 +790,7 @@ function buildBody(graph: BuilderGraph, cls: string): string {
   graph.rules.forEach((rule) => {
     const setName = DECISION_SET[rule.decision];
     const rowBlocks = rule.conditions.map((row) => {
-      const lines = [`${setName}[${JSON.stringify(rule.ruleId)}] {`, `    input.agent.agent_class == ${JSON.stringify(cls)}`];
+      const lines = [`${setName}[${JSON.stringify(rule.ruleId)}] {`, `    ${guardLine}`];
       row.forEach((cond) => lines.push(`    ${compileConditionLine(cond, paramRegexIndices)}`));
       lines.push(`}`);
       return lines.join("\n");
@@ -707,16 +902,17 @@ const REFINEMENT_ORDER: (keyof BuilderAllowlistRefinements)[] = ["readonly", "eg
 /** The allowlist-mode header COMMENT lines (package + blob + hash lines are added identically by
  *  `buildFullRego` for both modes) — default-deny/tighten-only framing, the allowlist + refinements
  *  summary, the `norviq.intent.` governance-classification nuance, and the documented `learned_verbs`
- *  omission. `cls` is newline-stripped via `commentSafe` before interpolation, same doctrine as the
- *  rules-mode header. */
-function allowlistHeaderComment(graph: BuilderGraph, cls: string): string[] {
+ *  omission. The scope's identifier is newline-stripped via `commentSafe` before interpolation, same
+ *  doctrine as the rules-mode header. Tier-aware (Phase 3) via `scopeLabel`/`scopeIdentifier`; for the
+ *  class tier this reproduces the original "for agent class "<cls>"." wording byte-for-byte. */
+function allowlistHeaderComment(graph: BuilderGraph, scope: BuilderScope): string[] {
   const tools = cleanAllowlistTools(graph.allowlist);
   const names = [...new Set(tools.map((t) => t.toLowerCase()))].sort();
   const refinements = cleanAllowlistRefinements(graph.allowlist);
   const enabled = REFINEMENT_ORDER.filter((k) => !!refinements[k]);
-  const safeCls = commentSafe(cls);
+  const safeIdentifier = commentSafe(scopeIdentifier(scope));
   return [
-    `# GENERATED by the Visual Policy Builder (INTENT ALLOWLIST mode) for agent class "${safeCls}".`,
+    `# GENERATED by the Visual Policy Builder (INTENT ALLOWLIST mode) for ${scopeLabel(scope)} "${safeIdentifier}".`,
     `# DEFAULT-DENY, TIGHTEN-ONLY: a call is BLOCKED unless the tool is in the allowlist below AND every`,
     `# enabled refinement holds. The allowlist is matched evasion-normalized (lower-cased name + confusable`,
     `# skeleton, i.e. input.tool_name_normalized) so homoglyph/fullwidth/case tricks can't smuggle a`,
@@ -736,9 +932,12 @@ function allowlistHeaderComment(graph: BuilderGraph, cls: string): string[] {
   ];
 }
 
-function rulesHeaderComment(cls: string): string[] {
+/** Tier-aware (Phase 3): for the class tier this reproduces the original "for agent class "<cls>"."
+ *  wording byte-for-byte (`scopeLabel` returns "agent class" and `scopeIdentifier` returns the bare
+ *  class string for that tier) — the back-compat property the golden-snapshot test pins. */
+function rulesHeaderComment(scope: BuilderScope): string[] {
   return [
-    `# GENERATED by the Visual Policy Builder (graph -> rego compiler) for agent class "${commentSafe(cls)}".`,
+    `# GENERATED by the Visual Policy Builder (graph -> rego compiler) for ${scopeLabel(scope)} "${commentSafe(scopeIdentifier(scope))}".`,
     `# Source of truth is the GRAPH, embedded below as a base64 JSON blob; this rego is regenerated`,
     `# deterministically from it and is never hand-edited (see VISUAL-POLICY-BUILDER-PLAN.md, section 2).`
   ];
@@ -756,8 +955,11 @@ function rulesHeaderComment(cls: string): string[] {
  * `compileGraph` — the malformed shape is what `validateAllowlistGraph` rejects; this function must not
  * throw when it runs anyway to compute stats for the (ultimately blanked) result.
  */
-function buildAllowlistBody(graph: BuilderGraph, cls: string): string {
-  const token = sanitizeClassToken(cls);
+function buildAllowlistBody(graph: BuilderGraph, targetNamespace: string): string {
+  const scope = graph.scope;
+  const token = scopeToken(scope);
+  const guardLine = scopeGuardLine(scope, targetNamespace);
+  const reasonPhrase = scopeReasonPhrase(scope);
   const tools = cleanAllowlistTools(graph.allowlist);
   const names = [...new Set(tools.map((t) => t.toLowerCase()))].sort();
   const skels = [...new Set(tools.map((t) => skeleton(t)))].sort();
@@ -766,7 +968,7 @@ function buildAllowlistBody(graph: BuilderGraph, cls: string): string {
   const defaultTripleBlock = [
     `default decision = "block"`,
     `default rule_id = "intent_default_deny"`,
-    `default reason = ${JSON.stringify(`Blocked: tool is not in the intended allowlist for ${cls}`)}`
+    `default reason = ${JSON.stringify(`Blocked: tool is not in the intended allowlist for ${reasonPhrase}`)}`
   ].join("\n");
 
   const allowSetsBlock = [`allow_names = ${jsonSet(names)}`, `allow_skeletons = ${jsonSet(skels)}`].join("\n");
@@ -793,23 +995,23 @@ function buildAllowlistBody(graph: BuilderGraph, cls: string): string {
     rate: "    rate_within"
   };
   const guardLines = [
-    `    input.agent.agent_class == ${JSON.stringify(cls)}`,
+    `    ${guardLine}`,
     `    in_allowlist`,
     ...REFINEMENT_ORDER.filter((k) => !!refinements[k]).map((k) => guardLineFor[k])
   ];
   const allowIntentBlock = [`allow_intent {`, ...guardLines, `}`].join("\n");
 
   const tailBlock = [
-    `denied { input.agent.agent_class == ${JSON.stringify(cls)}; not allow_intent }`,
+    `denied { ${guardLine}; not allow_intent }`,
     ``,
     `decision = "allow" { allow_intent }`,
     `rule_id = ${JSON.stringify(`intent_allow_${token}`)} { allow_intent }`,
-    `reason = ${JSON.stringify(`Allowed: tool in the intended allowlist for ${cls}`)} { allow_intent }`,
+    `reason = ${JSON.stringify(`Allowed: tool in the intended allowlist for ${reasonPhrase}`)} { allow_intent }`,
     ``,
     `decision = "block" { denied; in_allowlist }`,
     `rule_id = "intent_refinement_mismatch" { denied; in_allowlist }`,
     `reason = sprintf(${JSON.stringify(
-      `Blocked: %s is allowlisted for ${cls} but fails an enabled refinement (e.g. no-external-egress)`
+      `Blocked: %s is allowlisted for ${reasonPhrase} but fails an enabled refinement (e.g. no-external-egress)`
     )}, [input.tool_name]) { denied; in_allowlist }`
   ].join("\n");
 
@@ -819,14 +1021,17 @@ function buildAllowlistBody(graph: BuilderGraph, cls: string): string {
   return sections.join("\n\n") + "\n";
 }
 
-function buildFullRego(graph: BuilderGraph): string {
-  const cls = graph.scope.agentClass;
-  const token = sanitizeClassToken(cls);
+/** `targetNamespace` (Phase 3, default "") is used ONLY by the workload tier's guard (see
+ *  `scopeGuardLine`) — ignored entirely for class/namespace tiers, so every pre-Phase-3 call site
+ *  (and every class-tier fixture) compiles byte-identically whether or not it's supplied. */
+function buildFullRego(graph: BuilderGraph, targetNamespace: string): string {
+  const scope = graph.scope;
+  const token = scopeToken(scope);
   const mode = modeOf(graph);
-  const body = mode === "allowlist" ? buildAllowlistBody(graph, cls) : buildBody(graph, cls);
+  const body = mode === "allowlist" ? buildAllowlistBody(graph, targetNamespace) : buildBody(graph, targetNamespace);
   const hash = fnv1aHex(body);
   const graphBlob = toBase64(JSON.stringify(graph));
-  const descriptionLines = mode === "allowlist" ? allowlistHeaderComment(graph, cls) : rulesHeaderComment(cls);
+  const descriptionLines = mode === "allowlist" ? allowlistHeaderComment(graph, scope) : rulesHeaderComment(scope);
 
   const header = [
     `package norviq.builder.${token}`,
@@ -885,12 +1090,21 @@ export function detachmentStatusOf(rego: string): "attached" | "detached" | "not
 
 /**
  * Compile a BuilderGraph into rego. Deterministic (same graph -> byte-identical output). On any
- * compile-time error (structural or budget), `rego` is the empty string and `errors` is non-empty —
- * the caller must not save/dry-run an empty-string result.
+ * compile-time error (structural, reserved-scope, or budget), `rego` is the empty string and `errors`
+ * is non-empty — the caller must not save/dry-run an empty-string result.
+ *
+ * `targetNamespace` (Phase 3, optional, default "") is the namespace this policy is being compiled to
+ * be saved INTO — the same value every tier's Save path already POSTs as the `namespace` body field.
+ * It is used for two things, both ignored entirely by the class tier (so every existing call site and
+ * fixture — `compileGraph(graph)` with no second argument — compiles exactly as before):
+ *   - the workload tier's rego guard (`input.agent.namespace == "<targetNamespace>"` — see
+ *     `scopeGuardLine`'s doc comment for why the workload tier needs this supplied externally);
+ *   - the `__cluster__`-as-target-namespace reserved-scope check for the class/workload tiers (the
+ *     namespace tier checks its own `scope.namespace` field instead — see `validateScope`).
  */
-export function compileGraph(graph: BuilderGraph): CompileResult {
-  const structuralErrors = validateGraph(graph);
-  const rego = buildFullRego(graph);
+export function compileGraph(graph: BuilderGraph, targetNamespace: string = ""): CompileResult {
+  const structuralErrors = validateGraph(graph, targetNamespace);
+  const rego = buildFullRego(graph, targetNamespace);
   const stats = computeStats(rego);
 
   const budgetErrors: BuilderError[] = [];
