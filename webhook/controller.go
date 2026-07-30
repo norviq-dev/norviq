@@ -32,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/rest"
@@ -55,6 +56,30 @@ var configGVR = schema.GroupVersionResource{
 }
 
 const deleteSyncedAnnotation = "norviq.io/delete-synced"
+
+// Fingerprint of the rego this controller last successfully pushed to the API for a CR.
+//
+// Policy CONTENT can change without the CR changing at all. A baseline CR names a `preset`, and the
+// rego for that preset is a FILE IN THIS IMAGE (`presetBasePath`) — so shipping a new image changes
+// what the CR means while its spec, and therefore its Generation, stay byte-identical. The informer's
+// resync does not bump Generation either, and the retry sweep skipped anything already Active. Net
+// effect: repo rego changes, new images roll out, and the DB keeps enforcing the OLD rego forever —
+// every version string reports the new release while enforcement silently lags it.
+//
+// Recording what was applied lets the sweep notice that drift and re-converge. An ANNOTATION rather
+// than a status field on purpose: CRDs are installed once from `crds/` and are NOT upgraded by
+// `helm upgrade` (a Helm limitation), so a new status property would be silently PRUNED by the
+// structural schema on every existing install — exactly where this fix is needed most. Annotations
+// carry no schema and work on a cluster that has never seen the new CRD. Writing one also does not
+// bump Generation, so it cannot feed back into the update handler as a reconcile loop.
+const appliedRegoAnnotation = "norviq.io/applied-rego-sha256"
+
+// regoFingerprint returns a short, stable content hash. Truncated to 16 hex chars: it only has to
+// detect change, and annotation values are read by humans debugging drift.
+func regoFingerprint(rego string) string {
+	sum := sha256.Sum256([]byte(rego))
+	return fmt.Sprintf("%x", sum)[:16]
+}
 
 // Policy status phases. `policyPhaseActive` is the ONLY terminal-success phase: the retry sweep
 // re-drives every policy that is not in it (Error, or an empty phase that never synced at all).
@@ -132,6 +157,12 @@ type Controller struct {
 	// malformed CR becomes an unbounded status-write loop, per replica, forever.
 	failedGenMu  sync.Mutex
 	failedGenMap map[string]int64
+	// Rego fingerprint last successfully applied per CR, mirroring appliedRegoAnnotation. The annotation
+	// is the durable record (survives restart, shared across replicas); this is a same-process backstop so
+	// that if the annotation PATCH keeps failing — RBAC drift, a stale informer copy — drift detection
+	// re-syncs once rather than re-POSTing every policy on every tick forever.
+	appliedRegoMu  sync.Mutex
+	appliedRegoMap map[string]string
 	// Set whenever the cached policy set may have changed (add/update/delete). processClass and
 	// processConfig derive policyCount/activeNamespaces/totalPolicies from that cache, but nothing
 	// re-drives them when it's a POLICY that changed — see refreshDerivedStatusIfStale for why.
@@ -189,6 +220,7 @@ func NewControllerWithClient(client dynamic.Interface, apiURL, apiSecret string)
 		classQueue:           make(chan *unstructured.Unstructured, 64),
 		configQueue:          make(chan *unstructured.Unstructured, 64),
 		failedGenMap:         make(map[string]int64),
+		appliedRegoMap:       make(map[string]string),
 	}
 }
 
@@ -359,9 +391,76 @@ func (c *Controller) refreshDerivedStatusIfStale() {
 	}
 }
 
-// retryUnsyncedPolicies re-submits every cached policy that is not in the Active phase. Reuses the
-// normal handlePolicy path, so retries inherit the same validation and the same syncSemaphore
-// concurrency bound as event-driven syncs.
+// stampAppliedRego records the fingerprint of the rego just pushed for this CR, so a later sweep can
+// distinguish "already synced" from "synced from an older image's preset". See appliedRegoAnnotation.
+//
+// Best-effort by design: this runs AFTER a successful sync, so failing it must not report an error. The
+// only cost of a missed stamp is one more idempotent re-sync on the next tick.
+func (c *Controller) stampAppliedRego(ctx context.Context, u *unstructured.Unstructured, rego string) {
+	if rego == "" {
+		return
+	}
+	want := regoFingerprint(rego)
+	// Record in-process BEFORE anything can return early. The backstop's whole job is to bound the loop
+	// when the durable write cannot happen, so it must not sit behind a guard for that same condition —
+	// a nil client IS "the write can't happen", and recording after it would re-POST every tick forever.
+	c.appliedRegoMu.Lock()
+	if c.appliedRegoMap == nil {
+		c.appliedRegoMap = make(map[string]string)
+	}
+	c.appliedRegoMap[genKey(u)] = want
+	c.appliedRegoMu.Unlock()
+	if c.client == nil {
+		return
+	}
+	if u.GetAnnotations()[appliedRegoAnnotation] == want {
+		return // unchanged — skip the write rather than churn resourceVersion every sync
+	}
+	// Patch, not Update: the informer's copy may be stale, and a full Update would clobber a concurrent
+	// status/finalizer write. A merge patch on one annotation key touches nothing else.
+	patch := fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, appliedRegoAnnotation, want)
+	_, err := c.client.Resource(policyGVR).Namespace(u.GetNamespace()).Patch(
+		ctx, u.GetName(), types.MergePatchType, []byte(patch), metav1.PatchOptions{},
+	)
+	if err != nil {
+		slog.Warn(
+			"NRVQ-WHK-4060: applied-rego stamp failed; policy is synced but drift detection will re-sync it",
+			"policy", u.GetName(), "namespace", u.GetNamespace(), "error", err,
+		)
+	}
+}
+
+// policyContentDrifted reports whether the rego this controller WOULD apply now differs from what it
+// last recorded applying. True after a new image ships a changed preset for an otherwise-unchanged CR.
+//
+// A CR with no stamp yet (installed before this controller version, or whose stamp write failed) is
+// treated as drifted so it converges once; the sync stamps it and the next sweep is a no-op. That is
+// why the comparison is on CONTENT and not on a timestamp — the known trap here is that
+// updatePolicyStatus rewrites `lastApplied` on every status write, so anything keyed off time re-drives
+// forever. A content hash is stable exactly as long as the content is.
+func (c *Controller) policyContentDrifted(u *unstructured.Unstructured) (bool, string) {
+	body, err := c.buildPolicySyncPayload(u)
+	if err != nil {
+		// Can't determine the desired content (e.g. the preset file is missing in this image). Leave it
+		// alone: handlePolicy is what should surface that, and re-driving would only spam the failure.
+		return false, ""
+	}
+	if body.RegoSource == "" {
+		return false, ""
+	}
+	want := regoFingerprint(body.RegoSource)
+	if u.GetAnnotations()[appliedRegoAnnotation] == want {
+		return false, want
+	}
+	c.appliedRegoMu.Lock()
+	seen := c.appliedRegoMap[genKey(u)]
+	c.appliedRegoMu.Unlock()
+	return seen != want, want
+}
+
+// retryUnsyncedPolicies re-submits every cached policy that is not in the Active phase, plus any Active
+// policy whose CONTENT has drifted from what was applied. Reuses the normal handlePolicy path, so both
+// inherit the same validation and the same syncSemaphore concurrency bound as event-driven syncs.
 func (c *Controller) retryUnsyncedPolicies() {
 	if c.policyStore == nil {
 		return
@@ -373,7 +472,23 @@ func (c *Controller) retryUnsyncedPolicies() {
 		}
 		phase, _, _ := unstructured.NestedString(u.Object, "status", "phase")
 		if phase == policyPhaseActive {
-			continue // already synced; nothing to converge
+			// "Active" only means the last sync SUCCEEDED — not that it applied the rego this image
+			// carries now. A preset's rego lives in the image, so a new release changes the desired
+			// content while the CR's spec and Generation stay identical, and nothing else re-drives it.
+			// Without this check the DB enforces the old rego indefinitely.
+			drifted, want := c.policyContentDrifted(u)
+			if !drifted {
+				continue // genuinely converged
+			}
+			slog.Info(
+				"NRVQ-WHK-4061: policy content drifted from the applied rego; re-syncing",
+				"policy", u.GetName(),
+				"namespace", u.GetNamespace(),
+				"applied", u.GetAnnotations()[appliedRegoAnnotation],
+				"desired", want,
+			)
+			c.handlePolicy(u, "content-drift")
+			continue
 		}
 		msg, _, _ := unstructured.NestedString(u.Object, "status", "message")
 		if msg == msgClassDeleted {
@@ -503,6 +618,10 @@ func (c *Controller) handlePolicy(obj interface{}, action string) {
 			}
 			c.clearDeterministicFailure(u)
 			c.updatePolicyStatus(context.Background(), u, policyPhaseActive, "policy synced")
+			// Record WHAT was applied, so the sweep can tell "already synced" from "synced, but from an
+			// older image's preset". Best-effort: a failed stamp costs one extra idempotent re-sync on the
+			// next tick and must never turn a successful sync into an error.
+			c.stampAppliedRego(context.Background(), u, body.RegoSource)
 			slog.Info(
 				"NRVQ-WHK-4026: Policy synced to API successfully",
 				"policy", name,
