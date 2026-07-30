@@ -12,6 +12,7 @@ import random
 import redis.asyncio as aioredis
 import structlog
 
+from norviq.engine.masking import redact_url_credentials
 from norviq.config import settings
 from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.trust import TrustScore
@@ -91,7 +92,7 @@ class RedisCache:
             retry_on_timeout=True,
         )
         self._trust_decr_sha = await self._redis.script_load(TRUST_DECREMENT_LUA)
-        log.info("nrvq.cache.connected", url=self._url, code="NRVQ-DB-9010")
+        log.info("nrvq.cache.connected", url=redact_url_credentials(self._url), code="NRVQ-DB-9010")
 
     async def close(self) -> None:
         """Close all Redis connections."""
