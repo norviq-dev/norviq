@@ -271,6 +271,25 @@ webhook:
     # nothing per-pod). "embedded" = the sidecar runs its own RedisCache+OPA(subprocess)+PolicyLoader
     # for air-gapped/edge (the chart then wires NRVQ_REDIS_URL/NRVQ_PG_URL through to the injector).
     sidecarMode: proxy
+    # Resources for the INJECTED sidecar, chosen per sidecarMode. `proxy` is a thin forwarder;
+    # `embedded` runs a whole engine in the pod (redis client, policy warm, audit emitter, pubsub
+    # watcher, plus an OPA subprocess) and was OOMKilled at the proxy budget in every release before
+    # 0.1.9 — the embedded numbers below are MEASURED peak working set plus headroom, not a guess.
+    sidecarResources:
+      proxy:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits:   { cpu: 200m, memory: 128Mi }
+      embedded:
+        # MEASURED, not guessed (kind, 2026-07-29, cgroup memory.peak inside the sidecar):
+        #   at rest            peak 163Mi   steady 157Mi
+        #   after 80 evaluations (each forking OPA under NRVQ_OPA_MODE=subprocess)
+        #                      peak 214Mi   steady 158Mi
+        #   CPU at warm-up     213m  (already above the proxy profile's 200m LIMIT)
+        # request sits ABOVE the measured peak on purpose: an enforcement sidecar that gets evicted
+        # under node pressure fails the workload it is guarding, so eviction-safety beats packing
+        # density here. The limit leaves ~79% headroom over peak for larger payloads and GC spikes.
+        requests: { cpu: 200m, memory: 256Mi }
+        limits:   { cpu: 500m, memory: 384Mi }
     # DATA-PLANE posture: what a GOVERNED AGENT does when the central engine is unreachable. Distinct
     # from failurePolicy below, which is the ADMISSION posture (whether a pod may be created at all).
     #   "block" (DEFAULT) = fail-CLOSED. The agent keeps talking, but every tool call is refused for as

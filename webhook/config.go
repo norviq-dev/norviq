@@ -13,14 +13,22 @@ import (
 )
 
 type Config struct {
-	Port            int
-	CertFile        string
-	KeyFile         string
-	SidecarImage    string
-	SidecarPort     int
-	EnableLabel     string
-	EnableValue     string
-	AgentClassLabel string
+	Port         int
+	CertFile     string
+	KeyFile      string
+	SidecarImage string
+	SidecarPort  int
+	// Resources for the INJECTED sidecar. Supplied by the chart, which picks them per sidecarMode —
+	// embedded runs a whole engine (redis client, policy warm, audit emitter, pubsub watcher, plus an
+	// OPA subprocess) and cannot live inside the thin proxy's budget. Defaults below are the proxy
+	// values that were previously hardcoded here, so an unset env renders exactly as before.
+	SidecarCPURequest string
+	SidecarMemRequest string
+	SidecarCPULimit   string
+	SidecarMemLimit   string
+	EnableLabel       string
+	EnableValue       string
+	AgentClassLabel   string
 	// When false, the injector IGNORES the per-pod opt-out (norviq-injection=disabled label /
 	// norviq.io/skip-injection annotation) so a pod author in an injection-enabled namespace cannot
 	// self-exempt their workload from enforcement — the namespace-uniform guarantee holds. Default
@@ -78,6 +86,11 @@ func LoadConfig() Config {
 		KeyFile:      envStr("NRVQ_TLS_KEY", "/etc/webhook/certs/tls.key"),
 		SidecarImage: envStr("NRVQ_SIDECAR_IMAGE", "ghcr.io/norviq-dev/norviq-engine:engine-latest"),
 		SidecarPort:  envInt("NRVQ_SIDECAR_PORT", 8282),
+
+		SidecarCPURequest: envStr("NRVQ_SIDECAR_CPU_REQUEST", "50m"),
+		SidecarMemRequest: envStr("NRVQ_SIDECAR_MEM_REQUEST", "64Mi"),
+		SidecarCPULimit:   envStr("NRVQ_SIDECAR_CPU_LIMIT", "200m"),
+		SidecarMemLimit:   envStr("NRVQ_SIDECAR_MEM_LIMIT", "128Mi"),
 		// Unify the opt-in/out label key with the MutatingWebhookConfiguration namespaceSelector
 		// (norviq-injection). The namespace opts in (MWC selector); a pod opts OUT with
 		// norviq-injection=disabled. Default flipped from the legacy "norviq" key.

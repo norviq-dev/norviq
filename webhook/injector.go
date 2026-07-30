@@ -225,7 +225,7 @@ func newSidecarTemplate(cfg Config) map[string]interface{} {
 		"ports": []map[string]interface{}{
 			{"containerPort": cfg.SidecarPort, "name": "sidecar", "protocol": "TCP"},
 		},
-		"resources":       sidecarResources(),
+		"resources":       sidecarResources(cfg),
 		"securityContext": sidecarSecurityContext(),
 		"startupProbe":    sidecarStartupProbe(cfg.SidecarPort),
 		"livenessProbe":   sidecarLivenessProbe(cfg.SidecarPort),
@@ -460,10 +460,18 @@ func parsePrivateKey(der []byte) (crypto.Signer, error) {
 	return nil, fmt.Errorf("NRVQ-WHK-4058: CA private key is not a supported PKCS#8/PKCS#1/SEC1 key")
 }
 
-func sidecarResources() map[string]interface{} {
+// sidecarResources takes its budget from config rather than hardcoding one.
+//
+// It was fixed at 64Mi/128Mi for every injected sidecar regardless of mode. `proxy` (the default) is
+// a thin forwarder and fits comfortably; `embedded` builds a full engine in-pod — redis client,
+// policy warm, audit emitter, pubsub watcher and an OPA subprocess — and was OOMKilled (exit 137)
+// every time, after reaching `nrvq.sidecar.started` but before uvicorn could bind. So embedded mode
+// had never worked in any release, and the symptom looked like a probe failure rather than a memory
+// one. The chart now picks the budget per mode and passes it in.
+func sidecarResources(cfg Config) map[string]interface{} {
 	return map[string]interface{}{
-		"requests": map[string]string{"cpu": "50m", "memory": "64Mi"},
-		"limits":   map[string]string{"cpu": "200m", "memory": "128Mi"},
+		"requests": map[string]string{"cpu": cfg.SidecarCPURequest, "memory": cfg.SidecarMemRequest},
+		"limits":   map[string]string{"cpu": cfg.SidecarCPULimit, "memory": cfg.SidecarMemLimit},
 	}
 }
 
