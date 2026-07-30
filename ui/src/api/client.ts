@@ -760,6 +760,11 @@ export type DryRunReplay = {
   truncated?: boolean;
   scope?: { namespace?: string; agent_class?: string | null };
   recommendation?: string;
+  // The server (norviq/api/routers/policies.py dry_run_policy) also returns whether the submitted
+  // rego_source itself is valid, plus any compile/validation errors — surfaced by the Visual Policy
+  // Builder's dry-run gate (see BuilderSheet.tsx's `canSave`).
+  valid?: boolean;
+  errors?: string[];
 };
 
 export async function dryRunPolicy(data: {
