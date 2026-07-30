@@ -335,6 +335,29 @@ _BOUND_IDENTITY_FIELDS = ("agent_class", "spiffe_id", "workload")
 # agent_class but not spiffe_id would otherwise satisfy an "is it bound at all?" test while leaving the
 # kill-switch evadable. `workload` is excluded because no issuer mints it for the sidecar path.
 _REQUIRED_BOUND_FIELDS = ("agent_class", "spiffe_id")
+
+# ...but `spiffe_id` is only MINTABLE in mock mode, so demanding it unconditionally made the ratchet
+# unsatisfiable — a trap rather than a posture.
+#
+# The webhook binds that claim only when it can predict the SVID byte-for-byte, i.e. the mock resolver
+# (`webhook/injector.go::mintSidecarToken`; `injector_identity_binding_test.go` asserts it is ABSENT under
+# workload-api, because a SPIRE-issued id has a trust domain the webhook does not control and a guess
+# would 403 every call). So on a workload-api install, `auth_require_bound_agent_identity=true` would
+# have rejected EVERY sidecar evaluation on the hot path — the one flag whose whole purpose is to be
+# turned on, and it could not be.
+#
+# Requiring only what the deployment can actually issue keeps the ratchet meaningful where it bites
+# (agent_class still selects the Rego program, so an unbound credential is still refused) without
+# demanding a claim that cannot exist. Note what this does NOT do: with no spiffe_id claim,
+# `attested_namespace` has nothing to derive from, so a workload-api token with no namespace claim keeps
+# the pre-existing body-supplied behaviour. Closing THAT needs the peer's real SVID read from the
+# internal mTLS client certificate — nginx already verifies it and forwards X-Nrvq-Client-Verify /
+# X-Nrvq-Client-Subject — which is a separate change, not this one.
+def _required_bound_fields() -> tuple[str, ...]:
+    """The bound-identity fields a machine principal must carry, for THIS deployment's SPIFFE mode."""
+    if str(getattr(settings, "spiffe_mode", "mock")).lower() == "workload-api":
+        return tuple(f for f in _REQUIRED_BOUND_FIELDS if f != "spiffe_id")
+    return _REQUIRED_BOUND_FIELDS
 # Fields that only ADD a policy candidate. For these, "unclaimed" resolves to empty (drop the tier)
 # rather than to the body's value — clearing an additive tier can only ever be more restrictive.
 _ADDITIVE_TIER_FIELDS = ("workload",)
@@ -410,7 +433,7 @@ def scoped_identity(user: dict, agent_identity: dict | None) -> dict:
                 )
                 identity[field] = ""
     if role == "service":
-        missing = [f for f in _REQUIRED_BOUND_FIELDS if f not in bound]
+        missing = [f for f in _required_bound_fields() if f not in bound]
         if missing and settings.auth_require_bound_agent_identity:
             log.warning(
                 "nrvq.auth.identity_unbound_denied",
