@@ -57,7 +57,7 @@ describe("BuilderSheet", () => {
 
     await waitFor(() => {
       const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
-      expect(rego).toContain("package norviq.builder.builder_spike");
+      expect(rego).toContain("package norviq.custom.builder_spike");
       // rule_id auto-slugged from the reason text (untouched rule_id field).
       expect(rego).toContain('blocks["sql_injection_blocked"]');
       expect(rego).toContain('"sql_injection_blocked": "SQL injection blocked"');
@@ -446,7 +446,7 @@ describe("BuilderSheet — Intent Allowlist mode (Phase 2c)", () => {
     // Compiled preview reflects the default-deny allowlist shape immediately.
     await waitFor(() => {
       const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
-      expect(rego).toContain("package norviq.builder.builder_spike");
+      expect(rego).toContain("package norviq.intent.builder_spike");
       expect(rego).toContain('default decision = "block"');
       expect(rego).toContain('default rule_id = "intent_default_deny"');
     });
@@ -720,7 +720,7 @@ describe("BuilderSheet — policy tier picker (Phase 3)", () => {
 
     await waitFor(() => {
       const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
-      expect(rego).toContain("package norviq.builder.ns_default");
+      expect(rego).toContain("package norviq.custom.ns_default");
       expect(rego).toContain('input.agent.namespace == "default"');
       expect(rego).not.toMatch(/agent_class ==/);
     });
@@ -742,7 +742,7 @@ describe("BuilderSheet — policy tier picker (Phase 3)", () => {
 
     await waitFor(() => {
       const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
-      expect(rego).toContain("package norviq.builder.wl_checkout");
+      expect(rego).toContain("package norviq.custom.wl_checkout");
       expect(rego).toContain('input.agent.namespace == "default"');
       expect(rego).not.toMatch(/agent_class ==/);
     });
@@ -862,7 +862,7 @@ describe("BuilderSheet — reserved-scope guard (Phase 3, Item A / P1 fix)", () 
     expect(screen.getByTestId("builder-scope-reserved-error")).toHaveTextContent(/reserved\/managed scope/i);
     expect(screen.getByTestId("builder-dryrun-btn")).toBeDisabled();
     expect(screen.getByTestId("builder-save-btn")).toBeDisabled();
-    expect((screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value).not.toContain("package norviq.builder");
+    expect((screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value).not.toContain("package norviq.");
   });
 
   it('typing "__cluster__" as the namespace-tier identifier shows the reserved-scope error and disables Save', async () => {

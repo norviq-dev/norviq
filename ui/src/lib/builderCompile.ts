@@ -832,9 +832,12 @@ function buildBody(graph: BuilderGraph, targetNamespace: string): string {
 // --- Intent Allowlist emission (Phase 2c) --------------------------------------------------------
 //
 // Mirrors the server's `norviq/api/threat_intent.py generate_intent_rego` (READ-ONLY reference, never
-// edited by this spike) to the shape the builder is allowed to own: package `norviq.builder.<token>`
-// (NOT `norviq.intent.<token>` — see the header comment this emits for the productization nuance),
-// deliberately OMITTING the server's `learned_verbs` feature (admin-promoted verb overrides sourced from
+// edited by this spike) to the shape the builder is allowed to own: package `norviq.intent.<token>` —
+// the same documented namespace prefix the server's own generator uses (docs.norviq.dev/guides/writing-policies/),
+// so the builder's allowlist policies are classified by the server exactly like any other intent policy
+// (coverage.py's `_parse_agent_policy` → `kind="intent"` with allow_names/refinements parsed; threats.py's
+// `_governing_policies` → counted as a chokepoint-governing defense). See the header comment this emits
+// for the classification detail. Deliberately OMITTING the server's `learned_verbs` feature (admin-promoted verb overrides sourced from
 // a server-side registry the browser has no access to — see skeleton.ts's analogous documented gap for
 // the same "client mirror, not a full port" doctrine). Named-set assignments below use `=` (not the
 // python generator's `:=`) to match THIS FILE's own idiom (`bld_sql_patterns = [...]` in buildBody above)
@@ -917,11 +920,13 @@ function allowlistHeaderComment(graph: BuilderGraph, scope: BuilderScope): strin
     `# enabled refinement holds. The allowlist is matched evasion-normalized (lower-cased name + confusable`,
     `# skeleton, i.e. input.tool_name_normalized) so homoglyph/fullwidth/case tricks can't smuggle a`,
     `# non-intended tool past the allow.`,
-    `# PRODUCTIONIZATION NOTE: this policy lives at package norviq.builder.<token> — the builder's one`,
-    `# policy slot for this class — NOT norviq.intent.<token>. The server-side generator this mirrors`,
-    `# (norviq/api/threat_intent.py generate_intent_rego) uses the norviq.intent. package prefix for its`,
-    `# own governance classification of intent policies (e.g. dashboards/audits that key off that prefix);`,
-    `# that classification distinction does not apply to a builder-owned policy and is not reproduced here.`,
+    `# This policy lives at package norviq.intent.<token> — the documented namespace for intent-allowlist`,
+    `# policies (docs.norviq.dev/guides/writing-policies/) — precisely so the server's own governance`,
+    `# classification (coverage.py's _parse_agent_policy, threats.py's _governing_policies) recognizes it`,
+    `# as an intent policy: the Overview reports kind="intent" with this allowlist's tools, and attack-path`,
+    `# chokepoint governance counts it as a defense. At push time the engine isolates every policy into its`,
+    `# own package (opa_client.py's managed_package/rewrite_package, norviq.managed.<key>), so this`,
+    `# declared package never collides with another policy's — it is read for classification, not evaluation.`,
     `# OMITTED from this client-side generator: the server's "learned_verbs" admin-promoted verb overrides`,
     `# (registry data the browser does not have — see generate_intent_rego's learned_verbs param). A`,
     `# tool's read/egress classification below is name-heuristic only, never admin-promotion-overridden.`,
@@ -1024,6 +1029,15 @@ function buildAllowlistBody(graph: BuilderGraph, targetNamespace: string): strin
 /** `targetNamespace` (Phase 3, default "") is used ONLY by the workload tier's guard (see
  *  `scopeGuardLine`) — ignored entirely for class/namespace tiers, so every pre-Phase-3 call site
  *  (and every class-tier fixture) compiles byte-identically whether or not it's supplied. */
+/** Documented-namespace package prefix by mode (see the module header comment for the taxonomy
+ *  reference): "rules" mode (tighten-only) emits into `norviq.custom.` — the same namespace the raw
+ *  Monaco editor seeds a new policy into (`NEW_POLICY_REGO` in PolicyCatalog.tsx) — and "allowlist"
+ *  mode emits into `norviq.intent.` so the server's own `norviq.intent.` classification (coverage.py's
+ *  `_parse_agent_policy`, threats.py's `_governing_policies`) recognizes it as an intent policy. */
+function packagePrefixFor(mode: BuilderMode): "norviq.custom." | "norviq.intent." {
+  return mode === "allowlist" ? "norviq.intent." : "norviq.custom.";
+}
+
 function buildFullRego(graph: BuilderGraph, targetNamespace: string): string {
   const scope = graph.scope;
   const token = scopeToken(scope);
@@ -1034,7 +1048,7 @@ function buildFullRego(graph: BuilderGraph, targetNamespace: string): string {
   const descriptionLines = mode === "allowlist" ? allowlistHeaderComment(graph, scope) : rulesHeaderComment(scope);
 
   const header = [
-    `package norviq.builder.${token}`,
+    `package ${packagePrefixFor(mode)}${token}`,
     ``,
     ...descriptionLines,
     `# nrvq-builder-graph/v1: ${graphBlob}`,
