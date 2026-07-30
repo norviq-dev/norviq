@@ -49,14 +49,23 @@ Two things bound it, and neither closes it completely:
   bypass at the **network** layer — it does not restore per-call parameter policy, and it **requires a
   NetworkPolicy-enforcing CNI** (Calico/Cilium; kindnet silently ignores NetworkPolicy).
 
-  Measured on Calico, with the lockdown active on the agent namespace. A bypassing agent — one that
-  ignores the SDK and dials a tool endpoint itself — was dropped on every path tried (external HTTPS and
-  HTTP, an in-cluster Service that is not allowlisted, the Postgres port), while DNS and the Norviq API
-  stayed reachable and the injected sidecar kept enforcing throughout (dangerous call dropped, benign
+  Measured on **both** engines, with the lockdown active on the agent namespace. A bypassing agent — one
+  that ignores the SDK and dials a tool endpoint itself — was dropped on every path tried (external HTTPS
+  and HTTP, an in-cluster Service that is not allowlisted, the Postgres port), while DNS and the Norviq
+  API stayed reachable and the injected sidecar kept enforcing throughout (dangerous call dropped, benign
   forwarded). Adding a CIDR to `allowedCIDRs` opened exactly that path (HTTP 200) and removing it closed
   it again, with an unlocked namespace as the control. So the bound is real and it does not cost
   enforcement — but note what it *is*: an agent may still freely reach anything on the allowlist without
   a verdict. The allowlist is the blast radius.
+
+  `engine=cilium` is verified on a real Cilium cluster (1.19.6, kube-proxy replacement, DNS proxy on),
+  including the two knobs that have no NetworkPolicy equivalent and therefore could only ever be
+  exercised here: `allowedFQDNs` admitted a host **by name** while a non-listed host was dropped, and
+  `allowedFQDNPatterns` did the same for a wildcard. `embeddedDatastores` was checked by observing the
+  Postgres port flip from dropped to connected when it was enabled. Worth knowing about the DNS-proxy
+  dependency: `toFQDNs` resolves only names Cilium's proxy has OBSERVED the pod look up, which is why
+  the rendered policy always carries the `rules.dns` visibility rule — remove it and every FQDN
+  allowlist silently matches nothing.
 
   One operator caveat, because a NetworkPolicy cannot select what is not a pod: with
   `embeddedDatastores=true` and a datastore **outside** the cluster (managed Postgres/Redis), no
