@@ -16,6 +16,7 @@ if sys.platform == "win32":
 from norviq.api.audit_hub import AuditHub
 from norviq.api.audit_retention import RetentionPruner
 from norviq.api.db.session import close_db, create_tables, ensure_schema_compatibility, get_session, init_db
+from norviq.api.path_timing import PathTimingMiddleware
 from norviq.api.rate_limit import RateLimitMiddleware
 from norviq.api.siem import AuditForwarder
 from norviq.fleet_relay import FleetRelayForwarder
@@ -346,6 +347,13 @@ def create_app() -> FastAPI:
     # a flooded/over-limit caller gets 429'd before the API spends any effort buffering the body or
     # recording telemetry for the request.
     app.add_middleware(RateLimitMiddleware)
+    # Added after RateLimit so it is the TRUE outermost layer and `total_asgi` covers everything above,
+    # including the rate limiter itself. This does not weaken the rate-limit-first intent above: it is a
+    # passthrough timer that buffers nothing and touches neither scope nor messages, so a flooded caller is
+    # still 429'd before any real work happens. Without it the only request-level number came from
+    # TelemetryMiddleware — the INNERMOST of the three — which left the outer layers unmeasured and ~46 ms
+    # of a caller's wait unattributable.
+    app.add_middleware(PathTimingMiddleware)
     mount_metrics_endpoint(app)
     return app
 

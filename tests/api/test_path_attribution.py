@@ -117,3 +117,87 @@ def test_the_sidecar_exposes_a_metrics_endpoint() -> None:
     paths = {getattr(r, "path", None) for r in app.routes}
     mounts = {getattr(r, "path", None) for r in app.router.routes}
     assert "/metrics" in paths or "/metrics" in mounts, f"no /metrics on the sidecar app: {paths | mounts}"
+
+
+# --- Closing the accounting: the outermost timer and the upstream split -----------------------------
+
+
+def test_path_timing_is_the_outermost_middleware() -> None:
+    """The whole point is measuring OUTSIDE the other layers.
+
+    Starlette prepends, so the last-added middleware is outermost. TelemetryMiddleware is added first and is
+    therefore the INNERMOST of the three — its `api_request_latency` excludes the rate limiter (~9 ms) and
+    the body-size limiter. If PathTiming stops being outermost it silently measures a subset and the ~46 ms
+    it exists to attribute becomes invisible again.
+    """
+    from norviq.api.main import create_app
+
+    names = [m.cls.__name__ for m in create_app().user_middleware]
+    assert names[0] == "PathTimingMiddleware", f"PathTiming must be outermost, got order {names}"
+    assert "RateLimitMiddleware" in names[1:], "the rate limiter must still wrap the real work"
+
+
+def test_path_timing_is_a_transparent_passthrough() -> None:
+    """It must not alter scope, messages or the response — it only observes.
+
+    Registered outside the rate limiter, so a bug here would affect every request including the ones the
+    limiter is meant to reject cheaply.
+    """
+    import asyncio
+
+    from norviq.api.path_timing import PathTimingMiddleware
+
+    seen: dict = {}
+
+    async def downstream(scope, receive, send):
+        seen["scope"] = scope
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    sent: list = []
+
+    async def send(msg):
+        sent.append(msg)
+
+    scope = {"type": "http", "path": "/api/v1/evaluate"}
+    asyncio.run(PathTimingMiddleware(downstream)(scope, None, send))
+    assert seen["scope"] is scope, "scope was replaced or copied"
+    assert [m["type"] for m in sent] == ["http.response.start", "http.response.body"]
+    assert sent[0]["status"] == 200 and sent[1]["body"] == b"ok"
+
+
+def test_path_timing_records_even_when_the_request_raises() -> None:
+    """A slow failing request is exactly the case worth seeing; `try/else` would drop it."""
+    import asyncio
+
+    from norviq.api import path_timing
+
+    recorded: list = []
+
+    async def boom(scope, receive, send):
+        raise RuntimeError("handler exploded")
+
+    orig = path_timing.record_path_phase
+    path_timing.record_path_phase = lambda c, p, ms: recorded.append((c, p))
+    try:
+        with pytest.raises(RuntimeError):
+            asyncio.run(path_timing.PathTimingMiddleware(boom)({"type": "http"}, None, None))
+    finally:
+        path_timing.record_path_phase = orig
+    assert ("api", "total_asgi") in recorded
+
+
+def test_path_timing_ignores_non_http_scopes() -> None:
+    """Websockets and lifespan must pass through untouched — timing them would be meaningless."""
+    import asyncio
+
+    from norviq.api.path_timing import PathTimingMiddleware
+
+    called: list = []
+
+    async def downstream(scope, receive, send):
+        called.append(scope["type"])
+
+    asyncio.run(PathTimingMiddleware(downstream)({"type": "lifespan"}, None, None))
+    asyncio.run(PathTimingMiddleware(downstream)({"type": "websocket"}, None, None))
+    assert called == ["lifespan", "websocket"]
