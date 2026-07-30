@@ -43,7 +43,12 @@ cd "$(dirname "$0")/.."
 
 SHA="$(git rev-parse HEAD)"
 SUFFIX=""
-if ! git diff --quiet HEAD -- || ! git diff --cached --quiet; then
+# `git status --porcelain` rather than `git diff HEAD`, because diff IGNORES UNTRACKED FILES. A brand-new
+# source file — precisely what a work-in-progress build contains — leaves `git diff HEAD` clean, so the
+# earlier check called the tree pristine and tagged with a sha that did not describe it. That is the same
+# blind spot as `git stash push` without `-u`, which silently no-opped on untracked files during the latency
+# work and produced three invalid regression comparisons before it was noticed.
+if [ -n "$(git status --porcelain)" ]; then
     if [ "${ALLOW_DIRTY:-0}" != "1" ]; then
         echo "ERROR: working tree is dirty, so the HEAD sha does NOT describe what would be built." >&2
         echo "       Tagging anyway reuses a sha that may already be pushed, silently overwriting a tag" >&2
