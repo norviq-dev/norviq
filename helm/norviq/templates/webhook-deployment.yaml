@@ -61,6 +61,19 @@ spec:
             - name: NRVQ_WEBHOOK_PORT
               value: "{{ .Values.webhook.port }}"
             # Pinned (-sha on CI) sidecar image. The controller refuses a mutable-tag CRD override.
+            {{- /* The injected sidecar's budget, selected by mode. Keeping the SELECTION here (not in
+                   the webhook) means the Go side stays a dumb consumer of four scalars, and an
+                   operator can retune either profile without a webhook rebuild. */}}
+            {{- $sc := .Values.webhook.injection.sidecarResources }}
+            {{- $prof := ternary $sc.embedded $sc.proxy (eq .Values.webhook.injection.sidecarMode "embedded") }}
+            - name: NRVQ_SIDECAR_CPU_REQUEST
+              value: {{ $prof.requests.cpu | quote }}
+            - name: NRVQ_SIDECAR_MEM_REQUEST
+              value: {{ $prof.requests.memory | quote }}
+            - name: NRVQ_SIDECAR_CPU_LIMIT
+              value: {{ $prof.limits.cpu | quote }}
+            - name: NRVQ_SIDECAR_MEM_LIMIT
+              value: {{ $prof.limits.memory | quote }}
             - name: NRVQ_SIDECAR_IMAGE
               value: "{{ include "norviq.image" (dict "root" $ "component" .Values.images.engine) }}"
             - name: NRVQ_CONTROLLER_ENABLED

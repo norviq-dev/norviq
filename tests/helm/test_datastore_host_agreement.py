@@ -140,3 +140,55 @@ def test_redis_ha_renders_the_master_service_it_points_at() -> None:
     assert svc["spec"]["selector"].get("redisfailovers-role") == "master", (
         f"master Service must select the promoted pod, got {svc['spec']['selector']}"
     )
+
+
+def _sidecar_env(rendered: str) -> dict[str, str]:
+    """The four budget scalars the webhook Deployment passes to the injector."""
+    out = {}
+    for doc in yaml.safe_load_all(rendered):
+        if doc and doc.get("kind") == "Deployment" and doc["metadata"]["name"] == "norviq-webhook":
+            for c in doc["spec"]["template"]["spec"]["containers"]:
+                for e in c.get("env") or []:
+                    if e.get("name", "").startswith("NRVQ_SIDECAR_") and "value" in e:
+                        out[e["name"]] = e["value"]
+    return out
+
+
+def _mib(v: str) -> int:
+    return int(v.removesuffix("Mi")) if v.endswith("Mi") else int(v.removesuffix("Gi")) * 1024
+
+
+@pytest.mark.parametrize(
+    "mode,floor_mib",
+    [
+        # embedded's MEASURED peak was 214Mi (cgroup memory.peak, after 80 OPA-forking evaluations).
+        # It shipped with the proxy's 128Mi limit and was OOMKilled (exit 137) in every release — it
+        # reached `nrvq.sidecar.started` and died before uvicorn could bind, so the symptom looked
+        # like a probe failure. The floor here is the measurement, not a preference.
+        ("embedded", 256),
+        ("proxy", 96),
+    ],
+)
+def test_injected_sidecar_budget_fits_its_mode(mode: str, floor_mib: int) -> None:
+    rendered = _render(["--set", "webhook.injection.enabled=true",
+                        "--set", f"webhook.injection.sidecarMode={mode}"])
+    env = _sidecar_env(rendered)
+    assert env, "the webhook Deployment passes no sidecar budget — the injector will use its defaults"
+    limit = _mib(env["NRVQ_SIDECAR_MEM_LIMIT"])
+    assert limit >= floor_mib, (
+        f"{mode} sidecar limit is {limit}Mi, below the {floor_mib}Mi this mode needs — it will be OOMKilled"
+    )
+
+
+def test_embedded_gets_a_bigger_budget_than_the_thin_proxy() -> None:
+    """The modes are not interchangeable: embedded runs an engine, proxy forwards.
+
+    A single shared budget is what caused the OOM, so the two profiles must actually differ —
+    otherwise someone has quietly collapsed them back together.
+    """
+    def limit(mode: str) -> int:
+        env = _sidecar_env(_render(["--set", "webhook.injection.enabled=true",
+                                    "--set", f"webhook.injection.sidecarMode={mode}"]))
+        return _mib(env["NRVQ_SIDECAR_MEM_LIMIT"])
+
+    assert limit("embedded") > limit("proxy"), "embedded must not inherit the thin proxy's budget"
