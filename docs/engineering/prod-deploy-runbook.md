@@ -65,7 +65,7 @@ the pull entirely and reference `oci://ghcr.io/norviq-dev/charts/norviq --versio
 | strong-secret guard / DB TLS | already on / already `require` | unchanged (on / `require`) |
 
 Note what is *not* a prod-only setting: `config.requireStrongSecret` is **`true` by default** and
-`config.dbSslMode` is already `require` in the base values. The overlay's real security delta is that
+`config.dbSslMode` derives to `require` for any external/HA datastore, so the overlay changes nothing there. The overlay's real security delta is that
 it **blanks `postgresql.password` / `redis.password`** so a prod install cannot silently ship the
 well-known dev credentials — the render fails until you supply your own.
 

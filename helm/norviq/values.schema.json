@@ -79,7 +79,7 @@
         "rateLimit": { "type": "integer", "minimum": 0 },
         "inprocCacheTtlS": { "type": "number", "minimum": 0, "description": "Per-pod in-process L1 TTL (seconds) for the enforcement hot path. Caches posture, stored trust score, trust history/profile (this TTL) and the pre-override base decision (additionally clamped to redis_ttl_eval_s). The admin freeze/cap are NEVER cached. 0 = disabled (default; opt-in)." },
         "inprocCacheMax": { "type": "integer", "minimum": 1, "description": "Hard per-cache entry cap for the in-process L1s (bounds per-pod memory)." },
-        "dbSslMode": { "enum": ["disable", "allow", "prefer", "require", "verify-ca", "verify-full"] },
+        "dbSslMode": { "enum": ["", "disable", "allow", "prefer", "require", "verify-ca", "verify-full"], "description": "DB TLS mode. Empty = derive from the chosen datastore (disable for the bundled non-TLS StatefulSet, require for HA/external). An explicit value always wins." },
         "internalTls": {
           "type": "object",
           "properties": { "enabled": { "type": "boolean" }, "proxyImage": { "type": "string" } }

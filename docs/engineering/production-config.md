@@ -46,9 +46,10 @@ kubectl get secret norviq-secrets -n norviq \
   ```
 
 ## 2. Database TLS
-- `config.dbSslMode` → `NRVQ_DB_SSL_MODE` (`require` | `verify-ca` | `verify-full`). **Already
-  `require` in the base values** — raise it to `verify-ca`/`verify-full` if your Postgres presents a
-  CA you pin. Verify: API startup logs `NRVQ-DB-DEBUG-CONNECT-ARGS` shows the resolved `ssl` mode.
+- `config.dbSslMode` → `NRVQ_DB_SSL_MODE` (`require` | `verify-ca` | `verify-full`). **Derives to
+  `require` for any external/managed or CloudNativePG-HA datastore**, so production needs no action —
+  raise it to `verify-ca`/`verify-full` if your Postgres presents a CA you pin. (It derives to `disable`
+  only for the bundled non-TLS StatefulSet, which is not a production datastore.) Verify: API startup logs `NRVQ-DB-DEBUG-CONNECT-ARGS` shows the resolved `ssl` mode.
 
 ## 3. High availability
 - `api.replicas: 2` (default) + `api.pdb.enabled: true` (default) keep enforcement available during
