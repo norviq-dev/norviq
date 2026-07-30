@@ -93,6 +93,17 @@ func retryTestController(t *testing.T, objs ...*unstructured.Unstructured) (*Con
 	return c, &posts
 }
 
+// retryPolicyObjConverged builds an Active policy already STAMPED with the fingerprint of the rego it
+// carries — i.e. genuinely converged, which after the content-drift fix is what "skip me" now means.
+// "Active" alone no longer implies converged: a preset's rego lives in the controller image, so a new
+// release changes the desired content while the CR's spec and Generation stay identical. See
+// appliedRegoAnnotation.
+func retryPolicyObjConverged(name string) *unstructured.Unstructured {
+	u := retryPolicyObj(name, policyPhaseActive)
+	u.SetAnnotations(map[string]string{appliedRegoAnnotation: regoFingerprint(retryTestRego)})
+	return u
+}
+
 // THE regression test: a policy left in Error by a transient failure must be re-synced by the sweep.
 func TestRetryUnsyncedPolicies_RetriesErrorPhase(t *testing.T) {
 	c, posts := retryTestController(t, retryPolicyObj("stranded", policyPhaseError))
@@ -113,14 +124,58 @@ func TestRetryUnsyncedPolicies_RetriesEmptyPhase(t *testing.T) {
 	}
 }
 
-// Already-Active policies must NOT be re-synced — otherwise the sweep would re-POST every policy
-// every interval, turning a convergence mechanism into steady-state load on the API.
-func TestRetryUnsyncedPolicies_SkipsActivePhase(t *testing.T) {
-	c, posts := retryTestController(t, retryPolicyObj("healthy", policyPhaseActive))
+// An Active policy whose applied rego MATCHES what the controller would apply now must NOT be
+// re-synced — otherwise the sweep would re-POST every policy every interval, turning a convergence
+// mechanism into steady-state load on the API. This is the load guarantee; the drift tests below are
+// the correctness one, and both have to hold at once.
+func TestRetryUnsyncedPolicies_SkipsActiveAndConverged(t *testing.T) {
+	c, posts := retryTestController(t, retryPolicyObjConverged("healthy"))
 	c.retryUnsyncedPolicies()
 	c.wg.Wait()
 	if got := atomic.LoadInt32(posts); got != 0 {
-		t.Fatalf("expected Active policies to be skipped, got %d POSTs", got)
+		t.Fatalf("expected an Active, converged policy to be skipped, got %d POSTs", got)
+	}
+}
+
+// THE issue-#4 regression test. An Active policy whose content has drifted MUST be re-synced.
+//
+// `deploy.yml` ships container IMAGES; policy rego is DB-seeded DATA that the deploy never touches. A
+// baseline CR names a preset whose rego is a file in the controller image, so a new release changes the
+// desired rego while the CR's spec — and therefore its Generation — stays byte-identical. The sweep used
+// to skip anything Active, so the database kept enforcing the OLD rego indefinitely: every version
+// string reported the new release while enforcement silently lagged it. Concretely, the F-02
+// homoglyph/Unicode-normalization clauses shipped in the engine but were never seeded, so two
+// attack-corpus cases did not actually pass on the deployed cluster.
+func TestRetryUnsyncedPolicies_ResyncsActiveWhenContentDrifted(t *testing.T) {
+	obj := retryPolicyObj("stale-preset", policyPhaseActive)
+	// Stamped with a DIFFERENT fingerprint: what a previous image's preset produced.
+	obj.SetAnnotations(map[string]string{appliedRegoAnnotation: "0000000000000000"})
+	c, posts := retryTestController(t, obj)
+	c.retryUnsyncedPolicies()
+	c.wg.Wait()
+	if got := atomic.LoadInt32(posts); got != 1 {
+		t.Fatalf("expected the drifted policy to be re-synced once, got %d POSTs", got)
+	}
+}
+
+// An Active policy that has never been stamped (installed by an older controller) converges exactly
+// ONCE. This is what makes the fix reach clusters that already exist — the reported case — but it must
+// not become a per-tick re-POST, so the second sweep has to be silent.
+func TestRetryUnsyncedPolicies_UnstampedActiveConvergesExactlyOnce(t *testing.T) {
+	c, posts := retryTestController(t, retryPolicyObj("legacy", policyPhaseActive))
+	c.retryUnsyncedPolicies()
+	c.wg.Wait()
+	if got := atomic.LoadInt32(posts); got != 1 {
+		t.Fatalf("expected one convergence sync for an unstamped Active policy, got %d POSTs", got)
+	}
+	// c.client is nil in this harness, so the ANNOTATION patch cannot land — which is exactly the
+	// failure mode the in-process backstop exists for. Without it this second sweep would re-POST, and
+	// would keep doing so every 60s forever.
+	c.retryUnsyncedPolicies()
+	c.wg.Wait()
+	if got := atomic.LoadInt32(posts); got != 1 {
+		t.Fatalf("drift detection re-POSTed on a second sweep (%d total) — this is the loop the "+
+			"in-process backstop must prevent when the annotation write fails", got)
 	}
 }
 
@@ -137,12 +192,13 @@ func TestRetryUnsyncedPolicies_SkipsDeletingPolicies(t *testing.T) {
 	}
 }
 
-// Mixed store: only the unsynced ones are re-driven.
+// Mixed store: only the unsynced ones are re-driven. The Active ones here are CONVERGED (stamped), so
+// they stay untouched — a policy that is Active but drifted is covered separately above.
 func TestRetryUnsyncedPolicies_OnlyUnsyncedAreRedriven(t *testing.T) {
 	c, posts := retryTestController(t,
-		retryPolicyObj("ok-1", policyPhaseActive),
+		retryPolicyObjConverged("ok-1"),
 		retryPolicyObj("bad-1", policyPhaseError),
-		retryPolicyObj("ok-2", policyPhaseActive),
+		retryPolicyObjConverged("ok-2"),
 		retryPolicyObj("bad-2", ""),
 	)
 	c.retryUnsyncedPolicies()
@@ -387,3 +443,4 @@ func TestRefreshDerivedStatusIfStale_PolicyDeleteMarksStale(t *testing.T) {
 		t.Fatalf("expected handlePolicyDelete to mark derived status stale")
 	}
 }
+
