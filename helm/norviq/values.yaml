@@ -302,7 +302,23 @@ webhook:
         # under node pressure fails the workload it is guarding, so eviction-safety beats packing
         # density here. The limit leaves ~79% headroom over peak for larger payloads and GC spikes.
         requests: { cpu: 200m, memory: 256Mi }
-        limits:   { cpu: 500m, memory: 384Mi }
+        # The CPU limit is 2000m, not 500m, and that is the difference between this mode helping and
+        # HURTING. Measured on AKS through a real injected sidecar, two runs each:
+        #
+        #   proxy (for reference)   p50 59.0ms   p95 92.7ms
+        #   embedded @ 500m         p50 72.0ms   p95 93.1ms    58.9% of CFS periods THROTTLED
+        #   embedded @ 2000m        p50 30.7ms   p95 58.0ms    0% throttled
+        #
+        # At 500m, embedded was SLOWER than the proxy default it exists to beat — so an operator who
+        # enabled it got a worse result than leaving it off, with nothing to indicate why. One evaluation
+        # costs ~69ms of CPU and embedded runs the WHOLE engine in the pod (redis client, policy warm,
+        # audit emitter, plus an OPA subprocess fork per call), so a 500m ceiling throttles it hard. The
+        # 213m warm-up figure noted above is a WARM-UP measurement, not a sustained-load one.
+        #
+        # As with the api limit, only the LIMIT is generous: `requests` stays at 200m, so scheduling
+        # density is unchanged and this cannot make a pod unschedulable. Memory is unchanged — 384Mi was
+        # measured against real peak (214Mi), and no OOM or restart was observed under load.
+        limits:   { cpu: 2000m, memory: 384Mi }
     # DATA-PLANE posture: what a GOVERNED AGENT does when the central engine is unreachable. Distinct
     # from failurePolicy below, which is the ADMISSION posture (whether a pod may be created at all).
     #   "block" (DEFAULT) = fail-CLOSED. The agent keeps talking, but every tool call is refused for as
