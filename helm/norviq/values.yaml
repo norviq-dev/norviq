@@ -203,7 +203,20 @@ api:
       cpu: 100m
       memory: 128Mi
     limits:
-      cpu: 500m
+      # 500m throttled this pod on 92.5% of CFS periods under a sustained single-client load —
+      # 23.8s of throttle across 400 evaluations, ~60ms of pure wait added to EVERY call. Caller-
+      # observed p50 was 115ms and p95 172ms; raising this limit alone (nothing else changed) took
+      # them to 62ms and 101ms with ZERO throttled periods. One evaluation costs ~69ms of CPU, so a
+      # 500m ceiling caps a replica near ~7 evaluations/sec and the excess is paid as latency.
+      #
+      # Only the LIMIT moves. `requests` stays at 100m deliberately: requests drive scheduling, so
+      # raising them can make this chart unschedulable on a small cluster — on a 2-node/2-vCPU AKS a
+      # 1000m request did not fit at all. A higher limit changes no scheduling decision; it only
+      # stops the kernel parking a pod that has work to do.
+      #
+      # Lower this if you are deliberately capping a noisy tenant, but the cost of a low cap here is
+      # paid as p95 latency on every enforcement decision.
+      cpu: 2000m
       memory: 256Mi
   port: 8080
   # Leave this at the sentinel default and the chart AUTO-GENERATES a strong random secret on
