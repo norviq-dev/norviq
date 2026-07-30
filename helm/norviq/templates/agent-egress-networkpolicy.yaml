@@ -53,20 +53,59 @@ spec:
             matchLabels:
               app: norviq-api
     {{- if $ep.embeddedDatastores }}
-    # embedded sidecar mode: the sidecar runs its own engine off the cluster datastores.
+    {{- /* embedded sidecar mode: the sidecar runs its own engine off the cluster datastores, so it
+           needs egress to Postgres and Redis directly. The pod labels DIFFER per datastore shape, and
+           a podSelector that matches nothing grants nothing — under a default-deny egress policy that
+           silently leaves the sidecar unable to reach its own datastores. So each shape names the
+           labels that actually exist in it:
+
+             bundled  the in-chart StatefulSets, labelled `app: norviq-{postgresql,redis}`
+             HA       operator-created pods — CNPG stamps `cnpg.io/cluster`, the Spotahome operator
+                      stamps its own component/instance pair. Neither carries `app: norviq-*`.
+             external not a pod in this cluster at all; no selector can ever match it, which is why
+                      the guard below requires an explicit allowedCIDRs entry instead. */}}
     - to:
+        {{- if $root.Values.postgresql.ha.enabled }}
+        # CloudNativePG. All pods of the cluster, not just the primary: the RW Service follows a
+        # failover, so pinning `role: primary` would break the sidecar the first time it moved.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $root.Release.Namespace }}
+          podSelector:
+            matchLabels:
+              cnpg.io/cluster: norviq-postgresql-ha
+        {{- else if $root.Values.postgresql.enabled }}
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ $root.Release.Namespace }}
           podSelector:
             matchLabels:
               app: norviq-postgresql
+        {{- end }}
+        {{- if $root.Values.redis.ha.enabled }}
+        # Spotahome RedisFailover. Again every redis pod of the failover, since the master moves —
+        # mirrors the master Service's selector minus `redisfailovers-role`.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $root.Release.Namespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: redis
+              redisfailovers.databases.spotahome.com/name: norviq-redis-ha
+        {{- else if $root.Values.redis.enabled }}
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ $root.Release.Namespace }}
           podSelector:
             matchLabels:
               app: norviq-redis
+        {{- end }}
+    {{- $external := list }}
+    {{- if not (or $root.Values.postgresql.enabled $root.Values.postgresql.ha.enabled) }}{{- $external = append $external "postgresql" }}{{- end }}
+    {{- if not (or $root.Values.redis.enabled $root.Values.redis.ha.enabled) }}{{- $external = append $external "redis" }}{{- end }}
+    {{- if and $external (not $ep.allowedCIDRs) }}
+    {{-   fail (printf "agentEgressPolicy.embeddedDatastores=true but %s external to this cluster, so no podSelector can reach that. Under default-deny egress the embedded sidecar would fail to connect. Add the datastore's CIDR to agentEgressPolicy.allowedCIDRs." (ternary (printf "%s are" (join " and " $external)) (printf "%s is" (join " and " $external)) (gt (len $external) 1))) }}
+    {{- end }}
     {{- end }}
     {{- range $cidr := $ep.allowedCIDRs }}
     # Operator-approved tool endpoint.

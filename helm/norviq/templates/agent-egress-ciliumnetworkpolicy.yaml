@@ -46,14 +46,36 @@ spec:
             k8s:io.kubernetes.pod.namespace: {{ $root.Release.Namespace }}
             app: norviq-api
     {{- if $ep.embeddedDatastores }}
-    # embedded sidecar mode: the sidecar runs its own engine off the cluster datastores.
+    {{- /* Per-shape labels — see the NetworkPolicy template for why. An endpoint selector that matches
+           nothing grants nothing, and under default-deny that silently strands the embedded sidecar. */}}
     - toEndpoints:
+        {{- if $root.Values.postgresql.ha.enabled }}
+        # CloudNativePG: every pod of the cluster, since the RW Service follows a failover.
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ $root.Release.Namespace }}
+            cnpg.io/cluster: norviq-postgresql-ha
+        {{- else if $root.Values.postgresql.enabled }}
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: {{ $root.Release.Namespace }}
             app: norviq-postgresql
+        {{- end }}
+        {{- if $root.Values.redis.ha.enabled }}
+        # Spotahome RedisFailover: every redis pod of the failover, since the master moves.
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ $root.Release.Namespace }}
+            app.kubernetes.io/component: redis
+            redisfailovers.databases.spotahome.com/name: norviq-redis-ha
+        {{- else if $root.Values.redis.enabled }}
         - matchLabels:
             k8s:io.kubernetes.pod.namespace: {{ $root.Release.Namespace }}
             app: norviq-redis
+        {{- end }}
+    {{- $external := list }}
+    {{- if not (or $root.Values.postgresql.enabled $root.Values.postgresql.ha.enabled) }}{{- $external = append $external "postgresql" }}{{- end }}
+    {{- if not (or $root.Values.redis.enabled $root.Values.redis.ha.enabled) }}{{- $external = append $external "redis" }}{{- end }}
+    {{- if and $external (not (or $ep.allowedCIDRs $ep.allowedFQDNs $ep.allowedFQDNPatterns)) }}
+    {{-   fail (printf "agentEgressPolicy.embeddedDatastores=true but %s external to this cluster, so no endpoint selector can reach that. Under default-deny egress the embedded sidecar would fail to connect. Add the datastore to agentEgressPolicy.allowedCIDRs (or allowedFQDNs, engine=cilium)." (ternary (printf "%s are" (join " and " $external)) (printf "%s is" (join " and " $external)) (gt (len $external) 1))) }}
+    {{- end }}
     {{- end }}
     {{- if or $ep.allowedFQDNs $ep.allowedFQDNPatterns }}
     # Operator-approved tool endpoints BY HOSTNAME (resolved via the DNS-visibility rule above).
