@@ -48,6 +48,21 @@ Two things bound it, and neither closes it completely:
   may egress only to the Norviq API, DNS, and an operator-approved CIDR/FQDN allowlist. This bounds
   bypass at the **network** layer — it does not restore per-call parameter policy, and it **requires a
   NetworkPolicy-enforcing CNI** (Calico/Cilium; kindnet silently ignores NetworkPolicy).
+
+  Measured on Calico, with the lockdown active on the agent namespace. A bypassing agent — one that
+  ignores the SDK and dials a tool endpoint itself — was dropped on every path tried (external HTTPS and
+  HTTP, an in-cluster Service that is not allowlisted, the Postgres port), while DNS and the Norviq API
+  stayed reachable and the injected sidecar kept enforcing throughout (dangerous call dropped, benign
+  forwarded). Adding a CIDR to `allowedCIDRs` opened exactly that path (HTTP 200) and removing it closed
+  it again, with an unlocked namespace as the control. So the bound is real and it does not cost
+  enforcement — but note what it *is*: an agent may still freely reach anything on the allowlist without
+  a verdict. The allowlist is the blast radius.
+
+  One operator caveat, because a NetworkPolicy cannot select what is not a pod: with
+  `embeddedDatastores=true` and a datastore **outside** the cluster (managed Postgres/Redis), no
+  selector can reach it, so the chart now refuses to render until you put that datastore in
+  `allowedCIDRs` (or `allowedFQDNs` under `engine=cilium`) rather than shipping a policy that would
+  strand the sidecar.
 - **Injection integrity** — the webhook wires the socket and env into app *and* init containers, and
   `webhook.injection.allowPodOptOut=false` removes the per-pod opt-out (see below).
 
