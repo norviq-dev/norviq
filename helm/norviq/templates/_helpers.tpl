@@ -154,6 +154,39 @@ one place is what stops it drifting apart again.
 {{- end -}}
 {{- end -}}
 
+{{/*
+Effective DB SSL mode.
+
+The chart shipped two defaults that could not both hold: `postgresql.enabled: true` (the in-chart
+StatefulSet, which has NO TLS listener — nothing in the chart ever gives it a cert) and
+`config.dbSslMode: require`. So `helm install` with pure defaults could not start:
+
+    ConnectionError: PostgreSQL server at "norviq-postgresql...:5432" rejected SSL upgrade
+    ERROR:    Application startup failed. Exiting.
+
+…which is the FIRST thing a new operator does. Four docs and the release gate all carried
+`--set config.dbSslMode=disable` to work around it.
+
+An explicit `config.dbSslMode` is honoured verbatim, always. Left empty it is derived, and the
+derivation can only ever relax the ONE target where `require` is unsatisfiable by construction:
+
+    bundled StatefulSet   disable   no TLS listener exists; `require` can only crash
+    HA (CloudNativePG)    require   CNPG issues server certs and serves TLS
+    external host         require   assume a managed/TLS-terminating Postgres
+
+A managed database therefore still gets `require` with no action from the operator, which is the
+posture that matters. `values-prod.yaml` pins it explicitly regardless.
+*/}}
+{{- define "norviq.dbSslMode" -}}
+{{- if .Values.config.dbSslMode -}}
+{{- .Values.config.dbSslMode -}}
+{{- else if and .Values.postgresql.enabled (not .Values.postgresql.ha.enabled) (not .Values.postgresql.host) -}}
+disable
+{{- else -}}
+require
+{{- end -}}
+{{- end -}}
+
 {{- define "norviq.redisHost" -}}
 {{- if .Values.redis.host -}}
 {{- .Values.redis.host -}}

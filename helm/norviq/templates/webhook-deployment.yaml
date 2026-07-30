@@ -118,7 +118,7 @@ spec:
                   key: NRVQ_PG_URL
                   {{- end }}
             - name: NRVQ_DB_SSL_MODE
-              value: {{ .Values.config.dbSslMode | quote }}
+              value: {{ include "norviq.dbSslMode" . | quote }}
             - name: NRVQ_SIDECAR_OPA_MODE
               value: "subprocess"
             {{- end }}

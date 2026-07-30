@@ -60,7 +60,7 @@ data:
   NRVQ_EVALUATOR_INPROC_CACHE_TTL_S: {{ dig "inprocCacheTtlS" 0 .Values.config | quote }}
   # Per-cache entry cap for the same in-process L1 (bounds per-pod memory under identity/namespace churn).
   NRVQ_EVALUATOR_INPROC_CACHE_MAX: {{ dig "inprocCacheMax" 8192 .Values.config | quote }}
-  NRVQ_DB_SSL_MODE: {{ .Values.config.dbSslMode | quote }}
+  NRVQ_DB_SSL_MODE: {{ include "norviq.dbSslMode" . | quote }}
   NRVQ_DB_POOL_MAX_OVERFLOW: {{ .Values.config.dbPoolMaxOverflow | quote }}
   NRVQ_DB_POOL_TIMEOUT: {{ .Values.config.dbPoolTimeout | quote }}
   NRVQ_DB_COMMAND_TIMEOUT: {{ .Values.config.dbCommandTimeout | quote }}

@@ -420,7 +420,8 @@ postgresql:
   # External Postgres hostname. EMPTY = the bundled service (`norviq-postgresql`, or ha.serviceName under
   # HA). REQUIRED when enabled=false — the chart refuses to render an address it would only guess wrong.
   #   --set postgresql.enabled=false --set postgresql.host=mydb.postgres.database.azure.com
-  # Keep config.dbSslMode=require (the default) for a managed database.
+  # config.dbSslMode is derived (empty default): `require` for a managed database, `disable` for the
+  # bundled non-TLS StatefulSet. Set it explicitly to pin one.
   host: ""
   # PRODUCTION credential path: name of a Secret YOU manage holding the full Postgres URL. When set, the
   # chart never renders or generates a DB credential — the pods read the URL straight from your Secret,
@@ -588,7 +589,12 @@ config:
   inprocCacheTtlS: 0
   # Hard per-cache entry cap for those L1s (bounds per-pod memory under identity/namespace churn).
   inprocCacheMax: 8192
-  dbSslMode: require
+  # Empty => DERIVED from the datastore you actually chose: `disable` for the bundled Postgres
+  # StatefulSet (it has no TLS listener, so `require` could only crash on startup), `require` for
+  # CloudNativePG HA and for any external/managed host. Set it explicitly to override — an explicit
+  # value always wins, and values-prod.yaml pins `require`. This was a hard `require`, which made a
+  # pure-defaults `helm install` unable to start.
+  dbSslMode: ""
   dbPoolMaxOverflow: 10
   dbPoolTimeout: 10
   dbCommandTimeout: 10

@@ -50,15 +50,14 @@ kubectl apply -f helm/norviq/crds/
 kubectl create namespace norviq
 kubectl create namespace my-agents          # tenant namespace; must exist before install
 helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.8 -n norviq \
-  --set-json 'policyQuotaNamespaces=["my-agents"]' \
-  --set config.dbSslMode=disable            # bundled Postgres has no TLS listener
+  --set-json 'policyQuotaNamespaces=["my-agents"]'
 kubectl -n norviq port-forward svc/norviq-ui 8080:80   # http://localhost:8080
 ```
 
-Both `--set` flags matter. `policyQuotaNamespaces` satisfies the baseline guard above (§0);
-`config.dbSslMode` defaults to `require`, which is right for a managed Postgres but wrong for the
-**bundled** Postgres StatefulSet, which serves no TLS listener. Do not carry the `disable` override
-into production.
+`policyQuotaNamespaces` satisfies the baseline guard above (§0) and is the one flag you must supply.
+`config.dbSslMode` needs no override: left empty it is derived from the datastore in use — `disable` for
+the bundled Postgres StatefulSet, which serves no TLS listener, and `require` for CloudNativePG HA or an
+external/managed host. Set it explicitly only to pin a stricter mode such as `verify-full`.
 
 The chart deploys the API, engine, console UI, mutating webhook, and bundled PostgreSQL + Redis + OPA.
 Sign in with the seeded admin account — leave `auth.adminPassword` at its sentinel and the chart
@@ -84,13 +83,13 @@ Two overlays worth knowing for local work:
 
 - **`values-dev.yaml`** — fixed dev secrets (`api.secretKey`, DB/Redis passwords), `logLevel: DEBUG`,
   and `config.enforcementMode: audit`, so a fresh dev install logs decisions instead of enforcing them
-  until you're ready. It does not set `dbSslMode`, so keep the `--set config.dbSslMode=disable` above.
+  until you're ready.
 - **`values-light.yaml`** — the smallest viable single-node footprint (one replica of everything,
   PDBs/HPAs/HA/SPIFFE off). Enforcement is byte-identical to the default chart; only replica counts,
   PDBs, and resource requests/limits change:
   ```bash
   helm upgrade --install norviq ./helm/norviq -f helm/norviq/values-light.yaml -n norviq \
-    --set-json 'policyQuotaNamespaces=["my-agents"]' --set config.dbSslMode=disable
+    --set-json 'policyQuotaNamespaces=["my-agents"]'
   ```
 
 ## 2. Production single-cluster — HA
@@ -115,7 +114,7 @@ renders a Spotahome `RedisFailover` CR by default — swap `templates/redis-ha.y
 | `postgresql.ha` | off (single StatefulSet) | on — CloudNativePG `Cluster` (3 instances), 20Gi |
 | `redis.ha` | off (single StatefulSet) | on — Spotahome `RedisFailover` (Sentinel, 3) |
 | rollout | surge (`maxSurge:1`/`maxUnavailable:0`) | same |
-| `config.requireStrongSecret` / `dbSslMode` | on / `require` | on / `require` |
+| `config.requireStrongSecret` / `dbSslMode` | on / derived `require` (external/HA DB) | on / `require` (pinned) |
 | `images.*.pullPolicy` | `Always` | `IfNotPresent` (pin immutable tags) |
 | `gracefulShutdown.preStopSleepSeconds` | 3 | 5 |
 | `postgresql.password` / `redis.password` | shipped defaults | **blanked** — you must supply them |
@@ -241,7 +240,7 @@ recovery playbook below generalize to any cloud:
   `values-light.yaml` is the closest starting point. The knobs that matter: `replace-in-place`
   rollouts (`maxSurge: 0` / `maxUnavailable: 1` — a surge pod can never schedule when the node has no
   CPU headroom), `engine.replicas: 0` (the API evaluates in-process against its own OPA sidecar), a
-  trimmed `opa.resources` request, and `config.dbSslMode: disable` for an in-cluster Postgres with no
+  trimmed `opa.resources` request, and the derived `dbSslMode: disable` for an in-cluster Postgres with no
   TLS. Apply it as an additional `-f` overlay in CI/CD; drop it once the node pool has headroom (the
   base `values.yaml` defaults give zero-downtime surge rollouts and a 2-replica API on their own).
 - **CRDs first, same as any cluster**: `kubectl apply -f helm/norviq/crds/` before `helm install`.

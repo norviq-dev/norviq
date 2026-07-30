@@ -142,9 +142,11 @@ def install(ctx: str, chart: Path, webhook_image: str = "") -> bool:
         extra = ["--set", f"images.webhook.tag={tag}", "--set", "images.webhook.digest=",
                  "--set", "images.webhook.pullPolicy=IfNotPresent"]
 
+    # Deliberately NO config.dbSslMode: the candidate chart derives it from the datastore in use, and a
+    # gate that overrides it would never prove that a pure-defaults install can start. That is exactly
+    # the failure this override used to hide.
     res = helm(ctx, "install", "norviq", str(chart), "-n", NS,
                "--set-json", f'policyQuotaNamespaces=["{TENANT}"]',
-               "--set", "config.dbSslMode=disable",
                "--set", "webhook.injection.enabled=true",
                *extra,
                "--wait", "--atomic", "--timeout", "12m", timeout=900)
@@ -512,6 +514,9 @@ def install_published(ctx: str, version: str) -> bool:
         kubectl(ctx, "create", "namespace", ns)
     kubectl(ctx, "label", "namespace", TENANT, "norviq-injection=enabled", "--overwrite")
 
+    # This installs an ALREADY-PUBLISHED chart, which hard-codes config.dbSslMode=require and cannot
+    # start against the bundled non-TLS Postgres without the override. Keep it here (unlike the
+    # candidate install above) — the upgrade baseline has to be a release that actually boots.
     res = helm(ctx, "install", "norviq", f"oci://{CHART_REPO}", "--version", version, "-n", NS,
                "--set-json", f'policyQuotaNamespaces=["{TENANT}"]',
                "--set", "config.dbSslMode=disable",

@@ -35,11 +35,8 @@ kubectl create namespace norviq
 # install time so the chart can render its baseline — see policyQuotaNamespaces below.
 kubectl create namespace chatbot-prod
 
-# On a local/kind cluster the bundled Postgres has no TLS listener, so the default
-# config.dbSslMode=require will fail to connect — disable it for local eval:
 helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.8 -n norviq \
-  --set 'policyQuotaNamespaces={chatbot-prod}' \
-  --set config.dbSslMode=disable
+  --set 'policyQuotaNamespaces={chatbot-prod}'
 ```
 
 The chart is **cosign-signed** and pins every Norviq image by immutable digest, so the pinned
@@ -67,7 +64,6 @@ kubectl create namespace chatbot-prod
 
 helm install norviq ./helm/norviq -n norviq \
   --set 'policyQuotaNamespaces={chatbot-prod}' \
-  --set config.dbSslMode=disable
 ```
 
 This tracks whatever is on your checkout, which is what you want when changing the chart and what you
@@ -91,11 +87,16 @@ A few things worth knowing about this install:
 - **Bundled dependencies** — the chart also deploys single-replica PostgreSQL (`postgres:16-alpine`)
   and Redis (`redis:7-alpine`) StatefulSets, plus an OPA (`openpolicyagent/opa:1.18.0-static`)
   sidecar in every API/engine pod. Nothing external is required to get the core stack running.
-- **`config.dbSslMode`** — the API's DB connection mode. The chart default is `require` (correct
-  for a managed/TLS-terminating Postgres in production — see `helm/norviq/values-prod.yaml`), but
-  the bundled Postgres StatefulSet doesn't enable TLS, so a **local install must set
-  `config.dbSslMode=disable`** as shown above. Skipping this on kind will leave the API pod failing to
-  connect to its own database.
+- **`config.dbSslMode`** — the API's DB connection mode. Left empty (the default) it is **derived from
+  the datastore you chose**: `disable` for the bundled Postgres StatefulSet, which has no TLS listener,
+  and `require` for CloudNativePG HA or any external/managed host. So a managed database gets `require`
+  with no action from you, and a local install starts without an override. Set it explicitly
+  (`require`, `verify-full`, …) to pin one — an explicit value always wins, and
+  `helm/norviq/values-prod.yaml` pins `require`.
+
+  This used to be a hard `require`, which meant a pure-defaults install could not start at all: the API
+  crash-looped on `PostgreSQL server ... rejected SSL upgrade` against the very Postgres the chart had
+  just deployed for it.
 - Wait for the rollout before continuing:
 
   ```bash
