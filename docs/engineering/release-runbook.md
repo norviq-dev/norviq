@@ -132,6 +132,42 @@ python -m build && python3 scripts/check_wheel_contents.py dist
 pytest tests/release/ -q
 ```
 
+## Test images go to a DIFFERENT package
+
+`ghcr.io/norviq-dev/norviq-engine` holds RELEASED artifacts: multi-arch, scanned fail-closed,
+cosign-signed, SBOM-attested. Test builds do not belong in it.
+
+Nothing about a stray test tag can corrupt a release — the released chart pins immutable **digests**, so a
+tag push cannot repoint what `--version X` installs, and that was verified directly. The problem is
+narrower and still real: unreleased, unsigned code becomes publicly pullable from the same namespace as the
+official images, where a passer-by can pull `api-<sha>` and reasonably believe it is a release.
+
+Use the dev package instead:
+
+```bash
+./scripts/push_dev_image.sh api engine webhook     # -> ghcr.io/norviq-dev/norviq-engine-dev
+```
+
+Then point a cluster at it:
+
+```bash
+helm upgrade ... --set images.registry=ghcr.io/norviq-dev/norviq-engine-dev/ \
+                 --set-json 'imagePullSecrets=[{"name":"ghcr-dev"}]'
+```
+
+Why a separate GHCR package rather than a different registry (Docker Hub was considered): same registry,
+same automatic `GITHUB_TOKEN`, so no new credential to provision or rotate; no pull-rate limits to trip
+during a rollout; and one auth path instead of two. Docker Hub's public tier would not have solved the
+exposure either — only a PRIVATE repository does, and the dev package can simply be created private.
+
+The script refuses to build from a dirty tree unless `ALLOW_DIRTY=1`, and then marks the tag. That is not
+pedantry: tagging from a dirty tree reuses the HEAD sha, so a second push OVERWRITES the first tag with
+different content. That mutation happened during the latency work — the exact thing digest pinning exists
+to prevent.
+
+Dev images are deliberately unsigned and unattested, so `cosign verify` fails against them. That failure is
+the feature: it is what keeps a release artifact distinguishable from a test build.
+
 ## One-time human setup
 
 CI cannot do these — they need an account login.
