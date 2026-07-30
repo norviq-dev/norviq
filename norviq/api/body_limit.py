@@ -19,9 +19,12 @@ passes ``send`` through untouched, so streaming responses are unaffected.
 
 from __future__ import annotations
 
+from time import perf_counter
+
 import structlog
 
 from norviq.config import settings
+from norviq.telemetry.metrics import record_path_phase
 
 log = structlog.get_logger()
 
@@ -70,6 +73,14 @@ class BodySizeLimitMiddleware:
         # accumulated bytes exceed the cap (never buffering the whole pathological payload), then replay the
         # buffered body to the app. `send` is passed through UNTOUCHED — this is what keeps StreamingResponse
         # working (the BaseHTTPMiddleware wrapping was the audit-export bug).
+        # Timed, because this loop WAITS ON THE CLIENT. Bisecting /evaluate showed ~21ms between the
+        # outermost ASGI timer and the innermost middleware, of which the rate limiter explained only
+        # 4.4ms. Draining the body is the other thing that happens in that window, and unlike the rest of
+        # the stack its cost is not server-side work at all — it is however long the caller (and the TLS
+        # proxy in front of it) takes to deliver the bytes. That distinction decides whether the remaining
+        # gap is something to optimise here or something to fix in the client, so it is worth a number
+        # rather than an assumption. Cheap: one perf_counter pair per request.
+        _t_body = perf_counter()
         body = bytearray()
         while True:
             message = await receive()
@@ -84,6 +95,8 @@ class BodySizeLimitMiddleware:
                     break
             elif mtype == "http.disconnect":
                 return
+
+        record_path_phase("api", "body_drain", (perf_counter() - _t_body) * 1000.0)
 
         replayed = False
         buffered = bytes(body)
