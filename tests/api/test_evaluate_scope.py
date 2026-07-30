@@ -308,3 +308,134 @@ def test_perf1_normal_body_passes() -> None:
     """A normal-size body is unaffected by the limit."""
     client = _client()
     assert _eval(client, _token("admin", "default"), "default") == 200
+
+
+# --- The SVID-attested namespace (issue #2 residual) ------------------------------------------------
+#
+# scoped_namespace deliberately trusts a MACHINE principal with an EMPTY namespace claim to evaluate
+# whatever namespace the request BODY names — the hot path needed that latitude. The consequence was
+# that an unbound service token could evaluate as any tenant, picking the Rego program, the trust
+# score's identity and the audit tenant by writing a different string in the body.
+#
+# The closure needs no new attestation channel: `spiffe_id` is already one of the credential-bound
+# identity fields, and a Norviq SVID encodes its namespace as spiffe://norviq/ns/<ns>/sa/<sa>. So the
+# workload's own attested identity names its namespace and the body cannot choose it.
+#
+# Note what was already safe: the webhook mints sidecar tokens WITH a non-empty `namespace` claim
+# (webhook/injector.go), so scoped_namespace already pinned the injected-sidecar path. These tests cover
+# the credentials that carry no namespace claim.
+
+
+def _capturing_client() -> tuple[TestClient, list]:
+    """Client that records the ToolCallEvent the evaluator actually received.
+
+    Asserting the status code alone would not prove the fix: a 200 says the request was allowed, not
+    which namespace was enforced. The whole defect was evaluating under the WRONG namespace.
+    """
+    seen: list = []
+    app = create_app()
+
+    async def _evaluate(event):
+        seen.append(event)
+        return PolicyDecision(decision="allow", rule_id="default_allow", trust_score=0.8)
+
+    app.state.evaluator = SimpleNamespace(evaluate=_evaluate)
+    app.state.emitter = None
+    app.state.audit_hub = None
+    return TestClient(app), seen
+
+
+def _eval_with_body_ns(
+    client: TestClient, token: str, body_ns: str | None, body_svid: str = "spiffe://norviq/ns/team-a/sa/bot"
+) -> int:
+    """Evaluate with only the NAMESPACE varying.
+
+    The body's spiffe_id mirrors the token's claim on purpose. scoped_identity already 403s on a
+    spiffe_id mismatch (NRVQ-AUTH-14019), so a body SVID that disagreed with the claim would make every
+    case here fail for that unrelated reason and prove nothing about the namespace.
+    """
+    identity = {"spiffe_id": body_svid, "agent_class": "x"}
+    if body_ns is not None:
+        identity["namespace"] = body_ns
+    resp = client.post(
+        "/api/v1/evaluate",
+        json={"tool_name": "get_order", "tool_params": {}, "agent_identity": identity, "session_id": "s"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    return resp.status_code
+
+
+def test_unbound_service_token_cannot_evaluate_another_tenant_when_its_svid_says_otherwise() -> None:
+    """THE residual, closed: no namespace claim, but the SVID attests team-a — payments is refused."""
+    client, _ = _capturing_client()
+    token = _token("service", "", spiffe_id="spiffe://norviq/ns/team-a/sa/bot")
+    assert _eval_with_body_ns(client, token, "payments") == 403
+
+
+def test_attested_namespace_is_what_gets_enforced_not_the_body() -> None:
+    """The SVID's namespace must be USED, not merely validated — a 200 alone proves nothing."""
+    client, seen = _capturing_client()
+    token = _token("service", "", spiffe_id="spiffe://norviq/ns/team-a/sa/bot")
+    # Body omits namespace entirely: previously this evaluated under whatever the body implied.
+    assert _eval_with_body_ns(client, token, None) == 200
+    assert seen, "the evaluator was never called"
+    assert seen[-1].agent_identity.namespace == "team-a", (
+        f"enforced namespace was {seen[-1].agent_identity.namespace!r}, not the attested team-a"
+    )
+
+
+def test_attested_namespace_matching_the_body_is_allowed() -> None:
+    client, seen = _capturing_client()
+    token = _token("service", "", spiffe_id="spiffe://norviq/ns/team-a/sa/bot")
+    assert _eval_with_body_ns(client, token, "team-a") == 200
+    assert seen[-1].agent_identity.namespace == "team-a"
+
+
+def test_a_foreign_trust_domain_attests_nothing() -> None:
+    """`spiffe://evil/ns/payments/sa/x` must not be usable to claim the payments namespace.
+
+    The loose scan in routers/agents.py (find "ns" anywhere in the path) would accept this, which is why
+    the authorization path uses the engine's strict parser — it pins the trust domain and the exact
+    4-segment shape. Behaviour falls back to scoped_namespace, i.e. unchanged.
+    """
+    client, _ = _capturing_client()
+    svid = "spiffe://evil/ns/payments/sa/x"
+    token = _token("service", "", spiffe_id=svid)
+    assert _eval_with_body_ns(client, token, "payments", body_svid=svid) == 200  # unchanged, not newly blocked
+
+
+def test_a_credential_that_disagrees_with_itself_is_refused() -> None:
+    """A namespace claim of team-a with an SVID for payments is misissued — refuse, don't guess."""
+    client, _ = _capturing_client()
+    svid = "spiffe://norviq/ns/payments/sa/bot"
+    token = _token("service", "team-a", spiffe_id=svid)
+    assert _eval_with_body_ns(client, token, "team-a", body_svid=svid) == 403
+
+
+def test_the_existing_hot_path_is_unchanged_when_nothing_is_attestable() -> None:
+    """No namespace claim AND no SVID claim: exactly the prior behaviour, by design.
+
+    This residual is closed by `auth_require_bound_agent_identity` (which REFUSES such a credential
+    outright), not here — deriving a namespace from nothing is not possible.
+    """
+    client, _ = _capturing_client()
+    assert _eval_with_body_ns(client, _token("service", ""), "payments") == 200
+
+
+def test_admin_keeps_its_cross_namespace_latitude() -> None:
+    """Console what-if / red-team simulate evaluate as other identities on purpose."""
+    client, _ = _capturing_client()
+    token = _token("admin", "default", spiffe_id="spiffe://norviq/ns/team-a/sa/bot")
+    assert _eval_with_body_ns(client, token, "payments") == 200  # admin bypasses both bindings
+
+
+def test_workload_api_mode_sidecars_are_unaffected() -> None:
+    """In workload-api mode the webhook deliberately omits spiffe_id (it is not predictable), so the
+    attested path must be a no-op there rather than a 403 on every call."""
+    client, _ = _capturing_client()
+    assert auth_mod.attested_namespace({"role": "service", "namespace": "team-a"}, "team-a") == ""
+
+
+@pytest.mark.parametrize("svid", ["", "not-a-spiffe-id", "spiffe://norviq/ns//sa/x", "spiffe://norviq/x/y/z/w"])
+def test_unparseable_svids_attest_nothing(svid: str) -> None:
+    assert auth_mod.attested_namespace({"role": "service", "spiffe_id": svid}, "payments") == ""

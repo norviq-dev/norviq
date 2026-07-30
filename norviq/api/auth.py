@@ -260,6 +260,72 @@ def scoped_namespace(user: dict, requested: str | None) -> str | None:
     return claim_ns or requested
 
 
+def attested_namespace(user: dict, requested: str | None = None) -> str:
+    """Namespace derived from the caller's OWN credential-claimed SPIFFE ID. ``""`` when not derivable.
+
+    Closes the residual that ``scoped_namespace`` deliberately leaves open. There, a MACHINE principal
+    (``role=service``) with an EMPTY namespace claim is trusted to evaluate any namespace the request
+    BODY names — the hot path needs that latitude, and the alternative at the time was breaking every
+    sidecar. The consequence is that an unbound service token could evaluate as any tenant.
+
+    The durable closure is to take the namespace from something the caller cannot choose. It already
+    exists: ``spiffe_id`` is one of ``_BOUND_IDENTITY_FIELDS``, so for a machine principal it is resolved
+    from the credential and (under ``auth_require_bound_agent_identity``) REQUIRED — and a Norviq SVID
+    encodes the namespace as ``spiffe://norviq/ns/<ns>/sa/<sa>``. So the workload's attested identity
+    names its own namespace, and no new attestation channel is needed.
+
+    Read strictly from ``user`` (the validated claims), NEVER from ``agent_identity``: after
+    ``scoped_identity`` the identity's ``spiffe_id`` falls back to the body's value when the credential
+    doesn't claim one, and deriving the namespace from a body-supplied SVID would just reintroduce the
+    same hole one level down.
+
+    Uses the engine's STRICT parser, which pins the trust domain and the exact 4-segment shape. The
+    looser scan in ``routers/agents.py`` (find "ns" anywhere in the path) is fine for display scoping but
+    would accept ``spiffe://evil/ns/victim/sa/x`` — not something to base an authorization decision on.
+
+    Raises 403 when the SVID's namespace contradicts an explicit request, or a namespace claim on the
+    same token. Both are spoof-or-misissue, so they are loud rather than silently corrected.
+    """
+    if str(user.get("role", "")).lower() != "service":
+        # Humans are already tenant-pinned by scoped_namespace and carry no workload SVID; admin keeps
+        # its cross-namespace latitude (console what-if / red-team simulate).
+        return ""
+    claimed_svid = str(user.get("spiffe_id", "") or "")
+    if not claimed_svid:
+        return ""
+    # Local import: keeps the auth module free of an engine-layer dependency at import time (parts of
+    # norviq.engine import norviq.api.db), matching the deferred-import pattern used elsewhere.
+    from norviq.engine.identity import _parse_norviq_spiffe_id
+
+    parsed = _parse_norviq_spiffe_id(claimed_svid)
+    if not parsed:
+        return ""  # a foreign or malformed SVID attests nothing; leave scoped_namespace in charge
+    attested = parsed[0]
+    claim_ns = str(user.get("namespace", "") or "")
+    if claim_ns and claim_ns != attested:
+        # The credential disagrees with itself. Picking either value silently would be a guess about
+        # which half to trust, so refuse and make the misissued token visible.
+        log.warning(
+            "nrvq.auth.attested_namespace_conflicts_with_claim",
+            sub=user.get("sub"), claim=claim_ns, attested=attested, code="NRVQ-AUTH-14022",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Credential namespace claim conflicts with its attested identity",
+        )
+    asked = str(requested or "")
+    if asked and asked != attested:
+        log.warning(
+            "nrvq.auth.attested_namespace_denied",
+            sub=user.get("sub"), attested=attested, requested=asked, code="NRVQ-AUTH-14023",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized for this namespace",
+        )
+    return attested
+
+
 # The identity fields that SELECT ENFORCEMENT and must therefore come from the credential, never from
 # the request body. `agent_class` picks the Rego program (evaluator._collect_candidates:
 # f"{namespace}:{agent_class}"), `spiffe_id` keys the trust score + the agent_frozen: kill-switch +
