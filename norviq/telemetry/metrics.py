@@ -43,10 +43,27 @@ try:
         "norviq_api_request_latency_ms", "API request latency in milliseconds",
         ["endpoint"], buckets=_LATENCY_BUCKETS, registry=NRVQ_REGISTRY,
     )
+    # Phase attribution needs FINER buckets than _LATENCY_BUCKETS. Individual phases are sub-millisecond
+    # to single-digit ms (the whole server path has a 1.4 ms floor), so a bucket set starting at 1 ms puts
+    # nearly every phase in the first bucket and answers nothing — which is the question this exists for.
+    _PHASE_BUCKETS = (0.1, 0.25, 0.5, 1, 2.5, 5, 10, 25, 50, 100, 250, 500)
+    _p_eval_phase = Histogram(
+        "norviq_evaluation_phase_ms", "Policy evaluation latency split by phase, in milliseconds",
+        ["namespace", "phase"], buckets=_PHASE_BUCKETS, registry=NRVQ_REGISTRY,
+    )
+    # What the CALLER waits, which is not what the engine spends. The published performance table reads the
+    # engine's own latency_ms and therefore excludes the sidecar->API round trip — in proxy mode that is the
+    # term that dominates the tail, so it was the one number never measured. `mode` separates sdk (in-proc
+    # interceptor), sidecar_proxy (UDS + cross-pod call) and sidecar_embedded (UDS + local evaluation).
+    _p_intercept_latency = Histogram(
+        "norviq_interception_latency_ms", "Latency observed by the CALLER for one interception decision",
+        ["mode", "phase"], buckets=_PHASE_BUCKETS, registry=NRVQ_REGISTRY,
+    )
 except ModuleNotFoundError:  # pragma: no cover
     NRVQ_REGISTRY = None
     _p_tool_calls = _p_tool_blocked = _p_cache_hits = _p_cache_misses = None
     _p_eval_latency = _p_trust = _p_api_latency = None
+    _p_eval_phase = _p_intercept_latency = None
 
 tool_call_total = None
 tool_call_blocked = None
@@ -54,6 +71,8 @@ cache_hits = None
 cache_misses = None
 policy_violations = None
 evaluation_latency = None
+evaluation_phase_latency = None
+interception_latency = None
 trust_score_distribution = None
 api_request_latency = None
 active_agents = None
@@ -66,6 +85,7 @@ def init_metrics(meter: Meter | None = None) -> None:
     """Create all telemetry instruments."""
     global _meter, tool_call_total, tool_call_blocked, cache_hits, cache_misses
     global policy_violations, evaluation_latency, trust_score_distribution, api_request_latency
+    global evaluation_phase_latency, interception_latency
     global active_agents, block_rate, graph_nodes, graph_edges
     _meter = meter or metrics.get_meter("norviq")
     tool_call_total = _meter.create_counter("norviq_tool_calls_total", description="Total tool calls processed", unit="1")
@@ -80,6 +100,12 @@ def init_metrics(meter: Meter | None = None) -> None:
     evaluation_latency = _meter.create_histogram(
         "norviq_evaluation_latency_ms", description="Policy evaluation latency in milliseconds", unit="ms"
     )
+    evaluation_phase_latency = _meter.create_histogram(
+        "norviq_evaluation_phase_ms", description="Policy evaluation latency split by phase", unit="ms"
+    )
+    interception_latency = _meter.create_histogram(
+        "norviq_interception_latency_ms", description="Latency observed by the caller per interception", unit="ms"
+    )
     trust_score_distribution = _meter.create_histogram("norviq_trust_score", description="Trust score distribution", unit="1")
     api_request_latency = _meter.create_histogram(
         "norviq_api_request_latency_ms",
@@ -90,6 +116,45 @@ def init_metrics(meter: Meter | None = None) -> None:
     block_rate = _meter.create_up_down_counter("norviq_block_rate_percent", description="Block rate percentage", unit="%")
     graph_nodes = _meter.create_up_down_counter("norviq_graph_nodes", description="Asset graph node count", unit="1")
     graph_edges = _meter.create_up_down_counter("norviq_graph_edges", description="Asset graph edge count", unit="1")
+
+
+def record_eval_phases(namespace: str, phases_ms: dict[str, float], unattributed_ms: float) -> None:
+    """Record per-phase evaluation latency. Never raises — telemetry must not fail an enforcement call.
+
+    `unattributed` is emitted as its own phase on purpose. If it dominates, the time is going somewhere no
+    phase wraps and the next step is to instrument THAT rather than tune a phase that was never the cost.
+    """
+    try:
+        for phase, ms in phases_ms.items():
+            labels = {"namespace": namespace, "phase": phase}
+            if evaluation_phase_latency is not None:
+                evaluation_phase_latency.record(ms, labels)
+            if _p_eval_phase is not None:
+                _p_eval_phase.labels(namespace, phase).observe(ms)
+        labels = {"namespace": namespace, "phase": "unattributed"}
+        if evaluation_phase_latency is not None:
+            evaluation_phase_latency.record(unattributed_ms, labels)
+        if _p_eval_phase is not None:
+            _p_eval_phase.labels(namespace, "unattributed").observe(unattributed_ms)
+    except Exception as exc:  # pragma: no cover - telemetry is never load-bearing
+        log.error("nrvq.telemetry.metric_failed", error=str(exc), code="NRVQ-TEL-12005")
+
+
+def record_interception_latency(mode: str, phase: str, ms: float) -> None:
+    """Record what the CALLER waited for one decision. Never raises.
+
+    This is the metric the published performance table does not cover: it reads the engine's own
+    latency_ms and so excludes the round trip to reach the engine. `mode` is sdk / sidecar_proxy /
+    sidecar_embedded; `phase` is `total` (what the agent waited) or `upstream` (the part spent waiting on
+    the central API), so the difference is the local cost.
+    """
+    try:
+        if interception_latency is not None:
+            interception_latency.record(ms, {"mode": mode, "phase": phase})
+        if _p_intercept_latency is not None:
+            _p_intercept_latency.labels(mode, phase).observe(ms)
+    except Exception as exc:  # pragma: no cover - telemetry is never load-bearing
+        log.error("nrvq.telemetry.metric_failed", error=str(exc), code="NRVQ-TEL-12005")
 
 
 def record_tool_call(labels: dict[str, str], latency_ms: float, trust_score: float, cache_hit_value: bool) -> None:
