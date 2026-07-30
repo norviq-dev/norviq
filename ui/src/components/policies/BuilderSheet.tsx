@@ -14,6 +14,7 @@
 // `section-label`, `field-row`, `KitButton`) so this reads as part of the same product, not a bolt-on.
 
 import "../../lib/monaco"; // Bundle Monaco locally — must precede <Editor> (see lib/monaco.ts)
+import "./BuilderSteps.css"; // Numbered-step left pane (UX redesign) — layout only, see file header.
 import Editor from "@monaco-editor/react";
 import { registerRego } from "../../lib/monaco-rego";
 import { AlertCircle, Check, FlaskConical, Maximize2, Minimize2, Plus, Trash2, X } from "lucide-react";
@@ -59,6 +60,13 @@ const REFINEMENT_LABEL: Record<keyof BuilderAllowlistRefinements, string> = {
   rate: "Rate-limit (advisory)"
 };
 const EMPTY_REFINEMENTS: BuilderAllowlistRefinements = { readonly: false, egress: false, scope: false, rate: false };
+// Step ② mode chooser (UX redesign) — one-line explanation under each option so the difference between
+// the two modes is legible without docs. Display-only; BuilderMode's wire values are unchanged.
+const MODE_DESCRIPTION: Record<BuilderMode, string> = {
+  rules: "Add blocks on top of what's already allowed. Everything not matched keeps its current outcome.",
+  allowlist: "Deny everything for this scope except the tools you list."
+};
+const MODE_LABEL: Record<BuilderMode, string> = { rules: "Tighten-only rules", allowlist: "Intent allowlist" };
 
 // Exported for reuse by this file's own ConditionChip/RuleCard below and by tests. (Previously also
 // shared with a second, drag-and-drop visual builder — cut in the Phase 2f consolidation: the
@@ -71,6 +79,19 @@ export const SCOPE_TIER_LABEL: Record<BuilderScope["kind"], string> = {
   class: "Agent class",
   namespace: "Namespace",
   workload: "Workload"
+};
+// Step ① tier cards (UX redesign) — one-line description + example shown on each selectable card, so
+// the difference between the three tiers is legible without docs. Display-only; the wire semantics
+// (BuilderScope["kind"]) are unchanged.
+export const SCOPE_TIER_DESCRIPTION: Record<BuilderScope["kind"], string> = {
+  class: "Every agent of one class, across the namespace.",
+  namespace: "Every agent in one namespace, whatever its class.",
+  workload: "One Deployment's agents only."
+};
+export const SCOPE_TIER_EXAMPLE: Record<BuilderScope["kind"], string> = {
+  class: "e.g. report-gen",
+  namespace: "e.g. default",
+  workload: "e.g. checkout"
 };
 export const KEYWORD_TARGETS: BuilderKeywordTarget[] = ["tool", "params", "both"];
 // The condition-type dropdown's own options — deliberately excludes "not" (Phase 2b): NOT is a toggle
@@ -612,6 +633,26 @@ function isConcreteNamespace(ns: string): boolean {
   return t !== "" && t.toLowerCase() !== "all";
 }
 
+/** The plain-English sentence that replaces the old cryptic "Will create in namespace: X ·
+ *  agent-class: Y" key summary (UX redesign) — states MEANING per tier rather than wire fields. Callers
+ *  still render the loader key alongside this (in muted small text) so the honesty guarantee — the
+ *  operator can always see the exact key that will be written — is preserved. */
+export function scopeSentence(params: {
+  scopeReady: boolean;
+  namespaceReady: boolean;
+  tier: BuilderScope["kind"];
+  agentClass: string;
+  workloadName: string;
+  targetNamespace: string;
+}): string {
+  const { scopeReady, namespaceReady, tier, agentClass, workloadName, targetNamespace } = params;
+  if (!scopeReady || !namespaceReady) return "Pick who this policy is for to continue.";
+  const ns = targetNamespace.trim();
+  if (tier === "class") return `Applies to every \`${agentClass.trim()}\` agent in namespace \`${ns}\`.`;
+  if (tier === "namespace") return `Applies to every agent in namespace \`${ns}\`, whatever its class.`;
+  return `Applies to agents of Deployment \`${workloadName.trim()}\` in namespace \`${ns}\`.`;
+}
+
 /** Every tool-name fragment the capability registry mirror knows about (across all sources/verbs),
  *  flattened and deduped — one of the "known" suggestion sources for the toolIn / allowlist tool-name
  *  fields (see capabilitySources.ts's own header comment for what this mirrors). Computed once at
@@ -836,6 +877,29 @@ export function BuilderSheet({
   const hasUnsavedContent = scopeIdentifier(scope).trim().length > 0 || rules.length > 0 || (mode === "allowlist" && allowlistTools.length > 0);
   const isDirty = hasUnsavedContent && !saved;
 
+  // --- numbered-step progressive disclosure (UX redesign) --------------------------------------------
+  // "Step ① valid" = a tier is chosen AND its identifier is non-empty AND not reserved AND a concrete
+  // target namespace is set. This is intentionally NARROWER than `!hasErrors` (which also trips on rule
+  // condition errors) — a bad rule shouldn't lock step ① back up.
+  const step1Valid = scopeReady && namespaceReady && scopeReservedErrors.length === 0;
+  // "Step ② valid" = rules mode: at least one rule with no compile errors of its own; allowlist mode:
+  // the mode itself has been chosen (an empty allowlist is legal — deny-all — so no tool is required).
+  const step2Valid = mode === "allowlist" ? true : rules.some((_, idx) => errorsForRule(compiled.errors, idx).length === 0);
+  // Steps dim (opacity only, never disabled — see BuilderSteps.css) until the prior step is valid. The
+  // REAL gating for dry-run/Save is untouched — canDryRun/canSave above, unaffected by these.
+  const step1State: "active" | "done" = step1Valid ? "done" : "active";
+  const step2State: "locked" | "active" | "done" = !step1Valid ? "locked" : step2Valid ? "done" : "active";
+  const step3State: "locked" | "active" | "done" = !step2Valid ? "locked" : saved ? "done" : "active";
+
+  // Auto-focus (Phase: numbered steps) — whichever tier is selected, its own identifier field gets
+  // focus: on the initial mount (tier defaults to "class") and again every time the tier changes. Only
+  // ONE of the three identifier inputs below attaches this ref at a time (tier-dispatched JSX), so this
+  // single ref always points at "the" current identifier field, never a stale one.
+  const identifierRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    identifierRef.current?.focus();
+  }, [tier]);
+
   const primaryEnforcementMode = rules.some((r) => r.decision === "block")
     ? "block"
     : rules.some((r) => r.decision === "escalate")
@@ -959,184 +1023,213 @@ export function BuilderSheet({
         </div>
 
         <div style={{ display: "flex", gap: 16, flex: 1, minHeight: 0 }}>
-          {/* LEFT: scope + rule rail + defaults */}
+          {/* LEFT: three numbered, progressively-revealed steps (UX redesign) — who this policy is for,
+              what it should do, then check & enforce. Replaces the old flat wall of two identical-
+              looking tab rows + two text fields, which gave the operator no ordering cue at all. */}
           <div style={{ flex: "1 1 480px", minWidth: 0, overflowY: "auto", maxHeight: "calc(100vh - 180px)", paddingRight: 4 }}>
-            <div className="section-label">Scope</div>
+            {/* --- Step ① — Who is this policy for? (never locked — it's the first step) --- */}
+            <div className="vpb-step" data-testid="builder-step-1" data-step-state={step1State}>
+              <div className="vpb-step-header">
+                <span className="vpb-step-badge">1</span>
+                <span className="vpb-step-title">Who is this policy for?</span>
+                <span className="vpb-step-chip" data-testid="builder-step-1-chip" data-done={step1Valid}>
+                  {step1Valid ? "✓ Done" : "Needs input"}
+                </span>
+              </div>
 
-            {/* Tier picker (Phase 3): switches which identifier field(s) below are shown/required and
-                which loader key + rego guard the compiler emits (builderCompile.ts's scope helpers) —
-                see builderGraph.ts's BuilderScope doc comments for the full class/namespace/workload
-                semantics. Switching tiers does NOT clear the other tiers' typed-in state (agentClass /
-                workloadName each keep their own value), so flipping back and forth doesn't lose work. */}
-            <div data-testid="builder-tier-picker" style={{ display: "flex", gap: 6, marginBottom: 10 }}>
-              {SCOPE_TIERS.map((t) => (
-                <button
-                  key={t}
-                  type="button"
-                  data-testid={`builder-tier-${t}`}
-                  aria-pressed={tier === t}
-                  className="sb-link"
-                  style={{
-                    fontSize: 12,
-                    padding: "5px 10px",
-                    borderRadius: 6,
-                    border: `1px solid ${tier === t ? "#2DDAB8" : "var(--border)"}`,
-                    background: tier === t ? "#2DDAB81e" : "transparent",
-                    color: tier === t ? "#2DDAB8" : "var(--text-muted)"
+              <div className="vpb-step-body">
+                {/* Tier picker (Phase 3, now three selectable CARDS not a tab row — radiogroup semantics
+                    so it reads as a single choice, visually distinct from step ②'s mode chooser below).
+                    Switches which identifier field(s) below are shown/required and which loader key +
+                    rego guard the compiler emits (builderCompile.ts's scope helpers) — see
+                    builderGraph.ts's BuilderScope doc comments for the full class/namespace/workload
+                    semantics. Switching tiers does NOT clear the other tiers' typed-in state (agentClass /
+                    workloadName each keep their own value), so flipping back and forth doesn't lose work. */}
+                <div
+                  data-testid="builder-tier-picker"
+                  role="radiogroup"
+                  aria-label="Who is this policy for?"
+                  className="vpb-tier-cards"
+                  onKeyDown={(e) => {
+                    if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+                    e.preventDefault();
+                    const idx = SCOPE_TIERS.indexOf(tier);
+                    const delta = e.key === "ArrowRight" ? 1 : -1;
+                    const next = SCOPE_TIERS[(idx + delta + SCOPE_TIERS.length) % SCOPE_TIERS.length];
+                    setTier(next);
                   }}
-                  onClick={() => setTier(t)}
                 >
-                  {SCOPE_TIER_LABEL[t]}
-                </button>
-              ))}
-            </div>
+                  {SCOPE_TIERS.map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      role="radio"
+                      data-testid={`builder-tier-${t}`}
+                      aria-checked={tier === t}
+                      className="vpb-tier-card"
+                      onClick={() => setTier(t)}
+                    >
+                      <span className="vpb-tier-card-title">{SCOPE_TIER_LABEL[t]}</span>
+                      <span className="vpb-tier-card-desc">{SCOPE_TIER_DESCRIPTION[t]}</span>
+                      <span className="vpb-tier-card-eg">{SCOPE_TIER_EXAMPLE[t]}</span>
+                      {t === "workload" && (
+                        <span className="vpb-tier-card-note">
+                          Deployments only — other workload kinds are never evaluated.
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
 
-            {tier === "class" && (
-              <div className="field-row">
-                <label className="field-label">Agent class</label>
-                <input
-                  data-testid="builder-agent-class"
-                  className="input mono"
-                  list="builder-known-classes"
-                  placeholder="e.g. builder-spike"
-                  value={agentClass}
-                  onChange={(e) => setAgentClass(e.target.value)}
-                  style={{ width: "100%" }}
-                />
-                <datalist id="builder-known-classes">
-                  {knownClasses.map((c) => (
-                    <option key={c} value={c} />
+                {tier === "class" && (
+                  <div className="field-row" style={{ marginTop: 10 }}>
+                    <label className="field-label">Agent class</label>
+                    <input
+                      ref={identifierRef}
+                      data-testid="builder-agent-class"
+                      className="input mono"
+                      list="builder-known-classes"
+                      placeholder="e.g. builder-spike"
+                      value={agentClass}
+                      onChange={(e) => setAgentClass(e.target.value)}
+                      style={{ width: "100%" }}
+                    />
+                    <datalist id="builder-known-classes">
+                      {knownClasses.map((c) => (
+                        <option key={c} value={c} />
+                      ))}
+                    </datalist>
+                  </div>
+                )}
+
+                {tier === "workload" && (
+                  <div className="field-row" style={{ marginTop: 10 }}>
+                    <label className="field-label">Workload name (Deployment)</label>
+                    <input
+                      ref={identifierRef}
+                      data-testid="builder-scope-identifier"
+                      className="input mono"
+                      placeholder="e.g. checkout"
+                      value={workloadName}
+                      onChange={(e) => setWorkloadName(e.target.value)}
+                      style={{ width: "100%" }}
+                    />
+                    <div className="panel-sub" style={{ fontSize: 10.5, marginTop: 4 }}>
+                      Deployments only — other workload kinds (StatefulSet, DaemonSet, …) are never enforced
+                      by the policy engine, so this tier only ever targets a Deployment name.
+                    </div>
+                  </div>
+                )}
+
+                {scopeReservedErrors.length > 0 && (
+                  <div
+                    data-testid="builder-scope-reserved-error"
+                    role="alert"
+                    style={{ fontSize: 11.5, color: "var(--danger,#e5484d)", marginTop: 4 }}
+                  >
+                    {scopeReservedErrors.map((e, i) => (
+                      <div key={i}>{e.message}</div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Namespace honesty (Phase 2f): the global selector's raw value flows straight through
+                    as the `namespace` prop — if it's "all"/"" there is no single concrete namespace to
+                    silently pick for the operator, so this field REQUIRES an explicit choice before Save
+                    unlocks (see `namespaceReady`/`canSave`). When the selector already had a concrete
+                    namespace, this is pre-filled but stays editable. Namespace tier (Phase 3): this SAME
+                    field doubles as the tier's own scope identifier (single field, not two that could
+                    drift apart) — its label/testid/helper text switch accordingly, and — per the numbered-
+                    step design — it is NOT rendered a second time for that tier (see the tier === "class"
+                    / tier === "workload" identifier blocks above, which are each tier's OWN field). */}
+                <div className="field-row" style={{ marginTop: 10 }}>
+                  <label className="field-label">{tier === "namespace" ? "Namespace" : "Target namespace"}</label>
+                  <input
+                    ref={tier === "namespace" ? identifierRef : undefined}
+                    data-testid={tier === "namespace" ? "builder-scope-identifier" : "builder-target-namespace"}
+                    className="input mono"
+                    list="builder-known-namespaces"
+                    placeholder={isConcreteNamespace(namespace) ? namespace : "Pick a namespace — required (scope is All namespaces)"}
+                    value={targetNamespace}
+                    onChange={(e) => setTargetNamespace(e.target.value)}
+                    style={{ width: "100%", borderColor: namespaceReady ? undefined : "var(--escalate)" }}
+                  />
+                  <datalist id="builder-known-namespaces">
+                    {knownNamespaces.map((n) => (
+                      <option key={n} value={n} />
+                    ))}
+                  </datalist>
+                  {tier === "namespace" && (
+                    <div className="panel-sub" style={{ fontSize: 10.5, marginTop: 4 }}>
+                      Namespace-tier policies apply to EVERY call in this namespace, regardless of the
+                      calling agent's class — like a namespace-scoped baseline.
+                    </div>
+                  )}
+                  {!namespaceReady && (
+                    <div
+                      data-testid="builder-namespace-required-warning"
+                      role="alert"
+                      style={{ fontSize: 11.5, color: "var(--escalate)", marginTop: 4 }}
+                    >
+                      The global scope is "All namespaces" — pick exactly one concrete namespace to create
+                      this policy in before you can dry-run or save.
+                    </div>
+                  )}
+                </div>
+
+                <datalist id="builder-known-tools">
+                  {toolSuggestions.map((t) => (
+                    <option key={t} value={t} />
                   ))}
                 </datalist>
               </div>
-            )}
+            </div>
 
-            {tier === "workload" && (
-              <div className="field-row">
-                <label className="field-label">Workload name (Deployment)</label>
-                <input
-                  data-testid="builder-scope-identifier"
-                  className="input mono"
-                  placeholder="e.g. checkout"
-                  value={workloadName}
-                  onChange={(e) => setWorkloadName(e.target.value)}
-                  style={{ width: "100%" }}
-                />
-                <div className="panel-sub" style={{ fontSize: 10.5, marginTop: 4 }}>
-                  Deployments only — other workload kinds (StatefulSet, DaemonSet, …) are never enforced
-                  by the policy engine, so this tier only ever targets a Deployment name.
-                </div>
+            {/* --- Step ② — What should it do? (dimmed until step ① is valid) --- */}
+            <div className="vpb-step" data-testid="builder-step-2" data-step-state={step2State}>
+              <div className="vpb-step-header">
+                <span className="vpb-step-badge">2</span>
+                <span className="vpb-step-title">What should it do?</span>
+                <span className="vpb-step-chip" data-testid="builder-step-2-chip" data-done={step2Valid}>
+                  {step2Valid ? "✓ Done" : "Needs input"}
+                </span>
               </div>
-            )}
-
-            {scopeReservedErrors.length > 0 && (
-              <div
-                data-testid="builder-scope-reserved-error"
-                role="alert"
-                style={{ fontSize: 11.5, color: "var(--danger,#e5484d)", marginTop: 4 }}
-              >
-                {scopeReservedErrors.map((e, i) => (
-                  <div key={i}>{e.message}</div>
-                ))}
-              </div>
-            )}
-
-            {/* Namespace honesty (Phase 2f): the global selector's raw value flows straight through as
-                the `namespace` prop — if it's "all"/"" there is no single concrete namespace to silently
-                pick for the operator, so this field REQUIRES an explicit choice before Save unlocks (see
-                `namespaceReady`/`canSave`). When the selector already had a concrete namespace, this is
-                pre-filled but stays editable — the operator can always see and, if they want, override it.
-                Namespace tier (Phase 3): this SAME field doubles as the tier's own scope identifier —
-                see the `tier`/`workloadName` state doc comment above for why it's the one field, not two
-                that could drift apart — so its label/testid/helper text switch accordingly. */}
-            <div className="field-row" style={{ marginTop: 8 }}>
-              <label className="field-label">{tier === "namespace" ? "Namespace" : "Target namespace"}</label>
-              <input
-                data-testid={tier === "namespace" ? "builder-scope-identifier" : "builder-target-namespace"}
-                className="input mono"
-                list="builder-known-namespaces"
-                placeholder={isConcreteNamespace(namespace) ? namespace : "Pick a namespace — required (scope is All namespaces)"}
-                value={targetNamespace}
-                onChange={(e) => setTargetNamespace(e.target.value)}
-                style={{ width: "100%", borderColor: namespaceReady ? undefined : "var(--escalate)" }}
-              />
-              <datalist id="builder-known-namespaces">
-                {knownNamespaces.map((n) => (
-                  <option key={n} value={n} />
-                ))}
-              </datalist>
-              {tier === "namespace" && (
-                <div className="panel-sub" style={{ fontSize: 10.5, marginTop: 4 }}>
-                  Namespace-tier policies apply to EVERY call in this namespace, regardless of the
-                  calling agent's class — like a namespace-scoped baseline.
-                </div>
+              {step2State === "locked" && (
+                <div className="vpb-step-hint">Choose who this policy is for first.</div>
               )}
-              {!namespaceReady && (
-                <div
-                  data-testid="builder-namespace-required-warning"
-                  role="alert"
-                  style={{ fontSize: 11.5, color: "var(--escalate)", marginTop: 4 }}
-                >
-                  The global scope is "All namespaces" — pick exactly one concrete namespace to create this
-                  policy in before you can dry-run or save.
-                </div>
-              )}
-            </div>
 
-            <datalist id="builder-known-tools">
-              {toolSuggestions.map((t) => (
-                <option key={t} value={t} />
-              ))}
-            </datalist>
-
-            <div className="section-label" style={{ marginTop: 12 }}>
-              Policy mode
-            </div>
-            <div data-testid="builder-mode-toggle" style={{ display: "flex", gap: 6, marginBottom: 14 }}>
-              <button
-                type="button"
-                data-testid="builder-mode-rules"
-                aria-pressed={mode === "rules"}
-                className="sb-link"
-                style={{
-                  fontSize: 12,
-                  padding: "5px 10px",
-                  borderRadius: 6,
-                  border: `1px solid ${mode === "rules" ? "#2DDAB8" : "var(--border)"}`,
-                  background: mode === "rules" ? "#2DDAB81e" : "transparent",
-                  color: mode === "rules" ? "#2DDAB8" : "var(--text-muted)"
-                }}
-                onClick={() => setMode("rules")}
-              >
-                Tighten-only rules
-              </button>
-              <button
-                type="button"
-                data-testid="builder-mode-allowlist"
-                aria-pressed={mode === "allowlist"}
-                className="sb-link"
-                style={{
-                  fontSize: 12,
-                  padding: "5px 10px",
-                  borderRadius: 6,
-                  border: `1px solid ${mode === "allowlist" ? "#2DDAB8" : "var(--border)"}`,
-                  background: mode === "allowlist" ? "#2DDAB81e" : "transparent",
-                  color: mode === "allowlist" ? "#2DDAB8" : "var(--text-muted)"
-                }}
-                onClick={() => setMode("allowlist")}
-              >
-                Intent allowlist
-              </button>
-            </div>
-
-            {mode === "rules" && (
-              <>
-                <div className="section-label" style={{ marginTop: 4, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                  <span>Rules</span>
-                  <button type="button" data-testid="builder-add-rule" className="sb-link" style={{ fontSize: 11.5, color: "#2DDAB8" }} onClick={addRule}>
-                    <Plus size={12} /> Add rule
+              <div className="vpb-step-body">
+                <div data-testid="builder-mode-toggle" className="vpb-mode-options">
+                  <button
+                    type="button"
+                    data-testid="builder-mode-rules"
+                    aria-pressed={mode === "rules"}
+                    className="vpb-mode-option"
+                    onClick={() => setMode("rules")}
+                  >
+                    <div className="vpb-mode-option-title">{MODE_LABEL.rules}</div>
+                    <div className="vpb-mode-option-desc">{MODE_DESCRIPTION.rules}</div>
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="builder-mode-allowlist"
+                    aria-pressed={mode === "allowlist"}
+                    className="vpb-mode-option"
+                    onClick={() => setMode("allowlist")}
+                  >
+                    <div className="vpb-mode-option-title">{MODE_LABEL.allowlist}</div>
+                    <div className="vpb-mode-option-desc">{MODE_DESCRIPTION.allowlist}</div>
                   </button>
                 </div>
+
+                {mode === "rules" && (
+                  <>
+                    <div className="section-label" style={{ marginTop: 4, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                      <span>Rules</span>
+                      <button type="button" data-testid="builder-add-rule" className="sb-link" style={{ fontSize: 11.5, color: "#2DDAB8" }} onClick={addRule}>
+                        <Plus size={12} /> Add rule
+                      </button>
+                    </div>
                 {rules.length === 0 && (
                   <div className="muted" style={{ fontSize: 12, padding: "8px 0" }}>
                     No rules yet — Add rule to start (defaults below apply until then).
@@ -1309,6 +1402,8 @@ export function BuilderSheet({
                 </div>
               </div>
             )}
+              </div>
+            </div>
           </div>
 
           {/* RIGHT: live compiled rego + stats + errors + actions */}
@@ -1377,62 +1472,81 @@ export function BuilderSheet({
               </div>
             )}
 
-            {/* ALWAYS rendered (Phase 2f namespace honesty) — the operator sees exactly where Save will
-                write, even before either field is filled in (both show a placeholder dash then).
-                Phase 3: "agent-class" here is the WIRE field name (POST /policies' `agent_class` body
-                key, for every tier) — its VALUE is the real per-tier loader key (`loaderKeyFor(scope)`:
-                `<class>` / `namespace:<ns>` / `deployment:<name>`), not a guess, so the operator always
-                sees exactly what gets written. For the class tier this is byte-identical to the
-                pre-Phase-3 behavior (the loader key IS the bare class name). */}
-            <div
-              data-testid="builder-create-target"
-              className="mono"
-              style={{ fontSize: 11.5, color: namespaceReady ? "var(--text-muted)" : "var(--escalate)", marginBottom: 8 }}
-            >
-              Will create in namespace: <strong>{targetNamespace.trim() || "—"}</strong> · agent-class:{" "}
-              <strong>{scopeIdentifier(scope).trim() ? loaderKeyFor(scope) : "—"}</strong>
-            </div>
+            {/* --- Step ③ — Check & enforce (dimmed until step ② has something). The compiled-rego
+                preview + stats/errors ABOVE this are the persistent "what you're building" panel — an
+                OUTPUT, not a step, so it stays un-numbered and never dims. */}
+            <div className="vpb-step" data-testid="builder-step-3" data-step-state={step3State} style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+              <div className="vpb-step-header">
+                <span className="vpb-step-badge">3</span>
+                <span className="vpb-step-title">Check & enforce</span>
+                <span className="vpb-step-chip" data-testid="builder-step-3-chip" data-done={saved}>
+                  {saved ? "✓ Done" : "Needs input"}
+                </span>
+              </div>
+              {step3State === "locked" && (
+                <div className="vpb-step-hint">Add at least one rule (or choose allowlist mode) first.</div>
+              )}
 
-            <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-              <KitButton
-                variant="outline"
-                icon={FlaskConical}
-                disabled={!canDryRun}
-                data-testid="builder-dryrun-btn"
-                title={!namespaceReady ? "Pick a concrete target namespace first" : !scopeReady ? "Set an agent class first" : undefined}
-                onClick={runDryRun}
-              >
-                {dryRunLoading ? "Dry-Running..." : "Run dry-run"}
-              </KitButton>
-              <KitButton
-                variant="primary"
-                icon={Check}
-                disabled={!canSave}
-                data-testid="builder-save-btn"
-                title={
-                  !namespaceReady
-                    ? "Pick a concrete target namespace first — the global scope is All namespaces"
-                    : !scopeReady
-                    ? "Set an agent class first"
-                    : hasErrors
-                    ? "Fix compile errors first"
-                    : dryRunResult?.valid !== true
-                    ? "Run a valid dry-run of the current graph first"
-                    : dryRunStale
-                    ? "The graph changed since the last dry-run — re-run it"
-                    : undefined
-                }
-                onClick={saveAndEnforce}
-              >
-                {saving ? "Saving..." : "Save & enforce"}
-              </KitButton>
-              <KitButton variant="ghost" onClick={requestClose}>
-                Cancel
-              </KitButton>
-            </div>
+              <div className="vpb-step-body" style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+                {/* ALWAYS rendered (Phase 2f namespace honesty) — the operator sees exactly where Save
+                    will write, even before either field is filled in. The plain-English sentence (UX
+                    redesign) states MEANING per tier; the muted small-text line below it is the exact
+                    WIRE key that will be POSTed (Phase 3: "agent-class" is the wire field name for every
+                    tier — its VALUE is the real per-tier loader key, `loaderKeyFor(scope)`: `<class>` /
+                    `namespace:<ns>` / `deployment:<name>`) — the honesty guarantee: the operator can
+                    always see the exact truth of what gets written, never just a guess. */}
+                <div
+                  data-testid="builder-create-target"
+                  style={{ marginBottom: 8 }}
+                >
+                  <div style={{ fontSize: 12.5, color: namespaceReady ? "var(--text-primary)" : "var(--escalate)" }}>
+                    {scopeSentence({ scopeReady, namespaceReady, tier, agentClass, workloadName, targetNamespace })}
+                  </div>
+                  <div className="mono" style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 3 }}>
+                    creates {targetNamespace.trim() || "—"} / {scopeIdentifier(scope).trim() ? loaderKeyFor(scope) : "—"}
+                  </div>
+                </div>
 
-            <div style={{ overflowY: "auto", flex: 1, minHeight: 0 }}>
-              {dryRunResult != null && (
+                <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+                  <KitButton
+                    variant="outline"
+                    icon={FlaskConical}
+                    disabled={!canDryRun}
+                    data-testid="builder-dryrun-btn"
+                    title={!namespaceReady ? "Pick a concrete target namespace first" : !scopeReady ? "Set an agent class first" : undefined}
+                    onClick={runDryRun}
+                  >
+                    {dryRunLoading ? "Dry-Running..." : "Run dry-run"}
+                  </KitButton>
+                  <KitButton
+                    variant="primary"
+                    icon={Check}
+                    disabled={!canSave}
+                    data-testid="builder-save-btn"
+                    title={
+                      !namespaceReady
+                        ? "Pick a concrete target namespace first — the global scope is All namespaces"
+                        : !scopeReady
+                        ? "Set an agent class first"
+                        : hasErrors
+                        ? "Fix compile errors first"
+                        : dryRunResult?.valid !== true
+                        ? "Run a valid dry-run of the current graph first"
+                        : dryRunStale
+                        ? "The graph changed since the last dry-run — re-run it"
+                        : undefined
+                    }
+                    onClick={saveAndEnforce}
+                  >
+                    {saving ? "Saving..." : "Save & enforce"}
+                  </KitButton>
+                  <KitButton variant="ghost" onClick={requestClose}>
+                    Cancel
+                  </KitButton>
+                </div>
+
+                <div style={{ overflowY: "auto", flex: 1, minHeight: 0 }}>
+                  {dryRunResult != null && (
                 <div data-testid="builder-dryrun-result" style={{ fontSize: 12.5, marginBottom: 10 }}>
                   <div style={{ fontWeight: 600, marginBottom: 6, display: "flex", alignItems: "center", gap: 8 }}>
                     Dry-Run Results
@@ -1488,6 +1602,8 @@ export function BuilderSheet({
               )}
 
               <ApplyResultPanel result={applyResult} onClose={() => setApplyResult(null)} />
+                </div>
+              </div>
             </div>
           </div>
         </div>

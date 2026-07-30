@@ -1,0 +1,194 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Norviq Contributors */
+
+/* Visual Policy Builder — numbered-step left pane (UX redesign, layout only, no compiler/semantics
+   changes). Three progressively-revealed steps replace the old flat wall of two identical-looking tab
+   rows + two text fields, so an operator has a single, ordered path: who -> what -> check & enforce.
+   Reuses the app's existing tokens (--border, --bg-elevated, --text-muted, --accent #2DDAB8) — no new
+   palette, dark theme is the default here so contrast is checked against --bg-elevated / --bg-surface. */
+
+.vpb-step {
+  margin-bottom: 18px;
+}
+
+.vpb-step-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.vpb-step-badge {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+/* Active/valid steps get the accent ring on their badge so the eye tracks progress top-to-bottom. */
+.vpb-step[data-step-state="active"] .vpb-step-badge,
+.vpb-step[data-step-state="done"] .vpb-step-badge {
+  border-color: #2ddab8;
+  color: #2ddab8;
+  background: #2ddab81a;
+}
+
+.vpb-step-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  flex: 1 1 auto;
+}
+
+.vpb-step-chip {
+  flex: none;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  background: transparent;
+  white-space: nowrap;
+}
+
+.vpb-step-chip[data-done="true"] {
+  border-color: #2ddab8;
+  color: #2ddab8;
+  background: #2ddab81a;
+}
+
+/* Steps 2/3 stay fully in the DOM (an operator revisiting a saved policy must see everything) — only
+   dimmed + a short hint while the prior step isn't valid yet. Never disabled/unclickable. */
+.vpb-step[data-step-state="locked"] .vpb-step-body {
+  opacity: 0.45;
+}
+
+.vpb-step-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+  margin: -2px 0 10px;
+}
+
+/* --- tier picker: three selectable cards (radiogroup), replacing the old segmented-tab row --------- */
+
+.vpb-tier-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.vpb-tier-card {
+  text-align: left;
+  padding: 10px 11px;
+  border-radius: var(--radius-md, 10px);
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  cursor: pointer;
+  transition: var(--transition, 150ms ease);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.vpb-tier-card:hover {
+  border-color: var(--border-active, #3a3a3a);
+}
+
+.vpb-tier-card:focus-visible {
+  outline: 2px solid #2ddab8;
+  outline-offset: 1px;
+}
+
+.vpb-tier-card[aria-checked="true"] {
+  border-color: #2ddab8;
+  background: #2ddab814;
+}
+
+.vpb-tier-card-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.vpb-tier-card[aria-checked="true"] .vpb-tier-card-title {
+  color: #2ddab8;
+}
+
+.vpb-tier-card-desc {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.vpb-tier-card-eg {
+  font-size: 10.5px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-muted);
+}
+
+.vpb-tier-card-note {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-style: italic;
+  margin-top: 2px;
+}
+
+/* --- mode chooser: two-option control, now with a one-line explanation under each ------------------- */
+
+.vpb-mode-options {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.vpb-mode-option {
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: var(--radius-md, 10px);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: var(--transition, 150ms ease);
+}
+
+.vpb-mode-option[aria-pressed="true"] {
+  border-color: #2ddab8;
+  background: #2ddab81e;
+  color: #2ddab8;
+}
+
+.vpb-mode-option-title {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.vpb-mode-option-desc {
+  font-size: 10.5px;
+  line-height: 1.35;
+  margin-top: 3px;
+  color: var(--text-secondary);
+}
+
+.vpb-mode-option[aria-pressed="true"] .vpb-mode-option-desc {
+  color: #2ddab8cc;
+}
+
+@media (max-width: 1000px) {
+  .vpb-tier-cards,
+  .vpb-mode-options {
+    grid-template-columns: 1fr;
+  }
+}

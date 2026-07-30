@@ -596,9 +596,12 @@ describe("BuilderSheet — namespace honesty (Phase 2f)", () => {
   it("gates Dry-Run/Save on a concrete target namespace when the caller passes 'all', and always shows the create-target summary", () => {
     render(<BuilderSheet namespace="all" onClose={() => {}} />);
 
-    // Nothing chosen yet — the summary line is ALWAYS rendered, even with nothing filled in, and the
-    // required-namespace prompt is visible because the global scope was "All namespaces".
-    expect(screen.getByTestId("builder-create-target")).toHaveTextContent(/Will create in namespace:\s*—\s*·\s*agent-class:\s*—/i);
+    // Nothing chosen yet — the summary sentence is ALWAYS rendered, even with nothing filled in, and the
+    // required-namespace prompt is visible because the global scope was "All namespaces". The plain-
+    // English sentence reads as "incomplete" until scope + namespace are both set; the muted small-text
+    // line beneath it still shows the (dash) loader key — the honesty guarantee, preserved verbatim.
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent(/Pick who this policy is for to continue/i);
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent(/creates\s*—\s*\/\s*—/);
     expect(screen.getByTestId("builder-namespace-required-warning")).toBeInTheDocument();
     expect(screen.getByTestId("builder-target-namespace")).toHaveValue("");
 
@@ -606,12 +609,13 @@ describe("BuilderSheet — namespace honesty (Phase 2f)", () => {
     expect(screen.getByTestId("builder-dryrun-btn")).toBeDisabled();
     expect(screen.getByTestId("builder-save-btn")).toBeDisabled();
 
-    // Picking a concrete namespace clears the gate and the prompt, and the summary line reflects it.
+    // Picking a concrete namespace clears the gate and the prompt, and the sentence reflects it.
     fireEvent.change(screen.getByTestId("builder-target-namespace"), { target: { value: "default" } });
     expect(screen.queryByTestId("builder-namespace-required-warning")).not.toBeInTheDocument();
     expect(screen.getByTestId("builder-create-target")).toHaveTextContent(
-      "Will create in namespace: default · agent-class: builder-spike"
+      "Applies to every `builder-spike` agent in namespace `default`."
     );
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent("creates default / builder-spike");
     expect(screen.getByTestId("builder-dryrun-btn")).not.toBeDisabled();
   });
 
@@ -619,7 +623,10 @@ describe("BuilderSheet — namespace honesty (Phase 2f)", () => {
     renderSheet(); // namespace="default"
     expect(screen.getByTestId("builder-target-namespace")).toHaveValue("default");
     expect(screen.queryByTestId("builder-namespace-required-warning")).not.toBeInTheDocument();
-    expect(screen.getByTestId("builder-create-target")).toHaveTextContent(/Will create in namespace:\s*default/i);
+    // Agent class still empty -> scope isn't complete yet, so the sentence reads as incomplete, but the
+    // muted key line already shows the concrete namespace (honesty: never hides what's already known).
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent(/Pick who this policy is for to continue/i);
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent(/creates\s*default\s*\/\s*—/);
   });
 });
 
@@ -674,16 +681,18 @@ describe("BuilderSheet — tool-name autocomplete + unknown-tool warning (Phase 
 describe("BuilderSheet — policy tier picker (Phase 3)", () => {
   it("defaults to the Agent class tier, and switching tiers swaps which identifier field(s) show", () => {
     renderSheet();
-    expect(screen.getByTestId("builder-tier-class")).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByTestId("builder-tier-namespace")).toHaveAttribute("aria-pressed", "false");
-    expect(screen.getByTestId("builder-tier-workload")).toHaveAttribute("aria-pressed", "false");
+    // Tier picker is now a radiogroup of three cards (UX redesign) — aria-checked, not aria-pressed.
+    expect(screen.getByTestId("builder-tier-picker")).toHaveAttribute("role", "radiogroup");
+    expect(screen.getByTestId("builder-tier-class")).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByTestId("builder-tier-namespace")).toHaveAttribute("aria-checked", "false");
+    expect(screen.getByTestId("builder-tier-workload")).toHaveAttribute("aria-checked", "false");
     expect(screen.getByTestId("builder-agent-class")).toBeInTheDocument();
     expect(screen.queryByTestId("builder-scope-identifier")).not.toBeInTheDocument();
 
     // Namespace tier: the Agent class field disappears — the (relabeled) Target namespace field IS the
     // scope identifier now (single field, testid swaps to builder-scope-identifier).
     fireEvent.click(screen.getByTestId("builder-tier-namespace"));
-    expect(screen.getByTestId("builder-tier-namespace")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("builder-tier-namespace")).toHaveAttribute("aria-checked", "true");
     expect(screen.queryByTestId("builder-agent-class")).not.toBeInTheDocument();
     expect(screen.getByTestId("builder-scope-identifier")).toBeInTheDocument();
     expect(screen.queryByTestId("builder-target-namespace")).not.toBeInTheDocument();
@@ -691,10 +700,12 @@ describe("BuilderSheet — policy tier picker (Phase 3)", () => {
     // Workload tier: a NEW workload-name identifier field appears, AND the Target namespace field is
     // still separately present (its own testid, unaffected) — a workload policy needs both.
     fireEvent.click(screen.getByTestId("builder-tier-workload"));
-    expect(screen.getByTestId("builder-tier-workload")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("builder-tier-workload")).toHaveAttribute("aria-checked", "true");
     expect(screen.getByTestId("builder-scope-identifier")).toBeInTheDocument();
     expect(screen.getByTestId("builder-target-namespace")).toBeInTheDocument();
-    expect(screen.getByText(/deployments only/i)).toBeInTheDocument();
+    // "Deployments only" appears twice now (the workload card's own small print, always shown, plus the
+    // identifier field's helper text once that tier is active) — assert at least one, not a single match.
+    expect(screen.getAllByText(/deployments only/i).length).toBeGreaterThan(0);
   });
 
   it("namespace tier: the compiled rego guards on input.agent.namespace, not agent_class, and uses the ns_ package/rule-id token", async () => {
@@ -715,8 +726,9 @@ describe("BuilderSheet — policy tier picker (Phase 3)", () => {
     });
     expect(screen.queryByTestId("builder-errors")).not.toBeInTheDocument();
     expect(screen.getByTestId("builder-create-target")).toHaveTextContent(
-      "Will create in namespace: default · agent-class: namespace:default"
+      "Applies to every agent in namespace `default`, whatever its class."
     );
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent("creates default / namespace:default");
   });
 
   it("workload tier: the compiled rego guards on input.agent.namespace using the TARGET namespace field, and uses the wl_ package/rule-id token", async () => {
@@ -736,8 +748,9 @@ describe("BuilderSheet — policy tier picker (Phase 3)", () => {
     });
     expect(screen.queryByTestId("builder-errors")).not.toBeInTheDocument();
     expect(screen.getByTestId("builder-create-target")).toHaveTextContent(
-      "Will create in namespace: default · agent-class: deployment:checkout"
+      "Applies to agents of Deployment `checkout` in namespace `default`."
     );
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent("creates default / deployment:checkout");
   });
 
   it("switching tiers preserves each tier's own typed identifier (no cross-tier data loss)", () => {
@@ -749,6 +762,91 @@ describe("BuilderSheet — policy tier picker (Phase 3)", () => {
     expect(screen.getByTestId("builder-agent-class")).toHaveValue("builder-spike");
     fireEvent.click(screen.getByTestId("builder-tier-workload"));
     expect(screen.getByTestId("builder-scope-identifier")).toHaveValue("checkout");
+  });
+
+  it("choosing a tier card reveals ONLY that tier's own identifier field, never more than one at a time", () => {
+    renderSheet();
+    // Default (class): only the agent-class field is shown.
+    expect(screen.getByTestId("builder-agent-class")).toBeInTheDocument();
+    expect(screen.queryByTestId("builder-scope-identifier")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("builder-tier-namespace"));
+    // Namespace: agent-class is gone, and the ONE identifier field shown is the (relabeled) namespace
+    // field — no second, separate identifier input appears alongside it.
+    expect(screen.queryByTestId("builder-agent-class")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("builder-scope-identifier")).toHaveLength(1);
+    expect(screen.queryByTestId("builder-target-namespace")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("builder-tier-workload"));
+    // Workload: agent-class stays hidden; exactly one workload-name identifier field, plus the always-
+    // needed target-namespace field (a second, distinct field — not a duplicate identifier).
+    expect(screen.queryByTestId("builder-agent-class")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("builder-scope-identifier")).toHaveLength(1);
+    expect(screen.getByTestId("builder-target-namespace")).toBeInTheDocument();
+  });
+});
+
+// --- UX redesign: numbered steps, plain-English sentence, progressive disclosure --------------------
+describe("BuilderSheet — numbered steps (UX redesign)", () => {
+  it("renders step ① active and steps ②/③ dimmed (locked) on a fresh sheet", () => {
+    renderSheet();
+    expect(screen.getByTestId("builder-step-1")).toHaveAttribute("data-step-state", "active");
+    expect(screen.getByTestId("builder-step-2")).toHaveAttribute("data-step-state", "locked");
+    expect(screen.getByTestId("builder-step-3")).toHaveAttribute("data-step-state", "locked");
+    expect(screen.getByTestId("builder-step-1-chip")).toHaveTextContent(/needs input/i);
+    // Locked steps stay fully present (an operator revisiting a saved policy must see everything) —
+    // never hard-disabled/unclickable.
+    expect(screen.getByTestId("builder-mode-rules")).not.toBeDisabled();
+  });
+
+  it("step ② flips from locked to active once step ① becomes valid (class tier)", () => {
+    renderSheet(); // namespace="default" already concrete
+    expect(screen.getByTestId("builder-step-2")).toHaveAttribute("data-step-state", "locked");
+
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "report-gen" } });
+
+    expect(screen.getByTestId("builder-step-1")).toHaveAttribute("data-step-state", "done");
+    expect(screen.getByTestId("builder-step-1-chip")).toHaveTextContent(/done/i);
+    expect(screen.getByTestId("builder-step-2")).toHaveAttribute("data-step-state", "active");
+  });
+
+  it("step ③ flips from locked to active once step ② has a valid rule", () => {
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "report-gen" } });
+    expect(screen.getByTestId("builder-step-3")).toHaveAttribute("data-step-state", "locked");
+
+    fireEvent.click(screen.getByTestId("builder-add-rule"));
+    fireEvent.change(screen.getByTestId("builder-rule-reason-0"), { target: { value: "Blocked a delete" } });
+    fireEvent.click(screen.getByTestId("builder-add-condition-0-0"));
+
+    expect(screen.getByTestId("builder-step-2")).toHaveAttribute("data-step-state", "done");
+    expect(screen.getByTestId("builder-step-3")).toHaveAttribute("data-step-state", "active");
+  });
+
+  it("renders the correct plain-English sentence for each of the three tiers, always with the loader key alongside it", () => {
+    renderSheet(); // namespace="default"
+
+    // class tier
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "report-gen" } });
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent(
+      "Applies to every `report-gen` agent in namespace `default`."
+    );
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent("creates default / report-gen");
+
+    // namespace tier
+    fireEvent.click(screen.getByTestId("builder-tier-namespace"));
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent(
+      "Applies to every agent in namespace `default`, whatever its class."
+    );
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent("creates default / namespace:default");
+
+    // workload tier
+    fireEvent.click(screen.getByTestId("builder-tier-workload"));
+    fireEvent.change(screen.getByTestId("builder-scope-identifier"), { target: { value: "checkout" } });
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent(
+      "Applies to agents of Deployment `checkout` in namespace `default`."
+    );
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent("creates default / deployment:checkout");
   });
 });
 
