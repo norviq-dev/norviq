@@ -18,6 +18,7 @@ import httpx
 import structlog
 from sqlalchemy import select
 
+from norviq.engine.masking import redact_url_to_origin
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
 from norviq.api.routers.audit import _to_dict
@@ -51,7 +52,7 @@ class AuditForwarder:
             self._client = httpx.AsyncClient(timeout=10.0)
         self._stop.clear()
         self._task = asyncio.create_task(self._run())
-        log.info("nrvq.siem.started", url=settings.siem_webhook_url, code="NRVQ-SIEM-14000")
+        log.info("nrvq.siem.started", url=redact_url_to_origin(settings.siem_webhook_url), code="NRVQ-SIEM-14000")
 
     async def _run(self) -> None:
         """Poll-and-forward until stopped, tolerating transient endpoint failures."""
