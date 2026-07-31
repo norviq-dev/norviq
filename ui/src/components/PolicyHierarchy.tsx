@@ -2,8 +2,12 @@
 // Copyright 2026 Norviq Contributors
 //
 // The Policy precedence HIERARCHY — the resolution stack the evaluator ACTUALLY uses for a (namespace,
-// agent-class), rendered top-to-bottom in priority order. It renders GET /policies/effective VERBATIM (scope, order,
-// priority, overlay flag) — precedence is NEVER re-implemented in the UI; it always mirrors real enforcement.
+// agent-class), rendered top-to-bottom in priority order. Scope, priority and the overlay flag come from
+// GET /policies/effective verbatim — precedence is NEVER re-derived in the UI. The ROWS are ordered by the
+// server's own priority value (descending, stable on ties), because /policies/effective returns
+// `_collect_candidates` COLLECTION order, which is not the order in which layers beat each other —
+// rendering that raw contradicted this panel's own "highest-priority-wins, top to bottom" subtitle.
+// Ordering by a number the server supplied is not the same as re-implementing resolution.
 //
 // The "Mode" column reflects the effective per-namespace enforcement posture (Block / Monitor)
 // from GET /settings, so the hierarchy agrees with the Namespace Governance card. Still cluster-aware in STRUCTURE
@@ -76,7 +80,28 @@ export function PolicyHierarchy({ namespace, testId = "policy-hierarchy" }: { na
     [namespace, agentClass],
     { cacheKey: `effective:${namespace}:${agentClass}`, staleTimeMs: 15_000 }
   );
-  const layers = eff.data?.layers ?? [];
+  // Ordered so the row that WINS is first, which is what the panel's own subtitle promises
+  // ("highest-priority-wins, top to bottom"). The API returns the stack grouped by how the evaluator
+  // COLLECTS candidates, not by what beats what, so the table used to render e.g.
+  //
+  //     1  agent-class policy   default:probe-class          100
+  //     2  namespace baseline   default:__baseline__           1
+  //     3  namespace:default    default:namespace:default     50
+  //
+  // — a priority-100 row above a priority-1 row above a priority-50 row. Read against the stated rule
+  // that is simply wrong, and an operator reasoning about precedence has no way to reconcile it.
+  //
+  // Sorted on the server's OWN priority number — the UI does not re-derive precedence, it just orders by
+  // the value enforcement already reported. Ties keep the API's order, which preserves the tie-break the
+  // collection order encodes (a class policy still shows above a namespace policy at equal priority, which
+  // is how the evaluator actually resolves them).
+  const layers = useMemo(() => {
+    const raw = eff.data?.layers ?? [];
+    return raw
+      .map((l, i) => ({ l, i }))
+      .sort((a, b) => (b.l.priority ?? 0) - (a.l.priority ?? 0) || a.i - b.i)
+      .map((x) => x.l);
+  }, [eff.data?.layers]);
 
   // The effective per-ns enforcement posture (Block / Monitor). "audit" is displayed as "Monitor".
   const posture = useApi(
