@@ -163,6 +163,34 @@ class NorviqSettings(BaseSettings):
     # OPT-IN, default-OFF output-DLP. Norviq's PEP is INPUT-only; when enabled the SDK adapter scans an
     # allowed tool's RETURN value and redacts PAN/SSN before it propagates (minimal; full output-DLP is roadmap).
     sdk_output_dlp_enabled: bool = False
+    # --- MCP action-firewall (norviq/mcp). Every knob here is inert unless the MCP proxy is running,
+    # so none of it changes any existing deployment's behaviour.
+    #
+    # Output DLP defaults ON here while the SDK's equivalent defaults OFF, and the difference is not an
+    # inconsistency. The SDK returns a tool result to APPLICATION CODE, which may need the raw value and
+    # can be trusted not to leak it; an MCP tool result is pasted straight into the MODEL's context, from
+    # where it reaches the transcript, the provider, and any downstream tool the model then calls. Turning
+    # it on for a NEW surface changes nothing that exists today. NRVQ_MCP_OUTPUT_DLP_ENABLED.
+    mcp_output_dlp_enabled: bool = True
+    # Gate A. Pinning mode: "tofu" (first sight is pinned and allowed, CHANGE is enforced) or "strict"
+    # (first sight is quarantined until an operator approves). See norviq/mcp/pins.py.
+    mcp_pin_mode: str = "tofu"
+    mcp_pin_store: str = "memory"            # memory | file
+    mcp_pin_path: str = ""                   # file store location when mcp_pin_store=file
+    # Scanner severity at/above which a tool definition is REMOVED from the tools/list the model sees
+    # (the payload never reaches the context), vs merely having its description replaced by a stub.
+    mcp_scan_strip_severity: str = "high"
+    mcp_scan_sanitize_severity: str = "medium"
+    # Scan content RETURNED by a server (tool results, resource bodies) for indirect injection. Costs one
+    # regex sweep over the result on the response path; off makes the response path pure passthrough.
+    mcp_scan_responses: bool = True
+    # Evaluate server-initiated sampling/createMessage against policy (denial-of-wallet / confused deputy).
+    mcp_govern_sampling: bool = True
+    # Evaluate resources/read against policy as a read-verb tool call (indirect-injection surface).
+    mcp_govern_resources: bool = True
+    # Upper bound on in-flight request-id bookkeeping per direction. A peer that opens requests and never
+    # completes them would otherwise grow this map without limit; oldest entries are evicted.
+    mcp_max_pending_requests: int = 4096
     pg_url: str = "postgresql://norviq:norviq_dev@localhost:5432/norviq"
     db_ssl_mode: str = Field(
         default="prefer",

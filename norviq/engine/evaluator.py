@@ -656,6 +656,18 @@ class OPAEvaluator:
             #   sql_normalized -> "select * from orders " fails an exact match against the allowlist
             # Additive only: every existing policy reads tool_name/tool_params exactly as before.
             "derived": self._derived_input(event),
+            # MCP protocol context, present only for calls that arrived over MCP (empty dict
+            # otherwise, so the input document is byte-identical for every existing caller).
+            #
+            # This is what lets a policy reach Gate-A state without a per-call cost: the proxy has
+            # already scanned and pin-checked the definition at DISCOVERY, so `input.mcp.pin_status`
+            # and `input.mcp.scan_severity` are cached values riding along on a call that was going
+            # to be evaluated anyway. It closes the gap where a drifted tool could only be handled by
+            # the proxy's own hard-coded action, with no way for an operator to say "escalate instead
+            # of block" or "block drift only for the payments class".
+            #
+            # See ToolCallEvent.mcp for the trust level: PEP-reported, exactly like tool_name.
+            "mcp": getattr(event, "mcp", None) or {},
         }
 
     # Tools whose params carry SQL, matched by alias/verb rather than one exact name — a renamed
