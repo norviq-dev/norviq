@@ -40,6 +40,15 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "jsdom",
+    // Pin jsdom's origin OFF port 3000. jsdom defaults to http://localhost:3000, and msw is configured
+    // with onUnhandledRequest:"bypass", so any request a test does not explicitly mock is resolved
+    // against that origin and put on the real network. Port 3000 is exactly where this project's own
+    // docs tell you to put the console (`kubectl port-forward svc/norviq-ui 3000:80`), and that service
+    // serves static assets — it accepts the /api/v1 connection and never answers, so the request hangs
+    // until the test times out. The result was a suite whose outcome depended on whether the developer
+    // happened to have the console open: 7 tests failed with a 15s timeout and passed again after
+    // pinning the origin. Nothing listens on 59999, so unmocked requests now fail fast and locally.
+    environmentOptions: { jsdom: { url: "http://localhost:59999" } },
     setupFiles: "./src/test/setup.ts",
     // Vitest owns the unit tests under src/. The Playwright E2E suite (tests/e2e/**, @playwright/test)
     // must NOT be collected by vitest — its `test()` is a different runner and errors on import.
