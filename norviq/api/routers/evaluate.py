@@ -32,6 +32,10 @@ class EvaluateRequest(BaseModel):
     trust_score: float = 0.0
     call_depth: int = 0
     framework: str = "redteam"
+    # Optional MCP protocol context (server id, transport, pin status, Gate-A scan severity). Absent
+    # for every non-MCP caller, so this is additive: an existing sidecar/SDK body is unchanged and
+    # every existing policy still sees exactly the input document it saw before.
+    mcp: dict = Field(default_factory=dict)
 
 
 class EvaluateResponse(BaseModel):
@@ -109,6 +113,13 @@ async def evaluate_tool_call(
         # but its PARAMS reveal the operation (a SQL body, a destination field), record that verb as
         # evidence on the audit row — /threats/tool-verbs aggregates it so an admin can PROMOTE the tool
         # to a defined verb. Pure in-memory token/dict classification — hot-path safe, no I/O.
+        # MCP provenance on the audit row: which server served this tool, over which transport, and
+        # what Gate A knew about its definition at the time. Without it an operator reading the audit
+        # log sees `send_email  block` with no way to tell WHICH of four MCP integrations it came
+        # from — the first question anyone asks when a chatbot has several. Stored under its own key
+        # so it can never collide with masked_params or the verb-observation fields below.
+        if event.mcp:
+            audit_payload = {**(audit_payload or {}), "mcp": event.mcp}
         name_verb, _ = classify_tool(event.tool_name)
         if name_verb is Verb.UNKNOWN:
             param_verb, param_risk = classify_tool(event.tool_name, event.tool_params)

@@ -12,6 +12,7 @@ import {
   Network,
   Package,
   Plug,
+  Plug2,
   ShieldCheck,
   SlidersHorizontal,
   Swords,
@@ -47,7 +48,10 @@ const PANEL_CONFIG: Record<Section, { title: string; groups: Group[] }> = {
         label: "MONITORING",
         items: [
           { to: "/audit", label: "Audit Log", icon: BarChart3 },
-          { to: "/agents", label: "Agents", icon: Users }
+          { to: "/agents", label: "Agents", icon: Users },
+          // MCP Servers — Gate A's console: which Model Context Protocol integrations are live and
+          // whether any of them changed a tool definition after it was approved.
+          { to: "/mcp", label: "MCP Servers", icon: Plug2 }
         ]
       },
       {

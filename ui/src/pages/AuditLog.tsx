@@ -32,7 +32,18 @@ type AuditRecord = {
   trust_score?: number;
   latency_ms?: number;
   tool_params?: Record<string, unknown> | null; // request args captured with the decision (may be absent)
-  framework?: string; // decision source (sidecar / sidecar-http / sdk / redteam / ...)
+  framework?: string; // decision source (sidecar / sidecar-http / sdk / redteam / mcp / ...)
+  // MCP provenance, present only on decisions that arrived over the Model Context Protocol. With
+  // several MCP integrations wired to one agent, "which server served this tool?" is the first thing
+  // an operator needs, and the tool name alone does not answer it.
+  mcp?: {
+    server?: string;
+    transport?: string;
+    surface?: string;
+    pin_status?: string;
+    scan_severity?: string;
+    tool_digest?: string;
+  } | null;
   _live?: boolean;
 };
 
@@ -455,6 +466,24 @@ export function AuditLog() {
                     <DetailRow label="Tool">
                       <span className="mono">{selected.tool_name || "—"}</span>
                     </DetailRow>
+                    {selected.mcp?.server && (
+                      <>
+                        <DetailRow label="MCP server">
+                          <span className="mono">{selected.mcp.server}</span>
+                          {selected.mcp.transport && (
+                            <span className="muted" style={{ marginLeft: 8 }}>via {selected.mcp.transport}</span>
+                          )}
+                        </DetailRow>
+                        <DetailRow label="Definition">
+                          <span className="mono">{selected.mcp.pin_status ?? "unknown"}</span>
+                          {selected.mcp.scan_severity && selected.mcp.scan_severity !== "none" && (
+                            <span style={{ marginLeft: 8, color: "#FFB020" }}>
+                              scanner: {selected.mcp.scan_severity}
+                            </span>
+                          )}
+                        </DetailRow>
+                      </>
+                    )}
                     <DetailRow label="Params">
                       {hasParams ? (
                         <pre className="json" style={{ margin: 0, fontSize: 12 }}>
