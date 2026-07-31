@@ -521,33 +521,48 @@ function RuleCard({
         background: "var(--bg-elevated)"
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-        <select
-          data-testid={`builder-rule-decision-${index}`}
-          className="input"
-          style={{ fontSize: 12.5, padding: "4px 8px", width: 110 }}
-          value={rule.decision}
-          onChange={(e) => onChange({ ...rule, decision: e.target.value as BuilderDecision })}
-        >
-          {DECISIONS.map((d) => (
-            <option key={d} value={d}>
-              {d}
-            </option>
-          ))}
-        </select>
-        <input
-          data-testid={`builder-rule-id-${index}`}
-          className="input mono"
-          placeholder="rule_id (auto from reason)"
-          style={{ fontSize: 12.5, padding: "4px 8px", flex: "1 1 160px" }}
-          value={rule.ruleId}
-          onChange={(e) => {
-            onRuleIdTouched();
-            onChange({ ...rule, ruleId: e.target.value });
-          }}
-        />
-        <button
-          type="button"
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span className="vpb-field-label">Decision</span>
+          <select
+            data-testid={`builder-rule-decision-${index}`}
+            className="input"
+            style={{ fontSize: 12.5, padding: "4px 8px", width: 110 }}
+            value={rule.decision}
+            onChange={(e) => onChange({ ...rule, decision: e.target.value as BuilderDecision })}
+          >
+            {DECISIONS.map((d) => (
+              <option key={d} value={d}>
+                {d}
+              </option>
+            ))}
+          </select>
+        </label>
+        {/* The rule id had NO label — only a placeholder, which vanishes the moment the field auto-fills
+            from the reason. An operator saw a mono string appear with no clue what it was, that it could
+            be changed, or where it surfaces. Not cosmetic: this id is stamped on every decision and audit
+            row for the rule, and dashboards group by it. */}
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, flex: "1 1 200px" }}>
+          <span className="vpb-field-label">
+            Rule ID{" "}
+            <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: "var(--text-muted)" }}>
+              — {ruleIdTouched ? "custom" : "auto from reason"}
+            </span>
+          </span>
+          <input
+            data-testid={`builder-rule-id-${index}`}
+            className="input mono"
+            placeholder="e.g. ns_ledger_snapshot_blocked"
+            style={{ fontSize: 12.5, padding: "4px 8px", width: "100%" }}
+            value={rule.ruleId}
+            onChange={(e) => {
+              onRuleIdTouched();
+              onChange({ ...rule, ruleId: e.target.value });
+            }}
+          />
+        </label>
+          <button
+            type="button"
           data-testid={`builder-remove-rule-${index}`}
           className="icon-btn"
           title="Remove rule"
@@ -559,7 +574,7 @@ function RuleCard({
       <input
         data-testid={`builder-rule-reason-${index}`}
         className="input"
-        placeholder="Reason shown to the operator (also feeds the auto rule_id)"
+        placeholder="Why this rule exists — shown to the operator when it fires"
         style={{ fontSize: 12.5, padding: "4px 8px", width: "100%", marginBottom: 10 }}
         value={rule.reason}
         onChange={(e) => {
@@ -568,6 +583,12 @@ function RuleCard({
           onChange({ ...rule, reason, ruleId });
         }}
       />
+        <div style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.5, marginBottom: 10 }}>
+          The <strong>reason</strong> is the sentence an operator reads when this rule fires. The{" "}
+          <strong>rule ID</strong> is the short identifier stamped on the decision and on every Audit Log row
+          for it — keep it stable, because dashboards and exports group by it. It follows the reason until you
+          edit it, then stays put so you can reword the reason freely.
+        </div>
 
       <div className="section-label" style={{ marginBottom: 6 }}>
         Conditions (OR of AND)

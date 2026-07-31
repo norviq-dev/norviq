@@ -295,3 +295,14 @@
   .vpb-form-pane { flex: 1.25 1 560px !important; }
   .vpb-rego-pane { flex: 0.85 1 420px !important; }
 }
+
+/* Field labels inside a rule row. The decision select and the rule id had no labels at all — only
+   placeholders, and a placeholder disappears the moment the field has a value, which is exactly when a
+   new user most needs to know what they are looking at. */
+.vpb-field-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
