@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -647,6 +647,58 @@ def test_volume() -> None:
     try:
         volume = client.get("/api/v1/audit/volume", headers=_auth_headers()).json()
         assert len(volume) == 1 and volume[0]["block"] == 1
+    finally:
+        client.close()
+
+
+def test_volume_bucket_width_follows_range() -> None:
+    """Bucket WIDTH must follow `range`, not always be an hour.
+
+    Every range used to bucket by hour, so `1h` collapsed to a single point no matter how the traffic
+    was distributed. One point is worse than coarse: the UI's line series has no segment to draw, so the
+    chart rendered blank while its tooltip still reported real numbers. Three calls ten minutes apart
+    must read as three points on the 1h view and collapse on a wide range.
+    """
+    now = datetime.now(timezone.utc)
+    rows = [
+        SimpleNamespace(
+            id=uuid4(),
+            event_id=uuid4(),
+            tool_name="tool.alpha",
+            decision="allow",
+            agent_id="spiffe://example/ns/default/sa/a",
+            agent_class="planner",  # non-synthetic: the volume route drops probe classes
+            namespace="default",
+            rule_id="allow",
+            reason="test",
+            framework="langchain",  # not "redteam", else the row is excluded as non-real
+            trust_score=0.5,
+            latency_ms=12.3,
+            timestamp_utc=now - timedelta(minutes=offset),
+            payload={"ok": True},
+        )
+        # 10 minutes apart is wider than the 5-minute bucket used for `1h`, so these can never
+        # share a bucket — no boundary-alignment flake.
+        for offset in (0, 10, 20)
+    ]
+
+    client = _client()
+    _override_session(client, FakeSession(rows))
+    try:
+        fine = client.get("/api/v1/audit/volume?range=1h", headers=_auth_headers()).json()
+        assert len(fine) == 3, f"1h must resolve to 5-minute buckets, got {fine}"
+        assert sum(b["allow"] for b in fine) == 3  # no row dropped by the finer bucketing
+    finally:
+        client.close()
+
+    client = _client()
+    _override_session(client, FakeSession(rows))
+    try:
+        coarse = client.get("/api/v1/audit/volume?range=30d", headers=_auth_headers()).json()
+        # A wide range must aggregate rather than emit one point per call. Compared relatively so the
+        # assertion cannot flake when the sample happens to straddle midnight.
+        assert len(coarse) < len(fine), f"30d must bucket coarser than 1h, got {coarse}"
+        assert sum(b["allow"] for b in coarse) == 3
     finally:
         client.close()
 

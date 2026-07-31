@@ -52,6 +52,25 @@ def _since_for_range(range_value: Literal["1h", "6h", "24h", "7d", "30d"]) -> da
     return datetime.now(timezone.utc) - timedelta(hours=range_map.get(range_value, 24))
 
 
+# Bucket WIDTH per range, in minutes. Volume was bucketed by hour for every range, so `1h` could only
+# ever yield one or two points and `30d` yielded 720 — one axis granularity serving a 720x span. A single
+# point is worse than coarse: a line has no segment to draw, so the chart rendered blank while its tooltip
+# still reported numbers (see ui VolumeChart). Each entry below keeps a range at roughly 12-30 points.
+_BUCKET_MINUTES: dict[str, int] = {"1h": 5, "6h": 15, "24h": 60, "7d": 360, "30d": 1440}
+
+
+def _bucket_key(ts: datetime, minutes: int) -> str:
+    """Floor `ts` to a `minutes`-wide bucket, formatted for the chart's category axis.
+
+    Floors on absolute minutes-since-midnight so bucket edges are stable and aligned across rows
+    (e.g. 15-minute buckets always land on :00/:15/:30/:45) rather than drifting with the first row seen.
+    """
+    floored = (ts.hour * 60 + ts.minute) // minutes * minutes
+    return ts.replace(hour=floored // 60, minute=floored % 60, second=0, microsecond=0).strftime(
+        "%Y-%m-%d %H:%M"
+    )
+
+
 def _to_dict(row: AuditLogEntry) -> dict:
     """Serialize audit row to API payload."""
     return {
@@ -259,9 +278,10 @@ async def audit_volume(
     session: AsyncSession = Depends(get_session),
     user: dict = Depends(get_current_user),
 ) -> list[dict]:
-    """Tool call volume bucketed by hour."""
+    """Tool call volume, bucketed at a width that follows the requested `range`."""
     namespace = read_namespace(user, namespace)
     since = _since_for_range(range)
+    bucket_minutes = _BUCKET_MINUTES.get(range, 60)
     query = select(AuditLogEntry).where(AuditLogEntry.timestamp_utc >= since).order_by(AuditLogEntry.timestamp_utc)
     if namespace:
         query = query.where(AuditLogEntry.namespace == namespace)
@@ -275,11 +295,12 @@ async def audit_volume(
             str(getattr(record, "agent_class", "") or "")
         ):
             continue
-        hour_key = record.timestamp_utc.strftime("%Y-%m-%d %H:00")
-        if hour_key not in buckets:
-            buckets[hour_key] = {"time": hour_key, "allow": 0, "block": 0, "escalate": 0, "audit": 0}
-        buckets[hour_key][record.decision] = int(buckets[hour_key].get(record.decision, 0)) + 1
-    log.debug("nrvq.api.audit.volume", buckets=len(buckets), code="NRVQ-API-7023")
+        key = _bucket_key(record.timestamp_utc, bucket_minutes)
+        if key not in buckets:
+            buckets[key] = {"time": key, "allow": 0, "block": 0, "escalate": 0, "audit": 0}
+        buckets[key][record.decision] = int(buckets[key].get(record.decision, 0)) + 1
+    log.debug("nrvq.api.audit.volume", buckets=len(buckets), bucket_minutes=bucket_minutes,
+              code="NRVQ-API-7023")
     return list(buckets.values())
 
 
