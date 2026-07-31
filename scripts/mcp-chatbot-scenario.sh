@@ -23,7 +23,12 @@ IMAGE="${IMAGE:-norviq-mcp:local}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${OUT:-${REPO_ROOT}/.mcp-demo-evidence}"
 mkdir -p "$OUT"
+# shellcheck source=scripts/_demo-common.sh
+source "${REPO_ROOT}/scripts/_demo-common.sh"
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
+
+demo_preflight
+CA_BUILD_DIR="$(demo_ca_dir)"
 
 GIT_SHA="$(cd "$REPO_ROOT" && git rev-parse HEAD)"
 TREE_DIGEST="$("${REPO_ROOT}/scripts/tree-digest.sh")"
@@ -31,13 +36,11 @@ TREE_DIGEST="$("${REPO_ROOT}/scripts/tree-digest.sh")"
 if [[ "${1:-}" != "--skip-build" ]]; then
   say "building $IMAGE from the working tree"
   docker build --provenance=false --sbom=false --network host \
-    --build-context "certs=${CA_DIR:-/root/.ccr}" \
+    --build-context "certs=${CA_BUILD_DIR}" \
     -f "${REPO_ROOT}/scripts/mcp-demo.Dockerfile" \
     --build-arg NRVQ_GIT_SHA="$GIT_SHA" --build-arg NRVQ_TREE_DIGEST="$TREE_DIGEST" \
     -t "$IMAGE" "$REPO_ROOT" 2>&1 | tail -2
-  docker save --platform linux/amd64 "$IMAGE" -o /tmp/mcp-image.tar
-  kind load image-archive --name "$CLUSTER" /tmp/mcp-image.tar
-  rm -f /tmp/mcp-image.tar
+  demo_kind_load "$IMAGE"
 fi
 
 # Roll the API onto the freshly-built image before anything reads from it. The scenario's policies
@@ -49,17 +52,7 @@ if [[ "${1:-}" != "--skip-build" ]]; then
   kubectl -n "$NS_CTRL" rollout status deploy/norviq-api --timeout=400s >/dev/null
 fi
 
-# Newest RUNNING api pod, not `items[0]`. During a rollout both the old and new pods exist and the
-# unsorted list can hand back the terminating one — which then reports the PREVIOUS image's digest
-# and trips the stale-image guard on a build that was actually fine. Sorting by creation time and
-# filtering to Running picks the pod the rollout just produced.
-api_pod() {
-  kubectl -n "$NS_CTRL" get pod -l app.kubernetes.io/component=api \
-    --field-selector=status.phase=Running \
-    --sort-by=.metadata.creationTimestamp \
-    -o jsonpath='{.items[-1:].metadata.name}'
-}
-API_POD="$(api_pod)"
+API_POD="$(demo_api_pod)"
 API_TREE="$(kubectl -n "$NS_CTRL" exec "$API_POD" -c api -- cat /app/.build_tree_digest | tr -d '\r\n')"
 [[ "$API_TREE" == "$TREE_DIGEST" ]] || { echo "STALE API IMAGE: $API_TREE != $TREE_DIGEST" >&2; exit 1; }
 ADMIN="$(kubectl -n "$NS_CTRL" exec "$API_POD" -c api -- python -m norviq.api.token_mint --ttl 7200 2>/dev/null)"

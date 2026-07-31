@@ -26,11 +26,16 @@ SKIP_BUILD=0
 [[ "${1:-}" == "--skip-build" ]] && SKIP_BUILD=1
 
 mkdir -p "$OUT"
+# shellcheck source=scripts/_demo-common.sh
+source "${REPO_ROOT}/scripts/_demo-common.sh"
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 
 # ---------------------------------------------------------------- 0. provenance
 # The no-stale-image rule. HEAD alone is not sufficient evidence here because this work is
 # deliberately never committed, so HEAD does not move when the source does. The tree digest does.
+demo_preflight
+CA_BUILD_DIR="$(demo_ca_dir)"
+
 GIT_SHA="$(cd "$REPO_ROOT" && git rev-parse HEAD)"
 TREE_DIGEST="$("${REPO_ROOT}/scripts/tree-digest.sh")"
 say "provenance"
@@ -41,23 +46,18 @@ echo "  tree digest  : $TREE_DIGEST"
 if [[ $SKIP_BUILD -eq 0 ]]; then
   say "building $IMAGE from the working tree"
   docker build --provenance=false --sbom=false --network host \
-    --build-context "certs=${CA_DIR:-/root/.ccr}" \
+    --build-context "certs=${CA_BUILD_DIR}" \
     -f "${REPO_ROOT}/scripts/mcp-demo.Dockerfile" \
     --build-arg NRVQ_GIT_SHA="$GIT_SHA" \
     --build-arg NRVQ_TREE_DIGEST="$TREE_DIGEST" \
     -t "$IMAGE" "$REPO_ROOT" 2>&1 | tail -2
   say "loading $IMAGE into kind/$CLUSTER"
-  docker save --platform linux/amd64 "$IMAGE" -o /tmp/mcp-image.tar
-  kind load image-archive --name "$CLUSTER" /tmp/mcp-image.tar
-  rm -f /tmp/mcp-image.tar
+  demo_kind_load "$IMAGE"
 fi
 
 # ---------------------------------------------------------------- 2. credentials
 say "minting the proxy's service token (same claim shape the webhook mints for a sidecar)"
-# Newest RUNNING api pod — see the note in mcp-chatbot-scenario.sh about the rollout race.
-API_POD="$(kubectl -n "$NS_CTRL" get pod -l app.kubernetes.io/component=api \
-            --field-selector=status.phase=Running --sort-by=.metadata.creationTimestamp \
-            -o jsonpath='{.items[-1:].metadata.name}')"
+API_POD="$(demo_api_pod)"
 SVC_TOKEN="$(kubectl -n "$NS_CTRL" exec "$API_POD" -c api -- python -c "
 import time, jwt
 from norviq.config import settings
