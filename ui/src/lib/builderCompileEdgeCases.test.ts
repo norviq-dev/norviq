@@ -114,3 +114,50 @@ describe("reserved scope: the remediation-overlay suffix (DOCUMENTED GAP, not a 
     expect(result.errors).toEqual([]);
   });
 });
+
+describe("keyword condition covers parameter NAMES, not just values", () => {
+  /**
+   * The emitted helper used to scan only top-level parameter VALUES, so the rule an operator most
+   * naturally writes for this condition — "block any call carrying a parameter called password /
+   * api_key / secret" — silently never fired. Verified against a live cluster before the fix:
+   * `{"api_key": "AKIA123"}` was ALLOWED while `{"note": "my password is x"}` was blocked.
+   *
+   * That is a MISS rather than a false block: the operator believes a class of parameter is covered and
+   * it is not. These assertions pin the BEHAVIOUR (which shapes the rego must be able to match) rather
+   * than the exact bytes, so a future refactor of the helper cannot quietly reintroduce the gap while
+   * still matching a golden string.
+   */
+  const graph = (): any => ({
+    schemaVersion: 1,
+    scope: { kind: "class", agentClass: "kw-bot" },
+    mode: "rules",
+    defaults: { decision: "allow", reason: "No builder rule matched" },
+    rules: [{
+      id: "r1", decision: "block", ruleId: "secret_param_blocked", reason: "Credential-shaped parameter",
+      conditions: [[{ type: "keyword", target: "params", keywords: ["password", "api_key", "secret"] }]],
+    }],
+  });
+
+  it("traverses params rather than reading only top-level values", () => {
+    const rego = (compileGraph(graph(), "default") as any).rego as string;
+    // `walk` is what makes both nested values AND key segments reachable; the old top-level
+    // `input.tool_params[k]` value-only form is exactly the shape that failed open.
+    expect(rego).toContain("walk(input.tool_params");
+    expect(rego).not.toContain("is_string(input.tool_params[bld_kw_p])");
+  });
+
+  it("matches a key segment of the params path, not only the value", () => {
+    const rego = (compileGraph(graph(), "default") as any).rego as string;
+    // Two partial-rule bodies OR together: one over values, one over path segments (the parameter names).
+    const bodies = rego.split("bld_kw_hit_params(terms) {").length - 1;
+    expect(bodies).toBeGreaterThanOrEqual(2);
+    expect(rego).toMatch(/bld_kw_hit\(\s*bld_kw_path\[_\]\s*,\s*terms\s*\)/);
+  });
+
+  it("still compiles cleanly and stays inside the budgets", () => {
+    const result: any = compileGraph(graph(), "default");
+    expect(result.errors).toEqual([]);
+    expect(result.stats.regexOps).toBeLessThanOrEqual(25);
+    expect(result.stats.lines).toBeLessThanOrEqual(500);
+  });
+});

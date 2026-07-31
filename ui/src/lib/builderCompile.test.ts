@@ -44,7 +44,7 @@ const FIXTURE_GOLDEN_REGO = `package norviq.custom.spike_demo
 # Source of truth is the GRAPH, embedded below as a base64 JSON blob; this rego is regenerated
 # deterministically from it and is never hand-edited (see VISUAL-POLICY-BUILDER-PLAN.md, section 2).
 # nrvq-builder-graph/v1: eyJzY2hlbWFWZXJzaW9uIjoxLCJzY29wZSI6eyJraW5kIjoiY2xhc3MiLCJhZ2VudENsYXNzIjoic3Bpa2UtZGVtbyJ9LCJydWxlcyI6W3siaWQiOiJyMSIsImRlY2lzaW9uIjoiYmxvY2siLCJydWxlSWQiOiJidWlsZGVyX3NxbF9ibG9jayIsInJlYXNvbiI6IlNRTCBpbmplY3Rpb24gYmxvY2tlZCBieSBidWlsZGVyIiwiY29uZGl0aW9ucyI6W1t7InR5cGUiOiJkZXRlY3RvciIsImRldGVjdG9yIjoic3FsX2luamVjdGlvbiJ9XSxbeyJ0eXBlIjoia2V5d29yZCIsImtleXdvcmRzIjpbImRyb3AgdGFibGUiXSwidGFyZ2V0IjoicGFyYW1zIn1dXX1dLCJkZWZhdWx0cyI6eyJkZWNpc2lvbiI6ImFsbG93IiwicmVhc29uIjoiTm8gYnVpbGRlciBydWxlIG1hdGNoZWQifX0=
-# nrvq-builder-hash: f32a7f6d
+# nrvq-builder-hash: 4a91c940
 default decision = "allow"
 default rule_id = "builder_default_spike_demo"
 default reason = "No builder rule matched"
@@ -76,9 +76,12 @@ bld_kw_hit_tool(terms) {
     bld_kw_hit(input.tool_name, terms)
 }
 bld_kw_hit_params(terms) {
-    some bld_kw_p
-    is_string(input.tool_params[bld_kw_p])
-    bld_kw_hit(input.tool_params[bld_kw_p], terms)
+    walk(input.tool_params, [_, bld_kw_v])
+    bld_kw_hit(bld_kw_v, terms)
+}
+bld_kw_hit_params(terms) {
+    walk(input.tool_params, [bld_kw_path, _])
+    bld_kw_hit(bld_kw_path[_], terms)
 }
 bld_kw_hit_both(terms) {
     bld_kw_hit_tool(terms)

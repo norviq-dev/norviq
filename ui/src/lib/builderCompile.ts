@@ -160,6 +160,23 @@ export function computeStats(rego: string): CompileStats {
 // builder's own idiom, generalizing composerRego.ts's single global `_kw_hit` to arbitrary
 // per-condition keyword sets via a parameterized function). Emitted at most once, only if the graph
 // has at least one keyword condition. ---
+// `bld_kw_hit_params` matches parameter NAMES as well as VALUES, at any depth.
+//
+// It used to scan only top-level VALUES (`input.tool_params[k]`), never the keys. So the rule an operator
+// most naturally writes for this condition — "block any call carrying a parameter called password /
+// api_key / secret" — silently never fired: `{"api_key": "AKIA123"}` was ALLOWED, because the term appears
+// in the key and the value is an opaque token. Verified on a live cluster before the fix: param-name hits
+// allowed, param-value hits blocked. The UI calls this "Keyword in tool params" and says nothing about
+// which half, so there was no way to discover the limit short of testing for it.
+//
+// That is the dangerous direction for a security control: a MISS, not a false block. The operator believes
+// the class of parameter is covered and it is not.
+//
+// `walk` also fixes the nesting gap the value-only form had — `{"auth": {"api_key": "x"}}` was invisible
+// too — and matches how the detector templates already traverse params. Two rule bodies rather than one
+// because rego partial rules OR together: first body matches any string VALUE, second matches any key
+// SEGMENT of the path. `bld_kw_hit` already guards `is_string`, so non-string values and numeric array
+// indices in the path are skipped rather than erroring.
 const KEYWORD_HELPER_BLOCK = `bld_kw_hit(text, terms) {
     is_string(text)
     term := terms[_]
@@ -169,9 +186,12 @@ bld_kw_hit_tool(terms) {
     bld_kw_hit(input.tool_name, terms)
 }
 bld_kw_hit_params(terms) {
-    some bld_kw_p
-    is_string(input.tool_params[bld_kw_p])
-    bld_kw_hit(input.tool_params[bld_kw_p], terms)
+    walk(input.tool_params, [_, bld_kw_v])
+    bld_kw_hit(bld_kw_v, terms)
+}
+bld_kw_hit_params(terms) {
+    walk(input.tool_params, [bld_kw_path, _])
+    bld_kw_hit(bld_kw_path[_], terms)
 }
 bld_kw_hit_both(terms) {
     bld_kw_hit_tool(terms)
