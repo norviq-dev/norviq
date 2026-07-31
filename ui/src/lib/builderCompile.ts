@@ -71,6 +71,9 @@ export type BuilderErrorCode =
   | "invalid_allowlist"
   | "empty_allowlist_tool"
   | "reserved_scope"
+  /** A condition whose `type` this build does not recognise — only reachable from a rehydrated or
+   *  hand-edited embedded graph, never from the UI. See validateCondition's trailing `else`. */
+  | "unknown_condition"
   | "budget_exceeded_bytes"
   | "budget_exceeded_lines"
   | "budget_exceeded_regex_ops";
@@ -480,6 +483,35 @@ function validateCondition(cond: BuilderCondition, pos: ConditionPos, errors: Bu
     } else {
       validateCondition(cond.inner, pos, errors);
     }
+  } else if (cond.type === "detector") {
+    // Nothing to validate: `detector` is a closed union with no free-form payload, so a well-typed
+    // detector condition is always valid. Listed explicitly rather than falling through, because the
+    // trailing `else` below now treats anything unrecognised as an error — and silently reclassifying
+    // every detector as "unknown" is exactly the regression that would cause.
+  } else {
+    // UNKNOWN condition type. Unreachable from this UI — but the graph is rehydrated by JSON.parsing the
+    // base64 blob in the compiled rego's header comment, so at runtime a condition is whatever that blob
+    // said, merely CAST to BuilderCondition. A hand-edited comment, or a policy authored by a builder
+    // version that knows a condition type this one does not, lands here.
+    //
+    // Without this branch nothing rejects it. The emitter's `default:` arm is a TypeScript `never`
+    // exhaustiveness check, which at RUNTIME returns the object itself and interpolates into the rule
+    // body as the literal text `[object Object]`. compileGraph only blanks `rego` when `errors` is
+    // non-empty, so the result was invalid rego reported as VALID: the operator sees a clean policy,
+    // hits Save, and gets an opaque 422 from the write gate rather than a message saying what is wrong.
+    // The server failing closed is not the same as the shape being unrepresentable here.
+    const unknownType = (cond as { type?: unknown }).type;
+    errors.push({
+      code: "unknown_condition",
+      message:
+        `Rule ${ruleIndex} ("${ruleId}"), row ${rowIndex}, condition ${conditionIndex}: unrecognised ` +
+        `condition type ${JSON.stringify(unknownType ?? null)}. This graph was probably written by a ` +
+        `different version of the builder, or its embedded graph comment was hand-edited. Rebuild the ` +
+        `rule, or use Advanced (raw rego).`,
+      ruleIndex,
+      rowIndex,
+      conditionIndex
+    });
   }
 }
 
