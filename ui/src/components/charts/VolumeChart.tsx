@@ -27,6 +27,12 @@ export const VolumeChart = memo(function VolumeChart({
   title?: string;
   labels?: [string, string];
 }) {
+  // A single bucket has no line SEGMENT to draw and no area beneath it, so with `symbol: "none"` the
+  // series renders to literally nothing — while `tooltip: {trigger: "axis"}` still reports the numbers
+  // on hover. The chart reads as broken: metrics but no chart. This is not an edge case; /audit/volume
+  // buckets by HOUR regardless of the selected range, so every freshly-installed or low-traffic tenant
+  // lands here. Draw the point itself when it is the only thing there is to draw.
+  const sparse = data.length < 2;
   const option = {
     color: [ALLOW_COLOR, BLOCK_COLOR],
     tooltip: { trigger: "axis", ...baseTooltip },
@@ -58,7 +64,9 @@ export const VolumeChart = memo(function VolumeChart({
         data: data.map((d) => d.allow),
         type: "line",
         smooth: true,
-        symbol: "none",
+        symbol: sparse ? "circle" : "none",
+        symbolSize: sparse ? 7 : 0,
+        showSymbol: sparse,
         areaStyle: { color: "#00E5A018" },
         lineStyle: { color: ALLOW_COLOR, width: 2 },
         itemStyle: { color: ALLOW_COLOR }
@@ -68,7 +76,9 @@ export const VolumeChart = memo(function VolumeChart({
         data: data.map((d) => d.block),
         type: "line",
         smooth: true,
-        symbol: "none",
+        symbol: sparse ? "circle" : "none",
+        symbolSize: sparse ? 7 : 0,
+        showSymbol: sparse,
         areaStyle: { color: "#FF3B5C18" },
         lineStyle: { color: BLOCK_COLOR, width: 2 },
         itemStyle: { color: BLOCK_COLOR }
