@@ -494,17 +494,29 @@ not substitute for a rule.
 
 ## 9. Performance
 
-Design targets for the trust computation on the policy-evaluation hot path:
+These were **design targets**, and the table below now carries the MEASURED value beside each one, because
+the two differ enough that reading the targets as a specification would mislead a capacity plan by an order
+of magnitude. Measured on a 2-node AKS cluster at 0.1.10, through a real injected sidecar over its UDS —
+the path a deployed agent actually takes, not a server-side stamp.
 
-| Operation | Target |
-|-----------|--------|
-| Trust calculation (all 7 signals) | < 2ms p99 |
-| Redis history fetch (ZRANGEBYSCORE) | < 1ms |
-| Redis profile fetch (HGETALL) | < 1ms |
-| Signal computation (pure math) | < 0.5ms |
-| Total added latency per tool call | < 5ms |
+| Operation | Original target | Measured (0.1.10) | |
+|-----------|-----------------|-------------------|---|
+| Trust calculation (all 7 signals) | < 2ms p99 | **0.1 ms** | better than target |
+| Redis history fetch (ZRANGEBYSCORE, 500 rows) | < 1ms | **0.44 ms** | met — but was 9.15 ms until the hiredis fix |
+| Redis profile fetch (HGETALL) | < 1ms | **~0.13 ms** | met |
+| Signal computation (pure math) | < 0.5ms | **0.1 ms** | met |
+| `trust_compute` phase, end to end | — | **~14 ms** | dominated by waiting on Redis, not by the math |
+| **Total added latency per tool call** | **< 5ms** | **~66 ms p50 / ~121 ms p95** | **NOT met — off by ~13x at p50** |
 
-Measured benchmarks will be published once collected. Trust computation is designed to add minimal overhead to the policy evaluation hot path. All signals are computed from data already in Redis — no database queries, no network calls beyond the local Redis instance.
+The per-operation targets are essentially all met; the total is not, and that is the point worth
+understanding. The signal math is 0.1 ms — trust computation is **not** what costs. The cost is the
+round trips around it and the request path it sits inside (auth, rate limiting, FastAPI routing, and the
+sidecar→TLS-proxy→API hop, which alone is ~23 ms). Optimising the trust signals would gain nothing
+measurable; that has been tried and measured.
+
+For where the remaining time actually goes, and what has been ruled out, see the Performance section of
+`IMPLEMENTATION-STATUS.md`. Budget **~66 ms p50 / ~121 ms p95 per governed tool call** when planning, and
+note that an agent making several tool calls per turn pays this per call.
 
 ---
 
