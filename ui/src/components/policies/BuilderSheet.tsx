@@ -144,15 +144,55 @@ export function isValidRegexPattern(pattern: string): boolean {
   }
 }
 
-/** Slugify a reason string into a rego-safe rule_id token. Used to auto-fill rule_id from reason until
- *  the author edits rule_id directly (tracked per-rule via `ruleIdTouched`). */
-export function slugifyRuleId(reason: string): string {
-  const slug = reason
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "");
-  return slug;
+/** Slugify a string into a rego-safe token. */
+function slugToken(text: string): string {
+  return text.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+/** The short prefix naming the tier a rule belongs to, so an audit row says which scope caught the call. */
+const TIER_ID_PREFIX: Record<BuilderScope["kind"], string> = { class: "cls", namespace: "ns", workload: "wl" };
+
+/** What a condition is ABOUT, in one token — the tool, detector, keyword or field it keys on. */
+function conditionSubject(c: BuilderCondition | undefined): string {
+  if (!c) return "";
+  switch (c.type) {
+    case "toolIn":     return slugToken((c.tools ?? [])[0] ?? "");
+    case "detector":   return slugToken(c.detector ?? "");
+    case "keyword":    return slugToken((c.keywords ?? [])[0] ?? "");
+    case "paramRegex": return slugToken(c.field ?? "");
+    case "sourceVerb": return slugToken(`${c.source ?? ""}_${c.verb ?? ""}`);
+    case "trustBelow": return "low_trust";
+    case "not":        { const inner = conditionSubject(c.inner); return inner ? `not_${inner}` : ""; }
+    default:           return "";
+  }
+}
+
+/**
+ * The auto rule_id.
+ *
+ * This used to be a slug of the WHOLE reason sentence, which produced ids like
+ * `record_deletion_is_not_permitted_for_analytics_agents` — 48 characters, truncated in every table it
+ * appears in. And nothing anywhere told an operator what a good rule_id looks like, so the only options
+ * were "accept a sentence" or "invent a convention". Neither is a product answer.
+ *
+ * The builder already knows the three things that identify a rule, so it derives them instead:
+ * tier, decision, and what the first condition is about — `ns_block_ledger_snapshot`,
+ * `cls_escalate_issue_refund`, `wl_block_export_bulk`. Short, scannable in an Audit Log, and the tier
+ * prefix means a reader can see WHICH scope caught a call without cross-referencing the policy.
+ *
+ * It also makes the alphabetical tie-break legible: when several rules match one call the resolver
+ * reports `sort([...])[0]`, so grouping by tier and decision is a more sensible ordering than whichever
+ * sentence happened to start with an earlier letter.
+ *
+ * Falls back to the reason slug while no condition exists yet (the id must never be empty — that is a
+ * validation error), and stays put the moment the author edits the field (`ruleIdTouched`).
+ */
+export function slugifyRuleId(reason: string, tier?: BuilderScope["kind"], rule?: BuilderRule): string {
+  const subject = conditionSubject(rule?.conditions?.[0]?.[0]);
+  if (tier && subject) {
+    return [TIER_ID_PREFIX[tier], rule?.decision ?? "block", subject].filter(Boolean).join("_").slice(0, 60);
+  }
+  return slugToken(reason).slice(0, 60);
 }
 
 export function defaultConditionFor(type: BuilderCondition["type"]): BuilderCondition {
@@ -486,6 +526,7 @@ function ConditionChip({
 function RuleCard({
   rule,
   index,
+  tier,
   errors,
   ruleIdTouched,
   knownTools,
@@ -495,6 +536,7 @@ function RuleCard({
 }: {
   rule: BuilderRule;
   index: number;
+  tier: BuilderScope["kind"];
   errors: BuilderError[];
   ruleIdTouched: boolean;
   knownTools: Set<string> | null;
@@ -504,7 +546,10 @@ function RuleCard({
 }) {
   const setRow = (ri: number, row: BuilderCondition[]) => {
     const conditions = rule.conditions.map((r, i) => (i === ri ? row : r));
-    onChange({ ...rule, conditions });
+    // Re-derive the id: its subject comes from the first condition, so picking or changing one must update
+    // it. Without this the id kept the reason-slug fallback chosen before any condition existed.
+    const next = { ...rule, conditions };
+    onChange(ruleIdTouched ? next : { ...next, ruleId: slugifyRuleId(rule.reason, tier, next) });
   };
 
   return (
@@ -546,7 +591,7 @@ function RuleCard({
           <span className="vpb-field-label">
             Rule ID{" "}
             <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: "var(--text-muted)" }}>
-              — {ruleIdTouched ? "custom" : "auto from reason"}
+              — {ruleIdTouched ? "custom" : "auto"}
             </span>
           </span>
           <input
@@ -579,15 +624,17 @@ function RuleCard({
         value={rule.reason}
         onChange={(e) => {
           const reason = e.target.value;
-          const ruleId = ruleIdTouched ? rule.ruleId : slugifyRuleId(reason);
+          const ruleId = ruleIdTouched ? rule.ruleId : slugifyRuleId(reason, tier, { ...rule, reason });
           onChange({ ...rule, reason, ruleId });
         }}
       />
         <div style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.5, marginBottom: 10 }}>
           The <strong>reason</strong> is the sentence an operator reads when this rule fires. The{" "}
           <strong>rule ID</strong> is the short identifier stamped on the decision and on every Audit Log row
-          for it — keep it stable, because dashboards and exports group by it. It follows the reason until you
-          edit it, then stays put so you can reword the reason freely.
+          for it — dashboards and exports group by it, so keep it stable once the rule is live. You do not have
+          to invent one: it is built from this rule\u2019s tier, decision and first condition (e.g.{" "}
+          <span className="mono">ns_block_ledger_snapshot</span>). Type your own if you prefer a house
+          convention — it then stops tracking, so you can reword the reason freely.
         </div>
 
       <div className="section-label" style={{ marginBottom: 6 }}>
@@ -1289,6 +1336,7 @@ export function BuilderSheet({
                     key={rule.id}
                     rule={rule}
                     index={idx}
+                    tier={tier}
                     errors={errorsForRule(compiled.errors, idx)}
                     ruleIdTouched={!!ruleIdTouched[rule.id]}
                     knownTools={knownToolNames}

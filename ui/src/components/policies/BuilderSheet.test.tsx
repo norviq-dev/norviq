@@ -59,8 +59,8 @@ describe("BuilderSheet", () => {
       const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
       expect(rego).toContain("package norviq.custom.builder_spike");
       // rule_id auto-slugged from the reason text (untouched rule_id field).
-      expect(rego).toContain('blocks["sql_injection_blocked"]');
-      expect(rego).toContain('"sql_injection_blocked": "SQL injection blocked"');
+      expect(rego).toContain('blocks["cls_block_sql_injection"]');
+      expect(rego).toContain('"cls_block_sql_injection": "SQL injection blocked"');
     });
     // A fully-formed rule has no compile errors.
     expect(screen.queryByTestId("builder-errors")).not.toBeInTheDocument();
@@ -540,7 +540,7 @@ describe("BuilderSheet — Intent Allowlist mode (Phase 2c)", () => {
     expect(screen.getByTestId("builder-rule-0")).toBeInTheDocument();
     await waitFor(() => {
       const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
-      expect(rego).toContain('blocks["sql_injection_blocked"]');
+      expect(rego).toContain('blocks["cls_block_sql_injection"]');
     });
 
     // Switching back to allowlist mode, the tool added earlier is still there too.
