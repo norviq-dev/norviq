@@ -1008,7 +1008,7 @@ export function BuilderSheet({
       <div
         data-testid="builder-sheet"
         className="sheet-kit"
-        style={{ width: 1040, maxWidth: "96vw", display: "flex", flexDirection: "column" }}
+        style={{ width: 1180, maxWidth: "96vw", display: "flex", flexDirection: "column" }}
       >
         <div className="sheet-head">
           <div>
@@ -1022,11 +1022,11 @@ export function BuilderSheet({
           </button>
         </div>
 
-        <div style={{ display: "flex", gap: 16, flex: 1, minHeight: 0 }}>
+        <div style={{ display: "flex", gap: 20, flex: 1, minHeight: 0 }}>
           {/* LEFT: three numbered, progressively-revealed steps (UX redesign) — who this policy is for,
               what it should do, then check & enforce. Replaces the old flat wall of two identical-
               looking tab rows + two text fields, which gave the operator no ordering cue at all. */}
-          <div style={{ flex: "1 1 480px", minWidth: 0, overflowY: "auto", maxHeight: "calc(100vh - 180px)", paddingRight: 4 }}>
+          <div className="vpb-form-pane" style={{ flex: "1 1 480px", minWidth: 0, overflowY: "auto", maxHeight: "calc(100vh - 180px)", paddingRight: 8 }}>
             {/* --- Step ① — Who is this policy for? (never locked — it's the first step) --- */}
             <div className="vpb-step" data-testid="builder-step-1" data-step-state={step1State}>
               <div className="vpb-step-header">
@@ -1406,8 +1406,9 @@ export function BuilderSheet({
             </div>
           </div>
 
-          {/* RIGHT: live compiled rego + stats + errors + actions */}
-          <div style={{ flex: "1 1 480px", minWidth: 0, display: "flex", flexDirection: "column", maxHeight: "calc(100vh - 180px)" }}>
+          {/* RIGHT: live compiled rego + stats + errors + actions — narrower than the form on a wide
+                viewport (see .vpb-rego-pane); the form is the work, the rego is reference. */}
+          <div className="vpb-rego-pane" style={{ flex: "1 1 480px", minWidth: 0, display: "flex", flexDirection: "column", maxHeight: "calc(100vh - 180px)" }}>
             <div className="section-label" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <span>Compiled Rego (live, read-only)</span>
               <button

@@ -192,3 +192,106 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Readability + density pass.
+   The first cut of this sheet ran at 10–12.5px across every element, in a pane
+   roughly 480px wide holding three-line tier descriptions, so the whole surface
+   read as one flat block of small grey text with no hierarchy — the operator had
+   nothing to anchor on. Nothing structural changes here: same DOM, same labels,
+   same behaviour, so the specs keep passing. Only type scale, spacing and the
+   selected-state affordance move.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/* Steps read as sections, not paragraphs. */
+.vpb-step { margin-bottom: 26px; }
+.vpb-step-header { gap: 12px; margin-bottom: 14px; }
+
+.vpb-step-badge {
+  width: 26px;
+  height: 26px;
+  font-size: 13px;
+}
+
+.vpb-step-title {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+/* The completed step is the one thing worth a colour cue at a glance. */
+.vpb-step[data-step-state="done"] .vpb-step-badge {
+  background: #2ddab8;
+  border-color: #2ddab8;
+  color: #08110f;
+}
+
+.vpb-step-chip { font-size: 11px; padding: 4px 10px; }
+.vpb-step-hint { font-size: 12.5px; line-height: 1.5; }
+
+/* A locked step should look inert, not broken — 0.45 was dim enough to look like a rendering fault. */
+.vpb-step[data-step-state="locked"] .vpb-step-body { opacity: 0.55; }
+
+/* --- tier cards: the primary choice on the sheet, so give them room --- */
+.vpb-tier-cards { gap: 10px; }
+
+.vpb-tier-card {
+  padding: 14px 14px 13px;
+  gap: 6px;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Accent bar on the chosen tier: the 1px border + faint tint alone was easy to miss on a dark surface. */
+.vpb-tier-card[aria-checked="true"]::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: #2ddab8;
+}
+
+.vpb-tier-card-title { font-size: 14px; letter-spacing: -0.01em; }
+.vpb-tier-card-desc { font-size: 12.5px; line-height: 1.5; }
+.vpb-tier-card-eg { font-size: 11.5px; }
+.vpb-tier-card-note { font-size: 11px; line-height: 1.45; margin-top: 4px; }
+
+/* --- mode chooser --- */
+.vpb-mode-options { gap: 10px; margin-bottom: 18px; }
+.vpb-mode-option { padding: 13px 14px; }
+.vpb-mode-option-title { font-size: 13.5px; font-weight: 650; }
+.vpb-mode-option-desc { font-size: 12.5px; line-height: 1.5; margin-top: 5px; }
+
+/* --- section labels: keep them as quiet signposts, not shouting --- */
+.vpb-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* --- condition rows read as one unit each, instead of loose controls on a flat background --- */
+.vpb-condition-row {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 10px);
+  padding: 10px 11px;
+  margin-bottom: 8px;
+}
+
+/* --- errors: a bordered block, so a long message stops looking like body copy --- */
+.vpb-errors {
+  border: 1px solid #ff6b6b40;
+  background: #ff6b6b12;
+  border-radius: var(--radius-md, 10px);
+  padding: 10px 12px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+/* On a wide viewport the form is the work and the rego is reference — stop splitting them 50/50. */
+@media (min-width: 1180px) {
+  .vpb-form-pane { flex: 1.25 1 560px !important; }
+  .vpb-rego-pane { flex: 0.85 1 420px !important; }
+}

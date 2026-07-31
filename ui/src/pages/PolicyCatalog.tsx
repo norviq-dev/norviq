@@ -228,6 +228,19 @@ function withTargetType(list: Policy[]): Policy[] {
   }));
 }
 
+/**
+ * The identity of a policy in the editor's file list: NAMESPACE + class, never the class alone.
+ *
+ * Two namespaces routinely run the same agent class — dev/staging/prod each having `customer-support` is
+ * the normal case, not an edge one — and under the "All namespaces" scope (the default landing view) they
+ * all appear in one flat list. Keying on the bare class name made those rows indistinguishable: the row
+ * highlight matched BOTH, and the lookup returned whichever came first, so selecting the second row loaded
+ * the first row's policy and a subsequent Save/Apply wrote to that other namespace instead.
+ */
+function policyFileKey(p: { namespace?: string; target?: string | null; agent_class?: string | null }): string {
+  return `${p.namespace ?? ""}/${p.target ?? p.agent_class ?? "policy"}`;
+}
+
 function PriorityBars({ tier }: { tier: TargetType }) {
   const p = PRIORITY[tier];
   return (
@@ -1349,7 +1362,12 @@ export function PolicyCatalog() {
 
   const editorPolicy = useMemo(() => {
     const list = policies.data ?? [];
-    if (activeFile) return list.find((p) => (p.target ?? p.agent_class) === activeFile);
+    // Resolve by NAMESPACE + class, not class alone. Two namespaces routinely run the same agent class
+    // (dev/staging/prod all have `customer-support`), and under the "All namespaces" scope both land in
+    // this list. Matching on the bare class name returned whichever happened to be FIRST, so clicking the
+    // second row loaded — and Save/Apply then targeted — a different tenant's policy than the one the
+    // operator selected. Same reason `policyFileKey` is used for the row key and the active-row highlight.
+    if (activeFile) return list.find((p) => policyFileKey(p) === activeFile);
     return list.find((p) => p.target_type === "class") ?? list[0];
   }, [policies.data, activeFile]);
 
@@ -1479,7 +1497,9 @@ export function PolicyCatalog() {
     try {
       await deletePolicy(ns, ac, overlay);
       await refreshPolicies();
-      if ((activeFile ?? editorPolicy?.agent_class) === ac) setActiveFile(null);  // deleted the loaded policy
+      // Compare the composite key: bare `ac` would also clear the selection when a SAME-NAMED class in a
+      // different namespace was deleted, blanking an editor the operator was still working in.
+      if ((activeFile ?? (editorPolicy ? policyFileKey(editorPolicy) : null)) === `${ns}/${ac}`) setActiveFile(null);
       setApplyResult({
         kind: "local",
         title: `Deleted ${ns}/${displayClass}${ver ? ` · v${ver}` : ""}`,
@@ -1600,7 +1620,8 @@ export function PolicyCatalog() {
   };
 
   const editorFiles = (policies.data ?? []).filter((p) => p.target_type === "class");
-  const activePolicyName = activeFile ?? editorFiles[0]?.target ?? editorFiles[0]?.agent_class ?? null;
+  const activePolicyKey = activeFile ?? (editorFiles[0] ? policyFileKey(editorFiles[0]) : null);
+  const activePolicyName = activePolicyKey ? activePolicyKey.split("/").slice(1).join("/") : null;
 
   // The STABLE identity of the loaded policy. The buffer-reset effect below keyed on
   // `editorPolicy?.id` (the policies API returns no id → always undefined) plus the raw rego string —
@@ -2099,19 +2120,31 @@ export function PolicyCatalog() {
                 )}
                 {editorFiles.map((p) => {
                   const name = p.target ?? p.agent_class ?? "policy";
-                  const isActive = !newPolicy && activePolicyName === name;
+                  const key = policyFileKey(p);
+                  const isActive = !newPolicy && activePolicyKey === key;
+                  // Show the namespace whenever another row carries the same class name. Two rows both
+                  // reading `customer-support.rego` are indistinguishable, and picking the wrong one edits
+                  // another tenant's policy.
+                  const ambiguous = editorFiles.filter((q) => (q.target ?? q.agent_class) === name).length > 1;
                   return (
                     <button
-                      key={p.id ?? name}
+                      key={key}
                       role="row"
                       className={`sb-link${isActive ? " active" : ""}`}
-                      onClick={() => { if (!confirmDiscardIfDirty(name)) return; setNewPolicy(null); resetDraftFlow(); setActiveFile(name); }}
-                      style={{ fontSize: 12.5 }}
+                      onClick={() => { if (!confirmDiscardIfDirty(name)) return; setNewPolicy(null); resetDraftFlow(); setActiveFile(key); }}
+                      style={{ fontSize: 12.5, flexDirection: "column", alignItems: "flex-start", gap: 1 }}
                     >
-                      <FileCode size={14} />
-                      <span className="mono" style={{ fontSize: 12 }}>
-                        {name}.rego
+                      <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <FileCode size={14} />
+                        <span className="mono" style={{ fontSize: 12 }}>
+                          {name}.rego
+                        </span>
                       </span>
+                      {ambiguous && (
+                        <span className="mono" style={{ fontSize: 10, color: "var(--text-muted)", paddingLeft: 20 }}>
+                          {p.namespace}
+                        </span>
+                      )}
                     </button>
                   );
                 })}
