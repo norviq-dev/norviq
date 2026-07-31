@@ -1,6 +1,6 @@
 [project]
 name = "norviq"
-version = "0.1.9"
+version = "0.1.10"
 description = "Runtime policy enforcement for LLM agent tool calls on Kubernetes."
 # PyPI-specific long description: pypi.org cannot resolve README.md's relative links/images, and the
 # pypi.org audience wants the Python SDK rather than README.md's `git clone` + `helm install` opener.
@@ -39,7 +39,15 @@ dependencies = [
     "opentelemetry-exporter-otlp>=1.20",
     "opentelemetry-exporter-prometheus>=0.41b0",
     "prometheus-client>=0.20",
-    "redis>=5.0",
+    # The [hiredis] extra is a LATENCY dependency, not a nicety. redis-py falls back to a pure-Python
+    # RESP parser when hiredis is absent, and the cost of that parser scales with the number of values
+    # returned — invisible on the small GETs that dominate a test suite, decisive on the one hot-path
+    # query that returns 500. Measured in-cluster on the trust history read (ZRANGEBYSCORE, 500 rows):
+    # p50 9.28ms -> 0.44ms and p90 53.9ms -> 1.55ms, a 21x/35x improvement from this extra alone.
+    # Redis itself was never the problem: its own commandstats put the same query at 190us server-side,
+    # so ~98% of what the caller waited for was client-side parsing. redis-py selects the C parser
+    # automatically when it can import hiredis, so this needs no code change.
+    "redis[hiredis]>=5.0",
     "sqlalchemy[asyncio]>=2.0",
     "asyncpg>=0.29",
     "alembic>=1.13",

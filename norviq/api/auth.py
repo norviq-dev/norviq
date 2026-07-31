@@ -11,6 +11,8 @@ applied to validated OIDC claims so all consumers (HTTP deps + the WebSocket pat
 normalized ``role``/``namespace``/``sub`` shape.
 """
 
+from time import perf_counter
+
 import jwt
 import structlog
 from fastapi import Depends, HTTPException, Request, status
@@ -20,6 +22,7 @@ from jwt import PyJWTError as JWTError
 from norviq.api.jwks import get_jwks_client
 from norviq.api.session_revocation import is_revoked, token_hash
 from norviq.config import settings
+from norviq.telemetry.metrics import record_path_phase
 
 log = structlog.get_logger()
 security = HTTPBearer(auto_error=False)
@@ -139,6 +142,27 @@ def _apply_group_mapping(claims: dict) -> dict:
 
 async def get_current_user(
     creds: HTTPAuthorizationCredentials = Depends(security), request: Request = None  # type: ignore[assignment]
+) -> dict:
+    """Time the auth dependency, then delegate to `_authenticate`.
+
+    A wrapper rather than a timer inside the body: that body has several return paths (JWT, OIDC, API key)
+    and raises 401/403 on others, so timing it inline would mean keeping half a dozen call sites in sync and
+    a new branch would silently stop being measured. `finally` covers every path, including the raises —
+    which matters, because a slow REJECTION is exactly as bad for a caller as a slow acceptance.
+
+    Why this is measured at all: the API's HTTP layer is ~35% of what a caller waits for one enforcement
+    decision, and auth runs on every request (JWT verify, plus a Redis session-revocation check). None of it
+    was attributed. The signature is unchanged so `Depends(get_current_user)` resolves exactly as before.
+    """
+    _t0 = perf_counter()
+    try:
+        return await _authenticate(creds, request)
+    finally:
+        record_path_phase("api", "auth", (perf_counter() - _t0) * 1000.0)
+
+
+async def _authenticate(
+    creds: HTTPAuthorizationCredentials | None, request: Request | None
 ) -> dict:
     """Validate the bearer token (OIDC or HS256) and return claims.
 

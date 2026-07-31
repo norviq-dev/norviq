@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from time import perf_counter
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
@@ -15,6 +17,7 @@ from norviq.engine.capability import Verb, classify_tool
 from norviq.engine.masking import mask_params
 from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.events import ToolCallEvent
+from norviq.telemetry.metrics import record_path_phase
 
 router = APIRouter()
 
@@ -46,6 +49,12 @@ async def evaluate_tool_call(
     user: dict = Depends(get_current_user),
 ) -> EvaluateResponse:
     """Evaluate one tool call against active policies."""
+    # Handler-level attribution. The evaluator reports its own phases and the outermost ASGI timer
+    # reports the total, but between them sat ~32ms that NOTHING measured: FastAPI routing and
+    # dependency resolution, request/response model validation, and the post-decision audit work. The
+    # phases below close that, and `route_total` vs the outer `total_asgi` is the framework's own cost
+    # — the part no application-level timer can see.
+    _t_handler = perf_counter()
     # Bind the evaluated namespace to the CALLER, not the client-supplied body. scoped_namespace()
     # already gives a service credential (sidecar/SDK/break-glass) the trusted hot path: an EMPTY namespace
     # claim on a service token is treated as authorized for any requested namespace, while a NON-empty
@@ -80,7 +89,11 @@ async def evaluate_tool_call(
         )
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=f"invalid agent_identity / tool call: {exc.errors()}") from exc
+    record_path_phase("api", "route_identity", (perf_counter() - _t_handler) * 1000.0)
+    _t = perf_counter()
     decision: PolicyDecision = await request.app.state.evaluator.evaluate(event)
+    record_path_phase("api", "route_evaluate", (perf_counter() - _t) * 1000.0)
+    _t = perf_counter()
     # Fire-and-forget audit emission (DB write + OTel span). emit() schedules its own
     # background task, holds the reference, and swallows write errors — so this never
     # blocks the response or fails the tool call (hot-path safe). The audit record carries
@@ -107,8 +120,18 @@ async def evaluate_tool_call(
                     "op_src": "params",
                 }
         emitter.emit(event, decision, payload=audit_payload)
+    record_path_phase("api", "route_audit", (perf_counter() - _t) * 1000.0)
+    _t = perf_counter()
     # Fan the decision out to live /ws/audit subscribers (in-process, non-blocking).
     hub = getattr(request.app.state, "audit_hub", None)
     if hub is not None:
         hub.publish(audit_record(event, decision))
-    return EvaluateResponse(decision=decision.decision, rule_id=decision.rule_id, trust_score=decision.trust_score)
+    record_path_phase("api", "route_fanout", (perf_counter() - _t) * 1000.0)
+    response = EvaluateResponse(
+        decision=decision.decision, rule_id=decision.rule_id, trust_score=decision.trust_score
+    )
+    # Recorded LAST so it covers the whole handler. FastAPI still has to validate and serialise this
+    # response afterwards, which is precisely why `total_asgi - route_total` is the number to read
+    # rather than assuming the handler is the request.
+    record_path_phase("api", "route_total", (perf_counter() - _t_handler) * 1000.0)
+    return response

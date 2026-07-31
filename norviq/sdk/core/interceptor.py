@@ -3,6 +3,7 @@
 
 """Framework-agnostic tool-call interceptor."""
 
+from time import perf_counter
 from typing import Any, Protocol
 
 import structlog
@@ -11,6 +12,7 @@ from norviq.engine.identity import SPIFFEResolver
 from norviq.exceptions import NorviqBlockError, NorviqEscalateError
 from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
+from norviq.telemetry.metrics import record_interception_latency
 from norviq.sdk.core.recorder import record_decision
 
 log = structlog.get_logger()
@@ -47,6 +49,11 @@ class ToolInterceptor:
         identity: AgentIdentity | None = None,
     ) -> PolicyDecision:
         """Evaluate a tool call and return policy decision."""
+        # What the CALLER waits for one decision — the number a deployed agent actually feels, and the one
+        # the published performance table cannot show: it reads the engine's own latency_ms, which excludes
+        # everything outside the engine (identity resolve, the round trip to reach it, response handling).
+        # In proxy mode that excluded part is the cross-pod hop, i.e. the term that dominates the tail.
+        _t0 = perf_counter()
         resolved = identity or await self._resolver.resolve()
         event = ToolCallEvent(
             tool_name=tool_name,
@@ -62,6 +69,11 @@ class ToolInterceptor:
         # an honest tools_called for frameworks whose message objects don't expose the calls. No-op
         # (one ContextVar.get) when nothing opted in, so the in-cluster hot path is untouched.
         record_decision(tool_name, decision)
+        # `framework` already distinguishes the injected sidecar from an in-process SDK adapter, so it
+        # doubles as the mode label rather than inventing a second signal that could disagree with it.
+        record_interception_latency(
+            "sidecar" if framework == "sidecar" else "sdk", "total", (perf_counter() - _t0) * 1000.0
+        )
         log.info("nrvq.intercept.result", tool=tool_name, decision=decision.decision, code="NRVQ-SDK-1020")
         return decision
 

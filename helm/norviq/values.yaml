@@ -203,7 +203,20 @@ api:
       cpu: 100m
       memory: 128Mi
     limits:
-      cpu: 500m
+      # 500m throttled this pod on 92.5% of CFS periods under a sustained single-client load —
+      # 23.8s of throttle across 400 evaluations, ~60ms of pure wait added to EVERY call. Caller-
+      # observed p50 was 115ms and p95 172ms; raising this limit alone (nothing else changed) took
+      # them to 62ms and 101ms with ZERO throttled periods. One evaluation costs ~69ms of CPU, so a
+      # 500m ceiling caps a replica near ~7 evaluations/sec and the excess is paid as latency.
+      #
+      # Only the LIMIT moves. `requests` stays at 100m deliberately: requests drive scheduling, so
+      # raising them can make this chart unschedulable on a small cluster — on a 2-node/2-vCPU AKS a
+      # 1000m request did not fit at all. A higher limit changes no scheduling decision; it only
+      # stops the kernel parking a pod that has work to do.
+      #
+      # Lower this if you are deliberately capping a noisy tenant, but the cost of a low cap here is
+      # paid as p95 latency on every enforcement decision.
+      cpu: 2000m
       memory: 256Mi
   port: 8080
   # Leave this at the sentinel default and the chart AUTO-GENERATES a strong random secret on
@@ -289,7 +302,29 @@ webhook:
         # under node pressure fails the workload it is guarding, so eviction-safety beats packing
         # density here. The limit leaves ~79% headroom over peak for larger payloads and GC spikes.
         requests: { cpu: 200m, memory: 256Mi }
-        limits:   { cpu: 500m, memory: 384Mi }
+        # The CPU limit is 2000m, not 500m, and that is the difference between this mode helping and
+        # HURTING. Measured on AKS through a real injected sidecar, two runs each, all three rows taken
+        # back-to-back in ONE session so they are directly comparable:
+        #
+        #   proxy (same session)    p50 59.0ms   p95 92.7ms
+        #   embedded @ 500m         p50 72.0ms   p95 93.1ms    58.9% of CFS periods THROTTLED
+        #   embedded @ 2000m        p50 30.7ms   p95 58.0ms    0% throttled
+        #
+        # The proxy row is a single-session reading; a later settled-cluster median of three runs put proxy
+        # at ~66ms p50 / ~121ms p95. So 59/92.7 is the OPTIMISTIC end of proxy's range, which means
+        # embedded's advantage here is understated rather than inflated. The two embedded rows remain a
+        # clean like-for-like A/B of the CPU limit alone.
+        #
+        # At 500m, embedded was SLOWER than the proxy default it exists to beat — so an operator who
+        # enabled it got a worse result than leaving it off, with nothing to indicate why. One evaluation
+        # costs ~69ms of CPU and embedded runs the WHOLE engine in the pod (redis client, policy warm,
+        # audit emitter, plus an OPA subprocess fork per call), so a 500m ceiling throttles it hard. The
+        # 213m warm-up figure noted above is a WARM-UP measurement, not a sustained-load one.
+        #
+        # As with the api limit, only the LIMIT is generous: `requests` stays at 200m, so scheduling
+        # density is unchanged and this cannot make a pod unschedulable. Memory is unchanged — 384Mi was
+        # measured against real peak (214Mi), and no OOM or restart was observed under load.
+        limits:   { cpu: 2000m, memory: 384Mi }
     # DATA-PLANE posture: what a GOVERNED AGENT does when the central engine is unreachable. Distinct
     # from failurePolicy below, which is the ADMISSION posture (whether a pod may be created at all).
     #   "block" (DEFAULT) = fail-CLOSED. The agent keeps talking, but every tool call is refused for as
