@@ -3,7 +3,8 @@
 // carries a visible ACTIVE state (teal --accent + aria-pressed + `active` class), distinct from the
 // muted inactive chips. Header's mount fetches are left unhandled (bypassed) — they fail gracefully;
 // the chips render synchronously from the route, which is what we assert.
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
+import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import { MemoryRouter } from "react-router-dom";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -66,5 +67,29 @@ describe("Header time-range selector — scope + active state", () => {
       expect(chip).toHaveAttribute("aria-pressed", "false");
       expect(chip.className).not.toContain("active");
     }
+  });
+});
+
+describe("Inbox alert copy agrees with its own count", () => {
+  // A single blocked call read as "1 tool calls blocked". An alert that contradicts the number
+  // sitting next to it undercuts the one thing the alert exists to state.
+  async function openInboxWith(blocked: number) {
+    server.use(
+      http.get("*/api/v1/audit/stats", () => HttpResponse.json({ total: 100, blocked, allowed: 100 - blocked })),
+      http.get("*/api/v1/agents", () => HttpResponse.json([]))
+    );
+    renderAt("/audit");
+    screen.getByRole("button", { name: /Inbox/i }).click();
+  }
+
+  it("says 'call' for exactly one blocked call", async () => {
+    await openInboxWith(1);
+    await waitFor(() => expect(screen.getByText(/1 tool call blocked in last 24h/)).toBeInTheDocument());
+    expect(screen.queryByText(/1 tool calls blocked/)).not.toBeInTheDocument();
+  });
+
+  it("keeps the plural for more than one", async () => {
+    await openInboxWith(4);
+    await waitFor(() => expect(screen.getByText(/4 tool calls blocked in last 24h/)).toBeInTheDocument());
   });
 });

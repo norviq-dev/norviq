@@ -581,7 +581,7 @@ export function Header({
                       close();
                     }}
                   >
-                    🔴 {inboxData?.blockedCount} tool calls blocked in last 24h
+                    🔴 {inboxData?.blockedCount} tool {inboxData?.blockedCount === 1 ? "call" : "calls"} blocked in last 24h
                   </button>
                 )}
                 {(inboxData?.lowTrustCount ?? 0) > 0 && (
@@ -595,7 +595,7 @@ export function Header({
                       close();
                     }}
                   >
-                    🟡 {inboxData?.lowTrustCount} agent(s) below trust threshold
+                    🟡 {inboxData?.lowTrustCount} {inboxData?.lowTrustCount === 1 ? "agent" : "agents"} below trust threshold
                   </button>
                 )}
                 {(inboxData?.blockedCount ?? 0) === 0 && (inboxData?.lowTrustCount ?? 0) === 0 && (
