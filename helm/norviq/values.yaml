@@ -563,7 +563,14 @@ opa:
       cpu: 50m
       memory: 64Mi
     limits:
-      cpu: 250m
+      # 250m was too tight to COMPILE with, even though it was ample to evaluate with. Rego compilation
+      # is a CPU-bound burst that happens whenever a policy is created or edited, and OPA stops answering
+      # queries while it recompiles its module store. Throttled at 250m that burst ran past the engine's
+      # 2s evaluation budget, so the first tool call after every policy change was wrongly blocked
+      # (fail-closed `evaluator_timeout`). Measured on AKS: 250m → 0/5 correct on the first call after a
+      # policy save, 1500m → 5/5. Steady-state evaluation is unaffected either way (it uses ~7m), so this
+      # limit exists for the compile burst, not the query path.
+      cpu: 1500m
       memory: 128Mi
 
 ingress:
