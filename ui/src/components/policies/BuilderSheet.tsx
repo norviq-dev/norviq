@@ -80,6 +80,30 @@ export const SCOPE_TIER_LABEL: Record<BuilderScope["kind"], string> = {
   namespace: "Namespace",
   workload: "Workload"
 };
+
+/**
+ * The priority POSTed for each tier.
+ *
+ * The builder used to send no `priority` at all, so every tier landed on the server default of 100 —
+ * including the Namespace tier, which the console itself renders under a "Catch-all fallback · lowest
+ * priority" heading (PolicyCatalog's PRIORITY map: workload highest, class medium, namespace lowest).
+ * The Resolution hierarchy made the contradiction visible: it states "highest-priority-wins, top to
+ * bottom" and then listed a priority-100 namespace policy BELOW the priority-1 namespace baseline.
+ *
+ * Enforcement was never wrong — `_collect_candidates` orders the tiers structurally, so a class policy
+ * still beat a namespace policy at equal priority (verified on a live cluster). This aligns the number
+ * with the model the UI already displays, so the table an operator reads to reason about precedence is
+ * self-consistent.
+ *
+ * Values sit inside the 0–499 band documented for namespace-scoped authors, keep the relative order
+ * workload > class > namespace, and 50 for the namespace tier matches the cookbook's own
+ * observe-first namespace baseline recipe.
+ */
+export const SCOPE_TIER_PRIORITY: Record<BuilderScope["kind"], number> = {
+  workload: 200,
+  class: 100,
+  namespace: 50
+};
 // Step ① tier cards (UX redesign) — one-line description + example shown on each selectable card, so
 // the difference between the three tiers is legible without docs. Display-only; the wire semantics
 // (BuilderScope["kind"]) are unchanged.
@@ -950,7 +974,11 @@ export function BuilderSheet({
         namespace: ns,
         agent_class: key,
         rego_source: compiled.rego,
-        enforcement_mode: primaryEnforcementMode
+        enforcement_mode: primaryEnforcementMode,
+        // Explicit per-tier priority. Omitting it defaulted EVERY tier to the server's 100, which put a
+        // Namespace policy on the same number as an Agent-class one while the console rendered it under
+        // "Catch-all fallback · lowest priority" — see SCOPE_TIER_PRIORITY.
+        priority: SCOPE_TIER_PRIORITY[tier]
       });
       const ver = res?.version;
       setApplyResult({
