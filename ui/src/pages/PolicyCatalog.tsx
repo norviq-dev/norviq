@@ -627,7 +627,8 @@ spec:
             </div>
             <div className="panel-sub" style={{ marginTop: 6, color: "var(--text-muted)" }}>
               Applied — these generate the block policy below. Rate limit and trust threshold are
-              namespace-wide and live in Target Settings.
+              namespace-wide and live in Settings → General (Tuning defaults); Target Settings holds
+              the enforcement mode and change control.
             </div>
           </div>
         )}

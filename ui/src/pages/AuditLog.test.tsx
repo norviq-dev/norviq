@@ -65,6 +65,51 @@ describe("AuditLog live feed (#5)", () => {
   });
 });
 
+describe("AuditLog live tail respects the active filters", () => {
+  /**
+   * The live tail is prepended to the server page on page 0. It used to mirror only `realOnly`, so the
+   * decision / tool / agent / rule filters applied server-side to the fetched page were absent from the
+   * streamed rows above it. Selecting "Block" on a namespace whose recent traffic is all allows rendered
+   * six ALLOW rows under a header reading "Showing 6 of 0 records" — six live rows over a server count of
+   * zero. In an audit tool that is not cosmetic: someone filtering to Block during an incident sees rows
+   * and reasonably reads them as blocks.
+   */
+  const ALLOW_ROW = {
+    id: "live-1",
+    timestamp: new Date().toISOString(),
+    tool_name: "search_kb",
+    decision: "allow",
+    rule_id: "moderate_default_allow",
+    agent_class: "finance-ops",
+    agent_id: "spiffe://norviq/ns/analytics/sa/default",
+    namespace: "analytics",
+    framework: "sidecar",
+    latency_ms: 21
+  };
+
+  it("does not show a streamed ALLOW row while the Block filter is active", async () => {
+    // The poll feeds the live tail; the filtered page itself is empty (no blocks).
+    server.use(
+      http.get("/api/v1/audit/records", ({ request }) => {
+        const url = new URL(request.url);
+        // the live-tail poll is the unfiltered one; the page query carries decision=block
+        return HttpResponse.json(url.searchParams.get("decision") === "block" ? [] : [ALLOW_ROW]);
+      })
+    );
+    renderPage();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^block$/i }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
+    // No ALLOW decision may survive a Block filter, from either source.
+    expect(screen.queryByText("ALLOW")).toBeNull();
+    expect(screen.queryByText("moderate_default_allow")).toBeNull();
+  });
+});
+
 describe("AuditLog pagination beyond the 500-offset cap", () => {
   // FAIL-ON-BUG: with a full count-probe (server caps limit at 500) and full pages, the pager must let
   // the user advance past page 10 / offset 500. Old code disabled Next at page 10 (totalPages-1), so

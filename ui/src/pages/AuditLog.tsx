@@ -217,13 +217,30 @@ export function AuditLog() {
   }, [ws.messages, polled]);
 
   const rows = useMemo(() => {
-    // Filtering is server-side (tool + agent + real-only); the live stream is only merged on page 0.
+    // The live tail must satisfy EVERY active filter, not just real-only.
+    //
+    // It used to mirror `realOnly` alone, so the filters applied server-side to `base.data` (decision,
+    // tool, agent, rule) were simply absent from the streamed rows prepended above it. Selecting "Block"
+    // on a namespace whose recent traffic is all allows produced six ALLOW rows under a header reading
+    // "Showing 6 of 0 records" — 6 live rows over a server count of 0. In an audit tool that is not a
+    // cosmetic slip: someone filtering to Block during an incident sees rows and reasonably reads them as
+    // blocks. Always exactly six, because `streamed` is capped at slice(0, 6).
     const liveIds = new Set(streamed.map((r) => r.id).filter(Boolean));
-    // In real-only mode the server already hides red-team/synthetic rows — mirror that for the live tail
-    // (drop red-team-source rows) so a streamed test row can't reappear above the filtered page.
-    const live = realOnly ? streamed.filter((r) => r.framework !== "redteam") : streamed;
+    const needle = debouncedTool.trim().toLowerCase();
+    const agentNeedle = debouncedAgent.trim().toLowerCase();
+    const ruleNeedle = rule.trim().toLowerCase();
+    const live = streamed.filter((r) => {
+      // Mirror the server's own predicates. `exclude_synthetic` drops red-team rows; the rest are the
+      // substring/equality matches audit/records applies.
+      if (realOnly && r.framework === "redteam") return false;
+      if (decision !== "all" && r.decision !== decision) return false;
+      if (needle && !(r.tool_name ?? "").toLowerCase().includes(needle)) return false;
+      if (agentNeedle && !(r.agent_id ?? "").toLowerCase().includes(agentNeedle)) return false;
+      if (ruleNeedle && !(r.rule_id ?? "").toLowerCase().includes(ruleNeedle)) return false;
+      return true;
+    });
     return [...(page === 0 ? live : []), ...(base.data ?? []).filter((r) => !liveIds.has(r.id))];
-  }, [streamed, base.data, page, realOnly]);
+  }, [streamed, base.data, page, realOnly, decision, debouncedTool, debouncedAgent, rule]);
 
   const totalCount = totalRecords.data?.length ?? 0;
   // The total-count probe is server-capped at limit=500 (audit/records enforces le=500), so records
