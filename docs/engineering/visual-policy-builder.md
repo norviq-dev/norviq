@@ -65,13 +65,63 @@ then silently never enforced. The builder therefore offers Deployment and nothin
   their current outcome. Emits `package norviq.custom.<token>`.
 - **Intent allowlist** — default-deny: everything for this scope is blocked except the tools listed,
   and only while the enabled refinements hold (read-only / no external egress / namespace-scoped /
-  rate-limit). Emits `package norviq.intent.<token>`.
+  rate-limit) and every per-tool constraint on that tool holds. Emits `package norviq.intent.<token>`.
+
+#### Per-tool argument scoping
+
+A list of tool *names* says exactly what a framework's own tool-binding says — "this agent may call
+`execute_sql`" — and nothing about how. The four refinements are class-wide, so read-only is on for
+every tool or none. **Grants** narrow one allowlisted tool by its arguments:
+
+| Constraint | Example |
+|---|---|
+| `matches` / `notMatches` | `query` matches `(?i)^\s*select\b`; does not match `(?i)card_number` |
+| `oneOf` / `noneOf` | `table` ∈ {`users`, `orders`}; ∉ {`payments`} |
+| `maxNumber` | `limit` ≤ 100 |
+| `required` / `forbidden` | `force` must be absent on a delete |
+| `hostIn` | `url` host ∈ {`api.internal.example.com`} |
+
+So an intent becomes *"may read `users` and `orders`, never `payments`, no card columns, ≤100 rows"*
+rather than *"may call `execute_sql`"*.
+
+Rules that are load-bearing rather than stylistic:
+
+- **A grant narrows, it never grants.** A grant for a tool not on the allowlist is a compile error
+  (`grant_not_allowlisted`), so the allowlist stays the single answer to "what may this class call".
+- **An absent parameter denies.** Every constraint is a positive assertion over a well-typed value.
+  The alternative — treating a missing field as "constraint not applicable" — would let any caller
+  bypass every constraint by omitting the argument. The emitted `_p_str`/`_p_num` accessors are
+  *total* functions returning a never-matching sentinel: a partial rule would leave the enclosing body
+  undefined, which under a negated constraint (`notMatches`/`noneOf`/`forbidden`) reads as satisfied
+  and **allows** the call.
+- **A duplicate grant is an error, not last-one-wins** — silently discarding half an operator's
+  constraints yields a policy quietly *more* permissive than what they wrote.
+- **Blocks are attributed distinctly.** A constraint failure reports `intent_constraint_violation`,
+  separate from `intent_refinement_mismatch`. The two rule bodies are mutually exclusive because
+  `rule_id` is a complete rule and two simultaneously-true bodies is a rego eval *conflict*.
+- **`hostIn` escapes its host literals.** Unescaped, the `.` in `api.example.com` would also match
+  `apiXexample.com` — a host allowlist matching hosts it must not. It is anchored at the scheme and
+  terminated at the first `/?#`, and excludes `@`, so neither a path-embedded lookalike
+  (`https://evil.com/api.internal.example.com`) nor userinfo confusion
+  (`https://api.internal.example.com@evil.com/`) passes.
+
+A graph with no grants emits no constraint machinery at all, so every policy authored before this
+feature compiles byte-identically.
+
+Decisions are verified against the **real `opa` binary** in `ui/src/lib/builderIntentGrants.test.ts`,
+including the engine's own pre-push gate (`opa check --v0-compatible --capabilities=…`). Note the
+sidecar runs `--v0-compatible`: emitted bodies are v0 syntax, and evaluating them under OPA's v1
+default fails with "`if` keyword is required" — the harness needs the flag, not the emitter.
 
 ### Condition types
 
 `Content detector` (injection / PII / secrets / destructive tool / shell) · `Keyword in tool params`
 · `Param matches regex` · `Tool name is one of` · `Source + verb (capability)` · `Agent trust below`
 — composable as OR-of-AND rows, each negatable with a NOT toggle.
+
+These are the *rules*-mode conditions. Intent-allowlist mode uses per-tool **constraints** instead
+(see "Per-tool argument scoping" above); the two are separate vocabularies because a rule adds a block
+on top of existing behaviour, while a constraint narrows an allow that already exists.
 
 ---
 
