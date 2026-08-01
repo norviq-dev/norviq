@@ -20,6 +20,7 @@ const PolicyPacks = lazy(() => import("./pages/PolicyPacks").then((m) => ({ defa
 const TargetSettings = lazy(() => import("./pages/TargetSettings").then((m) => ({ default: m.TargetSettings })));
 const AuditLog = lazy(() => import("./pages/AuditLog").then((m) => ({ default: m.AuditLog })));
 const McpServers = lazy(() => import("./pages/McpServers").then((m) => ({ default: m.McpServers })));
+const Intents = lazy(() => import("./pages/Intents").then((m) => ({ default: m.Intents })));
 const AgentMonitor = lazy(() => import("./pages/AgentMonitor").then((m) => ({ default: m.AgentMonitor })));
 const PolicyTester = lazy(() => import("./pages/PolicyTester").then((m) => ({ default: m.PolicyTester })));
 const RedTeam = lazy(() => import("./pages/RedTeam"));
@@ -71,6 +72,7 @@ function App() {
             <Route path="/policies/targets" element={<ClusterScoped page="Target Settings"><TargetSettings /></ClusterScoped>} />
             <Route path="/audit" element={<ClusterScoped page="Audit Log"><AuditLog /></ClusterScoped>} />
             <Route path="/mcp" element={<ClusterScoped page="MCP Servers"><McpServers /></ClusterScoped>} />
+            <Route path="/intents" element={<ClusterScoped page="Intents"><Intents /></ClusterScoped>} />
             {/* Agents is centralized — a remote cluster renders its REAL relayed agents at the hub (with
                 freshness); a stale/unreachable spoke falls back to the deep-link. Local renders the full page. */}
             <Route
