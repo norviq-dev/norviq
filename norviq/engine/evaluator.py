@@ -17,6 +17,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 from typing import Awaitable
+from urllib.parse import urlsplit
 
 import structlog
 
@@ -29,7 +30,7 @@ from norviq.engine.cache import RedisCache
 from norviq.engine.capability import classify_tool
 from norviq.engine.confusables import skeleton
 from norviq.engine.inproc_cache import _MISS, TTLCache
-from norviq.engine.masking import mask_params
+from norviq.engine.masking import _PAN_RE, _SENSITIVE_KEYS, _SSN_RE, mask_params
 from norviq.engine.graph.asset_graph import AssetGraphBuilder
 from norviq.engine.graph.store import GraphStore
 from norviq.engine.opa_client import OpaClient, managed_package, rewrite_package, sanitize_key
@@ -46,6 +47,33 @@ log = structlog.get_logger()
 # Cap on concurrently-held ephemeral dry-run OPA modules (LRU-evicted past this) — bounds server
 # memory + the _pushed digest map against a user dry-running arbitrary ns/class strings.
 _MAX_DRYRUN_MODULES = 256
+
+# Scoping primitives for positive-security (intent) policies — see _derived_input.
+#
+# The PAN / SSN / sensitive-key patterns are imported from engine.masking rather than restated here,
+# so the request-side classifier (`derived.data_classes`) and the response-side masker cannot drift
+# into disagreeing about what counts as sensitive.
+_EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+_URL_RE = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]{1,31}://[^\s\"'<>\\]+")
+# Credential SHAPES, complementing masking's key-name list. Value-shape detection is what the
+# key-name list cannot do: a bare AWS key pair sitting in a free-text `body` has a perfectly
+# innocuous key. §11.5 recorded exactly that call being allowed on a live cluster.
+_SECRET_VALUE_RE = re.compile(
+    r"(?:"
+    r"\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)[0-9A-Z]{16}\b"   # AWS access key id
+    r"|-----BEGIN[ A-Z]*PRIVATE KEY-----"                            # PEM private key
+    r"|\bgh[pousr]_[A-Za-z0-9]{16,}\b"                               # GitHub token
+    r"|\bxox[baprs]-[A-Za-z0-9-]{10,}\b"                             # Slack token
+    r"|\bsk-[A-Za-z0-9]{20,}\b"                                      # OpenAI-style secret key
+    r"|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"  # JWT
+    r"|\bBearer\s+[A-Za-z0-9._~+/-]{20,}={0,2}"                      # bearer credential
+    r")"
+)
+# FROM / JOIN / INTO / UPDATE / TRUNCATE <table>. Not a parser; see _sql_tables.
+_SQL_TABLE_RE = re.compile(
+    r"\b(?:from|join|into|update|truncate\s+table|truncate)\s+([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)?)",
+    re.IGNORECASE,
+)
 
 # Rule_ids that namespace monitor (audit) mode must NOT soften — they stay hard even when a
 # namespace is set to visibility-only. An admin trust freeze is an incident-response kill switch that must outrank
@@ -668,6 +696,12 @@ class OPAEvaluator:
             #
             # See ToolCallEvent.mcp for the trust level: PEP-reported, exactly like tool_name.
             "mcp": getattr(event, "mcp", None) or {},
+            # Which PLANE the call is on: call | answer | definition | content. Reported by the PEP
+            # in the MCP context and lifted here so an intent can scope by direction without every
+            # policy having to reach into `input.mcp`. Defaults to "call", so every caller that
+            # predates the four-plane model stays governed by the call rules rather than escaping
+            # every rule — the difference between a default and a hole.
+            "direction": (getattr(event, "mcp", None) or {}).get("direction", "call"),
         }
 
     # Tools whose params carry SQL, matched by alias/verb rather than one exact name — a renamed
@@ -678,6 +712,7 @@ class OPAEvaluator:
     def _derived_input(self, event: ToolCallEvent) -> dict:
         """Flattened/normalized views of the call, for policies that must not depend on param naming."""
         values = [v for v in self._walk_values(event.tool_params) if isinstance(v, str)]
+        paths = self._walk_paths(event.tool_params)
         sql_like = self._sql_candidate(values)
         # The abstract operation this call performs — read / write / delete / send / unknown. Already
         # computed for the console's capability surfaces but never reachable from Rego, so "allow reads
@@ -724,7 +759,161 @@ class OPAEvaluator:
             # Stacked statements split out, each normalized, so an allowlist can require ALL of them
             # to be approved rather than only the first.
             "sql_statements": [self._normalize_sql(p) for p in sql_like.split(";") if p.strip()] if sql_like else [],
+            # -- scoping primitives (positive-security / intent policies) -------------------------
+            #
+            # `param_values` deliberately DISCARDS the key that held each value, which is exactly
+            # right for a detector ("is a secret anywhere in this call") and exactly wrong for a
+            # scope ("the RECIPIENT must be @acme.com"). Against a flat value list `to` and `body`
+            # are indistinguishable, so the obvious rule matches a secret in the body as readily as
+            # an address in the header. A dotted path -> value map restores the distinction without
+            # making the policy author guess at nesting.
+            #
+            # Paths use dots for object keys and [i] for list indices: {"filters": {"ids": ["C-91"]}}
+            # yields "filters.ids[0]".
+            "param_paths": paths,
+            # Egress targets, extracted once here rather than re-regexed inside every policy. Under
+            # deny-by-default the destination IS the control: "may email acme.com" needs no detector
+            # for what is being sent, which is the gap a detector list can never close (§11.5 — the
+            # strict preset blocked a card number and let a real AWS key through to an attacker).
+            "destinations": self._destinations(values),
+            # Classes of sensitive data carried by the REQUEST. Output DLP already masks responses;
+            # nothing classified the outbound direction, so "this call must not carry a secret" was
+            # unexpressible. Reuses the masking module's patterns rather than forking a second set.
+            "data_classes": self._data_classes(event.tool_params, values),
+            # Tables the SQL touches, so an intent can say `subsetOf: [orders, customers]` instead of
+            # pinning an exact normalized statement (which breaks on any harmless edit).
+            "sql_tables": self._sql_tables(sql_like) if sql_like else [],
+            # Total size of the string payload — a cheap volume guard for an intent.
+            "param_bytes": sum(len(v.encode("utf-8", "ignore")) for v in values),
         }
+
+    # Bounds. The input document is built on every evaluation and is serialised to OPA, so each of
+    # these is a hard cap rather than a heuristic: a hostile or merely enormous params object must not
+    # be able to grow the document without limit. Matches the posture already documented for the Gate-A
+    # scanner ("schema walks depth- and count-bounded; nothing grows with tool count").
+    _MAX_PATH_DEPTH = 12
+    _MAX_PATHS = 256
+    _MAX_PATH_KEY_LEN = 256
+    _MAX_PATH_VALUE_LEN = 4096
+    _MAX_DESTINATIONS = 64
+
+    def _walk_paths(self, node: object) -> dict:
+        """Dotted path -> string value for every string leaf, bounded in depth, count and length.
+
+        Non-string leaves are omitted for the same reason `param_values` drops them: a policy that
+        matched the string "1" against an integer 1 would be matching a coincidence of formatting.
+        """
+        out: dict[str, str] = {}
+
+        def walk(value: object, prefix: str, depth: int) -> None:
+            if len(out) >= self._MAX_PATHS or depth > self._MAX_PATH_DEPTH:
+                return
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    if len(out) >= self._MAX_PATHS:
+                        return
+                    # Keys come from the caller, so a key containing a dot would forge a path that
+                    # looks nested. Left as-is rather than escaped: an intent matches on the path it
+                    # observes in a dry-run, and silently rewriting keys would make what the operator
+                    # sees differ from what they wrote.
+                    child_prefix = f"{prefix}.{key}" if prefix else str(key)
+                    walk(child, child_prefix[: self._MAX_PATH_KEY_LEN], depth + 1)
+                return
+            if isinstance(value, (list, tuple)):
+                for index, child in enumerate(value):
+                    if len(out) >= self._MAX_PATHS:
+                        return
+                    walk(child, f"{prefix}[{index}]", depth + 1)
+                return
+            if isinstance(value, str) and prefix:
+                out[prefix] = value[: self._MAX_PATH_VALUE_LEN]
+
+        walk(node, "", 0)
+        return out
+
+    def _destinations(self, values: list) -> dict:
+        """Emails, URLs, hosts and schemes found anywhere in the params.
+
+        Reported as sorted, de-duplicated lists so a policy can use set operations (`subsetOf`)
+        without caring about ordering or repetition.
+        """
+        emails: set[str] = set()
+        urls: set[str] = set()
+        hosts: set[str] = set()
+        schemes: set[str] = set()
+        for raw in values:
+            for match in _EMAIL_RE.findall(raw):
+                emails.add(match.lower())
+            for match in _URL_RE.findall(raw):
+                urls.add(match)
+                parsed = urlsplit(match)
+                if parsed.scheme:
+                    schemes.add(parsed.scheme.lower())
+                if parsed.hostname:
+                    hosts.add(parsed.hostname.lower())
+            if len(emails) + len(urls) > self._MAX_DESTINATIONS:
+                break
+        cap = self._MAX_DESTINATIONS
+        return {
+            "emails": sorted(emails)[:cap],
+            "urls": sorted(urls)[:cap],
+            "hosts": sorted(hosts)[:cap],
+            "schemes": sorted(schemes)[:cap],
+        }
+
+    def _data_classes(self, params: object, values: list) -> list:
+        """Sensitive-data classes carried by the REQUEST: pci | pii | secret.
+
+        Key-name detection and value-shape detection are both used, because each misses what the
+        other catches: `{"password": "hunter2"}` has an innocuous value, and a bare AWS key in a
+        free-text `body` has an innocuous key.
+        """
+        classes: set[str] = set()
+        for raw in values:
+            if _PAN_RE.search(raw):
+                classes.add("pci")
+            if _SSN_RE.search(raw):
+                classes.add("pii")
+            if _SECRET_VALUE_RE.search(raw):
+                classes.add("secret")
+        # Sensitive KEY names (password, api_key, token, …) — reused from the masking module so the
+        # request-side classifier and the response-side masker cannot drift apart.
+        for key in self._walk_keys(params):
+            if key.lower() in _SENSITIVE_KEYS:
+                classes.add("secret")
+                break
+        return sorted(classes)
+
+    def _walk_keys(self, node: object, depth: int = 0):
+        """Every dict key in the params, bounded by the same depth cap as the path walk."""
+        if depth > self._MAX_PATH_DEPTH:
+            return
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if isinstance(key, str):
+                    yield key
+                yield from self._walk_keys(value, depth + 1)
+        elif isinstance(node, (list, tuple)):
+            for value in node:
+                yield from self._walk_keys(value, depth + 1)
+
+    def _sql_tables(self, sql_like: str) -> list:
+        """Table names referenced by FROM / JOIN / INTO / UPDATE / TRUNCATE.
+
+        Deliberately NOT a SQL parser. It is an aid for writing `subsetOf: [orders]` rather than
+        pinning an exact statement, and a policy that needs certainty should still gate on
+        `sql_normalized`. Anything it fails to recognise simply does not appear, which under
+        deny-by-default means the rule does not match — the safe direction.
+        """
+        found: list[str] = []
+        for match in _SQL_TABLE_RE.findall(sql_like or ""):
+            name = (match or "").strip('`"[] ').lower()
+            # strip a schema qualifier: public.orders -> orders
+            if "." in name:
+                name = name.rsplit(".", 1)[-1]
+            if name and name not in found:
+                found.append(name)
+        return found[: self._MAX_DESTINATIONS]
 
     def _walk_values(self, node: object) -> list:
         """Every leaf value in an arbitrarily nested params structure."""
