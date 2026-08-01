@@ -36,6 +36,7 @@ import {
 } from "../../lib/builderCompile";
 import type {
   BuilderAllowlistRefinements,
+  BuilderParamConstraint,
   BuilderCondition,
   BuilderConditionNot,
   BuilderDecision,
@@ -60,6 +61,113 @@ const REFINEMENT_LABEL: Record<keyof BuilderAllowlistRefinements, string> = {
   rate: "Rate-limit (advisory)"
 };
 const EMPTY_REFINEMENTS: BuilderAllowlistRefinements = { readonly: false, egress: false, scope: false, rate: false };
+
+// --- Per-tool parameter constraints (Phase 2d) -----------------------------------------------------
+// The refinements above are class-wide booleans; these scope ONE tool by its arguments, which is the
+// difference between "may call execute_sql" (what a framework tool-binding already says) and "may read
+// users and orders, never payments, capped at 100 rows".
+type ConstraintKind = BuilderParamConstraint["kind"];
+const CONSTRAINT_KINDS: ConstraintKind[] = [
+  "matches",
+  "notMatches",
+  "oneOf",
+  "noneOf",
+  "maxNumber",
+  "required",
+  "forbidden",
+  "hostIn"
+];
+/** Verb shown between the parameter name and its value, so each row reads as a sentence:
+ *  `query` · must match · ^\s*select\b */
+const CONSTRAINT_VERB: Record<ConstraintKind, string> = {
+  matches: "must match",
+  notMatches: "must NOT match",
+  oneOf: "must be one of",
+  noneOf: "must not be any of",
+  maxNumber: "at most",
+  required: "must be present",
+  forbidden: "must be absent",
+  hostIn: "host must be one of"
+};
+/** Concrete, copy-pasteable examples — an operator who has never written one of these should be able to
+ *  see what it is for without leaving the sheet. */
+const CONSTRAINT_HINT: Record<ConstraintKind, string> = {
+  matches: "e.g. (?i)^\\s*select\\b — only read statements",
+  notMatches: "e.g. (?i)(card_number|ssn) — never these columns",
+  oneOf: "e.g. users, orders — the only tables it may touch",
+  noneOf: "e.g. payments — tables it may never touch",
+  maxNumber: "e.g. 100 — cap rows returned",
+  required: "the call must supply this parameter",
+  forbidden: "e.g. force — refuse a forced delete",
+  hostIn: "e.g. api.internal.example.com — the only egress target"
+};
+const CONSTRAINT_PLACEHOLDER: Record<ConstraintKind, string> = {
+  matches: "regular expression",
+  notMatches: "regular expression",
+  oneOf: "comma-separated values",
+  noneOf: "comma-separated values",
+  maxNumber: "number",
+  required: "",
+  forbidden: "",
+  hostIn: "comma-separated hosts"
+};
+function blankConstraint(kind: ConstraintKind): BuilderParamConstraint {
+  switch (kind) {
+    case "matches":
+    case "notMatches":
+      return { kind, field: "", pattern: "" };
+    case "oneOf":
+    case "noneOf":
+      return { kind, field: "", values: [] };
+    case "maxNumber":
+      return { kind, field: "", max: 0 };
+    case "hostIn":
+      return { kind, field: "", hosts: [] };
+    default:
+      return { kind, field: "" };
+  }
+}
+/** Render a constraint's value side as editable text. Lists round-trip through a comma-separated string
+ *  so the operator types what they read. */
+function constraintValueText(c: BuilderParamConstraint): string {
+  switch (c.kind) {
+    case "matches":
+    case "notMatches":
+      return c.pattern;
+    case "oneOf":
+    case "noneOf":
+      return c.values.join(", ");
+    case "hostIn":
+      return c.hosts.join(", ");
+    case "maxNumber":
+      return String(c.max);
+    default:
+      return "";
+  }
+}
+function withConstraintValue(c: BuilderParamConstraint, text: string): BuilderParamConstraint {
+  const list = () =>
+    text
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s !== "");
+  switch (c.kind) {
+    case "matches":
+    case "notMatches":
+      return { ...c, pattern: text };
+    case "oneOf":
+    case "noneOf":
+      return { ...c, values: list() };
+    case "hostIn":
+      return { ...c, hosts: list() };
+    case "maxNumber": {
+      const n = Number(text);
+      return { ...c, max: Number.isFinite(n) ? n : Number.NaN };
+    }
+    default:
+      return c;
+  }
+}
 // Step ② mode chooser (UX redesign) — one-line explanation under each option so the difference between
 // the two modes is legible without docs. Display-only; BuilderMode's wire values are unchanged.
 const MODE_DESCRIPTION: Record<BuilderMode, string> = {
@@ -863,13 +971,37 @@ export function BuilderSheet({
   const [allowlistTools, setAllowlistTools] = useState<string[]>([]);
   const [allowlistRefinements, setAllowlistRefinements] = useState<BuilderAllowlistRefinements>(EMPTY_REFINEMENTS);
   const [allowlistToolInput, setAllowlistToolInput] = useState("");
+  // Per-tool constraints (Phase 2d), keyed by the tool name exactly as it appears in `allowlistTools`.
+  // A Record rather than an array so the editor never has to reconcile two orderings, and so removing a
+  // tool can drop its constraints in the same action — an orphan grant is a hard compile error
+  // (`grant_not_allowlisted`), and leaving one behind would break the policy from an unrelated edit.
+  const [allowlistGrants, setAllowlistGrants] = useState<Record<string, BuilderParamConstraint[]>>({});
+  const [openGrantTool, setOpenGrantTool] = useState<string | null>(null);
   const addAllowlistTool = () => {
     const t = allowlistToolInput.trim();
     if (t === "") return;
     setAllowlistTools((ts) => (ts.includes(t) ? ts : [...ts, t]));
     setAllowlistToolInput("");
   };
-  const removeAllowlistTool = (t: string) => setAllowlistTools((ts) => ts.filter((x) => x !== t));
+  const removeAllowlistTool = (t: string) => {
+    setAllowlistTools((ts) => ts.filter((x) => x !== t));
+    setAllowlistGrants(({ [t]: _dropped, ...rest }) => rest); // drop the grant with the tool
+    setOpenGrantTool((cur) => (cur === t ? null : cur));
+  };
+  const setToolConstraints = (tool: string, next: BuilderParamConstraint[]) =>
+    setAllowlistGrants((g) => {
+      if (next.length === 0) {
+        const { [tool]: _empty, ...rest } = g;
+        return rest; // an empty grant is a compile error — represent "no constraints" as absence
+      }
+      return { ...g, [tool]: next };
+    });
+  const addConstraint = (tool: string, kind: BuilderParamConstraint["kind"]) =>
+    setToolConstraints(tool, [...(allowlistGrants[tool] ?? []), blankConstraint(kind)]);
+  const updateConstraint = (tool: string, idx: number, next: BuilderParamConstraint) =>
+    setToolConstraints(tool, (allowlistGrants[tool] ?? []).map((c, i) => (i === idx ? next : c)));
+  const removeConstraint = (tool: string, idx: number) =>
+    setToolConstraints(tool, (allowlistGrants[tool] ?? []).filter((_, i) => i !== idx));
 
   const [dryRunLoading, setDryRunLoading] = useState(false);
   const [dryRunResult, setDryRunResult] = useState<DryRunReplay | null>(null);
@@ -931,9 +1063,26 @@ export function BuilderSheet({
       mode,
       rules,
       defaults,
-      ...(mode === "allowlist" ? { allowlist: { tools: allowlistTools, refinements: allowlistRefinements } } : {})
+      ...(mode === "allowlist"
+        ? {
+            allowlist: {
+              tools: allowlistTools,
+              refinements: allowlistRefinements,
+              // Emitted only when at least one tool is actually constrained, so a policy with no
+              // constraints carries no `grants` key at all and compiles byte-identically to a pre-2d one.
+              // Ordered by `allowlistTools` rather than by Record insertion so the compiled output is
+              // stable across edits that only reorder state.
+              ...(() => {
+                const grants = allowlistTools
+                  .filter((t) => (allowlistGrants[t] ?? []).length > 0)
+                  .map((t) => ({ tool: t, constraints: allowlistGrants[t] }));
+                return grants.length ? { grants } : {};
+              })()
+            }
+          }
+        : {})
     }),
-    [scope, rules, defaults, mode, allowlistTools, allowlistRefinements]
+    [scope, rules, defaults, mode, allowlistTools, allowlistRefinements, allowlistGrants]
   );
   // `targetNamespace` is passed as the compiler's 2nd argument for every tier (class/namespace tiers
   // ignore it; the workload tier needs it for its `input.agent.namespace` guard — see
@@ -1433,36 +1582,174 @@ export function BuilderSheet({
                       </div>
                     )}
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
-                    {allowlistTools.map((t) => (
-                      <span
-                        key={t}
-                        data-testid={`builder-allowlist-tool-chip-${t}`}
-                        className="mono"
-                        style={{
-                          display: "inline-flex",
-                          alignItems: "center",
-                          gap: 6,
-                          fontSize: 11.5,
-                          padding: "3px 8px",
-                          borderRadius: 999,
-                          background: "var(--bg-elevated)",
-                          border: "1px solid var(--border)"
-                        }}
-                      >
-                        {t}
+                    {allowlistTools.map((t) => {
+                      const count = (allowlistGrants[t] ?? []).length;
+                      return (
+                        <span
+                          key={t}
+                          data-testid={`builder-allowlist-tool-chip-${t}`}
+                          className="mono"
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 6,
+                            fontSize: 11.5,
+                            padding: "3px 8px",
+                            borderRadius: 999,
+                            background: "var(--bg-elevated)",
+                            border: `1px solid ${count > 0 ? "var(--accent)" : "var(--border)"}`
+                          }}
+                        >
+                          {t}
+                          {/* The scope affordance sits ON the tool it narrows — the alternative (a
+                              separate constraints section) makes it easy to allow a tool and never
+                              notice it is wide open. */}
+                          <button
+                            type="button"
+                            data-testid={`builder-allowlist-tool-scope-${t}`}
+                            aria-expanded={openGrantTool === t}
+                            title={count > 0 ? `${count} constraint${count === 1 ? "" : "s"} on ${t}` : `Scope ${t} by its arguments`}
+                            onClick={() => setOpenGrantTool((cur) => (cur === t ? null : t))}
+                            style={{
+                              background: "none",
+                              border: "none",
+                              cursor: "pointer",
+                              padding: 0,
+                              fontSize: 10.5,
+                              color: count > 0 ? "var(--accent)" : "var(--text-dim)"
+                            }}
+                          >
+                            {count > 0 ? `scoped · ${count}` : "+ scope"}
+                          </button>
+                          <button
+                            type="button"
+                            data-testid={`builder-allowlist-tool-remove-${t}`}
+                            className="icon-btn"
+                            style={{ width: 14, height: 14 }}
+                            title={`Remove ${t}`}
+                            onClick={() => removeAllowlistTool(t)}
+                          >
+                            <X size={10} />
+                          </button>
+                        </span>
+                      );
+                    })}
+                  </div>
+
+                  {openGrantTool !== null && allowlistTools.includes(openGrantTool) && (
+                    <div
+                      data-testid={`builder-grant-editor-${openGrantTool}`}
+                      style={{
+                        marginTop: 10,
+                        border: "1px solid var(--border)",
+                        borderRadius: 8,
+                        padding: 10,
+                        background: "var(--bg-elevated)"
+                      }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                        <div style={{ fontSize: 12.5 }}>
+                          When <span className="mono">{openGrantTool}</span> is called, allow it only if:
+                        </div>
                         <button
                           type="button"
-                          data-testid={`builder-allowlist-tool-remove-${t}`}
                           className="icon-btn"
-                          style={{ width: 14, height: 14 }}
-                          title={`Remove ${t}`}
-                          onClick={() => removeAllowlistTool(t)}
+                          title="Close"
+                          data-testid="builder-grant-editor-close"
+                          onClick={() => setOpenGrantTool(null)}
                         >
-                          <X size={10} />
+                          <X size={12} />
                         </button>
-                      </span>
-                    ))}
-                  </div>
+                      </div>
+                      <div style={{ fontSize: 10.5, color: "var(--text-dim)", marginTop: 2 }}>
+                        Every line must hold. A parameter that isn't supplied fails its line — so omitting an
+                        argument can't be used to skip a constraint.
+                      </div>
+
+                      {(allowlistGrants[openGrantTool] ?? []).map((c, i) => (
+                        <div
+                          key={i}
+                          data-testid={`builder-constraint-row-${openGrantTool}-${i}`}
+                          style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}
+                        >
+                          <input
+                            data-testid={`builder-constraint-field-${openGrantTool}-${i}`}
+                            className="mono"
+                            placeholder="parameter"
+                            aria-label="parameter name"
+                            value={c.field}
+                            onChange={(e) => updateConstraint(openGrantTool, i, { ...c, field: e.target.value })}
+                            style={{ width: 120, fontSize: 11.5 }}
+                          />
+                          <select
+                            data-testid={`builder-constraint-kind-${openGrantTool}-${i}`}
+                            aria-label="constraint type"
+                            value={c.kind}
+                            onChange={(e) =>
+                              updateConstraint(openGrantTool, i, {
+                                ...blankConstraint(e.target.value as ConstraintKind),
+                                field: c.field
+                              })
+                            }
+                            style={{ fontSize: 11.5 }}
+                          >
+                            {CONSTRAINT_KINDS.map((k) => (
+                              <option key={k} value={k}>
+                                {CONSTRAINT_VERB[k]}
+                              </option>
+                            ))}
+                          </select>
+                          {CONSTRAINT_PLACEHOLDER[c.kind] !== "" && (
+                            <input
+                              data-testid={`builder-constraint-value-${openGrantTool}-${i}`}
+                              className="mono"
+                              aria-label="constraint value"
+                              placeholder={CONSTRAINT_PLACEHOLDER[c.kind]}
+                              value={constraintValueText(c)}
+                              onChange={(e) => updateConstraint(openGrantTool, i, withConstraintValue(c, e.target.value))}
+                              style={{ flex: 1, minWidth: 160, fontSize: 11.5 }}
+                            />
+                          )}
+                          <button
+                            type="button"
+                            className="icon-btn"
+                            data-testid={`builder-constraint-remove-${openGrantTool}-${i}`}
+                            title="Remove this constraint"
+                            onClick={() => removeConstraint(openGrantTool, i)}
+                          >
+                            <X size={11} />
+                          </button>
+                          <div style={{ width: "100%", fontSize: 10, color: "var(--text-dim)", paddingLeft: 2 }}>
+                            {CONSTRAINT_HINT[c.kind]}
+                          </div>
+                        </div>
+                      ))}
+
+                      <div style={{ display: "flex", gap: 6, marginTop: 10, alignItems: "center" }}>
+                        <select
+                          data-testid="builder-constraint-add-kind"
+                          aria-label="add a constraint"
+                          value=""
+                          onChange={(e) => {
+                            if (e.target.value) addConstraint(openGrantTool, e.target.value as ConstraintKind);
+                          }}
+                          style={{ fontSize: 11.5 }}
+                        >
+                          <option value="">+ add a constraint…</option>
+                          {CONSTRAINT_KINDS.map((k) => (
+                            <option key={k} value={k}>
+                              {CONSTRAINT_VERB[k]}
+                            </option>
+                          ))}
+                        </select>
+                        {(allowlistGrants[openGrantTool] ?? []).length === 0 && (
+                          <span style={{ fontSize: 10.5, color: "var(--text-dim)" }}>
+                            No constraints — <span className="mono">{openGrantTool}</span> is allowed with any arguments.
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
                   {allowlistTools.length === 0 && (
                     <div
                       data-testid="builder-allowlist-empty-warning"

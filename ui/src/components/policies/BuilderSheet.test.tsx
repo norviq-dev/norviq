@@ -883,3 +883,106 @@ describe("BuilderSheet — reserved-scope guard (Phase 3, Item A / P1 fix)", () 
     expect(screen.queryByTestId("builder-scope-reserved-error")).not.toBeInTheDocument();
   });
 });
+
+// --- Phase 2d: per-tool parameter constraints ------------------------------------------------------
+// These assert the EDITOR wires through to the compiled policy. The policy's own DECISIONS are proven
+// against the real opa binary in src/lib/builderIntentGrants.test.ts — asserting decisions here would
+// only be asserting on rego text.
+describe("BuilderSheet — scoping an allowlisted tool by its arguments", () => {
+  const addTool = (name: string) => {
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: name } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+  };
+  const openAllowlistWith = (tool: string) => {
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    addTool(tool);
+  };
+
+  it("a newly allowed tool is unconstrained, and says so", () => {
+    openAllowlistWith("execute_sql");
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-scope-execute_sql"));
+    expect(screen.getByTestId("builder-grant-editor-execute_sql")).toBeInTheDocument();
+    // The wide-open state is stated rather than left to inference — allowing a tool and not noticing it
+    // takes any arguments is the exact failure this feature exists to prevent.
+    expect(screen.getByTestId("builder-grant-editor-execute_sql").textContent).toMatch(/allowed with any arguments/i);
+  });
+
+  it("adding a constraint narrows the compiled policy for that tool only", async () => {
+    openAllowlistWith("execute_sql");
+    addTool("search_kb");
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-scope-execute_sql"));
+    fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "matches" } });
+    fireEvent.change(screen.getByTestId("builder-constraint-field-execute_sql-0"), { target: { value: "query" } });
+    fireEvent.change(screen.getByTestId("builder-constraint-value-execute_sql-0"), {
+      target: { value: "(?i)^\\s*select\\b" }
+    });
+
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain("constraints_ok");
+      expect(rego).toContain('_constrained := {"execute_sql"}');   // search_kb stays unconstrained
+      expect(rego).toContain("regex.match");
+    });
+  });
+
+  it("the chip shows how many constraints a tool carries", async () => {
+    openAllowlistWith("execute_sql");
+    // Before: an invitation to scope it.
+    expect(screen.getByTestId("builder-allowlist-tool-scope-execute_sql").textContent).toContain("+ scope");
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-scope-execute_sql"));
+    fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "forbidden" } });
+    fireEvent.change(screen.getByTestId("builder-constraint-field-execute_sql-0"), { target: { value: "force" } });
+    await waitFor(() =>
+      expect(screen.getByTestId("builder-allowlist-tool-scope-execute_sql").textContent).toContain("scoped · 1")
+    );
+  });
+
+  it("removing a tool drops its constraints, so no orphan grant breaks the compile", async () => {
+    openAllowlistWith("execute_sql");
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-scope-execute_sql"));
+    fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "required" } });
+    fireEvent.change(screen.getByTestId("builder-constraint-field-execute_sql-0"), { target: { value: "query" } });
+    await waitFor(() =>
+      expect((screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value).toContain("constraints_ok")
+    );
+
+    // A grant for a tool that is no longer allowlisted is a hard compile error, so the tool's removal
+    // must take its constraints with it rather than leaving the policy uncompilable.
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-remove-execute_sql"));
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).not.toContain("constraints_ok");
+      expect(rego).not.toContain("execute_sql");
+    });
+  });
+
+  it("removing the last constraint returns the tool to unconstrained (not an empty grant)", async () => {
+    openAllowlistWith("execute_sql");
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-scope-execute_sql"));
+    fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "required" } });
+    fireEvent.change(screen.getByTestId("builder-constraint-field-execute_sql-0"), { target: { value: "query" } });
+    await waitFor(() =>
+      expect((screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value).toContain("constraints_ok")
+    );
+
+    fireEvent.click(screen.getByTestId("builder-constraint-remove-execute_sql-0"));
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      // An empty grant is a compile ERROR; "no constraints" must be represented as absence.
+      expect(rego).not.toContain("constraints_ok");
+      expect(rego).toContain('allow_names := {"execute_sql"}');
+    });
+  });
+
+  it("switching a constraint's type keeps the parameter name", () => {
+    openAllowlistWith("http_get");
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-scope-http_get"));
+    fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "matches" } });
+    fireEvent.change(screen.getByTestId("builder-constraint-field-http_get-0"), { target: { value: "url" } });
+    fireEvent.change(screen.getByTestId("builder-constraint-kind-http_get-0"), { target: { value: "hostIn" } });
+    // Retyping the parameter after every type change would be needless friction.
+    expect(screen.getByTestId("builder-constraint-field-http_get-0")).toHaveValue("url");
+  });
+});
