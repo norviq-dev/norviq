@@ -685,6 +685,11 @@ function isValidRe2Pattern(pattern: string): boolean {
   // Keep only the inline flags JS also spells the same way; `s` and `m` map directly, `i` maps directly.
   const flags = inline ? [...new Set(inline[1].split(""))].join("") : "";
   try {
+    // Same VALIDITY PROBE as the paramRegex check above: the RegExp is constructed to learn whether
+    // the pattern parses, then discarded without ever being executed against input — so this is not
+    // the ReDoS vector detect-non-literal-regexp guards against. The pattern's only runtime home is
+    // the emitted rego, where OPA evaluates it with RE2 (linear time, no backtracking).
+    // eslint-disable-next-line security/detect-non-literal-regexp -- validity check only, discarded
     new RegExp(body, flags);
     return true;
   } catch {

@@ -77,10 +77,28 @@ function evalQuery(policyPath: string, inputPath: string, query: string): string
 /** Evaluate the compiled policy for one tool call and return its decision. The compiled module declares
  *  `package norviq.intent.<token>`; the engine rewrites that at push time, but for evaluation we query
  *  the package the module actually declares. */
-function decide(rego: string, toolName: string, params: Record<string, unknown>): string {
+/** Write one fixture file into a freshly-minted temp dir and return its path.
+ *
+ *  THE SINGLE `writeFileSync` CALL SITE IN THIS FILE, deliberately. `security/detect-non-literal-fs-filename`
+ *  is a fail-closed rule in ui/eslint.config.js, and it fires on every dynamic path — correctly, in general.
+ *  Here the path is not attacker-influenced in any sense: `dir` comes from `mkdtempSync` (kernel-chosen,
+ *  0700, unique per call) and `name` is a hard-coded literal at every call site. Funnelling all of them
+ *  through one helper means the gate is suppressed ONCE, next to the reasoning, instead of five times
+ *  where the reasoning would have to be repeated or (more likely) omitted.
+ */
+function writeFixture(dir: string, name: string, body: string): string {
+  const path = join(dir, name);
+  // eslint-disable-next-line security/detect-non-literal-fs-filename -- mkdtemp dir + literal basename
+  writeFileSync(path, body, "utf8");
+  return path;
+}
+
+/** Compile-to-disk + evaluate one query against the emitted policy. `decide` and `ruleId` were
+ *  byte-identical apart from the queried field, which is how they drifted into using two different
+ *  package-line extractions (`?.[1]` with a throw vs a bare `!`). One implementation, one behaviour. */
+function queryPolicy(rego: string, toolName: string, params: Record<string, unknown>, field: string): string {
   const dir = mkdtempSync(join(tmpdir(), "nrvq-grants-"));
-  const policyPath = join(dir, "policy.rego");
-  writeFileSync(policyPath, rego, "utf8");
+  const policyPath = writeFixture(dir, "policy.rego", rego);
   const pkg = /^package\s+(\S+)/m.exec(rego)?.[1];
   if (!pkg) throw new Error("compiled rego has no package line");
   const input = {
@@ -90,26 +108,16 @@ function decide(rego: string, toolName: string, params: Record<string, unknown>)
     agent: { spiffe_id: "spiffe://norviq/ns/analytics/sa/report-gen", namespace: "analytics", agent_class: "report-gen" },
     call_depth: 0
   };
-  const inputPath = join(dir, "input.json");
-  writeFileSync(inputPath, JSON.stringify(input), "utf8");
-  return evalQuery(policyPath, inputPath, `data.${pkg}.decision`);
+  const inputPath = writeFixture(dir, "input.json", JSON.stringify(input));
+  return evalQuery(policyPath, inputPath, `data.${pkg}.${field}`);
+}
+
+function decide(rego: string, toolName: string, params: Record<string, unknown>): string {
+  return queryPolicy(rego, toolName, params, "decision");
 }
 
 function ruleId(rego: string, toolName: string, params: Record<string, unknown>): string {
-  const dir = mkdtempSync(join(tmpdir(), "nrvq-grants-"));
-  const policyPath = join(dir, "policy.rego");
-  writeFileSync(policyPath, rego, "utf8");
-  const pkg = /^package\s+(\S+)/m.exec(rego)![1];
-  const input = {
-    tool_name: toolName,
-    tool_name_normalized: toolName.toLowerCase(),
-    tool_params: params,
-    agent: { spiffe_id: "spiffe://norviq/ns/analytics/sa/report-gen", namespace: "analytics", agent_class: "report-gen" },
-    call_depth: 0
-  };
-  const inputPath = join(dir, "input.json");
-  writeFileSync(inputPath, JSON.stringify(input), "utf8");
-  return evalQuery(policyPath, inputPath, `data.${pkg}.rule_id`);
+  return queryPolicy(rego, toolName, params, "rule_id");
 }
 
 describe("intent allowlist — per-tool parameter constraints", () => {
@@ -155,8 +163,7 @@ describe("intent allowlist — per-tool parameter constraints", () => {
       "analytics"
     );
     const dir = mkdtempSync(join(tmpdir(), "nrvq-check-"));
-    const policyPath = join(dir, "policy.rego");
-    writeFileSync(policyPath, rego, "utf8");
+    const policyPath = writeFixture(dir, "policy.rego", rego);
     const caps = join(REPO_ROOT, "norviq", "engine", "opa-capabilities.json");
     // Throws (failing the test) if opa check rejects the module.
     execFileSync("opa", ["check", "--v0-compatible", `--capabilities=${caps}`, policyPath], {
