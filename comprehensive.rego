@@ -259,21 +259,61 @@ secret_value_patterns = [
     `-----begin [a-z ]*private key-----`,
 ]
 
+# DL-001b: a BARE, UNLABELLED credential in a param value.
+#
+# Every pattern above needs a LABEL — `api_key:`, `secret_key=`, `bearer <tok>`. A raw key pasted
+# into a message body carries no label and matched nothing. Recorded live in
+# DESIGN-NOTE-MCP-FIREWALL.md §11.5: under this very preset, `send_email` to an attacker-controlled
+# address with `AKIAIOSFODNN7EXAMPLE wJalr...` in the body was ALLOWED, while a card number in the
+# same position blocked. These shapes are self-identifying and need no label.
+#
+# They extend the single credential pattern list rather than getting their own rule ON PURPOSE: one
+# match call over a list costs ONE regex op regardless of list length, and the API caps a stored
+# policy at 25 ops (tests/api/test_shipped_presets_validate.py). Note the cap is counted TEXTUALLY,
+# so even naming the builtin in a comment spends budget — a separate rule, or this sentence written
+# less carefully, would have consumed the last of the headroom for no added expressiveness.
+all_credential_patterns := array.concat(secret_value_patterns, bare_credential_patterns)
+
+bare_credential_patterns = [
+    `\b(AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)[0-9A-Z]{16}\b`,
+    `\bgh[pousr]_[A-Za-z0-9]{16,}\b`,
+    `\bxox[baprs]-[A-Za-z0-9-]{10,}\b`,
+    `\bAIza[0-9A-Za-z_-]{35}\b`,
+    `\b(sk|rk)_(live|test)_[0-9A-Za-z]{16,}\b`,
+    `\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`,
+    `\bglpat-[A-Za-z0-9_-]{16,}\b`,
+]
+
+# Texts the credential rules scan. `security_scan_texts` lowercases, which is right for prose
+# (injection phrases) and wrong for credential shapes: an AWS key id is uppercase by construction,
+# and folding case turns `AKIA[0-9A-Z]{16}` into a pattern loose enough to hit ordinary words. So the
+# credential rules see BOTH the folded copy (for the labelled patterns) and the original.
+secret_scan_texts[t] {
+    t := security_scan_texts[_]
+}
+
+secret_scan_texts[t] {
+    walk(input.tool_params, [_, val])
+    is_string(val)
+    t := val
+}
+
 data_leakage_detected {
     external_tools[input.tool_name]
-    val := security_scan_texts[_]
+    val := secret_scan_texts[_]
     some i
-    regex.match(secret_value_patterns[i], val)
+    regex.match(all_credential_patterns[i], val)
 }
 # A secret in a param VALUE must ALSO block on ANY egress-verb sink, not only the 3 named
 # external_tools — mirrors the key-name egress rule above. Otherwise http_post/s3_put/send_sms
 # carrying "api_key=sk-…" / "password=…" / "bearer …" in a body param exfiltrated freely.
 data_leakage_detected {
     egress_verb_tool
-    val := security_scan_texts[_]
+    val := secret_scan_texts[_]
     some i
-    regex.match(secret_value_patterns[i], val)
+    regex.match(all_credential_patterns[i], val)
 }
+
 
 # DL-004: BULK REGULATED-DATA EXPORT to an external sink.
 #

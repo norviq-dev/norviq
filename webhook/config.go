@@ -71,6 +71,27 @@ type Config struct {
 	InternalTLS bool
 	CACertFile  string
 	CAKeyFile   string
+	// MCP action-firewall injection. When McpInject is true, every container named by the pod's
+	// norviq.io/mcp-servers annotation has its command rewritten to run UNDER the MCP proxy
+	// (norviq/mcp/__main__.py), so Model Context Protocol traffic is governed with no change to the
+	// agent's code or image. Default OFF: with it off not a single byte of the emitted patch changes,
+	// so existing clusters upgrade into identical output.
+	McpInject bool
+	// Image the proxy payload is copied FROM by the injected init container. Empty -> the sidecar
+	// image, which already carries the norviq package. NRVQ_MCP_PROXY_IMAGE.
+	McpProxyImage string
+	// Directory holding the relocatable proxy payload inside McpProxyImage, with the executable
+	// `norviq-mcp` at its root (scripts/mcp-proxy-payload.Dockerfile builds exactly that). The init
+	// container copies the whole tree into the shared volume and the rewritten command execs it from
+	// there. A directory rather than a single file because the payload is a PyInstaller onedir tree —
+	// it carries its own interpreter and stdlib, which is what lets it run in an image that has no
+	// Python. NRVQ_MCP_PROXY_SOURCE_PATH.
+	McpProxySourcePath string
+	// Pin backend + mode handed to injected proxies. "control-plane" is the right posture in a
+	// cluster: pins are approvals, approvals belong with policy, and an emptyDir pin file would be
+	// lost on every restart (see norviq/mcp/pins.py). NRVQ_MCP_PIN_STORE / NRVQ_MCP_PIN_MODE.
+	McpPinStore string
+	McpPinMode  string
 }
 
 type RuntimeConfig struct {
@@ -116,6 +137,11 @@ func LoadConfig() Config {
 		InternalTLS:          envBool("NRVQ_INTERNAL_TLS", false),
 		CACertFile:           envStr("NRVQ_CA_CERT_FILE", ""),
 		CAKeyFile:            envStr("NRVQ_CA_KEY_FILE", ""),
+		McpInject:            envBool("NRVQ_MCP_INJECT", false),
+		McpProxyImage:        envStr("NRVQ_MCP_PROXY_IMAGE", ""),
+		McpProxySourcePath:   envStr("NRVQ_MCP_PROXY_SOURCE_PATH", "/opt/norviq/mcp-proxy"),
+		McpPinStore:          envStr("NRVQ_MCP_PIN_STORE", "control-plane"),
+		McpPinMode:           envStr("NRVQ_MCP_PIN_MODE", "tofu"),
 	}
 	runtime.SetSidecarImage(cfg.SidecarImage)
 	return cfg

@@ -284,6 +284,36 @@ webhook:
     # nothing per-pod). "embedded" = the sidecar runs its own RedisCache+OPA(subprocess)+PolicyLoader
     # for air-gapped/edge (the chart then wires NRVQ_REDIS_URL/NRVQ_PG_URL through to the injector).
     sidecarMode: proxy
+    # MCP action-firewall injection — the same zero-code-change deal the sidecar gives the SDK, for
+    # Model Context Protocol traffic. A pod opts in per container:
+    #
+    #   metadata:
+    #     annotations:
+    #       norviq.io/mcp-servers: "filesystem,github"     # containers whose command IS an MCP server
+    #       norviq.io/mcp-server-id.github: "github-prod"  # optional stable pin id (default: the name)
+    #
+    # The injector rewrites each named container's command to exec the proxy, and an init container
+    # copies that proxy in from proxyImage — so the MCP server's own image needs nothing installed.
+    #
+    # Two admission rules follow from "never leave a named server ungoverned": a name that matches no
+    # container, and a container with no explicit `command` (its argv is the image ENTRYPOINT, which
+    # admission cannot see), are both DENIED rather than skipped.
+    mcp:
+      enabled: false
+      # REQUIRED when enabled, with no fallback. Must hold the relocatable payload at proxySourcePath;
+      # build it with scripts/mcp-proxy-payload.Dockerfile and confirm it runs in the images your MCP
+      # servers actually use with scripts/mcp-proxy-payload-verify.sh. Defaulting this to the engine
+      # image was wrong — that image carries the norviq package, not the frozen payload, so the init
+      # container's `cp` found nothing and every governed pod failed at start.
+      proxyImage: ""
+      proxySourcePath: /opt/norviq/mcp-proxy
+      # Where Gate-A definition pins live. `control-plane` is the right posture in a cluster: pins are
+      # approvals, so they belong with policy — tenant-scoped, RBAC'd, audited, console-visible, and
+      # not lost when a pod restarts. `memory`/`file` exist for air-gapped single-process use.
+      pinStore: control-plane
+      # `tofu` trusts a server's definitions on first sight; `strict` quarantines them until an
+      # operator approves. strict is safer and needs an approval workflow to be practical.
+      pinMode: tofu
     # Resources for the INJECTED sidecar, chosen per sidecarMode. `proxy` is a thin forwarder;
     # `embedded` runs a whole engine in the pod (redis client, policy warm, audit emitter, pubsub
     # watcher, plus an OPA subprocess) and was OOMKilled at the proxy budget in every release before

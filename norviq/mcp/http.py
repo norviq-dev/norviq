@@ -1,0 +1,300 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+
+"""Streamable-HTTP transport driver.
+
+MCP's streamable-HTTP transport is asymmetric in a way that matters for a firewall:
+
+  * The client POSTs a JSON-RPC message to a single endpoint. The response is EITHER a single
+    ``application/json`` body (one message) OR a ``text/event-stream`` carrying several messages —
+    the server chooses per request.
+  * The client may also open a standalone GET SSE stream on the same endpoint, on which the SERVER
+    initiates messages (notifications, and server->client requests like ``sampling/createMessage``).
+  * ``Mcp-Session-Id`` bound subsequent requests to a session in 2025-06-18. The 2026-07-28
+    revision REMOVES it along with protocol-level sessions (SEP-2567), and list results no longer
+    vary per connection. It is therefore accepted-and-ignored here: see `_firewall_for`.
+
+So the proxy must mediate three distinct flows, and the SSE ones are STREAMS: a `tools/list`
+response can arrive as one event inside a stream that stays open afterwards. Buffering the stream to
+inspect it would break the transport's whole point, so events are parsed and re-emitted one at a
+time as they arrive, and back-pressure is preserved by streaming through rather than collecting.
+
+IDENTITY IN HTTP MODE. Placement is still a SIDECAR in the agent's pod, not a shared gateway, for
+the reason given in stdio.py: the proxy's own SVID is the caller's identity only when the proxy runs
+where the caller runs. A shared gateway would have to attest callers over the network — solvable
+(mTLS + SPIFFE, which Norviq's internal-TLS path already does), but it is a different, larger design
+and this spike does not pretend to have validated it. Client-supplied identity is never read.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+from typing import AsyncIterator
+
+import httpx
+import structlog
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response, StreamingResponse
+from starlette.routing import Route
+
+from norviq.config import settings
+from norviq.engine.identity import SPIFFEResolver
+from norviq.mcp import protocol as P
+from norviq.mcp.firewall import McpFirewall
+from norviq.mcp.pins import PinRegistry, build_store
+from norviq.sdk.client.engine import PolicyEngineClient
+from norviq.sdk.core.interceptor import ToolInterceptor
+
+log = structlog.get_logger()
+
+_SSE = "text/event-stream"
+# Headers that belong to THIS hop and must not be copied across it. Content-Length in particular is
+# wrong the moment the firewall rewrites a body, and a stale one truncates the response.
+_HOP_HEADERS = frozenset({
+    "content-length", "transfer-encoding", "connection", "keep-alive",
+    "host", "upgrade", "te", "trailer", "proxy-authorization", "proxy-authenticate",
+})
+
+
+class HttpProxy:
+    """Streamable-HTTP MCP proxy. One firewall instance per ATTESTED CALLER IDENTITY."""
+
+    def __init__(self, upstream: str, host: str, port: int, server_id: str,
+                 tool_name_prefix: str = "") -> None:
+        self._upstream = upstream.rstrip("/")
+        self._host = host
+        self._port = port
+        self._server_id = server_id
+        self._prefix = tool_name_prefix
+        self._client: httpx.AsyncClient | None = None
+        self._engine: PolicyEngineClient | None = None
+        # Keyed by ATTESTED identity, never by anything the caller sends. See _firewall_for.
+        self._firewalls: dict[str, McpFirewall] = {}
+        self._identity_key: str | None = None
+        # Pins are per-SERVER, not per-session: a rug pull that reset itself every time a client
+        # reconnected would not be detectable at all.
+        #
+        # `memory` is refused on this transport. Under 2026-07-28 any request may land on any
+        # instance (SEP-2567), so a per-process pin store means instance A approves a definition that
+        # instance B has never seen — every replica reports first_seen forever and drift is
+        # undetectable across the fleet. It is a silent degradation of the control, not an outage,
+        # which is exactly the kind that survives to production. `file` is allowed because an
+        # operator choosing it has chosen shared storage deliberately.
+        pin_store = settings.mcp_pin_store
+        if pin_store == "memory":
+            log.warning(
+                "nrvq.mcp.http.pin_store_upgraded",
+                configured=pin_store, using="control-plane", code="NRVQ-MCP-5065",
+                hint="an in-process pin store cannot detect drift when any request may land on any "
+                     "instance; set NRVQ_MCP_PIN_STORE explicitly to silence this",
+            )
+            pin_store = "control-plane"
+        self._pin_store_kind = pin_store
+        self._pins = PinRegistry(
+            store=build_store(pin_store, settings.mcp_pin_path),
+            mode=settings.mcp_pin_mode,
+        )
+        self._lock = asyncio.Lock()
+
+    # ------------------------------------------------------------------ wiring
+    async def _firewall_for_caller(self) -> McpFirewall:
+        """The firewall instance for the ATTESTED caller.
+
+        This used to be keyed on the `Mcp-Session-Id` REQUEST HEADER, defaulting to the literal
+        string "default". Two things were wrong with that, and the second is the serious one:
+
+        1. 2026-07-28 removes the header (SEP-2567). Every request would then fall to "default", so
+           every caller would share ONE firewall instance — and the firewall holds the discovered
+           tool catalog. One caller's `tools/list` would decide the Gate-A verdicts applied to
+           another caller's `tools/call`.
+        2. Even while the header existed it was CLIENT-SUPPLIED. A caller could send any value,
+           including another caller's, so it was never an isolation boundary — it was a correlation
+           id doing a security job it was never able to do.
+
+        The key is now the attested SVID, which is the same thing `/evaluate` binds the decision to
+        (§3: identity is resolved from the credential and never read from an MCP message). In the
+        sidecar placement this driver is built for there is exactly one caller, so the map holds one
+        entry; keying it explicitly is what makes that a property rather than a coincidence.
+
+        Reusing one instance across requests is also what the stateless revision asks for: list
+        results no longer vary per connection, so a catalog that reset per "session" would re-derive
+        the same thing and lose drift detection in between.
+        """
+        key = await self._attested_key()
+        fw = self._firewalls.get(key)
+        if fw is None:
+            fw = McpFirewall(
+                interceptor=ToolInterceptor(self._engine, SPIFFEResolver()),
+                server_id=self._server_id,
+                session_id=f"mcp-http-{key}",
+                pins=self._pins,
+                tool_name_prefix=self._prefix,
+            )
+            # Bounded anyway. The key is attested now, so a peer cannot mint entries — but a resolver
+            # returning a varying id (a misconfiguration) should degrade to eviction, not to a memory
+            # exhaustion primitive. Pins live in the shared registry, so an evicted entry only loses
+            # its in-memory catalog and drift detection stays intact.
+            if len(self._firewalls) >= 64:
+                self._firewalls.pop(next(iter(self._firewalls)), None)
+            self._firewalls[key] = fw
+        return fw
+
+    async def _attested_key(self) -> str:
+        """Stable key for the caller this proxy runs alongside, from its attested identity."""
+        if self._identity_key is None:
+            identity = await SPIFFEResolver().resolve()
+            self._identity_key = (
+                getattr(identity, "spiffe_id", "")
+                or f"ns/{getattr(identity, 'namespace', '')}/sa/{getattr(identity, 'service_account', '')}"
+            )
+        return self._identity_key
+
+    @staticmethod
+    def _forward_headers(headers) -> dict[str, str]:
+        return {k: v for k, v in headers.items() if k.lower() not in _HOP_HEADERS}
+
+    # ------------------------------------------------------------------ routes
+    async def _handle_post(self, request: Request) -> Response:
+        """Client -> server. One JSON-RPC message in; JSON or an SSE stream back."""
+        raw = await request.body()
+        fw = await self._firewall_for_caller()
+        msg = P.decode(raw)
+        if msg is None:
+            return JSONResponse(P.error_response(None, P.E_PARSE, "invalid JSON-RPC payload"), status_code=400)
+
+        mediation = await fw.on_client_message(msg)
+        if mediation.reply is not None and mediation.forward is None:
+            # Answered locally: the upstream is never contacted. This is the block path, and the
+            # 200 is correct — the JSON-RPC envelope carries the refusal, not the HTTP status.
+            return Response(mediation.reply, media_type="application/json")
+        if mediation.forward is None:
+            return JSONResponse(P.error_response(msg.id, P.E_INTERNAL, "message refused by firewall"),
+                                status_code=400)
+
+        upstream = await self._client.request(
+            "POST", self._upstream, content=mediation.forward,
+            headers={**self._forward_headers(request.headers), "content-type": "application/json"},
+        ) if not _wants_stream(request) else None
+
+        if upstream is not None and _SSE not in upstream.headers.get("content-type", ""):
+            out = await self._mediate_server_bytes(fw, upstream.content)
+            return Response(out, status_code=upstream.status_code,
+                            headers=_passthrough(upstream.headers), media_type="application/json")
+
+        # Either the client asked for a stream, or the server answered with one. Stream through,
+        # mediating each SSE event as it arrives so nothing is buffered.
+        return await self._stream_through(fw, "POST", request, mediation.forward)
+
+    async def _handle_get(self, request: Request) -> Response:
+        """Standalone SSE stream: server -> client, including server-initiated requests."""
+        return await self._stream_through(await self._firewall_for_caller(), "GET", request, None)
+
+    async def _handle_delete(self, request: Request) -> Response:
+        """Session teardown.
+
+        The catalog is deliberately NOT dropped here any more. It used to be keyed on a
+        client-supplied header, so a DELETE discarded whatever that header pointed at; now the
+        instance belongs to the attested caller, and a caller must not be able to reset its OWN
+        Gate-A state by asking. Re-discovering a catalog is exactly how a rug pull would be laundered
+        into a clean first sight. Pins are server-scoped and survive regardless.
+        """
+        upstream = await self._client.request(
+            "DELETE", self._upstream, headers=self._forward_headers(request.headers))
+        return Response(upstream.content, status_code=upstream.status_code,
+                        headers=_passthrough(upstream.headers))
+
+    # ------------------------------------------------------------------ streaming
+    async def _stream_through(self, fw: McpFirewall, method: str, request: Request,
+                              body: bytes | None) -> Response:
+        headers = self._forward_headers(request.headers)
+        if body is not None:
+            headers["content-type"] = "application/json"
+
+        async def events() -> AsyncIterator[bytes]:
+            req = self._client.build_request(method, self._upstream, headers=headers, content=body)
+            async with self._client.stream(
+                method, self._upstream, headers=headers, content=body, timeout=None
+            ) as resp:
+                buffer = b""
+                async for chunk in resp.aiter_bytes():
+                    buffer += chunk
+                    # SSE frames are separated by a blank line. Split on the boundary and emit whole
+                    # frames only — a half-received frame must not be parsed, and must not be held
+                    # back longer than it takes to complete.
+                    while b"\n\n" in buffer:
+                        frame, buffer = buffer.split(b"\n\n", 1)
+                        yield await self._mediate_frame(fw, frame) + b"\n\n"
+                if buffer.strip():
+                    yield await self._mediate_frame(fw, buffer)
+            del req
+
+        return StreamingResponse(events(), media_type=_SSE, headers={"cache-control": "no-cache"})
+
+    async def _mediate_frame(self, fw: McpFirewall, frame: bytes) -> bytes:
+        """Mediate the JSON payload of one SSE frame, preserving every other SSE field.
+
+        Only `data:` lines carry the JSON-RPC message; `event:`, `id:` and `retry:` are transport
+        bookkeeping the client needs intact (`id:` in particular drives resumption).
+        """
+        out_lines: list[bytes] = []
+        for line in frame.split(b"\n"):
+            if not line.startswith(b"data:"):
+                out_lines.append(line)
+                continue
+            payload = line[5:].strip()
+            mediated = await self._mediate_server_bytes(fw, payload)
+            out_lines.append(b"data: " + mediated if mediated else b"data: ")
+        return b"\n".join(out_lines)
+
+    async def _mediate_server_bytes(self, fw: McpFirewall, payload: bytes) -> bytes:
+        msg = P.decode(payload)
+        if msg is None:
+            return payload
+        result = await fw.on_server_message(msg)
+        if result.reply is not None:
+            # A server-initiated request we refused. On this transport the reply travels back as a
+            # separate POST rather than inline, so it is dispatched without blocking the stream.
+            asyncio.create_task(self._post_back(result.reply))
+        if result.forward is None:
+            return b""
+        return result.forward.rstrip(b"\n")
+
+    async def _post_back(self, payload: bytes) -> None:
+        with contextlib.suppress(Exception):
+            await self._client.post(self._upstream, content=payload,
+                                    headers={"content-type": "application/json"})
+
+    # ------------------------------------------------------------------ lifecycle
+    async def run(self) -> int:
+        import uvicorn
+
+        self._engine = PolicyEngineClient()
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(60.0, connect=5.0),
+            limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
+        )
+        app = Starlette(routes=[
+            Route("/mcp", self._handle_post, methods=["POST"]),
+            Route("/mcp", self._handle_get, methods=["GET"]),
+            Route("/mcp", self._handle_delete, methods=["DELETE"]),
+        ])
+        log.info("nrvq.mcp.http.started", listen=f"{self._host}:{self._port}",
+                 upstream=self._upstream, code="NRVQ-MCP-5006")
+        config = uvicorn.Config(app, host=self._host, port=self._port, log_level="warning")
+        try:
+            await uvicorn.Server(config).serve()
+        finally:
+            await self._client.aclose()
+            with contextlib.suppress(Exception):
+                await self._engine.close()
+        return 0
+
+
+def _wants_stream(request: Request) -> bool:
+    return _SSE in request.headers.get("accept", "")
+
+
+def _passthrough(headers) -> dict[str, str]:
+    return {k: v for k, v in headers.items() if k.lower() not in _HOP_HEADERS}

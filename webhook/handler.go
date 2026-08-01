@@ -8,6 +8,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -246,6 +247,20 @@ func (h *Handler) patchResponse(req *admissionv1.AdmissionRequest, pod *corev1.P
 	}
 	patch, err := h.injector.CreatePatch(pod, agentClass, req.Namespace)
 	if err != nil {
+		// A pod whose own MCP annotation cannot be honored gets the reason back: the fix is always in
+		// the pod spec (a misnamed container, or one with no explicit command), and a generic failure
+		// leaves the operator with nothing to act on. Other patch failures stay generic.
+		var mcpErr *mcpConfigError
+		if errors.As(err, &mcpErr) {
+			slog.Warn("NRVQ-WHK-4041: MCP injection denial", "pod", pod.Name, "namespace", req.Namespace, "error", err)
+			return &admissionv1.AdmissionResponse{
+				Allowed: false,
+				Result: &metav1.Status{Message: "NRVQ-WHK-4041: " + mcpErr.Error() +
+					" — the pod asked for MCP governance via " + mcpServersAnnotation +
+					" and it could not be applied, so admission fails closed rather than running an" +
+					" MCP server unpoliced."},
+			}
+		}
 		slog.Error("NRVQ-WHK-4009: patch creation failed", "error", err)
 		return &admissionv1.AdmissionResponse{
 			Allowed: false,
@@ -323,6 +338,14 @@ func neuteredSidecarDecoy(cfg Config, pod *corev1.Pod) (string, bool) {
 		return "", false
 	}
 	for _, c := range allPodContainers(pod) {
+		// The injector's OWN MCP init container is a sidecar-image container that necessarily overrides
+		// command (it runs a `cp`), so it would read as a decoy on every re-admission of a pod it was
+		// injected into. Exempt it only on an exact match against the spec the injector generates —
+		// reproducing that means reproducing the real proxy copy, so the carve-out buys an attacker
+		// nothing.
+		if cfg.McpInject && isInjectorMcpInitContainer(cfg, c) {
+			continue
+		}
 		if (len(c.Command) > 0 || len(c.Args) > 0) && isSidecarContainer(c, configuredImage) {
 			return "container " + c.Name + " presents as the norviq sidecar but overrides command/args (neutered decoy)", true
 		}
@@ -366,7 +389,10 @@ func fullyInjected(cfg Config, pod *corev1.Pod) bool {
 			return false
 		}
 	}
-	return true
+	// A correct sidecar does not make an MCP server governed. A pod that ASKS for MCP governance but
+	// carries an unwrapped (or differently-wrapped) MCP container is not already-injected — skipping it
+	// would run that server unpoliced, which is the same hole the app-container check above closes.
+	return mcpFullyInjected(cfg, pod)
 }
 
 // enforcementArtifact reports any injector-owned plumbing on a pod that is NOT fully injected: a
@@ -388,6 +414,13 @@ func enforcementArtifact(cfg Config, pod *corev1.Pod) (string, bool) {
 		}
 		if hasSocketPathEnv(c) {
 			return "container " + c.Name + " pre-sets the injector-owned NRVQ_SOCKET_PATH env", true
+		}
+	}
+	// MCP plumbing is injector-owned on exactly the same terms. Gated on McpInject so that with the
+	// feature off the webhook's admission decisions are unchanged for every possible pod.
+	if cfg.McpInject {
+		if reason, ok := mcpArtifact(cfg, pod); ok {
+			return reason, true
 		}
 	}
 	return "", false

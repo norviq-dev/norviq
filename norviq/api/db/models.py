@@ -370,3 +370,56 @@ class RedTeamRun(Base):
     efficacy: Mapped[dict[str, object]] = mapped_column(JSONB)  # roll-up (overall + per-technique/owasp) — SUMMARY
     created_by: Mapped[str] = mapped_column(String(255), default="")
     __table_args__ = (Index("idx_redteam_run_created", "created_at"),)
+
+
+class McpToolPin(Base):
+    """A pinned MCP tool DEFINITION — the control-plane record of what was approved.
+
+    WHY THIS IS A CONTROL-PLANE TABLE AND NOT PROXY-LOCAL STATE. A pin is an APPROVAL, and approvals
+    are policy: they are the operator's statement that this exact tool definition, from this exact
+    server, is the one the model may be shown. Keeping them in each proxy's memory (or a file on an
+    emptyDir) makes them per-pod, invisible to the console, unauditable, and — worst — resettable by
+    anything that restarts the pod, which is precisely the moment an attacker would choose. Putting
+    them here gets tenant scoping, RBAC, the audit trail and console visibility for free, because
+    every one of those already exists for the policy tables next to it.
+
+    The digest covers only the SECURITY-RELEVANT fields of a definition (name/title/description/
+    inputSchema/outputSchema/annotations — see norviq/mcp/pins.canonical_definition), so a server
+    re-serialising its catalog or bumping unrelated metadata does not register as a change. A drift
+    detector that cries wolf gets switched off, which is worse than not having one.
+
+    ``approved_digest`` is deliberately NOT updated when drift is observed. Silently adopting the new
+    definition would mean an attacker need only absorb a single blocked call before their rug pull
+    takes effect; adopting it is an explicit operator action (POST /mcp/pins/approve, which names the
+    digest so an approval cannot race a second change). ``last_digest`` records what the server is
+    currently serving so the console can diff approved-vs-served.
+
+    Never consulted by the evaluator. This is Gate A state; enforcement of a tool CALL is Gate B.
+    """
+
+    __tablename__ = "mcp_tool_pins"
+    namespace: Mapped[str] = mapped_column(String(255), primary_key=True)
+    server_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    tool_name: Mapped[str] = mapped_column(String(255), primary_key=True)
+    approved_digest: Mapped[str] = mapped_column(String(64))
+    # What the server is serving right now. Equal to approved_digest in the steady state; different
+    # means drift, and the pair is what the console diffs.
+    last_digest: Mapped[str] = mapped_column(String(64), default="")
+    # The canonical JSON of the APPROVED definition. Kept because "what did it used to say?" is the
+    # first question asked when a rug pull fires, and the old definition cannot be re-fetched after
+    # the server has already changed it.
+    approved_canonical: Mapped[str] = mapped_column(Text, default="")
+    last_canonical: Mapped[str] = mapped_column(Text, default="")
+    approved: Mapped[bool] = mapped_column(Boolean, default=True)
+    approved_by: Mapped[str] = mapped_column(String(255), default="")
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    scan_severity: Mapped[str] = mapped_column(String(16), default="none")
+    findings: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    drift_count: Mapped[int] = mapped_column(Integer, default=0)
+    transport: Mapped[str] = mapped_column(String(16), default="stdio")
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    __table_args__ = (
+        Index("idx_mcp_pin_ns_server", "namespace", "server_id"),
+        Index("idx_mcp_pin_last_seen", "last_seen_at"),
+    )

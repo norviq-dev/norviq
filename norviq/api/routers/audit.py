@@ -90,7 +90,27 @@ def _to_dict(row: AuditLogEntry) -> dict:
         # Decision source (sidecar / sidecar-http / sdk / redteam / ...) for the UI Source column + filter.
         "framework": getattr(row, "framework", ""),
         "timestamp": row.timestamp_utc.isoformat(),
+        # MCP provenance, when the decision came over the Model Context Protocol. Lifted out of the
+        # JSONB payload so the console can show WHICH integration a decision belongs to without
+        # fetching the full record — the first question anyone asks of a chatbot wired to four MCP
+        # servers is "which one did this come from?". Absent (None) for every non-MCP row, so the
+        # response shape is unchanged for existing consumers.
+        "mcp": _mcp_context(row),
     }
+
+
+def _mcp_context(row: AuditLogEntry) -> dict | None:
+    """The `mcp` object the evaluate route stored on the audit payload, or None.
+
+    `getattr`, not `row.payload`, and for the same reason every other optional field in `_to_dict`
+    uses it: not all callers pass a full ORM row. The SIEM forwarder builds row-like objects from a
+    projected query and has no `payload` column, so a direct attribute read raised AttributeError and
+    took the forwarder down — caught by tests/api/test_siem_forwarder.py, which is exactly what that
+    defensive style in `_to_dict` exists to prevent.
+    """
+    payload = getattr(row, "payload", None)
+    ctx = payload.get("mcp") if isinstance(payload, dict) else None
+    return ctx if isinstance(ctx, dict) else None
 
 
 @router.get("/audit/records")

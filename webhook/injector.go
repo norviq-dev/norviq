@@ -92,8 +92,70 @@ func (inj *Injector) CreatePatch(pod *corev1.Pod, agentClass string, namespace s
 	patches = append(patches, envPatches("containers", len(pod.Spec.Containers), envState(pod.Spec.Containers), inj.cfg)...)
 	patches = append(patches, mountPatches("initContainers", len(pod.Spec.InitContainers), mountState(pod.Spec.InitContainers), inj.cfg.SpiffeInject)...)
 	patches = append(patches, envPatches("initContainers", len(pod.Spec.InitContainers), envState(pod.Spec.InitContainers), inj.cfg)...)
+	// MCP action-firewall. Emitted LAST because it appends to container env lists with "/env/-", which
+	// requires those lists to exist — envPatches above creates them for any container that had none.
+	// A pod with no norviq.io/mcp-servers annotation (or a cluster with McpInject off) adds nothing, so
+	// the emitted patch stays byte-identical to before this path existed.
+	mcpOps, err := inj.mcpPatchOps(pod, agentClass, namespace)
+	if err != nil {
+		return nil, err
+	}
+	patches = append(patches, mcpOps...)
 	patches = append(patches, injectedAnnotationPatch(pod.Annotations))
 	return json.Marshal(patches)
+}
+
+// mcpPatchOps builds the MCP half of the patch: the proxy volume, the init container that fills it,
+// and the per-container command rewrite. Returns a *mcpConfigError when the pod's annotation cannot
+// be honored, which the handler surfaces to the operator verbatim — an unwrappable container must be
+// a loud denial, not a silent ungoverned server.
+func (inj *Injector) mcpPatchOps(pod *corev1.Pod, agentClass, namespace string) ([]patchOp, error) {
+	if !inj.cfg.McpInject {
+		return nil, nil
+	}
+	targets, err := mcpTargets(inj.cfg, pod)
+	if err != nil {
+		slog.Warn("NRVQ-WHK-4039: MCP injection refused", "pod", pod.Name, "namespace", namespace,
+			"annotations", mcpAnnotationKeys(pod), "error", err)
+		return nil, &mcpConfigError{msg: err.Error()}
+	}
+	if len(targets) == 0 {
+		return nil, nil
+	}
+	ops := make([]patchOp, 0, len(targets)*4+2)
+	// After the sidecar's volume adds, /spec/volumes always exists -> append.
+	ops = append(ops, volumePatch(true, mcpVolumeTemplate()))
+	ops = append(ops, mcpPatches(inj.cfg, targets, namespace, agentClass)...)
+	// The delivery init container is emitted LAST and PREPENDED, and both halves of that matter.
+	//
+	// Prepended, because init containers run in order: appending it put the payload copy AFTER an
+	// annotated init container, so a wrapped init container tried to exec a binary that did not exist
+	// yet and the pod could never start.
+	//
+	// Last, because prepending shifts every existing init container's index by one. Every
+	// index-addressed op above — the sidecar's mount/env wiring and the MCP command rewrite — was
+	// computed against the ORIGINAL spec, and JSON Patch applies in order, so they must all land
+	// before the shift happens.
+	ops = append(ops, initContainerPatch(len(pod.Spec.InitContainers) > 0, mcpInitContainer(inj.cfg)))
+	slog.Info("NRVQ-WHK-4040: MCP proxy injected", "pod", pod.Name, "namespace", namespace,
+		"containers", len(targets))
+	return ops, nil
+}
+
+// mcpConfigError marks a denial caused by the pod's own MCP annotation, so the handler can return the
+// reason to the operator instead of the generic patch-failure message.
+type mcpConfigError struct{ msg string }
+
+func (e *mcpConfigError) Error() string { return e.msg }
+
+// initContainerPatch PREPENDS to /spec/initContainers, creating the list when the pod has none, so
+// the payload is staged before any init container that might need it. Callers must emit this after
+// every index-addressed op, because index 0 shifts the rest of the list.
+func initContainerPatch(hasInitContainers bool, container map[string]interface{}) patchOp {
+	if hasInitContainers {
+		return patchOp{Op: "add", Path: "/spec/initContainers/0", Value: container}
+	}
+	return patchOp{Op: "add", Path: "/spec/initContainers", Value: []map[string]interface{}{container}}
 }
 
 // injectedAnnotationPatch stamps injectedAnnotation ("norviq.io/injected": "true") on every patched pod

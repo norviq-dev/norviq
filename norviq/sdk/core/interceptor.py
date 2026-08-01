@@ -17,6 +17,14 @@ from norviq.sdk.core.recorder import record_decision
 
 log = structlog.get_logger()
 
+# `framework` -> the `mode` label on the caller-observed interception-latency metric. A table rather
+# than a conditional so a new enforcement surface adds a row instead of editing the hot path, and so
+# every surface keeps its OWN latency series: folding MCP into "sdk" would have silently mixed a
+# proxy-mediated call into the in-process adapter's numbers and made the no-regression comparison on
+# the existing series unreadable. Anything unlisted still maps to "sdk", so the existing two labels
+# are byte-for-byte what they were.
+_MODE_BY_FRAMEWORK = {"sidecar": "sidecar", "mcp": "mcp"}
+
 
 class SupportsEvaluate(Protocol):
     """Structural type for anything ToolInterceptor can delegate evaluation to.
@@ -47,8 +55,15 @@ class ToolInterceptor:
         framework: str = "",
         call_depth: int = 0,
         identity: AgentIdentity | None = None,
+        mcp: dict[str, Any] | None = None,
     ) -> PolicyDecision:
-        """Evaluate a tool call and return policy decision."""
+        """Evaluate a tool call and return policy decision.
+
+        ``mcp`` carries protocol context for calls that arrived over MCP (server id, transport, pin
+        status, Gate-A scan severity). Keyword-only in practice and defaulted to None, so every
+        existing caller — the sidecar, all six framework adapters, the red-team runner — is
+        unchanged and still produces an event with an empty ``mcp``.
+        """
         # What the CALLER waits for one decision — the number a deployed agent actually feels, and the one
         # the published performance table cannot show: it reads the engine's own latency_ms, which excludes
         # everything outside the engine (identity resolve, the round trip to reach it, response handling).
@@ -62,6 +77,7 @@ class ToolInterceptor:
             session_id=session_id,
             framework=framework,
             call_depth=call_depth,
+            mcp=mcp or {},
         )
         decision = await self._evaluator.evaluate(event)
         # Record every evaluated call on the active capture scope (if any). This is what lets a host
@@ -72,7 +88,7 @@ class ToolInterceptor:
         # `framework` already distinguishes the injected sidecar from an in-process SDK adapter, so it
         # doubles as the mode label rather than inventing a second signal that could disagree with it.
         record_interception_latency(
-            "sidecar" if framework == "sidecar" else "sdk", "total", (perf_counter() - _t0) * 1000.0
+            _MODE_BY_FRAMEWORK.get(framework, "sdk"), "total", (perf_counter() - _t0) * 1000.0
         )
         log.info("nrvq.intercept.result", tool=tool_name, decision=decision.decision, code="NRVQ-SDK-1020")
         return decision
@@ -85,9 +101,12 @@ class ToolInterceptor:
         framework: str = "",
         call_depth: int = 0,
         identity: AgentIdentity | None = None,
+        mcp: dict[str, Any] | None = None,
     ) -> PolicyDecision:
         """Evaluate call and raise on blocked or escalated outcomes."""
-        decision = await self.intercept(tool_name, tool_params, session_id, framework, call_depth, identity)
+        decision = await self.intercept(
+            tool_name, tool_params, session_id, framework, call_depth, identity, mcp
+        )
         if decision.is_blocked():
             log.warning("nrvq.intercept.blocked", tool=tool_name, rule=decision.rule_id, code="NRVQ-SDK-1021")
             raise NorviqBlockError(decision)

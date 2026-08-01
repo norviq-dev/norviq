@@ -3,6 +3,7 @@
 
 import {
   BadgeCheck,
+  Crosshair,
   BarChart3,
   Beaker,
   Info,
@@ -12,6 +13,7 @@ import {
   Network,
   Package,
   Plug,
+  Plug2,
   ShieldCheck,
   SlidersHorizontal,
   Swords,
@@ -39,7 +41,11 @@ const PANEL_CONFIG: Record<Section, { title: string; groups: Group[] }> = {
         items: [
           { to: "/policies/catalog", label: "Policy Catalog", icon: ShieldCheck },
           { to: "/policies/packs", label: "Policy Packs", icon: Package },
-          { to: "/policies/targets", label: "Target Settings", icon: Target }
+          { to: "/policies/targets", label: "Target Settings", icon: Target },
+          // Intents — the positive-security surface: state what a class is FOR and deny the rest.
+          // Sits under ENFORCEMENT rather than MONITORING because it authors policy, even though
+          // nothing it produces enforces until an operator applies the draft from Policy Catalog.
+          { to: "/intents", label: "Intents", icon: Crosshair }
         ]
       },
       {
@@ -47,7 +53,10 @@ const PANEL_CONFIG: Record<Section, { title: string; groups: Group[] }> = {
         label: "MONITORING",
         items: [
           { to: "/audit", label: "Audit Log", icon: BarChart3 },
-          { to: "/agents", label: "Agents", icon: Users }
+          { to: "/agents", label: "Agents", icon: Users },
+          // MCP Servers — Gate A's console: which Model Context Protocol integrations are live and
+          // whether any of them changed a tool definition after it was approved.
+          { to: "/mcp", label: "MCP Servers", icon: Plug2 }
         ]
       },
       {

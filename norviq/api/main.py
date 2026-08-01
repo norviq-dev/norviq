@@ -21,7 +21,7 @@ from norviq.api.rate_limit import RateLimitMiddleware
 from norviq.api.siem import AuditForwarder
 from norviq.fleet_relay import FleetRelayForwarder
 from norviq.fleet_puller import FleetPolicyPuller
-from norviq.api.routers import attack_graph_compute, agents, audit, auth_login, cluster_info, coverage, deployments, evaluate, fleet_enroll, graph, graphs, health, keys, me, mitre, packs, policies, redteam, search, settings_router, system_health, threats, version
+from norviq.api.routers import attack_graph_compute, agents, audit, auth_login, cluster_info, coverage, deployments, evaluate, fleet_enroll, graph, graphs, health, intents, keys, mcp, me, mitre, packs, policies, redteam, search, settings_router, system_health, threats, version
 from norviq.config import settings
 from norviq.engine.audit_emitter import AuditEmitter
 from norviq.engine.cache import RedisCache
@@ -267,6 +267,13 @@ def create_app() -> FastAPI:
     app.include_router(settings_router.router, prefix="/api/v1", tags=["settings"])
     app.include_router(version.router, prefix="/api/v1", tags=["version"])
     app.include_router(keys.router, prefix="/api/v1", tags=["keys"])
+    # MCP inventory + tool-definition pins. Read endpoints are tenant-scoped like every other read;
+    # approve/revoke are admin-only; /mcp/pins/observe is the proxy's service-credential write path.
+    app.include_router(mcp.router, prefix="/api/v1", tags=["mcp"])
+    # Intent compile / propose / dry-run / draft. There is deliberately no apply endpoint: a draft
+    # lands in `intent_drafts` (which the evaluator never reads) and applying stays the gated
+    # Policies flow, so there is exactly one way to start enforcing.
+    app.include_router(intents.router, prefix="/api/v1", tags=["intents"])
     app.include_router(search.router, prefix="/api/v1", tags=["search"])  # ⌘K backing endpoint
     app.include_router(packs.router, prefix="/api/v1", tags=["packs"])
     app.include_router(fleet_enroll.router, prefix="/api/v1", tags=["fleet-enroll"])

@@ -84,6 +84,13 @@ langgraph = ["langgraph>=0.2"]
 # major, which crewai does not yet declare support for. See SECURITY.md.
 crewai = ["crewai>=0.80", "mcp>=1.28.1,<2"]
 autogen = ["autogen-core>=0.4", "autogen-agentchat>=0.4", "autogen-ext[openai]>=0.4"]
+# MCP action-firewall (norviq/mcp). The PROXY itself needs nothing beyond the base dependencies —
+# it speaks JSON-RPC over pipes and reuses the SDK's httpx engine client, deliberately taking no
+# dependency on the `mcp` SDK so it can forward messages it does not model (see norviq/mcp/protocol.py).
+# This extra exists for the streamable-HTTP driver (starlette) and for the adversarial harness, which
+# drives a REAL `mcp` client so the end-to-end claim is not tested against a bespoke one. Same
+# CVE-2026-59950 floor as the crewai extra.
+mcp = ["mcp>=1.28.1,<2", "starlette>=0.37"]
 semantic-kernel = ["semantic-kernel>=1.0"]
 frameworks = [
     "langchain-core>=0.2",
