@@ -222,6 +222,10 @@ export function PolicyTester() {
     setToolSelection(normalizeTool(scenario.tool));
     setCustomToolName(normalizeTool(scenario.tool) === "custom" ? scenario.tool : "");
     setToolParams(scenario.params);
+    // Clear any stale validation error. A quick scenario REPLACES the params wholesale with known-good
+    // JSON, so leaving "Tool params must be valid JSON." on screen accuses the user of a problem the click
+    // just fixed — and it sits directly above the Evaluate button, which reads as "this is still broken".
+    setFormError(null);
   }
 
   async function evaluate() {

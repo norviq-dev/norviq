@@ -6,6 +6,7 @@ import "../lib/monaco"; // Bundle Monaco locally (no cdn.jsdelivr fetch) — mus
 import Editor from "@monaco-editor/react";
 import { registerRego } from "../lib/monaco-rego";
 import { composerRego } from "../lib/composerRego";
+import { detachmentStatusOf } from "../lib/builderCompile";
 import {
   AlertCircle,
   ArrowUpCircle,
@@ -46,6 +47,7 @@ import { DecisionBadge, type Decision } from "../components/common/DecisionBadge
 import { KitButton } from "../components/common/KitButton";
 import { PageHead } from "../components/common/PageHead";
 import { Panel } from "../components/common/Panel";
+import { BuilderSheet } from "../components/policies/BuilderSheet";
 import { PolicyHierarchy } from "../components/PolicyHierarchy";
 import { useApi, invalidateApiCache } from "../hooks/useApi";
 import { timeAgo } from "../lib/d3-helpers";
@@ -224,6 +226,19 @@ function withTargetType(list: Policy[]): Policy[] {
     ...p,
     target_type: p.target_type ?? (p.agent_class ? "class" : p.target_type)
   }));
+}
+
+/**
+ * The identity of a policy in the editor's file list: NAMESPACE + class, never the class alone.
+ *
+ * Two namespaces routinely run the same agent class — dev/staging/prod each having `customer-support` is
+ * the normal case, not an edge one — and under the "All namespaces" scope (the default landing view) they
+ * all appear in one flat list. Keying on the bare class name made those rows indistinguishable: the row
+ * highlight matched BOTH, and the lookup returned whichever came first, so selecting the second row loaded
+ * the first row's policy and a subsequent Save/Apply wrote to that other namespace instead.
+ */
+function policyFileKey(p: { namespace?: string; target?: string | null; agent_class?: string | null }): string {
+  return `${p.namespace ?? ""}/${p.target ?? p.agent_class ?? "policy"}`;
 }
 
 function PriorityBars({ tier }: { tier: TargetType }) {
@@ -612,7 +627,8 @@ spec:
             </div>
             <div className="panel-sub" style={{ marginTop: 6, color: "var(--text-muted)" }}>
               Applied — these generate the block policy below. Rate limit and trust threshold are
-              namespace-wide and live in Target Settings.
+              namespace-wide and live in Settings → General (Tuning defaults); Target Settings holds
+              the enforcement mode and change control.
             </div>
           </div>
         )}
@@ -1171,6 +1187,9 @@ export function PolicyCatalog() {
     searchParams.get("tab") === "catalog" ? "catalog" : "editor"
   );
   const [selected, setSelected] = useState<Policy | null>(null);
+  // Visual Policy Builder (round B) — a separate sheet from the guided composer above (multi-rule,
+  // multi-condition graph -> rego, compiled client-side; see components/policies/BuilderSheet.tsx).
+  const [builderOpen, setBuilderOpen] = useState(false);
   const [restoreV, setRestoreV] = useState<number | null>(null);
   const [viewV, setViewV] = useState<number | null>(null); // Version whose rego is expanded read-only
   const [activeFile, setActiveFile] = useState<string | null>(null);
@@ -1344,7 +1363,12 @@ export function PolicyCatalog() {
 
   const editorPolicy = useMemo(() => {
     const list = policies.data ?? [];
-    if (activeFile) return list.find((p) => (p.target ?? p.agent_class) === activeFile);
+    // Resolve by NAMESPACE + class, not class alone. Two namespaces routinely run the same agent class
+    // (dev/staging/prod all have `customer-support`), and under the "All namespaces" scope both land in
+    // this list. Matching on the bare class name returned whichever happened to be FIRST, so clicking the
+    // second row loaded — and Save/Apply then targeted — a different tenant's policy than the one the
+    // operator selected. Same reason `policyFileKey` is used for the row key and the active-row highlight.
+    if (activeFile) return list.find((p) => policyFileKey(p) === activeFile);
     return list.find((p) => p.target_type === "class") ?? list[0];
   }, [policies.data, activeFile]);
 
@@ -1474,7 +1498,9 @@ export function PolicyCatalog() {
     try {
       await deletePolicy(ns, ac, overlay);
       await refreshPolicies();
-      if ((activeFile ?? editorPolicy?.agent_class) === ac) setActiveFile(null);  // deleted the loaded policy
+      // Compare the composite key: bare `ac` would also clear the selection when a SAME-NAMED class in a
+      // different namespace was deleted, blanking an editor the operator was still working in.
+      if ((activeFile ?? (editorPolicy ? policyFileKey(editorPolicy) : null)) === `${ns}/${ac}`) setActiveFile(null);
       setApplyResult({
         kind: "local",
         title: `Deleted ${ns}/${displayClass}${ver ? ` · v${ver}` : ""}`,
@@ -1595,7 +1621,8 @@ export function PolicyCatalog() {
   };
 
   const editorFiles = (policies.data ?? []).filter((p) => p.target_type === "class");
-  const activePolicyName = activeFile ?? editorFiles[0]?.target ?? editorFiles[0]?.agent_class ?? null;
+  const activePolicyKey = activeFile ?? (editorFiles[0] ? policyFileKey(editorFiles[0]) : null);
+  const activePolicyName = activePolicyKey ? activePolicyKey.split("/").slice(1).join("/") : null;
 
   // The STABLE identity of the loaded policy. The buffer-reset effect below keyed on
   // `editorPolicy?.id` (the policies API returns no id → always undefined) plus the raw rego string —
@@ -1607,6 +1634,16 @@ export function PolicyCatalog() {
     editorPolicy?.namespace && editorPolicy?.agent_class
       ? `${editorPolicy.namespace}/${editorPolicy.agent_class}`
       : null;
+
+  // Phase 2b detachment badge: classify the LOADED (saved) policy's rego against its own embedded
+  // builder-graph header, independent of the in-progress editor buffer (`regoDraft`) — the badge
+  // describes the server's current state, not an unsaved edit-in-flight. "not-builder" (no builder
+  // header at all — hand-authored/composer rego) renders nothing; see detachmentStatusOf's own doc
+  // comment in builderCompile.ts for the "attached"/"detached" distinction.
+  const detachStatus = useMemo(
+    () => (newPolicy ? "not-builder" : detachmentStatusOf(detail.data?.rego_source ?? "")),
+    [newPolicy, detail.data?.rego_source]
+  );
 
   useEffect(() => {
     // In new-policy mode the draft is the author's raw rego (seeded to NEW_POLICY_REGO on entry) — never
@@ -1777,29 +1814,34 @@ export function PolicyCatalog() {
         title="Policy Catalog"
         subtitle={`Showing: ${namespace}`}
         actions={
-          <KitButton
-            variant="ghost"
-            icon={Plus}
-            style={outlineTealButtonStyle}
-            // UX-CREATE: two create paths, now self-evidently distinct. This is the GUIDED composer
-            // (target + toggles → generated rego); the sidebar "raw rego" entry is for authors. A
-            // one-way bridge ("Edit as raw rego") lets the guided path graduate into the raw editor.
-            title="Guided: pick a target and toggles; Norviq generates the rego for you"
-            onMouseEnter={(e) => (e.currentTarget.style.background = "#2DDAB815")}
-            onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-            onClick={() =>
-              setSelected({
-                target_type: "class",
-                target: "",
-                agent_class: "",
-                // No `current_version` → the sheet treats this as a NEW policy (isNew) and the manual
-                // class is created (not a stamp of a non-existent saved policy).
-                mode: "block"
-              })
-            }
-          >
-            New Policy (guided)
-          </KitButton>
+          <div style={{ display: "flex", gap: 8 }}>
+            <KitButton
+              variant="ghost"
+              icon={Plus}
+              style={outlineTealButtonStyle}
+              // UX-CREATE (Phase 2f consolidation): the form-based Visual Builder is THE visual builder —
+              // the React Flow canvas (Phase 2d/2e) was cut, both compiled to identical rego over the
+              // same compiler so nothing was lost. Two create paths remain: this one (guided form, dry-run
+              // gated) and "Advanced (raw rego)" below for authors who want the raw editor directly.
+              title="Visual builder: compose multi-rule policies (detectors, keywords, tools, trust) with a live rego preview and dry-run gate"
+              onMouseEnter={(e) => (e.currentTarget.style.background = "#2DDAB815")}
+              onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+              onClick={() => setBuilderOpen(true)}
+            >
+              Visual Builder
+            </KitButton>
+            <KitButton
+              variant="ghost"
+              icon={Plus}
+              style={outlineTealButtonStyle}
+              title="Advanced: author the rego directly in the editor (no guided form)"
+              onMouseEnter={(e) => (e.currentTarget.style.background = "#2DDAB815")}
+              onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+              onClick={startNewPolicy}
+            >
+              Advanced (raw rego)
+            </KitButton>
+          </div>
         }
       />
 
@@ -2079,19 +2121,31 @@ export function PolicyCatalog() {
                 )}
                 {editorFiles.map((p) => {
                   const name = p.target ?? p.agent_class ?? "policy";
-                  const isActive = !newPolicy && activePolicyName === name;
+                  const key = policyFileKey(p);
+                  const isActive = !newPolicy && activePolicyKey === key;
+                  // Show the namespace whenever another row carries the same class name. Two rows both
+                  // reading `customer-support.rego` are indistinguishable, and picking the wrong one edits
+                  // another tenant's policy.
+                  const ambiguous = editorFiles.filter((q) => (q.target ?? q.agent_class) === name).length > 1;
                   return (
                     <button
-                      key={p.id ?? name}
+                      key={key}
                       role="row"
                       className={`sb-link${isActive ? " active" : ""}`}
-                      onClick={() => { if (!confirmDiscardIfDirty(name)) return; setNewPolicy(null); resetDraftFlow(); setActiveFile(name); }}
-                      style={{ fontSize: 12.5 }}
+                      onClick={() => { if (!confirmDiscardIfDirty(name)) return; setNewPolicy(null); resetDraftFlow(); setActiveFile(key); }}
+                      style={{ fontSize: 12.5, flexDirection: "column", alignItems: "flex-start", gap: 1 }}
                     >
-                      <FileCode size={14} />
-                      <span className="mono" style={{ fontSize: 12 }}>
-                        {name}.rego
+                      <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <FileCode size={14} />
+                        <span className="mono" style={{ fontSize: 12 }}>
+                          {name}.rego
+                        </span>
                       </span>
+                      {ambiguous && (
+                        <span className="mono" style={{ fontSize: 10, color: "var(--text-muted)", paddingLeft: 20 }}>
+                          {p.namespace}
+                        </span>
+                      )}
                     </button>
                   );
                 })}
@@ -2191,6 +2245,52 @@ export function PolicyCatalog() {
                            show its real name, not a generic "policy.rego" that disagrees with the highlighted
                            sidebar row. activePolicyName resolves the same fallback the sidebar uses. */
                         (activePolicyName ?? "policy") + ".rego"}
+                    {/* Phase 2b: whether the loaded policy still matches the visual graph it was built
+                        from (see detachmentStatusOf's doc comment in builderCompile.ts). "not-builder"
+                        (never built visually) renders nothing — most policies in this catalog. */}
+                    {detachStatus === "detached" && (
+                      <span
+                        data-testid="builder-detachment-badge"
+                        data-status="detached"
+                        title="This policy has the Visual Policy Builder's header, but its rego body no longer matches the embedded graph hash — someone hand-edited it after it was generated, so reopening it in the builder would not reconstruct what's actually live."
+                        style={{
+                          marginLeft: 10,
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 4,
+                          fontSize: 10.5,
+                          fontWeight: 700,
+                          letterSpacing: ".03em",
+                          padding: "2px 8px",
+                          borderRadius: 999,
+                          background: "#ff3b5c1a",
+                          color: "#ff9eb0",
+                          border: "1px solid #ff3b5c55"
+                        }}
+                      >
+                        <TriangleAlert size={11} /> Hand-edited — detached from its visual graph
+                      </span>
+                    )}
+                    {detachStatus === "attached" && (
+                      <span
+                        data-testid="builder-detachment-badge"
+                        data-status="attached"
+                        title="This policy was generated by the Visual Policy Builder and its rego still matches the graph — reopening it in the builder reconstructs exactly this."
+                        style={{
+                          marginLeft: 10,
+                          fontSize: 10.5,
+                          fontWeight: 700,
+                          letterSpacing: ".03em",
+                          padding: "2px 8px",
+                          borderRadius: 999,
+                          background: "#2DDAB81a",
+                          color: "#2DDAB8",
+                          border: "1px solid #2DDAB855"
+                        }}
+                      >
+                        Built visually
+                      </span>
+                    )}
                     <span style={{ marginLeft: "auto", color: "var(--text-muted)" }}>Rego · OPA</span>
                   </div>
                   <Editor
@@ -2562,6 +2662,19 @@ export function PolicyCatalog() {
             setDryRunResult(null);
             setDryRunError(null);  // Reset the dry-run panel for the seeded raw editor
             setApplyResult(null);
+          }}
+        />
+      )}
+
+      {builderOpen && (
+        <BuilderSheet
+          // Phase 2f: pass the RAW selector value through (no silent "all" -> "default" resolution
+          // here) — BuilderSheet itself gates Save behind a concrete target namespace when this is
+          // "all"/empty, so the operator always sees and confirms exactly where the policy lands.
+          namespace={namespace}
+          onClose={() => setBuilderOpen(false)}
+          onSaved={() => {
+            refreshPolicies();
           }}
         />
       )}

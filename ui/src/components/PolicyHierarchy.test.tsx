@@ -56,6 +56,48 @@ describe("PolicyHierarchy", () => {
     });
   });
 
+  it("orders the winning layer first even when the API returns collection order", async () => {
+    /**
+     * GET /policies/effective returns `_collect_candidates` order — the order the evaluator COLLECTS
+     * layers, not the order in which they beat each other. On a real cluster that produced:
+     *
+     *     agent-class policy   default:probe-class          100
+     *     namespace baseline   default:__baseline__           1
+     *     namespace:default    default:namespace:default     50
+     *
+     * a priority-100 row above a priority-1 row above a priority-50 row, in a panel whose subtitle
+     * promises "highest-priority-wins, top to bottom". Read against that rule it is simply wrong, and an
+     * operator reasoning about which policy overrides which has no way to reconcile it.
+     */
+    const COLLECTION_ORDER = [
+      { scope: "default:probe-class", label: "agent-class policy", priority: 100, overlay: false },
+      { scope: "default:__baseline__", label: "namespace baseline", priority: 1, overlay: false },
+      { scope: "default:namespace:default", label: "namespace:default", priority: 50, overlay: false }
+    ];
+    handlers(COLLECTION_ORDER);
+    render(<PolicyHierarchy namespace="default" />);
+    await waitFor(() => expect(screen.getAllByTestId("policy-hierarchy-row").length).toBe(3));
+    const priorities = screen
+      .getAllByTestId("policy-hierarchy-priority")
+      .map((n) => Number(n.textContent));
+    expect(priorities).toEqual([100, 50, 1]);
+  });
+
+  it("keeps the API's relative order for equal priorities", async () => {
+    // Ties carry real meaning: at equal priority the evaluator resolves in collection order, so a class
+    // policy beats a namespace policy. Sorting must not shuffle that.
+    const TIED = [
+      { scope: "default:cls", label: "agent-class policy", priority: 100, overlay: false },
+      { scope: "default:namespace:default", label: "namespace:default", priority: 100, overlay: false }
+    ];
+    handlers(TIED);
+    render(<PolicyHierarchy namespace="default" />);
+    await waitFor(() => expect(screen.getAllByTestId("policy-hierarchy-row").length).toBe(2));
+    const scopes = screen.getAllByTestId("policy-hierarchy-scope").map((n) => n.textContent);
+    expect(scopes[0]).toContain("default:cls");
+    expect(scopes[1]).toContain("namespace:default");
+  });
+
   // CATHIER-MODE-01: the Mode column now reflects the effective per-ns posture (Block / Monitor) from /settings,
   // agreeing with the Governance card — no longer the wired-to-nothing static "Enforce".
   it("Mode column shows 'Block' for a block-mode namespace", async () => {

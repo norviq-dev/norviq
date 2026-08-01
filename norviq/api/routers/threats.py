@@ -131,12 +131,18 @@ def _short_id(*parts: str) -> str:
     return "p" + hashlib.sha1("|".join(parts).encode(), usedforsecurity=False).hexdigest()[:10]
 
 
-async def _assemble(session: AsyncSession, namespaces: list[str] | None):
+async def _assemble(session: AsyncSession, namespaces: list[str] | None, hours: int = 24):
     """Union the latest asset-graph snapshot(s) into nodes/edges with real decision history (like
-    get_asset_graph). Returns (nodes_by_id, out_edges, seen_namespaces)."""
+    get_asset_graph). Returns (nodes_by_id, out_edges, seen_namespaces).
+
+    `hours` is the DECISION-HISTORY window and must come from the caller's `range`. It used to be
+    hardcoded to 24 here while /threats/attack-paths discarded its own `range` into `_`, each site
+    commenting that the OTHER one handled it — so selecting 7d or 30d changed nothing and any chain
+    whose only decisions were older than 24h rendered "unsimulated" (no history) even though the
+    history existed inside the range the user asked for.
+    """
     snapshots = await _latest_snapshots(session, namespaces)
     multi = namespaces is None or len(namespaces) != 1
-    hours = 24  # decision-history window handled by caller's range; assembly uses a wide-enough default
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
     nodes_by_id: dict[str, dict] = {}
     out_edges: dict[str, list[dict]] = {}
@@ -478,9 +484,9 @@ def _path_governed_by(gov: dict, cls: str, chokepoint: str, choke_verb: str | No
 
 
 async def _derive_paths(
-    session: AsyncSession, namespaces: list[str] | None, cls: str | None
+    session: AsyncSession, namespaces: list[str] | None, cls: str | None, hours: int = 24
 ) -> tuple[list[ThreatPath], list[str]]:
-    nodes_by_id, out_edges, seen = await _assemble(session, namespaces)
+    nodes_by_id, out_edges, seen = await _assemble(session, namespaces, hours)
     overrides = await _verb_overrides(session, namespaces)
     evidence = await _verb_evidence(session, namespaces)
     governing = await _governing_policies(session, namespaces)
@@ -536,12 +542,12 @@ async def get_threat_paths(
     ``?ns=`` (empty string → no namespaces → 0 paths) edge is preserved rather than flipped to "all".
     Supplying BOTH with different values is a caller bug → 400, never a silently-dropped scope filter.
     """
-    _ = RANGE_HOURS.get(range, 24)  # range validated; decision window handled in _assemble
+    hours = RANGE_HOURS.get(range, 24)  # the caller's range IS the decision-history window
     if ns is not None and namespace is not None and ns != namespace:
         raise HTTPException(status_code=400, detail="conflicting 'ns' and 'namespace' query parameters")
     requested = ns if ns is not None else (namespace if namespace is not None else "all")
     namespaces = _resolve_namespaces(user, requested)
-    paths, seen = await _derive_paths(session, namespaces, cls)
+    paths, seen = await _derive_paths(session, namespaces, cls, hours)
     # A kill-chain rooted at a synthetic/probe agent is test noise — hide it by default (toggle brings it back).
     synthetic_hidden = 0
     if not include_synthetic:

@@ -33,6 +33,10 @@ type AuditRecord = {
   latency_ms?: number;
   tool_params?: Record<string, unknown> | null; // request args captured with the decision (may be absent)
   framework?: string; // decision source (sidecar / sidecar-http / sdk / redteam / ...)
+  // Server's verdict on the real-traffic-only exclusion (red-team framework OR synthetic/probe class).
+  // Computed API-side by the one shared classifier so the live tail applies exactly the predicate
+  // `exclude_synthetic` applies to fetched rows, without forking the class-prefix list into TypeScript.
+  non_real?: boolean;
   _live?: boolean;
 };
 
@@ -217,13 +221,37 @@ export function AuditLog() {
   }, [ws.messages, polled]);
 
   const rows = useMemo(() => {
-    // Filtering is server-side (tool + agent + real-only); the live stream is only merged on page 0.
+    // The live tail must satisfy EVERY active filter, not just real-only.
+    //
+    // It used to mirror `realOnly` alone, so the filters applied server-side to `base.data` (decision,
+    // tool, agent, rule) were simply absent from the streamed rows prepended above it. Selecting "Block"
+    // on a namespace whose recent traffic is all allows produced six ALLOW rows under a header reading
+    // "Showing 6 of 0 records" — 6 live rows over a server count of 0. In an audit tool that is not a
+    // cosmetic slip: someone filtering to Block during an incident sees rows and reasonably reads them as
+    // blocks. Always exactly six, because `streamed` is capped at slice(0, 6).
     const liveIds = new Set(streamed.map((r) => r.id).filter(Boolean));
-    // In real-only mode the server already hides red-team/synthetic rows — mirror that for the live tail
-    // (drop red-team-source rows) so a streamed test row can't reappear above the filtered page.
-    const live = realOnly ? streamed.filter((r) => r.framework !== "redteam") : streamed;
+    const needle = debouncedTool.trim().toLowerCase();
+    const agentNeedle = debouncedAgent.trim().toLowerCase();
+    const ruleNeedle = rule.trim().toLowerCase();
+    const live = streamed.filter((r) => {
+      // Mirror the server's own predicates. The rest are the substring/equality matches audit/records
+      // applies.
+      //
+      // `non_real` is the SERVER's verdict on the same exclusion audit/records applies with
+      // exclude_synthetic (red-team framework OR a synthetic/probe agent class). This used to test
+      // `r.framework === "redteam"`, but the live payload carried no `framework` field at all — so the
+      // comparison was against `undefined`, never matched, and "Real traffic only" silently passed
+      // red-team and probe rows straight into the tail while the fetched rows below were correctly
+      // filtered. Reading the server's boolean also avoids forking the synthetic class-name list into TS.
+      if (realOnly && r.non_real) return false;
+      if (decision !== "all" && r.decision !== decision) return false;
+      if (needle && !(r.tool_name ?? "").toLowerCase().includes(needle)) return false;
+      if (agentNeedle && !(r.agent_id ?? "").toLowerCase().includes(agentNeedle)) return false;
+      if (ruleNeedle && !(r.rule_id ?? "").toLowerCase().includes(ruleNeedle)) return false;
+      return true;
+    });
     return [...(page === 0 ? live : []), ...(base.data ?? []).filter((r) => !liveIds.has(r.id))];
-  }, [streamed, base.data, page, realOnly]);
+  }, [streamed, base.data, page, realOnly, decision, debouncedTool, debouncedAgent, rule]);
 
   const totalCount = totalRecords.data?.length ?? 0;
   // The total-count probe is server-capped at limit=500 (audit/records enforces le=500), so records

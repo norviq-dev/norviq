@@ -24,6 +24,7 @@ from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
 from norviq.api.synthetic import audit_row_is_non_real, is_synthetic_identity  # the ONE shared synthetic/probe classifier (do not fork)
 from norviq.config import settings
+from norviq.engine.evaluator import WOULD_BLOCK_RULE_PREFIXES  # softened-would-block rule_id prefixes (do not fork)
 
 
 def _canonical(record: dict) -> str:
@@ -50,6 +51,25 @@ def _since_for_range(range_value: Literal["1h", "6h", "24h", "7d", "30d"]) -> da
     """Convert API range token to UTC datetime bound."""
     range_map = {"1h": 1, "6h": 6, "24h": 24, "7d": 168, "30d": 720}
     return datetime.now(timezone.utc) - timedelta(hours=range_map.get(range_value, 24))
+
+
+# Bucket WIDTH per range, in minutes. Volume was bucketed by hour for every range, so `1h` could only
+# ever yield one or two points and `30d` yielded 720 — one axis granularity serving a 720x span. A single
+# point is worse than coarse: a line has no segment to draw, so the chart rendered blank while its tooltip
+# still reported numbers (see ui VolumeChart). Each entry below keeps a range at roughly 12-30 points.
+_BUCKET_MINUTES: dict[str, int] = {"1h": 5, "6h": 15, "24h": 60, "7d": 360, "30d": 1440}
+
+
+def _bucket_key(ts: datetime, minutes: int) -> str:
+    """Floor `ts` to a `minutes`-wide bucket, formatted for the chart's category axis.
+
+    Floors on absolute minutes-since-midnight so bucket edges are stable and aligned across rows
+    (e.g. 15-minute buckets always land on :00/:15/:30/:45) rather than drifting with the first row seen.
+    """
+    floored = (ts.hour * 60 + ts.minute) // minutes * minutes
+    return ts.replace(hour=floored // 60, minute=floored % 60, second=0, microsecond=0).strftime(
+        "%Y-%m-%d %H:%M"
+    )
 
 
 def _to_dict(row: AuditLogEntry) -> dict:
@@ -177,6 +197,13 @@ async def audit_stats(
         stmt = stmt.where(AuditLogEntry.namespace == namespace)
     total = 0
     blocked = 0
+    # Monitor mode (namespace enforcement_mode=audit, or a per-policy audit-mode policy) SOFTENS a
+    # would-block into an `audit` decision — it never emits `block`. So `blocked` is structurally 0 for a
+    # monitored namespace, and the Overview tile (which correctly relabels itself "Would-block") was
+    # reading that 0 and reporting "nothing would have been stopped" for a namespace the policy was
+    # stopping plenty in. Counted separately rather than folded into `blocked` so an enforcing namespace's
+    # number keeps meaning "actually blocked".
+    would_blocked = 0
     # Engine (OPA-eval) errors are fail-closed ENGINE faults, not policy decisions. Surface them as a
     # distinct dashboard signal so an `evaluator_error` spike reads as an engine-health problem, not a wall of
     # "policy blocks". A clean input never produces one (transient errors self-heal via the evaluator retry).
@@ -197,6 +224,8 @@ async def audit_stats(
         total += n
         if decision == "block":
             blocked += n
+        if str(rule_id or "").startswith(WOULD_BLOCK_RULE_PREFIXES):
+            would_blocked += n
         if rule_id == "evaluator_error":
             engine_errors += n
         tool_counts[str(tool_name or "")] = tool_counts.get(str(tool_name or ""), 0) + n
@@ -207,10 +236,14 @@ async def audit_stats(
         for name, count in sorted(tool_counts.items(), key=lambda kv: -kv[1])[:5]
     ]
     rate = round((blocked / total) * 100, 2) if total else 0.0
+    # Companion rate for the monitored case, so the tile and its percentage agree instead of the label
+    # flipping to "Would-block Rate %" over a figure derived from live blocks.
+    would_block_rate = round((would_blocked / total) * 100, 2) if total else 0.0
     avg_latency_ms = round(latency_sum / latency_n, 2) if latency_n else 0.0
-    log.debug("nrvq.api.audit.stats", total=total, blocked=blocked, engine_errors=engine_errors,
-              avg_latency_ms=avg_latency_ms, code="NRVQ-API-7021")
+    log.debug("nrvq.api.audit.stats", total=total, blocked=blocked, would_blocked=would_blocked,
+              engine_errors=engine_errors, avg_latency_ms=avg_latency_ms, code="NRVQ-API-7021")
     return {"total": total, "blocked": blocked, "allowed": total - blocked, "block_rate_pct": rate,
+            "would_blocked": would_blocked, "would_block_rate_pct": would_block_rate,
             "engine_errors": engine_errors, "avg_latency_ms": avg_latency_ms, "top_tools": top_tools}
 
 
@@ -259,9 +292,10 @@ async def audit_volume(
     session: AsyncSession = Depends(get_session),
     user: dict = Depends(get_current_user),
 ) -> list[dict]:
-    """Tool call volume bucketed by hour."""
+    """Tool call volume, bucketed at a width that follows the requested `range`."""
     namespace = read_namespace(user, namespace)
     since = _since_for_range(range)
+    bucket_minutes = _BUCKET_MINUTES.get(range, 60)
     query = select(AuditLogEntry).where(AuditLogEntry.timestamp_utc >= since).order_by(AuditLogEntry.timestamp_utc)
     if namespace:
         query = query.where(AuditLogEntry.namespace == namespace)
@@ -275,11 +309,12 @@ async def audit_volume(
             str(getattr(record, "agent_class", "") or "")
         ):
             continue
-        hour_key = record.timestamp_utc.strftime("%Y-%m-%d %H:00")
-        if hour_key not in buckets:
-            buckets[hour_key] = {"time": hour_key, "allow": 0, "block": 0, "escalate": 0, "audit": 0}
-        buckets[hour_key][record.decision] = int(buckets[hour_key].get(record.decision, 0)) + 1
-    log.debug("nrvq.api.audit.volume", buckets=len(buckets), code="NRVQ-API-7023")
+        key = _bucket_key(record.timestamp_utc, bucket_minutes)
+        if key not in buckets:
+            buckets[key] = {"time": key, "allow": 0, "block": 0, "escalate": 0, "audit": 0}
+        buckets[key][record.decision] = int(buckets[key].get(record.decision, 0)) + 1
+    log.debug("nrvq.api.audit.volume", buckets=len(buckets), bucket_minutes=bucket_minutes,
+              code="NRVQ-API-7023")
     return list(buckets.values())
 
 

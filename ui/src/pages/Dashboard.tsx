@@ -56,6 +56,10 @@ type AuditStats = {
   blocked?: number;
   allowed?: number;
   block_rate_pct?: number;
+  // Monitor mode softens every would-block to an `audit` decision and emits no `block`, so `blocked` is
+  // structurally 0 there. These carry the number the relabelled "Would-block" tile actually means.
+  would_blocked?: number;
+  would_block_rate_pct?: number;
   engine_errors?: number;  // fail-closed OPA-eval faults (distinct from policy blocks)
   avg_latency_ms?: number; // real AVG(latency_ms) over the window (from /audit/stats)
 };
@@ -151,7 +155,11 @@ export function Dashboard() {
     }
   );
   const blocked = useApi<AuditRecord[]>(
-    () => fetchAuditRecords({ range: timeRange, namespace: selectedNamespace, decision: "block", limit: 10 }),
+    // exclude_synthetic mirrors the "Blocked (24h)" tile above, which counts REAL traffic only. Without it
+    // this panel listed red-team/synthetic rows the tile did not count, so the card could read "Blocked: 0"
+    // directly above a list of blocked calls — and "See All" then landed on an Audit Log that (correctly)
+    // defaults to real-traffic-only and showed nothing.
+    () => fetchAuditRecords({ range: timeRange, namespace: selectedNamespace, decision: "block", exclude_synthetic: true, limit: 10 }),
     [timeRange, selectedNamespace]
   );
   const topBlocked = useApi<Array<{ tool_name: string; count: number }>>(
@@ -210,8 +218,16 @@ export function Dashboard() {
   }, [hubSummary.data, selectedCluster]);
 
   const totalCalls = useHub ? hubTotals.total : stats.data?.total ?? 0;
-  const blockedToday = useHub ? hubTotals.block : stats.data?.blocked ?? 0;
-  const blockRate = useHub ? hubTotals.rate : Math.round(stats.data?.block_rate_pct ?? 0);
+  // In Monitor mode the engine SOFTENS every would-block into an `audit` decision and emits no `block`
+  // at all, so `blocked` is structurally 0. The tile already relabels itself "Would-block" here — but it
+  // was still bound to `blocked`, so it read a confident 0 for a namespace whose policy was matching
+  // constantly. Bind the relabelled tile to the number its label promises.
+  const blockedToday = useHub
+    ? hubTotals.block
+    : (monitorScope ? stats.data?.would_blocked : stats.data?.blocked) ?? 0;
+  const blockRate = useHub
+    ? hubTotals.rate
+    : Math.round((monitorScope ? stats.data?.would_block_rate_pct : stats.data?.block_rate_pct) ?? 0);
   // Engine (OPA-eval) faults — fail-closed, NOT policy decisions. Surfaced as a distinct signal.
   const engineErrors = stats.data?.engine_errors ?? 0;
   // First paint — no data resolved yet. Show skeletons instead of flashing 0/0/0 + a half-drawn donut.
@@ -525,6 +541,10 @@ export function Dashboard() {
           action={
             <button
               className="btn btn-ghost btn-sm"
+              // Lands on the Audit Log with decision=block. No real-only param is passed because the Audit Log
+              // already DEFAULTS to real-traffic-only, and this panel now uses that same lens — so the list you
+              // clicked and the page you arrive at agree. They did not before: this panel included synthetic rows
+              // the destination filtered out, so a populated list drilled through to an empty table.
               onClick={() => navigate(`/audit?decision=block`)}
               type="button"
             >
