@@ -33,8 +33,10 @@
 
 import type {
   BuilderAllowlist,
+  BuilderAllowlistGrant,
   BuilderAllowlistRefinements,
   BuilderCondition,
+  BuilderParamConstraint,
   BuilderConditionParamRegex,
   BuilderDetector,
   BuilderGraph,
@@ -70,6 +72,13 @@ export type BuilderErrorCode =
   | "not_double_negation"
   | "invalid_allowlist"
   | "empty_allowlist_tool"
+  /** Per-tool constraint problems (Phase 2d). `grant_not_allowlisted` and `duplicate_grant` are called
+   *  out separately from the generic `invalid_grant` because both describe a policy that would be QUIETLY
+   *  MORE PERMISSIVE than what the operator wrote — the failure mode worth naming precisely. */
+  | "invalid_grant"
+  | "grant_not_allowlisted"
+  | "duplicate_grant"
+  | "invalid_constraint"
   | "reserved_scope"
   /** A condition whose `type` this build does not recognise — only reachable from a rehydrated or
    *  hand-edited embedded graph, never from the UI. See validateCondition's trailing `else`. */
@@ -583,6 +592,161 @@ function validateAllowlistGraph(graph: BuilderGraph): BuilderError[] {
       errors.push({ code: "empty_allowlist_tool", message: `Allowlist tool at index ${i} is empty after trim` });
     }
   });
+  errors.push(...validateGrants(allowlist!));
+  return errors;
+}
+
+/** Field names are emitted as rego STRING keys (`input.tool_params["<field>"]`), never as identifiers, so
+ *  the only real requirement is non-empty. Kept deliberately permissive about the character set — tool
+ *  params in the wild are `snake_case`, `camelCase`, and occasionally dotted — while still rejecting the
+ *  blank/whitespace case that would compile to a lookup nothing can satisfy. */
+function invalidField(field: unknown): boolean {
+  return typeof field !== "string" || field.trim() === "";
+}
+
+/**
+ * Validate the optional per-tool `grants` (Phase 2d).
+ *
+ * Two rules carry real weight beyond shape-checking:
+ *  - a grant whose tool is NOT on the allowlist is an ERROR, not an implicit allow. A grant NARROWS an
+ *    existing permission; letting it also grant one would make the allowlist stop being the single
+ *    answer to "what may this class call".
+ *  - a duplicate grant for one tool is an ERROR rather than last-one-wins, because silently discarding
+ *    half of an operator's constraints produces a policy that is quietly more permissive than what they
+ *    wrote — the worst failure mode this feature can have.
+ */
+function validateGrants(allowlist: BuilderAllowlist): BuilderError[] {
+  const errors: BuilderError[] = [];
+  const rawGrants = (allowlist as { grants?: unknown }).grants;
+  if (rawGrants === undefined || rawGrants === null) return errors; // absent is the pre-2d shape — fine
+  if (!Array.isArray(rawGrants)) {
+    errors.push({ code: "invalid_grant", message: 'Allowlist "grants" must be an array when present' });
+    return errors;
+  }
+  const allowed = new Set(
+    allowlist.tools.filter((t): t is string => typeof t === "string").map((t) => t.trim().toLowerCase())
+  );
+  const seen = new Set<string>();
+  rawGrants.forEach((rawGrant, gi) => {
+    if (!rawGrant || typeof rawGrant !== "object" || Array.isArray(rawGrant)) {
+      errors.push({ code: "invalid_grant", message: `Grant at index ${gi} is not an object` });
+      return;
+    }
+    const grant = rawGrant as BuilderAllowlistGrant;
+    if (invalidField(grant.tool)) {
+      errors.push({ code: "invalid_grant", message: `Grant at index ${gi} has no tool name` });
+      return;
+    }
+    const tool = grant.tool.trim().toLowerCase();
+    if (!allowed.has(tool)) {
+      errors.push({
+        code: "grant_not_allowlisted",
+        message: `Grant for "${grant.tool}" constrains a tool that is not on the allowlist — add it to the allowed tools, or remove the constraints`
+      });
+    }
+    if (seen.has(tool)) {
+      errors.push({
+        code: "duplicate_grant",
+        message: `More than one set of constraints for "${grant.tool}" — merge them into a single entry (all constraints on a tool must hold together)`
+      });
+    }
+    seen.add(tool);
+    if (!Array.isArray(grant.constraints) || grant.constraints.length === 0) {
+      errors.push({
+        code: "invalid_grant",
+        message: `Grant for "${grant.tool}" has no constraints — remove it, or add at least one (an empty grant would silently widen the tool back to unconstrained)`
+      });
+      return;
+    }
+    grant.constraints.forEach((c, ci) => errors.push(...validateConstraint(c, `${grant.tool}[${ci}]`)));
+  });
+  return errors;
+}
+
+/**
+ * Author-time validity check for a pattern that will be evaluated by OPA, i.e. by Go's RE2 — NOT by the
+ * browser's regex engine.
+ *
+ * The difference matters in one very common case: RE2 supports INLINE FLAGS (`(?i)` for
+ * case-insensitive, and `(?s)`/`(?m)`), and JavaScript's `RegExp` does not — `new RegExp("(?i)^select")`
+ * throws. Validating naively with `new RegExp` therefore rejected `(?i)…` patterns that OPA accepts and
+ * enforces perfectly well, and case-insensitivity is the single most common thing an operator wants when
+ * matching a SQL statement or a URL. So a leading inline-flag group is translated to the equivalent JS
+ * flags for the purposes of the check rather than treated as a syntax error.
+ *
+ * This stays a best-effort check in the other direction: RE2 is not a superset of JS regex (no
+ * backreferences, no lookaround), so a pattern using those passes here and is rejected later by OPA. That
+ * asymmetry is acceptable — the check exists to catch typos at author time, and the server's own rego
+ * validation is the backstop — but it is the reason this is not claimed to be an exact RE2 parser.
+ */
+function isValidRe2Pattern(pattern: string): boolean {
+  const inline = /^\(\?([ims]+)\)/.exec(pattern);
+  const body = inline ? pattern.slice(inline[0].length) : pattern;
+  // Keep only the inline flags JS also spells the same way; `s` and `m` map directly, `i` maps directly.
+  const flags = inline ? [...new Set(inline[1].split(""))].join("") : "";
+  try {
+    new RegExp(body, flags);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Validate ONE parameter constraint. `pattern` is compiled with `new RegExp` here — the same
+ *  fail-at-author-time guarantee `paramRegex` already gives in rules mode — so an unparseable pattern is
+ *  a builder error rather than a policy that OPA rejects at push time (which surfaces as a 422 the
+ *  operator sees long after saving, with the OLD rego still enforcing). */
+function validateConstraint(c: unknown, where: string): BuilderError[] {
+  const errors: BuilderError[] = [];
+  const bad = (message: string) => errors.push({ code: "invalid_constraint", message: `${where}: ${message}` });
+  if (!c || typeof c !== "object" || Array.isArray(c)) {
+    bad("constraint is not an object");
+    return errors;
+  }
+  const con = c as BuilderParamConstraint;
+  if (invalidField((con as { field?: unknown }).field)) {
+    bad("constraint has no parameter name");
+    return errors;
+  }
+  switch (con.kind) {
+    case "matches":
+    case "notMatches": {
+      if (typeof con.pattern !== "string" || con.pattern === "") {
+        bad("pattern is empty");
+        break;
+      }
+      if (!isValidRe2Pattern(con.pattern)) bad(`"${con.pattern}" is not a valid regular expression`);
+      break;
+    }
+    case "oneOf":
+    case "noneOf": {
+      const values = (con as { values?: unknown }).values;
+      if (!Array.isArray(values) || values.length === 0) {
+        bad("needs at least one value");
+        break;
+      }
+      if (values.some((v) => typeof v !== "string" || v.trim() === "")) bad("every value must be a non-empty string");
+      break;
+    }
+    case "maxNumber": {
+      if (typeof con.max !== "number" || !Number.isFinite(con.max)) bad("max must be a finite number");
+      break;
+    }
+    case "hostIn": {
+      const hosts = (con as { hosts?: unknown }).hosts;
+      if (!Array.isArray(hosts) || hosts.length === 0) {
+        bad("needs at least one host");
+        break;
+      }
+      if (hosts.some((h) => typeof h !== "string" || h.trim() === "")) bad("every host must be a non-empty string");
+      break;
+    }
+    case "required":
+    case "forbidden":
+      break;
+    default:
+      bad(`unknown constraint type "${String((con as { kind?: unknown }).kind)}"`);
+  }
   return errors;
 }
 
@@ -954,6 +1118,162 @@ function cleanAllowlistRefinements(allowlist: BuilderAllowlist | null | undefine
 
 const REFINEMENT_ORDER: (keyof BuilderAllowlistRefinements)[] = ["readonly", "egress", "scope", "rate"];
 
+/** Defensive re-derivation of the per-tool grants, tolerant of a malformed blob for the same reason as
+ *  `cleanAllowlistTools`: `buildFullRego` runs even on an invalid graph so stats can be computed. Keeps
+ *  only well-formed grants with at least one constraint, deduped by tool (first wins here — the DUPLICATE
+ *  itself is already a hard validation error, so this path only matters for the stats-on-invalid-graph
+ *  case), and sorted so output is deterministic. */
+function cleanAllowlistGrants(allowlist: BuilderAllowlist | null | undefined): BuilderAllowlistGrant[] {
+  const raw = allowlist && Array.isArray((allowlist as { grants?: unknown }).grants)
+    ? ((allowlist as { grants?: unknown }).grants as unknown[])
+    : [];
+  const byTool = new Map<string, BuilderAllowlistGrant>();
+  for (const g of raw) {
+    if (!g || typeof g !== "object" || Array.isArray(g)) continue;
+    const grant = g as BuilderAllowlistGrant;
+    if (typeof grant.tool !== "string" || grant.tool.trim() === "") continue;
+    if (!Array.isArray(grant.constraints) || grant.constraints.length === 0) continue;
+    const tool = grant.tool.trim().toLowerCase();
+    if (!byTool.has(tool)) byTool.set(tool, { tool, constraints: grant.constraints });
+  }
+  return [...byTool.values()].sort((a, b) => a.tool.localeCompare(b.tool));
+}
+
+/** Escape a literal for safe inclusion in a rego regex. Used by `hostIn`, whose hosts are operator-typed
+ *  literals spliced into an alternation — an unescaped `.` there would turn `api.example.com` into a
+ *  pattern matching `apiXexample.com`, i.e. a HOST ALLOWLIST THAT MATCHES HOSTS IT SHOULD NOT. */
+function regexEscapeLiteral(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Compile ONE constraint to a rego expression line (indented, no trailing semicolon).
+ *
+ * Every variant except `forbidden` is a POSITIVE assertion over a well-typed value, so an absent or
+ * wrong-typed parameter fails the constraint and the call is denied. That direction is deliberate: the
+ * alternative (treat "field missing" as "constraint not applicable") would let a caller bypass every
+ * constraint by simply omitting the parameter.
+ */
+function constraintExpr(c: BuilderParamConstraint): string {
+  const f = JSON.stringify(c.field);
+  switch (c.kind) {
+    case "matches":
+      return `    regex.match(${JSON.stringify(c.pattern)}, _p_str(${f}))`;
+    case "notMatches":
+      return `    not regex.match(${JSON.stringify(c.pattern)}, _p_str(${f}))`;
+    case "oneOf":
+      return `    ${jsonSet(c.values.map((v) => v.trim().toLowerCase()))}[lower(_p_str(${f}))]`;
+    case "noneOf":
+      return `    not ${jsonSet(c.values.map((v) => v.trim().toLowerCase()))}[lower(_p_str(${f}))]`;
+    case "maxNumber":
+      return `    _p_num(${f}) <= ${JSON.stringify(c.max)}`;
+    case "required":
+      return `    _present(${f})`;
+    case "forbidden":
+      return `    not _present(${f})`;
+    case "hostIn": {
+      // Anchored at the scheme and terminated at the first /?# so a lookalike host cannot be smuggled in
+      // the path or query (`https://evil.com/api.internal.example.com`). An optional `//` userinfo segment
+      // is NOT permitted before the host — `https://api.internal.example.com@evil.com/` must NOT pass,
+      // and it doesn't, because `@` is excluded from the host character class below.
+      const alt = c.hosts.map((h) => regexEscapeLiteral(h.trim().toLowerCase())).join("|");
+      return `    regex.match(${JSON.stringify(`^(?i)https?://(${alt})(:[0-9]+)?([/?#]|$)`)}, lower(_p_str(${f})))`;
+    }
+    default:
+      // Unreachable for a validated graph (validateConstraint rejects unknown kinds). Emitting a literal
+      // `false` rather than nothing keeps a malformed blob FAIL-CLOSED: the tool's grant can never hold.
+      return `    false`;
+  }
+}
+
+/** The param-accessor helpers every constraint expression relies on. Emitted once, only when at least one
+ *  grant exists, so a pre-2d graph's output is byte-identical to before.
+ *
+ *  `_p_str`/`_p_num` are total functions (a value when the param is present AND the right type, a
+ *  never-matching sentinel otherwise) rather than partial rules, because a partial rule would make the
+ *  whole enclosing body undefined on a missing param — which in a `not`-wrapped constraint like
+ *  `notMatches` would flip the result to ALLOW. Returning a sentinel keeps every variant's truth value
+ *  well-defined on absent input. */
+function paramHelperBlock(): string {
+  return `# --- per-tool parameter accessors (Phase 2d) ---
+# Total, not partial: a partial rule left the enclosing body UNDEFINED on a missing param, which under a
+# negated constraint (notMatches / noneOf / forbidden) would read as "constraint satisfied" and ALLOW the
+# call. The sentinels below can never satisfy a positive constraint, so an absent param denies instead.
+_present(f) { _ = input.tool_params[f] }
+_p_str(f) = v { v := input.tool_params[f]; is_string(v) }
+_p_str(f) = "\\u0000" { not _has_str(f) }
+_has_str(f) { is_string(input.tool_params[f]) }
+_p_num(f) = v { v := input.tool_params[f]; is_number(v) }
+_p_num(f) = 1e308 { not _has_num(f) }
+_has_num(f) { is_number(input.tool_params[f]) }`;
+}
+
+/**
+ * Emit the per-tool constraint section: a `_constrained` set naming every tool that carries constraints,
+ * one `_grant_ok` body per constrained tool, and the `constraints_ok` gate the allow rule adds.
+ *
+ * `constraints_ok` holds when the tool is unconstrained OR its own grant body holds — so adding a grant
+ * can only ever NARROW what the allowlist already permits, never widen it, and a tool nobody constrained
+ * behaves exactly as it did before this feature existed.
+ */
+function grantsSection(grants: BuilderAllowlistGrant[]): string {
+  if (grants.length === 0) return "";
+  const constrained = jsonSet(grants.map((g) => g.tool));
+  const bodies = grants.map((g) => {
+    const lines = g.constraints.map((c) => constraintExpr(c));
+    return [`_grant_ok {`, `    lower(input.tool_name) == ${JSON.stringify(g.tool)}`, ...lines, `}`].join("\n");
+  });
+  return [
+    paramHelperBlock(),
+    "",
+    `# --- per-tool constraints: a grant NARROWS an allowlisted tool, it never grants one ---`,
+    `_constrained := ${constrained}`,
+    `constraints_ok { not _constrained[lower(input.tool_name)] }`,
+    `constraints_ok { _grant_ok }`,
+    "",
+    bodies.join("\n\n")
+  ].join("\n");
+}
+
+/** One human-readable line per constrained tool, so the scope a policy actually enforces is legible from
+ *  the rego header without decoding the embedded graph. Returns [] when there are no grants — which is
+ *  what keeps every pre-2d header byte-identical. */
+function grantSummaryLines(allowlist: BuilderAllowlist | null | undefined): string[] {
+  const grants = cleanAllowlistGrants(allowlist);
+  if (grants.length === 0) return [];
+  return [
+    `# Per-tool scope (${grants.length} constrained tool${grants.length === 1 ? "" : "s"}) — ALL constraints must`,
+    `# hold; a constrained tool is allowed ONLY for arguments matching its line below. Unlisted tools stay`,
+    `# unconstrained. This is what an intent allowlist of bare tool NAMES cannot express.`,
+    ...grants.map((g) => `#   ${commentSafe(g.tool)}: ${commentSafe(g.constraints.map(describeConstraint).join("; "))}`)
+  ];
+}
+
+/** Plain-English rendering of one constraint for the header comment (never parsed — the embedded graph
+ *  is the source of truth; this exists so a human reading the rego can see the intent). */
+function describeConstraint(c: BuilderParamConstraint): string {
+  switch (c.kind) {
+    case "matches":
+      return `${c.field} matches /${c.pattern}/`;
+    case "notMatches":
+      return `${c.field} does NOT match /${c.pattern}/`;
+    case "oneOf":
+      return `${c.field} in {${c.values.join(", ")}}`;
+    case "noneOf":
+      return `${c.field} not in {${c.values.join(", ")}}`;
+    case "maxNumber":
+      return `${c.field} <= ${c.max}`;
+    case "required":
+      return `${c.field} required`;
+    case "forbidden":
+      return `${c.field} must be absent`;
+    case "hostIn":
+      return `${c.field} host in {${c.hosts.join(", ")}}`;
+    default:
+      return "unrecognised constraint (fails closed)";
+  }
+}
+
 /** The allowlist-mode header COMMENT lines (package + blob + hash lines are added identically by
  *  `buildFullRego` for both modes) — default-deny/tighten-only framing, the allowlist + refinements
  *  summary, the `norviq.intent.` governance-classification nuance, and the documented `learned_verbs`
@@ -984,6 +1304,7 @@ function allowlistHeaderComment(graph: BuilderGraph, scope: BuilderScope): strin
     `# tool's read/egress classification below is name-heuristic only, never admin-promotion-overridden.`,
     `# Allowlist (${names.length} tool${names.length === 1 ? "" : "s"}): ${names.length ? names.join(", ") : "(empty — denies every tool for this class)"}`,
     `# Refinements: ${enabled.length ? enabled.join(", ") : "(none)"}`,
+    ...grantSummaryLines(graph.allowlist),
     `# Source of truth is the GRAPH, embedded below as a base64 JSON blob; this rego is regenerated`,
     `# deterministically from it and is never hand-edited (see VISUAL-POLICY-BUILDER-PLAN.md, section 2).`
   ];
@@ -1056,12 +1377,49 @@ function buildAllowlistBody(graph: BuilderGraph, targetNamespace: string): strin
     scope: "    in_scope",
     rate: "    rate_within"
   };
+  // `constraints_ok` sits with the refinements as one more AND-guard on the single allow rule, so the
+  // default-deny shape is untouched: still exactly one way to be allowed, now with a narrower gate.
+  // Omitted entirely when there are no grants, which is what keeps pre-2d graphs byte-identical.
+  const grants = cleanAllowlistGrants(graph.allowlist);
   const guardLines = [
     `    ${guardLine}`,
     `    in_allowlist`,
-    ...REFINEMENT_ORDER.filter((k) => !!refinements[k]).map((k) => guardLineFor[k])
+    ...REFINEMENT_ORDER.filter((k) => !!refinements[k]).map((k) => guardLineFor[k]),
+    ...(grants.length ? [`    constraints_ok`] : [])
   ];
   const allowIntentBlock = [`allow_intent {`, ...guardLines, `}`].join("\n");
+  const grantsBlock = grantsSection(grants);
+
+  // A denied-but-allowlisted call now has TWO possible causes: a refinement, or a per-tool constraint.
+  // They get distinct rule_ids so the operator sees WHICH gate rejected the call — "allowlisted but
+  // blocked" with no further detail is exactly the kind of decision that gets debugged by guesswork.
+  //
+  // The two bodies MUST be mutually exclusive: `rule_id` is a complete rule, so two simultaneously-true
+  // bodies assigning different values is a rego eval CONFLICT (which fails closed as an engine error, not
+  // as a policy decision). `constraints_ok` / `not constraints_ok` partitions the space exactly.
+  //
+  // Emitted only when grants exist — with no grants `constraints_ok` is not defined at all, so
+  // `not constraints_ok` would be vacuously TRUE and every refinement block would be misattributed.
+  const blockAttribution = grants.length
+    ? [
+        `decision = "block" { denied; in_allowlist }`,
+        `rule_id = "intent_refinement_mismatch" { denied; in_allowlist; constraints_ok }`,
+        `reason = sprintf(${JSON.stringify(
+          `Blocked: %s is allowlisted for ${reasonPhrase} but fails an enabled refinement (e.g. no-external-egress)`
+        )}, [input.tool_name]) { denied; in_allowlist; constraints_ok }`,
+        ``,
+        `rule_id = "intent_constraint_violation" { denied; in_allowlist; not constraints_ok }`,
+        `reason = sprintf(${JSON.stringify(
+          `Blocked: %s is allowed for ${reasonPhrase}, but these arguments fall outside what it is scoped to do`
+        )}, [input.tool_name]) { denied; in_allowlist; not constraints_ok }`
+      ]
+    : [
+        `decision = "block" { denied; in_allowlist }`,
+        `rule_id = "intent_refinement_mismatch" { denied; in_allowlist }`,
+        `reason = sprintf(${JSON.stringify(
+          `Blocked: %s is allowlisted for ${reasonPhrase} but fails an enabled refinement (e.g. no-external-egress)`
+        )}, [input.tool_name]) { denied; in_allowlist }`
+      ];
 
   const tailBlock = [
     `denied { ${guardLine}; not allow_intent }`,
@@ -1070,16 +1428,18 @@ function buildAllowlistBody(graph: BuilderGraph, targetNamespace: string): strin
     `rule_id = ${JSON.stringify(`intent_allow_${token}`)} { allow_intent }`,
     `reason = ${JSON.stringify(`Allowed: tool in the intended allowlist for ${reasonPhrase}`)} { allow_intent }`,
     ``,
-    `decision = "block" { denied; in_allowlist }`,
-    `rule_id = "intent_refinement_mismatch" { denied; in_allowlist }`,
-    `reason = sprintf(${JSON.stringify(
-      `Blocked: %s is allowlisted for ${reasonPhrase} but fails an enabled refinement (e.g. no-external-egress)`
-    )}, [input.tool_name]) { denied; in_allowlist }`
+    ...blockAttribution
   ].join("\n");
 
-  const sections = [defaultTripleBlock, allowSetsBlock, membershipBlock, helperSection, allowIntentBlock, tailBlock].filter(
-    (s) => s.length > 0
-  );
+  const sections = [
+    defaultTripleBlock,
+    allowSetsBlock,
+    membershipBlock,
+    helperSection,
+    grantsBlock,
+    allowIntentBlock,
+    tailBlock
+  ].filter((s) => s.length > 0);
   return sections.join("\n\n") + "\n";
 }
 

@@ -176,6 +176,58 @@ export interface BuilderAllowlistRefinements {
 }
 
 /**
+ * A single constraint on ONE tool parameter (Phase 2d — "minute-level intent").
+ *
+ * WHY THIS EXISTS. An intent allowlist of tool NAMES plus four class-wide booleans expresses exactly
+ * what a framework's own tool-binding already expresses: "this agent may call execute_sql". It says
+ * nothing about HOW, and the four refinements are all-or-nothing across every tool in the class — so
+ * "read-only" is either on for the whole class or off. The real intent of a reporting agent is not
+ * "may call execute_sql", it is "may READ users and orders, never payments, never card columns, capped
+ * at 100 rows". Constraints are where that gets said.
+ *
+ * Every variant is closed-form (enum kind + string/number/string[] payload) for the same anti-injection
+ * reason as the rest of this file: `field`/`values`/`hosts` are JSON.stringify-escaped into rego STRING
+ * literals, and `pattern` is validated with `new RegExp()` at compile time and then escaped the same way
+ * — it reaches rego only as the string argument to `regex.match`, never as rego syntax.
+ *
+ * A missing or wrong-typed parameter never silently passes: each variant compiles to a POSITIVE match on
+ * a well-typed value (see builderCompile's `_p_str`/`_p_num` helpers), so an absent field fails the
+ * constraint and the call is denied. `forbidden` is the deliberate exception — it asserts ABSENCE.
+ */
+export type BuilderParamConstraint =
+  /** `input.tool_params[field]` is a string matching `pattern`. e.g. query matches ^\s*select\b */
+  | { kind: "matches"; field: string; pattern: string }
+  /** `input.tool_params[field]` is a string NOT matching `pattern`. e.g. query has no `card_number` */
+  | { kind: "notMatches"; field: string; pattern: string }
+  /** Value (lower-cased) is one of `values`. e.g. table ∈ {users, orders} */
+  | { kind: "oneOf"; field: string; values: string[] }
+  /** Value (lower-cased) is none of `values`. e.g. table ∉ {payments} */
+  | { kind: "noneOf"; field: string; values: string[] }
+  /** Numeric value <= `max`. e.g. limit <= 100 */
+  | { kind: "maxNumber"; field: string; max: number }
+  /** The parameter must be present (any type). */
+  | { kind: "required"; field: string }
+  /** The parameter must be ABSENT. e.g. no `force` flag on a delete. */
+  | { kind: "forbidden"; field: string }
+  /** Value is an http(s) URL whose HOST is one of `hosts` — the egress control users cannot write
+   *  correctly by hand as a regex (host confusion, userinfo tricks, path-embedded lookalikes). */
+  | { kind: "hostIn"; field: string; hosts: string[] };
+
+/**
+ * Per-tool constraints inside an intent allowlist (Phase 2d). ALL constraints must hold for the call to
+ * be allowed; a tool with no grant stays unconstrained (exactly today's behaviour), which is what keeps
+ * every pre-2d graph compiling unchanged.
+ *
+ * `tool` MUST also appear in `BuilderAllowlist.tools` — a grant is a NARROWING of an existing allow, never
+ * a second way to grant one. builderCompile rejects an orphan grant (`grant_not_allowlisted`) rather than
+ * silently permitting a tool the operator never put on the allowlist.
+ */
+export interface BuilderAllowlistGrant {
+  tool: string;
+  constraints: BuilderParamConstraint[];
+}
+
+/**
  * An intent allowlist (Phase 2c): only `tools` may be called for the class, and only when every
  * enabled refinement in `refinements` also holds — everything else (every non-listed tool, and any
  * listed tool that fails an enabled refinement) is blocked. `tools` MAY be empty — that is a valid,
@@ -187,6 +239,15 @@ export interface BuilderAllowlistRefinements {
 export interface BuilderAllowlist {
   tools: string[];
   refinements: BuilderAllowlistRefinements;
+  /**
+   * Optional per-tool parameter constraints (Phase 2d). Optional and absent-by-default is load-bearing
+   * for back-compat: every graph authored before 2d has no `grants` key, and the compiler emits
+   * byte-identical rego for those (see builderCompile's `cleanAllowlistGrants` → empty → no constraint
+   * section at all). At most one grant per tool; duplicates are a validation error rather than a
+   * last-one-wins merge, because silently dropping half an operator's constraints is the kind of failure
+   * that reads as "the policy is too permissive" long after anyone remembers why.
+   */
+  grants?: BuilderAllowlistGrant[];
 }
 
 export interface BuilderGraph {
