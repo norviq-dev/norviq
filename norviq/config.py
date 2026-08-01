@@ -186,6 +186,12 @@ class NorviqSettings(BaseSettings):
     mcp_scan_responses: bool = True
     # Evaluate server-initiated sampling/createMessage against policy (denial-of-wallet / confused deputy).
     mcp_govern_sampling: bool = True
+    # 2026-07-28 lets tool PARAMETERS set outbound HTTP headers (`x-mcp-header`). That is
+    # model-controlled input reaching the header layer — header injection, auth-token smuggling and
+    # SSRF pivoting in one feature, and it is specified behaviour rather than a bug. Default DENY:
+    # a governed workload that genuinely needs it should say so explicitly.
+    # NRVQ_MCP_ALLOW_TOOL_HEADERS.
+    mcp_allow_tool_headers: bool = False
     # Evaluate resources/read against policy as a read-verb tool call (indirect-injection surface).
     mcp_govern_resources: bool = True
     # Upper bound on in-flight request-id bookkeeping per direction. A peer that opens requests and never

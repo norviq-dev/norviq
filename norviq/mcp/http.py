@@ -10,7 +10,9 @@ MCP's streamable-HTTP transport is asymmetric in a way that matters for a firewa
     the server chooses per request.
   * The client may also open a standalone GET SSE stream on the same endpoint, on which the SERVER
     initiates messages (notifications, and server->client requests like ``sampling/createMessage``).
-  * ``Mcp-Session-Id`` on the initialize response binds subsequent requests to a session.
+  * ``Mcp-Session-Id`` bound subsequent requests to a session in 2025-06-18. The 2026-07-28
+    revision REMOVES it along with protocol-level sessions (SEP-2567), and list results no longer
+    vary per connection. It is therefore accepted-and-ignored here: see `_firewall_for`.
 
 So the proxy must mediate three distinct flows, and the SSE ones are STREAMS: a `tools/list`
 response can arrive as one event inside a stream that stays open afterwards. Buffering the stream to
@@ -57,7 +59,7 @@ _HOP_HEADERS = frozenset({
 
 
 class HttpProxy:
-    """Streamable-HTTP MCP proxy. One firewall instance per `Mcp-Session-Id`."""
+    """Streamable-HTTP MCP proxy. One firewall instance per ATTESTED CALLER IDENTITY."""
 
     def __init__(self, upstream: str, host: str, port: int, server_id: str,
                  tool_name_prefix: str = "") -> None:
@@ -68,37 +70,86 @@ class HttpProxy:
         self._prefix = tool_name_prefix
         self._client: httpx.AsyncClient | None = None
         self._engine: PolicyEngineClient | None = None
-        self._sessions: dict[str, McpFirewall] = {}
+        # Keyed by ATTESTED identity, never by anything the caller sends. See _firewall_for.
+        self._firewalls: dict[str, McpFirewall] = {}
+        self._identity_key: str | None = None
         # Pins are per-SERVER, not per-session: a rug pull that reset itself every time a client
         # reconnected would not be detectable at all.
+        #
+        # `memory` is refused on this transport. Under 2026-07-28 any request may land on any
+        # instance (SEP-2567), so a per-process pin store means instance A approves a definition that
+        # instance B has never seen — every replica reports first_seen forever and drift is
+        # undetectable across the fleet. It is a silent degradation of the control, not an outage,
+        # which is exactly the kind that survives to production. `file` is allowed because an
+        # operator choosing it has chosen shared storage deliberately.
+        pin_store = settings.mcp_pin_store
+        if pin_store == "memory":
+            log.warning(
+                "nrvq.mcp.http.pin_store_upgraded",
+                configured=pin_store, using="control-plane", code="NRVQ-MCP-5065",
+                hint="an in-process pin store cannot detect drift when any request may land on any "
+                     "instance; set NRVQ_MCP_PIN_STORE explicitly to silence this",
+            )
+            pin_store = "control-plane"
+        self._pin_store_kind = pin_store
         self._pins = PinRegistry(
-            store=build_store(settings.mcp_pin_store, settings.mcp_pin_path),
+            store=build_store(pin_store, settings.mcp_pin_path),
             mode=settings.mcp_pin_mode,
         )
         self._lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ wiring
-    def _firewall_for(self, session: str) -> McpFirewall:
-        fw = self._sessions.get(session)
+    async def _firewall_for_caller(self) -> McpFirewall:
+        """The firewall instance for the ATTESTED caller.
+
+        This used to be keyed on the `Mcp-Session-Id` REQUEST HEADER, defaulting to the literal
+        string "default". Two things were wrong with that, and the second is the serious one:
+
+        1. 2026-07-28 removes the header (SEP-2567). Every request would then fall to "default", so
+           every caller would share ONE firewall instance — and the firewall holds the discovered
+           tool catalog. One caller's `tools/list` would decide the Gate-A verdicts applied to
+           another caller's `tools/call`.
+        2. Even while the header existed it was CLIENT-SUPPLIED. A caller could send any value,
+           including another caller's, so it was never an isolation boundary — it was a correlation
+           id doing a security job it was never able to do.
+
+        The key is now the attested SVID, which is the same thing `/evaluate` binds the decision to
+        (§3: identity is resolved from the credential and never read from an MCP message). In the
+        sidecar placement this driver is built for there is exactly one caller, so the map holds one
+        entry; keying it explicitly is what makes that a property rather than a coincidence.
+
+        Reusing one instance across requests is also what the stateless revision asks for: list
+        results no longer vary per connection, so a catalog that reset per "session" would re-derive
+        the same thing and lose drift detection in between.
+        """
+        key = await self._attested_key()
+        fw = self._firewalls.get(key)
         if fw is None:
             fw = McpFirewall(
                 interceptor=ToolInterceptor(self._engine, SPIFFEResolver()),
                 server_id=self._server_id,
-                session_id=f"mcp-http-{session}",
+                session_id=f"mcp-http-{key}",
                 pins=self._pins,
                 tool_name_prefix=self._prefix,
             )
-            # Bounded: a peer can mint session ids freely, and an unbounded map is a memory
-            # exhaustion primitive. Oldest-first eviction only costs the evicted session its
-            # in-memory catalog — pins survive in the shared registry, so drift detection is intact.
-            if len(self._sessions) >= 512:
-                self._sessions.pop(next(iter(self._sessions)), None)
-            self._sessions[session] = fw
+            # Bounded anyway. The key is attested now, so a peer cannot mint entries — but a resolver
+            # returning a varying id (a misconfiguration) should degrade to eviction, not to a memory
+            # exhaustion primitive. Pins live in the shared registry, so an evicted entry only loses
+            # its in-memory catalog and drift detection stays intact.
+            if len(self._firewalls) >= 64:
+                self._firewalls.pop(next(iter(self._firewalls)), None)
+            self._firewalls[key] = fw
         return fw
 
-    @staticmethod
-    def _session_of(request: Request) -> str:
-        return request.headers.get("mcp-session-id", "default")
+    async def _attested_key(self) -> str:
+        """Stable key for the caller this proxy runs alongside, from its attested identity."""
+        if self._identity_key is None:
+            identity = await SPIFFEResolver().resolve()
+            self._identity_key = (
+                getattr(identity, "spiffe_id", "")
+                or f"ns/{getattr(identity, 'namespace', '')}/sa/{getattr(identity, 'service_account', '')}"
+            )
+        return self._identity_key
 
     @staticmethod
     def _forward_headers(headers) -> dict[str, str]:
@@ -108,7 +159,7 @@ class HttpProxy:
     async def _handle_post(self, request: Request) -> Response:
         """Client -> server. One JSON-RPC message in; JSON or an SSE stream back."""
         raw = await request.body()
-        fw = self._firewall_for(self._session_of(request))
+        fw = await self._firewall_for_caller()
         msg = P.decode(raw)
         if msg is None:
             return JSONResponse(P.error_response(None, P.E_PARSE, "invalid JSON-RPC payload"), status_code=400)
@@ -138,12 +189,17 @@ class HttpProxy:
 
     async def _handle_get(self, request: Request) -> Response:
         """Standalone SSE stream: server -> client, including server-initiated requests."""
-        return await self._stream_through(self._firewall_for(self._session_of(request)),
-                                          "GET", request, None)
+        return await self._stream_through(await self._firewall_for_caller(), "GET", request, None)
 
     async def _handle_delete(self, request: Request) -> Response:
-        """Session teardown. Drop the per-session catalog; pins are server-scoped and survive."""
-        self._sessions.pop(self._session_of(request), None)
+        """Session teardown.
+
+        The catalog is deliberately NOT dropped here any more. It used to be keyed on a
+        client-supplied header, so a DELETE discarded whatever that header pointed at; now the
+        instance belongs to the attested caller, and a caller must not be able to reset its OWN
+        Gate-A state by asking. Re-discovering a catalog is exactly how a rug pull would be laundered
+        into a clean first sight. Pins are server-scoped and survive regardless.
+        """
         upstream = await self._client.request(
             "DELETE", self._upstream, headers=self._forward_headers(request.headers))
         return Response(upstream.content, status_code=upstream.status_code,

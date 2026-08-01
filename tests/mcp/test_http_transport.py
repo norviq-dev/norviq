@@ -106,15 +106,17 @@ def _make(decision: str = "allow"):
     proxy._engine = evaluator                             # noqa: SLF001
     proxy._pins = PinRegistry(store=MemoryPinStore(), mode="tofu")  # noqa: SLF001
 
-    # The real firewall factory, but with the stub resolver so no SPIFFE socket is needed.
-    original = proxy._firewall_for                        # noqa: SLF001
+    # The real firewall factory, but with the stub resolver so no SPIFFE socket is needed. The key
+    # is the ATTESTED identity now, so the stub resolver also supplies it.
+    proxy._identity_key = "spiffe://norviq/ns/test/sa/default"   # noqa: SLF001
+    original = proxy._firewall_for_caller                        # noqa: SLF001
 
-    def _firewall_for(session: str):
-        fw = original(session)
+    async def _firewall_for_caller():
+        fw = await original()
         fw._interceptor = ToolInterceptor(evaluator, _StubResolver())  # noqa: SLF001
         return fw
 
-    proxy._firewall_for = _firewall_for                   # noqa: SLF001
+    proxy._firewall_for_caller = _firewall_for_caller            # noqa: SLF001
 
     app = Starlette(routes=[
         Route("/mcp", proxy._handle_post, methods=["POST"]),    # noqa: SLF001
@@ -204,29 +206,39 @@ def test_content_length_is_not_copied_across_the_hop():
     assert json.loads(r.content)["result"]["tools"]
 
 
-# ── session handling ────────────────────────────────────────────────────────────────────────────
-def test_sessions_are_isolated_but_pins_are_shared():
-    """Per-session catalogs, per-SERVER pins.
+# ── caller isolation ────────────────────────────────────────────────────────────────────────────
+def test_the_client_supplied_session_header_is_not_an_isolation_boundary():
+    """The instance is keyed on the ATTESTED caller, never on a header.
 
-    Two clients with different session ids get their own catalogs, so one session's `tools/list`
-    cannot leak into another's — but they share ONE pin registry. A rug pull that reset itself
-    whenever a client reconnected would not be detectable at all, and minting a fresh session id is
-    something any client can do.
+    This test previously asserted the opposite — that two `Mcp-Session-Id` values produced two
+    firewalls — and called it isolation. It never was: the header is chosen by the caller, so any
+    client could claim any other client's session, and 2026-07-28 removes it entirely (SEP-2567),
+    which would have collapsed every caller onto one shared "default" instance carrying the
+    discovered tool catalog. Keying on the attested SVID is the property that actually holds, and it
+    is the same identity `/evaluate` binds the decision to.
     """
     client, _, _, proxy = _make("allow")
     client.post("/mcp", json=_rpc("tools/list"), headers={"mcp-session-id": "s1"})
     client.post("/mcp", json=_rpc("tools/list"), headers={"mcp-session-id": "s2"})
 
-    assert set(proxy._sessions) == {"s1", "s2"}                     # noqa: SLF001
-    pinned = {p.tool_name for p in proxy._pins.snapshot_records()}  # noqa: SLF001
+    # one attested caller -> one firewall, whatever the caller claims its session is
+    assert set(proxy._firewalls) == {"spiffe://norviq/ns/test/sa/default"}  # noqa: SLF001
+    pinned = {p.tool_name for p in proxy._pins.snapshot_records()}          # noqa: SLF001
     assert {"add", "search_docs"} <= pinned
 
 
-def test_delete_drops_the_session_catalog():
+def test_a_caller_cannot_reset_its_own_gate_a_state_with_delete():
+    """DELETE used to drop the catalog the header pointed at. Re-discovering a catalog on demand is
+    exactly how a rug pull would be laundered into a clean first sight, so the attested caller's
+    Gate-A state now survives its own teardown request. Pins are server-scoped and survive anyway.
+    """
     client, upstream, _, proxy = _make("allow")
     client.post("/mcp", json=_rpc("tools/list"), headers={"mcp-session-id": "s1"})
+    before = set(proxy._firewalls)                                   # noqa: SLF001
     r = client.delete("/mcp", headers={"mcp-session-id": "s1"})
+
     assert r.status_code == 200
+    assert set(proxy._firewalls) == before                           # noqa: SLF001
     assert any(True for _ in upstream.received)
 
 

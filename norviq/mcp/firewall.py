@@ -228,6 +228,13 @@ class McpFirewall:
             self._client_pending.put(msg.id, msg.method)
 
         method = msg.method
+        # ANSWER PLANE (2026-07-28 MRTR). A retry carries `inputResponses` — data leaving the trust
+        # boundary in reply to a question the SERVER composed. That is the confused-deputy vector the
+        # sampling gate used to cover, and it is egress, so it is adjudicated before it is forwarded.
+        if self._answer_payload(msg) is not None:
+            result = await self._gate_answer(msg)
+            if result is not None:
+                return result
         if method == P.M_TOOLS_CALL:
             return await self._gate_b_tools_call(msg)
         if method == P.M_RESOURCES_READ and settings.mcp_govern_resources:
@@ -255,15 +262,32 @@ class McpFirewall:
         if msg.is_notification:
             if msg.method in (P.N_TOOLS_CHANGED, P.N_PROMPTS_CHANGED, P.N_RESOURCES_CHANGED):
                 self._on_catalog_changed(msg.method)
+            # 2026-07-28 replaces the standalone GET stream and resources/subscribe with ONE opted-in
+            # server->client stream (`subscriptions/listen`). Its notifications are tagged with a
+            # subscriptionId and carry server-authored content straight into the model's context —
+            # the same indirect-injection surface as a tool result, on a channel that never passed a
+            # gate. Content-guarded, not blocked: a listChanged notification is ordinary.
+            if msg.method.startswith("notifications/") and self._subscription_content(msg):
+                return self._guard_content(msg, "params.content", self._subscription_content(msg))
             return MediationResult(forward=msg.framed)
 
         if msg.is_response:
             requested = self._client_pending.take(msg.id)
+            # `server/discover` replaces the initialize handshake and is the FIRST thing a 2026-07-28
+            # client asks. It advertises the server's identity and capabilities as free text, so it is
+            # a discovery surface exactly like tools/list — and Gate A never saw it.
+            if requested == P.M_SERVER_DISCOVER:
+                return self._gate_a_discover(msg)
             if requested == P.M_TOOLS_LIST:
                 return self._gate_a_tools_list(msg)
             if requested == P.M_PROMPTS_GET:
                 return self._gate_a_prompts_get(msg)
             if requested == P.M_TOOLS_CALL:
+                # A server may now answer a call with a DEMAND for more input rather than a result.
+                # It arrives as ordinary response content, so without this it would be forwarded to
+                # the model unexamined — the confused-deputy vector wearing a new shape.
+                if self._is_input_required(msg):
+                    return self._gate_input_required(msg)
                 return self._on_tool_result(msg)
             if requested == P.M_RESOURCES_READ:
                 return self._on_resource_result(msg)
@@ -293,6 +317,10 @@ class McpFirewall:
             "scan_severity": entry.scan_severity if entry else "none",
             "definition_seen": entry is not None,
             "catalog_stale": bool(entry.stale) if entry else False,
+            # Which PLANE this decision is on, so one policy language covers all four directions.
+            # `answer` is egress in reply to a server-composed question; everything else here is the
+            # ordinary call plane. The evaluator lifts this to `input.direction`.
+            "direction": "answer" if surface == "answer" else "call",
         }
         if entry is not None and entry.digest:
             ctx["tool_digest"] = entry.digest[:16]
@@ -318,6 +346,18 @@ class McpFirewall:
         params = msg.params
         name = str(params.get("name", ""))
         arguments = params.get("arguments")
+        if not settings.mcp_allow_tool_headers and self._sets_transport_headers(arguments):
+            self._bump("tool_header_denied")
+            log.warning("nrvq.mcp.tool_header_denied", tool=name, code="NRVQ-MCP-5063")
+            return MediationResult(
+                reply=P.encode(P.error_response(
+                    msg.id, P.E_POLICY_DENIED,
+                    f"Norviq policy refused '{name}': its arguments set outbound HTTP headers via "
+                    f"'{P.X_MCP_HEADER}'. Model-controlled input reaching the header layer is header "
+                    "injection and SSRF surface; enable NRVQ_MCP_ALLOW_TOOL_HEADERS only for a tool "
+                    "that genuinely needs it.")),
+                blocked=True, note="tool_header_denied",
+            )
         if not isinstance(arguments, dict):
             # MCP allows `arguments` to be absent for a zero-argument tool. Anything else non-dict is
             # malformed; normalising to {} would silently evaluate a DIFFERENT call than the one sent.
@@ -620,11 +660,176 @@ class McpFirewall:
     # ============================================================ RESPONSE PATH
     def _on_tool_result(self, msg: P.JsonRpcMessage) -> MediationResult:
         """Output DLP + indirect-injection scan on an ALLOWED tool's result."""
-        return self._guard_content(msg, "result.content", msg.result.get("content"))
+        guarded = self._guard_content(msg, "result.content", msg.result.get("content"))
+        return self._guard_structured(guarded, msg)
+
+    def _guard_structured(self, prior: MediationResult, msg: P.JsonRpcMessage) -> MediationResult:
+        """DLP over `structuredContent`, which 2026-07-28 loosened to ANY JSON value.
+
+        The text-block guard above walks `result.content`; a card number returned in
+        `structuredContent.customer.card` is in the model's context just as surely and was never
+        looked at. Strings are masked in place at any depth; the shape is preserved, because a tool's
+        declared output schema still has to validate.
+        """
+        if prior.blocked:
+            return prior
+        if not settings.mcp_output_dlp_enabled:
+            return prior
+        raw = prior.forward if prior.forward else msg.framed
+        try:
+            doc = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+        except (ValueError, AttributeError, UnicodeDecodeError):
+            return prior
+        result = doc.get("result") if isinstance(doc, dict) else None
+        if not isinstance(result, dict) or P.STRUCTURED_CONTENT not in result:
+            return prior
+
+        redacted = [0]
+
+        def walk(node: Any) -> Any:
+            if isinstance(node, str):
+                masked = mask_text(node)
+                if masked != node:
+                    redacted[0] += 1
+                return masked
+            if isinstance(node, dict):
+                return {k: walk(v) for k, v in node.items()}
+            if isinstance(node, list):
+                return [walk(v) for v in node]
+            return node
+
+        result[P.STRUCTURED_CONTENT] = walk(result[P.STRUCTURED_CONTENT])
+        if not redacted[0]:
+            return prior
+        self._bump("structured_dlp_redacted")
+        log.warning("nrvq.mcp.output_dlp.structured_redacted", values=redacted[0], code="NRVQ-MCP-5062")
+        result.setdefault("_meta", {}).setdefault("norviq", {})["structured_dlp_redacted"] = redacted[0]
+        return MediationResult(forward=P.encode(doc), note="structured_guarded")
 
     def _on_resource_result(self, msg: P.JsonRpcMessage) -> MediationResult:
         """Same treatment for `resources/read` bodies, which land in context identically."""
         return self._guard_content(msg, "result.contents", msg.result.get("contents"))
+
+    @staticmethod
+    def _sets_transport_headers(arguments: Any) -> bool:
+        """Whether these arguments would set outbound HTTP headers (2026-07-28 `x-mcp-header`).
+
+        Checked at ANY depth: the feature is keyed on the parameter name, and a nested object is
+        still a parameter. Matched case-insensitively because HTTP header names are.
+        """
+        stack = [arguments]
+        seen = 0
+        while stack and seen < 4096:
+            node = stack.pop()
+            seen += 1
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if isinstance(key, str) and key.lower() == P.X_MCP_HEADER:
+                        return True
+                    stack.append(value)
+            elif isinstance(node, list):
+                stack.extend(node)
+        return False
+
+    @staticmethod
+    def _subscription_content(msg: P.JsonRpcMessage) -> Any:
+        """Content blocks carried by a subscription notification, if any."""
+        params = msg.params
+        if not params.get("_meta", {}).get(P.META_SUBSCRIPTION_ID) and "subscriptionId" not in params:
+            return None
+        blocks = params.get("content")
+        return blocks if isinstance(blocks, list) and blocks else None
+
+    def _gate_a_discover(self, msg: P.JsonRpcMessage) -> MediationResult:
+        """Scan a `server/discover` result before the client acts on it.
+
+        Flagged rather than blocked: refusing discovery would make the server unusable, and the
+        threat here is the model READING advertised text as instructions — which fencing addresses
+        and refusal does not.
+        """
+        report: ScanReport = scan_untrusted_content(
+            json.dumps(msg.result, sort_keys=True)[:16384], "result.server_discover")
+        if report.clean:
+            self._bump("discover_clean")
+            return MediationResult(forward=msg.framed)
+        findings = [f.as_dict() for f in report.findings]
+        self._bump("discover_flagged")
+        log.warning("nrvq.mcp.discover.flagged",
+                    findings=[f["rule"] for f in findings], code="NRVQ-MCP-5064")
+        rewritten = json.loads(msg.raw)
+        rewritten["result"].setdefault("_meta", {})["norviq"] = {
+            "gate": "A", "surface": P.M_SERVER_DISCOVER, "scan": findings,
+        }
+        return MediationResult(forward=P.encode(rewritten), note="discover_flagged")
+
+    # ============================================================ ANSWER PLANE (MRTR)
+    # The message SHAPES live in the codec (protocol.py), not here: the firewall decides what to do
+    # about a shape, and the codec decides what a shape IS. Keeping the second half in one place is
+    # what lets both protocol revisions be spoken without a mode flag.
+    @staticmethod
+    def _answer_payload(msg: P.JsonRpcMessage) -> Any:
+        return msg.input_responses
+
+    @staticmethod
+    def _is_input_required(msg: P.JsonRpcMessage) -> bool:
+        return msg.is_input_required
+
+    async def _gate_answer(self, msg: P.JsonRpcMessage) -> MediationResult | None:
+        """Adjudicate the client's ANSWER to a server-composed question, as egress.
+
+        Returns None to fall through to the ordinary call gate when the answer is permitted, so a
+        retry is still governed as the `tools/call` it also is — one message, two planes.
+        """
+        answers = self._answer_payload(msg)
+        params = msg.params if isinstance(msg.params, dict) else {}
+        decision, _ms = await self._evaluate(
+            self._engine_tool_name(str(params.get("name") or msg.method or "")),
+            {P.INPUT_RESPONSES: answers, P.REQUEST_STATE: params.get(P.REQUEST_STATE)},
+            surface="answer",
+        )
+        if decision.decision == "allow":
+            self._bump("answer_allowed")
+            return None
+        self._bump("answer_denied")
+        log.warning("nrvq.mcp.answer.denied", rule=decision.rule_id, code="NRVQ-MCP-5060")
+        return MediationResult(
+            reply=P.encode(P.error_response(
+                msg.id, P.E_POLICY_DENIED,
+                f"Norviq policy refused to answer this server's request ({decision.rule_id}). "
+                "The server asked the client for additional input; that answer was not permitted to leave.",
+            )),
+            blocked=True, note="answer_denied",
+        )
+
+    def _gate_input_required(self, msg: P.JsonRpcMessage) -> MediationResult:
+        """Scan a server's DEMAND for input before the model ever sees it.
+
+        The requests are attacker-authorable text presented to the model as a legitimate prompt —
+        exactly the Gate-A problem, arriving on the response path. They are scanned rather than
+        blocked outright: a lawful `roots/list` demand is ordinary, and refusing every one would
+        break MRTR entirely.
+        """
+        requests = msg.input_requests
+        if not requests:
+            return MediationResult(forward=msg.framed)
+        findings: list[dict] = []
+        for entry in requests:
+            report: ScanReport = scan_untrusted_content(json.dumps(entry, sort_keys=True)[:16384],
+                                                        "result.inputRequests")
+            if not report.clean:
+                findings.extend(f.as_dict() for f in report.findings)
+        if not findings:
+            self._bump("input_required_clean")
+            return MediationResult(forward=msg.framed)
+
+        self._bump("input_required_flagged")
+        log.warning("nrvq.mcp.input_required.flagged",
+                    findings=[f["rule"] for f in findings], code="NRVQ-MCP-5061")
+        rewritten = json.loads(msg.raw)
+        rewritten["result"].setdefault("_meta", {})["norviq"] = {
+            "gate": "answer", "input_request_scan": findings,
+        }
+        return MediationResult(forward=P.encode(rewritten), note="input_required_flagged")
 
     def _guard_content(self, msg: P.JsonRpcMessage, path: str, blocks: Any) -> MediationResult:
         if not isinstance(blocks, list) or not blocks:
@@ -675,10 +880,13 @@ class McpFirewall:
             log.warning("nrvq.mcp.response.injection_flagged",
                         findings=[f["rule"] for f in findings], code="NRVQ-MCP-5036")
 
+        # `path` names the envelope AND the field, because this guard now serves two of them: a tool
+        # or resource RESULT, and a `subscriptions/listen` notification, whose blocks live under
+        # params. Hard-coding "result" here silently skipped the notification path.
         rewritten = json.loads(msg.raw)
-        key = path.split(".", 1)[1]
-        rewritten["result"][key] = new_blocks
-        rewritten["result"].setdefault("_meta", {})["norviq"] = {
+        envelope, key = path.split(".", 1)
+        rewritten[envelope][key] = new_blocks
+        rewritten[envelope].setdefault("_meta", {})["norviq"] = {
             "output_dlp_redacted_blocks": redacted, "response_scan": findings,
         }
         return MediationResult(forward=P.encode(rewritten), note="response_guarded")
