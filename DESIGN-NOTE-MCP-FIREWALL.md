@@ -422,10 +422,14 @@ Real, pre-existing behaviours the MCP surface made visible. None is caused by th
 
 ## 10. Recommended next steps
 
-1. **Webhook injection.** Teach `webhook/injector.go` to rewrite an annotated pod's MCP server
-   commands to route through the proxy, so MCP governance becomes zero-code-change like the sidecar.
-   This is the largest remaining gap between "works" and "turnkey".
+> **Superseded in part by §12 and §13.** The 2026-07-28 spec makes the protocol stateless, which
+> reorders this list: §12.5 steps 2–5 are correctness and security work and come before anything
+> below. Items 3–6 here remain valid as written.
+
+1. ~~**Webhook injection.**~~ **Done** — see §11.
 2. **Propagate verb promotions across replicas** over the policy-invalidation pub/sub (finding #2).
+   Confirmed live on kind: a newly bound `preset: strict` policy was `Active` in the CRD and present
+   in `policies`, while both API replicas kept serving `default_allow` until they were restarted.
 3. **Re-measure the ~6 ms residual** (§5.2) on a node with headroom.
 4. **Feed Gate-A findings into the trust score.** A server that repeatedly serves flagged definitions
    is a signal the existing trust engine could consume.
@@ -433,3 +437,582 @@ Real, pre-existing behaviours the MCP surface made visible. None is caused by th
    path, so an operator only discovers a quarantined tool by visiting the screen.
 6. **HTTP transport at scale.** Now covered by 13 tests including SSE framing and stream-path
    enforcement, but still unproven under real concurrency and with resumption after a dropped stream.
+
+---
+
+## 11. Webhook injection — MCP governance without touching the workload
+
+Until now the proxy had to be wired by hand: change the agent's MCP server command, set the engine
+env, mount a pin store. The sidecar has never asked that of anyone, and MCP should not either.
+
+A pod opts in per container:
+
+```yaml
+metadata:
+  annotations:
+    norviq.io/mcp-servers: "filesystem,github"      # containers whose command IS an MCP server
+    norviq.io/mcp-server-id.github: "github-prod"   # optional stable pin id (default: container name)
+```
+
+and the injector rewrites each named container:
+
+```jsonc
+// before                                     // after
+{"command": ["npx"],                          {"command": ["/norviq/mcp/norviq-mcp",
+ "args": ["-y", "server-filesystem", "/work"]}             "--server-id", "filesystem", "--",
+                                                           "npx", "-y", "server-filesystem", "/work"],
+                                               "args": []}
+```
+
+`command` and `args` are folded into one `command` because Kubernetes ignores the image `CMD` once
+`command` is set and `args` is empty — so the effective argv is exactly what is written, independent
+of how the pod author split the two fields.
+
+### 11.1 Delivering the proxy — the part that makes it zero-code-change
+
+Rewriting the command is easy. Making the rewritten command *runnable* is the actual problem: the
+upstream MCP server image was not built by us. An `npx` server runs on a node image with no Python in
+it at all, so `python -m norviq.mcp` is not available and never will be.
+
+So the payload is frozen with PyInstaller into a self-contained tree — interpreter, stdlib and
+dependencies — and an injected init container copies it into an `emptyDir` that the target container
+mounts **readOnly**. The target image needs nothing but a compatible libc.
+
+`--onedir`, not `--onefile`: a onefile binary unpacks itself to a temp directory on every start, and
+the governed container may have a read-only root filesystem and no writable `/tmp`. A onedir tree is
+read straight from the mount, which is exactly why the mount can be readOnly.
+
+**The libc floor is load-bearing and was found the hard way.** A payload frozen on the current Python
+base (glibc 2.38+) built cleanly, passed its own smoke test, and then died instantly on Debian
+bookworm:
+
+```
+[PYI-9:ERROR] Failed to load Python shared library '.../libpython3.12.so.1.0':
+dlopen: .../libm.so.6: version `GLIBC_2.38' not found
+```
+
+which is precisely the case the feature exists for — an image the operator does not control. The
+payload base is therefore pinned to bullseye (glibc 2.31), and
+`scripts/mcp-proxy-payload-verify.sh` replays the real init-container copy and then execs the payload
+from each target image with the mount read-only. Verified on `node:20-slim` (no Python at all),
+`debian:bookworm-slim`, `python:3.12-slim` and `ubuntu:22.04`. Payload is ~92 MB.
+
+The limit this does **not** lift is musl: an Alpine-based MCP server image cannot run a glibc payload.
+
+### 11.2 Fail-closed rules
+
+The sidecar path's posture is "a pod carrying norviq plumbing that is not fully injected is refused,
+because skipping would run it unpoliced". MCP inherits it exactly:
+
+| situation | verdict | why |
+|---|---|---|
+| annotation names a container the pod lacks | **deny** | a typo that "worked" is the failure mode |
+| named container sets no explicit `command` | **deny** | its argv is the image ENTRYPOINT, which admission cannot see; prepending to `args` would run neither correctly |
+| pod pre-places the proxy volume / mount / a proxy-shaped command / the init container name | **deny** | injector-owned plumbing it did not place; a pre-occupied proxy path runs a chosen binary in place of the firewall |
+| sidecar correct but a named MCP container unwrapped | **inject** (not skip) | that server would otherwise run ungoverned |
+| exactly the injector's own output | **skip** | idempotent re-admission |
+
+Two compositions with the existing classifier were needed. The injected init container is a
+sidecar-image container that necessarily overrides `command` (it runs a `cp`), which the
+neutered-decoy check would otherwise deny on every re-admission — so it is exempted, but only on an
+**exact** match against the spec the injector generates, which buys an attacker nothing because
+reproducing it means reproducing the real proxy copy. And `fullyInjected` now also requires every
+annotated container to be wrapped *with its own server id*, so a proxy-shaped command pointing at a
+catalogue the operator never approved does not read as already-governed.
+
+### 11.3 Off by default, byte-identically
+
+`NRVQ_MCP_INJECT` defaults to false, and with it off the emitted patch and every admission verdict
+are unchanged for any pod — asserted directly in
+`TestMcpInjection_OffEmitsIdenticalPatch` and `TestMcpInjection_PreOccupiedPlumbingIgnoredWhenOff`.
+Enable with `--set webhook.injection.mcp.enabled=true`.
+
+### 11.4 One bug worth recording
+
+The first implementation decided create-vs-append for the target's `volumeMounts` by looking at the
+*original* container, the way `mountPatches` does. That is wrong inside a single patch document: the
+sidecar's mount op had already created `/volumeMounts`, so a second `add /volumeMounts` **replaced**
+it — leaving the MCP container mounting the proxy but not the enforcement socket. Wrapped, and
+unwired. Op-counting assertions passed; it was caught only by applying the patch and inspecting the
+resulting pod, which is why the tests now do that. `TestMcpInjection_KeepsSocketWiringOnTargetContainer`
+locks it.
+
+### 11.5 What an adversarial review of this found
+
+The injector was put through a four-lens adversarial review (admission bypass, JSON-patch
+composition, idempotency, feature-off identity), each finding independently refuted before being
+accepted. 23 candidates, 17 survived. Four mattered enough to change the design:
+
+**A full bypass, and the lesson behind it.** The skip path recognised the delivery init container by
+**name**. So a tenant could hand-write a pod carrying a `norviq-mcp-init` container of their own that
+wrote a three-line shim — `shift 3; exec "$@"` — into a `norviq-mcp-proxy` volume of their own, wrap
+their MCP container in a command that merely *looked* proxied, and be admitted **unpatched** as
+"already injected". The MCP server then ran with the firewall replaced by a script that drops the
+proxy's arguments. Nothing in that pod required anything only the webhook can produce.
+
+The same mistake appeared three more times once named: the delivery volume was matched by name (so a
+`hostPath` passed), the proxy mount was checked without `readOnly` (so the workload could overwrite
+its own firewall), and the wrapped container's routing env was never checked at all (so `NRVQ_API_URL`
+could point at an allow-all engine). The sidecar path had already learned this — it has
+`sidecarRoutingTrusted` for exactly that reason — and the MCP path simply had not inherited it.
+
+The rule now is the one the sidecar already followed: **re-derive what the injector would emit and
+compare, never look for injector-shaped plumbing.**
+
+**The delivery container ran too late.** It was appended to `initContainers`, so when the annotated
+target *was* an init container the payload was staged after the container that execs it — a pod that
+could never start. It is now prepended, and emitted as the last op in the patch, because prepending
+shifts every index the earlier ops address.
+
+**The default proxy image could not work.** `McpProxyImage` fell back to the sidecar image, which
+carries the norviq *package*, not the frozen payload — so `cp /opt/norviq/mcp-proxy` found nothing and
+every governed pod failed its init container. A default that cannot work is worse than none: it fails
+at pod start instead of at install. The image is now required, refused at admission with an
+actionable message and by `required` in the chart.
+
+**Exact image refs broke upgrades.** Recognising the injector's own init container by exact image ref
+meant rolling the proxy tag stopped it recognising its own output, denying re-admission of pods it had
+itself injected. It now compares repository name, the same rule `sameSidecarImageName` already used.
+
+Each is locked by a test that fails against the old code:
+`TestMcpInjection_SelfWiredPodWithFakeProxyIsDenied`,
+`TestMcpInjection_UntrustedDeliveryPlumbingIsRejected`,
+`TestMcpInjection_DeliveryInitContainerRunsBeforeWrappedTarget`,
+`TestMcpInjection_RequiresAnExplicitProxyImage`,
+`TestMcpInjection_ImageTagRollStillSkips`.
+
+**Still open**, deliberately not fixed here:
+
+* `norviq/mcp/__main__.py` strips *every* literal `--` from the upstream argv, not just the first, so
+  folding `command`+`args` corrupts a server whose own arguments use `--` as a separator. It is a
+  pre-existing proxy bug that folding makes reachable; the fix belongs in the proxy's arg parsing.
+* `McpProxySourcePath` is interpolated unquoted into the init container's `/bin/sh -c`. It is
+  operator-controlled, not tenant-controlled, so it is not a privilege boundary — but it should be
+  quoted.
+* `McpProxyImage` is not checked against the sidecar image allowlist. That allowlist is
+  engine-specific by construction, so reusing it would be wrong; a proxy-image allowlist is the
+  correct shape if one is wanted.
+* An unparseable `NRVQ_MCP_INJECT` silently disables MCP governance, because `envBool` falls back to
+  its default. Operator-facing, and the same for every other bool setting in the webhook.
+
+---
+
+## 12. Migrating to MCP 2026-07-28 — the protocol went stateless
+
+This spike targets protocol **2025-06-18** (what `demo_client` prints on connect). Two revisions have
+landed since: `2025-11-25`, then `2026-07-28`, which
+[removes protocol-level sessions and makes MCP a stateless request/response protocol][chg].
+
+That is not a version bump. Several of this design's load-bearing assumptions are assumptions about a
+*session*, and the changelog deletes the session.
+
+[chg]: https://modelcontextprotocol.io/specification/2026-07-28/changelog
+
+### 12.1 What breaks, precisely
+
+| # | Spec change | What it breaks here |
+|---|---|---|
+| 1 | `Mcp-Session-Id` and protocol-level sessions removed (SEP-2567) | ~~`http.py` keyed one firewall instance per session~~ — **fixed.** It now keys on the **attested SVID**, the same identity `/evaluate` binds the decision to. The old key was `headers.get("mcp-session-id", "default")`: with the header gone every caller collapses onto `"default"` and shares one firewall — *and the firewall holds the discovered tool catalog*, so one caller's `tools/list` would decide the Gate-A verdicts applied to another's `tools/call`. It was never an isolation boundary even while the header existed, because the caller chooses the value. `DELETE` no longer drops the catalog either: re-discovering on demand is how a rug pull gets laundered into a clean first sight. |
+| 2 | `initialize` / `notifications/initialized` removed (SEP-2575) | `protocol.py:M_INITIALIZE`. Capability negotiation is now per-request `_meta`. |
+| 3 | `server/discover` added, servers **MUST** implement | A new discovery surface advertising identity and capabilities. Gate A does not scan it. |
+| 4 | Sampling **deprecated**; server-initiated requests replaced by MRTR (SEP-2322, SEP-2577) | `firewall.py:428` governs `sampling/createMessage` as "the confused-deputy / wallet vector". That method is on a twelve-month deprecation clock. The *threat* is unchanged; the interception point moved to `InputRequiredResult`. |
+| 5 | `resources/subscribe`/`unsubscribe` and the HTTP GET endpoint replaced by `subscriptions/listen` | A single long-lived server→client stream that Gate A/B never sees. |
+| 6 | SSE resumability and `Last-Event-ID` removed (SEP-2575) | A broken stream loses the in-flight request; the client re-issues with a **new request ID**. `_client_pending`/`_server_pending` correlate IDs across a stream that no longer survives. |
+| 7 | `ttlMs` + `cacheScope` required on every list result (SEP-2549) | Pins assume the proxy sees each `tools/list`. A `cacheScope: "public"` list may be served by a shared intermediary the proxy never touches. |
+| 8 | Roots and Logging deprecated; `ping`, `logging/setLevel` removed | Dead branches. |
+
+And the headline performance claim — **Gate A amortised per session, +0.09 ms p50** — was measured
+under session semantics. When any request may land on any instance, there is no session to amortise
+across. The number is not wrong; it is no longer the right number to quote.
+
+### 12.2 What survives unchanged
+
+**stdio, entirely.** A stdio server is still a child process, so parent-child interception is
+untouched — which means §11's webhook injection is unaffected. Gate B's 1:1 mapping of MCP
+`arguments` onto `tool_params` is unaffected. The engine, Rego, audit, trust and RBAC are unaffected,
+because none of them ever modelled MCP.
+
+The reuse thesis held up well here: everything specific to MCP is in `norviq/mcp/`, and everything
+that survives is what was reused.
+
+### 12.3 What gets *better*
+
+* **`Mcp-Method` and `Mcp-Name` are now required headers** on Streamable HTTP POSTs (SEP-2243). A
+  firewall can route, rate-limit and pre-filter without parsing a body. That is a cheap first-pass
+  gate we could not previously have.
+* **`ControlPlanePinStore` was already the right answer.** Shared, tenant-scoped pin state is exactly
+  what "any request, any instance" demands. `memory`/`file` must stop being defaults for HTTP; the
+  architecture anticipated this by accident, and now it is forced.
+* **A central gateway becomes viable for HTTP.** §2.2 argued sidecar-not-gateway; that argument was
+  always strongest for stdio and weakest for HTTP. Stateless request/response plus routable headers
+  tips HTTP toward a gateway. **Decision: keep the sidecar as the default and treat the gateway as a
+  deployment option, not a rewrite.** Identity is still the reason — a gateway must attest callers it
+  did not spawn, and the sidecar's SPIFFE story is the whole basis of §3.
+
+### 12.4 The new attack surface nobody has governed yet
+
+Statelessness gets the headlines. These are the changes that matter more to a firewall:
+
+1. **`x-mcp-header`: custom HTTP headers built from tool parameters** (SEP-2243, minor change 4).
+   Model-controlled input now reaches the HTTP header layer. That is header injection, auth-token
+   smuggling and SSRF pivoting in one feature, and it is *specified behaviour* rather than a bug.
+   **This is the single sharpest new vector and should be default-denied.**
+2. **Server-minted handles passed as ordinary tool arguments** (SEP-2567) — the sanctioned
+   replacement for session state. A handle is a bearer capability travelling in `tool_params`. Handle
+   theft becomes cross-tenant access, and nothing binds a handle to the identity it was minted for.
+3. **`$ref` resolution and loosened schemas** (SEP-2106) — `inputSchema` may use any JSON Schema
+   2020-12 keyword, with `$ref` resolution and composition keywords. The Gate A scanner walks
+   schemas; `$ref` is a fetch, and composition is an expansion bomb. The spec adds resource bounds
+   because this is dangerous.
+4. **`structuredContent` may be any JSON value** (SEP-2106). Output DLP currently reasons about text.
+5. **`cacheScope: "public"`** — a poisoned `tools/list` may now be legitimately cached and re-served
+   by shared intermediaries. Poisoning gains an amplification channel.
+6. **`_meta` is attacker-controlled.** `io.modelcontextprotocol/clientInfo`, `clientCapabilities` and
+   `protocolVersion` now ride on every request. They are convenient and they are **not** identity.
+   §3's rule stands and gets sharper: identity comes from the SVID, never from an MCP message. These
+   fields are inputs to policy, never inputs to trust.
+
+### 12.5 Migration plan
+
+Ordered by what fails closed today versus what fails open.
+
+| Step | Change | Why this order |
+|---|---|---|
+| 1 | Version-negotiate: keep the 2025-06-18 codec, add 2026-07-28. `server/discover` is the probe. | Nothing else can land until both wire formats are speakable. |
+| 2 | Replace session keying in `http.py` with per-request adjudication; derive the firewall instance from **attested identity**, never from `_meta`. | This is an isolation failure today. Fix first. |
+| 3 | Force `mcp_pin_store=control-plane` whenever the transport is HTTP; make `memory` an stdio-only default. | Per-instance pins are silently wrong under any-instance routing. |
+| 4 | Re-target the confused-deputy gate from `sampling/createMessage` onto `InputRequiredResult.inputRequests`, and govern `inputResponses` on the retry as an **egress** decision. | The vector outlives the method. |
+| 5 | Govern `x-mcp-header` and handle-bearing arguments. | New surface, no coverage. |
+| 6 | Bound `$ref` resolution in the scanner; extend DLP over `structuredContent`. | Scanner hardening. |
+| 7 | Gate A over `server/discover` and `subscriptions/listen`. | Close the remaining ungoverned channels. |
+| 8 | Re-measure. Drop the per-session amortisation claim and publish a per-request number. | The published figure must describe the protocol we run on. |
+
+Steps 2–5 are correctness and security. Steps 1, 6–8 are completeness.
+
+---
+
+## 13. Direction: from mediation to adjudication, and from block-lists to declared intent
+
+A console that shows what MCP did is a monitoring product. The firewall claim requires that **nothing
+crosses in either direction without an adjudicated decision**, and that the default is *no*.
+
+Two things push the same way. Statelessness makes per-request adjudication the natural shape — there
+is no session left to mediate. And the demonstration in §11.5 showed the honest limit of negative
+security: the strict preset blocked a card number and let a real AWS key pair through to an
+attacker-controlled address. **A detector list is a list of things someone thought of.** Under
+deny-by-default, the same call fails because `send_email` to an unlisted domain was never in scope —
+no detector required.
+
+The repository already leans this way and says so out loud. `read-only-intent-deny-by-default.rego`
+opens with `default decision = "block"` and warns that *"Tool-name classification can never be a
+security boundary"* and *"scope is not a perimeter"*. `tool-allowlist-perimeter.rego` is the
+registration-based perimeter that comment points to. `IntentDraft` exists so a positive-security
+policy can be observed before it is enforced. The pieces are there and unassembled.
+
+### 13.1 Four planes, all default-deny
+
+Today Gate B governs egress calls and Gate A governs ingress definitions. Two planes are ungoverned,
+and both are new:
+
+| Plane | Direction | Carries | Today |
+|---|---|---|---|
+| **Call** | egress | `tools/call`, `resources/read` | Gate B |
+| **Definition** | ingress | `tools/list`, `prompts/get`, `server/discover` | Gate A (`server/discover` missing) |
+| **Answer** | egress | MRTR `inputResponses`, handles, `x-mcp-header` | **ungoverned** |
+| **Content** | ingress | results, `structuredContent`, `subscriptions/listen` | output DLP only |
+
+The **Answer plane** is the one that should worry us most. Under MRTR a server can demand input
+mid-call, and the client's reply is data leaving the trust boundary in response to a request the
+*server* composed. That is the confused-deputy vector with a specification behind it, and it is
+egress, so it belongs under the same deny-by-default rule as a tool call.
+
+### 13.2 Intent is not an allowlist
+
+Today `IntentDraft.allow_tools` is a JSONB blob of tool names plus `toggles`. That is a **capability
+list**, and a capability list cannot express a use case. "This bot may call `send_email`" is not an
+intent; it is a permission. The intent is *"this support bot may email a refund confirmation to the
+customer who raised the ticket, and nothing else."*
+
+The gap between those two sentences is where every real incident lives. `send_email` to
+`collector@attacker.example` satisfies the allowlist perfectly — as §11.5 demonstrated on a live
+cluster, with a real AWS key in the body.
+
+So an intent must be able to say all of this, in one rule:
+
+| Dimension | Example | Reachable today? |
+|---|---|---|
+| Integration | only the `postgres-prod` MCP server | yes — `input.mcp.server` |
+| Operation | `verb == read`, not the tool's *name* | yes — `input.derived.verb` |
+| Named parameter | `to` must match `^[^@]+@acme\.com$` | **partly** — raw `tool_params`, exact key only |
+| Nested parameter | `filters.customer.id` equals the ticket's customer | **no** — flattening loses the path |
+| Value semantics | the SQL touches only `orders`, `customers` | partly — `derived.sql_normalized` |
+| Destination | recipient domain, webhook host, URL scheme | **no** — must regex a flat value list |
+| Data class carried | this call must not carry PCI or a secret | **no** — DLP is output-side only |
+| Volume | at most 20 sends per hour per agent | **no** |
+| Time | business hours, weekdays | **no** |
+| Preconditions | trust ≥ medium **and** `mcp.pin_status == pinned` | yes |
+| Direction | applies to the Answer plane, not the Call plane | **no** — one direction is modelled |
+| Result shape | may return at most 64 KiB, no `structuredContent` beyond declared schema | **no** |
+
+Half of "minute level" is unreachable **not because Rego is limited, but because the input document
+does not carry the facts.** `_build_input` gives a policy `tool_params`, a flattened
+`derived.param_values` (strings, paths discarded), `verb`, `tool_kind` and SQL normalisation. That was
+right for a detector; it is insufficient for a scope.
+
+**Decision: the input document is the real work.** Extend `_derived_input` with the primitives an
+intent needs, additively, exactly as `verb`/`tool_kind` were added:
+
+```jsonc
+"derived": {
+  // existing: verb, tool_kind, param_values, param_values_lower, sql_normalized, sql_statements
+  "param_paths":   {"to": "a@acme.com", "filters.customer.id": "C-91", "body": "..."},
+  "destinations":  {"emails": ["a@acme.com"], "hosts": ["api.acme.com"],
+                    "urls": ["https://api.acme.com/v1"], "schemes": ["https"]},
+  "data_classes":  ["pii"],            // detected in the REQUEST, not just the response
+  "sql_tables":    ["orders"],
+  "param_bytes":   412
+},
+"context": {"ts": "2026-08-01T14:02:11Z", "dow": "fri", "hour": 14},
+"rate":    {"calls_1h": 7, "verb_send_1h": 3},
+"direction": "call"                    // call | definition | answer | content
+```
+
+`param_paths` is the one that unlocks the rest: a dotted path → value map lets an intent scope a
+*specific argument* without the policy author guessing at nesting, and without the brittleness of
+matching a flattened value list where `to` and `body` are indistinguishable.
+
+`direction` is what lets one policy language cover all four planes of §13.1 instead of growing a
+second evaluator for the Answer plane.
+
+**These are policy inputs, never trust inputs.** `destinations` and `data_classes` are PEP-reported,
+exactly like `tool_name` — §3's rule is unchanged.
+
+### 13.3 The intent rule schema
+
+An intent is an ordered set of **allow** rules. There is no deny list: deny is the absence of a match.
+
+```yaml
+intent:
+  name: support-bot-refunds
+  class: support-bot
+  planes: [call, answer, content]      # definition plane stays with Gate A pins
+
+  call:
+    - id: read-customer-orders          # ← becomes rule_id in the audit row
+      server: postgres-prod
+      match:
+        verb: read
+        derived.sql_tables: {subsetOf: [orders, customers]}
+        derived.sql_statements: {maxCount: 1}
+      require:
+        mcp.pin_status: pinned
+        data_classes: {noneOf: [pci, secret]}
+
+    - id: notify-customer
+      match:
+        verb: send
+        param_paths.to: {matches: '^[^@]+@acme\.com$'}
+        destinations.schemes: {subsetOf: [https]}
+      require:
+        trust: {atLeast: medium}
+        data_classes: {noneOf: [secret, pci]}
+      limit: {perHour: 20, per: agent}
+
+  answer:                               # MRTR — nothing answerable unless listed
+    - id: workspace-roots
+      match: {inputRequest: roots/list}
+      respond: {roots: ["file:///workspace"]}
+
+  content:
+    - id: order-results
+      from: postgres-prod
+      require: {data_classes: {noneOf: [pci]}, maxBytes: 65536}
+```
+
+Design rules, each of which the repo already learned the hard way:
+
+1. **Match on derived facts, not names, wherever a derived fact exists.** Tool names are chosen by the
+   agent side; `read-only-intent-deny-by-default.rego` says outright that *"tool-name classification
+   can never be a security boundary"*. `server` + `verb` + `param_paths` is a boundary; a name is not.
+2. **`unknown` is matchable, never implicit.** A rule may say `verb: unknown` and decide. An
+   unclassified call that matches no rule is denied — which is also how `run_query` (finding #1) stops
+   being a landmine: under default-deny a misclassification locks work out loudly instead of letting
+   something through quietly.
+3. **Every rule has a stable `id`, and it lands in the audit row as `rule_id`.** Allows are
+   attributable to the sentence that permitted them.
+4. **Rules only tighten.** An intent is composed *under* the namespace baseline, matching `IntentDraft`'s
+   existing priority behaviour, so an intent can never widen what the baseline blocks.
+
+### 13.4 Explainability is the feature, not a nicety
+
+Default-deny fails in production for one reason: something legitimate breaks and nobody can say why.
+"Denied" is not an answer when the rule that denied is *the absence of a rule*.
+
+**Decision: every intent denial returns the near-miss.** The compiler knows each rule's predicates, so
+the evaluator can report which rule came closest and which single predicate failed:
+
+```
+denied: no intent rule matched  (class=support-bot, tool=send_email)
+  closest: notify-customer (3/4 predicates matched)
+    ✓ verb == send
+    ✓ destinations.schemes ⊆ [https]
+    ✓ trust >= medium
+    ✗ param_paths.to  "collector@attacker.example"  !~ ^[^@]+@acme\.com$
+```
+
+That line is the difference between an operator tightening the regex and an operator disabling the
+policy. It is also the honest audit record: it states what was asked for and which clause refused it.
+
+### 13.5 Compilation and the engine constraint
+
+Intents compile to a **single self-contained Rego module** — not a library import. `_build_input`'s
+comment records why: the engine evaluates each policy as one module and *"OPA here cannot import
+across packages"*, which is exactly why the primitives ship as input. The compiler must therefore
+inline everything it needs, and `tests/policies/test_horizontal_parity.py` is the guard that it stays
+consistent with the bundled presets.
+
+Two properties worth testing from day one: compilation is **deterministic** (same intent → byte-identical
+Rego, so a diff in `policies` means a real change), and every generated module is **fail-closed on
+error** — an intent that fails to evaluate must deny, matching the `evaluator_error` behaviour we
+already saw fail closed on the live cluster.
+
+### 13.6 The adoption path, which is not optional
+
+**Decision: default-deny ships behind the `IntentDraft` lifecycle, never as a flag.** A cold switch
+gets switched off in week one; the `read-only-intent` template says so in its own header.
+
+The table is already built for this — `covered_count`, `total`, `would_block`, `would_allow`, an
+expiry, and a hard guarantee that *"this is a DEDICATED table the evaluator never reads"*. The loop is:
+observe real traffic → propose an intent from it → replay recorded calls against the draft and show
+exactly what *would* have been denied, with the near-miss for each → operator applies through the
+gated Policies flow.
+
+The proposal step is inference and inference is wrong sometimes; that is why a draft is never
+enforcing and an operator always applies. What the machine is good at here is the *diff*, not the
+judgement.
+
+### 13.7 What I would build, in order
+
+1. ~~**Extend the input document**~~ — **built.** `derived` gains `param_paths`, `destinations`,
+   `data_classes`, `sql_tables`, `param_bytes` (`engine/evaluator.py`, 22 tests in
+   `tests/engine/test_derived_input.py`). Additive: the six pre-existing keys are asserted
+   byte-identical. `context`/`rate` are **not** built — `rate` needs per-agent counters the evaluator
+   does not keep, so it is deferred with §13.8's sequencing note rather than half-built.
+2. ~~**Intent compiler + near-miss explainer**~~ — **built.** `engine/intent/` compiles an intent to
+   one self-contained v0 Rego module in `package norviq.custom`; 34 tests in
+   `tests/engine/test_intent_compiler.py`, most of which evaluate the *generated* module through a
+   real `opa` rather than asserting on source text.
+3. ~~**Draft → dry-run → apply**~~ — **built.** `engine/intent/dryrun.py` replays recorded calls and
+   reports would-allow/would-block, per-rule coverage, rules that matched nothing, and the near-miss
+   for every call that would break. It evaluates the real generated Rego through an injected
+   evaluator; it does **not** reimplement predicate semantics in Python, because the second
+   implementation would be the one the operator was shown.
+
+   Surfaced at `POST /api/v1/intents/{compile,propose,dry-run,drafts}` and `GET /intents/drafts`
+   (`api/routers/intents.py`, 15 tests). There is deliberately **no apply endpoint**: a draft lands
+   in `intent_drafts` — the table `_collect_candidates` never reads — and applying stays the existing
+   gated Policies flow, so there is exactly one way to start enforcing. Two tests assert that
+   directly, including one that greps the router for `Policy(`.
+
+   The dry-run loads the candidate into OPA under a scratch package and deletes it afterwards; it is
+   never written to `policies`, so the policy loader cannot pick it up even transiently.
+
+   **A ceiling worth knowing about.** Audit rows carry parameters only when
+   `NRVQ_AUDIT_PERSIST_PARAMS` is on (default OFF), and even then they are masked. Without them a
+   proposal reaches tool names and the derived verb — no recipient domains, no data classes, no SQL
+   tables. The API reports `params_available: false` rather than returning a confident-looking intent
+   the operator would over-trust; callers can supply sample calls directly instead.
+4. ~~**Answer-plane governance**~~ — **built** (`tests/mcp/test_answer_plane.py`, 15 tests):
+
+   * **`inputResponses` on the way out.** A retry carrying answers is adjudicated as **egress** on
+     the `answer` plane before it is forwarded, then still governed as the `tools/call` it also is —
+     one message, two planes. A denial never reaches the server.
+   * **`inputRequests` on arrival.** A server's *demand* for input is scanned before the model sees
+     it: attacker-authorable text presented as a legitimate prompt, which is the Gate-A problem
+     arriving on the response path. Flagged rather than refused — a lawful `roots/list` demand is
+     ordinary, and refusing every one would break MRTR entirely.
+   * **`x-mcp-header` default-denied**, at any nesting depth, case-insensitively (HTTP header names
+     are). `NRVQ_MCP_ALLOW_TOOL_HEADERS` lets an operator permit it explicitly.
+   * **`direction` reaches the policy.** The PEP reports the plane in the MCP context and
+     `_build_input` lifts it to `input.direction`, defaulting to `"call"` so every caller predating
+     the four-plane model stays governed by the call rules rather than escaping every rule.
+
+   Handles bound to the identity they were minted for remain **to do** — that needs the handle to be
+   distinguishable from an ordinary argument, which the spec does not require.
+
+5. ~~**Content-plane DLP over `structuredContent`**~~ — **built.** 2026-07-28 loosened
+   `structuredContent` to any JSON value; the existing guard only walked `result.content` text
+   blocks, so a card number returned in `structuredContent.customer.card` sat in the model's context
+   unexamined. Strings are now masked at any depth with the shape preserved, because the tool's
+   declared output schema still has to validate.
+
+9. ~~**The transport half of §12.5**~~ — **built** (`tests/mcp/test_codec_2026.py`, 14 tests):
+
+   * **One codec, both revisions.** `protocol.py` gained `result_type`, `is_input_required`,
+     `input_requests`, `input_responses`, `meta`, `protocol_version` and `cache_hints`. Every one is
+     defined for a 2025-06-18 message and defaults to the pre-2026 meaning — a result with no
+     `resultType` is `complete`, as the spec requires. A proxy cannot be *told* which revision it is
+     on: it sits between a client and a server it did not choose, either of which may upgrade first,
+     so a mode flag would be wrong the moment one of them did.
+   * **Renumbered error codes.** `HeaderMismatch` −32020, `MissingRequiredClientCapability` −32021,
+     `UnsupportedProtocolVersion` −32022, inside the range the spec reserves. `E_POLICY_DENIED`
+     stays grandfathered below it.
+   * **`server/discover` is a Gate-A surface.** It replaced the handshake, a 2026-07-28 client calls
+     it first, and it advertises identity and capabilities as free text. Scanned and flagged, not
+     refused — refusing discovery bricks the server, and the threat is the model reading advertised
+     text as instructions.
+   * **`subscriptions/listen` is content-guarded.** One opted-in stream replaced the standalone GET
+     and `resources/subscribe`; its notifications carry server-authored content into the model's
+     context on a channel no gate saw. This also fixed a latent bug: `_guard_content` hard-coded the
+     `result` envelope, so the notification path would have silently skipped.
+   * **`memory` pins refused on HTTP.** Any request may land on any instance, so a per-process pin
+     store means one replica approves what another has never seen — every instance reports
+     `first_seen` forever and drift is undetectable fleet-wide. A silent degradation of the control,
+     which is the kind that reaches production. Upgraded to `control-plane` with a warning naming the
+     setting.
+
+   Still open: binding server-minted handles to the identity they were minted for. The spec does not
+   make a handle distinguishable from an ordinary argument, so any implementation would be a guess.
+5. ~~**Propose an intent from observed traffic**~~ — **built.** `engine/intent/propose.py` groups
+   recorded calls by (server, verb), carries the observed tool names as a registration perimeter,
+   narrows a recipient domain only when the traffic is unambiguous about it, and always requires the
+   absence of credentials. The closing property is asserted: propose from traffic, replay that same
+   traffic, nothing breaks — and novel traffic still denies.
+6. ~~**Perimeter by default**~~ — **dropped, deliberately.** Shipping `tool-allowlist-perimeter.rego`
+   as a hard class default contradicts §13.6: it is precisely the cold switch that gets turned off in
+   week one. An intent already *is* a perimeter (default block plus allow rules), and the proposer
+   emits the tool-name allowlist, so the capability exists without the breaking default.
+7. **Content-plane DLP over `structuredContent`**, walking arbitrary JSON rather than text. Blocked
+   on the same §12.5 migration as the Answer plane.
+8. ~~**Credential-egress detectors that actually fire**~~ — **built.** Both `derived.data_classes`
+   (request-side classification) and the shipped Rego now detect AWS/GitHub/Slack/GitLab/Stripe keys,
+   Google API keys, PEM blocks and JWTs by value *shape*. The §11.5 payload — a real AWS key pair to
+   an attacker-controlled address — now blocks on `llm02_data_leakage` under both `comprehensive.rego`
+   and the `strict` preset, and prose containing `AKIA123` still allows.
+
+   Two constraints shaped the fix, both discovered by tests rather than reasoning. `security_scan_texts`
+   lowercases, which is right for prose and wrong for an AWS key id (uppercase by construction), so
+   the credential rules scan a case-preserving copy as well. And the API caps a stored policy at 25
+   regex ops, counted **textually** — so the patterns had to extend the existing list rather than get
+   their own rule, and even naming the builtin in a comment spends budget.
+
+Items 1–3 were the feature, and they exist. Without them "intent" was a tool allowlist with better
+marketing.
+
+### 13.8 What this is not
+
+Not a promise that Gate A becomes sound — it stays a heuristic, and `test_known_evasion_*` should keep
+asserting what it misses.
+
+Not a claim that intent inference is safe to auto-apply; the operator approves, always.
+
+And the honest cost: default-deny moves the failure mode from "attack succeeds" to "legitimate work is
+blocked". That is the right trade **only** if the dry-run and the near-miss explainer are genuinely
+good, which is why they are items 2 and 4 rather than a later polish pass. A firewall nobody can debug
+gets turned off, and a firewall that is off is worse than the detector list it replaced.
+
+One thing this design deliberately does **not** attempt: cross-call sequencing ("may delete only after
+reading the same record"). It needs per-session history the evaluator does not keep, and MCP just
+removed the session that would have carried it. Server-minted handles (§12.4) are the protocol's own
+answer to cross-call state, so the tractable version is to treat a handle as a capability and bind it
+to the identity it was minted for — which is item 3, not a sequencing engine.

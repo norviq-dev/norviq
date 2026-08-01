@@ -42,6 +42,34 @@ Open <http://localhost:18080> and sign in as `admin`
 The script refuses to report anything unless the running image's git SHA **and** working-tree digest
 match your checkout, so what you see is what you built.
 
+### 0.1 Optional — governing MCP without wiring anything by hand
+
+The scenario above wires the proxy explicitly, so you can see every moving part. In a real cluster you
+would let the webhook do it. Build the proxy payload, confirm it runs in the images your MCP servers
+actually use, and turn injection on:
+
+```bash
+./scripts/mcp-proxy-payload-verify.sh          # builds the payload, execs it from 4 target images
+helm upgrade norviq ./helm/norviq -n norviq \
+  --set webhook.injection.enabled=true \
+  --set webhook.injection.mcp.enabled=true \
+  --set webhook.injection.mcp.proxyImage=<image containing /opt/norviq/mcp-proxy>
+```
+
+Then a pod opts in per container, and its image needs no change at all:
+
+```yaml
+metadata:
+  annotations:
+    norviq.io/mcp-servers: "filesystem,github"
+    norviq.io/mcp-server-id.github: "github-prod"   # optional; defaults to the container name
+```
+
+Two things will refuse admission rather than quietly leave a server ungoverned: naming a container the
+pod does not have, and naming a container with no explicit `command` (its argv is the image
+ENTRYPOINT, which admission cannot see). Both say so in the rejection message. Full design in
+`DESIGN-NOTE-MCP-FIREWALL.md` §11.
+
 ---
 
 ## 1. MCP Servers — "what is my bot actually connected to?"
