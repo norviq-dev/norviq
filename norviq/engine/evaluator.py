@@ -51,6 +51,16 @@ _MAX_DRYRUN_MODULES = 256
 # data-plane deadline. Bounded so a wedged OPA still degrades to the normal fail-closed path.
 _MODULE_WARM_TIMEOUT_S = 10.0
 
+# rule_id PREFIXES stamped when a would-block is SOFTENED to a logged `audit` decision — namespace
+# monitor mode and per-policy audit mode respectively. Exported (not inlined into the f-strings below)
+# because /audit/stats has to recognise them: a monitor namespace emits no `block` decision at all, so a
+# tile counting only decision == "block" reads zero no matter how much the policy would have stopped —
+# which is exactly what the Overview's "Would-block" tile did. Any new softening path MUST add its prefix
+# here, or its would-blocks become invisible to the dashboard.
+MONITOR_WOULD_BLOCK_PREFIX = "monitor_would_block:"
+POLICY_AUDIT_WOULD_BLOCK_PREFIX = "policy_audit_would_block:"
+WOULD_BLOCK_RULE_PREFIXES: tuple[str, ...] = (MONITOR_WOULD_BLOCK_PREFIX, POLICY_AUDIT_WOULD_BLOCK_PREFIX)
+
 # Rule_ids that namespace monitor (audit) mode must NOT soften — they stay hard even when a
 # namespace is set to visibility-only. An admin trust freeze is an incident-response kill switch that must outrank
 # namespace posture; a not-ready / engine-error / invalid-payload block is an engine-health signal, not a policy
@@ -484,7 +494,7 @@ class OPAEvaluator:
         )
         return decision.model_copy(update={
             "decision": "audit",
-            "rule_id": f"policy_audit_would_block:{decision.rule_id}",
+            "rule_id": f"{POLICY_AUDIT_WOULD_BLOCK_PREFIX}{decision.rule_id}",
         })
 
     def _apply_posture(self, decision: PolicyDecision, posture: dict, event_id: str) -> PolicyDecision:
@@ -503,7 +513,7 @@ class OPAEvaluator:
                  orig_rule=decision.rule_id, code="NRVQ-ENG-2059")
         return decision.model_copy(update={
             "decision": "audit",
-            "rule_id": f"monitor_would_block:{decision.rule_id}",
+            "rule_id": f"{MONITOR_WOULD_BLOCK_PREFIX}{decision.rule_id}",
             "reason": f"Monitor mode (namespace audit): would {decision.decision} — {decision.reason}",
         })
 

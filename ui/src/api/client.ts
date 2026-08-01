@@ -414,10 +414,10 @@ export async function fetchReadiness(): Promise<Readiness> {
 export async function fetchAuditStats(
   range: string = "24h",
   namespace?: string
-): Promise<{ total?: number; blocked?: number; allowed?: number; block_rate_pct?: number; engine_errors?: number; avg_latency_ms?: number }> {
+): Promise<{ total?: number; blocked?: number; allowed?: number; block_rate_pct?: number; would_blocked?: number; would_block_rate_pct?: number; engine_errors?: number; avg_latency_ms?: number }> {
   const params = new URLSearchParams({ range });
   if (namespace && namespace !== "all") params.set("namespace", namespace);
-  return apiGet<{ total?: number; blocked?: number; allowed?: number; block_rate_pct?: number; engine_errors?: number; avg_latency_ms?: number }>(
+  return apiGet<{ total?: number; blocked?: number; allowed?: number; block_rate_pct?: number; would_blocked?: number; would_block_rate_pct?: number; engine_errors?: number; avg_latency_ms?: number }>(
     `/api/v1/audit/stats?${params.toString()}`
   );
 }

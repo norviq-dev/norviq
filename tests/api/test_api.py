@@ -651,6 +651,43 @@ def test_volume() -> None:
         client.close()
 
 
+def test_stats_counts_would_blocks_in_monitor_mode() -> None:
+    """Monitor mode must not report "nothing was stopped".
+
+    A monitored namespace emits NO `block` decision at all — the engine softens every would-block to an
+    `audit` decision stamped `monitor_would_block:` / `policy_audit_would_block:`. /audit/stats counted
+    only `decision == "block"`, so the Overview tile (which correctly relabels itself "Would-block")
+    reported a confident 0 for a namespace whose policy was matching constantly. `blocked` must stay
+    strictly live blocks so an ENFORCING namespace's number keeps its meaning.
+    """
+    def _row(decision: str, rule_id: str):
+        return SimpleNamespace(
+            id=uuid4(), event_id=uuid4(), tool_name="execute_sql", decision=decision,
+            agent_id="spiffe://example/ns/default/sa/a", agent_class="report-gen", namespace="default",
+            rule_id=rule_id, reason="test", framework="langchain", trust_score=0.5, latency_ms=10.0,
+            timestamp_utc=datetime.now(timezone.utc), payload={},
+        )
+
+    rows = [
+        _row("audit", "monitor_would_block:deny_sql_injection"),
+        _row("audit", "monitor_would_block:deny_sql_injection"),
+        _row("audit", "policy_audit_would_block:pii_detection"),
+        _row("audit", "namespace_audit_note"),  # an `audit` row that is NOT a softened would-block
+        _row("allow", "default_allow"),
+    ]
+
+    client = _client()
+    _override_session(client, FakeSession(rows))
+    try:
+        stats = client.get("/api/v1/audit/stats", headers=_auth_headers()).json()
+        assert stats["would_blocked"] == 3, stats  # pre-fix: the tile had no such number at all
+        assert stats["blocked"] == 0, "monitor mode emits no live block — this must NOT be inflated"
+        assert stats["total"] == 5
+        assert stats["would_block_rate_pct"] == 60.0  # 3/5 — the relabelled rate must match the tile
+    finally:
+        client.close()
+
+
 def test_volume_bucket_width_follows_range() -> None:
     """Bucket WIDTH must follow `range`, not always be an hour.
 

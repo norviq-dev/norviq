@@ -24,6 +24,7 @@ from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
 from norviq.api.synthetic import audit_row_is_non_real, is_synthetic_identity  # the ONE shared synthetic/probe classifier (do not fork)
 from norviq.config import settings
+from norviq.engine.evaluator import WOULD_BLOCK_RULE_PREFIXES  # softened-would-block rule_id prefixes (do not fork)
 
 
 def _canonical(record: dict) -> str:
@@ -196,6 +197,13 @@ async def audit_stats(
         stmt = stmt.where(AuditLogEntry.namespace == namespace)
     total = 0
     blocked = 0
+    # Monitor mode (namespace enforcement_mode=audit, or a per-policy audit-mode policy) SOFTENS a
+    # would-block into an `audit` decision — it never emits `block`. So `blocked` is structurally 0 for a
+    # monitored namespace, and the Overview tile (which correctly relabels itself "Would-block") was
+    # reading that 0 and reporting "nothing would have been stopped" for a namespace the policy was
+    # stopping plenty in. Counted separately rather than folded into `blocked` so an enforcing namespace's
+    # number keeps meaning "actually blocked".
+    would_blocked = 0
     # Engine (OPA-eval) errors are fail-closed ENGINE faults, not policy decisions. Surface them as a
     # distinct dashboard signal so an `evaluator_error` spike reads as an engine-health problem, not a wall of
     # "policy blocks". A clean input never produces one (transient errors self-heal via the evaluator retry).
@@ -216,6 +224,8 @@ async def audit_stats(
         total += n
         if decision == "block":
             blocked += n
+        if str(rule_id or "").startswith(WOULD_BLOCK_RULE_PREFIXES):
+            would_blocked += n
         if rule_id == "evaluator_error":
             engine_errors += n
         tool_counts[str(tool_name or "")] = tool_counts.get(str(tool_name or ""), 0) + n
@@ -226,10 +236,14 @@ async def audit_stats(
         for name, count in sorted(tool_counts.items(), key=lambda kv: -kv[1])[:5]
     ]
     rate = round((blocked / total) * 100, 2) if total else 0.0
+    # Companion rate for the monitored case, so the tile and its percentage agree instead of the label
+    # flipping to "Would-block Rate %" over a figure derived from live blocks.
+    would_block_rate = round((would_blocked / total) * 100, 2) if total else 0.0
     avg_latency_ms = round(latency_sum / latency_n, 2) if latency_n else 0.0
-    log.debug("nrvq.api.audit.stats", total=total, blocked=blocked, engine_errors=engine_errors,
-              avg_latency_ms=avg_latency_ms, code="NRVQ-API-7021")
+    log.debug("nrvq.api.audit.stats", total=total, blocked=blocked, would_blocked=would_blocked,
+              engine_errors=engine_errors, avg_latency_ms=avg_latency_ms, code="NRVQ-API-7021")
     return {"total": total, "blocked": blocked, "allowed": total - blocked, "block_rate_pct": rate,
+            "would_blocked": would_blocked, "would_block_rate_pct": would_block_rate,
             "engine_errors": engine_errors, "avg_latency_ms": avg_latency_ms, "top_tools": top_tools}
 
 
