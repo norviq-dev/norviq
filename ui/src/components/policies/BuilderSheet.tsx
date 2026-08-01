@@ -1548,10 +1548,21 @@ export function BuilderSheet({
                     />
                     {/* NOT .sb-link here: that class is width:100% (built for the sidebar) and, as a flex
                         sibling, it claimed the whole row and collapsed the input to ~0px. Size to content. */}
+                    {/* Disabled on an empty field. It used to stay fully enabled and simply no-op —
+                        `addAllowlistTool` returns early on a blank name — so clicking it did nothing at
+                        all, with no message and no state change. That reads as "the Add button is
+                        broken" rather than "there is nothing to add", which is exactly how it was
+                        reported. A control that cannot act must not look actionable. */}
                     <button
                       type="button"
                       data-testid="builder-allowlist-tool-add"
                       onClick={addAllowlistTool}
+                      disabled={allowlistToolInput.trim() === ""}
+                      title={
+                        allowlistToolInput.trim() === ""
+                          ? "Type a tool name to add it to the allowlist"
+                          : `Allow ${allowlistToolInput.trim()}`
+                      }
                       style={{
                         flex: "none",
                         display: "inline-flex",
@@ -1563,8 +1574,9 @@ export function BuilderSheet({
                         borderRadius: "var(--radius-md)",
                         border: "1px solid var(--border)",
                         background: "transparent",
-                        color: "#2DDAB8",
-                        cursor: "pointer"
+                        color: allowlistToolInput.trim() === "" ? "var(--text-dim)" : "#2DDAB8",
+                        opacity: allowlistToolInput.trim() === "" ? 0.55 : 1,
+                        cursor: allowlistToolInput.trim() === "" ? "not-allowed" : "pointer"
                       }}
                     >
                       <Plus size={12} /> Add

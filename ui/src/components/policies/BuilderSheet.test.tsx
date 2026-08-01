@@ -986,3 +986,32 @@ describe("BuilderSheet — scoping an allowlisted tool by its arguments", () => 
     expect(screen.getByTestId("builder-constraint-field-http_get-0")).toHaveValue("url");
   });
 });
+
+describe("BuilderSheet — the allowlist Add control", () => {
+  it("is disabled while the field is empty, rather than looking live and silently doing nothing", () => {
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+
+    // Reported as "the Add button is not working": it stayed enabled on a blank field and no-oped, so a
+    // click produced no chip, no message and no state change at all.
+    const add = screen.getByTestId("builder-allowlist-tool-add");
+    expect(add).toBeDisabled();
+
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "execute_sql" } });
+    expect(add).toBeEnabled();
+    fireEvent.click(add);
+    expect(screen.getByTestId("builder-allowlist-tool-chip-execute_sql")).toBeInTheDocument();
+
+    // …and it goes back to disabled once the field clears after the add.
+    expect(screen.getByTestId("builder-allowlist-tool-add")).toBeDisabled();
+  });
+
+  it("stays disabled for whitespace only (which would add an empty tool)", () => {
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "   " } });
+    expect(screen.getByTestId("builder-allowlist-tool-add")).toBeDisabled();
+  });
+});
