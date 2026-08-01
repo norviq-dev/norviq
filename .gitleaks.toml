@@ -12,7 +12,15 @@ paths = [
   '''.*\.md$''',                 # docs/specs use example tokens
   '''specs/prompts/.*''',
   '''scripts/live-pentest/.*''',        # local-kind E2E / release-exit overlays: dummy secretKeys for throwaway clusters
-  '''webhook/presets/.*_test\.rego$''', # rego test fixtures: fake api_key/PII payloads that exercise the detectors
+  # Rego test fixtures: fake api_key/PII/token payloads that EXERCISE the detectors. Widened from
+  # `webhook/presets/.*_test\.rego$` to any `_test.rego`, because comprehensive_test.rego lives at the
+  # repo ROOT and was not covered — its bare-credential cases (a sample AWS key id, GitHub/Slack tokens,
+  # the jwt.io example JWT) are exactly the shapes strict.rego's DL-001b rule must match, so they trip
+  # gitleaks by construction. Sanitising the fixtures instead would defeat the tests: a payload that no
+  # longer looks like a credential no longer proves the detector fires on one.
+  # `_test.rego` is not a loose glob — it is the suffix `opa test` itself requires, so this can only
+  # ever match a test file.
+  '''.*_test\.rego$''',
 ]
 # Common non-secret placeholders used in dev/kind (e.g. norviq-redis-password).
 regexes = [
