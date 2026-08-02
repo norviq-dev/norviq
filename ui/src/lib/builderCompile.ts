@@ -41,6 +41,7 @@ import type {
   BuilderParamConstraint,
   BuilderConditionParamRegex,
   BuilderDetector,
+  BuilderGrantFact,
   BuilderGraph,
   BuilderKeywordTarget,
   BuilderMode,
@@ -1063,8 +1064,13 @@ function factRootsOf(cond: BuilderCondition, out: Set<string>): void {
  * only for undefined or false). So this is inert everywhere except the exact skew case, where it
  * converts a silent non-enforcement into a block carrying its own explanation.
  *
- * ALLOWLIST MODE DOES NOT NEED THIS and does not get it: an allowlist already defaults to block, so a
- * predicate that cannot evaluate withholds an ALLOW — fail-closed by construction.
+ * ALLOWLIST MODE NEEDS A DIFFERENT SHAPE, not none — see `grantAvailabilityLines`. An earlier version
+ * of this comment claimed allowlist mode was "fail-closed by construction" because a predicate that
+ * cannot evaluate withholds an ALLOW. That is true only of predicates which PROPAGATE undefined. The
+ * collection operators do not: `count([v | v := <absent>[_]; ...]) == 0` is TRUE, because a
+ * comprehension over an undefined collection yields `[]` rather than becoming undefined. So a grant
+ * fact meaning "allowed only if it carries no credential" silently became a no-op. The guard here is
+ * the RULES-mode shape (fire a block); allowlist mode gets a conjunct that withholds the allow.
  */
 function engineCapabilityGuards(graph: BuilderGraph): string {
   const roots = new Set<string>();
@@ -1510,6 +1516,34 @@ _has_num(f) { is_number(input.tool_params[f]) }`;
  * can only ever NARROW what the allowlist already permits, never widen it, and a tool nobody constrained
  * behaves exactly as it did before this feature existed.
  */
+
+/**
+ * Availability conjuncts for a grant's scoping facts — the ALLOWLIST-mode counterpart of
+ * `engineCapabilityGuards`.
+ *
+ * The two modes need OPPOSITE shapes because they have opposite defaults. Rules mode is default-allow,
+ * so skew is handled by FIRING a block. Allowlist mode is default-deny, so skew must WITHHOLD the
+ * allow — and withholding does not happen on its own, which is the bug this fixes: `subsetOf`/`noneOf`
+ * compile to `count([v | v := <expr>[_]; ...]) == 0`, and a comprehension over an undefined collection
+ * yields `[]`, not undefined. `count([]) == 0` is TRUE, so the narrowing evaporated and the tool was
+ * allowed unconstrained.
+ *
+ * This was not merely a version-skew hazard. `_opa_input_from_record` and the dry-run sample input in
+ * api/routers/policies.py build OPA documents with NO `derived` key at all, so the product's own
+ * replay path hit it on a current engine — an operator dry-running a credential-egress grant would
+ * have been shown `allow` for calls that enforcement blocks.
+ *
+ * `object.get(input.derived, "<root>", null) != null` is a real boolean either way, so on an engine
+ * that does not publish the root the grant body simply fails and the allowlist denies.
+ */
+function grantAvailabilityLines(facts: BuilderGrantFact[] | undefined): string[] {
+  const roots = new Set<string>();
+  (facts ?? []).forEach((f) => factRootsOf(f as BuilderCondition, roots));
+  return [...roots]
+    .sort()
+    .map((root) => `    object.get(input.derived, ${JSON.stringify(root)}, null) != null`);
+}
+
 function grantsSection(grants: BuilderAllowlistGrant[]): string {
   if (grants.length === 0) return "";
   const constrained = jsonSet(grants.map((g) => g.tool));
@@ -1519,7 +1553,10 @@ function grantsSection(grants: BuilderAllowlistGrant[]): string {
     // SAME emitter rules mode uses, so a fact cannot mean one thing in a rule and another in a grant —
     // which is the only way the cross-compiler parity fixtures can hold.
     const factLines = (g.facts ?? []).map((f) => `    ${compileConditionLine(f, new Map())}`);
-    return [`_grant_ok {`, `    lower(input.tool_name) == ${JSON.stringify(g.tool)}`, ...lines, ...factLines, `}`].join("\n");
+    // Availability FIRST: on an engine that cannot publish the fact the grant must fail before the
+    // vacuously-true comprehension below is ever reached.
+    const availability = grantAvailabilityLines(g.facts);
+    return [`_grant_ok {`, `    lower(input.tool_name) == ${JSON.stringify(g.tool)}`, ...availability, ...lines, ...factLines, `}`].join("\n");
   });
   return [
     paramHelperBlock(),
