@@ -48,11 +48,16 @@ denies everything else. The builder's *rules* mode is default-allow with tighten
 the same fixture would mean opposite things on the two sides. Allowlist mode is default-deny too, so
 the comparison is like-for-like.
 
-## The known gap, deliberately recorded
+## The gap this file used to record — now closed
 
-`data_classes`, `destinations.*`, `sql_tables` and `param_bytes` are expressible by the intent
-compiler and, since the scoping-facts work, by the builder's **rules** mode — but not yet inside an
-allowlist **grant**. Fixtures needing them set `"graph": null` and assert the intent side only.
-`test_every_fixture_is_covered_by_both_sides_or_says_why` fails if a `null` graph appears without a
-`gap` field explaining it, so the gap stays visible instead of quietly becoming permanent — and when
-allowlist grants gain those conditions, filling `graph` in is the whole change.
+`data_classes`, `destinations.*`, `sql_tables` and `param_bytes` were expressible by the intent
+compiler and by the builder's **rules** mode, but not inside an allowlist **grant**. So
+`credential-egress.json` shipped with `"graph": null` and asserted only the intent side.
+
+Grants now carry `facts` (see `BuilderAllowlistGrant.facts`), that fixture has a builder half, and
+**all three fixtures are pinned on both sides.** Filling `graph` in was indeed the whole change, which
+is the outcome the escape hatch was designed to make cheap.
+
+The hatch remains, because the next gap will not announce itself either: a fixture may still set
+`"graph": null`, but `test_every_fixture_is_covered_by_both_sides_or_says_why` fails unless it also
+carries a `gap` sentence saying why. A coverage hole has to be written down before it can exist.

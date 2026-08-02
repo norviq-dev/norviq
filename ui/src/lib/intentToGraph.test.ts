@@ -88,12 +88,25 @@ describe("intent -> builder graph", () => {
     expect(graph.allowlist?.grants ?? []).toEqual([]);
   });
 
-  it("REPORTS facts an allowlist grant cannot express, rather than dropping the restriction", () => {
-    const { dropped } = intentToBuilderGraph({
+  it("carries engine-derived facts into the grant — the gap this used to record", () => {
+    // This test previously asserted the OPPOSITE: that data_classes was reported as unrepresentable.
+    // Grants now carry scoping facts, so the restriction crosses instead of being refused, and
+    // tests/fixtures/cross_compiler/credential-egress.json has a builder half for the first time.
+    const { graph, dropped } = intentToBuilderGraph({
       class: "c",
-      call: [{ id: "r", match: { tool_name: "send_email" }, require: { data_classes: { noneOf: ["secret"] } } }]
+      call: [
+        {
+          id: "r",
+          match: { tool_name: "send_email" },
+          require: { data_classes: { noneOf: ["secret"] }, "destinations.emails": { subsetOf: ["ops@acme.com"] } }
+        }
+      ]
     });
-    expect(dropped.join(" ")).toContain("data_classes");
+    expect(dropped).toEqual([]);
+    expect(graph.allowlist?.grants?.[0].facts).toEqual([
+      { type: "collectionFact", field: "data_classes", op: "noneOf", values: ["secret"] },
+      { type: "collectionFact", field: "destinations.emails", op: "subsetOf", values: ["ops@acme.com"] }
+    ]);
   });
 
   it("REPORTS a rule that does not scope by tool name", () => {
@@ -121,18 +134,20 @@ describe("intent -> builder graph", () => {
           id: "r",
           match: { tool_name: "send_email" },
           require: {
-            "param_paths.to": { matches: "@acme\\.com$" }, // representable
-            data_classes: { noneOf: ["secret"] }, // NOT representable
-            "destinations.hosts": { subsetOf: ["acme.com"] } // NOT representable
+            "param_paths.to": { matches: "@acme\\.com$" }, // -> a per-field constraint
+            data_classes: { noneOf: ["secret"] }, // -> a grant fact
+            "destinations.hosts": { subsetOf: ["acme.com"] }, // -> a grant fact
+            "param_paths.filters.ids[0]": "C-91" // -> nothing: a nested path has no grant form
           }
         }
       ]
     };
     const { graph, dropped } = intentToBuilderGraph(intent);
     const narrowing = Object.keys(intent.call[0].require);
-    const represented = (graph.allowlist?.grants ?? []).flatMap((g) => g.constraints).length;
-    expect(represented + dropped.length).toBeGreaterThanOrEqual(narrowing.length);
-    expect(dropped.join(" ")).toContain("data_classes");
-    expect(dropped.join(" ")).toContain("destinations.hosts");
+    const g = (graph.allowlist?.grants ?? [])[0];
+    const represented = (g?.constraints.length ?? 0) + (g?.facts?.length ?? 0);
+    // EVERY narrowing predicate is either represented or named — none may simply vanish.
+    expect(represented + dropped.length).toBe(narrowing.length);
+    expect(dropped.join(" ")).toContain("nested path");
   });
 });

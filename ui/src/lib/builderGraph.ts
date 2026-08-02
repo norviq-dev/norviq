@@ -308,9 +308,37 @@ export type BuilderParamConstraint =
  * a second way to grant one. builderCompile rejects an orphan grant (`grant_not_allowlisted`) rather than
  * silently permitting a tool the operator never put on the allowlist.
  */
+/** The scoping-fact conditions a grant may carry. A closed subset of BuilderCondition on purpose:
+ *  detector/keyword/toolIn/trustBelow/sourceVerb belong to tighten-only RULES, and admitting them
+ *  inside a positive grant would let an allowlist entry be widened by a content detector — the
+ *  opposite of what a grant is for (a grant only ever NARROWS an already-allowed tool). */
+export type BuilderGrantFact =
+  | BuilderConditionScalarFact
+  | BuilderConditionCollectionFact
+  | BuilderConditionNumericFact
+  | (BuilderConditionNot & { inner: BuilderConditionScalarFact | BuilderConditionCollectionFact | BuilderConditionNumericFact });
+
 export interface BuilderAllowlistGrant {
   tool: string;
   constraints: BuilderParamConstraint[];
+  /**
+   * Scoping facts required for this tool, ANDed with `constraints`.
+   *
+   * `constraints` address `input.tool_params[field]` — ONE flat named parameter. That is not enough
+   * to say the things that actually matter under deny-by-default: "this call must not carry a
+   * credential" (`data_classes`), "the recipient must be inside our domain" (`destinations.emails`),
+   * "the query may only touch these tables" (`sql_tables`). Those are engine-derived facts about the
+   * WHOLE call, not about one argument, so they could never be expressed as a per-field constraint.
+   *
+   * Optional and absent-by-default, which is load-bearing for back-compat: every graph authored
+   * before this emits byte-identical rego (see grantsSection — no facts, no extra lines).
+   *
+   * SENSE, because it is the opposite of a rules-mode condition and easy to get backwards: a grant
+   * fact is a REQUIREMENT for the call to be allowed. `{data_classes, noneOf, [secret]}` here means
+   * "allowed only if it carries no secret", whereas the same condition in rules mode would mean
+   * "block when it carries no secret". Allowlist mode is positive security; rules mode is negative.
+   */
+  facts?: BuilderGrantFact[];
 }
 
 /**

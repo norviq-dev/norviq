@@ -753,14 +753,33 @@ function validateGrants(allowlist: BuilderAllowlist): BuilderError[] {
       });
     }
     seen.add(tool);
-    if (!Array.isArray(grant.constraints) || grant.constraints.length === 0) {
+    const grantConstraints = Array.isArray(grant.constraints) ? grant.constraints : [];
+    const grantFacts = Array.isArray(grant.facts) ? grant.facts : [];
+    if (grantConstraints.length === 0 && grantFacts.length === 0) {
       errors.push({
         code: "invalid_grant",
-        message: `Grant for "${grant.tool}" has no constraints — remove it, or add at least one (an empty grant would silently widen the tool back to unconstrained)`
+        message: `Grant for "${grant.tool}" narrows nothing — remove it, or add a constraint or a scoping fact (an empty grant would silently widen the tool back to unconstrained)`
       });
       return;
     }
-    grant.constraints.forEach((c, ci) => errors.push(...validateConstraint(c, `${grant.tool}[${ci}]`)));
+    grantConstraints.forEach((c, ci) => errors.push(...validateConstraint(c, `${grant.tool}[${ci}]`)));
+    // Facts are validated by the SAME function rules-mode conditions use, so a fact cannot be legal in
+    // one place and illegal in the other. The synthetic position just names the grant in the message.
+    grantFacts.forEach((f, fi) => {
+      const factErrors: BuilderError[] = [];
+      validateCondition(f as BuilderCondition, { ruleIndex: 0, ruleId: `grant:${grant.tool}`, rowIndex: 0, conditionIndex: fi }, factErrors);
+      errors.push(...factErrors);
+      // A grant may only NARROW an already-allowed tool. Admitting a content detector or a trust
+      // threshold here would let an allowlist entry be widened by something that is not a fact about
+      // the call's arguments — the opposite of what a grant is for.
+      const kind = (f as BuilderCondition).type === "not" ? ((f as { inner: BuilderCondition }).inner || {}).type : (f as BuilderCondition).type;
+      if (!["scalarFact", "collectionFact", "numericFact"].includes(String(kind))) {
+        errors.push({
+          code: "invalid_grant",
+          message: `Grant for "${grant.tool}" fact ${fi}: only scoping facts (scalarFact/collectionFact/numericFact, optionally negated) may narrow a grant — "${String(kind)}" belongs in a rules-mode rule`
+        });
+      }
+    });
   });
   return errors;
 }
@@ -1402,9 +1421,14 @@ function cleanAllowlistGrants(allowlist: BuilderAllowlist | null | undefined): B
     if (!g || typeof g !== "object" || Array.isArray(g)) continue;
     const grant = g as BuilderAllowlistGrant;
     if (typeof grant.tool !== "string" || grant.tool.trim() === "") continue;
-    if (!Array.isArray(grant.constraints) || grant.constraints.length === 0) continue;
+    const constraints = Array.isArray(grant.constraints) ? grant.constraints : [];
+    const facts = Array.isArray(grant.facts) ? grant.facts : [];
+    // A grant is well-formed if it narrows the tool SOMEHOW — by a per-field constraint, by a scoping
+    // fact, or both. Requiring `constraints` specifically would silently drop a facts-only grant, and a
+    // dropped narrowing is a policy that admits more than its author wrote.
+    if (constraints.length === 0 && facts.length === 0) continue;
     const tool = grant.tool.trim().toLowerCase();
-    if (!byTool.has(tool)) byTool.set(tool, { tool, constraints: grant.constraints });
+    if (!byTool.has(tool)) byTool.set(tool, { tool, constraints, ...(facts.length ? { facts } : {}) });
   }
   return [...byTool.values()].sort((a, b) => a.tool.localeCompare(b.tool));
 }
@@ -1491,7 +1515,11 @@ function grantsSection(grants: BuilderAllowlistGrant[]): string {
   const constrained = jsonSet(grants.map((g) => g.tool));
   const bodies = grants.map((g) => {
     const lines = g.constraints.map((c) => constraintExpr(c));
-    return [`_grant_ok {`, `    lower(input.tool_name) == ${JSON.stringify(g.tool)}`, ...lines, `}`].join("\n");
+    // Scoping facts are ANDed in alongside the per-field constraints. `compileConditionLine` is the
+    // SAME emitter rules mode uses, so a fact cannot mean one thing in a rule and another in a grant —
+    // which is the only way the cross-compiler parity fixtures can hold.
+    const factLines = (g.facts ?? []).map((f) => `    ${compileConditionLine(f, new Map())}`);
+    return [`_grant_ok {`, `    lower(input.tool_name) == ${JSON.stringify(g.tool)}`, ...lines, ...factLines, `}`].join("\n");
   });
   return [
     paramHelperBlock(),

@@ -16,7 +16,14 @@
 // reported: every predicate is either translated or named in `dropped`, and the caller is expected to
 // refuse the handoff (not merely warn) when `dropped` is non-empty. There is a test for that.
 
-import type { BuilderAllowlistGrant, BuilderGraph, BuilderParamConstraint } from "./builderGraph";
+import type {
+  BuilderAllowlistGrant,
+  BuilderConditionCollectionFact,
+  BuilderConditionNumericFact,
+  BuilderGrantFact,
+  BuilderGraph,
+  BuilderParamConstraint
+} from "./builderGraph";
 
 /** The subset of the server's intent shape this converter reads. Mirrors norviq/engine/intent/schema.py. */
 export type IntentPredicateSpec = string | Record<string, unknown>;
@@ -69,13 +76,78 @@ function toolNamesOf(rule: IntentRuleLike): string[] | null {
   return null;
 }
 
+/** Fields a grant can now carry directly as a scoping FACT (see BuilderAllowlistGrant.facts). */
+const COLLECTION_FACT_FIELDS = new Set([
+  "data_classes",
+  "sql_tables",
+  "sql_statements",
+  "param_values",
+  "destinations.emails",
+  "destinations.urls",
+  "destinations.hosts",
+  "destinations.schemes"
+]);
+const NUMERIC_FACT_FIELDS = new Set(["param_bytes", "call_depth", "trust_score"]);
+const SCALAR_FACT_FIELDS = new Set([
+  "verb",
+  "tool_kind",
+  "sql_normalized",
+  "direction",
+  "mcp.server",
+  "mcp.pin_status",
+  "mcp.scan_severity"
+]);
+
+/**
+ * Translate one non-tool_name predicate into a grant FACT, when it is one.
+ *
+ * These are the predicates that could not previously cross: they are engine-derived facts about the
+ * whole call ("does it carry a credential", "where is it going", "which tables") rather than about a
+ * single named argument, so no per-field constraint could ever express them. A grant carries them
+ * directly now, which is what closed the recorded gap.
+ *
+ * The intent's operator names ARE the builder's operator names — both mirror
+ * norviq/engine/intent/schema.py — so this is a re-shaping, not a translation, and there is no
+ * vocabulary in which the two could disagree.
+ */
+function factFor(field: string, spec: IntentPredicateSpec): BuilderGrantFact | null {
+  const ops = asRecord(spec);
+  if (COLLECTION_FACT_FIELDS.has(field)) {
+    for (const op of ["subsetOf", "noneOf", "anyOf"] as const) {
+      const v = ops[op];
+      if (Array.isArray(v)) {
+        return { type: "collectionFact", field: field as BuilderConditionCollectionFact["field"], op, values: v.filter((x): x is string => typeof x === "string") };
+      }
+    }
+    if (typeof ops.maxCount === "number") {
+      return { type: "collectionFact", field: field as BuilderConditionCollectionFact["field"], op: "maxCount", count: ops.maxCount };
+    }
+    return null;
+  }
+  if (NUMERIC_FACT_FIELDS.has(field)) {
+    for (const op of ["max", "min"] as const) {
+      if (typeof ops[op] === "number") {
+        return { type: "numericFact", field: field as BuilderConditionNumericFact["field"], op, value: ops[op] as number };
+      }
+    }
+    return null;
+  }
+  if (SCALAR_FACT_FIELDS.has(field)) {
+    if (typeof ops.equals === "string") return { type: "scalarFact", field, op: "equals", value: ops.equals };
+    if (Array.isArray(ops.in)) return { type: "scalarFact", field, op: "in", values: ops.in.filter((x): x is string => typeof x === "string") };
+    if (typeof ops.matches === "string") return { type: "scalarFact", field, op: "matches", value: ops.matches };
+    if (typeof ops.notMatches === "string") return { type: "scalarFact", field, op: "notMatches", value: ops.notMatches };
+    return null;
+  }
+  return null;
+}
+
 /** Translate one non-tool_name predicate into a grant constraint, or explain why it cannot be. */
 function constraintFor(field: string, spec: IntentPredicateSpec): BuilderParamConstraint | string {
   if (!field.startsWith(PARAM_PATH_PREFIX)) {
-    // data_classes / destinations.* / sql_tables / param_bytes / verb / mcp.* are all expressible by
-    // the builder's RULES mode (see builderScopingFacts.test.ts) but not yet inside an allowlist
-    // GRANT — which is the exact gap tests/fixtures/cross_compiler records.
-    return `${field}: an allowlist grant cannot express this yet (only the builder's rules mode can)`;
+    // Reached only when factFor() already declined it — an addressable field with an operator that has
+    // no builder equivalent, or a field neither side knows.
+    return `${field}: no allowlist-grant equivalent for this field/operator combination`;
   }
   const flat = flatFieldFor(field);
   if (!flat) return `${field}: a grant addresses one flat parameter, so a nested path has no equivalent`;
@@ -128,22 +200,35 @@ export function intentToBuilderGraph(intent: IntentLike, agentClass?: string): I
     }
 
     const constraints: BuilderParamConstraint[] = [];
+    const facts: BuilderGrantFact[] = [];
     const predicates = { ...(rule.match ?? {}), ...(rule.require ?? {}) };
     Object.entries(predicates).forEach(([field, spec]) => {
       if (field === "tool_name") return;
+      // Facts first: an engine-derived fact about the whole call has a direct grant representation and
+      // must not be forced through the per-field constraint path, which would either lose it or point
+      // it at an argument that does not exist.
+      const f = factFor(field, spec);
+      if (f) {
+        facts.push(f);
+        return;
+      }
       const c = constraintFor(field, spec);
       if (typeof c === "string") dropped.push(`rule ${rule.id}: ${c}`);
       else constraints.push(c);
     });
 
-    if (constraints.length) {
+    if (constraints.length || facts.length) {
       names.forEach((tool) => {
         const existing = grants.find((g) => g.tool === tool);
         // One grant per tool: the compiler rejects duplicates rather than merging, because silently
         // dropping half an operator's constraints reads as "the policy is too permissive" long after
         // anyone remembers why.
-        if (existing) existing.constraints.push(...constraints);
-        else grants.push({ tool, constraints: [...constraints] });
+        if (existing) {
+          existing.constraints.push(...constraints);
+          if (facts.length) existing.facts = [...(existing.facts ?? []), ...facts];
+        } else {
+          grants.push({ tool, constraints: [...constraints], ...(facts.length ? { facts: [...facts] } : {}) });
+        }
       });
     }
   });

@@ -36,12 +36,17 @@ const CONVERTIBLE = {
   params_available: true
 };
 
-/** Not representable: data_classes has no allowlist-grant form. */
+/** Not representable: a NESTED param_paths path.
+ *
+ *  This used to be `data_classes`, which grants now carry as a fact — so that intent converts cleanly
+ *  and the handoff correctly stops refusing it. A nested path is the remaining honest example: a grant
+ *  addresses one flat `tool_params[field]`, and taking the last segment of `filters.ids[0]` would point
+ *  the constraint at a DIFFERENT argument, which is the silent-wrong case the refusal exists to stop. */
 const LOSSY = {
   intent: {
-    name: "no-secret-egress",
+    name: "narrow-by-nested-arg",
     class: "report-gen",
-    call: [{ id: "mail", match: { tool_name: "send_email" }, require: { data_classes: { noneOf: ["secret"] } } }]
+    call: [{ id: "rows", match: { tool_name: "read_rows" }, require: { "param_paths.filters.ids[0]": "C-91" } }]
   },
   sampled: 4,
   params_available: true

@@ -120,6 +120,17 @@ function ruleId(rego: string, toolName: string, params: Record<string, unknown>)
   return queryPolicy(rego, toolName, params, "rule_id");
 }
 
+
+/** Evaluate a compiled module against a FULL input document (the grant-facts tests need to set
+ *  `derived`, which the tool/params helper above synthesises rather than accepts). */
+function decideDoc(rego: string, input: Record<string, unknown>): string {
+  const dir = mkdtempSync(join(tmpdir(), "nrvq-grantfacts-"));
+  const policyPath = writeFixture(dir, "policy.rego", rego);
+  const pkg = /^package\s+(\S+)/m.exec(rego)![1];
+  const inputPath = writeFixture(dir, "input.json", JSON.stringify(input));
+  return evalQuery(policyPath, inputPath, `data.${pkg}.decision`);
+}
+
 describe("intent allowlist — per-tool parameter constraints", () => {
   it("compiles without errors and stays inside the server's rego budget", () => {
     const res = compileGraph(
@@ -392,5 +403,94 @@ describe("intent grants — back-compat", () => {
     expect(rego).not.toContain("_p_str");
     expect(rego).not.toContain("intent_constraint_violation");
     expect(rego).not.toContain("Per-tool scope");
+  });
+});
+
+describe("grant facts — narrowing by what the call CARRIES, not just by one argument", () => {
+  // Constraints address `input.tool_params[field]`: ONE flat named parameter. That cannot say the
+  // things deny-by-default actually needs — "must not carry a credential", "the recipient must be
+  // in-domain", "only these tables" — because those are facts about the whole call. Grants carry them
+  // as `facts` now, which is what let cross_compiler/credential-egress.json gain a builder half.
+
+  itOpa("a fact in a grant is a REQUIREMENT to allow, the inverse of the same fact in a rule", () => {
+    // The sense is genuinely invertible and worth pinning: {data_classes noneOf [secret]} here means
+    // "allowed only if it carries no secret"; the identical condition in rules mode means "BLOCK when
+    // it carries no secret". Getting this backwards would allow exactly the calls it should refuse.
+    const { rego, errors } = compileGraph(
+      {
+        ...intentGraph(["send_email"]),
+        allowlist: {
+          tools: ["send_email"],
+          refinements: { readonly: false, egress: false, scope: false, rate: false },
+          grants: [
+            {
+              tool: "send_email",
+              constraints: [],
+              facts: [{ type: "collectionFact", field: "data_classes", op: "noneOf", values: ["secret"] }]
+            }
+          ]
+        }
+      },
+      "analytics"
+    );
+    expect(errors).toEqual([]);
+    const clean = { tool_name: "send_email", tool_params: { body: "hi" },
+      agent: { spiffe_id: "spiffe://norviq/ns/analytics/sa/report-gen", namespace: "analytics", agent_class: "report-gen" },
+      call_depth: 0, derived: { data_classes: [] } };
+    const dirty = { ...clean, tool_params: { body: "AKIAIOSFODNN7EXAMPLE" }, derived: { data_classes: ["secret"] } };
+    expect(decideDoc(rego, clean)).toBe("allow");
+    expect(decideDoc(rego, dirty)).toBe("block");
+  });
+
+  it("a grant carrying ONLY facts is valid — requiring a constraint would drop the narrowing", () => {
+    const res = compileGraph(
+      {
+        ...intentGraph(["send_email"]),
+        allowlist: {
+          tools: ["send_email"],
+          refinements: { readonly: false, egress: false, scope: false, rate: false },
+          grants: [{ tool: "send_email", constraints: [],
+            facts: [{ type: "collectionFact", field: "destinations.emails", op: "subsetOf", values: ["ops@acme.com"] }] }]
+        }
+      },
+      "analytics"
+    );
+    expect(res.errors).toEqual([]);
+    expect(res.rego).toContain("destinations");
+  });
+
+  it("refuses a rules-only condition inside a grant, which could only ever WIDEN it", () => {
+    // A grant exists to narrow an already-allowed tool. A detector or trust threshold is not a fact
+    // about the call's arguments, and admitting one here would let an allowlist entry be widened by
+    // something the allowlist never authorised.
+    const res = compileGraph(
+      {
+        ...intentGraph(["send_email"]),
+        allowlist: {
+          tools: ["send_email"],
+          refinements: { readonly: false, egress: false, scope: false, rate: false },
+          grants: [{ tool: "send_email", constraints: [],
+            facts: [{ type: "detector", detector: "sql_injection" } as never] }]
+        }
+      },
+      "analytics"
+    );
+    expect(res.errors.map((e) => e.code)).toContain("invalid_grant");
+    expect(res.rego).toBe("");
+  });
+
+  it("still rejects a grant that narrows nothing at all", () => {
+    const res = compileGraph(
+      {
+        ...intentGraph(["send_email"]),
+        allowlist: {
+          tools: ["send_email"],
+          refinements: { readonly: false, egress: false, scope: false, rate: false },
+          grants: [{ tool: "send_email", constraints: [], facts: [] }]
+        }
+      },
+      "analytics"
+    );
+    expect(res.errors.map((e) => e.code)).toContain("invalid_grant");
   });
 });
