@@ -1617,39 +1617,46 @@ function grantAvailabilityLines(facts: BuilderGrantFact[] | undefined): string[]
 
 function grantsSection(grants: BuilderAllowlistGrant[]): string {
   if (grants.length === 0) return "";
-  // KEYED ON THE EVASION-NORMALIZED NAME, exactly as `in_allowlist` is.
+  // THE GATE MUST COVER EVERY FORM `in_allowlist` CAN MATCH — which is TWO, not one:
   //
-  // These two gates must agree on what "the tool" means or the second one can be walked around. They
-  // did not: `in_allowlist` matches `allow_skeletons[input.tool_name_normalized]` — deliberately, so
-  // "homoglyph/fullwidth/case tricks can't smuggle a non-intended tool past the allow" — while the
-  // grant gate matched the RAW `lower(input.tool_name)`. A Cyrillic-e `еxеcute_sql` therefore skeletons
-  // to `execute_sql`, is ADMITTED by the allowlist, and then misses `_constrained` entirely, so
-  // `constraints_ok { not _constrained[...] }` holds and every per-tool constraint AND scoping fact is
-  // skipped. Demonstrated: that name carrying `DROP TABLE orders` — which violates the grant's
-  // `^select` constraint — evaluated to `allow`. The evasion the allowlist exists to stop, let back in
-  // one layer down.
-  const constrained = jsonSet([...new Set(grants.map((g) => skeleton(g.tool)))].sort());
-  const bodies = grants.map((g) => {
+  //     in_allowlist { allow_names[lower(input.tool_name)] }          <- raw, lower-cased
+  //     in_allowlist { allow_skeletons[input.tool_name_normalized] }  <- evasion-normalized
+  //
+  // Keying the grant gate on only ONE of them leaves the other as a hole, and it has now been wrong in
+  // BOTH directions. Originally it keyed on the raw name, so a Cyrillic call name was admitted by the
+  // skeleton branch and escaped its constraints. Re-keying it onto the normalized name fixed that case
+  // and opened the mirror image: an operator whose own allowlist ENTRY is non-ASCII got
+  // `_constrained := {"еxеcute_sql"}` (the builder's TS skeleton does not fold cross-script confusables
+  // — a documented gap in ui/src/lib/skeleton.ts) while the ENGINE sends
+  // `tool_name_normalized = "execute_sql"`. The raw branch admitted the call, `_constrained` missed it,
+  // and `DROP TABLE orders` sailed past a grant requiring `^select`.
+  //
+  // So both forms of every constrained tool go into `_constrained`, the unconstrained branch requires
+  // NEITHER to match, and each grant matches on either form. The two normalizations do not have to
+  // agree for this to be sound — that is the point, because they demonstrably do not.
+  const forms = (tool: string): string[] => [...new Set([tool.toLowerCase(), skeleton(tool)])];
+  const constrained = jsonSet([...new Set(grants.flatMap((g) => forms(g.tool)))].sort());
+  const bodies = grants.flatMap((g, i) => {
     const lines = g.constraints.map((c) => constraintExpr(c));
-    // Scoping facts are ANDed in alongside the per-field constraints. `compileConditionLine` is the
-    // SAME emitter rules mode uses, so a fact cannot mean one thing in a rule and another in a grant —
-    // which is the only way the cross-compiler parity fixtures can hold.
-    const factLines = (g.facts ?? []).map((f) => `    ${compileConditionLine(f, new Map())}`);
     // Availability FIRST: on an engine that cannot publish the fact the grant must fail before the
     // vacuously-true comprehension below is ever reached.
     const availability = grantAvailabilityLines(g.facts);
-    return [
-      `_grant_ok {`,
-      `    input.tool_name_normalized == ${JSON.stringify(skeleton(g.tool))}`,
-      ...availability, ...lines, ...factLines, `}`
+    const factLines = (g.facts ?? []).map((f) => `    ${compileConditionLine(f, new Map())}`);
+    const match = [
+      `_grant_tool_${i} { lower(input.tool_name) == ${JSON.stringify(g.tool.toLowerCase())} }`,
+      `_grant_tool_${i} { input.tool_name_normalized == ${JSON.stringify(skeleton(g.tool))} }`
     ].join("\n");
+    const body = [`_grant_ok {`, `    _grant_tool_${i}`, ...availability, ...lines, ...factLines, `}`].join("\n");
+    return [match, body];
   });
   return [
     paramHelperBlock(),
     "",
     `# --- per-tool constraints: a grant NARROWS an allowlisted tool, it never grants one ---`,
     `_constrained := ${constrained}`,
-    `constraints_ok { not _constrained[input.tool_name_normalized] }`,
+    // Unconstrained only if NEITHER form is constrained — a conjunction, so either form being present
+    // sends the call down the `_grant_ok` path instead of past it.
+    `constraints_ok { not _constrained[lower(input.tool_name)]; not _constrained[input.tool_name_normalized] }`,
     `constraints_ok { _grant_ok }`,
     "",
     bodies.join("\n\n")

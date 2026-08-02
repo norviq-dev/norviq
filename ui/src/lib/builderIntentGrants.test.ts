@@ -536,4 +536,33 @@ describe("evasion: the allowlist and the grant gate must agree on what 'the tool
     // ...and must still be allowed when it obeys it, or the fix would just be a blanket denial.
     expect(decideDoc(rego, call(HOMOGLYPH, "SELECT id FROM orders"))).toBe("allow");
   });
+
+  itOpa("...and the MIRROR IMAGE: a non-ASCII allowlist ENTRY still binds its constraint", () => {
+    // The first fix for the homoglyph bypass re-keyed the grant gate from the raw name onto the
+    // normalized one — and opened this. `in_allowlist` matches on TWO forms:
+    //     in_allowlist { allow_names[lower(input.tool_name)] }
+    //     in_allowlist { allow_skeletons[input.tool_name_normalized] }
+    // so a gate covering only one leaves the other as a hole, whichever one it picks. Here the
+    // operator's own entry is Cyrillic: the builder's TS skeleton does not fold cross-script
+    // confusables (a documented gap in skeleton.ts) while the ENGINE's does, so `_constrained` held
+    // "еxеcute_sql" and the engine sent "execute_sql" — the raw branch admitted the call and the
+    // constraint was skipped. `DROP TABLE orders` was ALLOWED against a grant requiring ^select.
+    const CYRILLIC = "\u0435x\u0435cute_sql";
+    const { rego, errors } = compileGraph(
+      intentGraph([CYRILLIC], [
+        { tool: CYRILLIC, constraints: [{ kind: "matches", field: "query", pattern: "(?i)^\\s*select\\b" }] }
+      ]),
+      "analytics"
+    );
+    expect(errors).toEqual([]);
+    const call2 = (query: string) => ({
+      tool_name: CYRILLIC,
+      tool_name_normalized: "execute_sql", // what the ENGINE computes — deliberately != the TS skeleton
+      tool_params: { query },
+      agent: { spiffe_id: "spiffe://norviq/ns/analytics/sa/report-gen", namespace: "analytics", agent_class: "report-gen" },
+      call_depth: 0
+    });
+    expect(decideDoc(rego, call2("DROP TABLE orders"))).toBe("block");
+    expect(decideDoc(rego, call2("SELECT id FROM orders"))).toBe("allow");
+  });
 });
