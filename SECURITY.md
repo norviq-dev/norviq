@@ -124,7 +124,7 @@ take `.[spiffe]`, and `framework-compat.yml` installs one framework at a time.
 | CVE-2026-45829 | `chromadb` (via `crewai`) | No fixed release exists — the latest version is still affected. | It is a pre-auth RCE in the **ChromaDB HTTP server**; CrewAI uses chromadb as an **embedded client**, so the vulnerable server path is never started. |
 | CVE-2026-26030 | `semantic-kernel` | The fix (`>=1.39.4`) pulls a **pre-release** `azure-ai-agents` dependency, which we will not ship in a lockfile. | RCE is in the `InMemoryVectorStore` filter-lambda path, which the Norviq semantic-kernel adapter does not use. |
 | CVE-2026-25592 | `semantic-kernel` | This is a **.NET** CVE (fixed in .NET Core `1.71.0`); FOSSA maps it onto the pip package, where no release clears it. | The affected `[KernelFunction] DownloadFileAsync` helper exists only in the .NET SDK, not the Python package we depend on. |
-| GHSA-337j-9hxr-rhxg | `react-router` / `react-router-dom` (console UI) | Fixed only in **7.18.0**. There is no patched 6.x — we are on 6.30.4, already the latest 6.x — so closing it means a **major-version migration** of the router. | The flaw is arbitrary constructor injection in `deserializeErrors()` during **SSR hydration**. The console does no SSR: [`ui/src/main.tsx`](ui/src/main.tsx) renders with `ReactDOM.createRoot`, there is no `renderToString` / `hydrateRoot` / `StaticRouter` / Remix server entry anywhere in `ui/src`, and `Dockerfile.ui` builds a static bundle served by nginx. The vulnerable path is never executed. |
+| GHSA-qwww-vcr4-c8h2 | `react-router` / `react-router-dom` (console UI) | Fixed only in **8.3.0**, which requires **React >= 19.2.7** and **Node >= 22.22.0** and drops `react-router-dom` entirely — a React 18→19 migration, not a bump. Downgrading is not an escape either: the only versions below the affected range (`>=7.12.0 <8.3.0`) are back inside the **7.17.0-and-below** range of the advisories this entry replaces. | The flaw is a CSRF bypass in **RSC mode**, letting an action execute before a 400 response. The console never enters RSC mode: [`ui/src/main.tsx`](ui/src/main.tsx) renders with `ReactDOM.createRoot` under a plain `BrowserRouter`, there is no server runtime, no `@vitejs/plugin-rsc`, no `unstable_RSC*` API in `ui/src`, and `Dockerfile.ui` builds a static bundle served by nginx. |
 
 These are reviewed each release; we will drop an exception and bump the moment upstream ships a fixed
 release reachable without a pre-release dependency.
@@ -132,16 +132,30 @@ release reachable without a pre-release dependency.
 **React Router is a scheduled fix, not a permanent exception.** The other three entries are blocked on
 upstream; this one is blocked only on our own migration effort, which is a different kind of reason and
 should not be allowed to age quietly into "accepted". Two things would change the calculus immediately
-and should be treated as a trigger to prioritise the v7 migration:
+and should be treated as a trigger to prioritise the React 19 / router v8 migration:
 
-- the console gaining **any** server-side rendering or prerendering step, which would put the
-  `deserializeErrors()` path into the executed code — the reason for the exception disappears the moment
-  that changes, and it is the kind of change that arrives as a performance or SEO improvement rather than
-  as a security decision;
-- a `react-router` 6.x backport appearing, which removes the migration cost entirely.
+- the console gaining **any** server-side rendering, prerendering, or React Server Components step,
+  which would put the vulnerable path into the executed code — the reason for the exception disappears
+  the moment that changes, and it is the kind of change that arrives as a performance or SEO
+  improvement rather than as a security decision;
+- the project moving to React 19 for an unrelated reason, which removes the migration cost entirely.
 
 Until then the residual risk is bounded: the console is authenticated, served as static assets, and the
-advisory requires an SSR hydration payload that no code path here produces.
+advisory requires an RSC request flow that no code path here produces.
+
+> **This entry was rewritten when the router was upgraded 6.30.4 → 7.18.2**, which closed
+> CVE-2026-53668 / -53669 / -53666 (`GHSA-337j-9hxr-rhxg` and the two open-redirect advisories) —
+> those were the three the FOSSA gate was actually failing on, and 6.30.4 was the last 6.x, so there
+> was no patch on that line. The upgrade needed **no code changes**: the console uses only
+> `MemoryRouter`/`BrowserRouter`, `Routes`/`Route`, `Link`/`NavLink`, `Navigate`, `useNavigate`,
+> `useLocation` and `useSearchParams` — no data-router APIs, no loaders/actions, no `json()`/`defer()`,
+> and no splat routes for `v7_relativeSplatPath` to affect.
+>
+> A NOTE ON WHY THE GATE WENT RED ANYWAY, because it cost time: the old React Router row was written
+> into this table but **never added to `ACCEPTED_CVES` in `.github/workflows/fossa.yml`**, so the gate
+> kept failing on a vulnerability this document had already accepted. The two are supposed to be in
+> lockstep and were not. The gate now matches **GHSA ids as well as CVE ids** — this advisory has no
+> CVE assigned, so a CVE-only matcher could never have accepted it.
 
 The three Python entries are also marked **Ignored** in the FOSSA project UI (reason: *vulnerable code
 not in execute path*, scoped to this project and the current dependency versions), so FOSSA's own
