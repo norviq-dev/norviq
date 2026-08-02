@@ -220,7 +220,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (wantNs === null) params.delete("ns");
     else params.set("ns", wantNs);
     const query = params.toString();
-    navigate(`${location.pathname}${query ? `?${query}` : ""}${location.hash}`, { replace: true });
+    // PRESERVE `location.state`. This effect exists only to keep the `?ns=` query param in step with
+    // the selected namespace — a URL sync. Omitting `state` made it a URL sync that also silently
+    // DISCARDED whatever the previous navigation carried, because react-router replaces the whole
+    // location entry and defaults state to null.
+    //
+    // That made router state unusable across this app, not just inconvenient: any screen deep-linking
+    // to another with `navigate(path, { state })` had its payload wiped the moment this effect ran,
+    // which is on essentially every navigation. The /intents -> builder handoff was the first feature
+    // to depend on it and simply never opened; the failure was invisible because the destination
+    // rendered perfectly, just empty-handed.
+    navigate(`${location.pathname}${query ? `?${query}` : ""}${location.hash}`, {
+      replace: true,
+      state: location.state
+    });
   }, [selectedNamespace, location.pathname, location.search, location.hash, navigate]);
 
   // Governance posture of the selected scope. "all" (no ns param) returns the cluster DEFAULT

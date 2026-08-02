@@ -107,7 +107,13 @@ export function Intents() {
     }
     // The builder owns authoring and the gated save; nothing here enforces. Carrying the graph in
     // router state (not a query string) keeps a policy body out of browser history and access logs.
-    navigate("/policies", { state: { builderGraph: handoff.graph, fromIntent: proposal?.intent?.name ?? "" } });
+    // `/policies/catalog`, NOT `/policies`. App.tsx routes `/policies` through
+    // `<Navigate to="/policies/catalog" replace />`, and a redirect does not carry router state — so
+    // targeting the shorthand delivered the operator to the catalog with `location.state` null and the
+    // builder never opened. Found only by walking the flow in a browser: the unit tests covered the
+    // converter and the seeding separately and rendered BuilderSheet directly, so nothing exercised
+    // navigate -> redirect -> catalog. Deep-link to the real route.
+    navigate("/policies/catalog", { state: { builderGraph: handoff.graph, fromIntent: proposal?.intent?.name ?? "" } });
   }, [handoff, navigate, proposal, push]);
 
   const reset = () => {

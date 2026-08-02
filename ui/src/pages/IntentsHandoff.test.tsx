@@ -15,7 +15,7 @@
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Intents } from "./Intents";
 import { BuilderSheet } from "../components/policies/BuilderSheet";
@@ -143,5 +143,49 @@ describe("the handoff must not lose a narrowing on the way into the builder", ()
       (graph.allowlist?.grants ?? []).filter((g) => (g.facts ?? []).length > 0).map((g) => [g.tool, g.facts])
     );
     expect(seededFacts["send_email"]).toEqual(grant?.facts);
+  });
+});
+
+describe("the handoff must land on a route that actually keeps the state", () => {
+  it("reaches the catalog WITH the graph, through the real router", async () => {
+    // App.tsx routes `/policies` through `<Navigate to="/policies/catalog" replace />`, and a redirect
+    // DROPS router state — so navigating to the shorthand delivered the operator to the catalog with
+    // location.state null and the builder silently never opened. The earlier tests could not catch it:
+    // they rendered BuilderSheet directly with a seedGraph prop, so navigate -> redirect -> catalog was
+    // never exercised. This drives the REAL router, including that redirect, and asserts the graph
+    // survives the trip — which is the property that actually matters, not the literal path string.
+    vi.spyOn(client, "apiSend").mockResolvedValue(CONVERTIBLE as never);
+    const user = userEvent.setup();
+
+    function Landing() {
+      const loc = useLocation();
+      const g = (loc.state as { builderGraph?: { allowlist?: { tools?: string[] } } } | null)?.builderGraph;
+      return <div data-testid="landing">{`${loc.pathname}|graph=${g ? (g.allowlist?.tools ?? []).join(",") : "MISSING"}`}</div>;
+    }
+
+    render(
+      <MemoryRouter initialEntries={["/intents?ns=agents"]}>
+        <AppProvider>
+          <ToastProvider>
+            <Routes>
+              <Route path="/intents" element={<Intents />} />
+              {/* the real redirect, reproduced exactly */}
+              <Route path="/policies" element={<Navigate to="/policies/catalog" replace />} />
+              <Route path="/policies/catalog" element={<Landing />} />
+            </Routes>
+          </ToastProvider>
+        </AppProvider>
+      </MemoryRouter>
+    );
+
+    await propose(user);
+    await waitFor(() => expect(screen.getByTestId("open-in-builder")).toBeInTheDocument());
+    await user.click(screen.getByTestId("open-in-builder"));
+
+    await waitFor(() => expect(screen.getByTestId("landing")).toBeInTheDocument());
+    const landed = screen.getByTestId("landing").textContent ?? "";
+    expect(landed).toContain("/policies/catalog");
+    expect(landed, "the graph must survive the navigation").not.toContain("MISSING");
+    expect(landed).toContain("execute_sql");
   });
 });
