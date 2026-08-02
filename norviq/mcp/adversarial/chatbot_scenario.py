@@ -26,6 +26,7 @@ import os
 import sys
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
 
@@ -60,6 +61,23 @@ class Check:
 
     def as_dict(self) -> dict:
         return asdict(self)
+
+
+
+def _urlopen_http(req: "urllib.request.Request", timeout: int = 20):
+    """`urlopen` restricted to http/https.
+
+    bandit flags a bare `urlopen` (B310) because urllib will happily open `file://` — and here the
+    base URL comes from `--api` / an env var, so a caller (or a mistyped default) can reach the local
+    filesystem through what reads like an HTTP client. This harness ships in a SECURITY product and is
+    pointed at whatever cluster the operator names, so the scheme is checked rather than assumed.
+    """
+    scheme = urllib.parse.urlparse(req.full_url).scheme
+    if scheme not in ("http", "https"):
+        raise ValueError(f"refusing to open a non-HTTP(S) URL: {scheme}://…")
+    # The scheme is validated directly above, and this is the module's ONLY urlopen call site — which
+    # is the point of funnelling both callers through here rather than suppressing at each of them.
+    return urllib.request.urlopen(req, timeout=timeout)  # nosec B310  # noqa: S310
 
 
 def _params(server: str, agent_class: str, call_log: str, rugpull: str = "",
@@ -146,7 +164,7 @@ def _promote_verb(api: str, admin_token: str, namespace: str, tool: str, verb: s
                                  headers={"Authorization": f"Bearer {admin_token}",
                                           "Content-Type": "application/json"})
     try:
-        urllib.request.urlopen(req, timeout=20).read()
+        _urlopen_http(req).read()
         return True
     except (urllib.error.URLError, urllib.error.HTTPError):
         return False
@@ -296,7 +314,7 @@ async def run(api: str, admin_token: str) -> list[Check]:
             req = urllib.request.Request(
                 f"{api}/api/v1/audit/records?limit=100&range=1h&framework=mcp",
                 headers={"Authorization": f"Bearer {admin_token}"})
-            rows = json.loads(urllib.request.urlopen(req, timeout=20).read())
+            rows = json.loads(_urlopen_http(req).read())
             rows = rows if isinstance(rows, list) else rows.get("items", [])
             servers_seen = {(r.get("mcp") or {}).get("server") for r in rows if r.get("mcp")}
             checks.append(Check(

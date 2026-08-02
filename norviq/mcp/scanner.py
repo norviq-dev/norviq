@@ -164,8 +164,15 @@ _RULES: tuple[tuple[str, str, re.Pattern[str], str], ...] = (
 # Characters that carry no meaning in a human-readable description and are the classic vehicle for
 # hiding text from a reviewer while leaving it visible to the model: zero-width space/joiner, word
 # joiner, bidi overrides, and Unicode tag characters (the "invisible ASCII" channel, U+E0000 block).
+#
+# WRITTEN AS \u ESCAPES, NOT LITERAL CHARACTERS, and that is not a style choice. Spelling this class
+# out literally puts real bidi overrides (U+202A..U+202E) into this file — the Trojan Source pattern
+# (CVE-2021-42574), where source renders differently to a reviewer than it compiles. bandit flags it
+# HIGH as B613 and is right to: a scanner whose job is detecting hidden characters must not be the one
+# file in the tree a reviewer cannot read faithfully. The compiled pattern is byte-identical either
+# way; there is a test asserting each codepoint is still matched.
 _INVISIBLE = re.compile(
-    r"[​-‏‪-‮⁠-⁤⁦-⁩﻿\U000e0000-\U000e007f]"
+    r"[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\U000e0000-\U000e007f]"
 )
 
 # A description this long is not documentation. The threshold is generous — the longest description
