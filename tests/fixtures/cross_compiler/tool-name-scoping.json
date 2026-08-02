@@ -1,0 +1,174 @@
+{
+  "name": "tool-name-scoping",
+  "why": "The baseline both sides claim: a listed tool is admitted, an unlisted one is denied.",
+  "intent": {
+    "name": "reads-only",
+    "class": "report-gen",
+    "call": [
+      {
+        "id": "read-orders",
+        "match": {
+          "tool_name": {
+            "in": [
+              "read_table",
+              "search_kb"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "graph": {
+    "schemaVersion": 1,
+    "scope": {
+      "kind": "class",
+      "agentClass": "report-gen"
+    },
+    "mode": "allowlist",
+    "rules": [],
+    "defaults": {
+      "decision": "block",
+      "reason": "not in the allowlist"
+    },
+    "allowlist": {
+      "tools": [
+        "read_table",
+        "search_kb"
+      ],
+      "refinements": {
+        "readonly": false,
+        "egress": false,
+        "scope": false,
+        "rate": false
+      }
+    }
+  },
+  "cases": [
+    {
+      "note": "listed tool",
+      "input": {
+        "tool_name": "read_table",
+        "tool_name_normalized": "read_table",
+        "tool_params": {
+          "table": "orders"
+        },
+        "agent": {
+          "spiffe_id": "spiffe://norviq/ns/analytics/sa/report-gen",
+          "namespace": "analytics",
+          "agent_class": "report-gen"
+        },
+        "call_depth": 0,
+        "trust_score": 0.9,
+        "derived": {
+          "verb": "read",
+          "tool_kind": "other",
+          "param_values": [
+            "orders"
+          ],
+          "param_values_lower": [
+            "orders"
+          ],
+          "sql_normalized": "",
+          "sql_statements": [],
+          "param_paths": {
+            "table": "orders"
+          },
+          "sql_tables": [],
+          "data_classes": [],
+          "param_bytes": 0,
+          "destinations": {
+            "emails": [],
+            "urls": [],
+            "hosts": [],
+            "schemes": []
+          }
+        }
+      },
+      "expect": "allow"
+    },
+    {
+      "note": "other listed tool",
+      "input": {
+        "tool_name": "search_kb",
+        "tool_name_normalized": "search_kb",
+        "tool_params": {
+          "q": "refund"
+        },
+        "agent": {
+          "spiffe_id": "spiffe://norviq/ns/analytics/sa/report-gen",
+          "namespace": "analytics",
+          "agent_class": "report-gen"
+        },
+        "call_depth": 0,
+        "trust_score": 0.9,
+        "derived": {
+          "verb": "read",
+          "tool_kind": "other",
+          "param_values": [
+            "refund"
+          ],
+          "param_values_lower": [
+            "refund"
+          ],
+          "sql_normalized": "",
+          "sql_statements": [],
+          "param_paths": {
+            "q": "refund"
+          },
+          "sql_tables": [],
+          "data_classes": [],
+          "param_bytes": 0,
+          "destinations": {
+            "emails": [],
+            "urls": [],
+            "hosts": [],
+            "schemes": []
+          }
+        }
+      },
+      "expect": "allow"
+    },
+    {
+      "note": "unlisted tool is denied by ABSENCE of a rule",
+      "input": {
+        "tool_name": "delete_kb",
+        "tool_name_normalized": "delete_kb",
+        "tool_params": {
+          "id": "1"
+        },
+        "agent": {
+          "spiffe_id": "spiffe://norviq/ns/analytics/sa/report-gen",
+          "namespace": "analytics",
+          "agent_class": "report-gen"
+        },
+        "call_depth": 0,
+        "trust_score": 0.9,
+        "derived": {
+          "verb": "read",
+          "tool_kind": "other",
+          "param_values": [
+            "1"
+          ],
+          "param_values_lower": [
+            "1"
+          ],
+          "sql_normalized": "",
+          "sql_statements": [],
+          "param_paths": {
+            "id": "1"
+          },
+          "sql_tables": [],
+          "data_classes": [],
+          "param_bytes": 0,
+          "destinations": {
+            "emails": [],
+            "urls": [],
+            "hosts": [],
+            "schemes": []
+          }
+        }
+      },
+      "expect": "block"
+    }
+  ]
+}
