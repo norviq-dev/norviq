@@ -718,3 +718,32 @@ def test_not_matches_produces_loadable_rego() -> None:
     # And it must DECIDE the negation, not merely parse.
     assert _eval(intent, _mk("your refund is on its way")) == "allow"
     assert _eval(intent, _mk("the password is hunter2")) == "block"
+
+
+@pytest.mark.skipif(_OPA is None, reason="opa binary required")
+@pytest.mark.parametrize("field,spec", [
+    ("param_paths.to", {"matches": "^x$"}),
+    ("destinations.emails", {"subsetOf": ["ops@acme.com"]}),
+    ("data_classes", {"noneOf": ["secret"]}),
+    ("sql_tables", {"subsetOf": ["orders"]}),
+    ("param_bytes", {"max": 1024}),
+])
+def test_every_version_gated_root_gets_its_availability_predicate(field: str, spec: dict) -> None:
+    """Per-ROOT, not as a whole.
+
+    The existing coverage exercised the availability machinery only through `data_classes`, so removing
+    any OTHER root from `_VERSION_GATED_ROOTS` restored the fail-open with the entire suite green.
+    Parametrised so a root added to the compiler without a case here is the thing that fails.
+    """
+    intent = {"name": "n", "class": "c",
+              "call": [{"id": "r", "match": {"tool_name": "x"}, "require": {field: spec}}]}
+    rego = _rego(intent)
+    root = field.split(".")[0]
+    assert f'object.get(input.derived, "{root}", null) != null' in rego, root
+
+    # And it must actually DENY on a document that lacks the root.
+    old_engine = {"tool_name": "x", "direction": "call", "tool_params": {},
+                  "agent": {"agent_class": "c", "namespace": "n"}, "call_depth": 0,
+                  "derived": {"verb": "read", "tool_kind": "other", "param_values": [],
+                              "param_values_lower": [], "sql_normalized": "", "sql_statements": []}}
+    assert _eval(intent, old_engine) == "block", f"{root} failed open on an engine without it"

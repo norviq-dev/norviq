@@ -158,24 +158,37 @@ function operatorCount(spec: IntentPredicateSpec): number {
   return typeof spec === "string" ? 1 : Object.keys(spec ?? {}).length;
 }
 
-/** Translate one non-tool_name predicate into a grant constraint, or explain why it cannot be. */
-function constraintFor(field: string, spec: IntentPredicateSpec): BuilderParamConstraint | string {
+/** Translate one non-tool_name predicate into grant constraints — EVERY operator it states.
+ *
+ *  Returns `{ constraints, unrepresentable }`. The "every operator" fix was applied to `factsFor` and
+ *  NOT here, so a predicate like `{matches: "^select ", notMatches: "drop|delete"}` kept only the
+ *  `matches` and left `dropped` EMPTY — the handoff refusal keys on `dropped.length`, so it could not
+ *  fire, and the operator saved a policy that had quietly lost its negative clause. Same bug, same
+ *  file, other function.
+ */
+function constraintsFor(field: string, spec: IntentPredicateSpec): { constraints: BuilderParamConstraint[]; unrepresentable: string[] } {
+  const out: BuilderParamConstraint[] = [];
+  const bad: string[] = [];
   if (!field.startsWith(PARAM_PATH_PREFIX)) {
-    // Reached only when factFor() already declined it — an addressable field with an operator that has
-    // no builder equivalent, or a field neither side knows.
-    return `${field}: no allowlist-grant equivalent for this field/operator combination`;
+    return { constraints: out, unrepresentable: [`${field}: no allowlist-grant equivalent for this field/operator combination`] };
   }
   const flat = flatFieldFor(field);
-  if (!flat) return `${field}: a grant addresses one flat parameter, so a nested path has no equivalent`;
+  if (!flat) {
+    return { constraints: out, unrepresentable: [`${field}: a grant addresses one flat parameter, so a nested path has no equivalent`] };
+  }
   const ops = asRecord(spec);
-  if (typeof ops.matches === "string") return { kind: "matches", field: flat, pattern: ops.matches };
-  if (typeof ops.notMatches === "string") return { kind: "notMatches", field: flat, pattern: ops.notMatches };
-  if (typeof ops.equals === "string") return { kind: "oneOf", field: flat, values: [ops.equals] };
+  if (typeof ops.matches === "string") out.push({ kind: "matches", field: flat, pattern: ops.matches });
+  if (typeof ops.notMatches === "string") out.push({ kind: "notMatches", field: flat, pattern: ops.notMatches });
+  if (typeof ops.equals === "string") out.push({ kind: "oneOf", field: flat, values: [ops.equals] });
   if (Array.isArray(ops.in)) {
     const values = ops.in.filter((v): v is string => typeof v === "string");
-    if (values.length) return { kind: "oneOf", field: flat, values };
+    if (values.length) out.push({ kind: "oneOf", field: flat, values });
   }
-  return `${field}: operator ${Object.keys(ops).join("/") || "(none)"} has no grant equivalent`;
+  const stated = operatorCount(spec);
+  if (out.length < stated) {
+    bad.push(`${field}: states ${stated} operator(s), ${out.length} representable`);
+  }
+  return { constraints: out, unrepresentable: bad };
 }
 
 /**
@@ -234,9 +247,9 @@ export function intentToBuilderGraph(intent: IntentLike, agentClass?: string): I
         }
         return;
       }
-      const c = constraintFor(field, spec);
-      if (typeof c === "string") dropped.push(`rule ${rule.id}: ${c}`);
-      else constraints.push(c);
+      const { constraints: cs, unrepresentable } = constraintsFor(field, spec);
+      constraints.push(...cs);
+      unrepresentable.forEach((u) => dropped.push(`rule ${rule.id}: ${u}`));
     });
 
     if (constraints.length || facts.length) {

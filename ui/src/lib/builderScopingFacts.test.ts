@@ -304,3 +304,24 @@ describe("coverage the earlier tests did not have", () => {
     expect(decide(maxRego, recips(3)).decision).toBe("allow"); // > 1 -> does not fire
   });
 });
+
+describe("trustBelow must read the key the evaluator actually sets", () => {
+  itOpa("a low-trust call BLOCKS and a high-trust one does not", () => {
+    // The compiler emitted `input.agent.trust_score`, which no input builder sets — evaluator.py puts
+    // trust_score at the TOP LEVEL and `input.agent` holds only spiffe_id/namespace/agent_class. So the
+    // comparison was undefined and EVERY low-trust block rule was dead. The two tests that covered this
+    // condition asserted the emitted STRING, so they passed on the broken key; this one evaluates.
+    const rego = compileOk(rulesGraph([{ type: "trustBelow", threshold: 0.5 }]));
+    const at = (score: number) => ({
+      tool_name: "x",
+      tool_name_normalized: "x",
+      tool_params: {},
+      agent: { spiffe_id: "spiffe://norviq/ns/analytics/sa/report-gen", namespace: "analytics", agent_class: "report-gen" },
+      call_depth: 0,
+      trust_score: score,
+      derived: {}
+    });
+    expect(decide(rego, at(0.1)).decision).toBe("block");
+    expect(decide(rego, at(0.9)).decision).toBe("allow");
+  });
+});

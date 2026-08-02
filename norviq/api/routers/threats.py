@@ -475,8 +475,21 @@ async def _governing_policies(session: AsyncSession, namespaces: list[str] | Non
                 except ValueError:
                     parsed = []
                 if isinstance(parsed, list):
-                    allow = sorted({str(v) for v in parsed})
-                    out[str(r["agent_class"])] = {"kind": kind, "allow": allow, "readonly": "is_read " in rego}
+                    # LOWER-CASED, matching the `allow_names` branch below and the only consumer:
+                    # `_path_governed_by` lower-cases the chokepoint before the membership test. Storing
+                    # raw case here meant an intent admitting `sendEmail` was compared against `sendemail`
+                    # and missed — so a chokepoint the intent ALLOWS was reported as DEFENDED, which is
+                    # the wrong direction for an attack-path badge.
+                    allow = {str(v).lower() for v in parsed}
+                    out[str(r["agent_class"])] = {
+                        "kind": kind, "allow": allow, "readonly": "is_read " in rego,
+                        # An EMPTY marker means "this intent does not scope by tool name" (the compiler
+                        # says so in its own header), NOT "it admits nothing". Those read identically as
+                        # an empty `allow`, and the consumer treats an absent name as DENIED — so an
+                        # intent scoping by verb or destination badged EVERY chokepoint as defended.
+                        # Claiming a defence that does not exist is the wrong direction for this badge.
+                        "name_scoped": bool(allow),
+                    }
                     continue
         if am:
             allow = {a.lower() for a in _POLICY_QUOTED_RE.findall(am.group(1))}
@@ -493,6 +506,10 @@ def _path_governed_by(gov: dict, cls: str, chokepoint: str, choke_verb: str | No
         return "capability"  # verb forward-guard blocks destructive tools by name pattern
     # intent (default-deny): denies any tool NOT allowlisted; an allowlisted MUTATING tool is denied only
     # when Read-only is on. A permitted (allowlisted, non-refined) chokepoint is NOT governed — be honest.
+    # An intent that does not scope by tool name says nothing about this chokepoint, so it cannot be
+    # claimed as the thing defending it. Only a name-scoped allowlist supports "not listed => denied".
+    if not p.get("name_scoped", True):
+        return ""
     name = (chokepoint or "").lower()
     if name not in p["allow"]:
         return "intent"

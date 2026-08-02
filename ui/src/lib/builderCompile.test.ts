@@ -170,7 +170,10 @@ describe("builderCompile — shape", () => {
     expect(result.rego).toContain('default reason = "nothing matched"');
     expect(result.rego).toContain('blocks["block_shell"]');
     expect(result.rego).toContain('escalates["low_trust"]');
-    expect(result.rego).toContain('input.agent.trust_score < 0.4');
+    // `input.trust_score`, not `input.agent.trust_score`. evaluator.py's _build_input puts trust_score
+    // at the top level; `input.agent` carries only spiffe_id/namespace/agent_class. This assertion
+    // previously encoded the wrong key, so it passed while every low-trust block rule was dead.
+    expect(result.rego).toContain('input.trust_score < 0.4');
     // resolver — the verbatim (adapted, no shell/sql shadow rule) template
     expect(result.rego).toContain("block_fired { blocks[_] }");
     expect(result.rego).toContain("escalate_fired { escalates[_] }");
@@ -636,7 +639,7 @@ describe("builderCompile — not condition (Phase 2b)", () => {
     ]);
     const result = compileGraph(graph);
     expect(result.errors).toEqual([]);
-    expect(result.rego).toContain("not input.agent.trust_score < 0.4");
+    expect(result.rego).toContain("not input.trust_score < 0.4");
   });
 
   it("rejects not-of-not as a single not_double_negation error, no rego emitted", () => {

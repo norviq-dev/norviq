@@ -862,7 +862,35 @@ function validateGrants(allowlist: BuilderAllowlist): BuilderError[] {
  * asymmetry is acceptable — the check exists to catch typos at author time, and the server's own rego
  * validation is the backstop — but it is the reason this is not claimed to be an exact RE2 parser.
  */
+/** Constructs JavaScript's RegExp accepts that RE2 — and therefore OPA — does not.
+ *
+ *  This is the asymmetry that matters, and it is the DANGEROUS direction. A lookahead or backreference
+ *  compiles fine under `new RegExp`, so the validity probe passed it through; OPA then does not raise
+ *  an error on `regex.match` with an unsupported pattern, it makes the call UNDEFINED. In a
+ *  `notMatches` constraint that becomes `not <undefined>`, which is TRUE — so the constraint is
+ *  satisfied and the call is ALLOWED. Verified: a grant refusing bodies matching `(?=.*secret)`
+ *  allowed a body containing "secret".
+ *
+ *  Deliberately a syntactic screen, not an RE2 parser: it rejects the constructs RE2 documents as
+ *  unsupported. A pattern that slips past is still caught by the server's own rego validation at push
+ *  time — the point here is to catch it at AUTHOR time, before it silently stops enforcing.
+ */
+const RE2_UNSUPPORTED: [RegExp, string][] = [
+  [/\((\?=|\?!)/, "lookahead ((?= or (?!)"],
+  [/\(\?<[=!]/, "lookbehind ((?<= or (?<!)"],
+  [/\\[1-9]/, "backreference (\\1)"],
+  [/\\k<[^>]+>/, "named backreference (\\k<name>)"],
+  [/\(\?</, "named capture group ((?<name>) — RE2 uses (?P<name>)"]
+];
+
+/** The RE2 construct this pattern uses that OPA cannot evaluate, or "" if none. */
+export function re2Unsupported(pattern: string): string {
+  for (const [probe, label] of RE2_UNSUPPORTED) if (probe.test(pattern)) return label;
+  return "";
+}
+
 function isValidRe2Pattern(pattern: string): boolean {
+  if (re2Unsupported(pattern)) return false;
   const inline = /^\(\?([ims]+)\)/.exec(pattern);
   const body = inline ? pattern.slice(inline[0].length) : pattern;
   // Keep only the inline flags JS also spells the same way; `s` and `m` map directly, `i` maps directly.
@@ -1163,7 +1191,13 @@ function compileConditionLine(cond: BuilderCondition, paramRegexIndices: Map<Bui
       return `${jsonSet(tools)}[input.tool_name]`;
     }
     case "trustBelow":
-      return `input.agent.trust_score < ${JSON.stringify(cond.threshold)}`;
+      // `input.trust_score`, NOT `input.agent.trust_score`. evaluator.py's _build_input puts
+      // trust_score at the TOP LEVEL; `input.agent` holds only spiffe_id / namespace / agent_class.
+      // The old path named a key no input builder ever sets, so the comparison was undefined and EVERY
+      // low-trust block rule was dead — a shipped condition type that silently enforced nothing.
+      // Verified against a real evaluator-shaped document: trust_score 0.1 against a 0.5 threshold
+      // evaluated `allow`.
+      return `input.trust_score < ${JSON.stringify(cond.threshold)}`;
     case "sourceVerb":
       return sourceVerbPredicateName(cond.source, cond.verb);
     case "paramRegex": {
