@@ -151,3 +151,43 @@ describe("intent -> builder graph", () => {
     expect(dropped.join(" ")).toContain("nested path");
   });
 });
+
+describe("the conversion must preserve SENSE, not just count", () => {
+  it("a negative constraint stays negative across the handoff", () => {
+    // The exhaustiveness assertion above is arithmetic — represented + dropped === stated — so it is
+    // blind to a predicate that IS represented but represented WRONGLY. Flipping constraintFor's
+    // notMatches arm to emit `matches` inverts every negative argument constraint that crosses the
+    // handoff, leaves `dropped` empty, and passes the count check: the operator's "the body must NOT
+    // contain a password" silently becomes "the body MUST contain a password".
+    const { graph, dropped } = intentToBuilderGraph({
+      class: "c",
+      call: [{
+        id: "r",
+        match: { tool_name: "send_email" },
+        require: { "param_paths.body": { notMatches: "(?i)password" }, "param_paths.to": { matches: "@acme\\.com$" } }
+      }]
+    });
+    expect(dropped).toEqual([]);
+    const cs = graph.allowlist?.grants?.[0].constraints ?? [];
+    const neg = cs.find((c) => c.field === "body");
+    const pos = cs.find((c) => c.field === "to");
+    expect(neg?.kind, "a notMatches must not become a matches").toBe("notMatches");
+    expect(pos?.kind, "a matches must not become a notMatches").toBe("matches");
+  });
+
+  it("a collection operator keeps its own sense", () => {
+    // Same hazard on the fact side: noneOf and anyOf are opposites, and the count check cannot tell
+    // them apart.
+    const { graph } = intentToBuilderGraph({
+      class: "c",
+      call: [{
+        id: "r",
+        match: { tool_name: "send_email" },
+        require: { data_classes: { noneOf: ["secret"] }, "destinations.hosts": { anyOf: ["acme.com"] } }
+      }]
+    });
+    const facts = graph.allowlist?.grants?.[0].facts ?? [];
+    expect(facts.find((f) => f.type === "collectionFact" && f.field === "data_classes")).toMatchObject({ op: "noneOf" });
+    expect(facts.find((f) => f.type === "collectionFact" && f.field === "destinations.hosts")).toMatchObject({ op: "anyOf" });
+  });
+});

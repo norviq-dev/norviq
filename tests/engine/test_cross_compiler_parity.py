@@ -60,6 +60,14 @@ def test_fixtures_exist() -> None:
     assert _fixtures(), f"no cross-compiler fixtures found in {_FIXTURE_DIR}"
 
 
+def test_every_fixture_asserts_something() -> None:
+    """A fixture with an empty `cases` array compiles on both halves, asserts ZERO decisions, and adds
+    a passing test to each side — the parity contract can be emptied out without either guard noticing.
+    `fixtures exist` and `graph-or-gap` both miss it, because neither looks at the cases."""
+    for fx in _fixtures():
+        assert fx.get("cases"), f"{fx['name']}: has no cases, so it proves nothing on either side"
+
+
 def test_every_fixture_is_covered_by_both_sides_or_says_why() -> None:
     """A fixture the builder cannot express is allowed — but it must SAY so.
 

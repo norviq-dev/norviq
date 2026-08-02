@@ -64,6 +64,20 @@ class Check:
 
 
 
+class _HttpOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Re-apply the http(s)-only rule to redirect targets.
+
+    urllib's default handler allows `ftp` as a redirect target, so a scheme check on the initial URL
+    alone is bypassable by a redirect — the exact gap that made the `nosec` justification on the call
+    below overstated.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102 - stdlib signature
+        if urllib.parse.urlparse(newurl).scheme not in ("http", "https"):
+            raise ValueError(f"refusing to follow a redirect to a non-HTTP(S) URL: {newurl.split(':', 1)[0]}://…")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _urlopen_http(req: "urllib.request.Request", timeout: int = 20):
     """`urlopen` restricted to http/https.
 
@@ -75,9 +89,14 @@ def _urlopen_http(req: "urllib.request.Request", timeout: int = 20):
     scheme = urllib.parse.urlparse(req.full_url).scheme
     if scheme not in ("http", "https"):
         raise ValueError(f"refusing to open a non-HTTP(S) URL: {scheme}://…")
-    # The scheme is validated directly above, and this is the module's ONLY urlopen call site — which
-    # is the point of funnelling both callers through here rather than suppressing at each of them.
-    return urllib.request.urlopen(req, timeout=timeout)  # nosec B310  # noqa: S310
+    # Checking only the INITIAL url is not enough: urlopen FOLLOWS redirects, and
+    # HTTPRedirectHandler.redirect_request permits targets in ('http', 'https', 'ftp', ''), so an
+    # http:// URL that passes the check above can still land on ftp://. The opener below re-applies
+    # the same check to every hop, which is what makes the `nosec` justification true rather than
+    # approximately true.
+    opener = urllib.request.build_opener(_HttpOnlyRedirectHandler)
+    # Scheme validated above AND on every redirect hop; this is the module's only urlopen path.
+    return opener.open(req, timeout=timeout)  # nosec B310  # noqa: S310
 
 
 def _params(server: str, agent_class: str, call_log: str, rugpull: str = "",

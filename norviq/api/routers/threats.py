@@ -417,6 +417,8 @@ def _build_path(
     )
 
 
+# Mirrors coverage.py's marker parser — see the note at the fallback below.
+_INTENT_TOOLS_RE = re.compile(r"(?m)^#\s*nrvq:intent-tools\s+(\[.*\])\s*$")
 _POLICY_ALLOW_RE = re.compile(r"allow_names\s*:=\s*\{([^}]*)\}")
 _POLICY_QUOTED_RE = re.compile(r'"([^"]+)"')
 
@@ -459,7 +461,23 @@ async def _governing_policies(session: AsyncSession, namespaces: list[str] | Non
         else:
             continue  # a plain custom policy — don't claim to reason about its chokepoint coverage
         allow: set[str] = set()
+        # Same fallback coverage.py grew: an INTENT-compiled policy has no `allow_names := {...}` —
+        # its scoping lives in per-rule predicates — so `allow` came back empty and every
+        # intent-compiled policy read as governing NOTHING (or, read the other way by callers that
+        # treat an empty allow as unrestricted, as governing EVERYTHING). Both registers parse the same
+        # marker or they disagree about what a policy covers.
         am = _POLICY_ALLOW_RE.search(rego)
+        if not am:
+            im = _INTENT_TOOLS_RE.search(rego or "")
+            if im:
+                try:
+                    parsed = json.loads(im.group(1))
+                except ValueError:
+                    parsed = []
+                if isinstance(parsed, list):
+                    allow = sorted({str(v) for v in parsed})
+                    out[str(r["agent_class"])] = {"kind": kind, "allow": allow, "readonly": "is_read " in rego}
+                    continue
         if am:
             allow = {a.lower() for a in _POLICY_QUOTED_RE.findall(am.group(1))}
         out[str(r["agent_class"])] = {"kind": kind, "allow": allow, "readonly": "is_read " in rego}

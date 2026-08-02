@@ -512,7 +512,27 @@ function validateCondition(cond: BuilderCondition, pos: ConditionPos, errors: Bu
         conditionIndex
       });
     }
+    if (![["equals", "in", "matches", "notMatches"]].flat().includes(cond.op as string)) {
+      // Without this an unrecognised operator falls through compileConditionLine's inner switch to
+      // `return ""`, so the condition is emitted as a BLANK LINE inside the rule body and simply
+      // vanishes — compileGraph reports zero errors and the policy silently enforces less than it says.
+      errors.push({
+        code: "unknown_fact_field",
+        message: `Rule ${ruleIndex} ("${ruleId}"), row ${rowIndex}, condition ${conditionIndex}: "${String(cond.op)}" is not a scalar operator (expected one of ${["equals", "in", "matches", "notMatches"].join(", ")})`,
+        ruleIndex, rowIndex, conditionIndex
+      });
+    }
     if (cond.op === "matches" || cond.op === "notMatches") {
+      // A BLANK pattern is a valid regex that matches EVERYTHING, so `matches ""` always fires and
+      // `notMatches ""` never does — a rule that reads as a restriction and enforces the opposite of
+      // what it says, or nothing at all. Rejected rather than emitted.
+      if ((cond.value ?? "").trim() === "") {
+        errors.push({
+          code: "paramRegex_invalid",
+          message: `Rule ${ruleIndex} ("${ruleId}"), row ${rowIndex}, condition ${conditionIndex}: ${cond.op} needs a pattern — an empty one matches every value`,
+          ruleIndex, rowIndex, conditionIndex
+        });
+      }
       // Fail at AUTHOR time, exactly as paramRegex does — an unparseable pattern otherwise surfaces as
       // a 422 long after saving, with the previous policy still enforcing.
       if (!isValidRe2Pattern(cond.value ?? "")) {
@@ -533,6 +553,13 @@ function validateCondition(cond: BuilderCondition, pos: ConditionPos, errors: Bu
         ruleIndex,
         rowIndex,
         conditionIndex
+      });
+    }
+    if (![["subsetOf", "noneOf", "anyOf", "maxCount"]].flat().includes(cond.op as string)) {
+      errors.push({
+        code: "unknown_fact_field",
+        message: `Rule ${ruleIndex} ("${ruleId}"), row ${rowIndex}, condition ${conditionIndex}: "${String(cond.op)}" is not a collection operator (expected one of ${["subsetOf", "noneOf", "anyOf", "maxCount"].join(", ")})`,
+        ruleIndex, rowIndex, conditionIndex
       });
     }
     if (cond.op === "maxCount") {
@@ -564,6 +591,13 @@ function validateCondition(cond: BuilderCondition, pos: ConditionPos, errors: Bu
         ruleIndex,
         rowIndex,
         conditionIndex
+      });
+    }
+    if (![["max", "min"]].flat().includes(cond.op as string)) {
+      errors.push({
+        code: "unknown_fact_field",
+        message: `Rule ${ruleIndex} ("${ruleId}"), row ${rowIndex}, condition ${conditionIndex}: "${String(cond.op)}" is not a numeric operator (expected max or min)`,
+        ruleIndex, rowIndex, conditionIndex
       });
     }
     if (typeof cond.value !== "number" || Number.isNaN(cond.value)) {
@@ -604,10 +638,21 @@ function validateCondition(cond: BuilderCondition, pos: ConditionPos, errors: Bu
       });
     }
   } else if (cond.type === "not") {
-    if (cond.inner.type === "not") {
+    // Double negation is not only `not` wrapping a `not` NODE. `compileConditionLine` prefixes `not `
+    // onto whatever the inner condition emitted, and two inner forms ALREADY emit a `not `-prefixed
+    // expression — `scalarFact/notMatches` and any future operator that compiles to a negation. Wrapping
+    // one produced `not not regex.match(...)`, a rego parse error, with compileGraph reporting zero
+    // errors: invalid rego declared valid, which is exactly the class of bug PR #96 fixed once already.
+    // Checking the emitted SHAPE rather than only the node type is what makes this total.
+    const innerNegates =
+      cond.inner.type === "not" ||
+      (cond.inner.type === "scalarFact" && cond.inner.op === "notMatches");
+    if (innerNegates) {
       errors.push({
         code: "not_double_negation",
-        message: `Rule ${ruleIndex} ("${ruleId}"), row ${rowIndex}, condition ${conditionIndex}: NOT cannot wrap another NOT`,
+        message: `Rule ${ruleIndex} ("${ruleId}"), row ${rowIndex}, condition ${conditionIndex}: NOT cannot wrap something already negative (${
+          cond.inner.type === "not" ? "another NOT" : 'a "does not match" condition — drop the NOT and use "matches" instead'
+        })`,
         ruleIndex,
         rowIndex,
         conditionIndex
@@ -693,6 +738,22 @@ function validateAllowlistGraph(graph: BuilderGraph): BuilderError[] {
     }
     if (raw.trim() === "") {
       errors.push({ code: "empty_allowlist_tool", message: `Allowlist tool at index ${i} is empty after trim` });
+    }
+    // A tool name carrying a newline or control character is never legitimate, and it is not a
+    // cosmetic problem: the allowlist is echoed into a HEADER COMMENT, so a `\n` terminates the
+    // comment at a legal top-level position and everything after it compiles AS REGO. A name of
+    // `ok\n\ndecision = "allow" { true }\n#` produced a module that opa loads, that
+    // validate_rego_source ACCEPTS, and that evaluates an unlisted tool to `allow` — the default-deny
+    // allowlist completely defeated.
+    //
+    // Reachable by an attacker, not only by a careless operator: /intents/propose derives its tool
+    // names from OBSERVED TRAFFIC, so a compromised agent chooses the string that reaches this field
+    // via the handoff.
+    if (typeof raw === "string" && /[\u0000-\u001f\u007f]/.test(raw)) {
+      errors.push({
+        code: "invalid_allowlist",
+        message: `Allowlist tool at index ${i} contains a control character or newline — a tool name cannot contain one, and it would break out of the generated policy's header comment`
+      });
     }
   });
   errors.push(...validateGrants(allowlist!));
@@ -1323,6 +1384,16 @@ function buildBody(graph: BuilderGraph, targetNamespace: string): string {
 
   const reasonEntries = graph.rules.map((rule) => `    ${JSON.stringify(rule.ruleId)}: ${JSON.stringify(rule.reason)},`);
   reasonEntries.push(`    ${JSON.stringify(defaultRuleId)}: ${JSON.stringify(graph.defaults.reason)},`);
+  // The capability guard blocks under a rule_id the `reasons` map did not contain, so
+  // `reason = reasons[rule_id]` was undefined and fell through to `default reason` — the reason the
+  // author wrote for the ALLOW default. A version-skew block therefore arrived in the audit log
+  // explaining itself as the allow case, which is precisely the confusion the guard exists to remove:
+  // the operator sees a block, reads an allow reason, and concludes the policy is broken.
+  if (capabilityGuardSection) {
+    reasonEntries.push(
+      `    "bld_unsupported_engine": "This policy scopes on a fact this engine does not publish, so it cannot be enforced as written — blocked rather than silently allowed. Upgrade the engine, or remove the condition.",`
+    );
+  }
   const reasonsBlock = ["reasons = {", ...reasonEntries, "}"].join("\n");
 
   const sections = [
@@ -1546,7 +1617,18 @@ function grantAvailabilityLines(facts: BuilderGrantFact[] | undefined): string[]
 
 function grantsSection(grants: BuilderAllowlistGrant[]): string {
   if (grants.length === 0) return "";
-  const constrained = jsonSet(grants.map((g) => g.tool));
+  // KEYED ON THE EVASION-NORMALIZED NAME, exactly as `in_allowlist` is.
+  //
+  // These two gates must agree on what "the tool" means or the second one can be walked around. They
+  // did not: `in_allowlist` matches `allow_skeletons[input.tool_name_normalized]` — deliberately, so
+  // "homoglyph/fullwidth/case tricks can't smuggle a non-intended tool past the allow" — while the
+  // grant gate matched the RAW `lower(input.tool_name)`. A Cyrillic-e `еxеcute_sql` therefore skeletons
+  // to `execute_sql`, is ADMITTED by the allowlist, and then misses `_constrained` entirely, so
+  // `constraints_ok { not _constrained[...] }` holds and every per-tool constraint AND scoping fact is
+  // skipped. Demonstrated: that name carrying `DROP TABLE orders` — which violates the grant's
+  // `^select` constraint — evaluated to `allow`. The evasion the allowlist exists to stop, let back in
+  // one layer down.
+  const constrained = jsonSet([...new Set(grants.map((g) => skeleton(g.tool)))].sort());
   const bodies = grants.map((g) => {
     const lines = g.constraints.map((c) => constraintExpr(c));
     // Scoping facts are ANDed in alongside the per-field constraints. `compileConditionLine` is the
@@ -1556,14 +1638,18 @@ function grantsSection(grants: BuilderAllowlistGrant[]): string {
     // Availability FIRST: on an engine that cannot publish the fact the grant must fail before the
     // vacuously-true comprehension below is ever reached.
     const availability = grantAvailabilityLines(g.facts);
-    return [`_grant_ok {`, `    lower(input.tool_name) == ${JSON.stringify(g.tool)}`, ...availability, ...lines, ...factLines, `}`].join("\n");
+    return [
+      `_grant_ok {`,
+      `    input.tool_name_normalized == ${JSON.stringify(skeleton(g.tool))}`,
+      ...availability, ...lines, ...factLines, `}`
+    ].join("\n");
   });
   return [
     paramHelperBlock(),
     "",
     `# --- per-tool constraints: a grant NARROWS an allowlisted tool, it never grants one ---`,
     `_constrained := ${constrained}`,
-    `constraints_ok { not _constrained[lower(input.tool_name)] }`,
+    `constraints_ok { not _constrained[input.tool_name_normalized] }`,
     `constraints_ok { _grant_ok }`,
     "",
     bodies.join("\n\n")
@@ -1637,7 +1723,7 @@ function allowlistHeaderComment(graph: BuilderGraph, scope: BuilderScope): strin
     `# OMITTED from this client-side generator: the server's "learned_verbs" admin-promoted verb overrides`,
     `# (registry data the browser does not have — see generate_intent_rego's learned_verbs param). A`,
     `# tool's read/egress classification below is name-heuristic only, never admin-promotion-overridden.`,
-    `# Allowlist (${names.length} tool${names.length === 1 ? "" : "s"}): ${names.length ? names.join(", ") : "(empty — denies every tool for this class)"}`,
+    `# Allowlist (${names.length} tool${names.length === 1 ? "" : "s"}): ${names.length ? commentSafe(names.join(", ")) : "(empty — denies every tool for this class)"}`,
     `# Refinements: ${enabled.length ? enabled.join(", ") : "(none)"}`,
     ...grantSummaryLines(graph.allowlist),
     `# Source of truth is the GRAPH, embedded below as a base64 JSON blob; this rego is regenerated`,

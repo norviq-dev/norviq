@@ -90,6 +90,11 @@ describe("cross-compiler parity — the builder half", () => {
     // A parity guard with no fixtures passes vacuously, which is worse than not having one. This also
     // fails loudly if the fixture directory is ever moved out from under one of the two consumers.
     expect(fixtures.length).toBeGreaterThan(0);
+    // ...and each must actually assert something. A fixture with `cases: []` compiles on both halves
+    // and asserts zero decisions, so the contract can be silently emptied while both suites stay green.
+    for (const fx of fixtures) {
+      expect(fx.cases?.length, `${fx.name}: has no cases, so it proves nothing`).toBeGreaterThan(0);
+    }
   });
 
   for (const fx of fixtures) {

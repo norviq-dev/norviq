@@ -110,36 +110,52 @@ const SCALAR_FACT_FIELDS = new Set([
  * norviq/engine/intent/schema.py — so this is a re-shaping, not a translation, and there is no
  * vocabulary in which the two could disagree.
  */
-function factFor(field: string, spec: IntentPredicateSpec): BuilderGrantFact | null {
+function factsFor(field: string, spec: IntentPredicateSpec): BuilderGrantFact[] {
   const ops = asRecord(spec);
+  const out: BuilderGrantFact[] = [];
   if (COLLECTION_FACT_FIELDS.has(field)) {
-    for (const op of ["subsetOf", "noneOf", "anyOf"] as const) {
+    // EVERY operator, not the first. schema.py accepts several in one predicate spec
+    // (`set(spec) <= COLLECTION_OPS`) and compiler.py emits all of them, so returning on the first hit
+    // silently discarded the rest — while `dropped` stayed empty, which is worse than discarding them
+    // loudly: the handoff refusal keys on `dropped.length`, so it could not fire, and the operator
+    // saved a policy strictly more permissive than the one they dry-ran.
+    (["subsetOf", "noneOf", "anyOf"] as const).forEach((op) => {
       const v = ops[op];
       if (Array.isArray(v)) {
-        return { type: "collectionFact", field: field as BuilderConditionCollectionFact["field"], op, values: v.filter((x): x is string => typeof x === "string") };
+        out.push({ type: "collectionFact", field: field as BuilderConditionCollectionFact["field"], op,
+                   values: v.filter((x): x is string => typeof x === "string") });
       }
-    }
+    });
     if (typeof ops.maxCount === "number") {
-      return { type: "collectionFact", field: field as BuilderConditionCollectionFact["field"], op: "maxCount", count: ops.maxCount };
+      out.push({ type: "collectionFact", field: field as BuilderConditionCollectionFact["field"],
+                 op: "maxCount", count: ops.maxCount });
     }
-    return null;
+    return out;
   }
   if (NUMERIC_FACT_FIELDS.has(field)) {
-    for (const op of ["max", "min"] as const) {
+    (["max", "min"] as const).forEach((op) => {
       if (typeof ops[op] === "number") {
-        return { type: "numericFact", field: field as BuilderConditionNumericFact["field"], op, value: ops[op] as number };
+        out.push({ type: "numericFact", field: field as BuilderConditionNumericFact["field"], op,
+                   value: ops[op] as number });
       }
-    }
-    return null;
+    });
+    return out;
   }
   if (SCALAR_FACT_FIELDS.has(field)) {
-    if (typeof ops.equals === "string") return { type: "scalarFact", field, op: "equals", value: ops.equals };
-    if (Array.isArray(ops.in)) return { type: "scalarFact", field, op: "in", values: ops.in.filter((x): x is string => typeof x === "string") };
-    if (typeof ops.matches === "string") return { type: "scalarFact", field, op: "matches", value: ops.matches };
-    if (typeof ops.notMatches === "string") return { type: "scalarFact", field, op: "notMatches", value: ops.notMatches };
-    return null;
+    if (typeof ops.equals === "string") out.push({ type: "scalarFact", field, op: "equals", value: ops.equals });
+    if (Array.isArray(ops.in)) out.push({ type: "scalarFact", field, op: "in",
+                                         values: ops.in.filter((x): x is string => typeof x === "string") });
+    if (typeof ops.matches === "string") out.push({ type: "scalarFact", field, op: "matches", value: ops.matches });
+    if (typeof ops.notMatches === "string") out.push({ type: "scalarFact", field, op: "notMatches", value: ops.notMatches });
+    return out;
   }
-  return null;
+  return out;
+}
+
+/** How many operators a predicate spec actually states — the denominator the exhaustiveness invariant
+ *  needs. A bare string is shorthand for one `equals`. */
+function operatorCount(spec: IntentPredicateSpec): number {
+  return typeof spec === "string" ? 1 : Object.keys(spec ?? {}).length;
 }
 
 /** Translate one non-tool_name predicate into a grant constraint, or explain why it cannot be. */
@@ -207,9 +223,15 @@ export function intentToBuilderGraph(intent: IntentLike, agentClass?: string): I
       // Facts first: an engine-derived fact about the whole call has a direct grant representation and
       // must not be forced through the per-field constraint path, which would either lose it or point
       // it at an argument that does not exist.
-      const f = factFor(field, spec);
-      if (f) {
-        facts.push(f);
+      const fs = factsFor(field, spec);
+      if (fs.length) {
+        facts.push(...fs);
+        // Carrying SOME operators of a predicate but not all is the silent-permissive case: report any
+        // the builder could not represent rather than letting them evaporate.
+        const stated = operatorCount(spec);
+        if (fs.length < stated) {
+          dropped.push(`rule ${rule.id}: ${field} states ${stated} operator(s), ${fs.length} representable`);
+        }
         return;
       }
       const c = constraintFor(field, spec);

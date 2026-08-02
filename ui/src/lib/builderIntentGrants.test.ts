@@ -434,7 +434,11 @@ describe("grant facts — narrowing by what the call CARRIES, not just by one ar
       "analytics"
     );
     expect(errors).toEqual([]);
-    const clean = { tool_name: "send_email", tool_params: { body: "hi" },
+    // `tool_name_normalized` is REQUIRED now, and that is the point: the grant gate keys on the
+    // evasion-normalized name so a homoglyph cannot be admitted by the allowlist and then skip its
+    // constraints. The engine always supplies it (_build_input -> skeleton(tool_name)), so a test
+    // input without one was testing a document the evaluator never produces.
+    const clean = { tool_name: "send_email", tool_name_normalized: "send_email", tool_params: { body: "hi" },
       agent: { spiffe_id: "spiffe://norviq/ns/analytics/sa/report-gen", namespace: "analytics", agent_class: "report-gen" },
       call_depth: 0, derived: { data_classes: [] } };
     const dirty = { ...clean, tool_params: { body: "AKIAIOSFODNN7EXAMPLE" }, derived: { data_classes: ["secret"] } };
@@ -492,5 +496,44 @@ describe("grant facts — narrowing by what the call CARRIES, not just by one ar
       "analytics"
     );
     expect(res.errors.map((e) => e.code)).toContain("invalid_grant");
+  });
+});
+
+describe("evasion: the allowlist and the grant gate must agree on what 'the tool' is", () => {
+  itOpa("a homoglyph name cannot be admitted by the allowlist and then skip its constraints", () => {
+    // `in_allowlist` matches `allow_skeletons[input.tool_name_normalized]` DELIBERATELY, so homoglyph,
+    // fullwidth and case tricks cannot smuggle a tool past the allow. The grant gate used to key on the
+    // RAW `lower(input.tool_name)`, so a Cyrillic-e `еxеcute_sql` skeletoned to `execute_sql`, WAS
+    // admitted, and then missed `_constrained` entirely — `constraints_ok { not _constrained[...] }`
+    // held and every per-tool constraint was skipped. Demonstrated with `DROP TABLE orders`, which
+    // violates the grant's ^select constraint: it evaluated to `allow`.
+    const { rego, errors } = compileGraph(
+      intentGraph(["execute_sql"], [
+        { tool: "execute_sql", constraints: [{ kind: "matches", field: "query", pattern: "(?i)^\\s*select\\b" }] }
+      ]),
+      "analytics"
+    );
+    expect(errors).toEqual([]);
+
+    const call = (rawName: string, query: string) => ({
+      tool_name: rawName,
+      // What the engine computes: skeleton() folds the confusables back to ASCII.
+      tool_name_normalized: "execute_sql",
+      tool_params: { query },
+      agent: { spiffe_id: "spiffe://norviq/ns/analytics/sa/report-gen", namespace: "analytics", agent_class: "report-gen" },
+      call_depth: 0
+    });
+
+    const HOMOGLYPH = "\u0435x\u0435cute_sql"; // Cyrillic U+0435 in place of both ASCII 'e'
+    expect(HOMOGLYPH).not.toBe("execute_sql");
+
+    // The honest tool, used the way the grant permits.
+    expect(decideDoc(rego, call("execute_sql", "SELECT id FROM orders"))).toBe("allow");
+    // The honest tool, forbidden argument — blocked, as before.
+    expect(decideDoc(rego, call("execute_sql", "DROP TABLE orders"))).toBe("block");
+    // The EVASION: admitted by the allowlist via its skeleton, so it must still face the constraint.
+    expect(decideDoc(rego, call(HOMOGLYPH, "DROP TABLE orders"))).toBe("block");
+    // ...and must still be allowed when it obeys it, or the fix would just be a blanket denial.
+    expect(decideDoc(rego, call(HOMOGLYPH, "SELECT id FROM orders"))).toBe("allow");
   });
 });

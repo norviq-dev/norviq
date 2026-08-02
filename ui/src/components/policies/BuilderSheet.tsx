@@ -230,17 +230,27 @@ export const KEYWORD_TARGETS: BuilderKeywordTarget[] = ["tool", "params", "both"
 // The condition-type dropdown's own options — deliberately excludes "not" (Phase 2b): NOT is a toggle
 // applied ON TOP of one of these types (see ConditionChip's NOT button below), not a selectable type of
 // its own, since "a NOT of nothing" isn't a coherent condition.
-export const CONDITION_TYPES: Exclude<BuilderCondition["type"], "not">[] = [
+// `as const satisfies` rather than a widening annotation: the label/hint maps below are keyed on
+// `(typeof CONDITION_TYPES)[number]`, so with a widened type they demanded an entry for EVERY condition
+// type — including the three that deliberately have no editor. `satisfies` still checks each entry is a
+// real condition type, so a typo is caught, while the element type stays the actual list.
+export const CONDITION_TYPES = [
   "detector",
   "keyword",
   "toolIn",
   "trustBelow",
   "sourceVerb",
-  "paramRegex",
-  "scalarFact",
-  "collectionFact",
-  "numericFact"
-];
+  "paramRegex"
+] as const satisfies readonly Exclude<BuilderCondition["type"], "not">[];
+
+// scalarFact / collectionFact / numericFact are DELIBERATELY NOT LISTED, and this is not an oversight.
+// They are fully supported by the graph model, the compiler and the validator — they arrive via the
+// /intents handoff (lib/intentToGraph.ts) and round-trip correctly. What does not exist yet is an
+// EDITOR for them: ConditionRow renders field/op/value inputs for the six types above and nothing for
+// these three. Listing them in the dropdown let an operator pick one and get a condition they could
+// neither see nor fill in — `scalarFact`'s default (`field: "param_paths."`, empty value) does not even
+// compile. Offering a control that cannot be used is worse than not offering it; they go back in the
+// list the moment ConditionRow can render them.
 
 /** True if `pattern` compiles as a JS RegExp — the same engine builderCompile.ts's validateCondition
  *  uses for paramRegex's `paramRegex_invalid` check, so the inline hint here agrees with the compiler. */
@@ -353,10 +363,7 @@ export const CONDITION_TYPE_LABEL: Record<(typeof CONDITION_TYPES)[number], stri
   keyword: "Keyword in tool params",
   trustBelow: "Agent trust below",
   sourceVerb: "Source + verb (capability)",
-  paramRegex: "Param matches regex",
-  scalarFact: "One argument, by path (or MCP server / plane)",
-  collectionFact: "Data classes, destinations, or SQL tables",
-  numericFact: "Payload size, call depth, or trust score"
+  paramRegex: "Param matches regex"
 };
 
 /** One-line hint shown near the type dropdown for whichever type is currently selected — the label
@@ -367,12 +374,7 @@ export const CONDITION_TYPE_HINT: Record<(typeof CONDITION_TYPES)[number], strin
   keyword: "Fires when any listed keyword appears in the tool name and/or its parameters.",
   trustBelow: "Fires when the calling agent's live trust score is below this threshold.",
   sourceVerb: "Fires on a CAPABILITY (e.g. any 'delete' on Postgres) without listing every tool name.",
-  paramRegex: "Fires when a specific parameter's value matches the regex pattern below.",
-  scalarFact:
-    "Fires on ONE argument named by its path (filters.ids[0]), so a value in the body can't be confused with one in the recipient. Also reaches the MCP server and the call's plane.",
-  collectionFact:
-    "Fires on what the call CARRIES or where it GOES — a credential in the payload, a recipient outside your domain, a SQL table outside the approved set. Costs nothing against the regex budget.",
-  numericFact: "Fires on a numeric bound: payload size, call depth, or the agent's trust score."
+  paramRegex: "Fires when a specific parameter's value matches the regex pattern below."
 };
 
 /** Groups the type dropdown into optgroups by category — purely a display grouping, the wire value

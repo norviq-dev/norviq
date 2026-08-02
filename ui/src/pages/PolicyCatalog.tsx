@@ -27,7 +27,7 @@ import {
   X
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useLocation, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import {
   apiGet,
   apiSend,
@@ -1191,6 +1191,7 @@ export function PolicyCatalog() {
   // Visual Policy Builder (round B) — a separate sheet from the guided composer above (multi-rule,
   // multi-condition graph -> rego, compiled client-side; see components/policies/BuilderSheet.tsx).
   const location = useLocation();
+  const navigate = useNavigate();
   const [builderOpen, setBuilderOpen] = useState(false);
   // Handoff from /intents: that screen proposes a policy from RECORDED TRAFFIC and replays it — the
   // two things the builder structurally cannot do — then hands the graph here to be edited, rather
@@ -1198,10 +1199,14 @@ export function PolicyCatalog() {
   // business in browser history, a Referer header, or an access log.
   const handoffGraph = (location.state as { builderGraph?: BuilderGraph } | null)?.builderGraph ?? null;
   useEffect(() => {
-    if (handoffGraph) setBuilderOpen(true);
-    // Consume it once. Without clearing, a back-navigation re-opens the sheet with a stale proposal
-    // over whatever the operator has since edited.
-    if (handoffGraph) window.history.replaceState({}, "");
+    if (!handoffGraph) return;
+    setBuilderOpen(true);
+    // Consume it once, THROUGH THE ROUTER. `window.history.replaceState` does not work here:
+    // BrowserRouter keeps the location in React state and only updates it from its own history
+    // listener, and a direct replaceState fires neither that listener nor a popstate — so
+    // `useLocation().state` kept the graph, and any later re-render re-opened the sheet with a stale
+    // proposal on top of whatever the operator had since edited.
+    navigate(location.pathname + location.search, { replace: true, state: null });
   }, [handoffGraph]);
   const [restoreV, setRestoreV] = useState<number | null>(null);
   const [viewV, setViewV] = useState<number | null>(null); // Version whose rego is expanded read-only

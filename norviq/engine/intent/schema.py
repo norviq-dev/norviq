@@ -127,6 +127,14 @@ def normalize_intent(intent: dict) -> dict:
     agent_class = intent.get("class", "")
     if not isinstance(agent_class, str) or not agent_class:
         raise IntentError("intent.class is required")
+    # `name` is pinned by _ID_RE; `class` was validated only as a non-empty string, and it is
+    # interpolated RAW into the generated module's header comment. A newline therefore ends the comment
+    # at a legal top-level position and the remainder is parsed as rego — the module stops loading
+    # (`opa check` fails), while validate_rego_source, which does not run opa, accepts it. The policy
+    # saves and then fails at PUSH time, leaving the previous one enforcing while the console shows the
+    # new one. Control characters are never legitimate in an agent class.
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in agent_class):
+        raise IntentError("intent.class must not contain control characters or newlines")
 
     out: dict = {"name": name, "class": agent_class, "planes": {}}
     seen_ids: set[str] = set()

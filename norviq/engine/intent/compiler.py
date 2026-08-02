@@ -239,7 +239,11 @@ def compile_intent(intent: dict) -> CompiledIntent:
     labels: dict[str, list[str]] = {}
     rule_ids: list[str] = []
 
-    lines.append(_HEADER.format(name=norm["name"], agent_class=norm["class"],
+    # commentSafe the class even though schema.py now rejects control characters: the header is the one
+    # place operator text becomes rego SOURCE rather than a JSON-encoded literal, so it gets a second
+    # barrier rather than relying on a single upstream check.
+    lines.append(_HEADER.format(name=norm["name"],
+                                agent_class=str(norm["class"]).replace("\r", " ").replace("\n", " "),
                                 planes=", ".join(sorted(norm["planes"])),
                                 token=package_token(norm["class"]),
                                 tools=json.dumps(_scoped_tool_names(norm))))

@@ -264,3 +264,43 @@ describe("budget and validation", () => {
     expect(res.rego).toContain(JSON.stringify(hostile));
   });
 });
+
+describe("coverage the earlier tests did not have", () => {
+  it("the capability guard covers EVERY version-gated root, not just data_classes", () => {
+    // Both skew tests used data_classes and nothing else, so dropping the other four roots from
+    // factRootsOf left the whole suite green while a policy scoping on them failed OPEN on any engine
+    // predating the merge. One assertion per root, driven off a list, so adding a root to the compiler
+    // without adding it here is the thing that fails.
+    const cases: [string, BuilderCondition][] = [
+      ["param_paths", { type: "scalarFact", field: "param_paths.to", op: "equals", value: "x" }],
+      ["destinations", { type: "collectionFact", field: "destinations.hosts", op: "anyOf", values: ["evil.example"] }],
+      ["data_classes", { type: "collectionFact", field: "data_classes", op: "anyOf", values: ["secret"] }],
+      ["sql_tables", { type: "collectionFact", field: "sql_tables", op: "anyOf", values: ["payments"] }],
+      ["param_bytes", { type: "numericFact", field: "param_bytes", op: "min", value: 1 }]
+    ];
+    for (const [root, cond] of cases) {
+      const rego = compileOk(rulesGraph([cond]));
+      expect(rego, `${root} must emit a capability guard`).toContain(`not input.derived.${root}`);
+    }
+  });
+
+  itOpa("the `in` and `maxCount` emitters actually DECIDE, not merely compile", () => {
+    // Both are reachable from the /intents handoff (intentToGraph emits scalarFact/in for `verb: {in}`
+    // and collectionFact/maxCount for `destinations.emails: {maxCount}`), and neither had a single
+    // evaluation test — turning both into tautologies kept the suite green while a handed-off grant
+    // stopped narrowing anything.
+    const inRego = compileOk(rulesGraph([{ type: "scalarFact", field: "verb", op: "in", values: ["send", "write"] }]));
+    expect(decide(inRego, call("send_email", {}, { verb: "send" })).decision).toBe("block");
+    expect(decide(inRego, call("read_rows", {}, { verb: "read" })).decision).toBe("allow");
+
+    const maxRego = compileOk(
+      rulesGraph([{ type: "collectionFact", field: "destinations.emails", op: "maxCount", count: 1 }])
+    );
+    const recips = (n: number) =>
+      call("send_email", {}, {
+        destinations: { emails: Array.from({ length: n }, (_, i) => `u${i}@acme.com`), urls: [], hosts: [], schemes: [] }
+      });
+    expect(decide(maxRego, recips(1)).decision).toBe("block"); // <= 1 holds -> rule fires
+    expect(decide(maxRego, recips(3)).decision).toBe("allow"); // > 1 -> does not fire
+  });
+});
