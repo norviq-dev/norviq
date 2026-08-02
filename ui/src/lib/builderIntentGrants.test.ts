@@ -463,6 +463,65 @@ describe("grant facts — narrowing by what the call CARRIES, not just by one ar
     expect(res.rego).toContain("destinations");
   });
 
+  it("the header states the scope a facts-only grant enforces, instead of a bare empty line", () => {
+    // The header comment is what a reviewer reads in the catalog and in git; the embedded graph blob is
+    // base64 and not human-legible. Rendering only `constraints` printed `#   send_email: ` for a
+    // facts-only grant — a policy documenting itself as narrowed by nothing while enforcing two
+    // predicates below it. The "(1 constrained tool)" count on the line above was already correct,
+    // which is precisely what made the empty line read as authoritative rather than as a bug.
+    const { rego, errors } = compileGraph(
+      {
+        ...intentGraph(["send_email"]),
+        allowlist: {
+          tools: ["send_email"],
+          refinements: { readonly: false, egress: false, scope: false, rate: false },
+          grants: [
+            {
+              tool: "send_email",
+              constraints: [],
+              facts: [
+                { type: "collectionFact", field: "data_classes", op: "noneOf", values: ["secret"] },
+                { type: "numericFact", field: "trust_score", op: "min", value: 0.7 }
+              ]
+            }
+          ]
+        }
+      },
+      "analytics"
+    );
+    expect(errors).toEqual([]);
+    const line = rego.split("\n").find((l) => l.startsWith("#   send_email:"));
+    expect(line, "a constrained tool must get a summary line at all").toBeDefined();
+    expect(line).toContain("data_classes excludes {secret}");
+    expect(line).toContain("trust_score >= 0.7");
+  });
+
+  it("renders a NEGATED fact as negated, rather than printing the inner fact unqualified", () => {
+    // A `not`-wrapped fact has no row form in BuilderSheet, so this comment is the only place an
+    // operator ever sees it. Printing the inner fact without the negation would state the exact
+    // opposite of what the compiled rule enforces.
+    const { rego, errors } = compileGraph(
+      {
+        ...intentGraph(["send_email"]),
+        allowlist: {
+          tools: ["send_email"],
+          refinements: { readonly: false, egress: false, scope: false, rate: false },
+          grants: [
+            {
+              tool: "send_email",
+              constraints: [],
+              facts: [{ type: "not", inner: { type: "collectionFact", field: "sql_tables", op: "anyOf", values: ["payouts"] } }]
+            }
+          ]
+        }
+      },
+      "analytics"
+    );
+    expect(errors).toEqual([]);
+    const line = rego.split("\n").find((l) => l.startsWith("#   send_email:"));
+    expect(line).toContain("NOT (sql_tables intersects {payouts})");
+  });
+
   it("refuses a rules-only condition inside a grant, which could only ever WIDEN it", () => {
     // A grant exists to narrow an already-allowed tool. A detector or trust threshold is not a fact
     // about the call's arguments, and admitting one here would let an allowlist entry be widened by

@@ -23,19 +23,22 @@ import {
   apiSend,
   dryRunPolicy,
   fetchAllAgents,
-  fetchAuditRecords,
   fetchClusterInfo,
-  fetchTopBlocked,
-  type DryRunReplay
+  fetchTools,
+  type DryRunReplay,
+  type ToolRegistryEntry
 } from "../../api/client";
 import {
   COLLECTION_FIELD_EXPR,
   NUMERIC_FIELD_EXPR,
+  PARAM_PATH_PREFIX,
+  SCALAR_FIELD_EXPR,
   compileGraph,
   loaderKeyFor,
   scopeIdentifier,
   type BuilderError
 } from "../../lib/builderCompile";
+import { schemaPaths, type SchemaPath } from "../../lib/toolSchema";
 import type {
   BuilderAllowlistRefinements,
   BuilderParamConstraint,
@@ -140,19 +143,49 @@ const CONSTRAINT_PLACEHOLDER: Record<ConstraintKind, string> = {
 //
 // Labels are OVERRIDES over a generated default, so a new registry field shows up immediately with a
 // readable-enough name and can be given nicer wording later — it can never be missing.
-type FactFieldKind = "collection" | "numeric";
+//
+// THE SCALAR KIND, and why it arrived late. `param_paths.<dotted.path>` addresses ONE argument at any
+// depth — the only primitive that can reach `filters.ids[0]` — and until now it had no editor anywhere
+// in the product, reachable solely through the /intents handoff. The reason was recorded honestly a few
+// hundred lines below: `scalarFact`'s default is `field: "param_paths."` with an empty value, which does
+// not compile, and a control that starts invalid and asks the operator to guess a dotted path from
+// memory is worse than no control. What changed is not the compiler — it always supported this — but
+// that `GET /api/v1/tools` now supplies the tool's declared argument tree, so the control has something
+// real to offer.
+type FactFieldKind = "collection" | "numeric" | "scalar";
 type FactFieldSpec = { field: string; kind: FactFieldKind };
 
 const FACT_FIELDS: FactFieldSpec[] = [
   ...Object.keys(COLLECTION_FIELD_EXPR).map((field) => ({ field, kind: "collection" as const })),
-  ...Object.keys(NUMERIC_FIELD_EXPR).map((field) => ({ field, kind: "numeric" as const }))
+  ...Object.keys(NUMERIC_FIELD_EXPR).map((field) => ({ field, kind: "numeric" as const })),
+  ...Object.keys(SCALAR_FIELD_EXPR).map((field) => ({ field, kind: "scalar" as const }))
 ];
 
 /** Ops offered per field kind, in the order an operator is most likely to want them. */
-const FACT_OPS: Record<FactFieldKind, string[]> = {
+const FACT_OPS_BY_KIND: Record<FactFieldKind, string[]> = {
   collection: ["noneOf", "subsetOf", "anyOf", "maxCount"],
-  numeric: ["max", "min"]
+  numeric: ["max", "min"],
+  scalar: ["equals", "in", "matches", "notMatches"]
 };
+
+/**
+ * Ops offered for one field, narrowed by what the field can actually do.
+ *
+ * Keyed by kind AND field because kind alone over-offers. `matches`/`notMatches` are the only ops that
+ * spend the server's 25-regex-op budget, so a field with a small closed vocabulary (pin_status, verb,
+ * direction) should steer to set membership, which is free. This is advisory narrowing of the ORDER and
+ * the SET on offer — never a restriction on what the compiler accepts.
+ */
+function factOpsFor(kind: FactFieldKind, field: string): string[] {
+  const base = FACT_OPS_BY_KIND[kind];
+  if (kind !== "scalar") return base;
+  // Closed-vocabulary scalars: a regex over "pinned"/"drift"/"quarantined" costs budget to express what
+  // `in` says for free, and invites a pattern that silently matches more than intended.
+  if (CLOSED_VOCAB_SCALARS.has(field)) return ["equals", "in"];
+  return base;
+}
+
+const CLOSED_VOCAB_SCALARS = new Set(["verb", "tool_kind", "direction", "mcp.pin_status", "mcp.scan_severity"]);
 
 const FACT_OP_VERB: Record<string, string> = {
   noneOf: "must not include",
@@ -160,7 +193,11 @@ const FACT_OP_VERB: Record<string, string> = {
   anyOf: "must include one of",
   maxCount: "at most (count)",
   max: "at most",
-  min: "at least"
+  min: "at least",
+  equals: "is exactly",
+  in: "is one of",
+  matches: "matches regex",
+  notMatches: "does NOT match regex"
 };
 
 /** Friendly names where we have them; anything else falls back to a humanised field path. */
@@ -175,9 +212,19 @@ const FACT_FIELD_LABEL: Record<string, string> = {
   "destinations.schemes": "URL schemes",
   param_bytes: "payload size (bytes)",
   call_depth: "call depth",
-  trust_score: "agent trust score"
+  trust_score: "agent trust score",
+  verb: "operation verb",
+  tool_kind: "tool kind",
+  sql_normalized: "normalised SQL",
+  direction: "plane (call / answer)",
+  "mcp.server": "MCP server",
+  "mcp.pin_status": "MCP pin status",
+  "mcp.scan_severity": "MCP scan severity"
 };
 function factFieldLabel(field: string): string {
+  // A `param_paths.<path>` field is not in the registry — the path is whatever the tool's own arguments
+  // are — so it labels itself: `param_paths.filters.customer` reads as "argument filters.customer".
+  if (field.startsWith(PARAM_PATH_PREFIX)) return `argument ${field.slice(PARAM_PATH_PREFIX.length)}`;
   return FACT_FIELD_LABEL[field] ?? field.replace(/[._]/g, " ");
 }
 
@@ -193,6 +240,14 @@ function blankFact(field: string, kind: FactFieldKind, op: string): BuilderGrant
   if (kind === "numeric") {
     return { type: "numericFact", field: field as BuilderNumericFactField, op: op as "max" | "min", value: 0 };
   }
+  if (kind === "scalar") {
+    const scalarOp = op as "equals" | "in" | "matches" | "notMatches";
+    // `in` carries a LIST, everything else a single value. Emitting the wrong one produces a condition
+    // the validator rejects, so the shape is chosen here rather than patched up at render time.
+    return scalarOp === "in"
+      ? { type: "scalarFact", field, op: scalarOp, values: [] }
+      : { type: "scalarFact", field, op: scalarOp, value: "" };
+  }
   const collectionOp = op as "subsetOf" | "noneOf" | "anyOf" | "maxCount";
   if (collectionOp === "maxCount") {
     return { type: "collectionFact", field: field as BuilderCollectionFactField, op: collectionOp, count: 1 };
@@ -200,12 +255,28 @@ function blankFact(field: string, kind: FactFieldKind, op: string): BuilderGrant
   return { type: "collectionFact", field: field as BuilderCollectionFactField, op: collectionOp, values: [] };
 }
 
+/**
+ * Change a fact's OPERATOR while keeping the value the operator already typed.
+ *
+ * Rebuilding blank on every op change threw away a list someone had just entered merely because they
+ * switched "must not include" to "must be within" — two ops over the same values, where only the MEANING
+ * differs. Round-tripping through the text form carries the value wherever the shapes agree and degrades
+ * predictably where they do not (a value list becoming a count has nothing sensible to carry).
+ */
+function retypedFact(f: BuilderGrantFact, kind: FactFieldKind, nextOp: string): BuilderGrantFact {
+  if (f.type === "not") return f;
+  return withFactValue(blankFact(f.field, kind, nextOp), factValueText(f));
+}
+
 function factKindOfSpec(f: BuilderGrantFact): FactFieldKind {
-  return f.type === "numericFact" ? "numeric" : "collection";
+  if (f.type === "numericFact") return "numeric";
+  if (f.type === "scalarFact") return "scalar";
+  return "collection";
 }
 
 function factValueText(f: BuilderGrantFact): string {
   if (f.type === "numericFact") return String(f.value ?? "");
+  if (f.type === "scalarFact") return f.op === "in" ? (f.values ?? []).join(", ") : (f.value ?? "");
   if (f.type === "collectionFact") {
     return f.op === "maxCount" ? String(f.count ?? "") : (f.values ?? []).join(", ");
   }
@@ -214,6 +285,11 @@ function factValueText(f: BuilderGrantFact): string {
 
 function withFactValue(f: BuilderGrantFact, text: string): BuilderGrantFact {
   if (f.type === "numericFact") return { ...f, value: Number(text) || 0 };
+  if (f.type === "scalarFact") {
+    return f.op === "in"
+      ? { ...f, values: text.split(",").map((v) => v.trim()).filter(Boolean) }
+      : { ...f, value: text };
+  }
   if (f.type === "collectionFact") {
     if (f.op === "maxCount") return { ...f, count: Number(text) || 0 };
     return { ...f, values: text.split(",").map((v) => v.trim()).filter(Boolean) };
@@ -664,7 +740,11 @@ function ConditionChip({
                   style={{ width: "100%", order: 98, fontSize: 10.5, color: "var(--escalate)" }}
                 >
                   {unknown.map((t) => (
-                    <div key={t}>⚠ no agent has called "{t}" yet — this rule won't fire until one does</div>
+                    // Worth stating more sharply here than in allowlist mode. A rules-mode block that
+                    // names a tool nothing will ever send is not merely inert — it is a restriction the
+                    // operator believes is in force while every call sails past the default. Allowlist
+                    // mode fails the safe way round; this one does not.
+                    <div key={t}>⚠ "{t}" is not in this namespace's tool registry — this rule will never fire</div>
                   ))}
                 </div>
               ) : null;
@@ -1069,49 +1149,121 @@ export function BuilderSheet({
     };
   }, []);
 
-  // Tool-name autocomplete + unknown-tool warning (Phase 2f): `observedTools` is `null` until a
-  // concrete target namespace is chosen AND the fetch resolves — while `null`, ConditionChip/allowlist
-  // suppress the unknown-tool warning entirely (there's nothing trustworthy to compare against yet), so
-  // the warning never fires against the WRONG namespace's traffic or before one is even picked.
-  const [observedTools, setObservedTools] = useState<string[] | null>(null);
+  // Tool-name autocomplete + unknown-tool warning: `registry` is `null` until a concrete target
+  // namespace is chosen AND the fetch resolves — while `null`, ConditionChip/allowlist suppress the
+  // unknown-tool warning entirely (there's nothing trustworthy to compare against yet), so the warning
+  // never fires against the WRONG namespace's traffic or before one is even picked.
+  //
+  // GET /api/v1/tools returns two tiers, each row tagged with its own `source`, and they must stay
+  // apart: `mcp_declared` was read from an approved definition and may carry a JSON Schema; `observed`
+  // only proves the name appeared in real traffic. Flattening them back into one set is the bug this
+  // endpoint was built to retire.
+  const [registry, setRegistry] = useState<ToolRegistryEntry[] | null>(null);
 
   useEffect(() => {
     let live = true;
     const ns = targetNamespace.trim();
     if (!isConcreteNamespace(ns)) {
-      setObservedTools(null);
+      setRegistry(null);
       return;
     }
-    setObservedTools(null); // reset while (re)loading — avoid warning against a just-abandoned namespace's data
-    Promise.all([
-      fetchTopBlocked("30d", ns).catch(() => [] as Array<{ tool_name: string; count: number }>),
-      fetchAuditRecords({ namespace: ns, limit: 500 }).catch(() => [] as Array<{ tool_name: string }>)
-    ]).then(([topBlocked, audit]) => {
-      if (!live) return;
-      const names = new Set<string>();
-      topBlocked.forEach((t) => t.tool_name && names.add(t.tool_name));
-      audit.forEach((r) => r.tool_name && names.add(r.tool_name));
-      setObservedTools([...names]);
-    });
+    setRegistry(null); // reset while (re)loading — avoid warning against a just-abandoned namespace's data
+    fetchTools(ns)
+      .then((entries) => {
+        if (live) setRegistry(entries);
+      })
+      // A FAILED fetch must not read as "this namespace has no tools". The previous code caught each
+      // request into `[]`, which made an outage indistinguishable from an empty estate and pointed the
+      // unknown-tool warning at every name the operator typed. `null` is the honest state: we do not
+      // know yet, so we claim nothing.
+      .catch(() => {
+        if (live) setRegistry(null);
+      });
     return () => {
       live = false;
     };
   }, [targetNamespace]);
 
-  // `null` propagates (suppress the warning) until we've actually looked something up; once looked up
-  // (even to an empty result — a fresh namespace with zero traffic) every typed name is checked.
+  // `null` propagates (suppress the warning) until we have something trustworthy to compare against.
+  //
+  // AN EMPTY REGISTRY COUNTS AS `null`. It means no MCP server has been pinned AND no real traffic was
+  // recorded in the window — i.e. we know nothing, not that nothing exists. That is the common case, not
+  // an edge one: helm ships `webhook.injection.mcp.enabled: false`, so most estates have no pins at all.
+  // Warning on every name an operator types in that state is noise, and noise is how a warning gets
+  // trained out of existence before the one time it matters.
+  //
+  // CAPABILITY FRAGMENTS ARE DELIBERATELY ABSENT. They used to be unioned in here, and they are
+  // SUBSTRINGS ("post", "http", "delete", "send") meant for `contains()` matching inside the sourceVerb
+  // condition — not tool names. Because the same set fed the datalist, the UI offered names that could
+  // not exist and then suppressed its own warning for precisely those names: typing `delete` was silent
+  // while `delete_record` warned. An existence oracle may only contain things that exist.
   const knownToolNames = useMemo<Set<string> | null>(() => {
-    if (observedTools === null) return null;
-    return new Set([...observedTools, ...ALL_CAPABILITY_FRAGMENTS].map((s) => s.toLowerCase()));
-  }, [observedTools]);
+    if (registry === null || registry.length === 0) return null;
+    return new Set(registry.flatMap((t) => [t.name.toLowerCase(), t.name_skeleton.toLowerCase()]));
+  }, [registry]);
 
-  // Datalist suggestions (Phase 2f): observed-for-this-namespace tool names first-class, capability
-  // fragments as a fallback vocabulary — shown regardless of whether a namespace is chosen yet (fragments
-  // alone are still useful hints), sorted for a stable, scannable dropdown.
-  const toolSuggestions = useMemo(
-    () => [...new Set([...(observedTools ?? []), ...ALL_CAPABILITY_FRAGMENTS])].sort(),
-    [observedTools]
+  /** Names backed by a real, approved definition — a superset claim over `knownToolNames`, used to tell
+   *  "declared but never called" apart from "seen once in traffic". */
+  const declaredToolNames = useMemo<Set<string>>(
+    () => new Set(registry?.filter((t) => t.source === "mcp_declared").map((t) => t.name.toLowerCase()) ?? []),
+    [registry]
   );
+
+  /** The tools whose arguments we can actually describe, by lower-cased name. Feeds the scope picker. */
+  const schemaByTool = useMemo<Map<string, Record<string, unknown>>>(() => {
+    const out = new Map<string, Record<string, unknown>>();
+    for (const t of registry ?? []) {
+      if (t.schema_available && t.input_schema) out.set(t.name.toLowerCase(), t.input_schema);
+    }
+    return out;
+  }, [registry]);
+
+  /** Each tool's declared argument paths, walked once per registry load rather than per render. */
+  const pathsByTool = useMemo<Map<string, SchemaPath[]>>(() => {
+    const out = new Map<string, SchemaPath[]>();
+    for (const [tool, schema] of schemaByTool) out.set(tool, schemaPaths(schema));
+    return out;
+  }, [schemaByTool]);
+
+  /**
+   * The declared `enum` for a fact's argument, when there is one and the operator is comparing by
+   * membership. A typo'd literal in a value list is a silently dead restriction — fail-closed and noisy
+   * inside an allowlist grant, fail-open and silent in rules mode — so where the schema states the legal
+   * values, offering them beats asking someone to retype one.
+   *
+   * `equals` only, deliberately: `in` takes a LIST, and a single-select cannot express one. Free text
+   * stays the way to write a list, and the enum remains a suggestion rather than a restriction either
+   * way — a schema can be stale, and the compiler has never required a value to be declared.
+   */
+  const factEnumOptions = (f: BuilderGrantFact, tool: string): string[] | null => {
+    if (f.type !== "scalarFact" || f.op !== "equals" || !f.field.startsWith(PARAM_PATH_PREFIX)) return null;
+    const path = f.field.slice(PARAM_PATH_PREFIX.length);
+    return (pathsByTool.get(tool.toLowerCase()) ?? []).find((p) => p.path === path)?.enumValues ?? null;
+  };
+
+  /** The declared `enum` for a per-field CONSTRAINT's argument, when comparing by membership. */
+  const constraintEnumListId = (c: BuilderParamConstraint, tool: string): string[] | null => {
+    if (c.kind !== "oneOf" && c.kind !== "noneOf") return null;
+    if (!c.field) return null;
+    return (pathsByTool.get(tool.toLowerCase()) ?? []).find((p) => p.path === c.field)?.enumValues ?? null;
+  };
+
+  /** Top-level argument names a tool declares — datalist fodder for the constraint field box. Only the
+   *  addressable, single-segment ones: a constraint addresses ONE flat `tool_params[field]`, so a nested
+   *  path suggested here would point at an argument that does not exist under that name. */
+  const flatArgNames = (tool: string): string[] =>
+    (pathsByTool.get(tool.toLowerCase()) ?? [])
+      .filter((p) => p.addressable && !p.path.includes("."))
+      .map((p) => p.path);
+
+  // Datalist suggestions: real registry names when we have any. Capability fragments remain ONLY as a
+  // last-resort vocabulary when the registry is empty — which is the default in most deployments, since
+  // `mcp_tool_pins` is populated only when MCP injection is switched on. They are a hint of the shape of
+  // a name, never a claim that one exists, which is why they no longer reach `knownToolNames`.
+  const toolSuggestions = useMemo(() => {
+    const names = (registry ?? []).map((t) => t.name);
+    return names.length > 0 ? [...new Set(names)].sort() : [...new Set(ALL_CAPABILITY_FRAGMENTS)].sort();
+  }, [registry]);
 
   // Intent Allowlist mode (Phase 2c) — kept as SEPARATE state from rules/defaults above (rather than
   // overwriting them on a mode switch) so toggling the mode preserves each mode's own in-progress state:
@@ -1159,7 +1311,13 @@ export function BuilderSheet({
   };
   const removeAllowlistTool = (t: string) => {
     setAllowlistTools((ts) => ts.filter((x) => x !== t));
-    setAllowlistGrants(({ [t]: _dropped, ...rest }) => rest); // drop the grant with the tool
+    // BOTH scope stores, for the same reason the chip counts both. Dropping only `allowlistGrants` left
+    // the tool's FACTS behind, so removing a tool and re-adding it silently resurrected scoping the
+    // operator had discarded. Harmless only by accident today — the graph memo iterates `allowlistTools`
+    // — which makes it exactly the kind of latent divergence that becomes a live bug the moment some
+    // other consumer reads the record directly.
+    setAllowlistGrants(({ [t]: _droppedConstraints, ...rest }) => rest);
+    setAllowlistGrantFacts(({ [t]: _droppedFacts, ...rest }) => rest);
     setOpenGrantTool((cur) => (cur === t ? null : cur));
   };
   const setToolConstraints = (tool: string, next: BuilderParamConstraint[]) =>
@@ -1177,9 +1335,15 @@ export function BuilderSheet({
   const removeConstraint = (tool: string, idx: number) =>
     setToolConstraints(tool, (allowlistGrants[tool] ?? []).filter((_, i) => i !== idx));
   const setToolFacts = (tool: string, facts: BuilderGrantFact[]) =>
-    setAllowlistGrantFacts((prev) => ({ ...prev, [tool]: facts }));
+    setAllowlistGrantFacts((prev) => {
+      if (facts.length === 0) {
+        const { [tool]: _empty, ...rest } = prev;
+        return rest; // absence, not an empty array — same doctrine as `setToolConstraints` above
+      }
+      return { ...prev, [tool]: facts };
+    });
   const addFact = (tool: string, field: string, kind: FactFieldKind) =>
-    setToolFacts(tool, [...(allowlistGrantFacts[tool] ?? []), blankFact(field, kind, FACT_OPS[kind][0])]);
+    setToolFacts(tool, [...(allowlistGrantFacts[tool] ?? []), blankFact(field, kind, factOpsFor(kind, field)[0])]);
   const updateFact = (tool: string, idx: number, next: BuilderGrantFact) =>
     setToolFacts(tool, (allowlistGrantFacts[tool] ?? []).map((f, i) => (i === idx ? next : f)));
   const removeFact = (tool: string, idx: number) =>
@@ -1776,7 +1940,25 @@ export function BuilderSheet({
                         role="status"
                         style={{ fontSize: 10.5, color: "var(--escalate)", marginTop: 4 }}
                       >
-                        ⚠ no agent has called "{allowlistToolInput.trim()}" yet — this entry won't match until one does
+                        ⚠ "{allowlistToolInput.trim()}" is not in this namespace's tool registry — this entry
+                        won't match until such a tool appears
+                      </div>
+                    )}
+                  {/* The third state the old two-way check could not express. A tool with an approved
+                      definition that simply has not been called yet is a NORMAL thing to allowlist —
+                      deny-by-default requires authoring rules before the traffic exists — so saying
+                      "no agent has called this" here would be technically true and completely
+                      misleading. It is only worth a note, not a warning colour. */}
+                  {knownToolNames != null &&
+                    allowlistToolInput.trim() !== "" &&
+                    declaredToolNames.has(allowlistToolInput.trim().toLowerCase()) && (
+                      <div
+                        data-testid="builder-declared-tool-note"
+                        role="status"
+                        style={{ fontSize: 10.5, color: "var(--text-dim)", marginTop: 4 }}
+                      >
+                        declared by an MCP server in this namespace
+                        {schemaByTool.has(allowlistToolInput.trim().toLowerCase()) ? " — its arguments can be scoped" : ""}
                       </div>
                     )}
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
@@ -1869,6 +2051,14 @@ export function BuilderSheet({
                         Every line must hold. A parameter that isn't supplied fails its line — so omitting an
                         argument can't be used to skip a constraint.
                       </div>
+                      {/* The tool's own declared argument names, offered to the constraint field box.
+                          Suggestions only — a constraint addresses `tool_params[<field>]` directly, so a
+                          name the schema does not mention stays perfectly legal to type. */}
+                      <datalist id={`builder-args-${openGrantTool}`}>
+                        {flatArgNames(openGrantTool).map((a) => (
+                          <option key={a} value={a} />
+                        ))}
+                      </datalist>
 
                       {(allowlistGrants[openGrantTool] ?? []).map((c, i) => (
                         <div
@@ -1881,6 +2071,10 @@ export function BuilderSheet({
                             className="mono"
                             placeholder="parameter"
                             aria-label="parameter name"
+                            // Suggestions, not a constraint: a constraint addresses
+                            // `input.tool_params[<field>]` directly, so any name remains legal — a schema
+                            // can be stale or absent, and the tool may accept more than it declares.
+                            list={`builder-args-${openGrantTool}`}
                             value={c.field}
                             onChange={(e) => updateConstraint(openGrantTool, i, { ...c, field: e.target.value })}
                             style={{ width: 120, fontSize: 11.5 }}
@@ -1909,10 +2103,27 @@ export function BuilderSheet({
                               className="mono"
                               aria-label="constraint value"
                               placeholder={CONSTRAINT_PLACEHOLDER[c.kind]}
+                              // The declared `enum` for THIS argument, when the tool published one and
+                              // the operator is comparing by membership. A mistyped literal here is a
+                              // restriction that silently never matches, so suggesting the legal values
+                              // beats asking anyone to retype one — as a datalist, because a constraint
+                              // value list is comma-separated and free text has to stay available.
+                              list={
+                                constraintEnumListId(c, openGrantTool)
+                                  ? `builder-enum-${openGrantTool}-${c.field}`
+                                  : undefined
+                              }
                               value={constraintValueText(c)}
                               onChange={(e) => updateConstraint(openGrantTool, i, withConstraintValue(c, e.target.value))}
                               style={{ flex: 1, minWidth: 160, fontSize: 11.5 }}
                             />
+                          )}
+                          {constraintEnumListId(c, openGrantTool) && (
+                            <datalist id={`builder-enum-${openGrantTool}-${c.field}`}>
+                              {(constraintEnumListId(c, openGrantTool) ?? []).map((v) => (
+                                <option key={v} value={v} />
+                              ))}
+                            </datalist>
                           )}
                           <button
                             type="button"
@@ -1958,24 +2169,48 @@ export function BuilderSheet({
                               data-testid={`builder-fact-op-${openGrantTool}-${i}`}
                               aria-label="scoping fact operator"
                               value={f.op}
-                              onChange={(e) => updateFact(openGrantTool, i, blankFact(f.field, kind, e.target.value))}
+                              onChange={(e) =>
+                                // Carry the value across an op change wherever the two ops hold the same
+                                // shape. Rebuilding blank every time discarded a list the operator had
+                                // just typed for the sake of switching "must not include" to "must be
+                                // within" — a change of MEANING, not of data.
+                                updateFact(openGrantTool, i, retypedFact(f, kind, e.target.value))
+                              }
                               style={{ fontSize: 11.5 }}
                             >
-                              {FACT_OPS[kind].map((op) => (
+                              {factOpsFor(kind, f.field).map((op) => (
                                 <option key={op} value={op}>
                                   {FACT_OP_VERB[op] ?? op}
                                 </option>
                               ))}
                             </select>
-                            <input
-                              data-testid={`builder-fact-value-${openGrantTool}-${i}`}
-                              className="mono"
-                              aria-label="scoping fact value"
-                              placeholder={kind === "numeric" || f.op === "maxCount" ? "number" : "comma-separated values"}
-                              value={factValueText(f)}
-                              onChange={(e) => updateFact(openGrantTool, i, withFactValue(f, e.target.value))}
-                              style={{ flex: 1, minWidth: 160, fontSize: 11.5 }}
-                            />
+                            {factEnumOptions(f, openGrantTool) ? (
+                              <select
+                                data-testid={`builder-fact-value-${openGrantTool}-${i}`}
+                                className="mono"
+                                aria-label="scoping fact value"
+                                value={factValueText(f)}
+                                onChange={(e) => updateFact(openGrantTool, i, withFactValue(f, e.target.value))}
+                                style={{ flex: 1, minWidth: 160, fontSize: 11.5 }}
+                              >
+                                <option value="">choose…</option>
+                                {factEnumOptions(f, openGrantTool)?.map((v) => (
+                                  <option key={v} value={v}>
+                                    {v}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : (
+                              <input
+                                data-testid={`builder-fact-value-${openGrantTool}-${i}`}
+                                className="mono"
+                                aria-label="scoping fact value"
+                                placeholder={kind === "numeric" || f.op === "maxCount" ? "number" : "comma-separated values"}
+                                value={factValueText(f)}
+                                onChange={(e) => updateFact(openGrantTool, i, withFactValue(f, e.target.value))}
+                                style={{ flex: 1, minWidth: 160, fontSize: 11.5 }}
+                              />
+                            )}
                             <button
                               type="button"
                               className="icon-btn"
@@ -2000,17 +2235,52 @@ export function BuilderSheet({
                           aria-label="add a scoping fact"
                           value=""
                           onChange={(e) => {
-                            const spec = FACT_FIELDS.find((x) => x.field === e.target.value);
+                            const picked = e.target.value;
+                            if (!picked) return;
+                            // A `param_paths.<path>` field is not in the registry — the path is the
+                            // tool's own argument — so it is always the scalar kind.
+                            if (picked.startsWith(PARAM_PATH_PREFIX)) {
+                              addFact(openGrantTool, picked, "scalar");
+                              return;
+                            }
+                            const spec = FACT_FIELDS.find((x) => x.field === picked);
                             if (spec) addFact(openGrantTool, spec.field, spec.kind);
                           }}
                           style={{ fontSize: 11.5 }}
                         >
                           <option value="">+ scope what it carries / reaches…</option>
-                          {FACT_FIELDS.map((x) => (
-                            <option key={x.field} value={x.field}>
-                              {factFieldLabel(x.field)}
-                            </option>
-                          ))}
+                          {/* THIS TOOL'S OWN ARGUMENTS, first, because they are the most specific thing
+                              anyone can say and until now they could not be said at all. Non-addressable
+                              ones are rendered DISABLED WITH THE REASON rather than omitted: silently
+                              dropping an argument teaches the operator it does not exist, which is the
+                              capability-fragment mistake wearing different clothes. */}
+                          {(() => {
+                            const paths = pathsByTool.get(openGrantTool.toLowerCase()) ?? [];
+                            if (paths.length === 0) return null;
+                            return (
+                              <optgroup label={`${openGrantTool} arguments (declared)`}>
+                                {paths.map((p) => (
+                                  <option
+                                    key={p.path}
+                                    value={`${PARAM_PATH_PREFIX}${p.path}`}
+                                    disabled={!p.addressable}
+                                    title={p.note}
+                                  >
+                                    {p.path}
+                                    {p.required ? " *" : ""}
+                                    {p.addressable ? "" : ` — ${p.note ?? "cannot be scoped"}`}
+                                  </option>
+                                ))}
+                              </optgroup>
+                            );
+                          })()}
+                          <optgroup label="what the call carries or reaches">
+                            {FACT_FIELDS.map((x) => (
+                              <option key={x.field} value={x.field}>
+                                {factFieldLabel(x.field)}
+                              </option>
+                            ))}
+                          </optgroup>
                         </select>
                         <select
                           data-testid="builder-constraint-add-kind"

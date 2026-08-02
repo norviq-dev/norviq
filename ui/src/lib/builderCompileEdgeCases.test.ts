@@ -63,6 +63,41 @@ describe("unknown condition types cannot reach the emitted rego", () => {
   });
 });
 
+describe("an unknown SCOPE tier is an error, not a thrown exception", () => {
+  /** Same trust boundary as the conditions above, one level up. `validateScope` was an if/else-if over
+   *  the three known tiers with no trailing else, so an unrecognised tier collected zero errors and
+   *  compilation went ahead — where `scopeIdentifier`'s exhaustiveness fallback returns the scope OBJECT
+   *  and `commentSafe` throws on it. A TypeError out of `compileGraph` is worse than a bad policy: every
+   *  caller reads `{rego, errors}`, so the sheet renders a crash instead of "this cannot be opened". */
+  const withScope = (scope: unknown): any => ({
+    schemaVersion: 1,
+    scope,
+    mode: "rules",
+    defaults: { decision: "allow", reason: "default" },
+    rules: [{ id: "r1", decision: "block", ruleId: "r_block", reason: "nope", conditions: [[{ type: "detector", detector: "sql_injection" }]] }],
+  });
+
+  it.each([
+    ["a tier from a different builder version", { kind: "cluster", agentClass: "support" }],
+    ["no tier at all", { agentClass: "support" }],
+    ["a non-string identifier", { kind: "class", agentClass: 42 }],
+    ["null", null],
+  ])("returns unknown_scope for %s", (_label, scope) => {
+    let result: any;
+    expect(() => {
+      result = compileGraph(withScope(scope), "default");
+    }, "compileGraph must return its errors, never throw them").not.toThrow();
+    expect(result.errors.some((e: any) => e.code === "unknown_scope")).toBe(true);
+    expect(result.rego).toBe("");
+  });
+
+  it("leaves a known tier compiling exactly as before", () => {
+    const result: any = compileGraph(withScope({ kind: "class", agentClass: "report-gen" }), "default");
+    expect(result.errors).toEqual([]);
+    expect(result.rego).toContain('blocks["r_block"]');
+  });
+});
+
 describe("reserved scope: the remediation-overlay suffix (DOCUMENTED GAP, not a fix)", () => {
   /**
    * This block PINS CURRENT BEHAVIOUR and flags a decision, rather than changing anything.

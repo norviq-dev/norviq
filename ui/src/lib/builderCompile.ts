@@ -86,6 +86,12 @@ export type BuilderErrorCode =
   /** A condition whose `type` this build does not recognise — only reachable from a rehydrated or
    *  hand-edited embedded graph, never from the UI. See validateCondition's trailing `else`. */
   | "unknown_condition"
+  /** A scope whose tier this build does not recognise, or whose identifier is not a string — same
+   *  provenance as `unknown_condition` (a rehydrated blob, never the UI). Needed as an ERROR because
+   *  `scopeIdentifier`'s exhaustiveness fallback returns the scope OBJECT for an unknown tier, which
+   *  `commentSafe` then throws on: a TypeError escaping `compileGraph` breaks the {rego, errors}
+   *  contract the sheet needs in order to say "this policy cannot be opened in the builder". */
+  | "unknown_scope"
   /** Scoping-fact problems. `empty_fact_values` is its own code because an empty list is not a no-op:
    *  `noneOf []` and `subsetOf []` are TAUTOLOGIES, so the rule reads as a restriction and enforces
    *  nothing — the same class of quiet over-permissiveness as `grant_not_allowlisted` above. */
@@ -388,6 +394,28 @@ export function loaderKeyFor(scope: BuilderScope): string {
  * supplied `targetNamespace`, since those tiers' scope object carries no namespace field of its own).
  */
 function validateScope(scope: BuilderScope, targetNamespace: string): BuilderError[] {
+  // A graph rehydrated from the embedded base64 blob arrives through `JSON.parse` as `unknown`, so
+  // neither the tier discriminant nor its identifier is guaranteed to be what the type claims. The
+  // chain below used to be if/else-if with NO trailing else: an unrecognised tier produced zero errors,
+  // compilation proceeded, and `scopeIdentifier`'s `never` fallback handed the scope OBJECT to
+  // `commentSafe` — a TypeError thrown out of `compileGraph` rather than an error returned from it.
+  const raw = scope as { kind?: unknown; agentClass?: unknown; namespace?: unknown; workloadName?: unknown } | null;
+  const identifier =
+    raw?.kind === "class"
+      ? raw.agentClass
+      : raw?.kind === "namespace"
+        ? raw.namespace
+        : raw?.kind === "workload"
+          ? raw.workloadName
+          : undefined;
+  if (typeof identifier !== "string") {
+    return [
+      {
+        code: "unknown_scope",
+        message: `Unrecognised policy scope: expected tier "class", "namespace" or "workload" carrying a string identifier, got tier ${JSON.stringify(raw?.kind ?? null)}`
+      }
+    ];
+  }
   const errors: BuilderError[] = [];
   if (scope.kind === "class") {
     const cls = scope.agentClass.trim();
@@ -1035,8 +1063,13 @@ function validateRulesGraph(graph: BuilderGraph): BuilderError[] {
  *  graphs are validated structurally instead, and `rules[]` is not inspected at all (it is ignored by
  *  the allowlist emitter too — see `buildFullRego`). */
 function validateGraph(graph: BuilderGraph, targetNamespace: string): BuilderError[] {
+  // Scope first, and short-circuit on a scope this build cannot interpret. Both mode validators derive
+  // the policy's token from the scope identifier (`scopeToken` -> `sanitizeClassToken`), so running them
+  // ahead of `validateScope` means THEY throw on a malformed scope before it can ever be reported.
+  const scopeErrors = validateScope(graph.scope, targetNamespace);
+  if (scopeErrors.some((e) => e.code === "unknown_scope")) return scopeErrors;
   const modeErrors = modeOf(graph) === "allowlist" ? validateAllowlistGraph(graph) : validateRulesGraph(graph);
-  return [...validateScope(graph.scope, targetNamespace), ...modeErrors];
+  return [...scopeErrors, ...modeErrors];
 }
 
 // --- emission ---
@@ -1069,7 +1102,7 @@ function sourceVerbPredicateName(source: string, verb: string): string {
  *    with the capability guard emitted by `engineCapabilityGuards()`, which turns the same skew into a
  *    loud, attributable block. See NEW_FACT_ROOTS below.
  */
-const SCALAR_FIELD_EXPR: Record<string, string> = {
+export const SCALAR_FIELD_EXPR: Record<string, string> = {
   verb: "input.derived.verb",
   tool_kind: "input.derived.tool_kind",
   sql_normalized: "input.derived.sql_normalized",
@@ -1098,7 +1131,17 @@ export const NUMERIC_FIELD_EXPR: Record<BuilderNumericFactField, string> = {
 };
 
 /** Prefix of a `param_paths.<dotted.path>` scalar field. */
-const PARAM_PATH_PREFIX = "param_paths.";
+export const PARAM_PATH_PREFIX = "param_paths.";
+
+/**
+ * The charset a `param_paths` suffix may use, mirroring `schema.py`'s `_PARAM_PATH_RE` (and the check in
+ * `validateCondition`). Exported because the SCOPE EDITOR has to apply it when offering paths derived
+ * from a tool's declared JSON Schema: the evaluator will happily build a runtime key for an argument
+ * named `user email` or `x/y`, but both compilers reject the field, so offering it would produce a
+ * condition that cannot be saved. Screening at offer time is the difference between "that argument
+ * cannot be scoped here" and a validation error the operator has to reverse-engineer.
+ */
+export const PARAM_PATH_SUFFIX_RE = /^[\w.[\]$-]{1,256}$/;
 
 /**
  * The `input.derived` roots this merge introduced. A graph referencing any of them cannot be
@@ -1707,8 +1750,54 @@ function grantSummaryLines(allowlist: BuilderAllowlist | null | undefined): stri
     `# Per-tool scope (${grants.length} constrained tool${grants.length === 1 ? "" : "s"}) — ALL constraints must`,
     `# hold; a constrained tool is allowed ONLY for arguments matching its line below. Unlisted tools stay`,
     `# unconstrained. This is what an intent allowlist of bare tool NAMES cannot express.`,
-    ...grants.map((g) => `#   ${commentSafe(g.tool)}: ${commentSafe(g.constraints.map(describeConstraint).join("; "))}`)
+    // Constraints AND facts, in the order `grantsSection` emits them. Rendering only `constraints` here
+    // printed a bare `#   http_post:` for a facts-only grant — a header asserting a tool is constrained
+    // by nothing while the rules below enforced three predicates on it. `cleanAllowlistGrants` already
+    // refuses to drop a facts-only grant for exactly this reason; the prose has to keep the same promise,
+    // because this comment is what a reviewer reads in the catalog and in git.
+    ...grants.map((g) => {
+      const scope = [...g.constraints.map(describeConstraint), ...(g.facts ?? []).map(describeFact)];
+      return `#   ${commentSafe(g.tool)}: ${commentSafe(scope.join("; "))}`;
+    })
   ];
+}
+
+/** Plain-English rendering of one scoping FACT for the header comment, the `describeConstraint` of the
+ *  fact palette. Never parsed — the embedded graph stays the source of truth; this exists so the scope a
+ *  policy enforces is legible without decoding the blob. The final fallback is unreachable for a policy
+ *  that compiled: `validateAllowlistGrants` rejects any grant fact outside the three legal kinds
+ *  (`invalid_grant`) before a header is ever produced. */
+function describeFact(f: BuilderGrantFact): string {
+  if (f.type === "not") return `NOT (${describeFact(f.inner)})`;
+  switch (f.type) {
+    case "scalarFact":
+      switch (f.op) {
+        case "equals":
+          return `${f.field} == ${f.value ?? ""}`;
+        case "in":
+          return `${f.field} in {${(f.values ?? []).join(", ")}}`;
+        case "matches":
+          return `${f.field} matches /${f.value ?? ""}/`;
+        case "notMatches":
+          return `${f.field} does NOT match /${f.value ?? ""}/`;
+      }
+      break;
+    case "collectionFact":
+      switch (f.op) {
+        case "subsetOf":
+          return `${f.field} within {${(f.values ?? []).join(", ")}}`;
+        case "noneOf":
+          return `${f.field} excludes {${(f.values ?? []).join(", ")}}`;
+        case "anyOf":
+          return `${f.field} intersects {${(f.values ?? []).join(", ")}}`;
+        case "maxCount":
+          return `${f.field} count <= ${f.count ?? 0}`;
+      }
+      break;
+    case "numericFact":
+      return f.op === "max" ? `${f.field} <= ${f.value}` : `${f.field} >= ${f.value}`;
+  }
+  return "unrecognised scoping fact";
 }
 
 /** Plain-English rendering of one constraint for the header comment (never parsed — the embedded graph
@@ -1997,6 +2086,15 @@ export function detachmentStatusOf(rego: string): "attached" | "detached" | "not
  */
 export function compileGraph(graph: BuilderGraph, targetNamespace: string = ""): CompileResult {
   const structuralErrors = validateGraph(graph, targetNamespace);
+  // Never build from a graph that failed validation. The rego is discarded below whenever there are
+  // errors, so building it was always wasted work — but it is work that can THROW on a rehydrated graph
+  // whose shape contradicts its types, and a throw escapes the {rego, errors} contract that every caller
+  // relies on, replacing an actionable validation message with a crashed pane. Budget errors are not
+  // reported alongside structural ones for the same reason: the byte count of rego built from an invalid
+  // graph describes nothing the operator can act on.
+  if (structuralErrors.length > 0) {
+    return { rego: "", stats: computeStats(""), errors: structuralErrors };
+  }
   const rego = buildFullRego(graph, targetNamespace);
   const stats = computeStats(rego);
 

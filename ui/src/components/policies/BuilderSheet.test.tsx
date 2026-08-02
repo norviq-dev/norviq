@@ -631,32 +631,49 @@ describe("BuilderSheet — namespace honesty (Phase 2f)", () => {
 });
 
 // --- Phase 2f: tool-name autocomplete + unknown-tool warning ------------------------------------------
+/** One `GET /api/v1/tools` row. Defaults to the weak tier — `observed` proves the name exists and
+ *  claims nothing else, which is what most of these assertions are about. */
+function registryEntry(name: string, over: Record<string, unknown> = {}) {
+  return {
+    name,
+    name_skeleton: name,
+    source: "observed",
+    namespace: "default",
+    server_id: null,
+    pin_status: null,
+    scan_severity: null,
+    description: null,
+    description_withheld: false,
+    input_schema: null,
+    schema_available: false,
+    last_seen_at: null,
+    ...over
+  };
+}
+
 describe("BuilderSheet — tool-name autocomplete + unknown-tool warning (Phase 2f)", () => {
   it("warns (non-blocking) when a toolIn tool has never been observed in the target namespace, and stays silent for an observed one", async () => {
     server.use(
       http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
-      http.get("/api/v1/audit/top-blocked", () => HttpResponse.json([{ tool_name: "delete_kb", count: 3 }])),
-      http.get("/api/v1/audit/records", () =>
-        HttpResponse.json([{ timestamp: "2026-07-01T00:00:00Z", tool_name: "search_kb", decision: "allow" }])
-      ),
+      http.get("/api/v1/tools", () => HttpResponse.json([registryEntry("delete_kb"), registryEntry("search_kb")])),
       http.post("/api/v1/policies/dry-run", () =>
         HttpResponse.json({ valid: true, errors: [], total_records_checked: 0, newly_blocked: 0, recommendation: "n/a" })
       )
     );
 
-    renderSheet(); // namespace="default" — already concrete, so the observed-tools fetch fires on mount
+    renderSheet(); // namespace="default" — already concrete, so the registry fetch fires on mount
     buildValidRule();
     fireEvent.change(screen.getByTestId("builder-cond-0-0-0-type"), { target: { value: "toolIn" } });
     await waitFor(() => expect(screen.getByTestId("builder-cond-0-0-0-tools")).toBeInTheDocument());
 
-    // An observed tool (from top-blocked) — no warning once the fetch has resolved.
+    // A tool in the registry — no warning once the fetch has resolved.
     fireEvent.change(screen.getByTestId("builder-cond-0-0-0-tools"), { target: { value: "delete_kb" } });
     await waitFor(() => expect(screen.queryByTestId("builder-unknown-tool-warning")).not.toBeInTheDocument());
 
     // A typo'd/never-seen tool — warns, but the compile-error gate is untouched and Dry-Run stays enabled.
     fireEvent.change(screen.getByTestId("builder-cond-0-0-0-tools"), { target: { value: "delete_kb_typo" } });
     await waitFor(() =>
-      expect(screen.getByTestId("builder-unknown-tool-warning")).toHaveTextContent(/no agent has called "delete_kb_typo" yet/i)
+      expect(screen.getByTestId("builder-unknown-tool-warning")).toHaveTextContent(/"delete_kb_typo" is not in this namespace's tool registry/i)
     );
     expect(screen.queryByTestId("builder-errors")).not.toBeInTheDocument();
     expect(screen.getByTestId("builder-dryrun-btn")).not.toBeDisabled();
@@ -665,6 +682,65 @@ describe("BuilderSheet — tool-name autocomplete + unknown-tool warning (Phase 
     fireEvent.click(screen.getByTestId("builder-dryrun-btn"));
     await waitFor(() => expect(screen.getByTestId("builder-save-btn")).not.toBeDisabled());
     expect(screen.getByTestId("builder-unknown-tool-warning")).toBeInTheDocument();
+  });
+
+  it("warns for a CAPABILITY FRAGMENT, which the UI used to offer and then vouch for", async () => {
+    // The bug this endpoint exists to retire. `knownToolNames` was `observed ∪ ALL_CAPABILITY_FRAGMENTS`,
+    // and fragments are substrings for `contains()` matching inside sourceVerb — "delete", "post",
+    // "http" are not tool names and no call can ever carry one. Because the same set also fed the
+    // datalist, the builder SUGGESTED them and then suppressed its own warning for them: an operator
+    // picking "delete" from the dropdown got a rule that could never fire, with nothing said.
+    server.use(
+      http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
+      http.get("/api/v1/tools", () => HttpResponse.json([registryEntry("delete_kb")]))
+    );
+
+    renderSheet();
+    buildValidRule();
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-type"), { target: { value: "toolIn" } });
+    await waitFor(() => expect(screen.getByTestId("builder-cond-0-0-0-tools")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-tools"), { target: { value: "delete" } });
+    await waitFor(() =>
+      expect(screen.getByTestId("builder-unknown-tool-warning")).toHaveTextContent(/"delete" is not in this namespace's tool registry/i)
+    );
+  });
+
+  it("says nothing when the registry is empty — that is ignorance, not evidence of absence", async () => {
+    // helm ships `webhook.injection.mcp.enabled: false`, so an estate with no pins and no recent traffic
+    // is the COMMON case. Warning on every name there would be warning-on-everything, which is how a
+    // control gets ignored before the one time it matters.
+    server.use(
+      http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
+      http.get("/api/v1/tools", () => HttpResponse.json([]))
+    );
+
+    renderSheet();
+    buildValidRule();
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-type"), { target: { value: "toolIn" } });
+    await waitFor(() => expect(screen.getByTestId("builder-cond-0-0-0-tools")).toBeInTheDocument());
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-tools"), { target: { value: "anything_at_all" } });
+
+    await waitFor(() => expect(screen.getByTestId("builder-cond-0-0-0-tools")).toHaveValue("anything_at_all"));
+    expect(screen.queryByTestId("builder-unknown-tool-warning")).not.toBeInTheDocument();
+  });
+
+  it("a registry fetch FAILURE reads as unknown, not as an empty estate", async () => {
+    // The old code caught each request into `[]`, which made an outage indistinguishable from a
+    // namespace with no traffic and pointed the warning at every name the operator typed.
+    server.use(
+      http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
+      http.get("/api/v1/tools", () => HttpResponse.json({ detail: "boom" }, { status: 500 }))
+    );
+
+    renderSheet();
+    buildValidRule();
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-type"), { target: { value: "toolIn" } });
+    await waitFor(() => expect(screen.getByTestId("builder-cond-0-0-0-tools")).toBeInTheDocument());
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-tools"), { target: { value: "some_tool" } });
+
+    await waitFor(() => expect(screen.getByTestId("builder-cond-0-0-0-tools")).toHaveValue("some_tool"));
+    expect(screen.queryByTestId("builder-unknown-tool-warning")).not.toBeInTheDocument();
   });
 
   it("suppresses the unknown-tool warning entirely until a concrete target namespace has been chosen (nothing to check against yet)", () => {
@@ -1063,4 +1139,224 @@ describe("allowlist mode must be able to say more than a tool list", () => {
       expect(rego).toContain("_grant_ok");
     });
   });
+
+  it("removing a tool discards its FACTS too, so re-adding it does not resurrect them", async () => {
+    // `removeAllowlistTool` dropped `allowlistGrants[t]` and left `allowlistGrantFacts[t]` standing, so
+    // a tool removed and re-added came back silently pre-scoped with narrowing the operator had thrown
+    // away. It was masked only because the graph memo iterates `allowlistTools` — a latent divergence
+    // between two stores holding one concept, which is the same shape as every other defect here.
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    fireEvent.click(screen.getByTitle("Scope send_email by its arguments"));
+    fireEvent.change(screen.getByTestId("builder-fact-add-kind"), { target: { value: "data_classes" } });
+    await waitFor(() => expect(screen.getByTestId("builder-allowlist-tool-scope-send_email")).toHaveTextContent(/scoped · 1/));
+
+    fireEvent.click(screen.getByTitle("Remove send_email"));
+    await waitFor(() => expect(screen.queryByTestId("builder-allowlist-tool-scope-send_email")).not.toBeInTheDocument());
+
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+
+    // Unscoped, as a freshly-added tool must be.
+    await waitFor(() =>
+      expect(screen.getByTestId("builder-allowlist-tool-scope-send_email")).toHaveTextContent(/\+ scope/)
+    );
+  });
+
+  it("offers a declared tool's OWN arguments, and a chosen one reaches the compiled policy", async () => {
+    // `param_paths.<path>` is the only primitive that can name one argument at any depth, and it had no
+    // editor anywhere in the product — reachable solely through the /intents handoff. The blocker was
+    // never the compiler (builderScopingFacts.test.ts has pinned this shape all along) but that a picker
+    // had nothing to offer: asking an operator to type a dotted path from memory, into a control whose
+    // default value does not compile, is worse than offering nothing. The registry's schema is what
+    // makes the control possible.
+    server.use(
+      http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
+      http.get("/api/v1/tools", () =>
+        HttpResponse.json([
+          registryEntry("send_email", {
+            source: "mcp_declared",
+            server_id: "smtp",
+            schema_available: true,
+            input_schema: {
+              type: "object",
+              required: ["to"],
+              properties: {
+                to: { type: "string" },
+                retries: { type: "integer" },
+                attachments: { type: "array", items: { type: "string" } },
+                filters: { type: "object", properties: { customer: { type: "string" } } }
+              }
+            }
+          })
+        ])
+      )
+    );
+
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    fireEvent.click(screen.getByTitle("Scope send_email by its arguments"));
+
+    const dropdown = () => screen.getByTestId("builder-fact-add-kind") as HTMLSelectElement;
+    await waitFor(() => {
+      const values = [...dropdown().options].map((o) => o.value);
+      expect(values).toContain("param_paths.to");
+    });
+
+    const options = Object.fromEntries([...dropdown().options].map((o) => [o.value, o]));
+    // A nested string leaf is addressable — this is the case a flat per-field constraint cannot express.
+    expect(options["param_paths.filters.customer"]).toBeDefined();
+    expect(options["param_paths.filters.customer"].disabled).toBe(false);
+
+    // An integer argument produces NO param_paths key at runtime (evaluator.py emits string leaves
+    // only), so `object.get(..., "")` could never match — offered, but disabled, with the reason.
+    expect(options["param_paths.retries"].disabled).toBe(true);
+    expect(options["param_paths.retries"].textContent).toMatch(/only text/i);
+
+    // An array's runtime key carries a concrete index the schema cannot know.
+    expect(options["param_paths.attachments"].disabled).toBe(true);
+    expect(options["param_paths.attachments"].textContent).toMatch(/indexed at runtime/i);
+
+    // The engine-derived facts are still there — the tool's arguments are additive, not a replacement.
+    expect(options["data_classes"]).toBeDefined();
+
+    fireEvent.change(dropdown(), { target: { value: "param_paths.to" } });
+    await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
+    fireEvent.change(screen.getByTestId("builder-fact-value-send_email-0"), { target: { value: "ops@acme.com" } });
+
+    // ...and it must be real enforcement, not just a row in a panel.
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain('object.get(input.derived.param_paths, "to", "")');
+      expect(rego).toContain("ops@acme.com");
+    });
+  });
+
+  it("offers the declared enum as a picker instead of asking for a retyped literal", async () => {
+    // A typo'd literal is a silently dead restriction: fail-closed and noisy inside an allowlist grant,
+    // fail-open and silent in rules mode. Where the schema states the legal values, offering them is
+    // strictly better than a free-text box — while remaining a suggestion, never a restriction.
+    server.use(
+      http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
+      http.get("/api/v1/tools", () =>
+        HttpResponse.json([
+          registryEntry("deploy", {
+            source: "mcp_declared",
+            schema_available: true,
+            input_schema: {
+              type: "object",
+              properties: { region: { type: "string", enum: ["us-east", "eu-west"] } }
+            }
+          })
+        ])
+      )
+    );
+
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "deploy" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    fireEvent.click(screen.getByTitle("Scope deploy by its arguments"));
+
+    await waitFor(() => {
+      const values = [...(screen.getByTestId("builder-fact-add-kind") as HTMLSelectElement).options].map((o) => o.value);
+      expect(values).toContain("param_paths.region");
+    });
+    fireEvent.change(screen.getByTestId("builder-fact-add-kind"), { target: { value: "param_paths.region" } });
+    await waitFor(() => expect(screen.getByTestId("builder-fact-row-deploy-0")).toBeInTheDocument());
+
+    const value = screen.getByTestId("builder-fact-value-deploy-0") as HTMLSelectElement;
+    expect(value.tagName).toBe("SELECT");
+    expect([...value.options].map((o) => o.value)).toEqual(["", "us-east", "eu-west"]);
+
+    fireEvent.change(value, { target: { value: "eu-west" } });
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain('object.get(input.derived.param_paths, "region", "")');
+      expect(rego).toContain("eu-west");
+    });
+  });
+
+  it("suggests a declared argument's name and its enum to a per-field constraint, without restricting either", async () => {
+    // Constraints address `tool_params[<field>]` directly, so the schema can only ever SUGGEST here — a
+    // tool may accept more than it declares, and a stale schema must never make a real argument
+    // unauthorable. Hence datalists rather than selects.
+    server.use(
+      http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
+      http.get("/api/v1/tools", () =>
+        HttpResponse.json([
+          registryEntry("deploy", {
+            source: "mcp_declared",
+            schema_available: true,
+            input_schema: {
+              type: "object",
+              properties: {
+                region: { type: "string", enum: ["us-east", "eu-west"] },
+                nested: { type: "object", properties: { inner: { type: "string" } } }
+              }
+            }
+          })
+        ])
+      )
+    );
+
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "deploy" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    fireEvent.click(screen.getByTitle("Scope deploy by its arguments"));
+    fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "oneOf" } });
+    await waitFor(() => expect(screen.getByTestId("builder-constraint-row-deploy-0")).toBeInTheDocument());
+
+    // Flat argument names are suggested; a NESTED path is not, because a constraint addresses one flat
+    // `tool_params[field]` and "nested.inner" is not a key the tool receives under that name.
+    const args = [...(document.getElementById("builder-args-deploy") as HTMLDataListElement).options].map((o) => o.value);
+    expect(args).toContain("region");
+    expect(args).not.toContain("nested.inner");
+
+    // Naming the argument surfaces its declared enum as suggestions on the value box.
+    fireEvent.change(screen.getByTestId("builder-constraint-field-deploy-0"), { target: { value: "region" } });
+    await waitFor(() => expect(document.getElementById("builder-enum-deploy-region")).toBeInTheDocument());
+    const enums = [...(document.getElementById("builder-enum-deploy-region") as HTMLDataListElement).options].map((o) => o.value);
+    expect(enums).toEqual(["us-east", "eu-west"]);
+
+    // And a value the schema never mentioned is still perfectly typeable — suggestion, not gate.
+    fireEvent.change(screen.getByTestId("builder-constraint-value-deploy-0"), { target: { value: "ap-south" } });
+    await waitFor(() => expect(screen.getByTestId("builder-constraint-value-deploy-0")).toHaveValue("ap-south"));
+  });
+
+  it("keeps a typed value when only the operator changes", async () => {
+    // The op select rebuilt the fact blank every time, so switching "must not include" to "must be
+    // within" — a change of meaning over the SAME values — silently cleared what had just been typed.
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    fireEvent.click(screen.getByTitle("Scope send_email by its arguments"));
+    fireEvent.change(screen.getByTestId("builder-fact-add-kind"), { target: { value: "data_classes" } });
+    await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByTestId("builder-fact-value-send_email-0"), { target: { value: "secret, pci" } });
+    fireEvent.change(screen.getByTestId("builder-fact-op-send_email-0"), { target: { value: "subsetOf" } });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("builder-fact-value-send_email-0")).toHaveValue("secret, pci")
+    );
+  });
+
+  // NOT TESTED, deliberately: `setToolFacts` now deletes the key when the last fact goes, matching
+  // `setToolConstraints`. There is no test because the difference is not observable from here — the chip
+  // counts `.length` and the graph memo filters on it, so `{tool: []}` and an absent key render and
+  // compile identically. A test would pass with or without the fix, which is worse than no test. The
+  // change stands on preventing a future consumer from reading an empty array as "this tool is scoped".
 });

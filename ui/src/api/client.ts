@@ -478,6 +478,45 @@ export async function fetchTopBlocked(range: string = "24h", namespace?: string)
   return apiGet<Array<{ tool_name: string; count: number }>>(`/api/v1/audit/top-blocked?${params.toString()}`);
 }
 
+/**
+ * One entry in the tool registry.
+ *
+ * `source` is not decoration — it is the reason this type exists. The builder previously inferred a
+ * "known tools" set by unioning observed names with capability SUBSTRINGS ("post", "http", "delete")
+ * and treating the union as an existence oracle, which made it suggest names that cannot exist and then
+ * suppress its own unknown-tool warning for exactly those names. Callers must keep the tiers apart:
+ * `mcp_declared` means a definition was read and approved (and `input_schema` may be present);
+ * `observed` means only that the name appeared in real traffic.
+ */
+export interface ToolRegistryEntry {
+  name: string;
+  /** Server-computed. Never recompute this in the browser — ui/src/lib/skeleton.ts ports neither the
+   *  cross-script confusables table nor Cf/Cc stripping, so a locally derived value disagrees with the
+   *  evaluator's `input.tool_name_normalized`. */
+  name_skeleton: string;
+  source: "mcp_declared" | "observed";
+  namespace: string;
+  server_id: string | null;
+  pin_status: string | null;
+  scan_severity: string | null;
+  /** Null when withheld — see `description_withheld`. */
+  description: string | null;
+  /** True when Gate A stripped or stubbed this description before the model saw it. The stored
+   *  definition keeps the PRE-sanitize text, so the server refuses to send it and the console must not
+   *  go looking for it elsewhere. */
+  description_withheld: boolean;
+  input_schema: Record<string, unknown> | null;
+  /** False when the stored definition was truncated, unparseable, or carried no schema. */
+  schema_available: boolean;
+  last_seen_at: string | null;
+}
+
+export async function fetchTools(namespace?: string, range: string = "30d"): Promise<ToolRegistryEntry[]> {
+  const params = new URLSearchParams({ range });
+  if (namespace && namespace !== "all") params.set("namespace", namespace);
+  return apiGet<ToolRegistryEntry[]>(`/api/v1/tools?${params.toString()}`);
+}
+
 export async function fetchVolume(
   range: string = "24h",
   namespace?: string
