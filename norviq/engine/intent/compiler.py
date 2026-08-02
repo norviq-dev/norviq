@@ -200,7 +200,14 @@ def _predicate(field: str, spec) -> list[tuple[str, str]]:
         elif op == "matches":
             out.append((f"{field} matches {val}", f"regex.match({_lit(val)}, {expr_base})"))
         elif op == "notMatches":
-            out.append((f"{field} !matches {val}", f"not regex.match({_lit(val)}, {expr_base})"))
+            # `== false`, NOT `not regex.match(...)`. Every predicate here becomes the VALUE of an
+            # object key (`_predicates[id] = {"<label>": <expr>, ...}`), and `not` is a statement
+            # qualifier in rego, not an expression — so `"label": not regex.match(...)` is a
+            # rego_parse_error ("unexpected not keyword") and the whole module fails to load. Any
+            # intent using notMatches produced UNPARSEABLE rego; no test exercised the operator, so
+            # nothing caught it. `regex.match` returns a real boolean, so comparing it is both valid
+            # and exactly what the near-miss explainer needs (a false, not an undefined).
+            out.append((f"{field} !matches {val}", f"regex.match({_lit(val)}, {expr_base}) == false"))
         elif op == "subsetOf":
             # every element of the collection must be in the allowed set
             allowed = _lit(sorted(val))

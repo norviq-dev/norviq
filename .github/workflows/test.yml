@@ -55,6 +55,30 @@ jobs:
         # `npm ci` not `npm install`: it installs exactly the lockfile and fails if package.json and
         # the lock disagree, so a hand-edited dependency cannot pass CI while breaking a fresh clone.
         run: npm ci --no-audit --no-fund
+      # opa is REQUIRED here, not optional. A growing share of the builder suite compiles a graph and
+      # evaluates the emitted rego with the real binary — those are the only tests that can catch a
+      # policy which compiles cleanly and ENFORCES THE WRONG THING, which is the entire failure mode
+      # the visual builder exists to prevent. They `it.skip` when opa is absent, so without this step
+      # the job printed a green "572 passed" while every one of them silently did not run. A suite
+      # that cannot fail is worse than no suite, because it reports safety.
+      #
+      # Same pinned version + checksum as the python-tests job, so both halves evaluate against the
+      # dialect the sidecar actually runs.
+      - name: install opa (required by the builder's rego assertions)
+        run: |
+          curl -fsSL --retry 3 --retry-all-errors --max-time 120 \
+            -o /usr/local/bin/opa \
+            https://openpolicyagent.org/downloads/v1.18.0/opa_linux_amd64_static
+          echo "65d700b14b99b354982b61031b40bdc8e316ea93dadd61818f066d1d9a69dcce  /usr/local/bin/opa" | sha256sum -c -
+          chmod +x /usr/local/bin/opa
+          opa version
+      # Fail LOUDLY if the opa-gated tests would skip, rather than reporting a green run that proved
+      # less than it looks like. Without this the previous failure mode returns the moment the install
+      # step breaks or moves.
+      - name: assert the rego-backed tests actually run
+        working-directory: ui
+        run: |
+          command -v opa >/dev/null || { echo "opa missing — every rego-backed builder test would silently skip"; exit 1; }
       - name: vitest
         working-directory: ui
         # `--run` disables watch mode, which would otherwise hang the runner until the timeout.

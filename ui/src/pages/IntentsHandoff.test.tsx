@@ -119,3 +119,29 @@ describe("intents -> builder handoff", () => {
     expect(screen.getByText("execute_sql")).toBeInTheDocument();
   });
 });
+
+describe("the handoff must not lose a narrowing on the way into the builder", () => {
+  it("round-trips grant FACTS, not just constraints", () => {
+    // The seam had a hole: BuilderSheet seeded only `g.constraints`, so every scoping FACT an intent
+    // carried was dropped on arrival. Invisibly, too — intentToGraph converts facts successfully, so
+    // `dropped` is empty and the handoff refusal cannot fire. The operator would then save a policy
+    // strictly MORE PERMISSIVE than the one they dry-ran and approved.
+    const { graph, dropped } = intentToBuilderGraph({
+      class: "report-gen",
+      call: [{
+        id: "mail",
+        match: { tool_name: "send_email" },
+        require: { data_classes: { noneOf: ["secret"] } }
+      }]
+    });
+    expect(dropped).toEqual([]);
+    const grant = graph.allowlist?.grants?.[0];
+    expect(grant?.facts, "converter must produce the fact").toHaveLength(1);
+
+    // What the sheet reassembles from that seed must still carry it.
+    const seededFacts = Object.fromEntries(
+      (graph.allowlist?.grants ?? []).filter((g) => (g.facts ?? []).length > 0).map((g) => [g.tool, g.facts])
+    );
+    expect(seededFacts["send_email"]).toEqual(grant?.facts);
+  });
+});

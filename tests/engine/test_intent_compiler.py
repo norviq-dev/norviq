@@ -685,3 +685,36 @@ def test_a_scoping_predicate_does_not_fail_open_on_an_engine_without_the_fact() 
           "derived": {**old_engine["derived"], "data_classes": [],
                       "destinations": {"emails": ["ops@acme.com"], "urls": [], "hosts": [], "schemes": []}}}
     assert _eval(intent, ok) == "allow"
+
+
+@pytest.mark.skipif(_OPA is None, reason="opa binary required")
+def test_not_matches_produces_loadable_rego() -> None:
+    """`notMatches` emitted UNPARSEABLE rego, and nothing caught it because no test used the operator.
+
+    Every predicate becomes the VALUE of an object key (`_predicates[id] = {"<label>": <expr>}`), and
+    `not` is a statement qualifier in rego rather than an expression — so `"label": not regex.match(...)`
+    is a rego_parse_error and the whole module fails to load. An intent using notMatches could be saved
+    (validate_rego_source does not run opa) and then failed at push time, or worse, left the previous
+    policy enforcing while the console showed the new one.
+    """
+    intent = {"name": "n", "class": "c", "call": [
+        {"id": "no-secrets", "match": {"tool_name": "send_email"},
+         "require": {"param_paths.body": {"notMatches": "(?i)password"}}}]}
+    rego = _rego(intent)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "p.rego"
+        path.write_text(rego, encoding="utf-8")
+        # `opa check` is the gate the engine itself runs before pushing a module.
+        proc = subprocess.run(["opa", "check", "--v0-compatible", str(path)], capture_output=True, text=True)
+        assert proc.returncode == 0, f"emitted rego does not load:\n{proc.stderr}"
+
+    def _mk(body: str) -> dict:
+        return {"tool_name": "send_email", "direction": "call", "tool_params": {"body": body},
+                "agent": {"agent_class": "c", "namespace": "n"}, "call_depth": 0,
+                "derived": {"verb": "send", "tool_kind": "other", "param_values": [body],
+                            "param_values_lower": [body.lower()], "sql_normalized": "",
+                            "sql_statements": [], "param_paths": {"body": body}}}
+
+    # And it must DECIDE the negation, not merely parse.
+    assert _eval(intent, _mk("your refund is on its way")) == "allow"
+    assert _eval(intent, _mk("the password is hunter2")) == "block"

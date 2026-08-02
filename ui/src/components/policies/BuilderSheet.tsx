@@ -42,6 +42,7 @@ import type {
   BuilderDecision,
   BuilderDefaults,
   BuilderDetector,
+  BuilderGrantFact,
   BuilderGraph,
   BuilderKeywordTarget,
   BuilderMode,
@@ -1009,8 +1010,26 @@ export function BuilderSheet({
   // A Record rather than an array so the editor never has to reconcile two orderings, and so removing a
   // tool can drop its constraints in the same action — an orphan grant is a hard compile error
   // (`grant_not_allowlisted`), and leaving one behind would break the policy from an unrelated edit.
+  // Grant FACTS, kept beside the constraints and keyed the same way. The sheet has no editor for them
+  // yet (they arrive only via the /intents handoff), but they must survive a round trip — dropping
+  // them silently produces a policy strictly more permissive than the one the operator dry-ran, and
+  // `dropped` stays empty because intentToGraph converted them successfully.
+  const [allowlistGrantFacts] = useState<Record<string, BuilderGrantFact[]>>(() =>
+    Object.fromEntries(
+      (seedGraph?.allowlist?.grants ?? [])
+        .filter((g) => (g.facts ?? []).length > 0)
+        .map((g) => [g.tool, g.facts as BuilderGrantFact[]])
+    )
+  );
   const [allowlistGrants, setAllowlistGrants] = useState<Record<string, BuilderParamConstraint[]>>(() =>
-    Object.fromEntries((seedGraph?.allowlist?.grants ?? []).map((g) => [g.tool, g.constraints]))
+    // BOTH halves of a grant. Seeding only `constraints` silently dropped every scoping FACT, so an
+    // intent handed over from /intents lost exactly the narrowing that closed the credential-egress
+    // gap — and lost it invisibly, because intentToGraph reports nothing in `dropped` (it converted
+    // them fine), so the handoff refusal could not fire. The operator would then save a policy
+    // strictly more permissive than the one they dry-ran.
+    Object.fromEntries(
+      (seedGraph?.allowlist?.grants ?? []).map((g) => [g.tool, g.constraints])
+    )
   );
   const [openGrantTool, setOpenGrantTool] = useState<string | null>(null);
   const addAllowlistTool = () => {
@@ -1110,15 +1129,19 @@ export function BuilderSheet({
               // stable across edits that only reorder state.
               ...(() => {
                 const grants = allowlistTools
-                  .filter((t) => (allowlistGrants[t] ?? []).length > 0)
-                  .map((t) => ({ tool: t, constraints: allowlistGrants[t] }));
+                  .filter((t) => (allowlistGrants[t] ?? []).length > 0 || (allowlistGrantFacts[t] ?? []).length > 0)
+                  .map((t) => ({
+                    tool: t,
+                    constraints: allowlistGrants[t] ?? [],
+                    ...((allowlistGrantFacts[t] ?? []).length ? { facts: allowlistGrantFacts[t] } : {})
+                  }));
                 return grants.length ? { grants } : {};
               })()
             }
           }
         : {})
     }),
-    [scope, rules, defaults, mode, allowlistTools, allowlistRefinements, allowlistGrants]
+    [scope, rules, defaults, mode, allowlistTools, allowlistRefinements, allowlistGrants, allowlistGrantFacts]
   );
   // `targetNamespace` is passed as the compiler's 2nd argument for every tier (class/namespace tiers
   // ignore it; the workload tier needs it for its `input.agent.namespace` guard — see
