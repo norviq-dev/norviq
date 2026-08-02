@@ -112,6 +112,90 @@ const CONSTRAINT_PLACEHOLDER: Record<ConstraintKind, string> = {
   forbidden: "",
   hostIn: "comma-separated hosts"
 };
+// --- Scoping FACTS on a grant -----------------------------------------------------------------------
+//
+// WHY THIS EXISTS, and it is the difference between a security control and a restatement of the agent
+// framework's tool binding. The constraints above address `input.tool_params[<field>]` — ONE named
+// argument. That plus a list of tool names is exactly what LangChain/LangGraph already give you by
+// binding a tool set: "this bot may call send_email". It is a capability list, not an intent.
+//
+// The facts below are what the ENGINE derived about the whole call, so they can say the things a
+// per-field rule structurally cannot: it must not CARRY a credential (wherever in the payload it
+// hides), it may only REACH these recipients or hosts (extracted from every parameter, so moving the
+// URL to a differently-named field does not dodge it), it may only TOUCH these SQL tables.
+//
+// Every one is a SET operation, so none of them spends the server's 25-regex-op budget.
+type GrantFactKind = "noSecrets" | "recipientsWithin" | "hostsWithin" | "tablesWithin" | "payloadAtMost";
+const GRANT_FACT_KINDS: GrantFactKind[] = [
+  "noSecrets",
+  "recipientsWithin",
+  "hostsWithin",
+  "tablesWithin",
+  "payloadAtMost"
+];
+const FACT_VERB: Record<GrantFactKind, string> = {
+  noSecrets: "must not carry",
+  recipientsWithin: "recipients must be within",
+  hostsWithin: "hosts must be within",
+  tablesWithin: "SQL tables must be within",
+  payloadAtMost: "payload at most (bytes)"
+};
+const FACT_HINT: Record<GrantFactKind, string> = {
+  noSecrets: "secret, pci, pii — refuses the call if the payload carries one, wherever it sits",
+  recipientsWithin: "e.g. ops@acme.com — every email address found anywhere in the call must be listed",
+  hostsWithin: "e.g. api.internal.example.com — every URL host found anywhere in the call must be listed",
+  tablesWithin: "e.g. orders, customers — the only tables the SQL may touch",
+  payloadAtMost: "e.g. 65536 — a volume guard"
+};
+const FACT_PLACEHOLDER: Record<GrantFactKind, string> = {
+  noSecrets: "secret, pci, pii",
+  recipientsWithin: "comma-separated addresses",
+  hostsWithin: "comma-separated hosts",
+  tablesWithin: "comma-separated tables",
+  payloadAtMost: "number"
+};
+
+function blankFact(kind: GrantFactKind): BuilderGrantFact {
+  switch (kind) {
+    case "noSecrets":
+      return { type: "collectionFact", field: "data_classes", op: "noneOf", values: ["secret"] };
+    case "recipientsWithin":
+      return { type: "collectionFact", field: "destinations.emails", op: "subsetOf", values: [] };
+    case "hostsWithin":
+      return { type: "collectionFact", field: "destinations.hosts", op: "subsetOf", values: [] };
+    case "tablesWithin":
+      return { type: "collectionFact", field: "sql_tables", op: "subsetOf", values: [] };
+    case "payloadAtMost":
+      return { type: "numericFact", field: "param_bytes", op: "max", value: 65536 };
+  }
+}
+
+/** Which editor row a stored fact came from. Derived from the fact rather than stored beside it, so a
+ *  fact arriving via the /intents handoff renders in the same rows as one authored here. */
+function factKindOf(f: BuilderGrantFact): GrantFactKind | null {
+  if (f.type === "numericFact" && f.field === "param_bytes") return "payloadAtMost";
+  if (f.type !== "collectionFact") return null;
+  if (f.field === "data_classes") return "noSecrets";
+  if (f.field === "destinations.emails") return "recipientsWithin";
+  if (f.field === "destinations.hosts") return "hostsWithin";
+  if (f.field === "sql_tables") return "tablesWithin";
+  return null;
+}
+
+function factValueText(f: BuilderGrantFact): string {
+  if (f.type === "numericFact") return String(f.value ?? "");
+  if (f.type === "collectionFact") return (f.values ?? []).join(", ");
+  return "";
+}
+
+function withFactValue(f: BuilderGrantFact, text: string): BuilderGrantFact {
+  if (f.type === "numericFact") return { ...f, value: Number(text) || 0 };
+  if (f.type === "collectionFact") {
+    return { ...f, values: text.split(",").map((v) => v.trim()).filter(Boolean) };
+  }
+  return f;
+}
+
 function blankConstraint(kind: ConstraintKind): BuilderParamConstraint {
   switch (kind) {
     case "matches":
@@ -175,7 +259,15 @@ const MODE_DESCRIPTION: Record<BuilderMode, string> = {
   rules: "Add blocks on top of what's already allowed. Everything not matched keeps its current outcome.",
   allowlist: "Deny everything for this scope except the tools you list."
 };
-const MODE_LABEL: Record<BuilderMode, string> = { rules: "Tighten-only rules", allowlist: "Intent allowlist" };
+// "Allowlist (deny by default)" describes the MECHANISM. It was "Intent allowlist", which collided with
+// the /intents screen: after the handoff this mode IS an intent editor, so one concept carried the same
+// name in two places — the confusion this repo already paid to remove once by cutting the canvas.
+// The two surfaces do different jobs (that screen DISCOVERS and VALIDATES from recorded traffic; this
+// one AUTHORS and EDITS), so the fix is the naming, not the architecture.
+const MODE_LABEL: Record<BuilderMode, string> = {
+  rules: "Tighten-only rules",
+  allowlist: "Allowlist (deny by default)"
+};
 
 // Exported for reuse by this file's own ConditionChip/RuleCard below and by tests. (Previously also
 // shared with a second, drag-and-drop visual builder — cut in the Phase 2f consolidation: the
@@ -1016,7 +1108,7 @@ export function BuilderSheet({
   // yet (they arrive only via the /intents handoff), but they must survive a round trip — dropping
   // them silently produces a policy strictly more permissive than the one the operator dry-ran, and
   // `dropped` stays empty because intentToGraph converted them successfully.
-  const [allowlistGrantFacts] = useState<Record<string, BuilderGrantFact[]>>(() =>
+  const [allowlistGrantFacts, setAllowlistGrantFacts] = useState<Record<string, BuilderGrantFact[]>>(() =>
     Object.fromEntries(
       (seedGraph?.allowlist?.grants ?? [])
         .filter((g) => (g.facts ?? []).length > 0)
@@ -1059,6 +1151,14 @@ export function BuilderSheet({
     setToolConstraints(tool, (allowlistGrants[tool] ?? []).map((c, i) => (i === idx ? next : c)));
   const removeConstraint = (tool: string, idx: number) =>
     setToolConstraints(tool, (allowlistGrants[tool] ?? []).filter((_, i) => i !== idx));
+  const setToolFacts = (tool: string, facts: BuilderGrantFact[]) =>
+    setAllowlistGrantFacts((prev) => ({ ...prev, [tool]: facts }));
+  const addFact = (tool: string, kind: GrantFactKind) =>
+    setToolFacts(tool, [...(allowlistGrantFacts[tool] ?? []), blankFact(kind)]);
+  const updateFact = (tool: string, idx: number, next: BuilderGrantFact) =>
+    setToolFacts(tool, (allowlistGrantFacts[tool] ?? []).map((f, i) => (i === idx ? next : f)));
+  const removeFact = (tool: string, idx: number) =>
+    setToolFacts(tool, (allowlistGrantFacts[tool] ?? []).filter((_, i) => i !== idx));
 
   const [dryRunLoading, setDryRunLoading] = useState(false);
   const [dryRunResult, setDryRunResult] = useState<DryRunReplay | null>(null);
@@ -1798,7 +1898,82 @@ export function BuilderSheet({
                         </div>
                       ))}
 
-                      <div style={{ display: "flex", gap: 6, marginTop: 10, alignItems: "center" }}>
+                      {/* SCOPING FACTS — what the call CARRIES and where it GOES. Rendered in the same
+                          panel as the per-field constraints because to an operator they are one idea:
+                          "allow this tool, but only like this". Without these the panel offers only
+                          per-argument rules, which plus a tool list is what the agent framework already
+                          gives you — a capability list, not an intent. */}
+                      {(allowlistGrantFacts[openGrantTool] ?? []).map((f, i) => {
+                        const kind = factKindOf(f);
+                        if (!kind) return null;
+                        return (
+                          <div
+                            key={`fact-${i}`}
+                            data-testid={`builder-fact-row-${openGrantTool}-${i}`}
+                            style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}
+                          >
+                            <span
+                              className="mono"
+                              style={{ width: 120, fontSize: 11.5, color: "var(--text-dim)" }}
+                              title="An engine-derived fact about the whole call, not one named argument"
+                            >
+                              the call
+                            </span>
+                            <select
+                              data-testid={`builder-fact-kind-${openGrantTool}-${i}`}
+                              aria-label="scoping fact"
+                              value={kind}
+                              onChange={(e) => updateFact(openGrantTool, i, blankFact(e.target.value as GrantFactKind))}
+                              style={{ fontSize: 11.5 }}
+                            >
+                              {GRANT_FACT_KINDS.map((k) => (
+                                <option key={k} value={k}>
+                                  {FACT_VERB[k]}
+                                </option>
+                              ))}
+                            </select>
+                            <input
+                              data-testid={`builder-fact-value-${openGrantTool}-${i}`}
+                              className="mono"
+                              aria-label="scoping fact value"
+                              placeholder={FACT_PLACEHOLDER[kind]}
+                              value={factValueText(f)}
+                              onChange={(e) => updateFact(openGrantTool, i, withFactValue(f, e.target.value))}
+                              style={{ flex: 1, minWidth: 160, fontSize: 11.5 }}
+                            />
+                            <button
+                              type="button"
+                              className="icon-btn"
+                              data-testid={`builder-fact-remove-${openGrantTool}-${i}`}
+                              title="Remove this scoping fact"
+                              onClick={() => removeFact(openGrantTool, i)}
+                            >
+                              <X size={11} />
+                            </button>
+                            <div style={{ width: "100%", fontSize: 10, color: "var(--text-dim)", paddingLeft: 2 }}>
+                              {FACT_HINT[kind]}
+                            </div>
+                          </div>
+                        );
+                      })}
+
+                      <div style={{ display: "flex", gap: 6, marginTop: 10, alignItems: "center", flexWrap: "wrap" }}>
+                        <select
+                          data-testid="builder-fact-add-kind"
+                          aria-label="add a scoping fact"
+                          value=""
+                          onChange={(e) => {
+                            if (e.target.value) addFact(openGrantTool, e.target.value as GrantFactKind);
+                          }}
+                          style={{ fontSize: 11.5 }}
+                        >
+                          <option value="">+ scope what it carries / reaches…</option>
+                          {GRANT_FACT_KINDS.map((k) => (
+                            <option key={k} value={k}>
+                              {FACT_VERB[k]}
+                            </option>
+                          ))}
+                        </select>
                         <select
                           data-testid="builder-constraint-add-kind"
                           aria-label="add a constraint"
@@ -1815,11 +1990,13 @@ export function BuilderSheet({
                             </option>
                           ))}
                         </select>
-                        {(allowlistGrants[openGrantTool] ?? []).length === 0 && (
-                          <span style={{ fontSize: 10.5, color: "var(--text-dim)" }}>
-                            No constraints — <span className="mono">{openGrantTool}</span> is allowed with any arguments.
-                          </span>
-                        )}
+                        {(allowlistGrants[openGrantTool] ?? []).length === 0 &&
+                          (allowlistGrantFacts[openGrantTool] ?? []).length === 0 && (
+                            <span style={{ fontSize: 10.5, color: "var(--text-dim)" }}>
+                              Nothing scoped — <span className="mono">{openGrantTool}</span> is allowed with any
+                              arguments, which is what the agent framework's tool binding already says.
+                            </span>
+                          )}
                       </div>
                     </div>
                   )}

@@ -45,7 +45,7 @@ const PANEL_CONFIG: Record<Section, { title: string; groups: Group[] }> = {
           // Intents — the positive-security surface: state what a class is FOR and deny the rest.
           // Sits under ENFORCEMENT rather than MONITORING because it authors policy, even though
           // nothing it produces enforces until an operator applies the draft from Policy Catalog.
-          { to: "/intents", label: "Intents", icon: Crosshair }
+          { to: "/intents", label: "Propose from traffic", icon: Crosshair }
         ]
       },
       {

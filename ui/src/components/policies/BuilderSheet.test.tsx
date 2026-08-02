@@ -1015,3 +1015,33 @@ describe("BuilderSheet — the allowlist Add control", () => {
     expect(screen.getByTestId("builder-allowlist-tool-add")).toBeDisabled();
   });
 });
+
+describe("allowlist mode must be able to say more than a tool list", () => {
+  it("offers scoping facts, and an authored fact reaches the compiled policy", async () => {
+    // THE POINT OF THE MODE. A list of tool names plus per-argument rules is what a framework's tool
+    // binding already gives you — a capability list, not an intent. Until these rows existed the panel
+    // could only say "may call send_email", never "and it must not carry a credential": the facts were
+    // reachable ONLY via the /intents handoff, so they could not be authored at all, and a hand-built
+    // allowlist restated the agent framework instead of adding a control.
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    fireEvent.click(screen.getByTitle("Scope send_email by its arguments"));
+
+    // The fact rows exist at all — this is what was missing.
+    expect(screen.getByTestId("builder-fact-add-kind")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByTestId("builder-fact-add-kind"), { target: { value: "noSecrets" } });
+    await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
+
+    // ...and it must land in the EMITTED REGO, not merely in the UI.
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain("data_classes");
+      expect(rego).toContain("_grant_ok");
+    });
+  });
+});
