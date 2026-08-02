@@ -16,6 +16,7 @@ counting patch operations.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -56,12 +57,20 @@ def _rego(intent: dict) -> str:
 
 
 def _eval(intent: dict, payload: dict, query: str = "decision") -> str:
-    """Evaluate the generated module through real OPA, as the engine would."""
+    """Evaluate the generated module through real OPA, as the engine would.
+
+    Queries the package the module DECLARES rather than a hardcoded one. The hardcode this replaces
+    was invisibly coupled to the compiler: when the package moved to `norviq.intent.<class>`, every
+    query here returned an empty result and each assertion failed with an unhelpful IndexError rather
+    than naming the cause.
+    """
+    rego = _rego(intent)
+    package = re.search(r"(?m)^\s*package\s+([A-Za-z0-9_.]+)\s*$", rego).group(1)
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "intent.rego"
-        path.write_text(_rego(intent), encoding="utf-8")
+        path.write_text(rego, encoding="utf-8")
         proc = subprocess.run(
-            ["opa", "eval", "--v0-compatible", "-d", str(path), "-I", f"data.norviq.custom.{query}"],
+            ["opa", "eval", "--v0-compatible", "-d", str(path), "-I", f"data.{package}.{query}"],
             input=json.dumps(payload), capture_output=True, text=True, check=True,
         )
         return json.loads(proc.stdout)["result"][0]["expressions"][0]["value"]
@@ -150,8 +159,62 @@ def test_generated_module_defaults_to_block() -> None:
     assert 'default decision = "block"' in _rego(_BASE_INTENT)
 
 
-def test_generated_module_is_in_the_package_the_engine_evaluates() -> None:
-    assert "package norviq.custom" in _rego(_BASE_INTENT)
+def test_generated_module_is_in_the_package_the_console_classifies_as_an_intent() -> None:
+    """`norviq.intent.<class>`, not `norviq.custom`.
+
+    The package is never what the engine evaluates — `opa_client.rewrite_package` replaces it with
+    `norviq.managed.<key>` at push time. It is read for CLASSIFICATION: coverage.py maps the
+    `norviq.intent.` prefix to kind="intent", and emitting `norviq.custom` made every intent-authored
+    policy report on the Overview as an unclassified custom one, while the builder's allowlist mode
+    (which already emitted this prefix) classified correctly.
+    """
+    assert "package norviq.intent.support_bot" in _rego(_BASE_INTENT)
+
+
+def test_generated_module_passes_the_real_server_write_gate() -> None:
+    """An intent is saved through the SAME gated Policies flow as any other rego, so this is the
+    check that says the feature works end to end rather than only up to the draft.
+
+    It did not. `assert_decision_resolver` admits a module only on a complete
+    `decision = "block"|"escalate" { ... }` rule; the compiler emitted `default decision = "block"`
+    alone and was rejected 422 "rego_source must include block or escalate decision" — so an operator
+    could observe, propose, dry-run and save a draft, then be refused at the one step that starts
+    enforcement, by an error naming rego they never wrote.
+    """
+    from norviq.api.routers.policies import validate_rego_source
+
+    validate_rego_source(_rego(_BASE_INTENT), "block")  # raises HTTPException on any regression
+
+
+def test_package_token_matches_sanitize_class() -> None:
+    """`package_token` is a deliberate COPY of `threat_intent.sanitize_class` (engine code cannot
+    import from api without closing a cycle). Pin them together so the copy cannot drift — a
+    divergence would put two generators' policies for one class in two different packages."""
+    from norviq.api.threat_intent import sanitize_class
+    from norviq.engine.intent.compiler import package_token
+
+    for agent_class in ["report-gen", "support-bot", "9lives", "", "customer support", "a-b_c", "__x__"]:
+        assert package_token(agent_class) == sanitize_class(agent_class), agent_class
+
+
+def test_coverage_reads_the_tool_names_an_intent_admits() -> None:
+    """coverage.py's `allow_tools` comes from an `allow_names := {...}` set the OTHER two generators
+    emit. An intent has no such set — its scoping is per-rule predicates — so allow_tools came back
+    empty and the Overview showed an intent policy governing nothing. Read from the header marker."""
+    from norviq.api.routers.coverage import _parse_agent_policy
+
+    parsed = _parse_agent_policy("support-bot", _rego(_BASE_INTENT), 100, "block")
+    assert parsed["kind"] == "intent"
+    # _BASE_INTENT scopes by VERB, not tool name, so the honest answer is the empty list.
+    assert parsed["allow_tools"] == []
+
+    named = _rego({"name": "n", "class": "support-bot", "call": [
+        {"id": "r1", "match": {"tool_name": "send_email"}},
+        {"id": "r2", "match": {"tool_name": {"in": ["read_table", "execute_sql"]}}},
+    ]})
+    assert _parse_agent_policy("support-bot", named, 100, "block")["allow_tools"] == [
+        "execute_sql", "read_table", "send_email"
+    ]
 
 
 def test_generated_module_has_no_imports() -> None:

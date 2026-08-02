@@ -52,6 +52,10 @@ def _load_mapping() -> dict[str, list[str]]:
 _RESERVED_CLASS_RE = re.compile(r"^__.*__$")
 _ALLOW_NAMES_RE = re.compile(r'allow_names\s*:=\s*\{([^}]*)\}')
 _QUOTED_RE = re.compile(r'"([^"]+)"')
+# Marker emitted by the intent compiler's header (see its `_HEADER`), carrying the tool names that
+# intent's own predicates can admit, as JSON. Anchored to a comment line so it can never be confused
+# with rego syntax.
+_INTENT_TOOLS_RE = re.compile(r"(?m)^#\s*nrvq:intent-tools\s+(\[.*\])\s*$")
 # The refinement toggles are detectable by the helper rules the generator only emits when the toggle is on.
 _REFINEMENT_MARKERS = {"readonly": "is_read ", "egress": "is_egress ", "scope": "in_scope ", "rate": "rate_within "}
 _LEARNED_RE = re.compile(r'#\s*Learned verbs[^:]*:\s*(.+)')
@@ -75,6 +79,21 @@ def _parse_agent_policy(agent_class: str, rego: str, priority: int, mode: str) -
     am = _ALLOW_NAMES_RE.search(rego or "")
     if am:
         allow_tools = sorted(set(_QUOTED_RE.findall(am.group(1))))
+    else:
+        # An INTENT-compiled policy (norviq/engine/intent/compiler.py) has no `allow_names` set —
+        # its scoping lives in per-rule predicates, and emitting a parallel set just to feed this
+        # parser would put a second, drifting representation of the allowlist next to the real one
+        # (worse: `allow_names` is wired into `in_allowlist` by the OTHER two generators, so a set
+        # here would look like enforcement while being dead). The compiler instead states the
+        # admissible names once, in a header marker derived from those same predicates.
+        im = _INTENT_TOOLS_RE.search(rego or "")
+        if im:
+            try:
+                parsed = json.loads(im.group(1))
+            except ValueError:  # a hand-mangled marker must degrade, never 500 the Overview
+                parsed = []
+            if isinstance(parsed, list):
+                allow_tools = sorted({str(v) for v in parsed})
     refinements = [key for key, marker in _REFINEMENT_MARKERS.items() if marker in (rego or "")]
     learned: list[str] = []
     lm = _LEARNED_RE.search(rego or "")

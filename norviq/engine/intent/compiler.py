@@ -22,6 +22,7 @@ regex or tool name cannot terminate the string and inject Rego.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 from norviq.engine.intent.schema import (
@@ -44,8 +45,53 @@ _HEADER = """# GENERATED FROM AN INTENT — DO NOT EDIT BY HAND.
 #
 # Positive security: every rule below is an ALLOW. There is no deny list — deny is the absence of a
 # match, which is why `default decision` is "block".
-package norviq.custom
+#
+# nrvq:intent-tools {tools}
+#   The tool names this intent can ever admit, as a JSON array, for the console's coverage summary
+#   (api/routers/coverage.py `_parse_agent_policy`). A MARKER, never enforcement: the real scoping is
+#   the predicates below, and an intent that constrains no tool name emits [] — which honestly means
+#   "this intent does not scope by tool name", not "it admits nothing".
+package norviq.intent.{token}
 """
+
+
+def package_token(agent_class: str) -> str:
+    """A rego-package-safe token for an agent class ("customer-support" -> "customer_support").
+
+    Deliberately a COPY of `norviq.api.threat_intent.sanitize_class` rather than an import: this is
+    engine code and `norviq.api.threat_intent` imports from `norviq.engine`, so importing it back
+    would close an api->engine->api cycle. `test_package_token_matches_sanitize_class` pins the two
+    together so the copy cannot drift.
+
+    The leading-digit guard is not cosmetic: `package norviq.intent.9lives` is a rego PARSE error,
+    which would turn a legally-named agent class into a policy that can never be saved.
+    """
+    token = re.sub(r"[^a-zA-Z0-9_]", "_", agent_class.strip() or "agent")
+    if not re.match(r"[a-zA-Z_]", token):
+        token = f"c_{token}"
+    return token
+
+
+def _scoped_tool_names(norm: dict) -> list[str]:
+    """Tool names this intent can admit, for the coverage marker in the header.
+
+    Derived from the SAME normalized predicates the rules compile from, so the marker cannot come to
+    describe a policy other than the one emitted. Only `tool_name` equals/`in` narrows the admissible
+    set; an intent that scopes by verb or destination instead legitimately yields [] — which the
+    console must render as "not scoped by tool name", never as "admits nothing".
+    """
+    names: set[str] = set()
+    for rules in norm["planes"].values():
+        for rule in rules:
+            spec = rule["predicates"].get("tool_name")
+            if isinstance(spec, str):
+                names.add(spec)
+            elif isinstance(spec, dict):
+                if isinstance(spec.get("equals"), str):
+                    names.add(spec["equals"])
+                for value in spec.get("in") or []:
+                    names.add(value)
+    return sorted(names)
 
 
 @dataclass(frozen=True)
@@ -140,7 +186,9 @@ def compile_intent(intent: dict) -> CompiledIntent:
     rule_ids: list[str] = []
 
     lines.append(_HEADER.format(name=norm["name"], agent_class=norm["class"],
-                                planes=", ".join(sorted(norm["planes"]))))
+                                planes=", ".join(sorted(norm["planes"])),
+                                token=package_token(norm["class"]),
+                                tools=json.dumps(_scoped_tool_names(norm))))
     lines.append("")
     lines.append('# Deny is the absence of a matching allow rule.')
     lines.append('default decision = "block"')
@@ -191,6 +239,29 @@ def compile_intent(intent: dict) -> CompiledIntent:
     lines.append("")
     lines.append("decision = \"allow\" {")
     lines.append("\t_any_match")
+    lines.append("}")
+    lines.append("")
+    # The deny arm, stated as a COMPLETE RULE even though `default decision = "block"` above already
+    # produces exactly this value for exactly this case.
+    #
+    # It is required to SAVE the policy at all. api/routers/policies.py `assert_decision_resolver`
+    # admits a module only if it finds a complete `decision = "block"|"escalate" { ... }` rule (or
+    # partial sets plus a resolver); a default-only module falls through to its `else` and is rejected
+    # 422 "rego_source must include block or escalate decision". Without this, an operator could
+    # compile, propose, dry-run and save a DRAFT, then be refused at the one step that starts
+    # enforcement — with an error naming rego they never wrote.
+    #
+    # Fixed here rather than by loosening that validator, because the validator is guarding something
+    # real (a `decision` binding that is undefined at runtime silently becomes "allow" in the
+    # evaluator) and it is shared by every write path in the product. Widening a security gate to
+    # admit one generator is the wrong direction; emitting what the gate asks for is free.
+    #
+    # Semantically inert: `_any_match` is the same predicate the allow arm keys on, so the two arms
+    # are mutually exclusive and can never produce conflicting complete-rule values. When nothing
+    # matches, this and the `default` agree on "block".
+    lines.append("# Deny, stated explicitly — see the note in compiler.py on why this is not redundant.")
+    lines.append("decision = \"block\" {")
+    lines.append("\tnot _any_match")
     lines.append("}")
     lines.append("")
     lines.append("# Sorted so a call matching two rules is attributed deterministically.")

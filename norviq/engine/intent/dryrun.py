@@ -14,6 +14,7 @@ the drifted one would be the one the operator was shown before they approved.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -23,6 +24,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from norviq.engine.intent.compiler import CompiledIntent, compile_intent
+
+_PACKAGE_RE = re.compile(r"(?m)^\s*package\s+([A-Za-z0-9_.]+)\s*$")
+
+
+def _declared_package(rego: str) -> str:
+    """The package the module actually declares.
+
+    Read from the module rather than hardcoded. The previous hardcode (`data.norviq.custom.<key>`)
+    was silently coupled to the compiler's package name: moving the compiler to
+    `norviq.intent.<class>` made every `opa eval` here return no result, and `dry_run` reads a missing
+    decision as a BLOCK — so a perfectly good intent would have been reported as blocking 100% of
+    recorded traffic, which is the single most likely reason an operator abandons deny-by-default.
+    Parsing keeps this evaluator package-agnostic, matching what the API-side evaluator already does
+    via `rewrite_package`.
+    """
+    match = _PACKAGE_RE.search(rego or "")
+    return match.group(1) if match else "norviq.custom"
 
 # (rego_source, policy_input) -> {"decision": ..., "rule_id": ..., "reason": ...}
 Evaluator = Callable[[str, dict], dict]
@@ -91,7 +109,7 @@ def opa_subprocess_evaluator(rego: str, payload: dict) -> dict:
         for key in ("decision", "rule_id", "reason"):
             proc = subprocess.run(
                 ["opa", "eval", "--v0-compatible", "-d", str(path), "-I",
-                 f"data.norviq.custom.{key}"],
+                 f"data.{_declared_package(rego)}.{key}"],
                 input=json.dumps(payload), capture_output=True, text=True, check=True,
             )
             result = json.loads(proc.stdout).get("result") or []

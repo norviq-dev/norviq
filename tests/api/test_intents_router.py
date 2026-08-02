@@ -82,7 +82,8 @@ def test_compile_returns_rego_and_rule_ids() -> None:
     resp = _client().post("/api/v1/intents/compile", json={"intent": _GOOD_INTENT})
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert "package norviq.custom" in body["rego"]
+    # norviq.intent.<class> — the prefix coverage.py classifies as kind="intent".
+    assert "package norviq.intent." in body["rego"]
     assert 'default decision = "block"' in body["rego"]
     assert body["rule_ids"] == ["notify-customer"]
     assert len(body["sha256"]) == 64
