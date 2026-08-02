@@ -1034,8 +1034,27 @@ describe("allowlist mode must be able to say more than a tool list", () => {
     // The fact rows exist at all — this is what was missing.
     expect(screen.getByTestId("builder-fact-add-kind")).toBeInTheDocument();
 
-    fireEvent.change(screen.getByTestId("builder-fact-add-kind"), { target: { value: "noSecrets" } });
+    // The dropdown now lists FIELDS derived from the registry, not five hand-picked presets.
+    const factOptions = [...(screen.getByTestId("builder-fact-add-kind") as HTMLSelectElement).options]
+      .map((o) => o.value)
+      .filter(Boolean);
+    // Every addressable field must be reachable — a hand-written subset is how six of them became
+    // unreachable and how any future field would silently fail to appear.
+    expect(factOptions).toEqual(expect.arrayContaining([
+      "data_classes", "sql_tables", "sql_statements", "param_values",
+      "destinations.emails", "destinations.urls", "destinations.hosts", "destinations.schemes",
+      "param_bytes", "call_depth", "trust_score"
+    ]));
+
+    fireEvent.change(screen.getByTestId("builder-fact-add-kind"), { target: { value: "data_classes" } });
     await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
+    // The chip must now advertise the scope — counting only per-field constraints left a
+    // facts-only grant looking unscoped.
+    expect(screen.getByTestId("builder-allowlist-tool-scope-send_email")).toHaveTextContent(/scoped · 1/);
+
+    // An empty value list is deliberately a compile ERROR (noneOf [] is a tautology), so the fact is
+    // not enforceable until the operator says WHICH classes.
+    fireEvent.change(screen.getByTestId("builder-fact-value-send_email-0"), { target: { value: "secret" } });
 
     // ...and it must land in the EMITTED REGO, not merely in the UI.
     await waitFor(() => {

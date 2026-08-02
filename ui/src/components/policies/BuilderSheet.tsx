@@ -29,6 +29,8 @@ import {
   type DryRunReplay
 } from "../../api/client";
 import {
+  COLLECTION_FIELD_EXPR,
+  NUMERIC_FIELD_EXPR,
   compileGraph,
   loaderKeyFor,
   scopeIdentifier,
@@ -47,7 +49,9 @@ import type {
   BuilderKeywordTarget,
   BuilderMode,
   BuilderRule,
-  BuilderScope
+  BuilderScope,
+  BuilderCollectionFactField,
+  BuilderNumericFactField
 } from "../../lib/builderGraph";
 import { CAPABILITY_SOURCE_ORDER, CAPABILITY_SOURCES, verbsForSource, type CapabilityVerb } from "../../lib/capabilitySources";
 import { ApplyResultPanel, type ApplyResult } from "../common/ApplyResultPanel";
@@ -125,72 +129,93 @@ const CONSTRAINT_PLACEHOLDER: Record<ConstraintKind, string> = {
 // URL to a differently-named field does not dodge it), it may only TOUCH these SQL tables.
 //
 // Every one is a SET operation, so none of them spends the server's 25-regex-op budget.
-type GrantFactKind = "noSecrets" | "recipientsWithin" | "hostsWithin" | "tablesWithin" | "payloadAtMost";
-const GRANT_FACT_KINDS: GrantFactKind[] = [
-  "noSecrets",
-  "recipientsWithin",
-  "hostsWithin",
-  "tablesWithin",
-  "payloadAtMost"
+//
+// DERIVED FROM THE FIELD REGISTRY, not restated here. `COLLECTION_FIELD_EXPR` / `NUMERIC_FIELD_EXPR`
+// in builderCompile.ts are the addressable-field registry (itself mirroring schema.py). An earlier
+// version of this listed five hand-picked options, which meant six addressable fields —
+// sql_statements, param_values, destinations.urls, destinations.schemes, call_depth, trust_score —
+// simply could not be reached from the UI, and any field added to the registry later would silently
+// fail to appear. That is the same defect shape as every fail-open in this feature: two lists that
+// must agree about one thing, and only one of them maintained.
+//
+// Labels are OVERRIDES over a generated default, so a new registry field shows up immediately with a
+// readable-enough name and can be given nicer wording later — it can never be missing.
+type FactFieldKind = "collection" | "numeric";
+type FactFieldSpec = { field: string; kind: FactFieldKind };
+
+const FACT_FIELDS: FactFieldSpec[] = [
+  ...Object.keys(COLLECTION_FIELD_EXPR).map((field) => ({ field, kind: "collection" as const })),
+  ...Object.keys(NUMERIC_FIELD_EXPR).map((field) => ({ field, kind: "numeric" as const }))
 ];
-const FACT_VERB: Record<GrantFactKind, string> = {
-  noSecrets: "must not carry",
-  recipientsWithin: "recipients must be within",
-  hostsWithin: "hosts must be within",
-  tablesWithin: "SQL tables must be within",
-  payloadAtMost: "payload at most (bytes)"
-};
-const FACT_HINT: Record<GrantFactKind, string> = {
-  noSecrets: "secret, pci, pii — refuses the call if the payload carries one, wherever it sits",
-  recipientsWithin: "e.g. ops@acme.com — every email address found anywhere in the call must be listed",
-  hostsWithin: "e.g. api.internal.example.com — every URL host found anywhere in the call must be listed",
-  tablesWithin: "e.g. orders, customers — the only tables the SQL may touch",
-  payloadAtMost: "e.g. 65536 — a volume guard"
-};
-const FACT_PLACEHOLDER: Record<GrantFactKind, string> = {
-  noSecrets: "secret, pci, pii",
-  recipientsWithin: "comma-separated addresses",
-  hostsWithin: "comma-separated hosts",
-  tablesWithin: "comma-separated tables",
-  payloadAtMost: "number"
+
+/** Ops offered per field kind, in the order an operator is most likely to want them. */
+const FACT_OPS: Record<FactFieldKind, string[]> = {
+  collection: ["noneOf", "subsetOf", "anyOf", "maxCount"],
+  numeric: ["max", "min"]
 };
 
-function blankFact(kind: GrantFactKind): BuilderGrantFact {
-  switch (kind) {
-    case "noSecrets":
-      return { type: "collectionFact", field: "data_classes", op: "noneOf", values: ["secret"] };
-    case "recipientsWithin":
-      return { type: "collectionFact", field: "destinations.emails", op: "subsetOf", values: [] };
-    case "hostsWithin":
-      return { type: "collectionFact", field: "destinations.hosts", op: "subsetOf", values: [] };
-    case "tablesWithin":
-      return { type: "collectionFact", field: "sql_tables", op: "subsetOf", values: [] };
-    case "payloadAtMost":
-      return { type: "numericFact", field: "param_bytes", op: "max", value: 65536 };
-  }
+const FACT_OP_VERB: Record<string, string> = {
+  noneOf: "must not include",
+  subsetOf: "must be within",
+  anyOf: "must include one of",
+  maxCount: "at most (count)",
+  max: "at most",
+  min: "at least"
+};
+
+/** Friendly names where we have them; anything else falls back to a humanised field path. */
+const FACT_FIELD_LABEL: Record<string, string> = {
+  data_classes: "data it carries",
+  sql_tables: "SQL tables",
+  sql_statements: "SQL statements",
+  param_values: "any parameter value",
+  "destinations.emails": "recipient addresses",
+  "destinations.urls": "destination URLs",
+  "destinations.hosts": "destination hosts",
+  "destinations.schemes": "URL schemes",
+  param_bytes: "payload size (bytes)",
+  call_depth: "call depth",
+  trust_score: "agent trust score"
+};
+function factFieldLabel(field: string): string {
+  return FACT_FIELD_LABEL[field] ?? field.replace(/[._]/g, " ");
 }
 
-/** Which editor row a stored fact came from. Derived from the fact rather than stored beside it, so a
- *  fact arriving via the /intents handoff renders in the same rows as one authored here. */
-function factKindOf(f: BuilderGrantFact): GrantFactKind | null {
-  if (f.type === "numericFact" && f.field === "param_bytes") return "payloadAtMost";
-  if (f.type !== "collectionFact") return null;
-  if (f.field === "data_classes") return "noSecrets";
-  if (f.field === "destinations.emails") return "recipientsWithin";
-  if (f.field === "destinations.hosts") return "hostsWithin";
-  if (f.field === "sql_tables") return "tablesWithin";
-  return null;
+const FACT_FIELD_HINT: Record<string, string> = {
+  data_classes: "secret, pci, pii — matched wherever in the payload it sits, not just one argument",
+  "destinations.emails": "every address found anywhere in the call, so it cannot be moved to another field",
+  "destinations.hosts": "every URL host found anywhere in the call",
+  sql_tables: "the tables the SQL actually touches",
+  param_bytes: "a volume guard, e.g. 65536"
+};
+
+function blankFact(field: string, kind: FactFieldKind, op: string): BuilderGrantFact {
+  if (kind === "numeric") {
+    return { type: "numericFact", field: field as BuilderNumericFactField, op: op as "max" | "min", value: 0 };
+  }
+  const collectionOp = op as "subsetOf" | "noneOf" | "anyOf" | "maxCount";
+  if (collectionOp === "maxCount") {
+    return { type: "collectionFact", field: field as BuilderCollectionFactField, op: collectionOp, count: 1 };
+  }
+  return { type: "collectionFact", field: field as BuilderCollectionFactField, op: collectionOp, values: [] };
+}
+
+function factKindOfSpec(f: BuilderGrantFact): FactFieldKind {
+  return f.type === "numericFact" ? "numeric" : "collection";
 }
 
 function factValueText(f: BuilderGrantFact): string {
   if (f.type === "numericFact") return String(f.value ?? "");
-  if (f.type === "collectionFact") return (f.values ?? []).join(", ");
+  if (f.type === "collectionFact") {
+    return f.op === "maxCount" ? String(f.count ?? "") : (f.values ?? []).join(", ");
+  }
   return "";
 }
 
 function withFactValue(f: BuilderGrantFact, text: string): BuilderGrantFact {
   if (f.type === "numericFact") return { ...f, value: Number(text) || 0 };
   if (f.type === "collectionFact") {
+    if (f.op === "maxCount") return { ...f, count: Number(text) || 0 };
     return { ...f, values: text.split(",").map((v) => v.trim()).filter(Boolean) };
   }
   return f;
@@ -1153,8 +1178,8 @@ export function BuilderSheet({
     setToolConstraints(tool, (allowlistGrants[tool] ?? []).filter((_, i) => i !== idx));
   const setToolFacts = (tool: string, facts: BuilderGrantFact[]) =>
     setAllowlistGrantFacts((prev) => ({ ...prev, [tool]: facts }));
-  const addFact = (tool: string, kind: GrantFactKind) =>
-    setToolFacts(tool, [...(allowlistGrantFacts[tool] ?? []), blankFact(kind)]);
+  const addFact = (tool: string, field: string, kind: FactFieldKind) =>
+    setToolFacts(tool, [...(allowlistGrantFacts[tool] ?? []), blankFact(field, kind, FACT_OPS[kind][0])]);
   const updateFact = (tool: string, idx: number, next: BuilderGrantFact) =>
     setToolFacts(tool, (allowlistGrantFacts[tool] ?? []).map((f, i) => (i === idx ? next : f)));
   const removeFact = (tool: string, idx: number) =>
@@ -1756,7 +1781,11 @@ export function BuilderSheet({
                     )}
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
                     {allowlistTools.map((t) => {
-                      const count = (allowlistGrants[t] ?? []).length;
+                      // BOTH stores. Counting only `allowlistGrants` meant a tool scoped purely by
+                      // FACTS still showed "+ scope" with an unhighlighted chip — the scope was
+                      // invisible on the very affordance that exists to advertise it. Same shape as
+                      // every other defect here: two stores holding one concept, one of them consulted.
+                      const count = (allowlistGrants[t] ?? []).length + (allowlistGrantFacts[t] ?? []).length;
                       return (
                         <span
                           key={t}
@@ -1904,8 +1933,12 @@ export function BuilderSheet({
                           per-argument rules, which plus a tool list is what the agent framework already
                           gives you — a capability list, not an intent. */}
                       {(allowlistGrantFacts[openGrantTool] ?? []).map((f, i) => {
-                        const kind = factKindOf(f);
-                        if (!kind) return null;
+                        // A NOT-wrapped fact has no single field/op to render, so it has no row form.
+                        // It is not droppable silently: it cannot be authored here (the dropdown only
+                        // ever produces plain facts) and a negated fact arriving from the handoff is
+                        // still compiled and still enforced — it simply is not editable in this panel.
+                        if (f.type === "not") return null;
+                        const kind = factKindOfSpec(f);
                         return (
                           <div
                             key={`fact-${i}`}
@@ -1915,20 +1948,20 @@ export function BuilderSheet({
                             <span
                               className="mono"
                               style={{ width: 120, fontSize: 11.5, color: "var(--text-dim)" }}
-                              title="An engine-derived fact about the whole call, not one named argument"
+                              title="A fact the ENGINE derived about the whole call, not one named argument"
                             >
-                              the call
+                              {factFieldLabel(f.field)}
                             </span>
                             <select
-                              data-testid={`builder-fact-kind-${openGrantTool}-${i}`}
-                              aria-label="scoping fact"
-                              value={kind}
-                              onChange={(e) => updateFact(openGrantTool, i, blankFact(e.target.value as GrantFactKind))}
+                              data-testid={`builder-fact-op-${openGrantTool}-${i}`}
+                              aria-label="scoping fact operator"
+                              value={f.op}
+                              onChange={(e) => updateFact(openGrantTool, i, blankFact(f.field, kind, e.target.value))}
                               style={{ fontSize: 11.5 }}
                             >
-                              {GRANT_FACT_KINDS.map((k) => (
-                                <option key={k} value={k}>
-                                  {FACT_VERB[k]}
+                              {FACT_OPS[kind].map((op) => (
+                                <option key={op} value={op}>
+                                  {FACT_OP_VERB[op] ?? op}
                                 </option>
                               ))}
                             </select>
@@ -1936,7 +1969,7 @@ export function BuilderSheet({
                               data-testid={`builder-fact-value-${openGrantTool}-${i}`}
                               className="mono"
                               aria-label="scoping fact value"
-                              placeholder={FACT_PLACEHOLDER[kind]}
+                              placeholder={kind === "numeric" || f.op === "maxCount" ? "number" : "comma-separated values"}
                               value={factValueText(f)}
                               onChange={(e) => updateFact(openGrantTool, i, withFactValue(f, e.target.value))}
                               style={{ flex: 1, minWidth: 160, fontSize: 11.5 }}
@@ -1950,9 +1983,11 @@ export function BuilderSheet({
                             >
                               <X size={11} />
                             </button>
-                            <div style={{ width: "100%", fontSize: 10, color: "var(--text-dim)", paddingLeft: 2 }}>
-                              {FACT_HINT[kind]}
-                            </div>
+                            {FACT_FIELD_HINT[f.field] && (
+                              <div style={{ width: "100%", fontSize: 10, color: "var(--text-dim)", paddingLeft: 2 }}>
+                                {FACT_FIELD_HINT[f.field]}
+                              </div>
+                            )}
                           </div>
                         );
                       })}
@@ -1963,14 +1998,15 @@ export function BuilderSheet({
                           aria-label="add a scoping fact"
                           value=""
                           onChange={(e) => {
-                            if (e.target.value) addFact(openGrantTool, e.target.value as GrantFactKind);
+                            const spec = FACT_FIELDS.find((x) => x.field === e.target.value);
+                            if (spec) addFact(openGrantTool, spec.field, spec.kind);
                           }}
                           style={{ fontSize: 11.5 }}
                         >
                           <option value="">+ scope what it carries / reaches…</option>
-                          {GRANT_FACT_KINDS.map((k) => (
-                            <option key={k} value={k}>
-                              {FACT_VERB[k]}
+                          {FACT_FIELDS.map((x) => (
+                            <option key={x.field} value={x.field}>
+                              {factFieldLabel(x.field)}
                             </option>
                           ))}
                         </select>

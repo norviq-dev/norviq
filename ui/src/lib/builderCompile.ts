@@ -1079,7 +1079,7 @@ const SCALAR_FIELD_EXPR: Record<string, string> = {
   "mcp.scan_severity": 'object.get(object.get(input, "mcp", {}), "scan_severity", "")'
 };
 
-const COLLECTION_FIELD_EXPR: Record<BuilderCollectionFactField, string> = {
+export const COLLECTION_FIELD_EXPR: Record<BuilderCollectionFactField, string> = {
   data_classes: "input.derived.data_classes",
   sql_tables: "input.derived.sql_tables",
   // Present on every engine that has `derived` at all — pre-merge facts, so no capability guard.
@@ -1091,7 +1091,7 @@ const COLLECTION_FIELD_EXPR: Record<BuilderCollectionFactField, string> = {
   "destinations.schemes": 'input.derived.destinations.schemes'
 };
 
-const NUMERIC_FIELD_EXPR: Record<BuilderNumericFactField, string> = {
+export const NUMERIC_FIELD_EXPR: Record<BuilderNumericFactField, string> = {
   param_bytes: "input.derived.param_bytes",
   call_depth: "input.call_depth",
   trust_score: "input.trust_score"
