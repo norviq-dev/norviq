@@ -1810,7 +1810,9 @@ export function BuilderSheet({
                             type="button"
                             data-testid={`builder-allowlist-tool-scope-${t}`}
                             aria-expanded={openGrantTool === t}
-                            title={count > 0 ? `${count} constraint${count === 1 ? "" : "s"} on ${t}` : `Scope ${t} by its arguments`}
+                            // "rule", not "constraint": `count` spans BOTH per-field constraints and
+                            // scoping facts, so naming one of them made the tooltip wrong for the other.
+                            title={count > 0 ? `${count} scope rule${count === 1 ? "" : "s"} on ${t}` : `Scope ${t} by its arguments`}
                             onClick={() => setOpenGrantTool((cur) => (cur === t ? null : t))}
                             style={{
                               background: "none",
