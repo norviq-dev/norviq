@@ -72,6 +72,53 @@ def package_token(agent_class: str) -> str:
     return token
 
 
+# `input.derived` roots that only exist on an engine carrying the MCP-merge scoping primitives.
+# A rule referencing one of these MUST also assert the root is published — see _availability_predicates.
+_VERSION_GATED_ROOTS = ("param_paths", "destinations", "data_classes", "sql_tables", "param_bytes")
+
+
+def _gated_roots(predicates: dict) -> set[str]:
+    """Which version-gated `input.derived` roots this rule's predicates read."""
+    roots: set[str] = set()
+    for field in predicates:
+        if field.startswith("param_paths."):
+            roots.add("param_paths")
+        elif field.startswith("destinations."):
+            roots.add("destinations")
+        elif field in _VERSION_GATED_ROOTS:
+            roots.add(field)
+    return roots
+
+
+def _availability_predicates(predicates: dict) -> list[tuple[str, str]]:
+    """One predicate per version-gated root the rule reads, asserting the engine publishes it.
+
+    WITHOUT THIS AN INTENT FAILS OPEN, which is the opposite of everything it is for. The collection
+    operators compile to counted comprehensions:
+
+        count([x | x := input.derived.data_classes[_]; _in(["secret"], x)]) == 0
+
+    A comprehension whose body is undefined does not become undefined — it yields the EMPTY ARRAY. So
+    on an engine that does not publish `data_classes`, `count([]) == 0` is TRUE: `noneOf` and
+    `subsetOf` are vacuously satisfied, the rule matches, and the intent ALLOWS the call it was written
+    to refuse. Observed on a live cluster, not reasoned about: the same `send_email` to an
+    attacker-controlled address carrying an AWS key evaluated `allow` against an engine predating these
+    facts and `block` against one carrying them.
+
+    `object.get(input.derived, "<root>", null) != null` is a real boolean either way — false when the
+    root is absent, true when present — so the rule simply fails to match on an old engine, which under
+    default-deny means block.
+
+    It is a LABELLED predicate rather than a hidden guard so the near-miss explainer names it: the
+    operator is told "data_classes is published by this engine" failed, instead of being told nothing
+    matched. That is the difference between diagnosing a version skew and disabling the policy.
+    """
+    return [
+        (f"{root} is published by this engine", f'object.get(input.derived, {_lit(root)}, null) != null')
+        for root in sorted(_gated_roots(predicates))
+    ]
+
+
 def _scoped_tool_names(norm: dict) -> list[str]:
     """Tool names this intent can admit, for the coverage marker in the header.
 
@@ -214,6 +261,9 @@ def compile_intent(intent: dict) -> CompiledIntent:
                           f'object.get(input, "direction", "call") == {_lit(plane)}'))
             for field, spec in sorted(rule["predicates"].items()):
                 preds.extend(_predicate(field, spec))
+            # Appended AFTER the field predicates so the near-miss explainer reports a genuine
+            # scope failure before a version-skew one when both are false.
+            preds.extend(_availability_predicates(rule["predicates"]))
             labels[rid] = [label for label, _ in preds]
             lines.append(f"_predicates[{_lit(rid)}] = p {{")
             lines.append("\tp := {")

