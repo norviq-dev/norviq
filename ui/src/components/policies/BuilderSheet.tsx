@@ -235,7 +235,10 @@ export const CONDITION_TYPES: Exclude<BuilderCondition["type"], "not">[] = [
   "toolIn",
   "trustBelow",
   "sourceVerb",
-  "paramRegex"
+  "paramRegex",
+  "scalarFact",
+  "collectionFact",
+  "numericFact"
 ];
 
 /** True if `pattern` compiles as a JS RegExp — the same engine builderCompile.ts's validateCondition
@@ -320,6 +323,14 @@ export function defaultConditionFor(type: BuilderCondition["type"]): BuilderCond
     }
     case "paramRegex":
       return { type: "paramRegex", field: "", pattern: "" };
+    case "scalarFact":
+      // param_paths is the reason this type exists — it addresses ONE argument at any depth, which the
+      // flat `field` of paramRegex cannot reach. Default to it rather than to a fixed field.
+      return { type: "scalarFact", field: "param_paths.", op: "equals", value: "" };
+    case "collectionFact":
+      return { type: "collectionFact", field: "data_classes", op: "anyOf", values: ["secret"] };
+    case "numericFact":
+      return { type: "numericFact", field: "param_bytes", op: "max", value: 65536 };
     case "not":
       // Not offered by the type dropdown (see CONDITION_TYPES) — only reachable via the NOT toggle,
       // which constructs `{type:"not", inner: <current condition>}` itself rather than calling this.
@@ -341,7 +352,10 @@ export const CONDITION_TYPE_LABEL: Record<(typeof CONDITION_TYPES)[number], stri
   keyword: "Keyword in tool params",
   trustBelow: "Agent trust below",
   sourceVerb: "Source + verb (capability)",
-  paramRegex: "Param matches regex"
+  paramRegex: "Param matches regex",
+  scalarFact: "One argument, by path (or MCP server / plane)",
+  collectionFact: "Data classes, destinations, or SQL tables",
+  numericFact: "Payload size, call depth, or trust score"
 };
 
 /** One-line hint shown near the type dropdown for whichever type is currently selected — the label
@@ -352,7 +366,12 @@ export const CONDITION_TYPE_HINT: Record<(typeof CONDITION_TYPES)[number], strin
   keyword: "Fires when any listed keyword appears in the tool name and/or its parameters.",
   trustBelow: "Fires when the calling agent's live trust score is below this threshold.",
   sourceVerb: "Fires on a CAPABILITY (e.g. any 'delete' on Postgres) without listing every tool name.",
-  paramRegex: "Fires when a specific parameter's value matches the regex pattern below."
+  paramRegex: "Fires when a specific parameter's value matches the regex pattern below.",
+  scalarFact:
+    "Fires on ONE argument named by its path (filters.ids[0]), so a value in the body can't be confused with one in the recipient. Also reaches the MCP server and the call's plane.",
+  collectionFact:
+    "Fires on what the call CARRIES or where it GOES — a credential in the payload, a recipient outside your domain, a SQL table outside the approved set. Costs nothing against the regex budget.",
+  numericFact: "Fires on a numeric bound: payload size, call depth, or the agent's trust score."
 };
 
 /** Groups the type dropdown into optgroups by category — purely a display grouping, the wire value

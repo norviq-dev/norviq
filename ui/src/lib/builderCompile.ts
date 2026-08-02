@@ -36,6 +36,8 @@ import type {
   BuilderAllowlistGrant,
   BuilderAllowlistRefinements,
   BuilderCondition,
+  BuilderCollectionFactField,
+  BuilderNumericFactField,
   BuilderParamConstraint,
   BuilderConditionParamRegex,
   BuilderDetector,
@@ -83,6 +85,12 @@ export type BuilderErrorCode =
   /** A condition whose `type` this build does not recognise — only reachable from a rehydrated or
    *  hand-edited embedded graph, never from the UI. See validateCondition's trailing `else`. */
   | "unknown_condition"
+  /** Scoping-fact problems. `empty_fact_values` is its own code because an empty list is not a no-op:
+   *  `noneOf []` and `subsetOf []` are TAUTOLOGIES, so the rule reads as a restriction and enforces
+   *  nothing — the same class of quiet over-permissiveness as `grant_not_allowlisted` above. */
+  | "unknown_fact_field"
+  | "empty_fact_values"
+  | "fact_count_invalid"
   | "budget_exceeded_bytes"
   | "budget_exceeded_lines"
   | "budget_exceeded_regex_ops";
@@ -144,6 +152,15 @@ function commentSafe(s: string): string {
 /** De-dupe + sort tool names. Case-sensitive (tool names are exact identifiers, unlike keywords). */
 function normalizeTools(tools: string[]): string[] {
   return [...new Set((tools || []).map((t) => t.trim()).filter(Boolean))].sort();
+}
+
+/** Trim/dedupe/sort fact values. Sorted so the emitted rego is deterministic — a diff in `policies`
+ *  must mean a real change, not set-iteration order. NOT lower-cased: unlike tool names, these are
+ *  compared against engine-extracted values that are already normalised where it matters
+ *  (`destinations.emails` is lower-cased by the extractor, `data_classes` is a closed vocabulary),
+ *  and folding case here would quietly break a case-sensitive `param_paths` comparison. */
+function normalizeFactValues(values: string[] | undefined): string[] {
+  return [...new Set((values || []).map((v) => String(v).trim()).filter(Boolean))].sort();
 }
 
 function jsonArray(values: string[]): string {
@@ -467,6 +484,91 @@ function validateCondition(cond: BuilderCondition, pos: ConditionPos, errors: Bu
       errors.push({
         code: "invalid_source_verb",
         message: `Rule ${ruleIndex} ("${ruleId}"), row ${rowIndex}, condition ${conditionIndex}: source "${cond.source}" does not expose verb "${cond.verb}" in the capability mirror`,
+        ruleIndex,
+        rowIndex,
+        conditionIndex
+      });
+    }
+  } else if (cond.type === "scalarFact") {
+    const known = cond.field.startsWith(PARAM_PATH_PREFIX)
+      ? /^param_paths\.[\w.[\]$-]{1,256}$/.test(cond.field) // mirrors schema.py's _PARAM_PATH_RE
+      : Object.prototype.hasOwnProperty.call(SCALAR_FIELD_EXPR, cond.field);
+    if (!known) {
+      errors.push({
+        code: "unknown_fact_field",
+        message: `Rule ${ruleIndex} ("${ruleId}"), row ${rowIndex}, condition ${conditionIndex}: "${cond.field}" is not an addressable scalar fact (expected one of ${Object.keys(SCALAR_FIELD_EXPR).join(", ")}, or param_paths.<path>)`,
+        ruleIndex,
+        rowIndex,
+        conditionIndex
+      });
+    }
+    if (cond.op === "in" && normalizeFactValues(cond.values).length === 0) {
+      errors.push({
+        code: "empty_fact_values",
+        message: `Rule ${ruleIndex} ("${ruleId}"), row ${rowIndex}, condition ${conditionIndex}: "in" needs at least one value`,
+        ruleIndex,
+        rowIndex,
+        conditionIndex
+      });
+    }
+    if (cond.op === "matches" || cond.op === "notMatches") {
+      // Fail at AUTHOR time, exactly as paramRegex does — an unparseable pattern otherwise surfaces as
+      // a 422 long after saving, with the previous policy still enforcing.
+      if (!isValidRe2Pattern(cond.value ?? "")) {
+        errors.push({
+          code: "paramRegex_invalid",
+          message: `Rule ${ruleIndex} ("${ruleId}"), row ${rowIndex}, condition ${conditionIndex}: pattern ${JSON.stringify(cond.value ?? "")} does not compile as a regular expression`,
+          ruleIndex,
+          rowIndex,
+          conditionIndex
+        });
+      }
+    }
+  } else if (cond.type === "collectionFact") {
+    if (!Object.prototype.hasOwnProperty.call(COLLECTION_FIELD_EXPR, cond.field)) {
+      errors.push({
+        code: "unknown_fact_field",
+        message: `Rule ${ruleIndex} ("${ruleId}"), row ${rowIndex}, condition ${conditionIndex}: "${cond.field}" is not an addressable collection fact`,
+        ruleIndex,
+        rowIndex,
+        conditionIndex
+      });
+    }
+    if (cond.op === "maxCount") {
+      if (!Number.isInteger(cond.count) || (cond.count ?? -1) < 0) {
+        errors.push({
+          code: "fact_count_invalid",
+          message: `Rule ${ruleIndex} ("${ruleId}"), row ${rowIndex}, condition ${conditionIndex}: maxCount must be a non-negative integer`,
+          ruleIndex,
+          rowIndex,
+          conditionIndex
+        });
+      }
+    } else if (normalizeFactValues(cond.values).length === 0) {
+      // An empty list would silently become a tautology (`subsetOf []` = "the collection is empty",
+      // `noneOf []` = always true) — a rule that reads as a restriction and enforces nothing.
+      errors.push({
+        code: "empty_fact_values",
+        message: `Rule ${ruleIndex} ("${ruleId}"), row ${rowIndex}, condition ${conditionIndex}: "${cond.op}" needs at least one value`,
+        ruleIndex,
+        rowIndex,
+        conditionIndex
+      });
+    }
+  } else if (cond.type === "numericFact") {
+    if (!Object.prototype.hasOwnProperty.call(NUMERIC_FIELD_EXPR, cond.field)) {
+      errors.push({
+        code: "unknown_fact_field",
+        message: `Rule ${ruleIndex} ("${ruleId}"), row ${rowIndex}, condition ${conditionIndex}: "${cond.field}" is not an addressable numeric fact`,
+        ruleIndex,
+        rowIndex,
+        conditionIndex
+      });
+    }
+    if (typeof cond.value !== "number" || Number.isNaN(cond.value)) {
+      errors.push({
+        code: "fact_count_invalid",
+        message: `Rule ${ruleIndex} ("${ruleId}"), row ${rowIndex}, condition ${conditionIndex}: ${cond.op} needs a number`,
         ruleIndex,
         rowIndex,
         conditionIndex
@@ -838,6 +940,125 @@ function sourceVerbPredicateName(source: string, verb: string): string {
   return `bld_srcverb_${source}_${verb}`;
 }
 
+/**
+ * Field -> rego expression, mirroring `norviq/engine/intent/schema.py`'s SCALAR_FIELDS /
+ * COLLECTION_FIELDS / NUMERIC_FIELDS. Kept in the same order and with the same names so a divergence
+ * is visible in a side-by-side diff.
+ *
+ * TWO DIFFERENT GUARD STYLES HERE, and the difference is load-bearing:
+ *
+ *  - `input.mcp.*` uses the nested `object.get(object.get(input, "mcp", {}), …, "")` form copied from
+ *    schema.py. A call that never went through MCP legitimately carries no `input.mcp`, and a bare
+ *    `input.mcp.server` would make the WHOLE rule body undefined rather than making one predicate
+ *    false — silently deleting the rule instead of failing it. That is normal absence, not skew.
+ *
+ *  - The facts this merge ADDED to the engine (`param_paths`, `destinations`, `data_classes`,
+ *    `sql_tables`, `param_bytes`) are referenced BARE, with no default. That is deliberate: on an
+ *    engine too old to publish them the reference is undefined, the condition is false, and a
+ *    rules-mode BLOCK therefore does not fire — which is FAIL-OPEN. Defaulting them to ""/[]/0 would
+ *    paper over exactly that case and make the failure invisible. Instead the bare reference is paired
+ *    with the capability guard emitted by `engineCapabilityGuards()`, which turns the same skew into a
+ *    loud, attributable block. See NEW_FACT_ROOTS below.
+ */
+const SCALAR_FIELD_EXPR: Record<string, string> = {
+  verb: "input.derived.verb",
+  tool_kind: "input.derived.tool_kind",
+  sql_normalized: "input.derived.sql_normalized",
+  direction: 'object.get(input, "direction", "call")',
+  "mcp.server": 'object.get(object.get(input, "mcp", {}), "server", "")',
+  "mcp.pin_status": 'object.get(object.get(input, "mcp", {}), "pin_status", "")',
+  "mcp.scan_severity": 'object.get(object.get(input, "mcp", {}), "scan_severity", "")'
+};
+
+const COLLECTION_FIELD_EXPR: Record<BuilderCollectionFactField, string> = {
+  data_classes: "input.derived.data_classes",
+  sql_tables: "input.derived.sql_tables",
+  // Present on every engine that has `derived` at all — pre-merge facts, so no capability guard.
+  sql_statements: "input.derived.sql_statements",
+  param_values: "input.derived.param_values",
+  "destinations.emails": 'input.derived.destinations.emails',
+  "destinations.urls": 'input.derived.destinations.urls',
+  "destinations.hosts": 'input.derived.destinations.hosts',
+  "destinations.schemes": 'input.derived.destinations.schemes'
+};
+
+const NUMERIC_FIELD_EXPR: Record<BuilderNumericFactField, string> = {
+  param_bytes: "input.derived.param_bytes",
+  call_depth: "input.call_depth",
+  trust_score: "input.trust_score"
+};
+
+/** Prefix of a `param_paths.<dotted.path>` scalar field. */
+const PARAM_PATH_PREFIX = "param_paths.";
+
+/**
+ * The `input.derived` roots this merge introduced. A graph referencing any of them cannot be
+ * enforced by an engine that predates it — see `engineCapabilityGuards()`.
+ */
+const NEW_FACT_ROOTS = ["param_paths", "destinations", "data_classes", "sql_tables", "param_bytes"] as const;
+
+/** The rego expression for a scalar field, including the dynamic `param_paths.<path>` form. */
+export function scalarFieldExpr(field: string): string {
+  if (field.startsWith(PARAM_PATH_PREFIX)) {
+    const path = field.slice(PARAM_PATH_PREFIX.length);
+    // Guarded on the ROOT only: `param_paths` itself is bare (so an old engine leaves it undefined and
+    // the capability guard fires), while the individual path is object.get'd because a call simply not
+    // carrying that argument is ordinary, not a version problem.
+    return `object.get(input.derived.param_paths, ${JSON.stringify(path)}, "")`;
+  }
+  return SCALAR_FIELD_EXPR[field] ?? "";
+}
+
+/** Which NEW_FACT_ROOTS a single condition depends on (recursing through `not`). */
+function factRootsOf(cond: BuilderCondition, out: Set<string>): void {
+  if (cond.type === "not") return factRootsOf(cond.inner, out);
+  if (cond.type === "scalarFact") {
+    if (cond.field.startsWith(PARAM_PATH_PREFIX)) out.add("param_paths");
+    return;
+  }
+  if (cond.type === "collectionFact") {
+    if (cond.field.startsWith("destinations.")) out.add("destinations");
+    else if (cond.field === "data_classes" || cond.field === "sql_tables") out.add(cond.field);
+    return;
+  }
+  if (cond.type === "numericFact" && cond.field === "param_bytes") out.add("param_bytes");
+}
+
+/**
+ * Capability guards for rules mode.
+ *
+ * THE PROBLEM. A tighten-only graph whose block condition reads `input.derived.data_classes` is
+ * enforced by whatever engine the cluster is running. On an engine that predates these facts the
+ * reference is undefined, the condition is false, and the block simply never fires — the policy reads
+ * as active in the console and enforces nothing. Fail-OPEN, and silent, which is the combination that
+ * actually hurts.
+ *
+ * WHY NOT A VERSION CHECK. `/api/v1/version` returns the package semver, which cannot answer this: a
+ * dev build and a release build report the same string whether or not the engine publishes these
+ * facts, and the policy may be pushed to a cluster other than the one the console is pointed at.
+ *
+ * WHAT THIS DOES. For each new fact root the graph actually uses, emit one body of a shared
+ * `bld_unsupported_engine` block. `not input.derived.<root>` is true ONLY when the engine does not
+ * publish that root at all — on a current engine the root is always defined (an empty object/array
+ * when there is nothing to report, and `not {}` / `not []` is false, because in rego `not` is true
+ * only for undefined or false). So this is inert everywhere except the exact skew case, where it
+ * converts a silent non-enforcement into a block carrying its own explanation.
+ *
+ * ALLOWLIST MODE DOES NOT NEED THIS and does not get it: an allowlist already defaults to block, so a
+ * predicate that cannot evaluate withholds an ALLOW — fail-closed by construction.
+ */
+function engineCapabilityGuards(graph: BuilderGraph): string {
+  const roots = new Set<string>();
+  graph.rules.forEach((rule) => rule.conditions.forEach((row) => row.forEach((c) => factRootsOf(c, roots))));
+  if (roots.size === 0) return "";
+  const bodies = [...roots].sort().map(
+    (root) =>
+      `# This policy scopes on input.derived.${root}, which this engine does not publish.\n` +
+      `blocks["bld_unsupported_engine"] {\n    not input.derived.${root}\n}`
+  );
+  return bodies.join("\n\n");
+}
+
 function compileConditionLine(cond: BuilderCondition, paramRegexIndices: Map<BuilderCondition, number>): string {
   switch (cond.type) {
     case "detector":
@@ -862,6 +1083,44 @@ function compileConditionLine(cond: BuilderCondition, paramRegexIndices: Map<Bui
     case "paramRegex": {
       const idx = paramRegexIndices.get(cond) ?? 0;
       return `bld_paramregex_${idx}`;
+    }
+    case "scalarFact": {
+      const expr = scalarFieldExpr(cond.field);
+      switch (cond.op) {
+        case "equals":
+          return `${expr} == ${JSON.stringify(cond.value ?? "")}`;
+        case "in":
+          // Set-literal membership. Free against the 25-regex-op budget, unlike a matches alternation.
+          return `${jsonSet(normalizeFactValues(cond.values))}[${expr}]`;
+        case "matches":
+          return `regex.match(${JSON.stringify(cond.value ?? "")}, ${expr})`;
+        case "notMatches":
+          return `not regex.match(${JSON.stringify(cond.value ?? "")}, ${expr})`;
+      }
+      return "";
+    }
+    case "collectionFact": {
+      const expr = COLLECTION_FIELD_EXPR[cond.field];
+      const values = normalizeFactValues(cond.values);
+      switch (cond.op) {
+        // v0 rego has no `every`, so each of these is a comprehension counted to zero/non-zero — the
+        // same shape schema.py's compiler emits, for the same reason.
+        case "subsetOf":
+          return `count([v | v := ${expr}[_]; not ${jsonSet(values)}[v]]) == 0`;
+        case "noneOf":
+          return `count([v | v := ${expr}[_]; ${jsonSet(values)}[v]]) == 0`;
+        case "anyOf":
+          return `count([v | v := ${expr}[_]; ${jsonSet(values)}[v]]) > 0`;
+        case "maxCount":
+          return `count(${expr}) <= ${JSON.stringify(cond.count ?? 0)}`;
+      }
+      return "";
+    }
+    case "numericFact": {
+      const expr = NUMERIC_FIELD_EXPR[cond.field];
+      return cond.op === "max"
+        ? `${expr} <= ${JSON.stringify(cond.value)}`
+        : `${expr} >= ${JSON.stringify(cond.value)}`;
     }
     case "not":
       // Every other condition type emits as a single bare rego expression (a predicate reference, a set
@@ -1026,9 +1285,15 @@ function buildBody(graph: BuilderGraph, targetNamespace: string): string {
   // server's `decision = "block" { false }` unreachable-rule reject, which only pattern-matches
   // `decision = "..."` bodies, not `blocks[id] { ... }` bodies).
   const usedDecisionSets = new Set(graph.rules.map((rule) => DECISION_SET[rule.decision]));
+  // The capability guard defines `blocks[...]`, so `blocks` counts as USED even when every authored
+  // rule escalates or audits — otherwise the stub below would emit a second, always-empty `blocks`
+  // rule alongside it. Harmless in rego, but it makes the module read as if the guard were unreachable.
+  const capabilityGuardSection = engineCapabilityGuards(graph);
+  if (capabilityGuardSection) usedDecisionSets.add("blocks");
   (["blocks", "escalates", "audits"] as const)
     .filter((setName) => !usedDecisionSets.has(setName))
     .forEach((setName) => ruleBlocks.push(`${setName}[id] { id := [][_] }`));
+  if (capabilityGuardSection) ruleBlocks.push(capabilityGuardSection);
   const ruleSection = ruleBlocks.join("\n\n");
 
   const reasonEntries = graph.rules.map((rule) => `    ${JSON.stringify(rule.ruleId)}: ${JSON.stringify(rule.reason)},`);

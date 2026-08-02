@@ -86,6 +86,89 @@ export interface BuilderConditionNot {
   inner: BuilderCondition;
 }
 
+/**
+ * SCOPING FACTS — the primitives the engine publishes in `input.derived` / `input.mcp`, addressable
+ * from the builder.
+ *
+ * These three condition types (scalarFact / collectionFact / numericFact) deliberately mirror the
+ * SERVER-side intent schema's own taxonomy one-for-one: `norviq/engine/intent/schema.py` splits
+ * addressable fields into SCALAR_FIELDS / COLLECTION_FIELDS / NUMERIC_FIELDS with operator sets
+ * SCALAR_OPS / COLLECTION_OPS / NUMERIC_OPS. Same field names, same operator names, same semantics.
+ *
+ * That mirroring is the entire point. Both halves of this product independently concluded that an
+ * allowlist of tool NAMES is not an intent — you have to scope the ARGUMENTS — and then said it in
+ * two different vocabularies. Adding a third would have made the drift permanent; adopting the
+ * server's makes a builder graph and a declared intent describe the same policy in the same words,
+ * which is what lets `builderIntentGrants.test.ts` assert the two compilers agree.
+ *
+ * Why these beat the existing `paramRegex` / `hostIn` constraints, which stay for back-compat:
+ *   - `param_paths.<dotted>` reaches a value at ANY nesting depth. The flat `field` in paramRegex and
+ *     BuilderParamConstraint cannot address `filters.ids[0]` at all.
+ *   - `destinations.*` is extracted by the ENGINE from every param, so it cannot be dodged by moving
+ *     a URL into a differently-named field — which is exactly how a `hostIn` on one named field is
+ *     evaded.
+ *   - `data_classes` states "this call must not carry a credential", which no tool-name or
+ *     single-field rule can express.
+ *
+ * BUDGET: only `matches` / `notMatches` spend the 25-regex-op cap. Every set operation
+ * (in / subsetOf / noneOf / anyOf) and every numeric bound is free, so the expressive forms here are
+ * the cheap ones — the opposite of the tradeoff `paramRegex` forces.
+ */
+export type BuilderScalarOp = "equals" | "in" | "matches" | "notMatches";
+export type BuilderCollectionOp = "subsetOf" | "noneOf" | "anyOf" | "maxCount";
+export type BuilderNumericOp = "max" | "min";
+
+/** Fixed scalar fields. A `param_paths.<dotted.path>` string is ALSO accepted here — validated by
+ *  pattern rather than enumerated, because the path is whatever the operator's own traffic contains. */
+export type BuilderScalarFactField =
+  | "tool_kind"
+  | "verb"
+  | "sql_normalized"
+  | "direction"
+  | "mcp.server"
+  | "mcp.pin_status"
+  | "mcp.scan_severity"
+  | string;
+
+export type BuilderCollectionFactField =
+  | "data_classes"
+  | "sql_tables"
+  | "sql_statements"
+  | "param_values"
+  | "destinations.emails"
+  | "destinations.urls"
+  | "destinations.hosts"
+  | "destinations.schemes";
+
+export type BuilderNumericFactField = "param_bytes" | "call_depth" | "trust_score";
+
+export interface BuilderConditionScalarFact {
+  type: "scalarFact";
+  field: BuilderScalarFactField;
+  op: BuilderScalarOp;
+  /** For equals / matches / notMatches. */
+  value?: string;
+  /** For `in`. */
+  values?: string[];
+}
+
+export interface BuilderConditionCollectionFact {
+  type: "collectionFact";
+  field: BuilderCollectionFactField;
+  op: BuilderCollectionOp;
+  /** For subsetOf / noneOf / anyOf. */
+  values?: string[];
+  /** For maxCount. */
+  count?: number;
+}
+
+export interface BuilderConditionNumericFact {
+  type: "numericFact";
+  field: BuilderNumericFactField;
+  op: BuilderNumericOp;
+  value: number;
+}
+
 export type BuilderCondition =
   | BuilderConditionDetector
   | BuilderConditionKeyword
@@ -93,6 +176,9 @@ export type BuilderCondition =
   | BuilderConditionTrustBelow
   | BuilderConditionSourceVerb
   | BuilderConditionParamRegex
+  | BuilderConditionScalarFact
+  | BuilderConditionCollectionFact
+  | BuilderConditionNumericFact
   | BuilderConditionNot;
 
 export type BuilderDecision = "block" | "escalate" | "audit";
