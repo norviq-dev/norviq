@@ -47,10 +47,15 @@ type Fixture = {
 };
 
 function loadFixtures(): Fixture[] {
+  // Both reads are against a path built from __dirname at module load — no input reaches either, and
+  // the filenames come from the directory listing itself. Enumerating the directory (rather than
+  // hardcoding a list) is the point: a fixture added by either side of the parity contract is picked
+  // up by both consumers automatically, so the two cannot drift by one forgetting to register it.
+  // eslint-disable-next-line security/detect-non-literal-fs-filename -- repo-relative dir from __dirname
   return readdirSync(FIXTURE_DIR)
     .filter((f) => f.endsWith(".json"))
     .sort()
-    // eslint-disable-next-line security/detect-non-literal-fs-filename -- repo-relative fixture dir, names from readdirSync
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- basenames from the listing above
     .map((f) => JSON.parse(readFileSync(join(FIXTURE_DIR, f), "utf8")) as Fixture);
 }
 

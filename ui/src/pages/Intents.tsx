@@ -14,7 +14,8 @@
 // applying stays the gated Policies flow, so there is exactly one place where enforcement begins.
 
 import { useCallback, useMemo, useState } from "react";
-import { AlertTriangle, CheckCircle2, FileText, Play, Wand2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, FileText, PencilLine, Play, Wand2 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { apiSend } from "../api/client";
 import { Column, DataTable } from "../components/common/DataTable";
 import { PageHead } from "../components/common/PageHead";
@@ -22,6 +23,8 @@ import { Panel } from "../components/common/Panel";
 import { StatTile } from "../components/common/StatTile";
 import { useToast } from "../components/common/Toast";
 import { useApp } from "../store/AppContext";
+import { intentToBuilderGraph, type IntentLike } from "../lib/intentToGraph";
+import type { BuilderGraph } from "../lib/builderGraph";
 
 export type IntentRule = {
   id: string;
@@ -70,6 +73,7 @@ function describePredicates(rule: IntentRule): string[] {
 export function Intents() {
   const { namespace } = useApp();
   const { push } = useToast();
+  const navigate = useNavigate();
   const [agentClass, setAgentClass] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [proposal, setProposal] = useState<ProposeResponse | null>(null);
@@ -77,6 +81,34 @@ export function Intents() {
   const [savedDraft, setSavedDraft] = useState<string | null>(null);
 
   const ns = namespace || "all";
+
+  // Convert eagerly so the button can state, BEFORE it is pressed, whether the handoff would lose a
+  // restriction. `dropped` non-empty means the resulting graph would be MORE PERMISSIVE than the
+  // intent that was just dry-run and approved — so the button refuses rather than warning. A warning
+  // that can be clicked through is how the permissive version gets saved.
+  const handoff = useMemo(
+    () =>
+      proposal?.intent
+        ? intentToBuilderGraph(proposal.intent as IntentLike, agentClass)
+        : { graph: null as BuilderGraph | null, dropped: [] as string[] },
+    [proposal, agentClass]
+  );
+
+  const openInBuilder = useCallback(() => {
+    if (!handoff.graph) return;
+    if (handoff.dropped.length) {
+      push({
+        kind: "error",
+        message: `This intent cannot be edited in the builder without weakening it: ${handoff.dropped[0]}${
+          handoff.dropped.length > 1 ? ` (+${handoff.dropped.length - 1} more)` : ""
+        }`
+      });
+      return;
+    }
+    // The builder owns authoring and the gated save; nothing here enforces. Carrying the graph in
+    // router state (not a query string) keeps a policy body out of browser history and access logs.
+    navigate("/policies", { state: { builderGraph: handoff.graph, fromIntent: proposal?.intent?.name ?? "" } });
+  }, [handoff, navigate, proposal, push]);
 
   const reset = () => {
     setReport(null);
@@ -231,6 +263,22 @@ export function Intents() {
                   }
                 >
                   <FileText size={14} /> Save as draft
+                </button>
+                {/* The handoff. This screen proposes from RECORDED TRAFFIC and replays it — the two
+                    things the builder structurally cannot do. Editing belongs in the builder, so
+                    this hands the proposal over rather than growing a second editor here. */}
+                <button
+                  className="btn"
+                  data-testid="open-in-builder"
+                  onClick={openInBuilder}
+                  disabled={busy !== null || !proposal || ns === "all"}
+                  title={
+                    handoff.dropped.length
+                      ? `Cannot hand off without weakening the policy:\n- ${handoff.dropped.join("\n- ")}`
+                      : "Edit this proposal in the Visual Builder"
+                  }
+                >
+                  <PencilLine size={14} /> Open in Visual Builder
                 </button>
               </div>
             }

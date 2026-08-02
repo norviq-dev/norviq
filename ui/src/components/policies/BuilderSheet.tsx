@@ -887,7 +887,8 @@ const ALL_CAPABILITY_FRAGMENTS: string[] = [
 export function BuilderSheet({
   namespace,
   onClose,
-  onSaved
+  onSaved,
+  seedGraph
 }: {
   /** RAW global-selector value (Phase 2f: the caller no longer silently resolves "all" — pass it
    *  straight through). Only ever used here to seed `targetNamespace`'s initial value: when concrete,
@@ -897,10 +898,19 @@ export function BuilderSheet({
   onClose: () => void;
   /** Fired after a successful Save & enforce (e.g. so the caller can refresh the policy list). */
   onSaved?: (result: { namespace: string; agentClass: string; version?: number }) => void;
+  /** Pre-populate the sheet from an existing graph — used by the /intents handoff, which proposes a
+   *  policy from recorded traffic and then hands it here to be edited (see lib/intentToGraph.ts).
+   *  Seeds INITIAL state only: once the sheet is open the operator owns it, so a later prop change
+   *  must not silently rewrite what they are editing. */
+  seedGraph?: BuilderGraph | null;
 }) {
-  const [agentClass, setAgentClass] = useState("");
-  const [rules, setRules] = useState<BuilderRule[]>([]);
-  const [defaults, setDefaults] = useState<BuilderDefaults>({ decision: "allow", reason: "No builder rule matched" });
+  const [agentClass, setAgentClass] = useState(() =>
+    seedGraph?.scope.kind === "class" ? seedGraph.scope.agentClass : ""
+  );
+  const [rules, setRules] = useState<BuilderRule[]>(() => seedGraph?.rules ?? []);
+  const [defaults, setDefaults] = useState<BuilderDefaults>(
+    () => seedGraph?.defaults ?? { decision: "allow", reason: "No builder rule matched" }
+  );
   const [ruleIdTouched, setRuleIdTouched] = useState<Record<string, boolean>>({});
   const [knownClasses, setKnownClasses] = useState<string[]>([]);
 
@@ -986,15 +996,22 @@ export function BuilderSheet({
   // Intent Allowlist mode (Phase 2c) — kept as SEPARATE state from rules/defaults above (rather than
   // overwriting them on a mode switch) so toggling the mode preserves each mode's own in-progress state:
   // switching to allowlist and back to rules leaves the rule rail exactly as it was, and vice versa.
-  const [mode, setMode] = useState<BuilderMode>("rules");
-  const [allowlistTools, setAllowlistTools] = useState<string[]>([]);
-  const [allowlistRefinements, setAllowlistRefinements] = useState<BuilderAllowlistRefinements>(EMPTY_REFINEMENTS);
+  // Seeded from `seedGraph` too, so an intent handed over from /intents arrives in ALLOWLIST mode
+  // with its tools and per-tool constraints intact. An intent is default-deny; opening it in rules
+  // mode (default-allow) would invert its meaning on arrival.
+  const [mode, setMode] = useState<BuilderMode>(() => seedGraph?.mode ?? "rules");
+  const [allowlistTools, setAllowlistTools] = useState<string[]>(() => seedGraph?.allowlist?.tools ?? []);
+  const [allowlistRefinements, setAllowlistRefinements] = useState<BuilderAllowlistRefinements>(
+    () => seedGraph?.allowlist?.refinements ?? EMPTY_REFINEMENTS
+  );
   const [allowlistToolInput, setAllowlistToolInput] = useState("");
   // Per-tool constraints (Phase 2d), keyed by the tool name exactly as it appears in `allowlistTools`.
   // A Record rather than an array so the editor never has to reconcile two orderings, and so removing a
   // tool can drop its constraints in the same action — an orphan grant is a hard compile error
   // (`grant_not_allowlisted`), and leaving one behind would break the policy from an unrelated edit.
-  const [allowlistGrants, setAllowlistGrants] = useState<Record<string, BuilderParamConstraint[]>>({});
+  const [allowlistGrants, setAllowlistGrants] = useState<Record<string, BuilderParamConstraint[]>>(() =>
+    Object.fromEntries((seedGraph?.allowlist?.grants ?? []).map((g) => [g.tool, g.constraints]))
+  );
   const [openGrantTool, setOpenGrantTool] = useState<string | null>(null);
   const addAllowlistTool = () => {
     const t = allowlistToolInput.trim();

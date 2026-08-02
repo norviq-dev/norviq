@@ -44,7 +44,7 @@ function rulesGraph(conditions: BuilderCondition[]): BuilderGraph {
     schemaVersion: 1,
     scope: { kind: "class", agentClass: "report-gen" },
     mode: "rules",
-    rules: [{ ruleId: "r_scope", decision: "block", reason: "out of scope", conditions: [conditions] }],
+    rules: [{ id: "r1", ruleId: "r_scope", decision: "block", reason: "out of scope", conditions: [conditions] }],
     defaults: { decision: "allow", reason: "default" }
   };
 }
