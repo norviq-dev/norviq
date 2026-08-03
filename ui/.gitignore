@@ -1,0 +1,5 @@
+
+
+# Playwright writes here when a spec is run from ui/ instead of ui/tests/e2e/ (the configured
+# testDir). Pure run output — traces, screenshots, error contexts — and it must never be committed.
+test-results/
