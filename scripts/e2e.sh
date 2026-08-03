@@ -52,13 +52,19 @@ curl -fsS -o /dev/null "$BASE_URL/" || { echo "✗ R10: console not reachable at
 # below tripped the lock, and the gate that would have fixed everything then failed with
 # "Too many failed attempts."
 clear_login_lockout() {
-  local pod
+  # `|| true` on BOTH lookups is load-bearing, not defensive noise. Under `set -euo pipefail` an
+  # assignment from a failing command substitution aborts the script, and `kubectl get pods -l <label>`
+  # exits NON-ZERO when nothing matches. The redis pod is labelled `app=norviq-redis`, not
+  # `app.kubernetes.io/name=redis` — so this function killed e2e.sh on its first call, before a single
+  # line of output, and because I had also sent kubectl's stderr to /dev/null there was nothing at all
+  # to read: a zero-byte log and exit 1. Suppressing the output of a step whose failure you have not
+  # yet seen, again, in the very file that documents the rule.
+  local pod pw
   pod="$(kubectl ${NRVQ_KUBE_CONTEXT:+--context "$NRVQ_KUBE_CONTEXT"} -n "${NRVQ_NAMESPACE:-norviq}" \
-    get pods -l app.kubernetes.io/name=redis -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+    get pods -l app=norviq-redis -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
   [ -n "$pod" ] || pod="norviq-redis-0"
-  local pw
   pw="$(kubectl ${NRVQ_KUBE_CONTEXT:+--context "$NRVQ_KUBE_CONTEXT"} -n "${NRVQ_NAMESPACE:-norviq}" \
-    get secret norviq-secrets -o go-template='{{index .data "NRVQ_REDIS_PASSWORD" | base64decode}}' 2>/dev/null)"
+    get secret norviq-secrets -o go-template='{{index .data "NRVQ_REDIS_PASSWORD" | base64decode}}' 2>/dev/null || true)"
   kubectl ${NRVQ_KUBE_CONTEXT:+--context "$NRVQ_KUBE_CONTEXT"} -n "${NRVQ_NAMESPACE:-norviq}" \
     exec "$pod" -- sh -c "redis-cli ${pw:+-a '$pw'} --no-auth-warning DEL callcount:login-fail:admin" \
     >/dev/null 2>&1 || true
