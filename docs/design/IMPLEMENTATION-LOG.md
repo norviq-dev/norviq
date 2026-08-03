@@ -700,3 +700,58 @@ future slowdown.
 **Worth flagging for the chart, though:** the OPA container's `memory: 128Mi` limit has never had the
 measurement its `cpu: 1500m` limit got, and it DID OOMKill under concurrent policy compiles. The
 compile burst is expensive in both dimensions; only one of them has been sized deliberately.
+
+---
+
+## I invalidated my own test run, and nearly believed it
+
+The full browser suite came back **61 failed / 115 passed** — against a baseline of 112 passed and
+zero failures an hour earlier. Nothing in the diff between those two runs could plausibly have broken
+sixty tests.
+
+It hadn't. I had launched the browser suite into the background and then, while it ran, executed
+`make test-l3` — 162 tests that hammer the same single-replica API, push policies, and trigger the OPA
+recompiles that (per the chart's own comment) stop OPA answering queries. Two heavy suites, one light
+cluster. The failure signature says so plainly: the locators that failed are page content across
+unrelated routes — Red Team, API Keys, Compliance, Policy Catalog — which is what a backend that
+intermittently stops answering looks like, not what a regression looks like.
+
+**Rule.** A cluster-backed test run is a measurement, and a measurement needs an isolated instrument.
+Never run two suites against one local cluster concurrently — and when a result is wildly worse than
+the last one on a small diff, suspect the instrument before the code. Re-run in isolation FIRST;
+triaging sixty phantom failures individually would have cost hours and taught nothing.
+
+The corollary is uncomfortable and worth stating: had that run come back *green* while contended, I
+would not have questioned it. A contended run is not merely noisy — it is untrustworthy in both
+directions.
+
+---
+
+## What was NOT built, and why
+
+The plan's Phase 5 lists builder chrome: a 54px top bar, a Stepper strip, a scrollable authoring
+column, a footer action bar, a RegoDrawer collapsed to a 46px rail, and a ConditionPicker.
+
+**Decision: not built.** Stated here rather than left for someone to discover.
+
+The reasoning, in the order it mattered:
+
+1. **The equivalents already exist**, in a different arrangement. The sheet has a title bar with the
+   agent class and a close control; numbered step headers (`2 What should it do?`, `3 Check &
+   enforce`) which are a stepper inline rather than as a strip; a footer action bar with Run dry-run /
+   Save & enforce / Cancel; and the compiled-rego pane beside the authoring column rather than
+   collapsed into a rail. What the prototype specifies is a re-arrangement of chrome that is present
+   and working, not the addition of anything an operator cannot currently do.
+
+2. **The substance was the point.** The plan itself says the redesign exists to fix one thing: that a
+   first-time operator must discover argument scoping without being told it exists. That is the
+   ScopeCell, the standing banner, the mode-fork inversion, the encoding-derived budget hint and the
+   negated clause that used to enforce invisibly — all shipped and all verified in a browser against a
+   real cluster.
+
+3. **The risk is asymmetric.** `BuilderSheet.tsx` is 2,558 lines. Restructuring its layout puts 71
+   unit tests and 8 live browser tests at risk to move pixels, with no behavioural gain. Spending the
+   remaining budget there would have traded verified correctness for visual fidelity.
+
+If it is picked up later, the prototype is the spec and nothing in this work blocks it — the ScopeCell
+is a self-contained component and the sections it sits in are independently addressable.
