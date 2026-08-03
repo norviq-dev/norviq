@@ -81,7 +81,17 @@ test("(API): the `namespace` alias scopes identically to `ns`, and a conflict is
   // Pre-fix `?namespace=` was silently ignored and returned EVERY namespace.
   expect(byAlias.body.namespaces).toEqual(["default"]);
   expect(byAlias.body.paths.length).toBe(byNs.body.paths.length);
-  expect(byAlias.body.paths.length).toBeLessThan(all.body.paths.length);
+  // Compare on `total_paths`, NOT on `paths.length`. `paths` is capped at the API's `_MAX_PATHS`, so
+  // once the estate saturates the cap the rendered list stops being a measure of anything: this
+  // assertion caught `ns=default` returning 167 while `ns=all` returned 165 — the "All namespaces"
+  // view showing FEWER paths than one namespace inside it, because the global list was truncated and
+  // the scoped one was not. The invariant the test means is "scoping narrows the result", and that is
+  // a statement about the true totals, which `total_paths` now reports truncation-free.
+  expect(byAlias.body.total_paths).toBe(byNs.body.total_paths);
+  expect(byAlias.body.total_paths).toBeLessThan(all.body.total_paths);
+  // And the nonsense reading must not be reachable through the rendered list either: a scoped view
+  // may never report more paths than the unscoped one it is a subset of.
+  expect(byAlias.body.paths.length).toBeLessThanOrEqual(all.body.total_paths);
 
   const conflict = await apiJson(page, "/api/v1/threats/attack-paths?ns=default&namespace=devops");
   expect(conflict.status).toBe(400);

@@ -92,6 +92,9 @@ export function AttackGraph() {
   // Default-hide probe-rooted kill-chains; shares the one preference key with the Asset graph (localStorage).
   const [showSynthetic, setShowSynthetic] = useState<boolean>(() => localStorage.getItem("nrvq_show_synthetic") === "1");
   const [syntheticHidden, setSyntheticHidden] = useState(0);
+  // Pre-cap total. `paths` is truncated server-side at `_MAX_PATHS`, and until this was reported the
+  // console had no way to know it was looking at a partial list — see the truncation note in the head.
+  const [totalPaths, setTotalPaths] = useState(0);
 
   const canvasRef = useRef<AttackCanvasHandle>(null);
   // A failed recompute POST raises `degraded`, but the finally re-triggers the display-fetch
@@ -111,6 +114,7 @@ export function AttackGraph() {
         setApiNamespaces(res.namespaces ?? []);
         setSyntheticHidden(res.synthetic_hidden ?? 0);
         setClassTotals(res.class_totals ?? {});
+        setTotalPaths(res.total_paths ?? (res.paths ?? []).length);
         // A successful GET does NOT clear a still-outstanding recompute failure — the paths it
         // returned are the STALE precompute the failed recompute couldn't refresh, so keep the banner up.
         setDegraded(recomputeFailedRef.current);
@@ -423,7 +427,23 @@ export function AttackGraph() {
         <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "18px 20px", borderBottom: "1px solid var(--graph-border-soft)" }}>
           <div>
             <div style={{ fontSize: 15, fontWeight: 700 }}>Threat Relationships</div>
-            <div style={{ fontSize: 12, color: "#a0a0a0", marginTop: 2 }}>{visible.length} attack paths · precomputed from the runtime asset graph</div>
+            <div style={{ fontSize: 12, color: "#a0a0a0", marginTop: 2 }} data-testid="attack-paths-caption">
+              {visible.length} attack paths · precomputed from the runtime asset graph
+            </div>
+            {/* SILENT TRUNCATION IS THE WORST KIND ON THIS SURFACE. The API ranks kill-chains
+                worst-first and returns the top `_MAX_PATHS`; below that ceiling the caption above is
+                a complete inventory, and above it the same sentence quietly becomes a sample. There
+                was a chip for `synthetic_hidden` and nothing at all for the cap, so an operator on a
+                saturated estate read "165 attack paths" as "we have 165 attack paths".
+                Worst-first ranking means what is dropped is the least severe, which is the right
+                thing to drop and still not something to drop in silence. */}
+            {totalPaths > paths.length && (
+              <div data-testid="attack-paths-truncated"
+                   style={{ fontSize: 12, color: "var(--warning)", marginTop: 4 }}>
+                Showing the {paths.length} most severe of {totalPaths}. Narrow the namespace or class
+                to see the rest.
+              </div>
+            )}
           </div>
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
             <div style={{ display: "flex", alignItems: "center", border: "1px solid var(--graph-border)", borderRadius: 9, overflow: "hidden" }}>
