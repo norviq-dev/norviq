@@ -73,8 +73,21 @@ if [ -z "${NRVQ_API_URL:-}" ]; then
   "${KUBECTL[@]}" -n "$NS" port-forward svc/norviq-redis 16379:6379 >/tmp/nrvq-l3-redis.log 2>&1 &
   PIDS+=($!)
   export NRVQ_API_URL="http://127.0.0.1:18080"
-  export NRVQ_PG_URL="${NRVQ_PG_URL:-postgresql://norviq:norviq@127.0.0.1:15432/norviq}"
-  export NRVQ_REDIS_URL="${NRVQ_REDIS_URL:-redis://127.0.0.1:16379/0}"
+  # CREDENTIALS FROM THE CLUSTER, not guessed defaults. A hardcoded `redis://host:port/0` connects on
+  # kind (no auth) and fails the AUTH handshake on any cluster with a password — and the attacks
+  # suite's `redis_client` fixture swallows that into `yield None`, which turns every Redis-seeded
+  # test into an xfail. Same failure shape as the JWT secret below: the suite reports success having
+  # skipped the part that mattered. Read the real ones, and fall back only when absent.
+  _rpw="$("${KUBECTL[@]}" -n "$NS" get secret norviq-secrets \
+    -o go-template='{{index .data "NRVQ_REDIS_PASSWORD" | base64decode}}' 2>/dev/null || true)"
+  _pgpw="$("${KUBECTL[@]}" -n "$NS" get secret norviq-secrets \
+    -o go-template='{{index .data "NRVQ_PG_PASSWORD" | base64decode}}' 2>/dev/null || true)"
+  export NRVQ_PG_URL="${NRVQ_PG_URL:-postgresql://norviq:${_pgpw:-norviq}@127.0.0.1:15432/norviq}"
+  if [ -n "$_rpw" ]; then
+    export NRVQ_REDIS_URL="${NRVQ_REDIS_URL:-redis://:${_rpw}@127.0.0.1:16379/0}"
+  else
+    export NRVQ_REDIS_URL="${NRVQ_REDIS_URL:-redis://127.0.0.1:16379/0}"
+  fi
 
   # Poll, never sleep-once: a forward that is not up yet is indistinguishable from a dead API, and
   # THAT is exactly the state the xfail turns into a false green.
