@@ -58,6 +58,43 @@ if [ -z "${NRVQ_E2E_PASSWORD:-}" ] && [ -x "$(dirname "$0")/kind-e2e/login-gate.
   fi
 fi
 
+# THE TOKEN MUST ACTUALLY WORK. Not "the file exists" — the file always exists, it just goes stale.
+#
+# ~160 of the 190 specs authenticate with the token in $TOKEN_FILE. `token_mint --ttl 7200` gives it
+# two hours; a full serial run is twenty minutes, and the file survives across runs, so a token minted
+# earlier in a working session expires silently between one run and the next. Nothing checked it.
+#
+# What that looks like: 136 failed, 38 passed, ONE HOUR AND FORTY-TWO MINUTES — because every spec sat
+# through its own 60s timeout waiting for content that a 401 was never going to deliver. The failure
+# list named 136 different features and not one of them was broken. Worse, it arrived immediately
+# after a seeding change, and the obvious reading — "the change I just made broke everything" — was
+# wrong.
+#
+# It is also reachable through the front door: the login gate above re-seeds this file, and it is
+# skipped whenever the caller exports NRVQ_E2E_PASSWORD. Doing exactly that is what left the stale
+# token in place. So the check lives HERE, after the gate, unconditional.
+if [ -s "$TOKEN_FILE" ] && curl -sf -o /dev/null -H "Authorization: Bearer $(cat "$TOKEN_FILE")" \
+     "$BASE_URL/api/v1/version"; then
+  echo "token: valid"
+else
+  echo "token: MISSING OR EXPIRED — re-minting rather than running 190 specs against a 401" >&2
+  _api_pod="$(kubectl ${NRVQ_KUBE_CONTEXT:+--context "$NRVQ_KUBE_CONTEXT"} -n "${NRVQ_NAMESPACE:-norviq}" \
+    get pods -l app.kubernetes.io/component=api \
+    -o jsonpath='{range .items[*]}{.metadata.name}|{.metadata.deletionTimestamp}|{.status.phase}{"\n"}{end}' \
+    2>/dev/null | awk -F'|' '$2 == "" && $3 == "Running" { print $1; exit }')"
+  if [ -n "$_api_pod" ]; then
+    kubectl ${NRVQ_KUBE_CONTEXT:+--context "$NRVQ_KUBE_CONTEXT"} -n "${NRVQ_NAMESPACE:-norviq}" \
+      exec "$_api_pod" -c api -- python -m norviq.api.token_mint --ttl 28800 2>/dev/null \
+      | tail -1 > "$TOKEN_FILE"
+  fi
+  # Re-check, and REFUSE to run if it still fails. A 20-minute suite whose every assertion is a
+  # disguised 401 is worse than no run: it produces a failure list that reads as 136 product defects.
+  curl -sf -o /dev/null -H "Authorization: Bearer $(cat "$TOKEN_FILE" 2>/dev/null)" \
+    "$BASE_URL/api/v1/version" \
+    || { echo "✗ R10: no working admin token for $BASE_URL — refusing to run the suite" >&2; exit 2; }
+  echo "token: re-minted and verified"
+fi
+
 # NRVQ_API_URL. Four specs (audit-filters-and-volume, and the traffic-generating helpers others
 # share) POST to `${NRVQ_API_URL}/api/v1/evaluate` and default to `http://127.0.0.1:18080` — a port
 # nothing in this script forwards. Unset, they fail with `connect ECONNREFUSED 127.0.0.1:18080`,
