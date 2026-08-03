@@ -27,6 +27,12 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 NS="${NRVQ_NAMESPACE:-norviq}"
 PY="${REPO_ROOT}/.venv/bin/python"
 
+# Explicit kube context. This script port-forwards Postgres and Redis and runs suites that WRITE, so
+# defaulting to whatever context happens to be current is how a test suite mutates the wrong cluster.
+KCTX="${NRVQ_KUBE_CONTEXT:-}"
+KUBECTL=(kubectl)
+[ -n "$KCTX" ] && KUBECTL=(kubectl --context "$KCTX")
+
 # Minimum PASSED tests per suite. Not a coverage target — a tripwire, and the thresholds are set from
 # MEASURED numbers rather than guessed:
 #
@@ -60,11 +66,11 @@ echo "  python $("$PY" --version)"
 # --- port-forwards ------------------------------------------------------------------------------
 if [ -z "${NRVQ_API_URL:-}" ]; then
   stage "Port-forwarding the cluster"
-  kubectl -n "$NS" port-forward svc/norviq-api 18080:8080 >/tmp/nrvq-l3-api.log 2>&1 &
+  "${KUBECTL[@]}" -n "$NS" port-forward svc/norviq-api 18080:8080 >/tmp/nrvq-l3-api.log 2>&1 &
   PIDS+=($!)
-  kubectl -n "$NS" port-forward svc/norviq-postgresql 15432:5432 >/tmp/nrvq-l3-pg.log 2>&1 &
+  "${KUBECTL[@]}" -n "$NS" port-forward svc/norviq-postgresql 15432:5432 >/tmp/nrvq-l3-pg.log 2>&1 &
   PIDS+=($!)
-  kubectl -n "$NS" port-forward svc/norviq-redis 16379:6379 >/tmp/nrvq-l3-redis.log 2>&1 &
+  "${KUBECTL[@]}" -n "$NS" port-forward svc/norviq-redis 16379:6379 >/tmp/nrvq-l3-redis.log 2>&1 &
   PIDS+=($!)
   export NRVQ_API_URL="http://127.0.0.1:18080"
   export NRVQ_PG_URL="${NRVQ_PG_URL:-postgresql://norviq:norviq@127.0.0.1:15432/norviq}"
@@ -85,7 +91,7 @@ fi
 # an authenticated non-admin gets 403; signed with this process's local default instead, the API
 # rejects it at the signature with 401 and the authorization check under test is never reached.
 if [ -z "${NRVQ_JWT_SECRET:-}" ]; then
-  NRVQ_JWT_SECRET="$(kubectl -n "$NS" get secret norviq-secrets \
+  NRVQ_JWT_SECRET="$("${KUBECTL[@]}" -n "$NS" get secret norviq-secrets \
     -o go-template='{{index .data "NRVQ_API_SECRET_KEY" | base64decode}}' 2>/dev/null || true)"
   [ -n "$NRVQ_JWT_SECRET" ] && export NRVQ_JWT_SECRET
 fi
@@ -95,8 +101,8 @@ if [ -z "${NRVQ_API_TOKEN:-}" ]; then
   if [ -r /tmp/nrvq-signin-token.txt ]; then
     NRVQ_API_TOKEN="$(cat /tmp/nrvq-signin-token.txt)"
   else
-    api_pod="$(kubectl -n "$NS" get pods -o name | grep api | head -1)"
-    NRVQ_API_TOKEN="$(kubectl -n "$NS" exec "${api_pod#pod/}" -c api -- python -m norviq.api.token_mint --ttl 7200 | tail -1)"
+    api_pod="$("${KUBECTL[@]}" -n "$NS" get pods -o name | grep api | head -1)"
+    NRVQ_API_TOKEN="$("${KUBECTL[@]}" -n "$NS" exec "${api_pod#pod/}" -c api -- python -m norviq.api.token_mint --ttl 7200 | tail -1)"
   fi
   export NRVQ_API_TOKEN
 fi

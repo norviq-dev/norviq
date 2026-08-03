@@ -39,10 +39,17 @@ curl -fsS -o /dev/null "$BASE_URL/" || { echo "✗ R10: console not reachable at
 # asserts must_change=false before returning. Skipped when the caller already exported a password, so
 # a CI job managing its own credential is not overridden.
 if [ -z "${NRVQ_E2E_PASSWORD:-}" ] && [ -x "$(dirname "$0")/kind-e2e/login-gate.sh" ]; then
-  if gate_out="$(PLAYWRIGHT_BASE_URL="$BASE_URL" "$(dirname "$0")/kind-e2e/login-gate.sh" 2>/dev/null)"; then
+  # stderr is NOT suppressed. The first version sent it to /dev/null, so when the gate failed — it
+  # was reaching for whatever kubectl context happened to be current, which after a cluster delete was
+  # a dangling one — the run printed "login gate FAILED" and nothing about WHY, and 27 tests failed
+  # again. Suppressing the output of a step whose failure you have not yet seen is how a fixable
+  # error becomes an unexplained one.
+  if gate_out="$(PLAYWRIGHT_BASE_URL="$BASE_URL" NRVQ_KUBE_CONTEXT="${NRVQ_KUBE_CONTEXT:-}" \
+                 NRVQ_NAMESPACE="${NRVQ_NAMESPACE:-norviq}" \
+                 "$(dirname "$0")/kind-e2e/login-gate.sh")"; then
     eval "$gate_out"
     export NRVQ_E2E_PASSWORD
-    echo "\u25b6 login gate: admin ready (must_change=false) for the 11 form-login specs"
+    echo "login gate: admin ready (must_change=false) for the 11 form-login specs"
   else
     # Not fatal — the other ~160 specs authenticate via the seeded token and are unaffected. But say
     # so loudly, because the alternative is 27 silent 20-second timeouts.
@@ -50,6 +57,15 @@ if [ -z "${NRVQ_E2E_PASSWORD:-}" ] && [ -x "$(dirname "$0")/kind-e2e/login-gate.
     echo "  page.waitForURL timeout. Run scripts/kind-e2e/login-gate.sh directly to see why." >&2
   fi
 fi
+
+# NRVQ_API_URL. Four specs (audit-filters-and-volume, and the traffic-generating helpers others
+# share) POST to `${NRVQ_API_URL}/api/v1/evaluate` and default to `http://127.0.0.1:18080` — a port
+# nothing in this script forwards. Unset, they fail with `connect ECONNREFUSED 127.0.0.1:18080`,
+# which reads as a broken backend rather than as a missing variable.
+#
+# The console already proxies `/api/v1` to the API — every other spec and `seed.py` reach the API
+# through it — so the base URL is the correct value and needs no extra forward.
+export NRVQ_API_URL="${NRVQ_API_URL:-$BASE_URL}"
 
 echo "▶ R10 — Playwright E2E against $BASE_URL"
 ( cd "$E2E_DIR" && [ -d node_modules/@playwright ] || npm ci --silent )

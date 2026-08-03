@@ -361,6 +361,26 @@ def seed_console_prereqs(base: str, token: str, repo_root: Path) -> int:
     return failures
 
 
+
+def seed_redteam(base: str, token: str) -> int:
+    """One completed red-team suite, so the Red Team surface has a scorecard and a history row.
+
+    `redteam-view`, `redteam-retention` and `redteam-view-pager` assert on `redteam-scorecard` and
+    `redteam-history-row`. Nothing in this repository ever produced a run, so those specs asserted
+    against whatever a human had happened to click — and on a fresh cluster they simply failed.
+
+    `POST /redteam/suite` takes its arguments as QUERY PARAMS rather than a body, and returns 409 with
+    the in-flight run id when one is already running for the namespace. Both are fine outcomes here:
+    the goal is "a run exists", not "this call started it".
+    """
+    status, body = post(base, "/api/v1/redteam/suite?target_namespace=default", token, {})
+    ok = status in (200, 201, 409)
+    detail = "already running" if status == 409 else ""
+    print(f"  {'ok ' if ok else 'FAIL'} redteam  suite on 'default' {detail}"
+          f"{'' if ok else f' -> {status} {body[:160]}'}")
+    return 0 if ok else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base-url", default="http://localhost:3400")
@@ -383,6 +403,8 @@ def main() -> int:
     failures += seed_drift(args.base_url, token)
     print("console suite prerequisites — the policy and traffic COVERAGE-MATRIX.md assumes:")
     failures += seed_console_prereqs(args.base_url, token, Path(__file__).resolve().parent.parent.parent)
+    print("red-team history — a completed suite the Red Team surface can report on:")
+    failures += seed_redteam(args.base_url, token)
 
     if failures:
         print(f"\n{failures} seeding step(s) failed", file=sys.stderr)

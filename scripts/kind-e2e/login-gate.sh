@@ -37,6 +37,12 @@
 set -euo pipefail
 
 NS="${NRVQ_NAMESPACE:-norviq}"
+# Explicit context. The gate runs `kubectl exec` into the api pod, and defaulting to whatever context
+# happens to be current is how a fixture ends up resetting the password on the WRONG cluster — or on
+# none at all, silently, when the current context points at a cluster that has since been deleted.
+KCTX="${NRVQ_KUBE_CONTEXT:-}"
+KUBECTL=(kubectl)
+[ -n "$KCTX" ] && KUBECTL=(kubectl --context "$KCTX")
 BASE_URL="${PLAYWRIGHT_BASE_URL:-http://localhost:3400}"
 USERNAME="${NRVQ_E2E_USERNAME:-admin}"
 
@@ -55,9 +61,9 @@ command -v kubectl >/dev/null || fail "kubectl not on PATH"
 curl -sf -o /dev/null "${BASE_URL}/" || fail "console unreachable at ${BASE_URL} (port-forward svc/norviq-ui)"
 
 # --- 1. reset in-pod to a temporary password -------------------------------------------------------
-api_pod="$(kubectl -n "$NS" get pods -o name | grep api | head -1)"
+api_pod="$("${KUBECTL[@]}" -n "$NS" get pods -o name | grep api | head -1)"
 [ -n "$api_pod" ] || fail "no api pod in namespace ${NS}"
-kubectl -n "$NS" exec "${api_pod#pod/}" -c api -- \
+"${KUBECTL[@]}" -n "$NS" exec "${api_pod#pod/}" -c api -- \
   python -m norviq.api.admin_reset --username "$USERNAME" --password "$TEMP_PW" >/dev/null 2>&1 \
   || fail "in-pod admin_reset failed for '${USERNAME}'"
 
