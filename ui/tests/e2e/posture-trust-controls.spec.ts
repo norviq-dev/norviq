@@ -60,6 +60,12 @@ async function pickNamespace(page: Page, ns: string) {
   await expect(page.locator("button.cluster-sel")).toContainText(ns, { timeout: 8000 });
 }
 
+// SERIAL. Both tests mutate state scoped to the SAME namespace — one flips `enforcement_mode` to
+// audit, the other freezes an agent in it. Run fully parallel they interleave, and the symptom is a
+// decision from the other test's posture (`monitor_would_block:no_policy_loaded`) rather than
+// anything about the test that reported it.
+test.describe.configure({ mode: "serial" });
+
 test.beforeAll(async ({ request, baseURL }) => {
   // Seed the scratch namespace + blocking policy via the API (allowed: test data setup).
   const login = await request.post(`${baseURL}/api/v1/auth/login`, { data: { username: "admin", password: PW } });
@@ -67,6 +73,15 @@ test.beforeAll(async ({ request, baseURL }) => {
   const h = { Authorization: `Bearer ${tok}`, "Content-Type": "application/json" };
   await request.post(`${baseURL}/api/v1/policies`, { headers: h, data: {
     namespace: NS, agent_class: CLS, enforcement_mode: "block", priority: 300, policy_name: NS, rego_source: REGO } });
+
+  // Start from an UNFROZEN agent. The freeze test below freezes `freeze-bot` through the UI, and an
+  // admin freeze is deliberately permanent (`agents.py` writes `agent_frozen:<spiffe>` with no TTL —
+  // correct for a human decision, wrong to leave behind). A run that failed after the freeze and
+  // before the reset left the key set FOREVER, so the next run's very first assertion — that the
+  // agent is allowed before anything touches it — failed with `block/trust_frozen`. Found exactly
+  // that key on the cluster, ttl -1.
+  await request.put(`${baseURL}/api/v1/agents/spiffe://norviq/ns/${NS}/sa/freeze-bot/trust`,
+    { headers: h, data: { score: 1.0 } });
 });
 
 test.afterAll(async ({ request, baseURL }) => {
@@ -74,6 +89,9 @@ test.afterAll(async ({ request, baseURL }) => {
   const tok = (await login.json()).access_token as string;
   const h = { Authorization: `Bearer ${tok}` };
   await request.delete(`${baseURL}/api/v1/policies/${NS}/${CLS}`, { headers: h });
+  // ...and never leave a permanent freeze behind, whatever happened above.
+  await request.put(`${baseURL}/api/v1/agents/spiffe://norviq/ns/${NS}/sa/freeze-bot/trust`,
+    { headers: { ...h, "Content-Type": "application/json" }, data: { score: 1.0 } });
   await request.put(`${baseURL}/api/v1/settings?namespace=${NS}`, {
     headers: { ...h, "Content-Type": "application/json" }, data: { enforcement_mode: "block", trust_threshold: 0.7, rate_limit: 60 } });
 });
@@ -83,21 +101,25 @@ test("the Settings Monitor toggle softens enforcement, and back re-blocks", asyn
   // Confirm the seed enforces before we touch posture.
   expect(await evalTool(page, "blocked_tool")).toBe("block/e2e_block");
 
-  await page.goto("/settings/general");
-  // Switching the global namespace refetches the settings for NS — wait for that GET so the toggle reflects
-  // NS's persisted mode (not the previously-loaded namespace's), removing the load/click race.
+  // TARGET SETTINGS, not /settings/general. The Block ⇄ Monitor axis is per-NAMESPACE governance and
+  // was moved there deliberately — `Settings.tsx:190` now says so in the UI itself ("Block ⇄ Monitor
+  // and Live ⇄ Frozen are per-namespace — managed in Target Settings"). This spec kept driving the
+  // old page and looked for a `block` button that is no longer on it.
+  //
+  // The control is also a direct toggle now (`enforcement-mode-block` / `enforcement-mode-audit` in
+  // TargetSettings.tsx:87), which PUTs on click — there is no separate "Save changes" step to press.
+  await page.goto("/policies/targets");
   const getForNs = page.waitForResponse(
     (r) => r.url().includes(`/api/v1/settings`) && r.url().includes(`namespace=${NS}`) && r.request().method() === "GET",
     { timeout: 15000 });
   await pickNamespace(page, NS);
   await getForNs;
-  await expect(page.getByRole("button", { name: /^block$/i })).toBeVisible({ timeout: 10000 });
+  await expect(page.getByTestId("enforcement-mode-block")).toBeVisible({ timeout: 10000 });
 
-  // Drive the REAL enforcement-mode toggle → Monitor (audit) → Save.
+  // Drive the REAL enforcement-mode toggle → Monitor (audit).
   const putAudit = page.waitForResponse(
     (r) => r.url().includes("/api/v1/settings") && r.request().method() === "PUT", { timeout: 15000 });
-  await page.getByRole("button", { name: /^audit$/i }).click();
-  await page.getByRole("button", { name: /save changes/i }).click();
+  await page.getByTestId("enforcement-mode-audit").click();
   const resp = await putAudit;
   expect((await resp.json()).enforcement_mode).toBe("audit");
 
@@ -107,8 +129,7 @@ test("the Settings Monitor toggle softens enforcement, and back re-blocks", asyn
   // Flip back to Block via the toggle → re-enforces immediately.
   const putBlock = page.waitForResponse(
     (r) => r.url().includes("/api/v1/settings") && r.request().method() === "PUT", { timeout: 15000 });
-  await page.getByRole("button", { name: /^block$/i }).click();
-  await page.getByRole("button", { name: /save changes/i }).click();
+  await page.getByTestId("enforcement-mode-block").click();
   await putBlock;
   await expect.poll(() => evalTool(page, "blocked_tool"), { timeout: 10000 }).toBe("block/e2e_block");
 });
@@ -133,10 +154,16 @@ test("the real Agents 'Freeze Agent' button blocks the agent; 'Reset Trust' reco
   await putFreeze;
   await expect.poll(() => evalTool(page, "benign_tool", freezeSpiffe), { timeout: 10000 }).toBe("block/trust_frozen");
 
-  // Drive the REAL "Reset Trust" button → recovers.
+  // Drive the REAL recovery button → recovers.
+  //
+  // A FROZEN agent's control is "Unfreeze Agent", not "Reset Trust" — AgentMonitor.tsx:291-300 swaps
+  // them deliberately, because resetting the score of a frozen agent is, in its own words, "a
+  // no-op-looking dead end". Both call updateTrust(spiffe, 0.8), so the PUT this waits on is the
+  // same; only the label differs, and this spec was looking for the one that is absent precisely
+  // when the agent is in the state the test just put it in. Matched loosely so either label works.
   const putReset = page.waitForResponse(
     (r) => /\/api\/v1\/agents\/.+\/trust/.test(r.url()) && r.request().method() === "PUT", { timeout: 15000 });
-  await page.getByRole("button", { name: /reset trust/i }).click();
+  await page.getByRole("button", { name: /unfreeze agent|reset trust/i }).click();
   await putReset;
   await expect.poll(() => evalTool(page, "benign_tool", freezeSpiffe), { timeout: 10000 }).not.toContain("trust_frozen");
 });
