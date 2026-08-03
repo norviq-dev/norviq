@@ -20,6 +20,7 @@ import {
   Target,
   User,
   Users,
+  Wrench,
   type LucideIcon
 } from "lucide-react";
 import { NavLink } from "react-router-dom";
@@ -54,6 +55,10 @@ const PANEL_CONFIG: Record<Section, { title: string; groups: Group[] }> = {
         items: [
           { to: "/audit", label: "Audit Log", icon: BarChart3 },
           { to: "/agents", label: "Agents", icon: Users },
+          // Tools — the registry: what exists in this namespace and how well Norviq knows each one.
+          // Above MCP Servers deliberately: this answers "what can I do with these tools", its sibling
+          // answers "are their definitions still trustworthy", and the first question comes first.
+          { to: "/tools", label: "Tools", icon: Wrench },
           // MCP Servers — Gate A's console: which Model Context Protocol integrations are live and
           // whether any of them changed a tool definition after it was approved.
           { to: "/mcp", label: "MCP Servers", icon: Plug2 }

@@ -19,6 +19,7 @@ const PolicyCatalog = lazy(() => import("./pages/PolicyCatalog").then((m) => ({ 
 const PolicyPacks = lazy(() => import("./pages/PolicyPacks").then((m) => ({ default: m.PolicyPacks })));
 const TargetSettings = lazy(() => import("./pages/TargetSettings").then((m) => ({ default: m.TargetSettings })));
 const AuditLog = lazy(() => import("./pages/AuditLog").then((m) => ({ default: m.AuditLog })));
+const Tools = lazy(() => import("./pages/Tools").then((m) => ({ default: m.Tools })));
 const McpServers = lazy(() => import("./pages/McpServers").then((m) => ({ default: m.McpServers })));
 const Intents = lazy(() => import("./pages/Intents").then((m) => ({ default: m.Intents })));
 const AgentMonitor = lazy(() => import("./pages/AgentMonitor").then((m) => ({ default: m.AgentMonitor })));
@@ -71,6 +72,10 @@ function App() {
             <Route path="/policies/packs" element={<ClusterScoped page="Policy Packs"><PolicyPacks /></ClusterScoped>} />
             <Route path="/policies/targets" element={<ClusterScoped page="Target Settings"><TargetSettings /></ClusterScoped>} />
             <Route path="/audit" element={<ClusterScoped page="Audit Log"><AuditLog /></ClusterScoped>} />
+            {/* Inventory, so it sits with MONITORING and immediately before its MCP sibling — Tools
+                answers "what exists and what can I do with it", /mcp answers "are these definitions
+                still trustworthy". Route order mirrors nav order. */}
+            <Route path="/tools" element={<ClusterScoped page="Tools"><Tools /></ClusterScoped>} />
             <Route path="/mcp" element={<ClusterScoped page="MCP Servers"><McpServers /></ClusterScoped>} />
             <Route path="/intents" element={<ClusterScoped page="Propose from traffic"><Intents /></ClusterScoped>} />
             {/* Agents is centralized — a remote cluster renders its REAL relayed agents at the hub (with

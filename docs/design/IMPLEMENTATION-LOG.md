@@ -154,3 +154,42 @@ The seeder deliberately produces the four awkward states, each verified live on 
 
 Result on the cluster: 14 rows, 10 declared / 4 observed, all five states confirmed via the live API.
 
+---
+
+## Phase 2 — Tools page
+
+### D4 — `/tools` gets its OWN range control, not the global header selector
+
+**The conflict.** `GET /api/v1/tools` accepts `24h | 7d | 30d | 90d`. The global header selector offers
+`1h | 6h | 24h | 7d | 30d`. Two values it offers cannot be served, and one the API supports is missing.
+
+**Decision.** Do not add `/tools` to `TIME_SCOPED_PATHS`. Give the page its own control carrying exactly
+the four values the API accepts.
+
+**Why.** The only way to honour a `1h` request with this API is to widen it to `24h`. The observed tier
+would then list tools that were not called in the hour the operator asked about — the page answering a
+question it was not asked, and answering it *wider*. On a security surface, silently broadening a window
+is the wrong direction to fail: it manufactures evidence of activity that did not occur in the period
+under review.
+
+The alternative — leave `1h`/`6h` visible but inert — is worse still, since the control would appear to
+work.
+
+**Precedent, not invention.** `routeMeta.ts` already documents exactly this split: Attack Graph and Asset
+Graph are excluded from the global selector *because they carry their own in-page range picker*. This is
+the third instance of the same pattern, so it needs no new concept.
+
+### D5 — What the `Flagged` tile counts
+
+**The gap.** The prototype shows `Flagged: 1`, counting only the critical-severity `post_message`. Its
+own observed table also renders `sеnd_email` in `--block` with a red `Homoglyph` pill — a row it visibly
+treats as dangerous and does not count.
+
+**Decision.** `Flagged` = `scan_severity ∈ {high, critical}` **OR** `name_skeleton !== name`.
+
+**Why.** The tile answers "how many rows here need a human to look at them?" A name that differs from its
+evasion-normalised skeleton is a homoglyph or zero-width attack on the operator's *reading* of the list —
+precisely a row needing a human. Counting only scanner severity would leave the page flagging a risk in
+the table while denying it in the summary, and a headline that disagrees with the rows beneath it teaches
+operators to distrust the headline.
+
