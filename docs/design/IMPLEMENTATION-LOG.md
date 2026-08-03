@@ -924,3 +924,37 @@ down. The in-cluster numbers are the ones above.
 
 Exact figures are specific to this cluster's replica count and CPU limits. The SHAPE — linear scaling,
 a knee at ~4, fail-closed past it — is a property of the one-event-loop-per-pod design, not of AKS.
+
+### The `--workers` fix: directionally right, and the cluster cannot demonstrate it
+
+Deployed `--workers 4` with the api memory limit at 2Gi and OPA at 512Mi. Verified live:
+`NRVQ_API_WORKERS=4`, api memory 214Mi → 509Mi, api CPU 4m → 947m under load. It is running more than
+one process and using more than one core, both of which it could not do before.
+
+Re-measured, same harness, same cluster:
+
+| concurrency | p50 before | p50 after | p95 before | p95 after |
+|---|---|---|---|---|
+| 1  | 66ms  | 65ms  | 109ms  | 149ms  |
+| 2  | 131ms | 109ms | 209ms  | 299ms  |
+| 4  | 291ms | **153ms** | 508ms  | 1241ms |
+| 8  | 489ms | 439ms | 1769ms | 1596ms |
+| 16 | 541ms | 820ms | 2000ms | **3950ms** |
+
+p50 at concurrency 4 nearly halved — the queueing the fix targets. But p95 got WORSE, and at 16-way
+markedly so.
+
+**The reason is the cluster, not the change.** Both AKS nodes are `Standard_*_v*` with **2 vCPU
+each — 4 vCPU total for the entire cluster**, running Postgres, Redis, the engine, the webhook, the UI
+and two API pods. Four workers per pod × two pods = eight API processes competing for cores that were
+already oversubscribed. More workers on a node with no spare CPU converts queueing-in-uvicorn into
+queueing-in-the-kernel, and the tail gets worse rather than better.
+
+So the honest reading: the single-worker ceiling was real and is removed, and on a node with CPU to
+spare this is strictly better. **On THIS cluster it cannot be demonstrated, and the G4 bar is not
+met** — benign traffic still returns `block` at concurrency 8 and above.
+
+**This is not "done". It is a correct change whose benefit is masked by a 4-vCPU test cluster.**
+Settling it needs either a larger node pool or a load test run against a single pod pinned to a node
+with headroom. Recorded rather than papered over, because a table showing p95 tripling would otherwise
+look like the fix made things worse.
