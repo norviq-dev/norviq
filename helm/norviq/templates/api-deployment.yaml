@@ -1,3 +1,28 @@
+{{- /* Refuse to render an api pod whose worker count cannot fit its own memory limit.
+
+       These are two numbers in two files (`api.workers` and `api.resources.limits.memory`), and when a
+       values profile overrode one without the other the pod OOMKilled in a restart loop. The install
+       then failed with "resource Deployment/norviq/norviq-api not ready ... Pending termination", which
+       points at Helm, at the cluster, at anything except the two settings that actually disagree.
+
+       Each uvicorn worker is a separate process — its own interpreter, SQLAlchemy pool and OPA client —
+       measured at roughly 150Mi resident under load. The floor below is deliberately 128Mi rather than
+       150Mi: this must catch the profile that is obviously wrong, not second-guess an operator who has
+       measured their own workload and is running close to the line. */}}
+{{- $memStr := .Values.api.resources.limits.memory | toString }}
+{{- $memMi := 0 }}
+{{- if hasSuffix "Gi" $memStr }}
+{{-   $memMi = mulf (trimSuffix "Gi" $memStr | float64) 1024 | int }}
+{{- else if hasSuffix "Mi" $memStr }}
+{{-   $memMi = trimSuffix "Mi" $memStr | float64 | int }}
+{{- end }}
+{{- $workers := .Values.api.workers | default 4 | int }}
+{{- if and (gt $memMi 0) (gt $workers 0) }}
+{{-   $perWorker := div $memMi $workers }}
+{{-   if lt $perWorker 128 }}
+{{-     fail (printf "api.workers=%d with api.resources.limits.memory=%s leaves %dMi per uvicorn worker. Each worker is a full process (~150Mi under load), so this pod will OOMKill in a loop and the install will time out on 'Pending termination'. Either lower api.workers or raise the memory limit — they are one setting in two places." $workers $memStr $perWorker) }}
+{{-   end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

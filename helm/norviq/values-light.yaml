@@ -17,13 +17,20 @@ api:
     enabled: false       # a PDB with a single replica just blocks drains; off for minimal
   autoscaling:
     enabled: false
+  # MUST move together with `resources.limits.memory` below. Each uvicorn worker is a full process
+  # holding its own interpreter, SQLAlchemy pool and OPA client — roughly 150Mi resident. The default
+  # profile pairs 4 workers with a 1Gi limit; this profile cuts memory to 384Mi, and inheriting the
+  # default 4 workers put ~600Mi of processes under a 384Mi cap. The pod OOMKilled in a loop, and the
+  # symptom was an install timing out on "Pending termination", which reads as a chart or cluster
+  # problem rather than as two numbers in two files that stopped agreeing.
+  workers: 1
   resources:
     requests:
       cpu: 100m
       memory: 128Mi
     limits:
       cpu: 500m
-      memory: 384Mi      # headroom for OPA sidecar + eval under load
+      memory: 384Mi      # one worker + OPA sidecar + eval under load
 
 engine:
   replicas: 1

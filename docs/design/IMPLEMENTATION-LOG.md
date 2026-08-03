@@ -958,3 +958,91 @@ met** — benign traffic still returns `block` at concurrency 8 and above.
 Settling it needs either a larger node pool or a load test run against a single pod pinned to a node
 with headroom. Recorded rather than papered over, because a table showing p95 tripling would otherwise
 look like the fix made things worse.
+
+---
+
+## G6 — four industry personas on kind
+
+Four autonomous personas (healthcare, fintech, e-commerce, legal) each drove the real adoption path:
+first-run credential ceremony → register MCP tools → confirm they surface in the registry → generate
+traffic with a **real LLM** (Groq, `llama-3.3-70b-versatile`) → propose an intent from that traffic →
+author and enforce an industry policy → re-probe → clean up. `scripts/personas/`.
+
+**Result: G6 met.** 4/4 journeys, every persona proved at least one real decision flip
+(healthcare 2, the rest 1 each), 0 blockers, 7 findings filed.
+
+### What broke on the way, and the rule each time
+
+**1. The kind cluster was running `main`, not this branch — and nothing failed.**
+`00-up.sh` builds and `kind load`s `norviq/norviq-engine:*`. The chart's `images.registry` defaults to
+`ghcr.io/norviq-dev/`, and `pullPolicy=IfNotPresent` found the *published* image already on the node.
+Five freshly built images were loaded, ignored, and every route added on this branch 404'd as though
+the feature had never been written. Pods Running, console serving, `helm` green.
+
+This is the same defect this project keeps producing: **two components keyed differently on one
+concept** — the build names the image, the chart names the image, and nobody reconciles them.
+
+> **Rule: a cluster must prove it runs *this* code before any result from it counts.** `00-up.sh` now
+> asserts both that each workload's image has the locally-built prefix *and* that the running process
+> serves `/api/v1/mcp/pins`, a route that exists here and not in the published image. The image name
+> alone proves only what was scheduled.
+
+**2. `api.workers` and `api.resources.limits.memory` are one setting in two files.**
+`values.yaml` gained `workers: 4` with a 1Gi limit (the earlier capacity fix). `values-light.yaml`
+overrides memory to 384Mi and inherited 4 workers → ~600Mi of processes under a 384Mi cap → OOMKill
+loop. The install failed with `resource Deployment/norviq/norviq-api not ready ... Pending
+termination`, which points at Helm or the cluster and never at the two numbers that disagree.
+
+Fixed in `values-light.yaml` (`workers: 1`) and, so it cannot recur, `api-deployment.yaml` now
+**refuses to render** below 128Mi per worker with a message naming both settings. Verified three ways:
+the light profile renders, the default profile renders, and `--set api.workers=4` against the light
+profile fails with the explanatory error.
+
+**3. `Dockerfile.webhook` does not exist.** Four images follow the repo-root `Dockerfile.<name>`
+convention; the webhook is a Go module rooted at `webhook/` with its own `go.mod` and its Dockerfile
+inside that directory. The loop assumed the convention held.
+
+**4. Every persona reported "LLM did not return a usable tool call".** The obvious readings — bad key,
+wrong model, prompt too strict — were all wrong. Groq's CDN answers `urllib`'s default
+`Python-urllib/3.12` User-Agent with HTTP 403 `error code: 1010`, a Cloudflare bot challenge that is
+indistinguishable from an auth failure at the call site. One header fixed it.
+
+> **Rule: when a client fails identically on every input, suspect the transport before the payload.**
+
+### The findings themselves
+
+All four personas independently filed **the same feature request**, which is what makes it a product
+defect rather than a domain quirk:
+
+> **Propose-from-traffic cannot constrain arguments.** `params_available: false`, so a proposal can
+> only name tools. For all four industries the control that matters is on *arguments* — PHI terms, card
+> data, price fields, privilege markers — which is exactly what it cannot express.
+
+The two `major` findings are the same gap wearing a different hat. In both, **the engine enforced the
+policy exactly as written**; the policy simply never described the call the model actually made:
+
+| Industry | Operator's rule | What the model emitted |
+|---|---|---|
+| fintech | `amount > 1000` | `amount: 25.0` — it paraphrased "25000 dollars" as 25 |
+| legal | bulk phrases: `all matters`, `all rows`, … | `matter_id: "all", q: "*"` |
+
+The operator reasoned about the *intent* and wrote predicates against the words they imagined. Nothing
+in the authoring surface shows the argument **values** real traffic carries, so the gap between the
+rule and the reality was invisible until it was missed. That is one product ask, confirmed six times
+from four independent directions, and it lands squarely on this redesign's own P1 thesis: naming a
+tool is not a control, and *neither is guessing at its arguments*.
+
+**A note on how that was classified.** The persona originally filed both as `blocker`. That was wrong,
+and the fix was not to argue it away in prose but to make the harness itself draw the distinction:
+`would_match()` mirrors the policy's predicates in Python, so "the engine did not enforce my rule"
+(blocker) and "my rule never described this call" (major, usability) are separated by a check rather
+than by an opinion. Without it every rephrasing by the model files a false blocker and buries the real
+ones. The discriminator is unit-checked against all six known cases before it is trusted.
+
+### A structural limitation, recorded rather than worked around
+
+The personas run **sequentially, and they have to**. The console has exactly one admin identity,
+resettable only by an in-pod CLI; there is no endpoint that creates a second operator. So "each persona
+sets its own password" can only be true one persona at a time — persona N takes ownership of the
+credential and hands the console to N+1. Four teams in one company cannot hold their own console
+logins today. Recorded here rather than papered over with a shared token.
