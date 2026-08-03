@@ -84,21 +84,37 @@ describe("intents -> builder handoff", () => {
     expect(screen.getByTestId("open-in-builder")).not.toBeDisabled();
   });
 
-  it("REFUSES the handoff rather than silently dropping a restriction", async () => {
+  it("REFUSES the handoff rather than silently dropping a restriction, and says so BEFORE the click", async () => {
     // The failure this prevents: the operator dry-runs an intent that forbids credential egress,
     // hands it to the builder, and edits a policy that no longer forbids it — while believing it is
     // the same policy. A warning that can be clicked through is how that gets saved.
+    //
+    // The refusal itself is unchanged. What changed is that it is now legible up front: it used to
+    // live in a `title` tooltip on a button that looked enabled, and arrive as a corner toast showing
+    // only the first of N reasons. A refusal you discover by pressing the button is a dead end.
     vi.spyOn(client, "apiSend").mockResolvedValue(LOSSY as never);
     const user = userEvent.setup();
     renderIntents();
     await propose(user);
     await waitFor(() => expect(screen.getByTestId("open-in-builder")).toBeInTheDocument());
+
+    // Stated in place, with EVERY reason, before anything is pressed.
+    const banner = await screen.findByTestId("handoff-blocked");
+    expect(banner).toHaveTextContent(/cannot be edited in the builder without weakening it/i);
+    expect(banner).toHaveTextContent(/nested path has no equivalent/i);
+
     await user.click(screen.getByTestId("open-in-builder"));
-    await waitFor(() =>
-      expect(screen.getByText(/cannot be edited in the builder without weakening it/i)).toBeInTheDocument()
-    );
     // And it did NOT navigate: the Intents screen is still the one rendered.
     expect(screen.getByLabelText("Agent class")).toBeInTheDocument();
+  });
+
+  it("shows no refusal banner for an intent the builder can represent in full", async () => {
+    vi.spyOn(client, "apiSend").mockResolvedValue(CONVERTIBLE as never);
+    const user = userEvent.setup();
+    renderIntents();
+    await propose(user);
+    await waitFor(() => expect(screen.getByTestId("open-in-builder")).toBeInTheDocument());
+    expect(screen.queryByTestId("handoff-blocked")).not.toBeInTheDocument();
   });
 
   it("the converted graph opens the builder in allowlist mode with its tools and constraints", async () => {

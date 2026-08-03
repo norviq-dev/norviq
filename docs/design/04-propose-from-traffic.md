@@ -21,9 +21,34 @@ Its own framing, and it is good:
 Three steps: **propose → dry run → save as draft** (or hand off to the builder). Nothing here enforces —
 a draft lands in a table the evaluator never reads. Enforcement only ever begins in Policy Catalog.
 
+> ## ⚠️ Update — two of the defects below are FIXED in code
+>
+> Since this brief was written, §2 (broken CSS vocabulary) and §6 (the invisible, near-universal handoff
+> refusal) have been fixed. Both sections are kept because they explain *why* the page looks and behaves
+> as it does in any screenshot taken before that commit — but do not re-solve them.
+>
+> **What changed:**
+> - Every undefined class is gone: the page root is now `page-enter stack`, the KPI tiles are a real
+>   grid, badges are `.pill` with allow/escalate tones, buttons are `KitButton`, and the near-miss cell
+>   wraps instead of scrolling horizontally.
+> - `server:` / `from:` scoping now **converts** into an `mcp.server` grant fact instead of refusing.
+>   It was only ever unrepresentable because a grant could not carry a scalar fact — which it now can —
+>   and because the two halves spell three MCP fields differently (`server` vs `mcp.server`). The
+>   refusal still exists for what genuinely has no grant form.
+> - When it *does* refuse, it now says so **in place, with every reason, before the button is pressed**
+>   (`data-testid="handoff-blocked"`), rather than as a tooltip on a button that looked enabled.
+> - Disabled actions state their reason as visible text, because `.btn:disabled` sets
+>   `pointer-events: none` and can never show a tooltip.
+> - The H1 and the nav now agree: both say **Propose from traffic**.
+>
+> **Still open for design:** everything in §4 (rules render as raw operators and raw regexes),
+> §5 (`params_available: false` deserves to be a designed state), §7 (destructive class-name edit,
+> raw-JSON errors, silent dry-run), and §8 (the near-miss explainer deserves to be a component).
+
 ## 2. Read this before looking at the live page
 
-**The page is styled against CSS classes that do not exist.** Verified against `ui/src/index.css`:
+**The page was styled against CSS classes that do not exist** *(fixed — see the update above)*.
+Verified against `ui/src/index.css`:
 
 | Class used | Reality | Visible consequence |
 |---|---|---|

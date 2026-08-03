@@ -191,3 +191,73 @@ describe("the conversion must preserve SENSE, not just count", () => {
     expect(facts.find((f) => f.type === "collectionFact" && f.field === "destinations.hosts")).toMatchObject({ op: "anyOf" });
   });
 });
+
+describe("server scoping converts, instead of dead-ending the handoff", () => {
+  // `propose.py` attaches `server` to EVERY rule it derives from MCP traffic, and the converter used to
+  // report that as unrepresentable. The refusal is deliberately un-clickable-through, so this turned the
+  // handoff into a dead end for nearly every real proposal — the exception became the default.
+  //
+  // It was only ever true because a grant could not carry a SCALAR fact. It can now, and `server` is the
+  // same field the builder calls `mcp.server`: schema.py desugars `server:`/`from:` into
+  // `predicates["server"]`, whose expression is byte-identical to SCALAR_FIELD_EXPR["mcp.server"].
+
+  it("carries `server:` sugar as an mcp.server fact and does NOT refuse", () => {
+    const { graph, dropped } = intentToBuilderGraph({
+      class: "support-bot",
+      call: [{ id: "slack-dm", server: "slack", match: { tool_name: "send_dm" } }]
+    });
+    expect(dropped, "a server-scoped rule must no longer dead-end the handoff").toEqual([]);
+    const grant = graph.allowlist?.grants?.find((g) => g.tool === "send_dm");
+    expect(grant?.facts).toContainEqual({ type: "scalarFact", field: "mcp.server", op: "equals", value: "slack" });
+  });
+
+  it("treats `from:` identically, because schema.py desugars both to the same predicate", () => {
+    const { graph, dropped } = intentToBuilderGraph({
+      class: "support-bot",
+      call: [{ id: "gh", from: "github", match: { tool_name: "get_issue" } }]
+    });
+    expect(dropped).toEqual([]);
+    expect(graph.allowlist?.grants?.[0].facts).toContainEqual({
+      type: "scalarFact", field: "mcp.server", op: "equals", value: "github"
+    });
+  });
+
+  it("aliases the three MCP facts the two halves spell differently", () => {
+    // schema.py: `server` / `pin_status` / `scan_severity`. builderCompile.ts: `mcp.*`. Identical rego.
+    const { graph, dropped } = intentToBuilderGraph({
+      class: "c",
+      call: [{
+        id: "r",
+        match: { tool_name: "run_query" },
+        require: { pin_status: { equals: "pinned" }, scan_severity: { in: ["none", "low"] } }
+      }]
+    });
+    expect(dropped).toEqual([]);
+    const facts = graph.allowlist?.grants?.[0].facts ?? [];
+    expect(facts).toContainEqual({ type: "scalarFact", field: "mcp.pin_status", op: "equals", value: "pinned" });
+    expect(facts).toContainEqual({ type: "scalarFact", field: "mcp.scan_severity", op: "in", values: ["none", "low"] });
+  });
+
+  it("does not double-apply when the sugar and an explicit predicate disagree", () => {
+    // schema.py rejects "server given twice", but the converter must not produce two conflicting facts
+    // for a hand-edited intent that slipped through — the explicit predicate wins.
+    const { graph } = intentToBuilderGraph({
+      class: "c",
+      call: [{ id: "r", server: "slack", match: { tool_name: "send_dm", server: { equals: "github" } } }]
+    });
+    const serverFacts = (graph.allowlist?.grants?.[0].facts ?? []).filter(
+      (f) => f.type === "scalarFact" && f.field === "mcp.server"
+    );
+    expect(serverFacts).toHaveLength(1);
+    expect(serverFacts[0]).toMatchObject({ value: "github" });
+  });
+
+  it("still refuses what genuinely has no grant form", () => {
+    // The refusal must keep working — this fix narrows it, it does not remove it.
+    const { dropped } = intentToBuilderGraph({
+      class: "c",
+      call: [{ id: "r", match: { tool_name: "read_rows" }, require: { "param_paths.filters.ids[0]": "C-91" } }]
+    });
+    expect(dropped.length).toBeGreaterThan(0);
+  });
+});

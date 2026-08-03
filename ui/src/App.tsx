@@ -72,7 +72,7 @@ function App() {
             <Route path="/policies/targets" element={<ClusterScoped page="Target Settings"><TargetSettings /></ClusterScoped>} />
             <Route path="/audit" element={<ClusterScoped page="Audit Log"><AuditLog /></ClusterScoped>} />
             <Route path="/mcp" element={<ClusterScoped page="MCP Servers"><McpServers /></ClusterScoped>} />
-            <Route path="/intents" element={<ClusterScoped page="Intents"><Intents /></ClusterScoped>} />
+            <Route path="/intents" element={<ClusterScoped page="Propose from traffic"><Intents /></ClusterScoped>} />
             {/* Agents is centralized — a remote cluster renders its REAL relayed agents at the hub (with
                 freshness); a stale/unreachable spoke falls back to the deep-link. Local renders the full page. */}
             <Route

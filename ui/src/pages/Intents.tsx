@@ -18,6 +18,7 @@ import { AlertTriangle, CheckCircle2, FileText, PencilLine, Play, Wand2 } from "
 import { useNavigate } from "react-router-dom";
 import { apiSend } from "../api/client";
 import { Column, DataTable } from "../components/common/DataTable";
+import { KitButton } from "../components/common/KitButton";
 import { PageHead } from "../components/common/PageHead";
 import { Panel } from "../components/common/Panel";
 import { StatTile } from "../components/common/StatTile";
@@ -183,7 +184,16 @@ export function Intents() {
       {
         key: "reason",
         title: "Why it would be denied",
-        render: (value) => <span className="mono-sm">{String(value)}</span>
+        // The near-miss explainer — "closest send-send-email met 3/4, failed: <clause>" — is the most
+        // useful sentence on the page and it contains raw regexes, so it needs the mono face. It also
+        // needs to WRAP: `.tbl td` is `white-space: nowrap`, which put the one string an operator has
+        // to read behind a horizontal scrollbar.
+        render: (value) => (
+          <span className="mono" style={{ fontSize: 12, whiteSpace: "normal", display: "inline-block" }}>
+            {String(value)}
+          </span>
+        ),
+        tdStyle: { whiteSpace: "normal" }
       }
     ],
     []
@@ -192,18 +202,23 @@ export function Intents() {
   const rules = proposal?.intent.call ?? [];
 
   return (
-    <div className="page">
+    // `page-enter stack` is what every other page uses: the fade-in plus a 16px gap between panels.
+    // This file previously said `page`, which is not a defined class — so the panels below sat flush
+    // against each other with no rhythm. Several classes here were in the same state; see the header.
+    <div className="page-enter stack">
       <PageHead
-        title="Intents"
+        // Matches the sidebar entry. The two disagreed ("Intents" here, "Propose from traffic" in the
+        // nav), which left the page looking like a different destination from the one just clicked.
+        title="Propose from traffic"
         subtitle="What each agent class is FOR. Anything an intent does not state is denied."
       />
 
       <Panel
-        title="Propose from traffic"
-        sub="Start from what the class actually did, not from memory — an allowlist written from memory is both too wide and missing the one tool that matters."
+        title="Start from what it actually did"
+        sub="An allowlist written from memory is both too wide and missing the one tool that matters."
       >
-        <div className="row gap-8 wrap items-end">
-          <label className="field">
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 240 }}>
             <span className="field-label">Agent class</span>
             <input
               className="input"
@@ -217,9 +232,9 @@ export function Intents() {
               }}
             />
           </label>
-          <button className="btn primary" onClick={propose} disabled={!agentClass.trim() || busy !== null}>
-            <Wand2 size={14} /> {busy === "propose" ? "Proposing…" : "Propose intent"}
-          </button>
+          <KitButton icon={Wand2} onClick={propose} disabled={!agentClass.trim() || busy !== null}>
+            {busy === "propose" ? "Proposing…" : "Propose intent"}
+          </KitButton>
         </div>
       </Panel>
 
@@ -227,8 +242,8 @@ export function Intents() {
         <>
           {proposal.params_available === false && (
             <Panel data-testid="params-warning">
-              <div className="row gap-8 items-center">
-                <AlertTriangle size={16} />
+              <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                <AlertTriangle size={16} style={{ color: "var(--escalate)", flex: "none", marginTop: 2 }} />
                 <div>
                   <strong>Proposed from tool names only.</strong> The audit log for this class carries no
                   call parameters, so this proposal cannot constrain recipients, data classes or SQL
@@ -239,12 +254,14 @@ export function Intents() {
             </Panel>
           )}
 
-          <div className="stat-row">
+          {/* `stat-row` was undefined, so these stacked vertically instead of forming a KPI row. The
+              rest of the app uses a Tailwind grid for exactly this (see McpServers' five tiles). */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-5">
             <StatTile label="Rules" value={rules.length} />
             <StatTile label="Calls sampled" value={proposal.sampled} />
-            {report && <StatTile label="Would allow" value={report.would_allow} />}
+            {report && <StatTile label="Would allow" value={report.would_allow} color="var(--allow)" />}
             {report && (
-              <StatTile label="Would block" value={report.would_block} color={report.would_block ? "#FF3B5C" : undefined} />
+              <StatTile label="Would block" value={report.would_block} color={report.would_block ? "var(--block)" : undefined} />
             )}
           </div>
 
@@ -252,62 +269,108 @@ export function Intents() {
             title="Proposed intent"
             sub="Every rule is an ALLOW. There is no deny list — deny is the absence of a match."
             action={
-              <div className="row gap-8">
-                <button className="btn" onClick={dryRun} disabled={busy !== null}>
-                  <Play size={14} /> {busy === "dryrun" ? "Replaying…" : "Dry run"}
-                </button>
-                <button
-                  className="btn"
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <KitButton variant="secondary" icon={Play} onClick={dryRun} disabled={busy !== null}>
+                  {busy === "dryrun" ? "Replaying…" : "Dry run"}
+                </KitButton>
+                <KitButton
+                  variant="secondary"
+                  icon={FileText}
                   onClick={saveDraft}
                   disabled={busy !== null || !report || ns === "all"}
-                  title={
-                    ns === "all"
-                      ? "Pick a single namespace — a draft is stored against one, not all"
-                      : !report
-                        ? "Dry run it first"
-                        : undefined
-                  }
                 >
-                  <FileText size={14} /> Save as draft
-                </button>
+                  {busy === "draft" ? "Saving…" : "Save as draft"}
+                </KitButton>
                 {/* The handoff. This screen proposes from RECORDED TRAFFIC and replays it — the two
                     things the builder structurally cannot do. Editing belongs in the builder, so
                     this hands the proposal over rather than growing a second editor here. */}
-                <button
-                  className="btn"
+                <KitButton
+                  variant="secondary"
+                  icon={PencilLine}
                   data-testid="open-in-builder"
                   onClick={openInBuilder}
                   disabled={busy !== null || !proposal || ns === "all"}
-                  title={
-                    handoff.dropped.length
-                      ? `Cannot hand off without weakening the policy:\n- ${handoff.dropped.join("\n- ")}`
-                      : "Edit this proposal in the Visual Builder"
-                  }
                 >
-                  <PencilLine size={14} /> Open in Visual Builder
-                </button>
+                  Open in Visual Builder
+                </KitButton>
               </div>
             }
           >
+            {/* WHY AN ACTION IS UNAVAILABLE, as text. These were `title` tooltips on the buttons, which
+                could never be read: `.btn:disabled` sets `pointer-events: none`, so a disabled button
+                never receives the hover that would show its own explanation. */}
+            {ns === "all" && (
+              <div className="muted" style={{ fontSize: 12, marginBottom: 10 }} data-testid="ns-blocker">
+                Pick a single namespace to save a draft or hand this to the builder — both are stored
+                against one namespace, not all.
+              </div>
+            )}
+            {/* The handoff REFUSES rather than warns when a restriction cannot be carried across, because
+                a warning that can be clicked through is how the weaker policy gets saved. That is right,
+                but it used to be invisible until you clicked: the button looked enabled and the reasons
+                arrived in a corner toast showing only the first. Stating it up front, in full, is the
+                same protection without the dead end. */}
+            {handoff.dropped.length > 0 && (
+              <div
+                data-testid="handoff-blocked"
+                role="status"
+                style={{
+                  fontSize: 12,
+                  marginBottom: 10,
+                  padding: "8px 10px",
+                  borderRadius: 8,
+                  border: "1px solid #FFB02030",
+                  background: "#FFB02015",
+                  color: "var(--escalate)"
+                }}
+              >
+                <strong>This proposal cannot be edited in the builder without weakening it.</strong>
+                <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                  {handoff.dropped.map((d) => (
+                    <li key={d}>{d}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
             {!report && (
-              <div className="muted small" data-testid="dryrun-hint">
+              <div className="muted" style={{ fontSize: 12 }} data-testid="dryrun-hint">
                 Dry run this against recorded traffic before saving — the draft is only worth having once
                 you know what it would have refused.
               </div>
             )}
-            <ul className="rule-list">
+            <ul style={{ listStyle: "none", margin: "12px 0 0", padding: 0, display: "flex", flexDirection: "column", gap: 10 }}>
               {rules.map((rule) => (
-                <li key={rule.id} data-testid={`rule-${rule.id}`}>
-                  <code>{rule.id}</code>
-                  {report?.unused_rules?.includes(rule.id) && (
-                    <span className="badge warn" title="No recorded call matched this rule">
-                      matched nothing
-                    </span>
-                  )}
-                  {typeof report?.coverage?.[rule.id] === "number" && !report.unused_rules.includes(rule.id) && (
-                    <span className="badge ok">{report.coverage[rule.id]} calls</span>
-                  )}
-                  <div className="muted small">{describePredicates(rule).join(" · ")}</div>
+                <li
+                  key={rule.id}
+                  data-testid={`rule-${rule.id}`}
+                  style={{ borderTop: "1px solid var(--border)", paddingTop: 10 }}
+                >
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <code className="mono">{rule.id}</code>
+                    {/* `.badge` is not a class in this app — these rendered as plain text, so a green
+                        "covered" and an amber "matched nothing" were indistinguishable. `.pill` is the
+                        real primitive, and it carries the colour that makes the two mean something. */}
+                    {report?.unused_rules?.includes(rule.id) && (
+                      <span
+                        className="pill"
+                        title="No recorded call matched this rule"
+                        style={{ background: "#FFB02015", color: "#FFB020", borderColor: "#FFB02030" }}
+                      >
+                        matched nothing
+                      </span>
+                    )}
+                    {typeof report?.coverage?.[rule.id] === "number" && !report.unused_rules.includes(rule.id) && (
+                      <span
+                        className="pill"
+                        style={{ background: "#00E5A015", color: "#00E5A0", borderColor: "#00E5A030" }}
+                      >
+                        {report.coverage[rule.id]} calls
+                      </span>
+                    )}
+                  </div>
+                  <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                    {describePredicates(rule).join(" · ")}
+                  </div>
                 </li>
               ))}
             </ul>
@@ -325,7 +388,7 @@ export function Intents() {
           }
         >
           {report.would_block === 0 ? (
-            <div className="row gap-8 items-center" data-testid="no-blocks">
+            <div style={{ display: "flex", gap: 10, alignItems: "center" }} data-testid="no-blocks">
               <CheckCircle2 size={16} /> {report.total} recorded calls replayed, none refused.
             </div>
           ) : (
@@ -340,8 +403,8 @@ export function Intents() {
 
       {savedDraft && (
         <Panel data-testid="draft-saved">
-          <div className="row gap-8 items-center">
-            <FileText size={16} />
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+            <FileText size={16} style={{ flex: "none", marginTop: 2 }} />
             <div>
               Draft <code>{savedDraft}</code> saved and <strong>not enforcing</strong>. Review and apply it
               from Policy Catalog — that is the only place enforcement begins.

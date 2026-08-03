@@ -88,6 +88,17 @@ const COLLECTION_FACT_FIELDS = new Set([
   "destinations.schemes"
 ]);
 const NUMERIC_FACT_FIELDS = new Set(["param_bytes", "call_depth", "trust_score"]);
+/** Intent field name -> builder registry field name, for the three facts the two halves spell
+ *  differently. `schema.py`'s SCALAR_FIELDS calls them `server` / `pin_status` / `scan_severity`;
+ *  `builderCompile.ts`'s SCALAR_FIELD_EXPR calls the same three `mcp.*`. Both compile to the identical
+ *  `object.get(object.get(input, "mcp", {}), …, "")` expression, so this is a naming seam, not a
+ *  semantic one — but an unaliased name matches no branch and gets reported as unrepresentable. */
+const INTENT_FIELD_ALIAS: Record<string, string> = {
+  server: "mcp.server",
+  pin_status: "mcp.pin_status",
+  scan_severity: "mcp.scan_severity"
+};
+
 const SCALAR_FACT_FIELDS = new Set([
   "verb",
   "tool_kind",
@@ -224,15 +235,30 @@ export function intentToBuilderGraph(intent: IntentLike, agentClass?: string): I
     }
     names.forEach((n) => tools.add(n));
 
-    if (rule.server || rule.from) {
-      dropped.push(`rule ${rule.id}: server/from scoping has no allowlist-grant equivalent`);
-    }
-
     const constraints: BuilderParamConstraint[] = [];
     const facts: BuilderGrantFact[] = [];
     const predicates = { ...(rule.match ?? {}), ...(rule.require ?? {}) };
-    Object.entries(predicates).forEach(([field, spec]) => {
-      if (field === "tool_name") return;
+
+    // `server:` / `from:` are SUGAR for one predicate on the field the builder calls `mcp.server`.
+    // schema.py desugars both into `predicates["server"]`, and that field's rego expression is
+    // byte-identical to `SCALAR_FIELD_EXPR["mcp.server"]` — same `object.get(input.mcp, "server", "")`.
+    //
+    // This used to be reported as unrepresentable, and it genuinely was until a grant could carry a
+    // SCALAR fact. The cost of leaving it was severe and invisible: `propose.py` attaches `server` to
+    // every rule derived from MCP traffic, so the refusal fired on nearly every real proposal and the
+    // handoff became a dead end rather than the exception it was designed to be.
+    const serverSugar = typeof rule.server === "string" ? rule.server : typeof rule.from === "string" ? rule.from : "";
+    if (serverSugar.trim() && !("server" in predicates)) {
+      facts.push({ type: "scalarFact", field: "mcp.server", op: "equals", value: serverSugar.trim() });
+    }
+
+    Object.entries(predicates).forEach(([rawField, spec]) => {
+      if (rawField === "tool_name") return;
+      // The two halves name the same three MCP facts differently — schema.py's SCALAR_FIELDS uses the
+      // bare `server` / `pin_status` / `scan_severity`, the builder's registry uses the `mcp.` prefix.
+      // Without this alias a predicate on any of them falls through every branch and is reported as
+      // having "no allowlist-grant equivalent", which is the same stale-refusal bug as the sugar above.
+      const field = INTENT_FIELD_ALIAS[rawField] ?? rawField;
       // Facts first: an engine-derived fact about the whole call has a direct grant representation and
       // must not be forced through the per-field constraint path, which would either lose it or point
       // it at an argument that does not exist.
