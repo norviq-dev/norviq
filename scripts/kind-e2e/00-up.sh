@@ -107,6 +107,7 @@ helm upgrade --install norviq "${REPO_ROOT}/helm/norviq" \
   --set images.webhook.pullPolicy=IfNotPresent \
   --set images.bootstrap.pullPolicy=IfNotPresent \
   --set "policyQuotaNamespaces={${QUOTA_NS}}" \
+  --set webhook.injection.enabled=true \
   --set-string "podAnnotations.nrvq-local-image-id=${API_IMAGE_ID}" \
   --wait --timeout 10m
 

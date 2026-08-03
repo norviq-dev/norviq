@@ -66,6 +66,18 @@ echo "  python $("$PY" --version)"
 # --- port-forwards ------------------------------------------------------------------------------
 if [ -z "${NRVQ_API_URL:-}" ]; then
   stage "Port-forwarding the cluster"
+  # Kill any forward already bound to these ports first. A leftover forward — from an interrupted run,
+  # or from someone debugging by hand — keeps the port bound and points at a pod that may no longer
+  # exist. `kubectl port-forward` then fails to bind, silently, and the attacks suite's `redis_client`
+  # fixture swallows the resulting connection error into `yield None`, which turns every Redis-seeded
+  # security test into an XFAIL. That is the exact false-green this script exists to prevent, arriving
+  # through the back door: 101 tests, 99 passed, 2 "expected failures", exit 0. Cost an hour chasing a
+  # credential mismatch that did not exist.
+  for _port in 18080 15432 16379; do
+    pkill -f "port-forward.*:${_port}" 2>/dev/null || true
+    pkill -f "port-forward.*${_port}:" 2>/dev/null || true
+  done
+  sleep 1
   "${KUBECTL[@]}" -n "$NS" port-forward svc/norviq-api 18080:8080 >/tmp/nrvq-l3-api.log 2>&1 &
   PIDS+=($!)
   "${KUBECTL[@]}" -n "$NS" port-forward svc/norviq-postgresql 15432:5432 >/tmp/nrvq-l3-pg.log 2>&1 &
@@ -88,6 +100,21 @@ if [ -z "${NRVQ_API_URL:-}" ]; then
   else
     export NRVQ_REDIS_URL="${NRVQ_REDIS_URL:-redis://127.0.0.1:16379/0}"
   fi
+
+  # OPT IN TO THE TESTS THAT NEED A REAL CLUSTER. Five data-plane enforcement tests self-skip unless
+  # NRVQ_E2E=1, on the grounds that they "need a cluster with the chart installed" — which is precisely
+  # what this script has just port-forwarded to. Left unset they print as skips and read as green, so
+  # the webhook injection path and the sidecar's own allow/block decisions went unexercised on every
+  # run of a suite whose entire purpose is to exercise them against a live cluster.
+  export NRVQ_E2E="${NRVQ_E2E:-1}"
+  # NRVQ_E2E_NAMESPACE is a SECOND, separate gate: those tests create throwaway pods, so they require
+  # the operator to name the namespace they consent to that happening in rather than inferring one.
+  # Correct design — it just has to be answered, not left to skip. `agents` is the tenant namespace
+  # this cluster creates for exactly this purpose.
+  export NRVQ_E2E_NAMESPACE="${NRVQ_E2E_NAMESPACE:-agents}"
+  # And the namespace must carry the injection opt-in label, which is also what unskips the three
+  # injected-sidecar health tests.
+  "${KUBECTL[@]}" label namespace "$NRVQ_E2E_NAMESPACE" norviq-injection=enabled --overwrite >/dev/null 2>&1 || true
 
   # Poll, never sleep-once: a forward that is not up yet is indistinguishable from a dead API, and
   # THAT is exactly the state the xfail turns into a false green.

@@ -1189,3 +1189,54 @@ side by killing a sidecar in a pod that was already going away.
 
 > **Rule: `kubectl get pods | .items[0]` is a coin toss. Any check that names a pod must require
 > Running and no `deletionTimestamp`, or it will eventually describe a pod that no longer exists.**
+
+---
+
+## G1 / G2 — hermetic gates and cluster suites
+
+**G1 met**: 1947 pytest · 759 vitest · tsc, eslint, build clean. Both counts are above the vacuity
+floors (≥1900 / ≥750), which exist because a collection error exits 0 with zero tests.
+
+**G2 met**: integration 68 passed / 0 failed · attacks 101 passed / **0 xfailed**.
+
+### Two xfails that were a stale port-forward, not a credential problem
+
+The attacks suite reported `99 passed, 2 xfailed`. The xfail bar is 0 precisely because an xfail here
+means a security control is not being exercised — and both were `test_frozen_agent_blocked`, i.e.
+"does freezing an agent actually stop it".
+
+The cause was not the credential. It was my own leftover `kubectl port-forward` on 16379, from probing
+Redis by hand: it kept the port bound while pointing at a pod that no longer existed, so `l3.sh`'s own
+forward could not bind, the `redis_client` fixture swallowed the connection error into `yield None`,
+and the freeze test xfailed. Exit 0, green summary.
+
+I spent a while proving the Redis password was wrong. It was not — the same URL connected fine once
+the stale forward was gone. `l3.sh` now kills anything bound to its ports before forwarding.
+
+> **Rule: before blaming a credential, check that the socket goes where you think it goes.**
+
+### Five data-plane tests that had never run
+
+`tests/integration` reported 9 skips. Five were the **data-plane enforcement** tests — the ones that
+prove the PEP actually intercepts a tool call inside a pod — self-skipping with "data-plane E2E is
+opt-in: set `NRVQ_E2E=1` (needs a cluster with the chart installed)". `l3.sh` is a script whose entire
+purpose is running against a cluster with the chart installed, and it never set the flag. Three more
+needed a namespace labelled for sidecar injection.
+
+Setting the flag made them **fail**, not pass: five assertions reading "could not reach the enforcement
+socket … the PEP is not intercepting anything". True, and misleading — `webhook.injection.enabled`
+defaults to false, so the chart had rendered no MutatingWebhookConfiguration and there was no data
+plane to intercept anything. The tests treated the namespace LABEL as evidence that injection was
+installed, when the label is only the namespace opting in.
+
+Both halves fixed: `00-up.sh` installs the injector, and `_require_live_infrastructure()` now checks
+for the MutatingWebhookConfiguration itself, so a labelled namespace on a cluster without injection
+skips honestly instead of failing with a socket error that sends the reader to debug a sidecar that
+was never created. Integration went 63 → **68 passed**, skips 9 → 4.
+
+The two remaining skips are honest: multi-replica needs two API endpoints (this profile deliberately
+runs one, because verb promotion does not propagate across replicas), and the injected-sidecar health
+tests report "no injected agent workloads deployed (valid empty state)".
+
+> **Rule: an opt-in flag that the harness never sets is coverage that does not exist. Grep the skip
+> reasons — every one that names an environment variable is a test asking to be run.**

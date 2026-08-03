@@ -322,6 +322,22 @@ def _require_live_infrastructure() -> str:
     labels = json.loads(res.stdout).get("metadata", {}).get("labels", {}) or {}
     if labels.get(INJECTION_LABEL_KEY) != "enabled":
         pytest.skip(f"namespace {namespace} is not labelled {INJECTION_LABEL_KEY}=enabled (injection opt-in)")
+    # The label is the namespace OPTING IN; it is not evidence that anything can act on that opt-in.
+    # `webhook.injection.enabled` defaults to false, so a chart installed with defaults renders no
+    # MutatingWebhookConfiguration at all — and a labelled namespace on such a cluster produced five
+    # failures reading "could not reach the enforcement socket ... the PEP is not intercepting
+    # anything", which is a true statement about a feature that was never installed. That reads as a
+    # broken data plane rather than an absent one, and sends the reader to debug the sidecar.
+    res = _kubectl("get", "mutatingwebhookconfiguration", "-o", "json")
+    installed = any(
+        "norviq" in (item.get("metadata", {}).get("name", ""))
+        for item in (json.loads(res.stdout).get("items", []) if res.returncode == 0 else [])
+    )
+    if not installed:
+        pytest.skip(
+            "no norviq MutatingWebhookConfiguration on this cluster — sidecar injection is not "
+            "installed (helm --set webhook.injection.enabled=true), so there is no data plane to test"
+        )
     return namespace
 
 
