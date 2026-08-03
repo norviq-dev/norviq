@@ -336,7 +336,13 @@ test.describe("Login form — valid admin advances; wrong password shows error +
   }) => {
     const { ctx, page } = await openLogin(browser);
     try {
-      await page.locator("input#nv-user").fill("admin");
+      // NOT `admin`. The failed-attempt lockout is keyed PER USERNAME, and this test exists to fail a
+      // login on purpose — so aiming it at `admin` spends the real operator account's budget and every
+      // later form-login spec in the run gets a 429 that has nothing to do with what it is testing.
+      // The assertions here (the error message, and the username field surviving) are about the login
+      // form's behaviour on bad credentials, which an unknown user exercises identically: the API
+      // deliberately runs a dummy verify for unknown users so the two paths are indistinguishable.
+      await page.locator("input#nv-user").fill("not-a-real-operator");
       await page.locator("input#nv-pass").fill("definitely-not-the-password-000");
       await page.getByRole("button", { name: "Sign in", exact: true }).click();
       await page.waitForTimeout(1400); // let /auth/login (401) resolve + the error render

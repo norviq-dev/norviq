@@ -1362,3 +1362,59 @@ way and proves nothing. That is why this survived every hermetic suite until a s
 `class_totals`, the fixture has stopped saturating and the test says so rather than passing quietly.
 
 Verified by reverting the one-line `cap=None` and watching it fail, then restoring it.
+
+---
+
+## G3, continued: what a fresh cluster exposed that an old one hid
+
+Rebuilding the kind cluster from scratch took the browser suite from 11 failures to 32 — on the same
+product code. Nothing regressed; the old cluster had been quietly supplying fixtures that no script
+provides.
+
+| Cause | What it broke |
+|---|---|
+| `NRVQ_E2E_PASSWORD` carried over from the previous cluster | the login gate is skipped when it is set, so ~27 form-login tests failed on 20s timeouts |
+| ~58 audit rows, all minutes old, `1h == 24h == 7d` | every range, bucket and KPI assertion was unanswerable by construction |
+| no deployed-but-never-observed agent had ever existed | `awaiting_hidden` was correctly 0, so the assertion could not hold |
+| one governed class in `default` | a full-namespace red-team suite returned ~29 rows against a ≥300 bar |
+
+The through-line: **these specs passed for months on AKS because that cluster was old, not because it
+was seeded.** Weeks of accumulated traffic is not a fixture. Every one of these is now created
+explicitly, so a fresh cluster and a long-lived one answer the same questions.
+
+### The credential guards, and how each was wrong before it was right
+
+Three rounds on one idea — *a supplied credential must be verified, not trusted*:
+
+1. **The token.** A file that exists proves nothing; `token_mint --ttl 7200` expires between runs.
+   `e2e.sh` now GETs `/api/v1/version` with it and re-mints from the live pod.
+2. **The password.** Same rule, and the first version used `curl -sf`, which cannot tell 401 from 429.
+   Verifying a password *spends* one of the five failed-attempt slots, so the probe tripped the lock
+   and the gate that would have fixed everything then failed with "Too many failed attempts" — a
+   message about the harness dressed as a message about the credential. It now reads the status code
+   and clears the counter on 429.
+3. **The lockout helper itself killed the script.** Zero-byte log, exit 1, no error anywhere. Under
+   `set -euo pipefail` an assignment from a failing command substitution aborts, `kubectl get pods -l
+   <label>` exits non-zero when nothing matches, the redis pod is labelled `app=norviq-redis`, and I
+   had sent kubectl's stderr to `/dev/null`. **The rule against suppressing the stderr of a step whose
+   failure you have not yet seen is written in a comment in that same file.**
+
+### A spec that poisoned every spec after it
+
+Eight `429`s in one run traced to `console-fixes-batch2.spec.ts`, which deliberately submits a wrong
+password to prove the login form shows the right error. The lockout is keyed **per username**, and it
+aimed at `admin` — the account every other form-login spec needs. Its assertions are about the form's
+behaviour on bad credentials, which an unknown user exercises identically (the API runs a dummy verify
+for unknown users precisely so the paths are indistinguishable), so it now uses a throwaway name.
+
+> **Rule: a test that deliberately trips a security control must not trip it on the identity the rest
+> of the suite depends on.**
+
+### And one self-inflicted wound worth recording
+
+The `LLM07 → LLM01` repair bound both sites to one constant — declared inside the test that generates
+the draft, while the other use lives in a *different* test block. `ReferenceError: CONTROL is not
+defined`, twice. The fix was right and the scope was wrong; it is hoisted to describe scope now.
+
+**Standing at the end of this session: 13 failed / 161 passed, down from 32 / 144, with the runtime
+back to 13.9 minutes.** G3 is NOT met. The remaining set is characterised, not guessed at.

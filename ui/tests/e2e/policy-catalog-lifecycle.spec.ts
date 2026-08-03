@@ -44,6 +44,18 @@ const REGO = [
   'reason = "lc blocked" { input.tool_name == "delete_database" }'
 ].join("\n");
 
+// ONE control, named once, at DESCRIBE scope — the generate call and the provenance assertion live in
+// different test blocks (PART B generates, PART A asserts), so a per-test const throws ReferenceError
+// in the other. That is how the first attempt at this fix failed.
+//
+// Why it is bound at all: the generate call was migrated LLM07 -> LLM01 and the assertion was left on
+// the old literal, so the spec asked for a draft about LLM01 and then demanded it say LLM07.
+// Unsatisfiable twice over — LLM07 maps to zero rules and deliberately escalates with `draft_id: null`
+// (escalate-only by design), and the draft id is sha256("owasp|<control>|<ns>|<class>"), so an LLM07
+// draft would live at a different testid entirely.
+const CONTROL = "LLM01:2025";
+const CONTROL_NAME = "Prompt Injection";
+
 test.describe("Policy Catalog — drafts lifecycle, retention & the apply→cluster enforcement proof", () => {
   test.beforeEach(async ({ page }) => {
     await page.goto("/");
@@ -93,14 +105,6 @@ test.describe("Policy Catalog — drafts lifecycle, retention & the apply→clus
     // `status: "escalate"` with `draft_id: null`, because the risk does not surface in agent tool-call
     // traffic and no rule could match it at enforcement time. Every assertion below needs a real
     // draft_id, so it has to be a control the product genuinely generates.
-    // ONE control, named once. The generate call was migrated LLM07 -> LLM01 but the provenance
-    // assertion below was left on the old literal, so the spec asked for a draft about LLM01 and then
-    // demanded it say LLM07. Unsatisfiable twice over: LLM07 maps to zero rules and deliberately
-    // escalates with `draft_id: null` (it is escalate-only by design), and the draft id is
-    // sha256("owasp|<control>|<ns>|<class>"), so an LLM07 draft would live at a different testid
-    // entirely. Binding both sites to one constant is what stops the next migration half-landing.
-    const CONTROL = "LLM01:2025";
-    const CONTROL_NAME = "Prompt Injection";
     const gen = await api(page, "/api/v1/compliance/owasp/generate", "POST", { technique_id: CONTROL, namespace: "default" });
     const draftId = gen.body.draft_id as string;
 
