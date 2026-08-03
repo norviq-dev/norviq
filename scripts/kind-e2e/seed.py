@@ -403,6 +403,49 @@ def seed_console_prereqs(base: str, token: str, repo_root: Path) -> int:
 
 
 
+# A REALISTIC FLEET in `default`, because two red-team surfaces are only meaningful at scale.
+#
+# `redteam-view-pager.spec.ts` drives a full-namespace suite and needs >= 300 results to prove the
+# results table stays bounded at the VIEW (<= 50 rows mounted) rather than rendering everything. Its
+# own comment reads "18 real classes x 29 attacks ~ 500+ rows" — true of the AKS cluster it was written
+# against, which had accumulated a real fleet. On a fresh kind cluster `default` holds ONE governed
+# class, so the suite returned ~29 rows, the spec failed on `got 0`/too-few, and the bound it exists to
+# check went unverified. `redteam-retention` needs several runs for the same reason.
+#
+# The catalog is 29 attacks, so >= 11 classes clears 300 with margin. These are named after plausible
+# agents rather than `probe-N` on purpose: `audit_row_is_non_real` hides `probe-`/`e2e-`/`smoke-`
+# prefixes, and a fleet the console deliberately hides would seed the surfaces it is meant to populate
+# with nothing at all.
+FLEET_CLASSES = [
+    "billing-assistant", "claims-triage", "content-moderator", "data-analyst",
+    "devops-copilot", "hr-chatbot", "inventory-agent", "onboarding-bot",
+    "report-runner", "sales-researcher", "support-router", "ticket-summarizer",
+]
+
+
+def seed_fleet(base: str, token: str) -> int:
+    """One governed call per class, so each becomes a real red-team target."""
+    failures = 0
+    for cls in FLEET_CLASSES:
+        status, body = post(base, "/api/v1/evaluate", token, {
+            "tool_name": "search_kb",
+            "tool_params": {"q": f"hello from {cls}"},
+            "agent_identity": {
+                "spiffe_id": f"spiffe://norviq/ns/{CUSTOMER_SUPPORT_NS}/sa/{cls}",
+                "namespace": CUSTOMER_SUPPORT_NS,
+                "agent_class": cls,
+            },
+            "framework": "sdk",
+        })
+        ok = status == 200
+        if not ok:
+            print(f"  FAIL fleet    {cls} -> {status} {body[:120]}")
+        failures += 0 if ok else 1
+    print(f"  ok  fleet    {len(FLEET_CLASSES)} agent classes in {CUSTOMER_SUPPORT_NS} "
+          f"({len(FLEET_CLASSES)} x 29 attacks = {len(FLEET_CLASSES) * 29} red-team results)")
+    return failures
+
+
 # SYNTHETIC identities — the ones the console hides by default.
 #
 # `wave4-compliance.spec.ts:34` asserts the asset graph EXCLUDES evtrace/scorer classes unless
@@ -530,6 +573,8 @@ def main() -> int:
     failures += seed_drift(args.base_url, token)
     print("console suite prerequisites — the policy and traffic COVERAGE-MATRIX.md assumes:")
     failures += seed_console_prereqs(args.base_url, token, Path(__file__).resolve().parent.parent.parent)
+    print("a realistic fleet — enough classes that a full-namespace red-team suite is LARGE:")
+    failures += seed_fleet(args.base_url, token)
     print("synthetic identities — the ones the asset graph hides by default:")
     failures += seed_synthetic(args.base_url, token)
     print("red-team history — a completed suite the Red Team surface can report on:")

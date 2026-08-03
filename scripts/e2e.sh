@@ -85,6 +85,16 @@ fi
 echo "▶ R10 — Playwright E2E against $BASE_URL"
 ( cd "$E2E_DIR" && [ -d node_modules/@playwright ] || npm ci --silent )
 ( cd "$E2E_DIR" && npx playwright install chromium >/dev/null 2>&1 || true )
+# WORKER COUNT. The config defaults to 3, and 3 workers share ONE storageState token against a
+# backend with ONE admin identity — so a spec that logs out or rotates the password breaks whatever is
+# running beside it. Measured over full runs: 3 workers gave 21 failed / 12 flaky, 1 worker gave
+# noticeably fewer of both. Serial costs ~21m against ~9m, which is the right trade for a gate whose
+# whole value is that its result means something; override for a quick local sweep.
+#
+# ALWAYS run this script rather than calling playwright directly: it exports NRVQ_API_URL (four specs
+# otherwise hit an unforwarded 127.0.0.1:18080 and fail with ECONNREFUSED, which reads as a broken
+# backend) and it resets + seeds first. A direct `npx playwright test` skips both and produces failures
+# that belong to the invocation, not to the product — that mistake cost a whole 21-minute run.
 PLAYWRIGHT_BASE_URL="$BASE_URL" NRVQ_TOKEN_FILE="$TOKEN_FILE" \
-  bash -c "cd '$E2E_DIR' && npx playwright test --reporter=line"
+  bash -c "cd '$E2E_DIR' && npx playwright test --workers=${NRVQ_E2E_WORKERS:-1} --reporter=line"
 echo "✓ R10 — Playwright E2E green (coverage matrix: $E2E_DIR/COVERAGE-MATRIX.md)"
