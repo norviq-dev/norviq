@@ -510,6 +510,15 @@ SELECT gen_random_uuid(), gen_random_uuid(), a.tool_name, a.decision, a.agent_id
        a.framework, now() - (g.h * interval '1 hour'), a.payload
 FROM (SELECT * FROM audit_log
       WHERE timestamp_utc > now() - interval '2 hours'
+        -- REAL TRAFFIC ONLY. This mirrors `audit_row_is_non_real` (norviq/api/synthetic.py), which
+        -- every console surface applies. Copying rows without it produced 2,240 perfectly valid
+        -- audit rows that no surface will ever display: the source window is dominated by the
+        -- red-team suite this same script runs, `framework = 'redteam'` is hidden by design, and the
+        -- stats endpoint went on reporting an identical total for 1h, 24h and 7d as though nothing
+        -- had been inserted. Exactly the trap this repo already had written down.
+        AND framework <> 'redteam'
+        AND lower(coalesce(agent_class, '')) NOT IN ('policy-tester', 'scorer')
+        AND lower(coalesce(agent_class, '')) !~ '^(allowlist-probe|canary-|e2e-|effecttest|evtrace-|policy-tester-|probe-|smoke-|wave[0-9]+e2e)'
       ORDER BY timestamp_utc DESC LIMIT 40) a
 CROSS JOIN generate_series(2, 168, 3) AS g(h);
 """
