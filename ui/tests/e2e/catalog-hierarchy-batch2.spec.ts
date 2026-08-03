@@ -100,16 +100,26 @@ test.describe("Catalog hierarchy + governance — real login", () => {
     const packPresent = () => page.getByTestId("policy-hierarchy-slot-pack").getAttribute("data-present");
     // baseline: no pack overlay
     await expect.poll(packPresent).toBe("0");
+    // Enabling a pack is a TWO-STEP action: the toggle only opens a confirm modal, and the write is
+    // behind `pack-confirm-apply` (PolicyPacks.tsx — `onClick={() => setConfirmPack(pack)}`). This spec
+    // clicked the toggle and then waited for the label to flip, which it never does on its own, so it
+    // burned the full timeout on a dialog nobody dismissed. The sibling `packs-governance-batch1.spec.ts`
+    // already drives it correctly; this is the same helper.
+    const flipPack = async () => {
+      await page.getByTestId("pack-toggle-ecommerce").click();
+      await expect(page.getByTestId("pack-confirm-modal")).toBeVisible({ timeout: 15000 });
+      await page.getByTestId("pack-confirm-apply").click();
+    };
     // enable a pack for this concrete namespace via the Packs page, then return to the hierarchy
-    await page.goto("/policies/packs");
-    await page.getByTestId("pack-toggle-ecommerce").click();
+    await page.goto("/policies/packs?ns=default");
+    await flipPack();
     await expect(page.getByTestId("pack-toggle-ecommerce")).toHaveText(/Disable/, { timeout: 15000 });
     await openHierarchy(page);
     await expect.poll(packPresent, { timeout: 15000 }).toBe("1"); // overlay layer now IN FORCE
     expect(await renderedStack(page)).toContainEqual(expect.objectContaining({ scope: expect.stringContaining("__pack__") }));
     // disable → the overlay disappears
-    await page.goto("/policies/packs");
-    await page.getByTestId("pack-toggle-ecommerce").click();
+    await page.goto("/policies/packs?ns=default");
+    await flipPack();
     await expect(page.getByTestId("pack-toggle-ecommerce")).toHaveText(/Enable/, { timeout: 15000 });
     await openHierarchy(page);
     await expect.poll(packPresent, { timeout: 15000 }).toBe("0");

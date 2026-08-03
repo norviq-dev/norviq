@@ -93,7 +93,15 @@ test.describe("Policy Catalog — drafts lifecycle, retention & the apply→clus
     // `status: "escalate"` with `draft_id: null`, because the risk does not surface in agent tool-call
     // traffic and no rule could match it at enforcement time. Every assertion below needs a real
     // draft_id, so it has to be a control the product genuinely generates.
-    const gen = await api(page, "/api/v1/compliance/owasp/generate", "POST", { technique_id: "LLM01:2025", namespace: "default" });
+    // ONE control, named once. The generate call was migrated LLM07 -> LLM01 but the provenance
+    // assertion below was left on the old literal, so the spec asked for a draft about LLM01 and then
+    // demanded it say LLM07. Unsatisfiable twice over: LLM07 maps to zero rules and deliberately
+    // escalates with `draft_id: null` (it is escalate-only by design), and the draft id is
+    // sha256("owasp|<control>|<ns>|<class>"), so an LLM07 draft would live at a different testid
+    // entirely. Binding both sites to one constant is what stops the next migration half-landing.
+    const CONTROL = "LLM01:2025";
+    const CONTROL_NAME = "Prompt Injection";
+    const gen = await api(page, "/api/v1/compliance/owasp/generate", "POST", { technique_id: CONTROL, namespace: "default" });
     const draftId = gen.body.draft_id as string;
 
     // The endpoint returns a BOUNDED page + a total count — not the whole list.
@@ -139,7 +147,8 @@ test.describe("Policy Catalog — drafts lifecycle, retention & the apply→clus
     await expect(target).toContainText(/agent-class/i);
     await expect(target).toContainText(/adds a block, never replaces|would apply/i);
     // Provenance still renders; filter chips present; per-draft dismiss present.
-    await expect(page.getByTestId(`intent-draft-source-${draftId}`)).toContainText("LLM07:2025");
+    await expect(page.getByTestId(`intent-draft-source-${draftId}`))
+      .toContainText(`OWASP LLM · ${CONTROL} ${CONTROL_NAME}`);
     await expect(page.getByTestId("draft-filter-new")).toBeVisible();
     await expect(page.getByTestId(`intent-draft-dismiss-${draftId}`)).toBeVisible();
     expect(bad, `unexpected 4xx/5xx on the catalog: ${bad.join(", ")}`).toEqual([]);

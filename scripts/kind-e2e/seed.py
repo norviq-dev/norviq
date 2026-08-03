@@ -416,11 +416,48 @@ def seed_console_prereqs(base: str, token: str, repo_root: Path) -> int:
 # agents rather than `probe-N` on purpose: `audit_row_is_non_real` hides `probe-`/`e2e-`/`smoke-`
 # prefixes, and a fleet the console deliberately hides would seed the surfaces it is meant to populate
 # with nothing at all.
+# `hr-chatbot` and `report-runner` are deliberately NOT here — they are the AWAITING fixture below,
+# and a class cannot be both. One governed call would make them "observed" and silently empty the
+# awaiting state the console is supposed to show.
 FLEET_CLASSES = [
     "billing-assistant", "claims-triage", "content-moderator", "data-analyst",
-    "devops-copilot", "hr-chatbot", "inventory-agent", "onboarding-bot",
-    "report-runner", "sales-researcher", "support-router", "ticket-summarizer",
+    "devops-copilot", "invoice-auditor", "inventory-agent", "onboarding-bot",
+    "shift-scheduler", "sales-researcher", "support-router", "ticket-summarizer",
 ]
+
+# DEPLOYED BUT NEVER OBSERVED — the "awaiting its first tool call" state.
+#
+# `wave4-compliance.spec.ts` asserts that such agents are hidden by default and revealed by
+# `?include_awaiting=true`. It is a genuinely useful guarantee: an operator who has written a policy
+# for an agent that has not shipped yet should see it as pending, not as absent. But NO fixture in
+# this repo had ever created one — `deployed - observed` was empty in every namespace, so
+# `awaiting_hidden` was correctly 0 and the assertion could never hold.
+#
+# The state is only reachable one way. `_deployed_classes` (graphs.py) unions `policies` and
+# `agent_registry`; `agent_registry` rows are written by the EVALUATOR, so any traffic at all makes the
+# class observed. A policy row with no traffic behind it is therefore the sole route in — which is
+# exactly what a real operator does when they author protection ahead of a deployment.
+AWAITING_CLASSES = ["hr-chatbot", "report-runner"]
+
+
+def seed_awaiting(base: str, token: str, repo_root: Path) -> int:
+    """Policies with NO traffic, so `deployed - observed` is non-empty."""
+    failures = 0
+    rego = (repo_root / "comprehensive.rego").read_text(encoding="utf-8")
+    for cls in AWAITING_CLASSES:
+        status, body = post(base, "/api/v1/policies", token, {
+            "namespace": CUSTOMER_SUPPORT_NS,
+            "agent_class": cls,
+            "rego_source": rego,
+            "enforcement_mode": "block",
+            "saved_by": "kind-e2e-seed",
+            "priority": 100,
+        })
+        ok = status in (200, 201, 409)   # 409 = already there, which is the desired state
+        print(f"  {'ok ' if ok else 'FAIL'} awaiting {cls}"
+              f"{'' if ok else f' -> {status} {body[:140]}'}")
+        failures += 0 if ok else 1
+    return failures
 
 
 def seed_fleet(base: str, token: str) -> int:
@@ -575,6 +612,8 @@ def main() -> int:
     failures += seed_console_prereqs(args.base_url, token, Path(__file__).resolve().parent.parent.parent)
     print("a realistic fleet — enough classes that a full-namespace red-team suite is LARGE:")
     failures += seed_fleet(args.base_url, token)
+    print("deployed-but-never-observed agents — the 'awaiting first tool call' state:")
+    failures += seed_awaiting(args.base_url, token, Path(__file__).resolve().parent.parent.parent)
     print("synthetic identities — the ones the asset graph hides by default:")
     failures += seed_synthetic(args.base_url, token)
     print("red-team history — a completed suite the Red Team surface can report on:")

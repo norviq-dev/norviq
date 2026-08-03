@@ -51,7 +51,13 @@ test.describe("Overview coverage caption sits below the gauge (no overlap)", () 
 test.describe("Policy Packs flat side-by-side grid", () => {
   test("all packs render in ONE flat grid (~4 per row, side-by-side), actions intact, no page clip", async ({ page, recorder }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto("/policies/packs");
+    // `?ns=` matters. The default scope is "all", where every mutation is DELIBERATELY disabled
+    // ("Select a namespace to apply changes.") — a pack has to land somewhere, so applying one across
+    // an unspecified set is refused. This spec asserts the pack actions are intact, which is only a
+    // meaningful question once a concrete namespace is selected. `packs-governance-batch1.spec.ts`
+    // asserts the disabled-at-all behaviour and passes, so this is not a product bug to fix; it is
+    // this spec asking its question in the one scope where the answer is always "no".
+    await page.goto("/policies/packs?ns=default");
     await waitForApp(page);
     await expect(page.getByText("Sector Starter Packs")).toBeVisible({ timeout: 15000 });
 
