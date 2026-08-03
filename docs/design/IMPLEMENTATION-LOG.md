@@ -825,3 +825,44 @@ performs NO seeding**, while `ui/tests/e2e/COVERAGE-MATRIX.md` documents specs t
 policies, attack paths and redteam history. Those specs have been passing on state accumulated by
 hand. That is a pre-existing suite-hygiene problem, larger than this plan, and the honest thing is to
 name it rather than to have quietly re-run until it looked green.
+
+---
+
+## The login gate — and the 160 tests it broke before it fixed 27
+
+### The gate
+
+`overview-kpi.spec.ts:11` refers to "the gate" that resets admin to a known password with
+`must_change=false`. No such thing existed in the repo, so the 11 real-form-login specs read
+`NRVQ_E2E_PASSWORD`, fell back to the literal `CHANGE_ME-e2e-pw`, and each of their 27 tests waited
+20 seconds for a navigation that could not happen.
+
+`scripts/kind-e2e/login-gate.sh` is that gate. It drives the SHIPPED flow rather than adding a
+test-only switch:
+
+1. `norviq.api.admin_reset --password <TEMP>` in-pod → `must_change=True`
+2. `POST /auth/login` with TEMP → a token flagged must_change
+3. `POST /auth/change-password` to FINAL → clears must_change
+
+`admin_reset` always sets `must_change=True`, deliberately. A `--no-force-change` flag would have been
+one line and would have weakened a real security property for a test's convenience; driving the forced
+change instead exercises that path rather than bypassing it. The gate then ASSERTS `must_change=false`
+by logging in again, so a regression in either endpoint fails here with a clear message instead of 27
+tests later as a navigation timeout.
+
+### What it broke, and why that was predictable
+
+First version fixed the 27 and took the run from **59 failed to 173 failed, 11 passed**.
+
+Changing a password REVOKES that user's outstanding tokens. About 160 of the suite's ~190 tests
+authenticate with the token in `$NRVQ_TOKEN_FILE` rather than through the form — so the gate pulled
+the credential out from under nearly the whole suite, and the new failures pointed at every page in
+the console rather than at the credential.
+
+The verification login in step 4 had already returned a valid token for the final password. It is now
+written back to `$NRVQ_TOKEN_FILE`.
+
+**Rule.** A fixture that mutates an account's credentials must leave every credential the suite uses
+consistent with the new state. "It fixed the thing I was looking at" is not a result until the things
+I was NOT looking at have been re-checked — and the measurement that catches it is the same full run
+that measured the problem, not a spot-check of the 27.

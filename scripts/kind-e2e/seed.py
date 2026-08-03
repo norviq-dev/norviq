@@ -45,6 +45,7 @@ import json
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 # Namespace the console e2e drives. Must appear in the chart's `policyQuotaNamespaces`.
 NS = "analytics"
@@ -294,6 +295,72 @@ def seed_observed(base: str, token: str) -> int:
     return failures
 
 
+
+# --- the console suite's OWN prerequisites ------------------------------------------------------------
+
+# `ui/tests/e2e/COVERAGE-MATRIX.md` documents specs that need "the seeded cluster": a
+# `default/customer-support` policy so the shell-injection payload resolves to `block`, and enough
+# governed traffic through it that `matches` is non-zero rather than 0.
+#
+# Nothing in this repository created it. `scripts/seed-local-policies.py` does — but it talks
+# STRAIGHT to Postgres and Redis, so it needs two more port-forwards and the DB credentials, and it
+# was written for a local dev stack rather than a cluster. Going through the API instead needs only
+# the console forward that is already up, and exercises the same path an operator would.
+CUSTOMER_SUPPORT_CLASS = "customer-support"
+CUSTOMER_SUPPORT_NS = "default"
+
+# Traffic that the policy above GOVERNS. Without it `matches` stays 0 and
+# `console-wave2-ui.spec.ts:65` fails on `expect(cs?.matches).toBeGreaterThan(0)` — a spec asserting a
+# real governed-call count, which is exactly the assertion a fabricated number would defeat.
+CS_TRAFFIC = [
+    ("search_kb", {"q": "refund policy"}),
+    ("search_kb", {"q": "password reset"}),
+    ("http_get", {"url": "https://docs.internal.example.com/faq"}),
+]
+
+
+def seed_console_prereqs(base: str, token: str, repo_root: Path) -> int:
+    failures = 0
+    rego_path = repo_root / "comprehensive.rego"
+    if not rego_path.exists():
+        print(f"  FAIL comprehensive.rego not found at {rego_path}")
+        return 1
+
+    status, body = post(base, "/api/v1/policies", token, {
+        "namespace": CUSTOMER_SUPPORT_NS,
+        "agent_class": CUSTOMER_SUPPORT_CLASS,
+        "rego_source": rego_path.read_text(encoding="utf-8"),
+        "enforcement_mode": "block",
+        "saved_by": "kind-e2e-seed",
+        "priority": 100,
+    })
+    # 409 is fine and expected on a re-run: the policy is already there, which is the desired state.
+    ok = status in (200, 201, 409)
+    print(f"  {'ok ' if ok else 'FAIL'} policy   {CUSTOMER_SUPPORT_NS}/{CUSTOMER_SUPPORT_CLASS}"
+          f"{'' if ok else f' -> {status} {body[:160]}'}")
+    failures += 0 if ok else 1
+
+    for tool, params in CS_TRAFFIC:
+        status, body = post(base, "/api/v1/evaluate", token, {
+            "tool_name": tool,
+            "tool_params": params,
+            "agent_identity": {
+                "spiffe_id": f"spiffe://norviq/ns/{CUSTOMER_SUPPORT_NS}/sa/{CUSTOMER_SUPPORT_CLASS}",
+                "namespace": CUSTOMER_SUPPORT_NS,
+                "agent_class": CUSTOMER_SUPPORT_CLASS,
+            },
+            # NOT the default. `framework` defaults to "redteam", which `audit_row_is_non_real`
+            # excludes — the row would be written and then hidden from every real-traffic surface,
+            # including the `matches` count this traffic exists to make non-zero.
+            "framework": "sdk",
+        })
+        ok = status == 200
+        print(f"  {'ok ' if ok else 'FAIL'} governed {tool:<14} as {CUSTOMER_SUPPORT_CLASS}"
+              f"{'' if ok else f' -> {status} {body[:160]}'}")
+        failures += 0 if ok else 1
+    return failures
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base-url", default="http://localhost:3400")
@@ -314,6 +381,8 @@ def main() -> int:
     # earlier would leave the FIRST definition as the drifted one and invert the diff.
     print("drift — a server that changed its mind after approval:")
     failures += seed_drift(args.base_url, token)
+    print("console suite prerequisites — the policy and traffic COVERAGE-MATRIX.md assumes:")
+    failures += seed_console_prereqs(args.base_url, token, Path(__file__).resolve().parent.parent.parent)
 
     if failures:
         print(f"\n{failures} seeding step(s) failed", file=sys.stderr)
