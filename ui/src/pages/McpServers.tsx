@@ -142,8 +142,11 @@ export function McpServers() {
   // Approve, revoke and forget are all admin-gated server-side. Asking the server who we are lets the
   // console say WHY a control is unavailable instead of showing a grey button with no explanation.
   const me = useApi(() => fetchMe(), []);
-  const isAdmin = me.data?.role === "admin";
-  const roleKnown = Boolean(me.data) || Boolean(me.error);
+  // Blocked only when we POSITIVELY know the caller is not an admin. An unreachable `/api/v1/me` is
+  // not evidence of anything: treating it as "viewer" turns an unrelated endpoint being down into a
+  // permanently dead Approve button with no way to find out why. The real gate is `require_admin`
+  // server-side, so being permissive here costs at worst an honest 403.
+  const notAdmin = Boolean(me.data) && me.data?.role !== "admin";
 
   const serverRows = useMemo(() => servers.data ?? [], [servers.data]);
   const allPins = useMemo(() => pins.data ?? [], [pins.data]);
@@ -395,11 +398,7 @@ export function McpServers() {
   const loading = servers.loading || pins.loading;
   const error = servers.error || pins.error;
   const selectedServerRow = serverRows.find((s) => s.server_id === selectedServer) ?? null;
-  const approveReason = !roleKnown
-    ? undefined
-    : !isAdmin
-      ? "Needs admin — you are a viewer."
-      : undefined;
+  const approveReason = notAdmin ? "Needs admin — you are a viewer." : undefined;
 
   return (
     <div className="stack page-enter">
@@ -590,7 +589,7 @@ export function McpServers() {
                 <button
                   type="button"
                   className="btn btn-primary"
-                  disabled={busy || !isAdmin}
+                  disabled={busy || notAdmin}
                   onClick={() => void act(selectedTool, "approve")}
                   data-testid="mcp-approve"
                 >
@@ -603,7 +602,7 @@ export function McpServers() {
                 <button
                   type="button"
                   className="btn btn-destructive"
-                  disabled={busy || !isAdmin}
+                  disabled={busy || notAdmin}
                   onClick={() => void act(selectedTool, "revoke")}
                   data-testid="mcp-revoke"
                 >
@@ -652,7 +651,7 @@ export function McpServers() {
               <button
                 type="button"
                 className="btn btn-destructive"
-                disabled={busy || !isAdmin}
+                disabled={busy || notAdmin}
                 onClick={() => void quarantineServer(conflict.row.server_id)}
                 data-testid="mcp-conflict-quarantine"
               >
@@ -717,7 +716,7 @@ export function McpServers() {
           }
           confirmWord={forgetting.server_id}
           confirmLabel="Forget server"
-          allowed={isAdmin}
+          allowed={!notAdmin}
           busy={busy}
           onCancel={() => setForgetting(null)}
           onConfirm={() => void forgetServer(forgetting)}

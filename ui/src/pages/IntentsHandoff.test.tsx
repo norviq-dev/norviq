@@ -100,8 +100,16 @@ describe("intents -> builder handoff", () => {
 
     // Stated in place, with EVERY reason, before anything is pressed.
     const banner = await screen.findByTestId("handoff-blocked");
-    expect(banner).toHaveTextContent(/cannot be edited in the builder without weakening it/i);
+    expect(banner).toHaveTextContent(/cannot be opened in the builder/i);
     expect(banner).toHaveTextContent(/nested path has no equivalent/i);
+    // ...and it says what to do instead, so the refusal is not a dead end.
+    expect(banner).toHaveTextContent(/Save it as a draft/i);
+
+    // The BUTTON is disabled, not merely guarded on click. It used to stay live: clicking fired a
+    // toast showing only the first reason and went nowhere, so the page both refused and looked
+    // broken. The reason is beside it as text, since a disabled button never receives hover.
+    expect(screen.getByTestId("open-in-builder")).toBeDisabled();
+    expect(screen.getByTestId("builder-gate-reason")).toHaveTextContent(/cannot be carried across/i);
 
     await user.click(screen.getByTestId("open-in-builder"));
     // And it did NOT navigate: the Intents screen is still the one rendered.

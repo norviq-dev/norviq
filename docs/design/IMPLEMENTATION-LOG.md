@@ -297,3 +297,117 @@ the collision. When two bugs share a root cause in a type that cannot express th
 Fixed in passing while in `DataTable`: `.tbl tbody tr { cursor: pointer }` applied to read-only tables
 too, so rows across the console invited a click that was never wired. Now gated on `onRowClick` via a
 `.row-clickable` class. Affordance follows behaviour.
+
+---
+
+## Phase 4 — Propose from traffic
+
+### D10 — The near miss became an API contract, not a string the console picks apart
+
+**The gap.** The design requires per-clause ✓/✗ on a refused call, *"with the implicit predicates
+rendered so `met 3 of 4` reconciles"*. The API returned one sentence:
+
+```
+no intent rule matched; closest send-send-email met 4/5, failed: tool_name in ['vector_search']
+```
+
+**Why the console could not do this alone.** Reconciling the count needs the closest rule's FULL
+predicate list, and two of those clauses are added by the compiler rather than the operator: the plane
+(`direction == call`) and the availability guard for each version-gated root
+(`data_classes is published by this engine`). Rebuilding that list in TypeScript means
+re-implementing `_predicate()` and `_availability_predicates()` in a second language — the exact
+"two components keyed differently on one concept" defect this session has hit repeatedly. The drifted
+copy would be the one the operator was shown before approving.
+
+Splitting the `failed:` tail is also **unsafe**, and quietly so: labels are built from Python reprs, so
+`tool_name in ['http_get', 'vector_search']` CONTAINS the `", "` separator. A naive split shreds one
+clause into three, none matching a real predicate. Verified on the live cluster — the proposer emits
+exactly that label for `support-agent`.
+
+**Decision.** Decompose in `norviq/engine/intent/dryrun.py`, beside the `sprintf` that formats the
+string, and publish `closest_rule` / `met` / `predicates` / `failed` per blocked call. The reason
+string is unchanged, so nothing that reads it loses anything.
+
+Two safety properties, both tested:
+- `split_failed_labels` matches the LONGEST candidate label at each position (one label may prefix
+  another) and returns `[]` if any text is unaccounted for. A partial parse would tick a clause as
+  *passed* — a restriction the operator believes is in force when it is not.
+- the API publishes the set only when `len(predicates) == total` and `len(failed) == total - met`. If
+  the parse and the compiler ever disagree, the console falls back to the raw sentence rather than
+  rendering a tick-list that contradicts its own heading.
+
+Verified live: `met 4 of 5`, five clauses published, two of them compiler-added, `4 + 1 == 5`.
+
+### D11 — An unknown role is not evidence of anything
+
+**Found by a test failure, and it was a real defect I had just introduced.** Both new admin gates read
+`roleKnown = Boolean(me.data) || Boolean(me.error)`, so a FAILED `/api/v1/me` counted as "this user is
+a viewer" and disabled Approve and Save-as-draft permanently, with a reason that was actively false.
+
+**Decision.** Block only on `Boolean(me.data) && role !== "admin"`. Unknown means permitted.
+
+**Why.** The real gate is `require_admin` server-side. The console's check is an affordance — it
+exists to explain a refusal before it happens, not to be the refusal. Being permissive when we do not
+know costs an honest 403; being restrictive costs a dead button caused by an unrelated endpoint being
+down, with no way for the operator to find out why. Applied to MCP Servers too.
+
+### D12 — "can only name tools" was not true
+
+**Found by screenshotting the built page.** The `params_available: false` panel said the proposal
+*"can only name tools"* while the rule card beneath it rendered `the operation is read` — a `verb`
+predicate, which the proposer derives from classification rather than from arguments. The design
+prototype carries the same imprecision.
+
+Corrected to "can only name tools and the operation they perform". Small, but it is the same failure
+mode `predicateSentence` refuses to commit: **prose that overstates what the policy does is worse than
+no prose**, because the operator approves the sentence and the engine enforces the predicate.
+
+### D13 — Refusals are grouped
+
+Replaying a class's traffic produces one row per call, so a single misconfigured rule can yield
+hundreds of identical refusals — burying the one that differs. Rows are grouped by
+`(tool, closest rule, failed clauses, reason)` with an occurrence count. The operator has one decision
+per distinct reason, not one per call. Confirmed live: four identical `http_get` refusals collapse to
+one card reading "4 calls".
+
+---
+
+## What broke in Phase 4, and the rule each one leaves behind
+
+### Editing the agent class destroyed the proposal
+
+`onChange` called `setProposal(null)`, so correcting a typo threw away a dry run that had just replayed
+the entire recorded sample. Worse, the builder handoff was keyed on the live input box rather than the
+proposal, so editing the box after proposing would have seeded the builder with an agent class the
+rules were never proposed from.
+
+Now the proposal survives, is keyed on its own class, and a divergence renders a `proposal-stale`
+banner naming both.
+
+**Rule.** An input that invalidates expensive derived state should mark it stale, never delete it. The
+operator can always ask again; they cannot un-ask.
+
+### The refusal banner and the button disagreed
+
+`9ecd610` added a banner saying the handoff would weaken the policy, but left the button ENABLED —
+clicking fired a toast showing only the first of N reasons and navigated nowhere. The page both
+refused and looked broken. The button is now disabled with the reason as adjacent text, and
+`openInBuilder` keeps its own guard: a protection that lives only in a `disabled` attribute is one
+refactor away from being gone, and what it protects is the weaker policy getting saved.
+
+### Three stale tests, correctly classified
+
+`Intents.test.tsx` and `IntentsHandoff.test.tsx` asserted the OLD copy and the OLD flat predicate line.
+Rewritten rather than deleted, each with the reason the behaviour changed. The plan predicted exactly
+this ("the Propose humanisation work will legitimately break `Intents.test.tsx`") — classifying before
+fixing is what kept them from being quietly weakened.
+
+### A NUL byte in a source file
+
+Three `\0` bytes reached `Intents.tsx` inside a template literal where spaces were intended. `tsc`,
+eslint and vitest ALL passed — a NUL is a legal character in a JS string — and the only symptom was
+`grep` reporting the file as binary and silently matching nothing.
+
+**Rule.** When a text search returns nothing from a file you just edited, check for binary content
+before concluding the edit did not land. The grouping key is now an explicit `join()` with a visible
+delimiter.

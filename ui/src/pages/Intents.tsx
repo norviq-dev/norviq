@@ -16,14 +16,18 @@
 import { useCallback, useMemo, useState } from "react";
 import { AlertTriangle, CheckCircle2, FileText, PencilLine, Play, Wand2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
-import { apiSend } from "../api/client";
-import { Column, DataTable } from "../components/common/DataTable";
+import { apiSend, fetchMe } from "../api/client";
+import { InlineDisabledReason } from "../components/common/InlineDisabledReason";
 import { KitButton } from "../components/common/KitButton";
+import { NearMissCard, type BlockedCallDetail } from "../components/common/NearMissCard";
 import { PageHead } from "../components/common/PageHead";
 import { Panel } from "../components/common/Panel";
+import { RuleCard } from "../components/common/RuleCard";
 import { StatTile } from "../components/common/StatTile";
 import { useToast } from "../components/common/Toast";
+import { useApi } from "../hooks/useApi";
 import { useApp } from "../store/AppContext";
+import { commonTerms, predicateSentence } from "../lib/predicateSentence";
 import { intentToBuilderGraph, type IntentLike } from "../lib/intentToGraph";
 import type { BuilderGraph } from "../lib/builderGraph";
 
@@ -38,7 +42,10 @@ export type Intent = { name: string; class: string; call?: IntentRule[] };
 
 export type ProposeResponse = { intent: Intent; sampled: number; params_available: boolean };
 
-export type BlockedCall = { index: number; tool_name: string; reason: string; [key: string]: unknown };
+/** The near miss, decomposed by the API so the clause list can reconcile with `met M of N`. The
+ *  optional fields are absent when the reason could not be decomposed; the card then shows the raw
+ *  sentence rather than a tick-list that contradicts its own heading. */
+export type BlockedCall = BlockedCallDetail & { [key: string]: unknown };
 
 export type DryRunResponse = {
   total: number;
@@ -50,25 +57,22 @@ export type DryRunResponse = {
   params_available?: boolean;
 };
 
-/** Render a predicate map as the sentence an operator reads, not as JSON. */
-function describePredicates(rule: IntentRule): string[] {
-  const out: string[] = [];
-  if (rule.server) out.push(`integration is ${rule.server}`);
-  const walk = (block?: Record<string, unknown>) => {
-    Object.entries(block ?? {}).forEach(([field, spec]) => {
-      if (typeof spec === "string") {
-        out.push(`${field} is ${spec}`);
-        return;
-      }
-      Object.entries((spec ?? {}) as Record<string, unknown>).forEach(([op, value]) => {
-        const rendered = Array.isArray(value) ? value.join(", ") : String(value);
-        out.push(`${field} ${op} ${rendered}`);
-      });
-    });
-  };
-  walk(rule.match);
-  walk(rule.require);
-  return out;
+/**
+ * Group identical refusals.
+ *
+ * The dry run replays every recorded call, so 1,241 `run_query` calls refused for one reason produce
+ * 1,241 rows. The operator has ONE decision to make there, not 1,241 — and a list that long buries
+ * the single `execute_sql` refusal that is actually interesting.
+ */
+export function groupBlocked(blocked: BlockedCall[]): Array<{ call: BlockedCall; occurrences: number }> {
+  const groups = new Map<string, { call: BlockedCall; occurrences: number }>();
+  for (const b of blocked) {
+    const key = [b.tool_name, b.closest_rule ?? "", (b.failed ?? []).join("|"), b.reason].join("\u241F");
+    const existing = groups.get(key);
+    if (existing) existing.occurrences += 1;
+    else groups.set(key, { call: b, occurrences: 1 });
+  }
+  return [...groups.values()].sort((a, b) => b.occurrences - a.occurrences);
 }
 
 export function Intents() {
@@ -82,30 +86,38 @@ export function Intents() {
   const [savedDraft, setSavedDraft] = useState<string | null>(null);
 
   const ns = namespace || "all";
+  // Saving a draft is admin-only server-side (`require_admin` in the intents router). Asking who we
+  // are lets the button say WHY rather than going grey for an unstated reason.
+  const me = useApi(() => fetchMe(), []);
+  // Blocked only when we POSITIVELY know the caller is not an admin. An unreachable `/api/v1/me` is
+  // not evidence of anything, and treating it as "viewer" made an unrelated endpoint being down
+  // present as a permanently dead button with no way to find out why. The real gate is server-side
+  // (`require_admin`), so the worst case of being permissive here is an honest 403.
+  const notAdmin = Boolean(me.data) && me.data?.role !== "admin";
 
   // Convert eagerly so the button can state, BEFORE it is pressed, whether the handoff would lose a
   // restriction. `dropped` non-empty means the resulting graph would be MORE PERMISSIVE than the
   // intent that was just dry-run and approved — so the button refuses rather than warning. A warning
   // that can be clicked through is how the permissive version gets saved.
+  // Keyed on the PROPOSAL's class, never the input box. Typing in the box after proposing used to
+  // re-seed the builder graph with a class the rules were not proposed from — a policy scoped to an
+  // agent class that never made those calls.
   const handoff = useMemo(
     () =>
       proposal?.intent
-        ? intentToBuilderGraph(proposal.intent as IntentLike, agentClass)
+        ? intentToBuilderGraph(proposal.intent as IntentLike, proposal.intent.class)
         : { graph: null as BuilderGraph | null, dropped: [] as string[] },
-    [proposal, agentClass]
+    [proposal]
   );
 
+  /** The box has been edited since this proposal was made, so the two no longer describe one class. */
+  const stale = Boolean(proposal && agentClass.trim() && proposal.intent.class !== agentClass.trim());
+
   const openInBuilder = useCallback(() => {
-    if (!handoff.graph) return;
-    if (handoff.dropped.length) {
-      push({
-        kind: "error",
-        message: `This intent cannot be edited in the builder without weakening it: ${handoff.dropped[0]}${
-          handoff.dropped.length > 1 ? ` (+${handoff.dropped.length - 1} more)` : ""
-        }`
-      });
-      return;
-    }
+    // Belt and braces: the button is disabled when a restriction would be lost, but the refusal
+    // stays here too. A guard that lives only in a `disabled` attribute is one keyboard shortcut or
+    // one refactor away from being gone, and what it protects is the weaker policy being saved.
+    if (!handoff.graph || handoff.dropped.length) return;
     // The builder owns authoring and the gated save; nothing here enforces. Carrying the graph in
     // router state (not a query string) keeps a policy body out of browser history and access logs.
     // `/policies/catalog`, NOT `/policies`. App.tsx routes `/policies` through
@@ -178,28 +190,26 @@ export function Intents() {
     }
   }, [proposal, ns, push]);
 
-  const blockedColumns: Column<BlockedCall>[] = useMemo(
-    () => [
-      { key: "tool_name", title: "Tool", thStyle: { width: "18%" } },
-      {
-        key: "reason",
-        title: "Why it would be denied",
-        // The near-miss explainer — "closest send-send-email met 3/4, failed: <clause>" — is the most
-        // useful sentence on the page and it contains raw regexes, so it needs the mono face. It also
-        // needs to WRAP: `.tbl td` is `white-space: nowrap`, which put the one string an operator has
-        // to read behind a horizontal scrollbar.
-        render: (value) => (
-          <span className="mono" style={{ fontSize: 12, whiteSpace: "normal", display: "inline-block" }}>
-            {String(value)}
-          </span>
-        ),
-        tdStyle: { whiteSpace: "normal" }
-      }
-    ],
-    []
-  );
-
   const rules = proposal?.intent.call ?? [];
+  // Clauses every rule repeats, stated once above the set instead of on each card. The proposer
+  // attaches `data_classes noneOf ['secret']` to everything it emits, so repeating it buries the
+  // clauses that actually differ — which is what an operator comparing rules is reading for.
+  const hoisted = useMemo(() => commonTerms(rules), [rules]);
+  const grouped = useMemo(() => (report ? groupBlocked(report.blocked) : []), [report]);
+
+  const draftBlocker = ns === "all"
+    ? "Pick a single namespace — a draft is stored against one, not all."
+    : !report
+      ? "Dry run it first. A draft is only worth having once you know what it would refuse."
+      : notAdmin
+        ? "Needs admin — you are a viewer."
+        : undefined;
+
+  const builderBlocker = ns === "all"
+    ? "Pick a single namespace — the builder saves against one."
+    : handoff.dropped.length > 0
+      ? `${handoff.dropped.length} restriction${handoff.dropped.length === 1 ? "" : "s"} cannot be carried across, listed above.`
+      : undefined;
 
   return (
     // `page-enter stack` is what every other page uses: the fade-in plus a 16px gap between panels.
@@ -225,11 +235,11 @@ export function Intents() {
               placeholder="support-bot"
               value={agentClass}
               aria-label="Agent class"
-              onChange={(e) => {
-                setAgentClass(e.target.value);
-                setProposal(null);
-                reset();
-              }}
+              // Editing the box no longer DESTROYS the proposal. It used to clear it on every
+              // keystroke, so correcting a typo threw away a dry run that had just taken a minute
+              // over 1,284 replayed calls. The proposal names its own class; when the two diverge
+              // the page says so and offers to propose again.
+              onChange={(e) => setAgentClass(e.target.value)}
             />
           </label>
           <KitButton icon={Wand2} onClick={propose} disabled={!agentClass.trim() || busy !== null}>
@@ -238,17 +248,37 @@ export function Intents() {
         </div>
       </Panel>
 
+      {stale && (
+        <Panel data-testid="proposal-stale">
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+            <AlertTriangle size={16} style={{ color: "var(--escalate)", flex: "none", marginTop: 2 }} />
+            <div style={{ fontSize: 13, lineHeight: 1.6 }}>
+              This proposal is for <code className="mono">{proposal?.intent.class}</code>, not{" "}
+              <code className="mono">{agentClass.trim()}</code>. It is still shown because a dry run over
+              recorded traffic is not cheap to redo — but propose again before saving anything.
+            </div>
+          </div>
+        </Panel>
+      )}
+
       {proposal && (
         <>
           {proposal.params_available === false && (
-            <Panel data-testid="params-warning">
+            // A PRIMARY state, not a footnote. With no recorded arguments this proposal can only name
+            // tools, and every argument-level affordance below is suppressed rather than shown empty —
+            // an empty ALLOWED IF band would read as "nothing is required here", when the truth is
+            // "nothing could be checked".
+            <Panel data-testid="params-warning" title="Proposed from tool names only">
               <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
                 <AlertTriangle size={16} style={{ color: "var(--escalate)", flex: "none", marginTop: 2 }} />
-                <div>
-                  <strong>Proposed from tool names only.</strong> The audit log for this class carries no
-                  call parameters, so this proposal cannot constrain recipients, data classes or SQL
-                  tables. Enable parameter capture, or supply sample calls, before relying on a
-                  destination-level rule.
+                <div style={{ fontSize: 13, lineHeight: 1.65 }}>
+                  No call arguments were recorded for this class, so these rules can only name tools and
+                  the operation they perform — not recipients, data classes or SQL tables. A rule here
+                  grants a tool outright.
+                  <div style={{ marginTop: 8, color: "var(--text-secondary)" }}>
+                    Enable parameter capture, or supply sample calls, before relying on a
+                    destination-level rule.
+                  </div>
                 </div>
               </div>
             </Panel>
@@ -269,111 +299,118 @@ export function Intents() {
             title="Proposed intent"
             sub="Every rule is an ALLOW. There is no deny list — deny is the absence of a match."
             action={
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-start" }}>
                 <KitButton variant="secondary" icon={Play} onClick={dryRun} disabled={busy !== null}>
                   {busy === "dryrun" ? "Replaying…" : "Dry run"}
                 </KitButton>
-                <KitButton
-                  variant="secondary"
-                  icon={FileText}
-                  onClick={saveDraft}
-                  disabled={busy !== null || !report || ns === "all"}
-                >
-                  {busy === "draft" ? "Saving…" : "Save as draft"}
-                </KitButton>
+                {/* WHY AN ACTION IS UNAVAILABLE, as text beside the control. These were `title`
+                    tooltips: `.btn:disabled` sets `pointer-events: none`, so a disabled button never
+                    receives the hover that would show its own explanation. */}
+                <InlineDisabledReason reason={draftBlocker} tone={notAdmin ? "muted" : "escalate"} data-testid="draft-gate">
+                  <KitButton
+                    variant="secondary"
+                    icon={FileText}
+                    onClick={saveDraft}
+                    data-testid="save-draft"
+                    disabled={busy !== null || Boolean(draftBlocker)}
+                  >
+                    {busy === "draft" ? "Saving…" : "Save as draft"}
+                  </KitButton>
+                </InlineDisabledReason>
                 {/* The handoff. This screen proposes from RECORDED TRAFFIC and replays it — the two
                     things the builder structurally cannot do. Editing belongs in the builder, so
-                    this hands the proposal over rather than growing a second editor here. */}
-                <KitButton
-                  variant="secondary"
-                  icon={PencilLine}
-                  data-testid="open-in-builder"
-                  onClick={openInBuilder}
-                  disabled={busy !== null || !proposal || ns === "all"}
+                    this hands the proposal over rather than growing a second editor here.
+
+                    DISABLED when a restriction would be lost. The banner below has said so since
+                    9ecd610, but the button stayed live: clicking it fired a toast showing only the
+                    first reason and went nowhere, so the page both refused and looked broken. */}
+                <InlineDisabledReason
+                  reason={builderBlocker}
+                  tone={handoff.dropped.length > 0 ? "block" : "escalate"}
+                  data-testid="builder-gate"
                 >
-                  Open in Visual Builder
-                </KitButton>
+                  <KitButton
+                    variant="secondary"
+                    icon={PencilLine}
+                    data-testid="open-in-builder"
+                    onClick={openInBuilder}
+                    disabled={busy !== null || !proposal || Boolean(builderBlocker)}
+                  >
+                    Open in Visual Builder
+                  </KitButton>
+                </InlineDisabledReason>
               </div>
             }
           >
-            {/* WHY AN ACTION IS UNAVAILABLE, as text. These were `title` tooltips on the buttons, which
-                could never be read: `.btn:disabled` sets `pointer-events: none`, so a disabled button
-                never receives the hover that would show its own explanation. */}
-            {ns === "all" && (
-              <div className="muted" style={{ fontSize: 12, marginBottom: 10 }} data-testid="ns-blocker">
-                Pick a single namespace to save a draft or hand this to the builder — both are stored
-                against one namespace, not all.
-              </div>
-            )}
-            {/* The handoff REFUSES rather than warns when a restriction cannot be carried across, because
-                a warning that can be clicked through is how the weaker policy gets saved. That is right,
-                but it used to be invisible until you clicked: the button looked enabled and the reasons
-                arrived in a corner toast showing only the first. Stating it up front, in full, is the
-                same protection without the dead end. */}
+            {/* The handoff REFUSES rather than warns when a restriction cannot be carried across,
+                because a warning that can be clicked through is how the weaker policy gets saved.
+                Naming each lost restriction is what makes the refusal actionable — the operator can
+                re-add them by hand in the builder, or keep the stronger intent as a draft. */}
             {handoff.dropped.length > 0 && (
               <div
                 data-testid="handoff-blocked"
                 role="status"
                 style={{
-                  fontSize: 12,
-                  marginBottom: 10,
-                  padding: "8px 10px",
-                  borderRadius: 8,
+                  fontSize: 12.5,
+                  lineHeight: 1.6,
+                  marginBottom: 12,
+                  padding: "10px 12px",
+                  borderRadius: 10,
                   border: "1px solid #FFB02030",
                   background: "#FFB02015",
-                  color: "var(--escalate)"
+                  color: "var(--text-secondary)"
                 }}
               >
-                <strong>This proposal cannot be edited in the builder without weakening it.</strong>
+                <strong style={{ color: "var(--escalate)" }}>
+                  This proposal cannot be opened in the builder.
+                </strong>{" "}
+                {handoff.dropped.length === 1 ? "One restriction has" : `${handoff.dropped.length} restrictions have`}{" "}
+                no allowlist equivalent.
                 <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
                   {handoff.dropped.map((d) => (
                     <li key={d}>{d}</li>
                   ))}
                 </ul>
+                <div style={{ marginTop: 6, color: "var(--text-muted)" }}>
+                  Save it as a draft and apply it from Policy Catalog, or re-add these by hand in the builder.
+                </div>
               </div>
             )}
             {!report && (
-              <div className="muted" style={{ fontSize: 12 }} data-testid="dryrun-hint">
+              <div className="muted" style={{ fontSize: 12, marginBottom: 10 }} data-testid="dryrun-hint">
                 Dry run this against recorded traffic before saving — the draft is only worth having once
                 you know what it would have refused.
               </div>
             )}
-            <ul style={{ listStyle: "none", margin: "12px 0 0", padding: 0, display: "flex", flexDirection: "column", gap: 10 }}>
+            {hoisted.length > 0 && (
+              <div
+                data-testid="hoisted-clauses"
+                style={{
+                  fontSize: 12.5,
+                  lineHeight: 1.6,
+                  padding: "9px 11px",
+                  borderRadius: 10,
+                  background: "var(--bg-elevated)",
+                  color: "var(--text-secondary)",
+                  marginBottom: 10
+                }}
+              >
+                <span style={{ fontWeight: 600, color: "var(--text-primary)" }}>Applied to every rule:</span>{" "}
+                {hoisted.map((t) => predicateSentence(t).prose).join("; ")} — stated once here instead of repeated
+                on all {rules.length}.
+              </div>
+            )}
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               {rules.map((rule) => (
-                <li
+                <RuleCard
                   key={rule.id}
-                  data-testid={`rule-${rule.id}`}
-                  style={{ borderTop: "1px solid var(--border)", paddingTop: 10 }}
-                >
-                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                    <code className="mono">{rule.id}</code>
-                    {/* `.badge` is not a class in this app — these rendered as plain text, so a green
-                        "covered" and an amber "matched nothing" were indistinguishable. `.pill` is the
-                        real primitive, and it carries the colour that makes the two mean something. */}
-                    {report?.unused_rules?.includes(rule.id) && (
-                      <span
-                        className="pill"
-                        title="No recorded call matched this rule"
-                        style={{ background: "#FFB02015", color: "#FFB020", borderColor: "#FFB02030" }}
-                      >
-                        matched nothing
-                      </span>
-                    )}
-                    {typeof report?.coverage?.[rule.id] === "number" && !report.unused_rules.includes(rule.id) && (
-                      <span
-                        className="pill"
-                        style={{ background: "#00E5A015", color: "#00E5A0", borderColor: "#00E5A030" }}
-                      >
-                        {report.coverage[rule.id]} calls
-                      </span>
-                    )}
-                  </div>
-                  <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-                    {describePredicates(rule).join(" · ")}
-                  </div>
-                </li>
+                  rule={rule}
+                  calls={report ? (report.coverage?.[rule.id] ?? 0) : null}
+                  unused={Boolean(report?.unused_rules?.includes(rule.id))}
+                  hoisted={hoisted.map((t) => t.raw)}
+                />
               ))}
-            </ul>
+            </div>
           </Panel>
         </>
       )}
@@ -383,7 +420,7 @@ export function Intents() {
           title={report.would_block ? "What this would have refused" : "Nothing legitimate would break"}
           sub={
             report.would_block
-              ? "Each row names the rule that came closest and the single clause that failed — tighten the rule, or accept the denial."
+              ? "The closest rule and the clause that failed — tighten the rule, or accept the denial."
               : "Every recorded call is covered by a rule. That is the point at which this is safe to draft."
           }
         >
@@ -392,11 +429,14 @@ export function Intents() {
               <CheckCircle2 size={16} /> {report.total} recorded calls replayed, none refused.
             </div>
           ) : (
-            <DataTable<BlockedCall>
-              rows={report.blocked}
-              columns={blockedColumns}
-              rowKey="index"
-            />
+            <div data-testid="near-misses">
+              {/* Grouped: replaying 1,284 calls produces one row per call, and 1,241 identical
+                  `run_query` refusals bury the single interesting one. The operator has one decision
+                  per distinct reason, not one per call. */}
+              {grouped.map(({ call, occurrences }) => (
+                <NearMissCard key={call.index} call={call} occurrences={occurrences} />
+              ))}
+            </div>
           )}
         </Panel>
       )}

@@ -46,6 +46,47 @@ def _declared_package(rego: str) -> str:
 Evaluator = Callable[[str, dict], dict]
 
 
+_NEAR_MISS_RE = re.compile(
+    r"^no intent rule matched; closest (?P<rule>.+?) met (?P<met>\d+)/(?P<total>\d+), failed: (?P<failed>.*)$"
+)
+
+
+def split_failed_labels(candidates: Sequence[str], joined: str) -> list[str]:
+    """Recover the failed-predicate LIST from the `", "`-joined tail of a near-miss reason.
+
+    A plain `joined.split(", ")` is wrong, and quietly so. Predicate labels are generated from Python
+    reprs — `tool_name in ['send_email', 'run_query']` — so a single label routinely CONTAINS `", "`.
+    Splitting on it shreds one clause into three, which then neither matches a real predicate nor adds
+    up against the `met M/N` in the same sentence.
+
+    Knowing the candidate labels makes it unambiguous: the compiler emits `sort([...])`, so the tail is
+    the sorted candidates joined in order. Walk it, matching the LONGEST candidate that is a prefix at
+    each position — longest-first because one label may prefix another (`x in [1]` prefixes
+    `x in [1, 2]`).
+
+    Returns `[]` when the tail cannot be accounted for exactly. A partial parse is worse than none:
+    the caller uses this to tick clauses as passed, and a clause wrongly shown as passed is a
+    restriction the operator believes is in force when it is not.
+    """
+    remaining = joined.strip()
+    if not remaining:
+        return []
+    by_length = sorted(candidates, key=len, reverse=True)
+    out: list[str] = []
+    while remaining:
+        for label in by_length:
+            if remaining == label:
+                out.append(label)
+                return out
+            if remaining.startswith(label + ", "):
+                out.append(label)
+                remaining = remaining[len(label) + 2:]
+                break
+        else:
+            return []  # unaccounted-for text — report nothing rather than something wrong
+    return out
+
+
 @dataclass
 class CallOutcome:
     """One recorded call replayed against the candidate intent."""
@@ -55,6 +96,14 @@ class CallOutcome:
     rule_id: str
     reason: str
     tool_name: str = ""
+    # The near miss, decomposed. The reason STRING already carries all of this, but only a console
+    # willing to re-implement the compiler's label rules in another language could take it apart —
+    # and that second implementation would drift from this one, which is the whole reason
+    # `CompiledIntent.labels` exists. Empty when the call was allowed or the reason did not parse.
+    closest_rule: str = ""
+    met: int = 0
+    predicates: tuple[str, ...] = ()
+    failed: tuple[str, ...] = ()
 
     @property
     def would_block(self) -> bool:
@@ -87,7 +136,19 @@ class DryRunReport:
             "coverage": dict(sorted(self.coverage.items())),
             "unused_rules": self.unused_rules,
             "blocked": [
-                {"index": o.index, "tool_name": o.tool_name, "reason": o.reason}
+                {
+                    "index": o.index,
+                    "tool_name": o.tool_name,
+                    "reason": o.reason,
+                    # The near miss as data. `predicates` is EVERY clause the closest rule asserts,
+                    # including the ones the compiler adds itself (the plane, and the availability
+                    # guards for version-gated roots). Rendering only the operator-authored clauses
+                    # is what makes "met 3 of 4" fail to add up against a list of two.
+                    "closest_rule": o.closest_rule,
+                    "met": o.met,
+                    "predicates": list(o.predicates),
+                    "failed": list(o.failed),
+                }
                 for o in self.blocked
             ],
         }
@@ -146,6 +207,25 @@ def dry_run(
             reason=reason,
             tool_name=str(payload.get("tool_name", "")),
         )
+        # Decompose the near miss HERE, next to the compiler that formats it, rather than leaving a
+        # console to do it. `compiled.labels` is the authority on what a rule asserts; anything that
+        # reconstructs the list from the intent document alone will miss the clauses the compiler
+        # adds and will disagree with the `met M/N` in the same sentence.
+        if outcome.would_block:
+            match = _NEAR_MISS_RE.match(reason)
+            if match:
+                rid = match.group("rule")
+                candidates = tuple(compiled.labels.get(rid, ()))
+                failed = tuple(split_failed_labels(candidates, match.group("failed")))
+                met = int(match.group("met"))
+                total = int(match.group("total"))
+                # Publish only a set that RECONCILES. If the parse and the compiler disagree the
+                # honest output is the raw sentence, not a tick-list that quietly contradicts it.
+                if len(candidates) == total and len(failed) == total - met:
+                    outcome.closest_rule = rid
+                    outcome.met = met
+                    outcome.predicates = candidates
+                    outcome.failed = failed
         report.total += 1
         if outcome.would_block:
             report.would_block += 1

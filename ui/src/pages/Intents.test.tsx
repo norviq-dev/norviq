@@ -85,8 +85,41 @@ describe("Intents", () => {
 
     await waitFor(() => expect(screen.getByTestId("rule-send-send-email")).toBeInTheDocument());
     const rule = screen.getByTestId("rule-send-send-email");
-    expect(within(rule).getByText(/verb is send/i)).toBeInTheDocument();
-    expect(within(rule).getByText(/param_paths\.to matches/i)).toBeInTheDocument();
+    // Two bands, not one flat predicate line. APPLIES TO answers "is this rule about the call I am
+    // worried about?"; ALLOWED IF answers "and what must additionally hold?". Flattened together,
+    // every rule looked like it might govern every call.
+    expect(within(rule).getByText("Applies to")).toBeInTheDocument();
+    expect(within(rule).getByText("Allowed if")).toBeInTheDocument();
+    expect(within(rule).getByText(/the operation is send/i)).toBeInTheDocument();
+    // The anchored recipient regex is stated as the domain it pins, not echoed as a regex.
+    expect(within(rule).getByText(/the to is an address at acme\.com/i)).toBeInTheDocument();
+  });
+
+  it("keeps the engine's own predicate text one click away", async () => {
+    // The near-miss report quotes these strings back, so an operator who has read a refusal must be
+    // able to find the same string on the rule. One dialect, per the design brief.
+    vi.spyOn(client, "apiSend").mockResolvedValue(PROPOSAL as never);
+    const user = userEvent.setup();
+    renderPage();
+    await propose(user);
+
+    await waitFor(() => expect(screen.getByTestId("rule-send-send-email")).toBeInTheDocument());
+    await user.click(screen.getByTestId("rule-send-send-email-raw-toggle"));
+    expect(screen.getByTestId("rule-send-send-email-raw")).toHaveTextContent("param_paths.to matches");
+  });
+
+  it("states a clause every rule repeats ONCE, above the set", async () => {
+    // `data_classes noneOf ['secret']` is attached to every proposed rule. Repeated on each card it
+    // costs a line per rule and buries the clauses that actually differ.
+    vi.spyOn(client, "apiSend").mockResolvedValue(PROPOSAL as never);
+    const user = userEvent.setup();
+    renderPage();
+    await propose(user);
+
+    const hoisted = await screen.findByTestId("hoisted-clauses");
+    expect(hoisted).toHaveTextContent(/carries none of secret/i);
+    // ...and NOT on the individual cards.
+    expect(within(screen.getByTestId("rule-send-send-email")).queryByText(/carries none of secret/i)).toBeNull();
   });
 
   it("will not let a draft be saved before the dry run", async () => {
@@ -148,7 +181,10 @@ describe("Intents", () => {
     await propose(user);
 
     await waitFor(() => expect(screen.getByTestId("params-warning")).toBeInTheDocument());
-    expect(screen.getByText(/cannot constrain recipients/i)).toBeInTheDocument();
+    // A primary state, not a footnote: with no recorded arguments a rule grants the tool outright,
+    // and saying so is the difference between an informed draft and a surprise.
+    expect(screen.getByText(/Proposed from tool names only/i)).toBeInTheDocument();
+    expect(screen.getByTestId("params-warning")).toHaveTextContent(/grants a tool outright/i);
   });
 
   it("states that a saved draft is not enforcing and where enforcement actually begins", async () => {
