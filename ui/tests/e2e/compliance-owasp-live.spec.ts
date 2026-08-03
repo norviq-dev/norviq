@@ -121,11 +121,21 @@ test.describe("OWASP LLM as a 2nd LIVE framework — EFFECT proofs on the live c
   });
 
   test("GAP→generate: an OWASP gap generates a real dry-run draft; an OOS control is refused", async ({ page }) => {
-    // LLM07:2025 is enforceable-but-unloaded (a GAP) → generate a real tighten-only dry-run draft (never enforces).
-    const gen = await apiPost(page, "/api/v1/mitre/coverage/generate", { technique_id: "LLM07:2025", namespace: "default", agent_class: "customer-support", framework: "owasp" });
+    // LLM01:2025 is enforceable-but-unloaded (a GAP) → generate a real tighten-only dry-run draft (never enforces).
+    //
+    // NOT LLM07. It reads like a gap in the coverage table, but generate deliberately REFUSES it —
+    // `status: "escalate"`, `draft_id: null`, with the reason: the risk does not surface in agent
+    // tool-call traffic, so no rule could match it at enforcement time. Asserting a draft id there was
+    // asking the product to emit a policy that enforces nothing.
+    const gen = await apiPost(page, "/api/v1/mitre/coverage/generate", { technique_id: "LLM01:2025", namespace: "default", agent_class: "customer-support", framework: "owasp" });
     expect(gen.status).toBe(200);
     expect(gen.body.draft_id).toMatch(/^dmitre/);
     expect(gen.body.enforcement).toBe("draft");
+
+    // ...and the escalate-only control is refused WITH its reason, rather than silently yielding null.
+    const escalateOnly = await apiPost(page, "/api/v1/mitre/coverage/generate", { technique_id: "LLM07:2025", namespace: "default", agent_class: "customer-support", framework: "owasp" });
+    expect(escalateOnly.body.status).toBe("escalate");
+    expect(escalateOnly.body.draft_id).toBeNull();
     const drafts = await api(page, "/api/v1/threats/intent-drafts?namespace=all");
     expect(((drafts.body.drafts ?? []) as any[]).some((d) => String(d.draft_id).startsWith("dmitre"))).toBeTruthy();
 
