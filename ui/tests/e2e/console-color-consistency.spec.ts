@@ -20,13 +20,33 @@ test.describe("color-consistency — computed-style proofs", () => {
     await waitForApp(page);
   });
 
-  test("the Simulate CTA fill resolves to the teal accent (not indigo/purple)", async ({ page }) => {
-    const btn = page.getByRole("button", { name: /Simulate path/i });
+  test("the Simulate CTA resolves to the teal accent (not indigo/purple)", async ({ page }) => {
+    // The CTA reads "Simulate (preview)" (AttackPathDetail.tsx:179) — the "(preview)" is load-bearing,
+    // since the action fires REAL /evaluate calls but enforces nothing. Matched EXACTLY because a loose
+    // /simulate/i resolves to 41 elements on this page (every per-hop control carries the word).
+    const btn = page.getByRole("button", { name: "Simulate (preview)" });
     await expect(btn).toBeVisible();
-    const bgImage = await btn.evaluate((el) => getComputedStyle(el).backgroundImage);
-    // A teal gradient — the fill contains rgb(45, 218, 184); it must NOT contain an indigo/purple channel
-    // (blue markedly greater than red).
-    expect(bgImage).toMatch(/45,\s*218,\s*184/);
+
+    // The control is an OUTLINED button now, not a filled one: AttackPathDetail.tsx:176 sets
+    // `background: var(--bg-graph-card)` with `color: #2ddab8`, so `backgroundImage` is "none" and the
+    // teal lives in the TEXT. This test's point is the accent hue — teal, never indigo/purple — so it
+    // reads whichever channel actually carries it rather than pinning the fill style of the day.
+    const { color, bgImage } = await btn.evaluate((el) => {
+      const cs = getComputedStyle(el);
+      return { color: cs.color, bgImage: cs.backgroundImage };
+    });
+    const teal = /45,\s*218,\s*184/;
+    expect(teal.test(color) || teal.test(bgImage)).toBe(true);
+
+    // ...and explicitly NOT indigo/purple. The discriminator is GREEN, not red: teal is
+    // rgb(45, 218, 184), whose blue channel is far above its red — so "blue > red" flags teal itself.
+    // What separates them is that teal's green dominates (218 > 184) while indigo's collapses
+    // (rgb(99, 102, 241): blue 241 >> green 102).
+    const rgb = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(color);
+    if (rgb) {
+      const [, g, b] = [Number(rgb[1]), Number(rgb[2]), Number(rgb[3])];
+      expect(b, `accent must not be indigo/purple: ${color}`).toBeLessThanOrEqual(g);
+    }
   });
 
   test("the Define-intent CTA border resolves to the teal accent", async ({ page }) => {
