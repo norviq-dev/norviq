@@ -83,7 +83,13 @@ test.describe("Apply-per-surface enforcement — each surface flips /evaluate on
 
   test("OVERRIDE (tighten-only) enforces, and REVERT (?namespace=) truly un-loads it", async ({ page }) => {
     const NS = "fbe-ovr", C = "fbe-a";
-    const OVR = ["package norviq.packoverride", 'decision = "block" { input.tool_name == "export_all" }',
+    // `default decision = "allow"` is REQUIRED. `assert_decision_resolver` (policies.py) rejects a module
+    // that defines a conditional `decision` without a default — the silent-allow guard: without it a
+    // non-matching call yields an UNDEFINED decision rather than an explicit one. This fixture predates
+    // that check and so 422'd on every run. The shipped OVERRIDE_TEMPLATE (PolicyPacks.tsx:36) carries
+    // the same line, which is the proof the product accepts this shape.
+    const OVR = ["package norviq.packoverride", 'default decision = "allow"',
+      'decision = "block" { input.tool_name == "export_all" }',
       'rule_id = "pack_override_block" { decision == "block" }', 'reason = "r" { decision == "block" }'].join("\n");
     try {
       await mkBase(page, NS, C);

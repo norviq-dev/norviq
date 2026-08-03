@@ -93,7 +93,12 @@ test.describe("Policy Editor — create (raw rego) + delete (guardrails), proven
       await page.reload();
       await waitForApp(page);
       await page.getByRole("button", { name: /^catalog$/i }).click();
-      await page.getByTestId(`catalog-delete-${CLS}`).click();
+      // The delete testid is `catalog-delete-<class>-<namespace>`; the namespace suffix was added when the
+    // catalog started keying rows on namespace + class. getByTestId matches EXACTLY, so the old id
+    // matched nothing — and because no actionTimeout is configured, the click auto-waited the full 60s
+    // test budget and reported a timeout rather than a missing element. Matched on PREFIX, as the
+    // sibling test in this same file already does.
+    await page.locator(`[data-testid^="catalog-delete-${CLS}-"]`).first().click();
 
       // GUARDRAILS: the confirm names ns/class/version and carries the enforcing warning.
       const modal = page.getByTestId("delete-policy-modal");
@@ -105,7 +110,9 @@ test.describe("Policy Editor — create (raw rego) + delete (guardrails), proven
       // EFFECT: the class FLIPS BACK — its own rule stops firing (a true un-load, not a stale cache).
       await expect.poll(async () => (await ev(page, NS, CLS, TOOL)).rule_id, { timeout: 20000 }).not.toBe(RULE);
       // …and the row is gone from the catalog.
-      await expect(page.getByTestId(`catalog-delete-${CLS}`)).toHaveCount(0);
+      // Same stale id here made this assertion VACUOUSLY true: a locator that never matched anything
+    // trivially has count 0, so "the row is gone" passed whether or not the delete worked.
+    await expect(page.locator(`[data-testid^="catalog-delete-${CLS}-"]`)).toHaveCount(0);
       recorder.expectNoConsoleErrors();
       recorder.expectNoApiFailures();
     } finally {
