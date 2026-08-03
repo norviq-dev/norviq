@@ -1240,3 +1240,63 @@ tests report "no injected agent workloads deployed (valid empty state)".
 
 > **Rule: an opt-in flag that the harness never sets is coverage that does not exist. Grep the skip
 > reasons — every one that names an environment variable is a test asking to be run.**
+
+---
+
+## G3 — the browser suite, and two runs that measured nothing
+
+Three full runs, three different numbers, and only one of them meant anything.
+
+| Run | Config | Result |
+|---|---|---|
+| 1 | `e2e.sh`, 3 workers | 21 failed · 12 flaky · 4 did not run · 146 passed (9.1m) |
+| 2 | `e2e.sh`, 1 worker | **12 failed · 0 flaky · 4 did not run · 167 passed (18.1m)** |
+| 3 | `e2e.sh`, 1 worker, expired token | 136 failed · 38 passed · **1h42m** |
+
+Only run 2 is evidence. The other two are artefacts of the harness.
+
+### The flakiness was not flakiness
+
+`playwright.config.ts` sets `fullyParallel` with 3 workers, and all three share ONE
+`storageState.json` token against a backend with a SINGLE admin identity. Any spec that logs out or
+rotates the password breaks whatever is running beside it. Serialising took flaky from **12 to 0** and
+failures from 21 to 12 — the twelve "flakes" were three workers fighting over one account.
+
+`e2e.sh` now defaults to `--workers=1` and takes `NRVQ_E2E_WORKERS` to override. Serial costs 18
+minutes against 9, which is the right trade for a gate whose entire value is that its result means
+something.
+
+### 136 failures, none of them real
+
+Run 3 reported 136 failed across 136 different surfaces — every route smoke test, the whole console.
+It took **an hour and forty-two minutes** because each spec sat through its own 60s timeout.
+
+The admin token had expired. ~160 specs authenticate with it, `token_mint --ttl 7200` gives two hours,
+a serial run takes twenty minutes, and the file persists across runs — so a token minted earlier in a
+working session goes stale between one run and the next. Nothing checked.
+
+It is reachable through the front door, too: the login gate re-seeds that file, and `e2e.sh` skips the
+gate whenever the caller exports `NRVQ_E2E_PASSWORD`. Exporting it is exactly what left the stale token
+in place.
+
+The trap worth naming is not the expiry. It is that **run 3 came immediately after a seeding change**,
+so the available reading — "the change I just made broke everything" — was both obvious and wrong. A
+136-failure list that names 136 unrelated features is not 136 defects; it is one precondition.
+
+> **Rule: before a long suite runs, assert its preconditions are LIVE, not merely present. A token file
+> that exists proves nothing. `e2e.sh` now GETs `/api/v1/version` with it, re-mints from the live api
+> pod if that fails, re-checks, and refuses to start rather than producing a failure list where every
+> assertion is a disguised 401.**
+
+Verified the way every other guard here is: by pointing it at a junk token and watching it re-mint.
+
+### Red-team surfaces tested below the scale that exercises them
+
+`redteam-view-pager` needs ≥300 results to prove the results table stays bounded at the VIEW. Its own
+comment reads "18 real classes × 29 attacks ≈ 500+ rows" — true of the AKS cluster it was written
+against. A fresh kind `default` namespace holds one governed class, so the suite returned ~29 rows and
+the bound went unverified.
+
+`seed.py` now seeds twelve plausibly-named agent classes: **638 results in 12s**. Named after real
+agents rather than `probe-N` deliberately — `audit_row_is_non_real` hides the `probe-`/`e2e-`/`smoke-`
+prefixes, so a fleet named that way would seed the surfaces it exists to populate with nothing at all.
