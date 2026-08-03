@@ -36,8 +36,35 @@ test.describe("Asset Graph hull encloses every ring node", () => {
     await page.goto("/asset-graph");
     await waitForApp(page);
     await expect(page.getByTestId("asset-graph-canvas")).toBeVisible();
-    // Let the fit/zoom + circle layout settle so hull `d` and node transforms are final.
-    await page.waitForTimeout(600);
+    // POLL until the layout STOPS MOVING, never sleep once. The d3 fit/zoom + circle layout settles in
+    // a time proportional to the node count, and a fixed 600ms was calibrated against a smaller graph:
+    // once the seeded estate grew to ~85 nodes the wait expired mid-settle and one node was still in
+    // flight, 259px from a hull of radius 141. It presented as a hard geometry failure — "a node is
+    // rendered outside its cluster" — and passed on retry, which is the signature of a sleep-once.
+    //
+    // The wait condition is STABILITY, not the assertion itself: sampling the transforms twice and
+    // waiting for them to agree would be circular if it waited for "all inside". This waits for the
+    // simulation to stop, then asks the question.
+    const transformSig = () =>
+      page.getByTestId("asset-graph-canvas").evaluate((svg) =>
+        Array.from(svg.querySelectorAll("g.ag-node"))
+          .map((g) => g.getAttribute("transform") ?? "")
+          .join("|")
+      );
+    // TWO CONSECUTIVE identical samples, not one. The canvas reaches a quiet moment before its data
+    // has fully landed and then re-lays-out, so a single match can catch that first lull and measure a
+    // layout that is about to change. Requiring the signature to hold twice in a row rides past it.
+    let prev = await transformSig();
+    let stableRuns = 0;
+    await expect
+      .poll(async () => {
+        await page.waitForTimeout(250);
+        const now = await transformSig();
+        stableRuns = now === prev && now.length > 0 ? stableRuns + 1 : 0;
+        prev = now;
+        return stableRuns;
+      }, { timeout: 30_000, message: "asset-graph layout never stopped moving" })
+      .toBeGreaterThanOrEqual(2);
 
     const result = await page.getByTestId("asset-graph-canvas").evaluate((svg) => {
       // Hull circles are <path d="M {cx-r} {cy} a {r} {r} 0 1 0 {2r} 0 a {r} {r} 0 1 0 {-2r} 0">.
