@@ -1766,8 +1766,12 @@ function grantSummaryLines(allowlist: BuilderAllowlist | null | undefined): stri
  *  fact palette. Never parsed — the embedded graph stays the source of truth; this exists so the scope a
  *  policy enforces is legible without decoding the blob. The final fallback is unreachable for a policy
  *  that compiled: `validateAllowlistGrants` rejects any grant fact outside the three legal kinds
- *  (`invalid_grant`) before a header is ever produced. */
-function describeFact(f: BuilderGrantFact): string {
+ *  (`invalid_grant`) before a header is ever produced.
+ *
+ *  EXPORTED so the builder's own scope cell renders the same words. The header comment and the UI row
+ *  describe one clause; two renderings of it would drift, and an operator comparing the generated rego
+ *  with the row that produced it could not tell whether they were the same restriction. */
+export function describeFact(f: BuilderGrantFact): string {
   if (f.type === "not") return `NOT (${describeFact(f.inner)})`;
   switch (f.type) {
     case "scalarFact":
@@ -1801,8 +1805,9 @@ function describeFact(f: BuilderGrantFact): string {
 }
 
 /** Plain-English rendering of one constraint for the header comment (never parsed — the embedded graph
- *  is the source of truth; this exists so a human reading the rego can see the intent). */
-function describeConstraint(c: BuilderParamConstraint): string {
+ *  is the source of truth; this exists so a human reading the rego can see the intent). Exported for
+ *  the same one-vocabulary reason as `describeFact`. */
+export function describeConstraint(c: BuilderParamConstraint): string {
   switch (c.kind) {
     case "matches":
       return `${c.field} matches /${c.pattern}/`;

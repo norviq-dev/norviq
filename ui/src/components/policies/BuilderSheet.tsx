@@ -17,6 +17,8 @@ import "../../lib/monaco"; // Bundle Monaco locally — must precede <Editor> (s
 import "./BuilderSteps.css"; // Numbered-step left pane (UX redesign) — layout only, see file header.
 import Editor from "@monaco-editor/react";
 import { registerRego } from "../../lib/monaco-rego";
+import { ProvenanceBadge } from "../common/ProvenanceBadge";
+import { ScopeCell } from "./ScopeCell";
 import { AlertCircle, Check, FlaskConical, Maximize2, Minimize2, Plus, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -34,6 +36,7 @@ import {
   PARAM_PATH_PREFIX,
   SCALAR_FIELD_EXPR,
   compileGraph,
+  describeFact,
   loaderKeyFor,
   scopeIdentifier,
   type BuilderError
@@ -1454,6 +1457,33 @@ export function BuilderSheet({
   // namespaceReady` already ANDed into canDryRun/canSave below makes that redundant-but-correct rather
   // than a second, possibly-inconsistent check.
   const scopeReady = tier === "class" ? agentClass.trim().length > 0 : tier === "namespace" ? namespaceReady : workloadName.trim().length > 0;
+  /** Allowed tools with NO condition on them at all — the grants that are exactly as wide as the tool.
+   *
+   *  Both stores, always. Counting only `allowlistGrants` is the defect that has recurred through this
+   *  work: a tool narrowed purely by scoping FACTS would be reported as unscoped by the very banner
+   *  that exists to tell the operator what is left to do. */
+  const unscopedTools = useMemo(
+    () => allowlistTools.filter((t) => (allowlistGrants[t] ?? []).length + (allowlistGrantFacts[t] ?? []).length === 0),
+    [allowlistTools, allowlistGrants, allowlistGrantFacts]
+  );
+
+  /** Per-tool newly-denied counts, from the dry run's SAMPLE of decision flips.
+   *
+   *  `null` until a dry run has been done — the scope cell then says nothing about traffic rather than
+   *  implying zero. The sample is truncated by the server on large replays, so the count is passed
+   *  with `sampled` and rendered as "at least N": a lower bound printed as a total would be a number
+   *  the operator could act on and the engine would contradict. */
+  const newlyDeniedByTool = useMemo<Map<string, number> | null>(() => {
+    const samples = dryRunResult?.newly_blocked_samples;
+    if (!samples) return null;
+    const out = new Map<string, number>();
+    for (const s of samples) {
+      const name = (s.tool_name ?? "").toLowerCase();
+      if (name) out.set(name, (out.get(name) ?? 0) + 1);
+    }
+    return out;
+  }, [dryRunResult]);
+
   const dryRunStale = dryRunRego !== null && dryRunRego !== compiled.rego;
   // Both the dry-run and the save POST a concrete namespace to the server (dry-run replays that
   // namespace's real traffic) — neither may proceed while the target is still "all"/"" (see
@@ -1961,63 +1991,107 @@ export function BuilderSheet({
                         {schemaByTool.has(allowlistToolInput.trim().toLowerCase()) ? " — its arguments can be scoped" : ""}
                       </div>
                     )}
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                  {/* THE STANDING BANNER. An unscoped grant is not a partial edit an operator will
+                      get back to — it is a finished policy that grants a whole capability. Counting
+                      them where the count cannot be scrolled past is what turns "I allowed six tools"
+                      into "I have narrowed two of six". */}
+                  {unscopedTools.length > 0 && (
+                    <div
+                      data-testid="builder-unscoped-banner"
+                      role="status"
+                      style={{
+                        marginTop: 10,
+                        padding: "10px 12px",
+                        borderRadius: 10,
+                        border: "1px solid #FFB02030",
+                        background: "#FFB02015",
+                        fontSize: 12,
+                        lineHeight: 1.55,
+                        color: "var(--text-secondary)"
+                      }}
+                    >
+                      <strong style={{ color: "var(--escalate)" }}>
+                        {unscopedTools.length} of {allowlistTools.length} allowed tool
+                        {allowlistTools.length === 1 ? " is" : "s are"} unscoped
+                      </strong>
+                      <div style={{ marginTop: 3 }}>
+                        A name is what your framework already grants. The control is the rest of the sentence —
+                        &ldquo;<span className="mono">{unscopedTools[0]}</span>, but only to @acme.com&rdquo;.
+                      </div>
+                      <button
+                        type="button"
+                        className="linklike"
+                        style={{ fontSize: 12, marginTop: 6 }}
+                        data-testid="builder-unscoped-banner-cta"
+                        onClick={() => setOpenGrantTool(unscopedTools[0])}
+                      >
+                        Narrow {unscopedTools[0]} →
+                      </button>
+                    </div>
+                  )}
+
+                  {/* ROWS, not chips. The scope affordance used to be a 10.5px grey `+ scope` link
+                      inside a pill — the product's entire differentiator, rendered as the least
+                      prominent thing on the screen. A row gives it two-thirds of the width and four
+                      slots that are never all empty. */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
                     {allowlistTools.map((t) => {
-                      // BOTH stores. Counting only `allowlistGrants` meant a tool scoped purely by
-                      // FACTS still showed "+ scope" with an unhighlighted chip — the scope was
-                      // invisible on the very affordance that exists to advertise it. Same shape as
-                      // every other defect here: two stores holding one concept, one of them consulted.
-                      const count = (allowlistGrants[t] ?? []).length + (allowlistGrantFacts[t] ?? []).length;
+                      const key = t.toLowerCase();
+                      const paths = pathsByTool.get(key) ?? [];
+                      // `null` is the badge's own word for "not in the registry"; it is not the same
+                      // as the registry being unavailable, which `registryNull` renders as silence.
+                      const provenance = declaredToolNames.has(key)
+                        ? "mcp_declared"
+                        : knownToolNames?.has(key)
+                          ? "observed"
+                          : null;
                       return (
-                        <span
+                        <div
                           key={t}
-                          data-testid={`builder-allowlist-tool-chip-${t}`}
-                          className="mono"
+                          data-testid={`builder-allowlist-tool-row-${t}`}
                           style={{
-                            display: "inline-flex",
-                            alignItems: "center",
-                            gap: 6,
-                            fontSize: 11.5,
-                            padding: "3px 8px",
-                            borderRadius: 999,
-                            background: "var(--bg-elevated)",
-                            border: `1px solid ${count > 0 ? "var(--accent)" : "var(--border)"}`
+                            display: "flex",
+                            gap: 12,
+                            alignItems: "flex-start",
+                            flexWrap: "wrap",
+                            padding: "10px 12px",
+                            borderRadius: 10,
+                            border: "1px solid var(--border)",
+                            background: "var(--bg-void)"
                           }}
                         >
-                          {t}
-                          {/* The scope affordance sits ON the tool it narrows — the alternative (a
-                              separate constraints section) makes it easy to allow a tool and never
-                              notice it is wide open. */}
-                          <button
-                            type="button"
-                            data-testid={`builder-allowlist-tool-scope-${t}`}
-                            aria-expanded={openGrantTool === t}
-                            // "rule", not "constraint": `count` spans BOTH per-field constraints and
-                            // scoping facts, so naming one of them made the tooltip wrong for the other.
-                            title={count > 0 ? `${count} scope rule${count === 1 ? "" : "s"} on ${t}` : `Scope ${t} by its arguments`}
-                            onClick={() => setOpenGrantTool((cur) => (cur === t ? null : t))}
-                            style={{
-                              background: "none",
-                              border: "none",
-                              cursor: "pointer",
-                              padding: 0,
-                              fontSize: 10.5,
-                              color: count > 0 ? "var(--accent)" : "var(--text-dim)"
-                            }}
-                          >
-                            {count > 0 ? `scoped · ${count}` : "+ scope"}
-                          </button>
+                          <div style={{ flex: "1 1 180px", minWidth: 0 }}>
+                            <div className="mono" style={{ fontSize: 12.5 }}>
+                              {t}
+                            </div>
+                            <div style={{ marginTop: 4 }}>
+                              <ProvenanceBadge source={provenance} registryNull={knownToolNames === null} />
+                            </div>
+                          </div>
+                          <ScopeCell
+                            tool={t}
+                            constraints={allowlistGrants[t] ?? []}
+                            facts={allowlistGrantFacts[t] ?? []}
+                            addressableArgs={paths.filter((p) => p.addressable).map((p) => p.path)}
+                            totalArgs={paths.length}
+                            schemaAvailable={schemaByTool.has(key)}
+                            expanded={openGrantTool === t}
+                            onToggle={() => setOpenGrantTool((cur) => (cur === t ? null : t))}
+                            newlyDenied={newlyDeniedByTool ? (newlyDeniedByTool.get(key) ?? 0) : null}
+                            sampled={dryRunResult?.truncated === true}
+                            data-testid={`builder-scope-cell-${t}`}
+                          />
                           <button
                             type="button"
                             data-testid={`builder-allowlist-tool-remove-${t}`}
                             className="icon-btn"
-                            style={{ width: 14, height: 14 }}
+                            style={{ flex: "none", marginTop: 2 }}
                             title={`Remove ${t}`}
                             onClick={() => removeAllowlistTool(t)}
                           >
-                            <X size={10} />
+                            <X size={12} />
                           </button>
-                        </span>
+                        </div>
                       );
                     })}
                   </div>
@@ -2146,11 +2220,55 @@ export function BuilderSheet({
                           per-argument rules, which plus a tool list is what the agent framework already
                           gives you — a capability list, not an intent. */}
                       {(allowlistGrantFacts[openGrantTool] ?? []).map((f, i) => {
-                        // A NOT-wrapped fact has no single field/op to render, so it has no row form.
-                        // It is not droppable silently: it cannot be authored here (the dropdown only
-                        // ever produces plain facts) and a negated fact arriving from the handoff is
-                        // still compiled and still enforced — it simply is not editable in this panel.
-                        if (f.type === "not") return null;
+                        // A NOT-wrapped fact has no single field/op to edit, because the dropdown that
+                        // authors facts only ever produces plain ones. It used to render NOTHING at
+                        // all — while still compiling and still enforcing. So a grant could say
+                        // "Narrowed · 3 conditions" and show two rows, with the third invisible,
+                        // un-removable, and live in production. A clause an operator cannot see is a
+                        // clause they cannot audit; read-only is a limitation, invisible is a defect.
+                        if (f.type === "not") {
+                          return (
+                            <div
+                              key={`fact-${i}`}
+                              data-testid={`builder-fact-negated-${openGrantTool}-${i}`}
+                              style={{
+                                display: "flex",
+                                gap: 8,
+                                alignItems: "flex-start",
+                                marginTop: 8,
+                                padding: "7px 9px",
+                                borderRadius: 8,
+                                border: "1px solid var(--border)",
+                                background: "var(--bg-void)"
+                              }}
+                            >
+                              <span
+                                className="pill"
+                                style={{ flex: "none", background: "#7C5CFC15", color: "var(--audit)", borderColor: "#7C5CFC30" }}
+                              >
+                                NOT
+                              </span>
+                              <span style={{ flex: 1, minWidth: 0 }}>
+                                <span className="mono" style={{ fontSize: 11.5, overflowWrap: "anywhere" }}>
+                                  {describeFact(f.inner)}
+                                </span>
+                                <span style={{ display: "block", fontSize: 10.5, color: "var(--text-dim)", marginTop: 2 }}>
+                                  Negated. Compiles and enforces. Not editable here — remove it and
+                                  re-author, or edit the policy source.
+                                </span>
+                              </span>
+                              <button
+                                type="button"
+                                className="icon-btn"
+                                data-testid={`builder-fact-remove-${openGrantTool}-${i}`}
+                                title="Remove this negated scoping fact"
+                                onClick={() => removeFact(openGrantTool, i)}
+                              >
+                                <X size={11} />
+                              </button>
+                            </div>
+                          );
+                        }
                         const kind = factKindOfSpec(f);
                         return (
                           <div

@@ -11,6 +11,7 @@ import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { BuilderSheet } from "./BuilderSheet";
+import type { BuilderGraph } from "../../lib/builderGraph";
 
 // A minimal Monaco stub: a read-only textarea that mirrors `value`, so the compiled rego preview is
 // inspectable without pulling in the real editor.
@@ -466,7 +467,7 @@ describe("BuilderSheet — Intent Allowlist mode (Phase 2c)", () => {
     fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "Search_Docs" } });
     fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
 
-    expect(screen.getByTestId("builder-allowlist-tool-chip-Search_Docs")).toBeInTheDocument();
+    expect(screen.getByTestId("builder-allowlist-tool-row-Search_Docs")).toBeInTheDocument();
     // The warning clears once at least one tool is listed.
     expect(screen.queryByTestId("builder-allowlist-empty-warning")).not.toBeInTheDocument();
     // The input clears after adding, ready for the next tool.
@@ -479,7 +480,7 @@ describe("BuilderSheet — Intent Allowlist mode (Phase 2c)", () => {
 
     // Removing the tool via its chip's remove button brings the empty-allowlist warning back.
     fireEvent.click(screen.getByTestId("builder-allowlist-tool-remove-Search_Docs"));
-    expect(screen.queryByTestId("builder-allowlist-tool-chip-Search_Docs")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("builder-allowlist-tool-row-Search_Docs")).not.toBeInTheDocument();
     expect(screen.getByTestId("builder-allowlist-empty-warning")).toBeInTheDocument();
   });
 
@@ -491,7 +492,7 @@ describe("BuilderSheet — Intent Allowlist mode (Phase 2c)", () => {
     fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "get_order" } });
     fireEvent.keyDown(screen.getByTestId("builder-allowlist-tool-input"), { key: "Enter" });
 
-    expect(screen.getByTestId("builder-allowlist-tool-chip-get_order")).toBeInTheDocument();
+    expect(screen.getByTestId("builder-allowlist-tool-row-get_order")).toBeInTheDocument();
   });
 
   it("toggling a refinement checkbox adds its guard (and helper vocabulary) into the compiled preview", async () => {
@@ -545,7 +546,7 @@ describe("BuilderSheet — Intent Allowlist mode (Phase 2c)", () => {
 
     // Switching back to allowlist mode, the tool added earlier is still there too.
     fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
-    expect(screen.getByTestId("builder-allowlist-tool-chip-search_docs")).toBeInTheDocument();
+    expect(screen.getByTestId("builder-allowlist-tool-row-search_docs")).toBeInTheDocument();
   });
 });
 
@@ -978,7 +979,7 @@ describe("BuilderSheet — scoping an allowlisted tool by its arguments", () => 
 
   it("a newly allowed tool is unconstrained, and says so", () => {
     openAllowlistWith("execute_sql");
-    fireEvent.click(screen.getByTestId("builder-allowlist-tool-scope-execute_sql"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-execute_sql-cta"));
     expect(screen.getByTestId("builder-grant-editor-execute_sql")).toBeInTheDocument();
     // The wide-open state is stated rather than left to inference — allowing a tool and not noticing it
     // takes any arguments is the exact failure this feature exists to prevent.
@@ -988,7 +989,7 @@ describe("BuilderSheet — scoping an allowlisted tool by its arguments", () => 
   it("adding a constraint narrows the compiled policy for that tool only", async () => {
     openAllowlistWith("execute_sql");
     addTool("search_kb");
-    fireEvent.click(screen.getByTestId("builder-allowlist-tool-scope-execute_sql"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-execute_sql-cta"));
     fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "matches" } });
     fireEvent.change(screen.getByTestId("builder-constraint-field-execute_sql-0"), { target: { value: "query" } });
     fireEvent.change(screen.getByTestId("builder-constraint-value-execute_sql-0"), {
@@ -1003,21 +1004,22 @@ describe("BuilderSheet — scoping an allowlisted tool by its arguments", () => 
     });
   });
 
-  it("the chip shows how many constraints a tool carries", async () => {
+  it("the scope cell shows how many conditions a tool carries", async () => {
     openAllowlistWith("execute_sql");
     // Before: an invitation to scope it.
-    expect(screen.getByTestId("builder-allowlist-tool-scope-execute_sql").textContent).toContain("+ scope");
-    fireEvent.click(screen.getByTestId("builder-allowlist-tool-scope-execute_sql"));
+    expect(screen.getByTestId("builder-scope-cell-execute_sql-cta").textContent).toContain("Narrow it");
+    expect(screen.getByTestId("builder-scope-cell-execute_sql-headline")).toHaveTextContent("Any arguments · unrestricted");
+    fireEvent.click(screen.getByTestId("builder-scope-cell-execute_sql-cta"));
     fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "forbidden" } });
     fireEvent.change(screen.getByTestId("builder-constraint-field-execute_sql-0"), { target: { value: "force" } });
     await waitFor(() =>
-      expect(screen.getByTestId("builder-allowlist-tool-scope-execute_sql").textContent).toContain("scoped · 1")
+      expect(screen.getByTestId("builder-scope-cell-execute_sql-headline")).toHaveTextContent("Narrowed · 1 condition")
     );
   });
 
   it("removing a tool drops its constraints, so no orphan grant breaks the compile", async () => {
     openAllowlistWith("execute_sql");
-    fireEvent.click(screen.getByTestId("builder-allowlist-tool-scope-execute_sql"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-execute_sql-cta"));
     fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "required" } });
     fireEvent.change(screen.getByTestId("builder-constraint-field-execute_sql-0"), { target: { value: "query" } });
     await waitFor(() =>
@@ -1036,7 +1038,7 @@ describe("BuilderSheet — scoping an allowlisted tool by its arguments", () => 
 
   it("removing the last constraint returns the tool to unconstrained (not an empty grant)", async () => {
     openAllowlistWith("execute_sql");
-    fireEvent.click(screen.getByTestId("builder-allowlist-tool-scope-execute_sql"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-execute_sql-cta"));
     fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "required" } });
     fireEvent.change(screen.getByTestId("builder-constraint-field-execute_sql-0"), { target: { value: "query" } });
     await waitFor(() =>
@@ -1054,7 +1056,7 @@ describe("BuilderSheet — scoping an allowlisted tool by its arguments", () => 
 
   it("switching a constraint's type keeps the parameter name", () => {
     openAllowlistWith("http_get");
-    fireEvent.click(screen.getByTestId("builder-allowlist-tool-scope-http_get"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-http_get-cta"));
     fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "matches" } });
     fireEvent.change(screen.getByTestId("builder-constraint-field-http_get-0"), { target: { value: "url" } });
     fireEvent.change(screen.getByTestId("builder-constraint-kind-http_get-0"), { target: { value: "hostIn" } });
@@ -1077,7 +1079,7 @@ describe("BuilderSheet — the allowlist Add control", () => {
     fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "execute_sql" } });
     expect(add).toBeEnabled();
     fireEvent.click(add);
-    expect(screen.getByTestId("builder-allowlist-tool-chip-execute_sql")).toBeInTheDocument();
+    expect(screen.getByTestId("builder-allowlist-tool-row-execute_sql")).toBeInTheDocument();
 
     // …and it goes back to disabled once the field clears after the add.
     expect(screen.getByTestId("builder-allowlist-tool-add")).toBeDisabled();
@@ -1105,7 +1107,7 @@ describe("allowlist mode must be able to say more than a tool list", () => {
 
     fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
     fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
-    fireEvent.click(screen.getByTitle("Scope send_email by its arguments"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
 
     // The fact rows exist at all — this is what was missing.
     expect(screen.getByTestId("builder-fact-add-kind")).toBeInTheDocument();
@@ -1126,7 +1128,7 @@ describe("allowlist mode must be able to say more than a tool list", () => {
     await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
     // The chip must now advertise the scope — counting only per-field constraints left a
     // facts-only grant looking unscoped.
-    expect(screen.getByTestId("builder-allowlist-tool-scope-send_email")).toHaveTextContent(/scoped · 1/);
+    expect(screen.getByTestId("builder-scope-cell-send_email-headline")).toHaveTextContent(/Narrowed · 1 condition/);
 
     // An empty value list is deliberately a compile ERROR (noneOf [] is a tautology), so the fact is
     // not enforceable until the operator says WHICH classes.
@@ -1151,19 +1153,19 @@ describe("allowlist mode must be able to say more than a tool list", () => {
 
     fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
     fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
-    fireEvent.click(screen.getByTitle("Scope send_email by its arguments"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
     fireEvent.change(screen.getByTestId("builder-fact-add-kind"), { target: { value: "data_classes" } });
-    await waitFor(() => expect(screen.getByTestId("builder-allowlist-tool-scope-send_email")).toHaveTextContent(/scoped · 1/));
+    await waitFor(() => expect(screen.getByTestId("builder-scope-cell-send_email-headline")).toHaveTextContent(/Narrowed · 1 condition/));
 
     fireEvent.click(screen.getByTitle("Remove send_email"));
-    await waitFor(() => expect(screen.queryByTestId("builder-allowlist-tool-scope-send_email")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByTestId("builder-scope-cell-send_email-cta")).not.toBeInTheDocument());
 
     fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
     fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
 
     // Unscoped, as a freshly-added tool must be.
     await waitFor(() =>
-      expect(screen.getByTestId("builder-allowlist-tool-scope-send_email")).toHaveTextContent(/\+ scope/)
+      expect(screen.getByTestId("builder-scope-cell-send_email-headline")).toHaveTextContent(/Any arguments · unrestricted/)
     );
   });
 
@@ -1202,7 +1204,7 @@ describe("allowlist mode must be able to say more than a tool list", () => {
     fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
     fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
     fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
-    fireEvent.click(screen.getByTitle("Scope send_email by its arguments"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
 
     const dropdown = () => screen.getByTestId("builder-fact-add-kind") as HTMLSelectElement;
     await waitFor(() => {
@@ -1264,7 +1266,7 @@ describe("allowlist mode must be able to say more than a tool list", () => {
     fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
     fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "deploy" } });
     fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
-    fireEvent.click(screen.getByTitle("Scope deploy by its arguments"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-deploy-cta"));
 
     await waitFor(() => {
       const values = [...(screen.getByTestId("builder-fact-add-kind") as HTMLSelectElement).options].map((o) => o.value);
@@ -1313,7 +1315,7 @@ describe("allowlist mode must be able to say more than a tool list", () => {
     fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
     fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "deploy" } });
     fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
-    fireEvent.click(screen.getByTitle("Scope deploy by its arguments"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-deploy-cta"));
     fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "oneOf" } });
     await waitFor(() => expect(screen.getByTestId("builder-constraint-row-deploy-0")).toBeInTheDocument());
 
@@ -1342,7 +1344,7 @@ describe("allowlist mode must be able to say more than a tool list", () => {
     fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
     fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
     fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
-    fireEvent.click(screen.getByTitle("Scope send_email by its arguments"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
     fireEvent.change(screen.getByTestId("builder-fact-add-kind"), { target: { value: "data_classes" } });
     await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
 
@@ -1359,4 +1361,59 @@ describe("allowlist mode must be able to say more than a tool list", () => {
   // counts `.length` and the graph memo filters on it, so `{tool: []}` and an absent key render and
   // compile identically. A test would pass with or without the fix, which is worse than no test. The
   // change stands on preventing a future consumer from reading an empty array as "this tool is scoped".
+});
+
+describe("a negated scoping fact is visible, not merely enforced", () => {
+  /**
+   * The defect: `if (f.type === "not") return null` — a NOT-wrapped fact rendered NOTHING while
+   * still compiling and still enforcing. A grant could therefore say "Narrowed · 2 conditions",
+   * show one row, and carry a second live clause the operator could neither read nor remove.
+   *
+   * Such a fact cannot be AUTHORED here (the palette only produces plain facts) — it arrives from
+   * the Propose-from-traffic handoff. Read-only is a fair limitation. Invisible is not: a clause
+   * nobody can see is a clause nobody can audit.
+   */
+  const NEGATED: BuilderGraph = {
+    version: 1,
+    mode: "allowlist",
+    scope: { kind: "class", agentClass: "support-bot" },
+    rules: [],
+    defaults: { decision: "allow", reason: "No builder rule matched" },
+    allowlist: {
+      tools: ["send_email"],
+      // An ARRAY of grants, matching `BuilderGraph`. Keying it by tool compiled fine as a cast and
+      // blew up at `grants.filter` — a reminder that `as unknown as` in a fixture buys nothing.
+      grants: [
+        {
+          tool: "send_email",
+          constraints: [],
+          facts: [
+            { type: "not", inner: { type: "collectionFact", field: "data_classes", op: "noneOf", values: ["secret"] } }
+          ]
+        }
+      ]
+    }
+  } as unknown as BuilderGraph;
+
+  it("renders the NOT clause, counts it, and lets it be removed", async () => {
+    render(<BuilderSheet namespace="default" onClose={() => {}} seedGraph={NEGATED} />);
+
+    // It counts toward the headline — the count and the rows must describe the same policy.
+    await waitFor(() =>
+      expect(screen.getByTestId("builder-scope-cell-send_email-headline")).toHaveTextContent("Narrowed · 1 condition")
+    );
+
+    fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
+    const row = await screen.findByTestId("builder-fact-negated-send_email-0");
+    expect(row).toHaveTextContent("NOT");
+    // In the same words the generated rego's header comment uses.
+    expect(row).toHaveTextContent("data_classes excludes {secret}");
+    expect(row).toHaveTextContent(/Compiles and enforces/i);
+
+    // And it is removable, which it was not when it rendered nothing at all.
+    fireEvent.click(screen.getByTestId("builder-fact-remove-send_email-0"));
+    await waitFor(() =>
+      expect(screen.getByTestId("builder-scope-cell-send_email-headline")).toHaveTextContent("Any arguments · unrestricted")
+    );
+  });
 });

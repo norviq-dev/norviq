@@ -411,3 +411,100 @@ eslint and vitest ALL passed — a NUL is a legal character in a JS string — a
 **Rule.** When a text search returns nothing from a file you just edited, check for binary content
 before concluding the edit did not land. The grouping key is now an explicit `join()` with a visible
 delimiter.
+
+---
+
+## Phase 5 (part 1) — the Visual Policy Builder's P1 fix
+
+### What shipped
+
+The allowed-tool row. This is the change the whole redesign exists for, so it went first rather than
+last, and the rest of the builder's chrome (top bar, Stepper strip, RegoDrawer rail, ConditionPicker,
+mode-fork callout, `.input` styling) is deliberately still outstanding.
+
+Before: an allowed tool rendered as a **pill** carrying a 10.5px grey text button reading `+ scope`.
+That button is the entire product differentiator — Norviq's claim is that an allowlist of tool NAMES
+is not a security control, because a name is exactly what the agent framework already grants. The
+control is the rest of the sentence: "send_dm, **but only to @acme.com**". Shipping it behind an
+unlabelled chip affordance ships the differentiator switched off, and a first-time operator finishes
+the flow having built a capability list while believing they built a policy.
+
+After: `[name + ProvenanceBadge] [ScopeCell] [remove]`, with the ScopeCell taking two-thirds of the
+width and **never rendering empty** — headline, detail, impact, CTA, always all four. An empty cell is
+what made the old chip readable as "done".
+
+### D14 — The impact line states POLICY, not traffic
+
+**The gap.** The design shows per-tool call counts: "Allows 312 · 4 would now be denied". `DryRunReplay`
+carries no per-tool totals — only `newly_blocked_samples`, a list the server TRUNCATES.
+
+**Decision.** The impact slot states what the grant permits, which needs no endpoint and is exactly
+true: *"Allows every call to send_dm, with any arguments."* Traffic is appended only where the dry run
+genuinely names that tool, and when `truncated` is set it renders as **"at least N"**.
+
+**Why.** A count derived from a truncated sample is a lower bound printed as a total. The operator
+would act on it and the engine would contradict them — the same failure mode as prose that overstates
+a predicate (D12). The policy fact is both always available and the more useful sentence: an unscoped
+grant's problem is not how much traffic it sees, it is that it is unbounded.
+
+### D15 — A negated fact is now VISIBLE, not merely enforced
+
+**The defect.** `if (f.type === "not") return null` — a NOT-wrapped scoping fact rendered **nothing**
+while still compiling and still enforcing. A grant could read "Narrowed · 2 conditions", show one row,
+and carry a second live clause the operator could neither read nor remove. The code comment
+acknowledged the gap and treated it as acceptable because such a fact cannot be *authored* in the
+panel (it arrives from the Propose-from-traffic handoff).
+
+**Decision.** Render it read-only: a `NOT` pill, the inner clause in `describeFact`'s words, the
+sentence "Negated. Compiles and enforces", and a remove button.
+
+**Why.** Read-only is a fair limitation. Invisible is a defect. A clause nobody can see is a clause
+nobody can audit, and it was live in production while the count above it claimed otherwise — the same
+"two components keyed differently on one concept" shape as every other defect in this work.
+
+### D16 — `describeFact` / `describeConstraint` are now exported
+
+The generated Rego's header comment and the ScopeCell's condition chips describe the same clause.
+Rendering them separately would drift, and an operator comparing the compiled module with the row that
+produced it could not then tell whether they were the same restriction. Both now call one function —
+a structural guarantee rather than a convention, asserted in `ScopeCell.test.tsx`.
+
+---
+
+## What broke in Phase 5, and the rule each one leaves behind
+
+### Sixteen stale tests, all one class
+
+Every failure selected `builder-allowlist-tool-chip-*` or `builder-allowlist-tool-scope-*` — the chip
+and its `+ scope` link, i.e. **the defect itself**. Rewritten to target the row and the ScopeCell's
+CTA/headline rather than deleted. A test asserting the shape a redesign deliberately removes is stale,
+not failing; classifying it as such before touching it is what stopped it being quietly weakened.
+
+Also replaced: `getByTitle("Scope send_email by its arguments")`. That `title` was a tooltip on a text
+link; the CTA is a labelled button whose text already says "Narrow it", so a title would be redundant.
+
+### A cast in a fixture bought nothing
+
+My first negated-fact fixture wrote `allowlist.grants` as an object keyed by tool. `BuilderGraph`
+declares it as an ARRAY, and `as unknown as BuilderGraph` silenced the compiler right up to
+`grants.filter is not a function` at runtime.
+
+**Rule.** `as unknown as T` in a test fixture disables the one check that would have caught the
+fixture being wrong. Build fixtures that typecheck honestly, or expect to debug them at runtime.
+
+### An unscoped Playwright locator asserted against the wrong document
+
+`page.locator(".monaco-editor .view-lines").first()` picked up the **Policy Catalog's** editor sitting
+behind the open sheet — it was happily reading `norviq.presets.strict` and reporting a mismatch
+against a policy the test never authored. Scoped to `getByTestId("builder-sheet")`.
+
+**Rule.** In a sheet-over-page UI, any structural locator (`.class`, `role`, `nth`) must be scoped to
+the sheet. The page behind it is still mounted, still rendering, and will answer first.
+
+### And one assertion that could not be honest, so it was narrowed
+
+The e2e originally claimed "the scope cell and the generated rego describe the same restriction", but
+Monaco virtualises its viewport and the summary line sits below the fold of a long generated header —
+so the assertion was testing scroll position, not vocabulary. The claim is a structural guarantee
+(both call the exported `describeFact`) and is asserted in the unit test where it can be. The browser
+test now asserts what a browser can see, and its name says so.
