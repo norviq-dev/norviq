@@ -1046,3 +1046,73 @@ resettable only by an in-pod CLI; there is no endpoint that creates a second ope
 sets its own password" can only be true one persona at a time — persona N takes ownership of the
 credential and hands the console to N+1. Four teams in one company cannot hold their own console
 logins today. Recorded here rather than papered over with a shared token.
+
+---
+
+## G5 — chaos: the system degrades honestly
+
+`scripts/kind-e2e/chaos.py`, five faults, all met. Every scenario asserts a DIRECTION of failure, not
+an absence of failure, and every one proves its own injection landed before judging anything.
+
+| Fault | Result |
+|---|---|
+| Kill one API replica | no 5xx reached the client; every deviation fail-CLOSED, never open |
+| Kill the OPA sidecar | 3,994 calls spanning a proven evaluator death, **zero attacks allowed**; recovered without a pod delete |
+| Redis to 0 replicas | 1,736/1,736 calls still decided; no attack allowed; no crash loop |
+| Postgres to 0 replicas | read degraded to an explicit HTTP 502, never a silent empty list |
+| 3 concurrent suite starts | exactly one accepted, two refused 409 |
+
+### The anti-vacuity design, and the three times it earned its keep
+
+A chaos test that cannot inject its fault reports "nothing broke", which is indistinguishable from a
+pass. Each scenario therefore proves the injection (0 ready replicas, restart count rose) before it
+believes any observation. That guard fired three times, and each time the harness was wrong, not the
+product:
+
+**1. `kubectl exec -c opa -- kill 1` cannot work.** `opa:1.18.0-static` is distroless — no shell — and
+pod containers do not share a PID namespace, so nothing else in the pod can see OPA's process either.
+The harness correctly refused to report a pass. `kubectl debug --target=opa` attaches an ephemeral
+container *into the target's* PID namespace, where PID 1 is OPA, and kills exactly the one process the
+scenario is about. Deleting the pod is not a substitute: it takes the API down too and proves nothing
+about how the API behaves when its evaluator vanishes underneath it.
+
+**2. The traffic window has to span the death.** The first version waited for the restart to be
+observed and only then sent traffic. OPA restarts in ~2s, so that measured a healthy system and would
+have reported a confident pass for a fault that was already over. Traffic now starts *before* the kill
+is issued.
+
+**3. The OPA scenario killed a pod that was already dying.** `kubectl get pods -l …` returns pods with
+a `deletionTimestamp`, and `.items[0]` right after the previous scenario's scale-down was a coin toss.
+The kill landed perfectly — on a pod that then ceased to exist, so its restart counter never moved and
+the harness reported "the kill did not land". Fixed with `live_pod()`: Running, ready, not terminating.
+Also added a `settle()` gate between scenarios, after the concurrency scenario saw three 502s and
+declared its own guard unverified when the only thing wrong was that Postgres had come back twelve
+seconds earlier.
+
+> **Rule: a fault harness needs a clean target and a clean baseline, or it reports the previous
+> scenario's convalescence as this scenario's result.**
+
+### A real product fix, and a wrong root cause caught by the discriminating experiment
+
+Scenario 1 showed benign calls being refused mid-teardown (1, then 31, of ~1,500). The obvious
+diagnosis: the API container has a `preStop` sleep and the OPA sidecar has none, so kubelet SIGTERMs
+OPA at t=0 while the API drains beside a dead evaluator and fails closed. It fit the evidence, it fit
+the code, and it was **wrong**.
+
+The discriminating experiment — raise `preStopSleepSeconds` and see which way the count moves —
+refuted it in one run. Under that theory a longer drain means *more* time serving with a dead
+evaluator, so refusals should rise. They went to zero.
+
+The real mechanism is endpoint propagation: 3s was not long enough for the pod's removal from the
+Service to reach every dataplane, so traffic was still being routed to a pod that had stopped serving.
+
+    preStopSleepSeconds: 3   ->  1 and 31 refused across two runs
+    preStopSleepSeconds: 15  ->  0, 0 and 2 refused across three runs
+
+Default raised to 15 in `values.yaml`, with the measurements recorded beside it. The residual ~0.1%
+needs connection draining rather than more waiting, and is left visible rather than tuned into
+apparent perfection.
+
+This is the second time this session a plausible root cause survived code review and died to a
+one-command experiment. **Spend the first move on the experiment that discriminates between the
+hypotheses, not on the one that confirms the favourite.**

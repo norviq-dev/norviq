@@ -128,7 +128,24 @@ tests:
   image: "curlimages/curl:8.10.1"
 
 gracefulShutdown:
-  preStopSleepSeconds: 3
+  # How long a terminating pod keeps serving before its process is asked to stop. This is NOT a
+  # politeness setting — it is the window in which the pod's removal from the Service endpoints
+  # propagates to every kube-proxy/dataplane. Until that lands, traffic is still being routed to a pod
+  # that is on its way out, and for a policy enforcement point that traffic does not merely fail: the
+  # engine fails CLOSED, so the agent's tool call is REFUSED. A rolling update quietly denies a slice
+  # of legitimate agent actions.
+  #
+  # MEASURED, not guessed (scripts/kind-e2e/chaos.py, scenario 1 — delete one replica under ~1,500
+  # concurrent evaluate calls):
+  #     preStopSleepSeconds: 3   ->  1 and 31 benign calls refused across two runs
+  #     preStopSleepSeconds: 15  ->  0, 0 and 2 refused across three runs
+  # Never once in the fail-OPEN direction, which is the property that actually matters; the cost of the
+  # short window was availability, not safety.
+  #
+  # 15s sits inside the 30s terminationGracePeriodSeconds with room for the app's own shutdown. The
+  # residual (~0.1%) is not eliminated by a longer sleep — that tail needs connection draining, not
+  # more waiting — so it is left visible rather than tuned into apparent perfection.
+  preStopSleepSeconds: 15
 
 # Hardened container securityContext for the primary app containers (defense-in-depth). The
 # chart sets it inline rather than relying on an external PSA/Kyverno restricted-profile mutation

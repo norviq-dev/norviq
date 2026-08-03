@@ -107,6 +107,25 @@ def hammer(ctx: Ctx, seconds: float, concurrency: int = 4) -> list[tuple[int, st
     return out
 
 
+def live_pod(ctx: Ctx, component: str) -> str:
+    """A pod that is Running, fully ready, and NOT terminating.
+
+    `kubectl get pods -l …` happily returns pods with a deletionTimestamp, and taking `.items[0]` from
+    that list is a coin toss right after anything scaled. The OPA scenario picked a pod that the
+    previous scenario's scale-down was already tearing down, killed its sidecar, and then watched a
+    restart counter on a pod that ceased to exist — reporting "the kill did not land" for a kill that
+    landed perfectly, on the wrong target.
+    """
+    p = kubectl(ctx, "get", "pods", "-l", f"app.kubernetes.io/component={component}",
+                "-o", "jsonpath={range .items[*]}{.metadata.name}|{.metadata.deletionTimestamp}|"
+                      "{.status.phase}|{.status.containerStatuses[*].ready}{'\\n'}{end}")
+    for line in p.stdout.strip().splitlines():
+        name, deleting, phase, ready = (line.split("|") + ["", "", ""])[:4]
+        if name and not deleting and phase == "Running" and "false" not in ready:
+            return name
+    return ""
+
+
 def ready_replicas(ctx: Ctx, kind: str, name: str) -> int:
     p = kubectl(ctx, "get", kind, name, "-o", "jsonpath={.status.readyReplicas}")
     return int(p.stdout.strip() or 0)
@@ -150,8 +169,7 @@ def s1_kill_api_replica(ctx: Ctx) -> None:
                                "so single-replica loss is UNVERIFIED (not 'fine')")
                 return
 
-        pods = kubectl(ctx, "get", "pods", "-l", "app.kubernetes.io/component=api",
-                       "-o", "jsonpath={.items[0].metadata.name}").stdout.strip()
+        pods = live_pod(ctx, "api")
         if not pods:
             ctx.fail("s1", "no api pod found — scenario NOT INJECTED")
             return
@@ -175,10 +193,25 @@ def s1_kill_api_replica(ctx: Ctx) -> None:
             ctx.ok("no 5xx reached the client")
         if transport:
             ctx.fail("s1", f"{len(transport)}/{len(rows)} calls failed at the transport")
-        if wrong:
-            ctx.fail("s1", f"{len(wrong)} calls returned the WRONG decision while a replica was dying")
-        else:
+        # WHICH WAY it went wrong is the entire question, and a bare count does not answer it. An
+        # attack that slipped through is a fail-open and a release blocker; a benign call refused
+        # during a pod teardown is the system failing in its safe direction. Reporting "1 wrong
+        # decision" for either is how a fail-open gets triaged as a flake.
+        opened = [r for r in wrong if r[2] == "attack"]
+        closed = [r for r in wrong if r[2] == "benign"]
+        if opened:
+            ctx.fail("s1", f"FAILED OPEN — {len(opened)}/{len(rows)} attack calls were ALLOWED while a "
+                           f"replica was terminating (decisions seen: {sorted({r[1] for r in opened})}). "
+                           "A release blocker: losing a replica must never widen what an agent may do.")
+        if closed:
+            ctx.note(f"{len(closed)}/{len(rows)} benign calls were refused mid-teardown "
+                     f"(decisions: {sorted({r[1] for r in closed})}) — the SAFE direction, but it is a "
+                     "real availability cost: a tool call the agent was entitled to make was denied "
+                     "because a pod was going away.")
+        if not wrong:
             ctx.ok("every decision stayed correct through the kill")
+        elif not opened:
+            ctx.ok("no attack was ever allowed — every deviation was in the fail-closed direction")
     finally:
         if scaled:
             kubectl(ctx, "scale", "deployment", "norviq-api", f"--replicas={max(before, 1)}")
@@ -190,54 +223,74 @@ def s1_kill_api_replica(ctx: Ctx) -> None:
 def s2_kill_opa(ctx: Ctx) -> None:
     """The one that matters most: with no evaluator, evaluate must BLOCK. Never allow."""
     print("\n[2] kill the OPA sidecar")
-    pod = kubectl(ctx, "get", "pods", "-l", "app.kubernetes.io/component=engine",
-                  "-o", "jsonpath={.items[0].metadata.name}").stdout.strip()
-    comp = "engine"
+    # The API pod's sidecar, NOT the engine's. `/api/v1/evaluate` — the endpoint being hammered — is
+    # served by the API, so the OPA that decides these calls is the one co-located with it. Killing the
+    # engine's sidecar instead would leave the traffic path completely intact and report a confident
+    # pass for a fault the request never touched.
+    comp = "api"
+    pod = live_pod(ctx, "api")
     if not pod:
-        pod = kubectl(ctx, "get", "pods", "-l", "app.kubernetes.io/component=api",
-                      "-o", "jsonpath={.items[0].metadata.name}").stdout.strip()
-        comp = "api"
-    if not pod:
-        ctx.fail("s2", "no pod with an opa sidecar found — scenario NOT INJECTED")
+        ctx.fail("s2", "no api pod with an opa sidecar found — scenario NOT INJECTED")
         return
 
     before = restart_counts(ctx, f"app.kubernetes.io/component={comp}").get(pod, 0)
-    killed = False
-    for cmd in (["kill", "1"], ["/bin/sh", "-c", "kill 1"], ["/busybox/sh", "-c", "kill 1"]):
-        p = kubectl(ctx, "exec", pod, "-c", "opa", "--", *cmd, timeout=60)
-        if p.returncode == 0:
-            killed = True
-            break
-    if not killed:
-        # Distroless OPA has no shell. Say so and use the only other honest lever: evict the whole pod
-        # is NOT equivalent (it kills the API too), so report the scenario as un-injectable here rather
-        # than substituting a different, easier fault and calling it a pass.
-        ctx.fail("s2", "could not signal the opa sidecar (no shell in the image) — FAIL-CLOSED ON "
-                       "EVALUATOR LOSS IS UNVERIFIED. This is the single most important chaos property "
-                       "and it must not be reported as passing.")
+
+    # HOW YOU KILL A DISTROLESS SIDECAR. `kubectl exec -c opa -- kill 1` cannot work: the image is
+    # `opa:1.18.0-static`, which has no shell and no coreutils, and containers in a pod do not share a
+    # PID namespace by default, so nothing else in the pod can see OPA's process either.
+    #
+    # `kubectl debug --target=opa` attaches an ephemeral container INTO the target container's process
+    # namespace, where PID 1 is OPA. That kills exactly the one process this scenario is about, which
+    # deleting the pod would not — deleting the pod also takes down the API and would prove nothing
+    # about how the API behaves when its evaluator disappears underneath it.
+    #
+    # Ephemeral containers cannot be removed from a running pod, so the name is unique per attempt or
+    # the second run of the day fails with "container already exists".
+    #
+    # The traffic starts BEFORE the kill is issued. `kubectl debug` creates the ephemeral container and
+    # returns; the container still has to be scheduled and started, and if traffic only begins after
+    # that the window can miss the death entirely.
+    stamp = str(int(time.monotonic() * 1000))[-8:]
+    pool = ThreadPoolExecutor(max_workers=2)
+    traffic = pool.submit(hammer, ctx, 45.0, 2)
+    time.sleep(2)
+    p = kubectl(ctx, "debug", "-q", pod, "--image=busybox:1.36", "--target=opa",
+                f"--container=chaos-opa-{stamp}", "--profile=general", "--",
+                "sh", "-c", "kill 1", timeout=180)
+    if p.returncode != 0:
+        traffic.result()
+        pool.shutdown()
+        ctx.fail("s2", f"could not signal the opa sidecar via kubectl debug ({p.stderr.strip()[:200]}) "
+                       "— FAIL-CLOSED ON EVALUATOR LOSS IS UNVERIFIED. This is the single most "
+                       "important chaos property and it must not be reported as passing.")
         return
 
     ctx.note(f"signalled opa in {pod}")
-    # Prove the injection landed before believing anything about the behaviour.
+    # ORDER MATTERS, and getting it wrong makes this scenario worthless. OPA restarts in a couple of
+    # seconds. Waiting for the restart to be OBSERVED and only then sending traffic measures a healthy
+    # system and reports a confident pass — the evaluator is already back before the first call lands.
+    # So the traffic runs CONCURRENTLY with the kill window, and the restart-count poll runs beside it.
     landed = False
-    for _ in range(20):
+    for _ in range(40):
         if restart_counts(ctx, f"app.kubernetes.io/component={comp}").get(pod, 0) > before:
             landed = True
             break
         time.sleep(1)
+    rows = traffic.result()
+    pool.shutdown()
 
-    rows = hammer(ctx, 8.0, 2)
     allowed_attacks = [r for r in rows if r[2] == "attack" and r[1] == "allow"]
+    if not landed:
+        # Report this FIRST: without it, every judgement below is about a system that never broke.
+        ctx.fail("s2", "opa restart count never rose — the kill did not land, so fail-closed behaviour "
+                       "is UNVERIFIED. Nothing below this line describes a degraded system.")
+        return
+    ctx.ok("injection proven (sidecar restart count rose during the traffic window)")
     if allowed_attacks:
         ctx.fail("s2", f"FAILED OPEN — {len(allowed_attacks)} attack calls were ALLOWED with the "
                        "evaluator down. This is a release blocker.")
     else:
-        ctx.ok("no attack was allowed while the evaluator was restarting")
-    if not landed:
-        ctx.fail("s2", "opa restart count never rose — the kill may not have landed; treat the above "
-                       "as unproven")
-    else:
-        ctx.ok("injection proven (sidecar restart count rose)")
+        ctx.ok(f"no attack allowed across {len(rows)} calls spanning the evaluator's death")
 
     if not wait_ready(ctx, "deployment", f"norviq-{comp}", 1, timeout=180):
         ctx.fail("s2", f"norviq-{comp} did not become ready again after the sidecar restart")
@@ -392,6 +445,19 @@ def s5_concurrent_suites(ctx: Ctx) -> None:
         ctx.fail("s5", "could not start even one suite — the mutual-exclusion guard is UNVERIFIED")
 
 
+def settle(ctx: Ctx, timeout: int = 180) -> bool:
+    """Wait until the system answers correctly again — the same check `main` uses as its baseline."""
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        st, dec = evaluate(ctx, ATTACK)
+        if st == 200 and dec == "block":
+            st2, dec2 = evaluate(ctx, BENIGN)
+            if st2 == 200 and dec2 == "allow":
+                return True
+        time.sleep(3)
+    return False
+
+
 SCENARIOS = {
     "api-replica": s1_kill_api_replica,
     "opa": s2_kill_opa,
@@ -421,11 +487,20 @@ def main() -> int:
     print(f"baseline healthy · {args.base_url} · context {args.kube_context}")
 
     chosen = args.only.split(",") if args.only else list(SCENARIOS)
-    for name in chosen:
+    for i, name in enumerate(chosen):
         fn = SCENARIOS.get(name.strip())
         if fn is None:
             print(f"unknown scenario {name!r}", file=sys.stderr)
             return 2
+        # Scaling a statefulset back to 1 makes the POD ready long before the API's connection pool has
+        # reconnected to it. Without this gate, scenario N+1 runs against scenario N's convalescence and
+        # reports failures that belong to the recovery, not to its own fault — the concurrency scenario
+        # saw three 502s and declared its guard unverified, when the only thing wrong was that Postgres
+        # had come back twelve seconds earlier.
+        if i and not settle(ctx):
+            ctx.fail(name, "the system never returned to a healthy baseline after the previous "
+                           "scenario — this run's result would describe the recovery, not the fault")
+            break
         try:
             fn(ctx)
         except Exception as exc:  # noqa: BLE001
