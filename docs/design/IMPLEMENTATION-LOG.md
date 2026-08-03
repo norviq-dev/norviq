@@ -578,3 +578,71 @@ Removing the cast then made `tsc` report a missing `schemaVersion` immediately.
 here than usual, because the failure mode was a test that measures nothing and reports success. Any
 test that compares a prediction against a measurement must first prove the measurement is non-trivial
 — a baseline that is zero for every input agrees with any prediction that is also zero.
+
+---
+
+## L3 + the kind CI job
+
+### The trap was real, and it was worse than documented
+
+`tests/integration` (18 files) and `tests/attacks` (13 files) are excluded from the PR gate because
+they need a cluster. `test.yml` says so and adds "they belong in a kind-based e2e job, not a PR gate".
+That job did not exist, so **162 tests ran nowhere**.
+
+Running them was not enough on its own. Measured, against a DEAD API:
+
+```
+integration:  11 passed · 61 skipped   → pytest exit 0
+attacks:       0 passed · 101 xfailed  → pytest exit 0
+```
+
+Both suites report success. `tests/attacks/conftest.py:119` calls `pytest.xfail` and
+`tests/integration/conftest.py:53` calls `pytest.skip` when the backend is unreachable, and an xfail
+is *expected failure* — green. Any CI checking only the exit code would have reported that the attack
+suite proved enforcement works, having asked nothing.
+
+`scripts/kind-e2e/l3.sh` therefore asserts a **nonzero PASSED count per suite**, from a JUnit XML
+rather than by grepping a summary line whose wording varies by pytest version.
+
+**Thresholds are measured, not guessed.** A threshold of 5 would have caught the dead API for
+`attacks` and missed it entirely for `integration`, which passes 11 tests with no backend at all:
+
+|             | live | dead |
+|-------------|------|------|
+| integration | 63   | 11   |
+| attacks     | 99   | 0    |
+
+Live result: **63 + 99 = 162 passing** against the real cluster.
+
+### The guard had the defect it guards against
+
+First version printed `✗ attacks: only 0 tests actually PASSED` and **exited 0**. `|| rc=$?` at the
+call site suppresses `set -e` for the whole function body, so the Python guard's non-zero exit was
+discarded. Found by running it against a dead API and reading the *exit code* rather than the message.
+
+**Rule.** A tripwire is not done when it prints. Verify it in BOTH directions — fails when it should,
+passes when it should — and check the exit code, which is the only thing CI reads.
+
+### One real fix fell out: a viewer token signed with the wrong key
+
+`test_auth_hardening.py` mints a viewer token to prove an authenticated non-admin gets **403**. It
+signed with this process's `settings.api_secret_key`, but the API reads `NRVQ_API_SECRET_KEY` from a
+cluster Secret — so the token was rejected at the SIGNATURE with 401 and the authorization check under
+test was never reached. The test now honours `NRVQ_JWT_SECRET`, and `l3.sh` reads the real key from
+the Secret.
+
+Note the shape: a 401 would satisfy any assertion phrased as "not 200". The test was specific enough
+to catch it, which is the argument for asserting the exact status rather than a category.
+
+### `.github/workflows/kind-e2e.yml`
+
+Nightly plus a path filter, so a PR touching the engine, the API routers, the webhook, the chart or
+either suite gets cluster coverage, while an ordinary UI PR does not pay 25 minutes for it. Five
+images (bootstrap is behind a Helm hook, not a Deployment), no `--platform` pin, namespaces created
+before install, `values-light.yaml`, `pullPolicy=IfNotPresent`, and an `if: failure()` cluster dump
+plus Playwright artifacts — a red cluster run without the state behind it is a guessing game.
+
+L4 delegates to `scripts/e2e.sh` rather than invoking Playwright directly, so the two cannot drift.
+The one thing it does add is `playwright install --with-deps`, unsuppressed: `e2e.sh` runs the install
+with `|| true`, which is fine on a machine that already has the system libs and fatal on a fresh
+runner, where the browser then fails to launch with no explanation.
