@@ -301,6 +301,16 @@ async def create_draft(
     return {"draft_id": draft_id, "rule_ids": list(compiled.rule_ids), "enforcing": False}
 
 
+def _mapping(value: object) -> dict:
+    """The JSONB column as a mapping, whatever shape the row actually holds.
+
+    `IntentDraft.toggles` / `.allow_tools` are typed `dict | None` and are ALSO written as lists by
+    `threats.py` and `mitre.py`. Anything that is not a mapping yields an empty one, so a reader
+    asking for a key gets the default instead of an AttributeError.
+    """
+    return value if isinstance(value, dict) else {}
+
+
 @router.get("/intents/drafts")
 async def list_drafts(
     ns: str | None = Query(None),
@@ -321,8 +331,22 @@ async def list_drafts(
                 "draft_id": r.id,
                 "namespace": r.namespace,
                 "agent_class": r.agent_class,
-                "kind": (r.toggles or {}).get("kind", "intent"),
-                "rule_ids": (r.allow_tools or {}).get("rule_ids", []),
+                # `toggles` and `allow_tools` are typed `dict | None`, but THREE other producers
+                # legitimately store a LIST in them: threats.py's intent generator (`enabled_keys()`),
+                # its verb-promotion path (`verbs`), and mitre.py's control mapping (`usable` rule
+                # ids). `threats.py` reads those back as `list(r["toggles"] or [])`, so both shapes
+                # are real and long-standing.
+                #
+                # `(r.toggles or {}).get(...)` therefore raised AttributeError on any list-shaped row
+                # — and because this is a LIST endpoint, one such row 500'd the whole drafts inbox for
+                # every caller and every namespace. Creating a draft from the Attack Graph or from
+                # MITRE permanently broke the inbox. Observed on AKS: a plain GET returned 500.
+                #
+                # Read defensively at the boundary rather than migrating the column: the list shape is
+                # in use by shipped features and in existing rows, so narrowing it would be a breaking
+                # change to fix a display default.
+                "kind": _mapping(r.toggles).get("kind", "intent"),
+                "rule_ids": _mapping(r.allow_tools).get("rule_ids", []),
                 "would_block": r.would_block,
                 "total": r.total,
                 "created_at": r.created_at.isoformat() if r.created_at else None,

@@ -318,6 +318,20 @@ CS_TRAFFIC = [
     ("http_get", {"url": "https://docs.internal.example.com/faq"}),
 ]
 
+# Calls that trip ATLAS-ONLY rules, so the two compliance frameworks report DIFFERENT blocked totals.
+#
+# `compliance-polish.spec.ts:34` asserts `atlas.blocked !== owasp.blocked` — ATLAS maps every OWASP
+# rule plus extras (cross-tenant access, supply chain), so with any activity on the extras the totals
+# must diverge. Without traffic on those rules both read 18 and the assertion fails on a value that is
+# accidentally equal rather than wrong. Each payload below satisfies `cross_tenant_detected` in
+# comprehensive.rego: a `tenant_id`/`namespace` param that disagrees with the caller's namespace, and
+# a SQL query reaching into another schema.
+ATLAS_ONLY_TRAFFIC = [
+    ("run_query", {"tenant_id": "some-other-tenant", "q": "select 1"}),
+    ("run_query", {"namespace": "payments", "q": "select 1"}),
+    ("execute_sql", {"query": "SELECT * FROM payments.users"}),
+]
+
 
 def seed_console_prereqs(base: str, token: str, repo_root: Path) -> int:
     failures = 0
@@ -340,7 +354,7 @@ def seed_console_prereqs(base: str, token: str, repo_root: Path) -> int:
           f"{'' if ok else f' -> {status} {body[:160]}'}")
     failures += 0 if ok else 1
 
-    for tool, params in CS_TRAFFIC:
+    for tool, params in CS_TRAFFIC + ATLAS_ONLY_TRAFFIC:
         status, body = post(base, "/api/v1/evaluate", token, {
             "tool_name": tool,
             "tool_params": params,

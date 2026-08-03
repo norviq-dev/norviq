@@ -247,3 +247,51 @@ def test_no_intent_endpoint_writes_a_policy_row() -> None:
     with open(src, encoding="utf-8") as fh:
         text = fh.read()
     assert "Policy(" not in text, "an intent endpoint must never construct a Policy row"
+
+
+# --- the drafts LIST endpoint tolerates every shape the column actually holds ---------------------
+
+class _DraftRow:
+    """An `IntentDraft` shaped the way `list_drafts` reads one."""
+
+    def __init__(self, draft_id: str, toggles, allow_tools):
+        self.id = draft_id
+        self.namespace = "agents"
+        self.agent_class = "support-bot"
+        self.toggles = toggles
+        self.allow_tools = allow_tools
+        self.would_block = 0
+        self.total = 0
+        self.created_at = None
+
+
+def test_list_drafts_survives_a_list_shaped_toggles_column():
+    """One row must not 500 the whole inbox.
+
+    `IntentDraft.toggles` and `.allow_tools` are typed `dict | None`, and THREE shipped producers
+    store a LIST in them instead: `threats.py`'s intent generator (`enabled_keys()`), its
+    verb-promotion path, and `mitre.py`'s control mapping. `threats.py` reads those back as
+    `list(r["toggles"] or [])`, so the list shape is long-standing and legitimate.
+
+    `list_drafts` did `(r.toggles or {}).get("kind", ...)`, which raises AttributeError on a list.
+    Because this is a LIST endpoint, one such row returned 500 for EVERY caller and EVERY namespace —
+    so creating a draft from the Attack Graph or from MITRE permanently broke the drafts inbox.
+    Observed on a live cluster: a plain GET /api/v1/intents/drafts returned 500.
+    """
+    rows = [
+        _DraftRow("d-list", toggles=["sql_injection", "pii_egress"], allow_tools=["search_kb"]),
+        _DraftRow("d-dict", toggles={"kind": "intent-v2"}, allow_tools={"rule_ids": ["r1", "r2"]}),
+        _DraftRow("d-none", toggles=None, allow_tools=None),
+    ]
+    resp = _client(_FakeSession(rows)).get("/api/v1/intents/drafts?ns=all")
+    assert resp.status_code == 200, resp.text
+
+    drafts = {d["draft_id"]: d for d in resp.json()["drafts"]}
+    assert len(drafts) == 3
+    # A list-shaped row degrades to the documented defaults rather than taking the endpoint down.
+    assert drafts["d-list"]["kind"] == "intent"
+    assert drafts["d-list"]["rule_ids"] == []
+    # ...and the dict-shaped row still reads exactly as before.
+    assert drafts["d-dict"]["kind"] == "intent-v2"
+    assert drafts["d-dict"]["rule_ids"] == ["r1", "r2"]
+    assert drafts["d-none"]["kind"] == "intent"
