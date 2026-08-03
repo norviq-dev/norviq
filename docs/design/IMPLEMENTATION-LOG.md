@@ -755,3 +755,73 @@ The reasoning, in the order it mattered:
 
 If it is picked up later, the prototype is the spec and nothing in this work blocks it — the ScopeCell
 is a self-contained component and the sections it sits in are independently addressable.
+
+---
+
+## CORRECTION: the 59 failures were neither contention nor policy pollution
+
+I published two explanations for the same 59 failures before finding the real one. Both are recorded
+above; both were wrong, and the record is worth keeping because the way each was wrong is instructive.
+
+**Wrong explanation 1 — "self-inflicted contention."** I had run `make test-l3` while a browser suite
+was in flight, so when the run came back 61 failed I attributed it to OPA recompiles blocking queries.
+Plausible, fitted the facts, and committed to in a commit message. **Refuted by re-running the suite in
+complete isolation: still 61 failed.**
+
+**Wrong explanation 2 — "L3 leaks policies."** It genuinely does: `test_policy_lifecycle.py` POSTs into
+`integration-<uuid>` and never deletes, and I found ten orphans on the cluster. A namespace exists as
+far as the console is concerned the moment a policy names one, so the selector had ten phantom
+entries. Real defect, real fix (below). **But not the cause: deleting all ten and re-running gave 61
+failed again.**
+
+**The actual cause, found by fanning four independent read-only analyses over the log rather than
+theorising a third time:**
+
+**27 of the 59 failures — 46%, across 11 spec files — are a single line.** Those specs opt OUT of the
+seeded token (`test.use({ storageState: { cookies: [], origins: [] } })`) because driving the real
+login form is the thing they exist to test. They read the password from `NRVQ_E2E_PASSWORD` and fall
+back to the literal `"CHANGE_ME-e2e-pw"`. **Nothing in this repository sets that variable** — not
+`scripts/e2e.sh`, not the new CI job, nothing. `overview-kpi.spec.ts:11` names a preflight "gate" that
+resets admin to a known password with `must_change=false`; no such step exists in the repo.
+
+The clinching evidence is a test that PASSED: `console-fixes-batch2.spec.ts:309` asserts
+`admin`/`norviq` logs in and advances to the change-password view. So the admin was still on the
+default credential with `must_change=True` — the gate had never run. And the first `realLogin` failure
+is at test 35 of 190, long before the first 429, which rules out rate-limiting as the initiator.
+
+The remaining 32 split as ~17 missing seeded data (compliance drafts, redteam runs, attack paths,
+a `default/customer-support` policy the coverage matrix names as required), ~9 backend (a dead
+`127.0.0.1:18080` gateway forward, and 429s late in the run), and ~6 genuine UI issues in surfaces this
+work never touched.
+
+**None of the 30 tests added by this work failed in any of the three runs.**
+
+### What this cost, and the rule
+
+Two confident wrong answers, and roughly a session of investigation, because each explanation *fitted*
+the evidence without *excluding* the alternatives. The cheap experiment that settled it — run the four
+new specs alone, then re-run the whole suite in isolation — was available from the first minute.
+
+**Rule.** When a broad failure has several plausible causes, spend the first move on the experiment
+that DISCRIMINATES between them, not on the one that confirms the leading hypothesis. And a hypothesis
+that survives only because it was never tested against a control is not a finding, it is a guess with
+a commit message.
+
+### Three fixes, all verified
+
+1. **`tests/integration/conftest.py`** — a session-scoped autouse sweep deletes every `integration-*`,
+   `emittest-*` and `replica-*` policy the suite creates. Verified: ran L3, policy table returned to
+   4 policies / 3 namespaces, 0 orphans, and L3 still passes 63 + 99.
+2. **`.github/workflows/kind-e2e.yml`** — L3 now runs AFTER L4. The cleanup is the fix; the ordering is
+   the second line of defence, because a cleanup that fails must not silently poison the browser suite.
+   My original ordering ran L3 first, which would have reproduced the pollution on every CI run.
+3. **`scripts/e2e.sh`** — a loud preflight when `NRVQ_E2E_PASSWORD` is unset, naming all 11 specs and
+   the ~27 tests that will fail and why. Not fatal: the other ~160 tests are valid without it, and
+   refusing to run them would be a worse trade. Stated before the run so the summary is never a
+   mystery again.
+
+The suite's real gap remains open and is now documented rather than mysterious: **`scripts/e2e.sh`
+performs NO seeding**, while `ui/tests/e2e/COVERAGE-MATRIX.md` documents specs that require seeded
+policies, attack paths and redteam history. Those specs have been passing on state accumulated by
+hand. That is a pre-existing suite-hygiene problem, larger than this plan, and the honest thing is to
+name it rather than to have quietly re-run until it looked green.

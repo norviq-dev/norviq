@@ -54,3 +54,52 @@ async def api_client(api_url: str):
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             pytest.skip(f"API unreachable at {api_url}: {exc}")
         yield client
+
+
+# Namespace prefixes this suite invents for throwaway policies. Every one is unambiguously
+# test-owned: `integration-<uuid4hex>`, `emittest-<8hex>`, `replica-<uuid4hex>`.
+_THROWAWAY_PREFIXES = ("integration-", "emittest-", "replica-")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _sweep_throwaway_policies(api_url: str, auth_headers: dict[str, str]):
+    """Delete the policies this suite creates, at session end.
+
+    WHY THIS EXISTS. `test_policy_lifecycle.py` POSTs a policy into `integration-<uuid>` and never
+    removed it, so every run left rows behind permanently. Ten of them accumulated on the local
+    cluster across five runs — and because a namespace EXISTS as far as the console is concerned once
+    a policy names it, the namespace selector grew ten phantom entries.
+
+    That is not a tidiness problem. It broke the BROWSER suite, which has no seeding step of its own
+    and asserts against whatever the cluster holds: policy counts, catalog listings, pack governance
+    rollups and namespace-scoped graph views all read a table this suite had quietly filled with
+    fixtures. Fifty-nine pre-existing specs failed, in files that had nothing to do with the change
+    under test, and the failure signature pointed at the console rather than at here.
+
+    Swept by PREFIX rather than by tracking each creation: the leak spans several modules, some of
+    which build the name inline, and a sweep cannot miss one that a registration list would.
+
+    Best-effort by design — a failure to clean up must never fail the suite that just passed, and the
+    API being gone at teardown is normal when the tests skipped.
+    """
+    yield
+
+    try:
+        with httpx.Client(base_url=api_url, timeout=10.0) as client:
+            listing = client.get("/api/v1/policies?limit=500", headers=auth_headers)
+            if listing.status_code != 200:
+                return
+            body = listing.json()
+            rows = body if isinstance(body, list) else (body.get("policies") or body.get("items") or [])
+            removed = 0
+            for row in rows:
+                ns = str(row.get("namespace", ""))
+                if not ns.startswith(_THROWAWAY_PREFIXES):
+                    continue
+                cls = str(row.get("agent_class", ""))
+                resp = client.delete(f"/api/v1/policies/{ns}/{cls}", headers=auth_headers)
+                removed += 1 if resp.status_code < 300 else 0
+            if removed:
+                print(f"\n[cleanup] removed {removed} throwaway integration policies")
+    except Exception as exc:  # noqa: BLE001 - teardown must never fail a passing run
+        print(f"\n[cleanup] could not sweep throwaway policies: {exc}")

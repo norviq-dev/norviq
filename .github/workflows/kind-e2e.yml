@@ -128,10 +128,6 @@ jobs:
             python -m norviq.api.token_mint --ttl 7200 | tail -1 > /tmp/nrvq-signin-token.txt
           test -s /tmp/nrvq-signin-token.txt
 
-      # L3 — the API/middleware layer. Asserts a nonzero PASSED count per suite; see the header.
-      - name: L3 · integration + attacks
-        run: scripts/kind-e2e/l3.sh
-
       - name: Seed the console's fixtures
         run: |
           kubectl -n norviq port-forward svc/norviq-ui 3400:80 &
@@ -153,6 +149,16 @@ jobs:
           # test with a stack trace about a missing shared object.
           (cd ui/tests/e2e && npx playwright install --with-deps chromium)
           bash scripts/e2e.sh
+
+      # L3 LAST, deliberately. It creates policies in throwaway `integration-<uuid>` namespaces, and a
+      # namespace EXISTS as far as the console is concerned the moment a policy names one — so running
+      # it first grew the namespace selector by ten phantom entries and broke the browser suite's
+      # policy counts, catalog listings, pack rollups and namespace-scoped graph views. Fifty-nine
+      # specs failed in files unrelated to any change, pointing at the console rather than at the
+      # cause. `tests/integration/conftest.py` now sweeps those rows at session end; this ordering is
+      # the second line of defence, because a cleanup that fails must not silently poison L4.
+      - name: L3 · integration + attacks
+        run: scripts/kind-e2e/l3.sh
 
       # Runs even when a step above failed. A red cluster run without the state behind it is a
       # guessing game, and reproducing it costs another 25 minutes.
