@@ -67,6 +67,21 @@ fi
 # through it — so the base URL is the correct value and needs no extra forward.
 export NRVQ_API_URL="${NRVQ_API_URL:-$BASE_URL}"
 
+# RESET + SEED before every run. The suite mutates shared, namespace-scoped state — enforcing policies
+# for throwaway classes, `apply_mode: dry_run_only`, `enforcement_mode: audit` — and a spec that fails
+# partway leaves it behind, so the NEXT run fails somewhere else entirely. Measured across consecutive
+# full runs the failing SET moved while the count stayed flat, which is the signature of leaked state
+# rather than of N separate defects. Starting from a known baseline is what makes a run comparable to
+# the one before it.
+if [ -x "$(dirname "$0")/kind-e2e/seed.py" ] || [ -f "$(dirname "$0")/kind-e2e/seed.py" ]; then
+  if [ -x .venv/bin/python ]; then
+    .venv/bin/python "$(dirname "$0")/kind-e2e/seed.py" --base-url "$BASE_URL" --token-file "$TOKEN_FILE" \
+      >/tmp/nrvq-e2e-seed.log 2>&1 \
+      && echo "seed: reset + fixtures applied" \
+      || echo "WARNING: seeding failed — specs asserting seeded data will fail; see /tmp/nrvq-e2e-seed.log" >&2
+  fi
+fi
+
 echo "▶ R10 — Playwright E2E against $BASE_URL"
 ( cd "$E2E_DIR" && [ -d node_modules/@playwright ] || npm ci --silent )
 ( cd "$E2E_DIR" && npx playwright install chromium >/dev/null 2>&1 || true )

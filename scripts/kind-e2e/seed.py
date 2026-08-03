@@ -86,6 +86,33 @@ def post(base: str, path: str, token: str, body: dict) -> tuple[int, str]:
         return exc.code, exc.read().decode()
 
 
+
+def _req(base: str, path: str, token: str, method: str, body: dict | None = None) -> tuple[int, str]:
+    req = urllib.request.Request(  # noqa: S310 - fixed http(s) base, test cluster only
+        f"{base}{path}",
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
+            return resp.status, resp.read().decode()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode()
+
+
+def get(base: str, path: str, token: str) -> tuple[int, str]:
+    return _req(base, path, token, "GET")
+
+
+def delete(base: str, path: str, token: str) -> tuple[int, str]:
+    return _req(base, path, token, "DELETE")
+
+
+def put(base: str, path: str, token: str, body: dict) -> tuple[int, str]:
+    return _req(base, path, token, "PUT", body)
+
+
 # --- declared tier -----------------------------------------------------------------------------------
 
 SEND_DM_SCHEMA = {
@@ -428,6 +455,57 @@ def seed_redteam(base: str, token: str) -> int:
     return 0 if ok else 1
 
 
+
+# --- reset: put shared state back to a known baseline -------------------------------------------------
+
+# Namespaces the suite invents for throwaway policies. Every prefix is unambiguously test-owned.
+_THROWAWAY_NS_PREFIXES = ("integration-", "emittest-", "replica-", "fbe-", "scen-e2e-", "q2-manual-")
+# ...and throwaway CLASSES inside real namespaces.
+_THROWAWAY_CLS_PREFIXES = ("q2-manual-", "bce2e-", "fbe-", "e2e-", "probe-")
+
+# Namespaces the console suite asserts against, which several specs flip out of enforce mode.
+_MANAGED_NS = (NS, CUSTOMER_SUPPORT_NS)
+
+
+def reset_state(base: str, token: str) -> int:
+    """Return the cluster to the baseline every spec assumes it starts from.
+
+    WHY THIS EXISTS. The browser suite mutates shared, namespace-scoped state — it creates enforcing
+    policies for throwaway classes, flips `apply_mode` to `dry_run_only`, switches `enforcement_mode`
+    to audit — and a spec that fails partway leaves that behind. The next run then fails in a
+    DIFFERENT place, because the leftovers change which policy governs and whether controls are
+    enabled. Measured across consecutive full runs: the failing SET moved even as the count stayed
+    flat, which is the signature of leaked state rather than of eleven separate defects.
+
+    Deleting a policy is destructive, so this only ever touches names the suite itself invents. It
+    never touches a seeded fixture (`default/customer-support`) or a real tenant namespace.
+    """
+    removed = 0
+    status, body = get(base, "/api/v1/policies?limit=500", token)
+    if status == 200:
+        try:
+            rows = json.loads(body)
+            rows = rows if isinstance(rows, list) else (rows.get("policies") or rows.get("items") or [])
+        except json.JSONDecodeError:
+            rows = []
+        for r in rows:
+            ns = str(r.get("namespace", ""))
+            cls = str(r.get("agent_class", ""))
+            if ns.startswith(_THROWAWAY_NS_PREFIXES) or cls.startswith(_THROWAWAY_CLS_PREFIXES):
+                st, _ = delete(base, f"/api/v1/policies/{ns}/{cls}", token)
+                removed += 1 if st < 300 else 0
+    print(f"  ok  cleared  {removed} throwaway polic{'y' if removed == 1 else 'ies'}")
+
+    # `namespace` is a QUERY param here; the model rejects it in the body as extra_forbidden.
+    restored = 0
+    for ns in _MANAGED_NS:
+        st, _ = put(base, f"/api/v1/settings?namespace={ns}", token,
+                    {"apply_mode": "enforce", "enforcement_mode": "block"})
+        restored += 1 if st == 200 else 0
+    print(f"  ok  restored {restored}/{len(_MANAGED_NS)} namespace(s) to enforce/block")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base-url", default="http://localhost:3400")
@@ -440,8 +518,10 @@ def main() -> int:
         return 2
 
     print(f"seeding {args.base_url} (namespace {NS})")
+    print("reset — clear what previous runs left behind:")
+    failures = reset_state(args.base_url, token)
     print("declared tier — MCP pins:")
-    failures = seed_declared(args.base_url, token)
+    failures += seed_declared(args.base_url, token)
     print("observed tier — audit rows from real traffic:")
     failures += seed_observed(args.base_url, token)
     # Last, deliberately: it re-serves a definition seed_declared already pinned, so running it
