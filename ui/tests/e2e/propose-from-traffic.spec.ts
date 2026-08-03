@@ -105,6 +105,13 @@ test("editing the class no longer destroys the proposal", async ({ page }) => {
 });
 
 test("the dry run replays real traffic and reports what it would refuse", async ({ page, recorder }) => {
+  // The dry run REPLAYS every recorded call for the class, capped at 500, and each one is an OPA
+  // evaluation. Cost therefore scales with how much traffic the cluster has accumulated: on a fresh
+  // seed this class had 12 calls and the whole test took under 2s; after a day of seeding and
+  // red-team runs it replays the full 500 and the API alone takes ~7s. That is the feature working,
+  // not a regression — but it outgrew the default 60s budget once page load and three parallel
+  // workers are added on top.
+  test.setTimeout(120_000);
   await propose(page);
   await page.getByRole("button", { name: /dry run/i }).click();
   // Either outcome is valid against live traffic; what must hold is that the page states one of them

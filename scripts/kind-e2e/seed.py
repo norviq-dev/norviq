@@ -376,6 +376,39 @@ def seed_console_prereqs(base: str, token: str, repo_root: Path) -> int:
 
 
 
+# SYNTHETIC identities — the ones the console hides by default.
+#
+# `wave4-compliance.spec.ts:34` asserts the asset graph EXCLUDES evtrace/scorer classes unless
+# `include_synthetic=true`, and that `synthetic_hidden > 0`. That is a real and useful guarantee — the
+# graph should show the customer's estate, not Norviq's own probes — but it can only be tested if at
+# least one synthetic identity exists, and nothing created one. Note these are named to MATCH the
+# synthetic-identity filter on purpose; that is the whole point of the fixture.
+SYNTHETIC_TRAFFIC = [
+    ("search_kb", {"q": "trace"}, "evtrace-probe"),
+    ("search_kb", {"q": "score"}, "scorer"),
+]
+
+
+def seed_synthetic(base: str, token: str) -> int:
+    failures = 0
+    for tool, params, cls in SYNTHETIC_TRAFFIC:
+        status, body = post(base, "/api/v1/evaluate", token, {
+            "tool_name": tool,
+            "tool_params": params,
+            "agent_identity": {
+                "spiffe_id": f"spiffe://norviq/ns/{CUSTOMER_SUPPORT_NS}/sa/{cls}",
+                "namespace": CUSTOMER_SUPPORT_NS,
+                "agent_class": cls,
+            },
+            "framework": "sdk",
+        })
+        ok = status == 200
+        print(f"  {'ok ' if ok else 'FAIL'} synthetic {cls:<14}"
+              f"{'' if ok else f' -> {status} {body[:160]}'}")
+        failures += 0 if ok else 1
+    return failures
+
+
 def seed_redteam(base: str, token: str) -> int:
     """One completed red-team suite, so the Red Team surface has a scorecard and a history row.
 
@@ -417,6 +450,8 @@ def main() -> int:
     failures += seed_drift(args.base_url, token)
     print("console suite prerequisites — the policy and traffic COVERAGE-MATRIX.md assumes:")
     failures += seed_console_prereqs(args.base_url, token, Path(__file__).resolve().parent.parent.parent)
+    print("synthetic identities — the ones the asset graph hides by default:")
+    failures += seed_synthetic(args.base_url, token)
     print("red-team history — a completed suite the Red Team surface can report on:")
     failures += seed_redteam(args.base_url, token)
 
