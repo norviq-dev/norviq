@@ -56,7 +56,11 @@ test.describe("Catalog hierarchy + governance — real login", () => {
   test.beforeEach(async ({ page }) => {
     await realLogin(page);
     for (const id of ["ecommerce", "erp-crm"]) await apiRaw(page, `/api/v1/policy-packs/${id}/disable`, "POST", { namespace: NS });
-    await apiRaw(page, `/api/v1/settings`, "PUT", { namespace: NS, apply_mode: "enforce" });
+    // `namespace` goes in the QUERY STRING, not the body: the settings model rejects it as
+    // `extra_forbidden`, so the body form 422'd and — because `apiRaw` does not assert on status —
+    // the namespace silently stayed in its previous mode. The dry-run test then waited for a banner
+    // that could never appear, and reported a missing element rather than a rejected write.
+    await apiRaw(page, `/api/v1/settings?namespace=${NS}`, "PUT", { apply_mode: "enforce" });
   });
 
   test("rendered hierarchy === direct /policies/effective (scope, order, priority)", async ({ page }) => {
@@ -69,10 +73,12 @@ test.describe("Catalog hierarchy + governance — real login", () => {
     const apiStack = (api.layers as { scope: string; priority: number }[]).map((l) => ({ scope: l.scope, priority: String(l.priority) }));
     await expect.poll(async () => (await renderedStack(page)).length).toBe(apiStack.length);
     expect(await renderedStack(page)).toEqual(apiStack); // same scopes, same ORDER, same priorities
-    // every row carries the reserved static Mode = Enforce
+    // Every row carries the namespace's enforcement mode. `PolicyHierarchy.tsx:112` maps it to exactly
+    // two labels — "Monitor" when `enforcement_mode === "audit"`, otherwise "Block" — so "Enforce",
+    // which this asserted, is a label the component has never rendered.
     const modes = page.getByTestId("policy-hierarchy-mode");
     expect(await modes.count()).toBe(apiStack.length);
-    expect(await modes.first().innerText()).toMatch(/Enforce/);
+    expect(await modes.first().innerText()).toMatch(/Block|Monitor/);
   });
 
   test("Target Settings has no effective-policy table; the link opens the hierarchy (ns preserved)", async ({ page }) => {
