@@ -99,6 +99,36 @@ describe("schemaPaths — what the evaluator will actually key", () => {
     expect(p["mixed"].enumValues).toBeUndefined();
   });
 
+  it("carries a property's own description, on addressable AND non-addressable rows alike", () => {
+    // The design renders a description under each argument. It matters MOST on a disabled row: that is
+    // exactly when an operator is reading the list looking for an alternative to the one they cannot use.
+    const p = byPath({
+      type: "object",
+      properties: {
+        to: { type: "string", description: "recipient email" },
+        retries: { type: "integer", description: "how many times to retry" }
+      }
+    });
+    expect(p["to"].description).toBe("recipient email");
+    expect(p["retries"].addressable).toBe(false);
+    expect(p["retries"].description, "a disabled row still needs its description").toBe("how many times to retry");
+  });
+
+  it("treats a blank or non-string description as absent", () => {
+    const p = byPath({
+      type: "object",
+      properties: { a: { type: "string", description: "   " }, b: { type: "string", description: 42 } }
+    });
+    expect(p["a"].description).toBeUndefined();
+    expect(p["b"].description).toBeUndefined();
+  });
+
+  it("does not invent a description where the schema declares none", () => {
+    // Guards against a renderer that would otherwise show a stale value from a sibling.
+    const p = byPath({ type: "object", properties: { to: { type: "string" } } });
+    expect(p["to"].description).toBeUndefined();
+  });
+
   it("marks required properties", () => {
     const p = byPath({ type: "object", required: ["to"], properties: { to: { type: "string" }, cc: { type: "string" } } });
     expect(p["to"].required).toBe(true);

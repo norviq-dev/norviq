@@ -48,6 +48,20 @@ export interface SchemaPath {
   enumValues?: string[];
   /** Whether the parent object lists this property in `required`. */
   required: boolean;
+  /**
+   * The property's own `description`, when it declares one.
+   *
+   * ⚠️ ATTACKER-ADJACENT. This is server-authored text out of `approved_canonical` — the same
+   * provenance as the tool-level description that `GET /api/v1/tools` withholds when the definition
+   * scanner condemns it. The scanner explicitly reports findings against paths like
+   * `inputSchema.properties.q.description`, so injection text lives here too.
+   *
+   * The endpoint ships `input_schema` whole (it has to — paths, types and enums all come from it) and
+   * only nulls the tool-level `description`. So the withholding decision has to be honoured by whoever
+   * RENDERS this: when a tool's `description_withheld` is true, do not display these either. See
+   * `ArgumentTree`'s `suppressDescriptions` prop.
+   */
+  description?: string;
 }
 
 function declaredType(node: Record<string, unknown>): string {
@@ -69,6 +83,12 @@ function enumOf(node: Record<string, unknown>): string[] | undefined {
   // param_paths value, which is always a string.
   const values = raw.filter((v): v is string => typeof v === "string");
   return values.length > 0 ? values : undefined;
+}
+
+/** A property's own `description`, when it declares a non-empty string one. */
+function descriptionOf(node: Record<string, unknown>): string | undefined {
+  const d = node.description;
+  return typeof d === "string" && d.trim() !== "" ? d : undefined;
 }
 
 /**
@@ -95,6 +115,11 @@ export function schemaPaths(schema: unknown): SchemaPath[] {
       const child = rawChild as Record<string, unknown>;
       const path = prefix ? `${prefix}.${key}` : key;
       const isRequired = required.has(key);
+      // Carried on EVERY outcome, addressable or not: an operator deciding whether an argument is the
+      // one they mean needs its description most when the row is disabled and they are looking for an
+      // alternative. See the field's doc comment for why rendering it is gated on the tool's
+      // `description_withheld`.
+      const description = descriptionOf(child);
 
       // The charset gate runs before anything else: the evaluator will happily build a key for an
       // argument named "user email", but `_PARAM_PATH_RE` rejects the field on both compilers, so the
@@ -105,7 +130,8 @@ export function schemaPaths(schema: unknown): SchemaPath[] {
           type: declaredType(child),
           addressable: false,
           note: "argument name uses characters a policy field cannot contain",
-          required: isRequired
+          required: isRequired,
+          description
         });
         continue;
       }
@@ -116,7 +142,8 @@ export function schemaPaths(schema: unknown): SchemaPath[] {
           type: declaredType(child),
           addressable: false,
           note: "shape depends on a reference or union the builder cannot resolve",
-          required: isRequired
+          required: isRequired,
+          description
         });
         continue;
       }
@@ -137,13 +164,14 @@ export function schemaPaths(schema: unknown): SchemaPath[] {
           // The evaluator indexes concretely: {"ids": ["C-91"]} becomes `ids[0]`. A schema says the
           // argument is a list but never how long, so no index derived here would be trustworthy.
           note: "list arguments are indexed at runtime (…[0], …[1]) — scope by a seen path, or use “any parameter value”",
-          required: isRequired
+          required: isRequired,
+          description
         });
         continue;
       }
 
       if (type === "string") {
-        out.push({ path, type, addressable: true, enumValues: enumOf(child), required: isRequired });
+        out.push({ path, type, addressable: true, enumValues: enumOf(child), required: isRequired, description });
         continue;
       }
 
@@ -156,7 +184,8 @@ export function schemaPaths(schema: unknown): SchemaPath[] {
           addressable: true,
           note: "no declared type — matches only if the value arrives as text",
           enumValues: enumOf(child),
-          required: isRequired
+          required: isRequired,
+          description
         });
         continue;
       }
@@ -166,7 +195,8 @@ export function schemaPaths(schema: unknown): SchemaPath[] {
         type,
         addressable: false,
         note: `${type} arguments never appear in param_paths — only text does`,
-        required: isRequired
+        required: isRequired,
+        description
       });
     }
   };
