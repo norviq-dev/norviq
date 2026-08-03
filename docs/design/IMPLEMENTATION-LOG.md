@@ -1116,3 +1116,76 @@ apparent perfection.
 This is the second time this session a plausible root cause survived code review and died to a
 one-command experiment. **Spend the first move on the experiment that discriminates between the
 hypotheses, not on the one that confirms the favourite.**
+
+---
+
+## G4 — enforcement latency, and the pool that refused instead of waiting
+
+**G4 met**, measured in-cluster (`kubectl exec` into the api pod, never through a port-forward — a
+laptop-to-cluster hop adds a uniform delay that reads as product latency).
+
+| Bar | Result |
+|---|---|
+| p50 @ concurrency 1 ≤ 150ms | **5.3ms** |
+| p95 @ concurrency 8 ≤ 500ms | 192–205ms across all five scenarios |
+| p99 @ concurrency 8 ≤ 1000ms | 281–403ms |
+| Every scenario decides correctly @ concurrency 16 | **yes** |
+
+### The defect: `ConnectionError("Too many connections")` on the enforcement path
+
+Benign calls were being BLOCKED — 3/200 at concurrency 8, 82/200 at 16 — with `rule_id:
+evaluator_fallback`. The engine fails closed on any exception, so this was not a slow tool call, it was
+a **refused** one: legitimate agent actions denied because of a client-side pool ceiling.
+
+Two causes, both in `norviq/engine/cache.py`:
+
+1. `redis_max_connections: 20`, sized for console traffic. One `/evaluate` makes several Redis
+   round-trips (trust read, decision cache, behaviour persist), so the ceiling arrives at a fraction of
+   the request concurrency. Now 64.
+2. **redis-py's default pool RAISES the moment it is exhausted rather than queueing.** This is the real
+   bug. Switched to `BlockingConnectionPool` with a 1.0s wait, held well inside the evaluator's own 2.0s
+   OPA budget so a genuinely stuck Redis still surfaces as the *named* `evaluator_timeout` rather than
+   an anonymous fallback. A queued call answering in 40ms beats a refused one.
+
+The side effect was larger than expected: benign p50 at concurrency 1 fell from **113ms to 5.3ms**. The
+old figure was not the cost of evaluating a policy, it was contention.
+
+The test that pinned `max_connections == 20` was updated to read the setting instead of duplicating the
+literal, and a second test now pins the pool CLASS — the property that actually matters and that no
+hermetic suite could otherwise observe, since the symptom only appears under concurrency.
+
+### Two triage rules, both learned the hard way
+
+**A `block` cannot be triaged without its `rule_id`.** The harness reported "WRONG DECISION" for calls
+blocked by `trust_frozen` — a red-team suite had frozen the measured identity, which is the product
+working exactly as designed. That sends the reader hunting an enforcement bug that does not exist. The
+runner now clears the freeze before timing and classifies `trust_frozen` / `rate_limit_exceeded` /
+`escalate_low_trust` as environmental rather than wrong. Same distinction the personas needed.
+
+**The two artefacts disagreed about the bar.** `EXIT-STATE.md` said p95 ≤ 500ms / p99 ≤ 1000ms at
+concurrency 8; `latency.py` defaulted to 250/500. The same run passed or failed depending on which file
+you read — the project's signature defect, committed by the person who wrote both. Reconciled to the
+document.
+
+### The cluster was serving a previous build, again, one level deeper
+
+The first "fixed" measurement showed no improvement at all. The pool change was not running: the image
+was rebuilt and loaded under the same `:api-latest` tag, which leaves the Deployment's pod template
+byte-identical, so Kubernetes correctly concluded there was nothing to reconcile and never rolled the
+pods. Helm reported success. The image-provenance guard added earlier passed too — it checks the image
+NAME and a route that existed in the older build as well.
+
+Fixes, in the chart rather than the script:
+* a `podAnnotations` passthrough (api + engine), stamped by `00-up.sh` with the built image ID, so the
+  pod template changes exactly when the image does — a real build rolls, a no-op re-run does not;
+* the guard now compares that annotation on the pod against the id this run built.
+
+Two false starts worth recording. Asserting on the container's `imageID` **cannot work under kind**:
+`kind load` re-imports into containerd under a fresh digest (`import-<date>@sha256:…`), so a node-side
+id never equals the local docker one. And the first annotation check read `.items[0]`, which was the
+pod the rollout had just replaced — still terminating, because `preStopSleepSeconds` had just been
+raised to 15 — and declared the roll had not happened. `chaos.py` hit the identical trap from the other
+side by killing a sidecar in a pod that was already going away.
+
+> **Rule: `kubectl get pods | .items[0]` is a coin toss. Any check that names a pod must require
+> Running and no `deletionTimestamp`, or it will eventually describe a pod that no longer exists.**

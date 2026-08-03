@@ -53,6 +53,13 @@ spec:
         # not take effect until an unrelated pod restart.
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- /* Operator-supplied pod annotations. Their real job is to make the pod template CHANGE
+               when something outside the template changes — most often a rebuilt image pushed under an
+               unchanged tag, where Kubernetes correctly sees an identical spec and never rolls, leaving
+               the cluster serving a previous build while reporting a successful upgrade. */}}
+        {{- with $.Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       labels:
         app: norviq-api
         {{- include "norviq.componentLabels" (dict "root" $ "component" "api") | nindent 8 }}

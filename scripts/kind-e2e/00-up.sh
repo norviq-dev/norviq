@@ -74,6 +74,10 @@ kind load docker-image --name "$CLUSTER" \
   norviq/norviq-engine:webhook-latest \
   norviq/norviq-engine:bootstrap-latest
 
+# Record the exact image IDs just built. These are what the running pods must be proved to carry — see
+# the verification stage. A tag proves nothing: `:api-latest` names whatever was loaded last.
+API_IMAGE_ID="$(docker image inspect -f '{{.Id}}' norviq/norviq-engine:api-latest)"
+
 # --- 4. install -----------------------------------------------------------------------------------
 stage "Installing the chart"
 kubectl apply -f "${REPO_ROOT}/helm/norviq/crds/" >/dev/null
@@ -103,7 +107,16 @@ helm upgrade --install norviq "${REPO_ROOT}/helm/norviq" \
   --set images.webhook.pullPolicy=IfNotPresent \
   --set images.bootstrap.pullPolicy=IfNotPresent \
   --set "policyQuotaNamespaces={${QUOTA_NS}}" \
+  --set-string "podAnnotations.nrvq-local-image-id=${API_IMAGE_ID}" \
   --wait --timeout 10m
+
+# FORCE THE ROLL. Rebuilding under the SAME TAG leaves the Deployment's pod template byte-identical, so
+# Kubernetes correctly concludes there is nothing to do and the pods keep running the old image — even
+# though the node now holds a new one under that tag. The cluster then reports a successful upgrade
+# while serving code from a previous build, which is indistinguishable from the change not working.
+# Stamping the built image ID into a pod annotation makes the template change exactly when the image
+# does, so the roll happens for real builds and is skipped for no-op re-runs.
+kubectl -n "$NS" rollout status deployment/norviq-api --timeout=5m
 kubectl -n "$NS" get pods
 
 # --- 4b. PROVE THE CLUSTER IS RUNNING *THIS* CODE --------------------------------------------------
@@ -123,10 +136,39 @@ for dep in norviq-api norviq-ui norviq-engine norviq-webhook; do
     same tag was already on the node and IfNotPresent preferred it." ;;
   esac
 done
-# The image name only proves what was scheduled. This proves what the process actually serves: a route
+# Did the pods actually ROLL onto this build? Rebuilding under the same `:api-latest` tag leaves the
+# Deployment's pod template identical, so Kubernetes has nothing to reconcile and the old pods stay —
+# the cluster serves a previous build while helm reports success. The route check below cannot catch
+# that, because the route it looks for existed in the older build too.
+#
+# The comparison is against the POD ANNOTATION, not the container's imageID. `kind load` re-imports the
+# image into the node's containerd under a fresh digest (`import-<date>@sha256:…`), so a node-side image
+# ID never equals the local docker one and asserting on it can only ever fail. The annotation is
+# stamped from the build, so a pod that predates this build carries the PREVIOUS id — which is exactly
+# the question being asked.
+# `.items[0]` is NOT safe here. The just-replaced pod is still terminating — for at least
+# gracefulShutdown.preStopSleepSeconds — and it sorts first as often as not, so the check would read
+# the annotation of the pod the roll just replaced and declare the roll never happened. Pick a pod that
+# is Running and NOT being deleted. (chaos.py hit this same trap from the other direction: it killed a
+# sidecar in a pod that was already going away.)
+live_api_pod() {
+  kubectl -n "$NS" get pods -l app.kubernetes.io/component=api \
+    -o jsonpath='{range .items[*]}{.metadata.name}|{.metadata.deletionTimestamp}|{.status.phase}{"\n"}{end}' \
+    | awk -F'|' '$2 == "" && $3 == "Running" { print $1; exit }'
+}
+api_live="$(live_api_pod)"
+[ -n "$api_live" ] || fail "no Running, non-terminating api pod after the rollout"
+running_id="$(kubectl -n "$NS" get pod "$api_live" -o jsonpath='{.metadata.annotations.nrvq-local-image-id}')"
+if [ "$running_id" = "$API_IMAGE_ID" ]; then
+  echo "  ok  api pod was rolled onto this build (${API_IMAGE_ID:7:12})"
+else
+  fail "the api pod was built from ${running_id:-<no annotation>}, but this run built ${API_IMAGE_ID}.
+    The node has the new image under the same tag and the pods were never rolled onto it."
+fi
+
+# The image ID only proves what was scheduled. This proves what the process actually serves: a route
 # that exists on this branch and does not exist in the published image.
-api_pod0="$(kubectl -n "$NS" get pods -l app.kubernetes.io/component=api -o jsonpath='{.items[0].metadata.name}')"
-routes="$(kubectl -n "$NS" exec "$api_pod0" -c api -- \
+routes="$(kubectl -n "$NS" exec "$api_live" -c api -- \
   python -c "import json,urllib.request;print(' '.join(json.load(urllib.request.urlopen('http://127.0.0.1:8080/openapi.json',timeout=20))['paths']))" 2>/dev/null || true)"
 case "$routes" in
   *"/api/v1/mcp/pins"*) echo "  ok  API serves /api/v1/mcp/pins — this is branch code" ;;

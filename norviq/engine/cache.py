@@ -81,9 +81,19 @@ class RedisCache:
 
     async def connect(self) -> None:
         """Initialize the Redis client and Lua scripts."""
-        self._redis = aioredis.from_url(
+        # A BLOCKING pool, deliberately. redis-py's default `ConnectionPool` raises
+        # `ConnectionError("Too many connections")` the moment it is exhausted, and the evaluator fails
+        # CLOSED on any exception — so a brief burst did not make an agent's tool call slower, it made
+        # it REFUSED. That showed up as 3/200 benign calls blocked with `evaluator_fallback` at
+        # concurrency 8, which reads as an enforcement bug and is really a pool ceiling.
+        #
+        # `BlockingConnectionPool` queues instead, bounded by `timeout`, which is held well under the
+        # evaluator's 2.0s OPA budget so a truly stuck Redis still lands on the NAMED `evaluator_timeout`
+        # block rather than an anonymous fallback.
+        pool = aioredis.BlockingConnectionPool.from_url(
             self._url,
             max_connections=settings.redis_max_connections,
+            timeout=settings.redis_pool_wait_s,
             decode_responses=True,
             # Resilience: proactively validate idle connections and keep TCP alive so a Redis restart
             # is recovered transparently on the next command (paired with the /readyz drain).
@@ -91,6 +101,7 @@ class RedisCache:
             socket_keepalive=True,
             retry_on_timeout=True,
         )
+        self._redis = aioredis.Redis(connection_pool=pool)
         self._trust_decr_sha = await self._redis.script_load(TRUST_DECREMENT_LUA)
         log.info("nrvq.cache.connected", url=redact_url_credentials(self._url), code="NRVQ-DB-9010")
 

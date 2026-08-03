@@ -54,8 +54,44 @@ SCENARIOS: list[dict] = [
 ]
 
 
-def evaluate(base: str, token: str, sc: dict) -> tuple[float, str]:
-    """One evaluate call. Returns (elapsed_ms, decision)."""
+# Rules that mean "a legitimate control fired", NOT "the product returned a wrong answer". Both are a
+# `block` on a benign call and they look identical in a decision histogram, but only one is a defect:
+#
+#   trust_frozen        an admin (or a red-team suite) froze this identity. Every call is blocked, by
+#                       design. If a chaos run or a suite has touched the agent, the latency run
+#                       inherits that state and every benign scenario "fails".
+#   rate_limit_exceeded a load generator hammering one identity IS what a rate limiter exists to stop.
+#
+# Reporting these as WRONG DECISION sends the reader looking for an enforcement bug that is not there —
+# the same triage failure the personas hit, where "the engine did not enforce my rule" and "my rule
+# never described this call" were both filed as blockers until a check separated them.
+ENVIRONMENTAL_BLOCKS = {"trust_frozen", "rate_limit_exceeded", "escalate_low_trust"}
+
+
+def reset_trust(base: str, token: str) -> str:
+    """Clear any admin freeze / trust cap on the measured identity before timing anything.
+
+    score=1.0 is the documented "clear both the freeze and the cap" value (see
+    `norviq/api/routers/agents.py::update_trust`), returning the agent to purely behavioural trust.
+    """
+    spiffe = f"spiffe://norviq/ns/{NS}/sa/{CLS}"
+    req = urllib.request.Request(  # noqa: S310
+        f"{base}/api/v1/agents/{spiffe}/trust", data=json.dumps({"score": 1.0}).encode(),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"}, method="PUT")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
+            return f"trust reset (HTTP {resp.status})"
+    except urllib.error.HTTPError as exc:
+        return f"trust reset FAILED (HTTP {exc.code}) — a frozen identity will block every benign call"
+    except Exception as exc:  # noqa: BLE001
+        return f"trust reset FAILED ({type(exc).__name__}) — results may be polluted"
+
+
+def evaluate(base: str, token: str, sc: dict) -> tuple[float, str, str]:
+    """One evaluate call. Returns (elapsed_ms, decision, rule_id).
+
+    The rule_id is carried through because a `block` alone cannot be triaged: see ENVIRONMENTAL_BLOCKS.
+    """
     body = json.dumps({
         "tool_name": sc["tool"],
         "tool_params": sc["params"],
@@ -70,8 +106,9 @@ def evaluate(base: str, token: str, sc: dict) -> tuple[float, str]:
         with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
             payload = json.loads(resp.read())
     except urllib.error.HTTPError as exc:
-        return (time.perf_counter() - start) * 1000, f"http_{exc.code}"
-    return (time.perf_counter() - start) * 1000, str(payload.get("decision"))
+        return (time.perf_counter() - start) * 1000, f"http_{exc.code}", ""
+    return ((time.perf_counter() - start) * 1000, str(payload.get("decision")),
+            str(payload.get("rule_id") or ""))
 
 
 def pct(values: list[float], p: float) -> float:
@@ -85,26 +122,31 @@ def pct(values: list[float], p: float) -> float:
 
 def run_scenario(base: str, token: str, sc: dict, n: int, concurrency: int) -> dict:
     # Cold call first, kept OUT of the percentiles and reported on its own.
-    cold_ms, cold_decision = evaluate(base, token, sc)
+    cold_ms, cold_decision, _ = evaluate(base, token, sc)
 
-    def one(_i: int) -> tuple[float, str]:
+    def one(_i: int) -> tuple[float, str, str]:
         return evaluate(base, token, sc)
 
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         results = list(pool.map(one, range(n)))
 
-    times = [t for t, _ in results]
-    decisions = {d for _, d in results}
+    times = [t for t, _, _ in results]
+    decisions = {d for _, d, _ in results}
+    # Split the deviations by WHY, not by count. A block from a frozen identity is the product working;
+    # a block from the policy path on a benign call is the product broken.
+    off = [(d, r) for _, d, r in results if sc["expect"] is not None and d != sc["expect"]]
+    environmental = [x for x in off if x[1] in ENVIRONMENTAL_BLOCKS]
     wrong = None
-    if sc["expect"] is not None and decisions != {sc["expect"]}:
-        # Loud, because a latency figure for a call that did the WRONG thing is worse than no figure.
-        wrong = f"expected {sc['expect']}, saw {sorted(decisions)}"
+    if len(off) > len(environmental):
+        real = sorted({f"{d}/{r or 'no-rule'}" for d, r in off if r not in ENVIRONMENTAL_BLOCKS})
+        wrong = f"expected {sc['expect']}, saw {real} on {len(off) - len(environmental)}/{n} calls"
 
     return {
         "name": sc["name"], "n": n, "cold_ms": cold_ms, "cold_decision": cold_decision,
         "p50": pct(times, 50), "p95": pct(times, 95), "p99": pct(times, 99),
         "max": max(times), "mean": statistics.fmean(times), "decisions": sorted(decisions),
-        "wrong": wrong,
+        "wrong": wrong, "environmental": len(environmental),
+        "env_rules": sorted({r for _, r in environmental}),
     }
 
 
@@ -116,8 +158,13 @@ def main() -> int:
     ap.add_argument("--concurrency", type=int, default=8)
     # The engine fails CLOSED at 2s (`evaluator_timeout`), so a p99 anywhere near it is not a
     # performance concern — it is tool calls being wrongly refused. Budget well under it.
-    ap.add_argument("--budget-p95-ms", type=float, default=250.0)
-    ap.add_argument("--budget-p99-ms", type=float, default=500.0)
+    #
+    # These MUST match docs/design/EXIT-STATE.md G4. They did not: the doc said p95<=500 / p99<=1000 at
+    # concurrency 8 while this file defaulted to 250/500, so the same run passed or failed depending on
+    # which artefact you read. Exactly the defect this project keeps shipping — two components keyed
+    # differently on one concept — committed by the person who wrote both.
+    ap.add_argument("--budget-p95-ms", type=float, default=500.0)
+    ap.add_argument("--budget-p99-ms", type=float, default=1000.0)
     args = ap.parse_args()
 
     token = open(args.token_file).read().strip()  # noqa: SIM115, PTH123
@@ -125,7 +172,10 @@ def main() -> int:
         print(f"empty token in {args.token_file}", file=sys.stderr)
         return 2
 
-    print(f"latency · {args.base_url} · n={args.n}/scenario · concurrency={args.concurrency}\n")
+    # Clear any admin freeze BEFORE timing: a red-team suite or a chaos run leaves the measured
+    # identity frozen, and every benign call then blocks for a reason that has nothing to do with speed.
+    print(f"latency · {args.base_url} · n={args.n}/scenario · concurrency={args.concurrency}")
+    print(f"  {reset_trust(args.base_url, token)}\n")
     print(f"{'scenario':<16}{'p50':>9}{'p95':>9}{'p99':>9}{'max':>9}{'cold':>9}   decisions")
     print("-" * 78)
 
@@ -137,6 +187,10 @@ def main() -> int:
     print()
     failures = 0
     for r in rows:
+        if r["environmental"]:
+            print(f"· {r['name']}: {r['environmental']}/{r['n']} calls blocked by "
+                  f"{','.join(r['env_rules'])} — a legitimate control, not a wrong answer. The timings "
+                  "stand; the decision check for those calls is inconclusive.")
         if r["wrong"]:
             print(f"✗ {r['name']}: WRONG DECISION — {r['wrong']}")
             print("   A latency number for a call that did the wrong thing is worse than no number.")

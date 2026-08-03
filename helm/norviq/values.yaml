@@ -127,6 +127,11 @@ imagePullSecrets: []
 tests:
   image: "curlimages/curl:8.10.1"
 
+# Extra annotations stamped onto every norviq pod template. Chiefly a rollout lever: a value that
+# changes with each build (an image ID, a git sha) forces the Deployment to actually roll, which a
+# rebuilt-but-same-tag image otherwise will not — see scripts/kind-e2e/00-up.sh.
+podAnnotations: {}
+
 gracefulShutdown:
   # How long a terminating pod keeps serving before its process is asked to stop. This is NOT a
   # politeness setting — it is the window in which the pod's removal from the Service endpoints

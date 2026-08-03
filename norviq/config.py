@@ -73,7 +73,21 @@ class NorviqSettings(BaseSettings):
     # socket/SVID error (no env-var fallback). NRVQ_SPIFFE_MODE; revert to mock with no redeploy.
     spiffe_mode: str = "mock"
     redis_url: str = "redis://localhost:6379"
-    redis_max_connections: int = 20
+    # Sized for the ENFORCEMENT path, not the console. One /evaluate does several Redis round-trips
+    # (trust read, decision cache, behaviour persist), so the pool ceiling is reached at a fraction of
+    # the request concurrency. At 20 it was exhausted by 8 concurrent evaluates on a single-worker pod.
+    redis_max_connections: int = 64
+    # SECONDS TO WAIT for a free connection before giving up. This exists because redis-py's default
+    # pool RAISES `ConnectionError("Too many connections")` the instant it is exhausted rather than
+    # queueing — and the evaluator fails CLOSED on any exception, so a momentary burst did not slow an
+    # agent's tool call down, it REFUSED it. Measured: 3/200 benign calls blocked with rule_id
+    # `evaluator_fallback` at concurrency 8.
+    #
+    # Bounded well inside the evaluator's own 2.0s OPA budget so that a genuinely stuck Redis still
+    # surfaces as the named `evaluator_timeout` block rather than as an anonymous fallback. Waiting is
+    # the right behaviour here: a queued call that answers in 40ms is strictly better than a refused
+    # one, and the 2s ceiling means the wait can never become unbounded.
+    redis_pool_wait_s: float = 1.0
     # Proactively re-validate idle Redis connections (resilience after a Redis restart).
     redis_health_check_interval_s: int = 15
     redis_ttl_policy_s: int = 60
