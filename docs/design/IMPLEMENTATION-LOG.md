@@ -1418,3 +1418,84 @@ defined`, twice. The fix was right and the scope was wrong; it is hoisted to des
 
 **Standing at the end of this session: 13 failed / 161 passed, down from 32 / 144, with the runtime
 back to 13.9 minutes.** G3 is NOT met. The remaining set is characterised, not guessed at.
+
+---
+
+## G3 met — 0 failed, twice back to back
+
+| Run | Result |
+|---|---|
+| 12 | **0 failed** · 1 flaky · 0 did not run · 182 passed (7.7m) |
+| 13 | **0 failed** · 0 flaky · 0 did not run · 183 passed (7.7m) |
+
+Identical (empty) failing set across both. The single flake in run 12,
+`posture-apply-ux.spec.ts:68`, is not in a spec this work touched — within G3's allowance.
+
+Trajectory: **21 failed / 12 flaky → 13 / 3 → 1 / 0 → 0 / 0**, with the runtime falling from 26
+minutes to 7.7.
+
+### The dominant cause was one product defect, and it was operator-reachable
+
+A 31-agent triage with adversarial verification put 13 of 15 failures under one slug: HTTP 429.
+
+`redteam` is rate-limited at 15/60s because starting a suite fans out over every agent class times
+every attack in the catalog — correct for the write. But `_ROUTE_RULES` classified the whole
+`/api/v1/redteam` prefix, and the console's landing page calls `/redteam/results/latest` on every
+boot. Measured over one run: **116 hits on results/latest against 20 actual Red Team page mounts** —
+83% of the traffic in the tight bucket came from Overview.
+
+So roughly fifteen visits to the **landing page** in a minute began 429-ing a real operator, on a
+guard built to stop them hammering the suite runner. Only `/redteam/suite` and `/redteam/run` are in
+that class now. A unit test pins the split and fails on the old rule.
+
+Two more real defects fell out of the same investigation, both about **how the console behaves when it
+is throttled** — which was untested because nothing had noticed it could be:
+
+* **`RedTeam.tsx` loaded three independent reads with `Promise.all` in one try/catch**, and the render
+  gate requires all of them — so one throttled history fetch erased the scorecard, the attack table
+  *and* the empty state together. `allSettled` now, each panel from its own result. The
+  `.catch(() => ({ targets: [] }))` was worse than useless: it turned an HTTP error into a confident
+  "this namespace has no target classes".
+* **`AppContext` swallowed every `/cluster-info` error into an empty namespace list**, commented
+  "honest empty selector". Honest for a 401; for a 429 or 5xx the picker tells the operator their
+  deployment has no namespaces. Only 401 clears it now.
+
+### Why the failing set kept moving
+
+The limiter keys on the JWT `sub`, and all 190 specs carry one admin token — so they share a single
+bucket. Reconstructed from the counter, one run's 60s windows peaked at **482 against a 300 ceiling**.
+The suite ran *at* the ceiling, and which spec ate the 429 was decided by ordering. That is exactly
+why run 8 lost `auth-logout` and run 9 lost five compliance tests while the count stayed at 13.
+
+A moving set is the signature G3 uses to detect leaked state, so this made the gate unpassable for a
+reason that had nothing to do with the product. The harness now starts each run from a cold bucket and
+raises the ceiling **locally only**; the product default stays 300, because the defect it exposed is
+fixed properly rather than papered over.
+
+### Three fixtures that were really other people's residue
+
+* `brand-new-agent` was created solely by `tests/attacks/conftest.py`. A browser spec asserting its
+  version history had only ever passed when the **attacks suite** ran first. Moved to `seed.py` with
+  three genuinely distinct revisions (posting identical rego cuts no new version, so the assertion
+  would have passed on one), and deleted from the attacks conftest — two owners at different
+  priorities is a conflict waiting to be debugged.
+* `ui-polish-batch-c` and `ui-batch-a` POSTed **identical** red-team suites. With
+  `redteam_detail_keep_runs = 1`, each POST prunes the previous run's detail rows, so the duplicate
+  was actively destroying the fixture other red-team specs read.
+* `graph-scope-search` picked the alphabetically-first namespace, which is `agents` — real, created
+  for sidecar injection, and holding zero attack paths. It now picks one that has kill-chains.
+
+### And the last failure was a sleep
+
+`console-fixes-batch2` asserted every graph node sits inside its cluster hull, after
+`waitForTimeout(600)`. It reported "1/85 nodes fell outside their nearest hull", 259px out from a
+radius of 141 — indistinguishable from a node rendered in the wrong place. It passed on retry.
+
+The 600ms was calibrated against a smaller graph; the seeded estate reached ~85 nodes and the wait
+expired mid-settle. It now polls for the transform signature to stop changing, and requires **two
+consecutive** identical samples — the canvas reaches a quiet moment before its data lands and then
+re-lays-out, so one match can catch that lull. The wait condition is stability, not the assertion:
+waiting for "all nodes inside" would be circular.
+
+> **Rule, earned three times this session: a fixed sleep is a threshold calibrated against whatever
+> the estate happened to contain that day. Grow the data and it becomes a defect report.**
