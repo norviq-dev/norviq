@@ -44,16 +44,52 @@ curl -fsS -o /dev/null "$BASE_URL/" || { echo "✗ R10: console not reachable at
 # the admin credential is new, and a value carried over from the previous cluster 401s: ~27 form-login
 # tests then fail on a 20s page.waitForURL timeout, naming nothing useful. That is precisely the
 # failure the gate was written to prevent, arriving through the door marked "trust the caller".
+# Clearing the failed-attempt counter is part of PREPARING to authenticate, not a workaround.
+# `admin` locks out after N failures (auth_login_max_attempts) and the lock is a plain Redis counter,
+# `callcount:login-fail:<user>`. The login gate itself performs three logins, so it cannot recover a
+# locked account — it just inherits the 429 and reports a failure that has nothing to do with the
+# credential. Verifying a password COSTS one of those attempts, which is how this bit me: the probe
+# below tripped the lock, and the gate that would have fixed everything then failed with
+# "Too many failed attempts."
+clear_login_lockout() {
+  local pod
+  pod="$(kubectl ${NRVQ_KUBE_CONTEXT:+--context "$NRVQ_KUBE_CONTEXT"} -n "${NRVQ_NAMESPACE:-norviq}" \
+    get pods -l app.kubernetes.io/name=redis -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+  [ -n "$pod" ] || pod="norviq-redis-0"
+  local pw
+  pw="$(kubectl ${NRVQ_KUBE_CONTEXT:+--context "$NRVQ_KUBE_CONTEXT"} -n "${NRVQ_NAMESPACE:-norviq}" \
+    get secret norviq-secrets -o go-template='{{index .data "NRVQ_REDIS_PASSWORD" | base64decode}}' 2>/dev/null)"
+  kubectl ${NRVQ_KUBE_CONTEXT:+--context "$NRVQ_KUBE_CONTEXT"} -n "${NRVQ_NAMESPACE:-norviq}" \
+    exec "$pod" -- sh -c "redis-cli ${pw:+-a '$pw'} --no-auth-warning DEL callcount:login-fail:admin" \
+    >/dev/null 2>&1 || true
+}
+
 if [ -n "${NRVQ_E2E_PASSWORD:-}" ]; then
-  if curl -sf -o /dev/null -X POST -H "Content-Type: application/json" \
-       -d "{\"username\":\"admin\",\"password\":\"${NRVQ_E2E_PASSWORD}\"}" \
-       "$BASE_URL/api/v1/auth/login"; then
-    echo "password: supplied NRVQ_E2E_PASSWORD verified"
-  else
-    echo "password: supplied NRVQ_E2E_PASSWORD is REJECTED by $BASE_URL — running the login gate" >&2
-    unset NRVQ_E2E_PASSWORD
-  fi
+  _pw_code="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Content-Type: application/json" \
+    -d "{\"username\":\"admin\",\"password\":\"${NRVQ_E2E_PASSWORD}\"}" \
+    "$BASE_URL/api/v1/auth/login")"
+  case "$_pw_code" in
+    200)
+      echo "password: supplied NRVQ_E2E_PASSWORD verified" ;;
+    429)
+      # NOT a wrong password — the account is locked, and every further attempt digs the hole deeper.
+      # Distinguishing this from 401 is the whole point of reading the status instead of `curl -sf`.
+      echo "password: admin is locked out (HTTP 429) — clearing the counter, then re-checking" >&2
+      clear_login_lockout
+      _pw_code="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Content-Type: application/json" \
+        -d "{\"username\":\"admin\",\"password\":\"${NRVQ_E2E_PASSWORD}\"}" \
+        "$BASE_URL/api/v1/auth/login")"
+      [ "$_pw_code" = "200" ] && echo "password: verified after clearing the lockout" \
+        || { echo "password: still rejected (HTTP ${_pw_code}) — running the login gate" >&2; unset NRVQ_E2E_PASSWORD; } ;;
+    *)
+      echo "password: supplied NRVQ_E2E_PASSWORD is REJECTED (HTTP ${_pw_code}) — running the login gate" >&2
+      unset NRVQ_E2E_PASSWORD ;;
+  esac
 fi
+
+# The gate performs three logins of its own; give it a clean counter to spend, whether the failures
+# above came from this run or a previous one.
+[ -z "${NRVQ_E2E_PASSWORD:-}" ] && clear_login_lockout
 
 if [ -z "${NRVQ_E2E_PASSWORD:-}" ] && [ -x "$(dirname "$0")/kind-e2e/login-gate.sh" ]; then
   # stderr is NOT suppressed. The first version sent it to /dev/null, so when the gate failed — it

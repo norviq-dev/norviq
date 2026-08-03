@@ -42,6 +42,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -483,6 +485,56 @@ def seed_fleet(base: str, token: str) -> int:
     return failures
 
 
+# TRAFFIC SPREAD ACROSS TIME — the fixture every range-sensitive surface needs and none provided.
+#
+# A freshly seeded cluster holds ~58 audit rows, all written within the last few minutes, so
+# `/audit/stats` returns the SAME total for 1h, 24h and 7d. Every spec that asks a question about time
+# is then unanswerable: "switching range on Overview actually refetches — 1h total != 24h total"
+# cannot hold when they are equal by construction, "bucket granularity follows the selected range"
+# has one bucket to work with, and the KPI cards' "never stuck at 0" has almost nothing to show.
+#
+# Those specs passed for months on the AKS cluster, which had accumulated real traffic over weeks.
+# That is not a fixture — it is an accident of the cluster being old, and it is why a fresh kind
+# cluster reports failures the same code does not have.
+#
+# WHY COPY REAL ROWS RATHER THAN FABRICATE THEM. Every row here was produced by the actual engine
+# deciding an actual call: real rule_ids, real decisions, real latencies. Only WHEN it happened moves.
+# A hand-built row would encode what someone thought the engine emits, which is precisely the class of
+# fixture this project keeps getting burned by.
+_BACKDATE_SQL = """
+INSERT INTO audit_log (id, event_id, tool_name, decision, agent_id, agent_class, namespace,
+                       policy_id, rule_id, reason, session_id, trust_score, latency_ms, framework,
+                       timestamp_utc, payload)
+SELECT gen_random_uuid(), gen_random_uuid(), a.tool_name, a.decision, a.agent_id, a.agent_class,
+       a.namespace, a.policy_id, a.rule_id, a.reason, a.session_id, a.trust_score, a.latency_ms,
+       a.framework, now() - (g.h * interval '1 hour'), a.payload
+FROM (SELECT * FROM audit_log
+      WHERE timestamp_utc > now() - interval '2 hours'
+      ORDER BY timestamp_utc DESC LIMIT 40) a
+CROSS JOIN generate_series(2, 168, 3) AS g(h);
+"""
+
+
+def seed_backdate(kube_context: str, namespace: str = "norviq") -> int:
+    """Spread copies of real decisions across the last 7 days so time ranges differ from each other."""
+    pod = subprocess.run(  # noqa: S603
+        ["kubectl", "--context", kube_context, "-n", namespace, "get", "pods",
+         "-l", "app.kubernetes.io/name=postgresql", "-o", "jsonpath={.items[0].metadata.name}"],
+        capture_output=True, text=True, check=False).stdout.strip() or "norviq-postgresql-0"
+    run = subprocess.run(  # noqa: S603
+        ["kubectl", "--context", kube_context, "-n", namespace, "exec", pod, "--",
+         "psql", "-U", "norviq", "-d", "norviq", "-tAc", _BACKDATE_SQL],
+        capture_output=True, text=True, check=False)
+    if run.returncode != 0:
+        # Say WHY rather than skipping quietly — a silent skip here reappears as a dozen unexplained
+        # range-assertion failures with nothing pointing back to the missing fixture.
+        print(f"  FAIL backdate  psql exited {run.returncode}: {run.stderr.strip()[:200]}")
+        return 1
+    print(f"  ok  backdate  {run.stdout.strip() or 'rows'} spread over the last 7 days "
+          "(1h < 24h < 7d now differ)")
+    return 0
+
+
 # SYNTHETIC identities — the ones the console hides by default.
 #
 # `wave4-compliance.spec.ts:34` asserts the asset graph EXCLUDES evtrace/scorer classes unless
@@ -590,6 +642,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base-url", default="http://localhost:3400")
     ap.add_argument("--token-file", default="/tmp/nrvq-signin-token.txt")
+    ap.add_argument("--kube-context", default=os.environ.get("NRVQ_KUBE_CONTEXT", "kind-norviq-local"),
+                    help="used only by the backdating step, which needs psql inside the cluster")
     args = ap.parse_args()
 
     token = open(args.token_file).read().strip()  # noqa: SIM115, PTH123
@@ -618,6 +672,9 @@ def main() -> int:
     failures += seed_synthetic(args.base_url, token)
     print("red-team history — a completed suite the Red Team surface can report on:")
     failures += seed_redteam(args.base_url, token)
+    # LAST, so it copies traffic every seeder above has already produced.
+    print("decision history spread over time — so 1h, 24h and 7d are different questions:")
+    failures += seed_backdate(args.kube_context)
 
     if failures:
         print(f"\n{failures} seeding step(s) failed", file=sys.stderr)
