@@ -866,3 +866,61 @@ written back to `$NRVQ_TOKEN_FILE`.
 consistent with the new state. "It fixed the thing I was looking at" is not a result until the things
 I was NOT looking at have been re-checked — and the measurement that catches it is the same full run
 that measured the problem, not a spot-check of the 27.
+
+---
+
+## Latency: the enforcement path saturates at ~4 concurrent calls, and fails CLOSED past it
+
+`scripts/kind-e2e/latency.py` measures `/api/v1/evaluate`, because that is the only path that sits in
+front of every agent tool call — its latency is added to every action an agent takes, and the engine
+fails CLOSED at 2s (`evaluator_timeout`), so latency here is an availability property, not a comfort
+one.
+
+**Measured in-cluster on AKS (2 API replicas, api cpu limit 2, opa cpu limit 1500m), benign
+`search_kb`, 60 calls per level:**
+
+| concurrency | p50 | p95 | p99 | decisions |
+|---|---|---|---|---|
+| 1  | 66ms  | 109ms  | 120ms  | allow |
+| 2  | 131ms | 209ms  | 261ms  | allow |
+| 4  | 291ms | 508ms  | 577ms  | allow |
+| 8  | 489ms | 1769ms | 1840ms | **allow AND block** |
+| 16 | 541ms | 2000ms | 2054ms | **allow AND block** |
+
+Per-call cost is healthy: **66ms p50 serial, every decision correct.** Latency then scales LINEARLY
+with concurrency — 66 → 131 → 291 — which is the signature of a queue in front of a single server,
+not of expensive work.
+
+**Past ~4 concurrent, legitimate calls stop being allowed.** At 16-way, of 64 identical benign calls:
+
+```
+  21x  block / evaluator_error
+  19x  block / trust_frozen
+  19x  block / evaluator_fallback
+   5x  allow / default_allow
+```
+
+**8% allowed.** Three distinct fail-closed mechanisms fire at once. Fail-closed is the right posture
+for a PEP — but the failure here is not an attack being refused, it is ordinary traffic being refused
+because the enforcement point ran out of capacity.
+
+`trust_frozen` was ruled out as contamination before this was written: Redis held zero
+`agent_frozen:*`, `trust_cap:*` and `trust:*` keys at the time of measurement. It is the trust
+calculation itself degrading to frozen under contention.
+
+### The constraint
+
+`Dockerfile.api:52` — `uvicorn norviq.api.main:app --host 0.0.0.0 --port 8080`, with **no
+`--workers`**. One event loop per pod; two replicas; so **two concurrent request handlers for the
+whole cluster**, against an api container whose CPU limit is 2 cores. The linear scaling and the knee
+at 4 both follow directly.
+
+### Measured honestly
+
+The first run of this harness was taken through a `kubectl port-forward` from a laptop to Azure and
+showed a uniform ~700ms p50 across every scenario. That uniformity was the tell — policy work differs
+per scenario, network cost does not. Re-measured from INSIDE the api pod before anything was written
+down. The in-cluster numbers are the ones above.
+
+Exact figures are specific to this cluster's replica count and CPU limits. The SHAPE — linear scaling,
+a knee at ~4, fail-closed past it — is a property of the one-event-loop-per-pod design, not of AKS.
