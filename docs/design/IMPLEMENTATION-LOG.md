@@ -508,3 +508,73 @@ Monaco virtualises its viewport and the summary line sits below the fold of a lo
 so the assertion was testing scroll position, not vocabulary. The claim is a structural guarantee
 (both call the exported `describeFact`) and is asserted in the unit test where it can be. The browser
 test now asserts what a browser can see, and its name says so.
+
+---
+
+## Phase 5 (part 2) — the comprehension fixes
+
+Chrome deferred deliberately (top bar, Stepper strip, RegoDrawer rail, ConditionPicker). What shipped
+instead is the set of changes where the screen was *saying something misleading*, which outranks
+layout.
+
+### D17 — The mode fork is stated as an INVERSION, not as two definitions
+
+The two mode cards described what each mode does. Neither said the thing that costs money: an
+identical clause means opposite things in them. `data_classes noneOf [secret]` is a precondition for
+ALLOWING in allowlist mode and a trigger for BLOCKING in tighten-only. An operator who switches mode
+with conditions already authored keeps every clause and reverses every outcome.
+
+The callout shows one clause read both ways, then names the consequence of the mode currently
+selected — "in this mode a mistake is LOUD (the call is denied)" versus "SILENT (a rule matching
+nothing never fires, and still looks like it enforces)". The second half is the actionable one, and it
+is the half a static definition cannot give.
+
+### D18 — The budget hint is computed from the ENCODING, never the label
+
+The server caps a policy at 25 regex ops, and the two clauses an operator would guess about are both
+backwards:
+
+| Clause | Reads like | Actually emits |
+|---|---|---|
+| `hostIn` | set membership | `regex.match` on an anchored alternation — **costs 1** |
+| `destinations.hosts anyOf` | a pattern match | a set comprehension — **free** |
+
+`constraintCostsRegexOp` / `factCostsRegexOp` live beside the emitters, and `regexCost.test.ts`
+compiles one real graph per clause kind and compares the predicate against `computeStats().regexOps`
+measured on the emitted rego. A change to any emitter now fails that test rather than quietly making
+the hint wrong — the hint cannot drift from the compiler because the test measures the compiler.
+
+### D19 — The scope panel groups by what a clause ADDRESSES
+
+`ARGUMENT` / `WHOLE CALL` / `NEGATED`. Per-argument constraints and whole-call facts were one
+undifferentiated list, and they read identically while behaving differently: an argument clause fails
+when the caller simply omits the argument, a whole-call fact is derived by the engine regardless. Each
+band carries that distinction as its hint.
+
+`NEGATED` is rendered as a SECOND PASS over the same array rather than as a heading emitted mid-list.
+A heading placed wherever the first negated fact happens to sit would group by authoring accident
+rather than by meaning. The index passed to `removeFact` is the index in the FULL array — filtering
+first would silently remove a different clause.
+
+### Four form controls had no styling at all
+
+`className="mono"` with no `.input`: no border, no focus ring, no placeholder colour. Fixed by
+matching only `className="mono"` that sits on an `<input>`/`<select>`/`<textarea>` — the same string on
+a `<span>` or `<div>` is correct and was left alone.
+
+---
+
+## What broke in Phase 5 part 2
+
+### The same fixture lesson, twice in one file, and the second time the type caught it
+
+`regexCost.test.ts` first omitted `refinements`, so `compileGraph` returned `invalid_allowlist` with an
+EMPTY rego — every measurement read zero, and the comparison would have passed vacuously in the wrong
+direction had the predicate said "free" everywhere. `as BuilderGraph` hid it; the assertion caught it.
+
+Removing the cast then made `tsc` report a missing `schemaVersion` immediately.
+
+**Rule, now demonstrated twice: a cast in a fixture disables the cheapest check available.** Worse
+here than usual, because the failure mode was a test that measures nothing and reports success. Any
+test that compares a prediction against a measurement must first prove the measurement is non-trivial
+— a baseline that is zero for every input agrees with any prediction that is also zero.

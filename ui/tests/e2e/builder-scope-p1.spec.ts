@@ -119,3 +119,54 @@ test("a condition authored on the row reaches the policy the builder is about to
     .poll(async () => (await lines.innerText()).replace(/\u00a0/g, " "), { timeout: 15_000 })
     .toContain("package norviq.intent.support_agent");
 });
+
+test("the mode fork states the inversion, not just the two definitions", async ({ page }) => {
+  // The two modes do not merely differ in emphasis — an identical clause is a precondition for
+  // ALLOWING in one and a trigger for BLOCKING in the other. An operator switching mode with
+  // conditions already authored keeps every clause and reverses every outcome, which is the most
+  // expensive mistake this screen can produce and the one it never mentioned.
+  await page.goto("/policies/catalog?ns=analytics");
+  await page.getByRole("button", { name: "Visual Builder" }).click();
+  await expect(page.getByTestId("builder-agent-class")).toBeVisible({ timeout: 20_000 });
+
+  const fork = page.getByTestId("builder-mode-fork");
+  await expect(fork).toContainText("The two modes invert what a condition means");
+  await expect(fork).toContainText("allow only if it carries no secret");
+  await expect(fork).toContainText("block when it carries no secret");
+
+  // ...and it names the consequence of the mode currently selected, which is the actionable half.
+  await page.getByTestId("builder-mode-rules").click();
+  await expect(fork).toContainText(/a mistake is SILENT/);
+  await page.getByTestId("builder-mode-allowlist").click();
+  await expect(fork).toContainText(/a mistake is LOUD/);
+});
+
+test("the budget hint follows the encoding, not the label", async ({ page }) => {
+  // `hostIn` reads like set membership and emits an anchored `regex.match`; `destinations.hosts
+  // anyOf` reads like a pattern and compiles to a free set comprehension. Both directions are
+  // counter-intuitive, and the server caps a policy at 25 regex ops.
+  await allowTool(page, "send_dm");
+  await page.getByTestId("builder-scope-cell-send_dm-cta").click();
+
+  await page.getByTestId("builder-constraint-add-kind").selectOption("hostIn");
+  await expect(page.getByTestId("builder-constraint-cost-send_dm-0")).toContainText("1 regex op");
+
+  await page.getByTestId("builder-fact-add-kind").selectOption("destinations.hosts");
+  await expect(page.getByTestId("builder-fact-cost-send_dm-0")).toContainText("free");
+});
+
+test("the scope panel groups clauses by what they address", async ({ page }) => {
+  // Per-argument constraints and whole-call facts read identically and behave differently: one fails
+  // when the caller simply omits the argument, the other is derived from the call as a whole.
+  await allowTool(page, "send_dm");
+  await page.getByTestId("builder-scope-cell-send_dm-cta").click();
+  const editor = page.getByTestId("builder-grant-editor-send_dm");
+
+  await page.getByTestId("builder-constraint-add-kind").selectOption("required");
+  await expect(editor.getByText("Argument", { exact: true })).toBeVisible();
+  await expect(editor).toContainText(/A call that omits it fails this line/);
+
+  await page.getByTestId("builder-fact-add-kind").selectOption("data_classes");
+  await expect(editor.getByText("Whole call", { exact: true })).toBeVisible();
+  await expect(editor).toContainText(/derived about the call, not one named argument/);
+});

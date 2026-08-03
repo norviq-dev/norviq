@@ -36,7 +36,9 @@ import {
   PARAM_PATH_PREFIX,
   SCALAR_FIELD_EXPR,
   compileGraph,
+  constraintCostsRegexOp,
   describeFact,
+  factCostsRegexOp,
   loaderKeyFor,
   scopeIdentifier,
   type BuilderError
@@ -359,6 +361,31 @@ function withConstraintValue(c: BuilderParamConstraint, text: string): BuilderPa
 }
 // Step ② mode chooser (UX redesign) — one-line explanation under each option so the difference between
 // the two modes is legible without docs. Display-only; BuilderMode's wire values are unchanged.
+/** One heading for the scope panel's three kinds of clause.
+ *
+ *  Per-argument constraints and whole-call facts were rendered as one undifferentiated list, so an
+ *  operator could not tell which clauses address a NAMED argument (and therefore fail when the caller
+ *  simply omits it) from those the engine derives about the call as a whole. They read identically and
+ *  behave differently — the design's ARGUMENT / WHOLE CALL / NEGATED split is the fix. */
+function ScopeSection({ label, hint }: { label: string; hint: string }) {
+  return (
+    <div style={{ marginTop: 12, marginBottom: 2 }}>
+      <div
+        style={{
+          fontSize: 10.5,
+          fontWeight: 600,
+          letterSpacing: "0.08em",
+          textTransform: "uppercase",
+          color: "var(--text-secondary)"
+        }}
+      >
+        {label}
+      </div>
+      <div style={{ fontSize: 10.5, color: "var(--text-dim)", marginTop: 1 }}>{hint}</div>
+    </div>
+  );
+}
+
 const MODE_DESCRIPTION: Record<BuilderMode, string> = {
   rules: "Add blocks on top of what's already allowed. Everything not matched keeps its current outcome.",
   allowlist: "Deny everything for this scope except the tools you list."
@@ -1847,6 +1874,46 @@ export function BuilderSheet({
                   </button>
                 </div>
 
+                {/* THE MODE FORK, stated as a consequence rather than a definition.
+                    The two modes do not merely differ in emphasis — they INVERT what an identical
+                    condition means. `data_classes noneOf [secret]` is a precondition for allowing in
+                    allowlist mode, and a trigger for blocking in tighten-only. An operator who
+                    switches mode with conditions already authored keeps every clause and reverses
+                    every outcome, which is the most expensive mistake this screen can produce and
+                    the one it never mentioned. Showing ONE clause read both ways is the shortest
+                    thing that makes it un-missable. */}
+                <div
+                  data-testid="builder-mode-fork"
+                  style={{
+                    marginTop: 10,
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: "1px solid var(--border)",
+                    background: "var(--bg-void)",
+                    fontSize: 12,
+                    lineHeight: 1.6,
+                    color: "var(--text-secondary)"
+                  }}
+                >
+                  <div style={{ fontWeight: 600, color: "var(--text-primary)", marginBottom: 5 }}>
+                    The two modes invert what a condition means
+                  </div>
+                  <div>
+                    In <strong style={{ color: "var(--accent)" }}>{MODE_LABEL.allowlist}</strong>,{" "}
+                    <span className="mono" style={{ color: "var(--text-primary)" }}>data_classes noneOf [secret]</span>{" "}
+                    means <em>allow only if it carries no secret</em>.
+                  </div>
+                  <div style={{ marginTop: 3 }}>
+                    In <strong style={{ color: "var(--escalate)" }}>{MODE_LABEL.rules}</strong>, the same clause means{" "}
+                    <em>block when it carries no secret</em>.
+                  </div>
+                  <div style={{ marginTop: 5, color: "var(--text-muted)" }}>
+                    {mode === "rules"
+                      ? "In this mode a mistake is SILENT: a rule matching nothing never fires, and still looks like it enforces."
+                      : "In this mode a mistake is LOUD: the call is denied, and the audit row names the rule that denied it."}
+                  </div>
+                </div>
+
                 {mode === "rules" && (
                   <>
                     <div className="section-label" style={{ marginTop: 4, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -2134,6 +2201,12 @@ export function BuilderSheet({
                         ))}
                       </datalist>
 
+                      {(allowlistGrants[openGrantTool] ?? []).length > 0 && (
+                        <ScopeSection
+                          label="Argument"
+                          hint="Addresses one named parameter. A call that omits it fails this line."
+                        />
+                      )}
                       {(allowlistGrants[openGrantTool] ?? []).map((c, i) => (
                         <div
                           key={i}
@@ -2142,7 +2215,7 @@ export function BuilderSheet({
                         >
                           <input
                             data-testid={`builder-constraint-field-${openGrantTool}-${i}`}
-                            className="mono"
+                            className="input mono"
                             placeholder="parameter"
                             aria-label="parameter name"
                             // Suggestions, not a constraint: a constraint addresses
@@ -2174,7 +2247,7 @@ export function BuilderSheet({
                           {CONSTRAINT_PLACEHOLDER[c.kind] !== "" && (
                             <input
                               data-testid={`builder-constraint-value-${openGrantTool}-${i}`}
-                              className="mono"
+                              className="input mono"
                               aria-label="constraint value"
                               placeholder={CONSTRAINT_PLACEHOLDER[c.kind]}
                               // The declared `enum` for THIS argument, when the tool published one and
@@ -2210,6 +2283,15 @@ export function BuilderSheet({
                           </button>
                           <div style={{ width: "100%", fontSize: 10, color: "var(--text-dim)", paddingLeft: 2 }}>
                             {CONSTRAINT_HINT[c.kind]}
+                            {/* Budget, from the ENCODING rather than the label. `hostIn` reads like set
+                                membership and emits an anchored `regex.match`; an operator budgeting by
+                                how a clause sounds gets it backwards. See regexCost.test.ts. */}
+                            <span
+                              data-testid={`builder-constraint-cost-${openGrantTool}-${i}`}
+                              style={{ marginLeft: 6, color: constraintCostsRegexOp(c) ? "var(--escalate)" : "var(--text-faint)" }}
+                            >
+                              {constraintCostsRegexOp(c) ? "· 1 regex op" : "· set operator — free"}
+                            </span>
                           </div>
                         </div>
                       ))}
@@ -2219,56 +2301,20 @@ export function BuilderSheet({
                           "allow this tool, but only like this". Without these the panel offers only
                           per-argument rules, which plus a tool list is what the agent framework already
                           gives you — a capability list, not an intent. */}
+                      {/* WHOLE CALL and NEGATED are rendered as two passes over one list rather than
+                          one pass with interleaved headings: the facts array holds both kinds in
+                          authoring order, and a heading that appeared mid-list wherever the first
+                          negated fact happened to sit would group by accident rather than by meaning.
+                          Indices are preserved so `removeFact(tool, i)` still addresses the right
+                          element — filtering the array first would silently remove the wrong clause. */}
+                      {(allowlistGrantFacts[openGrantTool] ?? []).some((f) => f.type !== "not") && (
+                        <ScopeSection
+                          label="Whole call"
+                          hint="A fact the ENGINE derived about the call, not one named argument."
+                        />
+                      )}
                       {(allowlistGrantFacts[openGrantTool] ?? []).map((f, i) => {
-                        // A NOT-wrapped fact has no single field/op to edit, because the dropdown that
-                        // authors facts only ever produces plain ones. It used to render NOTHING at
-                        // all — while still compiling and still enforcing. So a grant could say
-                        // "Narrowed · 3 conditions" and show two rows, with the third invisible,
-                        // un-removable, and live in production. A clause an operator cannot see is a
-                        // clause they cannot audit; read-only is a limitation, invisible is a defect.
-                        if (f.type === "not") {
-                          return (
-                            <div
-                              key={`fact-${i}`}
-                              data-testid={`builder-fact-negated-${openGrantTool}-${i}`}
-                              style={{
-                                display: "flex",
-                                gap: 8,
-                                alignItems: "flex-start",
-                                marginTop: 8,
-                                padding: "7px 9px",
-                                borderRadius: 8,
-                                border: "1px solid var(--border)",
-                                background: "var(--bg-void)"
-                              }}
-                            >
-                              <span
-                                className="pill"
-                                style={{ flex: "none", background: "#7C5CFC15", color: "var(--audit)", borderColor: "#7C5CFC30" }}
-                              >
-                                NOT
-                              </span>
-                              <span style={{ flex: 1, minWidth: 0 }}>
-                                <span className="mono" style={{ fontSize: 11.5, overflowWrap: "anywhere" }}>
-                                  {describeFact(f.inner)}
-                                </span>
-                                <span style={{ display: "block", fontSize: 10.5, color: "var(--text-dim)", marginTop: 2 }}>
-                                  Negated. Compiles and enforces. Not editable here — remove it and
-                                  re-author, or edit the policy source.
-                                </span>
-                              </span>
-                              <button
-                                type="button"
-                                className="icon-btn"
-                                data-testid={`builder-fact-remove-${openGrantTool}-${i}`}
-                                title="Remove this negated scoping fact"
-                                onClick={() => removeFact(openGrantTool, i)}
-                              >
-                                <X size={11} />
-                              </button>
-                            </div>
-                          );
-                        }
+                        if (f.type === "not") return null;
                         const kind = factKindOfSpec(f);
                         return (
                           <div
@@ -2305,7 +2351,7 @@ export function BuilderSheet({
                             {factEnumOptions(f, openGrantTool) ? (
                               <select
                                 data-testid={`builder-fact-value-${openGrantTool}-${i}`}
-                                className="mono"
+                                className="input mono"
                                 aria-label="scoping fact value"
                                 value={factValueText(f)}
                                 onChange={(e) => updateFact(openGrantTool, i, withFactValue(f, e.target.value))}
@@ -2321,7 +2367,7 @@ export function BuilderSheet({
                             ) : (
                               <input
                                 data-testid={`builder-fact-value-${openGrantTool}-${i}`}
-                                className="mono"
+                                className="input mono"
                                 aria-label="scoping fact value"
                                 placeholder={kind === "numeric" || f.op === "maxCount" ? "number" : "comma-separated values"}
                                 value={factValueText(f)}
@@ -2338,11 +2384,77 @@ export function BuilderSheet({
                             >
                               <X size={11} />
                             </button>
-                            {FACT_FIELD_HINT[f.field] && (
-                              <div style={{ width: "100%", fontSize: 10, color: "var(--text-dim)", paddingLeft: 2 }}>
-                                {FACT_FIELD_HINT[f.field]}
-                              </div>
-                            )}
+                            <div style={{ width: "100%", fontSize: 10, color: "var(--text-dim)", paddingLeft: 2 }}>
+                              {FACT_FIELD_HINT[f.field]}
+                              <span
+                                data-testid={`builder-fact-cost-${openGrantTool}-${i}`}
+                                style={{ marginLeft: FACT_FIELD_HINT[f.field] ? 6 : 0, color: factCostsRegexOp(f) ? "var(--escalate)" : "var(--text-faint)" }}
+                              >
+                                {factCostsRegexOp(f) ? "· 1 regex op" : "· set operator — free"}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+
+
+                      {/* NEGATED — a second pass, so the heading groups by MEANING rather than by
+                          wherever the first negated fact happens to sit in authoring order. */}
+                      {(allowlistGrantFacts[openGrantTool] ?? []).some((f) => f.type === "not") && (
+                        <ScopeSection
+                          label="Negated"
+                          hint="Authored elsewhere and carried in. Compiles and enforces; not editable here."
+                        />
+                      )}
+                      {(allowlistGrantFacts[openGrantTool] ?? []).map((f, i) => {
+                        // A NOT-wrapped fact has no single field/op to edit, because the dropdown that
+                        // authors facts only ever produces plain ones. It used to render NOTHING at all
+                        // — while still compiling and still enforcing. So a grant could say "Narrowed ·
+                        // 3 conditions" and show two rows, with the third invisible, un-removable, and
+                        // live in production. Read-only is a limitation; invisible is a defect.
+                        //
+                        // `i` is the index in the FULL array, so `removeFact(tool, i)` still addresses
+                        // this element. Filtering first would remove a different clause.
+                        if (f.type !== "not") return null;
+                        return (
+                          <div
+                            key={`neg-${i}`}
+                            data-testid={`builder-fact-negated-${openGrantTool}-${i}`}
+                            style={{
+                              display: "flex",
+                              gap: 8,
+                              alignItems: "flex-start",
+                              marginTop: 8,
+                              padding: "7px 9px",
+                              borderRadius: 8,
+                              border: "1px solid var(--border)",
+                              background: "var(--bg-void)"
+                            }}
+                          >
+                            <span
+                              className="pill"
+                              style={{ flex: "none", background: "#7C5CFC15", color: "var(--audit)", borderColor: "#7C5CFC30" }}
+                            >
+                              NOT
+                            </span>
+                            <span style={{ flex: 1, minWidth: 0 }}>
+                              <span className="mono" style={{ fontSize: 11.5, overflowWrap: "anywhere" }}>
+                                {describeFact(f.inner)}
+                              </span>
+                              <span style={{ display: "block", fontSize: 10.5, color: "var(--text-dim)", marginTop: 2 }}>
+                                Negated. Compiles and enforces. Not editable here — remove it and
+                                re-author, or edit the policy source.
+                              </span>
+                            </span>
+                            <button
+                              type="button"
+                              className="icon-btn"
+                              data-testid={`builder-fact-remove-${openGrantTool}-${i}`}
+                              title="Remove this negated scoping fact"
+                              onClick={() => removeFact(openGrantTool, i)}
+                            >
+                              <X size={11} />
+                            </button>
                           </div>
                         );
                       })}

@@ -182,6 +182,27 @@ function jsonSet(values: string[]): string {
 
 const REGEX_BUILTIN = /regex\.(match|replace|find_n|find_all_string_submatch_n|split|globs_match|template_match)\s*\(/g;
 
+/**
+ * Does this clause spend the server's 25-regex-op budget?
+ *
+ * DERIVED FROM THE ENCODING, NEVER THE LABEL. The two are not the same question, and the gap is not
+ * intuitive: `hostIn` reads like set membership and emits `regex.match` on an anchored alternation,
+ * while `destinations.hosts anyOf` reads like a pattern and compiles to a free set comprehension. An
+ * operator budgeting by how a clause SOUNDS gets it backwards in both directions.
+ *
+ * Kept beside the emitters so the two move together, and pinned by a test that compiles one graph per
+ * clause kind and checks this against `computeStats().regexOps` — so a change to an emitter fails
+ * here rather than quietly making the hint wrong.
+ */
+export function constraintCostsRegexOp(c: BuilderParamConstraint): boolean {
+  return c.kind === "matches" || c.kind === "notMatches" || c.kind === "hostIn";
+}
+
+export function factCostsRegexOp(f: BuilderGrantFact): boolean {
+  if (f.type === "not") return factCostsRegexOp(f.inner);
+  return f.type === "scalarFact" && (f.op === "matches" || f.op === "notMatches");
+}
+
 export function computeStats(rego: string): CompileStats {
   const bytes = new TextEncoder().encode(rego).length;
   const lines = rego.split("\n").filter((l) => l.trim().length > 0).length;
