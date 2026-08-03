@@ -68,6 +68,14 @@ clear_login_lockout() {
   kubectl ${NRVQ_KUBE_CONTEXT:+--context "$NRVQ_KUBE_CONTEXT"} -n "${NRVQ_NAMESPACE:-norviq}" \
     exec "$pod" -- sh -c "redis-cli ${pw:+-a '$pw'} --no-auth-warning DEL callcount:login-fail:admin" \
     >/dev/null 2>&1 || true
+  # Also start from a COLD http bucket. The limiter keys on the JWT `sub` and every spec carries the
+  # same admin token, so a previous run's window carries over into this one's first minute and the
+  # 429s land on whichever spec is unlucky. That is what made the failing set move between runs while
+  # the count stayed flat — a moving set is the signature G3 uses to detect leaked state, so leaving
+  # it in place would make the gate unpassable for a reason that has nothing to do with the product.
+  kubectl ${NRVQ_KUBE_CONTEXT:+--context "$NRVQ_KUBE_CONTEXT"} -n "${NRVQ_NAMESPACE:-norviq}" \
+    exec "$pod" -- sh -c "redis-cli ${pw:+-a '$pw'} --no-auth-warning --scan --pattern 'callcount:http:*' | xargs -r redis-cli ${pw:+-a '$pw'} --no-auth-warning DEL" \
+    >/dev/null 2>&1 || true
 }
 
 if [ -n "${NRVQ_E2E_PASSWORD:-}" ]; then

@@ -13,7 +13,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from norviq.api.rate_limit import RateLimitMiddleware
+from norviq.api.rate_limit import RateLimitMiddleware, _route_class
 from norviq.config import settings
 
 
@@ -175,3 +175,39 @@ def test_disabled_short_circuits(monkeypatch) -> None:
     client = TestClient(_app(_FakeCache()))
     for _ in range(5):
         assert client.get("/api/v1/whatever").status_code == 200
+
+
+class TestRedteamReadsAreNotChargedTheSuiteBudget:
+    """The console's landing page must not spend the suite runner's DoS budget.
+
+    `redteam` is sized at 15/60s because starting a suite fans out to every agent class times every
+    attack in the catalog. That ceiling is correct for the write and absurd for a read: the Overview
+    page calls `/redteam/results/latest` on every boot, so classifying the whole `/api/v1/redteam`
+    prefix into that class meant roughly fifteen visits to the LANDING PAGE in a minute began 429-ing
+    a real operator, on a guard built to stop them hammering the suite runner.
+
+    Measured over one full e2e run before the split: 116 requests to `/redteam/results/latest` against
+    20 actual Red Team page mounts — 83% of the traffic in the tight bucket came from elsewhere.
+    """
+
+    def test_the_expensive_writes_stay_in_the_tight_class(self) -> None:
+        assert _route_class("/api/v1/redteam/suite") == "redteam"
+        assert _route_class("/api/v1/redteam/run") == "redteam"
+
+    def test_reads_fall_through_to_the_default_ceiling(self) -> None:
+        for path in (
+            "/api/v1/redteam/results/latest",
+            "/api/v1/redteam/results",
+            "/api/v1/redteam/results/some-run-id",
+            "/api/v1/redteam/report/some-run-id",
+            "/api/v1/redteam/targets",
+            "/api/v1/redteam/catalog",
+        ):
+            assert _route_class(path) == "default", f"{path} is still charged the suite budget"
+
+    def test_the_two_ceilings_are_far_enough_apart_to_matter(self) -> None:
+        # If these ever converge the split above stops meaning anything, and the next person to read
+        # this file would have no way to tell that from a passing suite.
+        from norviq.config import settings
+
+        assert settings.http_rate_limit_default_per_window > settings.http_rate_limit_redteam_per_window * 5

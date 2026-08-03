@@ -47,8 +47,22 @@ test("selecting a concrete namespace scopes the Attack Graph (header + request +
   const options = page.locator('[role="listbox"][aria-label="Namespace"] [role="option"]');
   await expect(options.first()).toBeVisible({ timeout: 8000 });
   const labels = await options.allInnerTexts();
-  const concrete = labels.map((s) => s.replace("✓", "").trim()).find((s) => !/all namespaces/i.test(s));
-  test.skip(!concrete, "no concrete namespace available in this environment");
+  const candidates = labels.map((s) => s.replace("✓", "").trim()).filter((s) => !/all namespaces/i.test(s));
+  // Pick a namespace that HAS kill-chains, not merely the first one listed. The picker is alphabetical
+  // and its first entry is `agents`, a tenant namespace the harness creates for sidecar injection whose
+  // only DB row is a provisioning baseline policy — zero attack paths. Scoping to it returns 0, and the
+  // API correctly reports `namespaces: []` because that list is derived from the data it found, so
+  // `toEqual([concrete])` fails on a namespace that is real but empty. That is the test picking a bad
+  // subject, not the product mis-scoping.
+  let concrete = "";
+  for (const ns of candidates) {
+    const probe = await apiJson(page, `/api/v1/threats/attack-paths?ns=${ns}`);
+    if (probe.status === 200 && (probe.body.total_paths ?? probe.body.paths?.length ?? 0) > 0) {
+      concrete = ns;
+      break;
+    }
+  }
+  test.skip(!concrete, "no concrete namespace with attack paths in this environment");
 
   // The refetch must carry the scope.
   const scopedReq = page.waitForRequest(
@@ -66,7 +80,10 @@ test("selecting a concrete namespace scopes the Attack Graph (header + request +
   const all = await apiJson(page, `/api/v1/threats/attack-paths?ns=all`);
   expect(scoped.status).toBe(200);
   expect(scoped.body.namespaces).toEqual([concrete]);
-  expect(scoped.body.paths.length).toBeLessThan(all.body.paths.length);
+  // Compare TOTALS, not the rendered lists. `paths` is capped at the API's _MAX_PATHS, so once the
+  // estate saturates the cap a scoped view can return MORE rows than the unscoped one it is a subset
+  // of — the second test in this file documents that trap after it caught exactly that (167 vs 165).
+  expect(scoped.body.total_paths).toBeLessThan(all.body.total_paths);
   expect(await pathRows(page).count()).toBeLessThanOrEqual(allCount);
 });
 

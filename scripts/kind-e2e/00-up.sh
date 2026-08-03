@@ -108,6 +108,7 @@ helm upgrade --install norviq "${REPO_ROOT}/helm/norviq" \
   --set images.bootstrap.pullPolicy=IfNotPresent \
   --set "policyQuotaNamespaces={${QUOTA_NS}}" \
   --set webhook.injection.enabled=true \
+  --set-string config.extraEnv.NRVQ_HTTP_RATE_LIMIT_DEFAULT_PER_WINDOW=5000 \
   --set-string "podAnnotations.nrvq-local-image-id=${API_IMAGE_ID}" \
   --wait --timeout 10m
 
@@ -119,6 +120,16 @@ helm upgrade --install norviq "${REPO_ROOT}/helm/norviq" \
 # does, so the roll happens for real builds and is skipped for no-op re-runs.
 kubectl -n "$NS" rollout status deployment/norviq-api --timeout=5m
 kubectl -n "$NS" get pods
+
+# NOTE on the rate-limit ceiling above. The browser suite drives ~190 specs through ONE admin
+# identity, and the limiter keys on the JWT `sub` — so all 190 share a single bucket and the run sits
+# at 300-480 requests per 60s window against a 300 default. The 429s then land on whichever spec
+# happens to be running, which is why the failing SET moved between runs while the count stayed flat.
+# No real operator generates that load; the ceiling is right for production and wrong for a test rig.
+#
+# Raised HERE, in the local harness, and nowhere else. The product default stays 300, and the defect
+# this exposed — console READS being charged the suite runner's tight budget — is fixed properly in
+# `norviq/api/rate_limit.py` and pinned by a unit test, not papered over by this number.
 
 # --- 4b. PROVE THE CLUSTER IS RUNNING *THIS* CODE --------------------------------------------------
 # This cost a full run. The chart's `images.registry` defaults to `ghcr.io/norviq-dev/`, the build

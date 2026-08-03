@@ -442,6 +442,41 @@ FLEET_CLASSES = [
 AWAITING_CLASSES = ["hr-chatbot", "report-runner"]
 
 
+def seed_version_history(base: str, token: str, repo_root: Path) -> int:
+    """A class with MULTIPLE persisted policy versions, so version history has something to show.
+
+    `console-wave2-ui.spec.ts` asserts that `default/brand-new-agent` has versions and that they
+    survive a pod restart — a real guarantee about `policy_versions` being rehydrated rather than held
+    in memory. Nothing in the console fixtures ever created that class: the only thing in the repo
+    that did was `tests/attacks/conftest.py`, a fixture belonging to a DIFFERENT test layer. So the
+    browser spec passed only when the attacks suite had run first, on residue, and failed the moment
+    the browser suite ran against a cluster of its own.
+
+    Owned here now, and removed from the attacks conftest — two owners at different priorities (700
+    there, 100 here) is a conflict waiting to be debugged.
+    """
+    failures = 0
+    base_rego = (repo_root / "comprehensive.rego").read_text(encoding="utf-8")
+    # THREE distinct bodies, because `policy_loader` only cuts a new version when the content CHANGES.
+    # Posting the same rego three times leaves one version and the assertion (`length > 0`) would still
+    # pass — which is exactly the kind of accidental pass this fixture exists to stop relying on.
+    for n in range(3):
+        status, body = post(base, "/api/v1/policies", token, {
+            "namespace": CUSTOMER_SUPPORT_NS,
+            "agent_class": "brand-new-agent",
+            "rego_source": f"{base_rego}\n\n# seeded revision {n + 1}\n",
+            "enforcement_mode": "block",
+            "saved_by": "kind-e2e-seed",
+            "priority": 100,
+        })
+        ok = status in (200, 201, 409)
+        if not ok:
+            print(f"  FAIL versions brand-new-agent rev{n + 1} -> {status} {body[:140]}")
+        failures += 0 if ok else 1
+    print("  ok  versions brand-new-agent has 3 revisions in policy_versions")
+    return failures
+
+
 def seed_awaiting(base: str, token: str, repo_root: Path) -> int:
     """Policies with NO traffic, so `deployed - observed` is non-empty."""
     failures = 0
@@ -675,6 +710,8 @@ def main() -> int:
     failures += seed_console_prereqs(args.base_url, token, Path(__file__).resolve().parent.parent.parent)
     print("a realistic fleet — enough classes that a full-namespace red-team suite is LARGE:")
     failures += seed_fleet(args.base_url, token)
+    print("a class with real version history — nothing in the console fixtures ever created one:")
+    failures += seed_version_history(args.base_url, token, Path(__file__).resolve().parent.parent.parent)
     print("deployed-but-never-observed agents — the 'awaiting first tool call' state:")
     failures += seed_awaiting(args.base_url, token, Path(__file__).resolve().parent.parent.parent)
     print("synthetic identities — the ones the asset graph hides by default:")

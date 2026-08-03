@@ -9,12 +9,21 @@
 import { test, expect, waitForApp } from "./fixtures";
 import { type Page } from "@playwright/test";
 
+// FAIL LOUDLY ON A NON-2xx. These helpers used to return `r.json()` and drop the status, so a 401
+// (expired token), a 429 (rate-limited) and a 500 all arrived as a body with no `results` — and the
+// assertion downstream reported "got 0" or "element(s) not found". Whole runs were mis-triaged as
+// missing fixtures or product defects on the strength of that. A 409 is EXPECTED here (the
+// per-namespace concurrent guard) so it is passed through for the retry loop to handle.
 async function apiJson(page: Page, path: string): Promise<any> {
-  return page.evaluate(async (path) => {
+  const { status, body } = await page.evaluate(async (path) => {
     const t = localStorage.getItem("nrvq_token");
     const r = await fetch(path, { headers: t ? { Authorization: `Bearer ${t}` } : {} });
-    return r.json();
+    return { status: r.status, body: await r.json().catch(() => null) };
   }, path);
+  if (status >= 400 && status !== 409) {
+    throw new Error(`GET ${path} -> HTTP ${status}: ${JSON.stringify(body)?.slice(0, 200)}`);
+  }
+  return body;
 }
 
 test.describe("Red Team view runs the suite + renders durable efficacy (real engine)", () => {

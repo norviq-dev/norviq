@@ -7,7 +7,7 @@ import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, 
 import { useLocation, useNavigate } from "react-router-dom";
 import { oidcEnabled, login } from "../auth/oidc";
 import { getToken, tokenSubject } from "../auth/session";
-import { fetchClusterInfo, fetchSettings, RuntimeSettings } from "../api/client";
+import { fetchClusterInfo, fetchSettings, RuntimeSettings, ApiError } from "../api/client";
 import { primeApiCache, readFreshApiCache } from "../hooks/useApi";
 import { fleetEnabled, fetchFleetClusters } from "../api/fleet";
 import { setRemoteClusterContext, setSelectedClusterId } from "../api/clusterGuard";
@@ -47,6 +47,10 @@ export type Posture = {
 };
 
 type AppContextValue = {
+  // /cluster-info failed for a reason that is NOT "signed out". An empty `namespaces` list then means
+  // "we could not find out", not "you have none" — a distinction the list alone cannot carry, and one
+  // the rate limiter makes reachable in normal use.
+  namespaceLookupFailed: boolean;
   activeSection: Section;
   timeRange: TimeRange;
   selectedCluster: string;
@@ -118,6 +122,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // id -> console_url; used to build the spoke deep-link for a remote selection.
   const [clusterConsoleUrls, setClusterConsoleUrls] = useState<Record<string, string>>({});
   const [namespaces, setNamespaces] = useState<string[]>([]);
+  // True when /cluster-info failed for a reason that is NOT "you are signed out". Consumers can then
+  // distinguish "you have no namespaces" from "we could not find out", which an empty list cannot.
+  const [namespaceLookupFailed, setNamespaceLookupFailed] = useState(false);
 
   useEffect(() => {
     const KEY = "nrvq_token";
@@ -176,8 +183,20 @@ export function AppProvider({ children }: { children: ReactNode }) {
         // Default to "All namespaces" so the console shows every namespace's data on load (a fresh
         // deploy's traffic often lands outside "default"). Keep an explicit prior selection if still valid.
         setNamespaceState((prev) => (prev === "all" || info.namespaces.includes(prev) ? prev : "all"));
-      } catch {
-        /* unauthenticated or API down -> leave lists empty (honest empty selector) */
+      } catch (e) {
+        // An empty selector is honest for 401 — you are not signed in, so you have no namespaces.
+        // It is a LIE for anything else. A 429 or a 5xx on /cluster-info rendered the picker as
+        // "this deployment has no namespaces", which is a confident, wrong answer about the shape of
+        // the operator's estate rather than an admission that we could not ask. The rate limiter made
+        // this reachable in normal use: the console throttles, and the namespace picker empties.
+        //
+        // So: 401 clears, everything else keeps whatever we last knew and says the lookup failed.
+        const status = e instanceof ApiError ? e.status : 0;
+        if (status === 401) {
+          setNamespaces([]);
+        } else {
+          setNamespaceLookupFailed(true);
+        }
       }
     }
     void load();
@@ -306,6 +325,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       namespace: selectedNamespace,
       clusters,
       namespaces,
+      namespaceLookupFailed,
       posture,
       refreshPosture,
       setActiveSection,
@@ -324,6 +344,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       selectedClusterConsoleUrl,
       clusters,
       namespaces,
+      namespaceLookupFailed,
       posture,
       refreshPosture
     ]

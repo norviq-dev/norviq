@@ -101,7 +101,13 @@ test.describe("RedTeam scorecard metric cluster is unboxed + nudged right", () =
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/redteam");
     await waitForApp(page);
-    const run = await postSuite(page, "target_agent=customer-support&target_namespace=default");
+    // READ the newest run rather than starting another one. `ui-batch-a.spec.ts:53` already POSTs an
+    // identical suite (same target, same namespace) — these two are copy-paste twins asserting
+    // different CSS against the same cluster. Each suite POST costs ~12s, fans out over every agent
+    // class, and `redteam_detail_keep_runs = 1` means it PRUNES the previous run's detail rows, so the
+    // duplicate was actively destroying the fixture other red-team specs read. The assertions here are
+    // about the scorecard's layout and its agreement with the latest run; `results/latest` is that run.
+    const run = await apiJson(page, "/api/v1/redteam/results/latest?namespace=default");
     await page.goto("/redteam");
     await waitForApp(page);
     await expect(page.getByTestId("redteam-scorecard")).toBeVisible({ timeout: 30000 });

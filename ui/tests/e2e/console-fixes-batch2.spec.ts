@@ -342,7 +342,11 @@ test.describe("Login form — valid admin advances; wrong password shows error +
       // The assertions here (the error message, and the username field surviving) are about the login
       // form's behaviour on bad credentials, which an unknown user exercises identically: the API
       // deliberately runs a dummy verify for unknown users so the two paths are indistinguishable.
-      await page.locator("input#nv-user").fill("not-a-real-operator");
+      // ONE name, read back by the assertion below. Changing the fill without changing the assertion
+      // is how the first version of this fix failed — the same two-places-one-concept mistake this
+      // file's own comments keep warning about.
+      const BAD_USER = "not-a-real-operator";
+      await page.locator("input#nv-user").fill(BAD_USER);
       await page.locator("input#nv-pass").fill("definitely-not-the-password-000");
       await page.getByRole("button", { name: "Sign in", exact: true }).click();
       await page.waitForTimeout(1400); // let /auth/login (401) resolve + the error render
@@ -353,7 +357,7 @@ test.describe("Login form — valid admin advances; wrong password shows error +
       // The invalid-credential error is visible…
       await expect(page.getByText("Invalid username or password.", { exact: true })).toBeVisible({ timeout: 10_000 });
       // …and the username field is NOT cleared (the user keeps their typed username to retry).
-      await expect(page.locator("input#nv-user")).toHaveValue("admin");
+      await expect(page.locator("input#nv-user")).toHaveValue(BAD_USER);
       // Still on the default (sign-in) view, not advanced.
       await expect(page.getByRole("button", { name: "Sign in", exact: true })).toBeVisible();
     } finally {

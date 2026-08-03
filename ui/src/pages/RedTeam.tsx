@@ -52,23 +52,32 @@ const RedTeam = () => {
 
   const load = useCallback(async () => {
     setLoading(true);
-    try {
-      const [l, h, t] = await Promise.all([
-        // Scope efficacy + history to the selected namespace so the scorecard/table match the
-        // scope the page displays (not whatever cluster-wide run was newest).
-        fetchRedteamLatest(namespace),
-        fetchRedteamHistory(15, namespace),
-        fetchRedteamTargets(targetNs).catch(() => ({ targets: [] as string[] }))
-      ]);
-      setLatest(l);
-      setHistory(h.runs ?? []);
-      setTargets(t.targets ?? []);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load red-team results");
-    } finally {
-      setLoading(false);
-    }
+    // allSettled, NOT all. These three reads are independent, and with `Promise.all` in one
+    // try/catch a single failure erased the two that had loaded fine — one throttled history fetch
+    // blanked the scorecard, the attack table AND the empty state together, because the render gate
+    // below requires every piece at once. A partial outage should cost you the part that failed.
+    //
+    // The `.catch(() => ({ targets: [] }))` on targets was worse than useless: it turned an HTTP
+    // error into "this namespace has no target classes", which is a confident, wrong answer.
+    const [l, h, t] = await Promise.allSettled([
+      // Scope efficacy + history to the selected namespace so the scorecard/table match the
+      // scope the page displays (not whatever cluster-wide run was newest).
+      fetchRedteamLatest(namespace),
+      fetchRedteamHistory(15, namespace),
+      fetchRedteamTargets(targetNs)
+    ]);
+    if (l.status === "fulfilled") setLatest(l.value);
+    if (h.status === "fulfilled") setHistory(h.value.runs ?? []);
+    if (t.status === "fulfilled") setTargets(t.value.targets ?? []);
+    // Report only what actually failed, and name it — "Failed to load red-team results" gave no clue
+    // which of three calls broke, and appeared even when two of them had succeeded.
+    const failed = [
+      l.status === "rejected" ? "efficacy" : null,
+      h.status === "rejected" ? "history" : null,
+      t.status === "rejected" ? "target classes" : null
+    ].filter(Boolean);
+    setError(failed.length ? `Could not load ${failed.join(", ")}. The rest of this page is current.` : null);
+    setLoading(false);
   }, [targetNs, namespace]);
 
   useEffect(() => {
