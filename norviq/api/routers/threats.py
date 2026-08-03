@@ -519,7 +519,8 @@ def _path_governed_by(gov: dict, cls: str, chokepoint: str, choke_verb: str | No
 
 
 async def _derive_paths(
-    session: AsyncSession, namespaces: list[str] | None, cls: str | None, hours: int = 24
+    session: AsyncSession, namespaces: list[str] | None, cls: str | None, hours: int = 24,
+    cap: int | None = _MAX_PATHS,
 ) -> tuple[list[ThreatPath], list[str]]:
     nodes_by_id, out_edges, seen = await _assemble(session, namespaces, hours)
     overrides = await _verb_overrides(session, namespaces)
@@ -553,7 +554,11 @@ async def _derive_paths(
     # worst-first (exploitable / critical) path behind arbitrary graph-iteration order. Per-agent
     # fan-out is already bounded (chokepoint + chain budgets) and the asset graph is node-bounded,
     # so building all paths before the cap stays bounded.
-    return ordered[:_MAX_PATHS], seen
+    #
+    # `cap=None` returns the UNCAPPED ranked list. The paths endpoint needs it so it can count each
+    # class BEFORE truncating: counting inside a capped list answers "how many survived the cap",
+    # which is not the class's exposure. Callers that want the capped view keep the default.
+    return (ordered if cap is None else ordered[:cap]), seen
 
 
 @router.get("/threats/attack-paths", response_model=ThreatPathsResponse)
@@ -582,23 +587,34 @@ async def get_threat_paths(
         raise HTTPException(status_code=400, detail="conflicting 'ns' and 'namespace' query parameters")
     requested = ns if ns is not None else (namespace if namespace is not None else "all")
     namespaces = _resolve_namespaces(user, requested)
-    paths, seen = await _derive_paths(session, namespaces, cls, hours)
+    # UNCAPPED, then filter, then count, then cap — in that order. Doing it the other way round is
+    # what made the console disagree with itself: the class picker counted inside an already-truncated
+    # 200 and reported 22 paths for a class the coverage denominator scored out of 49.
+    all_paths, seen = await _derive_paths(session, namespaces, cls, hours, cap=None)
     # A kill-chain rooted at a synthetic/probe agent is test noise — hide it by default (toggle brings it back).
     synthetic_hidden = 0
     if not include_synthetic:
-        kept = [p for p in paths if not is_synthetic_identity(p.cls, p.src)]
-        synthetic_hidden = len(paths) - len(kept)
-        paths = kept
+        kept = [p for p in all_paths if not is_synthetic_identity(p.cls, p.src)]
+        synthetic_hidden = len(all_paths) - len(kept)
+        all_paths = kept
+    class_totals: dict[str, int] = {}
+    for p in all_paths:
+        if p.cls:
+            class_totals[p.cls] = class_totals.get(p.cls, 0) + 1
+    total_paths = len(all_paths)
+    paths = all_paths[:_MAX_PATHS]
     log.info(
         "nrvq.api.attack_paths.served",
         ns=requested,
         cls=cls,
         count=len(paths),
+        total_paths=total_paths,
         synthetic_hidden=synthetic_hidden,
         resolved=seen,
         code="NRVQ-API-7101",
     )
-    return ThreatPathsResponse(paths=paths, namespaces=seen, synthetic_hidden=synthetic_hidden)
+    return ThreatPathsResponse(paths=paths, namespaces=seen, synthetic_hidden=synthetic_hidden,
+                               class_totals=class_totals, total_paths=total_paths)
 
 
 async def _coverage(

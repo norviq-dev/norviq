@@ -77,6 +77,18 @@ class ThreatPathsResponse(BaseModel):
     namespaces: list[str] = []
     # Number of paths hidden because their source agent is synthetic/probe (drives the "N hidden — Show" chip).
     synthetic_hidden: int = 0
+    # TRUE per-class path counts, computed BEFORE the global `_MAX_PATHS` truncation.
+    #
+    # `paths` is capped, so counting a class inside it answers "how many of this class survived the
+    # global cap" — which is not that class's exposure and is smaller than it on any estate big enough
+    # to saturate the cap. The console's class picker did exactly that and told the operator
+    # "customer-support · 22 paths" while the coverage denominator beside it, derived class-scoped,
+    # said 49. Two numbers for one quantity, and the one shown first understated real exposure by 27
+    # paths on a positive-security surface.
+    class_totals: dict[str, int] = {}
+    # Total before truncation. `len(paths) < total_paths` is how a caller knows it is looking at a
+    # capped view at all — previously indistinguishable from "this is everything".
+    total_paths: int = 0
 
 
 class IntentToggles(BaseModel):

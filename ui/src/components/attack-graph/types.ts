@@ -66,6 +66,12 @@ export interface ThreatPathsResponse {
   namespaces: string[];
   // Count of probe-rooted kill-chains hidden (drives the "N test/probe hidden — Show" chip).
   synthetic_hidden?: number;
+  // TRUE per-class path counts, computed server-side BEFORE the global cap. `paths` is truncated, so
+  // counting a class inside it yields "how many of this class survived the cap" — a number smaller
+  // than the class's real exposure on any estate large enough to saturate it.
+  class_totals?: Record<string, number>;
+  // Total before truncation. `paths.length < total_paths` is how the client knows it holds a capped view.
+  total_paths?: number;
 }
 
 /** The four positive-security intent toggles. */

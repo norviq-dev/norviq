@@ -1300,3 +1300,65 @@ the bound went unverified.
 `seed.py` now seeds twelve plausibly-named agent classes: **638 results in 12s**. Named after real
 agents rather than `probe-N` deliberately — `audit_row_is_non_real` hides the `probe-`/`e2e-`/`smoke-`
 prefixes, so a fleet named that way would seed the surfaces it exists to populate with nothing at all.
+
+---
+
+## A real product defect: the Attack Graph reported two different sizes for one exposure
+
+Found by a 12-agent triage of the remaining browser-suite failures, then confirmed against the live
+cluster. `attack-graph.spec.ts:267` asserts that the class picker's path count equals the coverage
+denominator in the same dialog. It did not:
+
+    customer-support · 22 paths     <- the class picker
+    coverage 0 / 49                 <- the denominator beside it, in the same modal
+
+Both describe the same quantity. The second is right.
+
+`/threats/attack-paths` ranks every kill-chain worst-first and returns the top `_MAX_PATHS` (200). The
+denominator is derived class-scoped, so it sees all 49 of that class's paths. The picker tallied
+classes *inside the already-truncated 200*, which answers a different question — "how many of this
+class survived the global cap" — and is strictly smaller on any estate large enough to saturate it.
+
+Confirmed live:
+
+    ns=all&include_synthetic=true      -> exactly 200 paths (saturated)
+    customer-support inside that list  -> 22
+    cls=customer-support (class-scoped)-> 49, synthetic_hidden=0
+
+**The console understated real exposure by 27 paths on a positive-security surface.** Every class was
+undercounted, systematically, and the operator was shown the small number first.
+
+The trail says this was an incomplete migration: `IntentModal.tsx` documents the new contract
+("Coverage is always PER-CLASS ... measuring it over every class's paths is misleading") and the
+denominator was moved to per-class, but the picker's count was left on the old visible-paths
+derivation.
+
+**Fix, in the product.** `/threats/attack-paths` now derives UNCAPPED, filters synthetics, counts each
+class, and only then truncates — in that order. The response carries `class_totals` (true per-class
+counts) and `total_paths` (the pre-cap total, so a client can tell a capped view from a complete one at
+all, which it previously could not). The console reads `class_totals`, falling back to the old tally
+only for an API that predates the field.
+
+### How this was nearly recorded as the opposite of what it is
+
+The first triage called it a product defect. The adversarial verifier refuted that and called it a
+seeding gap: my own `FLEET_CLASSES` commit added 12 classes × 16 paths = 192, pushing `default` past
+the 200 cap, and the spec had passed before it.
+
+Both are partly right, and the synthesis is the honest reading: **the seed did not create this defect,
+it made a kind cluster large enough to expose one that any real customer with >200 attack paths already
+hits.** A latent bug that only appears at scale is still a bug; a fixture that grows the test estate to
+production size is doing its job. Reverting the seed would have hidden it again.
+
+> **Rule: when a fixture change surfaces a failure, ask whether the fixture created the defect or
+> merely crossed the threshold where it becomes visible. Those call for opposite responses.**
+
+### The regression test asserts the property, above the threshold
+
+`tests/api/test_threat_paths_class_totals.py` builds a fixture that *saturates* the cap on purpose,
+because below it the correct and buggy implementations agree exactly — a smaller fixture passes either
+way and proves nothing. That is why this survived every hermetic suite until a seeded cluster grew past
+200. It carries its own anti-vacuity assertion: if a tally over the returned paths ever equals
+`class_totals`, the fixture has stopped saturating and the test says so rather than passing quietly.
+
+Verified by reverting the one-line `cap=None` and watching it fail, then restoring it.

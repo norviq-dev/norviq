@@ -46,6 +46,9 @@ export function AttackGraph() {
   const [searchParams, setSearchParams] = useSearchParams();
 
   const [paths, setPaths] = useState<ThreatPath[]>([]);
+  // Authoritative per-class counts from the server, computed before the global cap. See the comment
+  // on `classGroups` for why this cannot be derived from `paths`.
+  const [classTotals, setClassTotals] = useState<Record<string, number>>({});
   const [apiNamespaces, setApiNamespaces] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [degraded, setDegraded] = useState(false);
@@ -107,6 +110,7 @@ export function AttackGraph() {
         setPaths(res.paths ?? []);
         setApiNamespaces(res.namespaces ?? []);
         setSyntheticHidden(res.synthetic_hidden ?? 0);
+        setClassTotals(res.class_totals ?? {});
         // A successful GET does NOT clear a still-outstanding recompute failure — the paths it
         // returned are the STALE precompute the failed recompute couldn't refresh, so keep the banner up.
         setDegraded(recomputeFailedRef.current);
@@ -314,12 +318,29 @@ export function AttackGraph() {
     const distinct = [...new Set(paths.map((p) => p.cls).filter(Boolean))];
     return [{ value: "all", label: "All classes" }, ...distinct.map((c) => ({ value: c, label: c }))];
   }, [paths]);
-  // Global intent: classes across all VISIBLE paths with their path counts (grouped-by-class), worst-first.
+  // Global intent: every class with a kill-chain, and its TRUE path count.
+  //
+  // The count comes from the server's `class_totals`, NOT from tallying `visible`. `paths` is capped
+  // at the API's `_MAX_PATHS`, so a tally over it answers "how many of this class survived the global
+  // cap" — which is not the class's exposure, and is smaller than it on any estate big enough to
+  // saturate the cap. This surface used to do exactly that, and the same dialog then showed
+  // "customer-support · 22 paths" beside a coverage denominator of 49: two numbers for one quantity,
+  // with the understated one shown first, on a console whose whole job is to size exposure honestly.
+  //
+  // The severity filter is deliberately NOT applied here. It filters the rendered list; the intent
+  // modal's coverage denominator is every path of the class, so filtering here would reintroduce the
+  // same disagreement in a subtler form.
   const classGroups = useMemo(() => {
+    const entries = Object.entries(classTotals);
+    if (entries.length) {
+      return entries.map(([cls, count]) => ({ cls, count })).sort((a, b) => b.count - a.count);
+    }
+    // Fallback for an API that predates `class_totals` (or a degraded read): tally what we hold, and
+    // accept the undercount rather than showing nothing.
     const m: Record<string, number> = {};
     visible.forEach((p) => { if (p.cls) m[p.cls] = (m[p.cls] || 0) + 1; });
     return Object.entries(m).map(([cls, count]) => ({ cls, count })).sort((a, b) => b.count - a.count);
-  }, [visible]);
+  }, [classTotals, visible]);
 
   const dropdowns = [
     {

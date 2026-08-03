@@ -64,7 +64,10 @@ def captured(monkeypatch) -> list:
     """Capture the namespace list the route hands to _derive_paths (the scoping decision itself)."""
     seen: list = []
 
-    async def _fake_derive(_session, namespaces, _cls, _hours=24):
+    # `cap` is part of the real signature: the route asks for the UNCAPPED list so it can count each
+    # class before truncating. A double that silently swallowed it with **kwargs would keep passing if
+    # the route stopped passing it, which is the regression that matters — so it is named explicitly.
+    async def _fake_derive(_session, namespaces, _cls, _hours=24, cap=None):
         seen.append(namespaces)
         return [], []
 
@@ -77,7 +80,7 @@ def captured_hours(monkeypatch) -> list:
     """Capture the decision-history WINDOW the route hands to _derive_paths."""
     seen: list = []
 
-    async def _fake_derive(_session, _namespaces, _cls, hours=24):
+    async def _fake_derive(_session, _namespaces, _cls, hours=24, cap=None):
         seen.append(hours)
         return [], []
 
