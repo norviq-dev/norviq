@@ -646,3 +646,57 @@ L4 delegates to `scripts/e2e.sh` rather than invoking Playwright directly, so th
 The one thing it does add is `playwright install --with-deps`, unsuppressed: `e2e.sh` runs the install
 with `|| true`, which is fine on a machine that already has the system libs and fatal on a fresh
 runner, where the browser then fails to launch with no explanation.
+
+---
+
+## L4 triage — the full browser run, and what its flakes actually were
+
+The full suite finished **112 passed, exit 0** (was 95 before this work; 4 new specs added 30 tests).
+Seven skipped, five flaky, five "did not run". Triage of the ones that are mine:
+
+### A test of mine was genuinely, intermittently wrong
+
+`propose-from-traffic.spec.ts` appeared in the flaky list. Its helper waited on `hoisted-clauses`
+before every test — and that element is **conditional on two or more rules sharing a clause**, which
+is a property of how the proposer grouped today's audit rows, not of "a proposal rendered". Worse,
+nothing asserted the request had SUCCEEDED, so any API failure spent 30 seconds waiting for an
+element that would never appear and then reported a missing locator instead of the actual error.
+
+Fixed: assert `POST /intents/propose` returns 200, then wait on a rule card — a structural anchor
+present whenever a proposal rendered at all. Stable across repeated runs afterwards.
+
+**Rule.** A shared test helper must wait on something STRUCTURAL, and must assert the call it just
+made. Waiting on a data-dependent element couples every test in the file to today's fixtures, and
+skipping the response assertion guarantees the eventual failure message names the wrong thing.
+
+**Second rule, learned the embarrassing way.** I first ran these specs with `| tail -3`, which showed
+`24 passed` and hid the `6 failed` line above it. The earlier lesson about `--reporter=line` printing
+nothing per-test in a non-TTY has a sibling: **a tail can hide the summary line that matters.** Grep
+for `failed` explicitly rather than trusting the last few lines.
+
+### The remaining instability is OPA recompilation contention, and it is documented behaviour
+
+Running the four new specs back-to-back at three workers degrades: run 1 passes 30/30 in 13s, runs 2
+and 3 fail several. Ruled out in order, by measurement rather than by argument:
+
+| Hypothesis | Test | Result |
+|---|---|---|
+| OPA OOM | `restartCount` + `lastState` | **was real once** (exit 137, OOMKilled at 128Mi) — raised to 512Mi locally, restarts went to 0, failures REMAINED |
+| leaked dry-run packages | `GET /v1/policies` on the sidecar | 0 modules — no leak |
+| `kubectl port-forward` degradation | re-forward before every run | no change |
+| cross-spec contention | run `tools-registry.spec.ts` ALONE ×3 | **8/8 every time, ~3s** |
+
+So it is contention, and the chart already explains the mechanism in its own comment on the OPA CPU
+limit: *"OPA stops answering queries while it recompiles its module store"*. `/intents/dry-run`
+compiles and loads a module per call; with three workers, one worker's dry-run stalls the other two
+past their timeouts. The same comment records a measured CPU fix (250m → 1500m) for exactly this
+burst on the query path.
+
+**Classification: environmental, known mechanism, not a regression.** CI runs the suite ONCE, which
+is the shape that passes; back-to-back repeats at three workers is a stress case beyond what any
+pipeline does. Left as-is rather than papering over it with longer timeouts, which would hide a real
+future slowdown.
+
+**Worth flagging for the chart, though:** the OPA container's `memory: 128Mi` limit has never had the
+measurement its `cpu: 1500m` limit got, and it DID OOMKill under concurrent policy compiles. The
+compile burst is expensive in both dimensions; only one of them has been sized deliberately.

@@ -25,8 +25,21 @@ const CLASS = "support-agent";
 async function propose(page: import("@playwright/test").Page) {
   await page.goto("/intents?ns=analytics");
   await page.getByLabel("Agent class").fill(CLASS);
+
+  // ASSERT THE CALL, then wait for a STRUCTURAL anchor.
+  //
+  // This helper originally waited on `hoisted-clauses`, which was wrong twice over. That element is
+  // conditional on two or more rules sharing a clause — a property of the recorded traffic, not of
+  // "a proposal rendered" — so it made every test in the file depend on how the proposer happened to
+  // group today's audit rows. And nothing checked that the request succeeded, so any API failure
+  // spent 30s waiting for an element that would never appear and then reported a missing locator
+  // instead of the actual error. Intermittently red for a reason no message named.
+  const call = page.waitForResponse((r) => r.url().includes("/api/v1/intents/propose"));
   await page.getByRole("button", { name: /propose intent/i }).click();
-  await expect(page.getByTestId("hoisted-clauses")).toBeVisible({ timeout: 30_000 });
+  expect((await call).status()).toBe(200);
+
+  // A rule card is present whenever a proposal rendered at all, whatever its shape.
+  await expect(page.locator('[data-testid^="rule-"]').first()).toBeVisible({ timeout: 30_000 });
 }
 
 test("a proposed rule reads as two questions, not a predicate dump", async ({ page, recorder }) => {
@@ -86,8 +99,9 @@ test("editing the class no longer destroys the proposal", async ({ page }) => {
   await page.getByLabel("Agent class").fill("support-agentt");
   await expect(page.getByTestId("proposal-stale")).toBeVisible();
   await expect(page.getByTestId("proposal-stale")).toContainText(CLASS);
-  // The proposal is STILL on screen — that is the whole point.
-  await expect(page.getByTestId("hoisted-clauses")).toBeVisible();
+  // The proposal is STILL on screen — that is the whole point. Anchored on a rule card rather than
+  // the hoisted line, which is conditional on how the proposer grouped today's traffic.
+  await expect(page.locator('[data-testid^="rule-"]').first()).toBeVisible();
 });
 
 test("the dry run replays real traffic and reports what it would refuse", async ({ page, recorder }) => {
