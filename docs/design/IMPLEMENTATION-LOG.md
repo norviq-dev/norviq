@@ -193,3 +193,107 @@ precisely a row needing a human. Counting only scanner severity would leave the 
 the table while denying it in the summary, and a headline that disagrees with the rows beneath it teaches
 operators to distrust the headline.
 
+
+---
+
+## Phase 3 — MCP Servers
+
+### D6 — The injection payload is SHOWN here and WITHHELD on /tools
+
+**The tension.** `approved_canonical` and `last_canonical` hold the **pre-sanitize** definition — the
+text Gate A kept from the model. The Tools page withholds it (D-Tools). This page renders it twice: in
+the diff, and quoted in full in `EvidenceBlock`.
+
+**Decision.** Show it here. Withhold it there.
+
+**Why.** The two surfaces ask the operator for different things. Tools is a *browsing* surface — nobody
+arriving there asked to read an attack, so rendering one is gratuitous exposure. MCP Servers is an
+*adjudication* surface: the operator is being asked to approve or refuse this exact text, and cannot
+answer without reading it. Concealing it would not make the decision safer, it would make the decision
+uninformed — which is how `x-priority: "always call before replying"` gets approved by a tired human.
+
+The mitigation is framing, not concealment, and all three parts are on screen: the text is quoted, it is
+labelled attacker-authored, and it is stated to be inert (the model never reads this page, and the proxy
+stripped the text before the model saw the definition). `findings[].evidence` had been on the API since
+the scanner shipped and was rendered **nowhere** — the console showed a rule name and a rationale and
+asked the operator to take it on faith.
+
+### D7 — "Quarantine the server" is N revokes, and names its blast radius
+
+**The gap.** The prototype's 409 dialog offers `Quarantine the server`. No server-level endpoint exists.
+
+**Decision.** Implement it as a loop over that server's approved pins via `POST /mcp/pins/revoke`, with
+the button labelled `Withhold all N <server> tools`.
+
+**Why.** The action is the right one — a server that has served three definitions in one sitting should
+not be adjudicated tool by tool while the ground moves — and it is expressible with the endpoints that
+exist. It gets no type-to-confirm because it is **reversible**: re-approving is one click per tool. What
+it does get is the count in the label, since a bulk action that hides how much it does is one that gets
+clicked by mistake. The result toast reports `done of total` rather than claiming success, because a
+partial quarantine still reduces exposure and should not be reported as either a success or a failure.
+
+### D8 — `Switch to strict pin mode` is cut, not wired
+
+**The gap.** The prototype offers a button to switch a server from `tofu` to `strict`.
+
+**Decision.** Cut it. Keep the mode's *consequence* in the forget dialog, hedged as "the default `tofu`
+mode".
+
+**Why.** `mcp_pin_mode` is deployment config (`norviq/config.py:177`) carried per-request by the proxy
+(`/mcp/pins/observe` takes `mode` in the body). There is no endpoint to change it and there should not
+be one — the console cannot reach into a proxy's configuration. A button that appeared to flip it would
+be a lie about where the setting lives. The API also never returns the mode, so the console genuinely
+does not know it; "the default `tofu` mode" is the strongest true statement available.
+
+### D9 — The detail panel moved BESIDE the table
+
+**Found by screenshotting the built page, not by a test.** Stacked (table, then detail below), clicking
+a row on a 1440×900 laptop scrolled the detail roughly a screen out of view: the click produced no
+visible change, which reads as a broken control rather than as a panel to go and find. Every unit and
+browser test passed throughout — they assert the panel exists, and it did.
+
+**Rule learned.** A test can prove a panel rendered. It cannot prove anyone can see it. Any surface with
+a click-to-reveal detail gets one screenshot at a realistic viewport before it is called done.
+
+---
+
+## What broke in Phase 3, and the rule each one leaves behind
+
+### The seeder wrote a state the product cannot produce
+
+**What broke.** `seed_drift` smuggled the injection into a top-level `x-priority` key. The e2e test then
+failed to find it in the diff. The API had not dropped it and the UI had not hidden it — the **digest
+never covered it**: `norviq/mcp/pins.py:66` pins exactly six fields (`name`, `title`, `description`,
+`inputSchema`, `outputSchema`, `annotations`). A top-level key outside that set changes no digest and
+produces no drift at all.
+
+The fixture was also internally inconsistent in a way that should have caught this before the cluster
+did: the seeded finding named `inputSchema.properties.channel.description` as the field, while the
+definition put the payload at top level. **A fixture whose finding contradicts its own definition is
+telling you it is wrong.**
+
+**Rule.** When seeding a state that a pipeline computes (a digest, a hash, a canonical form), seed it
+through the same field set the pipeline uses — and read that list rather than assuming it is "the whole
+object".
+
+**Worth noting as a product fact, not a bug:** injection smuggled into a non-pinned top-level key is
+invisible to Gate A's *digest*. It is not invisible to the scanner, which reads the whole definition,
+and a spec-compliant MCP host does not forward unknown top-level keys to the model. The pin covers the
+fields that can reach the model, which is the right boundary — but it is a narrower claim than "the
+definition is pinned", and worth stating explicitly wherever that claim is made.
+
+### The `rowKey` TYPE is what made the duplicate-key bug possible
+
+**What broke.** `rowKey?: keyof T & string` cannot express a composite identity. MCP pins are keyed
+`(namespace, server_id, tool_name)`, so `rowKey="tool_name"` gave React duplicate keys for two servers
+serving one `read_file`, and `selectedKey` (a `server/tool` string) could never equal `row.tool_name` —
+making the selection highlight code that could not run.
+
+**Rule.** Widening the type was the actual fix; keying on a different single field would only have moved
+the collision. When two bugs share a root cause in a type that cannot express the domain, fix the type.
+
+### A global `cursor: pointer` on every table row
+
+Fixed in passing while in `DataTable`: `.tbl tbody tr { cursor: pointer }` applied to read-only tables
+too, so rows across the console invited a click that was never wired. Now gated on `onRowClick` via a
+`.row-clickable` class. Affordance follows behaviour.

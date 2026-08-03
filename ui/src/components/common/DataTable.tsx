@@ -28,7 +28,14 @@ export function DataTable<T extends Record<string, unknown>>({
   rows: T[];
   onRowClick?: (row: T) => void;
   selectedKey?: string | number | null;
-  rowKey?: keyof T & string;
+  /**
+   * How to identify a row. A field name works when one field is unique; a function is required when
+   * identity is COMPOSITE — MCP pins are keyed `(namespace, server_id, tool_name)`, so two servers
+   * serving one `read_file` collided under `rowKey="tool_name"`: React saw duplicate keys, and
+   * `selectedKey` (a `server/tool` string) could never equal `row.tool_name`, so the highlight was
+   * unreachable. The type is what made the bug possible; widening it is the actual fix.
+   */
+  rowKey?: (keyof T & string) | ((row: T) => string);
   filterable?: boolean;
   placeholder?: string;
 }) {
@@ -71,12 +78,20 @@ export function DataTable<T extends Record<string, unknown>>({
           </thead>
           <tbody>
             {filtered.map((row, i) => {
-              const key = rowKey ? (row[rowKey] as unknown as string | number) : i;
+              const key = rowKey
+                ? typeof rowKey === "function"
+                  ? rowKey(row)
+                  : (row[rowKey] as unknown as string | number)
+                : i;
               const isSelected = selectedKey != null && selectedKey === key;
               return (
                 <tr
                   key={key}
-                  className={isSelected ? "selected" : ""}
+                  // Only a row that DOES something may look like it does. `index.css` sets
+                  // `cursor: pointer` on every `.tbl` row, so read-only tables invited a click that
+                  // was never wired — the class is applied here, gated on the handler existing.
+                  className={`${onRowClick ? "row-clickable" : ""}${isSelected ? " selected" : ""}`}
+                  data-row-key={String(key)}
                   onClick={() => onRowClick && onRowClick(row)}
                 >
                   {columns.map((c) => (

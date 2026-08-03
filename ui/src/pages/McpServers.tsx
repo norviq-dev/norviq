@@ -14,9 +14,15 @@
 // integrations are live, and is any of them misbehaving?" — before any per-tool detail.
 
 import { CSSProperties, useCallback, useMemo, useState } from "react";
-import { AlertTriangle, CheckCircle2, RefreshCw, ShieldAlert, ShieldCheck, XCircle } from "lucide-react";
-import { apiGet, apiSend } from "../api/client";
+import { Link } from "react-router-dom";
+import { AlertTriangle, CheckCircle2, Info, RefreshCw, ShieldAlert, ShieldCheck, Trash2, XCircle } from "lucide-react";
+import { ApiError, apiGet, apiSend, fetchMe } from "../api/client";
 import { Column, DataTable } from "../components/common/DataTable";
+import { DefinitionDiff } from "../components/common/DefinitionDiff";
+import { DestructiveConfirm } from "../components/common/DestructiveConfirm";
+import { EvidenceBlock } from "../components/common/EvidenceBlock";
+import { InlineDisabledReason } from "../components/common/InlineDisabledReason";
+import { Modal } from "../components/common/Modal";
 import { PageHead } from "../components/common/PageHead";
 import { Panel } from "../components/common/Panel";
 import { StatTile } from "../components/common/StatTile";
@@ -59,6 +65,16 @@ export type McpPinRow = {
   [key: string]: unknown;
 };
 
+/**
+ * A pin's identity is COMPOSITE. Two servers may serve one tool name — `read_file` from `filesystem`
+ * and from `runbooks` are different definitions, scanned and approved independently. Keying a row on
+ * `tool_name` alone produced duplicate React keys and made selection unreachable; the engine, which
+ * sees only the bare name, governs both with one policy. Both facts are surfaced below.
+ */
+export function pinKey(p: Pick<McpPinRow, "namespace" | "server_id" | "tool_name">): string {
+  return `${p.namespace}/${p.server_id}/${p.tool_name}`;
+}
+
 // Reuses the DecisionBadge colour language so severity reads the same way it does everywhere else in
 // the console: red = enforced against, amber = needs a human, green = fine.
 const TONE: Record<string, CSSProperties> = {
@@ -89,44 +105,28 @@ function severityTone(sev: string): string {
   return sev === "critical" || sev === "high" ? "bad" : sev === "none" ? "ok" : "warn";
 }
 
-/** Approved vs currently-served definition, side by side.
- *
- *  This is why the pin keeps `approved_canonical`: when a rug pull fires, the operator's first
- *  question is "what changed?", and the old definition cannot be re-fetched from a server that has
- *  already replaced it. Showing both turns an alarm into a decision. */
-function DefinitionDiff({ approved, served }: { approved: string; served: string }) {
-  const fmt = (s: string): string => {
-    if (!s) return "(none recorded)";
-    try {
-      return JSON.stringify(JSON.parse(s), null, 2);
-    } catch {
-      return s;
-    }
-  };
-  const changed = approved !== served && Boolean(served);
-  return (
-    <div className="grid grid-cols-2 md:grid-cols-1 gap-5">
-      <div>
-        <div className="page-sub">Approved definition</div>
-        <pre className="json" data-testid="approved-definition">{fmt(approved)}</pre>
-      </div>
-      <div>
-        <div className="page-sub" style={changed ? { color: "#FF3B5C" } : undefined}>
-          {changed ? "Definition served now (CHANGED)" : "Definition served now"}
-        </div>
-        <pre className="json" data-testid="served-definition">{fmt(served)}</pre>
-      </div>
-    </div>
-  );
+/** A definition withheld from the model is the tool being *off*, which the pin status alone does not
+ *  say. `Withheld` next to the name is the operator-facing consequence of `drift`/`quarantined`. */
+function isWithheld(p: McpPinRow): boolean {
+  return p.status !== "pinned" || p.scan_severity === "critical" || p.scan_severity === "high";
 }
+
+/** What the operator was shown, so approve can name the digest they actually reviewed. */
+function reviewedDigest(p: McpPinRow): string {
+  return p.last_digest || p.approved_digest;
+}
+
+type Conflict = { row: McpPinRow; reviewed: string; approved: string; servedNow: string | null; detail: string };
 
 export function McpServers() {
   const { selectedNamespace } = useApp();
   const toast = useToast();
   const ns = selectedNamespace || "all";
   const [selectedServer, setSelectedServer] = useState<string | null>(null);
-  const [selectedTool, setSelectedTool] = useState<McpPinRow | null>(null);
+  const [selectedPin, setSelectedPin] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [conflict, setConflict] = useState<Conflict | null>(null);
+  const [forgetting, setForgetting] = useState<McpServerRow | null>(null);
 
   const loadServers = useCallback(
     () => apiGet<McpServerRow[]>(`/api/v1/mcp/servers?namespace=${encodeURIComponent(ns)}`),
@@ -139,12 +139,38 @@ export function McpServers() {
 
   const servers = useApi<McpServerRow[]>(loadServers, [ns], { cacheKey: `mcp-servers:${ns}`, staleTimeMs: 5000 });
   const pins = useApi<McpPinRow[]>(loadPins, [ns], { cacheKey: `mcp-pins:${ns}`, staleTimeMs: 5000 });
+  // Approve, revoke and forget are all admin-gated server-side. Asking the server who we are lets the
+  // console say WHY a control is unavailable instead of showing a grey button with no explanation.
+  const me = useApi(() => fetchMe(), []);
+  const isAdmin = me.data?.role === "admin";
+  const roleKnown = Boolean(me.data) || Boolean(me.error);
 
   const serverRows = useMemo(() => servers.data ?? [], [servers.data]);
+  const allPins = useMemo(() => pins.data ?? [], [pins.data]);
   const pinRows = useMemo(
-    () => (pins.data ?? []).filter((p) => !selectedServer || p.server_id === selectedServer),
-    [pins.data, selectedServer]
+    () => allPins.filter((p) => !selectedServer || p.server_id === selectedServer),
+    [allPins, selectedServer]
   );
+
+  // Re-derived from the live list every render rather than held as an object: after a refetch the
+  // held copy would be a stale snapshot, and the detail panel would keep showing the digest that was
+  // true before the operator clicked Refresh — which is precisely the state this page exists to
+  // prevent anyone acting on.
+  const selectedTool = useMemo(
+    () => (selectedPin ? (allPins.find((p) => pinKey(p) === selectedPin) ?? null) : null),
+    [allPins, selectedPin]
+  );
+
+  /** Tool names served by more than one server, in view. Drives the collision note. */
+  const collisions = useMemo(() => {
+    const byName = new Map<string, Set<string>>();
+    for (const p of allPins) {
+      const set = byName.get(p.tool_name) ?? new Set<string>();
+      set.add(p.server_id);
+      byName.set(p.tool_name, set);
+    }
+    return [...byName.entries()].filter(([, servers_]) => servers_.size > 1).map(([name]) => name);
+  }, [allPins]);
 
   const totals = useMemo(() => {
     const t = { servers: serverRows.length, tools: 0, drifted: 0, quarantined: 0, flagged: 0 };
@@ -165,39 +191,116 @@ export function McpServers() {
   const act = useCallback(
     async (row: McpPinRow, action: "approve" | "revoke") => {
       setBusy(true);
+      const reviewed = reviewedDigest(row);
       try {
         // Approve names the SERVED digest explicitly. The API refuses a digest it has not seen, so a
         // server that changes its definition again between this screen rendering and the click
         // landing gets a 409 rather than an accidental blessing.
         const body =
           action === "approve"
-            ? {
-                namespace: row.namespace,
-                server_id: row.server_id,
-                tool_name: row.tool_name,
-                digest: row.last_digest || row.approved_digest
-              }
+            ? { namespace: row.namespace, server_id: row.server_id, tool_name: row.tool_name, digest: reviewed }
             : { namespace: row.namespace, server_id: row.server_id, tool_name: row.tool_name };
         await apiSend<McpPinRow>(`/api/v1/mcp/pins/${action}`, "POST", body);
         toast.push({
           kind: "success",
-          message:
-            action === "approve"
-              ? `Approved ${row.tool_name}`
-              : `Revoked ${row.tool_name}`,
+          message: action === "approve" ? `Approved ${row.tool_name}` : `Revoked ${row.tool_name}`,
           detail:
             action === "approve"
               ? "The served definition is now the approved one; the tool is visible to the model again."
               : "The tool is withheld from the model and calls to it are refused until it is re-approved."
         });
-        setSelectedTool(null);
+        setSelectedPin(null);
         refresh();
       } catch (err) {
+        // 409 is not an error to report — it is the rug pull happening while the operator reads. It
+        // gets a dialog naming all three digests, because "your approval failed" without them leaves
+        // the operator to guess whether they mis-clicked or are being attacked.
+        if (err instanceof ApiError && err.status === 409) {
+          const fresh = await apiGet<McpPinRow[]>(`/api/v1/mcp/pins?namespace=${encodeURIComponent(ns)}`).catch(
+            () => null
+          );
+          const now = fresh?.find((p) => pinKey(p) === pinKey(row)) ?? null;
+          setConflict({
+            row,
+            reviewed,
+            approved: row.approved_digest,
+            servedNow: now ? now.last_digest : null,
+            detail: err.message
+          });
+          refresh();
+        } else {
+          toast.push({
+            kind: "error",
+            message: `Could not ${action} ${row.tool_name}`,
+            detail: (err as Error).message
+          });
+        }
+      } finally {
+        setBusy(false);
+      }
+    },
+    [ns, refresh, toast]
+  );
+
+  /**
+   * Withdraw approval from every tool a server serves.
+   *
+   * The escape hatch when a server has changed its definition more than once in a sitting: rather
+   * than adjudicate each tool while the ground moves, withhold the lot and investigate. Reversible —
+   * re-approving is one click per tool — which is why it does not need type-to-confirm, and why the
+   * button names the blast radius instead.
+   */
+  const quarantineServer = useCallback(
+    async (server: string) => {
+      const victims = allPins.filter((p) => p.server_id === server && p.approved);
+      setBusy(true);
+      let done = 0;
+      for (const p of victims) {
+        try {
+          await apiSend<McpPinRow>("/api/v1/mcp/pins/revoke", "POST", {
+            namespace: p.namespace,
+            server_id: p.server_id,
+            tool_name: p.tool_name
+          });
+          done++;
+        } catch {
+          // Keep going: a partial quarantine still reduces exposure, and the count reports honestly.
+        }
+      }
+      setBusy(false);
+      setConflict(null);
+      toast.push({
+        kind: done === victims.length ? "success" : "error",
+        message: `Withheld ${done} of ${victims.length} ${server} tools`,
+        detail:
+          done === victims.length
+            ? "Every tool this server serves is now refused until an operator re-approves it individually."
+            : "Some revocations failed — re-run, or revoke the remaining tools individually."
+      });
+      refresh();
+    },
+    [allPins, refresh, toast]
+  );
+
+  const forgetServer = useCallback(
+    async (server: McpServerRow) => {
+      setBusy(true);
+      try {
+        const res = await apiSend<{ removed: number }>(
+          `/api/v1/mcp/servers/${encodeURIComponent(server.namespace)}/${encodeURIComponent(server.server_id)}`,
+          "DELETE"
+        );
         toast.push({
-          kind: "error",
-          message: `Could not ${action} ${row.tool_name}`,
-          detail: (err as Error).message
+          kind: "success",
+          message: `Forgot ${server.server_id}`,
+          detail: `${res.removed} pin${res.removed === 1 ? "" : "s"} deleted. If the server reappears, its next definition is pinned afresh.`
         });
+        setForgetting(null);
+        setSelectedServer(null);
+        setSelectedPin(null);
+        refresh();
+      } catch (err) {
+        toast.push({ kind: "error", message: `Could not forget ${server.server_id}`, detail: (err as Error).message });
       } finally {
         setBusy(false);
       }
@@ -241,7 +344,16 @@ export function McpServers() {
   ];
 
   const pinColumns: Array<Column<McpPinRow>> = [
-    { key: "tool_name", title: "Tool", render: (v) => <span className="mono">{String(v)}</span> },
+    {
+      key: "tool_name",
+      title: "Tool",
+      render: (v, row) => (
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
+          <span className="mono">{String(v)}</span>
+          {isWithheld(row) && <Pill text="Withheld" tone="bad" />}
+        </span>
+      )
+    },
     { key: "server_id", title: "Server", render: (v) => <span className="mono muted">{String(v)}</span> },
     {
       key: "status",
@@ -282,6 +394,12 @@ export function McpServers() {
 
   const loading = servers.loading || pins.loading;
   const error = servers.error || pins.error;
+  const selectedServerRow = serverRows.find((s) => s.server_id === selectedServer) ?? null;
+  const approveReason = !roleKnown
+    ? undefined
+    : !isAdmin
+      ? "Needs admin — you are a viewer."
+      : undefined;
 
   return (
     <div className="stack page-enter">
@@ -289,9 +407,14 @@ export function McpServers() {
         title="MCP Servers"
         subtitle="Model Context Protocol integrations, and the approval state of every tool definition they serve"
         actions={
-          <button type="button" className="btn btn-outline" onClick={refresh} disabled={loading}>
-            <RefreshCw size={14} /> Refresh
-          </button>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <Link className="btn btn-outline" to="/tools" data-testid="mcp-to-tools">
+              What can I do with these tools? →
+            </Link>
+            <button type="button" className="btn btn-outline" onClick={refresh} disabled={loading}>
+              <RefreshCw size={14} /> Refresh
+            </button>
+          </div>
         }
       />
 
@@ -304,17 +427,32 @@ export function McpServers() {
       </div>
 
       {error && (
-        <Panel title="MCP inventory unavailable">
-          <div className="muted">{String(error)}</div>
+        <Panel title="Couldn't read pin state" data-testid="mcp-error">
+          {/* Silence must never read as an all-clear. An operator who takes a failed fetch for "no
+              drift" concludes the estate is healthy at exactly the moment nobody checked. */}
+          <div style={{ fontSize: 13, lineHeight: 1.6, color: "var(--text-secondary)" }}>
+            Not the same as “no drift”. Approval state is unknown right now — enforcement is unaffected, and pinned
+            tools keep refusing changed definitions.
+          </div>
+          <div className="mono" style={{ marginTop: 10, fontSize: 12, color: "var(--text-muted)" }}>
+            {String(error)}
+          </div>
+          <button type="button" className="btn btn-outline" style={{ marginTop: 12 }} onClick={refresh}>
+            <RefreshCw size={14} /> Retry
+          </button>
         </Panel>
       )}
 
       {!error && !loading && serverRows.length === 0 && (
-        <Panel title="No MCP servers observed yet">
-          <div className="muted">
+        <Panel title="No MCP servers observed yet" data-testid="mcp-empty">
+          <div className="muted" style={{ lineHeight: 1.65 }}>
             A server appears here the first time an agent runs a <span className="mono">tools/list</span> through the
             Norviq MCP proxy. Point the host&apos;s server command at{" "}
             <span className="mono">python -m norviq.mcp -- &lt;server command&gt;</span> to start governing it.
+            <div style={{ marginTop: 10 }}>
+              MCP inspection ships off by default, so an empty inventory usually means a fresh install rather than a
+              problem. Enforcement does not depend on it — <Link to="/policies/catalog">write policies now →</Link>
+            </div>
           </div>
         </Panel>
       )}
@@ -327,19 +465,40 @@ export function McpServers() {
               ? `Filtered to ${selectedServer} — click the row again to clear`
               : "Click a server to filter the tool definitions below"
           }
+          action={
+            selectedServerRow && (
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm revoke"
+                onClick={() => setForgetting(selectedServerRow)}
+                data-testid="mcp-forget-open"
+              >
+                <Trash2 size={14} /> Forget {selectedServerRow.server_id}…
+              </button>
+            )
+          }
         >
           <DataTable<McpServerRow>
             columns={serverColumns}
             rows={serverRows}
-            rowKey="server_id"
-            selectedKey={selectedServer}
+            rowKey={(r) => `${r.namespace}/${r.server_id}`}
+            selectedKey={selectedServerRow ? `${selectedServerRow.namespace}/${selectedServerRow.server_id}` : null}
             onRowClick={(row) => setSelectedServer((cur) => (cur === row.server_id ? null : row.server_id))}
             placeholder="Filter servers…"
           />
+          <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>
+            Pins outlive the server until forgotten — a server that stops responding keeps enforcing the definition it
+            last had approved.
+          </div>
         </Panel>
       )}
 
+      {/* Table and detail SIDE BY SIDE, not stacked. Stacked, the detail panel opened roughly a
+          screen below the row that opened it: on a laptop the click produced no visible change, which
+          reads as a broken control rather than as a panel the operator has to go find. */}
+      <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "flex-start" }}>
       {pinRows.length > 0 && (
+        <div style={{ flex: "2 1 560px", minWidth: 0 }}>
         <Panel
           title="Tool definitions"
           sub="Pinned by content hash. A definition that changes after approval is a rug pull, and the tool is withheld from the model."
@@ -347,19 +506,31 @@ export function McpServers() {
           <DataTable<McpPinRow>
             columns={pinColumns}
             rows={pinRows}
-            rowKey="tool_name"
-            selectedKey={selectedTool ? `${selectedTool.server_id}/${selectedTool.tool_name}` : null}
-            onRowClick={(row) =>
-              setSelectedTool((cur) =>
-                cur?.tool_name === row.tool_name && cur?.server_id === row.server_id ? null : row
-              )
-            }
+            rowKey={pinKey}
+            selectedKey={selectedPin}
+            onRowClick={(row) => setSelectedPin((cur) => (cur === pinKey(row) ? null : pinKey(row)))}
             placeholder="Filter tools…"
           />
+          {collisions.length > 0 && (
+            <div
+              data-testid="mcp-collision"
+              style={{ display: "flex", gap: 8, alignItems: "flex-start", marginTop: 12 }}
+            >
+              <Info size={14} style={{ flex: "none", marginTop: 2, color: "var(--escalate)" }} />
+              <span style={{ fontSize: 12.5, lineHeight: 1.55, color: "var(--text-muted)" }}>
+                Two <span className="mono" style={{ color: "var(--text-secondary)" }}>{collisions[0]}</span> rows are
+                two definitions on two servers, keyed on{" "}
+                <span className="mono" style={{ color: "var(--text-secondary)" }}>(namespace, server_id, tool_name)</span>.
+                The engine sees only the bare name, so a policy naming it governs both.
+              </span>
+            </div>
+          )}
         </Panel>
+        </div>
       )}
 
       {selectedTool && (
+        <div style={{ flex: "1 1 420px", minWidth: 320 }}>
         <Panel
           title={`${selectedTool.server_id} / ${selectedTool.tool_name}`}
           sub={
@@ -369,61 +540,206 @@ export function McpServers() {
                 ? "Not approved. The tool is withheld from the model and calls to it are refused."
                 : "Approved. The served definition matches the approved one."
           }
-          action={
-            <div style={{ display: "flex", gap: 8 }}>
-              {selectedTool.status !== "pinned" && (
+          data-testid="mcp-detail"
+        >
+          <DefinitionDiff
+            approved={selectedTool.approved_canonical}
+            served={selectedTool.last_canonical}
+            approvedDigest={selectedTool.approved_digest}
+            servedDigest={selectedTool.last_digest}
+          />
+
+          {selectedTool.findings.length > 0 && (
+            <div style={{ marginTop: 18 }}>
+              <div
+                style={{
+                  fontSize: 11,
+                  fontWeight: 600,
+                  letterSpacing: "0.08em",
+                  textTransform: "uppercase",
+                  color: "var(--text-secondary)",
+                  marginBottom: 8
+                }}
+              >
+                Scanner findings
+              </div>
+              <div style={{ border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden" }}>
+                {selectedTool.findings.map((f, i) => (
+                  <div key={`${f.rule}-${i}`} data-testid={`mcp-finding-${f.rule}`}>
+                    <div style={{ padding: "11px 12px", background: "var(--bg-elevated)" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+                        <Pill text={f.severity.toUpperCase()} tone={severityTone(f.severity)} />
+                        <span className="mono" style={{ fontSize: 12.5 }}>
+                          {f.rule}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: 12.5, lineHeight: 1.55, color: "var(--text-secondary)" }}>{f.detail}</div>
+                    </div>
+                    {/* The sentence that fired the rule. Withheld from the model, shown here — the
+                        operator is being asked to judge this exact text. */}
+                    <EvidenceBlock evidence={f.evidence} field={f.field} data-testid={`mcp-evidence-${f.rule}`} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-start", marginTop: 18 }}>
+            {selectedTool.status !== "pinned" && (
+              <InlineDisabledReason reason={approveReason} tone="muted" align="start" data-testid="mcp-approve-gate">
                 <button
                   type="button"
                   className="btn btn-primary"
-                  disabled={busy}
+                  disabled={busy || !isAdmin}
                   onClick={() => void act(selectedTool, "approve")}
+                  data-testid="mcp-approve"
                 >
                   <CheckCircle2 size={14} /> Approve served definition
                 </button>
-              )}
-              {selectedTool.approved && (
+              </InlineDisabledReason>
+            )}
+            {selectedTool.approved && (
+              <InlineDisabledReason reason={approveReason} tone="muted" align="start" data-testid="mcp-revoke-gate">
                 <button
                   type="button"
                   className="btn btn-destructive"
-                  disabled={busy}
+                  disabled={busy || !isAdmin}
                   onClick={() => void act(selectedTool, "revoke")}
+                  data-testid="mcp-revoke"
                 >
                   <XCircle size={14} /> Revoke
                 </button>
-              )}
-            </div>
-          }
-          data-testid="mcp-detail"
-        >
-          {selectedTool.findings.length > 0 && (
-            <div style={{ marginBottom: 20 }}>
-              <div className="page-sub">Scanner findings</div>
-              <table className="tbl">
-                <thead>
-                  <tr>
-                    <th>Rule</th>
-                    <th>Severity</th>
-                    <th>Field</th>
-                    <th>Why it fired</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {selectedTool.findings.map((f, i) => (
-                    <tr key={`${f.rule}-${i}`}>
-                      <td className="mono">{f.rule}</td>
-                      <td>
-                        <Pill text={f.severity.toUpperCase()} tone={severityTone(f.severity)} />
-                      </td>
-                      <td className="mono muted">{f.field}</td>
-                      <td className="muted">{f.detail}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          <DefinitionDiff approved={selectedTool.approved_canonical} served={selectedTool.last_canonical} />
+              </InlineDisabledReason>
+            )}
+            {/* The other half of the operator's question. This page says whether the definition can be
+                trusted; Tools says what the definition lets the agent do, and how to narrow it. */}
+            <Link className="btn btn-outline" to="/tools" data-testid="mcp-detail-tools-link">
+              See this tool&apos;s arguments on Tools →
+            </Link>
+          </div>
         </Panel>
+        </div>
+      )}
+      </div>
+
+      {conflict && (
+        <Modal
+          danger
+          data-testid="mcp-conflict"
+          title={
+            <>
+              <XCircle size={19} style={{ color: "var(--block)" }} />
+              The definition changed again while you were reading it
+            </>
+          }
+          onClose={() => setConflict(null)}
+          actions={
+            <>
+              <button type="button" className="btn btn-ghost" onClick={() => setConflict(null)}>
+                Close
+              </button>
+              <button
+                type="button"
+                className="btn btn-outline"
+                onClick={() => {
+                  setConflict(null);
+                  refresh();
+                }}
+                data-testid="mcp-conflict-reread"
+              >
+                Re-read the pin
+              </button>
+              <button
+                type="button"
+                className="btn btn-destructive"
+                disabled={busy || !isAdmin}
+                onClick={() => void quarantineServer(conflict.row.server_id)}
+                data-testid="mcp-conflict-quarantine"
+              >
+                Withhold all {allPins.filter((p) => p.server_id === conflict.row.server_id && p.approved).length}{" "}
+                {conflict.row.server_id} tools
+              </button>
+            </>
+          }
+        >
+          <p style={{ margin: "0 0 14px", fontSize: 13, lineHeight: 1.6, color: "var(--text-secondary)" }}>
+            Your digest matches neither the approved nor the served definition.{" "}
+            <span style={{ color: "var(--text-primary)" }}>The rug pull, live</span> — the server swapped between this
+            screen rendering and your click landing.
+          </p>
+          <div className="mono" style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16, fontSize: 12 }}>
+            {[
+              { label: "you reviewed", value: conflict.reviewed, tone: "primary" },
+              { label: "approved", value: conflict.approved || "(none)", tone: "secondary" },
+              { label: "served now", value: conflict.servedNow ?? "could not re-read", tone: "danger" }
+            ].map((r) => (
+              <div
+                key={r.label}
+                style={{
+                  display: "flex",
+                  gap: 10,
+                  padding: "8px 11px",
+                  borderRadius: 9,
+                  background: r.tone === "danger" ? "#ff3b5c15" : "var(--bg-elevated)",
+                  border: r.tone === "danger" ? "1px solid #ff3b5c30" : "1px solid transparent"
+                }}
+              >
+                <span style={{ flex: "none", width: 96, color: "var(--text-muted)" }}>{r.label}</span>
+                <span
+                  data-testid={`mcp-conflict-${r.label.replace(/\s+/g, "-")}`}
+                  style={{
+                    overflowWrap: "anywhere",
+                    color:
+                      r.tone === "danger"
+                        ? "var(--block)"
+                        : r.tone === "primary"
+                          ? "var(--text-primary)"
+                          : "var(--text-secondary)"
+                  }}
+                >
+                  {r.value}
+                </span>
+              </div>
+            ))}
+          </div>
+          <p style={{ margin: "0 0 4px", fontSize: 12.5, lineHeight: 1.6, color: "var(--text-muted)" }}>
+            Nothing was approved. Re-read the pin — or treat three definitions in one session as the answer.
+          </p>
+        </Modal>
+      )}
+
+      {forgetting && (
+        <DestructiveConfirm
+          title={
+            <>
+              Forget <span className="mono">{forgetting.server_id}</span>?
+            </>
+          }
+          confirmWord={forgetting.server_id}
+          confirmLabel="Forget server"
+          allowed={isAdmin}
+          busy={busy}
+          onCancel={() => setForgetting(null)}
+          onConfirm={() => void forgetServer(forgetting)}
+          data-testid="mcp-forget"
+          consequence={
+            <>
+              If it reappears under the default <span className="mono" style={{ color: "var(--text-primary)" }}>tofu</span>{" "}
+              pin mode,{" "}
+              <strong style={{ color: "var(--escalate)", fontWeight: 600 }}>
+                the drifted definition would be auto-approved on sight.
+              </strong>{" "}
+              Forgetting a server to clear an alarm is one step from adopting the change that raised it.
+            </>
+          }
+        >
+          Deletes{" "}
+          <strong style={{ color: "var(--text-primary)", fontWeight: 600 }}>
+            {allPins.filter((p) => p.server_id === forgetting.server_id).length} pin
+            {allPins.filter((p) => p.server_id === forgetting.server_id).length === 1 ? "" : "s"}
+          </strong>
+          , their drift history and their findings. Policies are unchanged and keep enforcing.
+        </DestructiveConfirm>
       )}
     </div>
   );

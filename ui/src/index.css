@@ -336,6 +336,21 @@ body {
 .btn-save:hover { background: #1aedab; }
 .btn-sm { height: 27px; padding: 0 10px; font-size: 13px; border-radius: 8px; }
 .btn.revoke:hover { color: var(--block); }
+/* An in-prose control that reads as a link but is a real <button> — keyboard-reachable and announced
+   as a button, which an <a> without an href is not. */
+.linklike { background: none; border: none; padding: 0; font: inherit; font-size: inherit;
+  color: var(--accent); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.linklike:hover { color: var(--accent-hover); }
+
+/* ---- Modal ------------------------------------------------------------- */
+.modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.62); display: grid;
+  place-items: center; padding: 24px; z-index: 60; }
+.modal-card { width: 100%; max-width: 520px; background: var(--bg-surface); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6); padding: 22px;
+  max-height: calc(100vh - 48px); overflow-y: auto; }
+.modal-card.danger { border-color: #ff3b5c30; }
+.modal-title { font-size: 16px; font-weight: 600; margin-bottom: 10px; display: flex; align-items: center; gap: 10px; }
+.modal-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; align-items: flex-start; }
 
 /* ---- Inputs ------------------------------------------------------------ */
 .input {
@@ -412,8 +427,11 @@ body {
 .tbl { width: 100%; border-collapse: collapse; }
 .tbl th { text-align: left; font-size: 11px; font-weight: 500; color: var(--text-secondary); padding: 10px 14px; white-space: nowrap; }
 .tbl td { font-size: 13px; padding: 11px 14px; border-top: 1px solid var(--border); white-space: nowrap; color: var(--text-primary); }
-.tbl tbody tr { cursor: pointer; transition: background var(--transition); }
-.tbl tbody tr:hover { background: var(--bg-surface-hover); }
+.tbl tbody tr { transition: background var(--transition); }
+/* Affordance follows behaviour: a row is only pointer-and-hover when a click actually does something.
+   DataTable adds .row-clickable when it was given an onRowClick. */
+.tbl tbody tr.row-clickable { cursor: pointer; }
+.tbl tbody tr.row-clickable:hover { background: var(--bg-surface-hover); }
 .tbl tbody tr.selected { background: var(--bg-surface-hover); }
 .mono { font-family: var(--font-mono); }
 .muted { color: var(--text-secondary); }
