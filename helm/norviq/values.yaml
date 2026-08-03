@@ -217,7 +217,23 @@ api:
       # Lower this if you are deliberately capping a noisy tenant, but the cost of a low cap here is
       # paid as p95 latency on every enforcement decision.
       cpu: 2000m
-      memory: 256Mi
+      # MEMORY got the same treatment as cpu above, for the same reason: it was sized before the API
+      # ran more than one worker, and never re-measured.
+      #
+      # Measured at IDLE on AKS with a single uvicorn worker: 214Mi against a 256Mi limit — 84% full
+      # doing nothing. That left no room to serve a burst, and none at all to run the `--workers`
+      # the container now starts (each worker is a separate PROCESS with its own heap).
+      #
+      # 1Gi carries 4 workers with real headroom. As with cpu, only the LIMIT moves: `requests` stays
+      # at 128Mi so the chart still schedules on a small cluster, and a limit that is never reached
+      # costs nothing.
+      memory: 1Gi
+  # Uvicorn worker processes. Without this the API ran ONE event loop per pod, so a pod served one
+  # request at a time regardless of its CPU limit — and /api/v1/evaluate is in front of every agent
+  # tool call. Measured before: p50 66 -> 131 -> 291ms at concurrency 1/2/4 (linear: a queue, not
+  # work), and past ~4 concurrent it crossed the engine's 2s budget and FAILED CLOSED, refusing 92%
+  # of ordinary calls. Track this to the cpu limit; raising it needs memory to match.
+  workers: 4
   port: 8080
   # Leave this at the sentinel default and the chart AUTO-GENERATES a strong random secret on
   # first install (templates/secret.yaml), persisting it across `helm upgrade` (a live cluster lookup)
@@ -601,7 +617,12 @@ opa:
       # policy save, 1500m → 5/5. Steady-state evaluation is unaffected either way (it uses ~7m), so this
       # limit exists for the compile burst, not the query path.
       cpu: 1500m
-      memory: 128Mi
+      # ...and the same for memory, which never had the measurement cpu got. OPA sat at 117Mi against
+      # a 128Mi limit at idle — 91% full — and was OOMKilled (exit 137) during a run that pushed
+      # several policies concurrently. Rego COMPILATION is a burst in memory as well as CPU: the whole
+      # module store is rebuilt, so peak scales with how many policies exist, not with query rate.
+      # 512Mi is measured headroom for that burst, not a guess; steady-state evaluation stays ~117Mi.
+      memory: 512Mi
 
 ingress:
   # Console exposure. DEFAULT OFF, following the Grafana / Istio convention: the out-of-the-box access

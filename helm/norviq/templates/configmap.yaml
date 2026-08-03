@@ -65,6 +65,8 @@ data:
   {{- end }}
   NRVQ_TRUST_THRESHOLD: {{ .Values.config.trustThreshold | quote }}
   NRVQ_VIOLATION_PENALTY: {{ .Values.config.violationPenalty | quote }}
+  # Uvicorn worker processes per api pod. See values.yaml `api.workers` for the measurement.
+  NRVQ_API_WORKERS: {{ .Values.api.workers | default 4 | quote }}
   NRVQ_RATE_LIMIT: {{ .Values.config.rateLimit | quote }}
   # X-Forwarded-For trust for rate-limit bucketing: believed only from a trusted PEER (default loopback =
   # the in-pod tls-proxy nginx, which replaces the header), taking the Nth entry from the right.
