@@ -38,6 +38,23 @@ curl -fsS -o /dev/null "$BASE_URL/" || { echo "✗ R10: console not reachable at
 # `login-gate.sh` drives the real reset -> login -> forced-change flow (no test-only backdoor) and
 # asserts must_change=false before returning. Skipped when the caller already exported a password, so
 # a CI job managing its own credential is not overridden.
+# A SUPPLIED PASSWORD MUST BE VERIFIED, exactly like the token below. The skip-if-exported rule
+# exists so a CI job managing its own credential is not overridden — but it also means that exporting
+# a WRONG password silently disables the gate that would have fixed it. On a freshly rebuilt cluster
+# the admin credential is new, and a value carried over from the previous cluster 401s: ~27 form-login
+# tests then fail on a 20s page.waitForURL timeout, naming nothing useful. That is precisely the
+# failure the gate was written to prevent, arriving through the door marked "trust the caller".
+if [ -n "${NRVQ_E2E_PASSWORD:-}" ]; then
+  if curl -sf -o /dev/null -X POST -H "Content-Type: application/json" \
+       -d "{\"username\":\"admin\",\"password\":\"${NRVQ_E2E_PASSWORD}\"}" \
+       "$BASE_URL/api/v1/auth/login"; then
+    echo "password: supplied NRVQ_E2E_PASSWORD verified"
+  else
+    echo "password: supplied NRVQ_E2E_PASSWORD is REJECTED by $BASE_URL — running the login gate" >&2
+    unset NRVQ_E2E_PASSWORD
+  fi
+fi
+
 if [ -z "${NRVQ_E2E_PASSWORD:-}" ] && [ -x "$(dirname "$0")/kind-e2e/login-gate.sh" ]; then
   # stderr is NOT suppressed. The first version sent it to /dev/null, so when the gate failed — it
   # was reaching for whatever kubectl context happened to be current, which after a cluster delete was
