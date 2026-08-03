@@ -10,6 +10,19 @@
 import { test, expect, waitForApp } from "./fixtures";
 import { type Page } from "@playwright/test";
 
+// Read a GET endpoint from the page, carrying the real session token, and FAIL LOUDLY on a non-2xx.
+// Returning `res.json()` and dropping the status is how a 401 or a 429 arrives downstream as a body
+// with no fields and the assertion reports "undefined" — which mis-triaged whole runs in this repo.
+async function apiJson(page: Page, path: string): Promise<any> {
+  const { status, body } = await page.evaluate(async (p) => {
+    const t = localStorage.getItem("nrvq_token");
+    const res = await fetch(p, { headers: t ? { Authorization: `Bearer ${t}` } : {} });
+    return { status: res.status, body: await res.json().catch(() => null) };
+  }, path);
+  if (status >= 400) throw new Error(`GET ${path} -> HTTP ${status}: ${JSON.stringify(body)?.slice(0, 200)}`);
+  return body;
+}
+
 async function postSuite(page: Page, query: string): Promise<any> {
   for (let i = 0; i < 20; i++) {
     const r = await page.evaluate(async (q) => {
