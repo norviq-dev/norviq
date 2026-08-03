@@ -4,7 +4,21 @@
     "skipLibCheck": true,
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "allowSyntheticDefaultImports": true
+    "allowSyntheticDefaultImports": true,
+    // EMIT AWAY FROM THE SOURCE TREE. `composite` is required by tsconfig.json's project reference and
+    // cannot be combined with `noEmit`, so `tsc -b` must put its output somewhere — and by default that
+    // was next to the input, producing `vite.config.js` + `vite.config.d.ts`.
+    //
+    // Those artifacts were committed, and Vite resolves `vite.config.js` BEFORE `vite.config.ts`. So the
+    // real config silently stopped being the one in effect the moment the emitted copy drifted: the
+    // committed `.js` was missing the jsdom origin pin and the 30s test/hook timeouts, which meant every
+    // unmocked request in the vitest suite resolved against localhost:3000 — exactly where this project's
+    // own docs tell you to port-forward the console — and hung until a 5s timeout that was itself BELOW
+    // the 15s asyncUtilTimeout, destroying testing-library's DOM dump on failure.
+    //
+    // node_modules is gitignored, so the emit can never be committed or shadow the source again.
+    "outDir": "./node_modules/.tmp/tsconfig-node",
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig-node/tsconfig.node.tsbuildinfo"
   },
   "include": ["vite.config.ts"]
 }
