@@ -71,14 +71,69 @@ function handleUnauthorized(): void {
   }
 }
 
+/**
+ * A failed API call, carrying the things a caller needs to react rather than merely report.
+ *
+ * TWO DEFECTS THIS REPLACES, both of which the old plain `Error` made unavoidable.
+ *
+ * 1. THE STATUS WAS THROWN AWAY. `apiSend` discarded `response.status` entirely, so no caller could
+ *    branch on one. That is not a theoretical loss: `POST /mcp/pins/approve` returns **409** when the
+ *    server changed its definition again between the operator reading the pin and clicking approve —
+ *    the rug pull happening live, and the single most important thing that surface can tell anyone.
+ *    Unreachable, it degraded into an indistinguishable red toast.
+ *
+ * 2. THE MESSAGE WAS RAW JSON. `apiSend` threw `await response.text()`, so a FastAPI error reached the
+ *    operator as `{"detail":"no recorded traffic for class 'support-bot'; run it in monitor mode
+ *    first"}` — braces, quotes and all. The useful sentence was in there, wrapped in a wire format.
+ *
+ * `message` is the parsed `detail` so every existing `(err as Error).message` caller improves without
+ * being touched; `status` and `body` are additive.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  /** The raw response body, kept for diagnostics when the parsed detail is not enough. */
+  readonly body: string;
+
+  constructor(status: number, message: string, body: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.body = body;
+  }
+}
+
+/** Pull the human sentence out of a FastAPI error body, falling back sanely for anything else. */
+function detailOf(body: string, status: number): string {
+  const trimmed = body.trim();
+  if (!trimmed) return `Request failed: ${status}`;
+  try {
+    const parsed = JSON.parse(trimmed) as { detail?: unknown };
+    const detail = parsed?.detail;
+    if (typeof detail === "string" && detail.trim()) return detail;
+    // 422 bodies carry a LIST of validation errors; each has a `msg`. Joining them beats printing the
+    // array, which is how the raw form leaked to operators in the first place.
+    if (Array.isArray(detail)) {
+      const msgs = detail
+        .map((d) => (d && typeof d === "object" && typeof (d as { msg?: unknown }).msg === "string" ? (d as { msg: string }).msg : ""))
+        .filter(Boolean);
+      if (msgs.length) return msgs.join("; ");
+    }
+  } catch {
+    // Not JSON — a plain-text body (nginx, a proxy) is already the sentence we want.
+  }
+  return trimmed;
+}
+
 export async function apiGet<T>(path: string): Promise<T> {
   const response = await fetch(apiUrl(path), { headers: authHeaders() });
   if (response.status === 401) {
     handleUnauthorized();
-    throw new Error("Unauthorized");
+    throw new ApiError(401, "Unauthorized", "");
   }
   if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
+    // The body used to be dropped on the floor here, so a read failure could only ever say its number.
+    const body = await response.text().catch(() => "");
+    throw new ApiError(response.status, detailOf(body, response.status), body);
   }
   return (await response.json()) as T;
 }
@@ -101,11 +156,11 @@ export async function apiSend<T>(path: string, method: "POST" | "PUT" | "DELETE"
   });
   if (response.status === 401) {
     handleUnauthorized();
-    throw new Error("Unauthorized");
+    throw new ApiError(401, "Unauthorized", "");
   }
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || `Request failed: ${response.status}`);
+    const body = await response.text();
+    throw new ApiError(response.status, detailOf(body, response.status), body);
   }
   return (await response.json()) as T;
 }
