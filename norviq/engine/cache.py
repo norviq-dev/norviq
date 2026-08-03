@@ -195,6 +195,35 @@ class RedisCache:
         )
         return bool(await self._client().set(key, payload, ex=ttl, nx=True))
 
+    async def acquire_lock(self, name: str, holder: str, ttl_s: int) -> str | None:
+        """Take a cross-replica lock, or report who already holds it.
+
+        Returns None when acquired, and the CURRENT HOLDER's value when it was already taken — callers
+        generally need to name the holder in the rejection, not merely refuse.
+
+        `SET key value NX EX ttl` is a single round trip and atomic in Redis, so two API pods racing
+        the same lock cannot both win. The TTL is the whole safety story: a pod that dies mid-work
+        never releases, and without an expiry the lock would wedge that name permanently.
+        """
+        acquired = bool(await self._client().set(f"lock:{name}", holder, ex=ttl_s, nx=True))
+        if acquired:
+            return None
+        current = await self._client().get(f"lock:{name}")
+        # Lost the race AND the holder vanished between SET and GET — treat as acquired-by-nobody and
+        # let the caller proceed rather than refusing on a lock that no longer exists.
+        return current if current is not None else None
+
+    async def release_lock(self, name: str, holder: str) -> None:
+        """Release a lock this holder owns. A lock held by someone else is left alone.
+
+        The ownership check matters after a TTL expiry: if this worker overran and another already
+        took the name, deleting blindly would free a lock that is legitimately held.
+        """
+        key = f"lock:{name}"
+        current = await self._client().get(key)
+        if current == holder:
+            await self._client().delete(key)
+
     async def list_policy_entries(self) -> dict[str, dict]:
         """List all cached policy entries for runtime hydration.
 

@@ -15,6 +15,26 @@ metadata:
   labels:
     {{- include "norviq.labels" . | nindent 4 }}
 data:
+  {{- /*
+    Escape hatch for settings the chart does not expose as a named value.
+
+    `norviq/config.py` carries ~100 tunables; the chart deliberately surfaces only the ones an
+    operator normally needs, and that is the right default. But it left NO way to set the rest short
+    of patching this ConfigMap by hand, which the next `helm upgrade` silently reverts.
+
+    Concretely: running the browser e2e suite against a real cluster trips
+    NRVQ_HTTP_RATE_LIMIT_REDTEAM_PER_WINDOW (15 per 60s) — a DoS guard doing its job against three
+    parallel workers plus the console's own per-page polling. Raising it for a TEST environment is a
+    legitimate deployment choice, and there was no supported way to make it.
+
+    Every key is rendered verbatim, so it is also the documented way to try a new setting before it
+    earns a named value. Named values still win where both are set — this block comes first, and later
+    keys in a ConfigMap override earlier ones.
+  */}}
+  {{- range $key, $value := .Values.config.extraEnv | default dict }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+
   NRVQ_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
   NRVQ_ENFORCEMENT_MODE: {{ .Values.config.enforcementMode | quote }}
   # Decision when an enforcing namespace has no policy loaded (deny-by-default). "deny" | "allow".
