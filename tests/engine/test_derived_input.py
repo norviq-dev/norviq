@@ -123,6 +123,11 @@ def test_derived_keys_are_stable() -> None:
         "sql_statements",
         # scoping primitives (intent policies) — additive; the six above are unchanged
         "param_paths",
+        # Which of those paths a CALLER could have minted. Additive and safe by the same argument as
+        # the block above: a policy that does not read it is unaffected, and the compiler that does
+        # read it only ever uses it to REFUSE. Kept in this exact-set assertion rather than relaxed to
+        # a subset check, so adding an input-document key stays a deliberate act with a test to touch.
+        "param_paths_ambiguous",
         "destinations",
         "data_classes",
         "sql_tables",

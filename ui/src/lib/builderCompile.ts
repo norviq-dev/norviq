@@ -1405,10 +1405,30 @@ function sourceVerbBlock(source: CapabilitySourceKey, verb: CapabilityVerb): str
   return `${sourceVerbPredicateName(source, verb)} {\n    frag := ${jsonSet(fragments)}[_]\n    contains(lower(input.tool_name), frag)\n}`;
 }
 
+/**
+ * A param-regex trigger for TIGHTEN-ONLY (rules) mode — this predicate holding BLOCKS the call.
+ *
+ * Two bodies, because a block trigger that only inspects a top-level string is evaded by shape. The
+ * original emitted `is_string(val)` and matched only that: a caller who moved the offending text into
+ * an array or a nested object made the predicate false, and a false BLOCK trigger is an allow. The
+ * rule read "block when `body` mentions a password" and did not block `{"body": {"content": "…
+ * password …"}}`.
+ *
+ * The second body walks the value, so any string ANYWHERE beneath the named parameter can trigger it.
+ * Widening a BLOCK is always safe in the fail-closed direction — the worst case is a call refused
+ * that a narrower reading would have permitted, which is the error this product prefers to make.
+ * (The allowlist-mode accessors are the mirror image and are fixed in `constraintExpr`.)
+ */
 function paramRegexBlock(index: number, cond: BuilderConditionParamRegex): string {
-  return `bld_paramregex_${index} {\n    val := input.tool_params[${JSON.stringify(cond.field)}]\n    is_string(val)\n    regex.match(${JSON.stringify(
-    cond.pattern
-  )}, val)\n}`;
+  const field = JSON.stringify(cond.field);
+  const pat = JSON.stringify(cond.pattern);
+  return [
+    `bld_paramregex_${index} {`,
+    `    walk(input.tool_params[${field}], [_, leaf])`,
+    `    is_string(leaf)`,
+    `    regex.match(${pat}, leaf)`,
+    `}`
+  ].join("\n");
 }
 
 function buildBody(graph: BuilderGraph, targetNamespace: string): string {
@@ -1629,11 +1649,21 @@ function constraintExpr(c: BuilderParamConstraint): string {
     case "matches":
       return `    regex.match(${JSON.stringify(c.pattern)}, _p_str(${f}))`;
     case "notMatches":
-      return `    not regex.match(${JSON.stringify(c.pattern)}, _p_str(${f}))`;
+      // `_has_str` FIRST, and it is load-bearing. `_p_str` returns a " " sentinel for an absent
+      // or wrong-typed param; that sentinel can never satisfy a POSITIVE constraint, which is what
+      // the accessor was designed for — but under `not` it inverts into "constraint satisfied".
+      // Measured: a grant of `notMatches columns "(?i)(card_number|ssn)"` ALLOWED
+      // `{"columns": ["card_number", "ssn"]}` while blocking the string `"card_number, ssn"`. The
+      // UI's own placeholder for this kind advertises the column-list shape, so the vacuous case was
+      // the advertised one.
+      // Requiring a real string also honours the promise the panel makes in words — "A parameter
+      // that isn't supplied fails its line" — which was true for every kind except the negated ones.
+      return `    _has_str(${f})\n    not regex.match(${JSON.stringify(c.pattern)}, _p_str(${f}))`;
     case "oneOf":
       return `    ${jsonSet(c.values.map((v) => v.trim().toLowerCase()))}[lower(_p_str(${f}))]`;
     case "noneOf":
-      return `    not ${jsonSet(c.values.map((v) => v.trim().toLowerCase()))}[lower(_p_str(${f}))]`;
+      // Same inversion as `notMatches` — see above.
+      return `    _has_str(${f})\n    not ${jsonSet(c.values.map((v) => v.trim().toLowerCase()))}[lower(_p_str(${f}))]`;
     case "maxNumber":
       return `    _p_num(${f}) <= ${JSON.stringify(c.max)}`;
     case "required":

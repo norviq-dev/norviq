@@ -230,6 +230,27 @@ egress_verb_tool {
 egress_verb_tool { contains(lower(input.tool_name), "webhook") }
 egress_verb_tool { contains(lower(input.tool_name), "exfil") }
 
+# THE ENGINE'S OWN CLASSIFICATION, which this file was not reading.
+#
+# `input.derived.verb` is computed on the hot path by the capability registry for every call and
+# already published (engine/evaluator.py `_derived_input`). This policy enforced against a DIFFERENT,
+# narrower notion of "sink": three literal names plus the fourteen prefixes above. The two disagree on
+# real, ordinary vendor tools, and the disagreement is exploitable — measured with the shipped policy
+# and real `opa`, one byte-identical AWS credential payload:
+#
+#   send_email          -> ("block", "llm02_data_leakage")
+#   slack_post_message  -> ("allow", "default_allow")
+#
+# `slack_post_message` does not START with `post_`; it starts with `slack_`. The engine classifies it
+# (SEND, HIGH) and says so in the input document. Nothing here read it. The sink's name belongs to the
+# vendor, not to the attacker, so the exfiltration path was chosen by whichever SaaS the customer
+# happens to use — `forward_ticket`, `relay_case`, `dispatch_report`, `share_summary` all likewise.
+#
+# `object.get` with a default rather than a bare reference: on an engine that predates `derived.verb`
+# this body is simply false and the name-based bodies above still stand, so an older engine keeps its
+# previous behaviour instead of erroring.
+egress_verb_tool { object.get(input.derived, "verb", "") == "send" }
+
 data_leakage_detected {
     external_tools[input.tool_name]
     walk(input.tool_params, [path, _])

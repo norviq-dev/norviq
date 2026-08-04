@@ -474,15 +474,22 @@ const PARAMREGEX_GRAPH: BuilderGraph = graphWith([
 ]);
 
 describe("builderCompile — paramRegex condition (Phase 2b)", () => {
-  it("compiles to a bld_paramregex_<n> predicate over input.tool_params[field] via regex.match(pattern, val)", () => {
+  it("walks the named param so a nested or list-wrapped value still TRIGGERS the block", () => {
+    // A paramRegex condition is a BLOCK trigger, so a shape it cannot see is a shape it does not
+    // block. The original body read `val := input.tool_params[field]` and required `is_string(val)`,
+    // so moving the offending text one level down — `{"query": {"sql": "SELECT … FROM users"}}` —
+    // made the predicate false and the call ALLOWED, while the rule still read "block when query
+    // matches …". `walk` emits the ROOT first, so the flat string case is unchanged and only the
+    // shapes that used to escape are added. Widening a block is the fail-closed direction.
     const result = compileGraph(PARAMREGEX_GRAPH);
     expect(result.errors).toEqual([]);
     expect(result.rego).toContain("bld_paramregex_0 {");
-    expect(result.rego).toContain('val := input.tool_params["query"]');
-    expect(result.rego).toContain("is_string(val)");
-    expect(result.rego).toContain('regex.match("^SELECT.*FROM users$", val)');
-    expect(result.rego).toContain("bld_paramregex_0");
-    // A single regex.match call -> the existing regexOps counter (computeStats) picks it up automatically.
+    expect(result.rego).toContain('walk(input.tool_params["query"], [_, leaf])');
+    expect(result.rego).toContain("is_string(leaf)");
+    expect(result.rego).toContain('regex.match("^SELECT.*FROM users$", leaf)');
+    // STILL one regex.match. A two-body form (flat + walked) also worked but doubled the op count
+    // against the server's 25-op ceiling — halving how many of these an operator may write, for no
+    // gain, since `walk` already covers the flat case.
     expect(result.stats.regexOps).toBe(1);
   });
 

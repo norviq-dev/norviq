@@ -142,6 +142,20 @@ test("the real Agents 'Freeze Agent' button blocks the agent; 'Reset Trust' reco
 
   await page.goto("/agents");
   await pickNamespace(page, NS);
+
+  // REVEAL THE PROBES FIRST. This agent's class is `e2e-bot`, which the product's own synthetic
+  // classifier matches on the `e2e-` prefix — so the API returns it with `synthetic: true` and the
+  // Agents page now hides it by default, the same way the Overview donut and the asset/attack graphs
+  // always have. Before that change this page was the one surface counting probes as real agents.
+  //
+  // So the test does what an operator inspecting a probe does: it clicks Show. That is not a
+  // workaround — it is the only coverage the toggle has, and it proves the escape hatch actually
+  // reaches the hidden identity rather than merely relabelling a count.
+  const reveal = page.getByTestId("agents-synthetic-toggle");
+  await expect(reveal, "the hidden-probe toggle must appear when probes exist").toBeVisible({ timeout: 20000 });
+  await expect(reveal).toContainText(/synthetic\/probe hidden/i);
+  await reveal.click();
+
   // Open the agent's detail panel (which holds the Freeze/Reset controls).
   const row = page.getByText("freeze-bot").first();
   await expect(row).toBeVisible({ timeout: 20000 });

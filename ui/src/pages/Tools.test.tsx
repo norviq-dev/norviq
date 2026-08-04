@@ -11,14 +11,31 @@
 
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { BuilderGraph } from "../lib/builderGraph";
 import { Tools, isFlagged } from "./Tools";
 import { AppProvider } from "../store/AppContext";
 import { ToastProvider } from "../components/common/Toast";
 import { clearApiCache } from "../hooks/useApi";
 import * as client from "../api/client";
 import type { ToolRegistryEntry } from "../api/client";
+
+/**
+ * A stand-in for the Policy Catalog that reports the router STATE it was handed.
+ *
+ * `state` is a react-router prop, not an HTML attribute — it never reaches the DOM, so a test that
+ * asserts `href` cannot observe the handoff payload at all. That is exactly how a `state` object
+ * whose keys nothing read shipped here and stayed green. Reading it off the React fiber does not work
+ * either: the anchor's props carry href/onClick, not `state`.
+ *
+ * So this FOLLOWS the link the way an operator does, and asserts on the location that results —
+ * which is also the thing PolicyCatalog itself reads (`useLocation().state.builderGraph`).
+ */
+function CatalogProbe() {
+  const loc = useLocation();
+  return <pre data-testid="catalog-handoff-state">{JSON.stringify(loc.state ?? null)}</pre>;
+}
 
 function entry(over: Partial<ToolRegistryEntry> & { name: string }): ToolRegistryEntry {
   return {
@@ -72,6 +89,23 @@ function renderTools(rows: ToolRegistryEntry[] = FIXTURE) {
       <AppProvider>
         <ToastProvider>
           <Tools />
+        </ToastProvider>
+      </AppProvider>
+    </MemoryRouter>
+  );
+}
+
+/** As above, but with a real /policies/catalog route so the handoff can actually be followed. */
+function renderToolsRouted(rows: ToolRegistryEntry[] = FIXTURE) {
+  vi.spyOn(client, "fetchTools").mockResolvedValue(rows);
+  return render(
+    <MemoryRouter initialEntries={["/tools"]}>
+      <AppProvider>
+        <ToastProvider>
+          <Routes>
+            <Route path="/tools" element={<Tools />} />
+            <Route path="/policies/catalog" element={<CatalogProbe />} />
+          </Routes>
         </ToastProvider>
       </AppProvider>
     </MemoryRouter>
@@ -155,14 +189,35 @@ describe("Tools page", () => {
     expect(screen.getByTestId("argument-row-attachments")).toHaveTextContent(/indexed at runtime/i);
   });
 
-  it("offers the reverse handoff into the builder", async () => {
+  it("offers the reverse handoff into the builder, carrying the tool", async () => {
     // The other direction of the P1 fix: arrive at a tool, leave with a policy that narrows it, rather
     // than discovering scoping by accident inside the builder.
+    //
+    // ASSERT THE PAYLOAD, NOT THE href. This test used to check only
+    // `toHaveAttribute("href", "/policies/catalog")`, which is structurally incapable of observing the
+    // handoff: the whole BuilderGraph travels in react-router STATE and never appears in the anchor's
+    // href. That is exactly how the previous `state={{ scopeTool, fromTools }}` — keys nothing read —
+    // shipped and stayed green. PolicyCatalog fails silently on a bad payload
+    // (`?.builderGraph ?? null` then `if (!handoffGraph) return;`), so the operator just gets the raw
+    // editor. The e2e sibling was blind the same way and has been rewritten too.
     const user = userEvent.setup();
-    renderTools();
+    renderToolsRouted();
     await screen.findByTestId("tools-declared");
     await user.click(screen.getByTestId("tool-row-slack-send_dm"));
-    expect(await screen.findByTestId("tool-detail-scope-cta")).toHaveAttribute("href", "/policies/catalog");
+
+    const cta = await screen.findByTestId("tool-detail-scope-cta");
+    expect(cta).toHaveAttribute("href", "/policies/catalog");
+    await user.click(cta);
+
+    // Arrived — and carrying the payload PolicyCatalog actually reads.
+    const state = JSON.parse((await screen.findByTestId("catalog-handoff-state")).textContent ?? "null");
+    const graph = state?.builderGraph as BuilderGraph | undefined;
+    expect(graph, "the handoff must carry a builderGraph — the key PolicyCatalog reads").toBeDefined();
+    expect(graph!.mode).toBe("allowlist"); // a grant only exists under deny-by-default
+    expect(graph!.allowlist?.tools).toEqual(["send_dm"]);
+    // The class is deliberately blank: a tool is not owned by one, and inventing it would target an
+    // agent that may not exist. The builder gates Save on it in words.
+    expect(graph!.scope).toEqual({ kind: "class", agentClass: "" });
   });
 
   it("explains what an observed tool costs you, specifically", async () => {

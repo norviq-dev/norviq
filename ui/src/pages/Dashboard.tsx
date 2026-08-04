@@ -537,6 +537,11 @@ export function Dashboard() {
         <Panel
           title="Recent Blocked"
           sub="Last 10 blocked tool calls"
+          // Addressable so a test can scope to the FEED. Searching the page for /blocked/i instead
+          // matches this panel's own title, its empty state, the "Blocked (24h)" KPI label and the
+          // "Top blocked tools" heading — all rendered before any fetch resolves — which is how
+          // audit-pep.spec.ts's block-feed assertion became incapable of failing.
+          data-testid="recent-blocked"
           style={{ paddingBottom: 6 }}
           action={
             <button

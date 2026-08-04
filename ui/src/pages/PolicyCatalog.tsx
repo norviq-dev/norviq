@@ -365,20 +365,21 @@ function PolicyTarget({
             + raw editor support them) but the guided rego would never match them — offering them here
             (with a dead Name input) produced a policy that silently didn't enforce. Gate them to the raw
             editor instead of shipping a lie. */}
-        <RadioPill
-          active={mode === "workload"}
-          label="Workload"
-          disabled
-          title="Guided mode targets agent classes. Use 'New policy (raw rego)' to scope a policy to a workload."
-          onClick={() => {}}
-        />
-        <RadioPill
-          active={mode === "namespace"}
-          label="Namespace"
-          disabled
-          title="Guided mode targets agent classes. Use 'New policy (raw rego)' to scope a policy to a namespace."
-          onClick={() => {}}
-        />
+        <RadioPill active={mode === "workload"} label="Workload" disabled onClick={() => {}} />
+        <RadioPill active={mode === "namespace"} label="Namespace" disabled onClick={() => {}} />
+      </div>
+      {/* WHY THEY ARE GREY, AS TEXT. These two pills are hard-disabled — not state-dependent, never
+          enabled by anything — and the only explanation lived in a `title` on the disabled button.
+          `index.css` sets `.btn:disabled { pointer-events: none }`, so a disabled control never
+          receives the hover that would show it: the explanation was written, shipped, and
+          unreachable. An operator saw two greyed tiers and no way to learn that the limitation is
+          permanent in guided mode, or where to go instead — so they clicked, nothing happened, and
+          the page read as broken rather than as scoped.
+          Rendered once beneath the row rather than twice inside it: both pills have the same reason
+          and the same remedy, and two copies of one sentence is its own defect. */}
+      <div style={{ fontSize: 11.5, lineHeight: 1.5, color: "var(--text-muted)", margin: "-8px 0 16px" }}>
+        Guided mode targets agent classes. Use <strong>New policy (raw rego)</strong> to scope a policy to a
+        workload or a namespace.
       </div>
 
       {mode === "class" && (

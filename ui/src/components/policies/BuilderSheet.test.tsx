@@ -470,7 +470,11 @@ describe("BuilderSheet — Phase 2b condition types (sourceVerb / paramRegex / N
 
     await waitFor(() => {
       const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
-      expect(rego).toContain('regex.match("^SELECT", val)');
+      // `leaf`, not `val`: a paramRegex condition is a BLOCK trigger, and reading only a top-level
+      // string meant a nested or list-wrapped payload did not trigger it — so the rule read "block
+      // when query matches ^SELECT" and allowed `{"query": {"sql": "SELECT …"}}`. It now walks the
+      // named param (walk emits the root first, so the flat case is unchanged).
+      expect(rego).toContain('regex.match("^SELECT", leaf)');
     });
   });
 

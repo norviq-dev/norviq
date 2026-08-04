@@ -319,10 +319,26 @@ def scan_prompt_messages(messages: Iterable[dict]) -> ScanReport:
         content = message.get("content") if isinstance(message, dict) else None
         blocks = content if isinstance(content, list) else [content]
         for j, block in enumerate(blocks):
-            if isinstance(block, dict) and isinstance(block.get("text"), str):
-                report.findings.extend(_scan_text(block["text"], f"messages[{i}].content[{j}].text"))
-            elif isinstance(block, str):
+            if isinstance(block, str):
                 report.findings.extend(_scan_text(block, f"messages[{i}].content"))
+                continue
+            if not isinstance(block, dict):
+                continue
+            # EVERY string under the block, not `block["text"]`.
+            #
+            # MCP content blocks are a union, and only the `text` variant puts its payload at `.text`.
+            # An `EmbeddedResource` carries it at `.resource.text`, so the identical payload — the one
+            # in this repo's own adversarial fixture — moved one level down and scanned CLEAN: no
+            # findings, no `_meta`, no log line, delivered verbatim to the model. `scan_tool_definition`
+            # has always deep-walked with this same helper, so the shallow read here was an oversight
+            # rather than a scope decision, and the two halves of one defence disagreed.
+            #
+            # Bounded by `_walk_strings` itself (depth 12, 512 strings), so a hostile server cannot
+            # turn the fix into a scan-budget exhaustion.
+            leaves: list[tuple[str, str]] = []
+            _walk_strings(block, f"messages[{i}].content[{j}]", leaves)
+            for path, value in leaves:
+                report.findings.extend(_scan_text(value, path))
     return report
 
 

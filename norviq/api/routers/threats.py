@@ -632,7 +632,17 @@ async def _coverage(
     overrides = await _verb_overrides(session, namespaces)
     learned = {tool: verb for tool, (verb, _risk) in overrides.items()}
     rego = generate_intent_rego(cls, allow_tools, intent, learned_verbs=learned)
-    paths, _ = await _derive_paths(session, namespaces, cls)
+    # UNCAPPED. This omitted `cap` and so took the `_MAX_PATHS = 200` default, which is a DISPLAY cap
+    # for the graph's path list — the class filter is applied inside the walk, so it capped this
+    # class's paths at 200 and `total = len(covered) + len(residual)` became min(real, 200). The same
+    # endpoint's `class_totals` is computed with `cap=None`, so the Attack Graph could report a class
+    # with 240 paths while the intent modal's coverage denominator said 200, and an operator who
+    # neutralised every path would be shown 200/200 with 40 paths still live.
+    #
+    # This is the second place the display cap leaked into a COUNT; the path-list endpoint had the
+    # same defect and was fixed by deriving uncapped, counting, then capping. Coverage never renders a
+    # list, so it simply must not cap at all.
+    paths, _ = await _derive_paths(session, namespaces, cls, cap=None)
     evaluator = request.app.state.evaluator
     covered: list[str] = []
     residual: list[str] = []

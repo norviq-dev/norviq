@@ -34,6 +34,15 @@ type AgentRow = {
   namespace?: string;
   score: number;
   category: string;
+  /**
+   * A probe / eval / red-team identity rather than a real agent.
+   *
+   * The API has always sent this; this type simply did not declare it, so this page counted every
+   * identity including probes while the Overview's donut — reading the SAME endpoint — filtered them
+   * out (`Dashboard.tsx`: `.filter((a) => !a.synthetic)`). Two "agents" numbers over one population,
+   * with nothing on either screen saying which was which.
+   */
+  synthetic?: boolean;
   behavior?: "normal" | "anomalous";
   violation_count?: number;
   last_seen?: string;
@@ -73,10 +82,19 @@ export function AgentMonitor() {
   // Compliance deep-link: an affected-agent-class chip opens the Agents page pre-filtered to that class (?class=).
   const [searchParams] = useSearchParams();
   const classFilter = searchParams.get("class");
-  const rows = useMemo(() => {
+  // Hidden by DEFAULT, with an escape hatch and a count — the idiom the Attack Graph already uses
+  // ("N test/probe kill-chains hidden · Show"). Excluding them silently would make this page's total
+  // disagree with the Overview in the other direction; including them silently is what it did before.
+  const [showSynthetic, setShowSynthetic] = useState(false);
+  const scoped = useMemo(() => {
     const all = agents.data ?? [];
     return classFilter ? all.filter((a) => a.agent_class === classFilter) : all;
   }, [agents.data, classFilter]);
+  const syntheticCount = useMemo(() => scoped.filter((a) => a.synthetic).length, [scoped]);
+  const rows = useMemo(
+    () => (showSynthetic ? scoped : scoped.filter((a) => !a.synthetic)),
+    [scoped, showSynthetic]
+  );
 
   const trust = useMemo(
     () =>
@@ -190,10 +208,28 @@ export function AgentMonitor() {
         title="Agent Monitor"
         subtitle={`Showing: ${namespace}`}
         actions={
-          // Refresh is user-driven now (no background poll) — pull the latest trust/violation state on demand.
-          <KitButton variant="ghost" icon={RefreshCw} onClick={() => void agents.refetch()} disabled={agents.loading}>
-            Refresh
-          </KitButton>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {/* The escape hatch. Hidden BY DEFAULT so this page's identity count reconciles with the
+                Overview donut, which has always filtered probes — but never silently, because a
+                probe you cannot see is a probe you cannot investigate. */}
+            {syntheticCount > 0 && (
+              <button
+                type="button"
+                className="linklike"
+                style={{ fontSize: 12 }}
+                data-testid="agents-synthetic-toggle"
+                onClick={() => setShowSynthetic((v) => !v)}
+              >
+                {showSynthetic
+                  ? `Hide ${syntheticCount} synthetic/probe`
+                  : `${syntheticCount} synthetic/probe hidden · Show`}
+              </button>
+            )}
+            {/* Refresh is user-driven now (no background poll) — pull the latest trust/violation state on demand. */}
+            <KitButton variant="ghost" icon={RefreshCw} onClick={() => void agents.refetch()} disabled={agents.loading}>
+              Refresh
+            </KitButton>
+          </div>
         }
       />
       <div className="stack">
@@ -205,7 +241,18 @@ export function AgentMonitor() {
             className="grid-kit g2"
             style={{ gridColumn: "span 2", gridTemplateColumns: "1fr 1fr", alignContent: "start" }}
           >
-            <StatTile label="Agents Tracked" value={rows.length} color="var(--accent)" />
+            <StatTile
+              label="Agents Tracked"
+              value={rows.length}
+              color="var(--accent)"
+              sub={
+                syntheticCount > 0
+                  ? showSynthetic
+                    ? `includes ${syntheticCount} synthetic/probe`
+                    : `${syntheticCount} synthetic/probe hidden`
+                  : undefined
+              }
+            />
             <StatTile
               label="Frozen"
               value={rows.filter((a) => a.category === "frozen").length}

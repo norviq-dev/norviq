@@ -253,7 +253,17 @@ is_read {{ learned_read[input.tool_name_normalized] }}"""
         learned_egr_set, learned_egr = _learned_set("learned_egress", {"send"})
         block = f"""{_rego_str_set("egress_tools", EGRESS_TOOLS)}
 is_egress {{ egress_tools[lower(input.tool_name)] }}
-is_egress {{ egress_tools[lower(input.tool_name_normalized)] }}"""
+is_egress {{ egress_tools[lower(input.tool_name_normalized)] }}
+# THE ENGINE'S OWN CLASSIFICATION. `EGRESS_TOOLS` is eighteen literal names; the capability registry
+# classifies on every call and publishes `input.derived.verb`. They disagree on ordinary vendor tools
+# — `forward_ticket`, `slack_post_message`, `relay_case`, `dispatch_report`, `share_summary` are all
+# (SEND, HIGH) to the registry and absent from the literal list — so "No external egress" was ON,
+# the call was an egress call, and the toggle changed the decision not at all. The console made that
+# worse: with the toggle on, IntentModal SUPPRESSES the destructive-allowlist warning for a
+# send-classified tool, so enabling the control removed the operator's only signal while enforcing
+# nothing. `object.get` with a default so an engine predating `derived.verb` keeps the name-based
+# behaviour rather than erroring.
+is_egress {{ object.get(input.derived, "verb", "") == "send" }}"""
         if learned_egr:
             block += f"""
 {learned_egr_set}

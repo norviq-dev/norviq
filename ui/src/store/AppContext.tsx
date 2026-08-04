@@ -104,6 +104,15 @@ function initialNamespace(search: string): string {
   }
 }
 
+/**
+ * The five windows the header offers and the API accepts.
+ *
+ * Exported so a deep-link consumer can VALIDATE a `?range=` param against the real union instead of
+ * casting a hand-editable string straight into it. See AuditLog's adoption of the Compliance evidence
+ * link.
+ */
+export const TIME_RANGES: readonly TimeRange[] = ["1h", "6h", "24h", "7d", "30d"];
+
 export function AppProvider({ children }: { children: ReactNode }) {
   const [activeSection, setActiveSection] = useState<Section>("intelligence");
   const [timeRange, setTimeRange] = useState<TimeRange>("24h");

@@ -2485,7 +2485,13 @@ export function BuilderSheet({
                         const kind = factKindOfSpec(f);
                         return (
                           <Fragment key={`fact-${i}`}>
-                          {firstOfGroup && (
+                          {/* ONE heading per group across BOTH passes. Constraints and param_paths
+                              facts are stored separately but address the same thing — one named
+                              argument — and each pass emitted its own "Argument" heading with a
+                              byte-identical hint. With both present the editor showed ARGUMENT
+                              twice, which reads as two different kinds of argument clause rather
+                              than as one group split by an internal storage detail. */}
+                          {firstOfGroup && !(!whole && (allowlistGrants[openGrantTool] ?? []).length > 0) && (
                             <ScopeSection
                               label={whole ? "Whole call" : "Argument"}
                               hint={
@@ -2496,9 +2502,20 @@ export function BuilderSheet({
                             />
                           )}
                           <div data-testid={`builder-fact-row-${openGrantTool}-${i}`} style={CLAUSE_CARD}>
+                            {/* The title must FOLLOW the group, not assert one of them. It was an
+                                unguarded literal on every row, so a `param_paths.<arg>` clause —
+                                filed under ARGUMENT precisely because it addresses one named
+                                argument — carried a tooltip insisting it was a whole-call fact, and
+                                the whole-call rows repeated their own visible hint verbatim.
+                                A tooltip that contradicts the heading above it is worse than none:
+                                the heading is the thing this panel exists to teach. */}
                             <span
                               style={CLAUSE_LABEL}
-                              title="A fact the ENGINE derived about the whole call, not one named argument"
+                              title={
+                                whole
+                                  ? undefined
+                                  : `Addresses the ${f.field.replace(/^param_paths\./, "")} argument by name.`
+                              }
                             >
                               {factFieldLabel(f.field)}
                             </span>

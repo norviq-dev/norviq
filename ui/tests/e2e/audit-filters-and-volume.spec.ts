@@ -186,8 +186,20 @@ test.describe("Overview — Tool Call Volume", () => {
     // `1h` buckets at 5 minutes (HH:MM, minutes not pinned to :00); `30d` buckets daily (00:00).
     if (hour.length > 0) expect(hour[0].time).toMatch(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/);
     if (month.length > 0) expect(month[0].time).toMatch(/ 00:00$/);
-    // A wide range must aggregate, never emit more points than a narrow one over the same data.
-    if (hour.length > 0 && month.length > 0) expect(month.length).toBeLessThanOrEqual(hour.length + month.length);
+
+    // THE THIRD ASSERTION USED TO BE
+    //     expect(month.length).toBeLessThanOrEqual(hour.length + month.length)
+    // which reduces to `0 <= hour.length` — true for every possible response, so no input, no
+    // regression and no server bug could ever make it red. Its comment claimed "a wide range must
+    // aggregate, never emit more points than a narrow one", and that PROPERTY IS ALSO FALSE: 30 daily
+    // buckets legitimately outnumber the ~12 five-minute buckets in an hour. The line asserted nothing
+    // and documented something untrue.
+    //
+    // What granularity actually implies is a CEILING per range, which is exactly the regression the
+    // test exists to catch (every range used to bucket hourly — 30d would then return ~720 points).
+    // A couple of buckets of slack each way absorbs boundary alignment.
+    if (hour.length > 0) expect(hour.length, "1h must bucket at 5 minutes, not hourly").toBeLessThanOrEqual(14);
+    if (month.length > 0) expect(month.length, "30d must bucket daily, not hourly").toBeLessThanOrEqual(32);
   });
 });
 

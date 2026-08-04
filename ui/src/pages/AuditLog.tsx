@@ -15,7 +15,7 @@ import { TrustBadge, trustCategory } from "../components/common/TrustBadge";
 import { useApi } from "../hooks/useApi";
 import { useWebSocket } from "../hooks/useWebSocket";
 import { fmtDateTime, fmtTime } from "../lib/format";
-import { useApp } from "../store/AppContext";
+import { TIME_RANGES, useApp, type TimeRange } from "../store/AppContext";
 import { getToken } from "../auth/session";
 
 type AuditRecord = {
@@ -81,8 +81,33 @@ const DEC = ["all", "allow", "block", "escalate", "audit"] as const;
 type DecisionFilter = (typeof DEC)[number];
 
 export function AuditLog() {
-  const { selectedNamespace, timeRange, setNamespace } = useApp();
+  const { selectedNamespace, timeRange, setNamespace, setTimeRange } = useApp();
   const [searchParams] = useSearchParams();
+
+  // ADOPT THE DEEP-LINK'S WINDOW. Compliance builds evidence links as
+  // `/audit?rule=<rule_id>&range=<range>`, and `range` was being sent and never read: `timeRange`
+  // lives in AppContext as `useState("24h")` with no URL seeding and only two writers (the provider
+  // and the header's own click handler), so the param was dropped in transit.
+  //
+  // For an EVIDENCE link that is a correctness bug, not a convenience one. The operator follows a
+  // link from a count computed over 7d, lands on the last 24h, and the rows genuinely do not add up
+  // to the number they came from — with nothing on screen saying the window changed.
+  //
+  // Adopted HERE rather than in AppContext because /threats/graph owns a `?range=` of its own
+  // (AttackGraph hydrates a LOCAL range from it); a provider-level adopt-and-strip would fight it.
+  // Mount-time is sufficient and correct: arriving from Compliance is a route change, so this
+  // component mounts. Validated against the real union — a hand-edited value falls back rather than
+  // reaching the API as a range it rejects.
+  const linkedRange = searchParams.get("range");
+  useEffect(() => {
+    if (!linkedRange) return;
+    if (!(TIME_RANGES as readonly string[]).includes(linkedRange)) return;
+    if (linkedRange === timeRange) return;
+    setTimeRange(linkedRange as TimeRange);
+    // Deliberately mount-only on the linked value: re-running when the operator later changes the
+    // range from the header would drag them back to the link's window on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [linkedRange]);
   const initialDecision = (searchParams.get("decision") as DecisionFilter | null) ?? "all";
   const [decision, setDecision] = useState<DecisionFilter>(DEC.includes(initialDecision) ? initialDecision : "all");
   const [tool, setTool] = useState(searchParams.get("tool_name") ?? "");

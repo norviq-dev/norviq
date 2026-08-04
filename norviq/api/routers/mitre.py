@@ -73,7 +73,20 @@ async def _activity_by_rule(
     (efficacy tooling, not live enforcement) are excluded from the observed/blocked headline so the pack
     can't be read as real enforcement evidence. Red-team efficacy still lives in its own clearly-labelled
     'proven-blocking' surface (RedTeam page), never merged into these counts. The excluded count is
-    surfaced so the pack states the exclusion explicitly."""
+    surfaced so the pack states the exclusion explicitly.
+
+    WHAT "blocked" MEANS HERE, AND WHY IT DIFFERS FROM THE OVERVIEW. This counts ``block`` AND
+    ``escalate``, because for an attestation the question is "did the control act on this call" — an
+    escalated call did not proceed unchallenged, and the shipped packs really do emit escalates
+    (``policy/comprehensive.rego`` and ``webhook/presets/strict.rego`` both carry ``escalates[...]``
+    rules). The Overview's "Blocked (Nh)" KPI counts ``block`` ONLY
+    (``routers/audit.py``: ``if decision == "block"``), over the same real-traffic filter and the same
+    global range — so the two headline numbers can legitimately disagree for one namespace at one
+    moment, and a reader comparing them is entitled to know why.
+
+    The fold was previously undocumented, which is what made the difference read as a bug. It is a
+    deliberate difference of UNIT, and the Compliance surface labels its number accordingly
+    ("blocked or escalated") rather than presenting it as the same quantity."""
     since = datetime.now(timezone.utc) - timedelta(hours=_RANGE_HOURS.get(range_token, 24))
     # Group by agent_class + framework too, so the Python-side classifier can drop synthetic identities
     # (it is not expressible in SQL) and red-team events before aggregating.
@@ -100,6 +113,9 @@ async def _activity_by_rule(
                 continue
             entry = by_rule.setdefault(str(rid), {"observed": 0, "blocked": 0})
             entry["observed"] += n
+            # ESCALATE COUNTS AS THE CONTROL FIRING. See the docstring — this fold is deliberate for
+            # an attestation ("the control acted on the call") and is the ONE place the product's two
+            # blocked-counts differ, so it is named here rather than left to be discovered.
             if decision in ("block", "escalate"):
                 entry["blocked"] += n
     except Exception as exc:  # noqa: BLE001 — activity is derived; a DB error just shows 0

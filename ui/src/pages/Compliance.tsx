@@ -736,7 +736,9 @@ function FrameworkOverviewCard({
             <span><b style={{ color: GAP }}>{gap}</b> gap</span>
             <span><b style={{ color: OOS_TEXT }}>{oos}</b> out-of-scope</span>
             <span style={{ color: FAINT }}>·</span>
-            <span><b style={{ color: "#ededf0" }}>{fmt(data.blocked)}</b> blocked · {RANGE_LABEL[range]}</span>
+            <span
+              title="Counts blocked AND escalated decisions — for an attestation the question is whether the control acted. The Overview's Blocked KPI counts blocks only, so the two can differ."
+            ><b style={{ color: "#ededf0" }}>{fmt(data.blocked)}</b> blocked or escalated · {RANGE_LABEL[range]}</span>
           </div>
         </div>
 
@@ -1014,7 +1016,7 @@ function DetailView(props: {
           <div style={{ display: "flex", gap: 22 }}>
             <div style={{ fontSize: 11, color: MUTED }}>
               <b style={{ display: "block", fontSize: 19, fontWeight: 800, color: "#ededf0" }}>{fmt(data?.blocked)}</b>
-              blocked · {RANGE_LABEL[range]}
+              blocked or escalated · {RANGE_LABEL[range]}
             </div>
             <div style={{ fontSize: 11, color: MUTED }}>
               <b style={{ display: "block", fontSize: 19, fontWeight: 800, color: "#ededf0" }}>{fmt(data?.agent_classes)}</b>
@@ -1321,7 +1323,7 @@ function TechniqueDetail({
                     </span>
                     <span style={{ display: "flex", alignItems: "center", gap: 7, whiteSpace: "nowrap" }}>
                       <span style={{ fontSize: 11.5, fontWeight: 600, color: ruleBlocked > 0 ? ENFORCED : "#6e6e76" }}>
-                        {fmt(ruleBlocked)} blocked · {RANGE_LABEL[range]}
+                        {fmt(ruleBlocked)} blocked or escalated · {RANGE_LABEL[range]}
                       </span>
                       <span style={{ color: "#5f5f67" }}>↗</span>
                     </span>

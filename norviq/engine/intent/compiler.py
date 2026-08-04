@@ -167,6 +167,49 @@ def _field_expr(field: str) -> str:
     raise IntentError(f"unknown field {field!r}")  # unreachable: schema validated first
 
 
+def _path_trusted_expr(field: str) -> str | None:
+    """`None` unless `field` is a `param_paths.<path>`, else the expression that it was TRUSTWORTHILY derived.
+
+    Two ways a `param_paths` constraint reads as satisfied without the engine having seen the value it
+    claims to constrain:
+
+    * The path was never derived. `_field_expr` defaults to `""`, and `regex.match(pat, "") == false`
+      is TRUE — so a rule saying "``body`` must not mention a password" permitted
+      ``{"body": {"content": "the password is hunter2"}}``, because nesting the value moved the path
+      and the absent path satisfied the negation. Same for a list-wrapped value, and same once a
+      caller pushes the real key past ``_MAX_PATHS`` behind 300 junk keys.
+    * The path was derived from a caller-MINTED key. See ``_walk_paths``: a key containing ``.`` or
+      ``[`` forges nesting, so an attacker can publish a compliant value at the path the rule pins
+      while the tool receives a different one.
+
+    Both are "I could not derive this fact" wearing the costume of "the fact is compliant". This
+    expression makes the difference sayable in rego, and every operator over a ``param_paths`` field
+    is AND-ed with it.
+    """
+    if not field.startswith("param_paths."):
+        return None
+    path = _lit(field[len("param_paths."):])
+    return (
+        f"object.get(input.derived.param_paths, {path}, null) != null"
+        f"; not _in(object.get(input.derived, \"param_paths_ambiguous\", []), {path})"
+    )
+
+
+def _guarded(field: str, expr: str) -> str:
+    """AND a predicate with its field's derivability guard, as a single boolean EXPRESSION.
+
+    A comprehension, because these become the VALUES of an object key (`_predicates[id] = {...}`) and
+    rego has no boolean `and` operator at expression level — but a comprehension body may hold several
+    statements and `count(...) == 1` is a genuine boolean. The near-miss explainer keeps working:
+    the clause still evaluates to false rather than becoming undefined, so it can still be NAMED as
+    the one that failed.
+    """
+    guard = _path_trusted_expr(field)
+    if guard is None:
+        return expr
+    return f"count([1 | {guard}; {expr}]) == 1"
+
+
 def _predicate(field: str, spec) -> list[tuple[str, str]]:
     """One `field: spec` predicate -> [(label, rego boolean expression)].
 
@@ -184,11 +227,11 @@ def _predicate(field: str, spec) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
 
     if isinstance(spec, str):  # scalar shorthand
-        return [(f"{field} == {spec}", f"{expr_base} == {_lit(spec)}")]
+        return [(f"{field} == {spec}", _guarded(field, f"{expr_base} == {_lit(spec)}"))]
 
     for op, val in sorted(spec.items()):
         if op == "equals":
-            out.append((f"{field} == {val}", f"{expr_base} == {_lit(val)}"))
+            out.append((f"{field} == {val}", _guarded(field, f"{expr_base} == {_lit(val)}")))
         elif op == "in":
             # A COMPREHENSION, not `list[_] == x`. The bare `[_]` form iterates, so inside the
             # predicate object literal it yields one binding per element — and a complete rule with
@@ -196,9 +239,9 @@ def _predicate(field: str, spec) -> list[tuple[str, str]]:
             # A single-element list hides it exactly, which is how it survived the first test pass.
             allowed = _lit(sorted(val))
             out.append((f"{field} in {sorted(val)}",
-                        f"count([x | x := {allowed}[_]; x == {expr_base}]) > 0"))
+                        _guarded(field, f"count([x | x := {allowed}[_]; x == {expr_base}]) > 0")))
         elif op == "matches":
-            out.append((f"{field} matches {val}", f"regex.match({_lit(val)}, {expr_base})"))
+            out.append((f"{field} matches {val}", _guarded(field, f"regex.match({_lit(val)}, {expr_base})")))
         elif op == "notMatches":
             # `== false`, NOT `not regex.match(...)`. Every predicate here becomes the VALUE of an
             # object key (`_predicates[id] = {"<label>": <expr>, ...}`), and `not` is a statement
@@ -207,7 +250,7 @@ def _predicate(field: str, spec) -> list[tuple[str, str]]:
             # intent using notMatches produced UNPARSEABLE rego; no test exercised the operator, so
             # nothing caught it. `regex.match` returns a real boolean, so comparing it is both valid
             # and exactly what the near-miss explainer needs (a false, not an undefined).
-            out.append((f"{field} !matches {val}", f"regex.match({_lit(val)}, {expr_base}) == false"))
+            out.append((f"{field} !matches {val}", _guarded(field, f"regex.match({_lit(val)}, {expr_base}) == false")))
         elif op == "subsetOf":
             # every element of the collection must be in the allowed set
             allowed = _lit(sorted(val))

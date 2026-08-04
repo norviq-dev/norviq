@@ -624,4 +624,55 @@ describe("evasion: the allowlist and the grant gate must agree on what 'the tool
     expect(decideDoc(rego, call2("DROP TABLE orders"))).toBe("block");
     expect(decideDoc(rego, call2("SELECT id FROM orders"))).toBe("allow");
   });
+  itOpa("a NEGATED constraint is not satisfied by a value it cannot READ", () => {
+    // THE BUG THIS PINS. `_p_str` returns a "\u0000" sentinel for an absent or wrong-typed param.
+    // For a POSITIVE kind that is exactly right — the sentinel matches nothing, so the constraint
+    // fails and the call is denied. Under `not` it INVERTS: "the sentinel does not match your
+    // pattern" reads as "your constraint is satisfied", and the grant holds.
+    //
+    // Measured against real opa before the fix: `{"columns": ["card_number","ssn"]}` -> allow, while
+    // the string `"card_number, ssn"` -> block. The UI's own placeholder for `notMatches` advertises
+    // exactly the column-list shape ("e.g. (?i)(card_number|ssn) — never these columns"), so the
+    // vacuous case was the one the product taught operators to write.
+    //
+    // The sibling test above already covers OMISSION; these are the wrong-TYPE shapes, which no test
+    // reached because every fixture in this file passed strings.
+    const { rego, errors } = compileGraph(
+      intentGraph(["read_table"], [
+        {
+          tool: "read_table",
+          constraints: [
+            { kind: "oneOf", field: "table", values: ["users", "orders"] },
+            { kind: "notMatches", field: "columns", pattern: "(?i)(card_number|ssn)" }
+          ]
+        }
+      ]),
+      "analytics"
+    );
+    expect(errors).toEqual([]);
+
+    // The shapes that always behaved.
+    expect(decide(rego, "read_table", { table: "users", columns: "card_number, ssn" })).toBe("block");
+    expect(decide(rego, "read_table", { table: "users", columns: "id, created_at" })).toBe("allow");
+
+    // The shapes that used to evaporate the constraint entirely.
+    expect(decide(rego, "read_table", { table: "users", columns: ["card_number", "ssn"] })).toBe("block");
+    expect(decide(rego, "read_table", { table: "users", columns: { a: "card_number" } })).toBe("block");
+    expect(decide(rego, "read_table", { table: "users", columns: 42 })).toBe("block");
+    expect(decide(rego, "read_table", { table: "users" })).toBe("block");
+  });
+
+  itOpa("a NEGATED set constraint (noneOf) is not satisfied by a value it cannot READ either", () => {
+    const { rego, errors } = compileGraph(
+      intentGraph(["read_table"], [
+        { tool: "read_table", constraints: [{ kind: "noneOf", field: "table", values: ["payments"] }] }
+      ]),
+      "analytics"
+    );
+    expect(errors).toEqual([]);
+    expect(decide(rego, "read_table", { table: "orders" })).toBe("allow");
+    expect(decide(rego, "read_table", { table: "payments" })).toBe("block");
+    // A LIST containing the denied value used to sail straight through.
+    expect(decide(rego, "read_table", { table: ["payments"] })).toBe("block");
+  });
 });

@@ -141,6 +141,27 @@ class _PendingMap:
     def _key(msg_id: Any) -> str:
         # JSON-RPC ids may be strings or numbers, and `1` and `"1"` are DIFFERENT ids. Typed keys
         # keep them apart; a bare str() would conflate them and let a peer confuse the map.
+        #
+        # NUMBERS ARE NORMALISED ACROSS int/float, though, because JSON has ONE number type and the
+        # peers do not agree on how it decodes. We sent `"id": 1`; a server that answers `"id": 1.0`
+        # produced `float:1.0` here, missed `int:1`, and `take()` returned "" — so the response
+        # matched no discovery branch and was forwarded VERBATIM: no charset check, no skeleton map,
+        # no pin, no catalog entry. The subsequent tools/call on a homoglyph twin then found no
+        # catalog entry, so `call_denied` never ran either. One character skipped Gate A entirely.
+        # A JavaScript MCP host treats 1 and 1.0 as the same Number and accepts the correlation this
+        # proxy rejected, so the two ends genuinely disagreed about which request was being answered.
+        #
+        # `bool` is excluded deliberately: it is an int subclass in Python but is not a valid JSON-RPC
+        # id, and folding `True` into `num:1` would be the conflation the typed key exists to prevent.
+        if isinstance(msg_id, bool):
+            return f"bool:{msg_id}"
+        if isinstance(msg_id, (int, float)):
+            # Integral floats collapse onto the integer form; a genuinely fractional id keeps its own.
+            if isinstance(msg_id, float) and msg_id.is_integer():
+                return f"num:{int(msg_id)}"
+            if isinstance(msg_id, int):
+                return f"num:{msg_id}"
+            return f"num:{msg_id!r}"
         return f"{type(msg_id).__name__}:{msg_id}"
 
     def put(self, msg_id: Any, method: str) -> None:
@@ -844,10 +865,21 @@ class McpFirewall:
         findings: list[dict] = []
         new_blocks: list[Any] = []
         for block in blocks:
-            if not isinstance(block, dict) or not isinstance(block.get("text"), str):
+            # WHERE THE TEXT LIVES depends on which content variant this is. `TextContent` puts it at
+            # `.text`; an `EmbeddedResource` puts it at `.resource.text`. Reading only `.text` meant a
+            # server could move an identical payload one level down and skip BOTH halves of this
+            # guard — no injection fence and no output DLP masking — while the model received it
+            # unchanged. The prompt scanner had the same blind spot and is fixed alongside.
+            embedded = (
+                isinstance(block, dict)
+                and isinstance(block.get("resource"), dict)
+                and isinstance(block["resource"].get("text"), str)
+            )
+            if not isinstance(block, dict) or not (isinstance(block.get("text"), str) or embedded):
                 new_blocks.append(block)
                 continue
-            text = block["text"]
+            original = block["resource"]["text"] if embedded else block["text"]
+            text = original
             if scan_on:
                 report: ScanReport = scan_untrusted_content(text, path)
                 if not report.clean:
@@ -866,7 +898,12 @@ class McpFirewall:
                 if masked != text:
                     redacted += 1
                     text = masked
-            new_blocks.append({**block, "text": text} if text != block["text"] else block)
+            if text == original:
+                new_blocks.append(block)
+            elif embedded:
+                new_blocks.append({**block, "resource": {**block["resource"], "text": text}})
+            else:
+                new_blocks.append({**block, "text": text})
 
         record_path_phase("mcp", "response_guard", (perf_counter() - t0) * 1000.0)
         if redacted == 0 and not findings:
