@@ -1902,3 +1902,75 @@ on stderr.
 
 After the fixes, the seeder reports `backdate INSERT 0 1232 spread over the last 7 days`, and
 `/audit/stats` returns **22 / 198 / 1254** for 1h / 24h / 7d.
+
+---
+
+## G4 on AKS: the engine denies benign traffic when it is CPU-starved
+
+Moved off kind onto the AKS cluster (`rg-opsai-dev-eastus-001/norviq`) to get a latency measurement
+that is not competing with Docker Desktop and Chrome on a laptop. The measurement is worse, and the
+reason is the finding.
+
+### The numbers
+
+Quiet cluster, nothing else running, measured INSIDE the api pod:
+
+```
+concurrency 8    p50 ~560-660ms   p95 1.8-3.6s
+concurrency 16   p50 ~1.2-1.9s    p95 3.3-6.0s
+                 benign: WRONG DECISION — expected allow, saw
+                 ['block/evaluator_error', 'block/evaluator_fallback'] on 90/200 calls
+```
+
+kind, for comparison, held p50 ~190ms with a true p95 around 420-450ms against a 500ms budget.
+
+### Why
+
+| | |
+|---|---|
+| node pool | 2 × `Standard_A2_v2` — 2 vCPU / 4 GB **each**, for the whole stack |
+| `vmss00002q` at rest | CPU 74%, **memory 101%** |
+| `norviq-engine` CPU limit | **500m — half a core** |
+
+Under concurrency 16 the engine cannot finish an evaluation inside its fail-closed deadline, so it
+does exactly what it is built to do: it denies. **45% of benign calls were blocked.**
+
+### The finding, stated as a product property
+
+The product is not wrong here — failing closed is the correct behaviour and the alternative is
+unthinkable. The finding is what that costs, and it is stronger than the docstring's "latency is an
+availability property" suggests:
+
+**Starve the engine of CPU and Norviq stops being a policy engine and becomes an outage.** There is no
+intermediate degradation. Below some CPU floor the deny rate for LEGITIMATE traffic goes from ~0% to
+45% at one step of concurrency.
+
+Two consequences worth acting on, neither done here:
+
+1. **Nothing tells the operator this is the cause.** The console shows an `engine errors` count (the
+   Overview's amber band, "11 engine errors in 24h — fail-closed OPA-evaluation faults, not policy
+   blocks") which is honest but not actionable. It does not say "your engine is CPU-starved and is
+   denying real traffic". An operator reading a spike in blocked calls would go looking at their
+   policies, which are fine.
+2. **The chart ships a 500m engine limit** with no guidance tying it to expected concurrency. The
+   render-time guard added earlier for `api.workers` × memory is the right shape of idea; the engine's
+   CPU limit needs the equivalent.
+
+### What was NOT done
+
+The 500ms budget and the G4 gate are UNCHANGED. Fitting a threshold to undersized hardware would
+convert a real capacity finding into a green check, which is the failure mode this whole exit-state
+exists to prevent. G4 is recorded as **not measurable on `Standard_A2_v2`** — a statement about the
+environment, not a pass.
+
+### A methodology mistake worth recording
+
+The first AKS G4 run was taken WHILE the browser suite was running against the same cluster, and the
+browser suite's 4 failures were taken while the latency probe was firing 2,000 evaluations at the same
+API. Both numbers were contaminated, in both directions, and the giveaway was `large-payload` showing
+`allow,block` for a byte-identical payload.
+
+This is the sixth time this branch has recorded a measurement that described something other than the
+product — and the first where I caused it myself rather than inheriting it. The rule already written
+here ("never suppress stderr on a step whose failure you have not yet seen") has a sibling: **never
+start a measurement while another one is running against the same system.** Sequential or nothing.
