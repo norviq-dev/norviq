@@ -955,9 +955,19 @@ class OPAEvaluator:
             if bare:
                 host = bare.group("host").lower()
                 marked = bool(bare.group("rel") or bare.group("port") or bare.group("path"))
-                if marked or host.rsplit(".", 1)[-1] not in _FILE_SUFFIXES:
+                # Bounded WITHOUT joining the break budget below. Counting harvested hosts toward the
+                # stop condition made this change net-negative: 80 benign dotted strings
+                # ("svc0.internal.example", …) filled the budget, the walk stopped BEFORE reaching the
+                # real recipient, and `destinations.emails`/`urls` came back EMPTY — so a correctly
+                # authored `subsetOf` egress rule went vacuously true and allowed the call it was
+                # written to refuse. Measured: alone the payload yields the attacker's address and
+                # URL; padded, both lists are [].
+                #
+                # A cheap harvest must never be able to evict the expensive, high-signal findings.
+                if (marked or host.rsplit(".", 1)[-1] not in _FILE_SUFFIXES) and len(hosts) < self._MAX_DESTINATIONS:
                     hosts.add(host)
-            if len(emails) + len(urls) + len(hosts) > self._MAX_DESTINATIONS:
+            # UNCHANGED from before bare-host extraction: only emails and urls stop the walk.
+            if len(emails) + len(urls) > self._MAX_DESTINATIONS:
                 break
         cap = self._MAX_DESTINATIONS
         return {

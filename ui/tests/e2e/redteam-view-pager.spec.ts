@@ -60,12 +60,29 @@ async function postSuite(page: Page, query: string): Promise<any> {
       // assume either way, go and look for the run.
       const status = (e as Error & { status?: number }).status ?? 0;
       if (![502, 503, 504].includes(status)) throw e;
-      for (let j = 0; j < 40; j++) {
+
+      // WAIT FOR THE RUN TO FINISH, not merely to EXIST. Returning the first run that had any results
+      // handed back a PARTIALLY-WRITTEN one — the suite persists as it works through the namespace's
+      // classes, so `results/latest` answers with 29 rows (one class) long before all eighteen are
+      // done. The caller then failed its own "need a large run" pre-condition and reported `got 29`,
+      // which looks like the suite ran the wrong scope.
+      //
+      // Completion is inferred from the count going STABLE rather than from a status field, because
+      // that holds regardless of how the endpoint reports progress: growing means still working,
+      // twice-unchanged means done.
+      let prev = -1, stable = 0;
+      for (let j = 0; j < 60; j++) {
         await page.waitForTimeout(3000);
         const run = await latestRun(page, ns);
-        if ((run?.results ?? []).length > 0) return run;
+        const n = (run?.results ?? []).length;
+        if (n > 0 && n === prev) {
+          if (++stable >= 2) return run;   // unchanged across two polls -> the run has settled
+        } else {
+          stable = 0;
+        }
+        prev = n;
       }
-      throw new Error(`suite POST timed out (${status}) and no completed run appeared for ns=${ns}`);
+      throw new Error(`suite POST timed out (${status}) and no COMPLETED run appeared for ns=${ns} (last size ${prev})`);
     }
     if (!(r?.detail?.error || /already running/i.test(JSON.stringify(r?.detail ?? "")))) return r;
     await page.waitForTimeout(1500);
