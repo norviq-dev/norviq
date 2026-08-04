@@ -43,7 +43,7 @@ from norviq.config import settings
 from norviq.engine.identity import SPIFFEResolver
 from norviq.mcp import protocol as P
 from norviq.mcp.firewall import McpFirewall
-from norviq.mcp.pins import PinRegistry, build_store
+from norviq.mcp.pins import ControlPlanePinStore, PinRegistry, build_store
 from norviq.sdk.client.engine import PolicyEngineClient
 from norviq.sdk.core.interceptor import ToolInterceptor
 
@@ -82,6 +82,16 @@ class HttpProxy:
         # undetectable across the fleet. It is a silent degradation of the control, not an outage,
         # which is exactly the kind that survives to production. `file` is allowed because an
         # operator choosing it has chosen shared storage deliberately.
+        # THE UPGRADE USED TO BE COSMETIC. This branch logged "using: control-plane", set
+        # `_pin_store_kind = "control-plane"`, and then called `build_store("control-plane", ...)` —
+        # which knew only `file` and returned a MemoryPinStore. So the transport that most needs a
+        # shared store announced that it had one, reported it on every surface, and ran per-process
+        # pins anyway. `build_store` now REFUSES that kind rather than falling through, and the real
+        # store is constructed below.
+        #
+        # Construction is deferred to `run()` because `ControlPlanePinStore.load()` is awaited and
+        # `__init__` is sync. Deferring is not a weakening: `load()` happens once at startup before
+        # any traffic, exactly as the stdio path already does.
         pin_store = settings.mcp_pin_store
         if pin_store == "memory":
             log.warning(
@@ -93,10 +103,42 @@ class HttpProxy:
             pin_store = "control-plane"
         self._pin_store_kind = pin_store
         self._pins = PinRegistry(
-            store=build_store(pin_store, settings.mcp_pin_path),
+            # A local store for the local kinds; the control-plane store replaces it in `run()`.
+            # Never `build_store(pin_store, ...)` with pin_store == "control-plane" — that is the
+            # call that silently produced memory.
+            store=build_store("memory" if pin_store == "control-plane" else pin_store, settings.mcp_pin_path),
             mode=settings.mcp_pin_mode,
         )
         self._lock = asyncio.Lock()
+
+    async def _install_pin_store(self) -> None:
+        """Swap in the durable, cross-pod store before the listener accepts anything.
+
+        Only for the `control-plane` kind — `memory`/`file` are already correct from `__init__`.
+        Failure to reach the control plane degrades to the local store WITH A LOUD LOG, matching the
+        documented posture in `ControlPlanePinStore`: Gate B still evaluates every call, so what is
+        lost is cross-pod drift detection, not enforcement. Silence would be the unacceptable part.
+        """
+        if self._pin_store_kind != "control-plane":
+            return
+        namespace = getattr(settings, "namespace", "") or ""
+        store = ControlPlanePinStore(
+            namespace=namespace,
+            server_id=self._server_id,
+            mode=settings.mcp_pin_mode,
+            transport="http",
+        )
+        try:
+            await store.load()
+        except Exception as exc:  # noqa: BLE001 — availability choice, see the docstring
+            log.error(
+                "nrvq.mcp.http.pin_store_degraded",
+                error=str(exc), server_id=self._server_id, code="NRVQ-MCP-5046",
+                hint="cross-pod drift detection is unavailable until the control plane is reachable; "
+                     "enforcement is unaffected",
+            )
+            return
+        self._pins = PinRegistry(store=store, mode=settings.mcp_pin_mode)
 
     # ------------------------------------------------------------------ wiring
     async def _firewall_for_caller(self) -> McpFirewall:
@@ -271,6 +313,9 @@ class HttpProxy:
         import uvicorn
 
         self._engine = PolicyEngineClient()
+        # BEFORE the listener binds. A request arriving against the per-process fallback would take a
+        # first_seen TOFU decision this pod would then never reconcile with the shared store.
+        await self._install_pin_store()
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(60.0, connect=5.0),
             limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),

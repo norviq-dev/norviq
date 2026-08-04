@@ -208,6 +208,16 @@ class NorviqSettings(BaseSettings):
     mcp_allow_tool_headers: bool = False
     # Evaluate resources/read against policy as a read-verb tool call (indirect-injection surface).
     mcp_govern_resources: bool = True
+    # Refuse a tools/call whose arguments contradict the tool's OWN declared inputSchema — a missing
+    # required argument, a wrong-typed value, or (when the server sets additionalProperties: false)
+    # an argument it never declared. That last one is the residual behind every per-argument
+    # constraint an operator writes: they scope `query`, and the tool also honours `q`.
+    #
+    # ON by default because it enforces the SERVER's own statement about itself rather than a policy
+    # anyone had to author, so the false-positive case is a server whose schema disagrees with its
+    # implementation — which is a bug worth surfacing. Set false for a fleet with known-stale schemas.
+    # Tools with no published schema (the observed-only tier) are unaffected either way.
+    mcp_enforce_schema: bool = True
     # Upper bound on in-flight request-id bookkeeping per direction. A peer that opens requests and never
     # completes them would otherwise grow this map without limit; oldest entries are evicted.
     mcp_max_pending_requests: int = 4096

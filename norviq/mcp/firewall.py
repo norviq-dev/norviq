@@ -44,6 +44,7 @@ from norviq.mcp.scanner import (
     ScanReport,
     name_skeleton,
     scan_prompt_messages,
+    scan_object_text,
     scan_tool_definition,
     scan_untrusted_content,
 )
@@ -90,6 +91,12 @@ class CatalogEntry:
     # re-fetched from a server that has already replaced it, so if it is not captured here it is gone.
     # Bounded (see _CANONICAL_MAX) because it is server-controlled text held for the session.
     canonical: str = ""
+    # The tool's own declared `inputSchema`, kept SEPARATELY rather than parsed back out of
+    # `canonical`. `canonical` is truncated at `_CANONICAL_MAX` and `description` sorts before
+    # `inputSchema`, so a long (or deliberately padded) description pushes the schema out of the
+    # slice — recovering it from there would silently stop validating exactly the tool an attacker
+    # padded. Empty dict when the server declared none, which disables conformance for that tool.
+    input_schema: dict = field(default_factory=dict)
 
     @property
     def call_denied(self) -> bool:
@@ -278,6 +285,9 @@ class McpFirewall:
             self._server_pending.put(msg.id, msg.method)
             if msg.method == P.M_SAMPLING_CREATE and settings.mcp_govern_sampling:
                 return await self._gate_b_sampling(msg)
+            # The server asking a HUMAN a question it composed. Sampling was gated; this was not.
+            if msg.method == P.M_ELICITATION_CREATE:
+                return self._gate_a_elicitation(msg)
             return MediationResult(forward=msg.framed)
 
         if msg.is_notification:
@@ -290,6 +300,11 @@ class McpFirewall:
             # gate. Content-guarded, not blocked: a listChanged notification is ordinary.
             if msg.method.startswith("notifications/") and self._subscription_content(msg):
                 return self._guard_content(msg, "params.content", self._subscription_content(msg))
+            # The free-text channels. `_subscription_content` requires BOTH a subscriptionId and a
+            # `content` list, so a notification carrying its payload in `params.data`/`params.message`
+            # walked straight past the line above.
+            if msg.method in (P.N_MESSAGE, P.N_PROGRESS):
+                return self._gate_a_notification_text(msg)
             return MediationResult(forward=msg.framed)
 
         if msg.is_response:
@@ -303,6 +318,14 @@ class McpFirewall:
                 return self._gate_a_tools_list(msg)
             if requested == P.M_PROMPTS_GET:
                 return self._gate_a_prompts_get(msg)
+            # The three discovery siblings of tools/list. Same channel, different method name — the
+            # model does not know which RPC delivered the text it is reading.
+            if requested == P.M_RESOURCES_LIST:
+                return self._gate_a_item_list(msg, "resources/list", "resources")
+            if requested == P.M_RESOURCES_TEMPLATES:
+                return self._gate_a_item_list(msg, "resources/templates/list", "resourceTemplates")
+            if requested == P.M_PROMPTS_LIST:
+                return self._gate_a_item_list(msg, "prompts/list", "prompts")
             if requested == P.M_TOOLS_CALL:
                 # A server may now answer a call with a DEMAND for more input rather than a result.
                 # It arrives as ordinary response content, so without this it would be forwarded to
@@ -361,6 +384,82 @@ class McpFirewall:
         record_path_phase("mcp", "evaluate", ms)
         return decision, ms
 
+    # JSON-Schema `type` -> the Python shapes a decoded JSON value can take. `integer` is checked
+    # separately because `bool` is an int subclass in Python and `True` is not an integer argument.
+    _JSON_TYPES: dict[str, tuple] = {
+        "string": (str,),
+        "number": (int, float),
+        "integer": (int,),
+        "boolean": (bool,),
+        "array": (list,),
+        "object": (dict,),
+        "null": (type(None),),
+    }
+
+    def _schema_violations(self, schema: dict, arguments: dict) -> list[str]:
+        """The tool's OWN declared contract, checked against the arguments actually sent.
+
+        DELIBERATELY A SUBSET, and named as one. This is not a JSON Schema validator and must not be
+        mistaken for one — a full validator over an attacker-controlled schema is both a large
+        dependency and a denial-of-service surface (``$ref`` cycles, pathological ``patternProperties``).
+        Three checks are enforced, chosen because each is a statement the SERVER made about itself,
+        so enforcing it cannot be wrong unless the server's own declaration is wrong:
+
+          * ``required``      — the server said this argument must be present.
+          * ``properties.type`` — the server said this argument is an array/string/number.
+          * ``additionalProperties: false`` — the server said these are ALL the arguments.
+
+        The third is the security-relevant one. Without it a caller may smuggle an argument the tool
+        honours and the policy never mentions, which is the residual behind every per-argument
+        constraint an operator writes: they scope ``query`` and the tool also accepts ``q``.
+        The second is what catches a value whose SHAPE defeats a constraint — the array-typed
+        ``columns`` that made a ``notMatches`` clause vacuous.
+
+        Nested objects are NOT descended. One level is what can be checked cheaply and without a
+        recursion budget, and a half-descended check that claims completeness is worse than a shallow
+        one that does not. Anything unrecognised is ignored rather than guessed at.
+        """
+        if not isinstance(schema, dict) or schema.get("type") not in (None, "object"):
+            return []
+        props = schema.get("properties")
+        if not isinstance(props, dict):
+            return []
+        out: list[str] = []
+
+        for key in schema.get("required") or []:
+            if isinstance(key, str) and key not in arguments:
+                out.append(f"missing required argument '{key}'")
+
+        # `additionalProperties: false` is an explicit statement, so absence is NOT treated as false —
+        # the JSON Schema default is permissive and inventing strictness here would refuse calls the
+        # server is happy to serve.
+        if schema.get("additionalProperties") is False:
+            for key in arguments:
+                if key not in props:
+                    out.append(f"argument '{key}' is not declared by this tool")
+
+        for key, spec in props.items():
+            if key not in arguments or not isinstance(spec, dict):
+                continue
+            declared = spec.get("type")
+            # A `type` LIST ("string" or "null") is legal and common; satisfying any member passes.
+            wanted = [declared] if isinstance(declared, str) else declared
+            if not isinstance(wanted, list) or not wanted:
+                continue
+            allowed: tuple = ()
+            for name in wanted:
+                allowed += self._JSON_TYPES.get(name, ())
+            if not allowed:
+                continue
+            value = arguments[key]
+            ok = isinstance(value, allowed)
+            # `True` is an `int` in Python but is not an integer/number argument.
+            if ok and isinstance(value, bool) and "boolean" not in wanted:
+                ok = False
+            if not ok:
+                out.append(f"argument '{key}' must be {'/'.join(wanted)}")
+        return out[:16]  # bounded: the reason string goes back to the caller
+
     async def _gate_b_tools_call(self, msg: P.JsonRpcMessage) -> MediationResult:
         """Enforce policy on `tools/call` before the upstream server ever sees it."""
         timer0 = perf_counter()
@@ -408,6 +507,36 @@ class McpFirewall:
                 })),
                 blocked=True, note=f"gate_a:{entry.pin_status}",
             )
+
+        # --- Schema conformance, against the tool's OWN declaration. ---
+        #
+        # Runs BEFORE the policy evaluation, on purpose. An argument the tool never declared is one no
+        # policy mentions either, so evaluating first would produce an `allow` that means "no rule
+        # objected to a field nobody knew about" — a true statement and a useless one. Refusing here
+        # keeps the policy's allow honest: every argument that reaches it is one the server admits to.
+        #
+        # Only when the server actually published a schema. `input_schema` is `{}` for an
+        # observed-only tool, and inventing a contract for a tool nobody declared would refuse
+        # traffic on the strength of a guess.
+        if settings.mcp_enforce_schema and entry is not None and entry.input_schema:
+            violations = self._schema_violations(entry.input_schema, arguments)
+            if violations:
+                self._bump("schema_violation")
+                log.warning(
+                    "nrvq.mcp.gate_b.schema_violation", tool=name, violations=violations,
+                    server=self._server_id, code="NRVQ-MCP-5066",
+                )
+                record_path_phase("mcp", "call_total", (perf_counter() - timer0) * 1000.0)
+                return MediationResult(
+                    reply=P.encode(P.tool_error_result(
+                        msg.id,
+                        f"Norviq refused '{name}': the call does not match the tool's own declared "
+                        f"inputSchema — {'; '.join(violations)}.",
+                        {"gate": "B", "tool": name, "server": self._server_id,
+                         "schema_violations": violations},
+                    )),
+                    blocked=True, note="schema_violation",
+                )
 
         # --- Gate B: the deterministic control. ---
         decision, _ms = await self._evaluate(name, arguments)
@@ -589,6 +718,7 @@ class McpFirewall:
                 action=action,
                 findings=[f.as_dict() for f in report.findings],
                 canonical=canonical_definition(tool)[:_CANONICAL_MAX],
+                input_schema=tool.get("inputSchema") if isinstance(tool.get("inputSchema"), dict) else {},
             )
 
             if action == "strip":
@@ -677,6 +807,130 @@ class McpFirewall:
                 )},
             }]
         return MediationResult(forward=P.encode(rewritten), note="gate_a_prompt")
+
+    def _gate_a_item_list(self, msg: P.JsonRpcMessage, surface: str, key: str) -> MediationResult:
+        """Scan a DISCOVERY list whose items are server-authored — resources, templates, prompts.
+
+        `tools/list` has always been gated here; its three siblings were declared in `protocol.py`,
+        referenced nowhere, and forwarded untouched by the terminal fall-through in
+        `on_client_message`. Every one of them carries server-chosen `name`/`title`/`description`
+        text (and, for templates, a server-chosen `uriTemplate`) straight into the model's context.
+        A tool description is the canonical injection channel and these are the same channel with a
+        different method name — the model does not know or care which RPC delivered the text.
+
+        WITHHELD, not sanitised, at or above the strip severity — the same choice `tools/list` makes
+        and for the same reason: a sanitised entry is still listed, still selectable, and still
+        points wherever the server said. The remaining items pass through, so one poisoned resource
+        does not cost the agent the whole catalogue.
+
+        `scan_tool_definition` is reused rather than forked: it already deep-walks every string in a
+        definition-shaped dict, and resource/prompt entries are that same shape. A second scanner
+        would be a second set of rules to keep in step — the divergence this branch keeps paying for.
+        """
+        if not settings.mcp_scan_responses:
+            return MediationResult(forward=msg.framed)
+        items = msg.result.get(key)
+        if not isinstance(items, list) or not items:
+            return MediationResult(forward=msg.framed)
+
+        kept: list[Any] = []
+        withheld: list[str] = []
+        findings: list[dict] = []
+        strip_at = _SEVERITY_ORDER.get(settings.mcp_scan_strip_severity, 3)
+        for item in items:
+            if not isinstance(item, dict):
+                kept.append(item)
+                continue
+            report = scan_tool_definition(item)
+            if report.clean:
+                kept.append(item)
+                continue
+            findings.extend(f.as_dict() for f in report.findings)
+            if _SEVERITY_ORDER[report.severity] >= strip_at:
+                # Most-identifying first: a resource IS its uri, a prompt is its name. Reporting the
+                # name of a withheld resource would leave the operator unable to tell two apart.
+                withheld.append(str(item.get("uri") or item.get("uriTemplate") or item.get("name") or "?"))
+                continue
+            kept.append(item)
+
+        if not findings:
+            return MediationResult(forward=msg.framed)
+
+        self._bump(f"gate_a_{key}_flagged")
+        log.warning(
+            "nrvq.mcp.gate_a.item_list_flagged", surface=surface, withheld=withheld,
+            findings=[f.get("rule") for f in findings], server=self._server_id, code="NRVQ-MCP-5067",
+        )
+        rewritten = json.loads(msg.raw)
+        rewritten["result"][key] = kept
+        rewritten["result"].setdefault("_meta", {})["norviq"] = {
+            "gate": "A", "surface": surface, "withheld": withheld, "findings": findings,
+        }
+        return MediationResult(forward=P.encode(rewritten), note=f"gate_a_{key}")
+
+    def _gate_a_elicitation(self, msg: P.JsonRpcMessage) -> MediationResult:
+        """Scan a server-composed ELICITATION — a question the human is about to be asked.
+
+        The server writes the prompt the user sees. That makes it a social-engineering channel aimed
+        at a person rather than at the model ("to continue, paste your API key here"), and it reached
+        the proxy only to be forwarded: the server-initiated branch tested `sampling/createMessage`
+        and nothing else.
+
+        The DEMAND is scanned here; the ANSWER — data leaving the trust boundary in reply to a
+        question the server composed — is already adjudicated by the answer plane (`_gate_answer`).
+        Both halves are needed, and only one existed.
+        """
+        if not settings.mcp_scan_responses:
+            return MediationResult(forward=msg.framed)
+        params = msg.params if isinstance(msg.params, dict) else {}
+        report = scan_object_text(params, "params")
+        if report.clean:
+            return MediationResult(forward=msg.framed)
+        self._bump("gate_a_elicitation_flagged")
+        log.warning("nrvq.mcp.gate_a.elicitation_flagged", severity=report.severity,
+                    findings=[f.rule for f in report.findings], code="NRVQ-MCP-5068")
+        if _SEVERITY_ORDER[report.severity] >= _SEVERITY_ORDER.get(settings.mcp_scan_strip_severity, 3):
+            # REFUSED rather than rewritten. A rewritten question still gets asked, and the thing
+            # being protected here is a person deciding what to type — the one participant that
+            # cannot be told "treat the following as data".
+            return MediationResult(
+                reply=P.encode(P.error_response(
+                    msg.id, P.E_POLICY_DENIED,
+                    "Norviq refused this elicitation: the question composed by the server matched "
+                    "instruction-injection patterns.")),
+                blocked=True, note="elicitation_denied",
+            )
+        rewritten = json.loads(msg.raw)
+        rewritten.setdefault("params", {}).setdefault("_meta", {})["norviq"] = {
+            "gate": "A", "surface": "elicitation/create", "scan": report.as_dict(),
+        }
+        return MediationResult(forward=P.encode(rewritten), note="gate_a_elicitation")
+
+    def _gate_a_notification_text(self, msg: P.JsonRpcMessage) -> MediationResult:
+        """Guard the free-text notification channels — `notifications/message` and `.../progress`.
+
+        Neither is a `list_changed` signal, so neither was covered by the branch that handles those,
+        and both carry server-authored text: `message` is the logging channel (which lands in
+        OPERATOR-visible logs as well as the host's context — an injection aimed at whoever reads the
+        console) and `progress` is unbounded status text.
+
+        Annotated and fenced rather than dropped: a notification is ordinary traffic, and silently
+        discarding one desynchronises a client that is counting them.
+        """
+        if not settings.mcp_scan_responses:
+            return MediationResult(forward=msg.framed)
+        params = msg.params if isinstance(msg.params, dict) else {}
+        report = scan_object_text(params, "params")
+        if report.clean:
+            return MediationResult(forward=msg.framed)
+        self._bump("notification_text_flagged")
+        log.warning("nrvq.mcp.notification_flagged", method=msg.method, severity=report.severity,
+                    findings=[f.rule for f in report.findings], code="NRVQ-MCP-5069")
+        rewritten = json.loads(msg.raw)
+        rewritten.setdefault("params", {}).setdefault("_meta", {})["norviq"] = {
+            "gate": "A", "surface": msg.method, "scan": report.as_dict(),
+        }
+        return MediationResult(forward=P.encode(rewritten), note="notification_flagged")
 
     # ============================================================ RESPONSE PATH
     def _on_tool_result(self, msg: P.JsonRpcMessage) -> MediationResult:

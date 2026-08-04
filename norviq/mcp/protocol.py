@@ -42,6 +42,11 @@ M_SAMPLING_CREATE = "sampling/createMessage"
 # must speak whatever the pair in front of it speaks. See DESIGN-NOTE-MCP-FIREWALL.md §12.
 M_SERVER_DISCOVER = "server/discover"
 M_SUBSCRIPTIONS_LISTEN = "subscriptions/listen"
+# Discovery surfaces that were declared here and referenced NOWHERE — every one of them carries
+# server-authored text into the model's context and reached the proxy only to be forwarded untouched.
+M_RESOURCES_TEMPLATES = "resources/templates/list"
+M_ELICITATION_CREATE = "elicitation/create"
+M_ROOTS_LIST = "roots/list"
 
 RESULT_TYPE = "resultType"
 RESULT_COMPLETE = "complete"
@@ -67,6 +72,11 @@ X_MCP_HEADER = "x-mcp-header"
 N_TOOLS_CHANGED = "notifications/tools/list_changed"
 N_PROMPTS_CHANGED = "notifications/prompts/list_changed"
 N_RESOURCES_CHANGED = "notifications/resources/list_changed"
+# Free-text channels. `notifications/message` is the server writing into operator-visible logs AND
+# the host's context; `notifications/progress` is unbounded server-authored status. Neither is a
+# list-changed signal, so neither was covered by the branch above.
+N_MESSAGE = "notifications/message"
+N_PROGRESS = "notifications/progress"
 
 # JSON-RPC 2.0 reserved error codes (spec §5.1). -32000..-32099 is the implementation-defined band;
 # Norviq uses -32001 so a policy refusal is distinguishable from a genuine protocol error.

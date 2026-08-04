@@ -285,7 +285,25 @@ class PinRegistry:
 
 
 def build_store(kind: str, path: str) -> PinStore:
-    """Construct the configured backend. Unknown kind -> memory (the safe, dependency-free default)."""
+    """Construct a LOCAL backend. Unknown kind -> memory (the safe, dependency-free default).
+
+    `control-plane` IS NOT CONSTRUCTIBLE HERE and must not be passed. `ControlPlanePinStore` needs a
+    namespace, a server id and an awaited `load()`, none of which this signature carries — so falling
+    through to memory for it produced the worst possible outcome: `http.py` detected that a
+    per-process store cannot detect drift across replicas, logged that it was upgrading to
+    `control-plane`, recorded `control-plane` as the store in use, and then received a
+    `MemoryPinStore` from this function. The warning announced a fix that did not happen, and the
+    durability the log asserted was never true.
+
+    Raising is right rather than silently downgrading: a caller asking for the durable, cross-pod
+    store has made a security choice, and quietly giving them a per-process one disarms drift
+    detection while every surface reports it as armed.
+    """
+    if kind == "control-plane":
+        raise ValueError(
+            "build_store cannot construct the control-plane store — it requires namespace/server_id "
+            "and an awaited load(); construct ControlPlanePinStore directly"
+        )
     if kind == "file" and path:
         return FilePinStore(path)
     return MemoryPinStore()

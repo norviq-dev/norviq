@@ -308,6 +308,29 @@ def scan_tool_definition(tool: dict) -> ScanReport:
     return report
 
 
+def scan_object_text(obj: dict, base_path: str = "params") -> ScanReport:
+    """Scan EVERY string in an object whose whole purpose is free text.
+
+    `scan_tool_definition` is deliberately selective — it walks `inputSchema`/`outputSchema`/
+    `annotations` and scans other values only past 80 characters, because a tool definition is mostly
+    structure and scanning an enum of "read"/"write" is pure noise.
+
+    That selectivity is wrong for the surfaces this serves. An `elicitation/create` carries its
+    payload in `params.message`; a `notifications/message` carries it in `params.data`. Neither key is
+    a schema text key and neither lives under a schema root, so the definition scanner walked past
+    both — the payload is not hiding in the structure here, the payload IS the structure.
+
+    Bounded by `_walk_strings` (depth 12, 512 strings), so a hostile server cannot turn a scan into a
+    budget-exhaustion primitive.
+    """
+    report = ScanReport()
+    strings: list[tuple[str, str]] = []
+    _walk_strings(obj or {}, base_path, strings)
+    for path, value in strings:
+        report.findings.extend(_scan_text(value, path))
+    return report
+
+
 def scan_prompt_messages(messages: Iterable[dict]) -> ScanReport:
     """Scan the messages returned by ``prompts/get`` (template poisoning).
 
