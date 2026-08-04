@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import functools
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 import os
@@ -216,3 +217,60 @@ def test_arguments_beyond_the_known_names_keep_the_args_list() -> None:
     wrapped = protect([_VarargsTool()], rec, session_id=_session())
     wrapped[0]._run("a", "b", "c")
     assert rec.params == {"first": "a", "args": ["b", "c"]}
+
+
+# ── a WRONG name is worse than no name ──────────────────────────────────────────────────────────
+#
+# Binding positional args by zipping a name list against the argument tuple looked like the obvious
+# implementation and is the dangerous one. A decorator that injects a leading argument — a tenant,
+# retry or audit wrapper, all commonplace — shifts every name by one, and `functools.wraps` makes
+# `inspect.signature` report the signature UNDERNEATH the decorator while the caller uses the
+# decorated convention.
+#
+# The engine is then told `{"tenant": "collector@attacker.example", "to": "ops@acme.com"}` while the
+# tool sends to the attacker: the operator's `param_paths.to` pin inspects a compliant value and
+# ALLOWS. Under the deny-by-default policy the intent compiler emits, a MISSING name is fail-closed
+# (the rule never matches); a WRONG name is fail-open, and it also lies to the near-miss explainer.
+#
+# So binding goes through `Signature.bind`, which REFUSES rather than guesses, and the signature is
+# read with follow_wrapped=False so a wrapper's own `(self, *a, **k)` yields no usable names.
+
+def _tenant_decorator(tenant: str):
+    def deco(fn):
+        @functools.wraps(fn)
+        def inner(self, *a, **k):
+            return fn(self, tenant, *a, **k)
+        return inner
+    return deco
+
+
+class _ShiftedTool(BaseTool):
+    """A tool whose decorator injects a leading argument the caller never passes."""
+
+    name: str = "send_email"
+    description: str = "sends mail"
+
+    @_tenant_decorator("acme")
+    def _run(self, tenant: str = "", to: str = "", body: str = "") -> str:
+        return f"sent:{to}"
+
+
+def test_a_shifted_signature_claims_no_name_rather_than_the_wrong_one() -> None:
+    rec = _RecordingInterceptor()
+    wrapped = protect([_ShiftedTool()], rec, session_id=_session())
+    wrapped[0]._run("collector@attacker.example", "ops@acme.com")
+
+    # The attacker's address must NOT be filed under some other name while a compliant value sits
+    # under the one the operator pinned — that is the shape that turns a pin into a rubber stamp.
+    assert rec.params.get("to") != "ops@acme.com", "a shifted signature produced a WRONG name binding"
+    # Unnamed is the correct degradation: no per-argument rule can match, and under deny-by-default
+    # that is a refusal rather than a silent allow.
+    assert "args" in rec.params
+
+
+def test_an_honest_tool_is_unaffected_by_the_stricter_binding() -> None:
+    """The cost side: refusing to guess must not stop ordinary tools from being named."""
+    rec = _RecordingInterceptor()
+    wrapped = protect([_PositionalTool()], rec, session_id=_session())
+    wrapped[0]._run("ops@acme.com", "quarterly figures")
+    assert rec.params == {"to": "ops@acme.com", "body": "quarterly figures"}

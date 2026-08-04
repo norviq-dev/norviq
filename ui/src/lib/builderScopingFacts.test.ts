@@ -94,6 +94,10 @@ function call(toolName: string, params: Record<string, unknown>, derived: Record
       sql_statements: [],
       // The facts this merge added — present on a current engine, absent on an older one.
       param_paths: {},
+      // Which of those paths a CALLER could have minted. Every rule reading a param_paths value also
+      // reads this, so a fixture modelling a CURRENT engine must publish it — an older engine that
+      // does not is covered by its own test below, where the rule must fail closed.
+      param_paths_ambiguous: [],
       destinations: { emails: [], urls: [], hosts: [], schemes: [] },
       data_classes: [],
       sql_tables: [],

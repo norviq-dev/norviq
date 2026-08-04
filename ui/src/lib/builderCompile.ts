@@ -1171,6 +1171,55 @@ export const PARAM_PATH_SUFFIX_RE = /^[\w.[\]$-]{1,256}$/;
 const NEW_FACT_ROOTS = ["param_paths", "destinations", "data_classes", "sql_tables", "param_bytes"] as const;
 
 /** The rego expression for a scalar field, including the dynamic `param_paths.<path>` form. */
+/**
+ * The derivability guard for a `param_paths.<path>` field, as a rego EXPRESSION.
+ *
+ * The Python intent compiler grew this in `_path_trusted_expr`; this compiler did not, and the two
+ * therefore disagreed on every negated `param_paths` shape. Measured, same intent both sides:
+ * `param_paths.columns notMatches "(?i)(card_number|ssn)"` against
+ * `{"columns": ["card_number","ssn"]}` — Python blocked, this compiler ALLOWED, because
+ * `scalarFieldExpr` defaults an absent path to `""`, the regex misses, and the negation is true.
+ * The list form is not exotic: it is what `_walk_paths` produces for any array argument, and the
+ * grant editor's primary picker routes a declared argument straight to a `param_paths` fact.
+ *
+ * Two halves, matching the Python side exactly:
+ *   * the path was actually DERIVED (not defaulted to "");
+ *   * the path was not MINTED by a caller key containing `.`/`[`/`]` (see `_walk_paths`).
+ *
+ * `param_paths_ambiguous` is read with `object.get(..., null)` and compared, NOT defaulted to `[]`:
+ * defaulting it would make the anti-forgery half evaporate on an engine that predates the fact, which
+ * is the same fail-open this guard exists to close. The root is also declared in `factRootsOf` so the
+ * grant's availability lines require it.
+ */
+function paramPathGuards(field: string): string[] {
+  if (!field.startsWith(PARAM_PATH_PREFIX)) return [];
+  const path = JSON.stringify(field.slice(PARAM_PATH_PREFIX.length));
+  return [
+    // The path was actually derived — not defaulted to "" by `scalarFieldExpr`.
+    `object.get(input.derived.param_paths, ${path}, null) != null`,
+    // The engine publishes the ambiguity list at all. Checked explicitly rather than defaulted,
+    // because `object.get(..., [])` on an older engine makes the next line vacuously true and the
+    // anti-forgery half disappears — the same fail-open this guard exists to close.
+    `object.get(input.derived, "param_paths_ambiguous", null) != null`,
+    // ...and this path is not among the ones a caller could have minted. Inlined as a counted
+    // comprehension rather than a helper rule: these expressions are emitted in both the grant and
+    // the rules paths, which do not share a helper block.
+    `count([1 | object.get(input.derived, "param_paths_ambiguous", [])[_] == ${path}]) == 0`
+  ];
+}
+
+/**
+ * Fold a predicate together with its guards into ONE boolean expression.
+ *
+ * A counted comprehension, because these become the value of a single line and rego has no
+ * expression-level `and` — the same device `_guarded` uses on the Python side, for the same reason.
+ * The clause still evaluates to false rather than becoming undefined, so a `not`-wrapper around it
+ * behaves, and the near-miss explainer can still name it.
+ */
+function withGuards(expr: string, guards: string[]): string {
+  if (guards.length === 0 || expr === "") return expr;
+  return `count([1 | ${[...guards, expr].join("; ")}]) == 1`;
+}
 export function scalarFieldExpr(field: string): string {
   if (field.startsWith(PARAM_PATH_PREFIX)) {
     const path = field.slice(PARAM_PATH_PREFIX.length);
@@ -1186,7 +1235,11 @@ export function scalarFieldExpr(field: string): string {
 function factRootsOf(cond: BuilderCondition, out: Set<string>): void {
   if (cond.type === "not") return factRootsOf(cond.inner, out);
   if (cond.type === "scalarFact") {
-    if (cond.field.startsWith(PARAM_PATH_PREFIX)) out.add("param_paths");
+    if (cond.field.startsWith(PARAM_PATH_PREFIX)) {
+      out.add("param_paths");
+      // Reading a path commits the rule to checking whether it was forged, so it depends on BOTH.
+      out.add("param_paths_ambiguous");
+    }
     return;
   }
   if (cond.type === "collectionFact") {
@@ -1270,16 +1323,19 @@ function compileConditionLine(cond: BuilderCondition, paramRegexIndices: Map<Bui
     }
     case "scalarFact": {
       const expr = scalarFieldExpr(cond.field);
+      // EVERY operator over a param_paths field, not just the negated ones. A positive operator over
+      // a forged path is equally wrong — it reads the attacker's chosen value and reports compliance.
+      const guards = paramPathGuards(cond.field);
       switch (cond.op) {
         case "equals":
-          return `${expr} == ${JSON.stringify(cond.value ?? "")}`;
+          return withGuards(`${expr} == ${JSON.stringify(cond.value ?? "")}`, guards);
         case "in":
           // Set-literal membership. Free against the 25-regex-op budget, unlike a matches alternation.
-          return `${jsonSet(normalizeFactValues(cond.values))}[${expr}]`;
+          return withGuards(`${jsonSet(normalizeFactValues(cond.values))}[${expr}]`, guards);
         case "matches":
-          return `regex.match(${JSON.stringify(cond.value ?? "")}, ${expr})`;
+          return withGuards(`regex.match(${JSON.stringify(cond.value ?? "")}, ${expr})`, guards);
         case "notMatches":
-          return `not regex.match(${JSON.stringify(cond.value ?? "")}, ${expr})`;
+          return withGuards(`not regex.match(${JSON.stringify(cond.value ?? "")}, ${expr})`, guards);
       }
       return "";
     }

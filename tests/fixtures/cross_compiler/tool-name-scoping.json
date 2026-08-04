@@ -81,7 +81,8 @@
             "urls": [],
             "hosts": [],
             "schemes": []
-          }
+          },
+          "param_paths_ambiguous": []
         }
       },
       "expect": "allow"
@@ -123,7 +124,8 @@
             "urls": [],
             "hosts": [],
             "schemes": []
-          }
+          },
+          "param_paths_ambiguous": []
         }
       },
       "expect": "allow"
@@ -165,7 +167,8 @@
             "urls": [],
             "hosts": [],
             "schemes": []
-          }
+          },
+          "param_paths_ambiguous": []
         }
       },
       "expect": "block"

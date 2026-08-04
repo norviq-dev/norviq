@@ -713,7 +713,8 @@ def test_not_matches_produces_loadable_rego() -> None:
                 "agent": {"agent_class": "c", "namespace": "n"}, "call_depth": 0,
                 "derived": {"verb": "send", "tool_kind": "other", "param_values": [body],
                             "param_values_lower": [body.lower()], "sql_normalized": "",
-                            "sql_statements": [], "param_paths": {"body": body}}}
+                            "sql_statements": [], "param_paths": {"body": body},
+                            "param_paths_ambiguous": []}}
 
     # And it must DECIDE the negation, not merely parse.
     assert _eval(intent, _mk("your refund is on its way")) == "allow"

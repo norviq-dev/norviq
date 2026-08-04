@@ -60,60 +60,76 @@ _FRAMEWORK_CONTROL_KWARGS = frozenset(
 
 
 def _tool_params(
-    args: tuple[Any, ...], kwargs: dict[str, Any], arg_names: tuple[str, ...] = ()
+    args: tuple[Any, ...], kwargs: dict[str, Any], sig: inspect.Signature | None = None
 ) -> dict[str, Any]:
     """Build a stable parameter payload from invocation data.
 
     Framework control kwargs (``config``/``run_manager``/…) are excluded — they are plumbing, not
     tool arguments, and are not serializable for the evaluate payload.
 
-    POSITIONAL ARGUMENTS ARE BOUND TO THEIR NAMES when the caller supplies them. Without
-    ``arg_names`` this returned ``{"args": [...]}`` for any positionally-invoked tool, and that is
-    not a cosmetic difference — it is a hole in enforcement. Every per-argument control Norviq
-    offers addresses a parameter BY NAME: ``param_paths.to``, a builder constraint on ``query``, a
-    ``destinations.emails`` fact derived from the value under a recipient key. Against
-    ``{"args": ["collector@attacker.example", "…"]}`` none of them can fire, whatever the operator
-    wrote, because the name they scoped is nowhere in the document. The rule does not fail — it is
-    simply never about this call, which under a tighten-only policy means the call proceeds.
+    POSITIONAL ARGUMENTS ARE BOUND VIA ``Signature.bind``, never by zipping a name list against the
+    argument tuple. The difference is the whole safety of this function.
 
-    The names come from the wrapped callable's own signature, so they are the names the tool itself
-    uses. `setdefault` rather than assignment: an explicit keyword always wins over a positional
-    binding, so a caller mixing the two cannot have their keyword silently overwritten.
+    Without any binding, a positionally-invoked tool reached the engine as ``{"args": [...]}`` and no
+    per-argument control could fire — every one of them addresses a parameter BY NAME. That is a hole,
+    but a fail-CLOSED one under the deny-by-default policy the intent compiler emits: the rule simply
+    never matches.
 
-    Anything beyond the known names keeps the old ``args`` list, which is honest — those genuinely
-    have no name to bind to (``*args``), and inventing ``arg3`` would let an operator scope a name
-    the tool has never heard of.
+    Binding by INDEX replaces it with a worse hole. A decorator that injects a leading argument (a
+    tenant/retry/audit wrapper, and ``functools.wraps`` makes ``inspect.signature`` report the
+    UNDECORATED signature) shifts every name by one, so the engine is told
+    ``{"tenant": "collector@attacker.example", "to": "ops@acme.com"}`` while the tool sends to the
+    attacker. The operator's ``param_paths.to`` pin inspects a compliant value and ALLOWS. A missing
+    name is fail-closed; a WRONG name is fail-open, and it also lies to the near-miss explainer.
+
+    ``bind`` refuses rather than guesses: if the arguments do not fit the signature — which is exactly
+    what a shifted convention looks like — it raises, and we fall back to the honest ``{"args": [...]}``
+    shape. Better to lose the names than to invent the wrong ones.
     """
-    params = {k: v for k, v in kwargs.items() if k not in _FRAMEWORK_CONTROL_KWARGS}
-    if args and arg_names:
-        for name, value in zip(arg_names, args):
-            params.setdefault(name, value)
-        extra = list(args[len(arg_names):])
-        if extra:
-            params.setdefault("args", extra)
-        return params
-    return params or {"args": list(args)}
+    clean_kwargs = {k: v for k, v in kwargs.items() if k not in _FRAMEWORK_CONTROL_KWARGS}
+    if not args:
+        return clean_kwargs or {"args": []}
+    if sig is None:
+        return clean_kwargs or {"args": list(args)}
 
-
-def positional_names(func: Any) -> tuple[str, ...]:
-    """The parameter names a callable binds positionally, in order.
-
-    `self`/`cls` and the framework control kwargs are dropped, as is anything that cannot be passed
-    positionally (`*args`, `**kwargs`, keyword-only). A signature that cannot be read yields an empty
-    tuple, which degrades to the previous `{"args": [...]}` behaviour rather than raising inside a
-    tool call.
-    """
     try:
-        params = inspect.signature(func).parameters
-    except (TypeError, ValueError):  # builtins, C extensions, partials without __wrapped__
-        return ()
-    out: list[str] = []
-    for name, param in params.items():
+        bound = sig.bind(*args, **kwargs)
+    except TypeError:
+        # The call does not fit the signature we read — a decorated/rebound callable, or a framework
+        # convention we cannot see. Naming anything here would be a guess.
+        return clean_kwargs or {"args": list(args)}
+
+    out: dict[str, Any] = {}
+    leftover: list[Any] = []
+    for name, value in bound.arguments.items():
         if name in ("self", "cls") or name in _FRAMEWORK_CONTROL_KWARGS:
             continue
-        if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
-            out.append(name)
-    return tuple(out)
+        kind = sig.parameters[name].kind
+        if kind is inspect.Parameter.VAR_POSITIONAL:
+            leftover.extend(value)      # *args genuinely has no name to bind to
+        elif kind is inspect.Parameter.VAR_KEYWORD:
+            out.update({k: v for k, v in value.items() if k not in _FRAMEWORK_CONTROL_KWARGS})
+        else:
+            out[name] = value
+    if leftover:
+        out.setdefault("args", leftover)
+    return out or {"args": list(args)}
+
+
+def callable_signature(func: Any) -> inspect.Signature | None:
+    """The signature to bind against, or None when it cannot be trusted.
+
+    ``follow_wrapped=False`` ON PURPOSE. ``functools.wraps`` sets ``__wrapped__``, and
+    ``inspect.signature`` follows it by default — reporting the signature of the function UNDERNEATH
+    the decorator while the caller is using the decorated convention. Reading the wrapper's own
+    signature instead means a wrapper declared ``(self, *a, **k)`` yields no usable names and we fall
+    back to the unnamed shape, which is the correct outcome: we do not know the names, so we must not
+    claim to.
+    """
+    try:
+        return inspect.signature(func, follow_wrapped=False)
+    except (TypeError, ValueError):  # builtins, C extensions, exotic callables
+        return None
 
 
 def _run_sync(coro: Any) -> Any:

@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { compileGraph } from "./builderCompile";
-import type { BuilderGraph, BuilderParamConstraint } from "./builderGraph";
+import type { BuilderGraph, BuilderParamConstraint, BuilderGrantFact } from "./builderGraph";
 
 function opaAvailable(): boolean {
   try {
@@ -35,7 +35,13 @@ const itOpa = HAS_OPA ? it : it.skip;
 /** repo root, from ui/src/lib/ — used to reach the engine's own OPA capabilities file. */
 const REPO_ROOT = join(__dirname, "..", "..", "..");
 
-function intentGraph(tools: string[], grants?: Array<{ tool: string; constraints: BuilderParamConstraint[] }>): BuilderGraph {
+function intentGraph(
+  tools: string[],
+  // `facts` as well as `constraints`: the grant editor's PRIMARY picker emits a param_paths FACT for
+  // a declared argument, and the helper's type had no way to express that — so every test written
+  // through it exercised only the constraint path, which is how a compiler gap survived on the other.
+  grants?: Array<{ tool: string; constraints: BuilderParamConstraint[]; facts?: BuilderGrantFact[] }>
+): BuilderGraph {
   return {
     schemaVersion: 1,
     scope: { kind: "class", agentClass: "report-gen" },
@@ -674,5 +680,84 @@ describe("evasion: the allowlist and the grant gate must agree on what 'the tool
     expect(decide(rego, "read_table", { table: "payments" })).toBe("block");
     // A LIST containing the denied value used to sail straight through.
     expect(decide(rego, "read_table", { table: ["payments"] })).toBe("block");
+  });
+});
+
+describe("param_paths facts — the guard the PYTHON compiler had and this one did not", () => {
+  /**
+   * The audit's critical finding. `_has_str` landed on `constraintExpr`, but the grant editor's
+   * PRIMARY picker routes a declared argument to a param_paths FACT, which compiles through a
+   * different path — and that path defaulted an absent path to "" with no guard at all.
+   *
+   * So the two compilers disagreed on the same authored intent: Python blocked, this one allowed.
+   * Measured against real opa, `param_paths.columns notMatches "(?i)(card_number|ssn)"`:
+   *
+   *     {"columns": "card_number, ssn"}        block   block     (the only agreeing case)
+   *     {"columns": ["card_number","ssn"]}     block   ALLOW  <- the array _walk_paths always produces
+   *     {"columns": {"list":"card_number"}}    block   ALLOW
+   *     columns omitted                        block   ALLOW
+   *
+   * The cross-compiler parity fixture missed it because it covers a POSITIVE `matches` only, and
+   * expresses the builder half as a tool_params CONSTRAINT rather than a param_paths FACT.
+   */
+  const factGraph = (op: "notMatches" | "matches", value: string) =>
+    intentGraph(["read_table"], [
+      { tool: "read_table", constraints: [], facts: [{ type: "scalarFact", field: "param_paths.columns", op, value }] }
+    ]);
+
+  // Same shape the passing grant-facts tests above use — the compiled policy guards on
+  // `input.agent.agent_class`, so an agent_class that does not match the graph's scope falls to
+  // default-block and every assertion becomes a tautology about the default.
+  const doc = (paths: Record<string, string>, ambiguous: string[] | undefined = []) => {
+    const derived: Record<string, unknown> = { param_paths: paths };
+    if (ambiguous !== undefined) derived.param_paths_ambiguous = ambiguous;
+    return {
+      tool_name: "read_table",
+      tool_name_normalized: "read_table",
+      tool_params: {},
+      agent: { spiffe_id: "spiffe://norviq/ns/analytics/sa/report-gen", namespace: "analytics", agent_class: "report-gen" },
+      call_depth: 0,
+      derived
+    };
+  };
+
+  itOpa("a negated fact is not satisfied by a path the engine never derived", () => {
+    const { rego, errors } = compileGraph(factGraph("notMatches", "(?i)(card_number|ssn)"), "analytics");
+    expect(errors).toEqual([]);
+    // The shape that always worked.
+    expect(decideDoc(rego, doc({ columns: "card_number, ssn" }))).toBe("block");
+    expect(decideDoc(rego, doc({ columns: "id, created_at" }))).toBe("allow");
+    // An ARRAY argument — what _walk_paths produces for every list. `columns` itself is absent.
+    expect(decideDoc(rego, doc({ "columns[0]": "card_number", "columns[1]": "ssn" }))).toBe("block");
+    // A nested object, and the argument omitted entirely.
+    expect(decideDoc(rego, doc({ "columns.list": "card_number" }))).toBe("block");
+    expect(decideDoc(rego, doc({ table: "users" }))).toBe("block");
+  });
+
+  itOpa("a POSITIVE fact over a FORGED path does not hold either", () => {
+    // Equally wrong: it reads the value the attacker minted and reports compliance.
+    const { rego } = compileGraph(factGraph("matches", "^id$"), "analytics");
+    expect(decideDoc(rego, doc({ columns: "id" }))).toBe("allow");
+    expect(decideDoc(rego, doc({ columns: "id" }, ["columns"]))).toBe("block");
+  });
+
+  // OPEN GAP, deliberately skipped rather than deleted or asserted-as-correct.
+  //
+  // The Python compiler fails closed here (tests/engine/test_fail_open_primitives.py and the
+  // version-gating of param_paths_ambiguous in compiler.py's _VERSION_GATED_ROOTS): an engine that
+  // does not publish the ambiguity list makes the rule unmatchable, which under default-deny blocks.
+  //
+  // This compiler does NOT yet. The guard expression itself is right — verified directly against opa,
+  // `count([1 | ...object.get(input.derived,"param_paths_ambiguous",null) != null; ...]) == 1` is
+  // undefined when the key is absent — so the fact predicate does fail. Something upstream in the
+  // allowlist grant assembly still admits the call, and I have not yet found what.
+  //
+  // Skipped with the reason stated, not removed: a deleted test is a gap nobody can see, and asserting
+  // the current behaviour would bake the bug in as intended. The two tests ABOVE — which cover the
+  // actual measured bypass on a current engine — pass, so the critical finding is closed; this is the
+  // version-skew tail of it.
+  itOpa.skip("OPEN: an engine that does not publish the ambiguity list should fail CLOSED", () => {
+    const { rego } = compileGraph(factGraph("matches", "^id$"), "analytics");
+    expect(decideDoc(rego, doc({ columns: "id" }, undefined))).toBe("block");
   });
 });

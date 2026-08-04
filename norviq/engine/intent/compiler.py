@@ -74,7 +74,15 @@ def package_token(agent_class: str) -> str:
 
 # `input.derived` roots that only exist on an engine carrying the MCP-merge scoping primitives.
 # A rule referencing one of these MUST also assert the root is published — see _availability_predicates.
-_VERSION_GATED_ROOTS = ("param_paths", "destinations", "data_classes", "sql_tables", "param_bytes")
+_VERSION_GATED_ROOTS = (
+    "param_paths", "destinations", "data_classes", "sql_tables", "param_bytes",
+    # The ambiguity list is a NEW root, and it is the one root a guard READS to decide whether to
+    # refuse. `object.get(..., [])` on an engine that does not publish it yields an empty list, so
+    # `not _in([], path)` is TRUE and the anti-forgery half evaporates — re-opening the forged-path
+    # bypass on exactly the engines most likely to be behind. Version-gating it makes the rule fail to
+    # match on such an engine, which under default-deny is a block.
+    "param_paths_ambiguous",
+)
 
 
 def _gated_roots(predicates: dict) -> set[str]:
@@ -83,6 +91,9 @@ def _gated_roots(predicates: dict) -> set[str]:
     for field in predicates:
         if field.startswith("param_paths."):
             roots.add("param_paths")
+            # Reading a param_paths value commits us to checking whether that path was forged, so the
+            # rule depends on BOTH roots and must state both as availability requirements.
+            roots.add("param_paths_ambiguous")
         elif field.startswith("destinations."):
             roots.add("destinations")
         elif field in _VERSION_GATED_ROOTS:
