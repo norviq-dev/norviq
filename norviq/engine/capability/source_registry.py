@@ -260,19 +260,60 @@ def _reg(verb: Verb, risk: RiskLevel, *tokens: str) -> None:
 _reg(Verb.DELETE, RiskLevel.CRITICAL,
      "delete", "del", "drop", "truncate", "purge", "destroy", "remove", "rm", "erase", "wipe", "revoke",
      "terminate", "kill", "deprovision", "teardown", "uninstall", "expire", "invalidate", "flush")
-# code-exec / control-plane actuation (also critical — an exec or actuation is not a mere write)
-_reg(Verb.DELETE, RiskLevel.CRITICAL,
-     "exec", "execute", "eval", "invoke", "run", "spawn", "shell", "sh", "bash", "cmd", "system",
-     "actuate", "trip", "detonate", "fire", "launch", "reboot", "restart", "shutdown", "halt", "detach")
+# code-exec / lifecycle (also critical — an exec is not a mere write).
+#
+# These are QUALIFIERS: they say the call is executed/started/stopped, not what it does to data.
+# `run_export` is an export, `invoke_send_pipeline` is a send, `restart_sync` is a sync. Kept in their
+# own named set because the verb ranking below has to treat them differently from a token that names
+# the operation itself — see _enforcement_rank.
+_EXEC_TOKENS = frozenset({
+    "exec", "execute", "eval", "invoke", "run", "spawn", "shell", "sh", "bash", "cmd", "system",
+    "actuate", "trip", "detonate", "fire", "launch", "reboot", "restart", "shutdown", "halt", "detach",
+})
+_reg(Verb.DELETE, RiskLevel.CRITICAL, *sorted(_EXEC_TOKENS))
 # writes / mutations
 _reg(Verb.WRITE, RiskLevel.HIGH,
      "write", "update", "insert", "put", "upsert", "patch", "modify", "set", "create", "add", "append",
      "grant", "approve", "issue", "provision", "mint", "sign", "rotate", "enable", "disable", "configure",
      "register", "attach", "bind", "apply", "commit", "save", "store", "tag", "label")
 # egress / exfiltration (data leaving)
+#
+# The second line is the same class of verb as the first, and its absence was not cosmetic: a tool the
+# lexicon does not resolve gets `derived.verb == "unknown"`, and both baseline policies key their
+# egress detector on `verb == "send"` — so `deliver_report`, `transmit_payload`, `broadcast_alert` and
+# `escalate_case` carried a credential to `("allow", "default_allow")` through comprehensive.rego AND
+# webhook/presets/strict.rego, measured. `cc`/`bcc`/`outbound`/`egress` are the mail- and
+# network-vocabulary spellings of the same act.
+#
+# DELIBERATELY NOT ADDED: `route`, `stream`, `copy`. Each is at least as often a NOUN or a read in real
+# tool names (`get_route`, `list_routes`, `read_stream`, `stream_logs`, `copy_object` within one
+# bucket), and a SEND token beats a READ token in the ranking below — so adding them would reclassify
+# ordinary reads as egress sinks and refuse them. `route_message`/`stream_events` therefore remain
+# unresolved; that residual is real and is the reason this lexicon is not the only defence (the
+# policies keep their name-prefix and substring bodies alongside `verb == "send"`).
+#
+# THE COST OF THE LINE ABOVE, MEASURED — and it is not zero. The ambiguity test applied to
+# route/stream/copy was NOT applied to the tokens that were added, and several of them collide the
+# same way. Through real `opa` against comprehensive.rego, each of these ordinary NON-egress tools
+# carrying an ordinary pagination cursor under the key `token` went from ("allow", "default_allow") at
+# the previous lexicon to ("block", "llm02_data_leakage"):
+#
+#   submit_job, submit_query, submit_batch   (`submit` is AWS Batch's / Databricks' verb for a job)
+#   escalate_incident, escalate_ticket       (escalation is a workflow state change, not egress)
+#   ship_order, deliver_package              (physical fulfilment — `ecommerce` is a shipped sector pack)
+#   broadcast_config                         (a cluster-wide write)
+#
+# Kept anyway, and the direction is deliberate: this is a policy enforcement point, these are not
+# reads (reads are the traffic whose over-refusal gets a baseline switched off, and they are pinned
+# against in tests/engine/test_capability.py), and a missed credential sink is the worse error. But it
+# is a real cost on real deployments, it is NOT the "no read tool was reclassified" that a sweep of
+# repo identifiers suggests, and a narrower rule — `submit_form`/`ship_logs` as whole NAMES rather than
+# `submit`/`ship` as tokens — would carry the audit's cases without it. Recorded so it is revisited.
 _reg(Verb.SEND, RiskLevel.HIGH,
      "send", "post", "upload", "publish", "webhook", "email", "mail", "sms", "notify", "export",
-     "transfer", "push", "sync", "forward", "relay", "emit", "dispatch", "share", "leak", "exfiltrate")
+     "transfer", "push", "sync", "forward", "relay", "emit", "dispatch", "share", "leak", "exfiltrate",
+     "deliver", "transmit", "submit", "broadcast", "escalate", "ship", "outbound", "egress", "exfil",
+     "cc", "bcc")
 # reads (low)
 _reg(Verb.READ, RiskLevel.LOW,
      "read", "get", "list", "search", "query", "fetch", "scan", "describe", "select", "lookup", "view",
@@ -285,6 +326,29 @@ _ACTUATION_NOUNS = {"breaker", "valve", "relay", "switch", "actuator", "damper",
 _CONTROL_VERBS = {"open", "close", "toggle", "set", "adjust", "override", "reset", "engage", "disengage"}
 
 _VERB_ORDER = {Verb.DELETE: 3, Verb.SEND: 2, Verb.WRITE: 1, Verb.READ: 0, Verb.UNKNOWN: -1}
+
+# Which verb a name that matched SEVERAL tokens is reported as. NOT the same ordering as risk — see
+# classify_tool. It agrees with _VERB_ORDER on the operation tokens (destruction is still the worst
+# thing a name can say); the whole re-ranking lives in _enforcement_rank, which demotes the EXEC
+# QUALIFIERS below SEND without demoting the destruction tokens with them.
+_ENFORCEMENT_ORDER = {Verb.DELETE: 4, Verb.SEND: 3, Verb.WRITE: 1, Verb.READ: 0, Verb.UNKNOWN: -1}
+
+# An exec qualifier ranks between SEND and WRITE: below the egress token it merely accompanies
+# (`run_export` is an export), above a bare read it governs (`run_query` executes arbitrary SQL and is
+# emphatically not a read).
+_EXEC_QUALIFIER_RANK = 2
+
+
+def _enforcement_rank(verb: "Verb", from_exec_token: bool) -> int:
+    """How strongly this single match claims the right to BE the reported verb.
+
+    An exec token is evidence about how the call runs, not about what it does, so it must not outrank
+    a token that names the operation. Ranking it as a full DELETE is what erased the send evidence;
+    ranking SEND above DELETE outright (the first attempt at this fix) instead erased the DELETE
+    evidence for every ordinary `delete_email` / `remove_webhook` / `revoke_share`, which the console's
+    capability inventory and the perimeter template's "attempted a delete" reason both read.
+    """
+    return _EXEC_QUALIFIER_RANK if from_exec_token else _ENFORCEMENT_ORDER[verb]
 
 _CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
@@ -322,31 +386,78 @@ def _classify_params(tool_params: object) -> tuple[Verb, RiskLevel] | None:
 def classify_tool(tool_name: str, tool_params: object = None) -> tuple[Verb, RiskLevel | None]:
     """Dynamic (verb, risk) for ANY tool — cloud, opensource, control-plane — with no source-registry
     dependency. Tokenizes the name, matches whole verb tokens against the lexicon, recognises control-plane
-    actuations, and falls back to inspecting tool_params. Returns the WORST operation found, or
-    (UNKNOWN, None) when genuinely inconclusive (the UI then flags it 'unclassified — review', never 'safe').
-    Extend by adding a token to the lexicon — the classifier stays dynamic and data-driven."""
+    actuations, and falls back to inspecting tool_params. Returns the WORST RISK found paired with the
+    most consequential VERB, or (UNKNOWN, None) when genuinely inconclusive (the UI then flags it
+    'unclassified — review', never 'safe'). Extend by adding a token to the lexicon — the classifier
+    stays dynamic and data-driven.
+
+    RISK AND VERB ARE RANKED SEPARATELY, and that is the whole point of the two loops below.
+
+    Ranking both by risk together — `max(matches, key=(risk, verb))` — silently DISCARDED the send
+    evidence whenever a more-destructive token shared the name, because every exec/destroy token is
+    CRITICAL and every egress token is HIGH. `invoke_send_pipeline` classified (DELETE, CRITICAL); so
+    did `run_export`, `exec_upload`, `run_publish`, `restart_sync`, `eval_dispatch`. `derived.verb` was
+    then "delete", both baseline policies' `egress_verb_tool { derived.verb == "send" }` was false, and
+    an AWS key went out through all seven names as ("allow", "default_allow") — the exact vendor-named
+    sink the prefix list already missed.
+
+    `verb` is published as ONE value and is the only handle a policy has on this classification, so a
+    verb that loses the ranking is not under-displayed — it is UNSAYABLE. That cuts BOTH ways, and the
+    fix is not "SEND outranks DELETE".
+
+    What actually shadowed the egress evidence is that the exec tokens are QUALIFIERS. `run`, `invoke`,
+    `exec`, `eval`, `restart` say the call is executed, not what it does to data — so `run_export` is an
+    export and `restart_sync` is a sync, and letting the qualifier BE the verb throws away the only
+    token in the name that named an operation. Demoting the qualifier is therefore enough, and it is all
+    that is done: `_EXEC_TOKENS` rank below SEND (the token they accompany) but still above READ (the
+    token they govern — `run_query` executes arbitrary SQL and is not a read).
+
+    Ranking SEND above DELETE outright would fix the same seven names and break far more. `delete_email`,
+    `remove_webhook`, `delete_mail`, `revoke_share`, `expire_share`, `purge_mail_queue` and
+    `invalidate_push_token` all carry an egress NOUN beside a destruction verb; reporting them as "send"
+    makes the asset graph's per-verb inventory state that an agent holding a mailbox-delete grant cannot
+    delete, silences `tool-allowlist-perimeter.rego`'s "unlisted tool attempted a delete" reason, and
+    refuses them under an egress refinement they have nothing to do with. Destruction stays the worst
+    thing a NAME can say; only the qualifier moves.
+
+    The risk keeps the critical grade the exec token earned either way — the console still shows
+    `invoke_send_pipeline` as critical, it just no longer tells the policy the call sends nothing."""
     tokens = _tokenize_tool(tool_name)
     tset = set(tokens)
-    matches: list[tuple[Verb, RiskLevel]] = []
+    # (verb, risk, came-from-an-exec-qualifier)
+    matches: list[tuple[Verb, RiskLevel, bool]] = []
 
     # control-plane actuation: an actuation noun + a control verb ⇒ critical (open_breaker, set_valve).
+    #
+    # DECISIVE rather than one more candidate. This is a whole-NAME structural determination — a noun
+    # from the actuation vocabulary governed by a control verb — not a single token that happens to
+    # appear somewhere in the name. `open_relay` is an electrical relay being thrown, not a mail relay,
+    # and `relay` is also an egress token; deciding here keeps an ICS command out of the egress
+    # detectors no matter how the lexicon is later extended. (With the ranking below this is currently
+    # also what the ranking would conclude — DELETE from a non-qualifier match is the top rank — so the
+    # early return is a guard against lexicon drift, not a thumb on the scale.)
     if tset & _ACTUATION_NOUNS and tset & _CONTROL_VERBS:
-        matches.append((Verb.DELETE, RiskLevel.CRITICAL))
+        return Verb.DELETE, RiskLevel.CRITICAL
 
     for t in tokens:
         hit = _VERB_LEXICON.get(t)
         if hit:
-            matches.append(hit)
+            matches.append((hit[0], hit[1], t in _EXEC_TOKENS))
 
     if not matches:
         params_hit = _classify_params(tool_params)
         if params_hit:
-            matches.append(params_hit)
+            # Recovered from the payload, not from a qualifier token: a DROP statement in `run_report`'s
+            # params is the operation itself and must rank as one.
+            matches.append((params_hit[0], params_hit[1], False))
 
     if not matches:
         return Verb.UNKNOWN, None
-    # worst first: higher RiskLevel, then more-destructive verb.
-    verb, risk = max(matches, key=lambda m: (_RISK_ORDER[m[1]], _VERB_ORDER[m[0]]))
+    # The grade is the worst any matched token carries — an exec token still makes the call critical.
+    risk = max((m[1] for m in matches), key=lambda r: _RISK_ORDER[r])
+    # The verb is the one enforcement can act on. Ties inside a rank fall back to _VERB_ORDER so the
+    # result stays deterministic for a name that matched two tokens of the same enforcement weight.
+    verb = max(matches, key=lambda m: (_enforcement_rank(m[0], m[2]), _VERB_ORDER[m[0]]))[0]
     return verb, risk
 
 

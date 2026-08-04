@@ -661,11 +661,98 @@ describe("evasion: the allowlist and the grant gate must agree on what 'the tool
     expect(decide(rego, "read_table", { table: "users", columns: "card_number, ssn" })).toBe("block");
     expect(decide(rego, "read_table", { table: "users", columns: "id, created_at" })).toBe("allow");
 
-    // The shapes that used to evaporate the constraint entirely.
+    // The shapes that used to evaporate the constraint entirely: the forbidden text is CARRIED, just
+    // not at the top level, so the constraint must still fail.
     expect(decide(rego, "read_table", { table: "users", columns: ["card_number", "ssn"] })).toBe("block");
     expect(decide(rego, "read_table", { table: "users", columns: { a: "card_number" } })).toBe("block");
-    expect(decide(rego, "read_table", { table: "users", columns: 42 })).toBe("block");
+    // ...and the argument omitted: the panel promises "a parameter that isn't supplied fails its line".
     expect(decide(rego, "read_table", { table: "users" })).toBe("block");
+
+    // REWRITTEN ASSERTION — this line read `columns: 42 -> "block"` and that is no longer the correct
+    // answer. `42` was denied only as collateral of the first repair, which required a TOP-LEVEL STRING
+    // (`_has_str`) and so made a `notMatches` grant UNSATISFIABLE for every object, list and number:
+    // measured, `body: {"user":"alice"}`, `body: ["a","b"]` and `body: 42` all flipped allow -> BLOCK,
+    // denying the tool 100% of the time whatever it carried. The constraint the operator wrote is about
+    // CONTENT — "these columns must never appear" — and the number 42 contains no column name. It is
+    // the tool's declared schema (the MCP firewall's `_schema_violations`), not a content pattern, that
+    // decides whether `columns` may be a number at all.
+    expect(decide(rego, "read_table", { table: "users", columns: 42 })).toBe("allow");
+  });
+
+  itOpa("a NEGATED constraint stays SATISFIABLE for the shapes it does not forbid", () => {
+    // The over-block the `_has_str` repair introduced, pinned in the direction it broke. A clause that
+    // can never hold is not a narrow policy, it is an outage: the tool is denied regardless of content,
+    // including for the very shape this kind's own placeholder advertises.
+    const { rego, errors } = compileGraph(
+      intentGraph(["http_post"], [
+        { tool: "http_post", constraints: [{ kind: "notMatches", field: "body", pattern: "(?i)password" }] }
+      ]),
+      "analytics"
+    );
+    expect(errors).toEqual([]);
+
+    // Clean, in every shape a real tool takes: allowed.
+    expect(decide(rego, "http_post", { url: "u", body: "hello" })).toBe("allow");
+    expect(decide(rego, "http_post", { url: "u", body: { user: "alice" } })).toBe("allow");
+    expect(decide(rego, "http_post", { url: "u", body: ["a", "b"] })).toBe("allow");
+    expect(decide(rego, "http_post", { url: "u", body: 42 })).toBe("allow");
+
+    // Carrying the forbidden text, in every shape: denied — including the nested and list forms that
+    // were the original bypass. Widening WHERE the clause reads is what closes those; it must not also
+    // widen WHICH calls it refuses.
+    expect(decide(rego, "http_post", { url: "u", body: "the password is hunter2" })).toBe("block");
+    expect(decide(rego, "http_post", { url: "u", body: { content: "the password is hunter2" } })).toBe("block");
+    expect(decide(rego, "http_post", { url: "u", body: ["the password is hunter2"] })).toBe("block");
+    expect(decide(rego, "http_post", { url: "u", body: { a: { b: ["the password is hunter2"] } } })).toBe("block");
+
+    // Omitted still denies — the documented half, and the one the panel states in words.
+    expect(decide(rego, "http_post", { url: "u" })).toBe("block");
+  });
+
+  // THE WALK MUST NOT BE ESCAPABLE BY RE-TYPING THE VALUE. Widening the negated kinds from "the
+  // top-level string" to "every string beneath the parameter" closed the array/nested bypass and left
+  // a narrower one open one JSON type away: a walk filtered by `is_string` cannot see a number, so the
+  // identical characters sent unquoted became invisible to the clause whose whole job is to refuse
+  // them. Measured with `is_string`: `body: "4111111"` blocked, `body: 4111111` ALLOWED.
+  //
+  // This is not the same question as `columns: 42` (asserted `allow` above and still correct): 42 does
+  // not contain a forbidden column NAME. Here the digits ARE the forbidden content, and the only thing
+  // that changed between the blocked call and the allowed one is a pair of quotes.
+  itOpa("a NEGATED constraint is not escaped by sending the forbidden value as a NUMBER", () => {
+    const { rego, errors } = compileGraph(
+      intentGraph(["http_post"], [
+        { tool: "http_post", constraints: [{ kind: "notMatches", field: "body", pattern: "4[0-9]{6}" }] }
+      ]),
+      "analytics"
+    );
+    expect(errors).toEqual([]);
+    expect(decide(rego, "http_post", { url: "u", body: "4111111" }), "string").toBe("block");
+    expect(decide(rego, "http_post", { url: "u", body: 4111111 }), "number").toBe("block");
+    expect(decide(rego, "http_post", { url: "u", body: [4111111] }), "number in a list").toBe("block");
+    expect(decide(rego, "http_post", { url: "u", body: { card: 4111111 } }), "number nested").toBe("block");
+    // ...and the widening still does not cost a clean call: these carry no matching digits at all.
+    expect(decide(rego, "http_post", { url: "u", body: 12 }), "clean number").toBe("allow");
+    expect(decide(rego, "http_post", { url: "u", body: "hello" }), "clean string").toBe("allow");
+  });
+
+  // Sharper for `noneOf` than for `notMatches`, because the operator typed the denied value out by
+  // hand: `noneOf account ["12345"]` blocked `"12345"` and ALLOWED `12345`.
+  itOpa("a NEGATED set constraint is not escaped by sending the denied value as a NUMBER", () => {
+    const { rego, errors } = compileGraph(
+      intentGraph(["read_table"], [
+        { tool: "read_table", constraints: [{ kind: "noneOf", field: "account", values: ["12345", "root"] }] }
+      ]),
+      "analytics"
+    );
+    expect(errors).toEqual([]);
+    expect(decide(rego, "read_table", { account: "12345" }), "string").toBe("block");
+    expect(decide(rego, "read_table", { account: 12345 }), "number").toBe("block");
+    expect(decide(rego, "read_table", { account: [12345] }), "number in a list").toBe("block");
+    // A value that is genuinely not on the list still passes, in either type.
+    expect(decide(rego, "read_table", { account: "99999" }), "clean string").toBe("allow");
+    expect(decide(rego, "read_table", { account: 99999 }), "clean number").toBe("allow");
+    // A boolean renders as text too, and "true" is not on this list.
+    expect(decide(rego, "read_table", { account: true }), "boolean").toBe("allow");
   });
 
   itOpa("a NEGATED set constraint (noneOf) is not satisfied by a value it cannot READ either", () => {
@@ -680,6 +767,13 @@ describe("evasion: the allowlist and the grant gate must agree on what 'the tool
     expect(decide(rego, "read_table", { table: "payments" })).toBe("block");
     // A LIST containing the denied value used to sail straight through.
     expect(decide(rego, "read_table", { table: ["payments"] })).toBe("block");
+    // ...and the mirror image, which the `_has_str` repair got wrong: a list that carries NONE of the
+    // denied values is not a violation, and denying it made the clause unsatisfiable for list-typed
+    // arguments. `noneOf` says "not these", not "must be a bare string".
+    expect(decide(rego, "read_table", { table: ["orders", "users"] })).toBe("allow");
+    expect(decide(rego, "read_table", { table: { name: "orders" } })).toBe("allow");
+    // Omission still denies.
+    expect(decide(rego, "read_table", {})).toBe("block");
   });
 });
 
@@ -708,9 +802,17 @@ describe("param_paths facts — the guard the PYTHON compiler had and this one d
   // Same shape the passing grant-facts tests above use — the compiled policy guards on
   // `input.agent.agent_class`, so an agent_class that does not match the graph's scope falls to
   // default-block and every assertion becomes a tautology about the default.
-  const doc = (paths: Record<string, string>, ambiguous: string[] | undefined = []) => {
+  // `"omit"`, NOT `undefined`, and that is the whole reason the version-skew test below was reported
+  // as an unexplained compiler gap for a whole commit. The signature was
+  // `(paths, ambiguous: string[] | undefined = [])` with `if (ambiguous !== undefined)` inside — but a
+  // JS default parameter fires on an EXPLICITLY passed `undefined` too, so `doc({...}, undefined)`
+  // bound `ambiguous = []` and published `param_paths_ambiguous: []`. The fixture that was supposed to
+  // model an engine too old to publish the fact modelled a CURRENT engine publishing an empty list, the
+  // guard correctly allowed the honest call, and the test failed while the compiler was right. A
+  // literal sentinel cannot be swallowed by a default the way `undefined` can.
+  const doc = (paths: Record<string, string>, ambiguous: string[] | "omit" = []) => {
     const derived: Record<string, unknown> = { param_paths: paths };
-    if (ambiguous !== undefined) derived.param_paths_ambiguous = ambiguous;
+    if (ambiguous !== "omit") derived.param_paths_ambiguous = ambiguous;
     return {
       tool_name: "read_table",
       tool_name_normalized: "read_table",
@@ -741,23 +843,188 @@ describe("param_paths facts — the guard the PYTHON compiler had and this one d
     expect(decideDoc(rego, doc({ columns: "id" }, ["columns"]))).toBe("block");
   });
 
-  // OPEN GAP, deliberately skipped rather than deleted or asserted-as-correct.
-  //
-  // The Python compiler fails closed here (tests/engine/test_fail_open_primitives.py and the
-  // version-gating of param_paths_ambiguous in compiler.py's _VERSION_GATED_ROOTS): an engine that
-  // does not publish the ambiguity list makes the rule unmatchable, which under default-deny blocks.
-  //
-  // This compiler does NOT yet. The guard expression itself is right — verified directly against opa,
-  // `count([1 | ...object.get(input.derived,"param_paths_ambiguous",null) != null; ...]) == 1` is
-  // undefined when the key is absent — so the fact predicate does fail. Something upstream in the
-  // allowlist grant assembly still admits the call, and I have not yet found what.
-  //
-  // Skipped with the reason stated, not removed: a deleted test is a gap nobody can see, and asserting
-  // the current behaviour would bake the bug in as intended. The two tests ABOVE — which cover the
-  // actual measured bypass on a current engine — pass, so the critical finding is closed; this is the
-  // version-skew tail of it.
-  itOpa.skip("OPEN: an engine that does not publish the ambiguity list should fail CLOSED", () => {
+  // WAS `itOpa.skip`, described as an open compiler gap ("something upstream in the allowlist grant
+  // assembly still admits the call"). It was not a compiler gap. The FIXTURE could not express skew:
+  // `doc(paths, ambiguous = [])` swallowed the explicit `undefined` this test passed, so the input
+  // document carried `param_paths_ambiguous: []` and described a current engine. See the note on
+  // `doc` above. The compiler fails closed here and always did — measured, with the fixture repaired.
+  itOpa("an engine that does not publish the ambiguity list fails CLOSED", () => {
     const { rego } = compileGraph(factGraph("matches", "^id$"), "analytics");
-    expect(decideDoc(rego, doc({ columns: "id" }, undefined))).toBe("block");
+    expect(decideDoc(rego, doc({ columns: "id" }, "omit"))).toBe("block");
+  });
+
+  // Every operator, not just the one the un-skipped test above happens to use: version skew must deny
+  // whichever comparison the operator wrote, or "this engine cannot answer the question" is spelled
+  // the same as "the answer was compliant" for the operators nobody wrote a case for.
+  itOpa("version skew denies for EVERY scalar operator over a param_paths field", () => {
+    const facts: Array<[string, BuilderGrantFact]> = [
+      ["equals", { type: "scalarFact", field: "param_paths.columns", op: "equals", value: "id" }],
+      ["in", { type: "scalarFact", field: "param_paths.columns", op: "in", values: ["id", "name"] }],
+      ["matches", { type: "scalarFact", field: "param_paths.columns", op: "matches", value: "^id$" }],
+      ["notMatches", { type: "scalarFact", field: "param_paths.columns", op: "notMatches", value: "(?i)ssn" }],
+      [
+        "NOT(matches)",
+        { type: "not", inner: { type: "scalarFact", field: "param_paths.columns", op: "matches", value: "^ssn$" } }
+      ]
+    ];
+    for (const [name, fact] of facts) {
+      const { rego, errors } = compileGraph(
+        intentGraph(["read_table"], [{ tool: "read_table", constraints: [], facts: [fact] }]),
+        "analytics"
+      );
+      expect(errors, name).toEqual([]);
+      // The honest call on a CURRENT engine is allowed — otherwise "denies on skew" would be
+      // indistinguishable from "denies always", and a blanket denial proves nothing about skew.
+      expect(decideDoc(rego, doc({ columns: "id" })), `${name} current`).toBe("allow");
+      expect(decideDoc(rego, doc({ columns: "id" }, "omit")), `${name} skew`).toBe("block");
+    }
+  });
+
+  // THE GUARD HAS TO SURVIVE A `not`. `withGuards` folds the guards and the predicate into one
+  // `count([1 | guards; pred]) == 1`, which is FALSE when a guard fails — correct while it stands
+  // alone, and exactly backwards once the compiler prefixes it with `not`: `not count(...) == 1` is
+  // TRUE precisely when the path could not be read or was minted by the caller. Measured before the
+  // fix, grant fact `NOT (param_paths.columns matches "^ssn$")` on an allowlisted `read_table`:
+  // forged path ALLOW, path never derived ALLOW. A caller satisfied the grant by making the path
+  // unreadable. `not` is a legal grant-fact shape (BuilderGrantFact admits a `not` wrapper), so this
+  // is the same bypass the four plain operators were fixed for, reached one wrapper away.
+  itOpa("a NOT-wrapped fact is not satisfied by a path the caller made unreadable", () => {
+    const { rego, errors } = compileGraph(
+      intentGraph(["read_table"], [
+        {
+          tool: "read_table",
+          constraints: [],
+          facts: [
+            { type: "not", inner: { type: "scalarFact", field: "param_paths.columns", op: "matches", value: "^ssn$" } }
+          ]
+        }
+      ]),
+      "analytics"
+    );
+    expect(errors).toEqual([]);
+    // Honest, compliant: `columns` is derived, is not ambiguous, and is not "ssn".
+    expect(decideDoc(rego, doc({ columns: "id" }))).toBe("allow");
+    // Honest, violating.
+    expect(decideDoc(rego, doc({ columns: "ssn" }))).toBe("block");
+    // FORGED — the engine names `columns` as caller-mintable, so no clause may trust it.
+    expect(decideDoc(rego, doc({ columns: "id" }, ["columns"]))).toBe("block");
+    // NEVER DERIVED — the array/nested/omitted shapes all land here.
+    expect(decideDoc(rego, doc({ "columns[0]": "id" }))).toBe("block");
+    expect(decideDoc(rego, doc({ table: "users" }))).toBe("block");
+  });
+
+  // Finding 17: the grant editor files `param_paths.<arg>` fact rows under an "Argument" heading whose
+  // hint promises "A call that omits it fails this line", and the panel header says omitting an
+  // argument cannot be used to skip a constraint. That promise is enforcement, so it is pinned here
+  // rather than only asserted in copy — for the plain operators AND through the `not` wrapper.
+  itOpa("the panel's omission promise holds for every param_paths fact row it prints", () => {
+    const rows: Array<[string, BuilderGrantFact]> = [
+      ["notMatches", { type: "scalarFact", field: "param_paths.columns", op: "notMatches", value: "(?i)(card_number|ssn)" }],
+      ["matches", { type: "scalarFact", field: "param_paths.columns", op: "matches", value: "^id$" }],
+      ["equals", { type: "scalarFact", field: "param_paths.columns", op: "equals", value: "id" }],
+      ["in", { type: "scalarFact", field: "param_paths.columns", op: "in", values: ["id"] }],
+      [
+        "NOT(matches)",
+        { type: "not", inner: { type: "scalarFact", field: "param_paths.columns", op: "matches", value: "^ssn$" } }
+      ]
+    ];
+    for (const [name, fact] of rows) {
+      const { rego, errors } = compileGraph(
+        intentGraph(["read_table"], [{ tool: "read_table", constraints: [], facts: [fact] }]),
+        "analytics"
+      );
+      expect(errors, name).toEqual([]);
+      // `read_table({"table": "users"})` — `columns` omitted entirely.
+      expect(decideDoc(rego, doc({ table: "users" })), `${name} omitted`).toBe("block");
+    }
+  });
+});
+
+// A RULES-MODE test, in the grants file, on purpose. `compileConditionLine` is shared by both sites,
+// and the fix that made a `not`-wrapped grant fact fail closed (the test directly above) was applied
+// to that shared emitter — where it silently inverted the OTHER site. The regression belongs next to
+// the change that caused it, or the next person to fix one side breaks the other again.
+describe("the same clause compiled at the OTHER site: a negated param_paths BLOCK rule", () => {
+  /** Tighten-only graph, default ALLOW, one block rule whose single condition is `conditions[0][0]`. */
+  const blockRuleGraph = (): BuilderGraph => ({
+    schemaVersion: 1,
+    scope: { kind: "class", agentClass: "report-gen" },
+    mode: "rules",
+    rules: [
+      {
+        id: "r1",
+        ruleId: "r_external_url",
+        decision: "block",
+        reason: "url is not an internal host",
+        conditions: [
+          [
+            {
+              type: "not",
+              inner: { type: "scalarFact", field: "param_paths.url", op: "matches", value: "^https://internal\\." }
+            }
+          ]
+        ]
+      }
+    ],
+    defaults: { decision: "allow", reason: "default" }
+  });
+
+  const ruleDoc = (derived: Record<string, unknown>) => ({
+    tool_name: "http_get",
+    tool_name_normalized: "http_get",
+    tool_params: { url: "x" },
+    agent: {
+      spiffe_id: "spiffe://norviq/ns/analytics/sa/report-gen",
+      namespace: "analytics",
+      agent_class: "report-gen"
+    },
+    call_depth: 0,
+    derived
+  });
+
+  // "Block any call whose url is not an internal host" — the ordinary way to write an allowlist-shaped
+  // restriction as a tighten-only rule, and the shape where the guard's placement decides everything.
+  //
+  // A grant body holding means ALLOW, so an unanswerable clause there must be FALSE (withhold the
+  // allow). A block body holding means DENY, so an unanswerable clause here must be TRUE (fire the
+  // block). Hoisting the guards outside the negation — correct for the grant — flipped this site:
+  // measured, `count([1 | guards; not pred]) == 1` returned ALLOW for both untrustworthy documents
+  // below, where `not count([1 | guards; pred]) == 1` returns block.
+  //
+  // The forged row is the one that makes this a bypass rather than a nicety: `param_paths_ambiguous`
+  // is derived from the CALLER's own argument keys, so a caller who wants out of this rule only has to
+  // send a key containing `.`/`[`/`]`. Under the hoisted shape the guard he tripped acquitted him.
+  itOpa("fails CLOSED when the path is forged or was never derived", () => {
+    const { rego, errors } = compileGraph(blockRuleGraph(), "analytics");
+    expect(errors).toEqual([]);
+
+    // Honest calls first — otherwise "blocks on an untrustworthy path" is indistinguishable from
+    // "blocks everything", and a rule that blocks everything proves nothing about the guard.
+    expect(
+      decideDoc(rego, ruleDoc({ param_paths: { url: "https://internal.corp/x" }, param_paths_ambiguous: [] })),
+      "honest internal"
+    ).toBe("allow");
+    expect(
+      decideDoc(rego, ruleDoc({ param_paths: { url: "https://evil.example/x" }, param_paths_ambiguous: [] })),
+      "honest external"
+    ).toBe("block");
+
+    // FORGED: the engine names `url` as caller-mintable, so the rule cannot conclude the url is
+    // internal — and "cannot conclude" must not be spelled the same as "is internal".
+    expect(
+      decideDoc(rego, ruleDoc({ param_paths: { url: "https://internal.corp/x" }, param_paths_ambiguous: ["url"] })),
+      "forged"
+    ).toBe("block");
+
+    // NEVER DERIVED: `{"url": {"href": "…"}}` derives `url.href`, a different key. The rule cannot read
+    // the url it was written about.
+    expect(
+      decideDoc(rego, ruleDoc({ param_paths: { "url.href": "https://evil.example/x" }, param_paths_ambiguous: [] })),
+      "never derived"
+    ).toBe("block");
+
+    // VERSION SKEW: no ambiguity list at all. Covered by `bld_unsupported_engine` rather than by the
+    // clause, but asserted here so a change to either one cannot open it unnoticed.
+    expect(decideDoc(rego, ruleDoc({ param_paths: { url: "https://evil.example/x" } })), "skew").toBe("block");
   });
 });

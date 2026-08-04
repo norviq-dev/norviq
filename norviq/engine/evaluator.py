@@ -9,6 +9,7 @@ import asyncio
 from collections import OrderedDict
 import contextlib
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -67,8 +68,38 @@ WOULD_BLOCK_RULE_PREFIXES: tuple[str, ...] = (MONITOR_WOULD_BLOCK_PREFIX, POLICY
 # The PAN / SSN / sensitive-key patterns are imported from engine.masking rather than restated here,
 # so the request-side classifier (`derived.data_classes`) and the response-side masker cannot drift
 # into disagreeing about what counts as sensitive.
-_EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+# LEFT-ANCHORED ON THE RUN, not on `\b`, and that is a performance property rather than a taste.
+#
+# `\b[A-Za-z0-9._%+-]+@...` restarts at EVERY word character in a dotted or hyphenated run, and each
+# restart re-scans the rest of the run before failing — O(n^2) in the length of ONE argument value.
+# Measured on the shipped pattern: 4 KB of `a.a.a.…` cost 54 ms, 16 KB cost 212 ms, and 200 KB cost
+# 33 SECONDS against a 2 s evaluator_timeout. Nothing in that payload is even hostile — a document
+# body or a serialised JSON blob in a `body` argument reaches 40 KB routinely, and past ~40 KB the
+# evaluation times out. A CPU-starved engine denying benign traffic is a recorded incident here
+# (§G4), so this is the same defect, reached from the param surface instead of from load.
+#
+# The lookbehind makes each position in a run fail in O(1), so the scan is linear. It matches from the
+# START of the run rather than from the first word character, which is the ONLY behavioural difference
+# from `\b` — a local part may not begin with `.`, `%`, `+` or `-` (RFC 5321), so `_emails()` strips
+# exactly those and the extracted address is identical. Verified equivalent over the whole test corpus.
+_EMAIL_RE = re.compile(r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+_EMAIL_LEADER = ".%+-"
 _URL_RE = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]{1,31}://[^\s\"'<>\\]+")
+
+
+def _emails(text: str) -> list[str]:
+    """Addresses in `text`, lower-cased, with the leading punctuation `\\b` used to exclude removed.
+
+    A match that is ALL leading punctuation before the `@` (`"...@acme.com"`) is not an address and is
+    dropped — `\\b` never matched it either.
+    """
+    found: list[str] = []
+    for match in _EMAIL_RE.findall(text):
+        local, _, domain = match.partition("@")
+        local = local.lstrip(_EMAIL_LEADER)
+        if local:
+            found.append(f"{local}@{domain}".lower())
+    return found
 
 # A destination written WITHOUT a scheme, which `_URL_RE` cannot see.
 #
@@ -83,33 +114,193 @@ _URL_RE = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]{1,31}://[^\s\"'<>\\]+")
 # ANCHORED AT BOTH ENDS on purpose. Matching a host ANYWHERE in free text would harvest hosts out of
 # prose and log lines, and since these feed a `subsetOf` that direction OVER-blocks — it would refuse
 # legitimate calls because someone mentioned a domain in a message body. Requiring the whole value to
-# be the destination (optionally protocol-relative, optionally with a path) keeps false positives at
-# essentially zero while closing the shape an attacker actually uses.
+# be the destination (optionally protocol-relative, optionally with a path) is the first half of
+# keeping false positives down; the KEY, below, is the other half.
 #
-# The TLD must be alphabetic and 2+ chars, so `v1.2.3` and `report.2026` do not match.
+# The TLD must be alphabetic and 2+ chars, so `v1.2.3` and `report.2026` do not match. A trailing root
+# dot (`evil.example.`) is stripped rather than rejected — it is the same host to DNS, and rejecting it
+# left `{"host": "evil.example."}` deriving NO destination at all.
 #
-# `evil.example` and `report.txt` are STRUCTURALLY IDENTICAL, so shape alone cannot separate a bare
-# hostname from a filename — and the direction of that error matters: these feed a `subsetOf`, so a
-# filename harvested as a host makes a legitimate call fail an egress constraint it should pass.
-# Two signals are combined instead of one:
-#   * a MARKER a filename does not carry — a path, a port, or a `//` prefix — is decisive on its own;
-#   * a bare `a.b` with no marker is accepted only if its suffix is not a common file extension.
-# `.zip` and `.mov` really are TLDs, so this trades a rare miss (a bare host at one of those, with no
-# path and no port) for not breaking every call that mentions an attachment. Stated rather than
-# hidden, because it is a heuristic and the residual belongs in the threat model.
+# SHAPE ALONE IS NOT A SIGNAL, and the first cut of this rule proved it. `evil.example`, `report.txt`,
+# `object.get`, `java.lang.NullPointerException`, `john.smith` and `time.format` are all structurally
+# identical, and a per-suffix denylist cannot separate them: measured over every JSON file in this repo,
+# 58 of 58 values harvested by the shape-only rule were false positives (rego builtin names, tsconfig
+# `lib` entries, ASGI event types) — precision 0%. These feed a `subsetOf`, so each one makes a
+# LEGITIMATE call fail an egress constraint it should pass, and `destinations.hosts subsetOf [...]` —
+# a rule the product tells operators to author — could not be deployed in enforce mode.
+#
+# The suffix denylist was also wrong in the other direction: `sh`, `so`, `md`, `py`, `rs` and `zip` are
+# delegated TLDs, so `{"host": "exfil.sh", "path": "/collect"}` derived NO host and a correctly authored
+# egress rule went vacuously true. The residual was worth stating and the list could not state it: any
+# registrable domain under six real TLDs was silently unreachable by policy.
+#
+# So a schemeless value is a destination when SOMETHING IN THE CALL SAYS IT IS, never from its shape:
+#   * a MARKER no filename carries — a `//` prefix, a port, or a path/query/fragment — is decisive on
+#     its own, whatever key holds it and whatever it ends in (`evil.zip/collect` is a destination);
+#   * otherwise the KEY has to name a network location (`host`, `url`, `endpoint`, `webhook`, … — see
+#     _DESTINATION_KEY_TOKENS). A filename under a key called `host` is not a case worth trading for.
+# RESIDUALS, stated in full because this is still a heuristic and the gaps belong in the threat model.
+# Scheme-bearing URLs, emails, and anything with a path or port are unaffected by all three — those
+# are matched from the value alone.
+#   1. A bare host with no marker under a key whose name says nothing about the network
+#      (`{"svc": "evil.example"}`) is not harvested.
+#   2. The key is read from the value's OWN key, not an ancestor's, so `{"webhook": {"v":
+#      "evil.example"}}` is missed where `{"webhook": {"url": "evil.example"}}` is not. Inheriting the
+#      name down through nested objects was rejected: it would harvest `requests.auth` out of
+#      `{"endpoint": {"url": …, "module": "requests.auth"}}`, which is the 0%-precision harvest again.
+#      Lists DO inherit, because a list has no keys of its own.
+#   3. An IPv4 written as a single decimal or hex integer (`3232235777`, `0x7f000001`) or short-form
+#      (`127.1`) is not recognised. Dotted forms — including octal/zero-padded ones — are; see
+#      _IP_HOST_RE. The integer forms are left out because harvesting every bare number under keys
+#      like `address` and `origin` would refuse ordinary traffic (`{"destination": "us-east-1"}` is
+#      already only safe because it is not number-shaped).
 _BARE_HOST_RE = re.compile(
     r"^(?P<rel>//)?"                             # optional protocol-relative prefix
     r"(?P<host>(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,24})"
+    r"(?P<root>\.)?"                             # optional FQDN root dot — same host, stripped below
     r"(?P<port>:\d{1,5})?"                       # optional port
     r"(?P<path>[/?#][^\s\"'<>\\]*)?$"            # optional path/query/fragment
 )
-_FILE_SUFFIXES = frozenset(
-    """txt pdf csv tsv json yaml yml xml html htm md log doc docx xls xlsx ppt pptx
-       png jpg jpeg gif svg webp ico bmp tiff mp3 mp4 wav avi webm
-       zip gz tar rar 7z bz2 xz
-       py js ts tsx jsx go rs java rb php sh bash sql rego conf cfg ini env
-       exe dll so dylib bin dat db sqlite bak tmp lock pem key crt cer""".split()
+# An IP literal is the most obvious way to write a schemeless destination and `_BARE_HOST_RE` can never
+# match one (it requires an alphabetic TLD), so `{"host": "203.0.113.5"}` and `{"host": "[2001:db8::1]"}`
+# derived nothing at all. Matched separately and normalised through `ipaddress`.
+#
+# The octets accept LEADING ZEROS on purpose. `{"host": "0177.0.0.1"}` is 127.0.0.1 to a glibc
+# resolver, and an IP-shaped value that this pattern does not match at all is published as NO
+# destination — which is the vacuous-`subsetOf` fail-open this whole module exists to close. Matching
+# the shape is what lets the value be REPORTED (see _parse_bare_destination); it is deliberately not
+# re-interpreted into a canonical quad, because octal and decimal readings disagree and inventing
+# either would put a claim in the input document that the call never made. Bounded at `0{0,8}` rather
+# than `0*`: the match is published verbatim, and an unbounded run of zeros would let one
+# attacker-supplied value grow the serialised input document without limit on a 2s budget.
+_IP_HOST_RE = re.compile(
+    r"^(?P<rel>//)?"
+    r"(?P<host>0{0,8}\d{1,3}(?:\.0{0,8}\d{1,3}){3}|\[[0-9A-Fa-f:.]{2,45}\])"
+    r"(?P<port>:\d{1,5})?"
+    r"(?P<path>[/?#][^\s\"'<>\\]*)?$"
 )
+# An UNBRACKETED IPv6 literal is how a `host` argument is normally written when it is not part of a
+# URL (`{"host": "2001:db8::1", "port": 443}`), and brackets-only left that deriving nothing. Pre-
+# filtered on characters and length so the confirming parse is only reached by something that could
+# be an address; `12:30` and a MAC address fail the parse and fall through.
+_IPV6_CHARS_RE = re.compile(r"^[0-9A-Fa-f:.]{2,45}$")
+# Argument names that ASSERT a network location. Matched as whole tokens against the key split on
+# non-alphanumerics and camelCase boundaries, so `webhook_url`, `targetHost` and `api_endpoint` match
+# while `target_file` and `zip_path` do not. Deliberately EXCLUDES the polysemous ones — `to`, `from`,
+# `target`, `path`, `file` — because `copy({"to": "b.txt"})` is ordinary traffic and harvesting `b.txt`
+# as a host is precisely the over-block this set exists to avoid. Measured against the 601 distinct
+# argument/key names this repo uses: 24 match, and none of them holds a filename.
+_DESTINATION_KEY_TOKENS = frozenset(
+    """host hosts hostname hostnames url urls uri uris endpoint endpoints domain domains fqdn netloc
+       webhook webhooks callback callbacks origin origins server servers destination destinations dest
+       upstream upstreams proxy proxies href link links redirect ip ips ipaddress addr address
+       addresses""".split()
+)
+# How consequential each verb is, used ONLY to decide which of two readings of the same call survives
+# when an admin's verb promotion and the payload's own evidence disagree (see _derived_input).
+# Mirrors capability.source_registry._ENFORCEMENT_ORDER deliberately rather than importing it: this is
+# a local tie-break over the four verbs the promotion write path already validates, and a private
+# ordering from another module is not something the enforcement point should depend on. If the two
+# ever diverge the consequence is bounded — a disagreeing promotion resolves the other way — so this
+# cannot silently become a hole, but keep them in step.
+_PROMOTION_RANK = {"unknown": -1, "read": 0, "write": 1, "send": 3, "delete": 4}
+_KEY_CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_KEY_SPLIT_RE = re.compile(r"[^A-Za-z0-9]+")
+# The first structural segment of a caller-supplied key — everything before the first `.`, `[` or `]`.
+_PATH_HEAD_RE = re.compile(r"[.\[\]]")
+
+
+def _key_names_a_destination(key: str) -> bool:
+    """True when the ARGUMENT NAME itself asserts a network location (see _DESTINATION_KEY_TOKENS)."""
+    if not key:
+        return False
+    spaced = _KEY_CAMEL_RE.sub(" ", key)
+    return any(t.lower() in _DESTINATION_KEY_TOKENS for t in _KEY_SPLIT_RE.split(spaced) if t)
+
+
+def _parse_bare_destination(value: str) -> tuple[str, bool] | None:
+    """`(normalised host, carries a destination MARKER)` for a schemeless destination, else None.
+
+    The MARKER — `//`, a port, or a path/query/fragment — is what no filename carries, so it decides on
+    its own. Without one the caller must supply the other half of the signal (a destination-shaped key);
+    see the _BARE_HOST_RE comment for why shape alone is not a signal in either direction.
+    """
+    candidate = value.strip()
+    if not candidate:
+        return None
+    literal = _IP_HOST_RE.match(candidate)
+    if literal:
+        text = literal.group("host")
+        inner = text[1:-1] if text.startswith("[") else text
+        marked = bool(literal.group("rel") or literal.group("port") or literal.group("path"))
+        try:
+            return str(ipaddress.ip_address(inner)).lower(), marked
+        except ValueError:
+            # IP-SHAPED and not a parseable address: `0177.0.0.1` (octal, and 127.0.0.1 to a glibc
+            # resolver), `203.000.113.005`, `999.1.1.1`. DROPPING these was a fail-open of exactly the
+            # kind this module is about — the value was published as no destination at all, so
+            # `destinations.hosts subsetOf [...]` counted over an empty list and went vacuously TRUE
+            # for a call whose own `host` argument named somewhere else. The literal is republished
+            # VERBATIM rather than re-interpreted, because the octal and decimal readings of
+            # `0177.0.0.1` disagree and asserting either would be a claim the call never made. A
+            # verbatim literal is in nobody's allowlist, so the constraint fails CLOSED, which is the
+            # only honest spelling of "this names a network location and I could not resolve it".
+            # Still gated by the key/marker rule below the caller, so a version quad in free text is
+            # untouched. Not logged: fully attacker-controlled and reached once per string in every
+            # call, and per-call log spam on a 2s budget is its own denial of service.
+            return inner.lower(), marked
+    if ":" in candidate and _IPV6_CHARS_RE.match(candidate):
+        with contextlib.suppress(ValueError):
+            return str(ipaddress.ip_address(candidate)).lower(), False
+    match = _BARE_HOST_RE.match(candidate)
+    if not match:
+        return None
+    # The root dot is stripped, not treated as a marker: `norviq.custom.` is a package prefix, not a host.
+    host = match.group("host").lower()
+    return host, bool(match.group("rel") or match.group("port") or match.group("path"))
+
+
+def _mints_a_path(key: str, siblings: dict) -> bool:
+    """True when this caller-supplied KEY can assert a path some OTHER route also reaches.
+
+    Path syntax in a key is not by itself a lie. `{"attributes": {"http.method": "GET"}}` (OpenTelemetry)
+    and `{"filter[status]": "open"}` (JSON:API) are ordinary arguments, and treating their shape as
+    forgery made `param_paths.attributes.http.method` — the exact path the operator saw in a dry-run —
+    permanently unscopable: the derived value satisfied the pinned predicate and the rule could never
+    match, for any such call.
+
+    What makes a minted key dangerous is a SECOND ROUTE to the same path carrying a different value:
+
+        {"message": {"toRecipients": [{"emailAddress": {"address": "collector@attacker.example"}}]},
+         "message.toRecipients[0].emailAddress.address": "ops@acme.com"}
+
+    Any honest route to a path under this object must begin with a key OF THIS OBJECT, so the second
+    route exists exactly when the key's first structural segment is also a sibling key — an O(1) test
+    that is precise rather than shape-based. It catches what the collision check at the leaf cannot: a
+    minted `a.b` shadowing an honest `a.b[0]`, or an honest sibling whose leaf is a non-string (and so
+    is never emitted as a path at all).
+
+    A ZERO-LENGTH key is always minting. `{"": {"to": "ops@acme.com"}}` emits its children at the
+    PARENT's level — `to`, not `.to` — so it forges a top-level path using none of `.`, `[` or `]`, and
+    a rule pinned on `to` was answered by a value the tool never received under that name.
+    """
+    if key == "":
+        return True
+    head = _PATH_HEAD_RE.split(key, 1)[0]
+    if head == key:
+        return False                # no path syntax in the key: it can only name itself
+    return head in siblings
+
+
+def _fold_path(path: str) -> str:
+    """The form in which two derived paths are INDISTINGUISHABLE to whoever reads them.
+
+    Two keys that render identically (`café` composed vs decomposed, a Cyrillic `о` inside an otherwise
+    Latin name, `To` beside `to` on a layer that case-folds) are two paths the console shows as one and
+    the compiled rule label spells one way. Folded only for COLLISION DETECTION — `param_paths` still
+    carries the verbatim keys, because an operator scopes against the path they saw.
+    """
+    return path.casefold() if path.isascii() else skeleton(path)
 # Credential SHAPES, complementing masking's key-name list. Value-shape detection is what the
 # key-name list cannot do: a bare AWS key pair sitting in a free-text `body` has a perfectly
 # innocuous key. §11.5 recorded exactly that call being allowed on a live cluster.
@@ -789,24 +980,57 @@ class OPAEvaluator:
         # SECURITY: classification keys on the tool NAME, which the agent side controls, so
         # `allow { verb == "unknown" }` is a universal bypass for anything named unrecognisably.
         # Escalate (human review) is the intended handling; see the shipped template.
-        # A PROMOTED verb is an admin's explicit, evidence-backed decision about what this tool does,
-        # so it outranks the name/param classifier — which by construction returned UNKNOWN for anything
-        # that reached the promotion queue in the first place. Without this the promotion is
-        # console-only: the Threats screen shows the tool as `delete`, and a verb-gated policy still
-        # sees `unknown`, so promoting looks effective and changes nothing.
+        # A PROMOTED verb is an admin's explicit, evidence-backed decision about what this tool does.
+        # Without it the promotion is console-only: the Threats screen shows the tool as `delete`, and a
+        # verb-gated policy still sees `unknown`, so promoting looks effective and changes nothing.
+        #
+        # IT MAY ONLY FILL IN AN UNKNOWN, NEVER CONTRADICT A CLASSIFICATION. The comment below used to
+        # say the classifier "by construction returned UNKNOWN for anything that reached the promotion
+        # queue in the first place" — true of the queue LISTING (threats.py skips tools classify_tool
+        # resolves) but not of the write path, which validated only that the verb was one of
+        # read/write/delete/send. So one POST could promote `slack_post_message` to `read`, and the
+        # classified sink stopped being a sink: derived.verb == "read" satisfied `learned_read` and
+        # falsified `is_egress` at the same time, and an AWS key went out through both baseline policies
+        # as ("allow","default_allow") — the exact bypass this input was published to close, restored by
+        # an admin action that reads like a labelling correction.
+        #
+        # So the classifier runs FIRST and wins whenever it is confident. The stated worst case now
+        # actually holds: a promotion can only move a tool off `unknown`, never invent a verb that
+        # grants access a classified tool would not have had. A promotion that contradicts the
+        # classifier is ignored here rather than applied — an operator who believes the classifier is
+        # wrong needs the classifier changed, not an override that silently weakens enforcement.
+        #
         # getattr-guarded on BOTH sides: if the override map is not initialised, or the event carries no
         # identity, fall through to the classifier rather than raising. Degrading to classification is the
         # safe direction — the worst case is the pre-existing behaviour (an `unknown` verb, which a
-        # deny-by-default policy denies), never an invented verb that could grant access.
+        # deny-by-default policy denies).
         overrides = getattr(self, "_verb_overrides", None) or {}
         identity = getattr(event, "agent_identity", None)
         namespace = getattr(identity, "namespace", "") if identity is not None else ""
+        verb, _risk = classify_tool(event.tool_name, event.tool_params)
+        verb_value = verb.value
         promoted = overrides.get((namespace, event.tool_name))
         if promoted:
-            verb_value = promoted
-        else:
-            verb, _risk = classify_tool(event.tool_name, event.tool_params)
-            verb_value = verb.value
+            # WHICH classification the promotion may not contradict is the NAME's, and testing
+            # `verb_value == "unknown"` was the wrong test for it. `classify_tool` falls back to
+            # inspecting TOOL_PARAMS when the name matches nothing, and tool_params is agent-supplied:
+            # `acme_widget` promoted to `delete` came back as `read` the moment the caller added
+            # `{"query": "select 1 from orders"}`, because the payload had then "classified" it and
+            # the promotion was discarded. Measured. The promotion queue only ever offers tools whose
+            # NAME did not resolve, so that is every promoted tool — one attacker-chosen argument
+            # cancelled the admin's decision, in the weakening direction, which is the same defect as
+            # the demotion this branch exists to stop.
+            name_verb, _name_risk = classify_tool(event.tool_name)
+            if name_verb.value == "unknown":
+                # Name says nothing. The admin's promotion and the payload's own evidence are then two
+                # readings of the same call and NEITHER may erase the other, so the more consequential
+                # one is published: a `read` promotion cannot bury a DROP in the arguments, and a
+                # `select` in the arguments cannot bury a `delete` promotion.
+                verb_value = max((verb_value, promoted), key=lambda v: _PROMOTION_RANK.get(v, -1))
+            # Name resolved: the classifier wins outright, whichever direction the promotion points.
+            # Deliberately NOT max()-ed here — `milvus_search` promoted to `send` must stay `read`, or
+            # a promotion becomes a way to move a tool INTO an egress refinement it has nothing to do
+            # with. See test_a_promotion_cannot_demote_a_classified_tool_in_any_direction.
         return {
             # Risk is deliberately NOT exposed: it is a JUDGEMENT that shifts as the registry is
             # updated, so a policy pinned to it could change behaviour on an upgrade without the
@@ -835,16 +1059,19 @@ class OPAEvaluator:
             # Paths use dots for object keys and [i] for list indices: {"filters": {"ids": ["C-91"]}}
             # yields "filters.ids[0]".
             "param_paths": paths,
-            # Paths a caller could have MINTED — a key containing `.`/`[`/`]` forges nesting, and two
-            # routes reaching one path leave the winner to dict ordering. Published so a compiled
-            # constraint can refuse to hold over a path it cannot trust, instead of reading the
-            # attacker's chosen value as compliant. Empty on every honest call.
+            # Paths whose value cannot be trusted to describe one unambiguous position in the payload:
+            # a caller-minted key that another route also reaches, a zero-length key emitting its
+            # children at the parent's level, two keys that render identically, and a value the walk
+            # only read a PREFIX of. Published so a compiled constraint can refuse to hold over a path
+            # it cannot trust, instead of reading the attacker's chosen value as compliant. Empty on an
+            # honest call — including the ones with dotted or bracketed argument names, which is why
+            # the mint test is aliasing rather than shape (see _mints_a_path).
             "param_paths_ambiguous": ambiguous_paths,
             # Egress targets, extracted once here rather than re-regexed inside every policy. Under
             # deny-by-default the destination IS the control: "may email acme.com" needs no detector
             # for what is being sent, which is the gap a detector list can never close (§11.5 — the
             # strict preset blocked a card number and let a real AWS key through to an attacker).
-            "destinations": self._destinations(values),
+            "destinations": self._destinations(values, self._destination_keyed_hosts(event.tool_params)),
             # Classes of sensitive data carried by the REQUEST. Output DLP already masks responses;
             # nothing classified the outbound direction, so "this call must not carry a secret" was
             # unexpressible. Reuses the masking module's patterns rather than forking a second set.
@@ -889,6 +1116,19 @@ class OPAEvaluator:
         the policy. What changes is that a forged or colliding path is NAMED, so the compiler can
         refuse to let a constraint over it hold. Deriving nothing and deriving a lie must not be
         spelled the same way as deriving a compliant value.
+
+        FOUR THINGS ARE NAMED, and each of them is a way the map could otherwise assert something the
+        payload does not hold:
+          * a minted key that ALIASES another route to the same path (_mints_a_path — note that a
+            dotted or bracketed key with no such route is ORDINARY and is not named, or an OTel
+            `http.method` attribute would be unscopable);
+          * a zero-length key, which emits its children at the parent's own level (_mints_a_path);
+          * two routes arriving at one path with different values, whoever looked suspicious;
+          * a path the walk only read a PREFIX of — a key clipped at _MAX_PATH_KEY_LEN or a value
+            clipped at _MAX_PATH_VALUE_LEN. `{"body": "A"*4096 + " the password is hunter2"}` published
+            4096 clean characters, and `notMatches "(?i)password"` held over them while the tool
+            received the whole string. A truncated read is "I could not derive this fact" wearing the
+            costume of "the fact is compliant", which is the one thing this map must never do.
         """
         out: dict[str, str] = {}
         # Paths whose value cannot be trusted to describe one unambiguous position in the payload.
@@ -902,11 +1142,16 @@ class OPAEvaluator:
                     if len(out) >= self._MAX_PATHS:
                         return
                     text = str(key)
-                    # A key carrying path syntax is self-forging: everything beneath it inherits the
-                    # doubt, because the caller — not the structure — chose where the boundary falls.
-                    child_forged = forged or ("." in text) or ("[" in text) or ("]" in text)
+                    # A key that can assert a path some other route also reaches is self-forging:
+                    # everything beneath it inherits the doubt, because the caller — not the structure
+                    # — chose where the boundary falls.
+                    child_forged = forged or _mints_a_path(text, value)
                     child_prefix = f"{prefix}.{text}" if prefix else text
-                    walk(child, child_prefix[: self._MAX_PATH_KEY_LEN], depth + 1, child_forged)
+                    # A key clipped by the length cap names a position that is not the one it came
+                    # from, and two long keys sharing a prefix land on ONE path: same lie, different
+                    # cause, so it carries the same doubt.
+                    walk(child, child_prefix[: self._MAX_PATH_KEY_LEN], depth + 1,
+                         child_forged or len(child_prefix) > self._MAX_PATH_KEY_LEN)
                 return
             if isinstance(value, (list, tuple)):
                 for index, child in enumerate(value):
@@ -915,46 +1160,118 @@ class OPAEvaluator:
                     walk(child, f"{prefix}[{index}]", depth + 1, forged)
                 return
             if isinstance(value, str) and prefix:
+                clipped = value[: self._MAX_PATH_VALUE_LEN]
                 # A second arrival at one path means two different routes produced it — the collision
                 # itself, regardless of which key looked suspicious.
-                if prefix in out and out[prefix] != value[: self._MAX_PATH_VALUE_LEN]:
+                if prefix in out and out[prefix] != clipped:
                     ambiguous.add(prefix)
-                if forged:
+                if forged or len(value) > self._MAX_PATH_VALUE_LEN:
                     ambiguous.add(prefix)
-                out[prefix] = value[: self._MAX_PATH_VALUE_LEN]
+                out[prefix] = clipped
 
         walk(node, "", 0, False)
+        # Paths that RENDER identically are one path to everyone who reads them — the console, the
+        # compiled rule label, the near-miss explainer — so a rule pinned on the visible spelling is
+        # answered by whichever twin the caller ordered last. Raw string comparison cannot see it:
+        # NFC and NFD "café" are different dict keys. Both twins are named; neither is rewritten.
+        folded: dict[str, str] = {}
+        for path in out:
+            key = _fold_path(path)
+            twin = folded.setdefault(key, path)
+            if twin != path:
+                ambiguous.add(path)
+                ambiguous.add(twin)
         return out, sorted(ambiguous)
 
-    def _destinations(self, values: list) -> dict:
+    def _destination_keyed_hosts(self, node: object) -> set[str]:
+        """NORMALISED hosts sitting under a key that NAMES a network location.
+
+        The key is the half of the signal the value cannot carry (see the _BARE_HOST_RE comment), and
+        `_destinations` only sees a flat list of values, so the association has to be made here.
+
+        BOUNDED ON THE NORMALISED HOST, NOT THE RAW VALUE, and that distinction is the whole
+        difference between a bound and a starvation primitive. Collecting raw strings meant 64 SPELLINGS
+        of one already-allowlisted host — `API.acme.com`, `Api.acme.com`, `api.acme.com.`, all of which
+        collapse to a single entry in the output — filled the budget, the walk stopped BEFORE reaching
+        `{"host": "evil.example"}`, and `destinations.hosts` came back as exactly `["api.acme.com"]`:
+        a correctly authored `subsetOf` allowlist passed and the call to the attacker's host was
+        allowed. Measured. It is the same eviction that made the first bare-host change net-negative,
+        arriving through a new door, so the budget now counts what actually reaches the output — an
+        alias costs nothing because it adds nothing.
+
+        Filling the budget for real therefore means 64 DISTINCT hosts, which fills `hosts` and fails a
+        `subsetOf` CLOSED unless every one of the 64 is itself allowlisted. Depth is capped like every
+        other walk here.
+        """
+        found: set[str] = set()
+
+        def walk(value: object, key: str, depth: int) -> None:
+            if depth > self._MAX_PATH_DEPTH or len(found) >= self._MAX_DESTINATIONS:
+                return
+            if isinstance(value, dict):
+                for child_key, child in value.items():
+                    walk(child, str(child_key), depth + 1)
+                    if len(found) >= self._MAX_DESTINATIONS:
+                        return
+                return
+            if isinstance(value, (list, tuple)):
+                for child in value:
+                    # A list inherits the key that held it: {"endpoints": ["a.example", "b.example"]}.
+                    # A nested DICT does not: its own keys are the ones that describe its values, so
+                    # `{"webhook": {"url": "evil.example"}}` is harvested via `url` while
+                    # `{"webhook": {"v": "evil.example"}}` is the stated residual below.
+                    walk(child, key, depth + 1)
+                    if len(found) >= self._MAX_DESTINATIONS:
+                        return
+                return
+            if isinstance(value, str) and _key_names_a_destination(key):
+                candidate = value.strip()
+                if len(candidate) > self._MAX_PATH_VALUE_LEN:
+                    return
+                parsed = _parse_bare_destination(candidate)
+                if parsed:
+                    found.add(parsed[0])
+
+        walk(node, "", 0)
+        return found
+
+    def _destinations(self, values: list, dest_keyed: set[str] | frozenset[str] = frozenset()) -> dict:
         """Emails, URLs, hosts and schemes found anywhere in the params.
 
         Reported as sorted, de-duplicated lists so a policy can use set operations (`subsetOf`)
         without caring about ordering or repetition.
+
+        `dest_keyed` carries the NORMALISED hosts that sat under a destination-shaped argument name
+        (_destination_keyed_hosts); a schemeless value with no marker of its own is harvested only if
+        its host is in there. Matching on the normalised host rather than the raw string adds no host
+        that the destination-keyed occurrence would not have contributed by itself — the same value is
+        in `values` — while making the budget on the other side count hosts instead of spellings.
+        Defaults to empty, so a caller that passes bare values gets the marker rule alone rather than
+        the shape-only harvest that was measured at 0% precision.
         """
         emails: set[str] = set()
         urls: set[str] = set()
         hosts: set[str] = set()
         schemes: set[str] = set()
         for raw in values:
-            for match in _EMAIL_RE.findall(raw):
-                emails.add(match.lower())
+            emails.update(_emails(raw))
             for match in _URL_RE.findall(raw):
                 urls.add(match)
                 parsed = urlsplit(match)
                 if parsed.scheme:
                     schemes.add(parsed.scheme.lower())
                 if parsed.hostname:
-                    hosts.add(parsed.hostname.lower())
+                    # `api.acme.com.` and `api.acme.com` are one host; an allowlist naming the second
+                    # must not be sidestepped — or refused — by the root dot.
+                    hosts.add(parsed.hostname.lower().rstrip("."))
             # A schemeless destination is still a destination. Only the HOST is recorded — not a url
             # and not a scheme — because that is all the value actually asserts: inventing
             # `https://evil.example/collect` from `evil.example/collect` would put a claim in the
             # input document that the call never made, and `destinations.schemes` is used to reason
             # about the protocol, which a schemeless value leaves genuinely unknown.
-            bare = _BARE_HOST_RE.match(raw.strip())
+            bare = _parse_bare_destination(raw)
             if bare:
-                host = bare.group("host").lower()
-                marked = bool(bare.group("rel") or bare.group("port") or bare.group("path"))
+                host, marked = bare
                 # Bounded WITHOUT joining the break budget below. Counting harvested hosts toward the
                 # stop condition made this change net-negative: 80 benign dotted strings
                 # ("svc0.internal.example", …) filled the budget, the walk stopped BEFORE reaching the
@@ -964,7 +1281,7 @@ class OPAEvaluator:
                 # URL; padded, both lists are [].
                 #
                 # A cheap harvest must never be able to evict the expensive, high-signal findings.
-                if (marked or host.rsplit(".", 1)[-1] not in _FILE_SUFFIXES) and len(hosts) < self._MAX_DESTINATIONS:
+                if (marked or host in dest_keyed) and len(hosts) < self._MAX_DESTINATIONS:
                     hosts.add(host)
             # UNCHANGED from before bare-host extraction: only emails and urls stop the walk.
             if len(emails) + len(urls) > self._MAX_DESTINATIONS:

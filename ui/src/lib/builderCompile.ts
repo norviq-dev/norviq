@@ -40,6 +40,7 @@ import type {
   BuilderNumericFactField,
   BuilderParamConstraint,
   BuilderConditionParamRegex,
+  BuilderConditionScalarFact,
   BuilderDetector,
   BuilderGrantFact,
   BuilderGraph,
@@ -1226,6 +1227,12 @@ export function scalarFieldExpr(field: string): string {
     // Guarded on the ROOT only: `param_paths` itself is bare (so an old engine leaves it undefined and
     // the capability guard fires), while the individual path is object.get'd because a call simply not
     // carrying that argument is ordinary, not a version problem.
+    //
+    // THE `""` DEFAULT IS NOT SAFE ON ITS OWN and this function must never be used alone. It reports
+    // "the engine derived nothing here" with the same value it would report for an empty string, which
+    // a negated comparison then reads as compliance. Every caller pairs it with `paramPathGuards()`
+    // through `withGuards()` — including the `not` case in `compileConditionLine`, which has to
+    // re-hoist the guards so the negation cannot invert them (see the comment there).
     return `object.get(input.derived.param_paths, ${JSON.stringify(path)}, "")`;
   }
   return SCALAR_FIELD_EXPR[field] ?? "";
@@ -1290,7 +1297,53 @@ function engineCapabilityGuards(graph: BuilderGraph): string {
   return bodies.join("\n\n");
 }
 
-function compileConditionLine(cond: BuilderCondition, paramRegexIndices: Map<BuilderCondition, number>): string {
+/**
+ * The BARE predicate for a scalar fact — the comparison itself, with no derivability guard folded in.
+ *
+ * Split out from `compileConditionLine` because the guard's PLACEMENT relative to a `not` decides
+ * whether it protects anything (see the `not` case below): the caller has to be able to negate the
+ * predicate and then wrap the guards around the result, which is impossible once the two are already
+ * fused into one `count(...) == 1`.
+ */
+function scalarFactPredicate(cond: BuilderConditionScalarFact): string {
+  const expr = scalarFieldExpr(cond.field);
+  switch (cond.op) {
+    case "equals":
+      return `${expr} == ${JSON.stringify(cond.value ?? "")}`;
+    case "in":
+      // Set-literal membership. Free against the 25-regex-op budget, unlike a matches alternation.
+      return `${jsonSet(normalizeFactValues(cond.values))}[${expr}]`;
+    case "matches":
+      return `regex.match(${JSON.stringify(cond.value ?? "")}, ${expr})`;
+    case "notMatches":
+      return `not regex.match(${JSON.stringify(cond.value ?? "")}, ${expr})`;
+  }
+  return "";
+}
+
+/**
+ * WHAT A CLAUSE HOLDING MEANS AT THE SITE THAT EMITS IT — the only thing that decides which way a
+ * `param_paths` guard must fail.
+ *
+ * The same condition text is compiled into two structurally opposite places:
+ *
+ *   "allow" — a `_grant_ok` body (allowlist mode). The body is a conjunction that must HOLD for the
+ *             call to be permitted, under a default of block. A clause that cannot be answered must
+ *             therefore be FALSE, so the allow is withheld.
+ *   "deny"  — a `blocks[...]` / `escalates[...]` / `audits[...]` body (rules mode). The body is a
+ *             conjunction that must HOLD for the call to be REFUSED, under a default of allow. A
+ *             clause that cannot be answered must therefore be TRUE, so the block still fires.
+ *
+ * These are opposites, and no single expression satisfies both — which is exactly how a fix aimed at
+ * one site silently opened a hole at the other. See the `not` case below for the measured decisions.
+ */
+type ClauseHolding = "allow" | "deny";
+
+function compileConditionLine(
+  cond: BuilderCondition,
+  paramRegexIndices: Map<BuilderCondition, number>,
+  holding: ClauseHolding
+): string {
   switch (cond.type) {
     case "detector":
       return DETECTOR_PREDICATE[cond.detector];
@@ -1321,24 +1374,10 @@ function compileConditionLine(cond: BuilderCondition, paramRegexIndices: Map<Bui
       const idx = paramRegexIndices.get(cond) ?? 0;
       return `bld_paramregex_${idx}`;
     }
-    case "scalarFact": {
-      const expr = scalarFieldExpr(cond.field);
+    case "scalarFact":
       // EVERY operator over a param_paths field, not just the negated ones. A positive operator over
       // a forged path is equally wrong — it reads the attacker's chosen value and reports compliance.
-      const guards = paramPathGuards(cond.field);
-      switch (cond.op) {
-        case "equals":
-          return withGuards(`${expr} == ${JSON.stringify(cond.value ?? "")}`, guards);
-        case "in":
-          // Set-literal membership. Free against the 25-regex-op budget, unlike a matches alternation.
-          return withGuards(`${jsonSet(normalizeFactValues(cond.values))}[${expr}]`, guards);
-        case "matches":
-          return withGuards(`regex.match(${JSON.stringify(cond.value ?? "")}, ${expr})`, guards);
-        case "notMatches":
-          return withGuards(`not regex.match(${JSON.stringify(cond.value ?? "")}, ${expr})`, guards);
-      }
-      return "";
-    }
+      return withGuards(scalarFactPredicate(cond), paramPathGuards(cond.field));
     case "collectionFact": {
       const expr = COLLECTION_FIELD_EXPR[cond.field];
       const values = normalizeFactValues(cond.values);
@@ -1362,7 +1401,47 @@ function compileConditionLine(cond: BuilderCondition, paramRegexIndices: Map<Bui
         ? `${expr} <= ${JSON.stringify(cond.value)}`
         : `${expr} >= ${JSON.stringify(cond.value)}`;
     }
-    case "not":
+    case "not": {
+      // THE GUARD HAS TO SIT OUTSIDE THE NEGATION, or it becomes the bypass it exists to close.
+      //
+      // `withGuards` folds the guards and the predicate into one `count([1 | guards; pred]) == 1`. That
+      // expression is FALSE — not undefined — whenever a guard fails, which is exactly right while it
+      // stands alone: an underivable or forged path cannot satisfy the clause, so a grant withholds its
+      // allow. Prefix it with `not`, however, and the same falsity INVERTS into "clause satisfied":
+      // `not count([...]) == 1` is TRUE precisely when the path could not be read or was minted by the
+      // caller. Measured against real opa, grant fact `NOT (param_paths.columns matches "^ssn$")` on an
+      // allowlisted `read_table`: honest call allow (correct), `columns` in `param_paths_ambiguous`
+      // ALLOW, `columns` never derived at all ALLOW. Both should deny — a caller who makes the path
+      // unreadable satisfied the grant by making it unreadable. This is the same fail-open the four
+      // scalar operators were fixed for; `not` is a legal grant-fact shape (BuilderGrantFact admits a
+      // `not` wrapper around any plain fact) and it reached the same predicate by a different route.
+      //
+      // So for a `not`-wrapped scalar fact the guards are re-hoisted: negate the BARE predicate, then
+      // wrap the guards around that. `count([1 | guards; not pred]) == 1` — false when the path is not
+      // trustworthy, whichever way the operator wrote the comparison.
+      //
+      // ...AND ONLY WHERE A HOLDING CLAUSE MEANS "ALLOW". Hoisting is the fail-CLOSED shape for a grant
+      // body and the fail-OPEN shape for a block rule, because the two sites read the same falsity in
+      // opposite directions (see `ClauseHolding`). Applied unconditionally it fixed the grant bypass and
+      // opened a new one in rules mode. Measured against real opa, tighten-only graph, block rule
+      // `NOT (param_paths.url matches "^https://internal\\.")` — "refuse any call whose url is not
+      // internal":
+      //
+      //     forged: `url` listed in param_paths_ambiguous   hoisted ALLOW   un-hoisted block
+      //     never derived: caller sent {"url": {"href": …}}  hoisted ALLOW   un-hoisted block
+      //     honest internal / honest external                allow / block   allow / block  (agree)
+      //
+      // The forged row is the one that matters: `param_paths_ambiguous` is populated from the CALLER's
+      // own argument keys, so a caller who wants out of that block rule only has to send an argument key
+      // containing `.`/`[`/`]` and the guard he tripped becomes his acquittal. Under "deny" holding the
+      // guarded predicate keeps its `not` on the OUTSIDE — `not count([1 | guards; pred]) == 1` — which
+      // is true whenever the path is underivable or forged, so the block fires and the untrustworthy
+      // call is refused. That is the pre-existing shape; it is restored here rather than invented.
+      const inner = cond.inner;
+      if (holding === "allow" && inner.type === "scalarFact") {
+        const guards = paramPathGuards(inner.field);
+        if (guards.length > 0) return withGuards(`not ${scalarFactPredicate(inner)}`, guards);
+      }
       // Every other condition type emits as a single bare rego expression (a predicate reference, a set
       // membership test, or a comparison) — prefixing it with `not ` is always a valid negation. Nesting
       // (not-of-not) is rejected at validate time (`not_double_negation`); if it slips through here
@@ -1370,7 +1449,8 @@ function compileConditionLine(cond: BuilderCondition, paramRegexIndices: Map<Bui
       // see compileGraph), the recursion just produces a syntactically-odd-but-non-crashing `not not
       // ...` line in rego that is DISCARDED because compileGraph blanks `rego` whenever errors is
       // non-empty.
-      return `not ${compileConditionLine(cond.inner, paramRegexIndices)}`;
+      return `not ${compileConditionLine(cond.inner, paramRegexIndices, holding)}`;
+    }
     default: {
       const _exhaustive: never = cond;
       return _exhaustive;
@@ -1470,10 +1550,28 @@ function sourceVerbBlock(source: CapabilitySourceKey, verb: CapabilityVerb): str
  * rule read "block when `body` mentions a password" and did not block `{"body": {"content": "…
  * password …"}}`.
  *
- * The second body walks the value, so any string ANYWHERE beneath the named parameter can trigger it.
+ * The body walks the value, so any string ANYWHERE beneath the named parameter can trigger it.
  * Widening a BLOCK is always safe in the fail-closed direction — the worst case is a call refused
  * that a narrower reading would have permitted, which is the error this product prefers to make.
- * (The allowlist-mode accessors are the mirror image and are fixed in `constraintExpr`.)
+ *
+ * WHAT THE MIRROR IMAGE ACTUALLY COVERS, because an earlier version of this comment overclaimed it
+ * ("the allowlist-mode accessors are the mirror image and are fixed in `constraintExpr`") and a
+ * reader took that as coverage of every allowlist-mode clause over a named argument. There are
+ * THREE such clauses, not one, and they are fixed in three different places:
+ *
+ *   1. this predicate                  — rules mode, `paramRegex` over `input.tool_params[<arg>]`;
+ *   2. `constraintExpr`                — allowlist mode, a per-field CONSTRAINT, also over
+ *                                        `input.tool_params[<arg>]`; the negated kinds walk (above);
+ *   3. `compileConditionLine`'s        — either mode, a `param_paths.<arg>` scalar FACT, over the
+ *      `scalarFact` / `not` cases        ENGINE's flattened `input.derived.param_paths`.
+ *
+ * (3) does NOT walk and cannot: `param_paths` is already flattened, so `param_paths.body` names one
+ * derived key and `{"body": {"content": "…"}}` derives `body.content` instead — a DIFFERENT key. It
+ * is guarded rather than widened (`paramPathGuards`), which under allowlist mode's deny-by-default
+ * withholds the allow. In RULES mode, where a clause holding is what fires the block, that same guard
+ * makes an unreadable path fail to trigger — so a rules-mode block over `param_paths.<arg>` still does
+ * not see a nested or list-shaped argument. `paramRegex` (1) is the condition type that does; the
+ * builder offers both, and this is the difference between them.
  */
 function paramRegexBlock(index: number, cond: BuilderConditionParamRegex): string {
   const field = JSON.stringify(cond.field);
@@ -1531,7 +1629,8 @@ function buildBody(graph: BuilderGraph, targetNamespace: string): string {
     const setName = DECISION_SET[rule.decision];
     const rowBlocks = rule.conditions.map((row) => {
       const lines = [`${setName}[${JSON.stringify(rule.ruleId)}] {`, `    ${guardLine}`];
-      row.forEach((cond) => lines.push(`    ${compileConditionLine(cond, paramRegexIndices)}`));
+      // "deny": this body holding is what REFUSES the call, so an unanswerable clause must still fire.
+      row.forEach((cond) => lines.push(`    ${compileConditionLine(cond, paramRegexIndices, "deny")}`));
       lines.push(`}`);
       return lines.join("\n");
     });
@@ -1705,21 +1804,76 @@ function constraintExpr(c: BuilderParamConstraint): string {
     case "matches":
       return `    regex.match(${JSON.stringify(c.pattern)}, _p_str(${f}))`;
     case "notMatches":
-      // `_has_str` FIRST, and it is load-bearing. `_p_str` returns a " " sentinel for an absent
-      // or wrong-typed param; that sentinel can never satisfy a POSITIVE constraint, which is what
-      // the accessor was designed for — but under `not` it inverts into "constraint satisfied".
-      // Measured: a grant of `notMatches columns "(?i)(card_number|ssn)"` ALLOWED
-      // `{"columns": ["card_number", "ssn"]}` while blocking the string `"card_number, ssn"`. The
-      // UI's own placeholder for this kind advertises the column-list shape, so the vacuous case was
-      // the advertised one.
-      // Requiring a real string also honours the promise the panel makes in words — "A parameter
-      // that isn't supplied fails its line" — which was true for every kind except the negated ones.
-      return `    _has_str(${f})\n    not regex.match(${JSON.stringify(c.pattern)}, _p_str(${f}))`;
+      // PRESENCE, then a scan of every string BENEATH the parameter — not `_has_str` + `_p_str`.
+      //
+      // The bug this closes first: `_p_str` returns a never-matching sentinel for an absent or
+      // wrong-typed param, which can never satisfy a POSITIVE constraint (right, by design) but under
+      // `not` inverts into "constraint satisfied". Measured, `notMatches columns
+      // "(?i)(card_number|ssn)"` ALLOWED `{"columns": ["card_number","ssn"]}` while blocking the
+      // string `"card_number, ssn"` — and the column-list shape is the one this kind's own
+      // placeholder advertises, so the vacuous case was the advertised one.
+      //
+      // The FIRST repair was `_has_str(f)` — require a TOP-LEVEL STRING. That closed the bypass by
+      // making the clause unsatisfiable for every non-string, which is a different defect: measured
+      // against real opa, `body: {"user":"alice"}`, `body: ["a","b"]` and `body: 42` all went
+      // allow -> BLOCK. For any argument a tool takes as an object or a list, a `notMatches` grant
+      // then denied the tool 100% of the time whatever it carried. A permanently-unsatisfiable clause
+      // is not enforcement; it is an outage that reads like a policy.
+      //
+      // So: `_present` keeps the promise the panel makes in words ("A parameter that isn't supplied
+      // fails its line"), and the walk answers the CONTENT question the operator actually asked. Any
+      // scalar VALUE at any depth beneath the parameter can violate it — which is what made the array
+      // and nested forms evasions in the first place — while a value carrying no scalar at all carries
+      // no forbidden text either, and is allowed. This is the exact mirror of `paramRegexBlock`'s walk
+      // in rules mode: the two shapes of the same question now read the payload the same way.
+      //
+      // WHAT THE WALK STILL DOES NOT SEE, stated because "anywhere beneath the parameter" reads like a
+      // completeness claim and is not one: object KEYS. `walk` yields keys in the PATH, not the value,
+      // so `{"columns": {"ssn": 1}}` does not violate `notMatches columns "(?i)ssn"` even though the
+      // payload plainly names the column — measured. That is a pre-existing, product-wide reading of a
+      // parameter, shared verbatim with `paramRegexBlock`'s rules-mode walk (`[_, leaf]`, `is_string`),
+      // so the two modes still agree; it is NOT something this repair narrowed. It is deliberately left
+      // alone rather than widened here: matching keys needs a second `regex.match` per row (breaking
+      // `constraintCostsRegexOp`'s one-op-per-row promise against the server's 25-op cap) and it widens
+      // a DENY on every policy already deployed. `bld_kw_hit_params` is the condition that does read
+      // parameter names, at any depth, and is the answer for an operator who needs that.
+      //
+      // INLINE, not a shared helper rule, and that is a budget decision rather than a style one:
+      // `computeStats().regexOps` counts `regex.*` occurrences in the emitted text against the
+      // server's 25-op cap, and `constraintCostsRegexOp` promises the operator ONE op per `notMatches`
+      // row. A helper carrying the `regex.match` would charge the policy once no matter how many rows
+      // used it (under-counting the cap) while charging every grant policy that has no `notMatches` row
+      // at all (regexCost.test.ts catches exactly this). Inlining keeps one emitted `regex.match` per
+      // authored clause, so the hint and the cap both stay honest.
+      //
+      // `_leaf_text`, NOT `is_string(leaf)`. A walk that only looks at STRING leaves reopens the same
+      // evasion one type-cast away: measured, `notMatches body "4[0-9]{6}"` blocked `body: "4111111"`
+      // and ALLOWED `body: 4111111` — the identical digits, sent as a JSON number, became invisible to
+      // a clause whose entire job is to refuse them. `_leaf_text` renders every SCALAR leaf (string,
+      // number, boolean) as the text an operator would have written, so the pattern is matched against
+      // what the payload actually says rather than against how it was typed. Containers and `null` yield
+      // nothing: they carry no operator-authored value, and rendering them would match a pattern against
+      // rego's own punctuation. Cost is unchanged — one `sprintf` where there was one `is_string`.
+      return (
+        `    _present(${f})\n` +
+        `    count([1 | walk(input.tool_params[${f}], [_, leaf]); text := _leaf_text(leaf); ` +
+        `regex.match(${JSON.stringify(c.pattern)}, text)]) == 0`
+      );
     case "oneOf":
       return `    ${jsonSet(c.values.map((v) => v.trim().toLowerCase()))}[lower(_p_str(${f}))]`;
     case "noneOf":
-      // Same inversion as `notMatches` — see above.
-      return `    _has_str(${f})\n    not ${jsonSet(c.values.map((v) => v.trim().toLowerCase()))}[lower(_p_str(${f}))]`;
+      // Same inversion, same over-correction, same repair as `notMatches` — see above.
+      // `{"table": ["payments"]}` must deny (a denied value IS carried) and `{"table": ["orders"]}`
+      // must allow (none is); `_has_str` denied both.
+      //
+      // The type-cast evasion is sharper here than for `notMatches`, because the operator wrote the
+      // denied value out by hand: measured, `noneOf account ["12345"]` blocked `account: "12345"` and
+      // ALLOWED `account: 12345`. The set is keyed on text, so the leaf has to be compared as text.
+      return (
+        `    _present(${f})\n` +
+        `    count([1 | walk(input.tool_params[${f}], [_, leaf]); text := _leaf_text(leaf); ` +
+        `${jsonSet(c.values.map((v) => v.trim().toLowerCase()))}[lower(text)]]) == 0`
+      );
     case "maxNumber":
       return `    _p_num(${f}) <= ${JSON.stringify(c.max)}`;
     case "required":
@@ -1760,7 +1914,25 @@ _p_str(f) = "\\u0000" { not _has_str(f) }
 _has_str(f) { is_string(input.tool_params[f]) }
 _p_num(f) = v { v := input.tool_params[f]; is_number(v) }
 _p_num(f) = 1e308 { not _has_num(f) }
-_has_num(f) { is_number(input.tool_params[f]) }`;
+_has_num(f) { is_number(input.tool_params[f]) }
+# NOTE: the NEGATED kinds (notMatches / noneOf) do NOT use \`_p_str\`. They ask a question about
+# CONTENT, so they walk every string beneath the parameter instead — see \`constraintExpr\`. \`_p_str\`
+# cannot serve them in either direction: it reports the same never-matching sentinel for "the argument
+# is an object" as for "the argument is absent", which under \`not\` reads as "your constraint is
+# satisfied" (the array/nested bypass), and requiring a top-level string instead made the clause
+# UNSATISFIABLE for every object, list and number (a blanket denial of the tool). Both accessors below
+# remain exactly right for the POSITIVE kinds they were written for.
+#
+# \`_leaf_text\` is what they use instead, over each node of a \`walk\`. PARTIAL on purpose — undefined for
+# objects, arrays and null, so those nodes contribute no row to the enclosing comprehension. It is only
+# ever read inside \`count([...]) == 0\`, where "no row" is a real, safe answer (that node carries no
+# operator-authored value), so the partiality cannot leak an undefined into a body's truth value.
+# It renders numbers and booleans as text because a content constraint that only inspected STRING leaves
+# was evaded by re-typing: \`notMatches "4[0-9]{6}"\` blocked "4111111" and allowed 4111111, and
+# \`noneOf ["12345"]\` blocked "12345" and allowed 12345.
+_leaf_text(v) = v { is_string(v) }
+_leaf_text(v) = sprintf("%v", [v]) { is_number(v) }
+_leaf_text(v) = sprintf("%v", [v]) { is_boolean(v) }`;
 }
 
 /**
@@ -1825,7 +1997,8 @@ function grantsSection(grants: BuilderAllowlistGrant[]): string {
     // Availability FIRST: on an engine that cannot publish the fact the grant must fail before the
     // vacuously-true comprehension below is ever reached.
     const availability = grantAvailabilityLines(g.facts);
-    const factLines = (g.facts ?? []).map((f) => `    ${compileConditionLine(f, new Map())}`);
+    // "allow": this body holding is what PERMITS the call, so an unanswerable clause must withhold it.
+    const factLines = (g.facts ?? []).map((f) => `    ${compileConditionLine(f, new Map(), "allow")}`);
     const match = [
       `_grant_tool_${i} { lower(input.tool_name) == ${JSON.stringify(g.tool.toLowerCase())} }`,
       `_grant_tool_${i} { input.tool_name_normalized == ${JSON.stringify(skeleton(g.tool))} }`

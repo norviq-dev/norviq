@@ -346,6 +346,55 @@ describe("BuilderSheet — a clause is filed under what it ADDRESSES", () => {
     expect(wholeHeading).toBeLessThan(wholeClause);
   });
 
+  it("the ARGUMENT hint's omission promise is backed by an emitted guard, on the fact rows too", async () => {
+    // THE COPY IS A SECURITY CLAIM. The heading over these rows says "A call that omits it fails this
+    // line", and the panel header above it says omitting an argument cannot be used to skip a
+    // constraint. That was true of the CONSTRAINT rows and false of the `param_paths.<arg>` FACT rows
+    // printed under the same heading in the same panel: measured against real opa, a grant of
+    // `param_paths.columns notMatches "(?i)(card_number|ssn)"` ALLOWED a call that omitted `columns`.
+    //
+    // Two halves, and both have to hold or the sentence is a lie:
+    //   * the heading over a param_paths row still states the omission rule (asserted here);
+    //   * the compiler emits the derivability conjunct that MAKES it true (asserted here, on the rego
+    //     this very panel produced), and that conjunct actually denies — asserted against real opa in
+    //     builderIntentGrants.test.ts ("the panel's omission promise holds for every param_paths fact
+    //     row it prints"), because a decision is the only proof a policy enforces anything.
+    server.use(
+      http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
+      http.get("/api/v1/tools", () =>
+        HttpResponse.json([
+          registryEntry("send_email", {
+            source: "mcp_declared",
+            server_id: "smtp",
+            schema_available: true,
+            input_schema: { type: "object", required: ["to"], properties: { to: { type: "string" } } }
+          })
+        ])
+      )
+    );
+    renderSheet();
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
+
+    await waitFor(() => expect(pickerOptionIds()).toContain("to"));
+    pickCondition("to"); // -> addFact(param_paths.to), the picker's PRIMARY route for a declared arg
+    await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
+
+    // The heading this row sits under makes the promise...
+    const heading = screen.getByTestId("builder-scope-section-argument");
+    expect(heading.textContent).toMatch(/a call that omits it fails this line/i);
+
+    // ...and the rego this panel just compiled contains what makes it true: the path must have been
+    // DERIVED. Without this conjunct `scalarFieldExpr` defaults an absent path to "" and the clause is
+    // answered by a value the engine never saw.
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain('object.get(input.derived.param_paths, "to", null) != null');
+    });
+  });
+
   it("removing a clause removes the one that was clicked, not the one at its display position", async () => {
     // The pass is SORTED for display, so the ordinal a row appears at is not its index in the array.
     // `removeFact(tool, i)` takes the real index — if the sort ever leaked into that argument, this

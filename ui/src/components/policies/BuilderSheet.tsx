@@ -382,6 +382,29 @@ function withConstraintValue(c: BuilderParamConstraint, text: string): BuilderPa
  *  operator could not tell which clauses address a NAMED argument (and therefore fail when the caller
  *  simply omits it) from those the engine derives about the call as a whole. They read identically and
  *  behave differently — the design's ARGUMENT / WHOLE CALL / NEGATED split is the fix. */
+/**
+ * The ARGUMENT heading's hint — ONE constant, because the panel deliberately prints ONE heading over
+ * TWO clause storages (per-field `constraints` and `param_paths.<arg>` `facts`) and the two call sites
+ * held byte-identical string literals that could drift apart without anything noticing.
+ *
+ * THIS SENTENCE IS A SECURITY CLAIM, so it says only what the compiler enforces. Both storages now
+ * make the omission promise good — a constraint through `_present(f)`, a `param_paths` fact through
+ * `paramPathGuards`' derivability conjunct — and `builderIntentGrants.test.ts` pins both against real
+ * opa. It used to be true of the constraint rows and FALSE of the fact rows printed under the same
+ * heading in the same panel: `param_paths.columns notMatches …` with `columns` omitted evaluated ALLOW.
+ *
+ * The second clause exists because the two storages still READ a supplied value differently, and the
+ * merged heading hides that. A constraint walks the whole value, so a nested or list-shaped argument is
+ * inspected. A `param_paths` clause names ONE derived key, and `{"columns": ["a"]}` derives
+ * `columns[0]`, not `columns` — so the line fails rather than matching. Fail-closed either way, but an
+ * operator who is not told will read a passing dry-run as "my pattern did not match" when the truth is
+ * "the engine never gave this line a value to read".
+ */
+const ARGUMENT_SCOPE_HINT =
+  "Addresses one named parameter. A call that omits it fails this line — and a param_paths. clause " +
+  "fails it too when the argument arrives nested or as a list, because the engine derives a different " +
+  "path for those.";
+
 function ScopeSection({ label, hint }: { label: string; hint: string }) {
   return (
     // Addressable so a test can assert WHICH clauses sit under which heading by DOM order rather than
@@ -2359,7 +2382,7 @@ export function BuilderSheet({
                       {(allowlistGrants[openGrantTool] ?? []).length > 0 && (
                         <ScopeSection
                           label="Argument"
-                          hint="Addresses one named parameter. A call that omits it fails this line."
+                          hint={ARGUMENT_SCOPE_HINT}
                         />
                       )}
                       {(allowlistGrants[openGrantTool] ?? []).map((c, i) => (
@@ -2497,7 +2520,7 @@ export function BuilderSheet({
                               hint={
                                 whole
                                   ? "A fact the ENGINE derived about the call, not one named argument."
-                                  : "Addresses one named parameter. A call that omits it fails this line."
+                                  : ARGUMENT_SCOPE_HINT
                               }
                             />
                           )}

