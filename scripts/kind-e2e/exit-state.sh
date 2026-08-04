@@ -254,7 +254,15 @@ g7() {
     && met "G7 CI: kind-e2e workflow present" || unmet "G7 CI: .github/workflows/kind-e2e.yml missing"
 }
 
-for g in G1 G2 G3 G4 G5 G6 G7; do
+# RUN ORDER IS NOT LETTER ORDER, deliberately. EXIT-STATE.md's own G7 row requires "L3 after L4", and
+# this loop ran G2 (L3) first — so the browser suite inherited whatever L3 had just done to the
+# cluster. L3's attacks suite writes ~101 tests' worth of `framework=redteam` audit rows immediately
+# beforehand, and `audit-filters-and-volume.spec.ts` counts rows: it failed inside the full check with
+# "unfiltered total must include the test rows" while passing 0-failed standalone, twice.
+#
+# The document said which way round to do it and the script that enforces the document did the
+# opposite. G3 now runs first, matching both EXIT-STATE.md and the CI job.
+for g in G1 G3 G2 G4 G5 G6 G7; do
   selected "$g" && "$(echo "$g" | tr 'A-Z' 'a-z')"
 done
 
