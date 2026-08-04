@@ -18,9 +18,11 @@ import "./BuilderSteps.css"; // Numbered-step left pane (UX redesign) — layout
 import Editor from "@monaco-editor/react";
 import { registerRego } from "../../lib/monaco-rego";
 import { ProvenanceBadge } from "../common/ProvenanceBadge";
+import { InlineDisabledReason } from "../common/InlineDisabledReason";
+import { ConditionPicker, type PickerGroup, type PickerOption } from "./ConditionPicker";
 import { ScopeCell } from "./ScopeCell";
 import { AlertCircle, Check, FlaskConical, Maximize2, Minimize2, Plus, Trash2, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   apiSend,
   dryRunPolicy,
@@ -226,6 +228,19 @@ const FACT_FIELD_LABEL: Record<string, string> = {
   "mcp.pin_status": "MCP pin status",
   "mcp.scan_severity": "MCP scan severity"
 };
+/**
+ * Does this clause describe the WHOLE CALL, or one named argument?
+ *
+ * Both live in the facts array — `param_paths.<path>` is stored as a fact because that is how the
+ * compiler emits it — so which array it is in cannot be the answer. The field can: a `param_paths.`
+ * prefix means the clause addresses one declared argument; anything else the engine derived from the
+ * call as a whole.
+ */
+function isWholeCallFact(f: BuilderGrantFact): boolean {
+  const field = f.type === "not" ? (f.inner as { field?: string }).field : (f as { field?: string }).field;
+  return !field?.startsWith(PARAM_PATH_PREFIX);
+}
+
 function factFieldLabel(field: string): string {
   // A `param_paths.<path>` field is not in the registry — the path is whatever the tool's own arguments
   // are — so it labels itself: `param_paths.filters.customer` reads as "argument filters.customer".
@@ -369,7 +384,10 @@ function withConstraintValue(c: BuilderParamConstraint, text: string): BuilderPa
  *  behave differently — the design's ARGUMENT / WHOLE CALL / NEGATED split is the fix. */
 function ScopeSection({ label, hint }: { label: string; hint: string }) {
   return (
-    <div style={{ marginTop: 12, marginBottom: 2 }}>
+    // Addressable so a test can assert WHICH clauses sit under which heading by DOM order rather than
+    // by hunting for copy in a textContent blob — the grouping is the guarantee, and it should not
+    // break every time a label is reworded.
+    <div data-testid={`builder-scope-section-${label.toLowerCase().replace(/\s+/g, "-")}`} style={{ marginTop: 12, marginBottom: 2 }}>
       <div
         style={{
           fontSize: 10.5,
@@ -1286,6 +1304,76 @@ export function BuilderSheet({
       .filter((p) => p.addressable && !p.path.includes("."))
       .map((p) => p.path);
 
+  /**
+   * The condition picker's two-and-a-bit groups, built from what the registry actually says.
+   *
+   * Group order is the argument: this tool's OWN arguments first, because they are the most specific
+   * thing anyone can say about a call and until recently they could not be said at all. Whole-call
+   * facts second — broader, and they hold even when the payload moves between fields. The undeclared
+   * escape hatch last, because reaching for it means the schema did not describe what you want.
+   */
+  const pickerGroupsFor = (tool: string): PickerGroup[] => {
+    const key = tool.toLowerCase();
+    const paths = pathsByTool.get(key) ?? [];
+    // A grant fact may be a `not` wrapper, which carries the field on `.inner` — unwrap before reading
+    // it, or a negated clause silently stops counting as "already used".
+    const factField = (f: BuilderGrantFact): string =>
+      f.type === "not" ? ((f.inner as { field?: string }).field ?? "") : ((f as { field?: string }).field ?? "");
+    const usedFields = new Set((allowlistGrantFacts[tool] ?? []).map(factField).filter(Boolean));
+    const usedArgPaths = new Set(
+      [...usedFields].filter((f) => f.startsWith(PARAM_PATH_PREFIX)).map((f) => f.slice(PARAM_PATH_PREFIX.length))
+    );
+
+    const argOptions: PickerOption[] = paths.map((pth) => ({
+      id: pth.path,
+      label: pth.path,
+      meta: [pth.type, pth.path.includes(".") ? "nested" : null].filter(Boolean).join(" · "),
+      required: pth.required,
+      disabled: !pth.addressable,
+      // Never rendered without one — a greyed row with no reason is the thing this replaced.
+      reason: pth.addressable ? undefined : (pth.note ?? "This argument cannot be addressed by param_paths."),
+      used: usedArgPaths.has(pth.path)
+    }));
+
+    const groups: PickerGroup[] = [
+      {
+        key: "args",
+        label: `${tool} arguments`,
+        tone: "accent",
+        sub: schemaByTool.has(key)
+          ? paths.length === 0
+            ? "Its declared schema lists no properties, so there is nothing to address by path."
+            : "From the approved MCP definition. Unusable ones are shown with the reason, never hidden."
+          : `No declared schema for ${tool} — nothing here to list. Use a whole-call fact below, or scope a path you know.`,
+        options: argOptions
+      },
+      {
+        key: "facts",
+        label: "What the call carries or reaches",
+        tone: "audit",
+        sub: "Derived by the engine from the whole call, so they hold wherever the value sits in the payload.",
+        options: FACT_FIELDS.map((f) => ({
+          id: f.field,
+          label: factFieldLabel(f.field),
+          hint: FACT_FIELD_HINT[f.field],
+          used: usedFields.has(f.field)
+        }))
+      },
+      {
+        key: "undeclared",
+        label: "When the argument was never declared",
+        tone: "audit",
+        sub: "Names a path yourself. The row you get lets you change the operator.",
+        options: CONSTRAINT_KINDS.map((k) => ({
+          id: k,
+          label: `any parameter — ${CONSTRAINT_VERB[k]}`,
+          hint: CONSTRAINT_HINT[k]
+        }))
+      }
+    ];
+    return groups;
+  };
+
   // Datalist suggestions: real registry names when we have any. Capability fragments remain ONLY as a
   // last-resort vocabulary when the registry is empty — which is the default in most deployments, since
   // `mcp_tool_pins` is populated only when MCP injection is switched on. They are a hint of the shape of
@@ -1535,6 +1623,23 @@ export function BuilderSheet({
   const step2Valid = mode === "allowlist" ? true : rules.some((_, idx) => errorsForRule(compiled.errors, idx).length === 0);
   // Steps dim (opacity only, never disabled — see BuilderSteps.css) until the prior step is valid. The
   // REAL gating for dry-run/Save is untouched — canDryRun/canSave above, unaffected by these.
+  // WHY SAVE IS BLOCKED, as a sentence the operator can read without hovering a control that cannot
+  // be hovered. Ordered by what must be fixed FIRST — naming the dry-run while the namespace is still
+  // unset would send them to the wrong field.
+  const saveBlockedReason = !canSave
+    ? !namespaceReady
+      ? "Pick a concrete target namespace first — the global scope is All namespaces."
+      : !scopeReady
+        ? "Set an agent class first."
+        : hasErrors
+          ? "Fix the compile errors before saving."
+          : dryRunStale
+            ? "The policy changed since the last dry-run — re-run it."
+            : dryRunResult?.valid !== true
+              ? "Run a dry-run first — save is blocked until it passes."
+              : undefined
+    : undefined;
+
   const step1State: "active" | "done" = step1Valid ? "done" : "active";
   const step2State: "locked" | "active" | "done" = !step1Valid ? "locked" : step2Valid ? "done" : "active";
   const step3State: "locked" | "active" | "done" = !step2Valid ? "locked" : saved ? "done" : "active";
@@ -2301,24 +2406,46 @@ export function BuilderSheet({
                           "allow this tool, but only like this". Without these the panel offers only
                           per-argument rules, which plus a tool list is what the agent framework already
                           gives you — a capability list, not an intent. */}
-                      {/* WHOLE CALL and NEGATED are rendered as two passes over one list rather than
-                          one pass with interleaved headings: the facts array holds both kinds in
-                          authoring order, and a heading that appeared mid-list wherever the first
-                          negated fact happened to sit would group by accident rather than by meaning.
-                          Indices are preserved so `removeFact(tool, i)` still addresses the right
-                          element — filtering the array first would silently remove the wrong clause. */}
-                      {(allowlistGrantFacts[openGrantTool] ?? []).some((f) => f.type !== "not") && (
-                        <ScopeSection
-                          label="Whole call"
-                          hint="A fact the ENGINE derived about the call, not one named argument."
-                        />
-                      )}
-                      {(allowlistGrantFacts[openGrantTool] ?? []).map((f, i) => {
+                      {/* ONE pass, ORDERED by what each clause ADDRESSES, with the heading emitted at
+                          each group boundary.
+
+                          `param_paths.<path>` clauses live in the facts array — that is how the
+                          compiler emits them — but they address ONE NAMED ARGUMENT, and every one was
+                          rendering under a heading that said in so many words that they do not.
+                          ARGUMENT vs WHOLE CALL is the vocabulary this panel exists to teach: an
+                          argument clause fails when the caller omits that argument, a whole-call fact
+                          holds wherever the value sits in the payload. Filing one under the other
+                          teaches the distinction backwards.
+
+                          Ordering rather than filtering into two passes keeps ONE copy of the row
+                          markup, and `i` stays the clause's real index so `removeFact(tool, i)` still
+                          removes the clause the operator clicked. NEGATED remains its own pass below,
+                          for the reason it always was: a heading appearing wherever the first negated
+                          clause happens to sit would group by accident rather than by meaning. */}
+                      {(allowlistGrantFacts[openGrantTool] ?? [])
+                        .map((f, i) => ({ f, i }))
+                        .filter(({ f }) => f.type !== "not")
+                        .sort((a, b) => Number(isWholeCallFact(a.f)) - Number(isWholeCallFact(b.f)))
+                        .map(({ f, i }, ordinal, ordered) => {
+                        // Re-narrow: `.filter()` drops the `not` variant at runtime, but TypeScript
+                        // cannot see that through the chain and the row below reads `f.field`/`f.op`.
                         if (f.type === "not") return null;
+                        const whole = isWholeCallFact(f);
+                        const firstOfGroup = ordinal === 0 || isWholeCallFact(ordered[ordinal - 1].f) !== whole;
                         const kind = factKindOfSpec(f);
                         return (
+                          <Fragment key={`fact-${i}`}>
+                          {firstOfGroup && (
+                            <ScopeSection
+                              label={whole ? "Whole call" : "Argument"}
+                              hint={
+                                whole
+                                  ? "A fact the ENGINE derived about the call, not one named argument."
+                                  : "Addresses one named parameter. A call that omits it fails this line."
+                              }
+                            />
+                          )}
                           <div
-                            key={`fact-${i}`}
                             data-testid={`builder-fact-row-${openGrantTool}-${i}`}
                             style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}
                           >
@@ -2394,6 +2521,7 @@ export function BuilderSheet({
                               </span>
                             </div>
                           </div>
+                          </Fragment>
                         );
                       })}
 
@@ -2460,74 +2588,32 @@ export function BuilderSheet({
                       })}
 
                       <div style={{ display: "flex", gap: 6, marginTop: 10, alignItems: "center", flexWrap: "wrap" }}>
-                        <select
-                          data-testid="builder-fact-add-kind"
-                          aria-label="add a scoping fact"
-                          value=""
-                          onChange={(e) => {
-                            const picked = e.target.value;
-                            if (!picked) return;
-                            // A `param_paths.<path>` field is not in the registry — the path is the
-                            // tool's own argument — so it is always the scalar kind.
-                            if (picked.startsWith(PARAM_PATH_PREFIX)) {
-                              addFact(openGrantTool, picked, "scalar");
+                        {/* ONE picker, not two selects. A `<select>` cannot show a disabled option's
+                            REASON — the non-addressable arguments carried theirs in a `title` on a
+                            disabled `<option>`, which no browser renders, so the operator saw a greyed
+                            line and no way to learn why. It also cannot be searched, and it split this
+                            tool's OWN arguments from the whole-call facts into two dropdowns that could
+                            never be compared side by side — which is the one comparison that teaches
+                            the difference between them. */}
+                        <ConditionPicker
+                          groups={pickerGroupsFor(openGrantTool)}
+                          onPick={(groupKey, optionId) => {
+                            if (groupKey === "args") {
+                              // A `param_paths.<path>` field is not in the registry — the path is the
+                              // tool's own argument — so it is always the scalar kind.
+                              addFact(openGrantTool, `${PARAM_PATH_PREFIX}${optionId}`, "scalar");
                               return;
                             }
-                            const spec = FACT_FIELDS.find((x) => x.field === picked);
+                            if (groupKey === "undeclared") {
+                              // The escape hatch: a path the schema never declared. The row's own kind
+                              // selector can change it — the picker chooses WHAT, the row chooses HOW.
+                              addConstraint(openGrantTool, optionId as ConstraintKind);
+                              return;
+                            }
+                            const spec = FACT_FIELDS.find((x) => x.field === optionId);
                             if (spec) addFact(openGrantTool, spec.field, spec.kind);
                           }}
-                          style={{ fontSize: 11.5 }}
-                        >
-                          <option value="">+ scope what it carries / reaches…</option>
-                          {/* THIS TOOL'S OWN ARGUMENTS, first, because they are the most specific thing
-                              anyone can say and until now they could not be said at all. Non-addressable
-                              ones are rendered DISABLED WITH THE REASON rather than omitted: silently
-                              dropping an argument teaches the operator it does not exist, which is the
-                              capability-fragment mistake wearing different clothes. */}
-                          {(() => {
-                            const paths = pathsByTool.get(openGrantTool.toLowerCase()) ?? [];
-                            if (paths.length === 0) return null;
-                            return (
-                              <optgroup label={`${openGrantTool} arguments (declared)`}>
-                                {paths.map((p) => (
-                                  <option
-                                    key={p.path}
-                                    value={`${PARAM_PATH_PREFIX}${p.path}`}
-                                    disabled={!p.addressable}
-                                    title={p.note}
-                                  >
-                                    {p.path}
-                                    {p.required ? " *" : ""}
-                                    {p.addressable ? "" : ` — ${p.note ?? "cannot be scoped"}`}
-                                  </option>
-                                ))}
-                              </optgroup>
-                            );
-                          })()}
-                          <optgroup label="what the call carries or reaches">
-                            {FACT_FIELDS.map((x) => (
-                              <option key={x.field} value={x.field}>
-                                {factFieldLabel(x.field)}
-                              </option>
-                            ))}
-                          </optgroup>
-                        </select>
-                        <select
-                          data-testid="builder-constraint-add-kind"
-                          aria-label="add a constraint"
-                          value=""
-                          onChange={(e) => {
-                            if (e.target.value) addConstraint(openGrantTool, e.target.value as ConstraintKind);
-                          }}
-                          style={{ fontSize: 11.5 }}
-                        >
-                          <option value="">+ add a constraint…</option>
-                          {CONSTRAINT_KINDS.map((k) => (
-                            <option key={k} value={k}>
-                              {CONSTRAINT_VERB[k]}
-                            </option>
-                          ))}
-                        </select>
+                        />
                         {(allowlistGrants[openGrantTool] ?? []).length === 0 &&
                           (allowlistGrantFacts[openGrantTool] ?? []).length === 0 && (
                             <span style={{ fontSize: 10.5, color: "var(--text-dim)" }}>
@@ -2693,28 +2779,22 @@ export function BuilderSheet({
                   >
                     {dryRunLoading ? "Dry-Running..." : "Run dry-run"}
                   </KitButton>
-                  <KitButton
-                    variant="primary"
-                    icon={Check}
-                    disabled={!canSave}
-                    data-testid="builder-save-btn"
-                    title={
-                      !namespaceReady
-                        ? "Pick a concrete target namespace first — the global scope is All namespaces"
-                        : !scopeReady
-                        ? "Set an agent class first"
-                        : hasErrors
-                        ? "Fix compile errors first"
-                        : dryRunResult?.valid !== true
-                        ? "Run a valid dry-run of the current graph first"
-                        : dryRunStale
-                        ? "The graph changed since the last dry-run — re-run it"
-                        : undefined
-                    }
-                    onClick={saveAndEnforce}
-                  >
-                    {saving ? "Saving..." : "Save & enforce"}
-                  </KitButton>
+                  {/* The reason is VISIBLE TEXT, not a `title`.
+                      `.btn:disabled { pointer-events: none }` means a disabled button never fires the
+                      hover that would show its tooltip — so every reason living only in `title` was
+                      unreachable at exactly the moment it was needed, and the operator was left with a
+                      greyed primary button and nothing to act on. */}
+                  <InlineDisabledReason reason={saveBlockedReason}>
+                    <KitButton
+                      variant="primary"
+                      icon={Check}
+                      disabled={!canSave}
+                      data-testid="builder-save-btn"
+                      onClick={saveAndEnforce}
+                    >
+                      {saving ? "Saving..." : "Save & enforce"}
+                    </KitButton>
+                  </InlineDisabledReason>
                   <KitButton variant="ghost" onClick={requestClose}>
                     Cancel
                   </KitButton>

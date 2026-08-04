@@ -28,6 +28,39 @@ function renderSheet() {
   return render(<BuilderSheet namespace="default" onClose={() => {}} />);
 }
 
+/**
+ * Add a condition through the ConditionPicker.
+ *
+ * The two `<select>`s this replaced could be driven with a single `fireEvent.change`; a picker needs
+ * open → choose. Worth the two lines: a select cannot show a disabled option's REASON, which is the
+ * thing these tests care most about proving is visible.
+ *
+ * `id` is the option id — an argument path (`to`), a fact field (`data_classes`), or a constraint
+ * kind (`matches`).
+ */
+function openPicker() {
+  // IDEMPOTENT on purpose. These helpers get called inside `waitFor`, which retries — and the trigger
+  // is replaced by the popover on the first click, so a second unconditional click throws "unable to
+  // find builder-condition-picker-open" and the retry loop reports a missing element instead of the
+  // condition it was actually waiting for.
+  if (!screen.queryByTestId("builder-condition-picker")) {
+    fireEvent.click(screen.getByTestId("builder-condition-picker-open"));
+  }
+}
+
+function pickCondition(id: string) {
+  openPicker();
+  fireEvent.click(screen.getByTestId(`builder-condition-picker-option-${id}`));
+}
+
+/** Open the picker and read what it offers, without choosing anything. */
+function pickerOptionIds(): string[] {
+  openPicker();
+  return [...document.querySelectorAll('[data-testid^="builder-condition-picker-option-"]')].map((el) =>
+    (el.getAttribute("data-testid") ?? "").replace("builder-condition-picker-option-", "")
+  );
+}
+
 /** Scope + one rule with a reason (auto-fills rule_id) + one detector condition — a fully valid graph. */
 function buildValidRule() {
   fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
@@ -246,6 +279,122 @@ describe("BuilderSheet — compiled-rego editor expand/collapse", () => {
     fireEvent.click(toggle);
     expect(toggle).toHaveAttribute("data-expanded", "false");
     expect(editorContainer.style.height).toBe("260px");
+  });
+});
+
+describe("BuilderSheet — a clause is filed under what it ADDRESSES", () => {
+  it("puts a param_paths clause under Argument, not under Whole call", async () => {
+    // `param_paths.<path>` clauses are STORED as facts because that is how the compiler emits them,
+    // and the facts pass used to render every one of them under a heading reading "A fact the ENGINE
+    // derived about the call, not one named argument" — which is the precise opposite of what a
+    // param_paths clause is. ARGUMENT vs WHOLE CALL is the distinction this panel exists to teach:
+    // an argument clause fails when the caller omits that argument; a whole-call fact holds wherever
+    // the value sits. Filing one under the other teaches it backwards.
+    // The same declared schema the sibling argument tests use — the picker can only offer a tool's
+    // arguments when the registry declares them, so without this there is no ARGUMENT clause to file
+    // anywhere and the test would pass by having nothing to group.
+    server.use(
+      http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
+      http.get("/api/v1/tools", () =>
+        HttpResponse.json([
+          registryEntry("send_email", {
+            source: "mcp_declared",
+            server_id: "smtp",
+            schema_available: true,
+            input_schema: {
+              type: "object",
+              required: ["to"],
+              properties: { to: { type: "string" }, retries: { type: "integer" } }
+            }
+          })
+        ])
+      )
+    );
+    renderSheet();
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
+
+    // One of each kind, added in an order that would put the whole-call fact FIRST if the pass simply
+    // followed authoring order — so a passing result cannot be an accident of insertion sequence.
+    await waitFor(() => expect(pickerOptionIds()).toContain("data_classes"));
+    pickCondition("data_classes");
+    await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
+    await waitFor(() => expect(pickerOptionIds()).toContain("to"));
+    pickCondition("to");
+    await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-1")).toBeInTheDocument());
+
+    // Assert DOM ORDER, not string positions: which heading a clause sits under is the guarantee, and
+    // it must not break when a label is reworded.
+    const editor = screen.getByTestId("builder-grant-editor-send_email");
+    const marks = [...editor.querySelectorAll('[data-testid^="builder-scope-section-"], [data-testid^="builder-fact-row-"]')].map(
+      (el) => el.getAttribute("data-testid") ?? ""
+    );
+
+    const argHeading = marks.indexOf("builder-scope-section-argument");
+    const wholeHeading = marks.indexOf("builder-scope-section-whole-call");
+    const argClause = marks.indexOf("builder-fact-row-send_email-1");   // param_paths.to
+    const wholeClause = marks.indexOf("builder-fact-row-send_email-0"); // data_classes
+
+    expect(argHeading).toBeGreaterThanOrEqual(0);
+    expect(wholeHeading).toBeGreaterThanOrEqual(0);
+    // ARGUMENT first, then its clause, then WHOLE CALL, then its clause — the argument clause must
+    // never fall under a heading reading "not one named argument".
+    expect(argHeading).toBeLessThan(argClause);
+    expect(argClause).toBeLessThan(wholeHeading);
+    expect(wholeHeading).toBeLessThan(wholeClause);
+  });
+
+  it("removing a clause removes the one that was clicked, not the one at its display position", async () => {
+    // The pass is SORTED for display, so the ordinal a row appears at is not its index in the array.
+    // `removeFact(tool, i)` takes the real index — if the sort ever leaked into that argument, this
+    // would delete the wrong clause, silently, and the operator would be left enforcing something
+    // they thought they had removed.
+    // The same declared schema the sibling argument tests use — the picker can only offer a tool's
+    // arguments when the registry declares them, so without this there is no ARGUMENT clause to file
+    // anywhere and the test would pass by having nothing to group.
+    server.use(
+      http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
+      http.get("/api/v1/tools", () =>
+        HttpResponse.json([
+          registryEntry("send_email", {
+            source: "mcp_declared",
+            server_id: "smtp",
+            schema_available: true,
+            input_schema: {
+              type: "object",
+              required: ["to"],
+              properties: { to: { type: "string" }, retries: { type: "integer" } }
+            }
+          })
+        ])
+      )
+    );
+    renderSheet();
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
+
+    await waitFor(() => expect(pickerOptionIds()).toContain("data_classes"));
+    pickCondition("data_classes");                       // index 0 — whole call, displays SECOND
+    await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
+    await waitFor(() => expect(pickerOptionIds()).toContain("to"));
+    pickCondition("to");                                  // index 1 — argument, displays FIRST
+    await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-1")).toBeInTheDocument());
+
+    // Remove the ARGUMENT clause by its real index (1), and the whole-call one must survive.
+    fireEvent.click(screen.getByTestId("builder-fact-remove-send_email-1"));
+    await waitFor(() => {
+      // One clause left, and it must be the WHOLE-CALL one. If the display sort ever leaked into the
+      // index passed to removeFact, this removes data_classes instead and the operator is left
+      // enforcing a clause they believe they deleted.
+      const editor = screen.getByTestId("builder-grant-editor-send_email");
+      expect(editor.querySelectorAll('[data-testid^="builder-fact-row-"]')).toHaveLength(1);
+      expect(screen.getByTestId("builder-scope-section-whole-call")).toBeInTheDocument();
+      expect(screen.queryByTestId("builder-scope-section-argument")).not.toBeInTheDocument();
+    });
   });
 });
 
@@ -990,7 +1139,7 @@ describe("BuilderSheet — scoping an allowlisted tool by its arguments", () => 
     openAllowlistWith("execute_sql");
     addTool("search_kb");
     fireEvent.click(screen.getByTestId("builder-scope-cell-execute_sql-cta"));
-    fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "matches" } });
+    pickCondition("matches");
     fireEvent.change(screen.getByTestId("builder-constraint-field-execute_sql-0"), { target: { value: "query" } });
     fireEvent.change(screen.getByTestId("builder-constraint-value-execute_sql-0"), {
       target: { value: "(?i)^\\s*select\\b" }
@@ -1010,7 +1159,7 @@ describe("BuilderSheet — scoping an allowlisted tool by its arguments", () => 
     expect(screen.getByTestId("builder-scope-cell-execute_sql-cta").textContent).toContain("Narrow it");
     expect(screen.getByTestId("builder-scope-cell-execute_sql-headline")).toHaveTextContent("Any arguments · unrestricted");
     fireEvent.click(screen.getByTestId("builder-scope-cell-execute_sql-cta"));
-    fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "forbidden" } });
+    pickCondition("forbidden");
     fireEvent.change(screen.getByTestId("builder-constraint-field-execute_sql-0"), { target: { value: "force" } });
     await waitFor(() =>
       expect(screen.getByTestId("builder-scope-cell-execute_sql-headline")).toHaveTextContent("Narrowed · 1 condition")
@@ -1020,7 +1169,7 @@ describe("BuilderSheet — scoping an allowlisted tool by its arguments", () => 
   it("removing a tool drops its constraints, so no orphan grant breaks the compile", async () => {
     openAllowlistWith("execute_sql");
     fireEvent.click(screen.getByTestId("builder-scope-cell-execute_sql-cta"));
-    fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "required" } });
+    pickCondition("required");
     fireEvent.change(screen.getByTestId("builder-constraint-field-execute_sql-0"), { target: { value: "query" } });
     await waitFor(() =>
       expect((screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value).toContain("constraints_ok")
@@ -1039,7 +1188,7 @@ describe("BuilderSheet — scoping an allowlisted tool by its arguments", () => 
   it("removing the last constraint returns the tool to unconstrained (not an empty grant)", async () => {
     openAllowlistWith("execute_sql");
     fireEvent.click(screen.getByTestId("builder-scope-cell-execute_sql-cta"));
-    fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "required" } });
+    pickCondition("required");
     fireEvent.change(screen.getByTestId("builder-constraint-field-execute_sql-0"), { target: { value: "query" } });
     await waitFor(() =>
       expect((screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value).toContain("constraints_ok")
@@ -1057,7 +1206,7 @@ describe("BuilderSheet — scoping an allowlisted tool by its arguments", () => 
   it("switching a constraint's type keeps the parameter name", () => {
     openAllowlistWith("http_get");
     fireEvent.click(screen.getByTestId("builder-scope-cell-http_get-cta"));
-    fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "matches" } });
+    pickCondition("matches");
     fireEvent.change(screen.getByTestId("builder-constraint-field-http_get-0"), { target: { value: "url" } });
     fireEvent.change(screen.getByTestId("builder-constraint-kind-http_get-0"), { target: { value: "hostIn" } });
     // Retyping the parameter after every type change would be needless friction.
@@ -1109,22 +1258,20 @@ describe("allowlist mode must be able to say more than a tool list", () => {
     fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
     fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
 
-    // The fact rows exist at all — this is what was missing.
-    expect(screen.getByTestId("builder-fact-add-kind")).toBeInTheDocument();
+    // The picker exists at all — this is what was missing.
+    expect(screen.getByTestId("builder-condition-picker-open")).toBeInTheDocument();
 
-    // The dropdown now lists FIELDS derived from the registry, not five hand-picked presets.
-    const factOptions = [...(screen.getByTestId("builder-fact-add-kind") as HTMLSelectElement).options]
-      .map((o) => o.value)
-      .filter(Boolean);
-    // Every addressable field must be reachable — a hand-written subset is how six of them became
-    // unreachable and how any future field would silently fail to appear.
-    expect(factOptions).toEqual(expect.arrayContaining([
+    // It lists FIELDS derived from the registry, not five hand-picked presets. Every addressable
+    // field must be reachable — a hand-written subset is how six of them became unreachable, and how
+    // any future field would silently fail to appear.
+    expect(pickerOptionIds()).toEqual(expect.arrayContaining([
       "data_classes", "sql_tables", "sql_statements", "param_values",
       "destinations.emails", "destinations.urls", "destinations.hosts", "destinations.schemes",
       "param_bytes", "call_depth", "trust_score"
     ]));
+    fireEvent.click(screen.getByTestId("builder-condition-picker-close"));
 
-    fireEvent.change(screen.getByTestId("builder-fact-add-kind"), { target: { value: "data_classes" } });
+    pickCondition("data_classes");
     await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
     // The chip must now advertise the scope — counting only per-field constraints left a
     // facts-only grant looking unscoped.
@@ -1154,7 +1301,7 @@ describe("allowlist mode must be able to say more than a tool list", () => {
     fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
     fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
     fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
-    fireEvent.change(screen.getByTestId("builder-fact-add-kind"), { target: { value: "data_classes" } });
+    pickCondition("data_classes");
     await waitFor(() => expect(screen.getByTestId("builder-scope-cell-send_email-headline")).toHaveTextContent(/Narrowed · 1 condition/));
 
     fireEvent.click(screen.getByTitle("Remove send_email"));
@@ -1206,30 +1353,34 @@ describe("allowlist mode must be able to say more than a tool list", () => {
     fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
     fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
 
-    const dropdown = () => screen.getByTestId("builder-fact-add-kind") as HTMLSelectElement;
-    await waitFor(() => {
-      const values = [...dropdown().options].map((o) => o.value);
-      expect(values).toContain("param_paths.to");
-    });
+    await waitFor(() => expect(pickerOptionIds()).toContain("to"));
 
-    const options = Object.fromEntries([...dropdown().options].map((o) => [o.value, o]));
-    // A nested string leaf is addressable — this is the case a flat per-field constraint cannot express.
-    expect(options["param_paths.filters.customer"]).toBeDefined();
-    expect(options["param_paths.filters.customer"].disabled).toBe(false);
+    // A nested string leaf is addressable — the case a flat per-field constraint cannot express.
+    const nested = screen.getByTestId("builder-condition-picker-option-filters.customer");
+    expect(nested).toBeInTheDocument();
+    expect(nested).not.toHaveAttribute("data-disabled");
+
+    // And the two that CANNOT be addressed are shown WITH their reason rather than dropped. A select
+    // could only grey them out; the reason it carried lived in a `title` on a disabled option, which
+    // no browser renders. This is the assertion that was impossible before.
+    const anInteger = screen.getByTestId("builder-condition-picker-option-retries");
+    expect(anInteger).toHaveAttribute("data-disabled", "true");
+    expect(anInteger).toHaveAttribute("aria-disabled", "true");
+    expect(anInteger.textContent).toMatch(/param_paths|only text|cannot be/i);
 
     // An integer argument produces NO param_paths key at runtime (evaluator.py emits string leaves
     // only), so `object.get(..., "")` could never match — offered, but disabled, with the reason.
-    expect(options["param_paths.retries"].disabled).toBe(true);
-    expect(options["param_paths.retries"].textContent).toMatch(/only text/i);
+    expect(anInteger.textContent).toMatch(/only text/i);
 
     // An array's runtime key carries a concrete index the schema cannot know.
-    expect(options["param_paths.attachments"].disabled).toBe(true);
-    expect(options["param_paths.attachments"].textContent).toMatch(/indexed at runtime/i);
+    const anArray = screen.getByTestId("builder-condition-picker-option-attachments");
+    expect(anArray).toHaveAttribute("data-disabled", "true");
+    expect(anArray.textContent).toMatch(/indexed at runtime/i);
 
     // The engine-derived facts are still there — the tool's arguments are additive, not a replacement.
-    expect(options["data_classes"]).toBeDefined();
+    expect(screen.getByTestId("builder-condition-picker-option-data_classes")).toBeInTheDocument();
 
-    fireEvent.change(dropdown(), { target: { value: "param_paths.to" } });
+    pickCondition("to");
     await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
     fireEvent.change(screen.getByTestId("builder-fact-value-send_email-0"), { target: { value: "ops@acme.com" } });
 
@@ -1268,11 +1419,9 @@ describe("allowlist mode must be able to say more than a tool list", () => {
     fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
     fireEvent.click(screen.getByTestId("builder-scope-cell-deploy-cta"));
 
-    await waitFor(() => {
-      const values = [...(screen.getByTestId("builder-fact-add-kind") as HTMLSelectElement).options].map((o) => o.value);
-      expect(values).toContain("param_paths.region");
-    });
-    fireEvent.change(screen.getByTestId("builder-fact-add-kind"), { target: { value: "param_paths.region" } });
+    await waitFor(() => expect(pickerOptionIds()).toContain("region"));
+    fireEvent.click(screen.getByTestId("builder-condition-picker-close"));
+    pickCondition("region");
     await waitFor(() => expect(screen.getByTestId("builder-fact-row-deploy-0")).toBeInTheDocument());
 
     const value = screen.getByTestId("builder-fact-value-deploy-0") as HTMLSelectElement;
@@ -1316,7 +1465,7 @@ describe("allowlist mode must be able to say more than a tool list", () => {
     fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "deploy" } });
     fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
     fireEvent.click(screen.getByTestId("builder-scope-cell-deploy-cta"));
-    fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "oneOf" } });
+    pickCondition("oneOf");
     await waitFor(() => expect(screen.getByTestId("builder-constraint-row-deploy-0")).toBeInTheDocument());
 
     // Flat argument names are suggested; a NESTED path is not, because a constraint addresses one flat
@@ -1345,7 +1494,7 @@ describe("allowlist mode must be able to say more than a tool list", () => {
     fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
     fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
     fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
-    fireEvent.change(screen.getByTestId("builder-fact-add-kind"), { target: { value: "data_classes" } });
+    pickCondition("data_classes");
     await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
 
     fireEvent.change(screen.getByTestId("builder-fact-value-send_email-0"), { target: { value: "secret, pci" } });

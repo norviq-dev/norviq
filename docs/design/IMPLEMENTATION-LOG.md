@@ -1717,3 +1717,53 @@ picker is still live in the old builder: a `param_paths.<path>` clause addresses
 but renders under a heading reading *"A fact the ENGINE derived about the call, not one named
 argument."* That mislabel predates both builder commits. It is a small, self-contained fix to the
 old builder if wanted, independent of any layout work.
+
+---
+
+## Keeping the builder's features while reverting its layout
+
+The revert above went too far. It took the chrome — which was the point — but also took two things
+that were product value rather than decoration, and it left a real defect in place.
+
+Restored into the OLD layout, with no structural change to the sheet:
+
+**`ConditionPicker`.** The two `<select>`s it replaces cannot show a disabled option's REASON. The
+non-addressable arguments carried theirs in a `title` on a disabled `<option>`, which no browser
+renders — so an operator saw a greyed line and no way to learn why `retries` or `attachments` could
+not be scoped. It also cannot be searched, and it split the tool's own arguments from the whole-call
+facts into two dropdowns that could never be compared, which is the one comparison that teaches the
+difference between them.
+
+**Save's blocked reason as visible text.** `.btn:disabled { pointer-events: none }` means a disabled
+button never fires the hover that would show its tooltip, so a reason living only in `title` was
+unreachable exactly when it was needed. Now rendered beneath the button via `InlineDisabledReason`.
+
+### The defect the walkthrough surfaced
+
+`param_paths.<path>` clauses are STORED as facts — that is how the compiler emits them — and the facts
+pass rendered every non-negated fact under a heading reading *"A fact the ENGINE derived about the
+call, not one named argument."* So a clause addressing exactly one named argument was filed under a
+heading stating that it does not.
+
+ARGUMENT vs WHOLE CALL is the distinction the scope panel exists to teach — an argument clause fails
+when the caller omits that argument; a whole-call fact holds wherever the value sits in the payload.
+Filing one under the other teaches it backwards. This predates every builder commit in this session;
+it only became visible once the picker put the same two groups side by side.
+
+Fixed by ordering the facts pass by what each clause addresses and emitting the heading at each group
+boundary — one pass, so the row markup stays in one place, and `i` remains the clause's REAL index so
+`removeFact(tool, i)` still removes what the operator clicked. That last point has its own test: the
+display order is now a sort, so if it ever leaked into the index the wrong clause would be deleted
+silently and the operator would be left enforcing something they believed they had removed.
+
+`ScopeSection` gained a `data-testid` so the tests assert grouping by DOM order rather than by hunting
+for copy in a `textContent` blob — the grouping is the guarantee, and it should not break every time a
+label is reworded. Both tests were verified against the old behaviour: reintroducing the bug fails the
+grouping test.
+
+### What survived the revert untouched
+
+Worth stating, because it was the question asked: `ScopeCell` and its four slots, the unscoped banner,
+the mode-fork callout, the provenance badges and the refinements were all in the builder BEFORE the
+chrome work, so the revert never touched them. The P1 fix — "a first-time operator must discover
+argument scoping without being told it exists" — is intact.

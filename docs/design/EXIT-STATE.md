@@ -105,9 +105,9 @@ industry's edge cases.
 
 Stated so "done" is not confused with "everything":
 
-- **The Visual Policy Builder's UI.** The handoff's chrome (top bar, Stepper strip, footer action bar,
-  RegoDrawer rail) and `ConditionPicker` were built and then **reverted** — the builder is back to the
-  layout that carries the full validated history. Reasoning in `IMPLEMENTATION-LOG.md`. The Tools and
-  MCP Servers detail dialogs are NOT part of that revert and remain in place.
+- **The Visual Policy Builder's LAYOUT.** The handoff's chrome — top bar, Stepper strip, footer action
+  bar, RegoDrawer rail — was built and then reverted; the builder keeps the layout that carries the
+  full validated history. Its FEATURES were kept: `ScopeCell`, the unscoped banner, the mode fork,
+  `ConditionPicker`, and Save's blocked reason as visible text. Reasoning in `IMPLEMENTATION-LOG.md`.
 - **No merge to `main`, no PR, no release tag.** The exit state means *ready* to cut a version, and
   cutting it is the user's call.
