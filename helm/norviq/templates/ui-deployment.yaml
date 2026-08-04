@@ -18,6 +18,16 @@ spec:
       app: norviq-ui
   template:
     metadata:
+      {{- /* Operator-supplied pod annotations. Their real job is to make the pod template CHANGE when
+             something outside it changes — chiefly a rebuilt image under an unchanged tag, where
+             Kubernetes correctly sees an identical spec and never rolls. api and engine got this
+             first; ui and webhook were left out, so a UI rebuild loaded into the node and the pod
+             serving the console kept running the previous bundle. The console is the one component
+             a human LOOKS at, which made it the worst possible omission. */}}
+      {{- with $.Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       labels:
         app: norviq-ui
         {{- include "norviq.componentLabels" (dict "root" $ "component" "ui") | nindent 8 }}

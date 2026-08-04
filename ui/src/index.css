@@ -343,13 +343,23 @@ body {
 .linklike:hover { color: var(--accent-hover); }
 
 /* ---- Modal ------------------------------------------------------------- */
+/* The blur is not decoration. These dialogs now carry the DETAIL for a table row, so the table behind
+   them stays on screen with the selected row still highlighted — and a sharp table two feet from a
+   dialog about one of its rows reads as two competing things rather than one drilled into. Dimming
+   alone left the rows legible enough to keep pulling the eye. `.sheet-overlay` (blur 2px) and the
+   attack-graph modals (blur 3px) already set the precedent. */
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.62); display: grid;
-  place-items: center; padding: 24px; z-index: 60; }
+  place-items: center; padding: 24px; z-index: 60;
+  backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
 .modal-card { width: 100%; max-width: 520px; background: var(--bg-surface); border: 1px solid var(--border);
   border-radius: var(--radius-lg); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6); padding: 22px;
   max-height: calc(100vh - 48px); overflow-y: auto; }
+/* 520px is a question's width. A definition diff or an argument tree is a reading surface and wraps
+   into uselessness there. */
+.modal-card.wide { max-width: 760px; }
 .modal-card.danger { border-color: #ff3b5c30; }
 .modal-title { font-size: 16px; font-weight: 600; margin-bottom: 10px; display: flex; align-items: center; gap: 10px; }
+.modal-subtitle { font-size: 13px; line-height: 1.55; color: var(--text-secondary); margin: -4px 0 14px; }
 .modal-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; align-items: flex-start; }
 
 /* ---- Inputs ------------------------------------------------------------ */

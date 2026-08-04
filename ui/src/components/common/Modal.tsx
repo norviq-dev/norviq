@@ -20,10 +20,29 @@ export interface ModalProps {
   actions?: ReactNode;
   /** Red-bordered card for a destructive or alarming dialog. */
   danger?: boolean;
+  /**
+   * A wider card for content that is a READING surface rather than a question.
+   *
+   * The default 520px suits a confirm dialog. It does not suit a unified definition diff or a nested
+   * argument tree — both wrap into unreadability at that width, and both are the whole point of the
+   * dialog they appear in.
+   */
+  wide?: boolean;
+  /** A line under the title. Use it for status the reader needs before the body makes sense. */
+  subtitle?: ReactNode;
   "data-testid"?: string;
 }
 
-export function Modal({ title, onClose, children, actions, danger, "data-testid": testId }: ModalProps) {
+export function Modal({
+  title,
+  onClose,
+  children,
+  actions,
+  danger,
+  wide,
+  subtitle,
+  "data-testid": testId
+}: ModalProps) {
   const titleId = useId();
   const card = useRef<HTMLDivElement>(null);
 
@@ -32,10 +51,19 @@ export function Modal({ title, onClose, children, actions, danger, "data-testid"
       if (e.key === "Escape") onClose();
     };
     document.addEventListener("keydown", onKey);
+    // Remember where focus came from BEFORE moving it, so it can go back on close. Without this every
+    // dismissal drops a keyboard user at the top of the document — tolerable for the two dialogs this
+    // started with, actively hostile now that opening one is the normal way to read a table row.
+    const opener = document.activeElement as HTMLElement | null;
     // Move focus in, preferring the first input so a type-to-confirm dialog is immediately usable.
     const first = card.current?.querySelector<HTMLElement>("input, textarea, button");
     first?.focus();
-    return () => document.removeEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      // Only if the opener is still in the document — a row that was removed while the dialog was open
+      // cannot take focus back, and calling focus() on a detached node silently sends it to <body>.
+      if (opener && document.contains(opener)) opener.focus();
+    };
   }, [onClose]);
 
   return (
@@ -49,7 +77,7 @@ export function Modal({ title, onClose, children, actions, danger, "data-testid"
     >
       <div
         ref={card}
-        className={`modal-card${danger ? " danger" : ""}`}
+        className={`modal-card${danger ? " danger" : ""}${wide ? " wide" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -58,6 +86,7 @@ export function Modal({ title, onClose, children, actions, danger, "data-testid"
         <div className="modal-title" id={titleId}>
           {title}
         </div>
+        {subtitle ? <div className="modal-subtitle">{subtitle}</div> : null}
         {children}
         {actions ? <div className="modal-actions">{actions}</div> : null}
       </div>

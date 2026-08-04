@@ -168,15 +168,24 @@ live_api_pod() {
     -o jsonpath='{range .items[*]}{.metadata.name}|{.metadata.deletionTimestamp}|{.status.phase}{"\n"}{end}' \
     | awk -F'|' '$2 == "" && $3 == "Running" { print $1; exit }'
 }
-api_live="$(live_api_pod)"
-[ -n "$api_live" ] || fail "no Running, non-terminating api pod after the rollout"
-running_id="$(kubectl -n "$NS" get pod "$api_live" -o jsonpath='{.metadata.annotations.nrvq-local-image-id}')"
-if [ "$running_id" = "$API_IMAGE_ID" ]; then
-  echo "  ok  api pod was rolled onto this build (${API_IMAGE_ID:7:12})"
-else
-  fail "the api pod was built from ${running_id:-<no annotation>}, but this run built ${API_IMAGE_ID}.
-    The node has the new image under the same tag and the pods were never rolled onto it."
-fi
+# EVERY first-party component, not just the api. The first version of this guard checked the api pod
+# alone, and a UI-only change then sailed through it: the new bundle was built, loaded into the node,
+# and the pod serving the console kept running the previous one. The console is the component a human
+# actually looks at, so "the cluster runs this build" has to mean all of them.
+for comp in api ui engine webhook; do
+  live_pod="$(kubectl -n "$NS" get pods -l "app.kubernetes.io/component=${comp}" \
+    -o jsonpath='{range .items[*]}{.metadata.name}|{.metadata.deletionTimestamp}|{.status.phase}{"\n"}{end}' \
+    | awk -F'|' '$2 == "" && $3 == "Running" { print $1; exit }')"
+  [ -n "$live_pod" ] || fail "no Running, non-terminating ${comp} pod after the rollout"
+  running_id="$(kubectl -n "$NS" get pod "$live_pod" -o jsonpath='{.metadata.annotations.nrvq-local-image-id}')"
+  if [ "$running_id" = "$API_IMAGE_ID" ]; then
+    echo "  ok  ${comp} pod was rolled onto this build (${API_IMAGE_ID:7:12})"
+  else
+    fail "the ${comp} pod was built from ${running_id:-<no annotation>}, but this run built ${API_IMAGE_ID}.
+    The node has the new images under the same tags and this pod was never rolled onto them."
+  fi
+  [ "$comp" = "api" ] && api_live="$live_pod"
+done
 
 # The image ID only proves what was scheduled. This proves what the process actually serves: a route
 # that exists on this branch and does not exist in the published image.

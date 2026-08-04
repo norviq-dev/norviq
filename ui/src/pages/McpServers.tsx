@@ -492,12 +492,13 @@ export function McpServers() {
         </Panel>
       )}
 
-      {/* Table and detail SIDE BY SIDE, not stacked. Stacked, the detail panel opened roughly a
-          screen below the row that opened it: on a laptop the click produced no visible change, which
-          reads as a broken control rather than as a panel the operator has to go find. */}
-      <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "flex-start" }}>
+      {/* FULL WIDTH, detail in a dialog. The previous side-by-side layout was itself a fix for a worse
+          one — stacked, the detail opened a screen below the row that opened it and the click read as
+          a dead control. Side by side solved that and cost the table a third of the page, which is
+          where the digests, the drift column and the scan verdict all live. A dialog keeps the
+          proximity (it opens over the row, with the row still highlighted behind it) without renting
+          space that stands empty until something is selected. */}
       {pinRows.length > 0 && (
-        <div style={{ flex: "2 1 560px", minWidth: 0 }}>
         <Panel
           title="Tool definitions"
           sub="Pinned by content hash. A definition that changes after approval is a rug pull, and the tool is withheld from the model."
@@ -525,21 +526,32 @@ export function McpServers() {
             </div>
           )}
         </Panel>
-        </div>
       )}
 
-      {selectedTool && (
-        <div style={{ flex: "1 1 420px", minWidth: 320 }}>
-        <Panel
-          title={`${selectedTool.server_id} / ${selectedTool.tool_name}`}
-          sub={
+      {/* AFTER the tables in the DOM, and outside every <Panel>. `.panel` sets `backdrop-filter`,
+          which makes it a containing block for `position: fixed` and would pin the dialog under the
+          page chrome. DOM order also matters to the tests that reach a server row by index.
+
+          Suppressed while a conflict is open: two stacked Modals both register a document-level
+          Escape listener, so one keypress would dismiss both and drop the operator back to a table
+          having silently closed the 409 they needed to read. */}
+      {selectedTool && !conflict && (
+        <Modal
+          wide
+          data-testid="mcp-detail"
+          onClose={() => setSelectedPin(null)}
+          title={
+            <span className="mono" style={{ fontSize: 15 }}>
+              {selectedTool.server_id} / {selectedTool.tool_name}
+            </span>
+          }
+          subtitle={
             selectedTool.status === "drift"
               ? "This server is serving a definition that DIFFERS from the one approved. Calls to this tool are refused until an operator adopts the change."
               : selectedTool.status === "quarantined"
                 ? "Not approved. The tool is withheld from the model and calls to it are refused."
                 : "Approved. The served definition matches the approved one."
           }
-          data-testid="mcp-detail"
         >
           <DefinitionDiff
             approved={selectedTool.approved_canonical}
@@ -616,10 +628,8 @@ export function McpServers() {
               See this tool&apos;s arguments on Tools →
             </Link>
           </div>
-        </Panel>
-        </div>
+        </Modal>
       )}
-      </div>
 
       {conflict && (
         <Modal

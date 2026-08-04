@@ -25,6 +25,7 @@ import { fetchTools, type ToolRegistryEntry } from "../api/client";
 import { ArgumentTree } from "../components/common/ArgumentTree";
 import { BrandLoader } from "../components/common/BrandLoader";
 import { KitButton } from "../components/common/KitButton";
+import { Modal } from "../components/common/Modal";
 import { PageHead } from "../components/common/PageHead";
 import { Panel } from "../components/common/Panel";
 import { ProvenanceBadge } from "../components/common/ProvenanceBadge";
@@ -180,28 +181,50 @@ export function Tools() {
         />
       </div>
 
-      <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
-        <div style={{ flex: "1 1 620px", minWidth: 0, display: "flex", flexDirection: "column", gap: 16 }}>
-          <DeclaredPanel
-            rows={declared}
-            collisions={collisions}
-            selected={selected}
-            onSelect={(t) => setSelected(rowKey(t) === selected ? null : rowKey(t))}
-            rowKey={rowKey}
-          />
-          <ObservedPanel
-            rows={observed}
-            selected={selected}
-            onSelect={(t) => setSelected(rowKey(t) === selected ? null : rowKey(t))}
-            rowKey={rowKey}
-          />
-        </div>
-
-        <div style={{ flex: "0 1 384px", minWidth: 300, display: "flex", flexDirection: "column", gap: 16 }}>
-          {current ? <ToolDetail tool={current} /> : <NothingSelected empty={rows.length === 0} />}
-          {collisions.size > 0 && <CollisionNote names={[...collisions.keys()]} />}
-        </div>
+      {/* FULL WIDTH. The detail used to occupy a third of the page and stood empty until a row was
+          clicked, so the two tables — the thing you actually came to read — ran at 620px with their
+          argument counts and timestamps crushed against each other. Detail is a modal now, which is
+          also the honest shape for it: reading one tool is a drill-in, not a persistent companion. */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+        <DeclaredPanel
+          rows={declared}
+          collisions={collisions}
+          selected={selected}
+          onSelect={(t) => setSelected(rowKey(t) === selected ? null : rowKey(t))}
+          rowKey={rowKey}
+        />
+        <ObservedPanel
+          rows={observed}
+          selected={selected}
+          onSelect={(t) => setSelected(rowKey(t) === selected ? null : rowKey(t))}
+          rowKey={rowKey}
+        />
+        {/* Both of these stay OUT of the modal, deliberately. They are answers to questions you have
+            before you know which row to click: "why does one name appear twice" and "why is this
+            empty". Putting them behind a click would mean the reader has to already suspect the thing
+            the note exists to tell them. */}
+        {collisions.size > 0 && <CollisionNote names={[...collisions.keys()]} />}
+        <NothingSelected empty={rows.length === 0} />
       </div>
+
+      {/* Rendered AFTER the tables and outside every <Panel>: `.panel` sets `backdrop-filter`, which
+          makes it a containing block for `position: fixed` and would trap the dialog under the page
+          chrome. Three other call sites in this codebase carry the same warning. */}
+      {current && (
+        <Modal
+          wide
+          data-testid="tool-detail"
+          title={
+            <span className="mono" style={{ fontSize: 15 }}>
+              {current.server_id ? `${current.server_id} / ` : ""}
+              {current.name}
+            </span>
+          }
+          onClose={() => setSelected(null)}
+        >
+          <ToolDetail tool={current} />
+        </Modal>
+      )}
     </div>
   );
 }
@@ -325,15 +348,17 @@ function ObservedPanel({ rows, selected, onSelect, rowKey }: TableProps) {
 
 // --- detail -------------------------------------------------------------------------------------------
 
+/**
+ * The body of the tool dialog.
+ *
+ * No Panel and no `data-testid` of its own: the `Modal` that hosts it carries `tool-detail`, and the
+ * name is already the dialog's title. Two nested cards and the name printed twice is what you get if
+ * a side panel is dropped into a dialog unchanged.
+ */
 function ToolDetail({ tool }: { tool: ToolRegistryEntry }) {
   const declared = tool.source === "mcp_declared";
   return (
-    <Panel data-testid="tool-detail">
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
-        <span className="mono" style={{ fontSize: 14 }}>
-          {tool.server_id ? `${tool.server_id} / ${tool.name}` : tool.name}
-        </span>
-      </div>
+    <>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
         <ProvenanceBadge source={tool.source} />
         <ScopeabilityBadge source={tool.source} schemaAvailable={tool.schema_available} />
@@ -398,23 +423,39 @@ function ToolDetail({ tool }: { tool: ToolRegistryEntry }) {
           </Link>
         )}
       </div>
-    </Panel>
+    </>
   );
 }
 
+/**
+ * Always rendered, in the page body — never inside the dialog.
+ *
+ * With no tools at all it is the page's whole explanation, and there is no row to click that could
+ * reveal it. With tools present it is one line telling you a row is clickable, which is exactly the
+ * thing a modal cannot advertise about itself.
+ */
 function NothingSelected({ empty }: { empty: boolean }) {
+  if (!empty) {
+    return (
+      <div
+        data-testid="tool-detail-empty"
+        className="muted"
+        style={{ fontSize: 12.5, lineHeight: 1.6, padding: "0 2px" }}
+      >
+        Select a tool to see how well Norviq knows it, and which of its arguments a policy can address.
+      </div>
+    );
+  }
   return (
     <Panel data-testid="tool-detail-empty">
       <div className="muted" style={{ fontSize: 12.5, lineHeight: 1.6 }}>
-        {empty
-          ? "Norviq doesn't know about any tools here yet. Tools arrive two ways, and they are not equivalent: declared through the MCP proxy with a schema, so arguments can be scoped — or merely observed in a real call, which proves the name exists and nothing more."
-          : "Select a tool to see how well Norviq knows it, and which of its arguments a policy can address."}
+        Norviq doesn&rsquo;t know about any tools here yet. Tools arrive two ways, and they are not
+        equivalent: declared through the MCP proxy with a schema, so arguments can be scoped — or merely
+        observed in a real call, which proves the name exists and nothing more.
       </div>
-      {empty && (
-        <div className="muted" style={{ fontSize: 12.5, marginTop: 10 }}>
-          You needn&rsquo;t wait for either — a policy can name a tool nobody has called.
-        </div>
-      )}
+      <div className="muted" style={{ fontSize: 12.5, marginTop: 10 }}>
+        You needn&rsquo;t wait for either — a policy can name a tool nobody has called.
+      </div>
     </Panel>
   );
 }
