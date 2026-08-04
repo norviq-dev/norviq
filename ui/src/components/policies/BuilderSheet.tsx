@@ -20,6 +20,7 @@ import { registerRego } from "../../lib/monaco-rego";
 import { ProvenanceBadge } from "../common/ProvenanceBadge";
 import { InlineDisabledReason } from "../common/InlineDisabledReason";
 import { Stepper } from "../common/Stepper";
+import { ConditionPicker, type PickerGroup, type PickerOption } from "./ConditionPicker";
 import { RegoDrawer } from "./RegoDrawer";
 import { ScopeCell } from "./ScopeCell";
 import { AlertCircle, Check, FlaskConical, Maximize2, Minimize2, Plus, Trash2, X } from "lucide-react";
@@ -1289,6 +1290,76 @@ export function BuilderSheet({
       .filter((p) => p.addressable && !p.path.includes("."))
       .map((p) => p.path);
 
+  /**
+   * The condition picker's two-and-a-bit groups, built from what the registry actually says.
+   *
+   * Group order is the argument: this tool's OWN arguments first, because they are the most specific
+   * thing anyone can say about a call and until recently they could not be said at all. Whole-call
+   * facts second — broader, and they hold even when the payload moves between fields. The undeclared
+   * escape hatch last, because reaching for it means the schema did not describe what you want.
+   */
+  const pickerGroupsFor = (tool: string): PickerGroup[] => {
+    const key = tool.toLowerCase();
+    const paths = pathsByTool.get(key) ?? [];
+    // A grant fact may be a `not` wrapper, which carries the field on `.inner` — unwrap before reading
+    // it, or a negated clause silently stops counting as "already used".
+    const factField = (f: BuilderGrantFact): string =>
+      f.type === "not" ? ((f.inner as { field?: string }).field ?? "") : ((f as { field?: string }).field ?? "");
+    const usedFields = new Set((allowlistGrantFacts[tool] ?? []).map(factField).filter(Boolean));
+    const usedArgPaths = new Set(
+      [...usedFields].filter((f) => f.startsWith(PARAM_PATH_PREFIX)).map((f) => f.slice(PARAM_PATH_PREFIX.length))
+    );
+
+    const argOptions: PickerOption[] = paths.map((pth) => ({
+      id: pth.path,
+      label: pth.path,
+      meta: [pth.type, pth.path.includes(".") ? "nested" : null].filter(Boolean).join(" · "),
+      required: pth.required,
+      disabled: !pth.addressable,
+      // Never rendered without one — a greyed row with no reason is the thing this replaced.
+      reason: pth.addressable ? undefined : (pth.note ?? "This argument cannot be addressed by param_paths."),
+      used: usedArgPaths.has(pth.path)
+    }));
+
+    const groups: PickerGroup[] = [
+      {
+        key: "args",
+        label: `${tool} arguments`,
+        tone: "accent",
+        sub: schemaByTool.has(key)
+          ? paths.length === 0
+            ? "Its declared schema lists no properties, so there is nothing to address by path."
+            : "From the approved MCP definition. Unusable ones are shown with the reason, never hidden."
+          : `No declared schema for ${tool} — nothing here to list. Use a whole-call fact below, or scope a path you know.`,
+        options: argOptions
+      },
+      {
+        key: "facts",
+        label: "What the call carries or reaches",
+        tone: "audit",
+        sub: "Derived by the engine from the whole call, so they hold wherever the value sits in the payload.",
+        options: FACT_FIELDS.map((f) => ({
+          id: f.field,
+          label: factFieldLabel(f.field),
+          hint: FACT_FIELD_HINT[f.field],
+          used: usedFields.has(f.field)
+        }))
+      },
+      {
+        key: "undeclared",
+        label: "When the argument was never declared",
+        tone: "audit",
+        sub: "Names a path yourself. The row you get lets you change the operator.",
+        options: CONSTRAINT_KINDS.map((k) => ({
+          id: k,
+          label: `any parameter — ${CONSTRAINT_VERB[k]}`,
+          hint: CONSTRAINT_HINT[k]
+        }))
+      }
+    ];
+    return groups;
+  };
+
   // Datalist suggestions: real registry names when we have any. Capability fragments remain ONLY as a
   // last-resort vocabulary when the registry is empty — which is the default in most deployments, since
   // `mcp_tool_pins` is populated only when MCP injection is switched on. They are a hint of the shape of
@@ -2521,80 +2592,37 @@ export function BuilderSheet({
                         );
                       })}
 
-                      <div style={{ display: "flex", gap: 6, marginTop: 10, alignItems: "center", flexWrap: "wrap" }}>
-                        <select
-                          data-testid="builder-fact-add-kind"
-                          aria-label="add a scoping fact"
-                          value=""
-                          onChange={(e) => {
-                            const picked = e.target.value;
-                            if (!picked) return;
-                            // A `param_paths.<path>` field is not in the registry — the path is the
-                            // tool's own argument — so it is always the scalar kind.
-                            if (picked.startsWith(PARAM_PATH_PREFIX)) {
-                              addFact(openGrantTool, picked, "scalar");
+                      <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
+                        {/* ONE picker, not two selects. The tool's own arguments and the whole-call
+                            facts were in separate dropdowns, so the difference between "this tool's
+                            `to` field" and "every address anywhere in the call" — the distinction the
+                            operator most needs — could only be learned by opening both and comparing
+                            from memory. Side by side under one search, it reads itself. */}
+                        <ConditionPicker
+                          groups={pickerGroupsFor(openGrantTool)}
+                          onPick={(groupKey, optionId) => {
+                            if (groupKey === "args") {
+                              // A `param_paths.<path>` field is not in the registry — the path is the
+                              // tool's own argument — so it is always the scalar kind.
+                              addFact(openGrantTool, `${PARAM_PATH_PREFIX}${optionId}`, "scalar");
                               return;
                             }
-                            const spec = FACT_FIELDS.find((x) => x.field === picked);
+                            if (groupKey === "undeclared") {
+                              // The escape hatch: a path the schema never declared. `matches` is the
+                              // most common opening move and the row's own kind selector can change
+                              // it — the picker chooses WHAT, the row chooses HOW.
+                              addConstraint(openGrantTool, optionId as ConstraintKind);
+                              return;
+                            }
+                            const spec = FACT_FIELDS.find((x) => x.field === optionId);
                             if (spec) addFact(openGrantTool, spec.field, spec.kind);
                           }}
-                          style={{ fontSize: 11.5 }}
-                        >
-                          <option value="">+ scope what it carries / reaches…</option>
-                          {/* THIS TOOL'S OWN ARGUMENTS, first, because they are the most specific thing
-                              anyone can say and until now they could not be said at all. Non-addressable
-                              ones are rendered DISABLED WITH THE REASON rather than omitted: silently
-                              dropping an argument teaches the operator it does not exist, which is the
-                              capability-fragment mistake wearing different clothes. */}
-                          {(() => {
-                            const paths = pathsByTool.get(openGrantTool.toLowerCase()) ?? [];
-                            if (paths.length === 0) return null;
-                            return (
-                              <optgroup label={`${openGrantTool} arguments (declared)`}>
-                                {paths.map((p) => (
-                                  <option
-                                    key={p.path}
-                                    value={`${PARAM_PATH_PREFIX}${p.path}`}
-                                    disabled={!p.addressable}
-                                    title={p.note}
-                                  >
-                                    {p.path}
-                                    {p.required ? " *" : ""}
-                                    {p.addressable ? "" : ` — ${p.note ?? "cannot be scoped"}`}
-                                  </option>
-                                ))}
-                              </optgroup>
-                            );
-                          })()}
-                          <optgroup label="what the call carries or reaches">
-                            {FACT_FIELDS.map((x) => (
-                              <option key={x.field} value={x.field}>
-                                {factFieldLabel(x.field)}
-                              </option>
-                            ))}
-                          </optgroup>
-                        </select>
-                        <select
-                          data-testid="builder-constraint-add-kind"
-                          aria-label="add a constraint"
-                          value=""
-                          onChange={(e) => {
-                            if (e.target.value) addConstraint(openGrantTool, e.target.value as ConstraintKind);
-                          }}
-                          style={{ fontSize: 11.5 }}
-                        >
-                          <option value="">+ add a constraint…</option>
-                          {CONSTRAINT_KINDS.map((k) => (
-                            <option key={k} value={k}>
-                              {CONSTRAINT_VERB[k]}
-                            </option>
-                          ))}
-                        </select>
+                        />
                         {(allowlistGrants[openGrantTool] ?? []).length === 0 &&
                           (allowlistGrantFacts[openGrantTool] ?? []).length === 0 && (
-                            <span style={{ fontSize: 10.5, color: "var(--text-dim)" }}>
+                            <span style={{ fontSize: 11.5, color: "var(--text-muted)", flex: "1 1 240px", lineHeight: 1.5 }}>
                               Nothing scoped — <span className="mono">{openGrantTool}</span> is allowed with any
-                              arguments, which is what the agent framework's tool binding already says.
+                              arguments, which is what the agent framework&rsquo;s tool binding already says.
                             </span>
                           )}
                       </div>

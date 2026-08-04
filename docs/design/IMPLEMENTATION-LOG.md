@@ -1635,3 +1635,52 @@ budget survives the collapse.
 **Still not built: `ConditionPicker`.** Deferred deliberately — it changes the condition-editing model
 rather than the layout, and `ConditionChip` alone exposes ~20 testids both e2e specs drive. Shipping it
 alongside a layout restructure would make any regression unattributable.
+
+---
+
+## ConditionPicker — the last piece of the builder chrome
+
+`ui/src/components/policies/ConditionPicker.tsx` replaces the two `<select>` elements that were the
+only place a tool's own arguments were ever named.
+
+A native select is the wrong instrument for this job in three ways that all mattered:
+
+1. **It cannot show a REASON.** Non-addressable arguments were rendered as disabled `<option>`s with
+   the reason appended to the label and repeated in a `title` — a tooltip on a disabled option, which
+   no browser shows. The operator saw a greyed line and no way to learn why. This is the same defect
+   as `.btn:disabled { pointer-events: none }` hiding a disabled button's tooltip, in a different
+   control, and it had been sitting next to that one the whole time.
+2. **It cannot be searched.** A tool with thirty arguments is a scroll.
+3. **It collapses the moment you look away,** so the two groups — this tool's own arguments, and what
+   the call carries or reaches — could never be seen side by side. That comparison is the entire
+   lesson about which one to reach for.
+
+Three groups, in an order that is itself the argument: **this tool's arguments** first (most specific
+thing anyone can say, and until recently unsayable at all), **whole-call facts** second (broader, and
+they hold wherever the value sits in the payload), **undeclared paths** last (reaching for it means
+the schema did not describe what you want). Disabled options carry `aria-disabled` rather than
+`disabled`, so a screen reader can still land on them and read the reason — `disabled` removes a node
+from the tree, which is hiding by another name.
+
+**What was NOT built, and why.** The prototype's capture-off band needs `params_available`, which is a
+propose-side signal the builder does not receive. Rather than fabricate one, the picker states the
+condition the builder actually knows: a tool with no declared schema says so, and a tool whose schema
+declares no properties says that instead.
+
+### The migration made one assertion possible that was not before
+
+`BuilderSheet.test.tsx` asserted the disabled state of `<option>` elements. It could not assert the
+REASON, because a `title` is not rendered text. The picker's version reads:
+
+```ts
+expect(anInteger).toHaveAttribute("aria-disabled", "true");
+expect(anInteger.textContent).toMatch(/only text/i);
+```
+
+Eleven unit tests and six e2e steps moved from `selectOption` to a `pickCondition` helper. Both helpers
+are **idempotent** — they open the picker only if it is not already open — because they get called
+inside `waitFor`, and the trigger is replaced by the popover on first click, so an unconditional second
+click reports "unable to find builder-condition-picker-open" and the retry loop blames a missing
+element instead of the condition it was waiting on.
+
+With this, `EXIT-STATE.md` has nothing left in its "explicitly not in scope" list for the builder.

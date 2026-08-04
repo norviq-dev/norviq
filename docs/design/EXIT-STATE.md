@@ -105,10 +105,9 @@ industry's edge cases.
 
 Stated so "done" is not confused with "everything":
 
-- **`ConditionPicker`** — the handoff's grouped condition popover. Deliberately deferred: it changes
-  the condition-editing model rather than the layout, and `ConditionChip` alone exposes ~20 testids
-  both builder e2e specs drive, so shipping it alongside the chrome restructure would make any
-  regression unattributable. The rest of the builder chrome (top bar, Stepper strip, footer action
-  bar, RegoDrawer rail) IS built — see `IMPLEMENTATION-LOG.md`.
+- Nothing from the design handoff remains unbuilt. The builder chrome (top bar, Stepper strip, footer
+  action bar, RegoDrawer rail) and `ConditionPicker` all shipped — see `IMPLEMENTATION-LOG.md`. The
+  one deviation is recorded there: the picker has no capture-off band, because that needs
+  `params_available`, a propose-side signal the builder does not receive.
 - **No merge to `main`, no PR, no release tag.** The exit state means *ready* to cut a version, and
   cutting it is the user's call.
