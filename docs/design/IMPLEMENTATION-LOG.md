@@ -1553,3 +1553,85 @@ run incomparable to the next. Every run now starts at 1h=22 / 24h=198 / 7d=1254.
 > by 190 specs, and finally the checker's own ordering and parsing. Each one was indistinguishable
 > from a real defect until the discriminating experiment was run — and in every case the experiment
 > was cheap and the guess was expensive.**
+
+---
+
+## Reversing the builder-chrome decision, and moving two detail panels into dialogs
+
+Both came from walking the live console. The second is the more interesting one, because the record was
+already clear and wrong.
+
+### The chrome decision is reversed
+
+`IMPLEMENTATION-LOG.md` said *"The plan's Phase 5 lists builder chrome … **Decision: not built**"* and
+`EXIT-STATE.md` listed it as out of scope. Of the eleven components the handoff specifies, only
+`ScopeCell` and `ProvenanceBadge` were wired in. `Stepper.tsx` and `TokenInput.tsx` had been **built to
+spec and left dead** — imported by nothing but their own tests.
+
+Built now: the 54px top bar with a `namespace / class` breadcrumb, the stepper strip (wiring the
+`Stepper` that already existed), a sheet-level footer action bar, and `RegoDrawer` as a 46px rail.
+
+**The rail is the load-bearing part.** The compiled rego held half the sheet permanently, and the
+allowed-tool row is specced `[name] [ScopeCell flex: 2 1 300px] [remove]` — at half width the ScopeCell
+wrapped its four slots into a stack of fragments. A permanent reference pane was crowding out the one
+control this whole redesign exists to make readable. Collapsed, the rail still carries the budget line
+sideways, because those three caps are the reason an expert watches that pane at all: you lose the
+source, not the signal.
+
+**The footer is the other real fix.** `Run dry-run` and `Save & enforce` lived inside Step 3, inside
+the *right-hand rego column*, below a code editor — so the primary CTA of the sheet was in the
+reference pane, and expanding the editor pushed it out of view. A previous fix had made it `sticky` to
+work around that, which is a good hint the placement was wrong.
+
+Save's disabled reason is now **visible text** under the button via the existing
+`InlineDisabledReason`, not a `title`: `.btn:disabled { pointer-events: none }` means a disabled button
+can never show its tooltip, so every reason we put only in `title` was unreachable exactly when it was
+needed. The footer's status line describes the STATE and the button's reason names the ACTION — the
+first draft printed one sentence in both places, spending the two most-read spots in the sheet on the
+same words.
+
+### Two bugs in my own new component, both from the same root
+
+`Monaco` sized `height: 100%` inside a block with no height of its own resolves to **zero**: the drawer
+opened onto an empty pane with a scrollbar and nothing under it. And the authoring column, capped at
+860px for a readable measure, sat left-aligned with ~500px of void where the rego used to be — which
+reads as a pane failing to load. Both were only visible in a screenshot; both passed every test.
+
+### Tools and MCP Servers
+
+The detail panels rented a third of each page to something empty until a row was clicked, so the tables
+ran cramped. They are dialogs now, over a blurred backdrop, with the row still highlighted behind.
+
+What stays OUT of the dialog is the interesting part: the collision notes and the empty state. Those
+answer questions you have **before** you know which row to click — "why does one name appear twice",
+"why is this empty" — and behind a click, the reader has to already suspect the thing the note exists
+to tell them. The tests that asserted them with no row selected were right to.
+
+`Modal` gained `wide` (760px — a definition diff wraps into uselessness at 520; the injected
+description in the drift case now reads on one line), `subtitle`, and **focus restore on close**. It
+moved focus in and never gave it back, which was tolerable for two dialogs and hostile once opening one
+is how you read a table row.
+
+### The guard that was right and incomplete
+
+The `podAnnotations` rollout lever went on api and engine only. This UI-only change then sailed
+straight through the guard that exists to catch exactly it: the bundle was built, loaded into the node,
+and the pod **serving the console** kept running the previous one — the redesign looked unshipped in
+the browser while every gate reported success. All four first-party deployments carry it now, and
+`00-up.sh` verifies all four.
+
+> **Rule: a provenance guard that covers one component of four still reports "this cluster runs your
+> code". Second time this class of bug cost a session; the first fix was correct and partial.**
+
+### One test updated, and why it is not a weakening
+
+`builder-scope-p1.spec.ts` reads the compiled rego through Monaco. With the drawer collapsed the editor
+is not mounted, so the spec now opens the rail first — which is what a user does to read the rego. The
+vitest suite's `renderSheet()` helper does the same, because nearly every test in it asserts on the
+compiled preview and their premise is a sheet where that preview is on screen. The one test that
+asserted the *old* 260px↔560px height toggle is rewritten for rail↔drawer, and now also asserts the
+budget survives the collapse.
+
+**Still not built: `ConditionPicker`.** Deferred deliberately — it changes the condition-editing model
+rather than the layout, and `ConditionChip` alone exposes ~20 testids both e2e specs drive. Shipping it
+alongside a layout restructure would make any regression unattributable.

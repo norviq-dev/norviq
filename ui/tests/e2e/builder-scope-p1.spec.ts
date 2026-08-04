@@ -105,6 +105,13 @@ test("a condition authored on the row reaches the policy the builder is about to
     "data_classes excludes {secret}"
   );
 
+  // OPEN THE REGO DRAWER FIRST. It is a 46px rail by default — the compiled policy is reference, and
+  // a permanently-open pane was taking the width the allowed-tool row needs — so the editor is not
+  // mounted until someone asks for it. Driving the rail is what a user does to read the rego, and it
+  // is what this assertion depends on, so the spec should do it rather than assume a pane that is no
+  // longer there by default.
+  await page.getByTestId("builder-editor-expand-toggle").click();
+
   // And the live preview is compiling THIS class's intent-allowlist module — scoped to the sheet,
   // because the Policy Catalog behind it has its own Monaco showing the strict preset, and an
   // unscoped locator asserts green against the wrong document entirely.

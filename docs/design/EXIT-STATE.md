@@ -105,7 +105,10 @@ industry's edge cases.
 
 Stated so "done" is not confused with "everything":
 
-- **Builder chrome** (top bar, Stepper strip, RegoDrawer rail, ConditionPicker) — deliberately not
-  built; reasoning in `IMPLEMENTATION-LOG.md`.
+- **`ConditionPicker`** — the handoff's grouped condition popover. Deliberately deferred: it changes
+  the condition-editing model rather than the layout, and `ConditionChip` alone exposes ~20 testids
+  both builder e2e specs drive, so shipping it alongside the chrome restructure would make any
+  regression unattributable. The rest of the builder chrome (top bar, Stepper strip, footer action
+  bar, RegoDrawer rail) IS built — see `IMPLEMENTATION-LOG.md`.
 - **No merge to `main`, no PR, no release tag.** The exit state means *ready* to cut a version, and
   cutting it is the user's call.

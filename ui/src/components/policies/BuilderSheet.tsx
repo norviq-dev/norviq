@@ -18,6 +18,9 @@ import "./BuilderSteps.css"; // Numbered-step left pane (UX redesign) — layout
 import Editor from "@monaco-editor/react";
 import { registerRego } from "../../lib/monaco-rego";
 import { ProvenanceBadge } from "../common/ProvenanceBadge";
+import { InlineDisabledReason } from "../common/InlineDisabledReason";
+import { Stepper } from "../common/Stepper";
+import { RegoDrawer } from "./RegoDrawer";
 import { ScopeCell } from "./ScopeCell";
 import { AlertCircle, Check, FlaskConical, Maximize2, Minimize2, Plus, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -1539,6 +1542,44 @@ export function BuilderSheet({
   const step2State: "locked" | "active" | "done" = !step1Valid ? "locked" : step2Valid ? "done" : "active";
   const step3State: "locked" | "active" | "done" = !step2Valid ? "locked" : saved ? "done" : "active";
 
+  // WHY SAVE IS BLOCKED, as a sentence rather than a tooltip. `.btn:disabled { pointer-events: none }`
+  // means a disabled button can never show its `title`, so every reason that lived only there was
+  // unreachable at precisely the moment it mattered. Ordered by what the operator must fix FIRST —
+  // naming the dry-run while the namespace is still unset would send them to the wrong control.
+  const saveBlockedReason = !canSave
+    ? !namespaceReady
+      ? "Pick a concrete target namespace first — the global scope is All namespaces."
+      : !scopeReady
+        ? "Set an agent class first."
+        : hasErrors
+          ? "Fix the compile errors before saving."
+          : dryRunStale
+            ? "The policy changed since the last dry-run — re-run it."
+            : dryRunResult?.valid !== true
+              ? "Run a dry-run first — save is blocked until it passes."
+              : undefined
+    : undefined;
+
+  // The footer's status line. It describes the STATE; the reason under the Save button names the
+  // ACTION. Printing one sentence in both places wastes the two most-read spots in the sheet on the
+  // same words — the status says what is true, the button says what to do about it.
+  const footerStatus: { tone: "blocked" | "ready" | "saved"; text: string } = saved
+    ? { tone: "saved", text: "Saved. This policy is enforcing now." }
+    : !namespaceReady
+      ? { tone: "blocked", text: "No target namespace — this policy has nowhere to land yet." }
+      : !scopeReady
+        ? { tone: "blocked", text: "No agent class — nothing is scoped to yet." }
+        : hasErrors
+          ? { tone: "blocked", text: "The policy does not compile, so nothing can be checked against it." }
+          : dryRunStale
+            ? { tone: "blocked", text: "The policy changed after the last dry-run, so that result no longer describes it." }
+            : dryRunResult == null
+              ? { tone: "blocked", text: "No dry-run has run against this draft — its effect on real traffic is unknown." }
+              : {
+                  tone: "ready",
+                  text: `Dry-run matches this policy · ${(dryRunResult.newly_blocked ?? 0).toLocaleString()} recorded call${(dryRunResult.newly_blocked ?? 0) === 1 ? "" : "s"} would newly block.`
+                };
+
   // Auto-focus (Phase: numbered steps) — whichever tier is selected, its own identifier field gets
   // focus: on the initial mount (tier defaults to "class") and again every time the tier changes. Only
   // ONE of the three identifier inputs below attaches this ref at a time (tier-dispatched JSX), so this
@@ -1662,23 +1703,44 @@ export function BuilderSheet({
         className="sheet-kit vpb-sheet-fullscreen"
         style={{ display: "flex", flexDirection: "column" }}
       >
-        <div className="sheet-head">
-          <div>
-            <div className="sheet-title">Visual Policy Builder</div>
-            <div className="panel-sub mono" style={{ marginTop: 3 }}>
-              {SCOPE_TIER_LABEL[tier]}: {scopeIdentifier(scope).trim() || `new ${tier}`} · {targetNamespace.trim() || "no namespace set"}
-            </div>
+        {/* TOP BAR — 54px. The scope used to sit under the title as a full sentence
+            ("Agent class: support-bot · analytics"), which restated the labels the form beneath it
+            already carries. A breadcrumb says the same thing in the shape an operator reads without
+            parsing: where it lands / what it governs, leaf accented. */}
+        <div className="vpb-topbar">
+          <div className="vpb-topbar-title">Visual policy builder</div>
+          <div className="vpb-topbar-divider" aria-hidden />
+          <div className="vpb-topbar-crumb mono" title={`${SCOPE_TIER_LABEL[tier]} in ${targetNamespace.trim() || "no namespace"}`}>
+            <span>{targetNamespace.trim() || "no namespace"}</span>
+            <span style={{ color: "var(--border-active)" }}>/</span>
+            <span style={{ color: "var(--accent)" }}>{scopeIdentifier(scope).trim() || `new ${tier}`}</span>
           </div>
-          <button className="icon-btn" data-testid="builder-close" onClick={requestClose}>
-            <X size={18} />
+          <span style={{ flex: 1 }} />
+          <button className="icon-btn" data-testid="builder-close" aria-label="Close the builder" onClick={requestClose}>
+            <X size={17} />
           </button>
         </div>
 
-        <div className="vpb-body" style={{ display: "flex", gap: 20, flex: 1, minHeight: 0 }}>
-          {/* LEFT: three numbered, progressively-revealed steps (UX redesign) — who this policy is for,
-              what it should do, then check & enforce. Replaces the old flat wall of two identical-
-              looking tab rows + two text fields, which gave the operator no ordering cue at all. */}
-          <div className="vpb-form-pane" style={{ flex: "1 1 480px", minWidth: 0, overflowY: "auto", paddingRight: 8 }}>
+        {/* The middle band: [ stepper + authoring + footer | rego drawer ]. The footer lives INSIDE the
+            left column on purpose, so it does not run under the drawer — the primary CTA belongs to
+            the work, not to the reference pane it used to be buried in. */}
+        <div className="vpb-body" style={{ display: "flex", flex: 1, minHeight: 0 }}>
+          <div style={{ flex: "1 1 auto", minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
+            {/* STEP STRIP. The three steps were numbered cards stacked in the form, so "where am I"
+                could only be answered by scrolling. A strip answers it without moving. */}
+            <div className="vpb-stepper-strip">
+              <Stepper
+                data-testid="builder-stepper"
+                steps={[{ label: "Scope" }, { label: "What it may do" }, { label: "Check & enforce" }]}
+                current={step1Valid ? (step2Valid ? 2 : 1) : 0}
+                hint="Nothing is enforced until you save."
+              />
+            </div>
+
+          {/* Three progressively-revealed steps — who this policy is for, what it should do, then
+              check & enforce. Replaces the old flat wall of two identical-looking tab rows + two text
+              fields, which gave the operator no ordering cue at all. */}
+          <div className="vpb-form-pane" style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: "auto" }}>
             {/* --- Step ① — Who is this policy for? (never locked — it's the first step) --- */}
             <div className="vpb-step" data-testid="builder-step-1" data-step-state={step1State}>
               <div className="vpb-step-header">
@@ -2576,75 +2638,6 @@ export function BuilderSheet({
             )}
               </div>
             </div>
-          </div>
-
-          {/* RIGHT: live compiled rego + stats + errors + actions — narrower than the form on a wide
-                viewport (see .vpb-rego-pane); the form is the work, the rego is reference. */}
-          <div className="vpb-rego-pane" style={{ flex: "1 1 480px", minWidth: 0, display: "flex", flexDirection: "column", overflowY: "auto" }}>
-            <div className="section-label" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <span>Compiled Rego (live, read-only)</span>
-              <button
-                type="button"
-                data-testid="builder-editor-expand-toggle"
-                className="icon-btn"
-                aria-pressed={editorExpanded}
-                data-expanded={editorExpanded}
-                title={editorExpanded ? "Collapse editor" : "Expand editor"}
-                style={{ width: 22, height: 22 }}
-                onClick={() => setEditorExpanded((e) => !e)}
-              >
-                {editorExpanded ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
-              </button>
-            </div>
-            <div className="editor" data-testid="builder-editor-container" data-expanded={editorExpanded} style={{ height: editorExpanded ? 560 : 260, marginBottom: 8 }}>
-              <Editor
-                defaultLanguage="rego"
-                beforeMount={registerRego}
-                theme="vs-dark"
-                height={editorExpanded ? "560px" : "260px"}
-                value={compiled.rego || "# Fix the errors below to generate rego"}
-                options={{ readOnly: true, minimap: { enabled: false }, fontSize: 12 }}
-              />
-            </div>
-
-            <div
-              data-testid="builder-stats"
-              className="mono"
-              style={{ display: "flex", gap: 14, fontSize: 11.5, color: "var(--text-muted)", marginBottom: 8 }}
-            >
-              <span style={{ color: compiled.stats.bytes > 65536 ? "var(--danger,#e5484d)" : undefined }}>
-                {compiled.stats.bytes.toLocaleString()} / 65,536 bytes
-              </span>
-              <span style={{ color: compiled.stats.lines > 500 ? "var(--danger,#e5484d)" : undefined }}>
-                {compiled.stats.lines} / 500 lines
-              </span>
-              <span style={{ color: compiled.stats.regexOps > 25 ? "var(--danger,#e5484d)" : undefined }}>
-                {compiled.stats.regexOps} / 25 regex ops
-              </span>
-            </div>
-
-            {hasErrors && (
-              <div
-                data-testid="builder-errors"
-                role="alert"
-                style={{
-                  fontSize: 12,
-                  color: "var(--danger,#e5484d)",
-                  background: "#e5484d10",
-                  border: "1px solid #e5484d30",
-                  borderRadius: 8,
-                  padding: "8px 10px",
-                  marginBottom: 8,
-                  maxHeight: 90,
-                  overflowY: "auto"
-                }}
-              >
-                {compiled.errors.map((e, i) => (
-                  <div key={i}>{e.message}</div>
-                ))}
-              </div>
-            )}
-
             {/* --- Step ③ — Check & enforce (dimmed until step ② has something). The compiled-rego
                 preview + stats/errors ABOVE this are the persistent "what you're building" panel — an
                 OUTPUT, not a step, so it stays un-numbered and never dims. */}
@@ -2678,46 +2671,6 @@ export function BuilderSheet({
                   <div className="mono" style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 3 }}>
                     creates {targetNamespace.trim() || "—"} / {scopeIdentifier(scope).trim() ? loaderKeyFor(scope) : "—"}
                   </div>
-                </div>
-
-                {/* Sticky: this row holds Run dry-run / Save & enforce and sits BELOW the rego editor in this
-                    column. Expanding the editor used to push it out of a clipped pane with no way back. */}
-                <div className="vpb-actions-sticky" style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-                  <KitButton
-                    variant="outline"
-                    icon={FlaskConical}
-                    disabled={!canDryRun}
-                    data-testid="builder-dryrun-btn"
-                    title={!namespaceReady ? "Pick a concrete target namespace first" : !scopeReady ? "Set an agent class first" : undefined}
-                    onClick={runDryRun}
-                  >
-                    {dryRunLoading ? "Dry-Running..." : "Run dry-run"}
-                  </KitButton>
-                  <KitButton
-                    variant="primary"
-                    icon={Check}
-                    disabled={!canSave}
-                    data-testid="builder-save-btn"
-                    title={
-                      !namespaceReady
-                        ? "Pick a concrete target namespace first — the global scope is All namespaces"
-                        : !scopeReady
-                        ? "Set an agent class first"
-                        : hasErrors
-                        ? "Fix compile errors first"
-                        : dryRunResult?.valid !== true
-                        ? "Run a valid dry-run of the current graph first"
-                        : dryRunStale
-                        ? "The graph changed since the last dry-run — re-run it"
-                        : undefined
-                    }
-                    onClick={saveAndEnforce}
-                  >
-                    {saving ? "Saving..." : "Save & enforce"}
-                  </KitButton>
-                  <KitButton variant="ghost" onClick={requestClose}>
-                    Cancel
-                  </KitButton>
                 </div>
 
                 <div style={{ overflowY: "auto", flex: 1, minHeight: 0 }}>
@@ -2781,6 +2734,56 @@ export function BuilderSheet({
               </div>
             </div>
           </div>
+
+            {/* FOOTER ACTION BAR. These three used to sit inside Step 3, inside the RIGHT-hand rego
+                column — so the primary CTA of the whole sheet lived in the reference pane, below a
+                code editor, and expanding that editor pushed it out of view. Two children only: a
+                status region that grows and a button group that does not; loose children wrap
+                individually and orphan the primary button. */}
+            <div className="vpb-footer">
+              <div className="vpb-footer-status">
+                <span className="vpb-footer-dot" data-state={footerStatus.tone} aria-hidden />
+                <span>{footerStatus.text}</span>
+              </div>
+              <div style={{ flex: "none", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <KitButton variant="ghost" onClick={requestClose}>
+                  Cancel
+                </KitButton>
+                <KitButton
+                  variant="outline"
+                  icon={FlaskConical}
+                  disabled={!canDryRun}
+                  data-testid="builder-dryrun-btn"
+                  onClick={runDryRun}
+                >
+                  {dryRunLoading ? "Dry-Running..." : "Run dry-run"}
+                </KitButton>
+                {/* The reason is VISIBLE text, not a title: `.btn:disabled { pointer-events: none }`
+                    means a disabled button can never show its tooltip, so a reason we put only in
+                    `title` was unreachable exactly when it was needed. */}
+                <InlineDisabledReason reason={saveBlockedReason}>
+                  <KitButton
+                    variant="primary"
+                    icon={Check}
+                    disabled={!canSave}
+                    data-testid="builder-save-btn"
+                    onClick={saveAndEnforce}
+                  >
+                    {saving ? "Saving..." : "Save & enforce"}
+                  </KitButton>
+                </InlineDisabledReason>
+              </div>
+            </div>
+          </div>
+
+          <RegoDrawer
+            rego={compiled.rego}
+            stats={compiled.stats}
+            errors={compiled.errors}
+            expanded={editorExpanded}
+            onToggle={() => setEditorExpanded((e) => !e)}
+            beforeMount={registerRego}
+          />
         </div>
       </div>
     </>

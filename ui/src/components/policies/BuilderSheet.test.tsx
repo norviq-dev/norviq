@@ -24,7 +24,23 @@ beforeAll(() => server.listen({ onUnhandledRequest: "bypass" }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 
+/**
+ * Render the sheet with the compiled-rego drawer OPEN.
+ *
+ * The drawer is a 46px rail by default — the rego is reference, and a permanent half-screen of it was
+ * crowding out the allowed-tool row this redesign exists to make readable. Nearly every test below
+ * asserts on the compiled preview, so their premise is a sheet where that preview is on screen. This
+ * opens it the way a user does, through the rail, rather than reaching past the UI into internal
+ * state: if the rail ever stops opening the drawer, these fail, which is correct.
+ */
 function renderSheet() {
+  const result = render(<BuilderSheet namespace="default" onClose={() => {}} />);
+  fireEvent.click(screen.getByTestId("builder-editor-expand-toggle"));
+  return result;
+}
+
+/** The default view — rail collapsed, as a user first sees it. */
+function renderSheetCollapsed() {
   return render(<BuilderSheet namespace="default" onClose={() => {}} />);
 }
 
@@ -226,26 +242,31 @@ describe("BuilderSheet — unsaved-changes guard on close", () => {
 
 // --- editor expand/collapse (round B fix 4) ---
 describe("BuilderSheet — compiled-rego editor expand/collapse", () => {
-  it("toggles the editor between the compact and expanded height, and reflects state on the toggle + container", () => {
-    renderSheet();
+  it("is a rail by default that still carries the budget, and opens to the full pane", () => {
+    // The toggle no longer changes the editor's HEIGHT — it decides whether the editor exists at all.
+    // Collapsed, the drawer is a 46px rail and Monaco is not mounted; that is the point, since a
+    // permanently-open reference pane was taking the width the authoring column needs.
+    renderSheetCollapsed();
     const toggle = screen.getByTestId("builder-editor-expand-toggle");
-    const editorContainer = screen.getByTestId("builder-editor-container");
 
     expect(toggle).toHaveAttribute("data-expanded", "false");
-    expect(editorContainer).toHaveAttribute("data-expanded", "false");
-    expect(editorContainer.style.height).toBe("260px");
+    expect(screen.queryByTestId("builder-editor-container")).not.toBeInTheDocument();
+    // Collapsing must not cost the reader the budget — it is the reason to watch this pane at all.
+    expect(screen.getByTestId("builder-stats")).toBeInTheDocument();
+    expect(screen.getByTestId("builder-stats").textContent).toMatch(/regex/i);
 
     fireEvent.click(toggle);
-    expect(toggle).toHaveAttribute("data-expanded", "true");
-    expect(editorContainer).toHaveAttribute("data-expanded", "true");
-    expect(editorContainer.style.height).toBe("560px");
+    const opened = screen.getByTestId("builder-editor-expand-toggle");
+    expect(opened).toHaveAttribute("data-expanded", "true");
+    expect(screen.getByTestId("builder-editor-container")).toHaveAttribute("data-expanded", "true");
 
-    // The stats row below the editor is unaffected by the toggle (still present, unchanged testid).
+    // The stats row survives the toggle under the same testid, in both states.
     expect(screen.getByTestId("builder-stats")).toBeInTheDocument();
 
-    fireEvent.click(toggle);
-    expect(toggle).toHaveAttribute("data-expanded", "false");
-    expect(editorContainer.style.height).toBe("260px");
+    // ...and it collapses back to the rail, unmounting the editor again.
+    fireEvent.click(screen.getByTestId("builder-editor-expand-toggle"));
+    expect(screen.getByTestId("builder-editor-expand-toggle")).toHaveAttribute("data-expanded", "false");
+    expect(screen.queryByTestId("builder-editor-container")).not.toBeInTheDocument();
   });
 });
 
