@@ -643,6 +643,44 @@ _THROWAWAY_CLS_PREFIXES = ("q2-manual-", "bce2e-", "fbe-", "e2e-", "probe-")
 _MANAGED_NS = (NS, CUSTOMER_SUPPORT_NS)
 
 
+def reset_audit_volume(kube_context: str, namespace: str = "norviq") -> int:
+    """Truncate `audit_log` so every run starts from a KNOWN decision volume.
+
+    WHY VOLUME BELONGS IN THE BASELINE. Chaos and the latency harness drive roughly thirteen thousand
+    real evaluate calls between them, each red-team suite adds hundreds more, and nothing ever removed
+    them — the table reached 83,128 rows. Specs that ask questions ABOUT the volume then stop working:
+    `audit-filters-and-volume` asserts its own freshly-written rows appear in the unfiltered total, and
+    once its handful is buried under eighty thousand it cannot find them. That spec failed inside the
+    full exit-state check while passing 0-failed standalone, twice, for this reason alone.
+
+    Truncating is safe here and only here: every row the suite depends on is re-created immediately
+    afterwards by the seeders below — governed traffic, the observed tier, the fleet, and the backdated
+    history. What is destroyed is ACCUMULATION, not fixtures, and accumulation is exactly what makes
+    one run incomparable to the next.
+
+    `TRUNCATE` cascades to every partition; `DELETE` on a partitioned table does not do that cheaply.
+    """
+    pod = subprocess.run(  # noqa: S603
+        ["kubectl", "--context", kube_context, "-n", namespace, "get", "pods",
+         "-l", "app.kubernetes.io/name=postgresql", "-o", "jsonpath={.items[0].metadata.name}"],
+        capture_output=True, text=True, check=False).stdout.strip() or "norviq-postgresql-0"
+    before = subprocess.run(  # noqa: S603
+        ["kubectl", "--context", kube_context, "-n", namespace, "exec", pod, "--",
+         "psql", "-U", "norviq", "-d", "norviq", "-tAc", "SELECT count(*) FROM audit_log;"],
+        capture_output=True, text=True, check=False).stdout.strip()
+    run = subprocess.run(  # noqa: S603
+        ["kubectl", "--context", kube_context, "-n", namespace, "exec", pod, "--",
+         "psql", "-U", "norviq", "-d", "norviq", "-tAc", "TRUNCATE audit_log;"],
+        capture_output=True, text=True, check=False)
+    if run.returncode != 0:
+        # Loudly. A silent skip comes back later as volume assertions failing with nothing pointing at
+        # the reset that never happened.
+        print(f"  FAIL audit    truncate exited {run.returncode}: {run.stderr.strip()[:200]}")
+        return 1
+    print(f"  ok  audit     cleared {before or '?'} accumulated decision rows (re-seeded below)")
+    return 0
+
+
 def reset_state(base: str, token: str) -> int:
     """Return the cluster to the baseline every spec assumes it starts from.
 
@@ -697,7 +735,9 @@ def main() -> int:
 
     print(f"seeding {args.base_url} (namespace {NS})")
     print("reset — clear what previous runs left behind:")
-    failures = reset_state(args.base_url, token)
+    # Volume is part of the baseline, not an afterthought — see reset_audit_volume.
+    failures = reset_audit_volume(args.kube_context)
+    failures += reset_state(args.base_url, token)
     print("declared tier — MCP pins:")
     failures += seed_declared(args.base_url, token)
     print("observed tier — audit rows from real traffic:")
