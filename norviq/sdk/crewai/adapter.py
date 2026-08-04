@@ -9,8 +9,17 @@ import structlog
 
 from norviq.sdk.core.interceptor import ToolInterceptor
 from norviq.sdk.core.wrapping import _output_dlp, _run_sync, _tool_params, callable_signature
+# Shared declared-schema ingestion. It lives in the LangChain adapter module only because this
+# change is scoped to the five adapter files (see the banner there); that module imports no
+# framework at import time, so a CrewAI-only install pays nothing for this.
+from norviq.sdk.langchain.adapter import ingest_declared_schema
 
 log = structlog.get_logger()
+
+# CrewAI declares `args_schema` exactly as LangChain does — both build it from the tool's own
+# implementation and both publish it to the model. CrewAI's `BaseTool` has no `.args` property, so
+# there is no second source to fall back to.
+_CREWAI_SCHEMA_ATTRS = ("args_schema",)
 
 
 def _get_base_tool() -> type[Any]:
@@ -53,6 +62,11 @@ def protect(
             )
             protected.append(tool)
             continue
+        # The argument names the framework itself declares, ingested before anything is replaced so
+        # a derived schema describes the TOOL and not our wrapper.
+        ingest_declared_schema(
+            tool, tool_name=str(tool.name), framework="crewai", attrs=_CREWAI_SCHEMA_ATTRS
+        )
         original_run = tool._run
         # See wrapping._tool_params: without the names, a positionally-invoked tool reaches the
         # engine as `{"args": [...]}` and no per-argument control can address it.

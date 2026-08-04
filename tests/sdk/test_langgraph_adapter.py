@@ -9,9 +9,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from norviq.exceptions import NorviqBlockError
 from norviq.sdk.core.decisions import PolicyDecision
+from norviq.sdk.langchain.adapter import declared_tool_schemas, forget_declared_tool_schemas
 from norviq.sdk.langgraph.adapter import GuardedToolNode
 
 
@@ -180,6 +182,85 @@ async def test_output_dlp_on_leaves_non_string_content(
     state = {"messages": [_Msg(tool_calls=[{"name": "export_statement", "args": {}}])]}
     result = await node(state)
     assert result["messages"][0].content == {"rows": 1}
+
+
+# ── the DECLARED argument schema is ingested when the node is built ─────────────────────────────
+#
+# `GuardedToolNode` is handed the tool objects themselves, and LangGraph's tools ARE LangChain tools,
+# so the argument names the framework already declares are available at construction — before any
+# traffic exists to observe them from.
+
+
+async def test_guarded_tool_node_ingests_the_declared_schema_of_its_tools(fake_tool_node: None) -> None:
+    """`issue_refund` carries an argument called `amount`, knowable at graph-build time."""
+    forget_declared_tool_schemas()
+    try:
+        base_tool = pytest.importorskip("langchain_core.tools").BaseTool
+
+        class _RefundArgs(BaseModel):
+            txn_id: str
+            amount: float
+
+        class _RefundTool(base_tool):  # type: ignore[misc, valid-type]
+            name: str = "issue_refund"
+            description: str = "issues a refund"
+            args_schema: type[BaseModel] = _RefundArgs
+
+            def _run(self, txn_id: str = "", amount: float = 0.0) -> str:
+                return "ok"
+
+        GuardedToolNode(tools=[_RefundTool()], interceptor=_FakeInterceptor(), session_id="s")  # type: ignore[arg-type]
+        record = declared_tool_schemas()[("langgraph", "issue_refund")]
+        assert record.schema_available is True
+        assert record.param_keys == ("amount", "txn_id")
+    finally:
+        forget_declared_tool_schemas()
+
+
+async def test_a_tool_whose_NAME_explodes_does_not_break_node_construction(fake_tool_node: None) -> None:
+    """This is the one adapter where reading a tool's name is NEW work at a point that previously
+    did none, so it is the one place ingestion can turn "Norviq could not read a schema" into "your
+    graph does not build". `getattr(obj, "name", "")` swallows only AttributeError; a `.name`
+    property raising anything else escaped straight out of `__init__` before this was contained."""
+    forget_declared_tool_schemas()
+
+    class _NamelessHostile:
+        @property
+        def name(self) -> str:
+            raise RuntimeError("name access exploded")
+
+    try:
+        node = GuardedToolNode(
+            tools=[_NamelessHostile()], interceptor=_FakeInterceptor(), session_id="s"  # type: ignore[arg-type]
+        )
+        assert node is not None
+        assert declared_tool_schemas() == {}  # nothing was recorded under a name we could not read
+    finally:
+        forget_declared_tool_schemas()
+
+
+async def test_a_tool_whose_schema_explodes_does_not_break_node_construction(fake_tool_node: None) -> None:
+    """A graph that fails to build because Norviq could not read a schema is the worse outcome."""
+    forget_declared_tool_schemas()
+
+    class _Hostile:
+        name = "hostile_tool"
+
+        @property
+        def args_schema(self) -> Any:
+            raise RuntimeError("schema access exploded")
+
+    try:
+        interceptor = _FakeInterceptor()
+        node = GuardedToolNode(tools=[_Hostile()], interceptor=interceptor, session_id="s")  # type: ignore[arg-type]
+        state = {"messages": [_Msg(tool_calls=[{"name": "hostile_tool", "args": {"q": "x"}}])]}
+        assert (await node(state))["executed"] is True
+        assert interceptor.calls == [("hostile_tool", {"q": "x"}, "langgraph")]
+        record = declared_tool_schemas()[("langgraph", "hostile_tool")]
+        assert record.schema_available is False
+        assert record.param_keys is None
+    finally:
+        forget_declared_tool_schemas()
 
 
 def test_guarded_tool_node_works_as_state_graph_node() -> None:

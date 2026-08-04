@@ -10,6 +10,10 @@ import structlog
 from norviq.exceptions import NorviqBlockError, NorviqEscalateError
 from norviq.sdk.core.interceptor import ToolInterceptor
 from norviq.sdk.core.wrapping import _output_dlp
+# Shared declared-schema ingestion. It lives in the LangChain adapter module only because this
+# change is scoped to the five adapter files (see the banner there); LangGraph tools ARE LangChain
+# tools, so this adapter reads exactly the same declaration.
+from norviq.sdk.langchain.adapter import LANGCHAIN_SCHEMA_ATTRS, ingest_declared_schema
 
 log = structlog.get_logger()
 
@@ -61,6 +65,25 @@ class GuardedToolNode:
         tool_node = _get_tool_node()
         self._interceptor = interceptor
         self._session_id = session_id
+        # Graph-build time is the only moment this adapter sees the tool OBJECTS — every later call
+        # arrives as a `{"name": ..., "args": {...}}` message. So the argument names the framework
+        # declares are ingested here, which is also before any traffic exists to observe them from.
+        # Contained, because this is the ONE adapter where reading a tool's name is new work at a
+        # point that previously did none. `getattr(..., default)` only swallows AttributeError, so a
+        # `.name` implemented as a property that raises anything else would turn "Norviq could not
+        # read a schema" into "your graph does not build" — the failure this whole path exists to
+        # never cause. `ingest_declared_schema` is already total; the name read is not.
+        for tool in tools:
+            try:
+                name = str(getattr(tool, "name", "") or "")
+            except Exception as exc:  # noqa: BLE001 - a hostile tool must not break graph building
+                log.warning("nrvq.langgraph.schema_ingest_failed", error=str(exc), code="NRVQ-SDK-1045")
+                continue
+            if not name:
+                continue  # nothing to key a record on; a nameless object is not a tool
+            ingest_declared_schema(
+                tool, tool_name=name, framework="langgraph", attrs=LANGCHAIN_SCHEMA_ATTRS
+            )
         self._node = tool_node(tools)
         log.info("nrvq.langgraph.init", tool_count=len(tools), code="NRVQ-SDK-1040")
 

@@ -286,6 +286,24 @@ class NorviqSettings(BaseSettings):
     # Opt-in, default OFF: capture MASKED tool_params on the audit record (PAN->****1111,
     # SSN->***-**-6789, secrets->****) for event reconstruction (PCI 10.3) without storing raw PII/PAN.
     audit_capture_masked_params: bool = False
+    # Default ON, and INDEPENDENT of audit_capture_masked_params above: record the ARGUMENT NAMES a
+    # call carried (`param_keys`) — the sorted, de-duplicated set of flattened argument paths, KEYS
+    # ONLY. No value reaches this field, not even a masked one, so the privacy calculus is not the
+    # same one that keeps masked_params off: a key name is a fact about the tool's SCHEMA, which the
+    # operator wrote, not about the payload, which the model chose.
+    #
+    # WHY IT DEFAULTS ON. Without it an audit row records that `issue_refund` was called and nothing
+    # about what it was called WITH, so a rule proposed from traffic can only ever name tools. Two
+    # design partners independently shipped a rule they believed covered a call, and the model emitted
+    # an argument (`amount`) their predicates never mentioned — with no point at which the authoring
+    # surface could have shown them the mismatch. Key names are what closes that, and they are cheap:
+    # bounded by the engine's own path caps, derived in-memory on the audit path, never on the wire.
+    #
+    # The kill switch exists because in a few schemas the key names ARE the sensitive part (a column
+    # name in a medical export, an internal system name). Turning it off returns the audit row to
+    # exactly its pre-existing shape — the field is ABSENT, which readers must render as "arguments
+    # were not captured" and never as "the call carried no arguments". NRVQ_AUDIT_CAPTURE_PARAM_KEYS.
+    audit_capture_param_keys: bool = True
     # Opt-in: HMAC-SHA256 key for the tamper-evident /audit/export?signed=true manifest. Empty =
     # the signed export still hash-chains (integrity) but the manifest signature is null (no shared-key auth).
     audit_export_signing_key: str = ""

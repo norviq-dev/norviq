@@ -150,6 +150,51 @@ describe("intents -> builder handoff", () => {
   });
 });
 
+describe("an unmentioned argument is a flag, not a gate", () => {
+  it("names the argument the rule never mentions AND still hands the proposal to the builder", async () => {
+    // Two properties in one test, deliberately.
+    //
+    // The flag is the point: `issue_refund` traffic carried `amount`, the rule says nothing about it,
+    // and the operator must see that before saving. But the FIX for it is a clause, and the builder is
+    // where clauses get authored — so this must not become a fourth reason the handoff refuses. The
+    // handoff refuses only when a restriction would be LOST (a policy weaker than the one dry-run and
+    // approved); an argument nobody has constrained yet is not a lost restriction, and blocking here
+    // would leave the operator holding a warning with no way to act on it.
+    vi.spyOn(client, "apiSend").mockResolvedValue({
+      intent: {
+        name: "billing-intent",
+        class: "report-gen",
+        call: [{ id: "refunds", match: { tool_name: "issue_refund" }, require: {} }]
+      },
+      sampled: 9,
+      params_available: false,
+      params_detail: "keys",
+      // The API's own per-tool shape (`_ToolEvidence.as_dict`), not a bare list. A bare list is a
+      // shape the server never emits, and using one here would leave this test passing against a
+      // console that mis-reads the real payload.
+      observed_params: {
+        issue_refund: {
+          detail: "keys",
+          keys: ["amount", "txn_id"],
+          pinnable: [],
+          ambiguous: [],
+          calls: 9,
+          truncated: false,
+          dropped: 0
+        }
+      }
+    } as never);
+    const user = userEvent.setup();
+    renderIntents();
+    await propose(user);
+
+    const flagged = await screen.findByTestId("unscoped-args");
+    expect(flagged).toHaveTextContent("amount");
+    expect(screen.queryByTestId("handoff-blocked")).not.toBeInTheDocument();
+    expect(screen.getByTestId("open-in-builder")).not.toBeDisabled();
+  });
+});
+
 describe("the handoff must not lose a narrowing on the way into the builder", () => {
   it("round-trips grant FACTS, not just constraints", () => {
     // The seam had a hole: BuilderSheet seeded only `g.constraints`, so every scoping FACT an intent
