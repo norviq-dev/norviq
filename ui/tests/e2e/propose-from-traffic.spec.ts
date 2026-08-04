@@ -121,3 +121,32 @@ test("the dry run replays real traffic and reports what it would refuse", async 
   ).toBeVisible({ timeout: 30_000 });
   recorder.expectNoApiFailures();
 });
+
+test("a proposed rule naming a look-alike tool says so, and says what it costs", async ({ page }) => {
+  // The whole chain, end to end: the seeder drives `sеnd_email` (U+0435 CYRILLIC SMALL LETTER IE)
+  // through /evaluate, the proposer groups those rows into a rule, and the card renders the name.
+  //
+  // A unit test proves `predicateSentence` annotates a value I hand it. Only this proves the value
+  // reaching the card is REALLY spoofed — that the audit row, the proposer and the API preserve the
+  // codepoint rather than normalising it away somewhere in between. If any of them started folding
+  // the name, this test goes red and the unit tests stay green.
+  //
+  // Written as an escape, never pasted: a literal here is indistinguishable from the ASCII spelling,
+  // so a copy-paste error would silently turn this into a test of the wrong tool.
+  const HOMOGLYPH = "s\u0435nd_email";
+  await propose(page);
+
+  const note = page.getByTestId(/lookalike/).first();
+  await expect(note).toBeVisible();
+  // Position, not just the codepoint: "U+0435" says something is wrong, "s·nd_email" says where.
+  await expect(note).toContainText("s·nd_email");
+  await expect(note).toContainText("U+0435");
+  // The consequence is the half an operator cannot derive from the badge alone.
+  await expect(note).toContainText(/grants the look-alike/);
+
+  // ...and the raw clause still carries the real codepoint. `Show raw` is the string an operator
+  // greps the engine for; a "cleaned up" spelling there would be the same bug one layer down.
+  const card = page.locator('[data-testid^="rule-"]').filter({ has: page.getByTestId(/lookalike/) }).first();
+  await card.getByRole("button", { name: /show raw/i }).click();
+  await expect(card.locator("pre")).toContainText(HOMOGLYPH);
+});

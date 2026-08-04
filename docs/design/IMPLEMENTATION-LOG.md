@@ -1767,3 +1767,138 @@ Worth stating, because it was the question asked: `ScopeCell` and its four slots
 the mode-fork callout, the provenance badges and the refinements were all in the builder BEFORE the
 chrome work, so the revert never touched them. The P1 fix — "a first-time operator must discover
 argument scoping without being told it exists" — is intact.
+
+---
+
+## Walkthrough round 2 — the lookalike a proposed rule never mentioned
+
+Found by reading the console rather than by any test: **Propose from traffic** offered
+`send-s-nd-email`, a rule whose APPLIES TO band read *"calls to send_email"*. Its raw clause is
+
+```
+tool_name in ['sеnd_email']        # U+0435 CYRILLIC SMALL LETTER IE
+```
+
+The Tools page flags that exact tool with a red **Homoglyph** pill. This page — the one carrying
+**Save as draft** and **Open in Visual Builder** — said nothing, and the two spellings are identical
+in the console's font. The rule id was the only tell, and only because the slugifier dropped the
+non-ASCII character.
+
+### Why this is not a missing badge
+
+The generated allowlist matches EVASION-NORMALIZED. `norviq/api/threat_intent.py` emits
+
+```rego
+in_allowlist { allow_skeletons[input.tool_name_normalized] }
+```
+
+and `skeleton()` folds Cyrillic е to Latin e — verified, not assumed:
+
+```
+skeleton('sеnd_email') == skeleton('send_email') == 'send_email'
+```
+
+So approving that rule grants the look-alike **and** the real ASCII tool. That folding is correct and
+deliberate — a homoglyph must not dodge a DENY — but it means an operator's allow silently widened to
+two names, on the surface where they click Save, with nothing on screen saying so.
+
+The same defect shape this project has now hit eleven times: **one concept, two components, only one
+of them holding the fact.** Tools computes `name_skeleton` from the registry; the rule card never
+asked.
+
+### The fix
+
+Annotation attached in `predicateSentence()` — the ONE vocabulary both the rule card and the near-miss
+card render through — rather than in either page, because the near-miss card quotes the same clause
+back after a refusal and would otherwise have had the same blind spot.
+
+- `lookalikeOf(value)` → `{ value, codepoints, masked }`. `masked` (`s·nd_email`) is the load-bearing
+  field: `U+0435` alone says something is wrong, not *where*.
+- Scoped to `IDENTIFIER_FIELDS = {tool_name, mcp.server}` — names the engine folds. A non-ASCII
+  character in a `data_classes` term or a `param_paths.to` address is ordinary, and a warning that
+  fires on ordinary values is one operators learn to click past.
+- Attached in `done()` **and** on the un-humanised fall-through, so a raw predicate is annotated too —
+  a raw label hides the codepoint every bit as well as prose does. That branch has its own test.
+- `LookalikeNote` renders under the CLAUSE, not beside the rule id: a rule can name several tools and
+  a card-level badge cannot say which one is the spoof.
+- It states the CONSEQUENCE, which is the half an operator cannot derive: *"the rule grants the
+  look-alike and the plain-ASCII tool of the same shape."*
+
+Test literals are written `"s\u0435nd_email"`, never pasted. A pasted literal is a test that looks
+like it asserts the ASCII case and silently asserts the other one — the same trap as the bug.
+
+### A vacuous green found on the way out
+
+`npx vitest run` reported **761 passed, 2 errors** at HEAD, and had for some time. The errors were
+unhandled rejections from `AppContext.p1.test.tsx` / `AppContext.sticky.test.tsx`:
+
+```
+No "ApiError" export is defined on the "../api/client" mock
+```
+
+`AppContext.tsx:194` does `e instanceof ApiError` to tell a 429 from a real outage — the branch added
+earlier this session when the Overview's rate-limit budget made `AppContext` report "no namespaces" on
+a throttled read. With `ApiError` undefined, the catch handler threw a `TypeError` **before reaching
+that branch**, and the test still passed, because *"posture stays UNKNOWN"* is also true when nothing
+ran at all.
+
+Fixed with `importOriginal` rather than a stub class: `instanceof` needs the same constructor
+`client.ts` throws, so a hand-rolled `class ApiError {}` in the mock would have kept the test green and
+still not exercised the branch.
+
+**Rule.** A vitest "N errors" line under a green run is not cosmetic. An unhandled rejection inside a
+`catch` means the assertion's subject was never computed, and every such test is asserting the
+post-condition of code that did not execute.
+
+Gate after both fixes: **86 files · 773 passed · 0 errors** (was 761 + 2 errors), tsc clean, eslint
+clean, build clean.
+
+### The harness measuring itself, again — a truncated seed reported as a range-selector bug
+
+The browser suite came back **182 passed, 1 failed, 7 skipped**. The failure named
+`range-selector-scope.spec.ts` — *"switching range on Overview actually refetches — 1h total ≠ 24h
+total"*. The range selector was fine.
+
+`/audit/stats` returned **total=36 for 1h, for 24h AND for 7d**. Identical across every window is not
+a filtering bug, it is an empty history: the whole table held 3948 rows spanning eight minutes. The
+seeder's `seed_backdate()` — 1232 rows spread over seven days, whose print line literally reads *"so
+1h, 24h and 7d are different questions"* — had never run.
+
+`seed.py` died earlier, in `seed_redteam`, on a `TimeoutError`. `POST /redteam/suite` evaluates the
+corpus against every class in the namespace synchronously, and the step immediately above it seeds
+twelve classes into `default` — 348 evaluations, each a real OPA call. The shared 30s `post()` timeout
+was never sized for it. `main` aborted, and every fixture after that point silently went unwritten.
+
+And `scripts/e2e.sh` **warned and carried on**:
+
+```sh
+|| echo "WARNING: seeding failed — specs asserting seeded data will fail" >&2
+```
+
+7.3 minutes later the run reported a defect in a surface that had nothing to do with it, because a
+missing fixture surfaces wherever it is READ, not where it was missed.
+
+**Three fixes, none of them to the spec.**
+
+1. `post()` takes a per-call `timeout`; `seed_redteam` uses `REDTEAM_SUITE_TIMEOUT_S = 300`, sized
+   from the observed ~90s run with headroom. The failure mode of being too low is not a slow seed but
+   a truncated one.
+2. `seed_redteam` treats a client timeout as a THIRD outcome, distinct from failure — the request was
+   accepted and the server is still working — and *verifies* via `/redteam/results/latest` instead of
+   assuming either way.
+3. `e2e.sh` **aborts** on a nonzero seed, printing the last 20 lines of the seed log. `seed.py` already
+   returned a count of failed steps; nothing was reading it.
+
+**Rule.** A harness step that warns instead of failing converts its own breakage into a product
+defect report, and hands it to you 7 minutes later wearing someone else's name. If a fixture is a
+precondition, a missing fixture is a fatal error — the run that continues without it is not a weaker
+signal, it is a misleading one.
+
+This is the sixth time this session a failure that looked like a product defect turned out to be the
+harness measuring something other than the product: a published image, an expired token, a stale
+port-forward, a login lockout tripped by a neighbouring spec, a shared rate-limit bucket, the
+checker's own ordering — and now a seed that stopped two thirds of the way through and said so only
+on stderr.
+
+After the fixes, the seeder reports `backdate INSERT 0 1232 spread over the last 7 days`, and
+`/audit/stats` returns **22 / 198 / 1254** for 1h / 24h / 7d.

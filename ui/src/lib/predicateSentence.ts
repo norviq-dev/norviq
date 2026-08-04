@@ -131,6 +131,29 @@ const FIELD_NOUN: Record<string, string> = {
   direction: "the plane"
 };
 
+/**
+ * A value in this predicate is a name the operator will read as an identifier, and it is not the
+ * identifier it looks like.
+ *
+ * This is not cosmetic. The engine matches an allowlist EVASION-NORMALIZED — on the lower-cased name
+ * AND on the confusable `skeleton()` (`norviq/api/threat_intent.py`, `allow_skeletons`) — so a rule
+ * proposed from a homoglyph tool's traffic folds to the ASCII prototype and grants BOTH names. That
+ * is the correct defence against a lookalike dodging a DENY, and it is the opposite of what an
+ * operator assumes when they read `calls to send_email` and see nothing unusual.
+ *
+ * Rendered wherever a predicate is, because the surface where you ACT on a proposed rule is not the
+ * surface that flags the tool: Tools shows a red Homoglyph pill and Propose-from-traffic showed
+ * nothing at all, which is where the operator clicks Save.
+ */
+export type Lookalike = {
+  /** The value exactly as stored — never "cleaned up" for display. */
+  value: string;
+  /** Each non-ASCII codepoint, as `U+0435`, in the order it appears. */
+  codepoints: string[];
+  /** The value with every non-ASCII character replaced by `·`, so the POSITION is visible. */
+  masked: string;
+};
+
 export type Sentence = {
   /** What the operator reads. Falls back to `raw` when the shape is not one we can state safely. */
   prose: string;
@@ -139,7 +162,37 @@ export type Sentence = {
   /** False when `prose === raw`, so a caller can avoid offering a pointless toggle. */
   humanised: boolean;
   implicit: boolean;
+  /** Set when a name in this predicate carries characters the operator cannot see. */
+  lookalikes?: Lookalike[];
 };
+
+/**
+ * Fields whose value is a NAME the engine matches on, so a lookalike in it changes what is enforced.
+ *
+ * Deliberately not every field: `data_classes anyOf ['secret']` is a vocabulary term, and flagging a
+ * non-ASCII character there would be noise. `param_paths.*` values are user data (an address, a
+ * pattern) rather than an identifier the engine folds.
+ */
+const IDENTIFIER_FIELDS = new Set(["tool_name", "mcp.server"]);
+
+/** `null` when the name is plain ASCII — which is every name, almost always. */
+export function lookalikeOf(value: string): Lookalike | null {
+  const offending = [...value].filter((ch) => ch.codePointAt(0)! > 0x7f);
+  if (offending.length === 0) return null;
+  return {
+    value,
+    codepoints: offending.map((ch) => `U+${ch.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}`),
+    masked: [...value].map((ch) => (ch.codePointAt(0)! > 0x7f ? "·" : ch)).join("")
+  };
+}
+
+/** Every lookalike among a predicate's values, or `undefined` so the field stays absent when clean. */
+function lookalikesIn(field: string, value: PredicateTerm["value"]): Lookalike[] | undefined {
+  if (!IDENTIFIER_FIELDS.has(field)) return undefined;
+  const values = Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
+  const found = values.map(lookalikeOf).filter((l): l is Lookalike => l !== null);
+  return found.length ? found : undefined;
+}
 
 /**
  * A predicate as a sentence.
@@ -150,7 +203,11 @@ export type Sentence = {
  */
 export function predicateSentence(term: PredicateTerm): Sentence {
   const { field, op, value, raw, implicit } = term;
-  const done = (prose: string): Sentence => ({ prose, raw, humanised: prose !== raw, implicit });
+  // Attached in `done` rather than at each call site: a lookalike must survive every humanisation
+  // branch, including the fall-through that returns the raw label — a raw predicate renders the
+  // invisible codepoint just as invisibly.
+  const lookalikes = lookalikesIn(field, value);
+  const done = (prose: string): Sentence => ({ prose, raw, humanised: prose !== raw, implicit, ...(lookalikes && { lookalikes }) });
 
   if (op === "isPublished") {
     // Named, not hidden: an operator told "data_classes is published by this engine failed" can
@@ -190,7 +247,7 @@ export function predicateSentence(term: PredicateTerm): Sentence {
   if (op === "maxCount") return done(`${FIELD_NOUN[field] ?? field} has at most ${String(value)}`);
 
   // Nothing safe to say. The raw predicate IS the sentence — less friendly, never a misstatement.
-  return { prose: raw, raw, humanised: false, implicit };
+  return { prose: raw, raw, humanised: false, implicit, ...(lookalikes && { lookalikes }) };
 }
 
 /** Convenience: label string straight to sentence. */

@@ -58,6 +58,12 @@ PINNED_FIELDS = ("name", "title", "description", "inputSchema", "outputSchema", 
 # Mirrors norviq/mcp/firewall.py `_CANONICAL_MAX`.
 CANONICAL_MAX = 8192
 
+# `/redteam/suite` evaluates the corpus against every class in the namespace before it answers, and
+# `seed_fleet` puts twelve classes there — so the seeder sets its own cost. Sized from the observed
+# run (348 evaluations, ~90s on kind) with headroom, because the failure mode of being too low is not
+# a slow seed but a TRUNCATED one: `main` aborts and every later fixture silently goes unwritten.
+REDTEAM_SUITE_TIMEOUT_S = 300
+
 
 def canonical(tool: dict) -> str:
     """Exactly what `norviq.mcp.pins.canonical_definition` produces, including the 8 KiB slice.
@@ -74,7 +80,13 @@ def digest_of(canon: str) -> str:
     return hashlib.sha256(canon.encode()).hexdigest()
 
 
-def post(base: str, path: str, token: str, body: dict) -> tuple[int, str]:
+def post(base: str, path: str, token: str, body: dict, timeout: int = 30) -> tuple[int, str]:
+    """POST. `timeout` is per-call because one endpoint here does real work synchronously.
+
+    30s suits every fixture write. It does NOT suit `/redteam/suite`, which runs the whole corpus
+    against every class in the namespace before it answers — and the seeder's own fleet step is what
+    makes that namespace large. See `seed_redteam`.
+    """
     req = urllib.request.Request(  # noqa: S310 - fixed http(s) base, local cluster only
         f"{base}{path}",
         data=json.dumps(body).encode(),
@@ -82,7 +94,7 @@ def post(base: str, path: str, token: str, body: dict) -> tuple[int, str]:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
             return resp.status, resp.read().decode()
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read().decode()
@@ -622,13 +634,37 @@ def seed_redteam(base: str, token: str) -> int:
     `POST /redteam/suite` takes its arguments as QUERY PARAMS rather than a body, and returns 409 with
     the in-flight run id when one is already running for the namespace. Both are fine outcomes here:
     the goal is "a run exists", not "this call started it".
+
+    THE TIMEOUT IS PART OF THE FIXTURE. This endpoint runs the corpus synchronously — and the step
+    directly above this one seeds twelve agent classes into `default`, so the seeder itself is what
+    makes the run long (12 x 29 = 348 evaluations, each a real OPA call). At the shared 30s the POST
+    timed out, `main` aborted, and `seed_backdate` — which runs AFTER this — never wrote a row. The
+    visible symptom was a range-selector spec failing because 1h and 24h held identical traffic: a
+    seeding failure reported as a product defect two surfaces away.
+
+    A timeout is a THIRD outcome, and not the same as a failure: the request was accepted and the run
+    is proceeding on the server. So we verify rather than assume — if a run exists afterwards, the
+    fixture is satisfied whoever started it.
     """
-    status, body = post(base, "/api/v1/redteam/suite?target_namespace=default", token, {})
-    ok = status in (200, 201, 409)
-    detail = "already running" if status == 409 else ""
-    print(f"  {'ok ' if ok else 'FAIL'} redteam  suite on 'default' {detail}"
-          f"{'' if ok else f' -> {status} {body[:160]}'}")
-    return 0 if ok else 1
+    path = "/api/v1/redteam/suite?target_namespace=default"
+    try:
+        status, body = post(base, path, token, {}, timeout=REDTEAM_SUITE_TIMEOUT_S)
+    except TimeoutError:
+        status, body = 0, "client timed out waiting for the suite to finish"
+
+    if status in (200, 201, 409):
+        detail = "already running" if status == 409 else ""
+        print(f"  ok  redteam  suite on 'default' {detail}")
+        return 0
+
+    # The socket gave up; the server did not. A run that EXISTS is what the specs assert on.
+    rc, rbody = get(base, "/api/v1/redteam/results/latest?target_namespace=default", token)
+    if rc == 200 and '"results"' in rbody:
+        print("  ok  redteam  suite on 'default' (client timed out; a completed run is present)")
+        return 0
+
+    print(f"  FAIL redteam  suite on 'default' -> {status} {body[:160]}")
+    return 1
 
 
 

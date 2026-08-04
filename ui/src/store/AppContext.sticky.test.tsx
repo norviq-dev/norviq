@@ -9,7 +9,10 @@ import { AppProvider, useApp } from "./AppContext";
 // No token → the cluster/namespace load() + posture effects no-op, so we isolate the sticky state machine.
 vi.mock("../auth/session", () => ({ getToken: () => null, tokenSubject: () => null }));
 vi.mock("../auth/oidc", () => ({ oidcEnabled: false, login: () => Promise.resolve() }));
-vi.mock("../api/client", () => ({
+// Partial, so the real `ApiError` survives — AppContext's catch does `e instanceof ApiError`, and a
+// mock that omits it throws inside the handler instead. See AppContext.p1.test.tsx for the detail.
+vi.mock("../api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/client")>()),
   fetchClusterInfo: () => Promise.reject(new Error("no net")),
   fetchSettings: () => Promise.reject(new Error("no net"))
 }));

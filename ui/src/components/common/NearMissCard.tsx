@@ -22,6 +22,7 @@
 
 import { Check, X } from "lucide-react";
 import { sentenceOf } from "../../lib/predicateSentence";
+import { LookalikeNote } from "./LookalikeNote";
 
 export type BlockedCallDetail = {
   index: number;
@@ -68,6 +69,9 @@ function Clause({ label, failed }: { label: string; failed: boolean }) {
             {s.raw}
           </span>
         )}
+        {/* On a MET clause too, not only a failed one: "calls to send_email · met" against a rule
+            written from a lookalike is the reading that most needs correcting. */}
+        {s.lookalikes && <LookalikeNote lookalikes={s.lookalikes} />}
       </span>
     </div>
   );

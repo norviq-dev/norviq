@@ -14,10 +14,20 @@ import { describe, expect, it } from "vitest";
 import {
   addressDomainOf,
   commonTerms,
+  lookalikeOf,
   parsePredicateLabel,
   sentenceOf,
   termsOfRule
 } from "./predicateSentence";
+
+/**
+ * The seeded homoglyph tool: `send_email` with U+0435 CYRILLIC SMALL LETTER IE for the `e`.
+ *
+ * Written as an escape rather than pasted, because the whole point is that the two spellings are
+ * indistinguishable — a literal here would be a test that looks like it asserts the ASCII case and
+ * silently asserts the other one, which is the same trap the product bug was.
+ */
+const HOMOGLYPH = "s\u0435nd_email";
 
 describe("parsePredicateLabel", () => {
   it("parses a Python list repr, commas inside values included", () => {
@@ -87,6 +97,56 @@ describe("predicateSentence", () => {
     const s = sentenceOf("weird_field someOp 42");
     expect(s.prose).toBe(s.raw);
     expect(s.humanised).toBe(false);
+  });
+});
+
+describe("lookalike names", () => {
+  it("says nothing about a plain-ASCII name — the flag has to stay rare to mean anything", () => {
+    expect(lookalikeOf("send_email")).toBeNull();
+    expect(sentenceOf("tool_name == send_email").lookalikes).toBeUndefined();
+    expect(sentenceOf("mcp.server == slack").lookalikes).toBeUndefined();
+  });
+
+  it("names the codepoint AND its position, because the two spellings render identically", () => {
+    const l = lookalikeOf(HOMOGLYPH);
+    expect(l).not.toBeNull();
+    expect(l!.codepoints).toEqual(["U+0435"]);
+    // The mask is the whole point: "U+0435" alone says something is wrong, not where.
+    expect(l!.masked).toBe("s·nd_email");
+    // Never a "cleaned up" spelling — the value is what the rule will actually carry.
+    expect(l!.value).toBe(HOMOGLYPH);
+  });
+
+  it("flags a lookalike inside a tool_name clause, in both the scalar and list shapes", () => {
+    const scalar = sentenceOf(`tool_name == ${HOMOGLYPH}`);
+    expect(scalar.prose).toBe(`calls to ${HOMOGLYPH}`);
+    expect(scalar.lookalikes?.map((l) => l.codepoints)).toEqual([["U+0435"]]);
+
+    // The shape Propose-from-traffic actually emits.
+    const list = sentenceOf(`tool_name in ['${HOMOGLYPH}']`);
+    expect(list.lookalikes?.[0].masked).toBe("s·nd_email");
+  });
+
+  it("flags only one lookalike when a list mixes a clean name with a spoofed one", () => {
+    const s = sentenceOf(`tool_name in ['read_thread', '${HOMOGLYPH}']`);
+    expect(s.lookalikes).toHaveLength(1);
+    expect(s.lookalikes![0].value).toBe(HOMOGLYPH);
+  });
+
+  it("survives the un-humanised fall-through — a raw label hides the codepoint just as well", () => {
+    // `tool_name noneOf [...]` parses cleanly but has no humanisation branch, so it returns its raw
+    // form. That is exactly where an annotation attached per-branch would have been dropped, and a
+    // raw predicate renders the invisible codepoint every bit as invisibly as prose does.
+    const s = sentenceOf(`tool_name noneOf ['${HOMOGLYPH}']`);
+    expect(s.humanised).toBe(false);
+    expect(s.lookalikes?.[0].codepoints).toEqual(["U+0435"]);
+  });
+
+  it("stays silent on fields whose values are vocabulary or user data, not names the engine folds", () => {
+    // A non-ASCII character in a data class or an email address is not evidence of spoofing, and a
+    // warning that fires on ordinary values is one operators learn to click past.
+    expect(sentenceOf(`data_classes noneOf ['s\u0435cret']`).lookalikes).toBeUndefined();
+    expect(sentenceOf(`param_paths.to == ops@acm\u0435.com`).lookalikes).toBeUndefined();
   });
 });
 

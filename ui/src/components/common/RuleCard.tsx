@@ -17,6 +17,7 @@
 
 import { useState } from "react";
 import { predicateSentence, termsOfRule, type PredicateTerm } from "../../lib/predicateSentence";
+import { LookalikeNote } from "./LookalikeNote";
 
 export type ProposedRule = {
   id: string;
@@ -25,7 +26,7 @@ export type ProposedRule = {
   require?: Record<string, unknown>;
 };
 
-function Band({ label, terms, empty }: { label: string; terms: PredicateTerm[]; empty: string }) {
+function Band({ label, terms, empty, testId }: { label: string; terms: PredicateTerm[]; empty: string; testId?: string }) {
   return (
     <div style={{ marginTop: 10 }}>
       <div
@@ -49,6 +50,9 @@ function Band({ label, terms, empty }: { label: string; terms: PredicateTerm[]; 
             return (
               <div key={t.raw} style={{ fontSize: 13, lineHeight: 1.5, color: "var(--text-secondary)" }}>
                 {s.prose}
+                {/* Beneath the clause it qualifies, not beside the rule id: which of a rule's names is
+                    the lookalike is the whole question, and a card-level badge cannot answer it. */}
+                {s.lookalikes && <LookalikeNote lookalikes={s.lookalikes} data-testid={testId && `${testId}-lookalike`} />}
               </div>
             );
           })}
@@ -113,10 +117,16 @@ export function RuleCard({ rule, calls = null, unused = false, hoisted = [], "da
         </button>
       </div>
 
-      <Band label="Applies to" terms={appliesTo} empty="every call this class makes" />
+      <Band
+        label="Applies to"
+        terms={appliesTo}
+        empty="every call this class makes"
+        testId={`rule-${rule.id}-applies`}
+      />
       <Band
         label="Allowed if"
         terms={shown}
+        testId={`rule-${rule.id}-allowed`}
         // Not "nothing" on its own: an empty ALLOWED IF is the rule granting the tool outright, which
         // is a meaningful and slightly alarming state rather than a missing value.
         empty={

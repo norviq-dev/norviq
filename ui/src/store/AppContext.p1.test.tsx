@@ -15,7 +15,13 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../auth/session", () => ({ getToken: mocks.getToken, tokenSubject: mocks.tokenSubject }));
 vi.mock("../auth/oidc", () => ({ oidcEnabled: false, login: () => Promise.resolve() }));
-vi.mock("../api/client", () => ({
+// `importOriginal`, not a stub: AppContext branches on `e instanceof ApiError` to tell a 429 from a
+// real outage. A mock without that export made the catch block throw a TypeError BEFORE it reached
+// the branch under test — vitest reported the rejection as an unrelated unhandled error and the
+// assertions still passed, because "posture stays unknown" is also true when nothing ever ran.
+// A stub class would not do either: `instanceof` needs the same constructor `client.ts` throws.
+vi.mock("../api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/client")>()),
   fetchClusterInfo: () => Promise.reject(new Error("no net")),
   fetchSettings: mocks.fetchSettings
 }));

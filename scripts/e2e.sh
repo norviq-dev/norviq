@@ -177,12 +177,29 @@ export NRVQ_API_URL="${NRVQ_API_URL:-$BASE_URL}"
 # full runs the failing SET moved while the count stayed flat, which is the signature of leaked state
 # rather than of N separate defects. Starting from a known baseline is what makes a run comparable to
 # the one before it.
+#
+# A FAILED SEED ABORTS THE RUN. This used to warn and carry on, and that cost a full 7.3-minute run to
+# diagnose: `seed_redteam` timed out, `main` exited before `seed_backdate`, and the only visible
+# symptom was `range-selector-scope.spec.ts` failing because the 1h and 24h windows held identical
+# traffic. 189 specs passed. The one that failed named the range selector, and the range selector was
+# fine — the week of backdated rows it measures had never been written.
+#
+# That is the same argument as the paragraph above, one level up: a run against a partially-seeded
+# cluster is not a weaker signal, it is a MISLEADING one, because the failure surfaces wherever the
+# missing fixture happens to be read rather than where it was missed. `seed.py` already returns a
+# nonzero count of failed steps; honour it.
 if [ -x "$(dirname "$0")/kind-e2e/seed.py" ] || [ -f "$(dirname "$0")/kind-e2e/seed.py" ]; then
   if [ -x .venv/bin/python ]; then
-    .venv/bin/python "$(dirname "$0")/kind-e2e/seed.py" --base-url "$BASE_URL" --token-file "$TOKEN_FILE" \
-      >/tmp/nrvq-e2e-seed.log 2>&1 \
-      && echo "seed: reset + fixtures applied" \
-      || echo "WARNING: seeding failed — specs asserting seeded data will fail; see /tmp/nrvq-e2e-seed.log" >&2
+    if .venv/bin/python "$(dirname "$0")/kind-e2e/seed.py" --base-url "$BASE_URL" --token-file "$TOKEN_FILE" \
+         >/tmp/nrvq-e2e-seed.log 2>&1; then
+      echo "seed: reset + fixtures applied"
+    else
+      echo "FATAL: seeding failed — refusing to run against a partially-seeded cluster." >&2
+      echo "       A run started here reports the failure wherever the missing fixture is READ," >&2
+      echo "       not where it was missed. Last 20 lines of /tmp/nrvq-e2e-seed.log:" >&2
+      tail -20 /tmp/nrvq-e2e-seed.log >&2
+      exit 1
+    fi
   fi
 fi
 
