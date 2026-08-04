@@ -221,6 +221,22 @@ egress_verb_tool {
 egress_verb_tool { contains(lower(input.tool_name), "webhook") }
 egress_verb_tool { contains(lower(input.tool_name), "exfil") }
 
+# THE ENGINE'S OWN CLASSIFICATION — see comprehensive.rego for the full argument.
+#
+# THIS FILE IS THE ONE THAT SHIPS. The bootstrap pushes this preset as the cluster `__baseline__`, so
+# fixing only comprehensive.rego left the running cluster exactly as exposed: with the fix in that
+# file and real `opa` reporting block, a live `/evaluate` still returned
+# `allow/default_allow` for a credential through `slack_post_message`. The two files are a documented
+# pair of guarded copies (this OPA cannot import across packages), and a defence added to one of them
+# is a defence that is not deployed.
+#
+# `input.derived.verb` is computed on the hot path for every call and published by
+# engine/evaluator.py. The prefix list above and the registry disagree on ordinary vendor tool names —
+# `slack_post_message` starts with `slack_`, not `post_` — so the exfiltration path was chosen by
+# whichever SaaS the customer happens to use. `object.get` with a default so an engine predating
+# `derived.verb` keeps the name-based behaviour rather than erroring.
+egress_verb_tool { object.get(input.derived, "verb", "") == "send" }
+
 data_leakage_detected {
     external_tools[input.tool_name]
     walk(input.tool_params, [path, _])

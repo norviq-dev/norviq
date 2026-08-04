@@ -33,7 +33,16 @@ from norviq.engine.capability.source_registry import classify_tool
 from norviq.engine.evaluator import OPAEvaluator
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-POLICY = REPO_ROOT / "comprehensive.rego"
+
+# BOTH copies. This OPA cannot import across packages, so the horizontal policy exists as two guarded
+# copies — and `webhook/presets/strict.rego` is the one the bootstrap pushes as the cluster
+# `__baseline__`. Fixing only `comprehensive.rego` produced a green opa test beside a live cluster
+# that still returned `allow/default_allow` for a credential through `slack_post_message`: the defence
+# was written, tested, and not deployed. Parametrising over both is what makes the pair honest.
+POLICIES = {
+    "comprehensive": REPO_ROOT / "comprehensive.rego",
+    "strict (SHIPPED as the cluster baseline)": REPO_ROOT / "webhook" / "presets" / "strict.rego",
+}
 
 # The canonical AWS key pair the policy's own detectors match perfectly. Only the SINK differs
 # between the cases below — never the payload — so any difference in verdict is a difference in what
@@ -49,6 +58,14 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _package(policy: Path) -> str:
+    """The module's own package, read from the file — the two copies need not agree on it."""
+    for line in policy.read_text(encoding="utf-8").splitlines():
+        if line.startswith("package "):
+            return line.split(None, 1)[1].strip()
+    raise AssertionError(f"no package declaration in {policy}")
+
+
 def _derived(tool_name: str, params: object) -> dict:
     class _Event:
         pass
@@ -60,7 +77,7 @@ def _derived(tool_name: str, params: object) -> dict:
     return OPAEvaluator.__new__(OPAEvaluator)._derived_input(event)
 
 
-def _decide(tmp_path: Path, tool_name: str, params: dict) -> tuple[str, str]:
+def _decide(tmp_path: Path, policy: Path, tool_name: str, params: dict) -> tuple[str, str]:
     doc = {
         "tool_name": tool_name,
         "tool_params": params,
@@ -72,8 +89,8 @@ def _decide(tmp_path: Path, tool_name: str, params: dict) -> tuple[str, str]:
     input_path = tmp_path / "input.json"
     input_path.write_text(json.dumps(doc))
     out = subprocess.run(
-        ["opa", "eval", "-f", "raw", "--v0-compatible", "-d", str(POLICY), "-i", str(input_path),
-         "[data.norviq.strict.decision, data.norviq.strict.rule_id]"],
+        ["opa", "eval", "-f", "raw", "--v0-compatible", "-d", str(policy), "-i", str(input_path),
+         f"[data.{_package(policy)}.decision, data.{_package(policy)}.rule_id]"],
         capture_output=True, text=True, check=True,
     )
     decision, rule_id = json.loads(out.stdout.strip())
@@ -91,18 +108,25 @@ def test_the_registry_already_calls_these_sinks(tool_name: str) -> None:
     assert verb.value == "send"
 
 
+@pytest.mark.parametrize("policy_name,policy", POLICIES.items(), ids=list(POLICIES))
 @pytest.mark.parametrize("tool_name", VENDOR_SINKS)
-def test_a_credential_is_refused_through_every_tool_the_engine_calls_a_sink(tmp_path: Path, tool_name: str) -> None:
-    decision, rule_id = _decide(tmp_path, tool_name, CREDENTIAL_PAYLOAD)
-    assert decision == "block", f"{tool_name} exfiltrated a credential — the sink lists disagree again"
+def test_a_credential_is_refused_through_every_tool_the_engine_calls_a_sink(
+    tmp_path: Path, tool_name: str, policy_name: str, policy: Path
+) -> None:
+    decision, rule_id = _decide(tmp_path, policy, tool_name, CREDENTIAL_PAYLOAD)
+    assert decision == "block", (
+        f"{tool_name} exfiltrated a credential through {policy_name} — the sink lists disagree again"
+    )
     assert rule_id == "llm02_data_leakage"
 
 
-def test_the_named_sink_still_blocks(tmp_path: Path) -> None:
+@pytest.mark.parametrize("policy_name,policy", POLICIES.items(), ids=list(POLICIES))
+def test_the_named_sink_still_blocks(tmp_path: Path, policy_name: str, policy: Path) -> None:
     """The case that always worked — pinned so a change here is visible as a REGRESSION, not a fix."""
-    assert _decide(tmp_path, "send_email", CREDENTIAL_PAYLOAD) == ("block", "llm02_data_leakage")
+    assert _decide(tmp_path, policy, "send_email", CREDENTIAL_PAYLOAD) == ("block", "llm02_data_leakage")
 
 
+@pytest.mark.parametrize("policy_name,policy", POLICIES.items(), ids=list(POLICIES))
 @pytest.mark.parametrize(
     "tool_name,params",
     [
@@ -111,8 +135,10 @@ def test_the_named_sink_still_blocks(tmp_path: Path) -> None:
         ("read_thread", {"channel": "C123"}),
     ],
 )
-def test_reading_tools_are_not_swept_up(tmp_path: Path, tool_name: str, params: dict) -> None:
+def test_reading_tools_are_not_swept_up(
+    tmp_path: Path, tool_name: str, params: dict, policy_name: str, policy: Path
+) -> None:
     """The cost side. Widening what counts as a sink must not turn every read into a refusal —
     including one whose text mentions the word "password"."""
-    decision, _rule = _decide(tmp_path, tool_name, params)
+    decision, _rule = _decide(tmp_path, policy, tool_name, params)
     assert decision == "allow"
