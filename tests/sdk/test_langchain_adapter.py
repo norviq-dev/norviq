@@ -143,3 +143,76 @@ def test_protect_default_raises_on_non_base_tool_and_evaluates_nothing() -> None
     with pytest.raises(TypeError, match="object"):
         protect([sentinel], interceptor)  # type: ignore[arg-type]
     assert interceptor.calls == []
+
+
+# ── positional arguments reach the engine WITH THEIR NAMES ──────────────────────────────────────
+#
+# `_tool_params` returned `{"args": [...]}` for any positionally-invoked tool, and that is a hole in
+# enforcement rather than a cosmetic difference. Every per-argument control Norviq offers addresses a
+# parameter BY NAME — `param_paths.to`, a builder constraint on `query`, a `destinations.emails` fact
+# derived from the value under a recipient key. Against `{"args": ["collector@attacker.example"]}`
+# none of them can fire, whatever the operator wrote: the rule does not FAIL, it is simply never
+# about this call, and under a tighten-only policy the call proceeds.
+
+
+class _RecordingInterceptor:
+    """Captures the params the engine WOULD have evaluated."""
+
+    def __init__(self) -> None:
+        self.params: dict[str, Any] = {}
+
+    async def intercept_or_raise(self, *, tool_name: str, tool_params: dict, session_id: str,
+                                 framework: str) -> None:
+        self.params = tool_params
+
+
+class _PositionalTool(BaseTool):
+    """A tool whose arguments are POSITIONAL — the shape that lost its names."""
+
+    name: str = "send_email"
+    description: str = "sends mail"
+
+    def _run(self, to: str = "", body: str = "") -> str:
+        return f"sent:{to}"
+
+
+class _VarargsTool(BaseTool):
+    name: str = "varargs_tool"
+    description: str = "takes anything"
+
+    def _run(self, first: str = "", *rest: Any) -> str:
+        return "ok"
+
+
+def test_positional_arguments_are_bound_to_their_names() -> None:
+    """The names come from the tool's OWN `_run`, so they are the names the tool itself uses."""
+    rec = _RecordingInterceptor()
+    wrapped = protect([_PositionalTool()], rec, session_id=_session())
+    wrapped[0]._run("ops@acme.com", "quarterly figures")
+    # NOT {"args": [...]} — the recipient is addressable, so `param_paths.to` can fire at all.
+    assert rec.params == {"to": "ops@acme.com", "body": "quarterly figures"}
+
+
+def test_an_explicit_keyword_wins_over_a_positional_binding() -> None:
+    """Mixing the two must not let a positional silently overwrite what the caller named."""
+    rec = _RecordingInterceptor()
+    wrapped = protect([_PositionalTool()], rec, session_id=_session())
+    wrapped[0]._run("ops@acme.com", body="figures")
+    assert rec.params == {"to": "ops@acme.com", "body": "figures"}
+
+
+def test_keyword_invocation_is_unchanged() -> None:
+    """The path that always worked, pinned so the binding cannot regress it."""
+    rec = _RecordingInterceptor()
+    wrapped = protect([_PositionalTool()], rec, session_id=_session())
+    wrapped[0]._run(to="ops@acme.com")
+    assert rec.params == {"to": "ops@acme.com"}
+
+
+def test_arguments_beyond_the_known_names_keep_the_args_list() -> None:
+    """`*args` genuinely has no name to bind to. Inventing `arg3` would let an operator scope a name
+    the tool has never heard of — a rule that looks enforced and can never match."""
+    rec = _RecordingInterceptor()
+    wrapped = protect([_VarargsTool()], rec, session_id=_session())
+    wrapped[0]._run("a", "b", "c")
+    assert rec.params == {"first": "a", "args": ["b", "c"]}

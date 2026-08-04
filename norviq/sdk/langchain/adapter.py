@@ -9,7 +9,7 @@ from typing import Any, get_type_hints
 import structlog
 
 from norviq.sdk.core.interceptor import ToolInterceptor
-from norviq.sdk.core.wrapping import _output_dlp, _run_sync, _tool_params
+from norviq.sdk.core.wrapping import _output_dlp, _run_sync, _tool_params, positional_names
 
 log = structlog.get_logger()
 
@@ -87,11 +87,17 @@ def protect(
         original_run = tool._run
         original_arun = getattr(tool, "_arun", None)
 
-        def sync_wrapper(*args: Any, _name: str = tool.name, _orig: Any = original_run, **kwargs: Any) -> Any:
+        # The names this tool binds positionally, read from its OWN `_run`. Without them a
+        # positionally-invoked tool reached the engine as `{"args": [...]}` — every per-argument
+        # control addresses a parameter by NAME, so none of them could fire.
+        sync_names = positional_names(original_run)
+
+        def sync_wrapper(*args: Any, _name: str = tool.name, _orig: Any = original_run,
+                         _names: tuple = sync_names, **kwargs: Any) -> Any:
             _run_sync(
                 interceptor.intercept_or_raise(
                     tool_name=_name,
-                    tool_params=_tool_params(args, kwargs),
+                    tool_params=_tool_params(args, kwargs, _names),
                     session_id=session_id,
                     framework="langchain",
                 )
@@ -103,12 +109,15 @@ def protect(
         tool._run = sync_wrapper  # type: ignore[method-assign]
         if original_arun is not None:
 
+            async_names = positional_names(original_arun)
+
             async def async_wrapper(
-                *args: Any, _name: str = tool.name, _orig: Any = original_arun, **kwargs: Any
+                *args: Any, _name: str = tool.name, _orig: Any = original_arun,
+                _names: tuple = async_names, **kwargs: Any
             ) -> Any:
                 await interceptor.intercept_or_raise(
                     tool_name=_name,
-                    tool_params=_tool_params(args, kwargs),
+                    tool_params=_tool_params(args, kwargs, _names),
                     session_id=session_id,
                     framework="langchain",
                 )

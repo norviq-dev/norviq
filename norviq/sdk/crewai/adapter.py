@@ -8,7 +8,7 @@ from typing import Any
 import structlog
 
 from norviq.sdk.core.interceptor import ToolInterceptor
-from norviq.sdk.core.wrapping import _output_dlp, _run_sync, _tool_params
+from norviq.sdk.core.wrapping import _output_dlp, _run_sync, _tool_params, positional_names
 
 log = structlog.get_logger()
 
@@ -54,12 +54,16 @@ def protect(
             protected.append(tool)
             continue
         original_run = tool._run
+        # See wrapping._tool_params: without the names, a positionally-invoked tool reaches the
+        # engine as `{"args": [...]}` and no per-argument control can address it.
+        sync_names = positional_names(original_run)
 
-        def sync_wrapper(*args: Any, _name: str = tool.name, _orig: Any = original_run, **kwargs: Any) -> Any:
+        def sync_wrapper(*args: Any, _name: str = tool.name, _orig: Any = original_run,
+                         _names: tuple = sync_names, **kwargs: Any) -> Any:
             _run_sync(
                 interceptor.intercept_or_raise(
                     tool_name=_name,
-                    tool_params=_tool_params(args, kwargs),
+                    tool_params=_tool_params(args, kwargs, _names),
                     session_id=session_id,
                     framework="crewai",
                 )

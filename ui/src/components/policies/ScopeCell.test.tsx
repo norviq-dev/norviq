@@ -131,3 +131,56 @@ describe("ScopeCell", () => {
     expect(onToggle).toHaveBeenCalledOnce();
   });
 });
+
+/**
+ * "Narrowed · N conditions" counts CLAUSES, not arguments covered.
+ *
+ * An operator reads that headline as done. It answers a different question from the one that decides
+ * whether the grant is actually tight: two clauses on one argument leave every other argument wide
+ * open, and nothing on the row said so. That is the visible half of the largest remaining vector —
+ * argument scoping is the control that stops an attacker choosing a destination through a tool the
+ * agent is legitimately allowed to call, and an operator cannot finish work they cannot see is
+ * unfinished.
+ */
+describe("ScopeCell — unconstrained arguments", () => {
+  it("names what is still open after a partial narrowing", () => {
+    // One clause on `to`; `filters.customer` is narrowable and untouched.
+    setup({ constraints: [MATCHES] });
+    const note = screen.getByTestId("scope-cell-send_dm-unconstrained");
+    expect(note).toHaveTextContent("1 of its 2 narrowable arguments still unconstrained");
+    expect(note).toHaveTextContent("filters.customer");
+  });
+
+  it("says so plainly once every narrowable argument is covered", () => {
+    setup({
+      constraints: [
+        MATCHES,
+        { kind: "matches", field: "filters.customer", pattern: "^C-" } as BuilderParamConstraint
+      ]
+    });
+    expect(screen.queryByTestId("scope-cell-send_dm-unconstrained")).not.toBeInTheDocument();
+    expect(screen.getByTestId("scope-cell-send_dm-fully-scoped")).toBeInTheDocument();
+  });
+
+  it("counts a param_paths FACT as covering its argument, not just a constraint", () => {
+    // The two authoring routes reach the same place; only one of them was ever a `constraint`.
+    setup({
+      constraints: [MATCHES],
+      facts: [
+        { type: "scalarFact", field: "param_paths.filters.customer", op: "matches", value: "^C-" } as BuilderGrantFact
+      ]
+    });
+    expect(screen.queryByTestId("scope-cell-send_dm-unconstrained")).not.toBeInTheDocument();
+  });
+
+  it("says nothing when the tool has no schema — there is no argument list to be short of", () => {
+    setup({ constraints: [MATCHES], schemaAvailable: false });
+    expect(screen.queryByTestId("scope-cell-send_dm-unconstrained")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("scope-cell-send_dm-fully-scoped")).not.toBeInTheDocument();
+  });
+
+  it("says nothing on an UNSCOPED grant — the headline already says unrestricted", () => {
+    setup({});
+    expect(screen.queryByTestId("scope-cell-send_dm-unconstrained")).not.toBeInTheDocument();
+  });
+});

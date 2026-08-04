@@ -77,6 +77,25 @@ export function ScopeCell({
   const scoped = conditions.length > 0;
   const base = testId ?? `scope-cell-${tool}`;
 
+  // WHICH addressable arguments are actually spoken for.
+  //
+  // "Narrowed · 2 conditions" is a count of CLAUSES, and an operator reads it as done. It is not the
+  // same question as "which of this tool's arguments are still unconstrained" — two clauses on one
+  // argument leave four others wide open, and nothing on the row said so. That gap is the visible
+  // half of the largest remaining vector: argument scoping is the control that stops an attacker
+  // choosing a destination through a tool the agent is legitimately allowed to call, and an operator
+  // cannot finish work they cannot see is unfinished.
+  //
+  // A constraint names its field directly; a fact addresses an argument only via `param_paths.<path>`
+  // (every other fact is derived about the whole call and constrains no single argument).
+  const constrainedArgs = new Set<string>([
+    ...constraints.map((c) => c.field),
+    ...facts
+      .map((f) => (f.type !== "not" && f.field.startsWith("param_paths.") ? f.field.slice("param_paths.".length) : ""))
+      .filter(Boolean)
+  ]);
+  const unconstrained = addressableArgs.filter((a) => !constrainedArgs.has(a));
+
   // ---- slot 1: headline ------------------------------------------------------------------------
   const headline = scoped
     ? `Narrowed · ${conditions.length} condition${conditions.length === 1 ? "" : "s"}`
@@ -104,6 +123,28 @@ export function ScopeCell({
             {c}
           </span>
         ))}
+        {/* The count of clauses is not the count of arguments covered. Stated on the row that
+            already claims "Narrowed", because that word is where the false sense of completion
+            comes from — and only when a schema actually told us what the arguments ARE. */}
+        {schemaAvailable && unconstrained.length > 0 && (
+          <span
+            data-testid={`${base}-unconstrained`}
+            style={{ width: "100%", fontSize: 11, color: "var(--escalate)", marginTop: 2 }}
+          >
+            {unconstrained.length} of its {addressableArgs.length} narrowable argument
+            {addressableArgs.length === 1 ? "" : "s"} still unconstrained —{" "}
+            <span className="mono">{unconstrained.slice(0, 3).join(", ")}</span>
+            {unconstrained.length > 3 && ` and ${unconstrained.length - 3} more`}
+          </span>
+        )}
+        {schemaAvailable && addressableArgs.length > 0 && unconstrained.length === 0 && (
+          <span
+            data-testid={`${base}-fully-scoped`}
+            style={{ width: "100%", fontSize: 11, color: "var(--allow)", marginTop: 2 }}
+          >
+            Every narrowable argument is constrained.
+          </span>
+        )}
       </span>
     );
   } else if (!schemaAvailable) {
