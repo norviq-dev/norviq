@@ -1499,3 +1499,57 @@ waiting for "all nodes inside" would be circular.
 
 > **Rule, earned three times this session: a fixed sleep is a threshold calibrated against whatever
 > the estate happened to contain that day. Grow the data and it becomes a defect report.**
+
+---
+
+## EXIT STATE MET — all seven gates, one run
+
+```
+✓ G1 pytest: 1952 passed   ✓ G1 vitest: 759 passed   ✓ tsc  ✓ eslint  ✓ build
+✓ G3 browser: 183 passed, 0 failed, 0 did not run
+✓ G2 integration: 68 passed   ✓ G2 attacks: 101 passed   ✓ G2 attacks: 0 xfailed
+✓ G4 @ concurrency 8 and 16: within budget, every scenario decided correctly
+✓ G5: all 5 faults degraded correctly and legibly
+✓ G6: 4 journeys, every persona proved a flip, no blockers, 7 findings filed
+✓ G7: tree clean · chart renders both profiles · the workers-vs-memory guard still fires
+       · gitleaks clean over main..HEAD · CI workflow present
+```
+
+### The last three failures were all the checker, not the product
+
+G3 passed 0-failed twice standalone and then failed inside `exit-state.sh` three times running. Each
+cause was a different way of measuring the wrong thing:
+
+1. **The checker invoked playwright directly** instead of `scripts/e2e.sh`, skipping the exported
+   `NRVQ_API_URL`, the reset and re-seed, the token liveness check, the lockout and rate-limit bucket
+   clears, and the login gate. `e2e.sh` carries a comment saying precisely this, and the script written
+   to enforce the gate ignored it.
+2. **It read the absence of a "N failed" line as one failure.** Playwright prints no such line when
+   there are none, and the default was `1` — so a run of 183 passed and nothing failed reported
+   "? failed". A gate that treats missing bad news as bad news is as useless as one that treats it as
+   good news. Absence now reads as zero, made safe by two guards that distinguish a crashed run: a
+   zero exit from `e2e.sh` and a passed count clearing its floor.
+3. **It ran L3 before L4**, when `EXIT-STATE.md`'s own G7 row says "L3 after L4". The attacks suite
+   writes ~101 tests' worth of `framework=redteam` audit rows immediately beforehand, and
+   `audit-filters-and-volume` counts rows. The document said which way round; the script disagreed
+   with the document it exists to enforce.
+
+### And then the gate failed on its own exhaust
+
+With the order fixed, `audit-filters-and-volume` still failed: "unfiltered total must include the test
+rows". `audit_log` had reached **83,128 rows** — chaos and the latency harness drive ~13,000 real
+evaluate calls between them, every red-team suite adds hundreds, and the reset only ever cleared
+throwaway *policies*. A spec looking for its own handful of rows cannot find them under eighty
+thousand.
+
+Decision volume is now part of the reset baseline: `TRUNCATE audit_log` before seeding, which is safe
+here and only here because every row the suite depends on is re-created by the seeders immediately
+after. What is destroyed is accumulation, not fixtures — and accumulation is exactly what makes one
+run incomparable to the next. Every run now starts at 1h=22 / 24h=198 / 7d=1254.
+
+> **The through-line of this whole gate: five separate times, a failure that looked like a product
+> defect was the harness measuring something other than the product. The cluster running a published
+> image, an expired token, a login lockout tripped by a neighbouring spec, a rate-limit bucket shared
+> by 190 specs, and finally the checker's own ordering and parsing. Each one was indistinguishable
+> from a real defect until the discriminating experiment was run — and in every case the experiment
+> was cheap and the guess was expensive.**
