@@ -1684,3 +1684,36 @@ click reports "unable to find builder-condition-picker-open" and the retry loop 
 element instead of the condition it was waiting on.
 
 With this, `EXIT-STATE.md` has nothing left in its "explicitly not in scope" list for the builder.
+
+---
+
+## Reverted: the Visual Policy Builder UI
+
+The builder chrome and `ConditionPicker` described in the two entries above are **reverted**.
+`BuilderSheet.tsx`, `BuilderSheet.test.tsx`, `BuilderSteps.css` and `builder-scope-p1.spec.ts` are
+restored byte-for-byte to `5362d42`; `RegoDrawer.tsx` and `ConditionPicker.tsx` are deleted.
+
+**Why.** The old builder is the one carrying the full validated history — months of e2e runs, the
+whole `BuilderSheet.test.tsx` suite written against it, and every gate that has ever passed on this
+branch before the restructure. The new chrome passed its gates too, but it was hours old against a
+surface whose value is that it is trusted to author enforcement. Trading a long validation record for
+a nicer layout is the wrong trade on the one screen that decides what an agent may do.
+
+**Scope, verified rather than asserted.** `git diff HEAD --name-only` after the revert lists six
+files, all under `ui/src/components/policies/` or the builder's own spec. Nothing else moved:
+
+| Kept | Where |
+|---|---|
+| Tools + MCP detail dialogs, blurred backdrop, full-width tables | `Tools.tsx`, `McpServers.tsx` |
+| `Modal` gaining `wide`, `subtitle`, focus-restore | `common/Modal.tsx`, `index.css` |
+| `podAnnotations` on all four deployments + the four-way rollout guard | `helm/`, `00-up.sh` |
+
+The two builder commits touched only builder files plus docs, which is what made a clean revert
+possible — worth noting as an argument for keeping a change confined to its own surface even when
+you are confident in it.
+
+**What the revert costs, stated plainly.** The real defect I found while walking through the new
+picker is still live in the old builder: a `param_paths.<path>` clause addresses one named argument
+but renders under a heading reading *"A fact the ENGINE derived about the call, not one named
+argument."* That mislabel predates both builder commits. It is a small, self-contained fix to the
+old builder if wanted, independent of any layout work.

@@ -105,9 +105,9 @@ industry's edge cases.
 
 Stated so "done" is not confused with "everything":
 
-- Nothing from the design handoff remains unbuilt. The builder chrome (top bar, Stepper strip, footer
-  action bar, RegoDrawer rail) and `ConditionPicker` all shipped — see `IMPLEMENTATION-LOG.md`. The
-  one deviation is recorded there: the picker has no capture-off band, because that needs
-  `params_available`, a propose-side signal the builder does not receive.
+- **The Visual Policy Builder's UI.** The handoff's chrome (top bar, Stepper strip, footer action bar,
+  RegoDrawer rail) and `ConditionPicker` were built and then **reverted** — the builder is back to the
+  layout that carries the full validated history. Reasoning in `IMPLEMENTATION-LOG.md`. The Tools and
+  MCP Servers detail dialogs are NOT part of that revert and remain in place.
 - **No merge to `main`, no PR, no release tag.** The exit state means *ready* to cut a version, and
   cutting it is the user's call.

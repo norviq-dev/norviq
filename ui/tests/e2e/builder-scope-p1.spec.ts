@@ -18,21 +18,6 @@
 
 import { expect, test } from "./fixtures";
 
-/**
- * Add a condition through the ConditionPicker.
- *
- * Replaces `selectOption` on the two `<select>`s this used to drive. The picker is the affordance now
- * because a select cannot show a disabled option's REASON — the non-addressable arguments carried
- * theirs in a `title` on a disabled `<option>`, which no browser renders.
- *
- * Tolerates an already-open picker: some tests add two conditions in a row.
- */
-async function pickCondition(page: import("@playwright/test").Page, id: string): Promise<void> {
-  const open = page.getByTestId("builder-condition-picker-open");
-  if (await open.isVisible().catch(() => false)) await open.click();
-  await page.getByTestId(`builder-condition-picker-option-${id}`).click();
-}
-
 /** Open the builder and allow one tool — the shortest path to the row this spec is about. */
 async function allowTool(page: import("@playwright/test").Page, tool: string) {
   await page.goto("/policies/catalog?ns=analytics");
@@ -97,7 +82,7 @@ test("narrowing a tool flips the row from loud to quiet, and the banner clears",
   await expect(page.getByTestId("builder-grant-editor-send_dm")).toBeVisible();
 
   // Add one whole-call condition — the route that works whether or not a schema is available.
-  await pickCondition(page, "data_classes");
+  await page.getByTestId("builder-fact-add-kind").selectOption("data_classes");
   await page.getByTestId("builder-fact-value-send_dm-0").fill("secret");
 
   await expect(page.getByTestId("builder-scope-cell-send_dm-headline")).toContainText("Narrowed · 1 condition");
@@ -112,20 +97,13 @@ test("narrowing a tool flips the row from loud to quiet, and the banner clears",
 test("a condition authored on the row reaches the policy the builder is about to save", async ({ page }) => {
   await allowTool(page, "send_dm");
   await page.getByTestId("builder-scope-cell-send_dm-cta").click();
-  await pickCondition(page, "data_classes");
+  await page.getByTestId("builder-fact-add-kind").selectOption("data_classes");
   await page.getByTestId("builder-fact-value-send_dm-0").fill("secret");
 
   // The row states the clause in the compiler's own words.
   await expect(page.getByTestId("builder-scope-cell-send_dm-condition").first()).toHaveText(
     "data_classes excludes {secret}"
   );
-
-  // OPEN THE REGO DRAWER FIRST. It is a 46px rail by default — the compiled policy is reference, and
-  // a permanently-open pane was taking the width the allowed-tool row needs — so the editor is not
-  // mounted until someone asks for it. Driving the rail is what a user does to read the rego, and it
-  // is what this assertion depends on, so the spec should do it rather than assume a pane that is no
-  // longer there by default.
-  await page.getByTestId("builder-editor-expand-toggle").click();
 
   // And the live preview is compiling THIS class's intent-allowlist module — scoped to the sheet,
   // because the Policy Catalog behind it has its own Monaco showing the strict preset, and an
@@ -170,10 +148,10 @@ test("the budget hint follows the encoding, not the label", async ({ page }) => 
   await allowTool(page, "send_dm");
   await page.getByTestId("builder-scope-cell-send_dm-cta").click();
 
-  await pickCondition(page, "hostIn");
+  await page.getByTestId("builder-constraint-add-kind").selectOption("hostIn");
   await expect(page.getByTestId("builder-constraint-cost-send_dm-0")).toContainText("1 regex op");
 
-  await pickCondition(page, "destinations.hosts");
+  await page.getByTestId("builder-fact-add-kind").selectOption("destinations.hosts");
   await expect(page.getByTestId("builder-fact-cost-send_dm-0")).toContainText("free");
 });
 
@@ -184,11 +162,11 @@ test("the scope panel groups clauses by what they address", async ({ page }) => 
   await page.getByTestId("builder-scope-cell-send_dm-cta").click();
   const editor = page.getByTestId("builder-grant-editor-send_dm");
 
-  await pickCondition(page, "required");
+  await page.getByTestId("builder-constraint-add-kind").selectOption("required");
   await expect(editor.getByText("Argument", { exact: true })).toBeVisible();
   await expect(editor).toContainText(/A call that omits it fails this line/);
 
-  await pickCondition(page, "data_classes");
+  await page.getByTestId("builder-fact-add-kind").selectOption("data_classes");
   await expect(editor.getByText("Whole call", { exact: true })).toBeVisible();
   await expect(editor).toContainText(/derived about the call, not one named argument/);
 });

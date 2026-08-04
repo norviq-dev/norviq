@@ -290,6 +290,11 @@
   line-height: 1.5;
 }
 
+/* On a wide viewport the form is the work and the rego is reference — stop splitting them 50/50. */
+@media (min-width: 1180px) {
+  .vpb-form-pane { flex: 1.25 1 560px !important; }
+  .vpb-rego-pane { flex: 0.85 1 420px !important; }
+}
 
 /* Field labels inside a rule row. The decision select and the rule id had no labels at all — only
    placeholders, and a placeholder disappears the moment the field has a value, which is exactly when a
@@ -316,89 +321,37 @@
   max-width: 100vw;
   height: 100vh;
   max-height: 100vh;
-  min-height: 700px;
   border-radius: 0;
   border: none;
-  /* No padding on the shell. The top bar, stepper strip and footer are full-bleed bands with their
-     own borders; a padded shell would inset those rules from the edges and they would stop reading as
-     structure. Padding belongs to the scrolling authoring column alone. */
-  padding: 0;
-  overflow: hidden;
+  padding: 22px 26px 0;
   z-index: 60;
 }
 
-/* ── Top bar ─────────────────────────────────────────────────────────────── */
-.vpb-topbar {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  height: 54px;
-  padding: 0 20px;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-surface);
-}
-.vpb-topbar-title { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; white-space: nowrap; }
-.vpb-topbar-divider { flex: none; width: 1px; height: 20px; background: var(--border); }
-.vpb-topbar-crumb {
-  display: flex;
-  gap: 8px;
-  min-width: 0;
-  overflow: hidden;
-  font-size: 12px;
-  color: var(--text-secondary);
-  white-space: nowrap;
+/* The body is the only thing that grows; header stays put and each column scrolls on its own.
+   Previously both columns carried `maxHeight: calc(100vh - 180px)` — a hard-coded guess at the
+   chrome height that stopped matching as soon as the shell changed. */
+.vpb-sheet-fullscreen .vpb-body {
+  min-height: 0;
+  padding-bottom: 18px;
 }
 
-/* ── Stepper strip ───────────────────────────────────────────────────────── */
-/* Transparent, so it reads as the head of the authoring column rather than a second bar of chrome. */
-.vpb-stepper-strip {
-  flex: none;
-  padding: 9px 22px;
-  border-bottom: 1px solid var(--border);
-}
-
-/* ── Footer action bar ───────────────────────────────────────────────────── */
-.vpb-footer {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  padding: 13px 22px;
-  border-top: 1px solid var(--border);
-  background: var(--bg-sidebar);
-}
-/* Grows; the button group beside it does not. Both are single children so the bar wraps as two
-   units — loose children wrap individually and strand the primary CTA on a line of its own. */
-.vpb-footer-status {
-  flex: 1 1 240px;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  font-size: 12.5px;
-  line-height: 1.45;
-  color: var(--text-secondary);
-}
-.vpb-footer-dot { flex: none; width: 7px; height: 7px; border-radius: 999px; background: var(--text-faint); }
-.vpb-footer-dot[data-state="blocked"] { background: var(--escalate); }
-.vpb-footer-dot[data-state="ready"] { background: var(--allow); }
-.vpb-footer-dot[data-state="saved"] { background: var(--accent); }
-
-/* The band between the top bar and nothing — it is the only thing that grows, and the two columns
-   inside it scroll independently. */
-.vpb-sheet-fullscreen .vpb-body { min-height: 0; }
-
-/* All the padding lives here, on the one element that scrolls. */
-.vpb-sheet-fullscreen .vpb-form-pane { padding: 22px 22px 26px; }
-
-/* A comfortable measure. A single column of form fields stretched across a 1440px screen is worse
-   than a bounded one — and now that the rego is a 46px rail by default, without this cap the
-   authoring column would take the whole width the drawer gave back. */
+/* Comfortable reading measure: on a wide screen a single column of form fields stretched to 900px+
+   is worse than a bounded one, so cap the form and let the rego take the slack. */
 @media (min-width: 1180px) {
-  /* Centred, not left-hugged. With the rego collapsed to a rail the column has ~1350px to play with
-     and a bounded measure leaves ~500px over; parked on the left that reads as a pane failing to
-     load. Centring keeps the measure and spends the slack symmetrically. */
-  .vpb-sheet-fullscreen .vpb-form-pane { max-width: 860px; margin-inline: auto; width: 100%; }
+  .vpb-sheet-fullscreen .vpb-form-pane { flex: 1.1 1 560px !important; max-width: 720px; }
+  .vpb-sheet-fullscreen .vpb-rego-pane { flex: 1 1 520px !important; }
+}
+
+/* Step 3 carries the actions, and it sits BELOW the rego editor in the right column. With the editor
+   expanded there was no way to reach it — the pane clipped instead of scrolling. The pane scrolls now,
+   and the action row sticks to the bottom of it so Run dry-run / Save & enforce are reachable at any
+   editor size and any scroll position. */
+.vpb-actions-sticky {
+  position: sticky;
+  bottom: 0;
+  background: var(--bg-surface, #0d0f0f);
+  padding: 10px 0 12px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  z-index: 2;
 }

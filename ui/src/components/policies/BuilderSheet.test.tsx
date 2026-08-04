@@ -24,57 +24,8 @@ beforeAll(() => server.listen({ onUnhandledRequest: "bypass" }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 
-/**
- * Render the sheet with the compiled-rego drawer OPEN.
- *
- * The drawer is a 46px rail by default — the rego is reference, and a permanent half-screen of it was
- * crowding out the allowed-tool row this redesign exists to make readable. Nearly every test below
- * asserts on the compiled preview, so their premise is a sheet where that preview is on screen. This
- * opens it the way a user does, through the rail, rather than reaching past the UI into internal
- * state: if the rail ever stops opening the drawer, these fail, which is correct.
- */
 function renderSheet() {
-  const result = render(<BuilderSheet namespace="default" onClose={() => {}} />);
-  fireEvent.click(screen.getByTestId("builder-editor-expand-toggle"));
-  return result;
-}
-
-/** The default view — rail collapsed, as a user first sees it. */
-function renderSheetCollapsed() {
   return render(<BuilderSheet namespace="default" onClose={() => {}} />);
-}
-
-/**
- * Add a condition through the ConditionPicker.
- *
- * The two `<select>`s this replaced could be driven with a single `fireEvent.change`; a picker needs
- * open → choose. Worth the two lines: a select cannot show a disabled option's REASON, which is the
- * thing these tests care most about proving is visible.
- *
- * `id` is the option id — an argument path (`to`), a fact field (`data_classes`), or a constraint
- * kind (`matches`).
- */
-function openPicker() {
-  // IDEMPOTENT on purpose. These helpers get called inside `waitFor`, which retries — and the trigger
-  // is replaced by the popover on the first click, so a second unconditional click throws "unable to
-  // find builder-condition-picker-open" and the retry loop reports a missing element instead of the
-  // condition it was actually waiting for.
-  if (!screen.queryByTestId("builder-condition-picker")) {
-    fireEvent.click(screen.getByTestId("builder-condition-picker-open"));
-  }
-}
-
-function pickCondition(id: string) {
-  openPicker();
-  fireEvent.click(screen.getByTestId(`builder-condition-picker-option-${id}`));
-}
-
-/** Open the picker and read what it offers, without choosing anything. */
-function pickerOptionIds(): string[] {
-  openPicker();
-  return [...document.querySelectorAll('[data-testid^="builder-condition-picker-option-"]')].map((el) =>
-    (el.getAttribute("data-testid") ?? "").replace("builder-condition-picker-option-", "")
-  );
 }
 
 /** Scope + one rule with a reason (auto-fills rule_id) + one detector condition — a fully valid graph. */
@@ -275,31 +226,26 @@ describe("BuilderSheet — unsaved-changes guard on close", () => {
 
 // --- editor expand/collapse (round B fix 4) ---
 describe("BuilderSheet — compiled-rego editor expand/collapse", () => {
-  it("is a rail by default that still carries the budget, and opens to the full pane", () => {
-    // The toggle no longer changes the editor's HEIGHT — it decides whether the editor exists at all.
-    // Collapsed, the drawer is a 46px rail and Monaco is not mounted; that is the point, since a
-    // permanently-open reference pane was taking the width the authoring column needs.
-    renderSheetCollapsed();
+  it("toggles the editor between the compact and expanded height, and reflects state on the toggle + container", () => {
+    renderSheet();
     const toggle = screen.getByTestId("builder-editor-expand-toggle");
+    const editorContainer = screen.getByTestId("builder-editor-container");
 
     expect(toggle).toHaveAttribute("data-expanded", "false");
-    expect(screen.queryByTestId("builder-editor-container")).not.toBeInTheDocument();
-    // Collapsing must not cost the reader the budget — it is the reason to watch this pane at all.
-    expect(screen.getByTestId("builder-stats")).toBeInTheDocument();
-    expect(screen.getByTestId("builder-stats").textContent).toMatch(/regex/i);
+    expect(editorContainer).toHaveAttribute("data-expanded", "false");
+    expect(editorContainer.style.height).toBe("260px");
 
     fireEvent.click(toggle);
-    const opened = screen.getByTestId("builder-editor-expand-toggle");
-    expect(opened).toHaveAttribute("data-expanded", "true");
-    expect(screen.getByTestId("builder-editor-container")).toHaveAttribute("data-expanded", "true");
+    expect(toggle).toHaveAttribute("data-expanded", "true");
+    expect(editorContainer).toHaveAttribute("data-expanded", "true");
+    expect(editorContainer.style.height).toBe("560px");
 
-    // The stats row survives the toggle under the same testid, in both states.
+    // The stats row below the editor is unaffected by the toggle (still present, unchanged testid).
     expect(screen.getByTestId("builder-stats")).toBeInTheDocument();
 
-    // ...and it collapses back to the rail, unmounting the editor again.
-    fireEvent.click(screen.getByTestId("builder-editor-expand-toggle"));
-    expect(screen.getByTestId("builder-editor-expand-toggle")).toHaveAttribute("data-expanded", "false");
-    expect(screen.queryByTestId("builder-editor-container")).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("data-expanded", "false");
+    expect(editorContainer.style.height).toBe("260px");
   });
 });
 
@@ -1044,7 +990,7 @@ describe("BuilderSheet — scoping an allowlisted tool by its arguments", () => 
     openAllowlistWith("execute_sql");
     addTool("search_kb");
     fireEvent.click(screen.getByTestId("builder-scope-cell-execute_sql-cta"));
-    pickCondition("matches");
+    fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "matches" } });
     fireEvent.change(screen.getByTestId("builder-constraint-field-execute_sql-0"), { target: { value: "query" } });
     fireEvent.change(screen.getByTestId("builder-constraint-value-execute_sql-0"), {
       target: { value: "(?i)^\\s*select\\b" }
@@ -1064,7 +1010,7 @@ describe("BuilderSheet — scoping an allowlisted tool by its arguments", () => 
     expect(screen.getByTestId("builder-scope-cell-execute_sql-cta").textContent).toContain("Narrow it");
     expect(screen.getByTestId("builder-scope-cell-execute_sql-headline")).toHaveTextContent("Any arguments · unrestricted");
     fireEvent.click(screen.getByTestId("builder-scope-cell-execute_sql-cta"));
-    pickCondition("forbidden");
+    fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "forbidden" } });
     fireEvent.change(screen.getByTestId("builder-constraint-field-execute_sql-0"), { target: { value: "force" } });
     await waitFor(() =>
       expect(screen.getByTestId("builder-scope-cell-execute_sql-headline")).toHaveTextContent("Narrowed · 1 condition")
@@ -1074,7 +1020,7 @@ describe("BuilderSheet — scoping an allowlisted tool by its arguments", () => 
   it("removing a tool drops its constraints, so no orphan grant breaks the compile", async () => {
     openAllowlistWith("execute_sql");
     fireEvent.click(screen.getByTestId("builder-scope-cell-execute_sql-cta"));
-    pickCondition("required");
+    fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "required" } });
     fireEvent.change(screen.getByTestId("builder-constraint-field-execute_sql-0"), { target: { value: "query" } });
     await waitFor(() =>
       expect((screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value).toContain("constraints_ok")
@@ -1093,7 +1039,7 @@ describe("BuilderSheet — scoping an allowlisted tool by its arguments", () => 
   it("removing the last constraint returns the tool to unconstrained (not an empty grant)", async () => {
     openAllowlistWith("execute_sql");
     fireEvent.click(screen.getByTestId("builder-scope-cell-execute_sql-cta"));
-    pickCondition("required");
+    fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "required" } });
     fireEvent.change(screen.getByTestId("builder-constraint-field-execute_sql-0"), { target: { value: "query" } });
     await waitFor(() =>
       expect((screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value).toContain("constraints_ok")
@@ -1111,7 +1057,7 @@ describe("BuilderSheet — scoping an allowlisted tool by its arguments", () => 
   it("switching a constraint's type keeps the parameter name", () => {
     openAllowlistWith("http_get");
     fireEvent.click(screen.getByTestId("builder-scope-cell-http_get-cta"));
-    pickCondition("matches");
+    fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "matches" } });
     fireEvent.change(screen.getByTestId("builder-constraint-field-http_get-0"), { target: { value: "url" } });
     fireEvent.change(screen.getByTestId("builder-constraint-kind-http_get-0"), { target: { value: "hostIn" } });
     // Retyping the parameter after every type change would be needless friction.
@@ -1163,20 +1109,22 @@ describe("allowlist mode must be able to say more than a tool list", () => {
     fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
     fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
 
-    // The picker exists at all — this is what was missing.
-    expect(screen.getByTestId("builder-condition-picker-open")).toBeInTheDocument();
+    // The fact rows exist at all — this is what was missing.
+    expect(screen.getByTestId("builder-fact-add-kind")).toBeInTheDocument();
 
-    // It lists FIELDS derived from the registry, not five hand-picked presets. Every addressable
-    // field must be reachable — a hand-written subset is how six of them became unreachable, and how
-    // any future field would silently fail to appear.
-    expect(pickerOptionIds()).toEqual(expect.arrayContaining([
+    // The dropdown now lists FIELDS derived from the registry, not five hand-picked presets.
+    const factOptions = [...(screen.getByTestId("builder-fact-add-kind") as HTMLSelectElement).options]
+      .map((o) => o.value)
+      .filter(Boolean);
+    // Every addressable field must be reachable — a hand-written subset is how six of them became
+    // unreachable and how any future field would silently fail to appear.
+    expect(factOptions).toEqual(expect.arrayContaining([
       "data_classes", "sql_tables", "sql_statements", "param_values",
       "destinations.emails", "destinations.urls", "destinations.hosts", "destinations.schemes",
       "param_bytes", "call_depth", "trust_score"
     ]));
-    fireEvent.click(screen.getByTestId("builder-condition-picker-close"));
 
-    pickCondition("data_classes");
+    fireEvent.change(screen.getByTestId("builder-fact-add-kind"), { target: { value: "data_classes" } });
     await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
     // The chip must now advertise the scope — counting only per-field constraints left a
     // facts-only grant looking unscoped.
@@ -1206,7 +1154,7 @@ describe("allowlist mode must be able to say more than a tool list", () => {
     fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
     fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
     fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
-    pickCondition("data_classes");
+    fireEvent.change(screen.getByTestId("builder-fact-add-kind"), { target: { value: "data_classes" } });
     await waitFor(() => expect(screen.getByTestId("builder-scope-cell-send_email-headline")).toHaveTextContent(/Narrowed · 1 condition/));
 
     fireEvent.click(screen.getByTitle("Remove send_email"));
@@ -1258,34 +1206,30 @@ describe("allowlist mode must be able to say more than a tool list", () => {
     fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
     fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
 
-    await waitFor(() => expect(pickerOptionIds()).toContain("to"));
+    const dropdown = () => screen.getByTestId("builder-fact-add-kind") as HTMLSelectElement;
+    await waitFor(() => {
+      const values = [...dropdown().options].map((o) => o.value);
+      expect(values).toContain("param_paths.to");
+    });
 
-    // A nested string leaf is addressable — the case a flat per-field constraint cannot express.
-    const nested = screen.getByTestId("builder-condition-picker-option-filters.customer");
-    expect(nested).toBeInTheDocument();
-    expect(nested).not.toHaveAttribute("data-disabled");
-
-    // And the two that CANNOT be addressed are shown WITH their reason rather than dropped. A select
-    // could only grey them out; the reason it carried lived in a `title` on a disabled option, which
-    // no browser renders. This is the assertion that was impossible before.
-    const anInteger = screen.getByTestId("builder-condition-picker-option-retries");
-    expect(anInteger).toHaveAttribute("data-disabled", "true");
-    expect(anInteger).toHaveAttribute("aria-disabled", "true");
-    expect(anInteger.textContent).toMatch(/param_paths|only text|cannot be/i);
+    const options = Object.fromEntries([...dropdown().options].map((o) => [o.value, o]));
+    // A nested string leaf is addressable — this is the case a flat per-field constraint cannot express.
+    expect(options["param_paths.filters.customer"]).toBeDefined();
+    expect(options["param_paths.filters.customer"].disabled).toBe(false);
 
     // An integer argument produces NO param_paths key at runtime (evaluator.py emits string leaves
     // only), so `object.get(..., "")` could never match — offered, but disabled, with the reason.
-    expect(anInteger.textContent).toMatch(/only text/i);
+    expect(options["param_paths.retries"].disabled).toBe(true);
+    expect(options["param_paths.retries"].textContent).toMatch(/only text/i);
 
     // An array's runtime key carries a concrete index the schema cannot know.
-    const anArray = screen.getByTestId("builder-condition-picker-option-attachments");
-    expect(anArray).toHaveAttribute("data-disabled", "true");
-    expect(anArray.textContent).toMatch(/indexed at runtime/i);
+    expect(options["param_paths.attachments"].disabled).toBe(true);
+    expect(options["param_paths.attachments"].textContent).toMatch(/indexed at runtime/i);
 
     // The engine-derived facts are still there — the tool's arguments are additive, not a replacement.
-    expect(screen.getByTestId("builder-condition-picker-option-data_classes")).toBeInTheDocument();
+    expect(options["data_classes"]).toBeDefined();
 
-    pickCondition("to");
+    fireEvent.change(dropdown(), { target: { value: "param_paths.to" } });
     await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
     fireEvent.change(screen.getByTestId("builder-fact-value-send_email-0"), { target: { value: "ops@acme.com" } });
 
@@ -1324,9 +1268,11 @@ describe("allowlist mode must be able to say more than a tool list", () => {
     fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
     fireEvent.click(screen.getByTestId("builder-scope-cell-deploy-cta"));
 
-    await waitFor(() => expect(pickerOptionIds()).toContain("region"));
-    fireEvent.click(screen.getByTestId("builder-condition-picker-close"));
-    pickCondition("region");
+    await waitFor(() => {
+      const values = [...(screen.getByTestId("builder-fact-add-kind") as HTMLSelectElement).options].map((o) => o.value);
+      expect(values).toContain("param_paths.region");
+    });
+    fireEvent.change(screen.getByTestId("builder-fact-add-kind"), { target: { value: "param_paths.region" } });
     await waitFor(() => expect(screen.getByTestId("builder-fact-row-deploy-0")).toBeInTheDocument());
 
     const value = screen.getByTestId("builder-fact-value-deploy-0") as HTMLSelectElement;
@@ -1370,7 +1316,7 @@ describe("allowlist mode must be able to say more than a tool list", () => {
     fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "deploy" } });
     fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
     fireEvent.click(screen.getByTestId("builder-scope-cell-deploy-cta"));
-    pickCondition("oneOf");
+    fireEvent.change(screen.getByTestId("builder-constraint-add-kind"), { target: { value: "oneOf" } });
     await waitFor(() => expect(screen.getByTestId("builder-constraint-row-deploy-0")).toBeInTheDocument());
 
     // Flat argument names are suggested; a NESTED path is not, because a constraint addresses one flat
@@ -1399,7 +1345,7 @@ describe("allowlist mode must be able to say more than a tool list", () => {
     fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
     fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
     fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
-    pickCondition("data_classes");
+    fireEvent.change(screen.getByTestId("builder-fact-add-kind"), { target: { value: "data_classes" } });
     await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
 
     fireEvent.change(screen.getByTestId("builder-fact-value-send_email-0"), { target: { value: "secret, pci" } });
