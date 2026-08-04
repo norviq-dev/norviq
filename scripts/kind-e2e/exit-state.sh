@@ -109,21 +109,40 @@ g2() {
 g3() {
   stage "G3 · Browser suite (L4)"
   local log; log="$(mktemp)"
-  NRVQ_KUBE_CONTEXT="$KUBE_CTX" bash "${REPO_ROOT}/scripts/kind-e2e/login-gate.sh" >/dev/null 2>&1 \
-    || { unmet "G3: login gate failed — without it ~27 tests fail for the wrong reason"; return; }
-  ( cd "${REPO_ROOT}/ui/tests/e2e" && NRVQ_BASE_URL="$BASE_URL" \
-    NRVQ_E2E_PASSWORD="${NRVQ_E2E_PASSWORD:-nrvq-e2e-Passw0rd-2026}" \
-    npx playwright test --workers=1 --reporter=line ) >"$log" 2>&1
+  # DELEGATE to scripts/e2e.sh. This used to invoke playwright directly and reported 4 failures against
+  # a tree that runs 0 twice back to back — because calling playwright straight skips everything e2e.sh
+  # does first: exporting NRVQ_API_URL (four specs otherwise hit an unforwarded 127.0.0.1:18080),
+  # resetting and re-seeding, verifying the admin token is still live, clearing the login lockout and
+  # the rate-limit buckets, and running the login gate when the supplied password is rejected.
+  #
+  # e2e.sh carries a comment saying exactly this, and the checker written to enforce the gate ignored
+  # it — producing the one thing a gate must never produce: a failure that belongs to the harness and
+  # reads as a failure of the product.
+  #
+  # NRVQ_E2E_PASSWORD is deliberately NOT forced here. e2e.sh verifies whatever it is given and falls
+  # back to the login gate; pinning a stale literal is what silently disabled that gate before.
+  NRVQ_KUBE_CONTEXT="$KUBE_CTX" NRVQ_BASE_URL="$BASE_URL" \
+    bash "${REPO_ROOT}/scripts/e2e.sh" >"$log" 2>&1
+  local rc=$?
   local failed notrun passed
+  # Playwright prints NO "N failed" line when there are none, so a missing value means ZERO — this
+  # defaulted it to 1 and reported "? failed" against a run of 183 passed and nothing failed. A gate
+  # that reads the absence of bad news as bad news is as useless as one that reads it as good news.
+  #
+  # Absence is only safe to read as zero because the two guards below make a CRASHED run
+  # distinguishable from a clean one: e2e.sh must have exited 0, and the passed count must clear its
+  # floor. A run that died before reporting has neither.
   failed="$(grep -oE '^ *[0-9]+ failed' "$log" | grep -oE '[0-9]+' | head -1)"
   notrun="$(grep -oE '^ *[0-9]+ did not run' "$log" | grep -oE '[0-9]+' | head -1)"
   passed="$(grep -oE '^ *[0-9]+ passed' "$log" | grep -oE '[0-9]+' | head -1)"
-  if [ "${failed:-1}" -ne 0 ] || [ "${notrun:-0}" -ne 0 ]; then
-    unmet "G3 browser: ${failed:-?} failed, ${notrun:-0} did not run (${passed:-0} passed) — ${log}"
+  if [ "$rc" -ne 0 ] && [ -z "$passed" ]; then
+    unmet "G3 browser: e2e.sh exited ${rc} without a summary — the suite never reported. ${log}"
+  elif [ "${failed:-0}" -ne 0 ] || [ "${notrun:-0}" -ne 0 ]; then
+    unmet "G3 browser: ${failed:-0} failed, ${notrun:-0} did not run (${passed:-0} passed) — ${log}"
   elif [ "${passed:-0}" -lt 140 ]; then
     unmet "G3 browser: only ${passed:-0} passed (floor 140) — a config error runs almost nothing"
   else
-    met "G3 browser: ${passed} passed, 0 failed"
+    met "G3 browser: ${passed} passed, 0 failed, 0 did not run"
   fi
 }
 
