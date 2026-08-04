@@ -671,7 +671,10 @@ def seed_redteam(base: str, token: str) -> int:
 # --- reset: put shared state back to a known baseline -------------------------------------------------
 
 # Namespaces the suite invents for throwaway policies. Every prefix is unambiguously test-owned.
-_THROWAWAY_NS_PREFIXES = ("integration-", "emittest-", "replica-", "fbe-", "scen-e2e-", "q2-manual-")
+# `scen-` not `scen-e2e-`: the suite names scenario namespaces `scen-e2e-*` AND `scen-a2-posture`,
+# and the narrower prefix matched only the first family — so `scen-a2-posture` was invisible to every
+# reset below. See the apply_mode restore in `reset_state` for what that cost.
+_THROWAWAY_NS_PREFIXES = ("integration-", "emittest-", "replica-", "fbe-", "scen-", "q2-manual-")
 # ...and throwaway CLASSES inside real namespaces.
 _THROWAWAY_CLS_PREFIXES = ("q2-manual-", "bce2e-", "fbe-", "e2e-", "probe-")
 
@@ -753,6 +756,84 @@ def reset_state(base: str, token: str) -> int:
                     {"apply_mode": "enforce", "enforcement_mode": "block"})
         restored += 1 if st == 200 else 0
     print(f"  ok  restored {restored}/{len(_MANAGED_NS)} namespace(s) to enforce/block")
+
+    # THE NAMESPACES THIS SUITE MUTATES = the managed fixtures PLUS every throwaway one it invents.
+    # Both cleanups below need that same list, and getting it wrong is what made each of them miss:
+    # the pack disable first covered only `_MANAGED_NS`, and `fbe-pack` — a throwaway namespace — kept
+    # its enabled pack anyway.
+    reset_ns: list[str] = list(_MANAGED_NS)
+    status, body = get(base, "/api/v1/cluster-info", token)
+    if status == 200:
+        try:
+            for n in json.loads(body).get("namespaces") or []:
+                n = str(n)
+                if n.startswith(_THROWAWAY_NS_PREFIXES) and n not in reset_ns:
+                    reset_ns.append(n)
+        except json.JSONDecodeError:
+            pass
+
+    # DISABLE EVERY ENABLED PACK. This reset covered throwaway policies and enforcement mode and
+    # stopped there, so an enabled sector pack survived into the next run — and a pack is exactly the
+    # kind of leftover this function exists to remove: it changes which rules govern before any spec
+    # has done anything.
+    #
+    # `apply-surfaces-enforce` is the spec that pays for it, and it pays in the most confusing way
+    # available. Its first assertion is that the tool is ALLOWED *before* the pack is enabled:
+    #
+    #     expect((await ev(page, NS, C, "wire_transfer", {...})).decision).toBe("allow");
+    #     ... enable the finance pack ...
+    #     expect(on.decision).toBe("escalate");
+    #
+    # With the pack already on from a previous run, the FIRST line fails with `escalate` — so the
+    # failure names the pre-condition rather than the behaviour, and reads as "enabling a pack no
+    # longer works" when enabling a pack works fine. Observed on AKS: `fbe-pack` still had
+    # `finance-money-movement` enabled from an earlier run.
+    #
+    # Enabled state is per-namespace, so the catalog is read per namespace rather than once.
+    disabled = 0
+    for ns in reset_ns:
+        st, body = get(base, f"/api/v1/policy-packs?namespace={ns}", token)
+        if st != 200:
+            continue
+        try:
+            packs = json.loads(body)
+        except json.JSONDecodeError:
+            continue
+        for pk in packs if isinstance(packs, list) else []:
+            if not pk.get("enabled"):
+                continue
+            pid = str(pk.get("id") or pk.get("pack_id") or "")
+            if not pid:
+                continue
+            st2, _ = post(base, f"/api/v1/policy-packs/{pid}/disable", token, {"namespace": ns})
+            disabled += 1 if st2 < 300 else 0
+    print(f"  ok  packs    disabled {disabled} enabled pack(s) across {len(reset_ns)} namespace(s)")
+
+    # UNFREEZE THE SUITE'S OWN SCENARIO NAMESPACES.
+    #
+    # `posture-apply-ux` flips its namespace to Frozen (`apply_mode: dry_run_only`) to prove that
+    # freezing gates policy APPLIES without touching live traffic, then restores it by CLICKING the
+    # UI at the end of the test. When the test fails before that click — for any reason — the
+    # namespace stays frozen permanently.
+    #
+    # The next run then fails in a way that names the wrong thing. Its `beforeAll` POSTs the
+    # governance policy, the API answers 409 ("namespace is in dry-run-only mode — policy applies are
+    # disabled"), the spec did not check that status, and the first assertion reports
+    # `block/no_policy_loaded` — which reads as "the Block/Monitor toggle is broken" when the toggle
+    # is fine and the policy simply was never allowed to land. Reproduced by hand on AKS: the push
+    # returned 409 and sixty seconds of polling never moved off `no_policy_loaded`; after thawing, the
+    # same push returned 200 and the decision was `block/gov_block` within four seconds.
+    #
+    # One frozen namespace therefore poisons that spec on every subsequent run until someone thaws it
+    # by hand. Restoring it here is what makes a run comparable to the one before it.
+    thawed = 0
+    for ns in reset_ns:
+        if ns in _MANAGED_NS:
+            continue  # already restored above
+        st, _ = put(base, f"/api/v1/settings?namespace={ns}", token,
+                    {"apply_mode": "enforce", "enforcement_mode": "block"})
+        thawed += 1 if st == 200 else 0
+    print(f"  ok  thawed   {thawed} scenario namespace(s) back to enforce/block")
     return 0
 
 

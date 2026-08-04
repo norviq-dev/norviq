@@ -25,14 +25,48 @@ async function apiJson(page: Page, path: string, method = "GET"): Promise<any> {
     return { status: r.status, body: await r.json().catch(() => null) };
   }, { path, method });
   if (status >= 400 && status !== 409) {
-    throw new Error(`${method} ${path} -> HTTP ${status}: ${JSON.stringify(body)?.slice(0, 200)}`);
+    // The status rides on the error so a caller can tell a GATEWAY TIMEOUT from a real refusal —
+    // see postSuite. Without it every non-409 failure is one opaque string.
+    const err = new Error(`${method} ${path} -> HTTP ${status}: ${JSON.stringify(body)?.slice(0, 200)}`);
+    (err as Error & { status?: number }).status = status;
+    throw err;
   }
   return body;
 }
+
+/** A completed run for this namespace, or null. Used when the POST's socket gave up before the run did. */
+async function latestRun(page: Page, ns: string): Promise<any | null> {
+  try {
+    return await apiJson(page, `/api/v1/redteam/results/latest?target_namespace=${ns}`);
+  } catch {
+    return null;
+  }
+}
 // POST /redteam/suite, retrying if the per-namespace concurrent guard returns 409 (another run in flight).
 async function postSuite(page: Page, query: string): Promise<any> {
+  const ns = /target_namespace=([^&]+)/.exec(query)?.[1] ?? "default";
   for (let i = 0; i < 20; i++) {
-    const r = await apiJson(page, `/api/v1/redteam/suite?${query}`, "POST");
+    let r: any;
+    try {
+      r = await apiJson(page, `/api/v1/redteam/suite?${query}`, "POST");
+    } catch (e) {
+      // A GATEWAY TIMEOUT IS A THIRD OUTCOME, not a failure. This endpoint runs the whole corpus
+      // synchronously — 18 classes x 29 attacks, every one a real OPA evaluation — so on a cluster
+      // that is merely slow the proxy gives up long before the server does. The request WAS accepted
+      // and the run IS proceeding; only our socket left. Treating that as an error made the spec
+      // report "HTTP 504" for a run that completed seconds later.
+      //
+      // The same shape was already fixed once on the seeding side (seed.py's seed_redteam): don't
+      // assume either way, go and look for the run.
+      const status = (e as Error & { status?: number }).status ?? 0;
+      if (![502, 503, 504].includes(status)) throw e;
+      for (let j = 0; j < 40; j++) {
+        await page.waitForTimeout(3000);
+        const run = await latestRun(page, ns);
+        if ((run?.results ?? []).length > 0) return run;
+      }
+      throw new Error(`suite POST timed out (${status}) and no completed run appeared for ns=${ns}`);
+    }
     if (!(r?.detail?.error || /already running/i.test(JSON.stringify(r?.detail ?? "")))) return r;
     await page.waitForTimeout(1500);
   }
