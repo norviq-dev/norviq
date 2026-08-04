@@ -61,7 +61,18 @@ export function InlineDisabledReason({
         <span
           role="status"
           data-testid={testId ? `${testId}-reason` : "disabled-reason"}
-          style={{ fontSize: 11.5, lineHeight: 1.45, color: TONE_COLOR[tone], maxWidth: 320, textAlign: align === "end" ? "right" : "left" }}
+          style={{
+            fontSize: 11.5,
+            lineHeight: 1.45,
+            color: TONE_COLOR[tone],
+            // 320px was wide enough that a two-clause reason set the COLUMN's width, and since the
+            // column right-aligns inside an action row whose right edge is mid-row, the text spilled
+            // leftward underneath the neighbouring button — reading as a caption belonging to
+            // neither control. 220 keeps a reason hanging under the button it explains.
+            // Long enough to say a sentence; short enough that it cannot annex its neighbour.
+            maxWidth: 220,
+            textAlign: align === "end" ? "right" : "left"
+          }}
         >
           {reason}
         </span>

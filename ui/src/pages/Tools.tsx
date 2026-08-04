@@ -33,8 +33,42 @@ import { ScopeabilityBadge } from "../components/common/ScopeabilityBadge";
 import { SegmentedControl } from "../components/common/SegmentedControl";
 import { StatTile } from "../components/common/StatTile";
 import { useApi } from "../hooks/useApi";
+import type { BuilderGraph } from "../lib/builderGraph";
 import { schemaPaths } from "../lib/toolSchema";
 import { useApp } from "../store/AppContext";
+
+/**
+ * The handoff into the Visual Policy Builder, with this tool already allowed.
+ *
+ * This screen used to send `state={{ scopeTool, fromTools }}` — keys NOTHING read. The tool name was
+ * dropped in transit and the operator landed on the Policy Catalog's raw rego editor with an empty
+ * buffer, which is not "the reverse direction of the P1 fix", it is a dead link that returns 200.
+ * `builderGraph` is the channel `/intents` already uses and `PolicyCatalog` already consumes.
+ *
+ * ALLOWLIST MODE, deliberately. "Scope this tool" means constraining what this tool may do, and a
+ * grant only exists under deny-by-default — tighten-only has no allowed-tool list to hang a
+ * ScopeCell on. The operator arrives with the tool listed, its scope row reading "Any arguments ·
+ * unrestricted", and the Narrow it button one click away.
+ *
+ * The agent class is left EMPTY on purpose. It is the one thing this page cannot know — a tool is
+ * not owned by a class — and inventing one would produce a policy targeting an agent that may not
+ * exist. The builder already gates Save on it and says so in words ("Set an agent class first."),
+ * which is the correct place for that prompt.
+ */
+function scopeHandoffGraph(toolName: string): BuilderGraph {
+  return {
+    schemaVersion: 1,
+    scope: { kind: "class", agentClass: "" },
+    mode: "allowlist",
+    rules: [],
+    defaults: { decision: "block", reason: "No builder rule matched" },
+    allowlist: {
+      tools: [toolName],
+      refinements: { readonly: false, egress: false, scope: false, rate: false },
+      grants: []
+    }
+  };
+}
 
 /** Exactly the windows `GET /api/v1/tools` accepts. See D4 in the implementation log for why the page
  *  carries its own control instead of using the global header selector, which offers 1h/6h. */
@@ -410,7 +444,7 @@ function ToolDetail({ tool }: { tool: ToolRegistryEntry }) {
             that narrows it, rather than discovering scoping by accident inside the builder. */}
         <Link
           to="/policies/catalog"
-          state={{ scopeTool: tool.name, fromTools: true }}
+          state={{ builderGraph: scopeHandoffGraph(tool.name), fromTools: true }}
           data-testid="tool-detail-scope-cta"
           className="btn btn-primary"
           style={{ textDecoration: "none", justifyContent: "center" }}

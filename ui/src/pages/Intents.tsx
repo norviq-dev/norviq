@@ -195,20 +195,45 @@ export function Intents() {
   // attaches `data_classes noneOf ['secret']` to everything it emits, so repeating it buries the
   // clauses that actually differ — which is what an operator comparing rules is reading for.
   const hoisted = useMemo(() => commonTerms(rules), [rules]);
+  // DISTINCT tools across every rule. Deduped, because two rules may legitimately name the same tool
+  // under different operations, and a total that double-counts is worse than no total — it would fail
+  // to reconcile with the Attack Graph in the other direction.
+  const ruleToolCount = useMemo(() => {
+    const tools = new Set<string>();
+    for (const r of rules) {
+      const tn = (r.match as Record<string, unknown> | undefined)?.tool_name;
+      const vals = Array.isArray(tn)
+        ? tn
+        : typeof tn === "string"
+          ? [tn]
+          : ((tn as { in?: string[] } | undefined)?.in ?? []);
+      for (const v of vals) if (typeof v === "string" && v) tools.add(v);
+    }
+    return tools.size;
+  }, [rules]);
   const grouped = useMemo(() => (report ? groupBlocked(report.blocked) : []), [report]);
 
+  // KEEP THESE SHORT. The reason renders in the Panel's action row, right-aligned to its own column —
+  // whose right edge sits MID-ROW, so a long reason extends leftward underneath the neighbouring
+  // button and reads as text floating between the two controls rather than as belonging to either.
+  //
+  // The dry-run case was also saying the same thing twice: this string and `dryrun-hint` below were
+  // near-identical sentences on screen simultaneously. The full explanation belongs in the body hint,
+  // which is full-width and left-aligned; the button gets the pointer.
   const draftBlocker = ns === "all"
-    ? "Pick a single namespace — a draft is stored against one, not all."
+    ? "Pick one namespace first."
     : !report
-      ? "Dry run it first. A draft is only worth having once you know what it would refuse."
+      ? "Dry run it first."
       : notAdmin
         ? "Needs admin — you are a viewer."
         : undefined;
 
   const builderBlocker = ns === "all"
-    ? "Pick a single namespace — the builder saves against one."
+    ? "Pick one namespace first."
     : handoff.dropped.length > 0
-      ? `${handoff.dropped.length} restriction${handoff.dropped.length === 1 ? "" : "s"} cannot be carried across, listed above.`
+      // The detail is in the `handoff-blocked` band above, which names each lost restriction. This
+      // only has to say the button is refusing and point at it.
+      ? `${handoff.dropped.length} restriction${handoff.dropped.length === 1 ? "" : "s"} can't carry across — see above.`
       : undefined;
 
   return (
@@ -287,7 +312,13 @@ export function Intents() {
           {/* `stat-row` was undefined, so these stacked vertically instead of forming a KPI row. The
               rest of the app uses a Tailwind grid for exactly this (see McpServers' five tiles). */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-5">
-            <StatTile label="Rules" value={rules.length} />
+            {/* The unit, stated. A rule is one OPERATION over one or more tools, so this count is
+                smaller than the tool count every other surface reports — see StatTile's `sub`. */}
+            <StatTile
+              label="Rules"
+              value={rules.length}
+              sub={`covering ${ruleToolCount} tool${ruleToolCount === 1 ? "" : "s"}, grouped by operation`}
+            />
             <StatTile label="Calls sampled" value={proposal.sampled} />
             {report && <StatTile label="Would allow" value={report.would_allow} color="var(--allow)" />}
             {report && (
@@ -377,9 +408,12 @@ export function Intents() {
               </div>
             )}
             {!report && (
+              // The single home for WHY the dry run comes first. The Save-as-draft button carries only
+              // the short pointer ("Dry run it first."), so the two are no longer near-identical
+              // sentences competing on the same screen.
               <div className="muted" style={{ fontSize: 12, marginBottom: 10 }} data-testid="dryrun-hint">
                 Dry run this against recorded traffic before saving — the draft is only worth having once
-                you know what it would have refused.
+                you know what it would have refused. <strong>Save as draft stays disabled until it has run.</strong>
               </div>
             )}
             {hoisted.length > 0 && (

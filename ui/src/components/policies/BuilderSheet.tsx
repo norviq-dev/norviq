@@ -22,7 +22,7 @@ import { InlineDisabledReason } from "../common/InlineDisabledReason";
 import { ConditionPicker, type PickerGroup, type PickerOption } from "./ConditionPicker";
 import { ScopeCell } from "./ScopeCell";
 import { AlertCircle, Check, FlaskConical, Maximize2, Minimize2, Plus, Trash2, X } from "lucide-react";
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
   apiSend,
   dryRunPolicy,
@@ -387,22 +387,68 @@ function ScopeSection({ label, hint }: { label: string; hint: string }) {
     // Addressable so a test can assert WHICH clauses sit under which heading by DOM order rather than
     // by hunting for copy in a textContent blob — the grouping is the guarantee, and it should not
     // break every time a label is reworded.
-    <div data-testid={`builder-scope-section-${label.toLowerCase().replace(/\s+/g, "-")}`} style={{ marginTop: 12, marginBottom: 2 }}>
+    //
+    // A RULE ABOVE THE HEADING, not just a bolder word. ARGUMENT and WHOLE CALL are the two halves
+    // this panel exists to distinguish, and at 10.5px in --text-secondary the heading weighed the
+    // same as the clause text under it — so the section boundary was invisible and the whole editor
+    // read as one undifferentiated list.
+    <div
+      data-testid={`builder-scope-section-${label.toLowerCase().replace(/\s+/g, "-")}`}
+      style={{ marginTop: 16, marginBottom: 6, paddingTop: 10, borderTop: "1px solid var(--border)" }}
+    >
       <div
         style={{
-          fontSize: 10.5,
-          fontWeight: 600,
-          letterSpacing: "0.08em",
+          fontSize: 11,
+          fontWeight: 700,
+          letterSpacing: "0.1em",
           textTransform: "uppercase",
-          color: "var(--text-secondary)"
+          color: "var(--text-primary)"
         }}
       >
         {label}
       </div>
-      <div style={{ fontSize: 10.5, color: "var(--text-dim)", marginTop: 1 }}>{hint}</div>
+      <div style={{ fontSize: 11, lineHeight: 1.5, color: "var(--text-muted)", marginTop: 3 }}>{hint}</div>
     </div>
   );
 }
+
+/**
+ * One authored condition, as a discrete card.
+ *
+ * The rows were bare flex containers separated by an 8px margin on a single flat surface, so five
+ * conditions read as one run-on paragraph of controls — the operator could not see where a clause
+ * began or ended, only a field of uniform text. A clause is the unit of meaning here (each one is a
+ * line that must hold), so it gets the boundary.
+ *
+ * Inset rather than raised: the editor already sits on --bg-elevated, so a DARKER surface reads as
+ * "contained by" instead of competing with the panel it lives in.
+ */
+const CLAUSE_CARD: CSSProperties = {
+  display: "flex",
+  gap: 7,
+  alignItems: "center",
+  flexWrap: "wrap",
+  marginTop: 7,
+  padding: "8px 9px",
+  borderRadius: 8,
+  border: "1px solid var(--border)",
+  background: "var(--bg-void)"
+};
+
+/**
+ * The left-hand cell naming what a clause addresses.
+ *
+ * A LABEL, styled as one. It previously rendered at the same 11.5px mono as the value the operator
+ * types, so "data it carries" and the secret they were entering carried equal weight and neither
+ * read as the subject of the sentence.
+ */
+const CLAUSE_LABEL: CSSProperties = {
+  width: 124,
+  flex: "none",
+  fontSize: 11,
+  fontWeight: 600,
+  color: "var(--text-secondary)"
+};
 
 const MODE_DESCRIPTION: Record<BuilderMode, string> = {
   rules: "Add blocks on top of what's already allowed. Everything not matched keeps its current outcome.",
@@ -2280,8 +2326,12 @@ export function BuilderSheet({
                       }}
                     >
                       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                        <div style={{ fontSize: 12.5 }}>
-                          When <span className="mono">{openGrantTool}</span> is called, allow it only if:
+                        {/* The editor's own title outranks the section headings inside it. At 12.5px
+                            regular it did not, so "When http_get is called…" and "WHOLE CALL" and the
+                            clause text were three levels of meaning at one level of emphasis. */}
+                        <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text-primary)" }}>
+                          When <span className="mono" style={{ color: "var(--accent)" }}>{openGrantTool}</span> is
+                          called, allow it only if:
                         </div>
                         <button
                           type="button"
@@ -2293,7 +2343,7 @@ export function BuilderSheet({
                           <X size={12} />
                         </button>
                       </div>
-                      <div style={{ fontSize: 10.5, color: "var(--text-dim)", marginTop: 2 }}>
+                      <div style={{ fontSize: 11, lineHeight: 1.5, color: "var(--text-muted)", marginTop: 4 }}>
                         Every line must hold. A parameter that isn't supplied fails its line — so omitting an
                         argument can't be used to skip a constraint.
                       </div>
@@ -2316,7 +2366,7 @@ export function BuilderSheet({
                         <div
                           key={i}
                           data-testid={`builder-constraint-row-${openGrantTool}-${i}`}
-                          style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}
+                          style={CLAUSE_CARD}
                         >
                           <input
                             data-testid={`builder-constraint-field-${openGrantTool}-${i}`}
@@ -2445,13 +2495,9 @@ export function BuilderSheet({
                               }
                             />
                           )}
-                          <div
-                            data-testid={`builder-fact-row-${openGrantTool}-${i}`}
-                            style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 8, flexWrap: "wrap" }}
-                          >
+                          <div data-testid={`builder-fact-row-${openGrantTool}-${i}`} style={CLAUSE_CARD}>
                             <span
-                              className="mono"
-                              style={{ width: 120, fontSize: 11.5, color: "var(--text-dim)" }}
+                              style={CLAUSE_LABEL}
                               title="A fact the ENGINE derived about the whole call, not one named argument"
                             >
                               {factFieldLabel(f.field)}

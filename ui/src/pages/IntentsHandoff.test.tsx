@@ -109,7 +109,13 @@ describe("intents -> builder handoff", () => {
     // toast showing only the first reason and went nowhere, so the page both refused and looked
     // broken. The reason is beside it as text, since a disabled button never receives hover.
     expect(screen.getByTestId("open-in-builder")).toBeDisabled();
-    expect(screen.getByTestId("builder-gate-reason")).toHaveTextContent(/cannot be carried across/i);
+    // The reason must COUNT what is lost and point at the detail — the banner above names each one.
+    // Asserted on those two properties rather than on the sentence: the copy was shortened once the
+    // reason box was found to be overhanging its neighbouring button, and a test pinned to the exact
+    // phrasing would have failed for a layout fix while proving nothing about the refusal.
+    const reason = screen.getByTestId("builder-gate-reason");
+    expect(reason).toHaveTextContent(/1 restriction/i);
+    expect(reason).toHaveTextContent(/see above/i);
 
     await user.click(screen.getByTestId("open-in-builder"));
     // And it did NOT navigate: the Intents screen is still the one rendered.

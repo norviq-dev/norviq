@@ -85,11 +85,33 @@ test("a withheld description is never rendered, and its absence is explained", a
 test("Scope this tool in a policy → hands off to the builder", async ({ page }) => {
   // The reverse direction of the P1 fix: arrive at a tool, leave with a policy that narrows it, instead
   // of discovering argument scoping by accident inside the builder.
+  //
+  // THIS TEST USED TO ASSERT ONLY THE URL. It was named "hands off to the builder" and proved
+  // "navigated to a page" — so it stayed green for as long as the handoff was broken. Tools sent
+  // `state={{ scopeTool, fromTools }}`, keys nothing in the app read, and the operator landed on the
+  // raw rego editor with an empty buffer and no idea which tool they had come from. A test whose
+  // assertion is weaker than its name is worse than no test: it occupies the slot.
   await page.getByTestId("tool-row-slack-send_dm").click();
   const cta = page.getByTestId("tool-detail-scope-cta");
   await expect(cta).toBeVisible();
   await cta.click();
   await expect(page).toHaveURL(/\/policies\/catalog/);
+
+  // The builder is OPEN — not the raw editor behind it.
+  await expect(page.getByTestId("builder-sheet")).toBeVisible({ timeout: 20_000 });
+  // ...in allowlist mode, because a grant only exists under deny-by-default.
+  await expect(page.getByTestId("builder-allowlist-tool-row-send_dm")).toBeVisible();
+  // ...and the tool arrives UNSCOPED with the affordance to narrow it, which is the entire point of
+  // arriving from Tools rather than opening the builder cold.
+  await expect(page.getByTestId("builder-scope-cell-send_dm-headline")).toHaveText(
+    "Any arguments · unrestricted"
+  );
+  await expect(page.getByTestId("builder-scope-cell-send_dm-cta")).toHaveClass(/btn-primary/);
+
+  // The class is deliberately NOT invented — a tool is not owned by one — so Save states the gap in
+  // words rather than targeting an agent that may not exist.
+  await expect(page.getByTestId("builder-save-btn")).toBeDisabled();
+  await expect(page.getByTestId("builder-sheet")).toContainText(/Set an agent class first/i);
 });
 
 test("the window control offers only what the API accepts, and refetches", async ({ page, recorder }) => {

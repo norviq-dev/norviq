@@ -19,6 +19,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { createIntentDraft, demoteToolVerb, fetchCoverageByCategory, fetchIntentCoverage, fetchIntentSuggest, fetchMe, promoteToolVerb } from "../../api/client";
 import { useApi } from "../../hooks/useApi";
+import type { BuilderGraph } from "../../lib/builderGraph";
 import { INTENT_CONTROLS, SEVERITY_COLORS } from "./constants";
 import type { IntentCoverage, IntentDraft, IntentSuggestTool, IntentToggles, ThreatPath } from "./types";
 
@@ -229,6 +230,39 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
     } finally {
       setApplying(false);
     }
+  };
+
+  /**
+   * Hand the checked allowlist to the Visual Policy Builder, to be NARROWED there.
+   *
+   * This modal deliberately does not grow an argument-scoping editor of its own. That is the same
+   * call the repo already made for `/intents` ("editing belongs in the builder, so this hands the
+   * proposal over rather than growing a second editor here") and the reason is stronger here: the two
+   * screens would then hold two implementations of one concept, which is the defect shape this
+   * project has paid for repeatedly.
+   *
+   * What this screen uniquely knows — which tools are chokepoints, which reach an attack target,
+   * which paths stay residual — has already done its job by the time the boxes are ticked. What it
+   * cannot say is "…but only to @acme.com". So it hands over.
+   *
+   * `builderGraph` is the channel `/intents` and Tools already use and `PolicyCatalog` consumes.
+   * Router state rather than a query string: a policy body has no business in browser history.
+   */
+  const openInBuilder = () => {
+    const graph: BuilderGraph = {
+      schemaVersion: 1,
+      scope: { kind: "class", agentClass: activeCls },
+      mode: "allowlist",
+      rules: [],
+      defaults: { decision: "block", reason: "No builder rule matched" },
+      allowlist: {
+        tools: checkedTools,
+        // The four coarse refinements carry across unchanged — same four keys on both sides.
+        refinements: { readonly: intent.readonly, egress: intent.egress, scope: intent.scope, rate: intent.rate },
+        grants: []
+      }
+    };
+    navigate("/policies/catalog", { state: { builderGraph: graph, fromAttackGraph: activeCls } });
   };
 
   // Coverage is always PER-CLASS — the denominator + residual are the SELECTED class's attack paths (what the
@@ -443,6 +477,22 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
                         <span><span style={{ color: "#34d399" }}>{t.allow}</span> allow</span>
                         <span><span style={{ color: t.block > 0 ? "#ff8fa3" : "#a0a0a0" }}>{t.block}</span> block</span>
                       </div>
+                      {/* WHAT CHECKING THE BOX ACTUALLY GRANTS. This checklist allows a tool by NAME —
+                          which is precisely what the agent framework's own tool binding already does,
+                          the finding the Visual Builder's P1 fix exists to answer. The modal warned
+                          about destructive verbs and egress but never said that an intended tool is
+                          intended WITH ANY ARGUMENTS, so "send_email ✓" read as a decision when it was
+                          only half of one.
+                          Same words as the builder's ScopeCell headline, deliberately: one concept
+                          should not have two vocabularies across two screens. */}
+                      {on && (
+                        <div
+                          data-testid={`intent-tool-scope-${t.name}`}
+                          style={{ marginTop: 4, fontSize: 11, color: "#d0a24a" }}
+                        >
+                          Any arguments · unrestricted
+                        </div>
+                      )}
                     </div>
                   </label>
                 );
@@ -561,6 +611,32 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
             >
               {draft ? "Close" : "Cancel"}
             </button>
+          </div>
+
+          {/* The route out of a by-name allowlist. Disabled with a stated reason rather than hidden,
+              because "you can narrow these" is exactly the thing an operator must not have to
+              discover — the P1 finding, applied to the surface that produces the grants. */}
+          <div style={{ marginTop: 10 }}>
+            <button
+              type="button"
+              onClick={openInBuilder}
+              disabled={checkedTools.length === 0}
+              data-testid="intent-open-in-builder"
+              style={{
+                width: "100%", height: 34, display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                border: "1px solid var(--graph-border)", borderRadius: 10, background: "transparent",
+                color: checkedTools.length === 0 ? "#6b6b6b" : "#2ddab8",
+                fontFamily: "inherit", fontSize: 12.5, fontWeight: 650,
+                cursor: checkedTools.length === 0 ? "not-allowed" : "pointer"
+              }}
+            >
+              ✎ Narrow these arguments in the Visual Builder →
+            </button>
+            <div style={{ marginTop: 5, fontSize: 11, lineHeight: 1.5, color: "#7b8aa3", textAlign: "center" }}>
+              {checkedTools.length === 0
+                ? "Pick the intended tools first."
+                : "This list grants each tool with ANY arguments. The builder is where a grant becomes “only to @acme.com”."}
+            </div>
           </div>
         </div>
 

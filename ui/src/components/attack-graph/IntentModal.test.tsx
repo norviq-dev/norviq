@@ -3,13 +3,35 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import { MemoryRouter } from "react-router-dom";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import type { BuilderGraph } from "../../lib/builderGraph";
 import { IntentModal } from "./IntentModal";
 import type { ThreatPath } from "./types";
 
+/**
+ * The navigation PAYLOAD, captured.
+ *
+ * The builder handoff carries a whole `BuilderGraph` in router state, and the only thing that makes
+ * it a handoff rather than a link is that payload — the Tools screen shipped a broken one for weeks
+ * behind a green test that asserted the destination URL and nothing else. So this captures the
+ * argument rather than the destination.
+ *
+ * `importOriginal`, not a bare stub: MemoryRouter and the rest of the router must keep working.
+ */
+let navigated: { to: string; state: { builderGraph: BuilderGraph } } | null = null;
+vi.mock("react-router-dom", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("react-router-dom")>()),
+  useNavigate: () => (to: string, opts?: { state?: unknown }) => {
+    navigated = { to, state: (opts?.state ?? {}) as never };
+  }
+}));
+
 const server = setupServer();
 beforeAll(() => server.listen());
-afterEach(() => server.resetHandlers());
+afterEach(() => {
+  server.resetHandlers();
+  navigated = null;
+});
 afterAll(() => server.close());
 
 const PATH: ThreatPath = {
@@ -231,5 +253,80 @@ describe("IntentModal — allowlist builder", () => {
     expect(closed).toBe(true);
     // sanity: the checklist was inside the dialog
     expect(within(dialog).getByLabelText(/Intended: read_ledger/i)).toBeInTheDocument();
+  });
+});
+
+/**
+ * The scope gap, and the route out of it.
+ *
+ * This modal produces an allowlist of tool NAMES — which is exactly what the agent framework's own
+ * tool binding already produces, the finding the Visual Builder's P1 fix exists to answer. It warned
+ * about destructive verbs and about egress, but never said that an "intended" tool is intended WITH
+ * ANY ARGUMENTS, so a ticked box read as a finished decision when it was half of one.
+ *
+ * It deliberately does NOT grow an argument editor of its own: two implementations of one concept is
+ * the defect shape this project has paid for repeatedly. It hands over instead, through the same
+ * `builderGraph` router-state channel /intents and Tools use and PolicyCatalog consumes.
+ */
+describe("IntentModal — scope gap and builder handoff", () => {
+  function coverageHandler() {
+    return http.post("/api/v1/threats/intent-coverage", () =>
+      HttpResponse.json({ rego: "package x", covered: [], residual: ["p2"], covered_count: 0, total: 1 })
+    );
+  }
+
+  it("says nothing about scope for a tool that is not intended", async () => {
+    server.use(suggestHandler(), coverageHandler());
+    renderModal();
+    await screen.findByLabelText(/Intended: read_ledger/i);
+    // Unchecked means "not granted at all" — an unrestricted-grant warning there would be noise.
+    expect(screen.queryByTestId("intent-tool-scope-read_ledger")).not.toBeInTheDocument();
+  });
+
+  it("states that ticking a tool grants it with ANY arguments", async () => {
+    server.use(suggestHandler(), coverageHandler());
+    renderModal();
+    fireEvent.click(await screen.findByLabelText(/Intended: read_ledger/i));
+    // The builder's own words for the same state, deliberately — one concept, one vocabulary.
+    expect(await screen.findByTestId("intent-tool-scope-read_ledger")).toHaveTextContent(
+      "Any arguments · unrestricted"
+    );
+  });
+
+  it("refuses the handoff until something is intended, and says why", async () => {
+    server.use(suggestHandler(), coverageHandler());
+    renderModal();
+    await screen.findByLabelText(/Intended: read_ledger/i);
+    expect(screen.getByTestId("intent-open-in-builder")).toBeDisabled();
+    expect(screen.getByText(/Pick the intended tools first/i)).toBeInTheDocument();
+  });
+
+  it("hands the checked tools AND the refinements to the builder, in allowlist mode", async () => {
+    server.use(suggestHandler(), coverageHandler());
+    renderModal();
+    fireEvent.click(await screen.findByLabelText(/Intended: read_ledger/i));
+    fireEvent.click(screen.getByLabelText(/Intended: issue_refund/i));
+    fireEvent.click(screen.getByRole("button", { name: /Read-only/i }));
+
+    const cta = screen.getByTestId("intent-open-in-builder");
+    expect(cta).toBeEnabled();
+    // The consequence is stated on the way out, not left for the builder to reveal.
+    expect(screen.getByText(/grants each tool with ANY arguments/i)).toBeInTheDocument();
+
+    fireEvent.click(cta);
+
+    // ASSERT THE PAYLOAD, not the navigation. A handoff test that only checks the URL is how the
+    // Tools -> builder handoff stayed broken behind a green test named "hands off to the builder".
+    expect(navigated).not.toBeNull();
+    expect(navigated!.to).toBe("/policies/catalog");
+    const graph = navigated!.state.builderGraph;
+    expect(graph.mode).toBe("allowlist"); // a grant only exists under deny-by-default
+    expect(graph.scope).toEqual({ kind: "class", agentClass: "payments" });
+    // Asserted present, not optional-chained away: `allowlist` being undefined IS the failure this
+    // test exists to catch — a graph in allowlist mode with no allowlist grants nothing at all.
+    expect(graph.allowlist).toBeDefined();
+    expect(graph.allowlist!.tools).toEqual(["read_ledger", "issue_refund"]);
+    expect(graph.allowlist!.refinements.readonly).toBe(true);
+    expect(graph.defaults.decision).toBe("block");
   });
 });
