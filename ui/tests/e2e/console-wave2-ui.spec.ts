@@ -94,10 +94,19 @@ test.describe("UI wiring — EFFECT proofs on the live console", () => {
     expect(applied.status).toBe(200);
     expect(applied.body).toHaveProperty("version"); // the enforcing version the success panel shows
 
-    const after = await apiJson(page, "/api/v1/policies?namespace=default");
-    const csAfter = (after.body as any[]).find((p) => p.agent_class === "customer-support")?.last_applied;
-    expect(csAfter).toBeTruthy();
-    if (csBefore) expect(new Date(csAfter).getTime()).toBeGreaterThanOrEqual(new Date(csBefore).getTime());
+    // POLL. `last_applied` is stamped by the apply, but the list read that observes it is a separate
+    // round trip — so asserting in the next breath races the write. The assertion was already lenient
+    // (`>=`), which is why this surfaced as an intermittent rather than a clean failure: on a slower
+    // cluster the read simply lands before the stamp and `csAfter` comes back stale or absent.
+    let csAfter: string | undefined;
+    await expect
+      .poll(async () => {
+        const after = await apiJson(page, "/api/v1/policies?namespace=default");
+        csAfter = (after.body as any[]).find((p) => p.agent_class === "customer-support")?.last_applied;
+        if (!csAfter) return false;
+        return csBefore ? new Date(csAfter).getTime() >= new Date(csBefore).getTime() : true;
+      }, { timeout: 20_000, message: `last_applied never advanced (before=${csBefore}, after=${csAfter})` })
+      .toBe(true);
   });
 
   test("intent drafts dedupe by class — a class keeps one latest draft", async ({ page }) => {
