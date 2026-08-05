@@ -11,7 +11,7 @@ from typing import Any
 import structlog
 
 from norviq.config import settings
-from norviq.engine.masking import mask_text
+from norviq.engine.masking import mask_structure
 
 log = structlog.get_logger()
 
@@ -36,12 +36,17 @@ def _background_loop() -> asyncio.AbstractEventLoop:
 
 
 def _output_dlp(tool_name: str, result: Any) -> Any:
-    """Opt-in, default OFF: redact PAN/SSN in an allowed tool's string return before it propagates.
+    """Opt-in, default OFF: redact PAN/SSN anywhere in an allowed tool's return before it propagates.
     Norviq's PEP is input-only; this is a minimal output-side guard so a tool whose OUTPUT carries sensitive data
     doesn't silently exfiltrate it. Disabled by default → exact passthrough (no hot-path or behavior change)."""
-    if not settings.sdk_output_dlp_enabled or not isinstance(result, str):
+    if not settings.sdk_output_dlp_enabled:
         return result
-    masked = mask_text(result)
+    # STRUCTURED, not just top-level. This tested `isinstance(result, str)`, so a tool returning a
+    # list of rows, a dict record or a paginated envelope — the shapes real tools return — carried a
+    # PAN straight through. The MCP plane already redacts structured output
+    # (nrvq.mcp.output_dlp.structured_redacted), so the same product masked a card number on one path
+    # and missed it on the other while calling both "output DLP".
+    masked = mask_structure(result)
     if masked != result:
         log.warning("nrvq.sdk.output_dlp_redacted", tool=tool_name, code="NRVQ-SDK-1043")
     return masked

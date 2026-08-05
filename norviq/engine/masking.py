@@ -64,6 +64,53 @@ def mask_text(value: str) -> str:
     return _mask_string(value)
 
 
+# Bounds for `mask_structure`. A tool RESULT is attacker-influenced — it is whatever the far side of
+# an allowed call chose to return — and the engine fails CLOSED at a 2s evaluator timeout, so an
+# unbounded walk here is a denial of service against every other call in flight, not just slow.
+_MASK_MAX_NODES = 4096
+_MASK_MAX_DEPTH = 24
+
+
+def mask_structure(value: object) -> object:
+    """Mask PAN/SSN in every string reachable inside a result, not only a top-level one.
+
+    WHY THIS EXISTS. `mask_text` masks a string; `_output_dlp` applied it under
+    `isinstance(result, str)`, so a tool returning a LIST of rows, a dict record, or a paginated
+    envelope — the shapes real tools actually return — carried a PAN straight through the guard that
+    exists to stop exactly that. The MCP plane already redacts structured output
+    (`nrvq.mcp.output_dlp.structured_redacted`), so the product masked a card number on one path and
+    missed it on the other while calling both "output DLP": one concept, two behaviours.
+
+    Shape is preserved — a dict stays a dict, numbers/bools/None are untouched — because a tool's
+    return is a contract with the agent framework, and a guard that reshapes it breaks the caller on
+    a value it was told was safe.
+
+    BOUNDED, and the bound is visible in the result rather than silent: past the node or depth budget
+    the remaining subtree is returned UNMASKED, which is the honest failure — pretending to have
+    masked what we did not walk would be worse than saying nothing. Callers that need to know can
+    compare identity.
+    """
+    nodes = 0
+
+    def walk(node: object, depth: int) -> object:
+        nonlocal nodes
+        if nodes >= _MASK_MAX_NODES or depth > _MASK_MAX_DEPTH:
+            return node
+        nodes += 1
+        if isinstance(node, str):
+            return _mask_string(node)
+        if isinstance(node, dict):
+            return {k: walk(v, depth + 1) for k, v in node.items()}
+        if isinstance(node, list):
+            return [walk(v, depth + 1) for v in node]
+        if isinstance(node, tuple):
+            return tuple(walk(v, depth + 1) for v in node)
+        # Numbers, bools, None, and anything opaque (a model instance, bytes) pass through untouched.
+        return node
+
+    return walk(value, 0)
+
+
 def redact_url_credentials(url: str) -> str:
     """Strip userinfo from a URL so it is safe to log.
 
