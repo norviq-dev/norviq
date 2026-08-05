@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from norviq.api.synthetic import is_synthetic_identity
+from norviq.redteam.vectors import VECTORS_BY_ID, EVALUATE_REACHABLE, coverage_denominators
 
 _POLICIES_DIR = Path(__file__).resolve().parent.parent.parent / "policies"
 
@@ -89,6 +90,12 @@ def catalog_entry(attack: Any) -> dict[str, Any]:
         "atlas_technique_name": m["atlas"]["technique_name"],
         "owasp_control": m["owasp"]["control_id"] if m["owasp"] else None,
         "owasp_control_name": m["owasp"]["control_name"] if m["owasp"] else None,
+        "mcp_vector": getattr(attack, "mcp_vector", "") or None,
+        "mcp_vector_title": (
+            VECTORS_BY_ID[attack.mcp_vector].title
+            if getattr(attack, "mcp_vector", "") in VECTORS_BY_ID
+            else None
+        ),
     }
 
 
@@ -100,6 +107,32 @@ def _finalize(bucket: dict[str, Any]) -> dict[str, Any]:
     total, caught = bucket["total"], bucket["caught"]
     bucket["proven_blocking_pct"] = round(caught / total * 100, 1) if total else 0.0
     return bucket
+
+
+def _vector_coverage(exercised: set[str]) -> dict[str, Any]:
+    """What this run measured of the MCP/tool surface, and — the point — what it did not.
+
+    Without this block a scorecard reading 100% across two vectors is indistinguishable from full MCP
+    coverage, while thirty catalogued vectors went untouched. That is the "the console says covered,
+    and it is not" failure the whole product exists to prevent, so the denominator travels with the
+    numerator rather than being available on request.
+
+    The denominators come from the CATALOG, not from the rows, and they are STORED on the run. Only the
+    newest run per namespace keeps its result rows (`redteam_detail_keep_runs`), so a block re-derived
+    from rows would silently vanish from every older run while the rest of the efficacy summary
+    survived. `exercised` counts DISTINCT vectors seen, not rows: five attacks across two vectors is
+    two, because the question is surface coverage, not attack volume.
+
+    PROXY-only vectors are not failures and must never read as such. Most are enforced, several
+    provably (Gate A stripping, the content-hash pin) — they are simply decided before the policy
+    engine, which is the one thing this suite can score.
+    """
+    d = coverage_denominators()
+    return {
+        **d,
+        "exercised": len(exercised),
+        "unexercised_reachable": sorted(EVALUATE_REACHABLE - exercised),
+    }
 
 
 def compute_efficacy(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -115,6 +148,7 @@ def compute_efficacy(results: list[dict[str, Any]]) -> dict[str, Any]:
     overall = _blank_bucket()
     by_technique: dict[str, dict[str, Any]] = {}
     by_owasp: dict[str, dict[str, Any]] = {}
+    by_vector: dict[str, dict[str, Any]] = {}
     non_enforcement = 0
     sector_not_enabled = 0  # sector-pack attacks whose pack isn't enabled — out of scope, NOT a miss
     excluded_synthetic = len(results) - len(considered)
@@ -145,10 +179,25 @@ def compute_efficacy(results: list[dict[str, Any]]) -> dict[str, Any]:
             ob["total"] += 1
             ob["caught" if caught else "got_through"] += 1
 
+        # SKIPPED when absent, following `by_owasp` and NOT `by_technique`. `by_technique` defaults to
+        # "unknown" because every attack is supposed to carry a technique, so that bucket is an alarm
+        # for a broken mapping. An MCP vector is legitimately absent for every attack that predates the
+        # dimension — bucketing those as "unknown" would assert they exercise an unidentified MCP
+        # vector, which is false, and would render one row of ~29xN attacks that dominates the table
+        # and means nothing.
+        vid = r.get("mcp_vector")
+        if vid:
+            vb = by_vector.setdefault(vid, {**_blank_bucket(), "vector_id": vid,
+                                            "vector_title": r.get("mcp_vector_title") or vid})
+            vb["total"] += 1
+            vb["caught" if caught else "got_through"] += 1
+
     return {
         "overall": _finalize(overall),
         "by_technique": [_finalize(v) for v in sorted(by_technique.values(), key=lambda x: x["technique_id"])],
         "by_owasp": [_finalize(v) for v in sorted(by_owasp.values(), key=lambda x: x["control_id"])],
+        "by_vector": [_finalize(v) for v in sorted(by_vector.values(), key=lambda x: x["vector_id"])],
+        "vector_coverage": _vector_coverage(set(by_vector)),
         "non_enforcement": non_enforcement,
         "sector_not_enabled": sector_not_enabled,
         "excluded_synthetic": excluded_synthetic,

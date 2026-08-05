@@ -22,6 +22,7 @@ from norviq.api.redteam_efficacy import attack_mapping, catalog_entry, compute_e
 from norviq.api.synthetic import is_synthetic_identity
 from norviq.config import settings
 from norviq.redteam.attacks import ATTACKS, AttackCategory, get_attack_by_id
+from norviq.redteam.vectors import vector_title
 from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
 
 log = structlog.get_logger()
@@ -463,6 +464,11 @@ def _build_event(attack: Any, target_agent: str, target_namespace: str) -> ToolC
         framework="redteam",
         session_id=f"redteam-{attack.id}",
         call_depth=int(depth) if isinstance(depth, (int, str)) and str(depth).isdigit() else 0,
+        # Gate-A context, published to rego as `input.mcp`. Empty for every non-MCP attack, which is
+        # the same document a plain SDK call presents, so nothing about the existing 29 changes.
+        # COPY it: `ATTACKS` is a module constant built once at import, and handing the same dict to
+        # every event in every run makes any future mutation an untraceable cross-run bug.
+        mcp=dict(getattr(attack, "mcp_context", None) or {}),
     )
 
 
@@ -475,6 +481,10 @@ def _mapping_fields(attack: Any) -> dict[str, Any]:
         "atlas_technique_name": m["atlas"]["technique_name"],
         "owasp_control": m["owasp"]["control_id"] if m["owasp"] else None,
         "owasp_control_name": m["owasp"]["control_name"] if m["owasp"] else None,
+        # None, not "", for an attack with no MCP vector — `compute_efficacy` skips falsy vectors, and
+        # None reads as "this attack exercises no MCP vector" rather than as an empty vector id.
+        "mcp_vector": getattr(attack, "mcp_vector", "") or None,
+        "mcp_vector_title": vector_title(attack.mcp_vector) if getattr(attack, "mcp_vector", "") else None,
     }
 
 
@@ -492,10 +502,25 @@ def _loaded_rego(request: Request, namespace: str) -> str:
     return blob
 
 
+# Categories whose enforcing rule is CONDITIONAL on an operator having loaded something — a sector
+# pack, or the opt-in MCP integration guardrail. Verified: no shipped baseline reads `input.mcp` at all
+# (strict/moderate/permissive/comprehensive, zero references), so an MCP attack in a namespace without
+# the guardrail can never be blocked and would score got_through forever, with no operator action that
+# fixes it. That is not a miss, it is a control that was never installed — and reporting it as a miss
+# would paint every default namespace red on the day this ships.
+_CONDITIONAL_CATEGORIES = frozenset(
+    {AttackCategory.SECTOR_POLICY, AttackCategory.MCP_IDENTITY}
+)
+
+
 def _attack_applicable(attack: Any, ns_rego: str) -> bool:
-    """A non-sector attack always applies. A SECTOR_POLICY attack applies only when its enforcing rule is
-    loaded for the namespace (the pack is enabled) — otherwise it's out of scope, not a real miss."""
-    if attack.category != AttackCategory.SECTOR_POLICY:
+    """An unconditional attack always applies. A conditional one (sector pack, MCP guardrail) applies only
+    when its enforcing rule is loaded for the namespace — otherwise it's out of scope, not a real miss.
+
+    POLICY_COMPOSITION is deliberately NOT conditional: its expected rules are baseline blocks that ship
+    everywhere, so the question it asks — did this class's own policy override the baseline? — is always
+    a fair one to ask."""
+    if attack.category not in _CONDITIONAL_CATEGORIES:
         return True
     return bool(attack.expected_rule and attack.expected_rule in ns_rego)
 

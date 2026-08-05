@@ -75,3 +75,41 @@ def test_detail_keep_one_prunes_all_but_the_latest():
     # raising detail_runs back to 3 restores 3-run detail (env/Helm-configurable)
     d3, p3 = plan_retention(_runs(0, 1, 2), now=NOW, detail_runs=3, detail_ttl=D(days=7), summary_runs=20, summary_ttl=D(days=30))
     assert p3 == set()
+
+
+def test_vector_coverage_survives_a_detail_prune():
+    """WHY the coverage denominators are STORED rather than re-derived from result rows.
+
+    Retention nulls `results` on every run but the newest per namespace (`redteam_detail_keep_runs`
+    defaults to 1), while `efficacy` is kept verbatim. A coverage block computed on read from the rows
+    would therefore vanish from every older run — the score would survive and the statement of what it
+    did not cover would not, which is precisely the overclaim the block exists to prevent.
+    """
+    from types import SimpleNamespace
+
+    from norviq.api.redteam_efficacy import compute_efficacy
+    from norviq.api.routers.redteam import _run_to_dict
+
+    rows = [{
+        "attack_id": "MCP-01", "agent_class": "billing", "namespace": "default",
+        "expected": "block", "actual": "block", "passed": True,
+        "atlas_technique": "AML.T0010", "atlas_technique_name": "T",
+        "mcp_vector": "mcp-server-identity-unattested", "mcp_vector_title": "self-asserted server id",
+    }]
+    efficacy = compute_efficacy(rows)
+
+    pruned = SimpleNamespace(
+        id="r1", created_at=NOW, namespace="default", targets=["billing"],
+        total=1, passed=1, failed=0, pass_rate=100.0,
+        results=None,          # what a detail prune leaves behind
+        efficacy=efficacy,
+    )
+    out = _run_to_dict(pruned)
+
+    assert out["detail_pruned"] is True
+    assert out["results"] == []
+    cov = out["efficacy"]["vector_coverage"]
+    assert cov["catalogued"] > 0 and cov["exercised"] == 1
+    assert "resources-read-uri-gate" in cov["unexercised_reachable"]
+    # and the scored dimension survives alongside it
+    assert out["efficacy"]["by_vector"][0]["vector_id"] == "mcp-server-identity-unattested"
