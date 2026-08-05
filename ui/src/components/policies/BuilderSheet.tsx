@@ -19,10 +19,16 @@ import Editor from "@monaco-editor/react";
 import { registerRego } from "../../lib/monaco-rego";
 import { ProvenanceBadge } from "../common/ProvenanceBadge";
 import { InlineDisabledReason } from "../common/InlineDisabledReason";
+// The console's ONE lookalike DETECTOR (IntentModal / RuleCard / NearMissCard / Intents all use it).
+// A second detector keyed differently is the defect, not the fix: two surfaces would disagree about
+// whether the same observed name is trustworthy, and the quiet one would be this — the surface with
+// the Save button. See `BuilderLookalikeNote` below for why this sheet cannot also reuse the shared
+// LookalikeNote's *sentence* (a different compiler runs underneath it).
+import { lookalikeOf, type Lookalike } from "../../lib/predicateSentence";
 import { ConditionPicker, type PickerGroup, type PickerOption } from "./ConditionPicker";
 import { ScopeCell } from "./ScopeCell";
 import { AlertCircle, Check, FlaskConical, Maximize2, Minimize2, Plus, Trash2, X } from "lucide-react";
-import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
   apiSend,
   dryRunPolicy,
@@ -66,6 +72,79 @@ import type {
 import { CAPABILITY_SOURCE_ORDER, CAPABILITY_SOURCES, verbsForSource, type CapabilityVerb } from "../../lib/capabilitySources";
 import { ApplyResultPanel, type ApplyResult } from "../common/ApplyResultPanel";
 import { KitButton } from "../common/KitButton";
+
+/**
+ * The lookalike marking for THIS sheet — same detector, same words for the name, different
+ * consequence, because a different compiler runs underneath it.
+ *
+ * The shared `LookalikeNote` ends on: "The engine matches this allowlist evasion-normalised, so the
+ * rule grants the look-alike AND the plain-ASCII tool of the same shape." That is true where it
+ * ships — IntentModal / Intents compile SERVER-side through `norviq/api/threat_intent.py`, whose
+ * `skeleton()` folds Cyrillic е to Latin e, so `allow_skeletons` holds the ASCII prototype and both
+ * names match it. Its own header comment cites that file.
+ *
+ * The Visual Builder does not go through it. This sheet compiles in the BROWSER (`compileGraph`) and
+ * saves that rego verbatim (`rego_source: compiled.rego`), and `ui/src/lib/skeleton.ts` documents a
+ * deliberate gap: it implements NFKD + mark-strip + lowercase and NOT the cross-script confusables
+ * table, so it does not fold Cyrillic at all. Measured emission for the tool `sеnd_email` (U+0435):
+ *
+ *     allow_names     := {"sеnd_email"}      <- Cyrillic, unfolded
+ *     allow_skeletons := {"sеnd_email"}      <- Cyrillic, unfolded
+ *     in_allowlist { allow_names[lower(input.tool_name)] }
+ *     in_allowlist { allow_skeletons[input.tool_name_normalized] }
+ *
+ * The engine always sends `input.tool_name_normalized = skeleton(tool_name)` with the PYTHON
+ * skeleton, i.e. the folded `send_email`, which equals neither entry. So a call to the plain-ASCII
+ * `send_email` matches NOTHING here and stays denied by the allowlist's `intent_default_deny`; this
+ * grant covers the look-alike alone. Rendering the shared note's sentence on this row told the
+ * operator their allow had widened to two names when it had not — a claim about the policy they were
+ * about to save that the file they were about to save contradicts.
+ *
+ * So: `lookalikeOf` (the one detector) and its `masked`/`codepoints` vocabulary are reused verbatim,
+ * as is LookalikeNote's visual treatment; only the consequence sentence is this sheet's own. Delete
+ * this component and go back to the shared one the moment `ui/src/lib/skeleton.ts` gains the
+ * confusables table — at that point both compilers agree and one sentence is true of both.
+ */
+function BuilderLookalikeNote({
+  lookalikes,
+  trailer,
+  "data-testid": testId
+}: {
+  lookalikes: Lookalike[];
+  /** The consequence sentence. Differs between "already granted" and "offered, not yet added". */
+  trailer: ReactNode;
+  "data-testid"?: string;
+}) {
+  if (lookalikes.length === 0) return null;
+  return (
+    <div
+      data-testid={testId ?? "builder-lookalike-note"}
+      style={{
+        marginTop: 5,
+        padding: "7px 9px",
+        borderRadius: 8,
+        border: "1px solid #ff3b5c30",
+        background: "#ff3b5c12",
+        fontSize: 12,
+        lineHeight: 1.5,
+        color: "var(--text-secondary)"
+      }}
+    >
+      <span className="pill" style={{ background: "#ff3b5c15", color: "#ff3b5c", borderColor: "#ff3b5c30", marginRight: 7 }}>
+        Lookalike name
+      </span>
+      {lookalikes.map((l) => (
+        <span key={l.value} style={{ display: "block", marginTop: 5 }}>
+          <code className="mono" style={{ fontSize: 12 }}>
+            {l.masked}
+          </code>{" "}
+          carries {l.codepoints.join(", ")} where an ASCII letter appears to be.
+        </span>
+      ))}
+      <span style={{ display: "block", marginTop: 5 }}>{trailer}</span>
+    </div>
+  );
+}
 
 // --- Intent Allowlist mode (Phase 2c) --------------------------------------------------------------
 const REFINEMENT_KEYS: (keyof BuilderAllowlistRefinements)[] = ["readonly", "egress", "scope", "rate"];
@@ -1457,6 +1536,29 @@ export function BuilderSheet({
     return names.length > 0 ? [...new Set(names)].sort() : [...new Set(ALL_CAPABILITY_FRAGMENTS)].sort();
   }, [registry]);
 
+  /**
+   * The suggestion list, split by whether the name can be trusted to look like itself.
+   *
+   * A `<datalist>` option is a bare string: it cannot carry a badge, a colour, or a note. So offering
+   * `send_email` and `sеnd_email` (U+0435) side by side offers two entries that are pixel-identical in
+   * this font, with no way to tell which is which and no way to mark either. The impostor is then one
+   * arrow-key away from becoming a GRANT on a deny-by-default policy.
+   *
+   * Withholding it from the datalist is not hiding it — hiding an observed name would be its own lie.
+   * The flagged names are surfaced right below the field in a list that CAN say what they are, using
+   * the same `lookalikeOf` detector and the same masked form the rest of the console uses.
+   */
+  const asciiToolSuggestions = useMemo(() => toolSuggestions.filter((t) => lookalikeOf(t) === null), [toolSuggestions]);
+  // Read off the REGISTRY, not off `toolSuggestions`. The two are the same set whenever the registry
+  // has anything, but `toolSuggestions` falls back to `ALL_CAPABILITY_FRAGMENTS` — a hardcoded
+  // vocabulary that is "a hint of the shape of a name, never a claim that one exists". The list below
+  // is captioned "Observed in this namespace", and that sentence has to be true STRUCTURALLY, not by
+  // the accident that today's fragment list happens to be pure ASCII.
+  const lookalikeToolSuggestions = useMemo(
+    () => (registry ?? []).map((t) => lookalikeOf(t.name)).filter((l): l is Lookalike => l !== null),
+    [registry]
+  );
+
   // Intent Allowlist mode (Phase 2c) — kept as SEPARATE state from rules/defaults above (rather than
   // overwriting them on a mode switch) so toggling the mode preserves each mode's own in-progress state:
   // switching to allowlist and back to rules leaves the rule rail exactly as it was, and vice versa.
@@ -2108,8 +2210,10 @@ export function BuilderSheet({
                   )}
                 </div>
 
+                {/* ASCII names only — see `asciiToolSuggestions` for why a datalist may not carry a
+                    name whose appearance it cannot qualify. */}
                 <datalist id="builder-known-tools">
-                  {toolSuggestions.map((t) => (
+                  {asciiToolSuggestions.map((t) => (
                     <option key={t} value={t} />
                   ))}
                 </datalist>
@@ -2337,6 +2441,30 @@ export function BuilderSheet({
                         {schemaByTool.has(allowlistToolInput.trim().toLowerCase()) ? " — its arguments can be scoped" : ""}
                       </div>
                     )}
+                  {/* THE NAMES THE DATALIST WOULD NOT SAY ANYTHING ABOUT. Withheld from the bare
+                      suggestion list (an <option> is a string — no badge, no colour, and these are
+                      pixel-identical to their ASCII twins), surfaced here where each one can be shown
+                      masked, with its codepoints, next to the consequence of allowing it. Silence
+                      would be the worse choice: the tool WAS observed, and pretending it does not
+                      exist is the same class of lie as showing it unmarked. */}
+                  {lookalikeToolSuggestions.length > 0 && (
+                    <div data-testid="builder-lookalike-suggestions" style={{ marginTop: 6 }}>
+                      <div style={{ fontSize: 10.5, color: "var(--text-dim)" }}>
+                        Observed in this namespace, withheld from autocomplete because the name is not
+                        what it looks like:
+                      </div>
+                      <BuilderLookalikeNote
+                        lookalikes={lookalikeToolSuggestions}
+                        data-testid="builder-lookalike-suggestions-note"
+                        trailer={
+                          <>
+                            Adding one grants <strong>exactly that name</strong> — it does not also grant
+                            the plain-ASCII tool it imitates. Add that one separately if you meant both.
+                          </>
+                        }
+                      />
+                    </div>
+                  )}
                   {/* THE STANDING BANNER. An unscoped grant is not a partial edit an operator will
                       get back to — it is a finished policy that grants a whole capability. Counting
                       them where the count cannot be scrolled past is what turns "I allowed six tools"
@@ -2392,6 +2520,13 @@ export function BuilderSheet({
                           ? "observed"
                           : null;
                       const trafficNote = trafficNoteFor(key);
+                      // A GRANT is where a lookalike costs the most: the row below says "Observed",
+                      // "Any arguments · unrestricted" and "Allows every call to <name>", and every
+                      // one of those sentences is about a name the operator cannot distinguish from
+                      // the real tool. The badge asserting the name was seen in real traffic is TRUE
+                      // and makes it worse — it is the impostor's traffic. `null` for the ASCII case,
+                      // which is almost every case, so the row stays clean.
+                      const twin = lookalikeOf(t);
                       return (
                         <div
                           key={t}
@@ -2454,6 +2589,30 @@ export function BuilderSheet({
                               style={{ flex: "1 1 100%", fontSize: 11, lineHeight: 1.5, color: "var(--escalate)" }}
                             >
                               {trafficNote}
+                            </div>
+                          )}
+                          {/* Full-width, under the row it qualifies. The consequence is the sheet's own
+                              and not the shared LookalikeNote's — see `BuilderLookalikeNote` for the
+                              compiled rego this sentence was checked against. Short version: this sheet
+                              compiles in the browser, `ui/src/lib/skeleton.ts` does not fold cross-script
+                              letters, so `allow_names`/`allow_skeletons` carry the Cyrillic literal and
+                              the ASCII tool matches neither. The grant is one name wide, not two. */}
+                          {twin && (
+                            <div style={{ flex: "1 1 100%" }}>
+                              <BuilderLookalikeNote
+                                lookalikes={[twin]}
+                                data-testid={`builder-lookalike-${t}`}
+                                trailer={
+                                  <>
+                                    This entry grants <strong>exactly this name</strong>. The plain-ASCII
+                                    tool it imitates is a different tool to the engine and is not granted
+                                    here — the two names never collapse into one entry, because this
+                                    policy&apos;s rego is compiled in the browser, which does not fold
+                                    cross-script letters. Add the ASCII tool as its own entry if you meant
+                                    both.
+                                  </>
+                                }
+                              />
                             </div>
                           )}
                         </div>

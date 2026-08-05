@@ -677,3 +677,219 @@ describe("Inbox: a known answer is never hidden behind another scope's spinner",
     release();
   });
 });
+
+// ---------------------------------------------------------------------------------------------------
+// MONITOR: the chip must key on the ENGINE's rule, not on /settings' cluster-merged reading.
+//
+// settings_router `_effective` merges the CLUSTER-WIDE default (`row.enforcement_mode if row … else
+// app_settings.enforcement_mode`); the evaluator softens a would-block ONLY on an explicit per-namespace
+// override (`_resolve_posture`: "a null/global mode does NO softening"). On a cluster deployed global-audit
+// — the shipped dev profile, helm/norviq/values-dev.yaml `enforcementMode: audit` — every namespace with no
+// row of its own therefore read "audit" in /settings while the engine really BLOCKED it, and this chip
+// stated "live traffic is NOT blocked" on every page. coverage.py's `namespace_mode` is the engine's own
+// rule and is what the Overview already keys on (client.ts:790: "Any claim about would-blocks must key on
+// THIS field, not on the settings posture"), so the header asks for the same field.
+// ---------------------------------------------------------------------------------------------------
+describe("Posture chip: Monitor is the engine's posture, not the settings reading", () => {
+  const cluster = [
+    http.get("*/api/v1/cluster-info", () =>
+      HttpResponse.json({ cluster_id: "local-1", cluster_name: "local", namespaces: ["default", "payments"] })
+    ),
+    http.get("http://hub.test/api/v1/fleet/clusters", () => HttpResponse.json([])),
+    // /settings answers "audit" for payments — from the GLOBAL default, with no row of its own.
+    http.get("*/api/v1/settings", () => HttpResponse.json({ enforcement_mode: "audit", apply_mode: "enforce" })),
+    http.get("*/api/v1/audit/stats", () => HttpResponse.json({ total: 900, blocked: 34, allowed: 866 })),
+    http.get("*/api/v1/agents", () => HttpResponse.json([]))
+  ];
+  const coverage = (namespaceMode: string) =>
+    http.get("*/api/v1/coverage-by-category", ({ request }) =>
+      HttpResponse.json({
+        namespace: new URL(request.url).searchParams.get("namespace"),
+        coverage_pct: 64,
+        categories: [],
+        namespace_mode: namespaceMode,
+        agent_class_policies: []
+      })
+    );
+  const settled = async () => {
+    await waitFor(() =>
+      expect(screen.getByTestId("posture-chip-monitor").getAttribute("data-engine-mode")).not.toBe("unconfirmed")
+    );
+    return screen.getByTestId("posture-chip-monitor");
+  };
+
+  it("a namespace that reads Monitor only from the CLUSTER default never claims 'live traffic is NOT blocked'", async () => {
+    signIn();
+    server.use(...cluster, coverage("block")); // no per-ns row → engine blocks → coverage says block
+    renderAt("/audit?ns=payments");
+
+    const chip = await settled();
+    // FAIL-ON-BUG: pre-fix this read "Monitor mode" with the flat "live traffic is NOT blocked" tooltip.
+    expect(chip).toHaveAttribute("data-engine-mode", "block");
+    expect(chip).toHaveTextContent(/Monitor: cluster default/i);
+    expect(chip.getAttribute("title")).not.toMatch(/live traffic is NOT blocked/i);
+    expect(chip.getAttribute("title")).toMatch(/still ENFORCES its policy blocks/i);
+    expect(chip.getAttribute("title")).toMatch(/does not set Monitor itself/i);
+  });
+
+  it("a REAL Monitor namespace (engine confirms it) keeps the full 'live traffic is NOT blocked' statement", async () => {
+    signIn();
+    server.use(...cluster, coverage("audit")); // the namespace overrides the mode itself → engine softens
+    renderAt("/audit?ns=payments");
+
+    const chip = await settled();
+    expect(chip).toHaveAttribute("data-engine-mode", "audit");
+    expect(chip).toHaveTextContent(/^Monitor mode$/);
+    expect(chip.getAttribute("title")).toMatch(/live traffic is NOT blocked/i);
+  });
+
+  it("when the engine's mode cannot be read, the chip still warns but does NOT assert the consequence", async () => {
+    signIn();
+    server.use(...cluster, http.get("*/api/v1/coverage-by-category", () => new HttpResponse("boom", { status: 500 })));
+    renderAt("/audit?ns=payments");
+
+    const chip = await screen.findByTestId("posture-chip-monitor");
+    // Unknown stays unknown — never resolved to either posture by default.
+    await waitFor(() => expect(chip).toHaveAttribute("data-engine-mode", "unconfirmed"));
+    expect(chip.getAttribute("title")).not.toMatch(/live traffic is NOT blocked/i);
+    expect(chip.getAttribute("title")).toMatch(/has NOT been confirmed/i);
+  });
+
+  it("the aggregate scope is never 'confirmed' from coverage (the server returns 'block' for it by design)", async () => {
+    signIn();
+    let coverageHits = 0;
+    server.use(
+      ...cluster,
+      http.get("*/api/v1/coverage-by-category", () => {
+        coverageHits += 1;
+        return HttpResponse.json({ namespace: null, coverage_pct: 0, categories: [], namespace_mode: "block" });
+      })
+    );
+    renderAt("/audit"); // "all"
+
+    const chip = await screen.findByTestId("posture-chip-monitor");
+    // `_namespace_mode(None)` returns "block" deliberately ("don't imply monitor across the fleet"), so it is
+    // not an answer about any namespace — the header must not read it as one, and must not even ask.
+    expect(chip).toHaveAttribute("data-engine-mode", "unconfirmed");
+    expect(chip.getAttribute("title")).not.toMatch(/live traffic is NOT blocked/i);
+    expect(coverageHits).toBe(0);
+    // …and it must not attribute the unscoped reading to "the cluster default". `fetchSettings("all")`
+    // DROPS the ?namespace param (client.ts), and `GET /api/v1/settings` declares
+    // `namespace: str = Query("default")` — so an unscoped read returns the namespace literally named
+    // `default`, merged with the global. FAIL-ON-BUG: the title opened "The cluster default reads Monitor
+    // mode in Settings", a claim about a value this console never read.
+    expect(chip.getAttribute("title")).not.toMatch(/^The cluster default reads Monitor/);
+    expect(chip.getAttribute("title")).toMatch(/With no namespace selected/i);
+    expect(chip.getAttribute("title")).toMatch(/"default" namespace merged with the cluster-wide default/i);
+  });
+
+  // `namespace_mode` is optional in the payload type. An absent/unrecognised value is not "block": reading
+  // it as one publishes "the engine still ENFORCES this namespace" — a hard enforcement claim — out of a
+  // field that said nothing.
+  it("a coverage payload with NO namespace_mode is unconfirmed, not an enforcement claim", async () => {
+    signIn();
+    server.use(
+      ...cluster,
+      http.get("*/api/v1/coverage-by-category", ({ request }) =>
+        HttpResponse.json({
+          namespace: new URL(request.url).searchParams.get("namespace"),
+          coverage_pct: 64,
+          categories: [],
+          agent_class_policies: []
+        })
+      )
+    );
+    renderAt("/audit?ns=payments");
+
+    const chip = await screen.findByTestId("posture-chip-monitor");
+    await waitFor(() => expect(chip).toHaveAttribute("data-engine-mode", "unconfirmed"));
+    expect(chip.getAttribute("title")).not.toMatch(/still ENFORCES its policy blocks/i);
+    expect(chip.getAttribute("title")).not.toMatch(/live traffic is NOT blocked/i);
+    expect(chip).not.toHaveTextContent(/Monitor: cluster default/i);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
+// The bell's low-trust alert and the /agents page it deep-links to must count ONE population.
+// The predicate was a literal `score < 0.4` over every row, which disagreed with that page in both
+// directions: it counted synthetic probes the page hides by default, and it missed a real low-trust agent
+// whenever the namespace raises `trust_threshold` (the calculator moves BOTH tier boundaries with it).
+// ---------------------------------------------------------------------------------------------------
+describe("Bell low-trust count agrees with the Agents page it opens", () => {
+  const base = (agents: unknown[]) => [
+    http.get("*/api/v1/cluster-info", () =>
+      HttpResponse.json({ cluster_id: "local-1", cluster_name: "local", namespaces: ["default", "payments"] })
+    ),
+    http.get("http://hub.test/api/v1/fleet/clusters", () => HttpResponse.json([])),
+    http.get("*/api/v1/settings", () => HttpResponse.json({ enforcement_mode: "block", apply_mode: "enforce" })),
+    http.get("*/api/v1/audit/stats", () => HttpResponse.json({ total: 10, blocked: 0, allowed: 10 })),
+    http.get("*/api/v1/agents", () => HttpResponse.json(agents))
+  ];
+  const sid = (name: string) => `spiffe://norviq/ns/payments/sa/${name}`;
+
+  it("does not count synthetic probe identities the Agents page hides by default", async () => {
+    signIn();
+    server.use(
+      ...base([
+        // agents.py stamps `synthetic` so every consumer excludes probes and RECONCILES with the graph.
+        { spiffe_id: sid("redteam-probe-1"), agent_class: "redteam-probe", score: 0.11, category: "low", synthetic: true },
+        { spiffe_id: sid("eval-probe-2"), agent_class: "eval-probe", score: 0.2, category: "low", synthetic: true },
+        { spiffe_id: sid("billing"), agent_class: "billing", score: 0.92, category: "high", synthetic: false }
+      ])
+    );
+    renderAt("/audit?ns=payments");
+    openInbox();
+
+    // FAIL-ON-BUG: pre-fix this said "2 agents below trust threshold" and badged a red 2, while /agents
+    // reported "Low Trust 0" and listed neither probe.
+    expect(await screen.findByText(/All systems healthy/i)).toBeInTheDocument();
+    expect(screen.queryByText(/at low trust/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/below trust threshold/i)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("bell-badge")).not.toBeInTheDocument();
+  });
+
+  it("counts a REAL low-trust agent the raised trust_threshold created (score 0.45, server category 'low')", async () => {
+    signIn();
+    server.use(
+      // `_tiers(0.9)` puts the low boundary at 0.5143, so 0.45 is "low" server-side — and `0.45 < 0.4`,
+      // the predicate the bell used, is false. The bell showed no badge at all for a real low-trust agent.
+      ...base([{ spiffe_id: sid("billing"), agent_class: "billing", score: 0.45, category: "low", synthetic: false }])
+    );
+    renderAt("/audit?ns=payments");
+    openInbox();
+
+    // REWRITTEN (was: /1 agent below trust threshold/). The row counts `category === "low"`, and
+    // `_categorize` puts that boundary at `trust_threshold × 0.4/0.7` — at t=0.9 an agent scoring 0.6 is
+    // BELOW the threshold and is "medium", so it is not in this number. The label named a wider population
+    // than the count, and a different one from the "Low Trust" tile on the page it opens.
+    expect(await screen.findByText(/1 agent is at low trust/i)).toBeInTheDocument();
+    expect(screen.queryByText(/below trust threshold/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/All systems healthy/i)).not.toBeInTheDocument();
+    expect(screen.getByTestId("bell-badge")).toHaveTextContent("1");
+  });
+
+  it("a trust-FROZEN agent still raises an alert, on its own line (the Agents page tiles it separately)", async () => {
+    signIn();
+    server.use(
+      ...base([{ spiffe_id: sid("rogue"), agent_class: "rogue", score: 0, category: "frozen", synthetic: false }])
+    );
+    renderAt("/audit?ns=payments");
+    openInbox();
+
+    // Counting only `category === "low"` would have dropped the admin kill-switch case that the old
+    // score-based predicate happened to catch.
+    expect(await screen.findByTestId("inbox-frozen")).toHaveTextContent(/1 agent is trust-frozen/i);
+    expect(screen.queryByText(/All systems healthy/i)).not.toBeInTheDocument();
+    expect(screen.getByTestId("bell-badge")).toHaveTextContent("1");
+  });
+
+  it("a row with no trust category makes the check PARTIAL, not a clean all-clear", async () => {
+    signIn();
+    server.use(...base([{ spiffe_id: sid("mystery"), agent_class: "mystery", score: 0.8 }]));
+    renderAt("/audit?ns=payments");
+    openInbox();
+
+    expect(await screen.findByTestId("inbox-error")).toHaveTextContent(/carried no trust category/i);
+    expect(screen.queryByText(/All systems healthy/i)).not.toBeInTheDocument();
+  });
+});

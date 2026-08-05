@@ -28,10 +28,22 @@ export function TargetSettings() {
   const settings = useApi(() => fetchSettings(namespace), [namespace], { cacheKey: `tgt-settings:${namespace}`, staleTimeMs: 15_000 });
   const packs = useApi(() => fetchPolicyPacks(namespace), [namespace], { cacheKey: `tgt-packs:${namespace}`, staleTimeMs: 15_000 });
 
-  const applyMode = settings.data?.apply_mode === "dry_run_only" ? "dry_run_only" : "enforce";
+  // A posture we have not READ is not a posture. Both knobs used to resolve an absent `settings.data` to
+  // their reassuring value (`?.x === "audit" ? "audit" : "block"`, `?.x === "dry_run_only" ? … : "enforce"`),
+  // so a 5xx / 403 / offline API left this page highlighting "Block" and "Live" — the console stating, in
+  // the same pixels it uses for a measured answer, that the namespace is enforcing and its policy is live.
+  // `null` = not known yet: no tab is `active`, neither consequence sentence is asserted, and a failed read
+  // says so in text. (The tabs stay rendered and keep their testids — they are the CONTROL, and an admin can
+  // still set a posture from a page that could not read one.)
+  const settingsKnown = settings.data != null;
+  const applyMode = settingsKnown
+    ? settings.data?.apply_mode === "dry_run_only"
+      ? "dry_run_only"
+      : "enforce"
+    : null;
   // TGT-POSTURE-01: the enforcement axis (Block ⇄ Monitor). Wire value stays block|audit; "audit" is DISPLAYED
   // as "Monitor" so it doesn't collide with the `audit` decision or the Audit Log.
-  const enforcementMode = settings.data?.enforcement_mode === "audit" ? "audit" : "block";
+  const enforcementMode = settingsKnown ? (settings.data?.enforcement_mode === "audit" ? "audit" : "block") : null;
   // The toggles are namespace-scoped mutations — never let them target the phantom aggregate ("all").
   const { canMutate, blockedReason } = useMutationScope();
   const [savingMode, setSavingMode] = useState(false);
@@ -68,6 +80,25 @@ export function TargetSettings() {
     finally { setSavingMode(false); }
   };
 
+  // `.tab-kit` has NO disabled styling of its own (index.css gives `:disabled` opacity only to `.btn`), so a
+  // read-only segmented control rendered byte-for-byte like a live one — a viewer had no way to tell that the
+  // highlighted tab was a reading rather than a control they could work. Dim it inline; the reason itself is
+  // visible text below (a disabled control can never surface a `title`).
+  const tabsReadOnly = !isAdmin || !canMutate;
+  const readOnlyTabStyle = tabsReadOnly ? { opacity: 0.55, cursor: "not-allowed" } : undefined;
+  // "Admin only" is a fact about the CONTROL and is always true. "read-only for your ROLE" is a claim about
+  // the reader, and `isAdmin` is false for three different reasons: they are not an admin, /me has not
+  // answered yet, or /me FAILED — in which case telling an admin their role is read-only states, as fact,
+  // something we could not read. Say only what is known in each case.
+  const permissionNote = me.error
+    ? "Admin only — your role could not be read, so these controls are disabled."
+    : me.data
+    ? "Admin only — read-only for your role."
+    : "Admin only";
+  // The posture read itself faulted (not merely in flight): the knobs below show no state at all, so say why
+  // rather than leaving two un-highlighted toggles to be read as "nothing is set".
+  const postureUnreadable = !settingsKnown && !!settings.error;
+
   const enabledPacks = (packs.data ?? []).filter((p) => p.enabled);
   // Bind the subtitle/working-scope label to the ACTUAL working scope — never "Namespace: all" over data.
   const scopeLabel = namespace === "all" ? "All namespaces" : `Namespace: ${namespace}`;
@@ -87,19 +118,54 @@ export function TargetSettings() {
                 <button key={m} data-testid={`enforcement-mode-${m}`} className={`tab-kit${enforcementMode === m ? " active" : ""}`}
                   disabled={!isAdmin || savingMode || !canMutate}
                   title={blockedReason ?? undefined}
+                  style={readOnlyTabStyle}
                   onClick={() => setEnforcement(m)}>
                   {m === "audit" ? "Monitor" : "Block"}
                 </button>
               ))}
             </div>
-            {isAdmin && !blockedReason && enforcementMode === "audit" && (
+            {/* TGT-POSTURE-01 — WHAT THE MODE MEANS IS STATE, NOT PERMISSION. This sentence used to be
+                gated on `isAdmin`, so the reader most likely to be AUDITING posture — the one who cannot
+                change it — got the bare words "Monitor" and "Admin only" and had to infer from them that
+                nothing is being stopped. (From "Frozen" they were as likely to infer the opposite of the
+                truth: that ENFORCEMENT, not policy editing, was frozen.) The global header chip is not a
+                fallback — its visible text is the two words "Monitor mode", with the consequence only in a
+                `title` tooltip — so this page is the only place in the console where the consequence exists
+                as readable text. Permission is stated separately, at the control it applies to.
+                The second line is the /settings caveat: `_effective` merges the CLUSTER-WIDE default
+                (`row.enforcement_mode if row … else app_settings.enforcement_mode`) while the engine softens
+                ONLY on an explicit per-namespace override (`_resolve_posture`: "a null/global mode does NO
+                softening"), so "Monitor" here is not on its own proof that THIS namespace is softened. */}
+            {enforcementMode === "audit" && (concrete ? (
               <div data-testid="enforcement-monitor-note"
-                title="Monitor — evaluate & log would-block, but allow (observe mode; live traffic is not blocked)."
-                style={{ fontSize: 11, color: "var(--block, #ff5c7c)", marginTop: 4 }}>
-                Monitor — evaluate & log would-block, but allow (live traffic is not blocked).
+                style={{ fontSize: 11, color: "var(--block, #ff5c7c)", marginTop: 4, maxWidth: 300 }}>
+                Monitor — a matched rule logs a would-block instead of stopping the call.
+                <div style={{ color: "var(--text-muted)", marginTop: 2 }}>
+                  The engine softens calls only where this namespace sets Monitor itself; this reading also
+                  reflects the cluster-wide default.
+                </div>
+              </div>
+            ) : (
+              // NOT "the cluster-wide default is Monitor". `fetchSettings("all")` DROPS the namespace param
+              // (client.ts: `if (namespace && namespace !== "all")`), and the endpoint's own signature is
+              // `namespace: str = Query("default")` — so an unscoped read resolves to the namespace literally
+              // named `default` and returns THAT row merged with the global (`_effective`). Whenever `default`
+              // carries its own enforcement_mode, "the cluster-wide default is Monitor" is a statement about a
+              // value nothing on this page read. Name the reading instead of inventing a scope for it.
+              <div data-testid="enforcement-monitor-note-aggregate"
+                style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4, maxWidth: 300 }}>
+                Monitor is what the unscoped Settings read returns — the <span className="mono">default</span>{" "}
+                namespace merged with the cluster-wide default. It is not a posture for every namespace, and the
+                engine softens traffic only where a namespace sets Monitor itself — pick a namespace to see its own.
+              </div>
+            ))}
+            {postureUnreadable && (
+              <div data-testid="enforcement-mode-unreadable" style={{ fontSize: 11, color: "var(--escalate)", marginTop: 4, maxWidth: 300 }}>
+                This namespace&apos;s enforcement mode could not be read — <b>unknown, not Block</b>.
+                <span style={{ color: "var(--text-muted)" }}> {settings.error}</span>
               </div>
             )}
-            {!isAdmin && <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>Admin only</div>}
+            {!isAdmin && <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>{permissionNote}</div>}
           </div>
           <div>
             {/* Change control (apply governance) — a policy-EDIT lock, not a traffic mode. Wire values enforce|dry_run_only. */}
@@ -109,6 +175,7 @@ export function TargetSettings() {
                 <button key={m} data-testid={`apply-mode-${m}`} className={`tab-kit${applyMode === m ? " active" : ""}`}
                   disabled={!isAdmin || savingMode || !canMutate}
                   title={blockedReason ?? undefined}
+                  style={readOnlyTabStyle}
                   onClick={() => setApply(m)}>
                   {m === "enforce" ? "Live" : "Frozen"}
                 </button>
@@ -117,14 +184,23 @@ export function TargetSettings() {
             {modeMsg && <div style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4 }}>{modeMsg}</div>}
             {/* Prompt for a concrete scope when an aggregate is selected. */}
             {isAdmin && blockedReason && <div data-testid="apply-mode-scope-prompt" style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4 }}>{blockedReason}</div>}
-            {/* Make the frozen consequence explicit at the control that sets it. */}
-            {isAdmin && !blockedReason && applyMode === "dry_run_only" && (
+            {/* Make the frozen consequence explicit at the control that sets it — for EVERY reader, not just
+                the one who can change it (see the enforcement note above). Unlike enforcement_mode there is
+                no cluster-wide merge here: settings_router `_effective` reads apply_mode from the row alone
+                (`row.apply_mode if row and row.apply_mode else "enforce"`), so this sentence is true of the
+                namespace as written. */}
+            {applyMode === "dry_run_only" && (
               <div data-testid="apply-mode-dryrun-note" title="Frozen freezes POLICY EDITS for this namespace; the live policy still enforces."
                 style={{ fontSize: 11, color: "var(--block, #ff5c7c)", marginTop: 4 }}>
                 Frozen — policy edits are frozen (live policy still enforces).
               </div>
             )}
-            {!isAdmin && <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>Admin only</div>}
+            {postureUnreadable && (
+              <div data-testid="apply-mode-unreadable" style={{ fontSize: 11, color: "var(--escalate)", marginTop: 4, maxWidth: 300 }}>
+                Change control could not be read — <b>unknown, not Live</b>.
+              </div>
+            )}
+            {!isAdmin && <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>{permissionNote}</div>}
           </div>
           <div>
             <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>Sector packs applied</div>

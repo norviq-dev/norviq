@@ -35,6 +35,7 @@ from norviq.api.auth import get_current_user, require_admin
 from norviq.api.db.models import AuditLogEntry, IntentDraft
 from norviq.api.db.session import get_session
 from norviq.api.routers.graphs import _resolve_namespaces
+from norviq.api.synthetic import audit_row_is_non_real, is_synthetic_identity  # proposals derive from REAL traffic only
 from norviq.engine.evaluator import OPAEvaluator
 from norviq.engine.intent import IntentError, compile_intent, dry_run, propose_intent
 
@@ -517,7 +518,18 @@ async def _recorded_calls(
     ``params_detail`` carries that, and repurposing the boolean would make every existing reader
     silently wrong about what it was told.
     """
-    stmt = select(AuditLogEntry).where(AuditLogEntry.agent_class == agent_class)
+    # REAL traffic only. A red-team run targets the class's OWN identity (redteam.py `_build_event`
+    # keeps the target's agent_class and only stamps framework="redteam"), so without this predicate the
+    # attack's tool names arrive here indistinguishable from work the class actually did — and
+    # `propose_intent` turns observed names straight into `match.tool_name.in`. A default-deny allowlist
+    # would then permanently GRANT the exact tools the attack suite called. Same one-line predicate
+    # tools.py uses, for the same reason: synthetic traffic "would register as evidence that a tool is
+    # real, which is the opposite of what this tier claims". If red-team evidence is ever wanted here it
+    # has to be a separate, labelled tier — never folded into `sampled`.
+    stmt = select(AuditLogEntry).where(
+        AuditLogEntry.agent_class == agent_class,
+        ~audit_row_is_non_real(AuditLogEntry),
+    )
     if namespaces is not None:
         stmt = stmt.where(AuditLogEntry.namespace.in_(namespaces))
     stmt = stmt.order_by(desc(AuditLogEntry.timestamp_utc)).limit(limit)
@@ -526,6 +538,14 @@ async def _recorded_calls(
     calls: list[dict] = []
     evidence = _ParamEvidence()
     for row in rows:
+        # Belt-and-braces behind the SQL predicate above — the same pairing mitre.py uses on the object
+        # itself (framework tag + the ONE shared identity classifier), so a session that did not run the
+        # predicate still cannot let an attack's tool name become an allowlist grant. Skipped rows never
+        # enter `calls`, so `sampled` counts only traffic a rule may legitimately be derived from.
+        if str(getattr(row, "framework", "") or "") == "redteam" or is_synthetic_identity(
+            row.agent_class, getattr(row, "agent_id", None)
+        ):
+            continue
         payload = row.payload if isinstance(row.payload, dict) else {}
         masked = payload.get("masked_params")
         params = masked if isinstance(masked, dict) and masked else {}
@@ -695,7 +715,14 @@ async def propose_endpoint(
     if not calls:
         raise HTTPException(
             status_code=422,
-            detail=f"no recorded traffic for class '{body.cls}'; run it in monitor mode first, or supply calls",
+            # "REAL" is load-bearing now that `_recorded_calls` drops red-team and probe rows. A class
+            # whose only window is a red-team run has traffic the operator can SEE in the Audit Log,
+            # and telling them there is none sends them to check an emitter that is working fine.
+            detail=(
+                f"no real recorded traffic for class '{body.cls}' — red-team and test/probe rows are "
+                "excluded, because a rule may not be derived from an attack; run it in monitor mode "
+                "first, or supply calls"
+            ),
         )
     intent = propose_intent(body.name, body.cls, calls)
     added, bounded = _add_existence_predicates(intent, evidence)
@@ -744,7 +771,14 @@ async def dry_run_endpoint(
         calls.extend(_sample_calls(body.calls, body.cls, ns, evidence))
         evidence.params_available = True
     if not calls:
-        raise HTTPException(status_code=422, detail=f"no recorded traffic for class '{body.cls}' to replay")
+        # Same wording as /propose above, for the same reason: the replay corpus is real traffic only.
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"no real recorded traffic for class '{body.cls}' to replay — red-team and test/probe "
+                "rows are excluded"
+            ),
+        )
 
     # Letter-prefixed: a Rego package segment may not start with a digit, and a raw hex scope starts
     # with one about 62% of the time — which presents as an intermittent "illegal number format"

@@ -17,12 +17,14 @@ import {
   ApiError,
   fetchAllAgents,
   fetchAuditStats,
+  fetchCoverageByCategory,
   fetchMe,
   fetchSearch,
   logout,
   Me
 } from "../../api/client";
 import { fleetEnabled } from "../../api/fleet";
+import { useApi } from "../../hooks/useApi";
 import { TimeRange, useApp } from "@/store/AppContext";
 
 type Dropdown = "cluster" | "inbox" | null;
@@ -31,11 +33,23 @@ type Dropdown = "cluster" | "inbox" | null;
 type InboxPayload = {
   blockedCount: number | null;
   lowTrustCount: number | null;
+  frozenCount: number | null;
   checkedAt: Date;
   errors: string[];
 };
 type ToolResult = { tool_name?: string; decision?: string | null; timestamp?: string };
 type AgentResult = { spiffe_id?: string; agent_class?: string; score?: number; trust_score?: number };
+/** The /agents fields the bell's alert counts need. `synthetic` and `category` are both emitted by
+ *  agents.py `_agent_row` (on the hot AND the cold-registry path); `synthetic` is missing from client.ts's
+ *  `SearchAgent`, which is why tsc never flagged the bell reading past it — declared here so this component
+ *  reads the same two fields every other consumer of /agents does. (Flagged to the client.ts owner.) */
+type InboxAgentRow = {
+  spiffe_id?: string;
+  score?: number;
+  trust_score?: number;
+  category?: string;
+  synthetic?: boolean;
+};
 // CONTRACT B: the server deliberately sends NO mode for a policy hit (routers/search.py: the loader's
 // in-memory entry has no enforcement_mode and it refuses to fabricate one). So the field is optional AND
 // nullable here, and the renderer states "mode unknown" — never a concrete posture.
@@ -219,6 +233,7 @@ export function Header({
       }
 
       let lowTrustCount: number | null = null;
+      let frozenCount: number | null = null;
       if (agentsOutcome.status === "rejected") {
         errors.push(`Low-trust agents: ${failureText(agentsOutcome.reason)}.`);
       } else if (!Array.isArray(agentsOutcome.value)) {
@@ -233,19 +248,39 @@ export function Header({
         // scope the low-trust count to the selected namespace client-side.
         const inScope = (agent: { spiffe_id?: string }) =>
           selectedNamespace === "all" || (agent.spiffe_id ?? "").includes(`/ns/${selectedNamespace}/`);
-        lowTrustCount = agentsOutcome.value.filter((agent) => {
-          if (!inScope(agent)) return false;
-          const score =
-            typeof agent.score === "number"
-              ? agent.score
-              : typeof agent.trust_score === "number"
-              ? agent.trust_score
-              : null;
-          return score != null && score < 0.4;
-        }).length;
+        // ONE definition of "low trust", and it is the SERVER's. This used to re-derive the tier from a
+        // literal `score < 0.4`, which disagreed with the /agents page the alert DEEP-LINKS TO, in both
+        // directions:
+        //  · it counted SYNTHETIC probe/eval identities. agents.py stamps `synthetic` on every row
+        //    precisely "so the Overview trust donut + Agent Monitor exclude them and RECONCILE with the
+        //    asset/attack graph, which already hides exactly these probes by default" — every other
+        //    consumer honours it (Dashboard's donut, AgentMonitor, Asset/Attack Graph). So after a
+        //    red-team run the bell showed "2 agents below trust threshold" and the page it opened
+        //    reported "Low Trust 0" and listed neither of them.
+        //  · and it MISSED a real one whenever the namespace raises `trust_threshold`: the calculator
+        //    moves BOTH tier boundaries with it (`_tiers`: low = high × 0.4/0.7), so at t=0.9 an agent
+        //    scoring 0.45 is categorised "low" server-side while `0.45 < 0.4` is false — the bell showed
+        //    no badge and the dropdown read "All systems healthy".
+        // `category` is exactly what AgentMonitor's own tiles count (`a.category === "low" | "frozen"`).
+        const rows = agentsOutcome.value as InboxAgentRow[];
+        const alerting = rows.filter((agent) => inScope(agent) && agent.synthetic !== true);
+        const categoryOf = (agent: InboxAgentRow) => (agent.category ?? "").trim().toLowerCase();
+        lowTrustCount = alerting.filter((agent) => categoryOf(agent) === "low").length;
+        // A frozen identity is an admin kill-switch, and the old score-based predicate happened to catch it
+        // (a frozen agent scores 0). Counting only "low" would have dropped it from the bell silently, so it
+        // gets its own line — matching the Agents page's own separate Frozen tile rather than being folded
+        // into a number whose label says "below trust threshold".
+        frozenCount = alerting.filter((agent) => categoryOf(agent) === "frozen").length;
+        // A row with no `category` cannot be tiered, and an untiered row must not quietly become a
+        // not-low row: that is the "we could not measure it" → "we measured, and it is fine" inversion.
+        const untiered = alerting.filter((agent) => !categoryOf(agent)).length;
+        if (untiered > 0)
+          errors.push(
+            `Low-trust agents: ${untiered} of ${alerting.length} agents carried no trust category — the counts below are a floor.`
+          );
       }
 
-      const payload: InboxPayload = { blockedCount, lowTrustCount, checkedAt: new Date(), errors };
+      const payload: InboxPayload = { blockedCount, lowTrustCount, frozenCount, checkedAt: new Date(), errors };
       // Only a COMPLETE check is cached, under the scope it describes. Remembering a failure for 60s would
       // make Retry a no-op and keep the "we didn't check" state on screen after the outage cleared.
       if (errors.length === 0) inboxCacheRef.current = { ns: scope, timestamp: now, payload };
@@ -281,7 +316,8 @@ export function Header({
 
   // Only the counts we actually got. A failed source contributes nothing to the number and instead makes
   // the badge amber — silence after a failed check is exactly the inversion this console cannot afford.
-  const inboxKnownCount = (inboxData?.blockedCount ?? 0) + (inboxData?.lowTrustCount ?? 0);
+  const inboxKnownCount =
+    (inboxData?.blockedCount ?? 0) + (inboxData?.lowTrustCount ?? 0) + (inboxData?.frozenCount ?? 0);
   const inboxIncomplete = !!inboxData && inboxData.errors.length > 0;
   // The posture object describes `posture.namespace` — the scope its /settings read was issued FOR. A
   // namespace switch leaves the PREVIOUS scope's mode in place until the new read settles (AppContext only
@@ -291,6 +327,57 @@ export function Header({
   // Monitor-mode namespace was enforcing.
   const postureForScope = posture.namespace === selectedNamespace && !posture.loading;
   const postureScopeLabel = selectedNamespace === "all" ? "the cluster default" : `namespace ${selectedNamespace}`;
+
+  // ---- MONITOR: the ENGINE's rule, the same field the Overview keys on. --------------------------
+  // `posture.mode` comes from /settings, whose `_effective` MERGES the cluster-wide default
+  // (`row.enforcement_mode if row … else app_settings.enforcement_mode`). The evaluator does not: it softens
+  // a would-block ONLY on an explicit per-namespace override (`_resolve_posture`: "`monitor` is True ONLY
+  // when the namespace explicitly overrides enforcement_mode to 'audit' — a null/global mode does NO
+  // softening"; the global mode reaches only `_no_policy_decision`, the un-policed default). So on a cluster
+  // deployed global-audit — which is what the shipped dev profile does (helm values-dev.yaml
+  // `enforcementMode: audit`) — /settings answers "audit" for EVERY namespace that has no row of its own,
+  // all of which the engine really blocks, and this chip stated "live traffic is NOT blocked" two inches
+  // above an Overview tile counting real enforced blocks. client.ts:790 documents the invariant verbatim:
+  // "Any claim about would-blocks must key on THIS field, not on the settings posture."
+  //
+  // coverage.py's `namespace_mode` IS that field (it reads namespace_settings directly, no global fallback),
+  // and the Overview already keys `monitorScope` on it — so ask for it here too rather than inventing a
+  // second signal. Asked for ONLY when the settings posture claims Monitor (an enforcing cluster pays
+  // nothing), only for a CONCRETE namespace (`_namespace_mode(None)` returns "block" for the aggregate on
+  // purpose — "don't imply monitor across the fleet" — which is not an answer about any namespace), and
+  // never under a remote label. The cacheKey is the Overview's key VERBATIM so both share one entry.
+  const settingsSaysMonitor = postureForScope && posture.mode === "audit";
+  const canConfirmEngineMode = !isRemote && settingsSaysMonitor && selectedNamespace !== "all";
+  const engineCoverage = useApi(
+    () => (canConfirmEngineMode ? fetchCoverageByCategory(selectedNamespace) : Promise.resolve(null)),
+    [canConfirmEngineMode, selectedNamespace],
+    { cacheKey: canConfirmEngineMode ? `dashboard-coverage:${selectedNamespace}` : undefined, staleTimeMs: 60_000 }
+  );
+  // `null` = NOT CONFIRMED (not asked, still in flight, failed, or an answer about another scope — the
+  // payload echoes the scope it was computed for, so compare it). Never resolved to a posture by default.
+  // Only the two values the field is DEFINED to carry count as an answer: `namespace_mode` is optional in
+  // the payload type, and collapsing an absent/unrecognised value into "block" would publish "the engine
+  // still ENFORCES this namespace" — a hard enforcement claim — out of a field that said nothing.
+  const engineMonitorModeRaw =
+    canConfirmEngineMode && engineCoverage.data && engineCoverage.data.namespace === selectedNamespace
+      ? engineCoverage.data.namespace_mode
+      : undefined;
+  const engineMonitorMode: "audit" | "block" | null =
+    engineMonitorModeRaw === "audit" ? "audit" : engineMonitorModeRaw === "block" ? "block" : null;
+  const monitorChipLabel = engineMonitorMode === "block" ? "Monitor: cluster default" : "Monitor mode";
+  const monitorChipTitle =
+    engineMonitorMode === "audit"
+      ? `Namespace ${posture.namespace} is in Monitor mode — decisions are evaluated and logged, live traffic is NOT blocked. Click to change in Target Settings.`
+      : engineMonitorMode === "block"
+      ? `The CLUSTER-WIDE default is Monitor, but namespace ${posture.namespace} does not set Monitor itself — so the engine still ENFORCES its policy blocks, and only the un-policed default is relaxed to allow. Click to review in Target Settings.`
+      : // Not "the cluster default": with no namespace selected the console reads /settings with NO
+        // ?namespace (client.ts drops it for "all") and the endpoint defaults the parameter to "default", so
+        // the value is the `default` namespace's row merged with the global — not a cluster-wide reading.
+        `${
+          posture.namespace === "all"
+            ? 'With no namespace selected, Settings reads Monitor for the unscoped scope — the "default" namespace merged with the cluster-wide default, not a posture for every namespace'
+            : `Namespace ${posture.namespace} reads Monitor mode in Settings, and that reading merges the cluster-wide default`
+        }. The engine softens a would-block only where the namespace sets Monitor itself — which has NOT been confirmed here, so this is not a confirmation that live traffic is unblocked. Click to check Target Settings.`;
   const searchPanelOpen = !isTablet && searchFocused && searchText.trim().length > 0;
   // Both the tablet popup and the desktop dropdown render the same results panel (results shown on
   // every viewport width, including ≤1023px).
@@ -656,12 +743,15 @@ export function Header({
           </span>
         ) : (
           <>
-          {postureForScope && posture.mode === "audit" && (
+          {settingsSaysMonitor && (
             <button
               type="button"
               className="posture-chip"
               data-testid="posture-chip-monitor"
-              title={`${posture.namespace === "all" ? "Cluster default" : `Namespace ${posture.namespace}`} is in Monitor mode — decisions are evaluated and logged, live traffic is NOT blocked. Click to change in Target Settings.`}
+              // Which of the three postures this chip is actually asserting — the flat "live traffic is NOT
+              // blocked" is now reachable ONLY on `audit`, i.e. only when the engine really is softening.
+              data-engine-mode={engineMonitorMode ?? "unconfirmed"}
+              title={monitorChipTitle}
               onClick={() => navigate("/policies/targets")}
               style={{
                 display: "inline-flex", alignItems: "center", gap: 7, padding: "4px 11px", borderRadius: 999,
@@ -670,7 +760,7 @@ export function Header({
               }}
             >
               <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--escalate)" }} />
-              Monitor mode
+              {monitorChipLabel}
             </button>
           )}
           {postureForScope && posture.applyMode === "dry_run_only" && (
@@ -848,7 +938,27 @@ export function Header({
                       close();
                     }}
                   >
-                    🟡 {inboxData?.lowTrustCount} {inboxData?.lowTrustCount === 1 ? "agent" : "agents"} below trust threshold
+                    {/* "at LOW trust", not "below trust threshold". The count is `category === "low"`, and
+                        `_categorize` puts the low boundary at `trust_threshold × 0.4/0.7` — so at t=0.9 an
+                        agent scoring 0.6 IS below the threshold and is "medium", i.e. not counted. The old
+                        label promised a wider population than the number, and named a different one from the
+                        page this row opens, whose tile is "Low Trust". One population, one name. */}
+                    🟡 {inboxData?.lowTrustCount} {inboxData?.lowTrustCount === 1 ? "agent is" : "agents are"} at low trust
+                  </button>
+                )}
+                {(inboxData?.frozenCount ?? 0) > 0 && (
+                  <button
+                    type="button"
+                    className="dd-item"
+                    data-testid="inbox-frozen"
+                    style={{ padding: 12, borderBottom: "1px solid #2A2A2A", borderRadius: 0 }}
+                    onClick={() => {
+                      const nsq = selectedNamespace === "all" ? "" : `?ns=${encodeURIComponent(selectedNamespace)}`;
+                      navigate(`/agents${nsq}`);
+                      close();
+                    }}
+                  >
+                    🔴 {inboxData?.frozenCount} {inboxData?.frozenCount === 1 ? "agent is" : "agents are"} trust-frozen
                   </button>
                 )}
                 {/* The all-clear requires BOTH counts to have actually come back, and both to be zero.
@@ -857,7 +967,8 @@ export function Header({
                     that never completed. */}
                 {inboxData.errors.length === 0 &&
                   inboxData.blockedCount === 0 &&
-                  inboxData.lowTrustCount === 0 && (
+                  inboxData.lowTrustCount === 0 &&
+                  inboxData.frozenCount === 0 && (
                     <div style={{ padding: 12, borderBottom: "1px solid #2A2A2A", fontSize: 13 }}>
                       🟢 All systems healthy — no alerts
                     </div>

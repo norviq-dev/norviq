@@ -669,3 +669,98 @@ describe("PolicyCatalog — Phase 2b detachment badge", () => {
     expect(screen.queryByTestId("builder-detachment-badge")).not.toBeInTheDocument();
   });
 });
+
+
+// ------------------------------------------------------------------------------------------------
+// A DESTRUCTIVE CONFIRM'S TARGET IS FIXED THE MOMENT IT OPENS.
+//
+// The confirm was a hand-rolled `.sheet-overlay` + `.confirm-modal` pair: no role="dialog", no
+// aria-modal, no Escape listener, and focus never moved into it — it stayed on the trash button
+// BEHIND the dim overlay, at the far end of the page from the dialog's own buttons. So Tab walked the
+// policy list underneath, and Enter on a second row's trash fired `setDeleteTarget(otherPolicy)` while
+// the confirm was already up. The dialog stayed mounted, the red "removes it from every layer /
+// cannot be undone" warning stayed word-for-word identical, and the only thing that changed was one
+// line of title text. "Delete policy" then destroyed a different enforcing policy.
+//
+// Two same-namespace class policies is the exact estate that makes it invisible: the rows differ only
+// by class name, and the warning never mentions which one it is about.
+// ------------------------------------------------------------------------------------------------
+describe("the delete confirm cannot be re-aimed while it is open", () => {
+  function seedTwo() {
+    server.use(
+      http.get("/api/v1/policies", () =>
+        HttpResponse.json([
+          { namespace: "payments", agent_class: "checkout-agent", target_type: "class", current_version: 3, rego_length: 120, priority: 700 },
+          { namespace: "payments", agent_class: "refunds-agent", target_type: "class", current_version: 2, rego_length: 90, priority: 700 }
+        ])
+      ),
+      http.get("/api/v1/deployments", () => HttpResponse.json([])),
+      http.get("/api/v1/policies/payments/:cls", ({ params }) =>
+        HttpResponse.json({ namespace: "payments", agent_class: params.cls, rego_source: "package norviq.strict\n", version: 1 })
+      ),
+      http.get("/api/v1/policies/payments/:cls/versions", () => HttpResponse.json([]))
+    );
+  }
+
+  async function openCatalogConfirm() {
+    seedTwo();
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: /^catalog$/i }));
+    fireEvent.click(await screen.findByTestId("catalog-delete-checkout-agent-payments"));
+    return screen.findByTestId("delete-policy-modal");
+  }
+
+  it("announces itself as a dialog, and moves focus in without arming a destructive control", async () => {
+    const modal = await openCatalogConfirm();
+    expect(modal).toHaveAttribute("role", "dialog");
+    expect(modal).toHaveAttribute("aria-modal", "true");
+
+    // REWRITTEN, and the reason is worth keeping. This assertion previously read
+    //   expect(modal.contains(document.activeElement)).toBe(true);
+    //   expect(document.activeElement).toHaveTextContent(/cancel/i);
+    // under a comment claiming "focus lands on a control INSIDE the dialog — and on Cancel". Neither
+    // line can fail: `Modal` focuses the CARD, so `activeElement` IS `modal`, `contains()` is true of
+    // the node itself, and `toHaveTextContent` matches text carried by ANY descendant — the card
+    // contains the word "Cancel". Two green assertions describing a state the fixture cannot produce.
+    //
+    // What `Modal` actually does is deliberate and documented in its own header: focus goes to the
+    // card, "never a control", because focusing the first button once armed a destructive "Revoke"
+    // under the next Space on a card that scrolls with Space. So this asserts THAT — focus is in the
+    // dialog, it is the card rather than a button, and in particular it is not sitting on the control
+    // that deletes an enforcing policy.
+    expect(document.activeElement).toBe(modal);
+    expect(document.activeElement?.tagName).not.toBe("BUTTON");
+    expect(document.activeElement).not.toBe(screen.getByTestId("delete-policy-confirm"));
+  });
+
+  it("closes on Escape", async () => {
+    // A modal an operator cannot dismiss from the keyboard traps them mid-incident — Modal.tsx's own
+    // header says so, and this confirm was the counter-example.
+    await openCatalogConfirm();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("delete-policy-modal")).not.toBeInTheDocument());
+  });
+
+  it("ignores a second trash button fired from behind the overlay, and deletes what it named", async () => {
+    let deletePath = "";
+    server.use(
+      http.delete("/api/v1/policies/:ns/:cls", ({ params }) => {
+        deletePath = `${params.ns}/${params.cls}`;
+        return HttpResponse.json({ deleted: true });
+      })
+    );
+    const modal = await openCatalogConfirm();
+    expect(modal).toHaveTextContent("payments/checkout-agent");
+
+    // The retarget: the other row's trash is still fully reachable — the overlay only dims it.
+    fireEvent.click(screen.getByTestId("catalog-delete-refunds-agent-payments"));
+
+    // Same dialog, same target. Nothing about this confirm changed under the operator.
+    expect(screen.getByTestId("delete-policy-modal")).toHaveTextContent("payments/checkout-agent");
+    expect(screen.getByTestId("delete-policy-modal").textContent ?? "").not.toContain("refunds-agent");
+
+    // And the destructive action goes where the dialog said it would.
+    fireEvent.click(screen.getByTestId("delete-policy-confirm"));
+    await waitFor(() => expect(deletePath).toBe("payments/checkout-agent"));
+  });
+});

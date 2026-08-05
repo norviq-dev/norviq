@@ -67,11 +67,15 @@ def _client(session: _FakeSession | None = None, user: dict | None = None) -> Te
 class _Row:
     """An audit row shaped the way the endpoint reads one."""
 
-    def __init__(self, tool_name, namespace="agents", payload=None):
+    def __init__(self, tool_name, namespace="agents", payload=None, framework="sidecar", agent_class="support-bot"):
         self.tool_name = tool_name
         self.namespace = namespace
         self.payload = payload
-        self.agent_class = "support-bot"
+        self.agent_class = agent_class
+        # A red-team row keeps the TARGET's real agent_class and is distinguished only by this tag
+        # (redteam.py `_build_event`), which is exactly why it reaches a class-keyed query.
+        self.framework = framework
+        self.agent_id = f"spiffe://norviq/ns/{namespace}/sa/{agent_class}"
         self.timestamp_utc = None
 
 
@@ -107,6 +111,79 @@ def test_compile_is_deterministic_across_requests() -> None:
 
 
 # --- propose -----------------------------------------------------------------------------------
+
+
+def _allowlisted_tools(intent: dict) -> list[str]:
+    names: set[str] = set()
+    for rule in intent.get("call", []):
+        got = rule.get("match", {}).get("tool_name", {})
+        names.update(got.get("in", []) if isinstance(got, dict) else [])
+    return sorted(names)
+
+
+def test_propose_never_grants_a_tool_only_the_red_team_called() -> None:
+    """A red-team run targets the class's OWN identity — same namespace, same agent_class, only
+    `framework="redteam"` separates it from work the class really did. `propose_intent` turns every
+    observed tool name into `match.tool_name.in`, so folding the attack into the sample makes a
+    DEFAULT-DENY allowlist permanently grant the exact tools the attack used, in a class that never
+    legitimately called them. The count the console prints as "Calls sampled" must exclude them too."""
+    rows = [_Row("generate_report") for _ in range(8)]
+    rows += [
+        _Row(t, framework="redteam")
+        for t in ("execute_sql", "send_email", "delete_record")
+    ]
+    body = _client(_FakeSession(rows)).post(
+        "/api/v1/intents/propose", json={"ns": "agents", "cls": "support-bot"}
+    ).json()
+    assert _allowlisted_tools(body["intent"]) == ["generate_report"]
+    assert body["sampled"] == 8  # not 11
+
+
+def test_propose_ignores_synthetic_probe_identities() -> None:
+    """The same rule for the other half of `audit_row_is_non_real`: a policy-tester / e2e / probe
+    identity is a harness, not evidence that a tool is real."""
+    rows = [_Row("generate_report") for _ in range(4)]
+    rows += [_Row("drop_table", agent_class="policy-tester-9f2") for _ in range(3)]
+    body = _client(_FakeSession(rows)).post(
+        "/api/v1/intents/propose", json={"ns": "agents", "cls": "support-bot"}
+    ).json()
+    assert _allowlisted_tools(body["intent"]) == ["generate_report"]
+    assert body["sampled"] == 4
+
+
+def test_propose_query_excludes_non_real_rows_in_sql_too() -> None:
+    """The Python guard above is belt-and-braces; the DB must not ship the rows in the first place,
+    or the `limit` fills with attack traffic and crowds out the real calls before Python ever sees it."""
+    import asyncio
+
+    from norviq.api.routers.intents import _recorded_calls
+
+    class _Capturing(_FakeSession):
+        def __init__(self):
+            super().__init__([])
+            self.sql = ""
+
+        async def execute(self, stmt):
+            self.sql = str(stmt)
+            return _FakeResult([])
+
+    sess = _Capturing()
+    asyncio.run(_recorded_calls(sess, ["agents"], "support-bot", 200))
+    assert "framework" in sess.sql and "WHERE" in sess.sql
+    assert "audit_log.framework != " in sess.sql or "NOT (" in sess.sql
+
+
+def test_dry_run_replays_real_traffic_only() -> None:
+    """/intents/dry-run reports would-allow over the SAME sample. Replaying the attack calls against
+    a proposal derived from them would report the attack as permitted and call it evidence."""
+    import asyncio
+
+    from norviq.api.routers.intents import _recorded_calls
+
+    rows = [_Row("generate_report") for _ in range(5)]
+    rows += [_Row("execute_sql", framework="redteam")]
+    calls, _ = asyncio.run(_recorded_calls(_FakeSession(rows), ["agents"], "support-bot", 200))
+    assert [c["tool_name"] for c in calls] == ["generate_report"] * 5
 
 
 def test_propose_builds_an_intent_from_supplied_calls() -> None:
@@ -670,10 +747,28 @@ def test_supplied_calls_with_no_arguments_are_an_observation_not_a_blind_spot() 
 
 
 def test_propose_refuses_when_there_is_no_traffic() -> None:
-    """An intent proposed from nothing would allow nothing — a silent outage dressed as a policy."""
+    """An intent proposed from nothing would allow nothing — a silent outage dressed as a policy.
+
+    The message must also say WHICH traffic it counted. Now that red-team and probe rows are excluded
+    from the sample, a class whose only window is a red-team run hits this branch with rows plainly
+    visible in the Audit Log — "no recorded traffic" would send the operator to debug a healthy
+    emitter. Asserting the new sentence, not relaxing the old one."""
     resp = _client().post("/api/v1/intents/propose", json={"ns": "agents", "cls": "support-bot"})
     assert resp.status_code == 422
-    assert "no recorded traffic" in resp.json()["detail"]
+    detail = resp.json()["detail"]
+    assert "no real recorded traffic" in detail
+    assert "red-team" in detail  # names the exclusion rather than implying the log is empty
+    assert "monitor mode" in detail  # keeps the original next step
+
+
+def test_dry_run_refusal_names_the_same_exclusion() -> None:
+    """The replay corpus is the same helper, so its refusal must not describe a different world."""
+    resp = _client().post(
+        "/api/v1/intents/dry-run",
+        json={"ns": "agents", "cls": "support-bot", "intent": _GOOD_INTENT},
+    )
+    assert resp.status_code == 422
+    assert "no real recorded traffic" in resp.json()["detail"]
 
 
 def test_propose_refuses_a_managed_scope() -> None:

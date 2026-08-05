@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -163,14 +164,56 @@ async def _blocked_by_rule_class(session: AsyncSession, namespace: str | None, r
 # --------------------------------------------------------------------------------------------------
 
 def _rego_blob(request: Request, namespace: str | None) -> str:
+    """The EXECUTABLE rego loaded for this namespace, with whole-line `#` comments removed.
+
+    Coverage is decided by looking for a mapped rule_id in here, so anything that is not code must not
+    be able to satisfy that lookup. A line like `# TODO: reinstate deny_sql_injection` enforces nothing
+    and would otherwise mark the technique covered. Only whole-line comments are dropped — a trailing
+    `#` cannot be stripped safely (rego string literals contain `#`), which is why the containment test
+    below is anchored on the QUOTED id rather than on raw substring presence."""
     loader = getattr(request.app.state, "loader", None)
     blob = ""
     if loader is not None:
         for key, entry in loader._policies.items():
             ns = key.split(":", 1)[0]
             if namespace is None or ns in (namespace, "__cluster__"):
-                blob += str(entry.get("rego", ""))
+                source = str(entry.get("rego", ""))
+                blob += "\n".join(ln for ln in source.splitlines() if not ln.lstrip().startswith("#")) + "\n"
     return blob
+
+
+# Quoted string literals in the (comment-stripped) rego. Deliberately does not span newlines: a rego
+# literal is single-line, and a runaway match across an escaped quote would swallow whole files.
+_QUOTED_LITERAL_RE = re.compile(r'"([^"\n]*)"')
+
+
+def _rule_is_present(rule_id: str, rego_blob: str) -> bool:
+    """Is this rule_id actually DEFINED in the loaded rego, rather than merely mentioned?
+
+    Every producer emits a rule_id as a quoted STRING LITERAL, in one of exactly two shapes:
+
+      * the bare id — `blocks["deny_sql_injection"]`, `rule_id = "intent_allow_x"`,
+        `default rule_id = "..."` (comprehensive.rego, the sector packs, the intent compiler);
+      * a COLON-NAMESPACED id whose last segment is the mapped rule — this product's own compliance
+        remediation generator emits `blocks["remediation:<fw>:<control>:<rule_id>"]`
+        (threat_intent.generate_remediation_rego), which is the rego "Generate enforcing policy"
+        applies to close a gap. Testing for the bare quoted form ALONE fails that shape, so applying
+        the overlay left its technique reading `gap` forever and the console kept offering the same
+        generate button — the remediation loop could never close. It is matched here explicitly.
+
+    Matching literals rather than raw substrings is what keeps prose out: a rule NAME inside a reason
+    sentence, a docstring or a trailing `#` comment (whole-line comments are already stripped by
+    `_rego_blob`) is not a literal equal to the id nor one ending in `:<id>`, so it cannot make a
+    technique read ENFORCED. Escaped quotes inside a literal are not modelled — the generators never
+    emit them (`generate_remediation_rego` replaces `"` in operator text) and the worst case is one
+    hand-authored literal mis-paired, never a false ENFORCED from a comment."""
+    if not rule_id or rule_id not in rego_blob:
+        return False  # cheap reject; the scan below only runs for a genuine candidate
+    suffix = f":{rule_id}"
+    return any(
+        literal == rule_id or literal.endswith(suffix)
+        for literal in _QUOTED_LITERAL_RE.findall(rego_blob)
+    )
 
 
 async def _compute_coverage(request: Request, session: AsyncSession, namespace: str | None, range_token: str, framework: str = "atlas") -> dict:
@@ -184,7 +227,7 @@ async def _compute_coverage(request: Request, session: AsyncSession, namespace: 
     for technique_id, info in mapping.items():
         scope = info.get("scope", "enforceable")
         policies = list(info.get("policies", []))
-        covered_policies = [p for p in policies if p and p in rego_blob]
+        covered_policies = [p for p in policies if p and _rule_is_present(p, rego_blob)]
         enforceable = scope == "enforceable"
         covered = bool(covered_policies)
         if not enforceable:
@@ -224,6 +267,13 @@ async def _compute_coverage(request: Request, session: AsyncSession, namespace: 
             "policies": policies,
             "covered_policies": covered_policies,
             "covered": covered,
+            # `status: "enforced"` is RULES-PRESENT and nothing more — it is decided above from the
+            # loaded rego and never consults the block counts computed on the very next lines. `proven`
+            # is the separate, honest question: did this technique's rules actually act on traffic in
+            # this window? It is False for every technique in a monitor-mode namespace, where the
+            # evaluator softens block->audit and block evidence is structurally impossible. A reader
+            # (or a compliance sentence) that wants to claim block evidence must read THIS, not status.
+            "proven": blocked > 0,
             "observed": observed,
             "blocked": blocked,
             "blocked_by_rule": blocked_by_rule,
@@ -243,10 +293,20 @@ async def _compute_coverage(request: Request, session: AsyncSession, namespace: 
     total_observed = sum(by_rule.get(r, {}).get("observed", 0) for r in framework_rules)
     total_blocked = sum(by_rule.get(r, {}).get("blocked", 0) for r in framework_rules)
     agent_classes = len({c for r in framework_rules for c in by_rule_class.get(r, {})})
+    # How many of the ENFORCED techniques actually have block/escalate evidence in this window. The
+    # gap between `enforced` and `proven` is the whole difference between "a rule is loaded" and "the
+    # control demonstrably acted", and it is 100% of `enforced` in a monitor-mode namespace.
+    proven = sum(1 for t in techniques if t["status"] == "enforced" and t["proven"])
     return {
         "namespace": namespace, "range": range_token, "framework": framework,
         "enforceable_total": enforceable_total, "enforced": enforced, "gap": gap, "oos": oos,
         "coverage_pct": coverage_pct,
+        # BASIS, stated the way the sibling /coverage route states it (coverage.py: `basis`,
+        # "'present' is NOT 'effective'"). This number is rules-present: the mapped rule_ids that are
+        # DEFINED in the rego loaded for the namespace. It is not an efficacy measure and must not be
+        # rendered as one — `proven` below is the efficacy overlay, and the red-team suite is the proof.
+        "basis": "rules_present",
+        "proven": proven,
         # back-compat headline fields (old page)
         "covered": enforced, "total": enforceable_total,
         "observed": total_observed, "blocked": total_blocked, "agent_classes": agent_classes,

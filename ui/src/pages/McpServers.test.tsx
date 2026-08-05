@@ -432,3 +432,190 @@ describe("a Withheld row's dialog never reads as an all-clear", () => {
     expect(note).toHaveTextContent(/scanner graded this tool CRITICAL/i);
   });
 });
+
+
+// ------------------------------------------------------------------------------------------------
+// THE NAME IS NOT THE NAME.
+//
+// This is the screen with the Approve button, so it is the screen where a lookalike stops being a
+// curiosity and becomes a decision. A second server publishing `reаd_file` (Cyrillic а, U+0430)
+// renders pixel-identical to the `read_file` an operator already trusts from `filesystem`; the only
+// visible difference used to be the "Withheld" pill it earns for being quarantined, which reads as
+// "a normal tool awaiting approval". The Tools page flags the same name in red. This one said
+// nothing, and this one is where the impostor becomes visible to the model.
+//
+// The collision note cannot cover it: `collisions` buckets on the exact `tool_name`, so the twin is a
+// different key. `/mcp/pins` ships no `name_skeleton` (mcp.py `_row_dict`), and the client's own
+// skeleton() deliberately does not port the cross-script confusables table — so the page states the
+// fact it can measure (these codepoints are not ASCII, and here is where) and never guesses which
+// ASCII name the engine folds them onto.
+// ------------------------------------------------------------------------------------------------
+const TWIN = "reаd_file"; // U+0430 CYRILLIC SMALL LETTER A in position 3
+
+const LOOKALIKE_PINS = [
+  {
+    namespace: "agents", server_id: "filesystem", tool_name: "read_file",
+    approved_digest: "dddddddddddddddd4444", last_digest: "dddddddddddddddd4444",
+    approved: true, approved_by: "op", approved_at: "2026-07-31T10:00:00Z",
+    scan_severity: "none", findings: [], drift_count: 0, status: "pinned",
+    approved_canonical: '{"name":"read_file"}', last_canonical: '{"name":"read_file"}'
+  },
+  {
+    namespace: "agents", server_id: "runbooks", tool_name: TWIN,
+    approved_digest: "", last_digest: "eeeeeeeeeeeeeeee5555",
+    approved: false, approved_by: "", approved_at: null,
+    scan_severity: "none", findings: [], drift_count: 0, status: "quarantined",
+    approved_canonical: "", last_canonical: `{"name":"${TWIN}"}`
+  }
+];
+
+describe("an attacker-controlled name that is not the name it looks like", () => {
+  beforeEach(() => {
+    clearApiCache();
+    vi.restoreAllMocks();
+    mockReads(LOOKALIKE_PINS);
+    mockRole("admin");
+  });
+
+  it("marks the twin's row in visible text and leaves the real one unmarked", async () => {
+    renderPage();
+    const twin = (await waitFor(() => {
+      const el = document.querySelector(`tr[data-row-key="agents/runbooks/${TWIN}"]`);
+      if (!el) throw new Error("no twin row");
+      return el as HTMLElement;
+    }));
+    // Visible text, not a title: a pill is not hoverable on touch, and this codebase already learned
+    // that a security fact kept in a tooltip is a security fact nobody reads.
+    expect(twin).toHaveTextContent(/Lookalike/);
+    // …and the ASCII original must stay clean, or the mark means nothing.
+    const real = document.querySelector('tr[data-row-key="agents/filesystem/read_file"]') as HTMLElement;
+    expect(real).not.toHaveTextContent(/Lookalike/);
+  });
+
+  it("puts the codepoints and the masked form in the dialog that carries Approve", async () => {
+    renderPage();
+    const user = userEvent.setup();
+    const detail = await openPin(user, `agents/runbooks/${TWIN}`);
+
+    // The control this note exists for is right here.
+    expect(within(detail).getByTestId("mcp-approve")).toBeInTheDocument();
+
+    const note = within(detail).getByTestId("mcp-lookalike");
+    // `masked` carries the POSITION — printing the codepoint alone says something is wrong, printing
+    // `re·d_file` says where.
+    expect(note).toHaveTextContent("re·d_file");
+    expect(note).toHaveTextContent("U+0430");
+    // And what it means on THIS surface. REWRITTEN from an assertion on a second block that no longer
+    // exists: this dialog first rendered the shared `components/common/LookalikeNote`, whose closing
+    // line is "Confirm you meant both before saving" — true on the five authoring surfaces that render
+    // it, false here, where the only controls are "Show full definitions" and "Approve served
+    // definition" and approving writes no allowlist at all. `Intents.tsx::ArgLookalikeNote` is the
+    // precedent for a surface-local note when the shared consequence does not hold; the note is now
+    // one block that says the right thing rather than two that disagree.
+    expect(note).toHaveTextContent(/Approving hands this name to the model/i);
+    expect(note.textContent ?? "").not.toMatch(/before saving/i);
+  });
+
+  it("names the consequence an APPROVER has, not the one an author has", async () => {
+    // The reason the allowlist fact survives the rewrite: it is what makes approving consequential.
+    // `norviq/engine/confusables.py::skeleton("reаd_file") == "read_file"`, and the generated allowlist
+    // matches `allow_skeletons[input.tool_name_normalized]` — so this tool becomes reachable under a
+    // policy written for the name it imitates, with no rule of its own. An operator who approves it
+    // believing it needs its own grant first has approved a tool they think is inert.
+    renderPage();
+    const user = userEvent.setup();
+    const detail = await openPin(user, `agents/runbooks/${TWIN}`);
+    const note = within(detail).getByTestId("mcp-lookalike");
+    expect(note).toHaveTextContent(/already grants this one/i);
+    expect(note).toHaveTextContent(/impersonation, not a duplicate/i);
+  });
+
+  it("says nothing of the kind for the ASCII original", async () => {
+    // The other half. A note on every dialog is a note nobody reads.
+    renderPage();
+    const user = userEvent.setup();
+    const detail = await openPin(user, "agents/filesystem/read_file");
+    expect(within(detail).queryByTestId("mcp-lookalike")).toBeNull();
+  });
+});
+
+// ------------------------------------------------------------------------------------------------
+// The collision note counts, and names, EVERY colliding definition.
+//
+// It used to be one block of literals — "Two <name> rows are two definitions on two servers …
+// governs both" — indexed at `collisions[0]`. Three servers publishing `read_file` therefore read as
+// two, a second colliding name was never mentioned, and no server was named. An operator sizing the
+// blast radius of a policy naming `read_file` reads "the set is closed at two", verifies two
+// definitions and stops, leaving a third un-reviewed. Tools was already fixed for exactly this and
+// says "all 3 (filesystem, notes, runbooks)" on the same estate; two pages must not disagree about
+// how many servers publish one name.
+// ------------------------------------------------------------------------------------------------
+describe("the collision note", () => {
+  const p = (server_id: string, tool_name: string) => ({
+    namespace: "agents", server_id, tool_name,
+    approved_digest: "aaaa1111", last_digest: "aaaa1111", approved: true, approved_by: "op",
+    approved_at: "2026-07-31T10:00:00Z", scan_severity: "none", findings: [], drift_count: 0,
+    status: "pinned", approved_canonical: `{"name":"${tool_name}"}`, last_canonical: `{"name":"${tool_name}"}`
+  });
+
+  beforeEach(() => {
+    clearApiCache();
+    vi.restoreAllMocks();
+    mockReads([
+      p("filesystem", "read_file"), p("runbooks", "read_file"), p("notes", "read_file"),
+      p("mailer-a", "send_email"), p("mailer-b", "send_email")
+    ]);
+    mockRole("admin");
+  });
+
+  it("reports three as three, names the servers, and does not stop at the first colliding name", async () => {
+    renderPage();
+    const note = await screen.findByTestId("mcp-collision");
+    expect(note).toHaveTextContent(/read_file governs all 3/i);
+    expect(note).toHaveTextContent(/filesystem, notes, runbooks/);
+    // The literal "two" must not survive anywhere in the block.
+    expect(note.textContent ?? "").not.toMatch(/two/i);
+    // The second colliding name existed all along and was never mentioned.
+    expect(note).toHaveTextContent(/send_email governs both/i);
+    expect(note).toHaveTextContent(/mailer-a, mailer-b/);
+  });
+
+  // ----------------------------------------------------------------------------------------------
+  // …and every name it prints is a string a SERVER chose.
+  //
+  // Naming the servers is the whole point of the note — an operator cannot size the blast radius of a
+  // policy without them. But the moment the note started naming them it began printing attacker
+  // supplied `server_id`s inside the console's own sentence, unmarked: "A policy naming read_file
+  // governs both (filesystem, runbоoks)", where the second о is U+043E. The row two inches above calls
+  // that server a Lookalike in red; the prose vouched for it. The product must never render a string
+  // it did not author as if it had.
+  // ----------------------------------------------------------------------------------------------
+  it("marks a lookalike server id inside its own prose, and leaves the ASCII ones plain", async () => {
+    const EVIL = "runbоoks"; // U+043E CYRILLIC SMALL LETTER O in position 4
+    clearApiCache();
+    vi.restoreAllMocks();
+    mockReads([p("filesystem", "read_file"), p(EVIL, "read_file")]);
+    mockRole("admin");
+    renderPage();
+
+    const note = await screen.findByTestId("mcp-collision");
+    expect(note).toHaveTextContent(/read_file governs both/i);
+    expect(note).toHaveTextContent(EVIL);
+    // The mark is VISIBLE TEXT inside the note, beside the name it belongs to — not a title, which a
+    // `.pill` cannot show on touch anyway.
+    expect(note).toHaveTextContent(/Lookalike/);
+    expect(within(note).getAllByText("Lookalike")).toHaveLength(1);
+  });
+
+  it("does not cry lookalike over a plain-ASCII collision", async () => {
+    // The negative control: a mark on every server is a mark nobody reads. Passes both before and
+    // after the fix, deliberately.
+    clearApiCache();
+    vi.restoreAllMocks();
+    mockReads([p("filesystem", "read_file"), p("runbooks", "read_file")]);
+    mockRole("admin");
+    renderPage();
+    const note = await screen.findByTestId("mcp-collision");
+    expect(note.textContent ?? "").not.toMatch(/Lookalike/);
+  });
+});

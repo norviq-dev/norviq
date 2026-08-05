@@ -25,7 +25,15 @@ const COLLAPSED_LIMIT = 6; // cap the resting height; the rest fold behind a "+N
 // overflowed this card's bottom was painted UNDER the next panel (Tool Call Volume) and cut off. A portaled,
 // position:fixed card escapes that stacking context and floats above everything; it flips above the row when
 // there isn't room below.
-type HoverAnchor = { cls: string; left: number; top: number; below: boolean };
+//
+// ANCHORED ON THE ROW'S INDEX, NOT ITS CLASS NAME. The class name is not unique in this payload: at the
+// console's default "all namespaces" scope coverage.py selects DISTINCT ON (namespace, agent_class) with
+// namespace=None, so one class governed in two namespaces arrives as two rows — and neither the response
+// (`_parse_agent_policy` emits no namespace) nor `AgentClassPolicy` carries the discriminator. Keyed on
+// `cls`, BOTH rows matched one hover and both portals painted at the hovered row's rect, so the card on
+// top was the OTHER namespace's allowlist, refinements and mode. Same reason the row `key` carries the
+// index: React was warning about duplicate keys here, which is licence to duplicate or omit a row.
+type HoverAnchor = { idx: number; left: number; top: number; below: boolean };
 const TOOLTIP_W = 320;
 
 export function AgentClassCoverage({ policies, namespaceMode, bare = false }: { policies: AgentClassPolicy[]; namespaceMode?: string; bare?: boolean }) {
@@ -41,29 +49,38 @@ export function AgentClassCoverage({ policies, namespaceMode, bare = false }: { 
   const visible = expanded ? policies : policies.slice(0, COLLAPSED_LIMIT);
   const overflow = policies.length - visible.length;
 
+  // Class names that appear more than once. Two rows labelled `report-gen` with nothing else to tell them
+  // apart is a label that does not identify what it labels — and the payload cannot say which namespace
+  // each row is from, so the console says THAT rather than letting the operator assume one of them is
+  // "the" report-gen policy. Computed over the whole list, not the visible slice: the duplicate may be
+  // folded behind "+N more".
+  const counts = new Map<string, number>();
+  for (const p of policies) counts.set(p.cls, (counts.get(p.cls) ?? 0) + 1);
+  const duplicated = [...counts.entries()].filter(([, n]) => n > 1).map(([cls]) => cls);
+
   // Clean, color-first rows that MATCH the risk-category bars: a left label + a full-width bar whose
   // COLOUR carries the state (green = proven-blocking, grey = loaded-not-proven), no verbose text badge.
   // Everything else (what's enforced, efficacy) lives in the hover so the resting card stays quiet.
   const rows = (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      {visible.map((p) => {
+      {visible.map((p, idx) => {
         const color = p.effective ? "#00E5A0" : "#5f6b7a";
         return (
           <div
-            key={p.cls}
+            key={`${idx}:${p.cls}`}
             data-testid="agent-class-cov-row"
             onMouseEnter={(e) => {
               // Anchor the portaled card to this row's viewport rect; flip above when there's little room below.
               const b = e.currentTarget.getBoundingClientRect();
               const below = window.innerHeight - b.bottom > 200;
               setHover({
-                cls: p.cls,
+                idx,
                 left: Math.max(8, Math.min(b.left + 142, window.innerWidth - TOOLTIP_W - 12)),
                 top: below ? b.bottom + 4 : b.top - 4,
                 below
               });
             }}
-            onMouseLeave={() => setHover((h) => (h?.cls === p.cls ? null : h))}
+            onMouseLeave={() => setHover((h) => (h?.idx === idx ? null : h))}
             style={{ display: "flex", alignItems: "center", gap: 12, cursor: "default" }}
           >
             <span style={{ flex: "none", width: 130, fontSize: 12, color: "var(--text-secondary)", fontFamily: "ui-monospace, monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "right" }}>{p.cls}</span>
@@ -72,7 +89,7 @@ export function AgentClassCoverage({ policies, namespaceMode, bare = false }: { 
               <div style={{ width: "100%", height: "100%", borderRadius: 4, background: color, opacity: p.enforcing ? 1 : 0.55 }} />
             </div>
 
-            {hover?.cls === p.cls && createPortal(
+            {hover?.idx === idx && createPortal(
               <div
                 role="tooltip"
                 // position:fixed + portal to <body> so the card floats above every panel's stacking context.
@@ -119,6 +136,19 @@ export function AgentClassCoverage({ policies, namespaceMode, bare = false }: { 
             </>
           )}
         </button>
+      )}
+      {duplicated.length > 0 && (
+        // Not a decoration: without it the two rows are byte-identical on screen and an operator reads
+        // whichever one they hovered as "the" policy for that class. The payload has no namespace field,
+        // so naming the namespaces is not something this console can do — say what it CAN say.
+        <div
+          data-testid="agent-class-dup-note"
+          style={{ marginTop: 4, fontSize: 11, lineHeight: 1.5, color: "var(--escalate)" }}
+        >
+          <span className="mono">{duplicated.join(", ")}</span> {duplicated.length === 1 ? "is" : "are"} governed in{" "}
+          more than one namespace and this view does not say which row is which — scope to a namespace to
+          tell them apart.
+        </div>
       )}
     </div>
   );

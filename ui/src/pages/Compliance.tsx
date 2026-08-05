@@ -32,6 +32,7 @@ import { getToken } from "../auth/session";
 import { useApi } from "../hooks/useApi";
 import { useApp } from "../store/AppContext";
 import { FrameworkEmblem } from "../components/compliance/FrameworkEmblem";
+import { useToast } from "../components/common/Toast";
 
 // ---- canonical decision / status colors (NO blue anywhere) --------------------------------------
 const ACCENT = "var(--accent)"; // teal #2ddab8
@@ -227,6 +228,7 @@ function ComplianceEfficacyBanner({
 // ================================================================================================
 export function Compliance() {
   const navigate = useNavigate();
+  const { push } = useToast();
   const { namespace, timeRange } = useApp();
 
   const [view, setView] = useState<"overview" | "detail">("overview");
@@ -242,7 +244,6 @@ export function Compliance() {
   const [scopeOpen, setScopeOpen] = useState(false);
   const [fwMenuOpen, setFwMenuOpen] = useState(false);
   const [drafted, setDrafted] = useState<Record<string, boolean>>({});
-  const [toast, setToast] = useState<{ msg: string; link?: string } | null>(null);
   // Multi-select: the set of GAP technique_ids checked for batch generation + the class-scope mode
   // for that batch ("affected" = each control's top affected class · "all" = every real affected class · a
   // specific class name).
@@ -316,9 +317,30 @@ export function Compliance() {
     [techniques, selectedId]
   );
 
+  // THE ONE FEEDBACK SURFACE. This page used to run a private toast: one hard-coded accent-GREEN card, no
+  // `role`, no dismiss control, and an unconditional 3.5s fuse — so "Export failed", "Draft failed" and
+  // "Batch generate failed" arrived in the pixels of a success and erased themselves. An operator who
+  // glanced away walked off believing the auditor's evidence pack had been produced. Toast.tsx states the
+  // convention it was breaking: "no fetch result may be silently dropped … error/warning toasts are STICKY
+  // until dismissed so a failed or partial outcome can't expire unseen" — which it implements, along with
+  // the block-red border, `role="alert"` and a dismiss button. Route through it instead of re-implementing
+  // a second, weaker copy.
   function showToast(msg: string, link?: string) {
-    setToast({ msg, link });
-    window.setTimeout(() => setToast((cur) => (cur && cur.msg === msg ? null : cur)), 3500);
+    push({
+      kind: "success",
+      message: msg,
+      ...(link
+        ? { actionLabel: "Open →", onAction: () => navigate(link.startsWith("/") ? link : `/${link}`) }
+        : {})
+    });
+  }
+  /** A mutation that did NOT do what it says on the button. Sticky, red, announced, dismissible. */
+  function showFailure(msg: string) {
+    push({ kind: "error", message: msg });
+  }
+  /** A completed call whose OUTCOME was "nothing was created" — not a fault, but not a success either. */
+  function showNoOutcome(msg: string) {
+    push({ kind: "warning", message: msg });
   }
 
   // ---- open detail for a framework; jump to first gap. -------------------------------------------
@@ -354,7 +376,7 @@ export function Compliance() {
       showToast("Audit-evidence pack exported (JSON)");
       void covByFw[fw].refetch();
     } catch (e) {
-      showToast(e instanceof Error ? e.message : "Export failed");
+      showFailure(e instanceof Error ? e.message : "Export failed");
     }
   }
 
@@ -367,17 +389,17 @@ export function Compliance() {
     try {
       const res = await generateMitrePolicy(t.technique_id, namespace ?? "default", cls, framework);
       if (res.status === "no_affected_classes") {
-        showToast("No affected agent classes in range — nothing to remediate yet.");
+        showNoOutcome("No affected agent classes in range — nothing to remediate yet.");
         return;
       }
       if (res.status === "escalate") {
-        showToast(res.message ?? "This control can't be auto-generated — the risk doesn't show up in tool-call traffic, so it needs a manual (configuration/process) control.");
+        showNoOutcome(res.message ?? "This control can't be auto-generated — the risk doesn't show up in tool-call traffic, so it needs a manual (configuration/process) control.");
         return;
       }
       setDrafted((d) => ({ ...d, [t.technique_id]: true }));
       showToast(`Draft for ${res.control_name ?? t.name} · scoped to ${res.cls} · pending in Policies`, res.deeplink);
     } catch (e) {
-      showToast(e instanceof Error ? e.message : "Draft failed");
+      showFailure(e instanceof Error ? e.message : "Draft failed");
     }
   }
 
@@ -420,12 +442,11 @@ export function Compliance() {
       if (escalated) parts.push(`${escalated} need${escalated === 1 ? "s" : ""} a bespoke rule`);
       if (noClass) parts.push(`${noClass} with no affected class`);
       if (failed) parts.push(`${failed} failed`);
-      showToast(
-        res.drafts_created > 0 ? `${parts.join(" · ")} · drafts pending in Policies` : parts.join(" · "),
-        res.drafts_created > 0 ? firstLink : undefined
-      );
+      if (res.drafts_created > 0) showToast(`${parts.join(" · ")} · drafts pending in Policies`, firstLink);
+      // Nothing was created. The rollup used to go out in the same green card as a successful batch.
+      else showNoOutcome(parts.join(" · "));
     } catch (e) {
-      showToast(e instanceof Error ? e.message : "Batch generate failed");
+      showFailure(e instanceof Error ? e.message : "Batch generate failed");
     }
   }
 
@@ -515,41 +536,6 @@ export function Compliance() {
         />
       )}
 
-      {/* TOAST */}
-      {toast && (
-        <div
-          style={{
-            position: "fixed",
-            bottom: 22,
-            right: 22,
-            zIndex: 90,
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            padding: "12px 16px",
-            background: "#171717",
-            border: "1px solid #2ddab866",
-            borderRadius: 11,
-            boxShadow: "0 16px 40px -14px rgba(0,0,0,0.7)",
-            maxWidth: 360
-          }}
-        >
-          <span style={{ fontSize: 12.5, fontWeight: 600, color: "#ededf0" }}>{toast.msg}</span>
-          {toast.link && (
-            <button
-              type="button"
-              onClick={() => {
-                const path = toast.link!.startsWith("/") ? toast.link! : `/${toast.link!}`;
-                setToast(null);
-                navigate(path);
-              }}
-              style={{ marginLeft: 4, background: "transparent", border: "none", color: ACCENT, fontFamily: "inherit", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}
-            >
-              Open →
-            </button>
-          )}
-        </div>
-      )}
     </div>
   );
 }

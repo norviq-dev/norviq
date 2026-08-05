@@ -16,7 +16,7 @@ from norviq.api.auth import get_current_user, read_namespace, require_admin, req
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
 from norviq.api.routers.settings_router import assert_apply_allowed  # shared dry-run-only gate
-from norviq.api.synthetic import is_synthetic_identity  # exclude probe/test traffic from dry-run replay
+from norviq.api.synthetic import audit_row_is_non_real, is_synthetic_identity  # exclude probe/test traffic from dry-run replay
 from norviq.api.threat_intent import (  # accumulate remediation controls in the single overlay
     generate_remediation_overlay_rego, parse_remediation_controls, union_remediation_controls)
 from norviq.config import settings
@@ -224,13 +224,28 @@ def _infer_target_type(ns: str, agent_class: str) -> str:
     return "class"
 
 
-async def _policy_match_counts(namespace: str | None) -> dict[tuple[str, str], int]:
+async def _policy_match_counts(namespace: str | None) -> dict[tuple[str, str], int] | None:
     """{(ns, class): governed-call count} from the audit log, in ONE grouped query, so a policy card can
     show real "matches" instead of a hardcoded 0. Acquires the session lazily + best-effort: if the DB is
-    unavailable (or not initialized, e.g. a unit test with no DB) it returns an empty map — matches then falls
-    back to 0 and the policy list still renders."""
-    stmt = select(AuditLogEntry.namespace, AuditLogEntry.agent_class, func.count(AuditLogEntry.id)).group_by(
-        AuditLogEntry.namespace, AuditLogEntry.agent_class
+    unavailable (or not initialized, e.g. a unit test with no DB) it returns ``None`` — the policy list
+    still renders, but every ``matches`` is reported as UNKNOWN rather than as a measured 0. An empty
+    dict and a failed read are different facts: the first says the audit log holds no matching traffic,
+    the second says we could not look, and rendering them identically puts an "inert policy" warning on
+    a perfectly healthy control every time the DB blips.
+
+    REAL traffic only. The Catalog renders `matches > 0` as a GREEN dot labelled "Loaded & enforcing"
+    with the title "enforcing on matching workloads" — a claim about a live workload. A Policy-Tester
+    session, an e2e probe or a red-team run is none of those: it is the console (or the efficacy
+    harness) POSTing `/evaluate` under a throwaway identity. Counting them was survivable while every
+    namespace-wide tier read a hardcoded 0, but now that those tiers sum their whole namespace it would
+    paint the namespace FLOOR green off nothing but Policy-Tester clicks — a false all-clear on the
+    broadest control in the product. `audit_row_is_non_real` is the same shared filter /tools, /mitre,
+    /audit stats and the dry-run replay use, so this count reconciles with the Overview's governed-call
+    KPI instead of being a second definition of "a call happened"."""
+    stmt = (
+        select(AuditLogEntry.namespace, AuditLogEntry.agent_class, func.count(AuditLogEntry.id))
+        .where(~audit_row_is_non_real(AuditLogEntry))
+        .group_by(AuditLogEntry.namespace, AuditLogEntry.agent_class)
     )
     if namespace:
         stmt = stmt.where(AuditLogEntry.namespace == namespace)
@@ -245,7 +260,50 @@ async def _policy_match_counts(namespace: str | None) -> dict[tuple[str, str], i
             await provider.aclose()
     except Exception as exc:  # noqa: BLE001 — matches is display-only; never fail the policy list on it
         log.warning("nrvq.api.policies.match_count_failed", error=str(exc), code="NRVQ-API-7012")
+        return None
     return counts
+
+
+# Loader keys whose scope is a whole NAMESPACE rather than one agent class. None of them is a legal
+# RFC-1123 ServiceAccount name, so `audit_log.agent_class` can never hold one — looking them up in a
+# (namespace, agent_class)-keyed map returns 0 forever, and 0 is what paints the amber "Loaded — no
+# matching workload" dot on the most broadly-scoped controls in the product.
+_NAMESPACE_WIDE_SCOPES = ("__baseline__", "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__")
+_OVERLAY_SUFFIX = "__remediation__"
+
+
+def _matches_for(
+    ns: str, agent_class: str, match_map: dict[tuple[str, str], int] | None
+) -> tuple[int | None, str]:
+    """Governed-call count for a policy's ACTUAL scope, plus the basis it was resolved on.
+
+    `matches` is read by the Catalog as a health signal — >0 paints "Loaded & enforcing", 0 paints
+    "Loaded, but nothing currently matches it". That inverts unless the count is resolved per TIER,
+    because only the class tier is keyed the same way the audit log is:
+
+      * cluster baseline   -> every recorded call, in every namespace
+      * namespace tier     -> every recorded call in that namespace (`__baseline__`, `namespace:<ns>`,
+                              the pack overlays and the tool-allowlist guardrail all govern the
+                              namespace's whole population, not one class)
+      * compliance overlay -> the BASE class it overlays (`<class>__remediation__` is additive on
+                              `<class>`, so it matches exactly what that class matches)
+      * workload tier      -> `deployment:<name>` has NO audit column to join on. That is UNKNOWN, and
+                              returning ``None`` says so; returning 0 would assert a measurement that
+                              was never taken.
+      * class tier         -> the (namespace, agent_class) key, unchanged.
+    """
+    if match_map is None:
+        return None, "unavailable"
+    if ns == "__cluster__":
+        return sum(match_map.values()), "cluster"
+    if agent_class in _NAMESPACE_WIDE_SCOPES or agent_class.startswith("namespace:"):
+        return sum(n for (row_ns, _cls), n in match_map.items() if row_ns == ns), "namespace"
+    if agent_class.endswith(_OVERLAY_SUFFIX) and len(agent_class) > len(_OVERLAY_SUFFIX):
+        base = agent_class[: -len(_OVERLAY_SUFFIX)]
+        return match_map.get((ns, base), 0), "base_class"
+    if ":" in agent_class:  # kind:name workload target — nothing in audit_log identifies a workload
+        return None, "not_measurable"
+    return match_map.get((ns, agent_class), 0), "agent_class"
 
 
 @router.get("/policies")
@@ -271,6 +329,7 @@ async def list_policies(
         applied_at = loader.get_applied_at(ns, agent_class) if hasattr(loader, "get_applied_at") else None
         last_ts = max([t for t in (saved_at, applied_at) if t is not None], default=None)
         last_applied = last_ts.isoformat() if last_ts else None
+        matches, matches_basis = _matches_for(ns, agent_class, match_map)
         rows.append(
             {
                 "namespace": ns,
@@ -285,7 +344,12 @@ async def list_policies(
                 "rego_length": len(str(entry["rego"])),
                 "priority": int(entry.get("priority", 100)),
                 "last_applied": last_applied,
-                "matches": match_map.get((ns, agent_class), 0),  # real governed-call count
+                # Resolved against the tier this policy actually governs, NOT blindly against the
+                # (namespace, agent_class) audit key — see `_matches_for`. `null` means UNKNOWN (the
+                # scope is not measurable from audit, or the count query failed) and must never be
+                # rendered as a measured 0; `matches_basis` names which of the two it is.
+                "matches": matches,
+                "matches_basis": matches_basis,
             }
         )
     log.info("nrvq.api.policies.listed", count=len(rows), code="NRVQ-API-7010")
@@ -889,13 +953,21 @@ async def _replay_recent(evaluator, session, body: PolicyCreate, since) -> dict:
     that tells an operator whether applying breaks legitimate traffic). Scoped to the target agent_class
     (a class-scoped policy can only flip its own class's calls); a class-less (namespace/workload) policy
     replays the whole namespace. Synthetic/red-team traffic is excluded — dry-run answers 'would this break
-    REAL traffic'. The module is pushed to OPA once (digest-cached) then queried per record."""
+    REAL traffic'. The module is pushed to OPA once (digest-cached) then queried per record.
+
+    ``total_records_checked`` is the number of records the candidate was ACTUALLY evaluated against.
+    Records excluded as synthetic, and records the evaluator raised on, are reported separately
+    (``synthetic_skipped`` / ``eval_errors``) and are NOT in that total — see the comment at the return."""
     ns = body.namespace or "default"
     q = (
         select(AuditLogEntry)
         .where(AuditLogEntry.timestamp_utc >= since, AuditLogEntry.namespace == ns)
-        # real traffic only: red-team is synthetic efficacy, not live traffic the policy must not break.
-        .where(func.coalesce(AuditLogEntry.framework, "") != "redteam")
+        # real traffic only: red-team is synthetic efficacy, and policy-tester/e2e/probe identities are
+        # test harnesses — neither is live traffic the policy must not break. `audit_row_is_non_real` is
+        # the SQL twin of `is_synthetic_identity`, so the exclusion happens BEFORE the cap: a class-less
+        # replay whose most recent 500 namespace rows are all Policy-Tester sessions would otherwise fill
+        # the cap with rows the loop then skips and report that it replayed the namespace.
+        .where(~audit_row_is_non_real(AuditLogEntry))
         .order_by(AuditLogEntry.timestamp_utc.desc())
         .limit(_DRYRUN_REPLAY_CAP + 1)
     )
@@ -907,17 +979,26 @@ async def _replay_recent(evaluator, session, body: PolicyCreate, since) -> dict:
 
     dry_key = f"dryrun:{ns}:{body.agent_class or '__all__'}"
     would_block = would_allow = would_escalate = newly_blocked = newly_allowed = 0
+    # `replayed` counts records the candidate rego was ACTUALLY evaluated against — never the fetched
+    # row count. A skipped row was not measured, and reporting it as measured is what turns "we replayed
+    # nothing" into the all-clear "No currently-allowed traffic would be newly blocked — safe to deploy."
+    replayed = synthetic_skipped = eval_errors = 0
     flip_samples: list[dict] = []
     for rec in rows:
-        # The docstring promises synthetic traffic is excluded, but the query only drops framework=redteam.
-        # Policy-tester / e2e / probe records are synthetic-but-not-redteam and would pollute the "would this
-        # break REAL traffic" answer — filter them with the ONE shared classifier (mitre/redteam/retention use it).
+        # Belt-and-braces behind the SQL predicate above: the same shared classifier, applied to the
+        # object, so a stubbed/legacy session that did not run the predicate still cannot leak a
+        # policy-tester / e2e / probe record into the "would this break REAL traffic" answer.
         if is_synthetic_identity(rec.agent_class, getattr(rec, "agent_id", None)):
+            synthetic_skipped += 1
             continue
         try:
             dec = await evaluator._evaluate_opa(dry_key, ns, rec.agent_class, _opa_input_from_record(rec), body.rego_source)
         except Exception:
-            continue  # a single bad record never sinks the whole simulation
+            # A single bad record never sinks the whole simulation — but it is not a record that came
+            # back clean either, so it is COUNTED and reported rather than averaged into the denominator.
+            eval_errors += 1
+            continue
+        replayed += 1
         now = str(dec.get("decision", "allow"))
         was = str(rec.decision or "allow")
         if now == "block":
@@ -936,9 +1017,21 @@ async def _replay_recent(evaluator, session, body: PolicyCreate, since) -> dict:
                 flip_samples.append({"tool_name": rec.tool_name, "was": was, "now": now, "rule_id": str(dec.get("rule_id", ""))})
         elif was == "block" and now == "allow":
             newly_allowed += 1
-    checked = len(rows)
+    # `total_records_checked` is the DENOMINATOR every downstream number is read against — the console's
+    # "Replayed N recent real calls", its `replayUnmeasured` guard (replayCount === 0) and the route's
+    # own recommendation. It is therefore the count of records actually evaluated, NOT len(rows): a
+    # fetched-but-skipped row is a record we did not measure, and pricing it into the denominator both
+    # manufactures an all-clear out of an empty replay and understates the real block rate.
+    checked = replayed
     return {
         "total_records_checked": checked,
+        # What was fetched vs what was replayed, so the gap is inspectable instead of implied.
+        "records_fetched": len(rows),
+        "synthetic_skipped": synthetic_skipped,
+        # Records the evaluator could not decide. A non-zero value means the simulation is PARTIAL —
+        # surfaced rather than silently absorbed, because "OPA failed on every record" and "the candidate
+        # blocks nothing" must not produce the same answer.
+        "eval_errors": eval_errors,
         "would_block": would_block,
         "would_allow": would_allow,
         "would_escalate": would_escalate,
@@ -996,14 +1089,31 @@ async def dry_run_policy(
     replay = await _replay_recent(evaluator, session, body, since)
     checked = replay["total_records_checked"]
     newly = replay["newly_blocked"]
+    errored = replay.get("eval_errors", 0)
     if checked == 0:
-        recommendation = "No recent real traffic for this scope — cannot simulate impact; deploy with care."
+        # Nothing was measured. Distinguish "there was nothing to replay" from "the evaluator could not
+        # answer for anything we DID have" — the second is an engine fault, and telling the operator
+        # "no recent real traffic" there would send them looking for the wrong thing.
+        recommendation = (
+            f"The evaluator failed on all {errored} recent call{'' if errored == 1 else 's'} — impact was NOT simulated; "
+            "do not read this as clean."
+            if errored
+            else "No recent real traffic for this scope — cannot simulate impact; deploy with care."
+        )
     elif newly == 0:
         recommendation = "No currently-allowed traffic would be newly blocked — safe to deploy."
     else:
         pct = round(newly / checked * 100, 1)
         recommendation = f"Would NEWLY block {newly} of {checked} recent calls ({pct}%) — review the flips before deploying."
-    log.info("nrvq.api.policy.dry_run", valid=valid, checked=checked, would_block=replay["would_block"],
+    # A PARTIAL replay is never allowed to end on a bare all-clear: the records the evaluator could not
+    # decide are exactly the ones whose flips are unknown, so the caveat rides on whatever verdict we give.
+    if errored and checked:
+        recommendation += (
+            f" Simulation is PARTIAL — the evaluator failed on {errored} further "
+            f"record{'' if errored == 1 else 's'}, whose impact is unknown."
+        )
+    log.info("nrvq.api.policy.dry_run", valid=valid, checked=checked, fetched=replay.get("records_fetched"),
+             synthetic_skipped=replay.get("synthetic_skipped"), eval_errors=errored, would_block=replay["would_block"],
              newly_blocked=newly, ns=body.namespace, cls=body.agent_class, code="NRVQ-API-7014")
     return {
         "valid": True,

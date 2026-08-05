@@ -17,6 +17,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { Compliance } from "./Compliance";
 import { AppProvider, useApp } from "../store/AppContext";
 import { clearApiCache } from "../hooks/useApi";
+// Compliance no longer runs a private toast — it pushes into the shared ToastProvider (Shell mounts it
+// in the real app, App.tsx: <Shell><Compliance/></Shell>), so every render here has to supply one too.
+import { ToastProvider } from "../components/common/Toast";
 
 const server = setupServer();
 beforeAll(() => server.listen({ onUnhandledRequest: "bypass" }));
@@ -120,7 +123,9 @@ function renderPage() {
   return render(
     <MemoryRouter>
       <AppProvider>
+        <ToastProvider>
         <Compliance />
+              </ToastProvider>
       </AppProvider>
     </MemoryRouter>
   );
@@ -137,8 +142,10 @@ function renderPageWithSwitcher(to: string) {
   return render(
     <MemoryRouter>
       <AppProvider>
+        <ToastProvider>
         <NsSwitcher to={to} />
         <Compliance />
+              </ToastProvider>
       </AppProvider>
     </MemoryRouter>
   );

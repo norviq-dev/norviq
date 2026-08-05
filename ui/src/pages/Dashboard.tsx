@@ -80,16 +80,127 @@ type AuditRecord = {
 // excludes them by default so it reconciles with the asset/attack graph, which hides exactly these probes.
 type Agent = { category?: string; synthetic?: boolean };
 
-function TopBlockedTools({ data }: { data: Array<{ tool: string; count: number }> }) {
+// MONITOR MODE: the two block feeds count ENFORCED blocks, and a monitored namespace produces no POLICY
+// ones. `_apply_posture` rewrites every would-block/would-escalate to `decision="audit"` with a
+// `monitor_would_block:<rule>` rule id, so `AuditLogEntry.decision == "block"` — which is exactly what
+// `/audit/top-blocked` filters on and what this page asks `/audit/records` for — cannot match a policy hit.
+// Printing "No blocked tool calls in the selected range" there states a fact about the namespace's TRAFFIC
+// ("no rule is catching anything") beside a tile reporting hundreds of would-blocks. audit.py:222 says the
+// same thing in words for the KPI tile, which was fixed; these two panels were not. One shared sentence so
+// the two feeds cannot drift.
+//
+// It is "no POLICY block", not "nothing": `_apply_posture` returns the decision untouched for the five
+// `_POSTURE_EXEMPT_RULES` (trust_frozen, policy_load_pending, evaluator_error, evaluator_invalid_payload,
+// rate_limit_exceeded), which stay hard "even when a namespace is set to visibility-only". Those are real
+// `decision="block"` rows in a monitored namespace and they DO reach these feeds, so the sentence must not
+// tell an operator the namespace enforces nothing — least of all about the trust freeze, the kill switch
+// they reach for during an incident.
+//
+// `confirmed` is NOT decorative. The sentence below explains a MECHANISM ("the engine rewrites every
+// match"), so it may only be said when the ENGINE's own field says so — coverage.py `_namespace_mode`,
+// this namespace's own persisted enforcement_mode. `monitorScope` deliberately falls back to the
+// /settings posture while coverage is loading or after it fails, and that reading MERGES the
+// cluster-wide default (settings_router `_effective`), so on a global-audit cluster it says "audit" for
+// every namespace the engine really blocks. Rendering the mechanism sentence off that fallback turned
+// "we could not read this namespace's posture" into "we read it, and nothing here is enforced" — and
+// printed it next to "0 would-blocks were logged in this range", a self-contradiction, over a feed whose
+// zero was in fact a real measurement. Unconfirmed gets its own sentence that says the zero is
+// uninterpretable, which is the truth.
+function MonitorBlockFeedEmpty({
+  confirmed,
+  wouldBlocked,
+  onShowWouldBlocks,
+  onCheckPosture,
+  testid
+}: {
+  confirmed: boolean;
+  wouldBlocked?: number;
+  onShowWouldBlocks: () => void;
+  onCheckPosture: () => void;
+  testid: string;
+}) {
+  if (!confirmed) {
+    return (
+      <div
+        data-testid={`${testid}-unconfirmed`}
+        style={{ color: "var(--text-muted)", fontSize: 12.5, padding: "16px 2px", lineHeight: 1.6 }}
+      >
+        {/* "has not been confirmed" rather than "could not be read": this state also covers the first paint,
+            before the coverage read has landed. Both are the same thing for the reader — we are not in a
+            position to say what the engine does to this namespace's matched traffic. */}
+        <span style={{ color: "var(--escalate)", fontWeight: 600 }}>No enforced blocks in the selected range.</span>{" "}
+        Settings report Monitor for this scope, but that reading merges the cluster-wide default and this
+        namespace&apos;s own engine posture has not been confirmed — so whether this zero is a measurement or a
+        consequence of Monitor mode is <b>unknown</b>.
+        <div>
+          <button type="button" className="btn btn-ghost btn-sm" style={{ marginTop: 8 }} onClick={onCheckPosture}>
+            Check this namespace&apos;s posture →
+          </button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div data-testid={testid} style={{ color: "var(--text-muted)", fontSize: 12.5, padding: "16px 2px", lineHeight: 1.6 }}>
+      {/* NOT "nothing is blocked live", and NOT "structurally empty". Monitor softens POLICY matches only:
+          `_apply_posture` returns the decision untouched when `rule_id in _POSTURE_EXEMPT_RULES`
+          — trust_frozen, policy_load_pending, evaluator_error, evaluator_invalid_payload,
+          rate_limit_exceeded — "an admin trust freeze is an incident-response kill switch that must outrank
+          namespace posture". Those still land here as real `decision="block"` rows. Telling an operator that
+          a monitored namespace enforces NOTHING is wrong about the one control they reach for during an
+          incident, and it throws away the real information an empty feed carries: no freeze, no engine fault
+          and no throttle fired in this range. */}
+      <span style={{ color: "var(--escalate)", fontWeight: 600 }}>Monitor mode — policy matches are not blocked live.</span>{" "}
+      Every policy match is rewritten to an audit row with a <span className="mono">monitor_would_block:</span> rule id,
+      so <b>no policy block can appear here</b>. Only the non-policy blocks stay hard in Monitor — a trust freeze,
+      an engine fault, a rate-limit throttle — and none were recorded in this range.
+      {typeof wouldBlocked === "number" && (
+        <> {wouldBlocked.toLocaleString()} would-block{wouldBlocked === 1 ? "" : "s"} were logged in this range.</>
+      )}
+      <div>
+        <button type="button" className="btn btn-ghost btn-sm" style={{ marginTop: 8 }} onClick={onShowWouldBlocks}>
+          Show would-blocks in the Audit Log →
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function TopBlockedTools({
+  data,
+  monitorScope,
+  monitorConfirmed,
+  wouldBlocked,
+  onShowWouldBlocks,
+  onCheckPosture
+}: {
+  data: Array<{ tool: string; count: number }>;
+  monitorScope: boolean;
+  monitorConfirmed: boolean;
+  wouldBlocked?: number;
+  onShowWouldBlocks: () => void;
+  onCheckPosture: () => void;
+}) {
   const max = Math.max(...data.map((d) => d.count), 1);
   return (
-    <Panel title="Top blocked tools" sub="Most-blocked in selected range">
+    <Panel
+      title="Top blocked tools"
+      sub={monitorScope ? "Most-blocked in selected range — enforced blocks only" : "Most-blocked in selected range"}
+    >
       <div style={{ display: "flex", flexDirection: "column", gap: 13, marginTop: 4 }}>
-        {data.length === 0 && (
+        {data.length === 0 && (monitorScope ? (
+          <MonitorBlockFeedEmpty
+            testid="top-blocked-monitor-empty"
+            confirmed={monitorConfirmed}
+            wouldBlocked={wouldBlocked}
+            onShowWouldBlocks={onShowWouldBlocks}
+            onCheckPosture={onCheckPosture}
+          />
+        ) : (
           <div style={{ color: "var(--text-muted)", fontSize: 13, padding: "16px 0", textAlign: "center" }}>
             No blocked tool calls in the selected range
           </div>
-        )}
+        ))}
         {data.map((d) => (
           <div key={d.tool} style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <span
@@ -221,6 +332,13 @@ export function Dashboard() {
   const namespaceMode = coverageUsable ? coverage.data?.namespace_mode : undefined;
   const monitorScope =
     selectedNamespace !== "all" && (namespaceMode ? namespaceMode === "audit" : posture.mode === "audit");
+  // …and the STRONGER fact: the engine's own field actually answered, and it said Monitor. The fallback
+  // above is fine for a LABEL ("Would-block (24h)") — a label the operator reads together with the
+  // coverage card's own "could not be read" state. It is NOT enough for a sentence that explains what the
+  // engine does to matched traffic, or for a deep link premised on `monitor_would_block:` rows existing.
+  // Everything that asserts the MECHANISM keys on this instead, so an unread posture can never be
+  // published as "nothing here is enforced".
+  const monitorConfirmed = selectedNamespace !== "all" && namespaceMode === "audit";
   const provenPct = efficacy.data?.has_run ? efficacy.data.efficacy?.overall.proven_blocking_pct : undefined;
   // /redteam/results/latest is ADMIN-ONLY (redteam.py require_admin), so a non-admin operator — and any 5xx or
   // network fault — lands here with `error` set and `data` null. That is "we could not ask", which must never
@@ -311,6 +429,15 @@ export function Dashboard() {
   // any policy in it carries forced-zero efficacy with effective=false. Never draw that as a verdict.
   const agentClassDegraded = !!coverage.data?.agent_class_policies_degraded;
   const agentClassPolicies = coverage.data?.agent_class_policies ?? [];
+
+  // The only reachable population in Monitor mode. `/audit/records` filters `rule_id` by EXACT match, so a
+  // `monitor_would_block:` PREFIX is not a server-side filter the console can send — `decision=audit` is the
+  // narrowest filter that CAN match these rows, and the Audit Log renders that rule-id prefix specially
+  // (AuditLog.tsx: "a Monitor-mode softened row reads clearly as observe-mode"). Pointing "See All →" at
+  // `decision=block` here sent the operator to a table that is structurally incapable of returning a row.
+  const showWouldBlocks = () => navigate(`/audit?decision=audit`);
+  // The unconfirmed empty state's one honest action: go and read the posture this page could not.
+  const checkPosture = () => navigate(`/policies/targets`);
 
   // Export the loaded audit records as CSV (wired to the Export button and Report ▼ "Export CSV").
   const onExportCsv = () => {
@@ -544,7 +671,14 @@ export function Dashboard() {
           {useHub ? (
             <RemoteScopedPanel title="Top blocked tools" sub="Most-blocked in selected range" cluster={scopeCluster} consoleUrl={selectedClusterConsoleUrl} />
           ) : (
-            <TopBlockedTools data={topBlockedData} />
+            <TopBlockedTools
+              data={topBlockedData}
+              monitorScope={monitorScope}
+              monitorConfirmed={monitorConfirmed}
+              wouldBlocked={stats.data?.would_blocked}
+              onShowWouldBlocks={showWouldBlocks}
+              onCheckPosture={checkPosture}
+            />
           )}
         </div>
 
@@ -686,7 +820,21 @@ export function Dashboard() {
         ) : (
         <Panel
           title="Recent Blocked"
-          sub="Last 10 blocked tool calls"
+          // In Monitor mode this feed counts something the engine never emits — say which population it is
+          // over, right in the subtitle, rather than letting "Last 10 blocked tool calls" over an empty table
+          // read as "nothing matched". (The rows themselves stay ENFORCED blocks: `/audit/records` cannot
+          // filter on the `monitor_would_block:` rule-id prefix, so re-sourcing this feed would mean
+          // client-side sampling a capped page — a sample printed as a feed. The empty state names the real
+          // would-block number instead and links to the rows.)
+          // A claim about the ENGINE, so it keys on `monitorConfirmed`, not on the settings-fallback
+          // `monitorScope` (see the note on `monitorConfirmed`). And NOT "this namespace enforces none":
+          // `_POSTURE_EXEMPT_RULES` keeps trust-freeze / engine-fault / rate-limit blocks hard in Monitor,
+          // and those land in this feed.
+          sub={
+            monitorConfirmed
+              ? "Last 10 enforced blocks — in Monitor, only non-policy ones (trust freeze, engine fault, rate limit)"
+              : "Last 10 blocked tool calls"
+          }
           // Addressable so a test can scope to the FEED. Searching the page for /blocked/i instead
           // matches this panel's own title, its empty state, the "Blocked (24h)" KPI label and the
           // "Top blocked tools" heading — all rendered before any fetch resolves — which is how
@@ -700,7 +848,10 @@ export function Dashboard() {
               // already DEFAULTS to real-traffic-only, and this panel now uses that same lens — so the list you
               // clicked and the page you arrive at agree. They did not before: this panel included synthetic rows
               // the destination filtered out, so a populated list drilled through to an empty table.
-              onClick={() => navigate(`/audit?decision=block`)}
+              // `decision=audit` is the right destination only where `monitor_would_block:` rows actually
+              // exist — i.e. where the ENGINE confirmed Monitor. Sending an operator there off an unread
+              // posture would swap one unmatchable filter for a table of unrelated audit decisions.
+              onClick={() => (monitorConfirmed ? showWouldBlocks() : navigate(`/audit?decision=block`))}
               type="button"
             >
               See All →
@@ -709,16 +860,26 @@ export function Dashboard() {
         >
           <div style={{ overflowX: "auto" }}>
             {(Array.isArray(blocked.data) ? blocked.data : []).length === 0 ? (
-              <div
-                style={{
-                  textAlign: "center",
-                  color: "var(--text-muted)",
-                  padding: "32px 0",
-                  fontSize: 13
-                }}
-              >
-                No blocked tool calls in the selected range
-              </div>
+              monitorScope ? (
+                <MonitorBlockFeedEmpty
+                  testid="recent-blocked-monitor-empty"
+                  confirmed={monitorConfirmed}
+                  wouldBlocked={stats.data?.would_blocked}
+                  onShowWouldBlocks={showWouldBlocks}
+                  onCheckPosture={checkPosture}
+                />
+              ) : (
+                <div
+                  style={{
+                    textAlign: "center",
+                    color: "var(--text-muted)",
+                    padding: "32px 0",
+                    fontSize: 13
+                  }}
+                >
+                  No blocked tool calls in the selected range
+                </div>
+              )
             ) : (
               <table className="tbl">
                 <thead>

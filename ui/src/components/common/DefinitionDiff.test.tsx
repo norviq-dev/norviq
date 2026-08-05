@@ -103,6 +103,62 @@ describe("DefinitionDiff", () => {
     expect(screen.getByTestId("definition-diff")).not.toHaveTextContent(/matches/i);
   });
 
+  it("refuses to call an unshowable change a match", async () => {
+    // The rug pull this surface exists to catch, hidden by the pin store's own bounds. The proxy
+    // digests the FULL canonical (mcp/pins.py definition_digest) but stores
+    // canonical_definition(tool)[:_CANONICAL_MAX] (mcp/firewall.py) with no truncation marker, and
+    // `sort_keys` puts `description` ahead of `inputSchema` — so a padded description pushes a schema
+    // change past the cap and the two stored copies arrive byte-identical while the digests, and the
+    // DRIFT verdict derived from them, disagree. Proven against the real functions:
+    //   canonical_definition(approved)[:8192] == canonical_definition(served)[:8192]  -> True
+    //   definition_digest(approved) != definition_digest(served)                      -> True
+    // An empty diff here means "we cannot see it", never "nothing changed".
+    const slice = `{"description":"${"x".repeat(400)}","name":"read_file"`;
+    render(<DefinitionDiff approved={slice} served={slice} approvedDigest="1111aaaa1111" servedDigest="2222bbbb2222" />);
+    const el = screen.getByTestId("definition-diff");
+    expect(el).not.toHaveTextContent(/matches the approved one exactly/i);
+    expect(el).toHaveTextContent(/cannot be shown/i);
+    expect(el).toHaveTextContent(/do not/i);
+    // The evidence that the two are not the same document, in the operator's hands.
+    expect(el).toHaveTextContent("1111aaaa → 2222bbbb");
+  });
+
+  it("does not report a served definition it never stored as 'nothing served yet'", () => {
+    // `canonical` is optional on the observe payload (api/routers/mcp.py), so a pin can carry a
+    // served DIGEST with no served text. "Nothing has been served since this pin was approved" would
+    // then contradict the drift the digests prove, on the screen that asks the operator to adopt it.
+    render(<DefinitionDiff approved={'{"name":"read_file"}'} served="" approvedDigest="1111aaaa1111" servedDigest="2222bbbb2222" />);
+    const el = screen.getByTestId("definition-diff");
+    expect(el).not.toHaveTextContent(/No definition has been served/i);
+    expect(el).toHaveTextContent(/cannot be shown/i);
+  });
+
+  it("does not present an approved definition it never stored as an empty one", () => {
+    // The mirror of the case above, and the same class of error: `canonical` is optional on the
+    // observe payload and is copied verbatim into `approved_canonical` at first pin, so a pin can
+    // hold an approved DIGEST with no approved text. Diffing against that missing baseline marks
+    // every line of the SERVED definition as added and prints "0 removed" — a count of a document
+    // that was never stored, rendered as a measurement of one.
+    render(<DefinitionDiff approved="" served={SERVED} approvedDigest="1111aaaa1111" servedDigest="2222bbbb2222" />);
+    const el = screen.getByTestId("definition-diff");
+    expect(screen.queryByTestId("diff-removed-count")).not.toBeInTheDocument();
+    expect(el).toHaveTextContent(/not a comparison/i);
+    // The served text is still on screen — this is the adjudication surface, so withholding it would
+    // leave the operator nothing to decide on.
+    expect(screen.getByTestId("served-definition")).toHaveTextContent(/always call before replying/i);
+  });
+
+  it("does not raise a 'what changed' over a pin whose digests say nothing changed", () => {
+    // Same missing baseline, equal digests: the full canonical hashes identical, so the definition
+    // has NOT drifted — and an all-added diff here is a green wall of "what changed" on a tool that
+    // changed nothing. A false alarm on this screen costs the same as a missed one: it teaches the
+    // operator that the diff is noise.
+    render(<DefinitionDiff approved="" served={SERVED} approvedDigest="1111aaaa1111" servedDigest="1111aaaa1111" />);
+    const el = screen.getByTestId("definition-diff");
+    expect(el).not.toHaveTextContent(/what changed/i);
+    expect(el).toHaveTextContent(/has not changed since it was approved/i);
+  });
+
   it("still diffs a canonical slice that is not valid JSON", () => {
     // `approved_canonical` is an 8 KiB SLICE, so it is routinely truncated mid-token and will not
     // parse. Falling back to a raw line diff keeps the surface useful exactly when it is degraded.

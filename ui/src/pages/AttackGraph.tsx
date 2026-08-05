@@ -41,6 +41,31 @@ const RANGES = [
 const RANK_STATUS: Record<PathStatus, number> = { exploitable: 0, unsimulated: 1, blocked: 2 };
 const RANK_SEV: Record<Severity, number> = { critical: 0, high: 1, medium: 2, low: 3 };
 
+/**
+ * Say what a compute run actually did, from the route's own body.
+ *
+ * POST /attack-paths/compute answers one of two shapes: `{namespace, computed}` for a single
+ * namespace, `{computed_by_namespace, total}` for the aggregate. Both can legitimately be zero —
+ * no stored asset graph, no agents in it — and zero is exactly the outcome an operator must not
+ * read as "recomputed, all clear", because the screen underneath looks identical either way.
+ *
+ * A body we cannot parse is reported as UNREAD, never as a count. "We could not measure this" must
+ * not render like "we measured, and it is fine".
+ */
+function describeRecompute(body: unknown): string {
+  const b = (body ?? {}) as Record<string, unknown>;
+  if (typeof b.total === "number" && b.computed_by_namespace && typeof b.computed_by_namespace === "object") {
+    const ns = Object.keys(b.computed_by_namespace as Record<string, unknown>).length;
+    if (ns === 0) return "Recompute ran, but no namespace has a stored asset graph — there was nothing to compute from.";
+    return `Recomputed ${b.total} attack path${b.total === 1 ? "" : "s"} across ${ns} namespace${ns === 1 ? "" : "s"}.`;
+  }
+  if (typeof b.computed === "number") {
+    const where = typeof b.namespace === "string" && b.namespace ? ` in ${b.namespace}` : "";
+    return `Recomputed ${b.computed} attack path${b.computed === 1 ? "" : "s"}${where}.`;
+  }
+  return "Recompute returned 200, but the server did not report what it computed — treat the paths below as unverified.";
+}
+
 export function AttackGraph() {
   const { selectedNamespace, namespaces, selectedCluster, servedCluster, setCluster, setNamespace, clusters } = useApp();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -53,6 +78,10 @@ export function AttackGraph() {
   const [loading, setLoading] = useState(true);
   const [degraded, setDegraded] = useState(false);
   const [recomputing, setRecomputing] = useState(false);
+  // What the LAST compute run actually did, in the server's own words. `res.ok` only says the route
+  // ran; it cannot tell "recomputed 12 kill-chains" from "recomputed nothing", and this page's whole
+  // job after a Recompute is to say which of those happened. Null = no run since the last scope change.
+  const [recomputeNote, setRecomputeNote] = useState<string | null>(null);
 
   // filters (hydrated from URL on mount)
   const [range, setRange] = useState(searchParams.get("range") ?? "24h");
@@ -148,6 +177,12 @@ export function AttackGraph() {
   useEffect(() => {
     setScope((s) => (s ? buildScope(s.id, paths, loadedRange ?? undefined) : s));
   }, [paths, loadedRange]);
+
+  // The note describes ONE compute run at ONE scope. Once the namespace moves it would caption this
+  // scope's screen with another scope's run — the same rule `loadedRange` enforces for the window.
+  // (It is deliberately NOT cleared in the fetch effect: that effect re-runs as part of the recompute
+  // cycle itself and would wipe the note before the operator ever saw it.)
+  useEffect(() => { setRecomputeNote(null); }, [selectedNamespace]);
 
   // Flip synthetic-agent visibility + persist (shared with the Asset graph); the fetch effect re-runs.
   const toggleSynthetic = () => setShowSynthetic((v) => {
@@ -297,9 +332,19 @@ export function AttackGraph() {
     setWhatIf({});
     setSim({});
     setSimResult({});
+    setRecomputeNote(null);
     try {
       const token = getToken();
-      const res = await fetch(apiUrl(`/api/v1/attack-paths/compute?namespace=${encodeURIComponent(selectedNamespace)}`), {
+      // "all" is the console's AGGREGATE SENTINEL, not a namespace — policies.py rejects the same
+      // string at the write boundary (`_VIEW_SENTINEL_NAMESPACES`) precisely because no agent ever
+      // reports it. The compute route branches on `if namespace:`, so ANY truthy value takes its
+      // SINGLE-namespace path, which exact-matches `asset_graph.namespace = :ns` — a row that by
+      // construction never exists for "all". Sending it recomputed nothing, returned 200
+      // {"computed": 0}, and the operator got a spinner, no banner and the same stale kill-chains.
+      // The aggregate branch (`compute_all_namespaces`) is reachable ONLY when the parameter is ABSENT.
+      const scoped = selectedNamespace && selectedNamespace !== "all";
+      const qs = scoped ? `?namespace=${encodeURIComponent(selectedNamespace)}` : "";
+      const res = await fetch(apiUrl(`/api/v1/attack-paths/compute${qs}`), {
         method: "POST",
         headers: token ? { Authorization: `Bearer ${token}` } : {}
       });
@@ -308,7 +353,12 @@ export function AttackGraph() {
       // Latch the outcome so the follow-on refetch (below) can't clear the banner on a
       // successful READ of the stale paths — only a compute POST that returns ok clears the latch.
       if (!res.ok) { recomputeFailedRef.current = true; setDegraded(true); }
-      else recomputeFailedRef.current = false;
+      else {
+        recomputeFailedRef.current = false;
+        // 200 is not "the graph is fresh" — it is "the route ran". Read what it says it computed and
+        // put that on screen, so a run that produced nothing can never be mistaken for a full refresh.
+        setRecomputeNote(describeRecompute(await res.json().catch(() => null)));
+      }
     } catch {
       recomputeFailedRef.current = true;
       setDegraded(true);
@@ -430,6 +480,15 @@ export function AttackGraph() {
         <div role="alert" style={{ margin: "14px 0", display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: "rgba(255,176,32,0.08)", border: "1px solid #4a3a1a", borderRadius: 10 }}>
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#FFB020" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
           <span style={{ fontSize: 12.5, fontWeight: 600, color: "#ffcf82" }}>API unavailable. Showing partial data.</span>
+        </div>
+      )}
+
+      {/* What the last Recompute actually did. Silence after a compute POST is indistinguishable from
+          a successful full refresh, and on this page the two have opposite meanings. */}
+      {recomputeNote && !degraded && (
+        <div role="status" data-testid="recompute-note" style={{ margin: "14px 0", display: "flex", alignItems: "center", gap: 9, padding: "9px 14px", background: "var(--bg-graph-panel, #141414)", border: "1px solid var(--graph-border, #2a2a2a)", borderRadius: 10, fontSize: 12, color: "var(--text-secondary, #9aa4b2)" }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7c8a9a" strokeWidth="1.8" style={{ flex: "none" }}><circle cx="12" cy="12" r="9" /><path d="M12 8h.01M11 12h1v4h1" /></svg>
+          <span>{recomputeNote}</span>
         </div>
       )}
 
@@ -587,7 +646,14 @@ export function AttackGraph() {
           {empty ? (
             <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, minHeight: 520, textAlign: "center" }}>
               <div style={{ fontSize: 13, color: "#a0a0a0", lineHeight: 1.5 }}>
-                {paths.length === 0 && !loading ? "No attack paths stored for this namespace." : "No attack paths match the current filters."}
+                {/* Name the scope the emptiness is TRUE of. At the default aggregate scope "this
+                    namespace" reads as one namespace being clean while the operator is looking at
+                    the whole estate — the strongest possible claim, worded as the weakest. */}
+                {paths.length === 0 && !loading
+                  ? (selectedNamespace === "all"
+                      ? "No attack paths stored in any namespace."
+                      : `No attack paths stored for ${selectedNamespace}.`)
+                  : "No attack paths match the current filters."}
               </div>
               <div style={{ display: "flex", gap: 10 }}>
                 <button type="button" onClick={resetFilters} style={{ height: 30, padding: "0 14px", border: "1px solid var(--graph-border, #2a2a2a)", borderRadius: 8, background: "transparent", color: "#a0a0a0", fontFamily: "inherit", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Reset</button>

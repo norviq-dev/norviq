@@ -136,6 +136,78 @@ export function DefinitionDiff({
     };
   }, [approved, served]);
 
+  // THE DIGESTS OUTRANK THE TEXT. `approvedDigest`/`servedDigest` are taken over the WHOLE canonical
+  // definition (mcp/pins.py `definition_digest`); `approved`/`served` are the bounded slice the proxy
+  // kept (`canonical_definition(tool)[:_CANONICAL_MAX]` in mcp/firewall.py) — truncated with no marker,
+  // and `sort_keys` puts `description` ahead of `inputSchema`, so a padded description pushes a schema
+  // change out of BOTH stored copies. They then arrive byte-identical while the digests differ, and the
+  // digests are what the drift verdict is derived from (api/routers/mcp.py `_status_of`).
+  //
+  // So when the digests disagree and this component has nothing to show, the honest report is "the
+  // change is outside the copy we hold" — never the two reassuring sentences below, which would state
+  // an equality nobody checked on the one screen whose next button adopts the change.
+  const digestsDiffer = Boolean(approvedDigest && servedDigest && approvedDigest !== servedDigest);
+  if (digestsDiffer && (!served || rows.length === 0)) {
+    return (
+      <div data-testid={testId} style={{ fontSize: 12.5, lineHeight: 1.6 }}>
+        <div data-testid="diff-unshowable" style={{ color: "var(--escalate)", fontWeight: 600, marginBottom: 4 }}>
+          The change cannot be shown here.
+        </div>
+        <div style={{ color: "var(--text-secondary)" }}>
+          {served
+            ? `The stored copies of the approved and served definitions are identical, but their digests
+               are not — so what changed lies outside the truncated copy this console holds.`
+            : `A definition with a different digest has been served, but no copy of it was stored, so
+               there is nothing to compare it against.`}{" "}
+          This is <b>not</b> evidence that nothing changed. Do not adopt this definition on the strength
+          of an empty diff — read what the server is serving now at its source first.
+        </div>
+        <div className="mono" style={{ marginTop: 6, fontSize: 11.5, color: "var(--text-muted)" }}>
+          {approvedDigest?.slice(0, 8)} → {servedDigest?.slice(0, 8)}
+        </div>
+      </div>
+    );
+  }
+
+  // THE OTHER SIDE OF THE SAME COIN: no stored copy of the APPROVED definition.
+  //
+  // `canonical` is optional on the observe payload (api/routers/mcp.py `canonical: str = ""`) and is
+  // stored verbatim into `approved_canonical` at first pin, so a pin can hold an approved DIGEST with
+  // no approved text. An empty string is unambiguous here — `canonical_definition` (mcp/pins.py)
+  // json.dumps a dict, so its shortest possible output is `{}`, never "".
+  //
+  // Diffing against a missing baseline turns every line of the served definition into an ADD and puts
+  // "0 removed" under it: a count of a document that was never stored, presented as a measurement. On
+  // an unchanged pin (digests equal) it is worse than imprecise — the screen fills with a green "What
+  // changed" for a tool that did not change. Show the served text, and say what it is.
+  if (served && !approved) {
+    const known =
+      approvedDigest && servedDigest
+        ? approvedDigest === servedDigest
+          ? `Its digest still matches the approved digest, so the definition has not changed since it was approved.`
+          : `Its digest does not match the approved one, so it HAS changed — but with no approved copy stored, nothing here can show what changed.`
+        : `No digest pair was recorded either, so nothing about this definition has been compared.`;
+    return (
+      <div data-testid={testId} style={{ fontSize: 12.5, lineHeight: 1.6 }}>
+        <div data-testid="diff-no-baseline" style={{ color: "var(--escalate)", fontWeight: 600, marginBottom: 4 }}>
+          No copy of the approved definition was stored, so this is not a comparison.
+        </div>
+        <div style={{ color: "var(--text-secondary)" }}>
+          Everything below is the definition being served now, in full — not a change the server made.{" "}
+          {known}
+        </div>
+        {approvedDigest && servedDigest ? (
+          <div className="mono" style={{ marginTop: 6, fontSize: 11.5, color: "var(--text-muted)" }}>
+            {approvedDigest.slice(0, 8)} → {servedDigest.slice(0, 8)}
+          </div>
+        ) : null}
+        <pre className="json" data-testid="served-definition" style={{ marginTop: 8 }}>
+          {toLines(served).join("\n")}
+        </pre>
+      </div>
+    );
+  }
+
   // No served definition at all is NOT "no change" — it means nothing has been observed since the
   // approval, and saying "matches" there would assert something we never checked.
   if (!served) {

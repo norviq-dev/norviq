@@ -28,6 +28,7 @@ import { Panel } from "../components/common/Panel";
 import { StatTile } from "../components/common/StatTile";
 import { useToast } from "../components/common/Toast";
 import { useApi } from "../hooks/useApi";
+import { type Lookalike, lookalikeOf } from "../lib/predicateSentence";
 import { useApp } from "../store/AppContext";
 
 export type McpServerRow = {
@@ -93,11 +94,129 @@ const HEALTH_META: Record<string, { label: string; tone: string; icon: typeof Sh
 
 const STATUS_TONE: Record<string, string> = { drift: "bad", quarantined: "warn", pinned: "ok" };
 
-function Pill({ text, tone }: { text: string; tone: string }) {
+function Pill({ text, tone, label }: { text: string; tone: string; label?: string }) {
   return (
-    <span className="pill" style={TONE[tone] ?? TONE.neutral}>
+    <span className="pill" style={TONE[tone] ?? TONE.neutral} aria-label={label}>
       {text}
     </span>
+  );
+}
+
+/**
+ * A name on this page is not the name it appears to be.
+ *
+ * THIS is the screen with the Approve button, so it is the screen where a lookalike becomes a
+ * decision. A second server publishing `reаd_file` (Cyrillic а, U+0430) renders pixel-identical to the
+ * `read_file` an operator already trusts, earns a "Withheld" pill that reads as "a normal tool
+ * awaiting approval", and sits beside "Approve served definition".
+ *
+ * The detector is the console's existing one — `lookalikeOf` — reused rather than reinvented. What is
+ * deliberately NOT done here is fold the collision buckets on a skeleton: `ui/src/lib/skeleton.ts`
+ * says in its own header that it ports neither the cross-script confusables table nor Cf/Cc
+ * stripping, so a browser-derived skeleton does NOT fold Cyrillic а to Latin a and would disagree
+ * with the engine. `/mcp/pins` (`_row_dict`, mcp.py:90-109) ships no `name_skeleton` the way `/tools`
+ * does. So this page states the fact it can measure exactly — these codepoints are not ASCII, and
+ * here is where they sit — and never guesses which ASCII name the engine would fold them onto.
+ */
+function lookalikesOfPin(p: Pick<McpPinRow, "tool_name" | "server_id">): Lookalike[] {
+  return [lookalikeOf(p.tool_name), lookalikeOf(p.server_id)].filter((l): l is Lookalike => l !== null);
+}
+
+/** The row mark. Visible text, never a `title` — a pill is not hoverable on touch and `.btn:disabled`
+ *  taught this codebase that a tooltip is not a place to keep a security fact. */
+function LookalikePill({ l }: { l: Lookalike }) {
+  return (
+    <Pill
+      text="Lookalike"
+      tone="bad"
+      label={`Not the ASCII name it resembles: ${l.masked} carries ${l.codepoints.join(", ")}`}
+    />
+  );
+}
+
+/**
+ * A tool name or server id printed inside the console's own prose, marked if it is not what it looks
+ * like.
+ *
+ * The collision note names servers — it has to, or an operator cannot tell which definitions a policy
+ * would govern. But `server_id` and `tool_name` are strings an MCP server chose, and printing
+ * `governs both (filesystem, runbоoks)` in the product's own sentence is the product vouching for a
+ * name it did not author. That is the exact failure the row pills exist to prevent, one paragraph
+ * lower down the same panel, so the note uses the same mark.
+ */
+function MarkedName({ value }: { value: string }) {
+  const l = lookalikeOf(value);
+  return (
+    <>
+      <span className="mono" style={{ color: "var(--text-secondary)" }}>{value}</span>
+      {l && (
+        <>
+          {" "}
+          <LookalikePill l={l} />
+        </>
+      )}
+    </>
+  );
+}
+
+/**
+ * WHY THIS PAGE DOES NOT RENDER THE SHARED `LookalikeNote`.
+ *
+ * `components/common/LookalikeNote` closes with "…so the rule grants the look-alike AND the
+ * plain-ASCII tool of the same shape. Confirm you meant both before saving." That sentence is true on
+ * the five authoring surfaces that render it (BuilderSheet ×2, RuleCard, NearMissCard, IntentModal) —
+ * each has a rule and a Save. This dialog has neither: its controls are "Show full definitions" and
+ * "Approve served definition", and approving pins one server's definition rather than writing any
+ * allowlist. `Intents.tsx::ArgLookalikeNote` set the precedent and the reason — reusing the other
+ * note's copy "would be a misstatement of what the engine does, which this codebase treats as worse
+ * than no copy".
+ *
+ * So: same detector, same visual language, same `masked`-carries-`codepoints` line, and the
+ * consequence restated for the control that is actually on this screen. The allowlist fact survives
+ * because it is what makes approving consequential HERE — the engine matches
+ * `allow_skeletons[input.tool_name_normalized]` and `norviq/engine/confusables.py::skeleton` folds
+ * Cyrillic а to Latin a (verified: `skeleton("reаd_file") == "read_file"`), so this tool needs no
+ * rule of its own to become reachable under a policy written for the name it imitates.
+ */
+function PinLookalikeNote({ lookalikes }: { lookalikes: Lookalike[] }) {
+  if (lookalikes.length === 0) return null;
+  return (
+    <div
+      data-testid="mcp-lookalike"
+      style={{
+        marginTop: 5,
+        marginBottom: 14,
+        padding: "7px 9px",
+        borderRadius: 8,
+        border: "1px solid #ff3b5c30",
+        background: "#ff3b5c12",
+        fontSize: 12,
+        lineHeight: 1.5,
+        color: "var(--text-secondary)"
+      }}
+    >
+      <span
+        className="pill"
+        style={{ background: "#ff3b5c15", color: "#ff3b5c", borderColor: "#ff3b5c30", marginRight: 7 }}
+      >
+        Lookalike name
+      </span>
+      {lookalikes.map((l) => (
+        <span key={l.value} style={{ display: "block", marginTop: 5 }}>
+          <code className="mono" style={{ fontSize: 12 }}>
+            {l.masked}
+          </code>{" "}
+          carries {l.codepoints.join(", ")} where an ASCII letter appears to be.
+        </span>
+      ))}
+      <span style={{ display: "block", marginTop: 5 }}>
+        Approving hands this name to the model as a callable tool. The engine matches tool allowlists
+        evasion-normalised, so a policy written for the plain-ASCII tool of the same shape already grants
+        this one — it does not need a rule of its own to be reachable. Check it against the server you
+        expected to serve that name first: an identical-looking name from a second server is
+        impersonation, not a duplicate.
+      </span>
+    </div>
   );
 }
 
@@ -217,7 +336,22 @@ export function McpServers() {
     [allPins, selectedPin]
   );
 
-  /** Tool names served by more than one server, in view. Drives the collision note. */
+  /**
+   * Every tool name served by more than one DISTINCT server, each carrying its own server set.
+   *
+   * The count and the servers are both carried, and both are rendered, because the note used to be a
+   * single block of literals — "Two … rows are two definitions on two servers … governs both" —
+   * indexed at `collisions[0]`. Three servers publishing `read_file` therefore read as two, a second
+   * colliding name was never mentioned at all, and no server was named. An operator sizing the blast
+   * radius of a policy naming `read_file` reads "the set is closed at two", verifies two definitions
+   * and stops, leaving a third un-reviewed. The Tools page was already fixed for exactly this
+   * (Tools.tsx `CollisionNote`); this page is the same estate and must not disagree with it about how
+   * many servers publish one name.
+   *
+   * `Set` rather than a row count, for the reason Tools states: a pin's identity is `(namespace,
+   * server_id, tool_name)`, so ONE server pinned in two namespaces yields two rows with the same
+   * `server_id` and is not a collision.
+   */
   const collisions = useMemo(() => {
     const byName = new Map<string, Set<string>>();
     for (const p of allPins) {
@@ -225,7 +359,9 @@ export function McpServers() {
       set.add(p.server_id);
       byName.set(p.tool_name, set);
     }
-    return [...byName.entries()].filter(([, servers_]) => servers_.size > 1).map(([name]) => name);
+    return [...byName.entries()]
+      .filter(([, servers_]) => servers_.size > 1)
+      .map(([name, servers_]) => [name, [...servers_].sort()] as [string, string[]]);
   }, [allPins]);
 
   const totals = useMemo(() => {
@@ -365,7 +501,19 @@ export function McpServers() {
   );
 
   const serverColumns: Array<Column<McpServerRow>> = [
-    { key: "server_id", title: "Server", render: (v) => <span className="mono">{String(v)}</span> },
+    {
+      key: "server_id",
+      title: "Server",
+      render: (v, row) => {
+        const l = lookalikeOf(row.server_id);
+        return (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
+            <span className="mono">{String(v)}</span>
+            {l && <LookalikePill l={l} />}
+          </span>
+        );
+      }
+    },
     { key: "namespace", title: "Namespace", render: (v) => <span className="muted">{String(v)}</span> },
     { key: "transport", title: "Transport", render: (v) => <span className="mono muted">{String(v)}</span> },
     { key: "tools", title: "Tools" },
@@ -403,14 +551,30 @@ export function McpServers() {
     {
       key: "tool_name",
       title: "Tool",
-      render: (v, row) => (
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
-          <span className="mono">{String(v)}</span>
-          {isWithheld(row) && <Pill text="Withheld" tone="bad" />}
-        </span>
-      )
+      render: (v, row) => {
+        const l = lookalikeOf(row.tool_name);
+        return (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
+            <span className="mono">{String(v)}</span>
+            {l && <LookalikePill l={l} />}
+            {isWithheld(row) && <Pill text="Withheld" tone="bad" />}
+          </span>
+        );
+      }
     },
-    { key: "server_id", title: "Server", render: (v) => <span className="mono muted">{String(v)}</span> },
+    {
+      key: "server_id",
+      title: "Server",
+      render: (v, row) => {
+        const l = lookalikeOf(row.server_id);
+        return (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
+            <span className="mono muted">{String(v)}</span>
+            {l && <LookalikePill l={l} />}
+          </span>
+        );
+      }
+    },
     {
       key: "status",
       title: "Pin",
@@ -571,10 +735,29 @@ export function McpServers() {
             >
               <Info size={14} style={{ flex: "none", marginTop: 2, color: "var(--escalate)" }} />
               <span style={{ fontSize: 12.5, lineHeight: 1.55, color: "var(--text-muted)" }}>
-                Two <span className="mono" style={{ color: "var(--text-secondary)" }}>{collisions[0]}</span> rows are
-                two definitions on two servers, keyed on{" "}
-                <span className="mono" style={{ color: "var(--text-secondary)" }}>(namespace, server_id, tool_name)</span>.
-                The engine sees only the bare name, so a policy naming it governs both.
+                Rows are keyed on{" "}
+                <span className="mono" style={{ color: "var(--text-secondary)" }}>(namespace, server_id, tool_name)</span>,
+                so these are separate definitions rather than duplicates. The engine sees only the bare name.
+                {/* Both the name and every server id are strings a server chose. `MarkedName` is why
+                    they are not simply interpolated: naming the servers is the whole point of the
+                    note, and an unmarked `runbоoks` inside the console's own sentence reads as a
+                    second legitimate server rather than the impersonation the row pill calls it. */}
+                {collisions.map(([name, servers_]) => (
+                  <span key={name} style={{ display: "block", marginTop: 5 }}>
+                    A policy naming <MarkedName value={name} /> governs{" "}
+                    <strong style={{ color: "var(--text-secondary)", fontWeight: 600 }}>
+                      {servers_.length === 2 ? "both" : `all ${servers_.length}`}
+                    </strong>{" "}
+                    (
+                    {servers_.map((s, i) => (
+                      <span key={s}>
+                        {i > 0 && ", "}
+                        <MarkedName value={s} />
+                      </span>
+                    ))}
+                    ).
+                  </span>
+                ))}
               </span>
             </div>
           )}
@@ -600,6 +783,12 @@ export function McpServers() {
           }
           subtitle={detailSubtitle(selectedTool)}
         >
+          {/* FIRST in the body, above the diff and above Approve. The operator is about to decide
+              whether this definition is the one they think it is, and the name in the title is the
+              only thing they have to go on — `notes / reаd_file` and `filesystem / read_file` are the
+              same pixels. Reuses the console's own detector and note rather than a second mechanism. */}
+          <PinLookalikeNote lookalikes={lookalikesOfPin(selectedTool)} />
+
           {/* The badge's own sentence, in the view that outranks it. A scanner grade at or above
               `mcp_scan_strip_severity` strips the tool whatever the pin says, so this has to name
               what would CLEAR it — otherwise the only control on offer is Revoke, which is the

@@ -180,7 +180,14 @@ async def list_tools(
     pins = (await session.scalars(pin_stmt.order_by(McpToolPin.server_id, McpToolPin.tool_name))).all()
 
     rows = [_declared_row(p) for p in pins]
-    declared_names = {p.tool_name.lower() for p in pins}
+    # Keyed on (NAMESPACE, name), never on the bare name. `read_namespace` returns None for the
+    # console's default "All namespaces" scope, so `pins` then spans every tenant — and a name-only
+    # set would suppress the observed row for `payments/run_query` because SOME OTHER namespace pinned
+    # a `run_query`. The operator authoring policy for `payments` would read a tool that is unpinned,
+    # unscanned and of unknown shape there as declared-and-approved: precisely the flattening this
+    # module's docstring calls "reintroducing the bug". Declared in one namespace and merely observed
+    # in another is TWO facts, and they belong in their two tiers.
+    declared_keys = {(p.namespace, p.tool_name.lower()) for p in pins}
 
     # Observed tier. `audit_row_is_non_real` is the SQL twin of `is_synthetic_identity` and exists exactly
     # so this exclusion does not have to be re-expressed (or forgotten): without it, red-team and probe
@@ -196,16 +203,19 @@ async def list_tools(
         seen_stmt = seen_stmt.where(AuditLogEntry.namespace == ns)
     for tool_name, row_ns in (await session.execute(seen_stmt)).all():
         name = str(tool_name or "")
-        # A declared tool that has also been called stays in the strong tier — it is the same tool, and
-        # emitting it twice would invite a caller to count it twice.
-        if not name or name.lower() in declared_names:
+        # A declared tool that has also been called stays in the strong tier — it is the same tool IN
+        # THAT NAMESPACE, and emitting it twice would invite a caller to count it twice. The same name
+        # in a namespace with no pin is a DIFFERENT fact and keeps its observed row.
+        if not name or (str(row_ns or ""), name.lower()) in declared_keys:
             continue
         rows.append(_observed_row(str(row_ns or ""), name))
 
     log.debug(
         "nrvq.api.tools.list",
-        declared=len(declared_names),
-        observed=len(rows) - len(declared_names),
+        # Counted off `pins`/`rows`, not off a de-duplicated name set: `rows` holds one entry PER PIN,
+        # so two servers declaring one name made `len(rows) - len(names)` over-report the observed tier.
+        declared=len(pins),
+        observed=len(rows) - len(pins),
         code="NRVQ-API-7040",
     )
     return rows

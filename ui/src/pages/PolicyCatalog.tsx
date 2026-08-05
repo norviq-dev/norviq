@@ -45,6 +45,7 @@ import { baseClassOfOverlay, isReservedScope, isRemediationOverlayClass, overlay
 import { ApplyResultPanel, type ApplyResult } from "../components/common/ApplyResultPanel";
 import { DecisionBadge, type Decision } from "../components/common/DecisionBadge";
 import { KitButton } from "../components/common/KitButton";
+import { Modal } from "../components/common/Modal";
 import { PageHead } from "../components/common/PageHead";
 import { Panel } from "../components/common/Panel";
 import { BuilderSheet } from "../components/policies/BuilderSheet";
@@ -1230,6 +1231,22 @@ export function PolicyCatalog() {
   const [newPolicy, setNewPolicy] = useState<{ namespace: string; agent_class: string; mode: NonNullable<Policy["mode"]> } | null>(null);
   // The policy pending a confirmed delete (drives the confirm modal). Null = no delete in flight.
   const [deleteTarget, setDeleteTarget] = useState<Policy | null>(null);
+  /**
+   * Open the delete confirm, and REFUSE TO RE-TARGET one that is already open.
+   *
+   * The confirm is rendered at the very end of the page while the trash buttons that open it sit in the
+   * policy list above, so a keyboard operator who tabs from an open confirm walks the rows underneath it
+   * — the overlay dims them but takes no focus. Enter on a second row's trash then fired
+   * `setDeleteTarget(otherPolicy)` while a confirm was already up: the dialog stayed mounted, the red
+   * "cannot be undone / removes the class from every layer" warning stayed word-for-word identical, and
+   * the ONLY thing that changed was one line of title text. "Delete policy" then destroyed a different
+   * enforcing policy from the one the operator opened.
+   *
+   * Moving to `Modal` (focus in, Escape out, role=dialog) removes the ordinary way to get there; this
+   * guard removes the rest — a destructive confirm's target must be fixed at the moment it is opened.
+   * Functional form so it reads the live value rather than a render-time closure.
+   */
+  const openDeleteConfirm = (p: Policy) => setDeleteTarget((cur) => cur ?? p);
   // An existing (already-saved) policy's mode is read-only from `editorPolicy`; this holds the in-progress
   // override that lets the operator change JUST the enforcement mode from the editor for the currently
   // loaded existing policy; null = no override yet (falls back to the loaded policy's persisted mode).
@@ -2058,7 +2075,7 @@ export function PolicyCatalog() {
                               data-testid={`catalog-delete-${p.agent_class ?? p.target ?? "policy"}-${p.namespace ?? "none"}`}
                               aria-label={`Delete policy ${p.agent_class ?? p.target ?? ""} in namespace ${p.namespace ?? "unknown"}`}
                               title={`Delete policy · ${p.namespace ?? "unknown namespace"}`}
-                              onClick={(e) => { e.stopPropagation(); setDeleteTarget(p); }}
+                              onClick={(e) => { e.stopPropagation(); openDeleteConfirm(p); }}
                               style={{ position: "absolute", top: 8, right: 8, color: "#ff6b81" }}
                             >
                               <Trash2 size={14} />
@@ -2380,7 +2397,7 @@ export function PolicyCatalog() {
                       size="sm"
                       icon={Trash2}
                       data-testid="editor-delete-policy"
-                      onClick={() => setDeleteTarget(editorPolicy)}
+                      onClick={() => openDeleteConfirm(editorPolicy)}
                     >
                       Delete
                     </KitButton>
@@ -2610,7 +2627,7 @@ export function PolicyCatalog() {
                               variant="outline"
                               size="sm"
                               icon={RotateCcw}
-                              onClick={() => setRestoreV(v.version)}
+                              onClick={() => setRestoreV((cur) => cur ?? v.version)}
                             >
                               Restore
                             </KitButton>
@@ -2699,15 +2716,37 @@ export function PolicyCatalog() {
         />
       )}
 
+      {/* Through the shared `Modal`, not the hand-rolled `.sheet-overlay` + `.confirm-modal` pair this
+          used to be. That pair had no role="dialog", no aria-modal, no Escape handler and moved focus
+          nowhere — focus stayed on the trash button BEHIND the dim overlay, so Tab walked the policy
+          list underneath and the whole retarget in `openDeleteConfirm`'s note was two keystrokes away.
+          `Modal` moves focus to the first control (Cancel, the safe one), restores it on close, and
+          closes on Escape; its own header says a modal an operator cannot dismiss from the keyboard
+          traps them mid-incident. `data-testid` stays on the card so every existing caller still
+          resolves it. */}
       {deleteTarget != null && (
-        <>
-          <div className="sheet-overlay" onClick={() => setDeleteTarget(null)} />
-          <div className="confirm-modal" data-testid="delete-policy-modal">
-            <div className="sheet-title">
+        <Modal
+          danger
+          data-testid="delete-policy-modal"
+          onClose={() => setDeleteTarget(null)}
+          title={
+            <>
               Delete {deleteTarget.namespace}/{overlayDisplayLabel(deleteTarget.agent_class ?? deleteTarget.target)} · v{deleteTarget.current_version ?? 1}?
-            </div>
-            {/* Everything in /policies is loaded & enforcing, so deleting always changes the enforced state. */}
-            <div
+            </>
+          }
+          actions={
+            <>
+              <KitButton variant="ghost" onClick={() => setDeleteTarget(null)}>
+                Cancel
+              </KitButton>
+              <KitButton variant="destructive" icon={Trash2} data-testid="delete-policy-confirm" onClick={confirmDeletePolicy}>
+                Delete policy
+              </KitButton>
+            </>
+          }
+        >
+          {/* Everything in /policies is loaded & enforcing, so deleting always changes the enforced state. */}
+          <div
               data-testid="delete-policy-warning"
               style={{
                 display: "flex", gap: 8, alignItems: "flex-start",
@@ -2732,49 +2771,45 @@ export function PolicyCatalog() {
                   durable across an api restart.
                 </span>
               )}
-            </div>
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
-              <KitButton variant="ghost" onClick={() => setDeleteTarget(null)}>
-                Cancel
-              </KitButton>
-              <KitButton variant="destructive" icon={Trash2} data-testid="delete-policy-confirm" onClick={confirmDeletePolicy}>
-                Delete policy
-              </KitButton>
-            </div>
           </div>
-        </>
+        </Modal>
       )}
 
+      {/* Same primitive, same three defects, same fix — this one rolls an enforcing policy back to an
+          older version, and its trigger (the per-version Restore button) is likewise reachable from
+          behind the old overlay. */}
       {restoreV != null && (
-        <>
-          <div className="sheet-overlay" onClick={() => setRestoreV(null)} />
-          <div className="confirm-modal">
-            <div className="sheet-title">Restore version v{restoreV}?</div>
-            <p
-              style={{
-                fontSize: 13,
-                color: "var(--text-secondary)",
-                lineHeight: 1.5,
-                margin: "10px 0 18px"
-              }}
-            >
-              This rolls the active policy back to v{restoreV}. The current version is preserved in
-              history.
-            </p>
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        <Modal
+          data-testid="restore-version-modal"
+          onClose={() => setRestoreV(null)}
+          title={<>Restore version v{restoreV}?</>}
+          actions={
+            <>
               <KitButton variant="ghost" onClick={() => setRestoreV(null)}>
                 Cancel
               </KitButton>
               <KitButton
                 variant="primary"
                 icon={RotateCcw}
+                data-testid="restore-version-confirm"
                 onClick={() => void confirmRestoreVersion()}
               >
                 Confirm Restore
               </KitButton>
-            </div>
-          </div>
-        </>
+            </>
+          }
+        >
+          <p
+            style={{
+              fontSize: 13,
+              color: "var(--text-secondary)",
+              lineHeight: 1.5,
+              margin: "0 0 4px"
+            }}
+          >
+            This rolls the active policy back to v{restoreV}. The current version is preserved in history.
+          </p>
+        </Modal>
       )}
     </div>
   );

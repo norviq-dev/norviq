@@ -11,6 +11,27 @@ tool calls are forwarded UNGOVERNED and nothing visibly changes at all.
 This route answers one question: *is something wrong right now?* It reports only what it can prove
 from data this deployment already owns — the decisions the data plane actually recorded — so it never
 claims an outage it cannot substantiate. Each issue carries the evidence and the remediation.
+
+That cuts BOTH ways, and the second half used to be missing. "No infrastructure verdicts in the
+window" is not proof of health: the loudest outages are the ones that stop anything from being
+written at all. So the route also has to be able to answer *I do not know*:
+
+* Two of the rule_ids below (``thin_proxy_fail_open`` / ``thin_proxy_fail_closed``) are minted by the
+  THIN-PROXY sidecar, which by design has no local emitter — ``SidecarProxy.start`` sets
+  ``self._emitter = None`` in proxy mode because "the central /evaluate persisted the record", and the
+  central /evaluate is exactly what is unreachable when those verdicts fire. ``engine_rejected_request``
+  is the same shape from the SDK/MCP gateway side. They are kept here because they are the right keys
+  the day a producer can deliver them (a sidecar-side counter POSTed on reconnect), but nothing writes
+  them to ``audit_log`` today, and this module must not pretend otherwise.
+* ``evaluator_error`` and ``policy_load_pending`` DO reach ``audit_log``: the engine mints them
+  (evaluator.py) and they travel back out through the API's own emitter, so the API is by definition
+  up when they are recorded. They are the substantiable half of "Norviq itself is the problem".
+* And when the window holds NO REAL recorded decisions, the data plane is either idle or severed —
+  indistinguishable from here. That is reported as ``status: "unknown"``, never as ``"ok"``. "Real"
+  is doing work in that sentence: the Policy Tester and the red-team runner both write ``audit_log``
+  rows through this API's OWN emitter with no data plane in the loop, so counting them would let the
+  console manufacture its own all-clear. The liveness count applies the shared
+  ``audit_row_is_non_real`` filter; the incident query above deliberately does not.
 """
 
 from __future__ import annotations
@@ -25,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from norviq.api.auth import get_current_user
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
+from norviq.api.synthetic import audit_row_is_non_real  # the ONE shared real-traffic filter (do not fork)
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -59,6 +81,27 @@ _INFRA_RULE_IDS = {
         "The engine is reachable but refused these calls — typically an expired or wrong sidecar "
         "token, so the caller cannot be identified. Calls are blocked (this never fails open).",
         "Check the sidecar's NRVQ_API_TOKEN and the API secret it was minted from; restart affected pods.",
+    ),
+    # --- the substantiable half: written by the ENGINE, carried out through the API's own emitter, so
+    # --- the record exists precisely because the API was up to write it.
+    # OPA evaluation failed persistently. The engine answered the sidecar, then could not decide, and
+    # fail-closed blocked the call. Never a policy verdict — `_POSTURE_EXEMPT_RULES` keeps it hard even
+    # in monitor mode, so it is always a genuine refusal of real traffic.
+    "evaluator_error": (
+        "critical",
+        "Tool calls are being blocked by an engine fault",
+        "The policy engine is reachable but its evaluations are failing, so calls are being refused "
+        "fail-closed. These are engine errors, not policy decisions — no rule denied them.",
+        "Check the OPA container/sidecar and norviq-engine logs (NRVQ-ENG-2057) for the failing query.",
+    ),
+    # The policy subsystem had not finished warming when the call arrived. Transient at rollout; if it
+    # persists, policy never loaded and everything governed is being refused.
+    "policy_load_pending": (
+        "critical",
+        "Policy has not loaded — calls are being refused",
+        "The policy subsystem was not ready when these calls arrived, so they were blocked fail-closed "
+        "rather than evaluated against a policy that had not loaded yet.",
+        "Expected briefly during a rollout. If it persists, check the policy loader and the DB/Redis it warms from.",
     ),
 }
 
@@ -121,8 +164,84 @@ async def system_health(
             issues=[i["id"] for i in issues],
             code="NRVQ-API-7090",
         )
+        return {
+            "status": "degraded",
+            "issues": issues,
+            "window_minutes": _WINDOW_MINUTES,
+            "decisions_in_window": None,  # not needed: an incident is already substantiated
+        }
+
+    # No infrastructure verdict fired. That is only an ALL-CLEAR if the data plane was talking to us at
+    # all — every record this route reads arrives through the central /evaluate, so a data plane that
+    # has been severed from the API writes nothing and looks identical to a healthy quiet one. Count
+    # what the window actually holds, in the caller's scope, and say which of the two we are in.
+    recorded = await _decisions_in_window(session, since, None if role == "admin" or not claim_ns else claim_ns)
+    if recorded is None:
+        # The liveness read itself failed. "We could not look" is never "we looked and it is clean".
+        log.warning("nrvq.api.system_health.liveness_unavailable", code="NRVQ-API-7091")
+        return {
+            "status": "unknown",
+            "issues": [],
+            "window_minutes": _WINDOW_MINUTES,
+            "decisions_in_window": None,
+            "evidence": "No infrastructure verdict was recorded, and the liveness read failed — health is unknown.",
+        }
+    if recorded == 0:
+        return {
+            "status": "unknown",
+            "issues": [],
+            "window_minutes": _WINDOW_MINUTES,
+            "decisions_in_window": 0,
+            "evidence": (
+                f"No real governed tool call was recorded in the last {_WINDOW_MINUTES} min (Policy-Tester "
+                "and red-team rows do not count — the console writes those itself). The data plane is either "
+                "idle or unable to reach this API, and the two are indistinguishable from here, so this is "
+                "not an all-clear."
+            ),
+        }
     return {
-        "status": "degraded" if issues else "ok",
-        "issues": issues,
+        "status": "ok",
+        "issues": [],
         "window_minutes": _WINDOW_MINUTES,
+        "decisions_in_window": recorded,
+        "evidence": (
+            f"{recorded} real governed tool call{'' if recorded == 1 else 's'} reached this API in the last "
+            f"{_WINDOW_MINUTES} min and none carried an infrastructure verdict."
+        ),
     }
+
+
+async def _decisions_in_window(session: AsyncSession, since: datetime, claim_ns: str | None) -> int | None:
+    """How many REAL governed calls the data plane recorded in the window, in the caller's scope.
+
+    This is the route's POSITIVE liveness evidence — the thing that separates "we looked and it is
+    clean" from "nothing wrote to us, and we cannot tell why". Returns ``None`` when the read itself
+    failed, which is a third state and must never be collapsed into 0.
+
+    REAL TRAFFIC ONLY, and this filter is the whole load-bearing part. Two populations reach
+    ``audit_log`` WITHOUT any data plane involved, both written by this API's own in-process emitter:
+    the Policy Tester (the console POSTs ``/evaluate`` under an ephemeral ``policy-tester-<rand>``
+    class, routers/evaluate.py) and a red-team run (routers/redteam.py `_emit_redteam_audit`, tagged
+    ``framework="redteam"``). Counting either as proof that the data plane reached us means an
+    operator whose sidecars are severed gets a green all-clear the moment they open the Policy Tester
+    to find out why nothing works — the console substantiating its own health banner. So the count
+    uses `audit_row_is_non_real`, the ONE shared classifier every other real-traffic surface uses
+    (audit stats, /tools, /mitre, dry-run replay), which also makes this number reconcile with the
+    Overview's governed-call KPI instead of being a third definition of "a call happened".
+
+    Deliberately asymmetric with the incident query above, which is NOT filtered: an infrastructure
+    verdict recorded during a red-team run is still a genuine engine fault worth a banner. Evidence of
+    a FAULT is counted generously; evidence of HEALTH is counted strictly."""
+    stmt = (
+        select(func.count())
+        .select_from(AuditLogEntry)
+        .where(AuditLogEntry.timestamp_utc >= since)
+        .where(~audit_row_is_non_real(AuditLogEntry))
+    )
+    if claim_ns:
+        stmt = stmt.where(AuditLogEntry.namespace == claim_ns)
+    try:
+        return int(await session.scalar(stmt) or 0)
+    except Exception as exc:  # noqa: BLE001 — a failed probe is reported as unknown, never as healthy
+        log.warning("nrvq.api.system_health.liveness_failed", error=str(exc), code="NRVQ-API-7092")
+        return None

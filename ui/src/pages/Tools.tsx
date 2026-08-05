@@ -86,6 +86,49 @@ export function isFlagged(t: ToolRegistryEntry): boolean {
   return severe || t.name_skeleton.toLowerCase() !== t.name.toLowerCase();
 }
 
+/**
+ * WHAT THIS PAGE MAY AND MAY NOT SAY ABOUT "withheld".
+ *
+ * `description_withheld` is a SERVER-side measurement: `tools.py::_description_is_withheld` compares
+ * `scan_severity` against this deployment's real `mcp_scan_sanitize_severity`/`mcp_scan_strip_severity`
+ * and the row ships the answer. It is a fact about the DESCRIPTION TEXT and nothing else — at the
+ * shipped defaults it is true from MEDIUM up, while the tool itself is only stripped from HIGH up.
+ *
+ * The row pill used to read "Withheld" off that flag, in red, next to the tool name. On MCP Servers
+ * the same word is `withheldReason` — pin drifted, pin never approved, or a scanner grade at or above
+ * the strip threshold — i.e. THE TOOL IS OFF. So at MEDIUM, Tools shouted "Withheld" over a tool MCP
+ * Servers correctly called "Approved. The served definition matches the approved one", and at HIGH,
+ * where the tool really had been stripped, Tools said only that its description was hidden and still
+ * offered "Scope this tool in a policy". One word, two definitions, wrong in both directions.
+ *
+ * The rule adopted here: the description flag gets its own words, and the word "Withheld" is reserved
+ * for THE TOOL being off — the same three reasons `McpServers.tsx::withheldReason` counts, in the same
+ * order, so the two pages give one answer to "can the model still call this".
+ *
+ * WHY THE PREDICATE IS RESTATED RATHER THAN IMPORTED: `/tools` does not serve the strip judgement (see
+ * `_declared_row`, tools.py:103-137 — `pin_status` and `scan_severity`, no scanner action), and the two
+ * pages are separately code-split routes (App.tsx:22-23), so importing McpServers here would pull its
+ * module into the /tools chunk. `Tools.test.tsx` therefore asserts the two implementations agree by
+ * running the SAME fixture through `withheldReason` — if either drifts, that test goes red. The real
+ * repair is the server shipping the scanner's action alongside `description_withheld`, at which point
+ * both of these should be deleted in favour of reading it.
+ *
+ * The threshold caveat travels with the claim: this console is not told which `mcp_scan_strip_severity`
+ * a cluster runs, so the scanner branch is stated as the default and labelled as such, exactly as
+ * McpServers does. A guess rendered as a measurement, in the direction that stops the operator looking,
+ * is the failure this page exists to avoid.
+ */
+function scannerCondemned(t: ToolRegistryEntry): boolean {
+  return t.scan_severity === "high" || t.scan_severity === "critical";
+}
+
+/** True when THE TOOL — not merely its description — is withheld from the model. Mirrors
+ *  `McpServers.tsx::withheldReason() !== null`; only declared rows have a pin to judge. */
+export function toolIsWithheld(t: ToolRegistryEntry): boolean {
+  if (t.source !== "mcp_declared") return false;
+  return t.pin_status !== "pinned" || scannerCondemned(t);
+}
+
 /** What an operator loses by having no definition for this tool. Specific beats generic. */
 function costsYou(name: string): string {
   if (/^http|fetch|request|curl/i.test(name)) return "Destination hosts cannot be restricted";
@@ -319,10 +362,28 @@ function DeclaredPanel({
       data-testid="tools-declared"
       title={
         <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-          Declared <CountPill n={rows.length} tone="#2ddab8" label="schema-backed" />
+          Declared{" "}
+          {/* "N · schema-backed" labelled EVERY declared row schema-backed, and this file's own header
+              spends a paragraph on the third state where that is false: declared, pinned, and still
+              unscopeable because a long description evicted `inputSchema` from the 8 KiB canonical
+              slice. On the seeded estate the panel said "5 · schema-backed" three inches under a
+              "Scopeable 4" tile computed from `schema_available` — one quantity, two definitions, the
+              louder one wrong. The count of the panel is still the row count; the qualifier now counts
+              what it claims to, off the same predicate as the tile. */}
+          <CountPill
+            n={rows.length}
+            tone="#2ddab8"
+            label={`${rows.filter((t) => t.schema_available).length} schema-backed`}
+          />
         </span>
       }
-      sub="An MCP server published a definition and an operator approved it. Arguments can be scoped."
+      // The old line — "…and an operator approved it" — was false of the panel's own contents.
+      // `/tools` emits a `mcp_declared` row for EVERY `McpToolPin` (tools.py:182), and a pin written
+      // on a first `tools/list` in strict mode has `approved=False` (mcp.py:157-165). So a definition
+      // no human has ever looked at was filed in the strong tier under a sentence saying a human had.
+      // Publication and approval are two facts; the panel is keyed on the first and shows the second
+      // per row.
+      sub="An MCP server published a definition. Approval is per row — a drifted or unapproved pin is withheld from the model. Arguments can be scoped where a schema survived."
     >
       {rows.length === 0 ? (
         <div className="muted" style={{ fontSize: 12.5, lineHeight: 1.6 }} data-testid="tools-declared-empty">
@@ -361,7 +422,20 @@ function DeclaredPanel({
                   {collisions.has(t.name) && (
                     <MiniPill hex="#ffb020">{collisions.get(t.name)!.length} servers</MiniPill>
                   )}
-                  {t.description_withheld && <MiniPill hex="#ff3b5c">Withheld</MiniPill>}
+                  {/* "Withheld" alone read as the tool being off, which is a different predicate on a
+                      different page — see the note above `scannerCondemned`. This pill says only what
+                      the flag means, and amber rather than red because a sanitised description is not
+                      the capability being gone. */}
+                  {t.description_withheld && (
+                    <MiniPill hex="#ffb020" data-testid="tool-pill-description-withheld">
+                      Description withheld
+                    </MiniPill>
+                  )}
+                  {toolIsWithheld(t) && (
+                    <MiniPill hex="#ff3b5c" data-testid="tool-pill-withheld">
+                      Withheld
+                    </MiniPill>
+                  )}
                 </span>
                 <span><ScopeabilityBadge source="mcp_declared" schemaAvailable={t.schema_available} /></span>
                 {showNamespace && <span className="mono muted">{t.namespace}</span>}
@@ -442,13 +516,59 @@ function ToolDetail({ tool }: { tool: ToolRegistryEntry }) {
         {tool.pin_status && <PinPill status={tool.pin_status} />}
       </div>
 
+      {/* FIRST, above the description and the argument tree.
+          `ProvenanceBadge`'s teal "Declared" carries the title "An MCP server published this definition
+          and an operator approved it", and this dialog used to say nothing that contradicted it — so a
+          vendor definition nobody had ever reviewed read as human-blessed, with its argument tree
+          presented as "Arguments a policy can address" and a Scope CTA under it. The amber `quarantined`
+          PinPill was the only dissent, and a status word does not outrank a sentence.
+          The words match MCP Servers' `withheldReason` branch for branch, deliberately. */}
+      {toolIsWithheld(tool) && (
+        <Callout tone="#ff3b5c" title="Withheld from the model" data-testid="tool-withheld">
+          {tool.pin_status === "drift" && (
+            <div>
+              This server is serving a definition that <strong>differs from the approved one</strong>, so the
+              proxy strips this tool from every <span className="mono">tools/list</span> and calls to it are
+              refused. Nothing below has been reviewed against what is being served now.
+            </div>
+          )}
+          {tool.pin_status !== "drift" && tool.pin_status !== "pinned" && (
+            <div>
+              <strong>No operator has approved this definition.</strong> The proxy strips this tool from every{" "}
+              <span className="mono">tools/list</span> and calls to it are refused. The description and
+              arguments below are the server&rsquo;s own text, published by it and not yet reviewed.
+            </div>
+          )}
+          {scannerCondemned(tool) && (
+            <div style={{ marginTop: tool.pin_status !== "pinned" ? 6 : 0 }}>
+              The definition scanner graded this tool {String(tool.scan_severity).toUpperCase()}. At the
+              default <span className="mono">mcp_scan_strip_severity</span> (high) a grade this high strips the
+              tool whatever the pin says.{" "}
+              {/* Stated as the default, not as a reading of this cluster: no endpoint serves
+                  `mcp_scan_strip_severity` to the console. McpServers carries the same caveat. */}
+              <span style={{ color: "var(--text-muted)" }}>
+                This console is not told which threshold this cluster runs, so if it was raised the tool is
+                still being handed to the model and the grade is the only fact here.
+              </span>
+            </div>
+          )}
+          <div style={{ marginTop: 6 }}>
+            <Link to="/mcp" style={{ color: "#ff3b5c" }}>
+              Review its pin on MCP Servers →
+            </Link>
+          </div>
+        </Callout>
+      )}
+
       {tool.description_withheld ? (
         // The stored definition holds the PRE-sanitize text — the payload the firewall stripped before
         // the model saw it. Showing the fact of withholding is the whole affordance; showing the text
         // would put the attack in front of the operator instead of the model.
-        <Callout tone="#ff3b5c" title="Description withheld">
-          The definition scanner condemned this tool&rsquo;s description, so it is not shown here and was
-          withheld from the model. Review the finding on MCP Servers.
+        <Callout tone="#ffb020" title="Description withheld" data-testid="tool-description-withheld">
+          The definition scanner condemned this tool&rsquo;s <strong>description</strong>, so the description
+          is not shown here and was not passed to the model. This says nothing about whether the tool
+          itself is still callable — the sanitize threshold is lower than the strip threshold. Review the
+          finding on MCP Servers.
         </Callout>
       ) : (
         tool.description && (
@@ -458,7 +578,9 @@ function ToolDetail({ tool }: { tool: ToolRegistryEntry }) {
 
       {declared && !tool.schema_available && (
         <Callout tone="#ffb020" title="Declared, but unscopeable">
-          Approved definition, no argument schema — a long description evicted it from the 8&nbsp;KiB slice.
+          {/* "Approved definition" was the same false claim the panel subtitle made — this panel holds
+              never-approved pins too. The pin state is on the badge row above and in its own callout. */}
+          Declared definition, no argument schema — a long description evicted it from the 8&nbsp;KiB slice.
           Allow or deny by name, or hand-write a path you know. The registry informs, never restricts.
         </Callout>
       )}
@@ -477,6 +599,32 @@ function ToolDetail({ tool }: { tool: ToolRegistryEntry }) {
           </div>
           <div className="muted" style={{ fontSize: 12, marginBottom: 8 }}>
             Unusable ones are shown, never hidden.
+            {/* TWO unpinned states, and they are opposites about where this tree came from — one
+                sentence for both was wrong for one of them.
+                `_declared_row` reads `approved_canonical`, never `last_canonical`. On a NEVER-APPROVED
+                pin those are the same string (mcp.py:157-165 writes both at first sight with
+                `approved=False`), so the tree really is the server's own unreviewed text. On a DRIFTED
+                pin they are not: the tree is the pinned baseline, and what the server is serving now is
+                something else — so "no operator has approved these paths, the server chose them"
+                contradicted the drift callout six lines above, which had just said the tree is what was
+                approved and the SERVED definition is the unknown one.
+                Neither branch says "an operator approved this": `_status_of` (mcp.py:112-118) returns
+                `drift` before it looks at `approved`, so a first-sighting that later changed reports
+                drift with `approved=False` — and `/tools` ships `pin_status` without `approved`, so this
+                page cannot tell those apart and must not claim to. */}
+            {tool.pin_status === "drift" && (
+              <span data-testid="tool-args-stale" style={{ color: "var(--escalate)" }}>
+                {" "}
+                These paths come from the pinned definition, not from the one this server is serving now —
+                the two differ, which is why the tool is withheld.
+              </span>
+            )}
+            {tool.pin_status !== "pinned" && tool.pin_status !== "drift" && (
+              <span data-testid="tool-args-unreviewed" style={{ color: "var(--escalate)" }}>
+                {" "}
+                These paths come from a definition no operator has approved — the server chose them.
+              </span>
+            )}
           </div>
           <ArgumentTree schema={tool.input_schema} suppressDescriptions={tool.description_withheld} />
         </>
@@ -494,6 +642,21 @@ function ToolDetail({ tool }: { tool: ToolRegistryEntry }) {
         >
           Scope this tool in a policy →
         </Link>
+        {/* NOT suppressed: deny-by-default requires authoring rules for tools nobody has approved, and
+            gating the CTA on pin state would make the registry restrict rather than inform — the thing
+            ProvenanceBadge's header forbids. It gets a visible caveat instead, because the schema the
+            builder would seed from is the server's, not a reviewed one. */}
+        {toolIsWithheld(tool) && (
+          <div
+            data-testid="tool-scope-cta-caveat"
+            className="muted"
+            style={{ fontSize: 12, lineHeight: 1.55, marginTop: -2 }}
+          >
+            You can still write it — a policy may name any tool. But this one is withheld from the model
+            for the reason stated above, so the rule will not be exercised until that is resolved on MCP
+            Servers.
+          </div>
+        )}
         {tool.server_id && (
           <Link to="/mcp" className="btn btn-outline" style={{ textDecoration: "none", justifyContent: "center" }}>
             <ExternalLink size={14} /> View its pin on MCP Servers
@@ -617,9 +780,18 @@ function rowStyle(selected: boolean, template = DECLARED_TEMPLATE) {
   };
 }
 
-function MiniPill({ hex, children }: { hex: string; children: React.ReactNode }) {
+function MiniPill({
+  hex,
+  children,
+  "data-testid": testId
+}: {
+  hex: string;
+  children: React.ReactNode;
+  "data-testid"?: string;
+}) {
   return (
     <span
+      data-testid={testId}
       style={{
         flex: "none",
         fontSize: 10,
@@ -659,9 +831,19 @@ function ScanPill({ severity }: { severity: string | null }) {
   );
 }
 
-function Callout({ tone, title, children }: { tone: string; title: string; children: React.ReactNode }) {
+function Callout({
+  tone,
+  title,
+  children,
+  "data-testid": testId
+}: {
+  tone: string;
+  title: string;
+  children: React.ReactNode;
+  "data-testid"?: string;
+}) {
   return (
-    <div style={{ padding: 12, borderRadius: 10, border: `1px solid ${tone}30`, background: `${tone}15`, marginBottom: 12 }}>
+    <div data-testid={testId} style={{ padding: 12, borderRadius: 10, border: `1px solid ${tone}30`, background: `${tone}15`, marginBottom: 12 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 13, fontWeight: 600, color: tone, marginBottom: 5 }}>
         <Info size={14} /> {title}
       </div>

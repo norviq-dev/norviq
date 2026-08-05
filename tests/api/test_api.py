@@ -752,6 +752,13 @@ def test_dry_run() -> None:
         namespace="default",
         rule_id="deny",
         reason="test",
+        # `_opa_input_from_record` reads `rec.session_id` and `rec.framework`. Without them the row
+        # raised AttributeError INSIDE the replay loop, was swallowed by its `except Exception: continue`,
+        # and the assertion below still passed because `total_records_checked` was `len(rows)` — the
+        # fetched count, not the replayed one. The fixture could not produce the state its assertion
+        # claimed: it certified a replay of one record while replaying none.
+        session_id="s-dry-run",
+        framework="sidecar",
         trust_score=0.5,
         latency_ms=12.3,
         timestamp_utc=datetime.now(timezone.utc),
@@ -774,6 +781,9 @@ def test_dry_run() -> None:
         assert data["valid"] is True  # dry-run now actually validates the submitted rego
         assert data["errors"] == []
         assert data["total_records_checked"] == 1
+        # ...and the record was genuinely evaluated, not merely fetched.
+        assert data["eval_errors"] == 0
+        assert data["records_fetched"] == 1
     finally:
         client.app.dependency_overrides.clear()
         client.close()

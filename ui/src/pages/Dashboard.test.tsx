@@ -2,10 +2,10 @@
 // Smoke test: the Dashboard (default landing route) must mount without throwing React #130.
 // echarts core is stubbed so the chart components render without a canvas; the interop-shape guard
 // lives in components/common/EChart.test.tsx.
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("echarts-for-react/lib/core", () => ({
@@ -183,6 +183,12 @@ describe("Overview coverage caption reflects Red Team efficacy", () => {
 // REGRESSION — the Overview's headline numbers must belong to the scope the page says it is showing,
 // and a failed read must never be drawn as a measured value.
 // ==================================================================================================
+
+/** Renders the current location so a deep-link assertion tests the real navigation, not a spy. */
+function LocationProbe() {
+  const loc = useLocation();
+  return <span data-testid="test-location">{`${loc.pathname}${loc.search}`}</span>;
+}
 
 function renderAt(path: string) {
   return render(
@@ -514,5 +520,183 @@ describe("Overview Monitor-mode signals are scoped and true of the code beneath 
     // The green swatch must not be described as a "stop" full stop — it is exactly what an escalation and a
     // Monitor would-block are not.
     expect(screen.queryByTitle(/counted as stopped by these rules/i)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
+// MONITOR MODE: the two block feeds counted enforced blocks and reported their structural emptiness as a
+// measured fact about the namespace's traffic.
+//
+// `_apply_posture` rewrites EVERY would-block/would-escalate to `decision="audit"` with a
+// `monitor_would_block:<rule>` rule id (only the five non-policy `_POSTURE_EXEMPT_RULES` stay hard), so
+// `AuditLogEntry.decision == "block"` — what `/audit/top-blocked` filters on, and what this page asks
+// `/audit/records` for — can never match. Both panels therefore printed "No blocked tool calls in the
+// selected range" directly beneath the page's own "Would-block (24h) 812" tile, and "See All →" navigated
+// to `/audit?decision=block`, a filter structurally incapable of returning a row here. The KPI tile was
+// fixed for exactly this reason (audit.py:222); these two panels were not.
+// ---------------------------------------------------------------------------------------------------
+describe("Overview block feeds are Monitor-aware", () => {
+  function monitorNamespace(wouldBlocked = 812) {
+    return [
+      http.get("*/api/v1/settings", ({ request }) => {
+        const ns = new URL(request.url).searchParams.get("namespace") ?? "default";
+        return HttpResponse.json({ namespace: ns, enforcement_mode: "audit", apply_mode: "enforce" });
+      }),
+      healthyCoverage({ namespace_mode: "audit" }), // the ENGINE confirms it: a real per-ns override
+      http.get("*/api/v1/audit/stats", () =>
+        HttpResponse.json({
+          total: 2000, blocked: 0, allowed: 2000, block_rate_pct: 0,
+          would_blocked: wouldBlocked, would_block_rate_pct: 40.6
+        })
+      ),
+      // Structurally empty — this is what the server really returns for a monitored namespace.
+      http.get("*/api/v1/audit/records", () => HttpResponse.json([])),
+      http.get("*/api/v1/audit/top-blocked", () => HttpResponse.json([])),
+      http.get("*/api/v1/audit/volume", () => HttpResponse.json([])),
+      http.get("*/api/v1/agents", () => HttpResponse.json([])),
+      http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json({ has_run: false }))
+    ];
+  }
+
+  it("neither feed states 'No blocked tool calls' as a fact about the traffic", async () => {
+    server.use(...monitorNamespace());
+    renderAt("/?ns=payments");
+    expect(await screen.findByText(/Showing: payments/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("kpi-blocked")).toHaveTextContent(/Would-block \(24h\)/));
+
+    // FAIL-ON-BUG: pre-fix both panels rendered the traffic claim and neither said "would-block".
+    const recentEmpty = await screen.findByTestId("recent-blocked-monitor-empty");
+    const topEmpty = screen.getByTestId("top-blocked-monitor-empty");
+    for (const el of [recentEmpty, topEmpty]) {
+      // REWRITTEN (was: /structurally empty, not a measured zero/ and "nothing is blocked live"). Those
+      // sentences over-claimed: `_apply_posture` leaves `_POSTURE_EXEMPT_RULES` — trust_frozen,
+      // policy_load_pending, evaluator_error, evaluator_invalid_payload, rate_limit_exceeded — HARD in
+      // Monitor, and those land in this very feed as `decision="block"`. The panel now scopes the claim to
+      // POLICY blocks and names what still enforces, so the assertions follow it.
+      expect(el).toHaveTextContent(/no policy block can appear here/i);
+      expect(el).toHaveTextContent(/monitor_would_block:/);
+      expect(el).toHaveTextContent(/trust freeze/i);
+      expect(el).toHaveTextContent(/812 would-blocks were logged in this range/i);
+      expect(el).not.toHaveTextContent(/nothing is blocked live/i);
+    }
+    // The kill switch is not described away either: nothing on the page says a monitored namespace
+    // enforces nothing.
+    expect(screen.queryByText(/this namespace enforces none/i)).toBeNull();
+    expect(screen.queryByText(/No blocked tool calls in the selected range/i)).toBeNull();
+  });
+
+  it("'See All →' lands on a filter that CAN match a row (decision=block cannot, here)", async () => {
+    server.use(...monitorNamespace());
+    render(
+      <MemoryRouter initialEntries={["/?ns=payments"]}>
+        <AppProvider>
+          <LocationProbe />
+          <Dashboard />
+        </AppProvider>
+      </MemoryRouter>
+    );
+    await waitFor(() => expect(screen.getByTestId("kpi-blocked")).toHaveTextContent(/Would-block \(24h\)/));
+
+    const recent = screen.getByTestId("recent-blocked");
+    fireEvent.click(within(recent).getByRole("button", { name: /See All/ }));
+    // FAIL-ON-BUG: pre-fix this navigated to `?decision=block`, which `_apply_posture` guarantees matches
+    // nothing here. `/audit/records` filters `rule_id` by EXACT match, so the `monitor_would_block:` PREFIX
+    // is not a server-side filter the console can send — `decision=audit` is the narrowest one that can
+    // return these rows, and the Audit Log renders that prefix specially.
+    await waitFor(() => expect(screen.getByTestId("test-location")).toHaveTextContent("/audit?decision=audit"));
+
+    // The in-panel escape hatch goes to the same place.
+    fireEvent.click(within(recent).getByRole("button", { name: /Show would-blocks in the Audit Log/ }));
+    expect(screen.getByTestId("test-location")).toHaveTextContent("/audit?decision=audit");
+  });
+
+  // The empty state must not invent a number when the stats read failed — "we could not measure this" is
+  // not "812", and it is not "0" either.
+  it("does not state a would-block count when /audit/stats could not be read", async () => {
+    server.use(...monitorNamespace());
+    // A later `server.use` takes precedence over the earlier registration, so this really is the stats read
+    // failing while everything else answers normally.
+    server.use(http.get("*/api/v1/audit/stats", () => new HttpResponse("boom", { status: 500 })));
+    renderAt("/?ns=payments");
+    const topEmpty = await screen.findByTestId("top-blocked-monitor-empty");
+    expect(topEmpty).toHaveTextContent(/no policy block can appear here/i); // (was: /structurally empty…/)
+    expect(topEmpty).not.toHaveTextContent(/would-blocks were logged/i);
+  });
+
+  it("CONTROL: an ENFORCING namespace keeps the plain empty state and the decision=block deep-link", async () => {
+    server.use(
+      http.get("*/api/v1/settings", () => HttpResponse.json({ enforcement_mode: "block", apply_mode: "enforce" })),
+      healthyCoverage({ namespace_mode: "block" }),
+      http.get("*/api/v1/audit/stats", () => HttpResponse.json({ total: 900, blocked: 0, allowed: 900, block_rate_pct: 0 })),
+      http.get("*/api/v1/audit/records", () => HttpResponse.json([])),
+      http.get("*/api/v1/audit/top-blocked", () => HttpResponse.json([])),
+      http.get("*/api/v1/audit/volume", () => HttpResponse.json([])),
+      http.get("*/api/v1/agents", () => HttpResponse.json([])),
+      http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json({ has_run: false }))
+    );
+    renderAt("/?ns=payments");
+    expect(await screen.findByText(/Showing: payments/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("kpi-blocked")).toHaveTextContent(/^Blocked \(24h\)/));
+    // Here a zero really IS a measurement, and the plain sentence is true.
+    await waitFor(() => expect(screen.getAllByText(/No blocked tool calls in the selected range/i).length).toBe(2));
+    expect(screen.queryByTestId("recent-blocked-monitor-empty")).toBeNull();
+    expect(screen.queryByTestId("top-blocked-monitor-empty")).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------------------------------
+  // The case the Monitor-aware empty state was first shipped without: /settings says Monitor and the
+  // ENGINE's own field could not be read.
+  //
+  // `monitorScope` deliberately falls back to `posture.mode` while coverage is loading or after it fails
+  // ("Prefer the engine-accurate signal; fall back to the settings posture only until coverage answers"),
+  // and that posture MERGES the cluster-wide default — so on a global-audit cluster (helm values-dev.yaml
+  // `enforcementMode: audit`) it reads "audit" for every namespace the engine really blocks. Keying the
+  // MECHANISM sentence off that fallback made an unread posture render as "nothing here is enforced", over
+  // a feed whose zero was a genuine measurement, and printed "0 would-blocks were logged in this range" in
+  // the same breath as "this feed is structurally empty, not a measured zero".
+  // -------------------------------------------------------------------------------------------------
+  it("does NOT assert the Monitor mechanism when the engine's own posture could not be read", async () => {
+    server.use(
+      http.get("*/api/v1/settings", () => HttpResponse.json({ enforcement_mode: "audit", apply_mode: "enforce" })),
+      // The engine's field is unreadable. This namespace may well be enforcing.
+      http.get("*/api/v1/coverage-by-category", () => new HttpResponse("boom", { status: 500 })),
+      http.get("*/api/v1/audit/stats", () =>
+        HttpResponse.json({ total: 2000, blocked: 0, allowed: 2000, block_rate_pct: 0, would_blocked: 0 })
+      ),
+      http.get("*/api/v1/audit/records", () => HttpResponse.json([])),
+      http.get("*/api/v1/audit/top-blocked", () => HttpResponse.json([])),
+      http.get("*/api/v1/audit/volume", () => HttpResponse.json([])),
+      http.get("*/api/v1/agents", () => HttpResponse.json([])),
+      http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json({ has_run: false }))
+    );
+    render(
+      <MemoryRouter initialEntries={["/?ns=payments"]}>
+        <AppProvider>
+          <LocationProbe />
+          <Dashboard />
+        </AppProvider>
+      </MemoryRouter>
+    );
+    expect(await screen.findByText(/Showing: payments/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("coverage-categories-unavailable")).toBeInTheDocument());
+
+    // FAIL-ON-BUG: both feeds rendered the confirmed-Monitor sentence off the settings fallback.
+    const recent = await screen.findByTestId("recent-blocked-monitor-empty-unconfirmed");
+    const top = screen.getByTestId("top-blocked-monitor-empty-unconfirmed");
+    expect(screen.queryByTestId("recent-blocked-monitor-empty")).toBeNull();
+    expect(screen.queryByTestId("top-blocked-monitor-empty")).toBeNull();
+    for (const el of [recent, top]) {
+      expect(el).not.toHaveTextContent(/no policy block can appear here/i);
+      expect(el).not.toHaveTextContent(/not blocked live/i);
+      expect(el).toHaveTextContent(/has not been confirmed/i);
+      expect(el).toHaveTextContent(/unknown/i);
+    }
+    // …and the subtitle must not state the Monitor population either.
+    expect(within(screen.getByTestId("recent-blocked")).queryByText(/only non-policy ones/i)).toBeNull();
+
+    // The deep-link premised on `monitor_would_block:` rows existing is also withheld: `decision=audit`
+    // is only the right destination where the engine confirmed it softens.
+    fireEvent.click(within(screen.getByTestId("recent-blocked")).getByRole("button", { name: /See All/ }));
+    await waitFor(() => expect(screen.getByTestId("test-location")).toHaveTextContent("/audit?decision=block"));
   });
 });

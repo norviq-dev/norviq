@@ -268,6 +268,36 @@ export function AuditLog() {
   // Fallback: when the socket isn't connected but Live is on, poll recent records on an
   // interval and merge them in (deduped by id) so the Live feed still updates.
   const [polled, setPolled] = useState<AuditRecord[]>([]);
+
+  /**
+   * A POLLED tail row must not outlive the filter set it was fetched under.
+   *
+   * `polled` used to be cleared only when Live was switched OFF. Every other change — namespace,
+   * range, decision, tool, agent, rule, source, Real-traffic-only — left the previously fetched rows
+   * merged into the tail, and nothing downstream could remove them:
+   *
+   *   * `non_real` is the SERVER's real-traffic verdict, and only the WEBSOCKET payload carries it
+   *     (norviq/api/audit_hub.py). `/audit/records` `_to_dict` does not emit it, so every polled row
+   *     has `non_real === undefined` and the `realOnly && r.non_real` guard below is inert for them.
+   *     A red-team probe fetched with Real-traffic-only OFF therefore stayed on screen after it was
+   *     switched back ON — displayed as live governed traffic under a toggle reading "✓ Real traffic
+   *     only", above a count of 0. That is the "N of 0" shape this file already calls out as not
+   *     cosmetic, pointed at the one filter whose whole promise is that these rows are hidden.
+   *   * The tail has no Namespace column, so a row left over from the namespace the operator just
+   *     left reads as this namespace's traffic — exactly what `offScope` suppresses for the page.
+   *
+   * The predicate is deliberately NOT re-derived here. `non_real` is
+   * `framework == "redteam" OR is_synthetic_identity(agent_class, spiffe_id)`, and mirroring that
+   * class-prefix list into TypeScript is the drift audit_hub.py's own comment exists to prevent —
+   * one concept, two definitions. Instead, drop the fetched tail whenever the filter identity
+   * changes: the poll below re-runs immediately against the new filters, and the SERVER (which does
+   * apply `exclude_synthetic` to this endpoint) decides what the new filter set admits.
+   */
+  const pollScope = `${timeRange}|${selectedNamespace}|${decision}|${debouncedTool}|${debouncedAgent}|${rule}|${framework}|${realOnly ? 1 : 0}`;
+  useEffect(() => {
+    setPolled((prev) => (prev.length ? [] : prev));
+  }, [pollScope]);
+
   useEffect(() => {
     if (live && ws.connected) return; // socket is streaming; no need to poll
     if (!live) {
@@ -343,6 +373,22 @@ export function AuditLog() {
       // red-team and probe rows straight into the tail while the fetched rows below were correctly
       // filtered. Reading the server's boolean also avoids forking the synthetic class-name list into TS.
       if (realOnly && r.non_real) return false;
+      // NAMESPACE — the one server predicate the tail did not mirror, and the only feed that can
+      // carry a row from a scope the operator has left.
+      //
+      // Dropping `polled` when the filter identity changes (see `pollScope`) closes the POLL half.
+      // It cannot close the SOCKET half: `useWebSocket` keeps its `messages` across a url change
+      // (the hook exposes `clear()` and nothing calls it), so switching namespace closes the old
+      // socket, opens one scoped to the new namespace — and leaves up to 100 rows from the OLD one
+      // in state, six of which render above a table that has no Namespace column to contradict them,
+      // flagged `_live`, under a header that says this page is scoped somewhere else.
+      //
+      // Mirrors main.py's own ws_audit predicate exactly, INCLUDING its two edge cases, rather than
+      // inventing a stricter one: "all" is the aggregate sentinel and filters nothing, and a record
+      // whose namespace is empty/absent is passed through (`record.get("namespace") not in
+      // (namespace, "", None)`). A row the server chose to send is one the operator may see.
+      if (selectedNamespace && selectedNamespace !== "all" && r.namespace && r.namespace !== selectedNamespace)
+        return false;
       if (decision !== "all" && r.decision !== decision) return false;
       if (needle && !(r.tool_name ?? "").toLowerCase().includes(needle)) return false;
       if (agentNeedle && !(r.agent_id ?? "").toLowerCase().includes(agentNeedle)) return false;
@@ -354,7 +400,7 @@ export function AuditLog() {
       return true;
     });
     return [...(page === 0 ? live : []), ...(base.data ?? []).filter((r) => !liveIds.has(r.id))];
-  }, [streamed, base.data, page, realOnly, decision, debouncedTool, debouncedAgent, rule, framework]);
+  }, [streamed, base.data, page, realOnly, decision, debouncedTool, debouncedAgent, rule, framework, selectedNamespace]);
 
   const totalCount = totalRecords.data?.length ?? 0;
   // The total-count probe is server-capped at limit=500 (audit/records enforces le=500), so records

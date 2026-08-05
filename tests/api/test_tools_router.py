@@ -248,3 +248,41 @@ def test_an_admin_sees_every_namespace() -> None:
 def test_unauthenticated_callers_are_refused() -> None:
     client, _ = _client(pins=[_pin()])
     assert client.get("/api/v1/tools").status_code in (401, 403)
+
+
+def test_a_pin_in_one_namespace_does_not_erase_the_observed_row_in_another() -> None:
+    """The suppression must be keyed on (namespace, name), not on the name alone.
+
+    At the console's default "All namespaces" scope `read_namespace` returns None, so `pins` spans
+    every tenant. A name-only set therefore let a pin in `staging` delete the observed row for
+    `payments` — the operator authoring policy for `payments`, where nothing is pinned, read a tool
+    that is unpinned, unscanned and of unknown shape there as declared-and-approved, and the Observed
+    panel said "No undeclared tool has been called in this window." while the call had just happened."""
+    client, _ = _client(
+        pins=[_pin("run_query", namespace="staging", server_id="postgres-mcp")],
+        observed=[("run_query", "payments"), ("charge_card", "payments")],
+    )
+    rows = client.get("/api/v1/tools", headers=_hdr()).json()
+
+    declared = [r for r in rows if r["source"] == "mcp_declared"]
+    observed = [r for r in rows if r["source"] == "observed"]
+    assert [(r["name"], r["namespace"]) for r in declared] == [("run_query", "staging")]
+    assert sorted((r["name"], r["namespace"]) for r in observed) == [
+        ("charge_card", "payments"),
+        ("run_query", "payments"),
+    ]
+    # The payments row keeps the observed tier's honest claims — no schema, no pin, no scan.
+    payments_run_query = next(r for r in observed if r["name"] == "run_query")
+    assert payments_run_query["schema_available"] is False
+    assert payments_run_query["pin_status"] is None
+    assert payments_run_query["scan_severity"] is None
+
+
+def test_a_declared_tool_called_in_its_own_namespace_still_appears_once() -> None:
+    """The control for the test above: same-namespace dedupe must not regress."""
+    client, _ = _client(
+        pins=[_pin("run_query", namespace="payments", server_id="postgres-mcp")],
+        observed=[("run_query", "payments")],
+    )
+    rows = client.get("/api/v1/tools", headers=_hdr()).json()
+    assert [(r["name"], r["source"]) for r in rows] == [("run_query", "mcp_declared")]
