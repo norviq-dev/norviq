@@ -89,9 +89,18 @@ esac
 SIDECAR="$(echo "$CONS" | tr ' ' '\n' | grep norviq | head -1)"
 if [ -n "$SIDECAR" ]; then
   ENV_A="$(env_of inject-a "$SIDECAR")"
-  for want in NRVQ_POLICY_ENGINE_URL NRVQ_SPIFFE_MODE; do
+  # The env the injector ALWAYS sets (injector.go buildSidecar). NRVQ_SPIFFE_MODE is deliberately
+  # conditional on cfg.SpiffeInject and so is NOT asserted here — an earlier version of this script
+  # demanded it unconditionally, plus a `NRVQ_POLICY_ENGINE_URL` that does not exist under that name,
+  # and reported two failures against a product that was behaving correctly.
+  for want in NRVQ_API_URL NRVQ_SOCKET_PATH NRVQ_AGENT_CLASS NRVQ_NAMESPACE; do
     echo "$ENV_A" | grep -q "^${want}=" && ok "sidecar carries ${want}" || bad "sidecar is MISSING ${want}"
   done
+  # The sidecar must be told WHICH workload it is speaking for, or every decision is mis-scoped.
+  echo "$ENV_A" | grep -q "^NRVQ_NAMESPACE=${NS}\$" && ok "sidecar's namespace matches the pod's (${NS})" \
+    || bad "sidecar NRVQ_NAMESPACE does not match ${NS}"
+  echo "$ENV_A" | grep -q "^NRVQ_AGENT_CLASS=inject-probe\$" && ok "sidecar's agent class matches the pod label" \
+    || bad "sidecar NRVQ_AGENT_CLASS does not match the pod's norviq.io/agent-class label"
   # The token is what makes the sidecar able to ask the engine anything at all.
   if echo "$ENV_A" | grep -q "^NRVQ_API_TOKEN=."; then
     ok "sidecar carries a minted NRVQ_API_TOKEN"
