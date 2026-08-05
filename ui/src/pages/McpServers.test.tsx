@@ -338,3 +338,97 @@ describe("McpServers", () => {
     expect(err).toHaveTextContent(/enforcement is unaffected/i);
   });
 });
+
+// ------------------------------------------------------------------------------------------------
+// The badge and the dialog are ONE judgement.
+//
+// `isWithheld` has always counted three reasons — drift, never-approved, and a scanner grade at or
+// above `mcp_scan_strip_severity` (default "high", norviq/config.py). The dialog's subtitle keyed on
+// `status` alone, so the third reason opened with "Approved. The served definition matches the
+// approved one." under a red Withheld pill: two opposite claims about one tool, on the surface built
+// to catch rug pulls, with the dialog winning because it is the detail view.
+//
+// The `github / add` fixture above is exactly that state — pinned, digests equal, scan critical —
+// which is what `_status_of` returns PIN_OK for while `firewall._action_for` strips the tool.
+// ------------------------------------------------------------------------------------------------
+describe("a Withheld row's dialog never reads as an all-clear", () => {
+  beforeEach(() => {
+    clearApiCache();
+    vi.restoreAllMocks();
+    mockReads();
+    mockRole("admin");
+  });
+
+  it("does not lead with 'Approved. The served definition matches' for a pinned tool the scanner condemned", async () => {
+    renderPage();
+    const user = userEvent.setup();
+    const detail = await openPin(user, "agents/github/add");
+
+    // The row said Withheld…
+    const row = document.querySelector('tr[data-row-key="agents/github/add"]') as HTMLElement;
+    expect(row).toHaveTextContent(/withheld/i);
+
+    // …so the dialog may not say the opposite. This exact sentence, standing alone, is the defect.
+    expect(detail.textContent ?? "").not.toMatch(/Approved\.\s*The served definition matches the approved one\./);
+    expect(detail).toHaveTextContent(/withheld/i);
+    // And it must name the scanner grade as the cause and what clears it — Revoke is the only control
+    // on offer, which is the opposite of what this operator wants.
+    const note = within(detail).getByTestId("mcp-withheld-note");
+    expect(note).toHaveTextContent(/scanner graded this tool CRITICAL/i);
+    expect(note).toHaveTextContent(/Approving the definition does not clear it/i);
+    expect(note).toHaveTextContent(/mcp_scan_strip_severity/);
+  });
+
+  it("still says a clean pinned tool is approved, and shows no withheld note", async () => {
+    // The other half: a hedge on every dialog is a hedge nobody reads. `filesystem/read_file` is
+    // pinned, undrifted and scan-clean — the genuine all-clear.
+    renderPage();
+    const user = userEvent.setup();
+    const detail = await openPin(user, "agents/filesystem/read_file");
+    expect(detail).toHaveTextContent(/Approved\.\s*The served definition matches the approved one\./);
+    expect(within(detail).queryByTestId("mcp-withheld-note")).toBeNull();
+  });
+
+  it("warns a drifted-AND-condemned tool that approving will not make it visible", async () => {
+    // Adopting the served definition clears the drift and leaves the scanner strip in place. Without
+    // this the operator approves, watches the tool stay dark, and distrusts the control.
+    const pins = PINS.map((p) =>
+      p.server_id === "postgres" ? { ...p, scan_severity: "high" } : p
+    );
+    vi.restoreAllMocks();
+    mockReads(pins);
+    mockRole("admin");
+    clearApiCache();
+    renderPage();
+    const user = userEvent.setup();
+    const detail = await openPin(user, "agents/postgres/send_report");
+    expect(within(detail).getByTestId("mcp-withheld-note")).toHaveTextContent(
+      /will NOT make this tool visible again on its own/i
+    );
+  });
+
+  it("does not state a CONFIGURABLE strip threshold as a measurement of this cluster", async () => {
+    // ADVERSARIAL PASS. `mcp_scan_strip_severity` is a setting (norviq/config.py, default "high") and
+    // nothing serves it here: `/mcp/pins` returns `scan_severity` and `/settings` carries no
+    // `mcp_scan_*` field. So "the proxy strips this tool from every tools/list and the model cannot
+    // call it" was a guess about the deployment printed in the indicative — and on a cluster that
+    // raised the threshold to `critical`, a HIGH-graded tool is STILL being handed to the model while
+    // this dialog says it is unreachable. That is the direction that stops an operator looking.
+    renderPage();
+    const user = userEvent.setup();
+    const detail = await openPin(user, "agents/github/add");
+
+    const subtitle = detail.textContent ?? "";
+    // The unconditional claim is gone…
+    expect(subtitle).not.toMatch(/so the proxy strips this tool from every tools\/list and the model cannot call it/i);
+    // …replaced by the threshold it is actually conditional on.
+    expect(detail).toHaveTextContent(/at the default mcp_scan_strip_severity \(high\)/i);
+
+    // And the note says plainly that the console cannot read this cluster's threshold.
+    const note = within(detail).getByTestId("mcp-withheld-note");
+    expect(note).toHaveTextContent(/not told which threshold this cluster runs/i);
+    expect(note).toHaveTextContent(/still being handed to the model/i);
+    // The grade itself is the one thing measured, and it is still stated flatly.
+    expect(note).toHaveTextContent(/scanner graded this tool CRITICAL/i);
+  });
+});

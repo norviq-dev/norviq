@@ -205,3 +205,208 @@ describe("AuditLog structured event detail (E2b)", () => {
     expect(screen.getByText("engine timed out")).toBeInTheDocument();
   });
 });
+
+// ------------------------------------------------------------------------------------------------
+// THE RED-TEAM EVIDENCE LINK.
+//
+// Red Team's per-attack link is `/audit?rule=<rule_id>&framework=redteam`, titled "Audit rows for
+// this rule, scoped to red-team traffic". `framework` was never read from the URL, while
+// `exclude_synthetic` was sent true by default and the server's exclusion IS `framework ==
+// "redteam"` (norviq/api/synthetic.py) — the exact tag norviq/api/routers/redteam.py writes. So the
+// rows the link exists to show were the only rows guaranteed to be hidden, and either:
+//
+//   * nothing else is on that rule → "Showing 0 of 0 records" and a flat "No matching records in the
+//     last 24h." (a full stop: `hasFilter` omitted `rule`, so even the generic hint was suppressed),
+//     read as "the attack left no audit trail"; or
+//   * unrelated production traffic shares the rule_id → the link labelled "scoped to red-team
+//     traffic" shows EXACTLY that production row. That is the failure redteam.py documents as fixed.
+//
+// The active `rule` filter was also printed nowhere and had no control to clear it.
+// ------------------------------------------------------------------------------------------------
+describe("AuditLog red-team evidence deep-link", () => {
+  const REDTEAM_ROW = {
+    id: "rt-1",
+    timestamp: "2026-07-03T12:00:00Z",
+    tool_name: "send_email",
+    decision: "block",
+    rule_id: "mcp_tool_poisoning",
+    agent_class: "redteam-probe",
+    framework: "redteam",
+    non_real: true,
+    latency_ms: 9
+  };
+  const PRODUCTION_ROW = {
+    id: "prod-1",
+    timestamp: "2026-07-03T11:00:00Z",
+    tool_name: "fetch_url",
+    decision: "block",
+    rule_id: "mcp_tool_poisoning",
+    agent_class: "report-gen",
+    framework: "sidecar",
+    non_real: false,
+    latency_ms: 14
+  };
+
+  /** The ledger, filtered exactly as norviq/api/routers/audit.py filters it. */
+  function serveLedger(onQuery?: (q: URLSearchParams) => void) {
+    server.use(
+      http.get("/api/v1/audit/records", ({ request }) => {
+        const q = new URL(request.url).searchParams;
+        onQuery?.(q);
+        let out = [REDTEAM_ROW, PRODUCTION_ROW] as Array<Record<string, unknown>>;
+        const ruleId = q.get("rule_id");
+        if (ruleId) out = out.filter((r) => r.rule_id === ruleId);
+        const fw = q.get("framework");
+        if (fw) out = out.filter((r) => r.framework === fw); // exact equality, as the server does
+        if (q.get("exclude_synthetic") === "true") out = out.filter((r) => r.framework !== "redteam");
+        return HttpResponse.json(out);
+      })
+    );
+  }
+
+  function renderAt(url: string) {
+    return render(
+      <MemoryRouter initialEntries={[url]}>
+        <AppProvider>
+          <AuditLog />
+        </AppProvider>
+      </MemoryRouter>
+    );
+  }
+
+  it("sends framework=redteam and shows the red-team row, not the production row sharing the rule", async () => {
+    const queries: URLSearchParams[] = [];
+    serveLedger((q) => queries.push(q));
+    renderAt("/audit?rule=mcp_tool_poisoning&framework=redteam");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+
+    const pageQuery = queries.find((q) => q.get("limit") === "50")!;
+    expect(pageQuery.get("rule_id")).toBe("mcp_tool_poisoning");
+    expect(pageQuery.get("framework")).toBe("redteam");
+    // The exclusion the link would otherwise cancel itself with.
+    expect(pageQuery.get("exclude_synthetic")).toBeNull();
+
+    // The evidence is on screen…
+    expect(screen.getAllByText("send_email").length).toBeGreaterThan(0);
+    // …and the unrelated production row that merely shares the rule_id is NOT presented as it.
+    expect(screen.queryByText("fetch_url")).toBeNull();
+  });
+
+  it("prints the deep-linked rule as a chip the operator can clear", async () => {
+    serveLedger();
+    renderAt("/audit?rule=mcp_tool_poisoning&framework=redteam");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+
+    const chips = screen.getByTestId("audit-active-filters");
+    expect(chips).toHaveTextContent("mcp_tool_poisoning");
+    expect(chips).toHaveTextContent("redteam");
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("audit-chip-clear-rule"));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(screen.queryByTestId("audit-chip-rule")).toBeNull();
+  });
+
+  it("says so when Real-traffic-only and framework=redteam cancel each other out", async () => {
+    // Reachable by toggling the button back on after arriving from the link. An empty table under two
+    // filters with an empty intersection says nothing about whether the attack wrote rows.
+    serveLedger();
+    renderAt("/audit?rule=mcp_tool_poisoning&framework=redteam");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(screen.queryByTestId("audit-redteam-conflict")).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Showing all \(incl\. test\)/i }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(screen.getByTestId("audit-redteam-conflict")).toHaveTextContent(/cannot both hold/i);
+    expect(screen.queryByText("send_email")).toBeNull();
+  });
+
+  it("names the rule filter in the empty state instead of stopping at a full stop", async () => {
+    server.use(http.get("/api/v1/audit/records", () => HttpResponse.json([])));
+    renderAt("/audit?rule=mcp_tool_poisoning&framework=redteam");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    // The filter responsible for the emptiness is visible, and the hint is not suppressed.
+    expect(screen.getByTestId("audit-active-filters")).toHaveTextContent("mcp_tool_poisoning");
+    expect(screen.getByText(/for these filters/i)).toBeInTheDocument();
+  });
+});
+
+describe("AuditLog Params row", () => {
+  it("distinguishes 'we never asked for the arguments' from 'there were none'", async () => {
+    // `/audit/records`'s `_to_dict` emits no `tool_params` key at all, so this row could NEVER
+    // populate — and a bare em-dash sitting between a real Tool row and a real Trust row reads as
+    // captured-and-empty. An operator who switched `audit_capture_masked_params` ON for PCI 10.3
+    // event reconstruction saw the same em-dash while the masked values sat in the database.
+    server.use(
+      http.get("/api/v1/audit/records", () =>
+        HttpResponse.json([
+          {
+            id: "rec-np",
+            timestamp: "2026-07-03T12:00:00Z",
+            tool_name: "send_email",
+            decision: "block",
+            rule_id: "egress_block",
+            agent_id: "spiffe://norviq/ns/finance/sa/support-bot",
+            session_id: "sess-7",
+            trust_score: 40,
+            latency_ms: 12,
+            framework: "sidecar"
+            // no tool_params — exactly what the serializer emits
+          }
+        ])
+      )
+    );
+    renderPage();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText("send_email").closest("tr")!);
+    });
+
+    const row = screen.getByTestId("audit-params-uncaptured");
+    expect(row).toHaveTextContent(/does not return call arguments/i);
+    expect(row).toHaveTextContent(/Not evidence the call carried none/i);
+  });
+
+  it("still says 'captured, none' for a record that really carries an empty argument set", async () => {
+    server.use(
+      http.get("/api/v1/audit/records", () =>
+        HttpResponse.json([
+          {
+            id: "rec-empty",
+            timestamp: "2026-07-03T12:00:00Z",
+            tool_name: "list_matters",
+            decision: "allow",
+            latency_ms: 4,
+            tool_params: {}
+          }
+        ])
+      )
+    );
+    renderPage();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText("list_matters").closest("tr")!);
+    });
+    expect(screen.getByTestId("audit-params-empty")).toHaveTextContent(/carried no arguments/i);
+    expect(screen.queryByTestId("audit-params-uncaptured")).toBeNull();
+  });
+});

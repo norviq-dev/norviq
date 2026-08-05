@@ -19,7 +19,7 @@ import { fleetEnabled } from "../api/fleet";
 import { apiSend, apiUrl, createIntentDraft, fetchMe, fetchThreatPaths } from "../api/client";
 import { useApi } from "../hooks/useApi";
 import { getToken } from "../auth/session";
-import { AttackGraphCanvas, type AttackCanvasHandle, type ScopeCard } from "../components/attack-graph/AttackGraphCanvas";
+import { AttackGraphCanvas, buildScope, type AttackCanvasHandle, type ScopeCard } from "../components/attack-graph/AttackGraphCanvas";
 import { AttackGraphLegend } from "../components/attack-graph/AttackGraphLegend";
 import { AttackPathDetail, type SimResult } from "../components/attack-graph/AttackPathDetail";
 import { AttackPathList } from "../components/attack-graph/AttackPathList";
@@ -56,6 +56,17 @@ export function AttackGraph() {
 
   // filters (hydrated from URL on mount)
   const [range, setRange] = useState(searchParams.get("range") ?? "24h");
+  /**
+   * The window the paths ON SCREEN were actually counted over — set only inside a SUCCESSFUL fetch.
+   *
+   * `range` is what the operator has ASKED for; it changes the instant the dropdown moves and stays
+   * changed even when the fetch that would have re-measured it fails (the catch keeps the previous
+   * `paths` and raises the degraded banner). Captioning a range-scoped number with `range` therefore
+   * relabels last window's denial total with this window's name — the very defect the scope card's
+   * hardcoded "24h" was fixed for, just pointing the other way. Nothing on this page may caption a
+   * measurement with a window it was not measured over.
+   */
+  const [loadedRange, setLoadedRange] = useState<string | null>(null);
   const [agentClass, setAgentClass] = useState(searchParams.get("cls") ?? "all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>(
     searchParams.get("status") === "exploitable" || searchParams.get("status") === "blocked"
@@ -111,6 +122,9 @@ export function AttackGraph() {
       .then((res) => {
         if (!alive) return;
         setPaths(res.paths ?? []);
+        // These paths were counted over THIS range. Set together with `paths` so the two can never
+        // disagree, and never in the catch — a failed refetch leaves the old paths under the old label.
+        setLoadedRange(range);
         setApiNamespaces(res.namespaces ?? []);
         setSyntheticHidden(res.synthetic_hidden ?? 0);
         setClassTotals(res.class_totals ?? {});
@@ -126,6 +140,14 @@ export function AttackGraph() {
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, [selectedNamespace, range, agentClass, recomputing, showSynthetic, lifecycleTick]);
+
+  // An open scope card is DERIVED from `paths` and the window they were measured over (its denial
+  // row is a range-scoped total). When either changes — Range switch, Recompute, a verb promotion —
+  // a card left alone would keep last window's numbers under this window's label. Recompute it in
+  // place, keyed on `loadedRange` (not `range`) so a fetch that never landed cannot relabel it.
+  useEffect(() => {
+    setScope((s) => (s ? buildScope(s.id, paths, loadedRange ?? undefined) : s));
+  }, [paths, loadedRange]);
 
   // Flip synthetic-agent visibility + persist (shared with the Asset graph); the fetch effect re-runs.
   const toggleSynthetic = () => setShowSynthetic((v) => {
@@ -182,9 +204,13 @@ export function AttackGraph() {
     // annotation, never merged into `blocked`.
     const whatIfCount = visible.filter((p) => isWhatIf(p)).length;
     const maxBlast = visible.reduce((m, p) => Math.max(m, p.blast), 0);
-    const toolCount: Record<string, number> = {};
-    visible.forEach((p) => p.steps.forEach((st) => { if (st.kind === "tool") toolCount[st.to] = (toolCount[st.to] || 0) + 1; }));
-    const chokepoints = Object.values(toolCount).filter((c) => c >= 2).length;
+    // CHOKEPOINTS — one definition, the server's. `p.tool` is the path's chokepoint as the backend
+    // computed it (threats.py `_derive_paths` → `path.tool`); it is what the inspector labels with an
+    // amber "chokepoint" chip and what the intent builder tags. This strip used to define a
+    // chokepoint locally as "a tool on 2+ paths", so with paths through distinct tools — including
+    // the ordinary single-path case — it read "CHOKEPOINTS 0 tools" while the panel beside it was
+    // naming one. Two definitions of one word, on two panels an operator reads together.
+    const chokepoints = new Set(visible.map((p) => p.tool).filter(Boolean)).size;
     return { crit, high, exploitable, blocked, whatIfCount, maxBlast, chokepoints };
   }, [visible, statusOf, isWhatIf]);
 
@@ -606,6 +632,11 @@ export function AttackGraph() {
                     path={selected}
                     allPaths={paths}
                     whatIfIndex={wf}
+                    // The scope card reports denial counts the server aggregated over the window
+                    // these paths were FETCHED with — it must not caption a 30-day total "24h", nor
+                    // a 24-hour total "30d" because the 30d refetch failed. `loadedRange`, not
+                    // `range`, is the one the numbers on screen were actually measured over.
+                    range={loadedRange ?? undefined}
                     onToggleWhatIf={toggleWhatIf}
                     onScope={setScope}
                   />

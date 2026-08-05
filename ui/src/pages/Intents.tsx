@@ -90,6 +90,19 @@ export type ObservedArgSet = {
   ambiguous: Set<string>;
   /** The set was cut short by the capture bound, so absence from `keys` proves nothing. */
   truncated: boolean;
+  /**
+   * How many of the sampled calls went to THIS TOOL — `_ToolEvidence.as_dict()`'s `calls`.
+   *
+   * The evidence base behind every sentence this screen writes about one tool, and it is not the
+   * proposal's `sampled`. A multi-tool rule replayed over 500 calls may have seen `list_matters` on
+   * two of them; "carried no arguments at all across the 500 sampled calls" then offers a 500-call
+   * denominator for a two-call observation, and a strong negative with a large denominator is where
+   * an operator stops looking.
+   *
+   * `null` when the response did not say, which is the one case where borrowing the sample-wide
+   * number would be inventing evidence — so the sentence drops the number instead.
+   */
+  calls: number | null;
 };
 
 export type ProposeResponse = {
@@ -164,7 +177,10 @@ function readArgSet(value: unknown): ObservedArgSet | null {
       // A dropped entry is a name the operator will not be shown. Reported as truncation rather than
       // silently filtered: the whole point of this surface is that a partial list must not pass for a
       // complete one.
-      truncated: list.dropped > 0
+      truncated: list.dropped > 0,
+      // The bare-list form cannot carry a per-tool call count, and a shape that cannot say a thing
+      // must not be read as having said it.
+      calls: null
     };
   }
   if (value && typeof value === "object") {
@@ -183,7 +199,11 @@ function readArgSet(value: unknown): ObservedArgSet | null {
       truncated:
         Boolean(o.truncated ?? o.param_keys_truncated) ||
         list.dropped > 0 ||
-        Number(o.dropped ?? 0) > 0
+        Number(o.dropped ?? 0) > 0,
+      // Only a finite, non-negative integer is a call count. Anything else is read as "not reported"
+      // rather than coerced — a NaN or a negative rendered into a sentence is worse than no number.
+      calls:
+        typeof o.calls === "number" && Number.isFinite(o.calls) && o.calls >= 0 ? Math.floor(o.calls) : null
     };
   }
   return null;
@@ -312,13 +332,32 @@ export function scopedArgDetail(rule: IntentRule): Map<string, "value" | "presen
 export function unscopedArgs(
   rule: IntentRule,
   byTool: Map<string, ObservedArgSet>
-): Array<{ tool: string; name: string }> {
+): Array<{ name: string; tools: string[] }> {
   const scoped = scopedArgsOfRule(rule);
-  const out: Array<{ tool: string; name: string }> = [];
+  // ONE ENTRY PER DISTINCT NAME, not per (tool, name) pair.
+  //
+  // Argument paths are matched VERBATIM and tool-independently (`scopedArgsOfRule` above), so one
+  // `param_paths.to` clause closes `to` on `send_email` AND on `send_sms`. The number of distinct
+  // names is therefore the number of clauses the operator has to write, which is what the headline
+  // count is for. Keyed per pair, a rule scoping `tool_name in [send_email, send_sms]` where both
+  // carry `to` announced "2 arguments in traffic that no rule mentions" over a bullet that printed
+  // the identical name twice with a comma between — on the one screen whose whole design teaches the
+  // reader that two pixel-identical argument names may be two DIFFERENT verbatim paths. The tool list
+  // beside it was already deduped; only this half was not.
+  const order: string[] = [];
+  const tools = new Map<string, string[]>();
   for (const tool of toolsOfRule(rule)) {
-    for (const name of byTool.get(tool)?.keys ?? []) if (!scoped.has(name)) out.push({ tool, name });
+    for (const name of byTool.get(tool)?.keys ?? []) {
+      if (scoped.has(name)) continue;
+      if (!tools.has(name)) {
+        order.push(name);
+        tools.set(name, []);
+      }
+      const seen = tools.get(name)!;
+      if (!seen.includes(tool)) seen.push(tool);
+    }
   }
-  return out;
+  return order.map((name) => ({ name, tools: tools.get(name)! }));
 }
 
 /** The near miss, decomposed by the API so the clause list can reconcile with `met M of N`. The
@@ -535,10 +574,21 @@ function RuleArguments({
           }
           if (set.keys.length === 0) {
             // Only reachable with a POSITIVE capture state. This is an observation, not an absence.
+            //
+            // THE DENOMINATOR IS THIS TOOL'S OWN. `sampled` is the whole replay sample; the server
+            // saw this tool on `set.calls` of them. Attributing a strong negative to all 500 when the
+            // basis is 2 offers an evidence base the observation does not have, on a page whose every
+            // other sentence is careful not to overstate what was seen.
             return (
               <div key={tool} data-testid={`observed-args-${rule.id}-empty-${tool}`} style={{ marginTop: 4 }}>
-                <ArgName name={tool} /> — captured, and carried{" "}
-                <strong>no arguments at all</strong> across the {sampled} sampled calls.
+                <ArgName name={tool} /> — captured, and carried <strong>no arguments at all</strong>{" "}
+                {set.calls != null ? (
+                  <>
+                    across the {set.calls} call{set.calls === 1 ? "" : "s"} to this tool in the {sampled} sampled.
+                  </>
+                ) : (
+                  <>across the calls to this tool in the {sampled} sampled.</>
+                )}
                 {set.truncated && " (The capture bound was hit, so treat this as incomplete.)"}
               </div>
             );
@@ -565,7 +615,16 @@ function RuleArguments({
             : [];
           return (
             <div key={tool} style={{ marginTop: 6 }}>
-              <ArgName name={tool} /> carried:
+              <ArgName name={tool} /> carried
+              {/* This tool's own share of the sample, so the list below is read against the evidence
+                  base it actually has rather than against the whole replay. */}
+              {set.calls != null && (
+                <span style={{ color: "var(--text-muted)" }}>
+                  {" "}
+                  (on {set.calls} of the {sampled} sampled calls)
+                </span>
+              )}
+              :
               <div
                 data-testid={`arg-carried-${rule.id}`}
                 style={{ display: "flex", flexDirection: "column", gap: 3, marginTop: 3 }}
@@ -823,16 +882,44 @@ export function Intents() {
     [canCompare, rules, observed]
   );
   const unscopedCount = unscopedByRule.reduce((n, x) => n + x.args.length, 0);
-  // Whether any key-set feeding that count was cut short. If it was, the count is a FLOOR — and a
-  // floor printed as a total is the "12 of 400" failure, one level up from the per-tool list where it
-  // was already stated.
-  const unscopedPartial = useMemo(
-    () =>
-      unscopedByRule.some(({ args }) =>
-        args.some((a) => observed.byTool.get(a.tool)?.truncated)
-      ),
-    [unscopedByRule, observed]
+  // Whether any key-set that could have fed that count was cut short. If one was, the count is a
+  // FLOOR — and a floor printed as a total is the "12 of 400" failure, one level up from the per-tool
+  // list where it was already stated.
+  //
+  // EVERY TOOL IN THE RULE, not only the tools that contributed an entry. A truncated tool whose
+  // visible keys all happen to be scoped contributes nothing to `args`, so keying the check on `args`
+  // never consulted it — and that tool is exactly where the unseen names are. It is not an exotic
+  // state: the server sets `truncated` whenever `dropped > 0` and `_declared_keys` drops any name
+  // carrying a control character, so ONE hostile argument name truncates a two-key tool; and
+  // `_add_existence_predicates` scopes the always-present paths, which is precisely how a tool ends
+  // up with every visible key already mentioned.
+  const truncatedToolsOfRule = useCallback(
+    (rule: IntentRule) => toolsOfRule(rule).filter((t) => observed.byTool.get(t)?.truncated),
+    [observed]
   );
+  /**
+   * EVERY RULE, not only the rules that contributed an entry.
+   *
+   * `unscopedByRule` is already filtered to `args.length > 0`, so asking it whether anything was cut
+   * short repeats — one level up — the very mistake this guard was rewritten to fix. A proposal with
+   * two rules where the FIRST contributes the only unmentioned argument and the SECOND had its
+   * capture cut short printed "1 argument in traffic that no rule mentions" as a definite total: the
+   * rule holding the unseen names was excluded from the check by the same predicate that excluded it
+   * from the list. The headline counts across all rules, so a bound hit anywhere makes it a floor.
+   */
+  const truncatedRules = useMemo(
+    () => (canCompare ? rules.filter((r) => truncatedToolsOfRule(r).length > 0) : []),
+    [canCompare, rules, truncatedToolsOfRule]
+  );
+  const unscopedPartial = truncatedRules.length > 0;
+  // The rules whose capture was cut short and which the bullet list above does NOT name — either
+  // because nothing was flagged at all (a screen that says nothing where an operator expects a
+  // verdict reads as "there is no gap"), or because the flagged rules are different rules, which
+  // leaves "this count is a floor" true but unattributable to anything on screen.
+  const truncatedUnnamed = useMemo(() => {
+    const named = new Set(unscopedByRule.map(({ rule }) => rule.id));
+    return truncatedRules.filter((r) => !named.has(r.id));
+  }, [truncatedRules, unscopedByRule]);
 
   // KEEP THESE SHORT. The reason renders in the Panel's action row, right-aligned to its own column —
   // whose right edge sits MID-ROW, so a long reason extends leftward underneath the neighbouring
@@ -1025,13 +1112,13 @@ export function Intents() {
                         </code>{" "}
                         does not mention{" "}
                         {args.map((a, i) => (
-                          <span key={`${a.tool}␟${a.name}`}>
+                          <span key={a.name}>
                             {i > 0 && ", "}
                             <ArgName name={a.name} />
                           </span>
                         ))}{" "}
                         — seen on{" "}
-                        {[...new Set(args.map((a) => a.tool))].map((t, i) => (
+                        {[...new Set(args.flatMap((a) => a.tools))].map((t, i) => (
                           <span key={t}>
                             {i > 0 && ", "}
                             <ArgName name={t} />
@@ -1046,6 +1133,45 @@ export function Intents() {
                     that matter before saving — this proposal cannot invent one, because it never saw the
                     values.
                   </div>
+                </div>
+              </div>
+            </Panel>
+          )}
+
+          {truncatedUnnamed.length > 0 && (
+            // A rule whose capture ran out and which the list above does not name. Two shapes, one
+            // sentence: nothing was flagged at all (silence reads as "there is no gap"), or something
+            // was flagged on OTHER rules and the headline's "at least" would otherwise point at
+            // nothing on screen.
+            <Panel
+              data-testid="unscoped-args-truncated"
+              title={
+                unscopedCount === 0
+                  ? "Every argument seen is mentioned — but the list was cut short"
+                  : "Another rule’s argument capture was cut short"
+              }
+              sub="The capture bound was hit, so there are argument names this screen was never shown. Absence from it rules nothing out."
+            >
+              <div role="status" style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                <AlertTriangle size={16} style={{ color: "var(--escalate)", flex: "none", marginTop: 2 }} />
+                <div style={{ fontSize: 13, lineHeight: 1.65 }}>
+                  <ul style={{ margin: 0, paddingLeft: 18 }}>
+                    {truncatedUnnamed.map((rule) => (
+                      <li key={rule.id} style={{ marginBottom: 4 }}>
+                        <code className="mono" style={{ fontSize: 12 }}>
+                          {rule.id}
+                        </code>{" "}
+                        — capture was cut short on{" "}
+                        {truncatedToolsOfRule(rule).map((t, i) => (
+                          <span key={t}>
+                            {i > 0 && ", "}
+                            <ArgName name={t} />
+                          </span>
+                        ))}
+                        .
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               </div>
             </Panel>

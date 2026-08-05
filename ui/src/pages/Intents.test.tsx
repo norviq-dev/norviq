@@ -957,3 +957,276 @@ describe("the server's own per-tool capture state reaches the screen", () => {
     expect(names).toContain("“amount, txn_id”");
   });
 });
+
+// ------------------------------------------------------------------------------------------------
+// THE UNMENTIONED-ARGUMENT HEADLINE, AND WHAT IT COUNTS.
+//
+// Three separate ways the same panel overstated or understated what it knew:
+//
+//  1. It counted (tool, name) PAIRS. Argument paths are matched verbatim and tool-independently, so
+//     one `param_paths.to` clause closes `to` on both `send_email` and `send_sms` — the count of
+//     DISTINCT names is the number of clauses to write. Keyed per pair, the title read "2 arguments"
+//     over a bullet printing the identical name twice with a comma between, on the one screen whose
+//     design teaches the reader that two pixel-identical names may be two DIFFERENT verbatim paths.
+//
+//  2. The "this count is a floor" guard only inspected tools that CONTRIBUTED an entry, so a
+//     truncated tool whose visible keys happened to all be scoped was never consulted — and that is
+//     exactly where the unseen names are.
+//
+//  3. Per-tool evidence was attributed to the whole sample: "carried no arguments at all across the
+//     500 sampled calls" for a tool the server saw on 2 of them. `_ToolEvidence.as_dict()` puts
+//     `calls` on the wire; `readArgSet` never read it.
+// ------------------------------------------------------------------------------------------------
+describe("the unmentioned-argument panel counts what the operator has to write", () => {
+  beforeEach(() => {
+    clearApiCache();
+    vi.restoreAllMocks();
+  });
+
+  /** A rule over two tools that both carry the same argument — the normal multi-tool proposal. */
+  function twoToolProposal(over: Record<string, unknown> = {}) {
+    return refundProposal({
+      intent: {
+        name: "notify-intent",
+        class: "billing-bot",
+        call: [
+          {
+            id: "notify-send",
+            match: { verb: "write", tool_name: { in: ["send_email", "send_sms"] } },
+            require: {}
+          }
+        ]
+      },
+      ...over
+    });
+  }
+
+  it("counts one shared argument once, and prints its name once", async () => {
+    vi.spyOn(client, "apiSend").mockResolvedValue(
+      twoToolProposal({
+        observed_params: {
+          send_email: toolEvidence({ detail: "keys", keys: ["to"], calls: 6 }),
+          send_sms: toolEvidence({ detail: "keys", keys: ["to"], calls: 2 })
+        }
+      }) as never
+    );
+    const user = userEvent.setup();
+    renderPage();
+    await proposeBilling(user);
+
+    const summary = await screen.findByTestId("unscoped-args");
+    // ONE clause closes both entries, so the headline says one.
+    expect(summary).toHaveTextContent(/^1 argument in traffic that no rule mentions/i);
+    // The bullet lists the name once — printing it twice reads as a render glitch, or sends the
+    // operator hunting for a homoglyph that is not there.
+    const names = within(summary)
+      .getAllByTestId("arg-name")
+      .map((n) => n.textContent ?? "");
+    expect(names.filter((n) => n === "“to”")).toHaveLength(1);
+    // …while still naming BOTH tools it was seen on.
+    expect(names).toContain("“send_email”");
+    expect(names).toContain("“send_sms”");
+
+    // The per-rule band repeats the count, so it has to agree.
+    const band = screen.getByTestId("observed-args-notify-send");
+    expect(band).toHaveTextContent(/says nothing about that argument/i);
+    expect(band.textContent ?? "").not.toMatch(/those 2 arguments/);
+  });
+
+  it("still counts two DISTINCT names on one tool as two", async () => {
+    // The other half: dedupe by name must not collapse genuinely different arguments.
+    vi.spyOn(client, "apiSend").mockResolvedValue(
+      twoToolProposal({
+        observed_params: {
+          send_email: toolEvidence({ detail: "keys", keys: ["to", "body"], calls: 6 }),
+          send_sms: toolEvidence({ detail: "keys", keys: ["to"], calls: 2 })
+        }
+      }) as never
+    );
+    const user = userEvent.setup();
+    renderPage();
+    await proposeBilling(user);
+    expect(await screen.findByTestId("unscoped-args")).toHaveTextContent(
+      /^2 arguments in traffic that no rule mentions/i
+    );
+  });
+
+  it("calls the count a floor when a truncated tool contributed NO entry", async () => {
+    // `send_email`'s only visible key is scoped, so it contributes nothing to the flagged list — and
+    // its capture was cut short, so there may be further unmentioned names it never showed. The
+    // headline used to print "1 argument" as a definite total and the operator closed the gap they
+    // could see, believing it was the gap.
+    vi.spyOn(client, "apiSend").mockResolvedValue(
+      twoToolProposal({
+        intent: {
+          name: "notify-intent",
+          class: "billing-bot",
+          call: [
+            {
+              id: "notify-send",
+              match: { verb: "write", tool_name: { in: ["send_email", "send_sms"] } },
+              require: { "param_paths.to": { matches: "^ops@" } }
+            }
+          ]
+        },
+        observed_params: {
+          send_email: toolEvidence({ detail: "keys", keys: ["to"], truncated: true, dropped: 3, calls: 6 }),
+          send_sms: toolEvidence({ detail: "keys", keys: ["body"], calls: 2 })
+        }
+      }) as never
+    );
+    const user = userEvent.setup();
+    renderPage();
+    await proposeBilling(user);
+
+    const summary = await screen.findByTestId("unscoped-args");
+    expect(summary).toHaveTextContent(/at least 1 argument in traffic that no rule mentions/i);
+    expect(summary).toHaveTextContent(/this count is a floor/i);
+  });
+
+  it("still speaks when every visible argument is mentioned but the capture ran out", async () => {
+    // Nothing to flag, and the list is incomplete — which used to render no panel at all. Silence
+    // where the operator expects a verdict reads as "there is no gap".
+    vi.spyOn(client, "apiSend").mockResolvedValue(
+      twoToolProposal({
+        intent: {
+          name: "notify-intent",
+          class: "billing-bot",
+          call: [
+            {
+              id: "notify-send",
+              match: { verb: "write", tool_name: { in: ["send_email"] } },
+              require: { "param_paths.to": { matches: "^ops@" } }
+            }
+          ]
+        },
+        observed_params: {
+          send_email: toolEvidence({ detail: "keys", keys: ["to"], truncated: true, dropped: 3, calls: 6 })
+        }
+      }) as never
+    );
+    const user = userEvent.setup();
+    renderPage();
+    await proposeBilling(user);
+
+    expect(screen.queryByTestId("unscoped-args")).toBeNull();
+    const partial = await screen.findByTestId("unscoped-args-truncated");
+    expect(partial).toHaveTextContent(/cut short/i);
+    expect(partial).toHaveTextContent(/rules nothing out/i);
+    expect(within(partial).getByText("“send_email”")).toBeInTheDocument();
+  });
+
+  it("calls the count a floor when a DIFFERENT rule's capture was cut short", async () => {
+    // The same hole, one level up, and the one the rewrite left open. `unscopedByRule` is filtered to
+    // `args.length > 0`, so asking IT whether anything was cut short excludes — by the very predicate
+    // that excluded it from the list — the rule holding the unseen names.
+    //
+    // `notify-send` contributes the only flagged argument and is not truncated. `matters-read`
+    // mentions every key it can see AND had its capture cut short, so it contributes nothing. The
+    // headline printed "1 argument in traffic that no rule mentions" as a definite total, with the
+    // rule that has more to say named nowhere on the screen.
+    vi.spyOn(client, "apiSend").mockResolvedValue(
+      refundProposal({
+        sampled: 500,
+        intent: {
+          name: "billing-bot-intent",
+          class: "billing-bot",
+          call: [
+            {
+              id: "notify-send",
+              match: { verb: "write", tool_name: { in: ["send_email"] } },
+              require: {}
+            },
+            {
+              id: "matters-read",
+              match: { verb: "write", tool_name: { in: ["list_matters"] } },
+              require: { "param_paths.matter_id": { matches: "^M-" } }
+            }
+          ]
+        },
+        observed_params: {
+          send_email: toolEvidence({ detail: "keys", keys: ["to"], calls: 6 }),
+          list_matters: toolEvidence({
+            detail: "keys",
+            keys: ["matter_id"],
+            truncated: true,
+            dropped: 4,
+            calls: 9
+          })
+        }
+      }) as never
+    );
+    const user = userEvent.setup();
+    renderPage();
+    await proposeBilling(user);
+
+    const summary = await screen.findByTestId("unscoped-args");
+    expect(summary).toHaveTextContent(/at least 1 argument in traffic that no rule mentions/i);
+    expect(summary).toHaveTextContent(/this count is a floor/i);
+
+    // …and "a floor" has to point at something. The rule responsible is named.
+    const partial = screen.getByTestId("unscoped-args-truncated");
+    expect(partial).toHaveTextContent(/matters-read/);
+    expect(within(partial).getByText("“list_matters”")).toBeInTheDocument();
+    // The rule already named in the bullet list above is not repeated here.
+    expect(partial.textContent ?? "").not.toMatch(/notify-send/);
+  });
+});
+
+describe("per-tool evidence is attributed to the tool, not to the whole sample", () => {
+  beforeEach(() => {
+    clearApiCache();
+    vi.restoreAllMocks();
+  });
+
+  it("names THIS tool's call count behind a strong negative", async () => {
+    // "captured, and carried no arguments at all across the 500 sampled calls" offers a 500-call
+    // evidence base for an observation made on 2 calls. The operator reads the denominator and stops
+    // looking. `_ToolEvidence.as_dict()` has always put `calls` on the wire.
+    vi.spyOn(client, "apiSend").mockResolvedValue(
+      refundProposal({
+        sampled: 500,
+        intent: {
+          name: "billing-bot-intent",
+          class: "billing-bot",
+          call: [
+            {
+              id: "billing-mixed",
+              match: { verb: "write", tool_name: { in: ["issue_refund", "list_matters"] } },
+              require: {}
+            }
+          ]
+        },
+        observed_params: {
+          issue_refund: toolEvidence({ detail: "keys", keys: ["amount"], calls: 498 }),
+          list_matters: toolEvidence({ detail: "keys", keys: [], calls: 2 })
+        }
+      }) as never
+    );
+    const user = userEvent.setup();
+    renderPage();
+    await proposeBilling(user);
+
+    const empty = await screen.findByTestId("observed-args-billing-mixed-empty-list_matters");
+    expect(empty).toHaveTextContent(/across the 2 calls to this tool in the 500 sampled/i);
+    // The inflated sentence must be gone.
+    expect(empty.textContent ?? "").not.toMatch(/across the 500 sampled calls/);
+  });
+
+  it("drops the number rather than borrowing the sample-wide one when calls is absent", async () => {
+    // A response that does not report `calls` must not have the whole-sample figure attributed to it.
+    vi.spyOn(client, "apiSend").mockResolvedValue(
+      refundProposal({
+        sampled: 500,
+        observed_params: { issue_refund: { detail: "keys", keys: [], pinnable: [], ambiguous: [], truncated: false } }
+      }) as never
+    );
+    const user = userEvent.setup();
+    renderPage();
+    await proposeBilling(user);
+
+    const empty = await screen.findByTestId("observed-args-billing-write-issue-refund-empty-issue_refund");
+    expect(empty).toHaveTextContent(/across the calls to this tool in the 500 sampled/i);
+    expect(empty.textContent ?? "").not.toMatch(/across the 500 sampled calls/);
+  });
+});

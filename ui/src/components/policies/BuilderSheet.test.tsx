@@ -1619,3 +1619,416 @@ describe("a negated scoping fact is visible, not merely enforced", () => {
     );
   });
 });
+
+// --- The blocked reason must name a field that is ON SCREEN ----------------------------------------
+describe("the Save-blocked reason names the identifier the SELECTED tier actually renders", () => {
+  /**
+   * The defect: one tier-blind branch, `!scopeReady ? "Set an agent class first."`. On the workload
+   * tier the sheet draws no agent-class control at all — the only identifier is "Workload name
+   * (Deployment)" — so the single sentence that names a field sent the operator hunting for a control
+   * that does not exist, while the generic scope sentence above it ("Pick who this policy is for to
+   * continue.") named nothing. A reason an operator cannot act on is not a reason.
+   */
+  it("workload tier: asks for the workload (Deployment) name, on a tier with no agent-class field", () => {
+    renderSheet(); // namespace="default" is already concrete, so the namespace branch is satisfied
+    fireEvent.click(screen.getByTestId("builder-tier-workload"));
+
+    // The premise, proved rather than assumed: no agent-class control exists on this tier, and the
+    // identifier that IS empty is the workload name.
+    expect(screen.queryByTestId("builder-agent-class")).not.toBeInTheDocument();
+    expect(screen.getByTestId("builder-scope-identifier")).toHaveValue("");
+    expect(screen.getByTestId("builder-save-btn")).toBeDisabled();
+
+    // VISIBLE text (InlineDisabledReason), because `.btn:disabled { pointer-events: none }` means a
+    // `title` on the greyed Save button can never be read.
+    const reason = screen.getByTestId("disabled-reason");
+    expect(reason).toHaveTextContent("Set a workload (Deployment) name first.");
+    expect(reason).not.toHaveTextContent(/agent class/i);
+    // The dry-run button carried the same wrong string in its (unreachable) title — same source now.
+    expect(screen.getByTestId("builder-dryrun-btn")).toHaveAttribute(
+      "title",
+      "Set a workload (Deployment) name first."
+    );
+  });
+
+  it("class tier still asks for the agent class — the string is tier-aware, not merely reworded", () => {
+    // A pin, not a discovery: tests/e2e/tools-registry.spec.ts asserts this exact sentence on the
+    // default (class) tier, and the fix must not drag every tier onto one new generic wording.
+    renderSheet();
+    expect(screen.getByTestId("builder-save-btn")).toBeDisabled();
+    expect(screen.getByTestId("disabled-reason")).toHaveTextContent("Set an agent class first.");
+  });
+});
+
+// --- A per-tool dry-run number is a SAMPLE, and must say so ----------------------------------------
+describe("the dry-run's per-tool traffic numbers state the size of the sample they came from", () => {
+  /**
+   * The defect: `sampled` was keyed on `dryRunResult.truncated`, which is the server's flag for the
+   * REPLAY hitting its 500-record cap — a different fact entirely. The flip list itself is capped at 8
+   * rows across ALL tools, unconditionally (`if len(flip_samples) < 8` in _replay_recent). So on an
+   * ordinary run the 8-row sample printed as a per-tool total, and every tool the sample never reached
+   * got ScopeCell's affirmative 0-case, "No replayed call would be denied by this grant." — an
+   * all-clear for a grant nobody measured, on the one screen whose job is to say whether enforcing
+   * this policy breaks real traffic.
+   */
+  const flips = (n: number, tool: string) =>
+    Array.from({ length: n }, () => ({ tool_name: tool, was: "allow", now: "block", rule_id: "intent_default_deny" }));
+
+  async function dryRunWithAllowlist(body: Record<string, unknown>) {
+    server.use(http.post("/api/v1/policies/dry-run", () => HttpResponse.json(body)));
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "support-agent" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    for (const tool of ["send_email", "http_post"]) {
+      fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: tool } });
+      fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    }
+    await waitFor(() => expect(screen.getByTestId("builder-dryrun-btn")).not.toBeDisabled());
+    fireEvent.click(screen.getByTestId("builder-dryrun-btn"));
+    await waitFor(() => expect(screen.getByTestId("builder-dryrun-result")).toBeInTheDocument());
+  }
+
+  it("a capped sample is a lower bound for the tool it names, and no verdict at all for the tool it does not", async () => {
+    // The exact shape _replay_recent emits for a busy namespace: 47 flips counted, 8 named.
+    await dryRunWithAllowlist({
+      valid: true,
+      errors: [],
+      total_records_checked: 120,
+      would_block: 47,
+      would_allow: 73,
+      would_escalate: 0,
+      newly_blocked: 47,
+      newly_allowed: 0,
+      newly_blocked_samples: flips(8, "send_email"),
+      truncated: false, // the REPLAY was not capped — only the sample was, which is the whole point
+      recommendation: "Would NEWLY block 47 of 120 recent calls (39.2%) — review the flips before deploying."
+    });
+
+    // The named tool: a lower bound, never "8" as though it were the total.
+    const named = screen.getByTestId("builder-scope-cell-send_email-impact");
+    expect(named).toHaveTextContent("at least 8 replayed calls would now be denied");
+
+    // The unnamed tool: the affirmative all-clear must not appear. Its grant is wide open and 39 of
+    // the 47 flips are attributed to nobody — "we did not measure this" is the honest answer.
+    const unnamed = screen.getByTestId("builder-scope-cell-http_post-impact");
+    expect(unnamed).not.toHaveTextContent(/No replayed call would be denied/i);
+    expect(unnamed).not.toHaveTextContent(/replayed call/i);
+
+    // ...and the silence is explained on the row, with the sample's size in it — a row that simply
+    // said nothing would be indistinguishable from a row with nothing to report.
+    expect(screen.getByTestId("builder-scope-sample-note-http_post")).toHaveTextContent(
+      "Not named in the dry-run's sample of 8 of 47 newly-blocked calls"
+    );
+    expect(screen.getByTestId("builder-scope-sample-note-send_email")).toHaveTextContent(
+      "Counted from the dry-run's sample of 8 of 47 newly-blocked calls"
+    );
+    // And the chip list itself is labelled as the sample it is.
+    expect(screen.getByTestId("builder-dryrun-sample-label")).toHaveTextContent(
+      "Sample — 8 of 47 newly-blocked calls named below."
+    );
+  });
+
+  it("a COMPLETE sample is stated as a total — the honesty runs both ways", async () => {
+    await dryRunWithAllowlist({
+      valid: true,
+      errors: [],
+      total_records_checked: 40,
+      newly_blocked: 2,
+      newly_blocked_samples: [...flips(1, "send_email"), ...flips(1, "http_post")],
+      truncated: false,
+      recommendation: "Would NEWLY block 2 of 40 recent calls (5.0%)."
+    });
+
+    // Every flip the run counted is named, so neither row hedges and neither carries a sample note.
+    expect(screen.getByTestId("builder-scope-cell-send_email-impact")).toHaveTextContent(
+      "1 replayed call would now be denied"
+    );
+    expect(screen.getByTestId("builder-scope-cell-send_email-impact")).not.toHaveTextContent(/at least/i);
+    expect(screen.getByTestId("builder-scope-cell-http_post-impact")).toHaveTextContent(
+      "1 replayed call would now be denied"
+    );
+    expect(screen.queryByTestId("builder-scope-sample-note-send_email")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("builder-scope-sample-note-http_post")).not.toBeInTheDocument();
+    expect(screen.getByTestId("builder-dryrun-sample-label")).toHaveTextContent("All 2 newly-blocked calls named below.");
+  });
+
+  it("a response that reports no total does not get to claim its sample is the whole story", async () => {
+    // `newly_blocked` is optional on the wire (client.ts). `?? 0` would make a MISSING total read as
+    // "the 8 rows you can see are all there were" — the same fallback-to-zero, one field along.
+    await dryRunWithAllowlist({
+      valid: true,
+      errors: [],
+      total_records_checked: 120,
+      newly_blocked_samples: flips(8, "send_email"),
+      truncated: false,
+      recommendation: "n/a"
+    });
+
+    expect(screen.getByTestId("builder-scope-cell-send_email-impact")).toHaveTextContent(
+      "at least 8 replayed calls would now be denied"
+    );
+    expect(screen.getByTestId("builder-scope-sample-note-http_post")).toHaveTextContent(
+      "Not named in the dry-run's sample of 8 newly-blocked calls, with no total reported"
+    );
+    // ...and the panel headline says the number is missing rather than printing a zero in the
+    // all-clear colour, which is the same fabricated measurement one line up.
+    const panel = screen.getByTestId("builder-dryrun-result");
+    expect(panel).toHaveTextContent("newly-blocked count not reported");
+    expect(panel).not.toHaveTextContent("0 newly blocked");
+  });
+
+  it("a replay that examined nothing is unmeasured, not clean", async () => {
+    // An empty `newly_blocked_samples` over zero replayed records used to render as "No replayed call
+    // would be denied by this grant." on every row — a measurement result produced by a measurement
+    // that never happened.
+    await dryRunWithAllowlist({
+      valid: true,
+      errors: [],
+      total_records_checked: 0,
+      newly_blocked: 0,
+      newly_blocked_samples: [],
+      truncated: false,
+      recommendation: "No recent traffic to replay."
+    });
+
+    expect(screen.getByTestId("builder-scope-cell-send_email-impact")).not.toHaveTextContent(/replayed call/i);
+    expect(screen.getByTestId("builder-scope-sample-note-send_email")).toHaveTextContent(
+      "The dry-run replayed no recent calls, so this grant's effect on real traffic is unmeasured — not zero."
+    );
+  });
+});
+
+// --- The condition picker must be searchable by the names the rest of the product prints ------------
+describe("ConditionPicker search speaks the same vocabulary as the chips and the compiled rego", () => {
+  const openPickerFor = async (tool: string) => {
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "support-agent" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: tool } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    fireEvent.click(screen.getByTestId(`builder-scope-cell-${tool}-cta`));
+    openPicker();
+    return screen.getByTestId("builder-condition-picker-search");
+  };
+
+  it("finds a whole-call fact by the RAW field name the scope chip and the rego header both print", async () => {
+    // The picker filtered on `label`/`meta`/`hint` and never on `id`, while `describeFact` — the same
+    // export the scope cell and the rego header comment use — prints the raw field. So the operator
+    // read `sql_tables` on a chip, typed it here, and was told "Nothing matches “sql_tables”… it was
+    // never declared", with the option sitting two rows below under its friendly label "SQL tables".
+    const search = await openPickerFor("execute_sql");
+
+    for (const raw of ["sql_tables", "data_classes", "destinations.emails", "param_bytes"]) {
+      fireEvent.change(search, { target: { value: raw } });
+      expect(screen.getByTestId(`builder-condition-picker-option-${raw}`)).toBeInTheDocument();
+      expect(screen.queryByTestId("builder-condition-picker-empty")).not.toBeInTheDocument();
+    }
+
+    // The friendly label still matches — this is an addition to the vocabulary, not a swap.
+    fireEvent.change(search, { target: { value: "SQL tables" } });
+    expect(screen.getByTestId("builder-condition-picker-option-sql_tables")).toBeInTheDocument();
+
+    // A name that really is nowhere still reaches the empty state.
+    fireEvent.change(search, { target: { value: "zzz_not_a_field" } });
+    expect(screen.getByTestId("builder-condition-picker-empty")).toBeInTheDocument();
+  });
+
+  it("keeps an empty group's explanation while the operator is typing", async () => {
+    // "This tool declares no arguments" is an ANSWER, and the group carrying it has no options to
+    // match — so the `(!g.options.length && !q)` arm meant to preserve it was constant-false (`if (!q)
+    // return groups` above guarantees a non-empty `q`), and the explanation vanished on the first
+    // keystroke, leaving a facts-only list with no account of where the arguments went.
+    server.use(
+      http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
+      http.get("/api/v1/tools", () => HttpResponse.json([registryEntry("send_email")])) // schema_available: false
+    );
+    const search = await openPickerFor("send_email");
+
+    const sub = /No declared schema for send_email/i;
+    expect(screen.getByText(sub)).toBeInTheDocument();
+
+    // "host" matches two whole-call facts, so the search is genuinely filtering, not idling.
+    fireEvent.change(search, { target: { value: "host" } });
+    expect(screen.getByTestId("builder-condition-picker-option-destinations.hosts")).toBeInTheDocument();
+    expect(screen.getByText(sub)).toBeInTheDocument();
+  });
+});
+
+// --- ADVERSARIAL VERIFICATION of the sample-honesty work ------------------------------------------
+// Four states the sample-honesty fix does not survive: an unreported total over an EMPTY flip list, a
+// capped REPLAY whose flip list is complete, an unreported replay size, and a dry run whose numbers
+// belong to a policy the operator has since edited.
+describe("what the dry run could not measure stays unmeasured on every path into the row", () => {
+  const flips = (n: number, tool: string) =>
+    Array.from({ length: n }, () => ({ tool_name: tool, was: "allow", now: "block", rule_id: "intent_default_deny" }));
+
+  async function dryRunWithAllowlist(body: Record<string, unknown>) {
+    server.use(http.post("/api/v1/policies/dry-run", () => HttpResponse.json(body)));
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "support-agent" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    for (const tool of ["send_email", "http_post"]) {
+      fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: tool } });
+      fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    }
+    await waitFor(() => expect(screen.getByTestId("builder-dryrun-btn")).not.toBeDisabled());
+    fireEvent.click(screen.getByTestId("builder-dryrun-btn"));
+    await waitFor(() => expect(screen.getByTestId("builder-dryrun-result")).toBeInTheDocument());
+  }
+
+  it("an unreported total over an EMPTY flip list is not an all-clear, and does not contradict the headline", async () => {
+    // The hole the sample-completeness check left open: `flipSampleIncomplete` asked `flipSampleSize > 0`
+    // when no total was reported, so a response with an empty `newly_blocked_samples` and no
+    // `newly_blocked` scored as a COMPLETE sample — every row got ScopeCell's affirmative "No replayed
+    // call would be denied by this grant." on the same screen whose headline said the count was never
+    // reported. Two readings of one response, one of them an all-clear nobody measured.
+    await dryRunWithAllowlist({
+      valid: true,
+      errors: [],
+      total_records_checked: 120,
+      newly_blocked_samples: [],
+      truncated: false,
+      recommendation: "n/a"
+    });
+
+    const panel = screen.getByTestId("builder-dryrun-result");
+    expect(panel).toHaveTextContent("newly-blocked count not reported");
+    for (const tool of ["send_email", "http_post"]) {
+      expect(screen.getByTestId(`builder-scope-cell-${tool}-impact`)).not.toHaveTextContent(/replayed call/i);
+      expect(screen.getByTestId(`builder-scope-sample-note-${tool}`)).toHaveTextContent(
+        "The dry-run named no newly-blocked calls and reported no total, so this grant's effect on real traffic is unmeasured — not zero."
+      );
+    }
+  });
+
+  it("a capped REPLAY is named as the reason, not miscopied as a sample of 3 of 3", async () => {
+    // `flipSampleIncomplete` has TWO causes and the note stated only one. With the flip list complete
+    // (3 of 3) but the REPLAY stopped at its record cap, the row read "sample of 3 of 3 newly-blocked
+    // calls — this tool's real number can be higher": a sentence that refutes itself in nine words, and
+    // sends the operator looking for five missing flips instead of the records that were never
+    // evaluated at all.
+    await dryRunWithAllowlist({
+      valid: true,
+      errors: [],
+      total_records_checked: 500,
+      newly_blocked: 3,
+      newly_blocked_samples: flips(3, "send_email"),
+      truncated: true,
+      recommendation: "Would NEWLY block 3 of 500 recent calls (0.6%)."
+    });
+
+    // The named tool keeps its lower bound — the replay cap means calls beyond it were never seen.
+    expect(screen.getByTestId("builder-scope-cell-send_email-impact")).toHaveTextContent(
+      "at least 3 replayed calls would now be denied"
+    );
+    const named = screen.getByTestId("builder-scope-sample-note-send_email");
+    expect(named).not.toHaveTextContent("3 of 3");
+    expect(named).toHaveTextContent(/replay stopped at its record cap/i);
+    // The unnamed tool: still no all-clear, and still not blamed on a flip list that is in fact whole.
+    expect(screen.getByTestId("builder-scope-cell-http_post-impact")).not.toHaveTextContent(/replayed call/i);
+    const unnamed = screen.getByTestId("builder-scope-sample-note-http_post");
+    expect(unnamed).not.toHaveTextContent("3 of 3");
+    expect(unnamed).toHaveTextContent(/record cap/i);
+    // ...and the chip label above them does not call a complete list a sample of itself either.
+    expect(screen.getByTestId("builder-dryrun-sample-label")).not.toHaveTextContent("3 of 3");
+  });
+
+  it("a replay that never said how much it examined is unmeasured too — no 'Replayed 0'", async () => {
+    // `total_records_checked` is optional on the wire exactly like `newly_blocked`. `?? 0` printed
+    // "Replayed 0 recent real calls" — a measurement the run never claimed — one line above the
+    // headline that had just been fixed for the same fallback.
+    await dryRunWithAllowlist({
+      valid: true,
+      errors: [],
+      newly_blocked: 0,
+      newly_blocked_samples: [],
+      truncated: false,
+      recommendation: "n/a"
+    });
+
+    const panel = screen.getByTestId("builder-dryrun-result");
+    expect(panel).not.toHaveTextContent(/Replayed 0 recent real call/i);
+    expect(panel).toHaveTextContent(/did not report how many recent calls it replayed/i);
+    expect(screen.getByTestId("builder-scope-cell-send_email-impact")).not.toHaveTextContent(/replayed call/i);
+    expect(screen.getByTestId("builder-scope-sample-note-send_email")).toHaveTextContent(
+      "The dry-run did not report how many calls it replayed, so this grant's effect on real traffic is unmeasured — not zero."
+    );
+  });
+
+  it("numbers from a dry run the operator has since edited past do not describe the grant on screen", async () => {
+    // `dryRunStale` already re-locks Save and badges the results panel — but the per-tool traffic
+    // sentence, which sits far up the sheet beside the grant itself, went on printing the OLD rego's
+    // measurement as a fact about the grant now displayed. "at least 8 replayed calls would now be
+    // denied" under a grant that has since changed is a number about a policy that no longer exists.
+    await dryRunWithAllowlist({
+      valid: true,
+      errors: [],
+      total_records_checked: 120,
+      newly_blocked: 47,
+      newly_blocked_samples: flips(8, "send_email"),
+      truncated: false,
+      recommendation: "Would NEWLY block 47 of 120 recent calls (39.2%)."
+    });
+    // The fixture reaches the state: before the edit, the row is quoting this run.
+    expect(screen.getByTestId("builder-scope-cell-send_email-impact")).toHaveTextContent(
+      "at least 8 replayed calls would now be denied"
+    );
+
+    // Now change the policy — a third tool recompiles the rego, which is exactly what `dryRunStale` is.
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "http_get" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    await waitFor(() => expect(screen.getByTestId("builder-save-btn")).toBeDisabled());
+    expect(screen.getByTestId("builder-dryrun-result")).toHaveTextContent(/stale/i);
+
+    expect(screen.getByTestId("builder-scope-cell-send_email-impact")).not.toHaveTextContent(/replayed call/i);
+    for (const tool of ["send_email", "http_post", "http_get"]) {
+      expect(screen.getByTestId(`builder-scope-sample-note-${tool}`)).toHaveTextContent(
+        "This dry-run ran against an earlier version of the policy, so its numbers do not describe this grant — re-run it."
+      );
+    }
+  });
+});
+
+// --- ...and the picker must speak the OTHER half of that vocabulary too ---------------------------
+describe("the picker finds a declared argument by the param_paths name the chip and the rego print", () => {
+  it("searching the exact string the scope chip shows for an argument finds the argument", async () => {
+    // The id-search fix covered the whole-call facts, whose option id IS the printed field
+    // (`sql_tables`). A DECLARED ARGUMENT is the other half of the same vocabulary and does not match:
+    // picking `to` writes a fact on `param_paths.to` (BuilderSheet's addFact), which is what
+    // describeFact puts on the chip and what the compiled rego addresses — while the picker option is
+    // called `to` and matches neither. Typing back the name the product just printed still reached
+    // "Nothing matches … it was never declared", about an argument the schema declares.
+    server.use(
+      http.get("/api/v1/tools", () =>
+        HttpResponse.json([
+          registryEntry("send_email", {
+            source: "mcp_declared",
+            server_id: "smtp",
+            schema_available: true,
+            input_schema: { type: "object", required: ["to"], properties: { to: { type: "string" } } }
+          })
+        ])
+      )
+    );
+    renderSheet();
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
+    await waitFor(() => expect(pickerOptionIds()).toContain("to"));
+    pickCondition("to");
+    await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
+
+    // The vocabulary the operator actually reads on the row, proved rather than assumed.
+    const chip = screen.getByTestId("builder-scope-cell-send_email-condition");
+    expect(chip).toHaveTextContent("param_paths.to");
+
+    // Type that exact string back into the picker.
+    openPicker();
+    fireEvent.change(screen.getByTestId("builder-condition-picker-search"), {
+      target: { value: chip.textContent!.split(" ")[0] }
+    });
+    expect(screen.getByTestId("builder-condition-picker-option-to")).toBeInTheDocument();
+    expect(screen.queryByTestId("builder-condition-picker-empty")).not.toBeInTheDocument();
+  });
+});

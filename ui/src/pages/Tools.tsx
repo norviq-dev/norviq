@@ -118,17 +118,35 @@ export function Tools() {
   const declared = useMemo(() => rows.filter((t) => t.source === "mcp_declared"), [rows]);
   const observed = useMemo(() => rows.filter((t) => t.source === "observed"), [rows]);
 
-  /** Names served by more than one server. The API returns both rows; nothing merges them, and a policy
-   *  naming the tool governs BOTH because the engine only ever sees the bare name. */
+  /**
+   * Names served by more than one DISTINCT server. The API returns a row per pin and nothing merges
+   * them, and a policy naming the tool governs every one of them because the engine only ever sees
+   * the bare name.
+   *
+   * DISTINCT is the whole correctness of this block. A pin's identity is `(namespace, server_id,
+   * tool_name)` — `McpToolPin`'s primary key — so ONE server pinned in two namespaces returns two
+   * rows carrying the SAME `server_id`. Bucketing rows and testing `length > 1` reported that as two
+   * servers publishing one name, which is the shadowing/impersonation signal this note exists to
+   * raise, and then prescribed `mcp.server` as the remedy — which cannot separate two namespaces.
+   * A `Set` makes the count the number of servers rather than the number of rows.
+   */
   const collisions = useMemo(() => {
-    const byName = new Map<string, string[]>();
+    const byName = new Map<string, Set<string>>();
     for (const t of declared) {
-      const list = byName.get(t.name) ?? [];
-      if (t.server_id) list.push(t.server_id);
-      byName.set(t.name, list);
+      const set = byName.get(t.name) ?? new Set<string>();
+      if (t.server_id) set.add(t.server_id);
+      byName.set(t.name, set);
     }
-    return new Map([...byName].filter(([, servers]) => servers.length > 1));
+    return new Map(
+      [...byName]
+        .filter(([, servers]) => servers.size > 1)
+        .map(([name, servers]) => [name, [...servers].sort()] as [string, string[]])
+    );
   }, [declared]);
+
+  /** Whether the view spans more than one namespace — true on the default "All namespaces" scope. Two
+   *  declared rows differing only by namespace are otherwise character-for-character identical. */
+  const multiNamespace = useMemo(() => new Set(declared.map((t) => t.namespace)).size > 1, [declared]);
 
   const rowKey = (t: ToolRegistryEntry) => `${t.namespace}/${t.server_id ?? "-"}/${t.name}`;
   const current = rows.find((t) => rowKey(t) === selected) ?? null;
@@ -223,6 +241,7 @@ export function Tools() {
         <DeclaredPanel
           rows={declared}
           collisions={collisions}
+          showNamespace={multiNamespace}
           selected={selected}
           onSelect={(t) => setSelected(rowKey(t) === selected ? null : rowKey(t))}
           rowKey={rowKey}
@@ -237,7 +256,7 @@ export function Tools() {
             before you know which row to click: "why does one name appear twice" and "why is this
             empty". Putting them behind a click would mean the reader has to already suspect the thing
             the note exists to tell them. */}
-        {collisions.size > 0 && <CollisionNote names={[...collisions.keys()]} />}
+        {collisions.size > 0 && <CollisionNote collisions={collisions} />}
         <NothingSelected empty={rows.length === 0} />
       </div>
 
@@ -280,7 +299,21 @@ function CountPill({ n, tone, label }: { n: number; tone: string; label: string 
   );
 }
 
-function DeclaredPanel({ rows, collisions, selected, onSelect, rowKey }: TableProps & { collisions: Map<string, string[]> }) {
+function DeclaredPanel({
+  rows,
+  collisions,
+  showNamespace,
+  selected,
+  onSelect,
+  rowKey
+}: TableProps & { collisions: Map<string, string[]>; showNamespace: boolean }) {
+  // Only when the view actually spans namespaces. On a single-namespace scope the column would be one
+  // repeated value taking width from the digest/argument columns; on "All namespaces" its absence
+  // leaves two rows for the same server, pinned twice, byte-identical on screen.
+  const template = showNamespace ? DECLARED_TEMPLATE_NS : DECLARED_TEMPLATE;
+  const cols = showNamespace
+    ? ["Tool", "Scope", "Namespace", "Server", "Pin", "Scan", "Arguments", "Last seen"]
+    : ["Tool", "Scope", "Server", "Pin", "Scan", "Arguments", "Last seen"];
   return (
     <Panel
       data-testid="tools-declared"
@@ -298,16 +331,20 @@ function DeclaredPanel({ rows, collisions, selected, onSelect, rowKey }: TablePr
         </div>
       ) : (
         <div style={{ overflowX: "auto" }}>
-          <div style={{ minWidth: 840 }}>
-            <HeadRow cols={["Tool", "Scope", "Server", "Pin", "Scan", "Arguments", "Last seen"]} />
+          <div style={{ minWidth: showNamespace ? 944 : 840 }}>
+            <HeadRow cols={cols} template={template} />
             {rows.map((t) => (
               <button
                 key={rowKey(t)}
                 type="button"
                 data-testid={`tool-row-${t.server_id}-${t.name}`}
+                // The testid omits the namespace for continuity with every existing caller; this
+                // carries the full pin identity so two rows that differ only by namespace are still
+                // separately addressable.
+                data-rowkey={rowKey(t)}
                 onClick={() => onSelect(t)}
                 aria-pressed={rowKey(t) === selected}
-                style={rowStyle(rowKey(t) === selected)}
+                style={rowStyle(rowKey(t) === selected, template)}
               >
                 <span className="mono" style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0 }}>
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{t.name}</span>
@@ -318,10 +355,16 @@ function DeclaredPanel({ rows, collisions, selected, onSelect, rowKey }: TablePr
                       aria-label={`Name differs from its evasion-normalised skeleton ${t.name_skeleton}`}
                     />
                   )}
-                  {collisions.has(t.name) && <MiniPill hex="#ffb020">2 servers</MiniPill>}
+                  {/* The COUNT, never a literal. Three servers publishing one name reported as "2
+                      servers" tells an operator sizing the blast radius that the set is closed at
+                      two, so they verify two rows and stop. */}
+                  {collisions.has(t.name) && (
+                    <MiniPill hex="#ffb020">{collisions.get(t.name)!.length} servers</MiniPill>
+                  )}
                   {t.description_withheld && <MiniPill hex="#ff3b5c">Withheld</MiniPill>}
                 </span>
                 <span><ScopeabilityBadge source="mcp_declared" schemaAvailable={t.schema_available} /></span>
+                {showNamespace && <span className="mono muted">{t.namespace}</span>}
                 <span className="mono muted">{t.server_id ?? "—"}</span>
                 <span><PinPill status={t.pin_status} /></span>
                 <span><ScanPill severity={t.scan_severity} /></span>
@@ -494,13 +537,34 @@ function NothingSelected({ empty }: { empty: boolean }) {
   );
 }
 
-function CollisionNote({ names }: { names: string[] }) {
+/**
+ * One line per colliding NAME, each carrying its own server count.
+ *
+ * The count and the word "both" were both string literals, so three servers publishing `search` read
+ * as two — and "both" asserts the set is closed at two, which is exactly the number an operator
+ * sizing the blast radius of a policy would go on to verify before stopping. The title said "two"
+ * for the same reason.
+ */
+function CollisionNote({ collisions }: { collisions: Map<string, string[]> }) {
+  const entries = [...collisions.entries()];
+  const allTwo = entries.every(([, servers]) => servers.length === 2);
   return (
-    <Panel title="One name, two servers" sub="Not a duplicate — the key is (namespace, server_id, tool_name)." data-testid="tools-collision">
+    <Panel
+      title={allTwo ? "One name, two servers" : "One name, several servers"}
+      sub="Not a duplicate — the key is (namespace, server_id, tool_name)."
+      data-testid="tools-collision"
+    >
       <div className="muted" style={{ fontSize: 12.5, lineHeight: 1.6 }}>
-        A policy naming <span className="mono" style={{ color: "var(--text-primary)" }}>{names.join(", ")}</span> governs{" "}
-        <strong style={{ color: "var(--text-primary)" }}>both</strong> — the engine sees the bare name. Add{" "}
-        <span className="mono">mcp.server</span> to separate them.
+        {entries.map(([name, servers]) => (
+          <div key={name} style={{ marginBottom: entries.length > 1 ? 6 : 0 }}>
+            A policy naming <span className="mono" style={{ color: "var(--text-primary)" }}>{name}</span> governs{" "}
+            <strong style={{ color: "var(--text-primary)" }}>
+              {servers.length === 2 ? "both" : `all ${servers.length}`}
+            </strong>{" "}
+            (<span className="mono">{servers.join(", ")}</span>) — the engine sees the bare name. Add{" "}
+            <span className="mono">mcp.server</span> to separate them.
+          </div>
+        ))}
       </div>
     </Panel>
   );
@@ -509,6 +573,8 @@ function CollisionNote({ names }: { names: string[] }) {
 // --- small shared bits --------------------------------------------------------------------------------
 
 const DECLARED_TEMPLATE = "minmax(160px,1.5fr) 116px 104px 92px 84px 92px 108px";
+/** Same, with a Namespace column ahead of Server — used only when the view spans namespaces. */
+const DECLARED_TEMPLATE_NS = "minmax(160px,1.5fr) 116px 104px 104px 92px 84px 92px 108px";
 
 function HeadRow({ cols, template = DECLARED_TEMPLATE }: { cols: string[]; template?: string }) {
   return (

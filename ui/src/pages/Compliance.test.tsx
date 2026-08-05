@@ -15,7 +15,7 @@ import { setupServer } from "msw/node";
 import { MemoryRouter } from "react-router-dom";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { Compliance } from "./Compliance";
-import { AppProvider } from "../store/AppContext";
+import { AppProvider, useApp } from "../store/AppContext";
 import { clearApiCache } from "../hooks/useApi";
 
 const server = setupServer();
@@ -23,6 +23,10 @@ beforeAll(() => server.listen({ onUnhandledRequest: "bypass" }));
 afterEach(() => {
   server.resetHandlers();
   clearApiCache();
+  // AppContext.setNamespace persists the selection — without this, a test that switches namespace would
+  // start the NEXT test in that namespace instead of the "all" default.
+  localStorage.removeItem("nrvq_namespace");
+  localStorage.removeItem("nrvq_namespace_sub");
 });
 afterAll(() => server.close());
 
@@ -116,6 +120,24 @@ function renderPage() {
   return render(
     <MemoryRouter>
       <AppProvider>
+        <Compliance />
+      </AppProvider>
+    </MemoryRouter>
+  );
+}
+
+// A namespace SWITCH, driven as the Header drives it (AppContext.setNamespace). Needed to reach the state
+// where useApi still holds the PREVIOUS namespace's efficacy while the new namespace's read has failed —
+// its catch sets `error` and deliberately leaves the last good `data` in place.
+function NsSwitcher({ to }: { to: string }) {
+  const { setNamespace } = useApp();
+  return <button onClick={() => setNamespace(to)}>switch-ns</button>;
+}
+function renderPageWithSwitcher(to: string) {
+  return render(
+    <MemoryRouter>
+      <AppProvider>
+        <NsSwitcher to={to} />
         <Compliance />
       </AppProvider>
     </MemoryRouter>
@@ -271,6 +293,59 @@ describe("Compliance — efficacy overlay (proven-blocking from the last Red Tea
     const banner = await screen.findByTestId("compliance-efficacy-banner");
     expect(within(banner).getByTestId("compliance-not-tested")).toHaveTextContent(/not efficacy-tested/i);
     expect(within(banner).queryByTestId("compliance-proven-blocking")).toBeNull();
+  });
+
+  // /redteam/results/latest is admin-only (redteam.py `require_admin`). A 403 — the normal experience for
+  // every non-admin console user — is "we could not ask", NOT the fact "this posture has never been tested".
+  // The banner previously stated the latter and pointed the caller at a suite the API would refuse them.
+  it("a 403 from the admin-only efficacy endpoint renders UNKNOWN, not 'not efficacy-tested'", async () => {
+    useBothFrameworks();
+    server.use(
+      http.get("*/api/v1/redteam/results/latest", () =>
+        HttpResponse.json({ detail: "Admin role required" }, { status: 403 })
+      )
+    );
+    renderPage();
+    const banner = await screen.findByTestId("compliance-efficacy-banner");
+    await waitFor(() => expect(within(banner).getByTestId("compliance-efficacy-unknown")).toBeInTheDocument());
+    expect(within(banner).getByTestId("compliance-efficacy-unknown")).toHaveTextContent(/unknown/i);
+    // The server's own reason is shown, so the operator can tell a permissions gap from an outage.
+    expect(banner).toHaveTextContent(/Admin role required/);
+    // Neither of the two definite claims is made…
+    expect(within(banner).queryByTestId("compliance-not-tested")).toBeNull();
+    expect(within(banner).queryByTestId("compliance-proven-blocking")).toBeNull();
+    // …and the CTA is no longer an action this caller cannot perform.
+    expect(within(banner).queryByText(/Run Red Team suite/i)).toBeNull();
+    expect(within(banner).getByText(/^Retry$/)).toBeInTheDocument();
+  });
+
+  // The same rule one step later: a read that fails AFTER a successful one. `useApi` keeps the last good
+  // `data` (its catch only sets `error`), so gating the unknown state on "and we have no data" republished
+  // the PREVIOUS namespace's number under the new namespace's name — a definite compliance claim about a
+  // scope whose efficacy we could not read at all.
+  it("a failed efficacy read AFTER a namespace switch shows UNKNOWN, not the previous namespace's %", async () => {
+    useBothFrameworks();
+    server.use(
+      http.get("*/api/v1/redteam/results/latest", ({ request }) => {
+        const ns = new URL(request.url).searchParams.get("namespace");
+        if (ns === "payments") return HttpResponse.json({ detail: "statement timeout" }, { status: 500 });
+        return HttpResponse.json({
+          has_run: true,
+          efficacy: { overall: { total: 20, caught: 18, got_through: 2, proven_blocking_pct: 90.0 } }
+        });
+      })
+    );
+    renderPageWithSwitcher("payments");
+    const banner = await screen.findByTestId("compliance-efficacy-banner");
+    await waitFor(() => expect(within(banner).getByTestId("compliance-proven-blocking")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByText("switch-ns"));
+    await waitFor(() =>
+      expect(within(screen.getByTestId("compliance-efficacy-banner")).getByTestId("compliance-efficacy-unknown")).toBeInTheDocument()
+    );
+    const after = screen.getByTestId("compliance-efficacy-banner");
+    expect(after).not.toHaveTextContent(/90% proven-blocking/);
+    expect(within(after).queryByTestId("compliance-proven-blocking")).toBeNull();
   });
 
   // Multi-select: checking ≥1 GAP reveals the batch bar; "Generate for selected" fires ONE

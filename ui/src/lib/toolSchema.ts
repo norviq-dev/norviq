@@ -38,7 +38,14 @@ const MAX_PATHS = 256;
 export interface SchemaPath {
   /** Dotted path WITHOUT the `param_paths.` prefix, e.g. `filters.customer`. */
   path: string;
-  /** Declared JSON Schema type, or `"unknown"` when the schema does not say. */
+  /**
+   * Declared JSON Schema type, or `"unknown"` when the schema does not say.
+   *
+   * One inference, and only one: a node carrying an object-only keyword (`properties`,
+   * `additionalProperties`, `patternProperties`) is reported as `"object"` even with no `type`, because
+   * those keywords ARE the schema saying so. See `looksLikeObject` for why reading it as an untyped
+   * scalar instead was a fail-open.
+   */
   type: string;
   /** Whether `param_paths.<path>` can match anything at runtime. */
   addressable: boolean;
@@ -89,6 +96,91 @@ function enumOf(node: Record<string, unknown>): string[] | undefined {
 function descriptionOf(node: Record<string, unknown>): string | undefined {
   const d = node.description;
   return typeof d === "string" && d.trim() !== "" ? d : undefined;
+}
+
+/** How many properties this node NAMES, in a `properties` bag shaped the way the walk can read. */
+function namedPropertyCount(node: Record<string, unknown>): number {
+  const properties = node.properties;
+  return !!properties && typeof properties === "object" && !Array.isArray(properties)
+    ? Object.keys(properties as Record<string, unknown>).length
+    : 0;
+}
+
+/**
+ * Does this node say, in so many words, that it carries keys it does not name?
+ *
+ * Strictly, JSON Schema treats an absent `additionalProperties` as unconstrained, so EVERY object is
+ * open and every one of them would earn a caveat — which would put one on `filters` and drown the case
+ * that matters. The line is drawn at an EXPLICIT statement: `additionalProperties` present and not
+ * `false`, or a non-empty `patternProperties` bag. Those are the server saying "expect keys I have not
+ * listed", and each such key becomes a real `param_paths.<parent>.<key>` at runtime that no declared
+ * path covers.
+ */
+function declaresUnnamedProperties(node: Record<string, unknown>): boolean {
+  const extra = node.additionalProperties;
+  if (extra !== undefined && extra !== false) return true;
+  const patterns = node.patternProperties;
+  return (
+    !!patterns &&
+    typeof patterns === "object" &&
+    !Array.isArray(patterns) &&
+    Object.keys(patterns as Record<string, unknown>).length > 0
+  );
+}
+
+/**
+ * Is this an object, whatever it did or did not put in `type`?
+ *
+ * `properties`, `additionalProperties` and `patternProperties` are object-only keywords, so a node
+ * carrying one IS an object even when `type` is missing — and hand-written MCP schemas omit `type`
+ * constantly. Reading `{filters: {properties: {customer: {type: "string"}}}}` as an untyped scalar was
+ * wrong twice over: `filters.customer` never appeared in the tree or the count, and `filters` itself was
+ * offered as ADDRESSABLE under "matches only if the value arrives as text". It never arrives as text —
+ * the evaluator keys string leaves — so that path compares against `""` forever: a permanent block
+ * inside an allowlist grant and, in rules mode, a rule that silently never fires. A declared `type` is
+ * still believed over the inference; this only fills the gap where the schema said nothing.
+ */
+function looksLikeObject(node: Record<string, unknown>, type: string): boolean {
+  if (type === "object") return true;
+  if (type !== "unknown") return false;
+  return namedPropertyCount(node) > 0 || declaresUnnamedProperties(node);
+}
+
+/** Deeper than the evaluator will ever walk — the dominant fact whenever it applies. */
+function depthNote(): string {
+  return `nested deeper than the evaluator walks (${MAX_DEPTH} levels) — no path under it can appear in param_paths`;
+}
+
+/**
+ * Why an object property yielded no paths — the sentence shown on its own (non-addressable) row.
+ *
+ * Every branch says the same operative thing in different words: sub-paths under here WILL exist at
+ * runtime and this schema cannot name them, so scoping the tool's other arguments leaves this one
+ * unconstrained. Saying "it declares no arguments" or showing nothing at all would be a measurement
+ * claim we have not earned.
+ */
+function objectSilenceNote(node: Record<string, unknown>, childDepth: number): string {
+  if (childDepth > MAX_DEPTH) return depthNote();
+  if (namedPropertyCount(node) > 0) {
+    return "the schema names properties here but none in a form this can read — sub-paths appear at runtime and cannot be scoped from the schema";
+  }
+  return "free-form object — the schema names no properties, so its sub-paths appear only at runtime and scoping this tool's other arguments leaves them unconstrained";
+}
+
+/**
+ * The note for an object that names SOME properties and declares it accepts more.
+ *
+ * This is the hole in reporting only the objects that yielded nothing: add one readable property to a
+ * free-form object and it stops yielding nothing, so the row disappears again and the count reads a
+ * confident "1 of 1". `{options: {type: "object", properties: {mode: {type: "string"}},
+ * additionalProperties: true}}` really does produce `param_paths.options.anything` at runtime, and an
+ * operator who scopes `options.mode` has been shown a complete-looking list of what constraining this
+ * argument covers. The partial case needs the caveat more than the empty one, not less — an empty
+ * object at least looks empty.
+ */
+function objectOpenNote(childDepth: number): string {
+  if (childDepth > MAX_DEPTH) return depthNote();
+  return "the schema also accepts properties it does not name (additionalProperties) — those appear only at runtime, so scoping the ones listed under it leaves the rest unconstrained";
 }
 
 /**
@@ -150,9 +242,44 @@ export function schemaPaths(schema: unknown): SchemaPath[] {
 
       const type = declaredType(child);
 
-      if (type === "object") {
+      if (looksLikeObject(child, type)) {
+        // Names some properties AND says it accepts unnamed ones. The recursion WILL emit rows, so the
+        // before/after check below can never fire — the caveat has to be pushed on the way in. Pushed
+        // BEFORE the recursion on purpose: `ArgumentTree.toTreeRows` synthesises a branch node the
+        // first time it sees a dotted path, so a parent row arriving after its own children would be a
+        // duplicate row under a duplicate React key rather than the branch they hang from.
+        if (declaresUnnamedProperties(child) && namedPropertyCount(child) > 0) {
+          out.push({
+            path,
+            type: "object",
+            addressable: false,
+            note: objectOpenNote(depth + 1),
+            required: isRequired,
+            description
+          });
+          walk(child, path, depth + 1);
+          continue;
+        }
+
         // Not addressable itself — only its string leaves are — but its children are, so recurse.
+        const before = out.length;
         walk(child, path, depth + 1);
+        if (out.length > before) continue;
+
+        // The recursion produced nothing, so the object would otherwise VANISH — from the tree and from
+        // the "n of m" count above it. That is the one thing this module promises never to do, and the
+        // silence is not harmless: the evaluator walks the PAYLOAD, not the schema, so
+        // `{options: {type: "object", additionalProperties: {type: "string"}}}` really does produce
+        // `param_paths.options.mode` at runtime. Dropping the row tells an operator the tool takes one
+        // argument and that scoping it constrains the whole call, while `options.*` stays wide open.
+        out.push({
+          path,
+          type: "object",
+          addressable: false,
+          note: objectSilenceNote(child, depth + 1),
+          required: isRequired,
+          description
+        });
         continue;
       }
 
@@ -208,4 +335,28 @@ export function schemaPaths(schema: unknown): SchemaPath[] {
 /** The addressable subset, which is what a picker offers as selectable. */
 export function addressablePaths(schema: unknown): SchemaPath[] {
   return schemaPaths(schema).filter((p) => p.addressable);
+}
+
+/**
+ * Did the TOP-LEVEL definition tell us anything we could read?
+ *
+ * `schemaPaths` returns `[]` for two situations that must not read the same on screen:
+ *
+ *   1. `{type: "object", properties: {}}` — the tool positively declares no arguments. "This tool
+ *      declares no arguments" is true of it.
+ *   2. `{type: "object", additionalProperties: {type: "string"}}` — the definition is free-form, or the
+ *      `properties` key is missing or is not an object. We measured nothing. Saying "declares no
+ *      arguments" there is a claim about the tool made from a schema we could not read, and it sits
+ *      beside a "Scopeable" badge and a "0 of 0" count that repeat it.
+ *
+ * The nested version of this is handled inside `schemaPaths` (the object property is emitted as a
+ * non-addressable row with the reason on it). The top level has no row to hang the reason from, so the
+ * distinction has to be made by whoever renders the empty state — `ArgumentTree`'s `emptyLabel`,
+ * `Tools.argCount`, and the badge next to it. This is that predicate; it exists so those three read the
+ * schema the same way instead of each growing its own idea of "empty".
+ */
+export function schemaIsReadable(schema: unknown): boolean {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return false;
+  const properties = (schema as Record<string, unknown>).properties;
+  return !!properties && typeof properties === "object" && !Array.isArray(properties);
 }

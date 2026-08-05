@@ -270,3 +270,76 @@ describe("Tools page", () => {
     await waitFor(() => expect(spy).toHaveBeenCalledWith(expect.anything(), "7d"));
   });
 });
+
+// ------------------------------------------------------------------------------------------------
+// A COLLISION IS TWO SERVERS, NOT TWO ROWS.
+//
+// A pin's identity is `(namespace, server_id, tool_name)` — `McpToolPin`'s primary key — so one
+// server pinned in two namespaces returns two rows carrying the same `server_id`. The default scope
+// is "All namespaces" (`AppContext` seeds `"all"`, and `fetchTools` drops the namespace param there),
+// so every install with two governed namespaces lands on this shape.
+//
+// Bucketing ROWS reported that as two servers publishing one name — the shadowing/impersonation
+// signal — and then prescribed `mcp.server`, which cannot separate two namespaces. And the count was
+// the literal "2", so three real servers were reported as two, with "both" asserting the set was
+// closed there.
+// ------------------------------------------------------------------------------------------------
+describe("Tools collision detection", () => {
+  beforeEach(() => {
+    clearApiCache();
+    vi.restoreAllMocks();
+  });
+
+  const pinnedTwice: ToolRegistryEntry[] = [
+    entry({ name: "read_file", server_id: "filesystem", namespace: "analytics" }),
+    entry({ name: "read_file", server_id: "filesystem", namespace: "payments" })
+  ];
+
+  it("does not call ONE server pinned in two namespaces a collision", async () => {
+    renderTools(pinnedTwice);
+    await screen.findByTestId("tools-declared");
+    // No amber pill claiming a second server, and no note prescribing a remedy that cannot work.
+    expect(screen.queryByTestId("tools-collision")).not.toBeInTheDocument();
+    expect(screen.queryByText(/\d+ servers/)).not.toBeInTheDocument();
+  });
+
+  it("distinguishes the two same-server rows instead of drawing them identically", async () => {
+    // They were character-for-character identical and shared one data-testid, so nothing on screen
+    // said why the same tool from the same server appeared twice.
+    renderTools(pinnedTwice);
+    await screen.findByTestId("tools-declared");
+    const rows = [...document.querySelectorAll("[data-rowkey]")].map((el) => el.getAttribute("data-rowkey"));
+    expect(rows).toContain("analytics/filesystem/read_file");
+    expect(rows).toContain("payments/filesystem/read_file");
+    const declared = screen.getByTestId("tools-declared");
+    expect(within(declared).getByText("analytics")).toBeInTheDocument();
+    expect(within(declared).getByText("payments")).toBeInTheDocument();
+  });
+
+  it("counts the servers rather than printing the literal 2", async () => {
+    // Three DISTINCT servers in ONE namespace — a real collision, and the case the panel exists for.
+    renderTools([
+      entry({ name: "search", server_id: "a" }),
+      entry({ name: "search", server_id: "b" }),
+      entry({ name: "search", server_id: "c" })
+    ]);
+    await screen.findByTestId("tools-declared");
+    // One pill per row, and each names THREE servers.
+    expect(screen.getAllByText("3 servers")).toHaveLength(3);
+    expect(screen.queryByText("2 servers")).not.toBeInTheDocument();
+
+    const note = screen.getByTestId("tools-collision");
+    expect(note).toHaveTextContent(/governs\s*all 3/i);
+    // "both" asserts the set is closed at two, so it must not appear when it is not.
+    expect(note.textContent ?? "").not.toMatch(/\bboth\b/i);
+    expect(note).toHaveTextContent(/a, b, c/);
+  });
+
+  it("still says 'both' — and shows a 2 servers pill — for a genuine two-server collision", async () => {
+    // The other half. The seeded fixture's `read_file` really is two servers in one namespace.
+    renderTools();
+    await screen.findByTestId("tools-declared");
+    expect(within(screen.getByTestId("tool-row-filesystem-read_file")).getByText("2 servers")).toBeInTheDocument();
+    expect(screen.getByTestId("tools-collision")).toHaveTextContent(/governs\s*both/i);
+  });
+});

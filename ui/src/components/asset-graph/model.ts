@@ -9,14 +9,26 @@
 //   calls       <- tool properties.call_count | sum of incident call-edge call_counts
 //   awaiting    <- properties.awaiting (server-synthesized) OR agent with zero outgoing calls
 //   group (g)   <- the agent whose downstream chain (calls -> accesses) reaches the node
-//   verdict     <- decision_history buckets: blocked | mixed | allow
+//   verdict     <- decision_history buckets: blocked | would_block | mixed | allow
 //   lastSeen    <- max last_timestamp over incident call edges
 // belongs_to edges (shared-SPIFFE identity sub-nodes) are structural: they group with their parent
 // and never count toward blast radius.
 
 import type { AssetEdge, AssetNode, CapabilityVerb, SourceCapability } from "./types";
 
-export type Verdict = "allow" | "mixed" | "blocked";
+/**
+ * "would_block" is NOT a weaker "blocked" — it is a different fact about the world.
+ *
+ * In a Monitor-mode namespace the evaluator softens every block to decision="audit", which
+ * `graphs.py` reports back as `would_block`. Nothing was stopped: the call went through and was
+ * logged. Folding that into "blocked" made the Asset Graph paint the edge critical-red, hang a red
+ * ⚠ badge on it, count it in the "BLOCKED · N edges" stat and print an uppercase red BLOCKED in the
+ * inspector — while the badge itself read "0", because the enforced-block count really is zero.
+ * An operator comparing this screen with the Attack Graph (which has always kept the two apart:
+ * STEP_DECISION_COLORS.would_block is amber, the legend row says "Would block · monitor") saw the
+ * two surfaces disagree about the same edge.
+ */
+export type Verdict = "allow" | "mixed" | "blocked" | "would_block";
 
 export interface ViewNode {
   id: string;
@@ -43,6 +55,8 @@ export interface ViewEdge {
   verdict: Verdict;
   allow: number;
   block: number;
+  /** Monitor-mode would-blocks: evaluated, logged, NOT enforced. Never add this to `block`. */
+  wouldBlock: number;
   w: number;
   // Resolved operation of an accesses-edge (tool → data).
   verb?: CapabilityVerb;
@@ -70,10 +84,22 @@ export function verdictOf(h?: { allow: number; block: number; escalate: number; 
   const allow = h?.allow ?? 0;
   const block = h?.block ?? 0;
   const escalate = h?.escalate ?? 0;
-  // Monitor-mode would-block: the policy covers the edge (logged, not enforced). Treat it as covered so a
-  // Monitor namespace's edges aren't shown as clean "allow" (which read as "no policy activity at all").
+  // Monitor-mode would-block: the policy covers the edge (logged, not enforced). It gets its OWN
+  // verdict rather than being folded into "blocked", which claimed an enforcement that never happened.
+  //
+  // HONESTY NOTE, because the model alone cannot deliver the whole intent. The original code folded
+  // this into "blocked" so a Monitor namespace would not read as a clean "allow" ("no policy activity
+  // at all"). A fourth bucket removes the false enforcement claim, but it does NOT by itself restore
+  // the distinction on screen: AssetGraphCanvas only branches on `verdict === "blocked"`, so today a
+  // would_block edge paints exactly like an allow edge. The verdict and `ViewEdge.wouldBlock` are the
+  // contract for that fix; until the canvas, legend and inspector branch on them (see the ViewEdge
+  // note), the Asset Graph under-reports Monitor coverage. Under-reporting beats asserting an
+  // enforcement that does not exist, but it is not the finished state.
   const wouldBlock = h?.would_block ?? 0;
-  if ((block > 0 || wouldBlock > 0) && allow === 0) return "blocked";
+  // Nothing was enforced and nothing got through un-evaluated: every decision on this edge was a
+  // would-block. This is the Monitor-mode namespace case, and it is not a block.
+  if (wouldBlock > 0 && block === 0 && allow === 0 && escalate === 0) return "would_block";
+  if (block > 0 && allow === 0) return "blocked";
   if (block > 0 || escalate > 0 || wouldBlock > 0) return "mixed";
   return "allow";
 }
@@ -181,6 +207,7 @@ export function buildModel(nodes: AssetNode[], edges: AssetEdge[]): ViewModel {
       verdict: e.type === "belongs_to" ? "allow" : verdictOf(h),
       allow: h?.allow ?? 0,
       block: h?.block ?? 0,
+      wouldBlock: h?.would_block ?? 0,
       // stroke weight from real call volume (edge.weight is a constant 1 in builder snapshots)
       w: Math.min(3.2, 1.2 + Math.log((cc || (h ? h.allow + h.block + h.escalate + (h.would_block ?? 0) : 0)) + 1) * 0.55),
       verb: e.properties.verb
@@ -224,6 +251,8 @@ export function computeSets(model: ViewModel, s: FilterState): { vis: Record<str
   }
   if (s.blockedOnly) {
     const keep = new Set<string>();
+    // ENFORCED blocks only. This filter is driven by the "Blocked · N edges" stat cell, so it must
+    // select exactly what that cell counts; a Monitor-mode would-block belongs to neither.
     for (const e of model.edges) if (e.verdict === "blocked") { keep.add(e.s); keep.add(e.t); }
     for (const n of model.nodes) if (!keep.has(n.id)) vis[n.id] = false;
   }

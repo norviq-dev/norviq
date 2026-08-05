@@ -80,6 +80,54 @@ function DetailRow({ label, children }: { label: string; children: ReactNode }) 
 const DEC = ["all", "allow", "block", "escalate", "audit"] as const;
 type DecisionFilter = (typeof DEC)[number];
 
+/**
+ * `fetchAuditRecords`' filter bag, WITH `framework`.
+ *
+ * `GET /audit/records` has accepted `framework` since the Source column shipped
+ * (norviq/api/routers/audit.py — `AuditLogEntry.framework == framework`, exact match). The filter
+ * type in `api/client.ts` never declared it, so the red-team evidence deep-link
+ * `/audit?rule=<id>&framework=redteam` lost the half that scopes it to red-team traffic — and since
+ * `exclude_synthetic` defaults ON and the server's exclusion IS `framework == "redteam"`, the rows
+ * the link exists to show were the only rows guaranteed to be hidden.
+ *
+ * `fetchAuditRecords` serialises whatever keys it is handed, so widening the type here puts the param
+ * back on the wire. `client.ts` is owned by another surface and should adopt `framework?: string`
+ * into its own filter type; this alias is the seam until it does, not a second definition of it.
+ */
+type AuditFilters = Parameters<typeof fetchAuditRecords>[0] & { framework?: string };
+
+/** One active filter, printed where the operator can see it and clear it. */
+function FilterChip({ label, value, onClear }: { label: string; value: string; onClear: () => void }) {
+  return (
+    <span
+      data-testid={`audit-chip-${label}`}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "3px 6px 3px 9px",
+        borderRadius: 999,
+        border: "1px solid var(--border)",
+        background: "var(--bg-elevated)",
+        fontSize: 12
+      }}
+    >
+      <span className="muted">{label}</span>
+      <span className="mono">{value}</span>
+      <button
+        type="button"
+        className="linklike"
+        aria-label={`Clear ${label} filter`}
+        data-testid={`audit-chip-clear-${label}`}
+        onClick={onClear}
+        style={{ display: "inline-flex", alignItems: "center", color: "var(--text-muted)" }}
+      >
+        <X size={12} />
+      </button>
+    </span>
+  );
+}
+
 export function AuditLog() {
   const { selectedNamespace, timeRange, setNamespace, setTimeRange } = useApp();
   const [searchParams] = useSearchParams();
@@ -133,9 +181,18 @@ export function AuditLog() {
   const pageSize = 50;
   // Compliance deep-link: an evidence row opens the Audit Log pre-filtered by the enforcing rule (?rule=<rule_id>).
   const [rule, setRule] = useState(searchParams.get("rule") ?? "");
+  // Red Team deep-link: the per-attack "Audit" link is `/audit?rule=<id>&framework=redteam`, i.e. "the
+  // rows this attack wrote". Read it, and send it to the server, which filters on it.
+  const [framework, setFramework] = useState(searchParams.get("framework") ?? "");
   // Real-traffic-only (default ON) hides red-team + synthetic/probe rows so this log's population matches the
   // Overview headline (which counts real traffic only). Toggle OFF to see the full ledger incl. test/eval rows.
-  const [realOnly, setRealOnly] = useState(true);
+  //
+  // OFF when the link that opened this page asked for red-team rows. The server's real-traffic
+  // exclusion is literally `framework == "redteam"` (norviq/api/synthetic.py), so leaving it on makes
+  // `framework=redteam` self-cancelling: the operator lands on "No matching records" and concludes
+  // the attack left no audit trail, or — worse, when unrelated production traffic shares the rule_id —
+  // reads that production row as the red-team evidence they followed the link for.
+  const [realOnly, setRealOnly] = useState(() => searchParams.get("framework") !== "redteam");
 
   // The /audit route stays MOUNTED across query-string changes (React Router doesn't remount it),
   // so a SECOND deep-link fired while already on the page — e.g. the Header Inbox's
@@ -149,6 +206,7 @@ export function AuditLog() {
       tool_name: searchParams.get("tool_name"),
       agent: searchParams.get("agent") ?? searchParams.get("spiffe_id"),
       rule: searchParams.get("rule"),
+      framework: searchParams.get("framework"),
       namespace: searchParams.get("namespace")
     };
     const prev = lastParamsRef.current;
@@ -158,41 +216,41 @@ export function AuditLog() {
     if (!firstRun && cur.tool_name !== prev.tool_name && cur.tool_name != null) setTool(cur.tool_name);
     if (!firstRun && cur.agent !== prev.agent && cur.agent != null) setAgentFilter(cur.agent);
     if (!firstRun && cur.rule !== prev.rule && cur.rule != null) setRule(cur.rule);
+    if (!firstRun && cur.framework !== prev.framework && cur.framework != null) {
+      setFramework(cur.framework);
+      // Same reasoning as the mount-time seed: a second red-team deep-link fired while already on
+      // /audit must not be cancelled by a filter the operator never saw applied.
+      if (cur.framework === "redteam") setRealOnly(false);
+    }
     // Namespace deep-link (Asset Graph inspector) applies on mount too — switch the global scope to the agent's ns.
     if (cur.namespace && cur.namespace !== prev.namespace) setNamespace(cur.namespace);
     lastParamsRef.current = cur;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
 
+  // Every active filter, in one place, so the page query and the count probe can never disagree about
+  // the population they describe — a count computed over a different filter set than the rows beneath
+  // it is the "Showing 6 of 0" class of defect.
+  const activeFilters: AuditFilters = {
+    range: timeRange,
+    namespace: selectedNamespace,
+    decision: decision === "all" ? undefined : decision,
+    tool_name: debouncedTool || undefined,
+    agent: debouncedAgent || undefined,
+    rule_id: rule || undefined,
+    framework: framework || undefined,
+    exclude_synthetic: realOnly || undefined
+  };
+  const pageFilters: AuditFilters = { ...activeFilters, limit: pageSize, offset: page * pageSize };
+  const countFilters: AuditFilters = { ...activeFilters, limit: 500, offset: 0 };
+
   const base = useApi<AuditRecord[]>(
-    () =>
-      fetchAuditRecords({
-        range: timeRange,
-        namespace: selectedNamespace,
-        decision: decision === "all" ? undefined : decision,
-        tool_name: debouncedTool || undefined,
-        agent: debouncedAgent || undefined,
-        rule_id: rule || undefined,
-        exclude_synthetic: realOnly || undefined,
-        limit: pageSize,
-        offset: page * pageSize
-      }),
-    [timeRange, selectedNamespace, decision, debouncedTool, debouncedAgent, rule, realOnly, page]
+    () => fetchAuditRecords(pageFilters),
+    [timeRange, selectedNamespace, decision, debouncedTool, debouncedAgent, rule, framework, realOnly, page]
   );
   const totalRecords = useApi<AuditRecord[]>(
-    () =>
-      fetchAuditRecords({
-        range: timeRange,
-        namespace: selectedNamespace,
-        decision: decision === "all" ? undefined : decision,
-        tool_name: debouncedTool || undefined,
-        agent: debouncedAgent || undefined,
-        rule_id: rule || undefined,
-        exclude_synthetic: realOnly || undefined,
-        limit: 500,
-        offset: 0
-      }),
-    [timeRange, selectedNamespace, decision, debouncedTool, debouncedAgent, rule, realOnly]
+    () => fetchAuditRecords(countFilters),
+    [timeRange, selectedNamespace, decision, debouncedTool, debouncedAgent, rule, framework, realOnly]
   );
 
   // The /ws/audit socket authenticates before accepting. Browsers can't set Authorization headers on a
@@ -219,15 +277,17 @@ export function AuditLog() {
     let cancelled = false;
     const poll = async () => {
       try {
-        const recent = await fetchAuditRecords({
+        const pollFilters: AuditFilters = {
           range: timeRange,
           namespace: selectedNamespace,
           decision: decision === "all" ? undefined : decision,
           tool_name: debouncedTool || undefined,
+          framework: framework || undefined,
           exclude_synthetic: realOnly || undefined,
           limit: 10,
           offset: 0
-        });
+        };
+        const recent = await fetchAuditRecords(pollFilters);
         if (cancelled) return;
         setPolled((prev) => {
           const seen = new Set(prev.map((r) => r.id));
@@ -244,7 +304,7 @@ export function AuditLog() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [live, ws.connected, timeRange, selectedNamespace, decision, debouncedTool, realOnly]);
+  }, [live, ws.connected, timeRange, selectedNamespace, decision, debouncedTool, framework, realOnly]);
 
   const streamed = useMemo(() => {
     const merged = [...ws.messages, ...polled];
@@ -287,10 +347,14 @@ export function AuditLog() {
       if (needle && !(r.tool_name ?? "").toLowerCase().includes(needle)) return false;
       if (agentNeedle && !(r.agent_id ?? "").toLowerCase().includes(agentNeedle)) return false;
       if (ruleNeedle && !(r.rule_id ?? "").toLowerCase().includes(ruleNeedle)) return false;
+      // The server matches `framework` on EXACT equality, so the tail must too — a substring match
+      // here would let `sidecar-http` through a `sidecar` filter and put a row in the tail that the
+      // page below it cannot contain.
+      if (framework && r.framework !== framework) return false;
       return true;
     });
     return [...(page === 0 ? live : []), ...(base.data ?? []).filter((r) => !liveIds.has(r.id))];
-  }, [streamed, base.data, page, realOnly, decision, debouncedTool, debouncedAgent, rule]);
+  }, [streamed, base.data, page, realOnly, decision, debouncedTool, debouncedAgent, rule, framework]);
 
   const totalCount = totalRecords.data?.length ?? 0;
   // The total-count probe is server-capped at limit=500 (audit/records enforces le=500), so records
@@ -304,12 +368,20 @@ export function AuditLog() {
   const totalPages = Math.max(knownPages, page + 1);
   const canNext = page < knownPages - 1 || (countCapped && pageFull);
   const loading = base.loading || totalRecords.loading;
-  const hasFilter = Boolean(debouncedTool || debouncedAgent || decision !== "all");
+  // `rule` and `framework` count. They arrive only by deep-link and have no input of their own, so an
+  // empty result under one of them used to render the flat "No matching records in the last 24h." —
+  // a full stop, with the very filter responsible for the emptiness omitted from the hint AND printed
+  // nowhere on the page. That is the reading an operator takes as "the attack left no audit trail".
+  const hasFilter = Boolean(debouncedTool || debouncedAgent || rule || framework || decision !== "all");
   const noResults = !loading && rows.length === 0;
+  // The one combination that is guaranteed to return nothing: the server's real-traffic exclusion IS
+  // `framework == "redteam"`, so the two filters cancel. Reachable by toggling Real-traffic-only back
+  // on after arriving from a red-team link.
+  const selfCancelling = framework === "redteam" && realOnly;
 
   useEffect(() => {
     setPage(0);
-  }, [timeRange, selectedNamespace, decision, debouncedTool, debouncedAgent, realOnly]);
+  }, [timeRange, selectedNamespace, decision, debouncedTool, debouncedAgent, rule, framework, realOnly]);
 
   const columns: Array<Column<AuditRecord>> = [
     {
@@ -391,6 +463,42 @@ export function AuditLog() {
           </button>
         </div>
 
+        {/* Deep-linked filters, printed and clearable. `rule` and `framework` have no control of their
+            own — they arrive in the query string — so without this the operator cannot see that a
+            filter is narrowing the ledger, let alone remove it. */}
+        {(rule || framework) && (
+          <div
+            data-testid="audit-active-filters"
+            style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}
+          >
+            {rule && <FilterChip label="rule" value={rule} onClear={() => setRule("")} />}
+            {framework && <FilterChip label="source" value={framework} onClear={() => setFramework("")} />}
+          </div>
+        )}
+
+        {selfCancelling && (
+          // Not a hint — a contradiction. These two filters have an empty intersection by definition,
+          // so an empty table under them says nothing about whether the attack wrote any rows.
+          <div
+            role="status"
+            data-testid="audit-redteam-conflict"
+            style={{
+              padding: "8px 12px",
+              borderRadius: "var(--radius-md)",
+              border: "1px solid #FFB02040",
+              background: "#FFB02012",
+              color: "var(--text-secondary)",
+              fontSize: 12.5,
+              lineHeight: 1.55
+            }}
+          >
+            <strong style={{ color: "var(--escalate)" }}>These two filters cannot both hold.</strong> “Real
+            traffic only” hides every row whose source is <span className="mono">redteam</span>, which is
+            exactly what this view is filtered to. An empty table here is the filters cancelling, not an
+            absence of red-team evidence — switch Real traffic only off to see it.
+          </div>
+        )}
+
         {/* Visible count + an explicit no-results state. */}
         <div className="muted" style={{ fontSize: 12, minHeight: 16 }}>
           {loading
@@ -411,7 +519,7 @@ export function AuditLog() {
           >
             No matching records in the last {timeRange}
             {hasFilter ? " for these filters." : "."}
-            {hasFilter && " Try a broader time range or clearing the tool/agent/decision filters."}
+            {hasFilter && " Try a broader time range, or clear the filters above — including any rule/source chip a link applied."}
           </div>
         ) : (
           <DataTable
@@ -545,8 +653,23 @@ export function AuditLog() {
                         <pre className="json" style={{ margin: 0, fontSize: 12 }}>
                           {JSON.stringify(selected.tool_params, null, 2)}
                         </pre>
+                      ) : selected.tool_params != null ? (
+                        // Present and empty. A POSITIVE observation: the record carries an arguments
+                        // object and it holds nothing.
+                        <span className="muted" data-testid="audit-params-empty">
+                          Captured — the call carried no arguments.
+                        </span>
                       ) : (
-                        <span className="muted">—</span>
+                        // Absent. `/audit/records` does not serialise arguments at all: `_to_dict`
+                        // emits no `tool_params` key, so this row could never populate, and a bare
+                        // em-dash between a real Tool row above and a real Trust row below reads as
+                        // "captured, and there were none". They are opposite facts. Masked values may
+                        // well be in the database — `audit_capture_masked_params` writes them to
+                        // `payload.masked_params` — this console just never asks for them.
+                        <span className="muted" data-testid="audit-params-uncaptured">
+                          Not captured by this view — the records endpoint does not return call arguments. Not
+                          evidence the call carried none.
+                        </span>
                       )}
                     </DetailRow>
                   </div>

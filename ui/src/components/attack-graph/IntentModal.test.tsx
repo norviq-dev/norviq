@@ -330,3 +330,184 @@ describe("IntentModal — scope gap and builder handoff", () => {
     expect(graph.defaults.decision).toBe("block");
   });
 });
+
+/**
+ * A tool NAME on this checklist is attacker-controlled.
+ *
+ * `tool_name` comes from observed traffic, so an agent can register `exеcute_sql` with a Cyrillic е
+ * (U+0435). In the console's font that row is pixel-identical to the real `execute_sql`. Ticking it
+ * is not a cosmetic mistake: `checkedTools` carries the twin's bytes into
+ * createIntentDraft({allow_tools}) and into the builder handoff, so the generated DEFAULT-DENY
+ * allowlist permits the impostor. The repo already ships the detector (lookalikeOf) and the
+ * consequence sentence (LookalikeNote) for exactly this, and no attack-graph surface called them.
+ */
+describe("IntentModal — a lookalike tool name is marked before it becomes a grant", () => {
+  const TWIN = "exеcute_sql"; // U+0435 CYRILLIC SMALL LETTER IE in place of the third character
+
+  function twinHandlers() {
+    return [
+      http.get("/api/v1/threats/intent-suggest", () =>
+        HttpResponse.json({
+          ns: ["payments"], cls: "payments",
+          tools: [
+            { name: "execute_sql", allow: 90, block: 0, tag: "normal" as const, target: null, in_attack_path: false },
+            { name: TWIN, allow: 3, block: 0, tag: "normal" as const, target: null, in_attack_path: false }
+          ]
+        })
+      ),
+      http.post("/api/v1/threats/intent-coverage", () =>
+        HttpResponse.json({ rego: "package x", covered: [], residual: ["p2"], covered_count: 0, total: 1 })
+      )
+    ];
+  }
+
+  it("marks ONLY the homoglyph row, showing where the invisible character sits", async () => {
+    server.use(...twinHandlers());
+    renderModal();
+    await screen.findByLabelText(`Intended: ${TWIN}`);
+    // the plain-ASCII row stays clean — this must not become noise on every tool
+    expect(screen.queryByTestId("intent-tool-lookalike-execute_sql")).not.toBeInTheDocument();
+    const note = screen.getByTestId(`intent-tool-lookalike-${TWIN}`);
+    expect(note).toHaveTextContent("ex·cute_sql"); // the POSITION, not just "something is wrong"
+    expect(note).toHaveTextContent("U+0435");
+    // and the consequence the operator is entitled to know before ticking the box
+    expect(note).toHaveTextContent(/evasion-normalised/i);
+  });
+
+  it("marks it on the row itself, next to the name that will become the grant", async () => {
+    server.use(...twinHandlers());
+    renderModal();
+    await screen.findByLabelText(`Intended: ${TWIN}`);
+    const row = screen.getByLabelText(`Intended: ${TWIN}`).closest("label")!;
+    // The inline chip beside the name AND the note below it — the warning is on the row an operator
+    // is about to tick, not tucked into a summary elsewhere.
+    expect(within(row).getAllByText(/lookalike name/i).length).toBeGreaterThan(0);
+    const clean = screen.getByLabelText("Intended: execute_sql").closest("label")!;
+    expect(within(clean).queryAllByText(/lookalike/i)).toHaveLength(0);
+  });
+
+  it("still hands the name over EXACTLY as observed — flagged, never silently rewritten", async () => {
+    server.use(...twinHandlers());
+    renderModal();
+    fireEvent.click(await screen.findByLabelText(`Intended: ${TWIN}`));
+    fireEvent.click(screen.getByTestId("intent-open-in-builder"));
+    // Normalising the bytes here would be its own bug: the operator's decision must be about the
+    // real string. The fix is that they can now SEE which string it is.
+    expect(navigated!.state.builderGraph.allowlist!.tools).toEqual([TWIN]);
+  });
+});
+
+/**
+ * WHERE A PROMOTED VERB LANDS.
+ *
+ * The same fail-open that was fixed in ToolVerbsPanel, reached through this modal instead. A learned
+ * verb is a row keyed on (namespace, tool_name) and the evaluator reads it back with the REQUEST's
+ * namespace, so a row filed under the wrong namespace is never consulted: `input.derived.verb`
+ * resolves to `unknown` where the tool actually runs and `block when derived.verb == "delete"` never
+ * fires. ToolVerbsPanel POSTed the literal "all"; this modal did something quieter and worse — it
+ * read the server's `ns` list (threats.py returns `sorted(seen)`, the union of every namespace in the
+ * snapshots it read) and took `[0]`, the ALPHABETICALLY FIRST one. On an admin console at "All
+ * namespaces" a `warehouse_task` seen only in `studioai` was promoted into `hr`, which looks entirely
+ * plausible in the audit trail. The reload then re-reads overrides across ALL namespaces, so the row
+ * came back with a green "✓ learned" chip: the console asserting a classification that is inert
+ * everywhere the tool is actually called.
+ */
+describe("IntentModal — a promoted verb goes to ONE real namespace or nowhere", () => {
+  const OBSERVING = {
+    name: "warehouse_task", allow: 42, block: 0, tag: "normal" as const, target: null, in_attack_path: false,
+    op: null, op_risk: null, op_src: null,
+    observed_calls: 42, inferred_verb: "delete" as const, inferred_count: 30
+  };
+
+  /** `nsList` is what the server resolved the scope to. An admin at "all" gets every namespace it read. */
+  function scopedHandlers(nsList: string[], posted?: unknown[]) {
+    return [
+      http.get("/api/v1/me", () => HttpResponse.json({ sub: "admin", role: "admin", namespace: null })),
+      http.get("/api/v1/threats/intent-suggest", () =>
+        HttpResponse.json({ ns: nsList, cls: "payments", tools: [OBSERVING] })
+      ),
+      http.post("/api/v1/threats/intent-coverage", () =>
+        HttpResponse.json({ rego: "package x", covered: [], residual: ["p2"], covered_count: 0, total: 1 })
+      ),
+      http.post("/api/v1/threats/tool-verbs/promote", async ({ request }) => {
+        posted?.push(await request.json());
+        return HttpResponse.json({ promoted: true, verb: "delete", risk: "critical" });
+      })
+    ];
+  }
+
+  function renderGlobal() {
+    return render(
+      <MemoryRouter>
+        <IntentModal ns="all" cls="payments" tool="" paths={[PATH]} onClose={() => {}} global />
+      </MemoryRouter>
+    );
+  }
+
+  it("never promotes into the alphabetically-first of SEVERAL resolved namespaces", async () => {
+    const posted: unknown[] = [];
+    server.use(...scopedHandlers(["hr", "payments", "studioai"], posted));
+    renderGlobal();
+    const promote = await screen.findByRole("button", { name: /promote as delete/i });
+
+    // Pre-fix this POSTed {"ns":"hr","tool_name":"warehouse_task","verb":"delete"} and reported
+    // success — a learned verb filed in a namespace the tool is never called from.
+    fireEvent.click(promote);
+    await waitFor(() => expect(screen.getByText(/warehouse_task/)).toBeInTheDocument());
+    expect(posted).toEqual([]);
+    expect(promote).toBeDisabled();
+  });
+
+  it("says why, in visible text, rather than doing nothing when clicked", async () => {
+    server.use(...scopedHandlers(["hr", "payments", "studioai"]));
+    renderGlobal();
+    await screen.findByRole("button", { name: /promote as delete/i });
+    // `.btn:disabled { pointer-events: none }` — a title on a disabled control can never be read, so
+    // the blocked reason has to be text on the page.
+    const reason = screen.getByTestId("intent-verb-scope-warehouse_task-reason");
+    expect(reason).toHaveTextContent(/learned per namespace/i);
+    expect(reason).toHaveTextContent(/did not resolve to a single one/i);
+  });
+
+  it("does not offer a promotion that would silently do nothing when NO namespace resolved", async () => {
+    // The other half of the old behaviour: with an empty `ns` the click fell through a `!promoNs`
+    // early return — no POST, no error, no change. The button looked live and the tooltip named
+    // "this namespace", so the operator's only evidence that nothing happened was that nothing
+    // happened. An action that cannot be performed must say so instead of absorbing the click.
+    const posted: unknown[] = [];
+    server.use(...scopedHandlers([], posted));
+    renderGlobal();
+    const promote = await screen.findByRole("button", { name: /promote as delete/i });
+    expect(promote).toBeDisabled();
+    fireEvent.click(promote);
+    await waitFor(() => expect(screen.getByText(/warehouse_task/)).toBeInTheDocument());
+    expect(posted).toEqual([]);
+    expect(screen.getByTestId("intent-verb-scope-warehouse_task-reason")).toBeInTheDocument();
+    // …and it no longer claims a destination. The old title read "in this namespace" — naming a
+    // place the click would never have written to. (`?? ""` because an absent title is the fix.)
+    expect(promote.getAttribute("title") ?? "").not.toMatch(/this namespace/i);
+  });
+
+  it("promotes into the ONE namespace the server resolved the scope to", async () => {
+    // A namespace-scoped caller asking for "all" gets exactly its own back. That IS concrete, so
+    // promoting into it is honest — the fix must not disable the case it is supposed to allow.
+    const posted: unknown[] = [];
+    server.use(...scopedHandlers(["studioai"], posted));
+    renderGlobal();
+    fireEvent.click(await screen.findByRole("button", { name: /promote as delete/i }));
+    await waitFor(() =>
+      expect(posted).toEqual([{ ns: "studioai", tool_name: "warehouse_task", verb: "delete" }])
+    );
+  });
+
+  it("names the destination namespace on the control, not 'this namespace'", async () => {
+    server.use(...scopedHandlers(["studioai"]));
+    renderGlobal();
+    const promote = await screen.findByRole("button", { name: /promote as delete/i });
+    expect(promote).toBeEnabled();
+    // The old copy said "in this namespace" whenever the scope resolved to none — naming a namespace
+    // the click would never have written to.
+    expect(promote.getAttribute("title")).toContain("in studioai");
+    expect(promote.getAttribute("title")).not.toMatch(/this namespace/i);
+  });
+});

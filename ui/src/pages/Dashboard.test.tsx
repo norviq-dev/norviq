@@ -2,23 +2,30 @@
 // Smoke test: the Dashboard (default landing route) must mount without throwing React #130.
 // echarts core is stubbed so the chart components render without a canvas; the interop-shape guard
 // lives in components/common/EChart.test.tsx.
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
 import { MemoryRouter } from "react-router-dom";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("echarts-for-react/lib/core", () => ({
   default: () => null
 }));
 
 import { Dashboard } from "./Dashboard";
-import { AppProvider } from "../store/AppContext";
-import { clearApiCache } from "../hooks/useApi";
+import { AppProvider, useApp } from "../store/AppContext";
+import { clearApiCache, peekApiCache } from "../hooks/useApi";
 
 const server = setupServer();
 beforeAll(() => server.listen({ onUnhandledRequest: "bypass" }));
-afterEach(() => { server.resetHandlers(); clearApiCache(); });
+afterEach(() => {
+  server.resetHandlers();
+  clearApiCache();
+  // AppContext.setNamespace persists the selection, so a test that switches namespace would otherwise
+  // start the NEXT test in that namespace instead of the "all" default.
+  localStorage.removeItem("nrvq_namespace");
+  localStorage.removeItem("nrvq_namespace_sub");
+});
 afterAll(() => server.close());
 
 describe("Dashboard mounts", () => {
@@ -93,9 +100,52 @@ describe("Dashboard mounts", () => {
   });
 });
 
+// A healthy /coverage-by-category. These two tests are about the GAUGE CAPTION, and the gauge only
+// renders when the coverage read succeeded — an errored coverage now draws an explicit "could not be
+// measured" panel instead of a fabricated 0% ring. Previously the fixture left /coverage-by-category
+// unhandled, so both tests ran with coverage.error set and asserted the caption of a gauge that was only
+// on screen because the page treated a failed read as "0% coverage".
+//
+// It ECHOES the scope it was asked for, because the real endpoint does (coverage.py returns
+// `read_namespace(user, namespace)` — the scope it actually computed, `null` for the "all" aggregate).
+// Hardcoding "default" made this fixture unable to produce the state its name claims for any test that
+// selects a namespace: the page compares the echo before labelling a number with a namespace, so a
+// "healthy coverage for payments" that answers about `default` is exactly the off-scope payload the page
+// must refuse. `namespace_mode` defaults to "block" — the mode coverage.py reports for a namespace with no
+// enforcement_mode row of its own, which is also the mode the ENGINE enforces for it.
+// Every OTHER fetch the page-level "API unavailable. Showing partial data." notice is bound to, answering
+// normally — so a test can attribute that notice (or its absence) to the one endpoint it is about.
+function healthyRestOfPage() {
+  return [
+    http.get("*/api/v1/audit/stats", () =>
+      HttpResponse.json({ total: 900, blocked: 34, allowed: 866, block_rate_pct: 4, avg_latency_ms: 12 })
+    ),
+    http.get("*/api/v1/audit/records", () => HttpResponse.json([])),
+    http.get("*/api/v1/audit/top-blocked", () => HttpResponse.json([])),
+    http.get("*/api/v1/audit/volume", () => HttpResponse.json([])),
+    http.get("*/api/v1/agents", () => HttpResponse.json([]))
+  ];
+}
+
+function healthyCoverage(extra: Record<string, unknown> = {}) {
+  return http.get("*/api/v1/coverage-by-category", ({ request }) =>
+    HttpResponse.json({
+      namespace: new URL(request.url).searchParams.get("namespace"),
+      coverage_pct: 64,
+      basis: "rules_present",
+      available: 0,
+      categories: [{ category: "Prompt Injection", covered: 2, total: 2, score: 100, observed: 10, blocked: 3, effective: true, in_scope: true }],
+      namespace_mode: "block",
+      agent_class_policies: [],
+      ...extra
+    })
+  );
+}
+
 describe("Overview coverage caption reflects Red Team efficacy", () => {
   it("upgrades 'not efficacy-tested' to 'X% proven-blocking (last run)' when a run exists", async () => {
     server.use(
+      healthyCoverage(),
       http.get("*/api/v1/redteam/results/latest", () =>
         HttpResponse.json({ has_run: true, efficacy: { overall: { total: 20, caught: 17, got_through: 3, proven_blocking_pct: 85 } } })
       )
@@ -117,7 +167,7 @@ describe("Overview coverage caption reflects Red Team efficacy", () => {
   });
 
   it("keeps the honest 'not efficacy-tested' caption before any run", async () => {
-    server.use(http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json({ has_run: false })));
+    server.use(healthyCoverage(), http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json({ has_run: false })));
     render(
       <MemoryRouter>
         <AppProvider>
@@ -126,5 +176,343 @@ describe("Overview coverage caption reflects Red Team efficacy", () => {
       </MemoryRouter>
     );
     expect(await screen.findByText(/not efficacy-tested/i)).toBeInTheDocument();
+  });
+});
+
+// ==================================================================================================
+// REGRESSION — the Overview's headline numbers must belong to the scope the page says it is showing,
+// and a failed read must never be drawn as a measured value.
+// ==================================================================================================
+
+function renderAt(path: string) {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <AppProvider>
+        <Dashboard />
+      </AppProvider>
+    </MemoryRouter>
+  );
+}
+
+// A namespace SWITCH, driven exactly as the Header drives it (AppContext.setNamespace). This is the only
+// way to reach the state the scope checks exist for: `useApi` keeps the last good `data` when a later load
+// fails, so mid-switch the page is labelled ns-B while still holding ns-A's payload.
+function NsSwitcher({ to }: { to: string }) {
+  const { setNamespace } = useApp();
+  return <button onClick={() => setNamespace(to)}>switch-ns</button>;
+}
+function renderWithSwitcher(to: string) {
+  return render(
+    <MemoryRouter initialEntries={["/"]}>
+      <AppProvider>
+        <NsSwitcher to={to} />
+        <Dashboard />
+      </AppProvider>
+    </MemoryRouter>
+  );
+}
+
+describe("Overview efficacy is scoped to the selected namespace", () => {
+  it("requests /redteam/results/latest WITH ?namespace=, and shows that namespace's answer — not the newest cluster-wide run", async () => {
+    const latestUrls: string[] = [];
+    server.use(
+      healthyCoverage(),
+      http.get("*/api/v1/redteam/results/latest", ({ request }) => {
+        const url = new URL(request.url);
+        latestUrls.push(url.pathname + url.search);
+        // The real endpoint (redteam.py:320-324): a concrete namespace filters the query. `payments` has
+        // never been red-teamed; some OTHER namespace has a 92%-proven run that is the newest overall.
+        if (url.searchParams.get("namespace") === "payments") return HttpResponse.json({ has_run: false });
+        return HttpResponse.json({
+          has_run: true,
+          efficacy: { overall: { total: 25, caught: 23, got_through: 2, proven_blocking_pct: 92 } }
+        });
+      })
+    );
+    renderAt("/?ns=payments");
+
+    // The page header says it is showing `payments`…
+    expect(await screen.findByText(/Showing: payments/)).toBeInTheDocument();
+    const caption = await screen.findByTestId("score-gauge-caption");
+    // …so the caption must carry payments' OWN answer ("never tested"), never another namespace's 92%.
+    await waitFor(() => expect(caption).toHaveTextContent(/not efficacy-tested/i));
+    expect(caption).not.toHaveTextContent(/92/);
+    // And the request itself must be scoped.
+    expect(latestUrls).toContain("/api/v1/redteam/results/latest?namespace=payments");
+    expect(latestUrls).not.toContain("/api/v1/redteam/results/latest");
+  });
+
+  it("uses Compliance's exact cache key so the two surfaces share ONE entry and cannot diverge", async () => {
+    server.use(
+      healthyCoverage(),
+      http.get("*/api/v1/redteam/results/latest", () =>
+        HttpResponse.json({ has_run: true, efficacy: { overall: { total: 10, caught: 4, got_through: 6, proven_blocking_pct: 40 } } })
+      )
+    );
+    renderAt("/?ns=payments");
+    await screen.findByTestId("score-gauge-caption");
+    // Compliance.tsx keys this exact fetch `compliance-redteam-latest:${namespace}`. Sharing the key is what
+    // makes "the Overview and Compliance can show different %s for one namespace" structurally impossible.
+    await waitFor(() =>
+      expect(peekApiCache("compliance-redteam-latest:payments")).toMatchObject({ has_run: true })
+    );
+    // The old namespace-free key must be gone — it is what made the value both unscoped and un-refetchable.
+    expect(peekApiCache("dashboard-redteam-latest")).toBeUndefined();
+  });
+});
+
+describe("Overview never renders an unreadable value as a measured one", () => {
+  it("a failed /coverage-by-category shows an explicit 'could not be measured' panel — not 'Policy Coverage 0%'", async () => {
+    server.use(
+      http.get("*/api/v1/coverage-by-category", () => HttpResponse.json({ detail: "boom" }, { status: 500 })),
+      http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json({ has_run: false })),
+      http.get("*/api/v1/audit/stats", () => HttpResponse.json({ total: 4210, blocked: 12, allowed: 4198, block_rate_pct: 0.3 }))
+    );
+    renderAt("/");
+
+    // The unmeasured state is explicit…
+    expect(await screen.findByTestId("coverage-unavailable")).toBeInTheDocument();
+    expect(screen.getByText(/could not be measured/i)).toBeInTheDocument();
+    // …the confident 0% ring is NOT drawn…
+    expect(screen.queryByTestId("score-gauge-value")).toBeNull();
+    // …the category bars say unavailable rather than rendering an empty chart as "no coverage"…
+    expect(screen.getByTestId("coverage-categories-unavailable")).toBeInTheDocument();
+    // …and the page-level partial-data notice fires (coverage.error was the only fetch excluded from it).
+    expect(screen.getByText(/API unavailable\. Showing partial data\./i)).toBeInTheDocument();
+  });
+
+  it("CONTROL: a genuine 0% coverage still renders the real 0% gauge (the fix must not hide real zeros)", async () => {
+    server.use(
+      healthyCoverage({ coverage_pct: 0, categories: [] }),
+      http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json({ has_run: false }))
+    );
+    renderAt("/");
+    expect(await screen.findByTestId("score-gauge-value")).toHaveTextContent("0%");
+    expect(screen.queryByTestId("coverage-unavailable")).toBeNull();
+  });
+
+  it("a 403 from the admin-only efficacy endpoint reads 'unknown' — never the fact 'not efficacy-tested'", async () => {
+    server.use(
+      ...healthyRestOfPage(),
+      healthyCoverage(),
+      http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json({ detail: "Admin role required" }, { status: 403 }))
+    );
+    renderAt("/");
+    const caption = await screen.findByTestId("score-gauge-caption");
+    await waitFor(() => expect(screen.getByTestId("dash-efficacy-unknown")).toBeInTheDocument());
+    expect(caption).toHaveTextContent(/efficacy unknown/i);
+    // The server's own reason is surfaced, so a non-admin can see WHY rather than mis-report the posture.
+    expect(caption).toHaveTextContent(/Admin role required/);
+    expect(caption).not.toHaveTextContent(/not efficacy-tested/i);
+    // …and it does NOT raise the page-level outage notice. /redteam/results/latest is admin-only, so this
+    // 403 is the PERMANENT, correct response for every non-admin operator: folding it into the generic
+    // union pinned "API unavailable. Showing partial data." to their screen on every load, about an API
+    // that answered correctly. The one signal the console has for a real outage has to stay meaningful.
+    expect(screen.queryByText(/API unavailable\. Showing partial data\./i)).toBeNull();
+  });
+
+  it("a coverage read that fails AFTER a namespace switch does not republish the previous namespace's number", async () => {
+    server.use(
+      http.get("*/api/v1/coverage-by-category", ({ request }) => {
+        const ns = new URL(request.url).searchParams.get("namespace");
+        // `payments` faults; the aggregate answered 64% a moment ago. useApi still holds that 64%.
+        if (ns === "payments") return HttpResponse.json({ detail: "statement timeout" }, { status: 500 });
+        return HttpResponse.json({
+          namespace: ns, coverage_pct: 64, basis: "rules_present", available: 0,
+          categories: [{ category: "Prompt Injection", covered: 2, total: 2, score: 100, observed: 10, blocked: 3, effective: true, in_scope: true }],
+          namespace_mode: "block", agent_class_policies: []
+        });
+      }),
+      http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json({ has_run: false }))
+    );
+    renderWithSwitcher("payments");
+    expect(await screen.findByTestId("score-gauge-value")).toHaveTextContent("64%");
+
+    fireEvent.click(screen.getByText("switch-ns"));
+    expect(await screen.findByText(/Showing: payments/)).toBeInTheDocument();
+
+    // The page now says "payments" — so it must NOT still be showing the aggregate's 64% as payments'
+    // measured coverage, nor the aggregate's categories, nor its agent classes.
+    await waitFor(() => expect(screen.getByTestId("coverage-unavailable")).toBeInTheDocument());
+    expect(screen.queryByTestId("score-gauge-value")).toBeNull();
+    expect(screen.queryByText("64%")).toBeNull();
+    expect(screen.getByTestId("coverage-categories-unavailable")).toBeInTheDocument();
+  });
+
+  it("an efficacy read that fails AFTER a namespace switch does not republish the previous namespace's %", async () => {
+    server.use(
+      healthyCoverage(),
+      http.get("*/api/v1/redteam/results/latest", ({ request }) => {
+        const ns = new URL(request.url).searchParams.get("namespace");
+        if (ns === "payments") return HttpResponse.json({ detail: "Admin role required" }, { status: 403 });
+        return HttpResponse.json({
+          has_run: true,
+          efficacy: { overall: { total: 25, caught: 23, got_through: 2, proven_blocking_pct: 92 } }
+        });
+      })
+    );
+    renderWithSwitcher("payments");
+    const caption = await screen.findByTestId("score-gauge-caption");
+    await waitFor(() => expect(caption).toHaveTextContent(/92% proven-blocking/));
+
+    fireEvent.click(screen.getByText("switch-ns"));
+    expect(await screen.findByText(/Showing: payments/)).toBeInTheDocument();
+    // 92% belongs to the aggregate. payments' own read failed, so payments' efficacy is UNKNOWN — the one
+    // thing it must never be is another scope's number wearing this scope's label.
+    await waitFor(() => expect(screen.getByTestId("dash-efficacy-unknown")).toBeInTheDocument());
+    expect(screen.getByTestId("score-gauge-caption")).not.toHaveTextContent(/92/);
+  });
+});
+
+describe("Overview agent-class section honours the backend's degraded flag", () => {
+  it("degraded + EMPTY list renders the section with an unavailable note instead of hiding it", async () => {
+    server.use(
+      healthyCoverage({ agent_class_policies: [], agent_class_policies_degraded: true }),
+      http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json({ has_run: false }))
+    );
+    renderAt("/");
+    // The section is present (hiding it read as "no agent-class policies are applied here")…
+    expect(await screen.findByText(/By agent class/i)).toBeInTheDocument();
+    // …and says the read failed.
+    expect(screen.getByTestId("agent-class-degraded")).toHaveTextContent(/unavailable, not zero/i);
+  });
+
+  it("degraded + policies present withholds the proven/unproven bars (their efficacy is forced to 0)", async () => {
+    server.use(
+      healthyCoverage({
+        agent_class_policies: [
+          { cls: "report-gen", kind: "intent", allow_tools: ["read_report"], refinements: ["readonly"], learned_verbs: [],
+            priority: 100, enforcement_mode: "block", enforcing: true, observed: 0, blocked: 0, would_block: 0, effective: false }
+        ],
+        agent_class_policies_degraded: true
+      }),
+      http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json({ has_run: false }))
+    );
+    renderAt("/");
+    expect(await screen.findByTestId("agent-class-degraded")).toBeInTheDocument();
+    // The class is still named (we DO know a policy is applied) but no bar states a verdict on it.
+    expect(screen.getByText(/report-gen/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryAllByTestId("agent-class-cov-row")).toHaveLength(0));
+  });
+
+  it("CONTROL: not degraded → the real bars render (the degraded path must not swallow healthy data)", async () => {
+    server.use(
+      healthyCoverage({
+        agent_class_policies: [
+          { cls: "report-gen", kind: "intent", allow_tools: ["read_report"], refinements: [], learned_verbs: [],
+            priority: 100, enforcement_mode: "block", enforcing: true, observed: 40, blocked: 4, would_block: 0, effective: true }
+        ]
+      }),
+      http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json({ has_run: false }))
+    );
+    renderAt("/");
+    await waitFor(() => expect(screen.getAllByTestId("agent-class-cov-row").length).toBe(1));
+    expect(screen.queryByTestId("agent-class-degraded")).toBeNull();
+  });
+});
+
+describe("Overview Monitor-mode signals are scoped and true of the code beneath them", () => {
+  beforeEach(() => sessionStorage.setItem("nrvq_token", "test-token"));
+  afterEach(() => sessionStorage.removeItem("nrvq_token"));
+
+  // settings_router.py serves the `default` namespace row when no ?namespace= is sent, so under "all"
+  // `posture.mode` is ONE namespace's posture, not the aggregate's.
+  function monitorSettings() {
+    return http.get("*/api/v1/settings", ({ request }) => {
+      const ns = new URL(request.url).searchParams.get("namespace") ?? "default";
+      return HttpResponse.json({ namespace: ns, enforcement_mode: ns === "block-ns" ? "block" : "audit", trust_threshold: 50, rate_limit: 100 });
+    });
+  }
+
+  it("under 'all' the coverage legend shows NO monitor chip (it would assert 'does NOT enforce' over every namespace)", async () => {
+    server.use(
+      // Deliberately hostile fixture: the real endpoint returns namespace_mode "block" for the aggregate
+      // (coverage.py `_namespace_mode(None)` — "don't imply monitor across the fleet"), so this pins the
+      // CLIENT-side "all" guard on its own. Even handed a payload that claims Monitor, the aggregate scope
+      // must refuse to draw the chip.
+      healthyCoverage({ namespace_mode: "audit" }),
+      monitorSettings(),
+      http.get("*/api/v1/audit/stats", () => HttpResponse.json({ total: 900, blocked: 34, allowed: 866, block_rate_pct: 4 })),
+      http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json({ has_run: false }))
+    );
+    renderAt("/");
+    expect(await screen.findByText(/Showing: all/)).toBeInTheDocument();
+    // The same page's KPI tile already refuses to relabel itself under "all" — it still reads
+    // "Blocked (24h)" over 34 real enforced blocks. The chip must not contradict it two inches below.
+    const kpi = await screen.findByTestId("kpi-blocked");
+    expect(kpi).toHaveTextContent(/^Blocked \(24h\)/);
+    await waitFor(() => expect(screen.getByText(/By risk category/i)).toBeInTheDocument());
+    expect(screen.queryByText(/^monitor$/)).toBeNull();
+    expect(screen.queryByTestId("category-monitor-note")).toBeNull();
+  });
+
+  it("CONTROL: a concrete Monitor namespace still shows the chip, plus a note explaining why category bars cannot turn green", async () => {
+    server.use(
+      // A REAL Monitor namespace: it has its own enforcement_mode='audit' row, so /settings AND
+      // coverage.py's namespace_mode both say audit — and only then is the engine actually softening.
+      healthyCoverage({ namespace_mode: "audit" }),
+      monitorSettings(),
+      http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json({ has_run: false }))
+    );
+    renderAt("/?ns=payments");
+    expect(await screen.findByText(/Showing: payments/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(/^monitor$/)).toBeInTheDocument());
+    // The legend used to claim grey meant "no traffic has exercised these rules; run the Red Team suite to
+    // prove them" — false here: the engine rewrites would-blocks to a `monitor_would_block:` rule id that the
+    // category roll-up never attributes to a category, so `effective` is unreachable for every category.
+    const note = screen.getByTestId("category-monitor-note");
+    expect(note).toHaveTextContent(/monitor_would_block:/);
+    expect(note).toHaveTextContent(/no category bar can turn/i);
+    expect(screen.queryByTitle(/no traffic has exercised these rules/i)).toBeNull();
+    expect(screen.queryByTitle(/stopped \(or would-block\) traffic/i)).toBeNull();
+  });
+
+  // THE CONFIGURATION THE MONITOR SIGNALS WERE KEYED ON THE WRONG SOURCE FOR.
+  // /settings merges the namespace row with the CLUSTER-WIDE default (`_effective`), so on a cluster
+  // deployed with global enforcement_mode=audit it answers "audit" for a namespace that has no row of its
+  // own. The ENGINE does not: `_resolve_posture` softens only on an explicit per-namespace override ("a
+  // null/global mode does NO softening"), which is precisely the rule coverage.py's `namespace_mode`
+  // reports. Keyed on /settings, the Overview relabelled the tile "Would-block" over `would_blocked`, which
+  // is structurally 0 there because nothing is ever softened — HIDING 41 real enforced blocks behind a 0 —
+  // and told the operator matched rules "do NOT enforce" while they were enforcing.
+  it("a namespace that reads Monitor only from the CLUSTER default is not rendered as Monitor (the engine blocks it)", async () => {
+    server.use(
+      healthyCoverage({ namespace_mode: "block" }), // no per-namespace row → engine blocks → coverage says block
+      monitorSettings(), // …while /settings answers "audit" for it, from the global default
+      http.get("*/api/v1/audit/stats", () =>
+        HttpResponse.json({ total: 900, blocked: 41, allowed: 859, block_rate_pct: 5, would_blocked: 0, would_block_rate_pct: 0 })
+      ),
+      http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json({ has_run: false }))
+    );
+    renderAt("/?ns=payments");
+    expect(await screen.findByText(/Showing: payments/)).toBeInTheDocument();
+    // The tile must count the REAL enforced blocks under their real name, not a would-block counter of 0.
+    const kpi = await screen.findByTestId("kpi-blocked");
+    await waitFor(() => expect(kpi).toHaveTextContent(/^Blocked \(24h\)/));
+    // `data-value` is the raw bound number (the visible text count-up animates), as the KPI tests above use.
+    await waitFor(() => expect(screen.getByTestId("kpi-blocked-value")).toHaveAttribute("data-value", "41"));
+    expect(kpi).not.toHaveTextContent(/Monitor mode/);
+    // …and neither Monitor claim is made about a namespace the engine is really enforcing.
+    await waitFor(() => expect(screen.getByText(/By risk category/i)).toBeInTheDocument());
+    expect(screen.queryByText(/^monitor$/)).toBeNull();
+    expect(screen.queryByTestId("category-monitor-note")).toBeNull();
+  });
+
+  it("the shared proven/loaded legend names BOTH backends' definitions of green (escalate, and Monitor would-blocks)", async () => {
+    server.use(healthyCoverage({ namespace_mode: "audit" }), monitorSettings(), http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json({ has_run: false })));
+    renderAt("/?ns=payments");
+    await waitFor(() => expect(screen.getByText(/By risk category/i)).toBeInTheDocument());
+    // One legend, two backends: a CATEGORY turns green off block-OR-ESCALATE (mitre.py folds escalate into
+    // `blocked` — "the ONE place the product's two blocked-counts differ"), an AGENT CLASS also off a
+    // would_block, where the call was expressly NOT stopped. A legend that says green means "stopped" is
+    // false for both halves, so it has to name them.
+    const proven = screen.getByTitle(/^Proven —/);
+    expect(proven).toHaveTextContent(/^proven$/);
+    expect(proven.getAttribute("title")).toMatch(/escalation/i);
+    expect(proven.getAttribute("title")).toMatch(/would-block/i);
+    expect(proven.getAttribute("title")).toMatch(/NOT stopped/i);
+    // The green swatch must not be described as a "stop" full stop — it is exactly what an escalation and a
+    // Monitor would-block are not.
+    expect(screen.queryByTitle(/counted as stopped by these rules/i)).toBeNull();
   });
 });

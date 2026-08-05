@@ -162,10 +162,25 @@ function techStatus(t: MitreTechnique): keyof typeof ST {
   return t.status; // "enforced" | "gap" | "out_of_scope" — from the API, never inferred client-side
 }
 
-// Efficacy overlay. When a Red Team run exists it shows the REAL proven-blocking %; before any run it
-// keeps the honest "not efficacy-tested" caption with a call to action. Coverage (rules present) ≠ efficacy.
-function ComplianceEfficacyBanner({ efficacy, onView }: { efficacy?: RedteamLatest; onView: () => void }) {
-  const hasRun = !!efficacy?.has_run;
+// Efficacy overlay. Three states, because there are three: a run exists (the REAL proven-blocking %), no run
+// has been made yet (the honest "not efficacy-tested" + a call to action), and — the one this used to collapse
+// into the second — the read FAILED. /redteam/results/latest is admin-only (redteam.py `require_admin`), so
+// every non-admin console user, plus any 5xx or network fault, arrived with `error` set and `data` null and was
+// told as FACT that the posture is not efficacy-tested, and pointed at a "Run Red Team suite →" the API would
+// refuse them. "We could not ask" is not "we asked, and the answer is no". Coverage (rules present) ≠ efficacy.
+function ComplianceEfficacyBanner({
+  efficacy,
+  error,
+  onView,
+  onRetry
+}: { efficacy?: RedteamLatest; error?: string | null; onView: () => void; onRetry: () => void }) {
+  // NOT `&& !efficacy`: useApi keeps the PREVIOUS namespace's run in `data` when the new namespace's read
+  // fails (its catch only sets `error`), so that clause republished ns-A's "92% proven-blocking" as ns-B's
+  // the moment B's read faulted — a definite claim about a scope we could not read. An error means we cannot
+  // attest THIS scope's efficacy, whatever value we are still holding; `{has_run:false}` carries no namespace
+  // to compare against, so there is no narrower honest test.
+  const unknown = !!error;
+  const hasRun = !unknown && !!efficacy?.has_run;
   const pct = hasRun ? efficacy!.efficacy?.overall.proven_blocking_pct : undefined;
   const overall = efficacy?.efficacy?.overall;
   return (
@@ -173,13 +188,19 @@ function ComplianceEfficacyBanner({ efficacy, onView }: { efficacy?: RedteamLate
       data-testid="compliance-efficacy-banner"
       style={{
         display: "flex", alignItems: "center", gap: 12, padding: "11px 15px", marginBottom: 16,
-        background: hasRun ? "rgba(45,218,184,0.07)" : "rgba(255,255,255,0.03)",
-        border: `1px solid ${hasRun ? "#2ddab840" : "var(--border)"}`, borderRadius: 10
+        background: hasRun ? "rgba(45,218,184,0.07)" : unknown ? "rgba(255,176,32,0.08)" : "rgba(255,255,255,0.03)",
+        border: `1px solid ${hasRun ? "#2ddab840" : unknown ? "#4a3a1a" : "var(--border)"}`, borderRadius: 10
       }}
     >
       <span style={{ fontSize: 12.5, color: "var(--text-secondary)" }}>
         Coverage above shows <b>rules present</b>.{" "}
-        {hasRun ? (
+        {unknown ? (
+          <span data-testid="compliance-efficacy-unknown">
+            Efficacy is <b style={{ color: "var(--escalate)" }}>unknown</b> — the last Red Team run could not be
+            read, so this posture may or may not have been tested.
+            <span style={{ color: "var(--text-muted)" }}> {error}</span>
+          </span>
+        ) : hasRun ? (
           <span data-testid="compliance-proven-blocking">
             Efficacy: <b style={{ color: "#2ddab8" }}>{pct}% proven-blocking</b> on the last Red Team run
             {overall ? ` (${overall.caught}/${overall.total} block-expected attacks caught)` : ""}.
@@ -190,12 +211,14 @@ function ComplianceEfficacyBanner({ efficacy, onView }: { efficacy?: RedteamLate
           </span>
         )}
       </span>
+      {/* No "Run Red Team suite →" in the unknown state: the commonest cause is a 403 from the admin-only
+          endpoint, and that caller cannot run the suite either. Offer the action that IS theirs — retry. */}
       <button
-        onClick={onView}
+        onClick={unknown ? onRetry : onView}
         className="link-btn"
         style={{ marginLeft: "auto", background: "none", border: "none", color: "#2ddab8", cursor: "pointer", fontSize: 12.5, fontWeight: 600 }}
       >
-        {hasRun ? "View Red Team →" : "Run Red Team suite →"}
+        {unknown ? "Retry" : hasRun ? "View Red Team →" : "Run Red Team suite →"}
       </button>
     </div>
   );
@@ -424,7 +447,12 @@ export function Compliance() {
 
       {/* Proven-blocking efficacy overlay from the last Red Team run — coverage is "rules present",
           this is the honest "how much is PROVEN blocking". Coexists with the header range selector. */}
-      <ComplianceEfficacyBanner efficacy={efficacy.data ?? undefined} onView={() => navigate("/redteam")} />
+      <ComplianceEfficacyBanner
+        efficacy={efficacy.data ?? undefined}
+        error={efficacy.error}
+        onView={() => navigate("/redteam")}
+        onRetry={() => void efficacy.refetch()}
+      />
 
       {view === "overview" ? (
         <OverviewView

@@ -41,6 +41,13 @@ export interface PickerOption {
   reason?: string;
   /** Already on this grant. Still pickable — adding a second clause about one field is legitimate. */
   used?: boolean;
+  /** OTHER NAMES THE REST OF THE PRODUCT PRINTS FOR THIS SAME THING. Searched, never displayed.
+   *
+   *  A declared argument is listed here as `to`, but picking it writes a fact on `param_paths.to`, and
+   *  `param_paths.to` is what the scope chip and the compiled rego then show the operator. Matching only
+   *  `id`/`label` meant the one string they had just been shown matched nothing, and the empty state
+   *  told them the argument "was never declared" — about an argument out of the tool's own schema. */
+  aliases?: string[];
 }
 
 export interface PickerGroup {
@@ -71,17 +78,32 @@ export function ConditionPicker({ groups, onPick, "data-testid": testId = "build
     if (!q) return groups;
     return groups
       .map((g) => ({
-        ...g,
+        group: g,
         options: g.options.filter(
           (o) =>
+            // THE RAW NAME FIRST. `id` is the vocabulary the rest of the product speaks: the compiled
+            // rego, `describeFact`, and therefore every scope-cell chip print `sql_tables` and
+            // `destinations.emails`, while this list shows the friendly label ("SQL tables"). Searching
+            // only the label meant the name the operator just read on a chip matched nothing, and the
+            // empty state then told them it "was never declared" — the picker denying a control that is
+            // two rows below the box they typed into.
+            o.id.toLowerCase().includes(q) ||
+            // ...and the names it is known by elsewhere: an argument's option id is the bare path, while
+            // its chip and its rego line both read `param_paths.<path>`. Same defect as the line above,
+            // one vocabulary along.
+            (o.aliases ?? []).some((a) => a.toLowerCase().includes(q)) ||
             o.label.toLowerCase().includes(q) ||
             (o.meta ?? "").toLowerCase().includes(q) ||
             (o.hint ?? "").toLowerCase().includes(q)
         )
       }))
       // A group that matched nothing is dropped; a group that is empty to begin with keeps its `sub`,
-      // because "this tool declares no arguments" is an answer the search should not swallow.
-      .filter((g) => g.options.length > 0 || (!g.options.length && !q));
+      // because "this tool declares no arguments" is an answer the search should not swallow. That
+      // second half has to be asked of the ORIGINAL group: the old `!g.options.length && !q` tested a
+      // `q` that `if (!q) return groups` above has already guaranteed to be non-empty, so it was
+      // constant-false and the explanation vanished on the first keystroke.
+      .filter(({ group, options }) => options.length > 0 || group.options.length === 0)
+      .map(({ group, options }) => ({ ...group, options }));
   }, [groups, query]);
 
   const nothingMatched = query.trim().length > 0 && filtered.every((g) => g.options.length === 0);

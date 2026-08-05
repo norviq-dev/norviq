@@ -12,7 +12,8 @@ import {
   revertPackOverride,
   savePackOverride,
   dryRunPolicy,
-  PolicyPack
+  PolicyPack,
+  type DryRunReplay
 } from "../api/client";
 import { ApplyResultPanel, type ApplyResult } from "../components/common/ApplyResultPanel";
 import { KitButton } from "../components/common/KitButton";
@@ -33,8 +34,10 @@ function bustPackCaches(): void {
   for (const p of ["policy-packs:", "tgt-packs:", "settings:", "tgt-settings:", "policy-settings:", "effective:", "hier-classes:"]) invalidateApiCache(p);
 }
 
-const OVERRIDE_TEMPLATE = `# Tighten-only override for this namespace's sector pack(s).
-# You can ADD stricter blocks — you can never weaken/remove a pack's block.
+const OVERRIDE_TEMPLATE = `# Per-namespace override for this namespace's sector pack(s). DEFAULT MODE: tighten-only.
+# In tighten-only mode you can ADD stricter blocks; you cannot weaken/remove a pack's block.
+# Ticking "Advanced: allow weakening this pack" below stores this as a WEAKEN overlay instead —
+# in THAT mode an edit CAN relax a block the pack adds (still floored by your comprehensive baseline).
 package norviq.packoverride
 
 default decision = "allow"
@@ -67,26 +70,72 @@ export function PolicyPacks() {
   const [confirmPack, setConfirmPack] = useState<PolicyPack | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
-  // View a pack's rego (read-only) + author a tighten-only per-namespace override.
+  // View a pack's rego (read-only) + author a per-namespace override — tighten-only by default, or a
+  // WEAKEN overlay behind the audited Advanced opt-in below.
   const [viewRego, setViewRego] = useState<{ title: string; rego: string } | null>(null);
   const [overrideRego, setOverrideRego] = useState("");
   const [overrideActive, setOverrideActive] = useState(false);
   const [overrideMsg, setOverrideMsg] = useState<string | null>(null);
   const [overrideBusy, setOverrideBusy] = useState(false);
   // The loud "Advanced: allow weakening this pack" opt-in + dry-run + apply-result transparency.
+  // NOTE: `allowWeaken` is the operator's PENDING intent for the next Apply (it follows the checkbox).
+  // It is NOT a readout of what is currently enforced — `overrideMode` below is. Conflating the two would
+  // let an unapplied tick claim a weaken overlay is live, or an untick hide one that is.
   const [allowWeaken, setAllowWeaken] = useState(false);
-  const [packDryRun, setPackDryRun] = useState<{ would_block?: number; would_allow?: number; block_rate_pct?: number; recommendation?: string } | null>(null);
+  // The LIVE overlay's mode exactly as the server reports it ("tighten-only" | "weaken"), or null when no
+  // overlay is loaded. `undefined` mode on an ACTIVE overlay stays unknown — never silently "tighten-only".
+  const [overrideMode, setOverrideMode] = useState<string | null>(null);
+  // A failed override read is not "no override": it is "we could not tell". Kept separate so the status
+  // pill can say so instead of rendering the confident absent state over an unread namespace.
+  const [overrideLoadError, setOverrideLoadError] = useState<string | null>(null);
+  // …and neither is an IN-FLIGHT read. A read that has not landed yet is exactly as unmeasured as one that
+  // failed, and it starts true on mount: without this the pill rendered the confident "No override" over a
+  // namespace whose overlay had not been read, which is the same claim the failed-read branch above exists
+  // to prevent. It also stops the PREVIOUS namespace's `overrideActive` from being reinterpreted against
+  // this namespace's freshly-cleared `overrideMode` (that combination printed "Override active — mode
+  // unreported" plus an "an overlay is loaded for <ns>" banner for a namespace never read).
+  const [overrideLoading, setOverrideLoading] = useState(true);
+  const [packDryRun, setPackDryRun] = useState<DryRunReplay | null>(null);
   const [applyResult, setApplyResult] = useState<ApplyResult | null>(null);
   useEffect(() => {
     // Switching namespace reloads THIS ns's override rego — the dry-run / apply-result / message
     // panels below describe the PREVIOUS ns's rego and must be cleared too (the onChange-only clear
     // doesn't fire on a namespace switch).
+    // `cancelled` guards the switch race: without it a slow read of ns A that lands after the operator has
+    // moved to ns B writes A's active/mode/rego over B's, i.e. one namespace's enforcement posture shown as
+    // another's — the same lie the pill states below, arriving by a different route.
+    let cancelled = false;
     setPackDryRun(null);
     setApplyResult(null);
     setOverrideMsg(null);
+    setOverrideMode(null);
+    setOverrideLoadError(null);
+    // Drop the previous namespace's ANSWER, not just its mode. Leaving `overrideActive` set while clearing
+    // `overrideMode` is what manufactured "Override active — mode unreported" for an unread namespace.
+    setOverrideActive(false);
+    setAllowWeaken(false);
+    setOverrideLoading(true);
     fetchPackOverride(namespace)
-      .then((o) => { setOverrideActive(o.active); setOverrideRego(o.rego_source || OVERRIDE_TEMPLATE); setAllowWeaken(o.mode === "weaken"); })
-      .catch(() => { setOverrideActive(false); setOverrideRego(OVERRIDE_TEMPLATE); });
+      .then((o) => {
+        if (cancelled) return;
+        setOverrideActive(o.active);
+        setOverrideRego(o.rego_source || OVERRIDE_TEMPLATE);
+        setAllowWeaken(o.mode === "weaken");
+        // Mode is only meaningful while an overlay is actually loaded (packs.py returns the tighten-only
+        // default even for the empty case), so drop it when nothing is active.
+        setOverrideMode(o.active ? (o.mode ?? null) : null);
+        setOverrideLoading(false);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setOverrideActive(false);
+        setOverrideMode(null);
+        setAllowWeaken(false);
+        setOverrideRego(OVERRIDE_TEMPLATE);
+        setOverrideLoadError((e instanceof Error ? e.message : String(e)).replace(/^Error:\s*/, ""));
+        setOverrideLoading(false);
+      });
+    return () => { cancelled = true; };
   }, [namespace]);
 
   const isAdmin = me.data?.role === "admin";
@@ -96,6 +145,35 @@ export function PolicyPacks() {
   const { canMutate, blockedReason } = useMutationScope();
   const dryRunOnly = settings.data?.apply_mode === "dry_run_only";
   const mutationsDisabled = !canMutate || dryRunOnly;
+
+  // What is ENFORCED right now, read off the server's reported mode — never off the Advanced checkbox.
+  // packs.py's GET /policy-packs/override emits `"mode": "weaken" if weaken else "tighten-only"`.
+  const weakenLive = overrideActive && overrideMode === "weaken";
+  const tightenLive = overrideActive && overrideMode === "tighten-only";
+  // Active overlay whose mode the server did not report: we know something is overlaid but not whether it
+  // can relax a pack block. Say that, rather than defaulting the safer-sounding of the two.
+  const overrideModeUnknown = overrideActive && !weakenLive && !tightenLive;
+
+  // --- Dry-run readout, read strictly off what the server actually reported. -------------------------
+  // Every count below is `number | null`: ABSENT IS NOT ZERO. `?? 0` on any of these paints a measured
+  // zero-impact result out of a field the response never carried — the same defect the total_records_checked
+  // branch exists to prevent, one line further down. (Same doctrine as BuilderSheet's newly-blocked count.)
+  const asCount = (v: number | undefined): number | null => (typeof v === "number" ? v : null);
+  const drTotal = asCount(packDryRun?.total_records_checked);
+  const drBlock = asCount(packDryRun?.would_block);
+  const drAllow = asCount(packDryRun?.would_allow);
+  const drEscalate = asCount(packDryRun?.would_escalate);
+  const drRatePct = asCount(packDryRun?.block_rate_pct);
+  // `total_records_checked` is the number of audit rows FETCHED; `_replay_recent` then `continue`s past any
+  // row that is synthetic identity traffic or whose per-record OPA call threw, so those rows land in the
+  // total but in NONE of the three outcome buckets. Printing the total beside block/allow without naming
+  // that gap leaves visible arithmetic that does not close, and an operator to guess which number is wrong.
+  const drOutcomeSum = drBlock !== null && drAllow !== null && drEscalate !== null ? drBlock + drAllow + drEscalate : null;
+  const drUnsimulated = drTotal !== null && drOutcomeSum !== null ? drTotal - drOutcomeSum : null;
+  // A compile failure is NOT a fact about the namespace's traffic. The server answers an uncompilable rego
+  // with valid:false + errors + a zeroed replay block; rendering that through the traffic branch told the
+  // operator their namespace was idle when the truth was that their policy was broken.
+  const drInvalid = packDryRun?.valid === false;
 
   const bySector = useMemo(() => {
     const groups = new Map<string, PolicyPack[]>();
@@ -196,9 +274,25 @@ export function PolicyPacks() {
   const runPackDryRun = async () => {
     setOverrideMsg(null);
     try {
-      const r = await dryRunPolicy({ namespace, agent_class: "__pack_override__", rego_source: overrideRego });
+      const r = await dryRunPolicy({
+        namespace,
+        // Dry-run's `agent_class` selects WHICH RECORDS ARE REPLAYED — it is not the key the overlay is
+        // stored under. The server's `_replay_recent` (norviq/api/routers/policies.py) adds
+        // `where(AuditLogEntry.agent_class == agent_class)` only when the field is truthy, and its docstring
+        // says "a class-less (namespace/workload) policy replays the whole namespace".
+        // `__pack_override__` is the LOADER key this overlay is STORED under; no audit record ever carries it
+        // as its calling agent's class, so sending it filtered EVERY namespace down to zero rows and the
+        // server then answered "No recent real traffic for this scope" — blaming the namespace's traffic for
+        // what was a malformed request. This overlay is namespace-scoped, so it must replay the whole
+        // namespace: send "". Identical reasoning and identical fix to BuilderSheet's namespace/workload tiers.
+        agent_class: "",
+        rego_source: overrideRego
+      });
       setPackDryRun(r);
     } catch (e) {
+      // Never leave the previous run's numbers on screen underneath a failure notice — a stale readout next
+      // to "Dry-run failed" reads as a measurement of the rego that is about to ship.
+      setPackDryRun(null);
       setOverrideMsg(`Dry-run failed: ${(e instanceof Error ? e.message : String(e)).replace(/^Error:\s*/, "")}`);
     }
   };
@@ -210,6 +304,11 @@ export function PolicyPacks() {
       const res = await savePackOverride(namespace, overrideRego, allowWeaken);
       bustPackCaches();  // Keep pack/settings reads fresh across pages after an override write
       setOverrideActive(true);
+      // The status pill reads the LIVE mode — move it now, or a just-applied WEAKEN overlay would keep
+      // advertising the previous (tighten-only / none) posture until a reload. Prefer the server's own
+      // reported mode; fall back to the opt-in we just sent and it accepted.
+      setOverrideLoadError(null);
+      setOverrideMode(res.mode ?? (allowWeaken ? "weaken" : "tighten-only"));
       setApplyResult({
         kind: "local",
         title: allowWeaken ? `Pack WEAKEN applied — ${namespace}` : `Pack override applied — ${namespace}`,
@@ -238,6 +337,8 @@ export function PolicyPacks() {
       await revertPackOverride(namespace);
       bustPackCaches();  // Reflect the revert everywhere immediately
       setOverrideActive(false);
+      setOverrideMode(null);
+      setOverrideLoadError(null);
       setOverrideRego(OVERRIDE_TEMPLATE);
       setAllowWeaken(false);
       setApplyResult(null);
@@ -380,17 +481,83 @@ export function PolicyPacks() {
         <ApplyResultPanel result={applyResult} onClose={() => setApplyResult(null)} />
       </Panel>
 
-      {/* Per-namespace tighten-only override — customize pack enforcement; revert restores the original. */}
+      {/* Per-namespace pack override — TWO modes. The default overlay is tighten-only, but the audited
+          Advanced opt-in below authors a WEAKEN overlay that CAN relax a pack's added block
+          (norviq/api/routers/packs.py `_WEAKEN_KEY`, norviq/engine/evaluator.py's `__pack_weaken__` candidate).
+          The behaviour is deliberate and bounded by the comprehensive floor — it is the old blanket
+          "it never weakens or removes a pack's block" COPY that was false, so the copy and the status pill
+          are now driven by the mode the server reports for this namespace. */}
       <Panel
-        title="Customize pack enforcement (tighten-only)"
-        sub="A per-namespace override that can ONLY add stricter blocks — it never weakens or removes a pack's block. Revert restores the original pack cleanly."
+        title="Customize pack enforcement"
+        sub={
+          <>
+            A per-namespace overlay on this namespace's sector pack(s). <b>By default it is tighten-only</b> — it can
+            only ADD stricter blocks, and cannot weaken or remove a block the pack adds. The <b>Advanced</b> opt-in
+            below instead authors a <b>WEAKEN</b> overlay, which <b>can relax a block the pack adds</b> (your
+            comprehensive baseline still floors every decision, so it cannot drop below org policy). Revert restores
+            the original pack cleanly.
+          </>
+        }
       >
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-          <span style={{ fontSize: 11, fontWeight: 600, color: overrideActive ? ON : "var(--text-muted)", background: overrideActive ? `${ON}1a` : "var(--border)", padding: "2px 8px", borderRadius: 999 }}>
-            {overrideActive ? "Override active" : "No override"}
+          <span
+            data-testid="override-status-pill"
+            style={{
+              fontSize: 11,
+              fontWeight: 600,
+              color: overrideLoading
+                ? "var(--text-muted)"
+                : overrideLoadError || overrideModeUnknown
+                ? "var(--escalate)"
+                : weakenLive
+                ? GAP
+                : tightenLive
+                ? ON
+                : "var(--text-muted)",
+              background: !overrideLoading && weakenLive ? `${GAP}1a` : !overrideLoading && tightenLive ? `${ON}1a` : "var(--border)",
+              padding: "2px 8px",
+              borderRadius: 999
+            }}
+          >
+            {/* Loading is checked FIRST: until the read lands this namespace's posture is unmeasured, and
+                "No override" is a measurement claim. */}
+            {overrideLoading
+              ? "Reading override…"
+              : overrideLoadError
+              ? "Override state unknown"
+              : weakenLive
+              ? "WEAKEN overlay active"
+              : overrideModeUnknown
+              ? "Override active — mode unreported"
+              : tightenLive
+              ? "Tighten-only override active"
+              : "No override"}
           </span>
           <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>namespace: <span className="mono">{namespace}</span></span>
         </div>
+        {/* A live relaxation must be legible without scrolling past a 240px editor to read a checkbox. */}
+        {weakenLive && (
+          <div data-testid="override-weaken-live" style={{ color: GAP, fontSize: 12.5, marginBottom: 8, padding: "8px 12px", border: `1px solid ${GAP}`, borderRadius: 8, lineHeight: 1.5 }}>
+            A <b>WEAKEN</b> overlay is live for <span className="mono">{namespace}</span>. Pack enforcement here is{" "}
+            <b>not tighten-only</b> — this overlay can RELAX a block its sector pack(s) add. Your comprehensive
+            baseline is still a floor. Revert to restore the pack unmodified.
+          </div>
+        )}
+        {overrideModeUnknown && (
+          <div data-testid="override-mode-unknown" style={{ color: "var(--escalate)", fontSize: 12.5, marginBottom: 8, padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 8, lineHeight: 1.5 }}>
+            An overlay is loaded for <span className="mono">{namespace}</span>, but this server did not report whether
+            it is tighten-only or a WEAKEN overlay. Treat pack enforcement here as <b>unverified</b> — it may relax a
+            pack's block.
+          </div>
+        )}
+        {overrideLoadError && (
+          <div data-testid="override-load-error" style={{ color: "var(--escalate)", fontSize: 12.5, marginBottom: 8, padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 8, lineHeight: 1.5 }}>
+            Could not read this namespace's pack override — {overrideLoadError}. This is <b>not</b> "no override":
+            a tighten-only or WEAKEN overlay may be live and enforced. The editor below shows the blank template,
+            not this namespace's current overlay. <b>Revert is unavailable</b> until this read succeeds — it is
+            gated on a loaded overlay, so reload this page before trying to remove one.
+          </div>
+        )}
         <div style={{ border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
           <Editor
             height="240px"
@@ -434,10 +601,64 @@ export function PolicyPacks() {
                 (<span className="mono">NRVQ-API-7099</span>).
               </span>
             </label>
+            {/* Always state HOW MANY records were replayed. Without it, "would block 0, allow 0" from a
+                zero-record replay renders byte-identically to a real 0-of-500 zero-impact result — the reading
+                an operator takes into "Apply (weaken)". A replay that measured nothing must say so. */}
             {packDryRun && (
-              <div style={{ marginTop: 10, padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12.5 }}>
+              <div data-testid="override-dryrun-result" style={{ marginTop: 10, padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12.5, lineHeight: 1.5 }}>
                 <span style={{ fontWeight: 600 }}>Dry-Run: </span>
-                would block {packDryRun.would_block ?? 0} ({packDryRun.block_rate_pct ?? 0}%), allow {packDryRun.would_allow ?? 0}
+                {drInvalid ? (
+                  <span data-testid="override-dryrun-invalid" style={{ color: GAP }}>
+                    the rego in the editor did <b>not compile</b>, so nothing was replayed — the zeros below the
+                    fold are not impact numbers and say nothing about this namespace's traffic.
+                    {(packDryRun.errors?.length ?? 0) > 0 && (
+                      <> Errors: <span className="mono">{packDryRun.errors!.join(" · ")}</span></>
+                    )}
+                  </span>
+                ) : drTotal === null ? (
+                  <span style={{ color: "var(--escalate)" }}>
+                    this server did not report how many recent calls were replayed, so this run's impact numbers are
+                    not readable — not measured, not zero.
+                  </span>
+                ) : drTotal === 0 ? (
+                  <span style={{ color: "var(--escalate)" }}>
+                    replayed <b>0</b> recent calls in <span className="mono">{namespace}</span> — nothing was simulated.
+                    This is <b>not</b> a zero-impact result.
+                  </span>
+                ) : (
+                  <>
+                    replayed {drTotal} recent call{drTotal === 1 ? "" : "s"} in <span className="mono">{namespace}</span> —{" "}
+                    would block{" "}
+                    {drBlock === null ? <span style={{ color: "var(--escalate)" }}>not reported</span> : drBlock} (
+                    {drRatePct === null ? <span style={{ color: "var(--escalate)" }}>rate not reported</span> : `${drRatePct}%`}
+                    ), escalate{" "}
+                    {drEscalate === null ? <span style={{ color: "var(--escalate)" }}>not reported</span> : drEscalate}, allow{" "}
+                    {drAllow === null ? <span style={{ color: "var(--escalate)" }}>not reported</span> : drAllow}
+                    {drUnsimulated !== null && drUnsimulated !== 0 && (
+                      <span data-testid="override-dryrun-unsimulated" style={{ color: "var(--escalate)" }}>
+                        {drUnsimulated > 0 ? (
+                          <>
+                            {" "}— {drUnsimulated} of those {drTotal} produced no simulated decision (synthetic traffic,
+                            or the engine skipped the record) and are counted in none of the three outcomes above.
+                          </>
+                        ) : (
+                          // Buckets that exceed the total are a self-contradicting response. Rendering it without
+                          // saying so would show an inconsistency as a measurement.
+                          <>
+                            {" "}— these do not reconcile: the outcomes above total {drOutcomeSum} against{" "}
+                            {drTotal} records replayed. Do not read them as impact until the server is checked.
+                          </>
+                        )}
+                      </span>
+                    )}
+                    {packDryRun.truncated === true && (
+                      <span data-testid="override-dryrun-truncated" style={{ color: "var(--escalate)" }}>
+                        {" "}The replay hit the server's record cap, so older calls in the window were never replayed —
+                        these are lower bounds, not the full window.
+                      </span>
+                    )}
+                  </>
+                )}
                 {packDryRun.recommendation ? ` — ${packDryRun.recommendation}` : ""}
               </div>
             )}

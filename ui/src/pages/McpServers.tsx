@@ -105,10 +105,63 @@ function severityTone(sev: string): string {
   return sev === "critical" || sev === "high" ? "bad" : sev === "none" ? "ok" : "warn";
 }
 
+/**
+ * WHY the proxy is withholding this definition from the model, or `null` when it is not withholding it.
+ *
+ * THREE reasons, not two. The pin status accounts for only the first two: `norviq/mcp/firewall.py`
+ * `_action_for` strips a tool whenever the scanner's grade reaches `mcp_scan_strip_severity` (default
+ * `high`) REGARDLESS of pin status, so a tool can be approved, undrifted, and still absent from every
+ * `tools/list`.
+ *
+ * This function is the single source of that judgement. It exists because the row badge and the
+ * detail dialog used to decide it separately — the badge on all three reasons, the subtitle on pin
+ * status alone — so a row badged "Withheld" opened a dialog that led with "Approved. The served
+ * definition matches the approved one." Two opposite claims about one tool, on the surface built to
+ * catch rug pulls, with the dialog winning because it is the detail view.
+ */
+export type WithheldReason = "drift" | "quarantined" | "scan";
+
+/**
+ * The DEFAULT strip threshold, and the reason the scanner branch may not speak in the indicative.
+ *
+ * `mcp_scan_strip_severity` is a setting (norviq/config.py), and nothing serves it to this console:
+ * `/mcp/pins` returns `scan_severity` and `/settings` carries no `mcp_scan_*` field at all. So this
+ * comparison is not a reading of the deployment — it is the shipped default, and on a cluster that
+ * raised the threshold to `critical` a HIGH-graded tool is still handed to the model. Telling that
+ * operator the tool is "withheld from the model and the model cannot call it" is a guess rendered as
+ * a measurement, in the direction that stops them looking.
+ */
+const DEFAULT_STRIP_SEVERITY = "high";
+
+export function withheldReason(p: McpPinRow): WithheldReason | null {
+  if (p.status === "drift") return "drift";
+  if (p.status !== "pinned") return "quarantined";
+  if (p.scan_severity === "critical" || p.scan_severity === "high") return "scan";
+  return null;
+}
+
 /** A definition withheld from the model is the tool being *off*, which the pin status alone does not
- *  say. `Withheld` next to the name is the operator-facing consequence of `drift`/`quarantined`. */
+ *  say. `Withheld` next to the name is the operator-facing consequence of all three reasons above. */
 function isWithheld(p: McpPinRow): boolean {
-  return p.status !== "pinned" || p.scan_severity === "critical" || p.scan_severity === "high";
+  return withheldReason(p) !== null;
+}
+
+/** The dialog's lead sentence. Keyed on {@link withheldReason}, never on `status` alone. */
+function detailSubtitle(p: McpPinRow): string {
+  switch (withheldReason(p)) {
+    case "drift":
+      return "This server is serving a definition that DIFFERS from the one approved. Calls to this tool are refused until an operator adopts the change.";
+    case "quarantined":
+      return "Not approved. The tool is withheld from the model and calls to it are refused.";
+    case "scan":
+      // "so the proxy strips this tool" was stated as fact. It is a fact only at the DEFAULT
+      // threshold, which is all this console has — see DEFAULT_STRIP_SEVERITY.
+      return `Approved, and the scanner graded it ${String(
+        p.scan_severity
+      ).toUpperCase()}. The served definition matches the approved one, but at the default mcp_scan_strip_severity (${DEFAULT_STRIP_SEVERITY}) a grade this high strips the tool from every tools/list, whatever the pin says.`;
+    default:
+      return "Approved. The served definition matches the approved one.";
+  }
 }
 
 /** What the operator was shown, so approve can name the digest they actually reviewed. */
@@ -501,7 +554,7 @@ export function McpServers() {
       {pinRows.length > 0 && (
         <Panel
           title="Tool definitions"
-          sub="Pinned by content hash. A definition that changes after approval is a rug pull, and the tool is withheld from the model."
+          sub="Pinned by content hash. A definition that changes after approval is a rug pull, and the tool is withheld from the model — as is one the scanner grades high or critical, whatever its pin says."
         >
           <DataTable<McpPinRow>
             columns={pinColumns}
@@ -545,14 +598,61 @@ export function McpServers() {
               {selectedTool.server_id} / {selectedTool.tool_name}
             </span>
           }
-          subtitle={
-            selectedTool.status === "drift"
-              ? "This server is serving a definition that DIFFERS from the one approved. Calls to this tool are refused until an operator adopts the change."
-              : selectedTool.status === "quarantined"
-                ? "Not approved. The tool is withheld from the model and calls to it are refused."
-                : "Approved. The served definition matches the approved one."
-          }
+          subtitle={detailSubtitle(selectedTool)}
         >
+          {/* The badge's own sentence, in the view that outranks it. A scanner grade at or above
+              `mcp_scan_strip_severity` strips the tool whatever the pin says, so this has to name
+              what would CLEAR it — otherwise the only control on offer is Revoke, which is the
+              opposite of what the operator wants. */}
+          {isWithheld(selectedTool) && (
+            <div
+              data-testid="mcp-withheld-note"
+              style={{
+                display: "flex",
+                gap: 9,
+                alignItems: "flex-start",
+                padding: "10px 12px",
+                borderRadius: 10,
+                marginBottom: 14,
+                border: "1px solid #FF3B5C30",
+                background: "#FF3B5C15"
+              }}
+            >
+              <ShieldAlert size={15} style={{ flex: "none", marginTop: 2, color: "var(--block)" }} />
+              <div style={{ fontSize: 12.5, lineHeight: 1.6, color: "var(--text-secondary)" }}>
+                <div style={{ fontWeight: 600, color: "var(--block)", marginBottom: 3 }}>
+                  Withheld from the model
+                </div>
+                {withheldReason(selectedTool) === "drift" &&
+                  "The served definition differs from the approved one, so the proxy strips this tool from every tools/list. Adopting the served definition below clears it."}
+                {withheldReason(selectedTool) === "quarantined" &&
+                  "This definition has never been approved, so the proxy strips this tool from every tools/list. Approving the served definition below clears it."}
+                {withheldReason(selectedTool) === "scan" && (
+                  <>
+                    The definition scanner graded this tool {String(selectedTool.scan_severity).toUpperCase()}. At the
+                    default <span className="mono">mcp_scan_strip_severity</span> ({DEFAULT_STRIP_SEVERITY}) the proxy
+                    strips it from every <span className="mono">tools/list</span> whatever the pin says. Approving the
+                    definition does not clear it: fix the definition upstream, or raise{" "}
+                    <span className="mono">mcp_scan_strip_severity</span> above {String(selectedTool.scan_severity)}.
+                    <div style={{ marginTop: 5, color: "var(--text-muted)" }}>
+                      This console is not told which threshold this cluster runs — no endpoint serves{" "}
+                      <span className="mono">mcp_scan_strip_severity</span> — so if it was raised, this tool is still
+                      being handed to the model and the grade above is the only fact here.
+                    </div>
+                  </>
+                )}
+                {withheldReason(selectedTool) !== "scan" &&
+                  (selectedTool.scan_severity === "critical" || selectedTool.scan_severity === "high") && (
+                    <div style={{ marginTop: 5 }}>
+                      The scanner also graded it {String(selectedTool.scan_severity).toUpperCase()}, so approving the
+                      served definition will NOT make this tool visible again on its own — that grade strips it
+                      independently of the pin.
+                    </div>
+                  )}
+              </div>
+            </div>
+          )}
+
           <DefinitionDiff
             approved={selectedTool.approved_canonical}
             served={selectedTool.last_canonical}

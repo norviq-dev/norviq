@@ -1396,6 +1396,11 @@ export function BuilderSheet({
     const argOptions: PickerOption[] = paths.map((pth) => ({
       id: pth.path,
       label: pth.path,
+      // The name the REST of the product uses for this same argument. Picking it calls
+      // `addFact(`${PARAM_PATH_PREFIX}${path}`)`, so the chip on the row and the line in the compiled
+      // rego both read `param_paths.to` while this list says `to` — and the operator searches with the
+      // string they were shown.
+      aliases: [`${PARAM_PATH_PREFIX}${pth.path}`],
       meta: [pth.type, pth.path.includes(".") ? "nested" : null].filter(Boolean).join(" · "),
       required: pth.required,
       disabled: !pth.addressable,
@@ -1654,9 +1659,17 @@ export function BuilderSheet({
   /** Per-tool newly-denied counts, from the dry run's SAMPLE of decision flips.
    *
    *  `null` until a dry run has been done — the scope cell then says nothing about traffic rather than
-   *  implying zero. The sample is truncated by the server on large replays, so the count is passed
-   *  with `sampled` and rendered as "at least N": a lower bound printed as a total would be a number
-   *  the operator could act on and the engine would contradict. */
+   *  implying zero.
+   *
+   *  THE SAMPLE IS NOT THE TOTAL, AND `truncated` DOES NOT SAY THAT IT ISN'T. The server appends flips
+   *  to `newly_blocked_samples` only `if len(flip_samples) < 8` — an unconditional 8-row cap across ALL
+   *  tools — while `truncated` reports something else entirely: that the REPLAY hit its 500-record cap.
+   *  Keying "this number is a lower bound" on `truncated` therefore printed an 8-row sample as a
+   *  per-tool total on every ordinary dry run, and gave every tool the sample cut off ScopeCell's
+   *  affirmative 0-case, "No replayed call would be denied by this grant." A grant nobody measured must
+   *  never read as a grant measured and found harmless — so the counts below are passed as a lower
+   *  bound, withheld entirely where the sample cannot speak for a tool, and the sample's own size is
+   *  stated on the row (`builder-scope-sample-note-*`) so the gap is visible rather than merely absent. */
   const newlyDeniedByTool = useMemo<Map<string, number> | null>(() => {
     const samples = dryRunResult?.newly_blocked_samples;
     if (!samples) return null;
@@ -1667,8 +1680,87 @@ export function BuilderSheet({
     }
     return out;
   }, [dryRunResult]);
-
+  // Declared before the traffic derivations below because they all depend on it: a run against an
+  // EARLIER rego is not a measurement of the policy currently on screen.
   const dryRunStale = dryRunRego !== null && dryRunRego !== compiled.rego;
+  const flipSampleSize = dryRunResult?.newly_blocked_samples?.length ?? 0;
+  /** `newly_blocked` is optional on the wire. Absent, it is UNKNOWN — `?? 0` would turn a missing total
+   *  into "the sample is everything", which is the same fallback-to-zero this whole fix is about. */
+  const flipTotalReported = typeof dryRunResult?.newly_blocked === "number";
+  const flipTotal = dryRunResult?.newly_blocked ?? 0;
+  /** TWO INDEPENDENT REASONS the flip list is not the whole truth, kept APART because they are
+   *  different facts with different remedies, and one sentence covering both refuted itself:
+   *
+   *    `flipSampleCapped` — more flips were COUNTED than were NAMED (the server names at most 8 across
+   *      all tools). With no total reported at all this is unknowable, so it is assumed — WHATEVER the
+   *      sample's size, zero included. "Cannot be shown to be complete" is not "is complete": an empty
+   *      flip list with no total scored as a complete sample and handed every row ScopeCell's
+   *      affirmative "No replayed call would be denied by this grant.", on the same screen whose
+   *      headline said the count was never reported.
+   *    `replayCapped` — `truncated`: the REPLAY stopped at its 500-record cap, so calls exist that were
+   *      never evaluated at all. A flip list can be 3 of 3 and still miss every one of them, which is
+   *      why this cannot be folded into the sentence about the sample's size — "sample of 3 of 3
+   *      newly-blocked calls, this tool's real number can be higher" sends the operator hunting for
+   *      flips that do not exist instead of at the records the run never reached. */
+  const flipSampleCapped = flipTotalReported ? flipTotal > flipSampleSize : true;
+  const replayCapped = dryRunResult?.truncated === true;
+  const flipSampleIncomplete = flipSampleCapped || replayCapped;
+  /** The scale of what was named, in the words both the row note and the chip label use. */
+  const flipSampleScale = flipTotalReported
+    ? `${flipSampleSize} of ${flipTotal} newly-blocked calls`
+    : `${flipSampleSize} newly-blocked calls, with no total reported`;
+  /** How much traffic the replay examined. `total_records_checked` is optional exactly like
+   *  `newly_blocked`: ABSENT is not zero, and zero is not "clean" — both mean the grant's effect on
+   *  real traffic went unmeasured, and neither may be rendered as a measurement. */
+  const replayCountReported = typeof dryRunResult?.total_records_checked === "number";
+  const replayCount = dryRunResult?.total_records_checked ?? 0;
+  const replayUnmeasured = dryRunResult != null && (!replayCountReported || replayCount === 0);
+  /** What the scope cell is allowed to state about one tool's traffic.
+   *
+   *  `null` wherever the dry run cannot answer, because ScopeCell renders 0 as the affirmative "No
+   *  replayed call would be denied by this grant." — the one sentence a capped sample has not earned.
+   *  `trafficNoteFor` says WHY it is silent instead; silence alone would read as "nothing to report". */
+  const newlyDeniedFor = (toolKey: string): number | null => {
+    if (newlyDeniedByTool === null) return null;
+    // Measured, but against a policy the operator has since edited past — it describes a rego that is
+    // no longer on screen, and the row has no way to say "this number is about something else".
+    if (dryRunStale) return null;
+    const n = newlyDeniedByTool.get(toolKey) ?? 0;
+    // A flip the run NAMED for this tool is evidence in its own right, and stays visible as a lower
+    // bound: withholding a real number because some OTHER field of the response was unreported would
+    // be the mirror image of the same defect — an unknown hiding a measurement.
+    if (n > 0) return n;
+    if (replayUnmeasured || flipSampleIncomplete) return null;
+    return 0;
+  };
+  /** Why a row is silent, or why its number is a floor rather than a total — in the SAME words for the
+   *  same cause, so the note can never describe a different gap than the one `newlyDeniedFor` acted on. */
+  const trafficNoteFor = (toolKey: string): string | null => {
+    if (dryRunResult == null) return null;
+    if (dryRunStale)
+      return "This dry-run ran against an earlier version of the policy, so its numbers do not describe this grant — re-run it.";
+    const named = (newlyDeniedByTool?.get(toolKey) ?? 0) > 0;
+    // "Nothing was replayed" cannot be said on a row the run named flips for — a named flip IS a
+    // replayed call, and the two sentences side by side would contradict each other on one line. Such a
+    // response is self-inconsistent; the row falls through to what it can support, the flip count.
+    if (replayUnmeasured && !named)
+      return replayCountReported
+        ? "The dry-run replayed no recent calls, so this grant's effect on real traffic is unmeasured — not zero."
+        : "The dry-run did not report how many calls it replayed, so this grant's effect on real traffic is unmeasured — not zero.";
+    if (!flipSampleIncomplete) return null;
+    if (flipSampleCapped) {
+      if (flipSampleSize === 0 && !flipTotalReported)
+        return "The dry-run named no newly-blocked calls and reported no total, so this grant's effect on real traffic is unmeasured — not zero.";
+      return named
+        ? `Counted from the dry-run's sample of ${flipSampleScale} — this tool's real number can be higher.`
+        : `Not named in the dry-run's sample of ${flipSampleScale} — this grant may still deny replayed calls.`;
+    }
+    // The flip list IS whole; what is missing is the traffic the replay never reached.
+    return named
+      ? "Every newly-blocked call the dry-run found is named, but its replay stopped at its record cap — calls beyond it were never evaluated, so this tool's real number can be higher."
+      : "The dry-run's replay stopped at its record cap, so calls beyond it were never evaluated — this grant may still deny replayed calls.";
+  };
+
   // Both the dry-run and the save POST a concrete namespace to the server (dry-run replays that
   // namespace's real traffic) — neither may proceed while the target is still "all"/"" (see
   // `namespaceReady` above, seeded from `targetNamespace`). Every tier needs a concrete target
@@ -1692,6 +1784,19 @@ export function BuilderSheet({
   const step2Valid = mode === "allowlist" ? true : rules.some((_, idx) => errorsForRule(compiled.errors, idx).length === 0);
   // Steps dim (opacity only, never disabled — see BuilderSteps.css) until the prior step is valid. The
   // REAL gating for dry-run/Save is untouched — canDryRun/canSave above, unaffected by these.
+  // The identifier field step ① ACTUALLY DRAWS for the currently selected tier. A tier-blind "Set an
+  // agent class first." is not a rounded-off version of the truth: the workload tier renders no
+  // agent-class control anywhere on screen, so the one sentence naming a field sent the operator
+  // hunting for a control that does not exist while the field that is missing — "Workload name
+  // (Deployment)" — sat unnamed in front of them. The namespace tier's identifier IS `targetNamespace`
+  // and is absorbed by the `!namespaceReady` branch below, so its string here is unreachable-but-true
+  // rather than a fourth thing to keep in sync.
+  const scopeIdentifierPrompt =
+    tier === "workload"
+      ? "Set a workload (Deployment) name first."
+      : tier === "namespace"
+        ? "Set a target namespace first."
+        : "Set an agent class first.";
   // WHY SAVE IS BLOCKED, as a sentence the operator can read without hovering a control that cannot
   // be hovered. Ordered by what must be fixed FIRST — naming the dry-run while the namespace is still
   // unset would send them to the wrong field.
@@ -1699,7 +1804,7 @@ export function BuilderSheet({
     ? !namespaceReady
       ? "Pick a concrete target namespace first — the global scope is All namespaces."
       : !scopeReady
-        ? "Set an agent class first."
+        ? scopeIdentifierPrompt
         : hasErrors
           ? "Fix the compile errors before saving."
           : dryRunStale
@@ -2286,6 +2391,7 @@ export function BuilderSheet({
                         : knownToolNames?.has(key)
                           ? "observed"
                           : null;
+                      const trafficNote = trafficNoteFor(key);
                       return (
                         <div
                           key={t}
@@ -2318,8 +2424,8 @@ export function BuilderSheet({
                             schemaAvailable={schemaByTool.has(key)}
                             expanded={openGrantTool === t}
                             onToggle={() => setOpenGrantTool((cur) => (cur === t ? null : t))}
-                            newlyDenied={newlyDeniedByTool ? (newlyDeniedByTool.get(key) ?? 0) : null}
-                            sampled={dryRunResult?.truncated === true}
+                            newlyDenied={newlyDeniedFor(key)}
+                            sampled={flipSampleIncomplete}
                             data-testid={`builder-scope-cell-${t}`}
                           />
                           <button
@@ -2332,6 +2438,24 @@ export function BuilderSheet({
                           >
                             <X size={12} />
                           </button>
+                          {/* WHAT THE DRY RUN COULD NOT SAY ABOUT THIS ROW, on the row that quotes from
+                              it (last, so it takes its own full-width line under the cell rather than
+                              displacing the remove control). The per-tool number is drawn from at most
+                              8 named flips, so without this line "8 replayed calls would now be denied"
+                              reads as this tool's total, and a tool the sample never reached reads as
+                              cleared. STATED, not suppressed: "the dry-run has not measured this grant"
+                              is itself the finding, and a silent row is indistinguishable from a clean
+                              one. One source (`trafficNoteFor`) with the same inputs as the number
+                              itself, so the sentence can never name a different gap than the one that
+                              withheld the number. */}
+                          {trafficNote && (
+                            <div
+                              data-testid={`builder-scope-sample-note-${t}`}
+                              style={{ flex: "1 1 100%", fontSize: 11, lineHeight: 1.5, color: "var(--escalate)" }}
+                            >
+                              {trafficNote}
+                            </div>
+                          )}
                         </div>
                       );
                     })}
@@ -2860,7 +2984,12 @@ export function BuilderSheet({
                     icon={FlaskConical}
                     disabled={!canDryRun}
                     data-testid="builder-dryrun-btn"
-                    title={!namespaceReady ? "Pick a concrete target namespace first" : !scopeReady ? "Set an agent class first" : undefined}
+                    // Same two blockers, same words as the VISIBLE reason on Save beside it (which is
+                    // what the operator actually reads — `.btn:disabled { pointer-events: none }` means
+                    // this `title` never surfaces while the button is disabled). It is kept in sync
+                    // through the same `scopeIdentifierPrompt` so the two can never again disagree
+                    // about which field is missing.
+                    title={!namespaceReady ? "Pick a concrete target namespace first" : !scopeReady ? scopeIdentifierPrompt : undefined}
                     onClick={runDryRun}
                   >
                     {dryRunLoading ? "Dry-Running..." : "Run dry-run"}
@@ -2908,13 +3037,40 @@ export function BuilderSheet({
                     </div>
                   )}
                   <div style={{ color: "var(--text-secondary)" }}>
-                    Replayed {(dryRunResult.total_records_checked ?? 0).toLocaleString()} recent real call
-                    {(dryRunResult.total_records_checked ?? 0) === 1 ? "" : "s"} ·{" "}
-                    <strong style={{ color: (dryRunResult.newly_blocked ?? 0) > 0 ? "var(--escalate)" : "var(--allow)" }}>
-                      {dryRunResult.newly_blocked ?? 0} newly blocked
+                    {/* `total_records_checked` is optional too, and `?? 0` printed "Replayed 0 recent
+                        real calls" — a measurement stated for a run that never reported one — directly
+                        beside the newly-blocked count this panel already refuses to invent. */}
+                    {replayCountReported ? (
+                      <>
+                        Replayed {replayCount.toLocaleString()} recent real call{replayCount === 1 ? "" : "s"}
+                      </>
+                    ) : (
+                      <span style={{ color: "var(--escalate)" }}>
+                        The dry-run did not report how many recent calls it replayed
+                      </span>
+                    )}{" "}
+                    ·{" "}
+                    {/* An ABSENT count is not a count of zero. `?? 0` painted "0 newly blocked" in the
+                        all-clear colour for a response that never reported the number — the headline
+                        stating a safety result the run did not produce. */}
+                    <strong style={{ color: !flipTotalReported ? "var(--escalate)" : flipTotal > 0 ? "var(--escalate)" : "var(--allow)" }}>
+                      {flipTotalReported ? `${flipTotal} newly blocked` : "newly-blocked count not reported"}
                     </strong>
                   </div>
                   {(dryRunResult.newly_blocked_samples?.length ?? 0) > 0 && (
+                    <>
+                    {/* The chips are a SAMPLE — the server names at most 8 flips whatever the count
+                        above says. Unlabelled, eight chips under "47 newly blocked" read as the whole
+                        story, and the per-tool lines drawn from them read as totals. */}
+                    <div data-testid="builder-dryrun-sample-label" style={{ fontSize: 11, marginTop: 6, color: flipSampleIncomplete ? "var(--escalate)" : "var(--text-muted)" }}>
+                      {flipSampleCapped
+                        ? flipTotalReported
+                          ? `Sample — ${flipSampleScale} named below. Per-tool counts on the allowed-tool rows are lower bounds.`
+                          : `Sample — ${flipSampleSize} newly-blocked call${flipSampleSize === 1 ? "" : "s"} named below, with no total reported. Per-tool counts on the allowed-tool rows are lower bounds.`
+                        : replayCapped
+                          ? `All ${flipSampleSize} newly-blocked call${flipSampleSize === 1 ? "" : "s"} the replay reached are named below — it stopped at its record cap, so calls beyond it were never evaluated.`
+                          : `All ${flipSampleSize} newly-blocked call${flipSampleSize === 1 ? "" : "s"} named below.`}
+                    </div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
                       {dryRunResult.newly_blocked_samples!.map((f, i) => (
                         <span
@@ -2926,6 +3082,7 @@ export function BuilderSheet({
                         </span>
                       ))}
                     </div>
+                    </>
                   )}
                   <div style={{ marginTop: 6, fontWeight: 600 }}>{dryRunResult.recommendation ?? "n/a"}</div>
                 </div>

@@ -87,6 +87,39 @@ describe("AttackGraph page", () => {
     expect(within(expl).getByText("1")).toBeInTheDocument();
   });
 
+  // ONE definition of "chokepoint", shared with the inspector chip and the backend's own tag.
+  // The strip used to define it locally as "a tool appearing on 2+ paths", so with paths through
+  // distinct tools — including the ordinary single-path case — it read "CHOKEPOINTS 0 tools" while
+  // the inspector two panels over was naming one. Same shape as the 3-paths-vs-2-rules bug already
+  // found on this screen: two numbers for one word, on panels an operator reads together.
+  it("the Chokepoints stat counts the same thing the inspector chip names", async () => {
+    server.use(...baseHandlers([P1, P2])); // chokepoints: execute_sql, issue_refund — one path each
+    renderPage();
+    const inspector = await screen.findByRole("complementary", { name: /attack path inspector/i });
+    const cell = screen.getByTestId("stat-chokepoints");
+    // pre-fix this cell read "0" while the chip below named a tool
+    expect(within(cell).getByText("2")).toBeInTheDocument();
+    // the chip the number has to agree with
+    const chip = within(inspector).getByText(/^chokepoint$/i).parentElement as HTMLElement;
+    expect(chip).toHaveTextContent(/execute_sql|issue_refund/);
+  });
+
+  it("a single path with a chokepoint never reports zero chokepoints", async () => {
+    server.use(...baseHandlers([P2]));
+    renderPage();
+    await screen.findByRole("complementary", { name: /attack path inspector/i });
+    expect(within(screen.getByTestId("stat-chokepoints")).getByText("1")).toBeInTheDocument();
+  });
+
+  it("counts a shared chokepoint once, not once per path", async () => {
+    const A: ThreatPath = { ...P2, id: "a" };
+    const B: ThreatPath = { ...P2, id: "b", src: "other-runner" }; // same tool: issue_refund
+    server.use(...baseHandlers([A, B]));
+    renderPage();
+    await screen.findByRole("complementary", { name: /attack path inspector/i });
+    expect(within(screen.getByTestId("stat-chokepoints")).getByText("1")).toBeInTheDocument();
+  });
+
   it("selecting a path shows the inspector with its fix + verdict", async () => {
     server.use(...baseHandlers([P2, P1]));
     renderPage();
@@ -128,6 +161,90 @@ describe("AttackGraph page", () => {
     expect(await within(dialog).findByLabelText(/Intended: read_ledger/i)).toBeInTheDocument();
     // coverage is fetched once the checklist has seeded (debounced) — wait for it
     await waitFor(() => expect(coverageCalled).toBeGreaterThan(0));
+  });
+
+  // The denial total on the scope card is aggregated server-side over RANGE_HOURS[range], i.e. over
+  // whatever this dropdown asked for — but the card captioned it "Denials · 24h" unconditionally, so
+  // a thirty-day total was labelled a day's. This asserts the page actually hands the canvas the
+  // window it queried; the label itself is covered in AttackGraphCanvas.test.tsx.
+  it("the scope card's denial window follows the Range dropdown", async () => {
+    server.use(...baseHandlers([P2]));
+    const { container } = renderPage();
+    await screen.findByRole("complementary", { name: /attack path inspector/i });
+
+    // switch Range to Last 30d
+    fireEvent.click(screen.getByRole("button", { name: /^range$/i }));
+    fireEvent.click(within(screen.getByRole("listbox", { name: /range/i })).getByText("Last 30d"));
+
+    // click the chokepoint tool node on the kill-chain → the scope card opens
+    const toolNode = Array.from(container.querySelectorAll<SVGGElement>("g.ak-node")).find((g) =>
+      Array.from(g.querySelectorAll("text")).some((t) => t.textContent === "issue_refund")
+    )!;
+    expect(toolNode).toBeDefined();
+    fireEvent.click(toolNode);
+
+    const denials = await screen.findByText(/^Denials · /);
+    expect(denials).toHaveTextContent("Denials · 30d");
+    expect(denials.textContent).not.toContain("24h");
+  });
+
+  /** Open the kill-chain scope card for the chokepoint tool node. */
+  function openScopeCard(container: HTMLElement) {
+    const toolNode = Array.from(container.querySelectorAll<SVGGElement>("g.ak-node")).find((g) =>
+      Array.from(g.querySelectorAll("text")).some((t) => t.textContent === "issue_refund")
+    )!;
+    expect(toolNode).toBeDefined();
+    fireEvent.click(toolNode);
+  }
+
+  // An ALREADY OPEN card is the case the click-order test above cannot reach: the operator opens it,
+  // then widens the window. The card's denial total is range-scoped, so leaving it alone would keep a
+  // day's number under a month's label — the same defect as the old hardcoded caption, one step later.
+  it("relabels an already-open scope card when the window is re-measured", async () => {
+    server.use(...baseHandlers([P2]));
+    const { container } = renderPage();
+    await screen.findByRole("complementary", { name: /attack path inspector/i });
+    openScopeCard(container);
+    expect(await screen.findByText("Denials · 24h")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^range$/i }));
+    fireEvent.click(within(screen.getByRole("listbox", { name: /range/i })).getByText("Last 30d"));
+
+    await waitFor(() => expect(screen.getByText("Denials · 30d")).toBeInTheDocument());
+    expect(screen.queryByText("Denials · 24h")).not.toBeInTheDocument();
+  });
+
+  // …and the other direction, which is the one that matters. `range` is what was ASKED for;
+  // it moves the instant the dropdown does and STAYS moved when the fetch behind it fails — the catch
+  // keeps the previous `paths` and raises the degraded banner. Captioning the number with `range`
+  // therefore prints a 24-hour total as a 30-day one: "we could not measure this" rendered as a
+  // measurement. Only a window the numbers were actually fetched with may label them.
+  it("does not relabel the card with a window whose refetch FAILED", async () => {
+    let calls = 0;
+    server.use(
+      http.get("/api/v1/cluster-info", () => HttpResponse.json(CLUSTER_INFO)),
+      http.get("/api/v1/threats/attack-paths", () => {
+        calls += 1;
+        return calls === 1
+          ? HttpResponse.json({ paths: [P2], namespaces: ["payments", "default"] })
+          : new HttpResponse(null, { status: 503 });
+      })
+    );
+    const { container } = renderPage();
+    await screen.findByRole("complementary", { name: /attack path inspector/i });
+    openScopeCard(container);
+    const before = await screen.findByText("Denials · 24h");
+    const denials = before.parentElement!.textContent;
+
+    fireEvent.click(screen.getByRole("button", { name: /^range$/i }));
+    fireEvent.click(within(screen.getByRole("listbox", { name: /range/i })).getByText("Last 30d"));
+
+    // the 30d read failed — the page says so
+    await screen.findByText(/API unavailable/i);
+    // …and the card still reports the window its numbers came from, unchanged
+    expect(screen.getByText("Denials · 24h")).toBeInTheDocument();
+    expect(screen.queryByText("Denials · 30d")).not.toBeInTheDocument();
+    expect(screen.getByText("Denials · 24h").parentElement!.textContent).toBe(denials);
   });
 
   it("empty result shows the no-paths reset/recompute state", async () => {

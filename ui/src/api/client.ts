@@ -777,13 +777,32 @@ export type AgentClassPolicy = {
   effective: boolean; // has actually blocked / would-block traffic (proven, not just loaded)
 };
 export type CoverageByCategory = {
-  namespace: string;
+  /** The scope this payload was actually computed for, echoed by the server — NOT the scope you asked for.
+   *  `null` is the all-namespaces aggregate (`read_namespace` returns None for an admin's "all"), and a
+   *  SCOPED tenant's "all" comes back as its own claim namespace, never "all". It was typed `string`, which
+   *  is why nothing ever compared it: a consumer that wants to know "is this answer about the namespace I am
+   *  labelling it with?" must read this field and must handle the null. */
+  namespace: string | null;
   coverage_pct: number; // over IN-SCOPE categories only — not diluted by un-enabled sector packs
   basis?: string; // "rules_present" — score is presence, not a protection guarantee
   available?: number; // sector categories NOT enabled for this namespace ("available to add")
   categories: CategoryCoverageItem[];
-  namespace_mode?: string; // "block" | "audit" (Monitor) — how the namespace actually enforces
+  /** "block" | "audit" (Monitor) — coverage.py `_namespace_mode`: the namespace's OWN persisted
+   *  enforcement_mode row, or "block" when it has none. This is the ENGINE's rule for whether traffic is
+   *  softened to would-blocks (`_resolve_posture`: "`monitor` is True ONLY when the namespace explicitly
+   *  overrides enforcement_mode to 'audit' — a null/global mode does NO softening"). It is therefore NOT
+   *  interchangeable with /settings' `enforcement_mode`, which merges in the CLUSTER-WIDE default: on a
+   *  cluster deployed global-audit, /settings says "audit" for a namespace that the engine really blocks.
+   *  Any claim about would-blocks must key on THIS field, not on the settings posture. */
+  namespace_mode?: string;
   agent_class_policies?: AgentClassPolicy[];
+  /** TRUE when a DB read behind the agent-class section faulted (coverage.py `_agent_class_policies`):
+   *  either the policy query failed — so `agent_class_policies` is `[]` because we could not LOOK, not
+   *  because the namespace is empty — or the 30d efficacy query failed, so every policy's
+   *  observed/blocked/would_block came back forced to 0 and `effective` forced to false.
+   *  The numbers in that section are UNREADABLE, not zero. Any surface rendering it MUST show an explicit
+   *  degraded state — never grey/zero bars, an empty list, or a "not proven" verdict — as fact. */
+  agent_class_policies_degraded?: boolean;
 };
 
 /** Policy coverage per risk category: score = mapped rules PRESENT in the loaded rego (not efficacy).
@@ -831,7 +850,13 @@ export type SearchAgent = {
   trust_score?: number;
   category?: string;
 };
-export type SearchPolicy = { namespace?: string; agent_class?: string; mode?: string };
+/** A ⌘K policy hit. `mode` is DELIBERATELY absent from /api/v1/search: `_search_policies` reads the
+ *  loader's in-memory entry, which carries only {rego, priority} — the real enforcement_mode would need a
+ *  DB read, and the endpoint refuses to fabricate one because a hardcoded value would mislabel every
+ *  policy with a different posture. So the field is optional AND nullable, and a null/absent value means
+ *  "unknown" — it must be rendered as unknown, never defaulted to a concrete posture like "audit"
+ *  (that read as "Monitor / not enforcing" for policies that were actively blocking). */
+export type SearchPolicy = { namespace?: string; agent_class?: string; mode?: string | null };
 
 async function apiGetWithSignal<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(apiUrl(path), { signal, headers: authHeaders() });
