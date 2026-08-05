@@ -151,7 +151,27 @@ Everything in the "authoring only" bucket can be seeded from observed traffic: t
 
 ---
 
-## 4. The three highest-value things to build next
+## 4. The three highest-value things to build next — **all three are now built**
+
+> **Status, 2026-08-05.** Everything in this section has shipped on `integrate/mcp-and-builder`.
+> It is kept as written, because the analysis is what the work was measured against and rewriting it
+> would erase the record of what was claimed before it was tried. Read it as a specification that was
+> executed, not as a backlog. Where reality diverged from the plan below, it is noted inline.
+>
+> What the work actually cost, beyond what this section anticipated:
+>
+> - **The fix attempts introduced four new defects of the same severity as the ones they closed** —
+>   two fail-opens, a bypass, and a destination-eviction primitive rebuilt through a different budget.
+>   Every one was caught by an adversarial pass whose only job was to refute the fix, not confirm it.
+>   Nothing here is safe to land on a single agent's own report that it works.
+> - **Two tests were quietly weakened while being "fixed"**, one asserting a fail-open outright. A
+>   third had a fixture that could not produce the state its own name claimed, which is what had been
+>   hiding the version-skew gap: the compiler was correct all along.
+> - **A 33-second denial of service was found in passing** — `_EMAIL_RE` is quadratic in one value's
+>   length, so an ordinary 200 KB document blew the 2s fail-closed `evaluator_timeout`. Pre-existing,
+>   unrelated to any item below, and invisible until someone measured instead of assuming.
+>
+> The residuals that remain open on purpose are listed in §2, not here.
 
 ### 1. Make every fail-open primitive fail closed. Smallest diff, most bypasses closed.
 
@@ -171,5 +191,21 @@ Every one of these is local, testable, and closes a bypass that today produces `
 Norviq classifies `slack_post_message` and `forward_ticket` as `(SEND, HIGH)` on the hot path and publishes it at `evaluator.py:760-773`, then enforces against a *different, narrower* list: 3 names + 14 prefixes in the baseline (`comprehensive.rego:214,222-231`) and 18 literals in the toggle (`threat_intent.py:40-45`). `grep derived comprehensive.rego` returns nothing. Make `egress_verb_tool` and `is_egress` read `input.derived.verb`, extract bare hosts and host+path splits in `_destinations` (`evaluator.py:857-886`), replace `input.tool_params.tenant_id` with a `walk()` in `cross_tenant_detected`, and stop the console from suppressing warnings when the toggle is on (`IntentModal.tsx:136-152`). **Closes D5, D11, G6, and most of G2.** The data already exists; only the wiring is missing.
 
 ### 3. Ingest the argument surface automatically, then make unconstrained arguments visible.
+
+> **Built, and the design changed under contact.** The plan below assumed persisting the `param_paths`
+> key-set was enough. It was not, in two ways that only appeared once it ran:
+>
+> 1. **Values ride in KEY positions.** `{"balances": {"4111111111111111": 25.0}}` wrote a PAN, and
+>    `{"rows": {"123-45-6789": "x"}}` an SSN, straight into the key-set — on a default install whose
+>    value capture is deliberately OFF. "Keys only" is not automatically "no values", and the test
+>    written to guarantee it could not have caught it: every key in its fixture was schema-shaped.
+> 2. **Observed ≠ constrainable.** `param_paths` carries STRING leaves only, so `amount: 25.0` is
+>    named but never derivable. Under `default decision = "block"` a clause pinned on it refuses
+>    *every* call to that tool — and a key-only dry run cannot warn you, because it blocks the sound
+>    predicates too. So the row also carries `param_keys_pinnable`: `amount` is shown and never
+>    offered. **Showing an argument you cannot constrain is honest; offering it is a trap.**
+>
+> The sentence this section asked for is now on screen, and it is the one the personas asked for by a
+> different route: *"`issue_refund` carried: `amount` [Not in this rule], `txn_id` [Not in this rule]."*
 
 Ship `args_schema` / `inputSchema` from the framework at wrap time (`sdk/langchain/adapter.py:87-103`, additive field on `EvaluateRequest`, `evaluate.py:25-38`), **and** persist the derived `param_paths` key-set from real traffic (`evaluator.py:796`) so an observed-only tool has a real argument list. Then surface the one thing nothing surfaces today: *"`send_email` is allowlisted for this class with 0 of its 5 arguments constrained."* This attacks **G1**, the biggest ABSENT vector — argument-level narrowing already works (it is the one control that genuinely blocks an attacker-chosen destination), and the only reasons it is not deployed are that the operator cannot see the argument surface, cannot see which arguments are unprotected, and gets no warning when a rule they wrote is silently vacuous. This also fixes the positional-arg name loss at `wrapping.py:61-68`. **No operator retyping at any point** — the schema is read from the object the SDK is already holding, and the paths are read from calls Norviq has already evaluated.

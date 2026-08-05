@@ -7,7 +7,7 @@
 //  The RedTeam scorecard metric cluster is UNBOXED (no --bg-surface/--border) + nudged right; values==latest.
 //  Compliance framework cards carry no "coverage steady" trend line.
 
-import { test, expect, waitForApp } from "./fixtures";
+import { test, expect, waitForApp, suiteSettled } from "./fixtures";
 import { type Page } from "@playwright/test";
 
 // Read a GET endpoint from the page, carrying the real session token, and FAIL LOUDLY on a non-2xx.
@@ -23,18 +23,6 @@ async function apiJson(page: Page, path: string): Promise<any> {
   return body;
 }
 
-async function postSuite(page: Page, query: string): Promise<any> {
-  for (let i = 0; i < 20; i++) {
-    const r = await page.evaluate(async (q) => {
-      const t = localStorage.getItem("nrvq_token");
-      const res = await fetch(`/api/v1/redteam/suite?${q}`, { method: "POST", headers: t ? { Authorization: `Bearer ${t}` } : {} });
-      return res.json();
-    }, query);
-    if (!(r?.detail?.error || /already running/i.test(JSON.stringify(r?.detail ?? "")))) return r;
-    await page.waitForTimeout(1500);
-  }
-  throw new Error("suite stayed busy");
-}
 
 test.describe("Overview coverage caption sits below the gauge (no overlap)", () => {
   test("the score-gauge-caption is below the number and out of the arc; text preserved", async ({ page, recorder }) => {

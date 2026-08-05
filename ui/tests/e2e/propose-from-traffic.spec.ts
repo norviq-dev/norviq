@@ -9,8 +9,11 @@
 // prove the components render what I told them to.
 //
 // Two states this cluster reaches naturally and a fixture would have to fake:
-//   - `params_available: false` — the audit log records no call arguments, so the proposal can only
-//     name tools. This is the degraded state the design promotes to a primary one.
+//   - `params_available: false` with `params_detail: "keys"` — no argument VALUES are stored (the
+//     default install stores none), but the argument NAMES the traffic carried are. This is the
+//     degraded state the design promotes to a primary one. It used to be `detail: "none"`: before
+//     argument-name capture existed, a default install recorded nothing at all and the proposal
+//     could only name tools.
 //   - a hoisted clause — the proposer attaches `data_classes noneOf ['secret']` to every rule.
 //
 // Prerequisites (see scripts/e2e.sh):
@@ -74,14 +77,26 @@ test("the engine's own predicate text is one click away, in the same dialect", a
   await expect(card.locator("pre")).toContainText(/tool_name in \[/);
 });
 
-test("no recorded arguments is a primary state, not a footnote", async ({ page }) => {
-  // The audit log for this class carries no call parameters, so a rule here grants a tool outright.
-  // Saying that plainly is the difference between an informed draft and a surprise in production.
+test("the capture state is a primary state, not a footnote", async ({ page }) => {
+  // This class's audit rows carry argument NAMES and no values, which is what a default install
+  // records. Saying that plainly is the difference between an informed draft and a surprise in
+  // production — an operator who reads an existence check as a value check has mis-scoped the rule.
+  //
+  // This asserted `params-warning` ("Proposed from tool names only") until argument-name capture
+  // landed. That band is still correct and still tested, but it is now gated on `detail: "none"`,
+  // which this cluster no longer reaches: the proposal knows `url`, `to` and `query`, so "tool names
+  // only" would be a false statement about it.
   await propose(page);
-  const warning = page.getByTestId("params-warning");
-  await expect(warning).toBeVisible();
-  await expect(warning).toContainText(/Proposed from tool names only/i);
-  await expect(warning).toContainText(/grants a tool outright/i);
+  const band = page.getByTestId("params-keys");
+  await expect(band).toBeVisible();
+  await expect(band).toContainText(/Argument names recorded, values not/i);
+  await expect(band).toContainText(/present/i);
+  // The band claims names are recorded; this proves the page actually shows them. Without it the
+  // assertion above passes against a screen whose whole point — the names — never rendered.
+  await expect(page.getByTestId("unscoped-args")).toContainText(/no rule mentions/i);
+  // And the superseded band must NOT also be on screen: the two make contradictory claims about
+  // whether anything was captured, and rendering both would be worse than rendering either.
+  await expect(page.getByTestId("params-warning")).toHaveCount(0);
 });
 
 test("a draft cannot be saved before the dry run, and the button says why", async ({ page }) => {

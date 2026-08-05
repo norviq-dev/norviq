@@ -166,8 +166,19 @@ g4() {
   kubectl --context "$KUBE_CTX" -n norviq exec "$pod" -c api -- python /tmp/latency.py \
     --base-url http://127.0.0.1:8080 --token-file /tmp/tok.txt --n 200 --concurrency 8 >"$log" 2>&1
   local rc=$?
-  [ "$rc" -eq 0 ] && met "G4 @ concurrency 8: within budget and decided correctly" \
-                  || unmet "G4 @ concurrency 8: $(grep -m2 '✗' "$log" | tr '\n' ' ')"
+  if [ "$rc" -eq 0 ]; then
+    met "G4 @ concurrency 8: within budget and decided correctly"
+  else
+    # Report p50 next to the breach. The budget is on p95, but p95 alone cannot distinguish "the
+    # enforcement path got slower" from "this host was busy" — and on a contended machine those look
+    # identical in the summary while being opposite conclusions. A real regression moves p50 too, and
+    # breaches the SAME scenario every run. Host contention leaves p50 flat and the breach wanders
+    # between scenarios from run to run. Measured here: three consecutive runs of identical code
+    # breached sql-injection, then benign, then nothing, with p50 steady at ~200ms throughout.
+    # Do NOT raise the budget to make this green. Re-run on a quiet host, or measure p50.
+    local p50s; p50s="$(awk 'NR>2 && NF>=7 && $1 !~ /^(scenario|-)/ {printf "%s=%s ", $1, $2}' "$log")"
+    unmet "G4 @ concurrency 8: $(grep -m2 '✗' "$log" | tr '\n' ' ')— p50 was [ ${p50s}] (flat p50 + a breach that moves between runs means the host, not the code)"
+  fi
 
   # The real gate: a fast WRONG answer is worse than a slow right one.
   kubectl --context "$KUBE_CTX" -n norviq exec "$pod" -c api -- python /tmp/latency.py \
@@ -192,7 +203,17 @@ g5() {
   elif [ "$rc" -eq 0 ]; then
     met "G5: all 5 faults degraded correctly and legibly"
   else
-    unmet "G5: $(grep -m2 '✗' "$log" | tr '\n' ' ')"
+    # NEVER report an empty reason. chaos.py can exit non-zero without printing a '✗' — it died
+    # before its first check, or died on a traceback — and this branch then rendered `✗ G5:` with
+    # nothing after the colon. A gate that fails without saying why is worse than one that does not
+    # run: the operator cannot tell a real regression from a flake, and the log was a mktemp that is
+    # already gone by the time anyone reads the summary. So: prefer the '✗' lines, fall back to the
+    # tail of the log, and always name the exit code. Keep the log when it failed.
+    local why; why="$(grep -m2 '✗' "$log" | tr '\n' ' ')"
+    [ -n "${why// }" ] || why="no '✗' line — last output: $(tail -n 3 "$log" | tr '\n' ' ')"
+    local kept="${ARTIFACT_DIR:-/tmp}/chaos-failed.log"
+    cp "$log" "$kept" 2>/dev/null && why="$why [full log: $kept]"
+    unmet "G5 (chaos.py exit ${rc}): $why"
   fi
   grep -q "FAILED OPEN" "$log" && unmet "G5: FAILED OPEN somewhere — a release blocker, not a bug"
 }

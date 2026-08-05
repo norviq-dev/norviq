@@ -108,3 +108,57 @@ export async function waitForApp(page: Page): Promise<void> {
 export async function finalPath(page: Page): Promise<string> {
   return page.evaluate(() => window.location.pathname);
 }
+
+/**
+ * Start a RedTeam suite and return the SETTLED `results/latest` for its namespace.
+ *
+ * Three specs had their own copy of this, each returning the POST response. The POST answers as soon
+ * as the run is ACCEPTED, so a run still being scored carries no `efficacy` — and every caller then
+ * reads `run.efficacy.overall`, which throws a TypeError naming neither the suite nor the wait. It is
+ * intermittent by construction: whether it passes depends on how loaded the host was that minute.
+ *
+ * Two identical polls, not one. The run is written incrementally, so a single sighting of `efficacy`
+ * can be a partially-scored run whose totals move again under the assertion. Requiring the same
+ * fingerprint twice is what makes "finished" distinguishable from "in progress" — the same reason
+ * scripts/kind-e2e/seed.py waits for a stable count rather than sleeping once after a push.
+ */
+export async function suiteSettled(page: Page, query: string): Promise<any> {
+  let started: unknown = null;
+  for (let i = 0; i < 20; i++) {
+    const r = await page.evaluate(async (q) => {
+      const t = localStorage.getItem("nrvq_token");
+      const res = await fetch(`/api/v1/redteam/suite?${q}`, {
+        method: "POST",
+        headers: t ? { Authorization: `Bearer ${t}` } : {},
+      });
+      return res.json();
+    }, query);
+    const busy = (r as { detail?: unknown })?.detail;
+    if (!busy || !/already running|error/i.test(JSON.stringify(busy))) {
+      started = r;
+      break;
+    }
+    await page.waitForTimeout(1500);
+  }
+  if (started === null) throw new Error("redteam suite stayed busy across 20 attempts");
+
+  const ns = new URLSearchParams(query).get("target_namespace") ?? "default";
+  let prev = "";
+  for (let i = 0; i < 60; i++) {
+    const latest = await page.evaluate(async (n) => {
+      const t = localStorage.getItem("nrvq_token");
+      const res = await fetch(`/api/v1/redteam/results/latest?ns=${n}`, {
+        headers: t ? { Authorization: `Bearer ${t}` } : {},
+      });
+      return res.ok ? res.json() : null;
+    }, ns);
+    const o = latest?.efficacy?.overall;
+    if (o) {
+      const fingerprint = `${latest.run_id}|${o.total}|${o.caught}|${o.got_through}|${latest.pass_rate}`;
+      if (fingerprint === prev) return latest;
+      prev = fingerprint;
+    }
+    await page.waitForTimeout(1500);
+  }
+  throw new Error(`redteam results/latest for ns=${ns} never settled with an efficacy block`);
+}
