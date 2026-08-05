@@ -9,6 +9,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -261,10 +262,19 @@ func (h *Handler) patchResponse(req *admissionv1.AdmissionRequest, pod *corev1.P
 					" MCP server unpoliced."},
 			}
 		}
+		// SAY WHY. This returned the bare string "sidecar patch creation failed", so an operator whose
+		// namespace had suddenly stopped accepting ANY pod saw a message that named no cause and no
+		// fix — the real reason ("unauthorized sidecar image", with the image) was only in the
+		// webhook's own logs, which is the last place someone looks when kubectl apply is failing.
+		// Observed live: a cluster configured with a dev-package sidecar image the allowlist does not
+		// permit refused every pod in four namespaces, and the message said none of that.
 		slog.Error("NRVQ-WHK-4009: patch creation failed", "error", err)
 		return &admissionv1.AdmissionResponse{
 			Allowed: false,
-			Result:  &metav1.Status{Message: "sidecar patch creation failed"},
+			Result: &metav1.Status{Message: fmt.Sprintf(
+				"sidecar patch creation failed: %v. Admission fails CLOSED rather than running this"+
+					" workload unpoliced. Check the webhook's NRVQ_SIDECAR_IMAGE against the injector's"+
+					" image allowlist.", err)},
 		}
 	}
 	if req.DryRun != nil && *req.DryRun {

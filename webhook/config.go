@@ -143,6 +143,33 @@ func LoadConfig() Config {
 		McpPinStore:          envStr("NRVQ_MCP_PIN_STORE", "control-plane"),
 		McpPinMode:           envStr("NRVQ_MCP_PIN_MODE", "tofu"),
 	}
+	// VALIDATE THE CONFIGURED IMAGE HERE, where the misconfiguration is made — not at pod admission,
+	// where it presents as a cluster outage.
+	//
+	// `CreatePatch` refuses an image outside the allowlist, and admission fails CLOSED on that refusal.
+	// That is the correct posture for a security control, but nothing checked the image at startup, so
+	// a bad NRVQ_SIDECAR_IMAGE stayed silent until the first pod — and then EVERY pod in EVERY
+	// injection-enabled namespace was denied, with the reason only in the webhook's logs.
+	//
+	// Observed live on a cluster deployed from the dev image package: the allowlist permits
+	// `ghcr.io/norviq-dev/norviq-engine` but not `...-engine-dev`, so four namespaces silently
+	// stopped accepting workloads. The deploy that caused it had reported success.
+	//
+	// Falling back to the built-in default rather than exiting: refusing to start leaves the same
+	// cluster-wide denial in place (failurePolicy is Fail), so it converts a loud misconfiguration
+	// into the identical outage. Injecting the known-good default keeps workloads admitted and
+	// governed, and the log says exactly what was ignored and why.
+	if !isAllowedSidecarImage(cfg.SidecarImage) {
+		fallback := "ghcr.io/norviq-dev/norviq-engine:engine-latest"
+		// 4062, not 4034: 4034 already labels TWO different events (a cross-namespace policy rejection
+		// in controller.go and an enforcement-integrity denial in handler.go). That collision is
+		// pre-existing and makes both unsearchable; adding a third would be worse than leaving it.
+		slog.Error("NRVQ-WHK-4062: configured sidecar image is not on the injector allowlist — "+
+			"ignoring it and using the built-in default, because honouring it would deny every pod "+
+			"in every injection-enabled namespace",
+			"configured", cfg.SidecarImage, "using", fallback)
+		cfg.SidecarImage = fallback
+	}
 	runtime.SetSidecarImage(cfg.SidecarImage)
 	return cfg
 }
