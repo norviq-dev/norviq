@@ -627,7 +627,10 @@ export const AssetGraphCanvas = forwardRef<CanvasHandle, Props>(function AssetGr
       const lk = lookalikeCaption(gd.label);
       if (lk) {
         t.append("tspan").attr("x", 0).attr("dy", "1.15em")
-          .attr("fill", LOOKALIKE_COLOR).attr("font-size", 10.5).attr("font-weight", 600)
+          // 11.5 for the same reason as the node caption below: 10.5 x the ~0.85 fit zoom is 8.9px,
+          // under the >= 9px guardrail — a latent failure that only escaped because this hull-label
+          // branch happened not to render in the fixture that caught the node one.
+          .attr("fill", LOOKALIKE_COLOR).attr("font-size", 11.5).attr("font-weight", 600)
           .text(lk);
       }
     });
@@ -657,7 +660,13 @@ export const AssetGraphCanvas = forwardRef<CanvasHandle, Props>(function AssetGr
       .style("filter", "drop-shadow(0 1px 1.5px rgba(0,0,0,0.9))")
       .style("text-rendering", "geometricPrecision").style("pointer-events", "none");
     // Lookalike caption slot — text/position set in restyle() alongside the name it sits under.
-    nodeSel.append("text").attr("class", "lklbl").attr("text-anchor", "middle").attr("font-size", 10)
+    //
+    // 11.5, matching the node label it warns about. It was 10, which at the fit zoom this canvas
+    // settles to (~0.85) renders at 8.5px on screen and trips asset-graph.spec.ts's crisp-render
+    // guardrail (>= 9px effective). That guardrail is not cosmetic here: this caption is the ONLY
+    // thing distinguishing a Cyrillic impostor from the real tool, so it must not be the smallest,
+    // blurriest text on the canvas. Any new label added here must clear 9px AFTER the fit scale.
+    nodeSel.append("text").attr("class", "lklbl").attr("text-anchor", "middle").attr("font-size", 11.5)
       .attr("font-weight", 600).attr("font-family", "'Outfit',sans-serif").attr("fill", LOOKALIKE_COLOR)
       .style("filter", "drop-shadow(0 1px 1.5px rgba(0,0,0,0.9))")
       .style("text-rendering", "geometricPrecision").style("pointer-events", "none");
