@@ -176,7 +176,10 @@ g4() {
     # between scenarios from run to run. Measured here: three consecutive runs of identical code
     # breached sql-injection, then benign, then nothing, with p50 steady at ~200ms throughout.
     # Do NOT raise the budget to make this green. Re-run on a quiet host, or measure p50.
-    local p50s; p50s="$(awk 'NR>2 && NF>=7 && $1 !~ /^(scenario|-)/ {printf "%s=%s ", $1, $2}' "$log")"
+    # Only the scenario table rows: seven columns whose second is the p50 number. Without the numeric
+    # test this also scrapes the '✗ benign: p95 ...' lines and the cold-call footer, and the diagnostic
+    # meant to make the summary readable makes it worse.
+    local p50s; p50s="$(awk 'NF==7 && $2 ~ /^[0-9]+\.?[0-9]*$/ {printf "%s=%s ", $1, $2}' "$log")"
     unmet "G4 @ concurrency 8: $(grep -m2 '✗' "$log" | tr '\n' ' ')— p50 was [ ${p50s}] (flat p50 + a breach that moves between runs means the host, not the code)"
   fi
 

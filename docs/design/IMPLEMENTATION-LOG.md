@@ -1974,3 +1974,93 @@ This is the sixth time this branch has recorded a measurement that described som
 product — and the first where I caused it myself rather than inheriting it. The rule already written
 here ("never suppress stderr on a step whose failure you have not yet seen") has a sibling: **never
 start a measurement while another one is running against the same system.** Sequential or nothing.
+
+---
+
+## Release pass: the audit backlog, G1, and the live gate on kind (2026-08-05)
+
+Ten agents fixed the 29 catalogued audit findings across five disjoint file groups, then eight more
+built G1. Each group was fixed by one agent and then **refuted** by a second whose only instruction
+was to prove the first wrong.
+
+### The refutation pass is the entire value, and that is the finding
+
+The fixers' own reports were confident, detailed, and wrong in four places — every one a defect of the
+same severity as the finding it was closing:
+
+| Introduced by | What it did |
+|---|---|
+| the finding-19 fix | CRITICAL fail-open in `compileConditionLine` |
+| the finding-27 fix | HIGH bypass in `constraintExpr` |
+| the finding-5 fix | HIGH fail-open in **both** rego copies |
+| the finding-9 fix | bounded the new destination budget on RAW strings, so 70 spellings of one allowlisted host evict the real destination — finding 1's eviction rebuilt through a new door, under a docstring claiming padding could not starve it |
+| the finding-8 fix | gated promotion on `verb == "unknown"`, but `classify_tool` falls back to agent-supplied params, so `{"query": "select 1"}` cancels an admin's `delete` promotion — a demotion primitive handed to the attacker in place of the one being closed |
+
+**Rule: a fix is not evidence that a defect is closed. Only an adversary is.** Nothing on this branch
+should land on a single agent's report that its own work is correct.
+
+### Three tests were asserting nothing, in three different ways
+
+1. `test_a_bracket_in_a_key_forges_an_index_too` — relaxed from an exact list to a membership check
+   while being "fixed". Pinned nothing about minting.
+2. `test_a_version_quad_is_not_an_ip_destination` — asserted a fail-open outright
+   (`{"host": "999.1.1.1"} == []`), missing octal `0177.0.0.1` and bare IPv6 entirely.
+3. The `itOpa.skip` version-skew gap — **the compiler was correct all along, in both modes.** The
+   test's helper could not build the document its name claimed, so a `undefined` default silently
+   swallowed the state under test. The skip was hiding a broken fixture, and the commit message that
+   left it open asserted a compiler defect that did not exist.
+
+I then hit the same class twice myself:
+
+- `test_unclassified_denial_is_separately_identifiable` used `zzz_exfil` as unclassifiable gibberish.
+  It now classifies as send/high, because "exfil" entered the egress lexicon — so the test kept its
+  assertion and lost its meaning.
+- I wrote a new test for `detail: "none"` with non-empty keys, then deleted it: **no server response
+  can produce that state**, so it pinned nothing. Writing the test is not the same as the test being
+  able to fail.
+
+### G1 changed shape under contact
+
+The plan was "persist the `param_paths` key-set". Two things only appeared once it ran:
+
+- **Values ride in KEY positions.** `{"balances": {"<pan>": 25.0}}` wrote a PAN into the key-set on a
+  default install whose value capture is deliberately OFF — a worse privacy posture than the opt-in
+  field beside it. "Keys only" is not automatically "no values".
+- **Observed ≠ constrainable.** `param_paths` carries STRING leaves only, so `amount: 25.0` is named
+  but never derivable; under `default decision = "block"` a clause pinned on it refuses *every* call,
+  and a key-only dry run cannot warn you because it blocks the sound predicates too. Hence
+  `param_keys_pinnable`. **Showing an argument you cannot constrain is honest; offering it is a trap.**
+
+### The recurring defect, hit again — and this time between two agents
+
+The console gated its unpinnable note on `detail === "masked"` while the propose group, working
+concurrently, made `pinnable` meaningful for key-only rows. Both were internally consistent; the union
+hid `amount` on exactly the install the feature exists for. **Two components keyed differently on one
+concept** — the twelfth instance on this branch, and the first produced by parallelism rather than
+inherited. Disjoint file ownership prevents edit conflicts, not contract drift; only central assembly
+catches that.
+
+tsc then rejected my first fix's `!== "none"` guard as provably dead — the narrowing was already the
+guarantee, and the clause was noise pretending to be a safeguard.
+
+### Two gates could fail without saying why
+
+- **G5** rendered `✗ G5:` with nothing after the colon whenever `chaos.py` exited non-zero without
+  printing a `✗`, and its log was a `mktemp` already gone by the time anyone read the summary. A gate
+  that fails silently is worse than one that does not run: nobody can tell a regression from a flake.
+- **G4** reports p50 beside the breach now. p95 alone cannot separate "the enforcement path got
+  slower" from "this host was busy" — opposite conclusions, identical summary line.
+
+### What was NOT done, again
+
+The 500ms budget is UNCHANGED. Three consecutive runs of identical code breached `sql-injection`,
+then `benign`, then nothing, with p50 flat at ~200ms and every decision correct. Measured in-pod
+against the real scenario payloads, the new argument capture costs **0.004–0.008 ms/call** against a
+76–126 ms overshoot — five orders of magnitude too small to be the cause. G4 is recorded as **not
+measurable on this host**, which is a statement about the environment, not a pass.
+
+### Live state
+
+The corrected baseline was **never in the cluster** until this pass: `rego_length` went 32063 → 38729
+at version 14. The earlier fix landed on `comprehensive.rego`, and `webhook/presets/strict.rego` is
+the copy that ships.
