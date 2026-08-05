@@ -733,6 +733,12 @@ export function Intents() {
   const [agentClass, setAgentClass] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [proposal, setProposal] = useState<ProposeResponse | null>(null);
+  // The namespace this proposal was built from. The response carries the CLASS it describes but not
+  // the namespace, and nothing on this page remounts when the header scope changes (React Router
+  // keeps the route), so without recording it the proposal silently re-targets: propose in payments,
+  // switch to default, and Save writes payments' allowlist into default — where this page's own
+  // subtitle, "Anything an intent does not state is denied", then denies every tool default uses.
+  const [proposedNs, setProposedNs] = useState<string | null>(null);
   const [report, setReport] = useState<DryRunResponse | null>(null);
   const [savedDraft, setSavedDraft] = useState<string | null>(null);
 
@@ -762,7 +768,12 @@ export function Intents() {
   );
 
   /** The box has been edited since this proposal was made, so the two no longer describe one class. */
-  const stale = Boolean(proposal && agentClass.trim() && proposal.intent.class !== agentClass.trim());
+  const classStale = Boolean(proposal && agentClass.trim() && proposal.intent.class !== agentClass.trim());
+  /** The header scope moved since this proposal was made. Same failure as the class drift above and
+   *  strictly more dangerous — the class is at least visible in the box, whereas nothing on this page
+   *  echoes the namespace a proposal came from. */
+  const nsStale = Boolean(proposal && proposedNs && ns !== proposedNs);
+  const stale = classStale || nsStale;
 
   const openInBuilder = useCallback(() => {
     // Belt and braces: the button is disabled when a restriction would be lost, but the refusal
@@ -796,9 +807,11 @@ export function Intents() {
         name: `${agentClass.trim()}-intent`.toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 63)
       });
       setProposal(res);
+      setProposedNs(ns);
       push({ kind: "success", message: `Proposed ${res.intent.call?.length ?? 0} rules from ${res.sampled} calls` });
     } catch (err) {
       setProposal(null);
+      setProposedNs(null);
       push({ kind: "error", message: (err as Error).message || "Could not propose an intent" });
     } finally {
       setBusy(null);
@@ -930,11 +943,14 @@ export function Intents() {
   // which is full-width and left-aligned; the button gets the pointer.
   const draftBlocker = ns === "all"
     ? "Pick one namespace first."
-    : !report
-      ? "Dry run it first."
-      : notAdmin
-        ? "Needs admin — you are a viewer."
-        : undefined;
+    : nsStale
+      // Refuse rather than warn: saving here writes another namespace's allowlist into this one.
+      ? `This proposal was built from ${proposedNs} — propose again for ${ns}.`
+      : !report
+        ? "Dry run it first."
+        : notAdmin
+          ? "Needs admin — you are a viewer."
+          : undefined;
 
   const builderBlocker = ns === "all"
     ? "Pick one namespace first."
@@ -986,9 +1002,21 @@ export function Intents() {
           <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
             <AlertTriangle size={16} style={{ color: "var(--escalate)", flex: "none", marginTop: 2 }} />
             <div style={{ fontSize: 13, lineHeight: 1.6 }}>
-              This proposal is for <code className="mono">{proposal?.intent.class}</code>, not{" "}
-              <code className="mono">{agentClass.trim()}</code>. It is still shown because a dry run over
-              recorded traffic is not cheap to redo — but propose again before saving anything.
+              {nsStale ? (
+                <>
+                  This proposal was built from namespace <code className="mono">{proposedNs}</code>, not{" "}
+                  <code className="mono">{ns}</code>. Saving it here would write{" "}
+                  <code className="mono">{proposedNs}</code>&rsquo;s allowlist into{" "}
+                  <code className="mono">{ns}</code> — and anything an intent does not state is denied, so
+                  every tool <code className="mono">{ns}</code> actually uses would be refused. Propose again.
+                </>
+              ) : (
+                <>
+                  This proposal is for <code className="mono">{proposal?.intent.class}</code>, not{" "}
+                  <code className="mono">{agentClass.trim()}</code>. It is still shown because a dry run over
+                  recorded traffic is not cheap to redo — but propose again before saving anything.
+                </>
+              )}
             </div>
           </div>
         </Panel>

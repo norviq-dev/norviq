@@ -2,7 +2,7 @@
 // rule, trust score and captured params. Backed by a paged fetch plus a WebSocket tail for new records,
 // with client-side filtering and a row-detail drawer.
 
-import { X } from "lucide-react";
+import { RefreshCw, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import { fetchAuditRecords, wsUrl as buildWsUrl } from "../api/client";
@@ -368,6 +368,19 @@ export function AuditLog() {
   const totalPages = Math.max(knownPages, page + 1);
   const canNext = page < knownPages - 1 || (countCapped && pageFull);
   const loading = base.loading || totalRecords.loading;
+  // A FAILED READ IS NOT AN EMPTY AUDIT LOG — the same doctrine Tools.tsx already states, and this is
+  // the page where getting it wrong costs most: an operator triaging an incident reads "No matching
+  // records" and concludes the attack left no trail.
+  //
+  // Two distinct ways this page can be showing something untrue, and both must suppress the table:
+  //   error  — the read faulted; there is no count to print and no absence to assert.
+  //   stale  — useApi keeps the last good data on failure, so after a namespace switch these rows are
+  //            the PREVIOUS namespace's. This table has no Namespace column (Time/Tool/Decision/Rule/
+  //            Agent Class/Source/Trust/Latency), so nothing on screen would contradict them: one
+  //            namespace's BLOCK on a refund would sit under another namespace's header as fact.
+  const readFailed = Boolean(base.error || totalRecords.error);
+  const offScope = base.stale || totalRecords.stale;
+  const unreadable = readFailed || offScope;
   // `rule` and `framework` count. They arrive only by deep-link and have no input of their own, so an
   // empty result under one of them used to render the flat "No matching records in the last 24h." —
   // a full stop, with the very filter responsible for the emptiness omitted from the hint AND printed
@@ -503,6 +516,8 @@ export function AuditLog() {
         <div className="muted" style={{ fontSize: 12, minHeight: 16 }}>
           {loading
             ? "Loading…"
+            : unreadable
+            ? ""
             : `Showing ${rows.length} of ${totalCount}${countCapped ? "+" : ""} record${totalCount === 1 ? "" : "s"} in range (${timeRange})${
                 debouncedTool ? ` · tool contains “${debouncedTool}”` : ""
               }${debouncedAgent ? ` · agent contains “${debouncedAgent}”` : ""}${
@@ -510,7 +525,42 @@ export function AuditLog() {
               }`}
         </div>
 
-        {noResults ? (
+        {unreadable && !loading ? (
+          <div
+            data-testid="audit-unreadable"
+            role="alert"
+            style={{
+              padding: "22px 16px", color: "var(--text-secondary)", fontSize: 13, lineHeight: 1.65,
+              border: "1px solid var(--escalate)", background: "#ffb02010", borderRadius: "var(--radius-md)"
+            }}
+          >
+            <strong style={{ color: "var(--text-primary)" }}>
+              {offScope && !readFailed
+                ? "These records are from the namespace you just left."
+                : "Couldn’t read the audit log."}
+            </strong>{" "}
+            {offScope && !readFailed
+              ? "The read for this namespace has not returned yet, so nothing is shown rather than the previous namespace’s rows under this one’s name."
+              : "This is NOT “no records” — the query failed, so whether anything happened here is unknown."}
+            {base.error || totalRecords.error ? (
+              <div className="mono" style={{ marginTop: 8, color: "var(--text-muted)", fontSize: 12 }}>
+                {base.error || totalRecords.error}
+              </div>
+            ) : null}
+            <div style={{ marginTop: 10 }}>
+              <KitButton
+                variant="outline"
+                icon={RefreshCw}
+                onClick={() => {
+                  void base.refetch();
+                  void totalRecords.refetch();
+                }}
+              >
+                Retry
+              </KitButton>
+            </div>
+          </div>
+        ) : noResults ? (
           <div
             style={{
               padding: "28px 16px", textAlign: "center", color: "var(--text-secondary)", fontSize: 13,

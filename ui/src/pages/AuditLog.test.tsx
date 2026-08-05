@@ -410,3 +410,22 @@ describe("AuditLog Params row", () => {
     expect(screen.queryByTestId("audit-params-uncaptured")).toBeNull();
   });
 });
+
+describe("a failed read is not an empty audit log", () => {
+  it("never prints a record count or 'No matching records' when the query failed", async () => {
+    // This file installs fake timers globally for the poll tests; a real awaited find needs real ones.
+    vi.useRealTimers();
+    // The reading an operator takes from "No matching records in the last 24h" while triaging is the
+    // one this file's own comments name: the attack left no audit trail. It must never be produced by
+    // a failed read — "we could not look" and "we looked and it is clean" are opposite facts.
+    server.use(
+      http.get("/api/v1/audit/records", () => new HttpResponse(null, { status: 500 }))
+    );
+    renderPage();
+    const band = await screen.findByTestId("audit-unreadable", {}, { timeout: 5000 });
+    expect(band).toHaveTextContent(/Couldn.t read the audit log/i);
+    expect(band).toHaveTextContent(/NOT .no records./i);
+    expect(screen.queryByText(/No matching records/i)).toBeNull();
+    expect(screen.queryByText(/Showing \d+ of \d+ record/i)).toBeNull();
+  });
+});

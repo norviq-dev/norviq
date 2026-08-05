@@ -403,3 +403,27 @@ describe("Compliance — efficacy overlay (proven-blocking from the last Red Tea
     await waitFor(() => expect(screen.queryByTestId("gap-batch-bar")).toBeNull());
   });
 });
+
+describe("one framework failing is already a degraded reading", () => {
+  it("says the API is degraded when ONE coverage read fails, not only when both do", async () => {
+    // The gate was `&&` — BOTH frameworks had to fail before anything was said — while the comment
+    // directly above it said "either". So a single failure kept rendering that framework's previous
+    // coverage %, ENFORCED chip and counts with no indication, and the operator read a compliance
+    // claim about a scope that had never been read.
+    server.use(
+      http.get("/api/v1/compliance/:framework/coverage", ({ params }) =>
+        params.framework === "owasp"
+          ? HttpResponse.json(owaspPayload())
+          : new HttpResponse(null, { status: 500 })
+      ),
+      http.get("/api/v1/compliance/:framework/trend", ({ params }) =>
+        HttpResponse.json({ namespace: "default", range: "30d", framework: params.framework, points: [] })
+      )
+    );
+    renderPage();
+    await waitFor(
+      () => expect(screen.getByText(/API unavailable\. Coverage could not be loaded\./i)).toBeInTheDocument(),
+      { timeout: 5000 }
+    );
+  });
+});

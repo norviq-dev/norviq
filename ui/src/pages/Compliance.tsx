@@ -294,8 +294,21 @@ export function Compliance() {
   const activeCoverage = covByFw[framework];
   const data = activeCoverage.data;
   // Degraded when the selected framework's coverage errored (detail) — or, on overview, when either did.
+  //
+  // The overview arm was `&&`, so BOTH frameworks had to fail before anything was said, while the
+  // comment above it said "either". One framework failing therefore kept rendering its previous
+  // value — the coverage %, the ENFORCED chip, the enforced/gap counts and the blocked-or-escalated
+  // total — with no indication, and the operator read a compliance claim about a scope that had not
+  // been read. `||` is what the sentence always described.
+  //
+  // `stale` is the second half: on a namespace switch whose read fails, useApi keeps the PREVIOUS
+  // namespace's coverage, so an un-degraded render here would attribute one namespace's ATLAS
+  // posture to another. Error and stale are both "this is not this scope's answer".
+  const covUnreadable = (c: { error: string | null; stale: boolean }): boolean => !!c.error || c.stale;
   const apiDegraded =
-    view === "detail" ? !!activeCoverage.error : !!atlasCoverage.error && !!owaspCoverage.error;
+    view === "detail"
+      ? covUnreadable(activeCoverage)
+      : covUnreadable(atlasCoverage) || covUnreadable(owaspCoverage);
 
   const techniques = useMemo<MitreTechnique[]>(() => data?.techniques ?? [], [data]);
   const selected = useMemo(
