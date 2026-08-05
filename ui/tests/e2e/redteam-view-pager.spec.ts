@@ -42,6 +42,30 @@ async function latestRun(page: Page, ns: string): Promise<any | null> {
     return null;
   }
 }
+/**
+ * Wait until the namespace actually HAS real agent classes before running a full-namespace suite.
+ *
+ * `_seeded_classes` falls back to a single synthetic target when the registry has no real class for
+ * the namespace, so a suite posted during that window returns one class's worth of rows. The caller
+ * then fails its own "need a large run" precondition with `got 34`, which reads as "the suite ran the
+ * wrong scope" when the truth is "the registry was momentarily empty". Same lesson as the settle loop
+ * below: do not assume from one observation, go and look.
+ */
+async function waitForRealTargets(page: Page, ns: string, minimum = 2): Promise<number> {
+  let seen = 0;
+  for (let i = 0; i < 30; i++) {
+    try {
+      const r = await apiJson(page, `/api/v1/redteam/targets?ns=${ns}`);
+      seen = (r?.targets ?? []).length;
+      if (seen >= minimum) return seen;
+    } catch {
+      /* registry not answering yet — keep looking */
+    }
+    await page.waitForTimeout(2000);
+  }
+  throw new Error(`ns=${ns} never reported ${minimum}+ real agent classes (saw ${seen}); the registry is empty, so a full-namespace suite cannot be large`);
+}
+
 // POST /redteam/suite, retrying if the per-namespace concurrent guard returns 409 (another run in flight).
 async function postSuite(page: Page, query: string): Promise<any> {
   const ns = /target_namespace=([^&]+)/.exec(query)?.[1] ?? "default";
@@ -98,10 +122,16 @@ test.describe("results table bounded at the VIEW on a large run (served DOM)", (
     await page.goto("/redteam");
     await waitForApp(page);
 
-    // drive a FULL-namespace suite so the run is large (18 real classes × 29 attacks ≈ 500+ rows)
+    // drive a FULL-namespace suite so the run is large (dozens of real classes × the whole corpus)
+    const classes = await waitForRealTargets(page, "default");
     const run = await postSuite(page, "target_namespace=default");
     const total = (run.results ?? []).length;
-    expect(total, `need a large run to exercise the pager; got ${total}`).toBeGreaterThanOrEqual(300);
+    expect(
+      total,
+      `need a large run to exercise the pager; got ${total} from ${(run.targets ?? []).length} target(s) ` +
+        `while the registry reported ${classes} real classes — a mismatch here means the suite ran a ` +
+        `narrower scope than the namespace has, not that the pager is broken`
+    ).toBeGreaterThanOrEqual(300);
 
     // reload the view so it renders results/latest (the large run)
     await page.goto("/redteam");
