@@ -1525,12 +1525,33 @@ class OPAEvaluator:
         here: `call_depth` (drives the chain_depth_limit / OWASP-LLM08 anti-recursion block — a shallow-depth
         allow must NOT shadow a deep-depth block) and `workload` (workload-tier `deployment:` policies — one
         workload's decision must NOT bleed to another sharing tool+params). Include them so the cached
-        decision is only ever served for an identical decision input."""
+        decision is only ever served for an identical decision input.
+
+        `mcp` is the third such input, and it was omitted for the same reason the first two were: it
+        became decision-relevant after this key was written. `_build_input` publishes the whole document
+        as `input.mcp` and lifts `input.direction` from it, so a policy can gate on `pin_status`,
+        `scan_severity`, `schema_enforced` or `surface`. Without it, two calls with identical
+        tool+params but different MCP context — the SAME tool once `pinned` and once in `drift`, or a
+        `tools/call` and a `resources/read` — alias inside the 5s TTL, and the second is served the
+        first's decision. That is a drift block silently downgraded to an allow.
+
+        The WHOLE document is hashed, not a hand-picked subset. A subset would have to be kept in step
+        with `_mcp_context` in the proxy forever, and the day someone adds a fact there without adding
+        it here the bypass returns silently — two components keyed differently on one concept, which is
+        the failure this key already exists to prevent. Every field in that document is derived at
+        DISCOVERY and stable per (tool, catalog state), so hashing all of it costs no hit rate. The term
+        is omitted entirely when there is no MCP context, so non-MCP traffic keeps its existing key and
+        does not churn: absent and `{}` are the same decision input (`input.mcp == {}` either way)."""
         payload = json.dumps(event.tool_params, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
         workload = getattr(event.agent_identity, "workload", "") or ""
         depth = int(getattr(event, "call_depth", 0) or 0)
-        return f"{event.tool_name}:{digest}:d{depth}:w{workload}"
+        key = f"{event.tool_name}:{digest}:d{depth}:w{workload}"
+        mcp = getattr(event, "mcp", None) or {}
+        if mcp:
+            blob = json.dumps(mcp, sort_keys=True, separators=(",", ":"), default=str)
+            key = f"{key}:m{hashlib.sha256(blob.encode('utf-8')).hexdigest()[:16]}"
+        return key
 
     def _extract_package_name(self, rego_source: str) -> str | None:
         """Extract package name from Rego source header."""
