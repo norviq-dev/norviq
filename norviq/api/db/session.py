@@ -88,13 +88,6 @@ def _partition_months(count: int = PARTITION_LOOKAHEAD_MONTHS) -> list[tuple[str
     return windows
 
 
-def _partition_bounds() -> tuple[str, str, str]:
-    """Return current month partition and range."""
-    now = datetime.now(timezone.utc)
-    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    return _month_window(start)
-
-
 async def init_db() -> None:
     """Initialize async engine and session factory."""
     global _engine, _session_factory

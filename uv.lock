@@ -2386,6 +2386,7 @@ source = { editable = "." }
 dependencies = [
     { name = "alembic" },
     { name = "asyncpg" },
+    { name = "bcrypt" },
     { name = "click" },
     { name = "cryptography" },
     { name = "fastapi" },
@@ -2395,7 +2396,6 @@ dependencies = [
     { name = "opentelemetry-exporter-otlp" },
     { name = "opentelemetry-exporter-prometheus" },
     { name = "opentelemetry-sdk" },
-    { name = "passlib", extra = ["bcrypt"] },
     { name = "prometheus-client" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -2439,6 +2439,10 @@ langchain = [
 langgraph = [
     { name = "langgraph" },
 ]
+mcp = [
+    { name = "mcp" },
+    { name = "starlette" },
+]
 semantic-kernel = [
     { name = "semantic-kernel" },
 ]
@@ -2456,6 +2460,7 @@ requires-dist = [
     { name = "autogen-core", marker = "extra == 'frameworks'", specifier = ">=0.4" },
     { name = "autogen-ext", extras = ["openai"], marker = "extra == 'autogen'", specifier = ">=0.4" },
     { name = "autogen-ext", extras = ["openai"], marker = "extra == 'frameworks'", specifier = ">=0.4" },
+    { name = "bcrypt", specifier = ">=4.1" },
     { name = "click", specifier = ">=8.1" },
     { name = "crewai", marker = "extra == 'crewai'", specifier = ">=0.80" },
     { name = "crewai", marker = "extra == 'frameworks'", specifier = ">=0.80" },
@@ -2469,12 +2474,12 @@ requires-dist = [
     { name = "langgraph", marker = "extra == 'langgraph'", specifier = ">=0.2" },
     { name = "mcp", marker = "extra == 'crewai'", specifier = ">=1.28.1,<2" },
     { name = "mcp", marker = "extra == 'frameworks'", specifier = ">=1.28.1,<2" },
+    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.28.1,<2" },
     { name = "networkx", specifier = ">=3.0" },
     { name = "opentelemetry-api", specifier = ">=1.20" },
     { name = "opentelemetry-exporter-otlp", specifier = ">=1.20" },
     { name = "opentelemetry-exporter-prometheus", specifier = ">=0.41b0" },
     { name = "opentelemetry-sdk", specifier = ">=1.20" },
-    { name = "passlib", extras = ["bcrypt"], specifier = ">=1.7" },
     { name = "prometheus-client", specifier = ">=0.20" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pydantic-settings", specifier = ">=2.0" },
@@ -2487,11 +2492,12 @@ requires-dist = [
     { name = "semantic-kernel", marker = "extra == 'semantic-kernel'", specifier = ">=1.0" },
     { name = "spiffe", marker = "extra == 'spiffe'", specifier = ">=0.3" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
+    { name = "starlette", marker = "extra == 'mcp'", specifier = ">=0.37" },
     { name = "structlog", specifier = ">=23.0" },
     { name = "uvicorn", specifier = ">=0.27" },
     { name = "websockets", specifier = ">=12" },
 ]
-provides-extras = ["dev", "spiffe", "langchain", "langgraph", "crewai", "autogen", "semantic-kernel", "frameworks"]
+provides-extras = ["dev", "spiffe", "langchain", "langgraph", "crewai", "autogen", "mcp", "semantic-kernel", "frameworks"]
 
 [[package]]
 name = "numpy"
@@ -3025,20 +3031,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a4/f2/0b504486c2a5564798607d3860e48ed19c6443d5e9cc3ec61cc6b8b4ef58/parse-1.22.1.tar.gz", hash = "sha256:d3a4740ec3da338e2b258b2d69741b731eadfddca59e24a14bc4ee5fce38c911", size = 36970, upload-time = "2026-05-26T03:44:52.624Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/6f/c5/7c16e99869e1f422629092cfd23e3b58e461988c3f9c36fd3624bb4142e6/parse-1.22.1-py2.py3-none-any.whl", hash = "sha256:20f0925a46f06602485ac90d751764d0697fd8455aaa97489ba8953a4b66de32", size = 20925, upload-time = "2026-05-26T03:44:51.156Z" },
-]
-
-[[package]]
-name = "passlib"
-version = "1.7.4"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/b6/06/9da9ee59a67fae7761aab3ccc84fa4f3f33f125b370f1ccdb915bf967c11/passlib-1.7.4.tar.gz", hash = "sha256:defd50f72b65c5402ab2c573830a6978e5f202ad0d984793c8dde2c4152ebe04", size = 689844, upload-time = "2020-10-08T19:00:52.121Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/3b/a4/ab6b7589382ca3df236e03faa71deac88cae040af60c071a78d254a62172/passlib-1.7.4-py2.py3-none-any.whl", hash = "sha256:aa6bca462b8d8bda89c70b382f0c298a20b5560af6cbfa2dce410c0a2fb669f1", size = 525554, upload-time = "2020-10-08T19:00:49.856Z" },
-]
-
-[package.optional-dependencies]
-bcrypt = [
-    { name = "bcrypt" },
 ]
 
 [[package]]

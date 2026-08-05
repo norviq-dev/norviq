@@ -240,13 +240,16 @@ def test_partition_months_is_anchored_on_the_clock_not_on_a_constant(
     assert not set(may) & set(september), f"windows did not move with the clock: {may} vs {september}"
 
 
-def test_partition_helpers_agree_with_each_other_under_a_frozen_clock(
+def test_the_first_lookahead_window_is_the_current_month_on_a_leap_day(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The single-window helper and the look-ahead list must not drift apart at a month edge."""
+    """The last second of a leap day still names February, not March.
+
+    This used to assert through `_partition_bounds`, a back-compat helper no production path called;
+    the edge it guards is real, so it now runs against the function that actually provisions.
+    """
     _freeze(monkeypatch, session_mod, dt.datetime(2028, 2, 29, 23, 59, 59, tzinfo=dt.timezone.utc))
-    assert session_mod._partition_bounds() == session_mod._partition_months()[0]
-    assert session_mod._partition_bounds()[0] == "audit_log_2028_02"
+    assert session_mod._partition_months()[0][0] == "audit_log_2028_02"
 
 
 # ---------------------------------------------------------------------------------------------

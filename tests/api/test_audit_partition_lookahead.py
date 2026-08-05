@@ -24,7 +24,6 @@ import datetime as dt
 from norviq.api.db.session import (
     PARTITION_LOOKAHEAD_MONTHS,
     _month_window,
-    _partition_bounds,
     _partition_months,
 )
 
@@ -67,11 +66,6 @@ def test_partition_names_are_unique_and_month_shaped() -> None:
         assert name.startswith("audit_log_")
         year, month = name.removeprefix("audit_log_").split("_")
         assert len(year) == 4 and 1 <= int(month) <= 12
-
-
-def test_partition_bounds_still_returns_the_current_month() -> None:
-    """Back-compat: the single-window helper must agree with the first look-ahead window."""
-    assert _partition_bounds() == _partition_months()[0]
 
 
 def test_startup_creates_a_default_partition_backstop() -> None:

@@ -21,9 +21,27 @@ export default defineConfig({
         manualChunks(id) {
           if (id.includes("zrender")) return "zrender";
           if (id.includes("echarts")) return "echarts-core";
+          // Monaco gets its OWN named chunk so the build output names what is actually large.
+          // Without this the bundler folded ~2.5 MB of editor into whichever app module happened to
+          // anchor the shared chunk — most recently `ApplyResultPanel`, a ~9 kB status panel — and the
+          // >500 kB warning then pointed at a file with nothing to optimize in it. The chunk is still
+          // lazy (only the four editor-bearing routes import it, via `__vite__mapDeps`), so this
+          // changes the NAME and not what any route downloads.
+          if (id.includes("monaco-editor")) return "monaco-editor";
           return undefined;
         }
       }
+    }
+  },
+  // `vite preview` serves the PRODUCTION build, so it is the only way to exercise chunking, lazy
+  // route loading and Monaco's worker wiring before an image is built. It needs the same API proxy
+  // the dev server has, or every page renders its error state and proves nothing.
+  preview: {
+    proxy: {
+      "/api": "http://127.0.0.1:8080",
+      "/healthz": "http://127.0.0.1:8080",
+      "/readyz": "http://127.0.0.1:8080",
+      "/ws": { target: "ws://127.0.0.1:8080", ws: true }
     }
   },
   server: {

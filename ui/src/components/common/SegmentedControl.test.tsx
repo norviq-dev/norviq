@@ -4,10 +4,11 @@
 /**
  * Roving tabindex: the focus ring and the checked segment must be the SAME segment.
  *
- * The existing assertions in TokenInput.test.tsx pass a `vi.fn()` for `onChange`, so `value` never
- * changes and the group never re-renders — which is exactly why they could not see this. A segmented
- * control is a controlled component; everything about its keyboard behaviour only becomes observable
- * with a wrapper that actually holds the state, so that is what these use.
+ * The original assertions (written alongside two sibling primitives that never shipped, and removed
+ * with them) passed a `vi.fn()` for `onChange`, so `value` never changed and the group never
+ * re-rendered — which is exactly why they could not see this. A segmented control is a controlled
+ * component; everything about its keyboard behaviour only becomes observable with a wrapper that
+ * actually holds the state, so that is what these use.
  *
  * Why it matters more than a stray focus ring: this is the Tools page's observed-window picker. A
  * keyboard operator who arrows to a window and presses Space to confirm was silently put back on the
@@ -194,5 +195,25 @@ describe("SegmentedControl — when `value` is none of the options", () => {
     rerender(<SegmentedControl options={OPTS} value="audit" onChange={vi.fn()} ariaLabel="d" data-testid="dec" />);
     expect(screen.getByTestId("dec-block")).toHaveAttribute("tabindex", "-1");
     expect(screen.getByTestId("dec-audit")).toHaveAttribute("tabindex", "0");
+  });
+});
+
+/** Two assertions preserved from the deleted three-primitive test file: the ARIA contract and the tint. */
+describe("SegmentedControl — semantics and colour", () => {
+  it("is a radiogroup with exactly one checked option", () => {
+    render(<SegmentedControl options={OPTS} value="block" onChange={vi.fn()} ariaLabel="decision" data-testid="dec" />);
+    expect(screen.getByRole("radiogroup", { name: "decision" })).toBeInTheDocument();
+    expect(screen.getByTestId("dec-block")).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByTestId("dec-escalate")).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("tints the active segment by what it MEANS, not by the brand accent", () => {
+    // A selected Block must not look like a selected Audit — the choice is about consequence.
+    const { rerender } = render(
+      <SegmentedControl options={OPTS} value="block" onChange={vi.fn()} ariaLabel="d" data-testid="dec" />
+    );
+    const asBlock = screen.getByTestId("dec-block").getAttribute("style");
+    rerender(<SegmentedControl options={OPTS} value="audit" onChange={vi.fn()} ariaLabel="d" data-testid="dec" />);
+    expect(screen.getByTestId("dec-audit").getAttribute("style")).not.toBe(asBlock);
   });
 });

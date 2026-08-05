@@ -340,7 +340,6 @@ export async function revokeApiKey(id: string): Promise<ApiKey> {
   return apiSend<ApiKey>(`/api/v1/keys/${encodeURIComponent(id)}`, "DELETE");
 }
 
-export type RedteamAttack = { id: string; name: string; category: string; description?: string; expected_decision?: string };
 export type RedteamResult = {
   attack_id: string;
   attack_name: string;
@@ -370,11 +369,6 @@ export type RedteamReport = {
   pass_rate: number;
   results: RedteamResult[];
 };
-
-/** The red-team attack catalog. */
-export async function fetchRedteamCatalog(): Promise<RedteamAttack[]> {
-  return apiGet<RedteamAttack[]>("/api/v1/redteam/catalog");
-}
 
 /** The real agent classes seeded in a namespace, for the target selector. */
 export async function fetchRedteamTargets(namespace?: string): Promise<{ namespace: string; targets: string[] }> {
@@ -650,8 +644,6 @@ export type MitreCoverage = {
   last_exported?: string | null;
   techniques: MitreTechnique[];
 };
-export type MitreTrendPoint = { timestamp: string; enforced: number; coverage_pct: number; blocked: number };
-export type MitreTrend = { namespace: string; range: string; framework: string; points: MitreTrendPoint[] };
 
 // Compliance frameworks — both live, same real coverage machinery (atlas | owasp).
 export type ComplianceFramework = "atlas" | "owasp";
@@ -663,13 +655,6 @@ export async function fetchMitreCoverage(namespace?: string, range = "24h", fram
   if (namespace && namespace !== "all") params.set("namespace", namespace);
   params.set("range", range);
   return apiGet<MitreCoverage>(`/api/v1/compliance/${framework}/coverage?${params.toString()}`);
-}
-
-export async function fetchMitreTrend(namespace?: string, range = "30d", framework: ComplianceFramework = "atlas"): Promise<MitreTrend> {
-  const params = new URLSearchParams();
-  if (namespace && namespace !== "all") params.set("namespace", namespace);
-  params.set("range", range);
-  return apiGet<MitreTrend>(`/api/v1/compliance/${framework}/trend?${params.toString()}`);
 }
 
 // Evidence-pack export: returns the in-cluster download URL (json|pdf). The caller triggers the download via
@@ -864,23 +849,8 @@ async function apiGetWithSignal<T>(path: string, signal?: AbortSignal): Promise<
   return (await response.json()) as T;
 }
 
-export async function fetchAuditRecordsByTool(
-  toolName: string,
-  limit: number = 5,
-  signal?: AbortSignal
-): Promise<SearchAuditRecord[]> {
-  return apiGetWithSignal<SearchAuditRecord[]>(
-    `/api/v1/audit/records?tool_name=${encodeURIComponent(toolName)}&limit=${limit}`,
-    signal
-  );
-}
-
 export async function fetchAllAgents(signal?: AbortSignal): Promise<SearchAgent[]> {
   return apiGetWithSignal<SearchAgent[]>("/api/v1/agents", signal);
-}
-
-export async function fetchPolicies(signal?: AbortSignal): Promise<SearchPolicy[]> {
-  return apiGetWithSignal<SearchPolicy[]>("/api/v1/policies", signal);
 }
 
 export type SearchResults = { tools: SearchAuditRecord[]; agents: SearchAgent[]; policies: SearchPolicy[] };

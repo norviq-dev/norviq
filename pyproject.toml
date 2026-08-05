@@ -56,7 +56,13 @@ dependencies = [
     "uvicorn>=0.27",
     "websockets>=12",
     "pyjwt[crypto]>=2.8",
-    "passlib[bcrypt]>=1.7",
+    # bcrypt DIRECTLY, not `passlib[bcrypt]`. `norviq/api/passwords.py` imports bcrypt and says in its
+    # own docstring that passlib is deliberately not used — its CryptContext is broken against bcrypt
+    # 5.x, which is the version resolved here. So passlib was installed into every shipped image and
+    # never imported, while the module that IS imported was only reachable as somebody else's extra:
+    # a `passlib` release that dropped the extra would have broken login at import time.
+    # Only hashpw/gensalt/checkpw are used — stable across 4.x and 5.x.
+    "bcrypt>=4.1",
 ]
 
 [project.scripts]
