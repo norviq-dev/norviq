@@ -61,11 +61,29 @@ command -v kubectl >/dev/null || fail "kubectl not on PATH"
 curl -sf -o /dev/null "${BASE_URL}/" || fail "console unreachable at ${BASE_URL} (port-forward svc/norviq-ui)"
 
 # --- 1. reset in-pod to a temporary password -------------------------------------------------------
-api_pod="$("${KUBECTL[@]}" -n "$NS" get pods -o name | grep api | head -1)"
-[ -n "$api_pod" ] || fail "no api pod in namespace ${NS}"
-"${KUBECTL[@]}" -n "$NS" exec "${api_pod#pod/}" -c api -- \
-  python -m norviq.api.admin_reset --username "$USERNAME" --password "$TEMP_PW" >/dev/null 2>&1 \
-  || fail "in-pod admin_reset failed for '${USERNAME}'"
+# A RUNNING, non-terminating pod — not `get pods -o name | head -1`, which is alphabetical order and
+# will happily hand back a pod that is Completed, Terminating, or stuck in Init. `kubectl exec` into
+# one of those fails, the reset never happens, and the 11 real-form-login specs (~27 tests) all fail
+# on a 20s waitForURL timeout that says nothing about why. Observed exactly that on a cluster carrying
+# an old ReplicaSet's pod in Init:1/2 alongside two healthy ones.
+#
+# scripts/kind-e2e/00-up.sh already learned this and documents it at length ("`.items[0]` is NOT safe
+# here"). This script is the sibling that never got the fix.
+api_pod="$("${KUBECTL[@]}" -n "$NS" get pods -l app.kubernetes.io/component=api \
+  -o jsonpath='{range .items[*]}{.metadata.name}|{.metadata.deletionTimestamp}|{.status.phase}{"\n"}{end}' \
+  | awk -F'|' '$2 == "" && $3 == "Running" { print $1; exit }')"
+# Fall back to the old selector only if the label lookup finds nothing, so a chart that labels
+# differently still works rather than failing for a reason unrelated to the login.
+[ -n "$api_pod" ] || api_pod="$("${KUBECTL[@]}" -n "$NS" get pods -o name | grep api | head -1)"
+api_pod="${api_pod#pod/}"
+[ -n "$api_pod" ] || fail "no Running, non-terminating api pod in namespace ${NS}"
+
+# stderr is NOT suppressed. It was, and that is why the gate could only ever say "in-pod admin_reset
+# failed" while the actual message — the exec refusing a non-Running pod — went to /dev/null. This
+# repo's own rule: never suppress the output of a step whose failure you have not yet seen.
+reset_out="$("${KUBECTL[@]}" -n "$NS" exec "$api_pod" -c api -- \
+  python -m norviq.api.admin_reset --username "$USERNAME" --password "$TEMP_PW" 2>&1)" \
+  || fail "in-pod admin_reset failed for '${USERNAME}' on pod ${api_pod}: ${reset_out}"
 
 # --- 2. log in with it, collecting the must_change token -------------------------------------------
 login_body="$(curl -sS -X POST "${BASE_URL}/api/v1/auth/login" \

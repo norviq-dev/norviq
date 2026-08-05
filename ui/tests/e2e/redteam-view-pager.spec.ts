@@ -67,7 +67,7 @@ async function waitForRealTargets(page: Page, ns: string, minimum = 2): Promise<
 }
 
 // POST /redteam/suite, retrying if the per-namespace concurrent guard returns 409 (another run in flight).
-async function postSuite(page: Page, query: string): Promise<any> {
+async function postSuite(page: Page, query: string, minTargets = 1): Promise<any> {
   const ns = /target_namespace=([^&]+)/.exec(query)?.[1] ?? "default";
   for (let i = 0; i < 20; i++) {
     let r: any;
@@ -94,11 +94,23 @@ async function postSuite(page: Page, query: string): Promise<any> {
       // Completion is inferred from the count going STABLE rather than from a status field, because
       // that holds regardless of how the endpoint reports progress: growing means still working,
       // twice-unchanged means done.
-      let prev = -1, stable = 0;
+      // AND IT MUST BE **OUR** RUN. `results/latest` returns whatever ran most recently in the
+      // namespace, including another spec's — redteam-runstate-list posts with a single
+      // `target_agent`, so this loop would happily adopt its ONE-target run and then fail this
+      // spec's "need a large run" precondition with `got 34`, which reads as a broken pager.
+      // Requiring the target count the caller asked for is what makes the run identifiably ours.
+      let prev = -1, stable = 0, widest = 0;
       for (let j = 0; j < 60; j++) {
         await page.waitForTimeout(3000);
         const run = await latestRun(page, ns);
+        const targets = (run?.targets ?? []).length;
+        widest = Math.max(widest, targets);
         const n = (run?.results ?? []).length;
+        if (targets < minTargets) {          // someone else's narrower run — keep waiting for ours
+          stable = 0;
+          prev = -1;
+          continue;
+        }
         if (n > 0 && n === prev) {
           if (++stable >= 2) return run;   // unchanged across two polls -> the run has settled
         } else {
@@ -106,7 +118,7 @@ async function postSuite(page: Page, query: string): Promise<any> {
         }
         prev = n;
       }
-      throw new Error(`suite POST timed out (${status}) and no COMPLETED run appeared for ns=${ns} (last size ${prev})`);
+      throw new Error(`suite POST timed out (${status}) and no COMPLETED run with >= ${minTargets} target(s) appeared for ns=${ns} (last size ${prev}, widest target count seen ${widest})`);
     }
     if (!(r?.detail?.error || /already running/i.test(JSON.stringify(r?.detail ?? "")))) return r;
     await page.waitForTimeout(1500);
@@ -124,7 +136,8 @@ test.describe("results table bounded at the VIEW on a large run (served DOM)", (
 
     // drive a FULL-namespace suite so the run is large (dozens of real classes × the whole corpus)
     const classes = await waitForRealTargets(page, "default");
-    const run = await postSuite(page, "target_namespace=default");
+    // Demand a run that covers the namespace, so another spec's single-target run cannot be adopted.
+    const run = await postSuite(page, "target_namespace=default", Math.min(classes, 8));
     const total = (run.results ?? []).length;
     expect(
       total,
