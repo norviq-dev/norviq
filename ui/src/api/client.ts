@@ -351,8 +351,11 @@ export type RedteamResult = {
   actual: string;
   rule_id: string;
   passed: boolean;
-  // false = a sector-pack attack whose pack isn't enabled for this namespace — out of scope, NOT a real
-  // miss; excluded from proven-blocking and rendered as "pack not enabled" rather than a red "got through".
+  // false = a CONDITIONAL attack whose enforcing rule isn't loaded for this namespace — a sector pack,
+  // or the opt-in MCP integration guardrail. Out of scope, NOT a real miss: excluded from
+  // proven-blocking and rendered as "not enabled here" rather than a red "got through". Anything
+  // reading this must go through `gotThrough()` in RedTeam.tsx; a bare `!passed` disagrees with both
+  // the badge and the scorecard.
   applicable?: boolean;
   latency_ms?: number;
   error?: string;
@@ -392,11 +395,31 @@ export async function runRedteamSuite(targetAgent?: string, targetNamespace?: st
 export type RedteamEfficacyBucket = { total: number; caught: number; got_through: number; proven_blocking_pct: number };
 export type RedteamTechRow = RedteamEfficacyBucket & { technique_id: string; technique_name: string };
 export type RedteamOwaspRow = RedteamEfficacyBucket & { control_id: string; control_name: string };
+export type RedteamVectorRow = RedteamEfficacyBucket & { vector_id: string; vector_title: string };
+/**
+ * What the run measured of the catalogued MCP/tool surface, and what it did not. `proxy_only` vectors
+ * are decided at Gate A or in the pin registry — before any policy is consulted — so this suite has
+ * nothing to score for them. They are not failures and must never render as such.
+ */
+export type RedteamVectorCoverage = {
+  catalogued: number;
+  evaluate_reachable: number;
+  proxy_only: number;
+  out_of_scope: number;
+  exercised: number;
+  unexercised_reachable: string[];
+};
 export type RedteamEfficacy = {
   overall: RedteamEfficacyBucket;
   by_technique: RedteamTechRow[];
   by_owasp: RedteamOwaspRow[];
+  // OPTIONAL, and that is not laziness: retention keeps the efficacy blob of older runs verbatim, so a
+  // run written before this dimension shipped has neither key and the page must still render.
+  by_vector?: RedteamVectorRow[];
+  vector_coverage?: RedteamVectorCoverage;
   non_enforcement: number;
+  // Returned by the API since sector packs landed; the type had drifted and never listed it.
+  sector_not_enabled?: number;
   excluded_synthetic: number;
 };
 export type RedteamRunResult = RedteamResult & {
@@ -404,6 +427,8 @@ export type RedteamRunResult = RedteamResult & {
   atlas_technique_name?: string;
   owasp_control?: string | null;
   owasp_control_name?: string | null;
+  mcp_vector?: string | null;
+  mcp_vector_title?: string | null;
 };
 export type RedteamLatest = {
   has_run: boolean;
