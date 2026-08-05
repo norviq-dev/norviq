@@ -610,3 +610,27 @@ describe("PolicyPacks page", () => {
     expect(rail.querySelectorAll(".panel").length).toBe(2);
   });
 });
+
+describe("a pack is enabled per namespace, so the aggregate scope must not answer for one", () => {
+  // fetchPolicyPacks omits ?namespace at "all"; the route declares namespace: str = Query("default").
+  // So the API answers for ONE namespace and echoes it on every row, while the header says "all".
+  // Rendering that as "Enabled" is a control surface reporting a posture it was never told.
+  it("does not report one namespace's enabled state as the estate's", async () => {
+    mockApp.namespace = "all";
+    server.use(...handlers("admin", new Set(["finance-money-movement"])));
+    renderPage();
+    const pill = await screen.findByTestId("pack-state-finance-money-movement");
+    expect(pill).toHaveTextContent(/per namespace/i);
+    expect(screen.queryByText("Enabled")).not.toBeInTheDocument();
+    expect(screen.getByText(/pick one to see which are on/i)).toBeInTheDocument();
+  });
+
+  it("still reports real enabled state at a concrete namespace", async () => {
+    // The guard must not blank a scope where the answer IS knowable — that would be its own defect.
+    mockApp.namespace = "default";
+    server.use(...handlers("admin", new Set(["finance-money-movement"])));
+    renderPage();
+    expect(await screen.findByTestId("pack-state-finance-money-movement")).toHaveTextContent("Enabled");
+    expect(screen.getByTestId("pack-state-energy-ot")).toHaveTextContent("Off");
+  });
+});

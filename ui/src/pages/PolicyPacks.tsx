@@ -53,6 +53,12 @@ const GAP = "#ff5c7c";
 
 export function PolicyPacks() {
   const { namespace } = useApp();
+  // A pack is enabled PER NAMESPACE. At the aggregate scope the API cannot answer that question and
+  // does not try: `fetchPolicyPacks` omits `?namespace`, and the route defaults it to "default" — so
+  // every row describes ONE namespace while the page header says "all". Everything that renders
+  // enabled-state keys off this so the console never reports the default namespace's posture as the
+  // estate's.
+  const aggregateScope = namespace === "all";
   const packs = useApi(() => fetchPolicyPacks(namespace), [namespace], {
     cacheKey: `policy-packs:${namespace}`,
     staleTimeMs: 15_000
@@ -353,7 +359,13 @@ export function PolicyPacks() {
 
   return (
     <div className="page-enter">
-      <PageHead title="Policy Packs" subtitle={`Showing: ${namespace}`} />
+      {/* The subtitle must not read "Showing: all" over per-namespace state it cannot show. */}
+      <PageHead
+        title="Policy Packs"
+        subtitle={aggregateScope
+          ? "Showing: all — a pack is enabled per namespace, so pick one to see which are on"
+          : `Showing: ${namespace}`}
+      />
       <Panel
         title="Sector Starter Packs"
         sub="Out-of-box coverage for your sector's flagship risk. Starter templates — tune verbs/thresholds after enabling."
@@ -395,7 +407,7 @@ export function PolicyPacks() {
                       padding: 14,
                       borderRadius: 10,
                       border: "1px solid var(--border)",
-                      borderLeft: `3px solid ${pack.enabled ? ON : "var(--border)"}`
+                      borderLeft: `3px solid ${aggregateScope ? "var(--border)" : pack.enabled ? ON : "var(--border)"}`
                     }}
                   >
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
@@ -410,17 +422,36 @@ export function PolicyPacks() {
                     </div>
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
                       <span style={{ fontSize: 14, fontWeight: 600 }}>{pack.title}</span>
+                      {/*
+                        AT THE AGGREGATE SCOPE THIS PILL CANNOT BE ANSWERED, so it does not pretend to be.
+                        `fetchPolicyPacks` omits `?namespace` for "all", and the route declares
+                        `namespace: str = Query("default")` — so the API answers for the DEFAULT namespace
+                        and echoes it on every row. Rendering that as "Enabled"/"Off" under a header
+                        reading "Showing: all" reports ONE namespace's posture as the estate's, on a
+                        control surface, with nothing on screen naming the namespace it actually described.
+                        The row already carries `pack.namespace`; nothing read it.
+                        Fixed HERE and not in the client: sending `?namespace=all` is strictly worse
+                        (scoped_namespace returns "all" verbatim for an admin, no rows match a namespace
+                        literally named "all", and every live pack would render "Off" — a live control
+                        shown as absent), and making the call throw would break TargetSettings, which calls
+                        the same function at this scope and already guards correctly.
+                      */}
                       <span
+                        data-testid={`pack-state-${pack.id}`}
+                        title={aggregateScope
+                          ? "Enabled state is per namespace — pick one to see it"
+                          : `In namespace ${pack.namespace ?? namespace}`}
                         style={{
                           fontSize: 11,
                           fontWeight: 600,
-                          color: pack.enabled ? ON : "var(--text-muted)",
-                          background: pack.enabled ? `${ON}1a` : "var(--border)",
+                          color: aggregateScope ? "var(--text-muted)" : pack.enabled ? ON : "var(--text-muted)",
+                          background: aggregateScope ? "transparent" : pack.enabled ? `${ON}1a` : "var(--border)",
+                          border: aggregateScope ? "1px solid var(--border)" : undefined,
                           padding: "2px 8px",
                           borderRadius: 999
                         }}
                       >
-                        {pack.enabled ? "Enabled" : "Off"}
+                        {aggregateScope ? "— per namespace" : pack.enabled ? "Enabled" : "Off"}
                       </span>
                     </div>
                     <div style={{ marginTop: 8, fontSize: 13, color: "var(--text-secondary)" }}>{pack.enforces}</div>
