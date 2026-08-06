@@ -45,7 +45,22 @@ test.describe("UI wiring — EFFECT proofs on the live console", () => {
   test("the graph default-hides synthetic/probe agents; the toggle reveals them", async ({ page }) => {
     const hidden = await apiJson(page, "/api/v1/asset-graph?namespace=all&include_synthetic=false");
     const shown = await apiJson(page, "/api/v1/asset-graph?namespace=all&include_synthetic=true");
-    const isProbe = (n: any) => /allowlist-probe|e2e-intent|policy-tester/i.test(n.properties?.agent_class ?? "");
+    // Match the seeded synthetic identities FIRST, then the throwaway classes.
+    //
+    // This used to match only the throwaway names, and `scripts/kind-e2e/seed.py`'s reset deletes every
+    // one of them (`^(allowlist-probe|canary-|e2e-|…|policy-tester-|probe-|smoke-|wave[0-9]+e2e)`) while
+    // re-creating only the synthetics it owns: evtrace-probe and scorer. So on a genuinely clean cluster
+    // there was nothing for the toggle to reveal and line 54 read 0 — while on a cluster carrying an
+    // earlier run's debris, or once a later-alphabetical spec (intent-allowlist-effect) had minted an
+    // `e2e-intent-<ts>` class, it passed. Passing on residue is the leaked-state signature the reset
+    // exists to eliminate, and it made this assertion order-dependent rather than a product check.
+    //
+    // evtrace-probe/scorer are fixtures the seeder guarantees, and they reach the SAME classifier as the
+    // throwaway names (norviq/api/synthetic.py::is_synthetic_identity — one function, no per-class
+    // branch), so anchoring on them tests exactly the same behaviour deterministically. The throwaway
+    // pattern is kept so a leak of either kind still fails the default-view check on line 53.
+    const isProbe = (n: any) =>
+      /evtrace|^scorer$|allowlist-probe|e2e-intent|policy-tester/i.test(n.properties?.agent_class ?? "");
     const probesInDefault = (hidden.body.nodes as any[]).filter((n) => n.type === "agent" && isProbe(n));
     const probesInShown = (shown.body.nodes as any[]).filter((n) => n.type === "agent" && isProbe(n));
 
