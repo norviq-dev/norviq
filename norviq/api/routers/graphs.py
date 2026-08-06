@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from norviq.api.auth import get_current_user, require_admin
 from norviq.api.db.session import get_session
+from norviq.api.graph_maintenance import remove_graph_node
 from norviq.api.synthetic import is_synthetic_identity
 from norviq.api.schemas.graphs import (
     AssetEdge,
@@ -414,19 +415,13 @@ async def remove_asset_graph_node(
     policies, or decisions are touched)."""
     require_admin(user)
     evaluator = getattr(request.app.state, "evaluator", None)
-    store = getattr(request.app.state, "graph_store", None)
     if evaluator is None:
         raise HTTPException(status_code=503, detail="Graph engine is unavailable")
-    # Work on the evaluator's live builder so in-memory state and the snapshot can't diverge; restore
-    # the persisted snapshot first when this process hasn't touched the namespace yet.
-    restore = getattr(evaluator, "_restore_graph", None)
-    if restore is not None:
-        await restore(namespace)
-    graph = evaluator.get_graph(namespace)
-    if not graph.remove_node(node_id):
+    # Shared with DELETE /agents/{spiffe_id} (see norviq/api/graph_maintenance.py) so deregistering an
+    # agent and pruning a node cannot drift into two different notions of "removed from the graph".
+    if not await remove_graph_node(request, namespace, node_id):
         raise HTTPException(status_code=404, detail=f"node '{node_id}' not found in namespace '{namespace}'")
-    if store is not None:
-        await store.save(namespace, graph)
+    graph = evaluator.get_graph(namespace)
     log.info("nrvq.api.graph.node_removed", namespace=namespace, node_id=node_id,
              by=str(user.get("sub") or ""), code="NRVQ-API-7112")
     return {"removed": True, "namespace": namespace, "node_id": node_id,

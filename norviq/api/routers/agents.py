@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from norviq.api.auth import get_current_user, read_namespace, require_admin, require_target_cluster
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
+from norviq.api.graph_maintenance import try_remove_graph_node
 from norviq.api.synthetic import is_synthetic_identity  # the ONE shared synthetic/probe classifier
 from norviq.sdk.core.trust import TrustScore
 
@@ -504,8 +505,15 @@ async def deregister_agent(
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="Agent not found in registry")
+    ns = row.namespace
     await session.delete(row)
     await session.commit()
+    # ALSO prune the asset-graph node. Deleting the registry row alone only removes agents the graph
+    # was rendering from the registry — the never-observed "awaiting" ones. An agent that actually ran
+    # has its node baked into the persisted asset_graph snapshot, so it survived this call and stayed
+    # on the console while the response still said {"deleted": true}. That is the case that matters:
+    # an agent worth decommissioning is usually one that ran. See norviq/api/graph_maintenance.py.
+    graph_node_removed = await try_remove_graph_node(request, ns, spiffe_id)
     # Best-effort: drop the live trust/freeze cache entries so a deleted identity doesn't linger there.
     try:
         cache = request.app.state.cache
@@ -513,9 +521,15 @@ async def deregister_agent(
         await cache.clear_trust_override(spiffe_id)
     except Exception:  # noqa: BLE001 - cache cleanup is cosmetic; the registry row is already gone
         pass
-    log.info("nrvq.api.agent.deregistered", spiffe_id=spiffe_id, actor=user.get("sub"),
+    log.info("nrvq.api.agent.deregistered", spiffe_id=spiffe_id, namespace=ns,
+             graph_node_removed=graph_node_removed, actor=user.get("sub"),
              actor_role=user.get("role"), code="NRVQ-API-7121")
-    return {"deleted": True, "spiffe_id": spiffe_id}
+    # Report the graph outcome rather than folding it into `deleted`. False is legitimate — the agent
+    # may never have been observed, so it had no snapshot node — but it also covers a prune that
+    # failed, and a caller that cannot tell the two apart is back to guessing whether the console will
+    # still show the agent.
+    return {"deleted": True, "spiffe_id": spiffe_id, "namespace": ns,
+            "graph_node_removed": graph_node_removed}
 
 
 def _details_from_raw(raw: str | None, factors: dict) -> dict:
