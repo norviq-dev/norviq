@@ -1324,13 +1324,19 @@ class PromoteToolVerbRequest(BaseModel):
 async def warm_verb_overrides(evaluator, session) -> int:
     """Seed the evaluator's in-proc promoted-verb map from `tool_verb_overrides`.
 
-    Called at startup and after each promotion. Without it a promotion is CONSOLE-ONLY: the Threats
-    screen shows the tool classified, and `input.derived.verb` in a policy still reads `unknown`, so
-    promoting looks effective and changes nothing about enforcement.
+    Called at startup and after each promotion AND demotion. Without it a promotion is CONSOLE-ONLY:
+    the Threats screen shows the tool classified, and `input.derived.verb` in a policy still reads
+    `unknown`, so promoting looks effective and changes nothing about enforcement.
 
-    Best-effort — a DB hiccup must not block startup or fail an admin's promote. The consequence of a
-    miss is that the map stays as it was (stale, never wrong-by-invention), and the next promote or
-    restart re-seeds it.
+    Demotion needs it just as much, and asymmetrically worse. `_derived_input` resolves the verb as
+    `max((classifier_verb, promoted), key=_PROMOTION_RANK)`, so a promoted entry left in the map WINS
+    over the `unknown` a demotion restores — the retracted verb keeps enforcing.
+
+    Best-effort — a DB hiccup must not block startup or fail an admin's promote/demote. On a missed
+    promote the map stays as it was, which is stale but never wrong-by-invention. On a missed DEMOTE
+    "as it was" means still promoted, so the map keeps asserting a verb the operator retracted; that is
+    the price of not failing a request whose row is already durably committed, and the next
+    promote/demote or a restart re-seeds it.
     """
     try:
         rows = (await session.execute(
@@ -1403,6 +1409,7 @@ async def promote_tool_verb(
 
 @router.delete("/threats/tool-verbs")
 async def demote_tool_verb(
+    request: Request,
     ns: str = Query(...),
     tool_name: str = Query(...),
     session: AsyncSession = Depends(get_session),
@@ -1418,6 +1425,17 @@ async def demote_tool_verb(
     await session.commit()
     removed = int(getattr(res, "rowcount", 0) or 0)
     log.info("nrvq.api.toolverb.demote", ns=ns, tool=tool_name, removed=removed, code="NRVQ-API-7111")
+    # Re-seed for the SAME reason promote does, and this direction is the dangerous one. `_derived_input`
+    # resolves the verb as `max((classifier_verb, promoted), key=_PROMOTION_RANK)`, so a stale promoted
+    # verb WINS over the `unknown` the demotion was supposed to restore. Without this the row is gone,
+    # the Threats screen reads the DB and shows the tool back as observing, and enforcement keeps using
+    # the retracted verb until the pod restarts or some unrelated promote happens to rebuild the whole
+    # map. Which way that breaks depends on the rule: a grant keyed on `verb == "read"` stays live after
+    # the admin revoked it, and a tool demoted from "send" keeps tripping the shipped egress block with
+    # no console remedy.
+    evaluator = getattr(getattr(request.app, "state", None), "evaluator", None)
+    if evaluator is not None:
+        await warm_verb_overrides(evaluator, session)
     return {"demoted": removed > 0, "ns": ns, "tool_name": tool_name}
 
 

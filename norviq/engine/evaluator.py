@@ -545,7 +545,8 @@ class OPAEvaluator:
                 winner = self._resolve_with_packs(results)
                 log.debug("nrvq.eval.winner", winner=str(winner)[:200], code="NRVQ-ENG-DEBUG-5")
                 base_decision = self._apply_policy_mode(winner, event.event_id)
-            if base_decision.rule_id not in settings.evaluator_non_cacheable_rules:
+            if (base_decision.rule_id not in settings.evaluator_non_cacheable_rules
+                    and not self._depends_on_per_identity_facts(candidates)):
                 await self._cache.set_eval(event.agent_identity.namespace, event.agent_identity.agent_class, cache_tool, base_decision)
                 # Mirror the shared decision into the per-pod L1 under the SAME non-cacheable guard, so warm
                 # replays skip the get_eval round trip. Caches only the PRE-override base decision — the fresh
@@ -1478,13 +1479,12 @@ class OPAEvaluator:
     async def _safe_record_history(self, event: ToolCallEvent, decision: PolicyDecision) -> None:
         """Persist enforced decision for rolling trust-history features."""
         try:
-            cache_tool = self._cache_tool_key(event)
             await self._history.record(
                 event.agent_identity.spiffe_id,
                 {
                     "tool_name": event.tool_name,
                     "decision": decision.decision,
-                    "param_hash": cache_tool.split(":")[-1],
+                    "param_hash": self._params_digest(event),
                     "chain_depth": event.call_depth,
                     "timestamp": decision.decided_at.isoformat(),
                     "timestamp_unix": decision.decided_at.timestamp(),
@@ -1517,6 +1517,54 @@ class OPAEvaluator:
         self._audit_tasks.add(task)
         task.add_done_callback(self._audit_tasks.discard)
 
+    # Facts published per IDENTITY rather than per (namespace, agent_class, tool, params). The eval
+    # cache is keyed on the class, so a decision that turns on one of these cannot be shared.
+    _PER_IDENTITY_FACTS = ("input.trust_score", "input.trust_category", "input.agent.spiffe_id")
+
+    @classmethod
+    def _depends_on_per_identity_facts(cls, candidates: list[dict]) -> bool:
+        """True when any candidate policy reads a fact that varies BETWEEN agents of the same class.
+
+        The eval cache keys on (namespace, agent_class, tool+params+depth+workload+mcp) — deliberately
+        class-scoped, so two agents of a class share an entry. `_handle_cache_hit` re-applies the
+        namespace posture threshold, the freeze/cap and monitor mode on every hit, so those stay live.
+        What it does NOT re-run is the cached rego decision. A rule of the form
+        `deny if input.trust_score < 0.7` — authorable from the visual builder's `trustBelow` and from
+        the intent compiler's `trust_score` field — was therefore evaluated once for whichever agent
+        called first, and every other agent of that class was served that answer for the TTL. Where the
+        rule's threshold was stricter than the namespace posture (the whole reason to write one), a
+        low-trust agent got a high-trust agent's allow.
+
+        Skipping the cache WRITE is the fix rather than adding trust to the key. The key is built before
+        the cache read, and the read shares one pipelined Redis round trip with the freeze/cap fetch, so
+        the freshly computed score is not available there. The stored score is — but `_persist_behavior`
+        writes a newly computed trust back after EVERY evaluation, so keying on it changes the key on
+        every call and the cache never hits again. (Measured: it turned test_cache_hit_skips_opa's
+        second identical call into a miss.) Not writing an entry means there is never one to serve
+        wrongly, costs caching only for the policies that actually depend on per-agent state, and leaves
+        every other policy's hit rate untouched.
+        """
+        for candidate in candidates:
+            rego = candidate.get("rego") or ""
+            if any(fact in rego for fact in cls._PER_IDENTITY_FACTS):
+                return True
+        return False
+
+    @staticmethod
+    def _params_digest(event: "ToolCallEvent") -> str:
+        """The tool_params fingerprint, as its own function so callers never parse it back out of the
+        composite cache key.
+
+        `_safe_record_history` used to do `cache_tool.split(":")[-1]` and call the result `param_hash`.
+        It never was one: the key is `{tool}:{digest}:d{depth}:w{workload}[:m…][:t…]`, so the last
+        segment is the WORKLOAD (or the MCP hash, once that term was added) — meaning the rolling
+        trust-history feature that is supposed to notice "same tool, same arguments, over and over" was
+        comparing a value that is constant for an agent, and every call looked like a repeat. Indexing
+        from the front would not fix it either, because an MCP tool name legitimately contains a colon.
+        """
+        payload = json.dumps(event.tool_params, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
     def _cache_tool_key(self, event: "ToolCallEvent") -> str:
         """Build the eval-cache key suffix from EVERY decision-relevant input dimension, not just tool +
         params. SECURITY (cache-key-scope, fail-open): the 5s eval cache keys on (namespace, agent_class,
@@ -1542,8 +1590,7 @@ class OPAEvaluator:
         DISCOVERY and stable per (tool, catalog state), so hashing all of it costs no hit rate. The term
         is omitted entirely when there is no MCP context, so non-MCP traffic keeps its existing key and
         does not churn: absent and `{}` are the same decision input (`input.mcp == {}` either way)."""
-        payload = json.dumps(event.tool_params, sort_keys=True, separators=(",", ":"))
-        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+        digest = self._params_digest(event)
         workload = getattr(event.agent_identity, "workload", "") or ""
         depth = int(getattr(event, "call_depth", 0) or 0)
         key = f"{event.tool_name}:{digest}:d{depth}:w{workload}"

@@ -85,6 +85,18 @@ def _event(tool: str = "search_kb") -> ToolCallEvent:
     )
 
 
+def _inproc_key(ev: OPAEvaluator, event: ToolCallEvent) -> tuple[str, str, str]:
+    """Build the in-proc cache key EXACTLY as evaluate() does.
+
+    The suffix carries every decision-relevant input and has grown before (mcp context). A test that
+    hand-builds it with fewer terms seeds an entry under a key production never looks up: the warm-hit
+    branch these tests exist to exercise is silently skipped, evaluate() falls through to a real
+    evaluation, and the assertions then measure the fallback path instead of the invariant. Going
+    through the evaluator's own builder here means the next term added cannot reintroduce that.
+    """
+    return ("default", "customer-support", ev._cache_tool_key(event))
+
+
 def _allow() -> PolicyDecision:
     return PolicyDecision(decision="allow", rule_id="default_allow", reason="ok")
 
@@ -94,7 +106,7 @@ async def test_freeze_beats_a_stale_inproc_allow(monkeypatch: pytest.MonkeyPatch
     is read fresh on every call and applied on top of the cached base decision."""
     cache = _Cache(frozen=True)
     ev = _evaluator(cache, monkeypatch)
-    key = ("default", "customer-support", ev._cache_tool_key(_event()))
+    key = _inproc_key(ev, _event())
     ev._inproc_eval_cache.set(key, _allow())  # pretend a previous call cached an allow
 
     decision = await ev.evaluate(_event())
@@ -110,7 +122,7 @@ async def test_unfrozen_warm_hit_still_allows(monkeypatch: pytest.MonkeyPatch) -
     just asserting that everything blocks)."""
     cache = _Cache(frozen=False)
     ev = _evaluator(cache, monkeypatch)
-    key = ("default", "customer-support", ev._cache_tool_key(_event()))
+    key = _inproc_key(ev, _event())
     ev._inproc_eval_cache.set(key, _allow())
 
     decision = await ev.evaluate(_event())
@@ -124,7 +136,7 @@ async def test_admin_cap_is_also_applied_from_the_fresh_read(monkeypatch: pytest
     through a warm in-proc allow."""
     cache = _Cache(frozen=False, cap=0.05)
     ev = _evaluator(cache, monkeypatch)
-    key = ("default", "customer-support", ev._cache_tool_key(_event()))
+    key = _inproc_key(ev, _event())
     ev._inproc_eval_cache.set(key, _allow())
 
     decision = await ev.evaluate(_event())
