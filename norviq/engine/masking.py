@@ -90,15 +90,30 @@ def mask_structure(value: object) -> object:
     masked what we did not walk would be worse than saying nothing. Callers that need to know can
     compare identity.
     """
+    masked, _ = mask_structure_counted(value)
+    return masked
+
+
+def mask_structure_counted(value: object) -> tuple[object, int]:
+    """`mask_structure`, plus how many strings it actually changed.
+
+    Same single walk — the MCP plane needs the count for its telemetry and its `_meta` annotation, and
+    a second traversal written next to this one is exactly how the two output-DLP paths drifted apart
+    the first time. Callers that do not need the count use `mask_structure`.
+    """
     nodes = 0
+    redacted = 0
 
     def walk(node: object, depth: int) -> object:
-        nonlocal nodes
+        nonlocal nodes, redacted
         if nodes >= _MASK_MAX_NODES or depth > _MASK_MAX_DEPTH:
             return node
         nodes += 1
         if isinstance(node, str):
-            return _mask_string(node)
+            out = _mask_string(node)
+            if out != node:
+                redacted += 1
+            return out
         if isinstance(node, dict):
             return {k: walk(v, depth + 1) for k, v in node.items()}
         if isinstance(node, list):
@@ -108,7 +123,7 @@ def mask_structure(value: object) -> object:
         # Numbers, bools, None, and anything opaque (a model instance, bytes) pass through untouched.
         return node
 
-    return walk(value, 0)
+    return walk(value, 0), redacted
 
 
 def redact_url_credentials(url: str) -> str:
