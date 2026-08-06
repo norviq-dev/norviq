@@ -130,6 +130,9 @@ class HttpProxy:
         )
         try:
             await store.load()
+            # Keep re-reading — see stdio.py. A revoke must reach a RUNNING proxy, not only the next
+            # one to start.
+            store.start_refresh(settings.mcp_pin_refresh_s)
         except Exception as exc:  # noqa: BLE001 — availability choice, see the docstring
             log.error(
                 "nrvq.mcp.http.pin_store_degraded",
@@ -293,7 +296,18 @@ class HttpProxy:
     async def _mediate_server_bytes(self, fw: McpFirewall, payload: bytes) -> bytes:
         msg = P.decode(payload)
         if msg is None:
-            return payload
+            # FAIL CLOSED, like stdio does (`nrvq.mcp.server.undecodable_dropped`). This used to
+            # `return payload`, handing the bytes to the client untouched — so anything this proxy
+            # could not PARSE skipped both gates entirely. The server chooses the framing, so that is
+            # a bypass it can take at will: split one JSON-RPC message across two SSE `data:` frames,
+            # or emit deliberately malformed JSON, and neither the injection fence nor the output DLP
+            # mask ever runs on content the client is perfectly able to reassemble.
+            #
+            # `b""` is the same value this method already returns for a refused message, so both
+            # callers — the SSE splitter and the non-streaming JSON path — handle it without change.
+            log.warning("nrvq.mcp.server.undecodable_dropped", bytes=len(payload),
+                        transport="http", code="NRVQ-MCP-5004")
+            return b""
         result = await fw.on_server_message(msg)
         if result.reply is not None:
             # A server-initiated request we refused. On this transport the reply travels back as a

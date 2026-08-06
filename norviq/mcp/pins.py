@@ -45,6 +45,8 @@ design note rather than half-built here.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import hashlib
 import json
 import os
@@ -317,7 +319,11 @@ class ControlPlanePinStore:
     every `tools/list`, and a slow control plane would then stall session startup for every agent.
     Instead:
 
-      * `load()` — awaited ONCE at proxy startup — pulls this server's pins into memory.
+      * `load()` — awaited at proxy startup and then re-run on a timer by `start_refresh()` — pulls
+        this server's pins into memory. The refresh is why a REVOKE reaches a running proxy: without
+        it the process kept its startup copy for its whole lifetime, so an operator who withdrew
+        approval saw the console update while the tool stayed listed to the model and stayed callable
+        until the pod restarted.
       * `get()` / `all()` — pure in-memory, so the discovery path never blocks on the network and the
         call path (which only ever reads a cached catalog entry) is untouched.
       * `put()` — updates memory and enqueues an upsert; a background task flushes it. Discovery must
@@ -342,6 +348,7 @@ class ControlPlanePinStore:
         self._pins: dict[str, ToolPin] = {}
         self._pending: list[ToolPin] = []
         self._degraded = False
+        self._refresh_task: "asyncio.Task | None" = None
 
     # -- PinStore protocol (sync, in-memory) --------------------------------------------------
     def get(self, pin: str) -> ToolPin | None:
@@ -364,6 +371,34 @@ class ControlPlanePinStore:
         if self._token:
             h["Authorization"] = f"Bearer {self._token}"
         return h
+
+    def start_refresh(self, interval_s: int) -> None:
+        """Re-`load()` every `interval_s` seconds in the background. No-op when <= 0.
+
+        Deliberately a poll rather than a push: the proxy is the party that must not be blocked, and a
+        push channel would mean the control plane holding a connection per sidecar. The cost is that a
+        revoke takes effect within one interval instead of instantly, which is the trade named in
+        `settings.mcp_pin_refresh_s`. Errors inside `load()` are already swallowed there, so a control
+        plane outage degrades to the last good copy rather than killing the task.
+        """
+        if interval_s <= 0 or self._refresh_task is not None:
+            return
+
+        async def _loop() -> None:
+            while True:
+                await asyncio.sleep(interval_s)
+                await self.load()
+
+        self._refresh_task = asyncio.create_task(_loop())
+
+    async def aclose(self) -> None:
+        """Stop the refresh task. Safe to call more than once."""
+        task = self._refresh_task
+        self._refresh_task = None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
 
     async def load(self) -> None:
         """Pull this (namespace, server) pair's approved pins into memory. Never raises."""

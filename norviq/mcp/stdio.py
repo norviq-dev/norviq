@@ -153,6 +153,10 @@ class StdioProxy:
                 transport="stdio",
             )
             await store.load()
+            # Keep re-reading. Without this the process holds its startup copy for its whole life, so
+            # POST /mcp/pins/revoke updates the DB and the console while this proxy keeps listing and
+            # executing the revoked tool until the pod restarts.
+            store.start_refresh(settings.mcp_pin_refresh_s)
             self._pin_store = store
         else:
             store = build_store(settings.mcp_pin_store, settings.mcp_pin_path)
