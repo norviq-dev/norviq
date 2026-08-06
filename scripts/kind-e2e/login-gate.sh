@@ -72,9 +72,19 @@ curl -sf -o /dev/null "${BASE_URL}/" || fail "console unreachable at ${BASE_URL}
 api_pod="$("${KUBECTL[@]}" -n "$NS" get pods -l app.kubernetes.io/component=api \
   -o jsonpath='{range .items[*]}{.metadata.name}|{.metadata.deletionTimestamp}|{.status.phase}{"\n"}{end}' \
   | awk -F'|' '$2 == "" && $3 == "Running" { print $1; exit }')"
-# Fall back to the old selector only if the label lookup finds nothing, so a chart that labels
-# differently still works rather than failing for a reason unrelated to the login.
-[ -n "$api_pod" ] || api_pod="$("${KUBECTL[@]}" -n "$NS" get pods -o name | grep api | head -1)"
+# Fall back to a NAME match only if the label lookup finds nothing, so a chart that labels differently
+# still works rather than failing for a reason unrelated to the login.
+#
+# The fallback applies the SAME Running + non-terminating filter. It used to be a bare
+# `get pods -o name | grep api | head -1`, which quietly reintroduced the exact defect the block above
+# exists to prevent: on a cluster with no healthy api pod the label lookup returns empty, the fallback
+# then returns a Terminating or Init pod, and the `[ -n ... ]` guard below is satisfied by that
+# non-empty string — so the gate proceeds to exec into a pod that cannot answer, and reports it as
+# "admin_reset failed" instead of "no live pod". A fallback that can defeat the guard it falls back
+# past is worse than no fallback.
+[ -n "$api_pod" ] || api_pod="$("${KUBECTL[@]}" -n "$NS" get pods \
+  -o jsonpath='{range .items[*]}{.metadata.name}|{.metadata.deletionTimestamp}|{.status.phase}{"\n"}{end}' \
+  | awk -F'|' '$1 ~ /api/ && $2 == "" && $3 == "Running" { print $1; exit }')"
 api_pod="${api_pod#pod/}"
 [ -n "$api_pod" ] || fail "no Running, non-terminating api pod in namespace ${NS}"
 

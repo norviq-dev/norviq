@@ -206,8 +206,13 @@ kubectl -n "$NS" port-forward "svc/norviq-ui" "${UI_PORT}:80" >/tmp/nrvq-kind-ui
 for _ in $(seq 1 40); do curl -sf -o /dev/null "http://localhost:${UI_PORT}/" && break; sleep 0.5; done
 curl -sf -o /dev/null "http://localhost:${UI_PORT}/" || fail "console never came up on ${UI_PORT} — see /tmp/nrvq-kind-ui.log"
 
-api_pod="$(kubectl -n "$NS" get pods -o name | grep api | head -1)"
-kubectl -n "$NS" exec "${api_pod#pod/}" -c api -- \
+# Reuse `$api_live` from the verification stage — a pod already proved Running and NOT terminating.
+# This line used to be `get pods -o name | grep api | head -1`, which is the same alphabetical-pod trap
+# this script warns about at the `.items[0]` note above: it can hand back a terminating or Init pod, and
+# `exec` into one fails with an error that reads like a broken token minter rather than a bad choice of
+# pod. (login-gate.sh had the identical bug and it cost a 34-minute browser run.)
+[ -n "${api_live:-}" ] || fail "no live api pod recorded by the verification stage"
+kubectl -n "$NS" exec "$api_live" -c api -- \
   python -m norviq.api.token_mint --ttl 7200 | tail -1 > "$TOKEN_FILE"
 [ -s "$TOKEN_FILE" ] || fail "failed to mint an admin token"
 
