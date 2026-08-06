@@ -303,7 +303,23 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
   const covered = coverage?.covered_count ?? 0;
   const residualIds = coverage?.residual ?? [];
   const rego = coverage?.rego ?? "  # pick the intended tools to generate the allow-rule";
-  const grantedTo = global ? activeCls : ([...new Set(paths.filter((p) => p.tool === tool).map((p) => p.src))].join(", ") || cls);
+  // The grant target is the class the draft is actually created for — ONE class. `createIntentDraft`,
+  // `fetchIntentSuggest` and `fetchIntentCoverage` all take `activeCls`, so anything else here is a
+  // sentence describing something this modal does not do.
+  //
+  // The per-path branch used to render EVERY source class that reaches `tool`. On a busy namespace that
+  // is forty-odd names — including e2e debris like `q2-manual-*`, `bce2e-*` and `test` — under a heading
+  // that reads "Intended behaviour · customer-support", followed by "everything else is denied by
+  // default". The only available reading was that applying it would grant, or constrain, all forty.
+  // It grants exactly one.
+  const grantedTo = activeCls || cls;
+  // Those other classes ARE worth knowing about — they reach the same tool and each needs its own
+  // intent — so the fact is kept, stated as what it is rather than as the grant target. This is the
+  // same point the coverage comment above makes: an intent policy can only neutralize ITS class's paths.
+  const alsoReach = useMemo(
+    () => (tool ? [...new Set(paths.filter((p) => p.tool === tool && p.src !== (activeCls || cls)).map((p) => p.src))] : []),
+    [paths, tool, activeCls, cls]
+  );
   const hasSignal = checkedTools.length > 0 || enabledCount > 0;
   const coverColor = !hasSignal ? "#a0a0a0" : residualIds.length === 0 ? "#34d399" : "#FFB020";
   const byId = new Map(paths.map((p) => [p.id, p]));
@@ -362,7 +378,17 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
             </div>
           ) : (
             <div style={{ fontSize: 12, color: "#a0a0a0", marginTop: 5, lineHeight: 1.5 }}>
-              Granted to <b style={{ color: "#b8c2d6" }}>{grantedTo}</b>. Allow only what you intend — everything else is denied by default.
+              Granted to <b style={{ color: "#b8c2d6" }}>{grantedTo}</b> only. Allow only what you intend — everything else is denied by default.
+              {alsoReach.length > 0 && (
+                <>
+                  {" "}
+                  <span data-testid="intent-also-reach" style={{ color: "var(--escalate)" }}>
+                    {alsoReach.length} other {alsoReach.length === 1 ? "class" : "classes"} also reach{" "}
+                    <span style={{ fontFamily: "ui-monospace, monospace" }}>{tool}</span> — this policy does not
+                    constrain {alsoReach.length === 1 ? "it" : "them"}; each needs its own intent.
+                  </span>
+                </>
+              )}
             </div>
           )}
 

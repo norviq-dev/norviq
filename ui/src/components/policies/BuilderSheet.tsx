@@ -273,6 +273,34 @@ function factOpsFor(kind: FactFieldKind, field: string): string[] {
 
 const CLOSED_VOCAB_SCALARS = new Set(["verb", "tool_kind", "direction", "mcp.pin_status", "mcp.scan_severity"]);
 
+/**
+ * The actual values each closed-vocabulary scalar can hold, transcribed from the engine.
+ *
+ * `factOpsFor` already narrowed these fields to `equals`/`in` on the grounds that they have a small
+ * fixed vocabulary — but the VALUE stayed a free-text box, so the narrowing only removed the regex
+ * footgun and left the typo one. `drifted` instead of `drift`, `critical ` with a space, `Pinned`
+ * capitalised: each compiles to valid rego, passes the validator, and then matches nothing forever.
+ * A rule that silently never fires is the worst outcome for a security control, because it looks
+ * identical to one that fires and finds nothing.
+ *
+ * Sources, so a drift here is findable: pin_status from norviq/mcp/pins.py's PIN_* constants,
+ * scan_severity from firewall.py's _SEVERITY_ORDER plus the "unknown" a tool with no catalog entry
+ * now reports, direction from firewall.py's `"answer" if surface == "answer" else "call"`, verb from
+ * evaluator.py's _PROMOTION_RANK.
+ */
+export const SCALAR_ENUM_VALUES: Record<string, readonly string[]> = {
+  "mcp.pin_status": ["pinned", "first_seen", "drift", "quarantined", "unknown"],
+  // "unknown" is a real value, not a placeholder: a tool Gate A never scanned reports it, and it is
+  // deliberately OUTSIDE the severity ladder so it matches no allow list by accident.
+  "mcp.scan_severity": ["none", "low", "medium", "high", "critical", "unknown"],
+  direction: ["call", "answer"],
+  verb: ["unknown", "read", "write", "send", "delete"],
+  // Only two, and that is the engine's real answer — `_tool_kind` returns "sql" or "other", nothing
+  // else. Offering a richer-looking set here (read/write/exec/network) would be inventing a vocabulary
+  // the evaluator never emits, so every one of those rules would match nothing.
+  tool_kind: ["sql", "other"]
+};
+
 const FACT_OP_VERB: Record<string, string> = {
   noneOf: "must not include",
   subsetOf: "must be within",
@@ -629,17 +657,25 @@ export const CONDITION_TYPES = [
   "toolIn",
   "trustBelow",
   "sourceVerb",
-  "paramRegex"
+  "paramRegex",
+  // scalarFact is listed now that ConditionChip renders an editor for it. It is the ONLY way to write
+  // a rules-mode (negative) condition on the engine-derived scalars — `direction`, `sql_normalized`,
+  // `verb`, `tool_kind` and the three `mcp.*` facts. Allowlist mode could already require them as
+  // grant facts, so "MCP is authorable" was half true: you could NARROW a grant with pin_status, but
+  // you could not write "block when pin_status is drift" — which is precisely what the shipped
+  // mcp_integration_guardrail template does, and therefore the one policy shape operators most want
+  // to reproduce in the builder.
+  "scalarFact"
 ] as const satisfies readonly Exclude<BuilderCondition["type"], "not">[];
 
-// scalarFact / collectionFact / numericFact are DELIBERATELY NOT LISTED, and this is not an oversight.
+// collectionFact / numericFact are DELIBERATELY NOT LISTED, and this is not an oversight.
+// (scalarFact WAS in this list for the same reason and has now been given an editor — see above.)
 // They are fully supported by the graph model, the compiler and the validator — they arrive via the
 // /intents handoff (lib/intentToGraph.ts) and round-trip correctly. What does not exist yet is an
-// EDITOR for them: ConditionRow renders field/op/value inputs for the six types above and nothing for
-// these three. Listing them in the dropdown let an operator pick one and get a condition they could
-// neither see nor fill in — `scalarFact`'s default (`field: "param_paths."`, empty value) does not even
-// compile. Offering a control that cannot be used is worse than not offering it; they go back in the
-// list the moment ConditionRow can render them.
+// EDITOR for them: ConditionChip renders field/op/value inputs for the listed types and nothing for
+// these two. Listing them in the dropdown let an operator pick one and get a condition they could
+// neither see nor fill in. Offering a control that cannot be used is worse than not offering it; they
+// go back in the list the moment ConditionChip can render them.
 
 /** True if `pattern` compiles as a JS RegExp — the same engine builderCompile.ts's validateCondition
  *  uses for paramRegex's `paramRegex_invalid` check, so the inline hint here agrees with the compiler. */
@@ -752,7 +788,8 @@ export const CONDITION_TYPE_LABEL: Record<(typeof CONDITION_TYPES)[number], stri
   keyword: "Keyword in tool params",
   trustBelow: "Agent trust below",
   sourceVerb: "Source + verb (capability)",
-  paramRegex: "Param matches regex"
+  paramRegex: "Param matches regex",
+  scalarFact: "Engine fact is / is not (MCP pin, scan severity, plane, verb, SQL)"
 };
 
 /** One-line hint shown near the type dropdown for whichever type is currently selected — the label
@@ -762,6 +799,9 @@ export const CONDITION_TYPE_HINT: Record<(typeof CONDITION_TYPES)[number], strin
   toolIn: "Fires when the tool name exactly matches one of the names listed below.",
   keyword: "Fires when any listed keyword appears in the tool name and/or its parameters.",
   trustBelow: "Fires when the calling agent's live trust score is below this threshold.",
+  scalarFact:
+    "Fires on a fact the ENGINE derived about the call, not on its arguments — the MCP pin status or " +
+    "scan severity for the tool, which plane it is on, its verb, or the normalised SQL.",
   sourceVerb: "Fires on a CAPABILITY (e.g. any 'delete' on Postgres) without listing every tool name.",
   paramRegex: "Fires when a specific parameter's value matches the regex pattern below."
 };
@@ -960,6 +1000,120 @@ function ConditionChip({
           value={inner.threshold}
           onChange={(e) => setInner({ ...inner, threshold: parseFloat(e.target.value) })}
         />
+      )}
+
+      {inner.type === "scalarFact" && (
+        <>
+          <select
+            data-testid={`${testPrefix}-fact-field`}
+            className="input"
+            style={{ fontSize: 12, padding: "3px 6px" }}
+            value={inner.field}
+            onChange={(e) => {
+              const field = e.target.value;
+              // Re-seed the op AND the value together. `factOpsFor` narrows closed-vocabulary fields to
+              // equals/in, so moving from `sql_normalized` (which offers `matches`) to `mcp.pin_status`
+              // must not leave a `matches` op the field no longer offers — that compiles to a regex over
+              // a three-word vocabulary and burns the server's 25-op budget to say what `in` says free.
+              const ops = factOpsFor("scalar", field);
+              const op = (ops.includes(inner.op) ? inner.op : ops[0]) as "equals" | "in" | "matches" | "notMatches";
+              const enums = SCALAR_ENUM_VALUES[field];
+              // A value carried over from another field is almost never valid for the new one, and a
+              // stale value that silently matches nothing is the exact failure the enum picker exists
+              // to prevent. Seed the first legal value instead of preserving nonsense.
+              const seed = enums ? enums[0] : "";
+              setInner(op === "in"
+                ? { type: "scalarFact", field, op, values: enums ? [seed] : [] }
+                : { type: "scalarFact", field, op, value: seed });
+            }}
+          >
+            {FACT_FIELDS.filter((f) => f.kind === "scalar").map((f) => (
+              <option key={f.field} value={f.field}>
+                {FACT_FIELD_LABEL[f.field] ?? f.field}
+              </option>
+            ))}
+          </select>
+          <select
+            data-testid={`${testPrefix}-fact-op`}
+            className="input"
+            style={{ fontSize: 12, padding: "3px 6px" }}
+            value={inner.op}
+            /* The SAME op-retarget the grant-fact editor uses, so a value survives an op change
+               identically in both surfaces instead of one of them quietly discarding it. */
+            onChange={(e) => setInner(retypedFact(inner, "scalar", e.target.value) as BuilderCondition)}
+          >
+            {factOpsFor("scalar", inner.field).map((op) => (
+              <option key={op} value={op}>
+                {op}
+              </option>
+            ))}
+          </select>
+          {/* A CLOSED vocabulary gets a picker, not a text box. `factOpsFor` already stopped these
+              fields offering regex ops, but the VALUE stayed free text — so `drifted` for `drift`, or
+              `Pinned` capitalised, compiled fine, validated fine, and then matched nothing for ever.
+              A security rule that silently never fires looks identical to one that fires and finds
+              nothing, which is the worse of the two to ship. */}
+          {SCALAR_ENUM_VALUES[inner.field] ? (
+            inner.op === "in" ? (
+              <span data-testid={`${testPrefix}-fact-enum-multi`} style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {SCALAR_ENUM_VALUES[inner.field].map((v) => {
+                  const picked = (inner.values ?? []).includes(v);
+                  return (
+                    <button
+                      key={v}
+                      type="button"
+                      data-testid={`${testPrefix}-fact-enum-${v}`}
+                      aria-pressed={picked}
+                      onClick={() => {
+                        const next = picked
+                          ? (inner.values ?? []).filter((x) => x !== v)
+                          : [...(inner.values ?? []), v];
+                        setInner({ ...inner, values: next });
+                      }}
+                      style={{
+                        fontSize: 11, padding: "2px 8px", borderRadius: 6, cursor: "pointer",
+                        border: `1px solid ${picked ? "var(--accent)" : "var(--border)"}`,
+                        background: picked ? "rgba(45,218,184,0.14)" : "transparent",
+                        color: picked ? "var(--accent)" : "var(--text-secondary)"
+                      }}
+                    >
+                      {v}
+                    </button>
+                  );
+                })}
+              </span>
+            ) : (
+              <select
+                data-testid={`${testPrefix}-fact-enum`}
+                className="input"
+                style={{ fontSize: 12, padding: "3px 6px" }}
+                value={inner.value ?? ""}
+                onChange={(e) => setInner({ ...inner, value: e.target.value })}
+              >
+                {SCALAR_ENUM_VALUES[inner.field].map((v) => (
+                  <option key={v} value={v}>
+                    {v}
+                  </option>
+                ))}
+              </select>
+            )
+          ) : (
+            <input
+              data-testid={`${testPrefix}-fact-value`}
+              className="input"
+              style={{ fontSize: 12, padding: "3px 6px", minWidth: 160 }}
+              placeholder={inner.op === "in" ? "value, value" : "value"}
+              value={inner.op === "in" ? (inner.values ?? []).join(", ") : (inner.value ?? "")}
+              onChange={(e) =>
+                setInner(
+                  inner.op === "in"
+                    ? { ...inner, values: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) }
+                    : { ...inner, value: e.target.value }
+                )
+              }
+            />
+          )}
+        </>
       )}
 
       {inner.type === "sourceVerb" && (
