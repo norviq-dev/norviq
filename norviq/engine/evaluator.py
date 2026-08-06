@@ -886,11 +886,35 @@ class OPAEvaluator:
             )
         return decision
 
-    @staticmethod
-    def _normalize_for_match(params: dict) -> dict:
+    # Total characters folded across ONE event's params. `skeleton()` runs NFKC/NFKD, and the caller
+    # controls both the length of a string and how many of them there are.
+    #
+    # MEASURED before choosing the number, because the audit finding that prompted this overstated it
+    # (it claimed ~219 ms and a 9.7 MB input from a 255 KiB body). On the reference host, 200k chars
+    # costs 12 ms of ASCII, 13 ms of circled/fullwidth, and 39 ms of ligatures — the only shape that
+    # expands, and only 3x (ﬃ -> ffi). With `max_request_body_bytes` at 256 KiB the real worst case is
+    # roughly 40 ms and ~768 KiB, i.e. ~2% of the 2 s fail-closed budget: a cost worth bounding, not
+    # the denial of service it was reported as.
+    #
+    # So this bound is not load-bearing today — it exists so that raising the body cap cannot silently
+    # turn a 2% cost into a 20% one. It is set well above any reachable value, which is also why the
+    # un-normalized tail is not an evasion window in practice: nothing that fits the body cap can
+    # reach it.
+    _NORMALIZE_MAX_CHARS = 4 * 1024 * 1024
+
+    @classmethod
+    def _normalize_for_match(cls, params: dict) -> dict:
         """Confusable-skeleton string values for injection MATCHING only (original preserved for audit)."""
+        budget = cls._NORMALIZE_MAX_CHARS
+
         def _norm(value):
+            nonlocal budget
             if isinstance(value, str):
+                if budget <= 0:
+                    # Past the bound the ORIGINAL is returned, not a truncation: rego matches against
+                    # this document, and a half-folded string would be a value nobody sent.
+                    return value
+                budget -= len(value)
                 return skeleton(value)
             if isinstance(value, list):
                 return [_norm(v) for v in value]

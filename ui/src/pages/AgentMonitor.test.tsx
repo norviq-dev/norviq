@@ -348,3 +348,37 @@ describe("AgentMonitor — synthetic identities", () => {
     expect(screen.queryByTestId("agents-synthetic-toggle")).not.toBeInTheDocument();
   });
 });
+
+// A failed or FORBIDDEN /agents read is not an empty fleet. useApi keeps the last good data on error,
+// so a 403 (a viewer with no namespace scope, or a tenant asking for another namespace), a 5xx or a
+// network drop rendered "Agents Tracked 0 / Frozen 0 / Low Trust 0 / High Trust 0" — byte-identical
+// to a namespace that genuinely has no agents, and an operator would read it as "nothing to govern".
+describe("AgentMonitor — an unreadable fleet must not render as an empty one", () => {
+  it("shows — rather than 0 when /agents is forbidden", async () => {
+    server.use(http.get("/api/v1/agents", () => HttpResponse.json({ detail: "forbidden" }, { status: 403 })));
+    render(
+      <MemoryRouter>
+        <AppProvider>
+          <AgentMonitor />
+        </AppProvider>
+      </MemoryRouter>
+    );
+    await waitFor(() => expect(screen.getByText("Agent Monitor")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/could not read agents/i)).toBeInTheDocument());
+    // The zero that used to be here was the whole defect.
+    expect(screen.queryByText("Agents Tracked")?.parentElement?.textContent ?? "").not.toMatch(/\b0\b/);
+  });
+
+  it("still shows a real 0 for a namespace that genuinely has no agents", async () => {
+    server.use(http.get("/api/v1/agents", () => HttpResponse.json([])));
+    render(
+      <MemoryRouter>
+        <AppProvider>
+          <AgentMonitor />
+        </AppProvider>
+      </MemoryRouter>
+    );
+    await waitFor(() => expect(screen.getByText("Agent Monitor")).toBeInTheDocument());
+    expect(screen.queryByText(/could not read agents/i)).not.toBeInTheDocument();
+  });
+});

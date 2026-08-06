@@ -235,6 +235,13 @@ export function AgentMonitor() {
   // ("N test/probe kill-chains hidden · Show"). Excluding them silently would make this page's total
   // disagree with the Overview in the other direction; including them silently is what it did before.
   const [showSynthetic, setShowSynthetic] = useState(false);
+  // A failed or forbidden read is NOT an empty fleet. `useApi` keeps the last good `data` on error, so
+  // without this a 403 (viewer with no scope, or a tenant asking for another namespace), a 5xx, or a
+  // network drop rendered "Agents Tracked 0 / Frozen 0 / Low Trust 0", an all-zero donut and an empty
+  // table — byte-identical to a namespace that genuinely has no agents. On a failed namespace SWITCH it
+  // is worse than zero: the previous namespace's retained rows are counted under the new namespace's
+  // subtitle. (401 is not in scope — apiGet's handleUnauthorized clears the session and redirects.)
+  const agentsUnreadable = !!agents.error || agents.stale;
   const scoped = useMemo(() => {
     const all = agents.data ?? [];
     return classFilter ? all.filter((a) => a.agent_class === classFilter) : all;
@@ -426,29 +433,31 @@ export function AgentMonitor() {
           >
             <StatTile
               label="Agents Tracked"
-              value={rows.length}
+              value={agentsUnreadable ? "—" : rows.length}
               color="var(--accent)"
               sub={
-                syntheticCount > 0
-                  ? showSynthetic
-                    ? `includes ${syntheticCount} synthetic/probe`
-                    : `${syntheticCount} synthetic/probe hidden`
-                  : undefined
+                agentsUnreadable
+                  ? "could not read agents for this namespace"
+                  : syntheticCount > 0
+                    ? showSynthetic
+                      ? `includes ${syntheticCount} synthetic/probe`
+                      : `${syntheticCount} synthetic/probe hidden`
+                    : undefined
               }
             />
             <StatTile
               label="Frozen"
-              value={rows.filter((a) => a.category === "frozen").length}
+              value={agentsUnreadable ? "—" : rows.filter((a) => a.category === "frozen").length}
               color="var(--text-muted)"
             />
             <StatTile
               label="Low Trust"
-              value={rows.filter((a) => a.category === "low").length}
+              value={agentsUnreadable ? "—" : rows.filter((a) => a.category === "low").length}
               color="#ff3b5c"
             />
             <StatTile
               label="High Trust"
-              value={rows.filter((a) => a.category === "high").length}
+              value={agentsUnreadable ? "—" : rows.filter((a) => a.category === "high").length}
               color="#00e5a0"
             />
           </div>

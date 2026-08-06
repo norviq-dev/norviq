@@ -10,6 +10,11 @@
  * OPERATION (read → http_get + vector_search, send → send_email) and the graph counts by TOOL. Three
  * tools, two rules. Nothing on either screen said so, so the only available reading was that a tool
  * had been dropped — the more alarming of the two interpretations, and the wrong one.
+ *
+ * `value` accepts a string so a caller can render "—" for a count it could not READ. A tile is a
+ * definite claim about a quantity, and 0 is a claim: a failed or forbidden fetch that renders 0 is
+ * indistinguishable from a genuinely empty scope, which is how Agent Monitor came to report an empty
+ * fleet whenever /agents 403'd.
  */
 export function StatTile({
   label,
@@ -18,7 +23,7 @@ export function StatTile({
   sub
 }: {
   label: string;
-  value: number;
+  value: number | string;
   color?: string;
   /** What the number counts, when the unit is not the one a reader would assume. */
   sub?: string;
@@ -35,7 +40,7 @@ export function StatTile({
           fontVariantNumeric: "tabular-nums"
         }}
       >
-        {value.toLocaleString()}
+        {typeof value === "number" ? value.toLocaleString() : value}
       </div>
       {sub ? (
         <div style={{ fontSize: 11.5, lineHeight: 1.45, color: "var(--text-muted)", marginTop: 3 }}>{sub}</div>

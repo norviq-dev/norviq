@@ -180,3 +180,35 @@ describe("PolicyHierarchy", () => {
     expect(screen.getByTestId("policy-hierarchy-overlay")).toHaveTextContent(/tighten-only/i);
   });
 });
+
+// The Mode column is a CLAIM about enforcement, so it may only be made from a posture actually read.
+// GET /settings is DB-backed while the layer rows come from the in-memory loader, so the posture can
+// fail on its own and leave the table fully painted — every row confidently reading "Block" for a
+// namespace that is in Monitor and only logging would-blocks.
+describe("PolicyHierarchy — the Mode column must not claim Block it never read", () => {
+  it("shows Unknown, not Block, when the posture read fails", async () => {
+    server.use(
+      http.get("/api/v1/policies", () => HttpResponse.json([{ agent_class: "customer-support", target_type: "class" }])),
+      http.get("/api/v1/policies/effective", () =>
+        HttpResponse.json({ namespace: "default", agent_class: "customer-support", layers: LAYERS, note: "" })
+      ),
+      http.get("/api/v1/settings", () => HttpResponse.json({ detail: "db unavailable" }, { status: 503 }))
+    );
+    render(<PolicyHierarchy namespace="default" />);
+    await waitFor(() => expect(screen.getAllByTestId("policy-hierarchy-row").length).toBe(LAYERS.length));
+
+    const modes = screen.getAllByTestId("policy-hierarchy-mode");
+    modes.forEach((m) => {
+      expect(m).toHaveTextContent("Unknown");
+      expect(m).not.toHaveTextContent("Block");
+      expect(m.getAttribute("title") ?? "").toMatch(/could not be read/i);
+    });
+  });
+
+  it("still reports a real posture when the read succeeds", async () => {
+    handlers(LAYERS, "audit");
+    render(<PolicyHierarchy namespace="default" />);
+    await waitFor(() => expect(screen.getAllByTestId("policy-hierarchy-row").length).toBe(LAYERS.length));
+    screen.getAllByTestId("policy-hierarchy-mode").forEach((m) => expect(m).toHaveTextContent("Monitor"));
+  });
+});

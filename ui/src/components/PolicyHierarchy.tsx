@@ -109,10 +109,22 @@ export function PolicyHierarchy({ namespace, testId = "policy-hierarchy" }: { na
     [namespace],
     { cacheKey: `hier-posture:${namespace}`, staleTimeMs: 15_000 }
   );
-  const modeLabel = posture.data?.enforcement_mode === "audit" ? "Monitor" : "Block";
-  const modeTitle = posture.data?.enforcement_mode === "audit"
-    ? "Monitor — evaluate & log would-block, but allow (observe mode)"
-    : "Block — matching policies are enforced";
+  // "Block" is a CLAIM about enforcement, so it may only be made from a posture that was actually
+  // read. Before, `posture.data?.enforcement_mode === "audit" ? ... : "Block"` sent every other state
+  // down the Block branch: a failed GET /settings, the first render before it resolves, and — worst —
+  // a namespace switch whose read fails, where useApi deliberately keeps the PREVIOUS namespace's
+  // settings in `data`, so the old namespace's mode was painted under the new namespace's stack.
+  // /settings is DB-backed while the layer rows come from the in-memory loader, so the posture can 5xx
+  // on its own and leave the table fully painted and confidently wrong: a namespace in Monitor (only
+  // logging would-blocks) reads "Block — matching policies are enforced".
+  // Same settingsKnown treatment as TargetSettings.tsx and AppContext.
+  const postureKnown = posture.data != null && !posture.error && !posture.stale;
+  const modeLabel = !postureKnown ? "Unknown" : posture.data?.enforcement_mode === "audit" ? "Monitor" : "Block";
+  const modeTitle = !postureKnown
+    ? "Enforcement posture could not be read for this namespace — this is not a claim that policies are enforced"
+    : posture.data?.enforcement_mode === "audit"
+      ? "Monitor — evaluate & log would-block, but allow (observe mode)"
+      : "Block — matching policies are enforced";
 
   const presentSlot = (key: string) => {
     const slot = TEMPLATE.find((s) => s.key === key);
@@ -174,7 +186,7 @@ export function PolicyHierarchy({ namespace, testId = "policy-hierarchy" }: { na
                   : <span style={{ color: "var(--text-secondary)" }}>base</span>}</td>
                 {/* The effective per-ns posture (Block / Monitor), from GET /settings. */}
                 <td style={cell}><span data-testid={`${testId}-mode`} data-mode={modeLabel.toLowerCase()} title={modeTitle}
-                  style={{ fontSize: 11, color: modeLabel === "Monitor" ? "var(--escalate)" : "var(--text-secondary)", border: "1px solid var(--border)", borderRadius: 6, padding: "1px 7px" }}>{modeLabel}</span></td>
+                  style={{ fontSize: 11, color: modeLabel === "Monitor" ? "var(--escalate)" : "var(--text-secondary)", border: "1px solid var(--border)", borderRadius: 6, padding: "1px 7px", opacity: postureKnown ? 1 : 0.65 }}>{modeLabel}</span></td>
                 <td style={cell}><span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--good, #2ecc71)" }}>
                   <span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--good, #2ecc71)" }} /> in force
                 </span></td>

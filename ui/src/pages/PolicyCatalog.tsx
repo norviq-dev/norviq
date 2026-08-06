@@ -1177,6 +1177,15 @@ export function PolicyCatalog() {
   // Catalog can't claim enforcement the namespace isn't doing. Only trust a definite monitor posture for
   // a concrete namespace (the "all" aggregate carries only the cluster default; per-ns overrides vary).
   const catalogMonitor = posture.mode === "audit" && namespace !== "all";
+  // A THIRD state, because "not audit" is not the same as "block". AppContext sets `posture.mode` to
+  // null when the /settings read failed — reachable through the default HTTP rate limiter or any 5xx,
+  // and DURABLE, since posture is not refetched until the namespace changes or postureVersion bumps.
+  // Folding null into the else-branch labelled a Monitor-mode namespace "Enforcing … Loaded into this
+  // cluster's policy engine" indefinitely. Also require the posture to describe the namespace on
+  // screen, the same guard Header.tsx applies: on a switch the previous scope's mode lingers until the
+  // new read settles. "all" is exempt — it legitimately shows the cluster default.
+  const postureForScope = posture.namespace === namespace && !posture.loading;
+  const catalogPostureUnknown = namespace !== "all" && (posture.mode == null || !postureForScope);
   const [searchParams, setSearchParams] = useSearchParams();
   const outlineTealButtonStyle = {
     background: "transparent",
@@ -1966,14 +1975,16 @@ export function PolicyCatalog() {
                     background: "transparent"
                   }}
                 >
-                  <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: catalogMonitor ? "var(--escalate)" : "var(--success, #30a46c)" }} />
-                  {catalogMonitor ? "Monitor · would-block" : "Enforcing"}
+                  <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: catalogMonitor ? "var(--escalate)" : catalogPostureUnknown ? "var(--text-muted)" : "var(--success, #30a46c)" }} />
+                  {catalogMonitor ? "Monitor · would-block" : catalogPostureUnknown ? "Loaded · posture unknown" : "Enforcing"}
                 </span>
               </div>
               <div className="muted" style={{ fontSize: 12.5 }}>
                 {catalogMonitor
                   ? `Loaded into the policy engine and EVALUATED, but ${namespace} is in Monitor mode — matches are logged as would-block, live traffic is not blocked. Distinct from the dry-run drafts above.`
-                  : "Loaded into this cluster's policy engine — grouped by workload, agent-class and namespace tier. Distinct from the dry-run drafts above."}
+                  : catalogPostureUnknown
+                    ? `These policies are loaded into the engine, but ${namespace}'s enforcement posture could not be read — this is NOT a statement that they are blocking. Reload, or check Target Settings.`
+                    : "Loaded into this cluster's policy engine — grouped by workload, agent-class and namespace tier. Distinct from the dry-run drafts above."}
               </div>
             </div>
             {TIERS.map((tier) => {
