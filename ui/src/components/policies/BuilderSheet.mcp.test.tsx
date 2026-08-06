@@ -15,7 +15,13 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { CONDITION_TYPES, CONDITION_TYPE_LABEL, SCALAR_ENUM_VALUES, defaultConditionFor } from "./BuilderSheet";
+import {
+  CONDITION_TYPES,
+  CONDITION_TYPE_LABEL,
+  SCALAR_ENUM_VALUES,
+  assertGroupsCoverConditionTypes,
+  defaultConditionFor
+} from "./BuilderSheet";
 import { compileGraph } from "../../lib/builderCompile";
 import type { BuilderGraph } from "../../lib/builderGraph";
 
@@ -47,6 +53,16 @@ describe("MCP facts are authorable as rules", () => {
   it("scalarFact is offered in the condition palette", () => {
     expect([...CONDITION_TYPES]).toContain("scalarFact");
     expect(CONDITION_TYPE_LABEL.scalarFact).toMatch(/MCP/i);
+  });
+
+  it("and is actually REACHABLE from the dropdown, not just present in the constant", () => {
+    // This assertion exists because the first version of this test did not have it, and was therefore
+    // vacuous: the dropdown renders from CONDITION_TYPE_GROUPS, whose element type
+    // `(typeof CONDITION_TYPES)[number]` checks membership but NOT coverage. scalarFact was added to
+    // CONDITION_TYPES, the test passed, tsc passed, the build passed — and the option was still absent
+    // from the only control an operator can reach. Verified live in the browser, which is how it was
+    // caught. `assertGroupsCoverConditionTypes` throws if the two lists ever diverge again.
+    expect(() => assertGroupsCoverConditionTypes()).not.toThrow();
   });
 
   it("compiles the guardrail shape — block when the pin drifted", () => {

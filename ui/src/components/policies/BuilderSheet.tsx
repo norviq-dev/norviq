@@ -808,11 +808,39 @@ export const CONDITION_TYPE_HINT: Record<(typeof CONDITION_TYPES)[number], strin
 
 /** Groups the type dropdown into optgroups by category — purely a display grouping, the wire value
  *  and CONDITION_TYPES's flat validation universe are untouched. */
+// THE DROPDOWN RENDERS FROM HERE, not from CONDITION_TYPES. The element type is
+// `(typeof CONDITION_TYPES)[number]`, which checks that every entry is a REAL condition type but says
+// nothing about coverage — so a type added to CONDITION_TYPES and not to a group compiles, passes the
+// label/hint exhaustiveness checks, passes a unit test that asserts CONDITION_TYPES, and is still
+// absent from the only control an operator can reach. That is exactly what happened when scalarFact
+// was added: two lists keyed on one concept, the same defect this codebase keeps producing.
+//
+// `assertGroupsCoverConditionTypes` below closes it: the groups must partition CONDITION_TYPES
+// exactly, and the check runs at module load so a mismatch fails the first test that imports this
+// file rather than shipping a control nobody can find.
 const CONDITION_TYPE_GROUPS: { label: string; types: (typeof CONDITION_TYPES)[number][] }[] = [
   { label: "Content", types: ["detector", "keyword", "paramRegex"] },
   { label: "Tool", types: ["toolIn", "sourceVerb"] },
-  { label: "Trust", types: ["trustBelow"] }
+  { label: "Trust", types: ["trustBelow"] },
+  // Facts the ENGINE derived about the call rather than anything in its arguments — the MCP pin status
+  // and scan severity, which plane it is on, its verb, the normalised SQL. This group is what makes
+  // "block when the MCP pin drifted" — the shipped guardrail's shape — expressible in the builder.
+  { label: "Engine facts (MCP, plane, verb, SQL)", types: ["scalarFact"] }
 ];
+
+/** Every condition type must appear in exactly one group, or it is unreachable from the UI. */
+export function assertGroupsCoverConditionTypes(): void {
+  const grouped = CONDITION_TYPE_GROUPS.flatMap((g) => g.types);
+  const missing = CONDITION_TYPES.filter((t) => !grouped.includes(t));
+  const duplicated = grouped.filter((t, i) => grouped.indexOf(t) !== i);
+  if (missing.length || duplicated.length) {
+    throw new Error(
+      `CONDITION_TYPE_GROUPS must partition CONDITION_TYPES — missing: [${missing.join(", ")}]` +
+        `, duplicated: [${duplicated.join(", ")}]`
+    );
+  }
+}
+assertGroupsCoverConditionTypes();
 
 // --- condition chip -------------------------------------------------------------------------------
 

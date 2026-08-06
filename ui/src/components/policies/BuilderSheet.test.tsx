@@ -757,7 +757,7 @@ describe("BuilderSheet — Intent Allowlist mode (Phase 2c)", () => {
 // now the ONLY visual builder, so its dropdown vocabulary can move from wire-ish jargon
 // ("detector"/"tool in"/"source verb") to operator language, grouped by category.
 describe("BuilderSheet — de-jargoned condition-type dropdown (Phase 2f)", () => {
-  it("renders operator-language labels (not the old wire-name jargon), grouped into Content/Tool/Trust optgroups", () => {
+  it("renders operator-language labels (not the old wire-name jargon), grouped into Content/Tool/Trust/Engine-facts optgroups", () => {
     renderSheet();
     buildValidRule();
 
@@ -769,7 +769,13 @@ describe("BuilderSheet — de-jargoned condition-type dropdown (Phase 2f)", () =
       "Param matches regex",
       "Tool name is one of",
       "Source + verb (capability)",
-      "Agent trust below"
+      "Agent trust below",
+      // Engine-derived facts. This entry is the whole reason "block when the MCP pin drifted" is
+      // expressible in the builder at all — before it, scalarFact was in CONDITION_TYPES but absent
+      // from CONDITION_TYPE_GROUPS, so the dropdown (which renders from the groups) never offered it.
+      // Pinning the exact option list here is what makes that divergence fail a test instead of
+      // shipping an unreachable control.
+      "Engine fact is / is not (MCP pin, scan severity, plane, verb, SQL)"
     ]);
     // None of the old bare jargon values are still on screen as visible text.
     expect(screen.queryByText(/^detector$/)).not.toBeInTheDocument();
@@ -777,7 +783,7 @@ describe("BuilderSheet — de-jargoned condition-type dropdown (Phase 2f)", () =
     expect(screen.queryByText(/^source verb$/)).not.toBeInTheDocument();
 
     const groupLabels = Array.from(typeSelect.querySelectorAll("optgroup")).map((g) => g.getAttribute("label"));
-    expect(groupLabels).toEqual(["Content", "Tool", "Trust"]);
+    expect(groupLabels).toEqual(["Content", "Tool", "Trust", "Engine facts (MCP, plane, verb, SQL)"]);
   });
 
   it("shows a one-line hint near the dropdown for whichever type is currently selected, and it updates on type change", () => {
