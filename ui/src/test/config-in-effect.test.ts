@@ -25,7 +25,7 @@
  * the shadow back. These two assertions are the tripwire.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -47,5 +47,40 @@ describe("the vitest config in effect is vite.config.ts, not a stale emitted sha
       // eslint-disable-next-line security/detect-non-literal-fs-filename -- justified above
       expect(existsSync(resolve(ui, shadow)), `${shadow} shadows vite.config.ts — Vite resolves it first`).toBe(false);
     }
+  });
+});
+
+/**
+ * nginx defaults `proxy_read_timeout` to 60s. The `/api/` block did not override it, so any API call
+ * slower than a minute got nginx's own 504 while the API kept working and finished the job.
+ *
+ * Measured on AKS: `POST /api/v1/redteam/suite` returned `504 Gateway Time-out (nginx/1.27.5)` at 61s,
+ * and the run still completed server-side scoring 26/26 — the console's headline security action
+ * reporting failure for something that had succeeded, and the operator's natural retry then hitting a
+ * legitimate "already running" refusal.
+ *
+ * Asserted here because it is INVISIBLE on kind, where the same suite finishes inside the minute. A
+ * default that is only ever wrong on a big or distant cluster is exactly the kind that ships.
+ */
+describe("ui/nginx.conf — the /api proxy must outlast a long admin action", () => {
+  it("sets a read timeout on /api/ well above nginx's 60s default", () => {
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- a fixed repo path, not input
+    const conf = readFileSync(resolve(process.cwd(), "nginx.conf"), "utf8");
+    const apiBlock = conf.slice(conf.indexOf("location /api/"));
+    const block = apiBlock.slice(0, apiBlock.indexOf("}"));
+    const m = /proxy_read_timeout\s+(\d+)s/.exec(block);
+    expect(m, "the /api/ block must set proxy_read_timeout — the default 60s 504s a red-team suite").toBeTruthy();
+    expect(Number(m![1])).toBeGreaterThanOrEqual(120);
+  });
+
+  it("does not hold an /api request open for a whole session the way a websocket may", () => {
+    // /ws/ legitimately uses 3600s. A request that has not answered in minutes is a fault worth
+    // surfacing, not something to hold a worker on, so the two must not be given the same budget.
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- a fixed repo path, not input
+    const conf = readFileSync(resolve(process.cwd(), "nginx.conf"), "utf8");
+    const apiBlock = conf.slice(conf.indexOf("location /api/"));
+    const block = apiBlock.slice(0, apiBlock.indexOf("}"));
+    const m = /proxy_read_timeout\s+(\d+)s/.exec(block);
+    expect(Number(m![1])).toBeLessThan(3600);
   });
 });
