@@ -35,7 +35,7 @@ kubectl create namespace norviq
 # install time so the chart can render its baseline — see policyQuotaNamespaces below.
 kubectl create namespace chatbot-prod
 
-helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.10 -n norviq \
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.0 -n norviq \
   --set 'policyQuotaNamespaces={chatbot-prod}'
 ```
 
@@ -44,7 +44,7 @@ The chart is **cosign-signed** and pins every Norviq image by immutable digest, 
 the signature before installing if you want to:
 
 ```bash
-cosign verify ghcr.io/norviq-dev/charts/norviq:0.1.10 \
+cosign verify ghcr.io/norviq-dev/charts/norviq:0.2.0 \
   --certificate-identity-regexp '^https://github.com/norviq-dev/norviq/.github/workflows/release.yml@.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
@@ -147,7 +147,7 @@ password. After changing it, sign in again to get a session token that isn't fla
 Sidecar injection is off by default (`webhook.injection.enabled: false`). Turn it on:
 
 ```bash
-helm upgrade norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.10 -n norviq --reset-then-reuse-values --set webhook.injection.enabled=true
+helm upgrade norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.0 -n norviq --reset-then-reuse-values --set webhook.injection.enabled=true
 ```
 
 > **Use `--reset-then-reuse-values`, not `--reuse-values`.** `--reuse-values` replays only the values

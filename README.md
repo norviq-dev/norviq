@@ -133,7 +133,7 @@ kubectl create namespace norviq
 
 # Installs from the published, cosign-signed chart. CRDs ship inside it, and every Norviq image is
 # pinned by immutable digest — so this deploys exactly the bytes that release published.
-helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.10 -n norviq \
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.0 -n norviq \
   --set 'policyQuotaNamespaces={default}' \
   --set config.dbSslMode=disable   # the bundled Postgres has no TLS; omit if you point at an external TLS DB
 ```
@@ -172,7 +172,7 @@ namespaces you listed in `policyQuotaNamespaces` — the label alone does nothin
 enabled:
 
 ```bash
-helm upgrade norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.10 -n norviq --reset-then-reuse-values --set webhook.injection.enabled=true
+helm upgrade norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.0 -n norviq --reset-then-reuse-values --set webhook.injection.enabled=true
 kubectl label namespace <your-agent-namespace> norviq-injection=enabled
 ```
 
