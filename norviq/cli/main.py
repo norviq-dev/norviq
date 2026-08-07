@@ -160,11 +160,28 @@ def policy_dry_run(ctx: click.Context, rego_file: str, namespace: str, agent_cla
 @click.argument("agent_class")
 @click.option("--target-type", type=click.Choice(["agent_class", "workload", "namespace"]), default="agent_class")
 @click.option("--target-ns", required=True)
+@click.option("--target-name", default="", help="Workload name. REQUIRED for --target-type workload.")
+@click.option("--target-kind", type=click.Choice(["deployment"]), default="deployment",
+              help="Workload kind. Only `deployment` is enforceable — the evaluator resolves no other kind.")
 @click.option("--mode", type=click.Choice(["block", "audit", "escalate"]), default="block")
 @click.pass_context
-def policy_apply(ctx: click.Context, namespace: str, agent_class: str, target_type: str, target_ns: str, mode: str) -> None:
-    """Apply policy to target scope."""
-    payload = {"target_type": target_type, "target_namespace": target_ns, "enforcement_mode": mode}
+def policy_apply(ctx: click.Context, namespace: str, agent_class: str, target_type: str, target_ns: str,
+                 target_name: str, target_kind: str, mode: str) -> None:
+    """Apply policy to target scope.
+
+    `--target-type workload` needs `--target-name`: the server keys a workload policy at
+    `deployment:<name>`, which is what the engine looks up. Without a name there is no key, and the
+    apply used to silently fall back to a class policy while reporting success.
+    """
+    if target_type == "workload" and not target_name.strip():
+        raise click.UsageError("--target-type workload requires --target-name <workload-name>")
+    payload = {
+        "target_type": target_type,
+        "target_namespace": target_ns,
+        "target_name": target_name,
+        "target_kind": target_kind,
+        "enforcement_mode": mode,
+    }
     data = ctx.obj["client"].post(f"/api/v1/policies/{namespace}/{agent_class}/apply", payload)
     click.echo(f"Applied: {data.get('applied', False)}")
     _ok("policy.apply")

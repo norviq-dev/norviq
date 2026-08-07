@@ -1449,6 +1449,14 @@ class OPAEvaluator:
                 decision=decision.decision,
                 namespace=namespace,
                 agent_class=event.agent_identity.agent_class,
+                # The agent node used to keep add_agent's 0.8 DEFAULT forever, because this call never
+                # passed a score and nothing else ever updated one. The consequences were all downstream
+                # and all silent: the inspector's "Min trust" read 0.80 for every agent; the kill-chain
+                # severity formula collapsed to exactly two values, so the Critical and Low filter chips
+                # and the "Critical paths" stat could never match anything; and
+                # GET /api/v1/graph/critical-paths always returned []. The real score is right here on
+                # the decision we just made — it is the same number _persist_behavior stores.
+                trust_score=decision.trust_score,
             )
             if self._graph_store is not None:
                 await self._graph_store.save(namespace, graph)

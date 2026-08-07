@@ -39,6 +39,14 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 SHIPPED = [
     ROOT / "comprehensive.rego",
     *sorted(p for p in (ROOT / "webhook" / "presets").glob("*.rego") if not p.name.endswith("_test.rego")),
+    # policies/templates/ was NOT in this list, and that omission is why the exact failure this file's
+    # docstring describes shipped again — twice. `tool-allowlist-perimeter.rego` and
+    # `sql-allowlist-deny-by-default.rego` write deny-by-default as `default decision = "block"` with the
+    # allowlist as `decision = "allow" { ... }`. Both pass `opa check` and the Go controller's
+    # validateRego; both were refused by validate_rego_source with 422 "must include block or escalate
+    # decision". These are copy-me templates — the docs point authors at them — so a template the API
+    # will not store is a broken artifact in exactly the sense this file already argues.
+    *sorted(p for p in (ROOT / "policies" / "templates").glob("*.rego") if not p.name.endswith("_test.rego")),
 ]
 
 # Mirrors validate_rego_source. Kept as a literal rather than imported so that RAISING the cap cannot

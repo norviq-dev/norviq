@@ -583,6 +583,20 @@ def assert_decision_resolver(cleaned_rego: str) -> None:
     changing absent-at-runtime to fail-closed would break legitimate NARROW block policies whose whole
     point is to allow every non-matching tool).
     """
+    # DENY-BY-DEFAULT is a resolver, and the strongest one there is. `default decision = "block"`
+    # (with the allowlist expressed as `decision = "allow" { ... }`) binds `decision` on EVERY input,
+    # so the silent-allow this function exists to prevent is structurally impossible — strictly safer
+    # than the complete-rule form below, whose condition can fail to match. This branch used to be
+    # absent, so the shape fell to the final `else` and was rejected with "must include block or
+    # escalate decision". Two SHIPPED templates are written this way —
+    # policies/templates/tool-allowlist-perimeter.rego and sql-allowlist-deny-by-default.rego — and
+    # both were refused with a 422 by this validator while passing `opa check` AND the Go controller's
+    # validateRego. Via the CRD path that is terminal: markDeterministicFailure never retries, so the
+    # CR sat in phase=Error forever while the DB kept serving the previous rego. The contradiction was
+    # already visible below, where this function's own error text instructs authors that "a policy that
+    # is meant to always block should say so explicitly with `default decision = \"block\"`".
+    if re.search(r'\bdefault\s+decision\s*=\s*"(?:block|escalate)"', cleaned_rego):
+        return
     if re.search(r'decision\s*=\s*"(block|escalate)"\s*\{', cleaned_rego):
         has_resolver = True
     elif re.search(r"\b(blocks|escalates|audits)\s*\[", cleaned_rego):
@@ -724,20 +738,92 @@ def _strip_string_literals(rego: str) -> str:
     return re.sub(r'"(?:\\.|[^"\\])*"', '""', rego)
 
 
+def resolve_apply_target_key(body: ApplyRequest, agent_class: str) -> str:
+    """Where an apply actually lands, from `target_type`.
+
+    `target_type` used to be accepted, echoed in the 200 response and written to the audit log
+    (`NRVQ-API-7015`) while the destination was hard-coded to the SOURCE `agent_class` — so
+    `--target-type workload` reported a successful apply and produced a class policy. A knob that is
+    logged but not read is worse than an absent one: the audit trail then records an intent the system
+    never carried out, and the operator holds written evidence of a control they do not have.
+
+    Kept a pure function, deliberately: the endpoint around it needs Postgres, so inlining this logic
+    made it reachable only by tests that skip without a live database — which is how the defect it
+    replaces survived. Mirrors `resolve_policy_key`, since both must produce keys
+    `evaluator._collect_candidates` actually resolves.
+    """
+    target_type = (body.target_type or "agent_class").strip().lower()
+    if target_type in {"agent_class", "class", ""}:
+        return agent_class
+    if target_type == "namespace":
+        return f"namespace:{body.target_namespace}"
+    if target_type == "workload":
+        target_name = (body.target_name or "").strip()
+        if not target_name:
+            raise HTTPException(
+                status_code=422,
+                detail="target_type=workload requires target_name (the workload's name). Without it no "
+                       "workload key can be formed and the apply would silently fall back to a class policy.",
+            )
+        target_kind = (body.target_kind or "deployment").strip().lower()
+        # The engine only ever resolves `deployment:<name>`; minting `statefulset:<name>` would store a
+        # row nothing reads — the same silent no-op this fix exists to remove, in a new costume.
+        if target_kind != "deployment":
+            raise HTTPException(
+                status_code=422,
+                detail=f"target_kind={target_kind!r} is not enforceable: the evaluator only resolves "
+                       "`deployment:<name>` workload keys. Use target_kind=deployment.",
+            )
+        return f"{target_kind}:{target_name}"
+    raise HTTPException(
+        status_code=422, detail="target_type must be one of: agent_class, namespace, workload"
+    )
+
+
 def resolve_policy_key(body: PolicyCreate) -> str:
-    """Resolve a stable loader key for namespace/workload policies."""
+    """Resolve a stable loader key for namespace/workload policies.
+
+    ORDER IS LOAD-BEARING, and getting it wrong silently disarmed every targeted NrvqPolicy.
+
+    `policy_name` used to be checked here, second. But `webhook/controller.go
+    buildPolicySyncPayload` sets `payload.PolicyName = u.GetName()` for EVERY CR, unconditionally —
+    it is a display name, not a statement of scope. So a workload- or namespace-targeted CR resolved
+    to its own `metadata.name` and was stored at `<ns>:<metadata.name>`, a key
+    `evaluator._collect_candidates` never looks up (it builds `<ns>:deployment:<workload>` and
+    `<ns>:namespace:<ns>`). Both shipped examples were inert:
+    `crds/examples/policy-custom-rego.yaml` landed at `<ns>:custom-sql-guard`, and
+    `policy-namespace-baseline.yaml` at `<ns>:prod-baseline`. The CR went Ready, the catalog listed
+    it, `kubectl get nrvqpolicy` looked healthy — and it never took part in a single decision. That
+    is the worst failure mode this product has: enforcement that reports itself as working.
+
+    So an explicit target now OUTRANKS policy_name, which drops to a fallback for the
+    genuinely name-keyed case (no target at all).
+
+    `agent_class` still wins over everything, and must: the console posts its already-resolved loader
+    key there verbatim (`ui/src/lib/builderCompile.ts loaderKeyFor`), and the controller sets it to
+    `__baseline__` for a cluster-priority namespace baseline (`namespaceBaselineKey`). Neither may be
+    second-guessed by a target block — note the controller also back-fills `target.namespace` with the
+    CR's own namespace, so a target is present far more often than it is meaningful.
+
+    Cross-namespace targets are rejected by the controller unless they carry `clusterPriority`
+    (`controller.go:1096-1099`), so for a plain namespace target `target.namespace` is always the CR's
+    namespace and `<ns>:namespace:<ns>` matches what the engine looks up.
+    """
     if body.agent_class:
         return body.agent_class
-    if body.policy_name:
-        return body.policy_name
     target = body.target or {}
     target_kind = str(target.get("kind", "")).strip().lower()
     target_name = str(target.get("name", "")).strip()
     if target_kind and target_name:
         return f"{target_kind}:{target_name}"
+    # A half-specified workload target (kind without name, or name without kind) is NOT a workload
+    # key — falling through to the namespace branch keeps it enforceable instead of minting
+    # `deployment:` or `:billing-api`, neither of which anything looks up.
     target_namespace = str(target.get("namespace", "")).strip()
     if target_namespace:
         return f"namespace:{target_namespace}"
+    if body.policy_name:
+        return body.policy_name
     raise HTTPException(status_code=422, detail="agent_class or policy_name/target is required")
 
 
@@ -1160,11 +1246,19 @@ async def apply_policy(
     # path wrote the evaluator's unread dict and never persisted the target — a 200 that didn't enforce). This
     # routes apply through the same read-path/cache-invalidation create() uses; idempotent for the same-namespace
     # UI flow (re-affirm, no version bump), and it now genuinely enforces cross-target too.
+    # `target_type` used to be accepted, echoed in the response and written to the audit log while the
+    # destination key was hard-coded to the SOURCE agent_class — so `--target-type workload` reported a
+    # successful apply and produced a class policy. A knob that is logged but not read is worse than an
+    # absent one: the audit trail then records an intent the system never carried out.
+    #
+    # The destination key must be one the engine actually looks up, so this mirrors `resolve_policy_key`
+    # exactly (see `_collect_candidates`: `<ns>:namespace:<ns>` and `<ns>:deployment:<workload>`).
+    target_key = resolve_apply_target_key(body, agent_class)
     result = await loader.apply_to_target(
         namespace,
         agent_class,
         body.target_namespace,
-        agent_class,
+        target_key,
         saved_by=str(user.get("sub") or ""),
         enforcement_mode=body.enforcement_mode or "block",
     )
@@ -1178,13 +1272,14 @@ async def apply_policy(
     # Echoing body.enforcement_mode here is a 200 that can lie — apply_to_target's same-rego branch only
     # persists the caller's mode when it actually differs from what's stored (see NRVQ-REG-5019). Re-read the
     # TARGET entry so the response always reflects what's actually in the DB/read-path, not what was requested.
-    persisted_entry = loader.get_entry(body.target_namespace, agent_class)
+    persisted_entry = loader.get_entry(body.target_namespace, target_key)
     persisted_mode = str((persisted_entry or {}).get("enforcement_mode") or body.enforcement_mode or "block")
     log.info(
         "nrvq.api.policy.applied",
         namespace=namespace,
         agent_class=agent_class,
         target_type=body.target_type,
+        target_key=target_key,  # the loader key actually written, not just the requested shape
         target_namespace=body.target_namespace,
         mode=persisted_mode,
         actor=user.get("sub"),

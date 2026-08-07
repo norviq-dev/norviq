@@ -796,12 +796,23 @@ func (c *Controller) updatePolicyStatus(ctx context.Context, u *unstructured.Uns
 	if c.client == nil {
 		return
 	}
+	// matchingWorkloads and blockCount24h are NOT written. They used to be hard-coded to int64(0) on
+	// every status write, and the CRD advertised blockCount24h as a printer column called "Blocks-24h"
+	// — so `kubectl get nrvqpolicy` showed a confident 0 for a policy that was blocking all day, and an
+	// operator reading it concludes their policy has caught nothing. A fabricated metric on a security
+	// product is worse than an absent one.
+	//
+	// They are not computed here on purpose: nothing in the controller knows the count, there is no
+	// per-policy block-count endpoint to ask (audit/top-blocked aggregates by TOOL), and a status write
+	// happens on every reconcile — a rolling 24h figure fetched over the network on that path would be
+	// both expensive and stale between reconciles. Leaving the fields unset makes kubectl print
+	// "<none>", which is honest. The real numbers live in the console's audit view and GET
+	// /api/v1/audit/stats. The schema fields are retained (removing them from a published CRD would be
+	// a breaking change) and their descriptions now say they are unpopulated.
 	status := map[string]interface{}{
-		"phase":             phase,
-		"message":           message,
-		"lastApplied":       time.Now().UTC().Format(time.RFC3339),
-		"matchingWorkloads": int64(0),
-		"blockCount24h":     int64(0),
+		"phase":       phase,
+		"message":     message,
+		"lastApplied": time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := c.updateStatusWithRetry(ctx, policyGVR, u.GetNamespace(), u.GetName(), status); err != nil {
 		slog.Warn("NRVQ-WHK-4040: policy status update failed", "policy", u.GetName(), "namespace", u.GetNamespace(), "error", err)
@@ -1066,9 +1077,65 @@ func validateRego(rego string) error {
 	if strings.Count(cleaned, "\n") > 500 {
 		return fmt.Errorf("policy exceeds 500 line limit")
 	}
+	// MUST match validate_rego_source's cap of 25 (norviq/api/routers/policies.py). This was 5, and a
+	// controller stricter than the API is a policy an operator can never apply through the CRD path at
+	// all: the shipped `strict.rego` preset alone uses 23-26 regex ops. Divergence in EITHER direction
+	// is a defect — laxer here means the CR clears admission and then dies at the API with a 422 that
+	// markDeterministicFailure records once and never retries, so it cannot self-heal.
 	reCount := countRegexBuiltins(module)
-	if reCount > 5 {
-		return fmt.Errorf("too many regex operations (%d) - max 5 per policy", reCount)
+	if reCount > 25 {
+		return fmt.Errorf("too many regex operations (%d) - max 25 per policy", reCount)
+	}
+	// The API rejects network/env-escaping builtins and cross-package `data.` reads; the controller did
+	// not check either, so those policies passed admission and then failed terminally at the API.
+	if err := rejectForbiddenRego(cleaned); err != nil {
+		return err
+	}
+	return nil
+}
+
+// forbiddenRegoTokens mirrors _FORBIDDEN_REGO_TOKENS in norviq/api/routers/policies.py. Keep the two
+// lists in step: a token here that is missing there (or vice versa) recreates the split-brain this
+// function exists to close.
+var forbiddenRegoTokens = []*regexp.Regexp{
+	regexp.MustCompile(`\bhttp\.send\b`),
+	regexp.MustCompile(`\bopa\.runtime\b`),
+	regexp.MustCompile(`\bnet\.[a-z_]+\b`),
+	regexp.MustCompile(`\bio\.[a-z_]+\b`),
+	regexp.MustCompile(`\brego\.parse_module\b`),
+	regexp.MustCompile(`\btrace\s*\(`), // only the call form; a rule named `trace` is legal rego
+	regexp.MustCompile(`\bdata\s*\.\s*norviq\s*\.\s*managed\b`),
+}
+
+var (
+	regoStringLiteral = regexp.MustCompile(`"(?:\\.|[^"\\])*"`)
+	regoPackageDecl   = regexp.MustCompile(`(?m)^\s*package\s+([A-Za-z0-9_.]+)`)
+	regoDataRef       = regexp.MustCompile(`\bdata\.([A-Za-z0-9_.]*)`)
+)
+
+// rejectForbiddenRego is the Go half of _reject_forbidden_rego. `cleaned` is comment-stripped; string
+// literals are removed here so a policy's own `reason` text may mention these words freely — only real
+// rego references are rejected.
+func rejectForbiddenRego(cleaned string) error {
+	dequoted := regoStringLiteral.ReplaceAllString(cleaned, `""`)
+	for _, pattern := range forbiddenRegoTokens {
+		if pattern.MatchString(dequoted) {
+			return fmt.Errorf("policy references a forbidden builtin/cross-package data (network/env access is not permitted)")
+		}
+	}
+	// A `data.` read outside the module's OWN package is the cross-tenant escape: OPA's shared managed
+	// server namespaces every pushed module under data.norviq.managed.<key>, so one namespace can read
+	// another's compiled policy.
+	ownPkg := ""
+	if m := regoPackageDecl.FindStringSubmatch(dequoted); m != nil {
+		ownPkg = m[1]
+	}
+	for _, m := range regoDataRef.FindAllStringSubmatch(dequoted, -1) {
+		ref := m[1]
+		if ownPkg != "" && (ref == ownPkg || strings.HasPrefix(ref, ownPkg+".")) {
+			continue
+		}
+		return fmt.Errorf("policy references a forbidden builtin/cross-package data (network/env access is not permitted)")
 	}
 	return nil
 }

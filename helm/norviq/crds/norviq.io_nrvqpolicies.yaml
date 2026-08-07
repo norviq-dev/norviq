@@ -70,11 +70,26 @@ spec:
                   type: string
                   enum: ["block", "audit", "escalate"]
                   default: block
+                  description: >-
+                    How THIS policy's own verdicts are applied. "audit" is read by the engine
+                    (evaluator._apply_policy_mode): when this policy wins, its block/escalate is softened
+                    to audit and the rule_id is prefixed policy_audit_would_block: — so the policy reports
+                    what it WOULD have done without stopping the call. That makes it the right way to
+                    trial one policy, as opposed to the namespace-wide monitor posture. Exemptions still
+                    hard-block: an admin trust freeze, engine-health and rate-limit verdicts are not
+                    softened. "block" and "escalate" behave identically here — only "audit" is special-
+                    cased, so setting "escalate" does NOT turn a policy's blocks into escalations.
                 preset:
                   type: string
                   enum: ["strict", "moderate", "permissive"]
                 rules:
                   type: array
+                  description: >-
+                    ADVISORY ONLY — accepted and stored, read by nothing. The controller forwards it and
+                    the API's PolicyCreate accepts it, but no evaluation path consumes it: the rules that
+                    actually run are the ones in the policy's rego (spec.rego or spec.preset). It is
+                    useful as documentation of intent next to the rego, and is retained for that; do not
+                    expect listing a rule_id here to enforce it.
                   maxItems: 256
                   items:
                     type: string
@@ -108,8 +123,16 @@ spec:
                   format: date-time
                 matchingWorkloads:
                   type: integer
+                  description: >-
+                    RESERVED, not populated. The controller does not compute this; it is retained only
+                    so an existing consumer does not break. Do not treat an absent value as zero.
                 blockCount24h:
                   type: integer
+                  description: >-
+                    RESERVED, not populated. This was previously written as a hard-coded 0 on every
+                    status update and surfaced as a "Blocks-24h" printer column, so kubectl reported
+                    zero blocks for policies that were blocking. For real block counts use the
+                    console's audit view or GET /api/v1/audit/stats.
       subresources:
         status: {}
       additionalPrinterColumns:
@@ -125,10 +148,6 @@ spec:
           type: string
           jsonPath: .status.phase
           description: Policy status
-        - name: Blocks-24h
-          type: integer
-          jsonPath: .status.blockCount24h
-          description: Blocks in last 24h
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp

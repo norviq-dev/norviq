@@ -452,19 +452,34 @@ async def test_policy_create_regex_text_literal_allowed(real_db: None) -> None:
 
 
 async def test_policy_create_uses_policy_name_when_agent_class_empty(real_db: None) -> None:
-    """Use policy_name as storage key for non-agentClass policy payloads."""
+    """A TARGET outranks policy_name; policy_name keys only the untargeted case.
+
+    This test used to send both a `policy_name` and a namespace `target` and assert the key was
+    `payments-baseline`. That was pinning a defect: the controller sets policy_name on every CR, so
+    preferring it stored the policy at `payments:payments-baseline` — a key
+    `evaluator._collect_candidates` never looks up — and the policy never took part in a decision
+    while reporting itself healthy. See `resolve_policy_key` and tests/api/test_policy_key_targets.py.
+    """
+    rego = ('package norviq\ndefault decision = "allow"\n'
+            'decision = "block" { input.tool_name == "danger" }\nrule_id = "r"\nreason = "x"')
     client = _client()
     try:
-        body = {
-            "namespace": "payments",
-            "agent_class": "",
-            "policy_name": "payments-baseline",
-            "target": {"namespace": "payments"},
-            "rego_source": 'package norviq\ndefault decision = "allow"\ndecision = "block" { input.tool_name == "danger" }\nrule_id = "r"\nreason = "x"',
+        targeted = {
+            "namespace": "payments", "agent_class": "", "policy_name": "payments-baseline",
+            "target": {"namespace": "payments"}, "rego_source": rego,
         }
-        response = client.post("/api/v1/policies", json=body, headers=_auth_headers())
+        response = client.post("/api/v1/policies", json=targeted, headers=_auth_headers())
         assert response.status_code == 200
-        assert response.json()["agent_class"] == "payments-baseline"
+        # the key the engine actually looks up for the namespace tier
+        assert response.json()["agent_class"] == "namespace:payments"
+
+        untargeted = {
+            "namespace": "payments", "agent_class": "", "policy_name": "payments-named",
+            "rego_source": rego,
+        }
+        response = client.post("/api/v1/policies", json=untargeted, headers=_auth_headers())
+        assert response.status_code == 200
+        assert response.json()["agent_class"] == "payments-named"
     finally:
         client.close()
 
