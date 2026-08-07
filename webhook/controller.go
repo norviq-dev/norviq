@@ -822,10 +822,7 @@ func (c *Controller) updatePolicyStatus(ctx context.Context, u *unstructured.Uns
 func (c *Controller) reconcileDeletingPolicy(ctx context.Context, u *unstructured.Unstructured) {
 	name := u.GetName()
 	namespace := u.GetNamespace()
-	delNs, delClass := namespace, name
-	if bns, bclass, ok := namespaceBaselineKey(u); ok {
-		delNs, delClass = bns, bclass
-	}
+	delNs, delClass := policyStorageKey(u)
 	deletePath := fmt.Sprintf("/api/v1/policies/%s/%s", delNs, delClass)
 	if err := c.syncDelete(ctx, deletePath); err != nil {
 		if c.forceFinalizeAfterTimeout(ctx, u, err) {
@@ -912,10 +909,7 @@ func (c *Controller) handlePolicyDelete(obj interface{}) {
 		go func() {
 			defer c.wg.Done()
 			defer func() { <-c.syncSemaphore }()
-			delNs, delClass := namespace, name
-			if bns, bclass, ok := namespaceBaselineKey(u); ok {
-				delNs, delClass = bns, bclass
-			}
+			delNs, delClass := policyStorageKey(u)
 			deletePath := fmt.Sprintf("/api/v1/policies/%s/%s", delNs, delClass)
 			if err := c.syncDelete(context.Background(), deletePath); err != nil {
 				slog.Error("NRVQ-WHK-4031: API delete failed", "policy", name, "error", err)
@@ -1016,6 +1010,43 @@ const baselineFallbackPriority = 1
 // or workload kind+name. Such a policy is that namespace's catch-all and must be stored at
 // <targetNs>:__baseline__ to match the engine's baseline fallback (evaluator._collect_candidates).
 // ok is false for every other policy shape, leaving its keying unchanged.
+// policyStorageKey returns the (namespace, loader key) a CR is actually STORED under, mirroring
+// resolve_policy_key in norviq/api/routers/policies.py.
+//
+// This exists because the delete path used metadata.name while the create path let the API resolve a
+// key from spec.target — and once targeted policies were fixed to key on their target, deleting the CR
+// issued DELETE /policies/<ns>/<metadata.name>, a row that does not exist. kubectl reported the CR
+// gone and the policy KEPT ENFORCING, with no way to remove it short of the API directly. Consistently
+// wrong was survivable; half-fixed was worse. Both sides must derive the key the same way, so they
+// derive it here.
+//
+// Precedence must match the Python exactly: agentClass, then workload kind+name, then target namespace,
+// then metadata.name as the untargeted fallback.
+func policyStorageKey(u *unstructured.Unstructured) (ns, class string) {
+	namespace := u.GetNamespace()
+	if bns, bclass, ok := namespaceBaselineKey(u); ok {
+		return bns, bclass
+	}
+	spec, _, _ := unstructured.NestedMap(u.Object, "spec")
+	target, _ := spec["target"].(map[string]interface{})
+	if target != nil {
+		if agentClass, _ := target["agentClass"].(string); agentClass != "" {
+			return namespace, agentClass
+		}
+		kind, _ := target["kind"].(string)
+		wlName, _ := target["name"].(string)
+		if kind != "" && wlName != "" {
+			return namespace, fmt.Sprintf("%s:%s", strings.ToLower(strings.TrimSpace(kind)), strings.TrimSpace(wlName))
+		}
+		// The controller back-fills target.namespace with the CR's namespace when absent, so this
+		// branch is reached by any target that names neither a class nor a workload.
+		if targetNs, _ := target["namespace"].(string); targetNs != "" {
+			return namespace, fmt.Sprintf("namespace:%s", strings.TrimSpace(targetNs))
+		}
+	}
+	return namespace, u.GetName()
+}
+
 func namespaceBaselineKey(u *unstructured.Unstructured) (ns, class string, ok bool) {
 	spec, _, _ := unstructured.NestedMap(u.Object, "spec")
 	if spec == nil {

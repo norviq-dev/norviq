@@ -395,10 +395,17 @@ func TestHandlePolicy_MalformedObjectNoPanic(t *testing.T) {
 	controller.handlePolicy("unexpected-object", "created")
 }
 
+// The CR below targets agentClass=customer-support, so resolve_policy_key stores it at
+// default:customer-support. This test used to expect the delete at default/chatbot-strict —
+// metadata.name — which means it was asserting a real defect: deleting an agentClass-targeted
+// NrvqPolicy issued a DELETE for a row that does not exist, so the policy stayed in the API and kept
+// enforcing after kubectl reported the CR gone. That predates the targeted-policy key fix; the fix
+// merely widened the same mismatch to workload and namespace targets. Both sides now derive the key
+// through policyStorageKey.
 func TestHandlePolicyDelete_TriggersDeleteSync(t *testing.T) {
 	var deleteCalls int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete && r.URL.Path == "/api/v1/policies/default/chatbot-strict" {
+		if r.Method == http.MethodDelete && r.URL.Path == "/api/v1/policies/default/customer-support" {
 			atomic.AddInt32(&deleteCalls, 1)
 			w.WriteHeader(http.StatusOK)
 			return
@@ -735,10 +742,12 @@ func TestHandlePolicy_WithFinalizerStillSyncsUpdates(t *testing.T) {
 	}
 }
 
+// Same correction as TestHandlePolicyDelete_TriggersDeleteSync: this CR targets
+// agentClass=customer-support, so that is where the API stores it and where the delete must go.
 func TestHandlePolicy_DeletingWithFinalizerReconcilesDelete(t *testing.T) {
 	var deleteCalls int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete && r.URL.Path == "/api/v1/policies/default/chatbot-strict" {
+		if r.Method == http.MethodDelete && r.URL.Path == "/api/v1/policies/default/customer-support" {
 			atomic.AddInt32(&deleteCalls, 1)
 			w.WriteHeader(http.StatusOK)
 			return
