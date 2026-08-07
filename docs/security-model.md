@@ -198,7 +198,7 @@ implicit:
 | A manipulated / prompt-injected agent making tool calls it shouldn't | **Yes** — the core case | Policy on tool-call inputs + trust escalation |
 | A **compromised co-resident pod** dialing other pods' IPs | **Yes** | OPA binds loopback and is fronted by no Service; internal mTLS on the API path |
 | An agent workload trying to read the sidecar's mTLS key | **Yes** | tmpfs is mounted into the sidecar only, never the app container or the shared socket volume |
-| A pod author self-exempting from injection | **Yes, if you close it** | `webhook.injection.allowPodOptOut=false` (default `true`) + RBAC on pod labels |
+| A pod author self-exempting from injection | **Yes, if you close it** | `webhook.injection.allowPodOptOut=false` (default `true`) + RBAC on pod labels **and on `norviq.io/agent-class`** — see the note below, `allowPodOptOut` alone does not close it |
 | An authenticated user reaching another tenant's data | **Yes** | JWT namespace claim binding (`scoped_namespace` / `read_namespace`), per-tenant OPA packages |
 | A client asserting its own trust score | **Yes** | `trust_score` stripped from the request and recomputed server-side |
 | Agent code that bypasses the SDK entirely | **Partially** | `agentEgressPolicy` bounds it at the network layer; cooperative design cannot fully close it |
@@ -256,9 +256,14 @@ every scoped endpoint is single-tenant.
 These are stated intentionally, as operator responsibilities and threat-model notes — not gaps that
 were missed:
 
-- **Sidecar injection is opt-out-able by default.** The mutating webhook injects into every pod in a
-  namespace labeled `norviq-injection=enabled`, *unless* the pod itself carries
-  `norviq-injection=disabled` or the `norviq.io/skip-injection` annotation. This is documented,
+- **Sidecar injection is opt-out-able by default, in two ways.** Under the shipped default
+  `webhook.injection.gateOnlyAgentPods: true`, the webhook's `objectSelector` routes a pod to the
+  injector only if it carries `norviq.io/agent-class`; the pod is then injected *unless* it also carries
+  `norviq-injection=disabled` or the `norviq.io/skip-injection` annotation. So there are two exits, and
+  `allowPodOptOut=false` closes only the second: a pod author who simply OMITS the agent-class label is
+  never routed to the webhook at all, and no admission control runs. Closing self-exemption therefore
+  needs RBAC on the agent-class label (or an external admission policy requiring it on agent workloads),
+  not just `allowPodOptOut=false`. This is documented,
   intentional per-pod flexibility (e.g. exempting an infra pod from a labeled namespace) — but it also
   means a workload that can set its own pod annotations/labels before admission can opt itself out of
   enforcement. **Set `webhook.injection.allowPodOptOut=false`** (env `NRVQ_ALLOW_POD_OPT_OUT`, default

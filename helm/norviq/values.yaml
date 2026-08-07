@@ -262,15 +262,13 @@ api:
   # so upgrades never invalidate existing sessions/JWTs. Set an explicit value here to pin your own
   # secret instead (e.g. rotation, multi-cluster fleet trust) — it always wins over auto-generation.
   secretKey: "change-me-in-production"
-  env:
-    - name: NRVQ_DB_SSL_MODE
-      value: "require"
-    - name: NRVQ_DB_POOL_MAX_OVERFLOW
-      value: "10"
-    - name: NRVQ_DB_POOL_TIMEOUT
-      value: "10"
-    - name: NRVQ_DB_COMMAND_TIMEOUT
-      value: "10"
+  # An `api.env:` list used to sit here. No template ever read it — api-deployment.yaml's env surface is
+  # envFrom(norviq-config, norviq-secrets) plus an optional BYO-datastore var — so every entry was inert.
+  # Worse, it advertised NRVQ_DB_SSL_MODE: "require" while norviq-config renders "disable" for the
+  # bundled non-TLS StatefulSet, so it read as a security assurance the pods did not have. The real keys
+  # are config.dbPoolMaxOverflow / dbPoolTimeout / dbCommandTimeout, and TLS is chosen by the
+  # norviq.dbSslMode helper (see config.dbSslMode). Removed rather than wired: wiring it as written
+  # would set sslmode=require against the bundled Postgres and break a stock install on first boot.
 
 ui:
   replicas: 1
@@ -417,9 +415,17 @@ webhook:
     # so this takes effect as pods are recreated.
     #
     # UPGRADE CARE: if you have agent pods relying on namespace-wide injection WITHOUT an agent-class
-    # label, they stop being injected on their next restart. That is silent by nature, so the console
-    # raises an "ungoverned agent pods" warning for exactly this case — or set this to false to keep the
-    # previous namespace-wide behaviour.
+    # label, they stop being injected on their next restart, and that is SILENT — the pod starts fine,
+    # it is simply ungoverned.
+    #
+    # This comment used to promise that "the console raises an 'ungoverned agent pods' warning for
+    # exactly this case". It does not: system_health.py reports only the fixed infra verdicts read back
+    # from audit_log, and nothing anywhere computes injected-vs-expected. Saying otherwise told an
+    # operator a compensating control existed, which is worse than the gap itself. Until it is built,
+    # verify by hand after an upgrade:
+    #   kubectl get pods -n <ns> -l norviq.io/agent-class -o name          # will be injected
+    #   kubectl get pods -n <ns> -L norviq.io/agent-class                  # blanks are NOT
+    # Or set this to false to keep the previous namespace-wide behaviour.
     gateOnlyAgentPods: true
     # Admission failure posture for the injector. "Fail" (DEFAULT) = fail-CLOSED: if the injector is
     # unavailable, pod creation in an injection-enabled namespace is REJECTED so an agent pod can never

@@ -169,13 +169,15 @@ workloads — the webhook's namespace selector matches the key `norviq-injection
 kubectl label namespace chatbot-prod norviq-injection=enabled
 ```
 
-Every new pod created in `chatbot-prod` from now on gets the Norviq sidecar injected
-automatically (a pod can opt out individually with the label
-`norviq-injection=disabled` or the annotation `norviq.io/skip-injection: "true"`). By default the
+That opts the NAMESPACE in. Injection still requires the per-pod agent-class label below — under the
+shipped default (`webhook.injection.gateOnlyAgentPods: true`) an unlabelled pod is never routed to the
+webhook, so it starts un-injected and ungoverned, silently. A labelled pod can still opt out with the
+label `norviq-injection=disabled` or the annotation `norviq.io/skip-injection: "true"`. By default the
 sidecar runs in `sidecarMode: proxy` — it forwards each tool call to the central API's
 `/api/v1/evaluate` over a namespace-scoped service token; nothing is evaluated per-pod. Give your
 agent's **pod** the label `norviq.io/agent-class: <class>` (the injector reads it as
-`NRVQ_AGENT_CLASS_LABEL`, `webhook/config.go`) so class-tier policy (below) actually matches it.
+`NRVQ_AGENT_CLASS_LABEL`, `webhook/config.go`). This label does two jobs: it is what makes the pod
+eligible for injection at all, and it is what class-tier policy (below) matches on.
 
 ## 5. Apply your first policy
 

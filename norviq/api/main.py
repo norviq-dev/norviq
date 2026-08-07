@@ -69,19 +69,15 @@ async def _connect_with_backoff(coro_factory, name: str, retry_code: str, fail_c
             delay *= 2
 
 
-async def run_migrations() -> None:
-    """Apply pending Alembic migrations before cache warm-up."""
-    try:
-        from alembic import command
-        from alembic.config import Config
-
-        cfg = Config("alembic.ini")
-        db_url = settings.pg_url.strip().strip("\"'")
-        cfg.set_main_option("sqlalchemy.url", db_url.replace("+asyncpg", ""))
-        command.upgrade(cfg, "head")
-        log.info("nrvq.db.migrations_applied", code="NRVQ-DB-9032")
-    except Exception as exc:  # pragma: no cover - startup best-effort
-        log.error("nrvq.db.migration_failed", error=str(exc), code="NRVQ-DB-9033")
+# SCHEMA OWNERSHIP: there is no Alembic in this product, deliberately. Schema comes from
+# create_tables() (advisory-lock-serialized create_all) plus ensure_schema_compatibility()'s
+# idempotent ADD COLUMN IF NOT EXISTS statements, both in norviq/api/db/session.py. A run_migrations()
+# used to sit here calling Config("alembic.ini") -> command.upgrade(cfg, "head"), but no alembic.ini,
+# env.py or versions/ has ever existed in this tree and Dockerfile.api copies only norviq/ and
+# policies/. So it raised CommandError on EVERY boot and logged NRVQ-DB-9033 at ERROR — four times per
+# pod at the default worker count. That taught operators to ignore a red startup line, which is the
+# real cost; it also pulled alembic into the wheel and both images for nothing. Removed rather than
+# repaired: adding a migrations tree would mean two systems racing to own the same DDL.
 
 
 @asynccontextmanager
@@ -139,9 +135,6 @@ async def lifespan(app: FastAPI):
     await app.state.audit_retention_pruner.start()
     app.state.loader = PolicyLoader(app.state.cache, app.state.evaluator)
     app.state.evaluator.bind_loader(app.state.loader)
-    log.info("nrvq.startup.migrations_starting", code="NRVQ-DB-DEBUG-3")
-    await run_migrations()
-    log.info("nrvq.startup.migrations_done", code="NRVQ-DB-DEBUG-4")
     await ensure_schema_compatibility()
     # Seed the default admin (must_change=True) after the schema exists so a fresh install can log in.
     await auth_login.ensure_default_admin()

@@ -181,7 +181,13 @@ kubectl label namespace <your-agent-namespace> norviq-injection=enabled
 release that introduced one fails with `nil pointer evaluating interface {}`. On older Helm, pass
 your own `-f values.yaml`.
 
-Every new pod in a labeled namespace then gets the enforcement sidecar injected.
+Then label each agent **pod** `norviq.io/agent-class=<class>` — that pod label is what gets the
+enforcement sidecar injected, not the namespace label alone. The namespace label opts the namespace
+in; the pod label says which pods are agents. A pod without it starts un-injected and ungoverned.
+
+That is deliberate (`webhook.injection.gateOnlyAgentPods`, default `true`): with `failurePolicy: Fail`,
+routing every pod in the namespace through the webhook would make Norviq's availability a precondition
+for starting that namespace's database and ingress too. Set it to `false` for namespace-wide injection.
 
 > Trying it locally? A single-node [kind](https://kind.sigs.k8s.io/) cluster is enough to evaluate
 > everything except multi-node HA. See **[docs/getting-started.md](docs/getting-started.md)**.

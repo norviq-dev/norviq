@@ -11,7 +11,12 @@ images:
     pullPolicy: Always
 
 api:
-  secretKey: "dev-secret-key"
+  # MUST be >= 16 chars and not the "change-me-in-production" sentinel, or the API refuses to start:
+  # config.requireStrongSecret defaults true (values.yaml), configmap.yaml sets NRVQ_REQUIRE_STRONG_SECRET
+  # and main.py's startup gate raises on a weak key. This profile previously pinned "dev-secret-key" —
+  # 14 chars — so the API CrashLooped on any install that used it. It is a fixed, non-secret dev value on
+  # purpose: a dev cluster wants a stable JWT signing key across reinstalls so sessions survive.
+  secretKey: "dev-only-not-a-secret-000000000000"
 
 redis:
   password: "dev-redis-password"
