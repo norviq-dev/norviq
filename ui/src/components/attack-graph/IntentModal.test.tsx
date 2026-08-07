@@ -511,3 +511,95 @@ describe("IntentModal — a promoted verb goes to ONE real namespace or nowhere"
     expect(promote.getAttribute("title")).not.toMatch(/this namespace/i);
   });
 });
+
+/**
+ * "Granted to" must name the class the draft is ACTUALLY created for — one class.
+ *
+ * `createIntentDraft`, `fetchIntentSuggest` and `fetchIntentCoverage` all take `activeCls`, but the
+ * per-path branch used to render every source class that reaches the tool. On a busy namespace that is
+ * forty-odd names, including e2e debris, under a heading reading "Intended behaviour · <one class>"
+ * and followed by "everything else is denied by default". The only available reading was that applying
+ * it would grant, or constrain, all of them.
+ *
+ * Reported by a product user reading the screen — there was no test of any kind on this line, at any
+ * level, which is why it shipped.
+ */
+describe("IntentModal — the grant target is one class, not everyone who reaches the tool", () => {
+  // `alsoReach` compares each path's SOURCE CLASS against the active class, so the fixture has to put
+  // the active class on its own path — otherwise the class being granted counts itself as an "other"
+  // and the numbers are off by one. (That is exactly what my first draft of this test got wrong: it
+  // reused the shared PATH, whose src is `billing-runner` while cls is `payments`.)
+  const from = (src: string, id: string): ThreatPath => ({
+    ...PATH,
+    id,
+    src,
+    // Same tool — that is precisely what made the old code list them all as the grant target.
+    tool: "issue_refund"
+  });
+  const MINE = from("payments", "p2");
+
+  function renderCrowded() {
+    return render(
+      <MemoryRouter>
+        <IntentModal
+          ns="payments"
+          cls="payments"
+          tool="issue_refund"
+          paths={[MINE, from("q2-manual-1786050017202", "p3"), from("bce2e-create", "p4"), from("test", "p5")]}
+          onClose={() => {}}
+        />
+      </MemoryRouter>
+    );
+  }
+
+  it("names only the active class, never the other classes that reach the same tool", async () => {
+    server.use(
+      suggestHandler(),
+      http.post("/api/v1/threats/intent-coverage", () =>
+        HttpResponse.json({ rego: "package x", covered: [], residual: [], covered_count: 0, total: 4 })
+      )
+    );
+    renderCrowded();
+
+    const granted = await screen.findByText(/Granted to/i);
+    expect(granted).toHaveTextContent("payments");
+    // FAIL-ON-BUG: these are other classes' names. A grant sentence must not contain them.
+    expect(granted).not.toHaveTextContent("q2-manual-1786050017202");
+    expect(granted).not.toHaveTextContent("bce2e-create");
+  });
+
+  it("still surfaces those other classes — as a warning, not as the grant target", async () => {
+    server.use(
+      suggestHandler(),
+      http.post("/api/v1/threats/intent-coverage", () =>
+        HttpResponse.json({ rego: "package x", covered: [], residual: [], covered_count: 0, total: 4 })
+      )
+    );
+    renderCrowded();
+
+    // The fact is worth keeping: those classes reach the same tool and each needs its own intent.
+    // What changed is that it is stated as what it is instead of as who this policy grants.
+    const note = await screen.findByTestId("intent-also-reach");
+    expect(note).toHaveTextContent(/3 other classes also reach/i);
+    expect(note).toHaveTextContent(/does not constrain them/i);
+  });
+
+  it("says nothing about other classes when the active class is the only one reaching the tool", async () => {
+    server.use(
+      suggestHandler(),
+      http.post("/api/v1/threats/intent-coverage", () =>
+        HttpResponse.json({ rego: "package x", covered: [], residual: ["p2"], covered_count: 0, total: 1 })
+      )
+    );
+    render(
+      <MemoryRouter>
+        <IntentModal ns="payments" cls="payments" tool="issue_refund" paths={[MINE]} onClose={() => {}} />
+      </MemoryRouter>
+    );
+
+    await screen.findByText(/Granted to/i);
+    // A warning that fires when there is nothing to warn about is noise, and noise is how a warning
+    // gets trained out of existence before the one time it matters.
+    expect(screen.queryByTestId("intent-also-reach")).not.toBeInTheDocument();
+  });
+});
