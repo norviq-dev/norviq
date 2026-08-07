@@ -107,6 +107,12 @@ def _request_payload(attack: AttackDefinition, target_agent: str, target_namespa
             "namespace": target_namespace,
             "agent_class": target_agent,
         },
+        # EXPLICIT, not inherited. This payload used to omit `framework` and rely on
+        # EvaluateRequest defaulting it to "redteam" — which is what tagged these fabricated attacks
+        # as non-real everywhere (`audit_row_is_non_real`). That default is being removed, because it
+        # also silently tagged REAL operator traffic posted over raw HTTP. The suite that genuinely is
+        # synthetic now declares itself, the same way the console-driven runner already does.
+        "framework": "redteam",
         "session_id": f"redteam-{attack.id}",
         "trust_score": 0.3 if attack.category == AttackCategory.TRUST_MANIPULATION else 0.8,
     }

@@ -246,7 +246,27 @@ class EvaluateRequest(BaseModel):
     session_id: str = ""
     trust_score: float = 0.0
     call_depth: int = 0
-    framework: str = "redteam"
+    # "" — NOT "redteam". `framework == "redteam"` is this product's canonical marker for FABRICATED
+    # traffic (norviq/api/synthetic.py::audit_row_is_non_real), and rows carrying it are excluded from
+    # the Overview KPIs, MITRE/compliance evidence, coverage efficacy, intent proposals and dry-run
+    # replay, and hidden behind the Audit Log's default-ON "Real traffic only" filter.
+    #
+    # Defaulting it here meant the RAW-HTTP integration path asserted "this call was fabricated" on
+    # behalf of callers who never said so — and raw HTTP is exactly what the shipped docs teach
+    # (docs/getting-started.md's curl examples never mention the field). An operator following the
+    # documentation would see their real enforcement appear in the raw audit log and count for nothing:
+    # zero KPIs, zero compliance evidence, and a Compliance pack reporting their real blocks as
+    # "synthetic events excluded". Undercounted enforcement evidence is the worst failure mode for a
+    # product whose output is compliance evidence.
+    #
+    # The sidecar, the SDK, the MCP firewall and the console runner all set this explicitly and are
+    # unaffected. The one caller that genuinely relied on the default — redteam/simulator.py's suite —
+    # now declares "redteam" itself, so the two changes are a pair: removing this default alone would
+    # have flipped fabricated attacks into real traffic and INFLATED the same evidence.
+    #
+    # The SDK's own ToolCallEvent has always defaulted this to "" (sdk/core/events.py); the HTTP
+    # boundary was the only place that disagreed.
+    framework: str = ""
     # Optional MCP protocol context (server id, transport, pin status, Gate-A scan severity). Absent
     # for every non-MCP caller, so this is additive: an existing sidecar/SDK body is unchanged and
     # every existing policy still sees exactly the input document it saw before.
