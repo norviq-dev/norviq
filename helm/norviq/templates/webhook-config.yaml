@@ -1,7 +1,9 @@
 {{- if and .Values.webhook.enabled .Values.webhook.injection.enabled }}
 # Sidecar-injector admission webhook. caBundle is patched at install time by the webhook-cert-job hook
 # (self-signed cert acts as its own CA). failurePolicy defaults to Fail (fail-closed — an agent pod can't
-# start un-guarded); override via webhook.injection.failurePolicy.
+# start un-guarded -- for pods this webhook ROUTES; see the objectSelector below, which under
+# gateOnlyAgentPods limits that to pods labelled norviq.io/agent-class); override via
+# webhook.injection.failurePolicy.
 {{- /* PRESERVE the cert-job-patched caBundle across `helm upgrade`. The hook owns this field (kubectl
        field-manager); if we re-render the literal "" here, server-side apply sees a value DIVERGENT from
        the hook's and fails the whole release with a caBundle field-manager conflict. Re-emitting the

@@ -263,14 +263,16 @@ were missed:
   `allowPodOptOut=false` closes only the second: a pod author who simply OMITS the agent-class label is
   never routed to the webhook at all, and no admission control runs. Closing self-exemption therefore
   needs RBAC on the agent-class label (or an external admission policy requiring it on agent workloads),
-  not just `allowPodOptOut=false`. This is documented,
-  intentional per-pod flexibility (e.g. exempting an infra pod from a labeled namespace) — but it also
-  means a workload that can set its own pod annotations/labels before admission can opt itself out of
-  enforcement. **Set `webhook.injection.allowPodOptOut=false`** (env `NRVQ_ALLOW_POD_OPT_OUT`, default
-  `true` for backward compatibility) to make the injector ignore the per-pod opt-out entirely, so no pod
-  author in a labeled namespace can self-exempt and the namespace-uniform guarantee holds
-  (`webhook/handler.go`). Otherwise treat namespace labeling as the enforcement boundary and restrict
-  who can set those labels/annotations via RBAC.
+  not just `allowPodOptOut=false`.
+
+  The second exit is documented, intentional per-pod flexibility (e.g. exempting an infra pod from a
+  labeled namespace) — but it means a workload that can set its own pod annotations/labels before
+  admission can opt itself out of enforcement. **Set `webhook.injection.allowPodOptOut=false`** (env
+  `NRVQ_ALLOW_POD_OPT_OUT`, default `true` for backward compatibility) to make the injector ignore the
+  per-pod opt-out entirely (`webhook/handler.go`). That closes the second exit only; it does **not**
+  restore a namespace-uniform guarantee, because a pod omitting `norviq.io/agent-class` never reaches
+  the injector. So the enforcement boundary is the **pod** label, not the namespace label: restrict who
+  can set `norviq.io/agent-class` and the opt-out label/annotation via RBAC.
 - **CRD-level policy business rules are enforced by the controller, not at admission.**
   `webhook/controller.go` validates `NrvqPolicy` semantics — cross-namespace targets, `clusterPriority`
   bounds (500-1000, restricted to the admin policy namespace), and Rego content — when it syncs a CRD to

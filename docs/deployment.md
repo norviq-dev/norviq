@@ -79,6 +79,10 @@ namespace of agent pods:
 kubectl label namespace my-agents norviq-injection=enabled
 ```
 
+That opts the namespace in. Injection also needs the per-pod label `norviq.io/agent-class=<class>`:
+under the shipped default (`webhook.injection.gateOnlyAgentPods: true`) an unlabelled pod is never
+routed to the injector and starts ungoverned.
+
 Two overlays worth knowing for local work:
 
 - **`values-dev.yaml`** — fixed dev secrets (`api.secretKey`, DB/Redis passwords), `logLevel: DEBUG`,

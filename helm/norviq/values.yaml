@@ -428,8 +428,10 @@ webhook:
     # Or set this to false to keep the previous namespace-wide behaviour.
     gateOnlyAgentPods: true
     # Admission failure posture for the injector. "Fail" (DEFAULT) = fail-CLOSED: if the injector is
-    # unavailable, pod creation in an injection-enabled namespace is REJECTED so an agent pod can never
-    # start un-guarded (correct for a policy-enforcement product; the webhook is HA — 2 replicas + PDB,
+    # unavailable, creation of a pod the webhook ROUTES is REJECTED so a routed pod can never start
+    # un-guarded. Note what that does NOT cover: with gateOnlyAgentPods: true (above) only pods carrying
+    # norviq.io/agent-class are routed, so an unlabelled pod starts ungoverned no matter what this is set
+    # to (correct for a policy-enforcement product; the webhook is HA — 2 replicas + PDB,
     # and the control-plane/kube-system namespaces are excluded from the selector so this never self-
     # deadlocks). Set "Ignore" (fail-open) only for a dev/eval cluster where an un-injected pod is
     # acceptable.
@@ -439,9 +441,10 @@ webhook:
     # webhook.pdb.enabled=true, otherwise one drain can evict both replicas and reject pod creation in
     # every governed namespace until they reschedule.
     # Honor the per-pod injection opt-out (norviq-injection=disabled label / norviq.io/skip-injection
-    # annotation)? Default true (backward-compatible). Set false to make injection namespace-uniform — a
-    # pod author in an injection-enabled namespace cannot self-exempt their workload from
-    # enforcement (a real bypass otherwise). Pair with RBAC on pod label/annotation writes.
+    # annotation)? Default true (backward-compatible). Set false so a ROUTED pod cannot self-exempt (a
+    # real bypass otherwise). This is not namespace-uniform while gateOnlyAgentPods is true: omitting
+    # norviq.io/agent-class is an earlier exit this does not close. Pair with RBAC on the agent-class
+    # label as well as on pod opt-out label/annotation writes.
     allowPodOptOut: true
     # First-party bootstrap image for the TLS hooks. It carries openssl (self-sign the internal CA)
     # and curl (talk to the API server with the pod's service-account token). It deliberately does

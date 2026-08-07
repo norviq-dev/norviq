@@ -72,20 +72,26 @@ Each listed namespace must already exist. The same list also drives the optional
 ## 4. Sidecar injection (turnkey TLS)
 - Enable: `--set webhook.injection.enabled=true`. A post-install hook Job self-signs the serving
   cert, writes the `norviq-webhook-tls` secret, and patches the webhook `caBundle` (no cert-manager
-  required). Opt namespaces in: `kubectl label ns <ns> norviq-injection=enabled`.
+  required). Opt namespaces in: `kubectl label ns <ns> norviq-injection=enabled`, then label each agent
+  **pod** `norviq.io/agent-class=<class>` — under the default `gateOnlyAgentPods: true` the namespace
+  label alone does not inject anything.
 - Verify: `kubectl get mutatingwebhookconfiguration norviq-sidecar-injector -o jsonpath='{.webhooks[0].clientConfig.caBundle}' | head -c 20` is non-empty.
 - Two injection knobs decide whether enforcement can be dodged. Both already default to the safe
   value; changing them is a deliberate weakening:
   - `webhook.injection.failurePolicy: Fail` (default) — fail-**closed**: if the injector is
-    unavailable, pod creation in an injection-enabled namespace is rejected, so an agent pod can never
-    start un-guarded. `Ignore` (fail-open) is a dev/eval setting. The webhook is HA (2 replicas + PDB
+    unavailable, creation of a pod the webhook *routes* is rejected, so a routed pod can never start
+    un-guarded. It does NOT mean every agent pod is guarded: under the default
+    `gateOnlyAgentPods: true` only pods carrying `norviq.io/agent-class` are routed, and an unlabelled
+    pod starts ungoverned without admission ever running. `Ignore` (fail-open) is a dev/eval setting. The webhook is HA (2 replicas + PDB
     in the prod overlay) and control-plane namespaces are excluded from the selector, so `Fail` does
     not self-deadlock.
   - `webhook.injection.allowPodOptOut: true` (default, backward-compatible) — honors the per-pod
     `norviq-injection=disabled` label / `norviq.io/skip-injection` annotation. That means **a pod
     author in an injection-enabled namespace can exempt their own workload from enforcement.** Set it
-    `false` to make injection namespace-uniform, and pair that with RBAC on pod label/annotation
-    writes.
+    `false` so a routed pod cannot self-exempt. That is not namespace-uniform under the default
+    `gateOnlyAgentPods: true` — omitting `norviq.io/agent-class` is a second, earlier exit that this
+    setting does not close. Pair it with RBAC on the agent-class label AND on the opt-out
+    label/annotation writes.
 - Injected sidecars are pinned to the immutable `-sha` image; the controller refuses a mutable-tag
   (`:latest` / `…-latest`) override and keeps the pinned image, logging `NRVQ-WHK-4036`.
 

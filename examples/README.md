@@ -63,8 +63,9 @@ Norviq has two (see [docs/guides/integrating-agents.md](../docs/guides/integrati
 
 - **SDK** — in-process interception, what `chatbot/` uses. Pick it when you want the block to raise
   inside your agent process, or you're running outside Kubernetes.
-- **Sidecar** — the mutating webhook injects an enforcement sidecar into pods in any namespace
-  labelled `norviq-injection=enabled`; no application code changes. Covered in
+- **Sidecar** — the mutating webhook injects an enforcement sidecar into pods labelled
+  `norviq.io/agent-class`, in namespaces labelled `norviq-injection=enabled` (both are required by
+  default); no application code changes. Covered in
   [docs/getting-started.md](../docs/getting-started.md).
 
 Both produce the same `allow`/`block`/`escalate`/`audit` decisions from the same policy.
