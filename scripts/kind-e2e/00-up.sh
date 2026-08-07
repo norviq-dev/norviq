@@ -15,6 +15,20 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CLUSTER="${NRVQ_KIND_CLUSTER:-norviq-local}"
+# EVERY cluster-touching command below goes through these. They are not a tidiness measure.
+#
+# This script issued `kubectl apply`, `kubectl create namespace` and `helm upgrade --install` with no
+# --context at all, so a script whose entire purpose is a LOCAL kind cluster targeted whatever context
+# happened to be current. Run with a remote context selected, it would have applied CRDs there, created
+# seven namespaces there, and helm-installed values-light.yaml over that release — repointing it at
+# `norviq/…` images that exist only on the kind node, with pullPolicy=IfNotPresent, i.e. an
+# ImagePullBackOff on every component of a cluster it was never meant to touch.
+#
+# It nearly happened: this ran with the AKS context current and was stopped only because that cluster's
+# DNS failed to resolve at that moment, so the first apply errored and `set -e` aborted. "A remote
+# cluster was saved by a DNS outage" is not a safety property.
+KCTX=(--context "kind-${CLUSTER}")
+KUBECTL=(kubectl "${KCTX[@]}")
 NS="${NRVQ_NAMESPACE:-norviq}"
 UI_PORT="${NRVQ_UI_PORT:-3400}"
 TOKEN_FILE="${NRVQ_TOKEN_FILE:-/tmp/nrvq-signin-token.txt}"
@@ -45,7 +59,7 @@ if kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
 else
   kind create cluster --name "$CLUSTER" --wait 120s
 fi
-kubectl cluster-info --context "kind-${CLUSTER}" >/dev/null
+"${KUBECTL[@]}" cluster-info >/dev/null
 
 # --- 3. images ------------------------------------------------------------------------------------
 # FIVE, not four. `bootstrap` runs behind a Helm hook rather than as a Deployment, so a cluster
@@ -80,13 +94,13 @@ API_IMAGE_ID="$(docker image inspect -f '{{.Id}}' norviq/norviq-engine:api-lates
 
 # --- 4. install -----------------------------------------------------------------------------------
 stage "Installing the chart"
-kubectl apply -f "${REPO_ROOT}/helm/norviq/crds/" >/dev/null
+"${KUBECTL[@]}" apply -f "${REPO_ROOT}/helm/norviq/crds/" >/dev/null
 # EVERY namespace in `policyQuotaNamespaces` must exist BEFORE install, or the chart fails applying a
 # quota to a namespace that is not there. The persona namespaces are created here too — a persona is a
 # tenant, and creating its namespace after install would leave it outside the baseline cluster policy.
 TENANT_NS=(default agents analytics persona-health persona-fintech persona-shop persona-legal)
 for ns in "$NS" "${TENANT_NS[@]}"; do
-  kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  "${KUBECTL[@]}" create namespace "$ns" --dry-run=client -o yaml | "${KUBECTL[@]}" apply -f - >/dev/null
 done
 # `policyQuotaNamespaces` defaults to [] and the chart REFUSES to install with a baseline cluster
 # policy and no tenant namespaces — deliberately, so nobody ships a cluster whose baseline covers
@@ -97,7 +111,7 @@ QUOTA_NS="$(IFS=,; echo "${TENANT_NS[*]}")"
 # replicas, so a two-replica local cluster flaps in a way that looks like a product bug.
 # IfNotPresent: values-dev sets Always, which defeats `kind load` entirely — the node pulls from the
 # registry and never sees the image just loaded.
-helm upgrade --install norviq "${REPO_ROOT}/helm/norviq" \
+helm --kube-context "kind-${CLUSTER}" upgrade --install norviq "${REPO_ROOT}/helm/norviq" \
   -n "$NS" \
   -f "${REPO_ROOT}/helm/norviq/values-light.yaml" \
   --set images.registry="norviq/" \
@@ -118,8 +132,8 @@ helm upgrade --install norviq "${REPO_ROOT}/helm/norviq" \
 # while serving code from a previous build, which is indistinguishable from the change not working.
 # Stamping the built image ID into a pod annotation makes the template change exactly when the image
 # does, so the roll happens for real builds and is skipped for no-op re-runs.
-kubectl -n "$NS" rollout status deployment/norviq-api --timeout=5m
-kubectl -n "$NS" get pods
+"${KUBECTL[@]}" -n "$NS" rollout status deployment/norviq-api --timeout=5m
+"${KUBECTL[@]}" -n "$NS" get pods
 
 # NOTE on the rate-limit ceiling above. The browser suite drives ~190 specs through ONE admin
 # identity, and the limiter keys on the JWT `sub` — so all 190 share a single bucket and the run sits
@@ -141,7 +155,7 @@ kubectl -n "$NS" get pods
 # Two assertions, because either alone can be fooled:
 stage "Verifying the cluster runs the locally-built images"
 for dep in norviq-api norviq-ui norviq-engine norviq-webhook; do
-  img="$(kubectl -n "$NS" get deploy "$dep" -o jsonpath='{.spec.template.spec.containers[0].image}')"
+  img="$("${KUBECTL[@]}" -n "$NS" get deploy "$dep" -o jsonpath='{.spec.template.spec.containers[0].image}')"
   case "$img" in
     norviq/norviq-engine:*) echo "  ok  ${dep} -> ${img}" ;;
     *) fail "${dep} runs ${img}, not the image built from this working tree. A published image with the
@@ -164,7 +178,7 @@ done
 # is Running and NOT being deleted. (chaos.py hit this same trap from the other direction: it killed a
 # sidecar in a pod that was already going away.)
 live_api_pod() {
-  kubectl -n "$NS" get pods -l app.kubernetes.io/component=api \
+  "${KUBECTL[@]}" -n "$NS" get pods -l app.kubernetes.io/component=api \
     -o jsonpath='{range .items[*]}{.metadata.name}|{.metadata.deletionTimestamp}|{.status.phase}{"\n"}{end}' \
     | awk -F'|' '$2 == "" && $3 == "Running" { print $1; exit }'
 }
@@ -173,11 +187,11 @@ live_api_pod() {
 # and the pod serving the console kept running the previous one. The console is the component a human
 # actually looks at, so "the cluster runs this build" has to mean all of them.
 for comp in api ui engine webhook; do
-  live_pod="$(kubectl -n "$NS" get pods -l "app.kubernetes.io/component=${comp}" \
+  live_pod="$("${KUBECTL[@]}" -n "$NS" get pods -l "app.kubernetes.io/component=${comp}" \
     -o jsonpath='{range .items[*]}{.metadata.name}|{.metadata.deletionTimestamp}|{.status.phase}{"\n"}{end}' \
     | awk -F'|' '$2 == "" && $3 == "Running" { print $1; exit }')"
   [ -n "$live_pod" ] || fail "no Running, non-terminating ${comp} pod after the rollout"
-  running_id="$(kubectl -n "$NS" get pod "$live_pod" -o jsonpath='{.metadata.annotations.nrvq-local-image-id}')"
+  running_id="$("${KUBECTL[@]}" -n "$NS" get pod "$live_pod" -o jsonpath='{.metadata.annotations.nrvq-local-image-id}')"
   if [ "$running_id" = "$API_IMAGE_ID" ]; then
     echo "  ok  ${comp} pod was rolled onto this build (${API_IMAGE_ID:7:12})"
   else
@@ -189,7 +203,7 @@ done
 
 # The image ID only proves what was scheduled. This proves what the process actually serves: a route
 # that exists on this branch and does not exist in the published image.
-routes="$(kubectl -n "$NS" exec "$api_live" -c api -- \
+routes="$("${KUBECTL[@]}" -n "$NS" exec "$api_live" -c api -- \
   python -c "import json,urllib.request;print(' '.join(json.load(urllib.request.urlopen('http://127.0.0.1:8080/openapi.json',timeout=20))['paths']))" 2>/dev/null || true)"
 case "$routes" in
   *"/api/v1/mcp/pins"*) echo "  ok  API serves /api/v1/mcp/pins — this is branch code" ;;
@@ -201,7 +215,7 @@ esac
 stage "Console access"
 pkill -f "port-forward.*norviq-ui" 2>/dev/null || true
 sleep 1
-kubectl -n "$NS" port-forward "svc/norviq-ui" "${UI_PORT}:80" >/tmp/nrvq-kind-ui.log 2>&1 &
+"${KUBECTL[@]}" -n "$NS" port-forward "svc/norviq-ui" "${UI_PORT}:80" >/tmp/nrvq-kind-ui.log 2>&1 &
 # Poll, never sleep-once: a forward that is not up yet is indistinguishable from a broken one.
 for _ in $(seq 1 40); do curl -sf -o /dev/null "http://localhost:${UI_PORT}/" && break; sleep 0.5; done
 curl -sf -o /dev/null "http://localhost:${UI_PORT}/" || fail "console never came up on ${UI_PORT} — see /tmp/nrvq-kind-ui.log"
@@ -212,7 +226,7 @@ curl -sf -o /dev/null "http://localhost:${UI_PORT}/" || fail "console never came
 # `exec` into one fails with an error that reads like a broken token minter rather than a bad choice of
 # pod. (login-gate.sh had the identical bug and it cost a 34-minute browser run.)
 [ -n "${api_live:-}" ] || fail "no live api pod recorded by the verification stage"
-kubectl -n "$NS" exec "$api_live" -c api -- \
+"${KUBECTL[@]}" -n "$NS" exec "$api_live" -c api -- \
   python -m norviq.api.token_mint --ttl 7200 | tail -1 > "$TOKEN_FILE"
 [ -s "$TOKEN_FILE" ] || fail "failed to mint an admin token"
 
