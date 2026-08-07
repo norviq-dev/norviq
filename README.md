@@ -202,6 +202,7 @@ Full documentation is at **[docs.norviq.dev](https://docs.norviq.dev)**:
 - **[Policy cookbook](https://docs.norviq.dev/guides/policy-cookbook/)** — copy-paste `NrvqPolicy` recipes + validated Rego building blocks
 - **[Asset & attack graphs](https://docs.norviq.dev/guides/graphs/)** — real reach, kill chains, Simulate, Defend, tool classification
 - **[Compliance & coverage](https://docs.norviq.dev/guides/compliance/)** — MITRE ATLAS / OWASP LLM coverage, gaps, remediation, evidence pack
+- **[MCP firewall](https://docs.norviq.dev/guides/mcp/)** — governing MCP servers: the discovery and invocation gates, definition pinning and drift, and writing policy against `input.mcp`
 - **[Integrating agents](https://docs.norviq.dev/guides/integrating-agents/)** — the SDK: LangChain, LangGraph, CrewAI, AutoGen, Semantic Kernel
 - **[CLI reference](https://docs.norviq.dev/cli/)** — `norviq login`, policies, audit, agents, red-team, fleet
 - **[Configuration](https://docs.norviq.dev/configuration/)** — Helm `values.yaml` reference

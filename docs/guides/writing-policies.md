@@ -4,9 +4,10 @@
 # Writing Policies
 
 A practical guide to authoring `NrvqPolicy` Rego for Norviq: the contract every policy must satisfy,
-the positive-security (allowlist) model the console's Attack Graph generates for you, the tighten-only
-overlays that let compliance and platform teams add restrictions without touching a team's own policy,
-enforcement modes, and how to validate a policy before it ever blocks real traffic.
+every fact the evaluator publishes for a rule to read, the positive-security (allowlist) model the
+console's Attack Graph generates for you, the tighten-only overlays that let compliance and platform
+teams add restrictions without touching a team's own policy, enforcement modes, and how to validate a
+policy before it ever blocks real traffic.
 
 If you haven't read **[Concepts](../concepts.md)** yet, do that first — it covers agent identity,
 policy tiers/precedence, and the decision model this guide assumes.
@@ -41,8 +42,11 @@ ever compiled by OPA:
   fallback (`str(result.get("decision", "allow"))`) would silently default to `"allow"` — a fired block
   turned into an invisible allow. Requiring the default makes that structurally impossible: you must
   say explicitly what "nothing matched" means for your policy.
-- `decision`, `rule_id`, and `reason` must all appear as identifiers somewhere in the source (a cheap
-  lint that catches an obviously incomplete module before it ever reaches OPA).
+- `decision`, `rule_id`, and `reason` must all appear as **words** somewhere in the source (a cheap
+  lint that catches an obviously incomplete module before it ever reaches OPA). It is a
+  case-insensitive word-boundary match over the comment-stripped source, *not* over the
+  string-literal-stripped source, so the word inside a `reason = "..."` string satisfies it — it will
+  not catch a module that mentions `rule_id` only in prose.
 
 Two things that aren't in the validator but will still stop your policy:
 
@@ -58,11 +62,10 @@ Two things that aren't in the validator but will still stop your policy:
 
 ### Minimal working policy
 
-The engine builds its `input` from the real evaluator schema (`tool_name`, `tool_name_normalized`,
-`tool_params`, `agent.namespace`, `agent.agent_class`, `call_depth` — see
-`norviq/engine/evaluator.py::_build_input`; there is no `input.action`/`input.resource`). Here is the
-full working example from `crds/examples/policy-custom-rego.yaml` — block `execute_sql` when the
-query contains `DROP`, allow everything else:
+The engine builds its `input` from the real evaluator schema — **§2 enumerates every fact it
+publishes**. There is no `input.action`/`input.resource`, and no `input.agent_identity` (identity is
+under `input.agent`). Here is the full working example from `crds/examples/policy-custom-rego.yaml` —
+block `execute_sql` when the query contains `DROP`, allow everything else:
 
 ```yaml
 apiVersion: norviq.io/v1alpha1
@@ -97,7 +100,294 @@ namespace-wide baseline), or `kind` + `name` (one specific workload) — see
 to use one of the shipped starter policies (`webhook/presets/*.rego`) — `rego` always wins if both are
 set. `priority` is 0–499 for a namespace-scoped policy; 500–1000 (`clusterPriority`) is admin-only.
 
-## 2. Positive-security / intent policies
+## 2. The input document — every fact a policy can read
+
+The engine builds one JSON document per call and hands it to OPA as `input`
+(`norviq/engine/evaluator.py:937`, `_build_input`). What follows is the **complete** set of facts it
+publishes on this version; nothing else is there.
+
+That distinction is load-bearing. A reference to a key the evaluator does not set is *undefined*, and
+an undefined expression makes the enclosing rule body fail rather than raise. In a `default decision =
+"allow"` policy a misspelt or imagined fact is therefore a rule that silently never fires; in a
+deny-by-default policy it is a rule that silently never allows. Both are indistinguishable in the audit
+log from a rule that ran and found nothing. Grep `_build_input`/`_derived_input` before you reach for
+anything not on this page.
+
+> `docs/engineering/opa-input-schema.md` is the companion reference for the trust-signal weights and
+> the candidate-precedence machinery. Its "exact input keys" block predates `derived`, `mcp` and
+> `direction` and is no longer the full list — this section is.
+
+### 2.1 Top-level facts
+
+| Fact | Type | Values and notes |
+|---|---|---|
+| `input.tool_name` | string | The tool as the PEP reported it, verbatim. Never empty (`ToolCallEvent` rejects a blank name, `norviq/sdk/core/events.py:58`). The MCP proxy reports the bare MCP tool name — the `--tool-name-prefix` that would qualify it defaults to empty (`norviq/mcp/__main__.py:43`). |
+| `input.tool_name_normalized` | string | Confusable *skeleton* of the name (`norviq/engine/confusables.py::skeleton`): homoglyphs folded to ASCII, zero-width characters stripped. Cyrillic `open_bгeaker` arrives as `open_breaker`. Match control verbs against this **as well as** against `tool_name`; report the original. |
+| `input.tool_params` | object | Caller-supplied arguments, verbatim and unmasked. MCP `arguments` map onto it one-for-one (`tests/mcp/test_firewall.py::test_tools_call_maps_one_to_one_onto_tool_call_event`), which is why a rule written for the SDK governs MCP traffic unchanged. |
+| `input.tool_params_normalized` | object | Same shape; every **string** leaf skeleton-folded, non-strings passed through. Folding is budgeted at 4 MiB of string data per call (`_NORMALIZE_MAX_CHARS`, `evaluator.py:903`); past the budget the *original* string is published rather than a partial fold, so this document never carries a value nobody sent. |
+| `input.agent.spiffe_id` | string | `spiffe://norviq/ns/<namespace>/sa/<agent_class>` — the caller's attested SVID. |
+| `input.agent.namespace` | string | |
+| `input.agent.agent_class` | string | |
+| `input.trust_score` | number, 0.0–1.0 | Server-recomputed from Redis behavioural signals on every call; a caller-supplied `trust_score` in the request body is discarded. |
+| `input.trust_category` | enum: `high`, `medium`, `low`, `frozen` | Lower-case. `high ≥ 0.7`, `medium ≥ 0.4`, else `low` (`norviq/engine/trust/calculator.py:305`, `_categorize`); a per-namespace `trust_threshold` moves both boundaries proportionally. `frozen` comes **only** from an admin freeze — a computed score of `0.0` categorises as `low`, so behaviour can never auto-freeze an agent. |
+| `input.session_id` | string | `""` when the PEP sent none. |
+| `input.call_depth` | integer | Agent-to-agent chain depth; `0` unless the PEP reports otherwise. |
+| `input.derived` | object | Pre-computed views of the call — §2.2. |
+| `input.mcp` | object | MCP protocol context; **`{}`** for every call that did not arrive over MCP — §2.3. |
+| `input.direction` | enum: `call`, `answer` | Which plane the decision is on — §2.3. |
+
+```rego
+# Body expressions, one per top-level fact. These are fragments, not a module.
+input.tool_name == "execute_sql"
+input.tool_name_normalized == "open_breaker"                    # survives the Cyrillic spelling
+contains(lower(input.tool_params.query), "drop")
+walk(input.tool_params_normalized, [_, v]); is_string(v); contains(lower(v), "ignore previous")
+input.agent.namespace == "payments"
+input.agent.agent_class == "report-gen"
+startswith(input.agent.spiffe_id, "spiffe://norviq/ns/payments/")
+input.trust_score < 0.4
+input.trust_category == "frozen"
+input.session_id != ""
+input.call_depth >= 8
+```
+
+### 2.2 `input.derived` — what the engine computed about the call
+
+Every policy is compiled as a **single self-contained module**: the engine cannot import a shared
+library into your package, so a primitive you would otherwise factor out has to be re-implemented in
+every policy or shipped as input (`evaluator.py:956-965`;
+`tests/policies/test_horizontal_parity.py`). `input.derived` is the shipped set
+(`evaluator.py:992`, `_derived_input`). It exists because the obvious hand-written rule has three
+standard bypasses: a rule keyed on `tool_params.query` misses `tool_params.sql`, a rule keyed on
+`tool_name == "execute_sql"` misses a renamed `run_report`, and an exact-match allowlist misses
+`"select * from orders "` with a trailing space.
+
+| Fact | Type | Values and notes |
+|---|---|---|
+| `input.derived.verb` | enum: `read`, `write`, `delete`, `send`, `unknown` | The abstract operation the call performs, from the capability registry's name/params classifier (`norviq/engine/capability/source_registry.py:386`, `classify_tool`; the enum is `Verb`, same file line 40). `unknown` is a **first-class value**, not a hidden default. |
+| `input.derived.tool_kind` | enum: `sql`, `other` | Only those two. `sql` when the lower-cased name is in `_SQL_TOOL_NAMES` or contains `sql`/`query`/`report`/`select` (`evaluator.py:989`, `:1390`). Anything richer-looking (`read`/`write`/`network`) is a vocabulary the evaluator never emits. |
+| `input.derived.param_values` | array&lt;string&gt; | Every string leaf anywhere in `tool_params`, nesting included. |
+| `input.derived.param_values_lower` | array&lt;string&gt; | The same list, lower-cased. Published but **not** addressable from the intent schema or the visual builder — raw Rego only. |
+| `input.derived.sql_normalized` | string | The param value that looks most like the SQL, case-folded, whitespace-collapsed, trailing semicolon stripped (`evaluator.py:1397`, `:1405`). `""` when the call carries nothing SQL-shaped. |
+| `input.derived.sql_statements` | array&lt;string&gt; | The same candidate split on `;`, each normalised — so an allowlist can require *all* statements to be approved, not only the first. |
+| `input.derived.sql_tables` | array&lt;string&gt; | Tables named by `FROM`/`JOIN`/`INTO`/`UPDATE`/`TRUNCATE`, lower-cased, schema qualifier stripped (`public.orders` → `orders`). Deliberately **not** a SQL parser: anything it fails to recognise does not appear at all, which under deny-by-default means the rule does not match. Gate on `sql_normalized` when you need certainty. |
+| `input.derived.data_classes` | array&lt;string&gt;, sorted; values from `pci`, `pii`, `secret` | Sensitive classes carried by the **request** (`evaluator.py:1322`). `pci` = a PAN-shaped value, `pii` = an SSN-shaped value, `secret` = a credential-shaped value **or** a sensitive key name (`password`, `api_key`, …). The patterns are imported from `engine/masking.py`, so the request-side classifier and the response-side masker cannot drift apart. |
+| `input.derived.destinations` | object of four sorted, de-duplicated arrays: `emails`, `urls`, `hosts`, `schemes` | Egress targets extracted from every string value, so moving a URL to a differently-named field does not dodge the rule. `hosts` are lower-cased with the root dot stripped (`api.acme.com.` → `api.acme.com`). A **schemeless** value is harvested only when it carries its own marker (`//`, a port, a path/query/fragment) or sits under a destination-naming argument key — shape alone is not treated as a signal. A schemeless value contributes a host and *no* scheme, because the protocol is genuinely unknown. |
+| `input.derived.param_paths` | object: dotted path → string value | Every string leaf keyed by **where it was**, so a scope can distinguish `to` from `body`. Dots for object keys, `[i]` for list indices: `{"filters": {"ids": ["C-91"]}}` yields `filters.ids[0]`. Non-string leaves are omitted. |
+| `input.derived.param_paths_ambiguous` | array&lt;string&gt;, sorted | Paths whose value cannot be trusted to name one position in the payload. Empty on an honest call. Read it — see below. |
+| `input.derived.param_bytes` | integer | Total UTF-8 size of the string payload; a cheap volume guard. |
+
+`input.derived.risk` does **not** exist, and its absence is deliberate: risk is a judgement that shifts
+as the registry is updated, so a policy pinned to it would change behaviour on an upgrade without the
+policy changing. Verb is a stable fact about the call (`evaluator.py:1060`).
+
+```rego
+# Body expressions, one per derived fact.
+input.derived.verb == "delete"
+input.derived.tool_kind == "sql"
+some i; contains(lower(input.derived.param_values[i]), "-----begin")
+input.derived.param_values_lower[_] == "select 1"
+input.derived.sql_normalized == "select * from orders"
+count([s | s := input.derived.sql_statements[_]; not allowed_sql[s]]) > 0
+count([t | t := input.derived.sql_tables[_]; not {"orders", "customers"}[t]]) > 0
+input.derived.data_classes[_] == "secret"
+count([h | h := input.derived.destinations.hosts[_]; not {"api.acme.com"}[h]]) > 0
+input.derived.destinations.emails[_] == "collector@attacker.example"
+input.derived.destinations.schemes[_] == "http"
+input.derived.param_bytes > 65536
+```
+
+**`verb` is a classification of the tool NAME, which the agent side controls.** `allow { verb ==
+"unknown" }` is therefore a universal bypass for anything named unrecognisably; escalate to human
+review instead, which is the shape the shipped `read-only-intent-deny-by-default.rego` and
+`tool-allowlist-perimeter.rego` templates use. (Copy the *shape*, not that file verbatim:
+`tool-allowlist-perimeter.rego` and `sql-allowlist-deny-by-default.rego` are currently refused by the
+API validator with a 422 — see the warning in the [policy cookbook](policy-cookbook.md).) An admin verb *promotion* (the Threats screen's "learned
+verb") may only fill in an `unknown` **name** classification, never contradict one: when the name
+resolves, the classifier wins outright in both directions, and when it does not, the more consequential
+of (payload evidence, promotion) is published by rank `unknown < read < write < send < delete`
+(`evaluator.py:1032-1058`, `_PROMOTION_RANK` at `:206`). So a promotion can move a tool off `unknown`,
+but it can never turn a classified sink into a `read`.
+
+**`param_paths` is only safe when paired with the ambiguity check.** Argument keys come from the
+caller and the path grammar uses `.` and `[i]` as structure, so a caller-minted key can *forge* a path
+that another route also reaches — publishing a compliant value at the path your rule pins while the
+tool receives a different one. The evaluator names four such cases in `param_paths_ambiguous`: an
+aliasing minted key, a zero-length key (which emits its children at the parent's level), two routes
+arriving at one path with different values, and a path the walk read only a **prefix** of because it
+hit a length cap (`evaluator.py:1121-1209`). A truncated read is "I could not derive this fact"
+wearing the costume of "the fact is compliant". Both compilers therefore AND a derivability guard onto
+every `param_paths` operator (`norviq/engine/intent/compiler.py:181`, `_path_trusted_expr`;
+`ui/src/lib/builderCompile.ts:1195`, `paramPathGuards`), and hand-written Rego has to do the same:
+
+```rego
+# The recipient must be inside acme.com — and an underivable or forged path must NOT satisfy it.
+recipient_ok {
+    addr := object.get(input.derived.param_paths, "message.to", null)
+    addr != null                                        # the path was actually derived
+    not path_ambiguous("message.to")                    # ...and no caller key could have minted it
+    regex.match(`^[^@]+@acme\.com$`, addr)
+}
+path_ambiguous(p) { input.derived.param_paths_ambiguous[_] == p }
+
+# Keep the negation on the OUTSIDE in a BLOCK rule: `not recipient_ok` is true when the path is
+# missing, forged, or genuinely non-compliant, so all three refuse. Folding the guard inside the
+# negation instead inverts it and hands the caller an acquittal for making the path unreadable
+# (measured against real OPA — see the ClauseHolding note at ui/src/lib/builderCompile.ts:1404).
+blocks["recipient_outside_acme"] { not recipient_ok }
+```
+
+The walks that build these facts are bounded, and the bounds are hard caps rather than heuristics
+(`evaluator.py:1115-1119`): path depth 12, 256 paths, 256-character keys, 4096-character values, and 64
+entries per destination list / `sql_tables`. A path clipped by the key or value cap is named in
+`param_paths_ambiguous` rather than silently published short.
+
+### 2.3 `input.mcp` and `input.direction`
+
+`input.mcp` is present only for calls that arrived through the MCP proxy; every other caller gets
+`{}`, so the document is byte-identical to what it was before MCP existed. It carries Gate-A state the
+proxy computed at **discovery** and cached, which is what makes it affordable to send on every call
+(`norviq/mcp/firewall.py:495`, `_mcp_context`).
+
+| Fact | Type | Values and notes |
+|---|---|---|
+| `input.mcp.server` | string | The `--server-id` the proxy was started with. Keys the definition pins. |
+| `input.mcp.transport` | enum: `stdio`, `http` | `stdio` by default (`norviq/mcp/firewall.py:339`). |
+| `input.mcp.surface` | string: `tools/call`, `resources/read`, `sampling/createMessage`, `answer` | Which MCP surface produced the decision. |
+| `input.mcp.pin_status` | enum: `pinned`, `first_seen`, `drift`, `quarantined`, `unknown` | Definition-integrity state (`norviq/mcp/pins.py:70-73`). `unknown` means there is no catalog entry — Gate A never saw this tool. |
+| `input.mcp.scan_severity` | enum: `none`, `low`, `medium`, `high`, `critical`, `unknown` | Worst Gate-A scan finding on the definition (`firewall.py:58`). `unknown` is deliberately **outside** the severity ladder and is *not* `none`: `none` means scanned-and-clean, `unknown` means never scanned, and an allow list of `["none","low"]` must not admit the second. |
+| `input.mcp.definition_seen` | boolean | Whether a catalog entry exists at all. |
+| `input.mcp.catalog_stale` | boolean | The cached definition may be out of date. |
+| `input.mcp.schema_enforced` | boolean | Argument-schema conformance was actually applied. `false` both when the server published no schema and when it published one the subset checker cannot fully apply. |
+| `input.mcp.schema_closed` | boolean | The server declared its argument set closed. No checker can supply this on the server's behalf. |
+| `input.mcp.schema_notes` | array&lt;string&gt; | Why conformance was partial. An allow that arrives with notes attached is narrower than one without. |
+| `input.mcp.tool_digest` | string (16 hex chars) | **Present only** when a catalog entry with a digest exists — write `object.get(input.mcp, "tool_digest", "")` rather than a bare reference. |
+| `input.direction` | enum: `call`, `answer` | Lifted out of the MCP context so a rule can scope by direction without reaching into `input.mcp`. Defaults to `"call"`, so every caller predating the plane model stays governed by the call rules rather than escaping every rule. |
+
+**`input.mcp` is a policy input and never a trust input.** It is exactly as trustworthy as
+`input.tool_name` — both come from the PEP. Identity stays bound to the caller's attested SVID; do not
+use `input.mcp.server` to decide *who* is calling, only *what* they are calling
+(`norviq/sdk/core/events.py:48-53`).
+
+Guard against absence with `object.get`, not a bare path: on a non-MCP call `input.mcp` is `{}`, and
+`input.mcp.pin_status` in a rule body makes the **whole body** undefined — which deletes the rule
+rather than failing one predicate:
+
+```rego
+# Escalate a drifted definition; leave every non-MCP caller alone.
+drifted {
+    object.get(object.get(input, "mcp", {}), "pin_status", "") == "drift"
+}
+escalates["mcp_definition_drift"] { drifted }
+
+# Never answer a server-composed question with a credential.
+blocks["mcp_answer_carries_secret"] {
+    input.direction == "answer"
+    input.derived.data_classes[_] == "secret"
+}
+```
+
+The shipped, opt-in `policies/templates/mcp_integration_guardrail.rego` is the reference
+implementation of both shapes. For what Gate A actually does, how pins are approved, and what the four
+MCP surfaces mean, see **[MCP](mcp.md)** — this page does not restate it.
+
+Two honest gaps to know about before you author against these:
+
+- **`direction` today is only `call` or `answer`.** The proxy sets `"answer"` for the answer surface
+  and `"call"` for everything else (`firewall.py:539`). The intent schema additionally accepts a
+  `content` plane (`norviq/engine/intent/schema.py:59`), which compiles to `input.direction ==
+  "content"` — a predicate nothing currently populates, so such a rule never matches. Do not write it
+  expecting coverage.
+- **`input.mcp.surface`, `schema_*`, `catalog_stale`, `definition_seen` and `tool_digest` are
+  raw-Rego-only.** Neither the intent schema nor the visual builder can address them (§2.4). A policy
+  that must gate on schema conformance has to be written as Rego.
+
+### 2.4 The same facts from the visual builder
+
+The visual builder (Policies → New policy) compiles to the same Rego against the same document, so
+the two surfaces are interchangeable once you know which fact each condition reads. The palette is
+`CONDITION_TYPES` in `ui/src/components/policies/BuilderSheet.tsx:654`; the emission is
+`compileConditionLine` in `ui/src/lib/builderCompile.ts:1342`.
+
+| Builder condition | Facts it actually reads | Notes |
+|---|---|---|
+| **Content detector** (`detector`) | `tool_params` **and** `tool_params_normalized`, lower-cased (`sql_injection`, `prompt_injection`) or case-preserved (`shell_injection`); `tool_params` alone (`pii`); `tool_name` alone (`destructive_tool`) | Five detectors: `sql_injection`, `shell_injection`, `prompt_injection`, `pii`, `destructive_tool`. Note that `shell_injection`'s source set is named `bld_security_scan_texts_raw` — "raw" there means the text is **not** lower-cased, not that the normalized params are skipped; it walks both documents (`ui/src/lib/builderTemplates.ts:84-92`). `pii` is the only detector that reads `tool_params` alone (`:244-254`). They are **trimmed** copies of `comprehensive.rego`'s rules — the base64 iterative-decode chain is not included, so a base64-wrapped payload is not unwrapped by any of the builder's detectors (`ui/src/lib/builderTemplates.ts:19-36`). `destructive_tool` is a name check (a fixed set plus `delete_`/`drop_`/`truncate_`/… prefixes), not `derived.verb`. |
+| **Tool name is one of** (`toolIn`) | `input.tool_name` | Exact set membership against the **raw** name only — it does not consult `tool_name_normalized`, so pair it with a detector or a `verb` fact if homoglyph evasion is in scope. |
+| **Keyword in tool params** (`keyword`) | `input.tool_name` and/or `input.tool_params` | Target `tool`, `params`, or `both`. The params form walks **keys as well as values**, at any depth, so `{"api_key": "AKIA…"}` matches on the key. |
+| **Agent trust below** (`trustBelow`) | `input.trust_score` | Emits `input.trust_score < <threshold>` — the top-level fact, not `input.agent.trust_score`, which no input builder sets. |
+| **Source + verb (capability)** (`sourceVerb`) | `input.tool_name` | A *tool-name fragment* match per (source, verb) pair over six sources — `elasticsearch`, `postgresql`, `smtp`, `webhook`, `s3`, `filesystem` (`ui/src/lib/capabilitySources.ts:33`). It is **not** `input.derived.verb`; for the engine's own classification use an Engine-fact condition on `verb`. |
+| **Param matches regex** (`paramRegex`) | one named key under `input.tool_params` | Walks beneath the named parameter, so a value nested inside it still triggers. Costs one of the 25 `regex.*` calls the validator allows (§1). |
+| **Engine fact is / is not** (`scalarFact`) | `derived.verb`, `derived.tool_kind`, `derived.sql_normalized`, `direction`, `mcp.server`, `mcp.pin_status`, `mcp.scan_severity`, and `param_paths.<path>` | The registry is `SCALAR_FIELD_EXPR` (`ui/src/lib/builderCompile.ts:1127`). Operators `equals`, `in`, `matches`, `notMatches`; the closed-vocabulary fields are narrowed to `equals`/`in` with real value pickers, because a regex over `pinned`/`drift`/`quarantined` spends budget to say what `in` says for free — and invites a pattern that matches more than intended. |
+
+Any condition can be negated in place with the **NOT** toggle; `not` is not a selectable type.
+
+The vocabulary the pickers offer is transcribed from the engine and is exported as
+`SCALAR_ENUM_VALUES` (`BuilderSheet.tsx:291`) — `mcp.pin_status`, `mcp.scan_severity`, `direction`,
+`verb`, `tool_kind`, with exactly the values listed in §2.2/§2.3. It exists because a free-text
+`drifted` instead of `drift`, or `Pinned` capitalised, compiles to valid Rego, passes the validator,
+and then matches nothing forever — which looks identical to a rule that fires and finds nothing.
+
+**Allowlist-mode grants** additionally address the collection and numeric facts, which rules mode
+cannot yet reach:
+
+| Grant fact kind | Fields | Operators |
+|---|---|---|
+| `collectionFact` | `data_classes`, `sql_tables`, `sql_statements`, `param_values`, `destinations.emails`, `destinations.urls`, `destinations.hosts`, `destinations.schemes` | `noneOf`, `subsetOf`, `anyOf`, `maxCount` |
+| `numericFact` | `param_bytes`, `call_depth`, `trust_score` | `max`, `min` |
+
+`collectionFact` and `numericFact` are deliberately **absent from the rules-mode condition dropdown**
+(`BuilderSheet.tsx:671`): the graph model, compiler and validator support them and they round-trip
+from the `/intents` handoff, but `ConditionChip` has no editor for them yet, so offering them would
+produce a condition an operator could neither see nor fill in. To express "block when the call carries
+a secret" as a negative rule today, write it as Rego or as an intent.
+
+Three naming differences will bite when you move between surfaces:
+
+- The intent schema spells the MCP scalars **without** the prefix — `server`, `pin_status`,
+  `scan_severity` (`norviq/engine/intent/schema.py:18-32`) — while the builder spells them
+  `mcp.server`, `mcp.pin_status`, `mcp.scan_severity`. Both compile to the same `object.get` chain.
+- An intent selects a plane by declaring a `call:` / `answer:` / `content:` block; the builder selects
+  it with a `direction` scalar fact.
+- An intent expresses trust as `trust: {atLeast: low|medium|high}` — an ordered *category*, on purpose,
+  because a policy pinned to a raw score changes meaning when the trust model is retuned. It compiles
+  to a rank lookup over `input.trust_category` with a default of `-1`
+  (`norviq/engine/intent/compiler.py:234`), so `frozen` — which is not in the ranking — fails every
+  `atLeast`. The builder's **Agent trust below** condition and its `trust_score` grant fact read the
+  raw score instead.
+
+### 2.5 Where these facts are NOT populated
+
+Three input documents are built by hand rather than through `_build_input`, and none of them carries
+the full set. This is a limitation of the preview tooling, not of the enforcement path — a policy that
+enforces correctly in production can still look inert in a preview:
+
+- **The dry-run sample evaluation** (`norviq/api/routers/policies.py:893`) sends `tool_name`,
+  `tool_params`, `agent`, `trust_score`, `trust_category`, `session_id`, `call_depth` — and no
+  `tool_name_normalized`, `tool_params_normalized`, `derived`, `mcp` or `direction`.
+- **The dry-run replay** against recent audit records (`:926`, `_opa_input_from_record`) also omits
+  `derived`, `mcp` and `direction`. It does set both `_normalized` fields, but as unfolded copies of
+  the name and the stored (possibly masked) params — skeleton parity is not reconstructable from an
+  audit row, so a confusable-evasion rule neither fires nor is proven not to. It also *re-derives*
+  `trust_category` from the stored score at **0.75/0.5** (`policies.py:944`) rather than the engine's
+  0.7/0.4 (`_categorize`, §2.1), so a score of 0.72 replays as `medium` where live traffic was
+  `high` — a `trust_category` rule is replayed against a category the engine would not have produced.
+- **The intents dry-run / propose path** (`norviq/api/routers/intents.py:482`, `_policy_input`) does
+  build `derived` — it calls the evaluator's own `_derived_input` — and it does set `direction`, but
+  only ever to the literal `"call"`. Its `mcp` is `{"server": <id>}` when a server is supplied and
+  `{}` otherwise, so `pin_status`, `scan_severity`, `surface` and the `schema_*` facts are absent
+  there too. It omits `trust_score`, `call_depth`, `session_id` and both `_normalized` fields,
+  hard-codes `trust_category` to `"high"`, and builds `agent` with only `agent_class`/`namespace` —
+  no `spiffe_id`.
+
+A rule reading a fact its preview does not carry hits an undefined reference, and which way that lands
+depends on the policy. A tighten-only block rule does not fire, so `newly_blocked: 0` means "not
+exercised", not "safe" — the dangerous direction, because it reads as an all-clear. A deny-by-default
+grant that *requires* the fact fails to hold, so the preview reports blocks that live traffic
+would not have seen — noisy, but visible. Prove either with the red-team suite (§6): it builds a real
+`ToolCallEvent` and calls `evaluator.evaluate()` (`norviq/api/routers/redteam.py:448`, `:97`), so the
+full document is present.
+
+## 3. Positive-security / intent policies
 
 The alternative to hand-writing block rules is to flip the model: **allowlist the tools an agent class
 is actually supposed to call, and default-deny everything else.** This is what the console's Attack
@@ -117,23 +407,41 @@ homoglyph or zero-width-character trick can't smuggle a tool past the allow.
 The refinement toggles:
 
 - **`readonly`** — the tool's verb must be a read verb (`read`, `get`, `list`, `search`, `fetch`,
-  `describe`, `query`, `lookup`, `view`, `find`, `scan`, `count` — `READ_VERBS`). If an admin has
-  promoted a tool's classification (learned verbs, e.g. a misleadingly-named `warehouse_task` promoted
-  to `write`), that overrides the name heuristic in both directions.
+  `describe`, `query`, `lookup`, `view`, `find`, `scan`, `count` — `READ_VERBS`). An admin's promoted
+  classification (learned verbs) overrides the name heuristic, but **only upward**: a
+  `write`/`send`/`delete` promotion makes a misleadingly-named `warehouse_task` non-read whatever its
+  name says, while a promotion to `read` is *refused* when the tool's own name already says sink or
+  mutation — a name-evident egress action token, or a leading `WRITE_VERBS` token
+  (`read_promotion_would_demote`, `norviq/api/threat_intent.py:112`). Refused promotions are dropped
+  from `learned` and named in the generated policy's header comment (`:297-300`), not discarded
+  silently, so `slack_post_message` promoted to `read` cannot hand the allow back.
 - **`egress`** ("no external egress") — the tool must not be a known egress sink (`send_email`,
   `send_sms`, `http_post`, `webhook`, `upload`, `export_data`, `s3_put`, `publish`, … — `EGRESS_TOOLS`),
-  again subject to learned-verb overrides.
-- **`scope`** ("namespace-scoped") — any `namespace`/`ns`/`tenant` field in `tool_params` must equal
-  the caller's own `agent.namespace` (blocks cross-tenant reach through an allowlisted tool).
+  again subject to learned-verb overrides. It also reads the engine's own classification —
+  `object.get(input.derived, "verb", "") == "send"` (§2.2) — because the eighteen literal names miss
+  ordinary vendor sinks like `forward_ticket` or `slack_post_message`. Two guards sit around that
+  clause and both matter: a name whose **leading** token is a retrieval verb is exempted unless the
+  call also carries a destination-shaped argument (otherwise `get_mail` and `download_export`, which
+  the registry publishes as `send`, are refused under a deny-by-default allow), and an unambiguous
+  egress **action** token in the name is a sink on its own without consulting `input.derived`, so a
+  verb promotion cannot hand the allow back.
+- **`scope`** ("namespace-scoped") — any **top-level** `namespace`/`ns`/`tenant` key in `tool_params`
+  must equal the caller's own `agent.namespace` (blocks cross-tenant reach through an allowlisted
+  tool). The emitted `_cross_namespace` rule iterates `input.tool_params[k]` directly and does **not**
+  `walk` (`threat_intent.py:404-413`), so a nested `{"filters": {"tenant": "other"}}` is not checked
+  by this toggle; use a `param_paths` scope or hand-written Rego when the tenant field is nested.
 - **`rate`** — **advisory only**. A stateless OPA policy can't count calls/minute; this toggle checks
-  `input.call_depth <= 8` as a proxy. The real rate limiter is a separate layer (§6), not
+  `input.call_depth <= 8` as a proxy. The real rate limiter is a separate layer (§7), not
   something a Rego policy can enforce on its own.
 
-Generated intent policies are pushed at the **same priority as the cluster baseline**, so the
-evaluator's most-restrictive tie-break means a baseline `block` always wins over the intent policy's
-`allow` — applying one can only ever *add* denials, never turn an existing baseline block into an
-allow (`test_threat_intent.py` / `policies/threat_intent_test.rego` pin this against the canonical
-baseline-blocked attacks: delete, SQL exec, egress, cross-tenant).
+A generated intent policy is a **draft**: it is stored in `intent_drafts` and never auto-enforces —
+an operator reviews and applies it through the gated Policies flow. The draft carries the **baseline
+priority for its namespace** (`_baseline_priority`, `norviq/api/routers/threats.py:694`: that
+namespace's own `__baseline__` priority, falling back to the cluster baseline's, else `1`), so once
+applied the evaluator's most-restrictive tie-break means a baseline `block` always wins over the
+intent policy's `allow` — applying one can only ever *add* denials, never turn an existing baseline
+block into an allow (`tests/api/test_threat_intent.py` / `policies/threat_intent_test.rego` pin this
+against the canonical baseline-blocked attacks: delete, SQL exec, egress, cross-tenant).
 
 There's a narrower sibling generator, `generate_capability_rego`, used by the Attack-Graph "Defend"
 action on a single reachable data source: instead of an allowlist, it blocks any tool matching a set of
@@ -142,7 +450,7 @@ names observed reaching that source — a forward guard against a not-yet-seen r
 and-suspenders coverage for the ones you've already seen. It's tighten-only at baseline priority, same
 as the intent generator.
 
-## 3. Tighten-only overlays
+## 4. Tighten-only overlays
 
 Beyond the base tiers (agent-class → namespace baseline → cluster baseline, resolved by
 highest-priority-wins), Norviq layers **overlays** that can only make a decision *more* restrictive
@@ -150,20 +458,35 @@ than the base result, never less — regardless of their own priority (`_resolve
 `norviq/engine/evaluator.py`):
 
 - **`__baseline__`** (per-namespace) — not strictly an overlay; it's the namespace-wide *floor* every
-  agent class in that namespace falls back to when no more specific policy matches. Author it like any
-  other policy (`crds/examples/policy-namespace-baseline.yaml` targets a whole namespace with the
-  `permissive` preset in `audit` mode, priority 50 — low, so a real class policy always outranks it).
+  agent class in that namespace falls back to when no more specific policy matches
+  (`_append_policy(namespace, "__baseline__")`, `evaluator.py:1942`). **Authoring it through the CRD
+  has a precondition that is easy to miss.** The controller keys a `NrvqPolicy` to
+  `<targetNs>:__baseline__` only when it declares `spec.clusterPriority` *and* its target names a
+  namespace with no `agentClass` and no `kind`/`name` (`namespaceBaselineKey`,
+  `webhook/controller.go:1007-1027`); it then stores it at a fixed priority of `1`
+  (`baselineFallbackPriority`, `controller.go:1001`), ignoring whatever the CR declared, so the floor
+  can never outrank a real policy. That is the shape the chart renders
+  (`helm/norviq/templates/baseline-cluster-policy.yaml`, one `NrvqPolicy` per
+  `policyQuotaNamespaces` entry, `clusterPriority` set). A namespace-targeted CR that sets `priority`
+  instead — as `crds/examples/policy-namespace-baseline.yaml` does (`permissive` preset, `audit`
+  mode, `priority: 50`) — is **not** keyed as a baseline: `resolve_policy_key`
+  (`norviq/api/routers/policies.py:727-732`) falls through to `policy_name`, so it lands at
+  `<ns>:<metadata.name>` and `_collect_candidates` never collects it for an ordinary agent class.
+  Through the API/console instead, `POST /policies` with `agent_class: "__baseline__"` writes the
+  scope directly (it is not in the reserved-scope reject list).
 - **`__guardrail__`** — an opt-in per-namespace tool-allowlist overlay. Operator-authored via the
   normal `POST /policies` endpoint, same as `__baseline__`.
 - **`<agent_class>__remediation__`** — the per-class compliance remediation overlay. When you use the
   compliance dashboard's "Generate enforcing policy" action for a MITRE ATLAS / OWASP LLM control gap,
   the draft is built by `generate_remediation_rego` (`norviq/api/threat_intent.py`): a **default-allow**
-  policy scoped to one agent class that adds one `blocks[...]` clause per control-mapped `rule_id` (SQL
-  injection, prompt injection, excessive agency, supply chain, data leakage, cross-tenant access,
-  base64-obfuscated threat — whichever the control maps to and Norviq has a runtime template for). It
-  is applied to the **dedicated key** `(namespace, "<agent_class>__remediation__")` — never to the
-  base `(namespace, agent_class)` key — so it can only *add* a block for the gap the control closes; the
-  class's own comprehensive/custom policy is never overwritten or replaced.
+  policy scoped to one agent class that adds one `blocks[...]` clause per control-mapped `rule_id`.
+  There are eight runtime templates (`_REMEDIATION_RULES`, `norviq/api/threat_intent.py:513`): SQL
+  injection, shell execution, prompt injection, excessive agency, supply chain, data leakage,
+  cross-tenant access, and base64-obfuscated threat. A mapped `rule_id` with no template is skipped
+  and the control still gets its other mapped rules. It is applied to the **dedicated key**
+  `(namespace, "<agent_class>__remediation__")` — never to the base `(namespace, agent_class)` key —
+  so it can only *add* a block for the gap the control closes; the class's own comprehensive/custom
+  policy is never overwritten or replaced.
 
 Overlays are resolved as their own group and then combined with the base-tier winner by
 most-restrictive-wins: an overlay `block` beats a permissive base `allow`, but an overlay can never
@@ -178,10 +501,23 @@ matter what (see `_resolve_overlay`/`_resolve_hard_overlay`).
 stack the evaluator would resolve for that scope right now — the fastest way to see which layer is
 actually winning.
 
-## 4. Enforcement modes
+## 5. Enforcement modes
 
 Every `NrvqPolicy` declares `spec.enforcementMode: block | audit | escalate` (required by the CRD).
-This is the policy's own declared posture, and it's what the catalog and editor show/persist for it.
+This is the policy's own declared posture, it is what the catalog and editor show and persist, **and
+the engine reads it**: when the winning candidate was saved with `enforcement_mode: audit`, its own
+`block`/`escalate` is softened to a logged `audit` decision with `rule_id` prefixed
+`policy_audit_would_block:` (`_apply_policy_mode`, `norviq/engine/evaluator.py:721`, called at
+`:547`). Three limits are worth knowing before you rely on it:
+
+- Only `audit` softens. A policy declared `escalate` is **not** downgraded — the check is
+  `enforcement_mode != "audit" → return unchanged` (`:743`), so an `escalate`-mode policy that
+  resolves to `block` still blocks.
+- Only **base/floor** candidates carry a mode. Overlays (§4) are constructed without one and default
+  to `block`, deliberately: an overlay may only tighten, and honouring its mode would let it weaken
+  the base policy beneath it.
+- The same exempt rule_ids stay hard (`_POSTURE_EXEMPT_RULES`, `:329`) as for namespace posture.
+
 Separately, and layered on top, a **namespace** can be put into monitor mode wholesale:
 `PUT /api/v1/settings?namespace=<ns>` with `{"enforcement_mode": "audit"}` softens *any* would-block or
 would-escalate decision in that namespace to a logged `audit` decision (`rule_id` prefixed
@@ -194,19 +530,24 @@ The practical safe-rollout loop for a new or changed policy:
 
 1. Author the Rego (custom or preset-backed).
 2. **Dry-run it** — `norviq policy dry-run -f policy.rego -n <namespace> -c <agent_class>` (or
-   `POST /api/v1/policies/dry-run`, §5). This *replays* the candidate against real recent traffic for
+   `POST /api/v1/policies/dry-run`, §6). This *replays* the candidate against real recent traffic for
    its scope without touching anything live, and tells you specifically how many *currently-allowed*
    calls it would newly block.
 3. If you want a whole namespace to run in observe-only mode while you validate a batch of changes
    (rather than dry-running one policy at a time), flip that namespace's posture to `audit` via
    `PUT /api/v1/settings` as above, watch the audit log for `monitor_would_block:*` entries, then flip
    it back to `block` once you're satisfied. (`apply_mode: dry_run_only` on the same endpoint goes
-   further and makes the API refuse policy *applies* entirely for that namespace — drafts and dry-runs
-   still work — a harder gate for a namespace that must never auto-enforce.)
+   further and is a harder gate for a namespace that must never auto-enforce — but be precise about
+   what it stops: `assert_apply_allowed` guards `POST /policies` **as well as** `/apply`, plus pack
+   enable/disable and pack-override (`policies.py:439`, `:1154`; `packs.py:105`, `:134`, `:200`).
+   A "Save" is a full apply — create loads straight into the read path and enforces on the next call —
+   so under `dry_run_only` `norviq policy create` is refused too. Only `POST /policies/dry-run` and
+   non-enforcing intent drafts still work, because neither touches the loader.)
 4. `norviq policy create` to save, then `norviq policy apply` (or the console's Apply flow) to push it
-   to a target scope with `enforcementMode: block`.
+   to a target scope with `enforcementMode: block`. Both are refused while the namespace is
+   `dry_run_only` — see step 3.
 
-## 5. Validation & red-team
+## 6. Validation & red-team
 
 **Write-time validation** (`validate_rego_source`, §1) runs on every entry point that accepts Rego
 source — create, dry-run, and pack-override — in cheapest-check-first order: size/line/regex caps,
@@ -235,8 +576,18 @@ response:
 ```
 
 `newly_blocked`/`newly_allowed` are the decision **flips** relative to what actually happened — the
-number that matters before you apply. Dry-run is namespace-scoped like every sibling read route: a
-non-admin caller can only replay their own namespace's traffic.
+number that matters before you apply. Dry-run compiles and executes submitted Rego against the shared
+OPA server, so it is gated as a *write*, not a read: it requires the admin or service role
+(`require_admin_or_service`, `policies.py:1069`) on top of the namespace scoping, and a scoped caller
+can only replay its own namespace's traffic.
+
+Two limits on how far a dry-run can be believed. Params come from the stored (optionally masked)
+payload, so a param-content rule under-fires against masked records — an honest limitation the
+response surfaces. And neither the sample input nor the replayed records carry `input.derived`,
+`input.mcp` or `input.direction` (§2.5), so a rule gated on those facts is **not measured** by a
+dry-run at all — `newly_blocked: 0` for a tighten-only policy of that shape means "not exercised", not
+"safe". Red-team is what exercises them, because it builds a real `ToolCallEvent` and calls
+`evaluator.evaluate()` (`norviq/api/routers/redteam.py:448`, `:97`).
 
 **Red-team**: `norviq redteam run --agent <agent_class> --namespace <namespace>` (or
 `POST /api/v1/redteam/suite`) runs the built-in adversarial attack catalog — prompt injection,
@@ -249,7 +600,7 @@ just that it compiles.
 
 Recommended loop: author → dry-run replay → red-team suite → apply.
 
-## 6. Common patterns
+## 7. Common patterns
 
 The shipped baseline, `comprehensive.rego` (also inlined as the `strict` preset,
 `webhook/presets/strict.rego`), is the reference implementation for all of these. It — and the sector
@@ -261,6 +612,13 @@ via `POST /api/v1/policy-packs/{id}/enable`) — use the same partial-set + reso
 block > escalate > audit > allow, ties broken by sorted `rule_id`). Copy that shape for a new policy —
 it's what lets several rules fire on one call without a compile-time conflict, and every fired rule
 still carries a distinct, correct `reason`.
+
+The detectors below are written the long way, because that is how the baseline implements them and
+because a detector answers "is something bad in this call". Several of the same questions now have a
+pre-computed answer in `input.derived` (§2.2), and where the question is a *scope* rather than a
+detection — "may only email acme.com", "must not carry a credential", "may only touch these tables" —
+the derived fact is the better primitive: it needs no pattern list, and it cannot be dodged by moving
+the value to a differently-named parameter.
 
 **Deny SQL injection** — a syntax-context check, not a bare substring match, so business prose
 ("please delete from my calendar") isn't hard-blocked:
@@ -277,7 +635,12 @@ blocks["deny_sql_injection"] { sql_injection_detected }
 ```
 
 **Deny shell execution** — shell metacharacters, checked on both raw and base64-decoded parameter
-values (the baseline iteratively decodes base64 up to depth 4, bounded by an 8KB payload-size gate):
+values. The baseline iteratively decodes base64 to depth 4 (`b64_decoded_l1`…`l4`,
+`comprehensive.rego:676-685`). The bound is on the **work, not the payload size** — deliberately, so
+that a padded or oversized payload cannot skip the scan: at most `b64_scan_max_candidates = 64`
+candidates are decoded per level (`:640-644`), and a call carrying *more* than 64 base64-shaped
+values is itself treated as `base64_decoded_threat` (`:716-717`) so an attacker cannot pad a
+malicious blob past the scanned slice. There is no payload-size gate on this path:
 
 ```rego
 shell_patterns = ["|", ";", "$(", "`", "rm -rf", "/etc/passwd", "/etc/shadow"]
@@ -317,7 +680,7 @@ stateless). The closest Rego-level control is a call-chain depth cap
 agent-to-agent recursion, not call volume. Real rate limiting is a separate engine layer keyed off the
 caller's SPIFFE ID (`config.rateLimit` / `evaluator_rate_limit_per_window`, default 60/window,
 overridable per namespace via the same `PUT /api/v1/settings` used for enforcement mode) — this is
-also why the intent generator's `rate` toggle (§2) is explicitly advisory only.
+also why the intent generator's `rate` toggle (§3) is explicitly advisory only.
 
 **PII / PCI** — PII is SSN-shaped strings anywhere in `tool_params` (`walk()` recurses nested
 objects/arrays); PCI is a card-number-named *key* at any depth, or a Luhn-valid 13–19 digit value:
@@ -353,5 +716,5 @@ blocks["cross_tenant_access"] { cross_tenant_detected }
 If a pattern here matches your sector, check `policies/sector/<sector>/*.rego` and
 `policies/sector/_shared/horizontal.rego` (the shared PCI/PII rules every sector pack composes) before
 writing it from scratch — enabling the matching pack via `POST /api/v1/policy-packs/{id}/enable`
-materializes it as a tighten-only `__pack__` overlay (§3) for the namespace, with a customization path
+materializes it as a tighten-only `__pack__` overlay (§4) for the namespace, with a customization path
 (`__pack_override__`) if you need to go further.
