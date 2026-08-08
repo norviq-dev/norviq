@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from norviq.api.auth import get_current_user, read_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
+from norviq.engine.evaluator import WOULD_BLOCK_RULE_PREFIXES
 from norviq.api.routers.mitre import _activity_by_rule
 from norviq.api.synthetic import is_synthetic_identity
 
@@ -158,8 +159,14 @@ async def _agent_class_policies(
             d["observed"] += int(n)
             if str(decision) == "block":
                 d["blocked"] += int(n)
-            # Monitor-mode would-block: decision softened to audit with a would-block rule marker.
-            elif str(decision) == "audit" and str(rule_id or "").startswith("monitor_would_block:"):
+            # Would-block: decision softened to audit with a would-block rule marker. Use the SHARED
+            # tuple, not a literal — this hardcoded "monitor_would_block:" only, so the per-policy audit
+            # path (policy_audit_would_block:, evaluator._apply_policy_mode) was invisible here. An
+            # operator trialling ONE policy with the Monitor badge saw its Overview bar stay grey
+            # "loaded but unproven" no matter how much traffic it would have stopped, while the legend
+            # promised green for "a block, or a Monitor would-block". The constant's own comment says
+            # every softening path must be listed there; forking it defeated exactly that.
+            elif str(decision) == "audit" and str(rule_id or "").startswith(WOULD_BLOCK_RULE_PREFIXES):
                 d["would_block"] += int(n)
     except Exception as exc:  # best-effort; efficacy overlay is optional — but a fault still leaves the
         # efficacy numbers wrong/zeroed, so flag the section degraded rather than showing them as real.

@@ -1714,10 +1714,53 @@ is_read { read_verbs[tool_verb] }
 is_read { read_verbs[tool_verb_norm] }`;
 }
 
+// Kept BYTE-EQUIVALENT to the server generator's egress block (norviq/api/threat_intent.py
+// generate_intent_rego). The builder used to emit only the first two lines — the pre-hardening,
+// name-list-only form — so "No external egress" ticked in the Visual Policy Builder produced a policy
+// that let `forward_ticket`, `slack_post_message`, `relay_case`, `dispatch_report` and
+// `share_summary` straight through. The engine classifies every one of those as verb=send, and the
+// server's version of the SAME toggle blocks them. Two compilers, one toggle, opposite decisions —
+// and the Overview showed the identical `egress` refinement badge for both, so nothing on screen
+// distinguished the policy that enforced from the one that did not.
+//
+// Three rules do the work beyond the literal list:
+//   - derived.verb == "send" (the engine's own classification), exempted when the name LEADS with a
+//     retrieval verb and no parameter names a destination — without that exemption a default-deny
+//     allowlist refuses `get_mail`/`list_mail`, since the registry takes the worst verb over all
+//     tokens and `mail` is a SEND token;
+//   - unambiguous egress ACTION tokens matched as whole `_`-separated tokens, which is what catches
+//     the vendor-named tools above;
+//   - object.get for derived.verb so an engine predating the field keeps name-based behaviour.
+const RETRIEVAL_LEAD_VERBS = [
+  "get", "list", "read", "search", "describe", "lookup", "view", "find", "count", "download",
+  "retrieve", "poll", "check", "inspect", "show", "query", "load", "browse", "preview",
+];
+const EGRESS_ACTION_TOKENS = [
+  "send", "post", "upload", "publish", "forward", "relay", "dispatch", "share", "transmit",
+  "deliver", "broadcast", "notify", "emit", "push", "webhook", "exfil", "exfiltrate", "leak",
+  "smtp", "sms", "egress", "outbound",
+];
+const NAME_SPLIT_MAP =
+  '{"A": "_a", "B": "_b", "C": "_c", "D": "_d", "E": "_e", "F": "_f", "G": "_g", "H": "_h", ' +
+  '"I": "_i", "J": "_j", "K": "_k", "L": "_l", "M": "_m", "N": "_n", "O": "_o", "P": "_p", ' +
+  '"Q": "_q", "R": "_r", "S": "_s", "T": "_t", "U": "_u", "V": "_v", "W": "_w", "X": "_x", ' +
+  '"Y": "_y", "Z": "_z", "-": "_", ".": "_", ":": "_", "/": "_"}';
+
 function egressHelperBlock(): string {
   return `egress_tools = ${jsonSet(EGRESS_TOOL_NAMES)}
 is_egress { egress_tools[lower(input.tool_name)] }
-is_egress { egress_tools[lower(input.tool_name_normalized)] }`;
+is_egress { egress_tools[lower(input.tool_name_normalized)] }
+name_split_map = ${NAME_SPLIT_MAP}
+tool_name_tokens = [t | t := split(strings.replace_n(name_split_map, input.tool_name), "_")[_]; t != ""]
+norm_name_tokens = [t | t := split(strings.replace_n(name_split_map, input.tool_name_normalized), "_")[_]; t != ""]
+destination_keys = {"destination", "recipient", "url", "endpoint", "webhook", "callback"}
+names_a_destination { walk(input.tool_params, [p, _]); k := p[count(p) - 1]; is_string(k); destination_keys[lower(k)] }
+retrieval_lead_verbs = ${jsonSet(RETRIEVAL_LEAD_VERBS)}
+is_retrieval_lead { retrieval_lead_verbs[tool_name_tokens[0]]; not names_a_destination }
+is_egress { object.get(input.derived, "verb", "") == "send"; not is_retrieval_lead }
+egress_action_tokens = ${jsonSet(EGRESS_ACTION_TOKENS)}
+is_egress { egress_action_tokens[tool_name_tokens[_]] }
+is_egress { egress_action_tokens[norm_name_tokens[_]] }`;
 }
 
 function scopeHelperBlock(): string {

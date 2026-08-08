@@ -217,7 +217,11 @@ class AttackGraphEngine:
             nodes[node_id] = {
                 "id": node_id,
                 "type": str(node.get("type", "data")),
-                "name": str(node.get("name", node_id)),
+                # Snapshot nodes carry `label` (GraphNode.label); they have never had a `name` key, so
+                # this read always fell through to node_id. Every stored path therefore came out with
+                # mitre_techniques: [] and no destructive-tool terminal — which reads as "this path maps
+                # to no ATLAS technique" rather than "the lookup used the wrong key".
+                "name": str(node.get("label") or node.get("name") or node_id),
                 "properties": dict(node.get("properties") or {}),
             }
         return nodes

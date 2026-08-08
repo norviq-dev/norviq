@@ -23,6 +23,7 @@ from norviq.fleet_relay import FleetRelayForwarder
 from norviq.fleet_puller import FleetPolicyPuller
 from norviq.api.routers import attack_graph_compute, agents, audit, auth_login, cluster_info, coverage, deployments, evaluate, fleet_enroll, graph, graphs, health, intents, keys, mcp, me, mitre, packs, policies, redteam, search, settings_router, system_health, threats, tools, version
 from norviq.config import settings
+from norviq.logging_setup import configure_logging
 from norviq.engine.audit_emitter import AuditEmitter
 from norviq.engine.cache import RedisCache
 from norviq.engine.evaluator import OPAEvaluator
@@ -83,7 +84,12 @@ async def _connect_with_backoff(coro_factory, name: str, retry_code: str, fail_c
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Run API startup and shutdown lifecycle."""
+    # BEFORE anything logs: NRVQ_LOG_LEVEL was accepted, rendered into the ConfigMap and documented,
+    # while nothing outside the MCP stdio proxy ever configured structlog — so every API/engine/sidecar
+    # process ran at structlog's default and the knob did nothing.
+    applied_level = configure_logging()
     setup_telemetry()
+    log.info("nrvq.api.log_level_applied", level=applied_level, code="NRVQ-API-7100")
     # A weak JWT secret means forgeable admin tokens. "Weak" = the shipped default, empty, or too
     # short — checking all three so an unset/blank NRVQ_API_SECRET_KEY can't silently ship a forgeable
     # key when require_strong_secret is on (fail-safe: refuse to start rather than run insecure).

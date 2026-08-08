@@ -325,9 +325,17 @@ async def upsert_agent_registry(
     agent_class: str,
     trust_score: float,
     trust_category: str,
-    violation_count: int = 0,
+    violation: bool = False,
 ) -> None:
-    """Write-through an agent's latest trust into the persistent registry (upsert by spiffe_id)."""
+    """Write-through an agent's latest trust into the persistent registry (upsert by spiffe_id).
+
+    `violation` ADDS one to the stored count when this call was blocked or escalated. The parameter
+    used to be `violation_count: int = 0`, no caller ever passed it, and the conflict clause SET the
+    column rather than adding to it — so the value was structurally pinned at 0 forever, while the
+    Agent Monitor renders a "Violations" column that turns amber above 3 and red above 8 and
+    `norviq agent get` prints "Violations: 0". An operator triaging which agent is misbehaving read a
+    number that could never move.
+    """
     from norviq.api.db.models import AgentRegistryEntry
 
     stmt = insert(AgentRegistryEntry).values(
@@ -336,7 +344,7 @@ async def upsert_agent_registry(
         agent_class=agent_class,
         trust_score=trust_score,
         trust_category=trust_category,
-        violation_count=violation_count,
+        violation_count=1 if violation else 0,
         last_seen=datetime.now(timezone.utc),
     )
     stmt = stmt.on_conflict_do_update(
@@ -346,7 +354,8 @@ async def upsert_agent_registry(
             "agent_class": agent_class,
             "trust_score": trust_score,
             "trust_category": trust_category,
-            "violation_count": violation_count,
+            # ADD, do not SET: a violation count that is overwritten on every call is a constant.
+            "violation_count": AgentRegistryEntry.violation_count + (1 if violation else 0),
             "last_seen": datetime.now(timezone.utc),
         },
     )

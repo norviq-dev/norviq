@@ -1412,7 +1412,7 @@ class OPAEvaluator:
     async def _persist_behavior(self, event: ToolCallEvent, decision: PolicyDecision, trust_result: TrustResult) -> None:
         """Persist trust state, enforced outcome history, and profile evolution."""
         self._queue_background(self._safe_set_trust(event.agent_identity.spiffe_id, trust_result))
-        self._queue_background(self._safe_register_agent(event, trust_result))
+        self._queue_background(self._safe_register_agent(event, trust_result, decision))
         await self._post_decision(event, decision)
         self._queue_background(self._safe_record_graph(event, decision))
         self._queue_background(self._safe_record_history(event, decision))
@@ -1482,7 +1482,8 @@ class OPAEvaluator:
         except Exception as exc:  # pragma: no cover
             log.error("nrvq.engine.trust.cache_set_failed", error=str(exc), code="NRVQ-ENG-2049")
 
-    async def _safe_register_agent(self, event: ToolCallEvent, trust_result: TrustResult) -> None:
+    async def _safe_register_agent(self, event: ToolCallEvent, trust_result: TrustResult,
+                                   decision: PolicyDecision | None = None) -> None:
         """Write-through the agent's latest trust to the persistent registry (best-effort).
 
         Keeps the Agents view populated after the short-lived ``trust:*`` cache TTL expires.
@@ -1501,6 +1502,10 @@ class OPAEvaluator:
                     agent_class=event.agent_identity.agent_class,
                     trust_score=trust_result.score,
                     trust_category=trust_result.category.title(),
+                    # A blocked or escalated call is what "violation" means on the Agent Monitor. The
+                    # count was never incremented by anything, so its column could not move off 0 and
+                    # its amber/red thresholds were unreachable.
+                    violation=str(getattr(decision, "decision", "")) in ("block", "escalate"),
                 )
                 await session.commit()
             finally:

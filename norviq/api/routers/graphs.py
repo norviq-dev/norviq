@@ -336,7 +336,17 @@ def _attach_source_capability(nodes: list[AssetNode], edges: list[AssetEdge]) ->
             continue
         hist = e.properties.get("decision_history") or {}
         touched = int(hist.get("allow", 0)) + int(hist.get("block", 0)) + int(hist.get("escalate", 0))
-        guarded = int(hist.get("block", 0)) + int(hist.get("escalate", 0)) > 0
+        # would_block counts as GUARDED. In a Monitor-mode namespace the engine softens a policy's
+        # block/escalate to `audit` with a would-block rule marker, so `block` stays 0 for a rule that
+        # is catching traffic every day. Reading only block+escalate meant the source-capability panel
+        # could never report `defended` on such a namespace: it told the operator either "this grant is
+        # unused — revoke delete on PostgreSQL (least privilege)" for a verb their policy stopped 412
+        # times, or "undefended: observed in traffic, no policy has ever acted on it — author a rule.
+        # This is the live gap" for a rule that is already catching it. The count is fetched a few
+        # lines above and was simply not read here.
+        guarded = (
+            int(hist.get("block", 0)) + int(hist.get("escalate", 0)) + int(hist.get("would_block", 0))
+        ) > 0
         slot = tool_traffic.setdefault(e.target, {"touched": False, "guarded": False})
         slot["touched"] = slot["touched"] or touched > 0
         slot["guarded"] = slot["guarded"] or guarded

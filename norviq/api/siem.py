@@ -29,8 +29,51 @@ log = structlog.get_logger()
 _BATCH = 500
 
 
+
+# RFC5424 severity per decision. A block is the row an on-call rule triggers on, so it must not arrive
+# at the same severity as an ordinary allow.
+_SYSLOG_SEVERITY = {"block": 4, "escalate": 4, "audit": 5, "allow": 6}
+_SYSLOG_FACILITY = 16  # local0
+
+
+def _syslog_line(row: AuditLogEntry) -> str:
+    """One RFC5424 frame: <PRI>1 TIMESTAMP HOST APP PROCID MSGID SD MSG."""
+    doc = _to_dict(row)
+    severity = _SYSLOG_SEVERITY.get(str(doc.get("decision", "")).lower(), 6)
+    pri = _SYSLOG_FACILITY * 8 + severity
+    ts = getattr(row, "timestamp_utc", None)
+    stamp = ts.isoformat() if ts is not None else "-"
+    host = str(doc.get("namespace") or "-") or "-"
+    msgid = str(doc.get("decision") or "-") or "-"
+    procid = str(doc.get("agent_class") or "-") or "-"
+    # The event itself stays JSON in MSG: a collector that parses RFC5424 gets real framing and
+    # severity, and the payload remains machine-readable rather than being flattened into prose.
+    return f"<{pri}>1 {stamp} {host} norviq {procid} {msgid} - " + json.dumps(doc, separators=(",", ":"))
+
+
+def _encode_batch(rows: list[AuditLogEntry]) -> tuple[str, str]:
+    """Encode a batch in the format the operator SELECTED.
+
+    `siem.format` was accepted by the chart, written into the ConfigMap, documented in two places as
+    `ndjson | syslog` — and read by nothing. The forwarder always posted NDJSON with
+    content-type application/x-ndjson, then logged `nrvq.siem.forwarded count=N` at INFO. An operator
+    pointing this at a syslog collector saw the setting land, saw the success line, and believed their
+    audit evidence was flowing; the collector silently dropped or mis-parsed every record. On the
+    audit-evidence egress path of a compliance product, a knob that reports success while ignoring the
+    operator's choice is the worst place for this defect to live.
+    """
+    if str(getattr(settings, "siem_format", "ndjson")).strip().lower() == "syslog":
+        return "".join(_syslog_line(row) + "\n" for row in rows), "text/plain; charset=utf-8"
+    return (
+        "".join(json.dumps(_to_dict(row), separators=(",", ":")) + "\n" for row in rows),
+        "application/x-ndjson",
+    )
+
 class AuditForwarder:
-    """Periodically POSTs new audit rows to a SIEM endpoint as NDJSON (cursor by timestamp)."""
+    """Periodically POSTs new audit rows to a SIEM endpoint (cursor by timestamp).
+
+    Wire format follows `siem.format` — `ndjson` (default) or `syslog` (RFC5424). See `_encode_batch`.
+    """
 
     def __init__(self, session_factory=get_session, client: httpx.AsyncClient | None = None) -> None:
         """Store collaborators; session_factory yields an AsyncSession (overridable in tests)."""
@@ -71,9 +114,9 @@ class AuditForwarder:
         rows = await self._fetch_new()
         if not rows:
             return 0
-        payload = "".join(json.dumps(_to_dict(row), separators=(",", ":")) + "\n" for row in rows)
+        payload, content_type = _encode_batch(rows)
         response = await self._client.post(
-            settings.siem_webhook_url, content=payload, headers={"content-type": "application/x-ndjson"}
+            settings.siem_webhook_url, content=payload, headers={"content-type": content_type}
         )
         response.raise_for_status()
         self._cursor_ts = rows[-1].timestamp_utc
