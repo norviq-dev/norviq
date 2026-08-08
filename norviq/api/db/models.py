@@ -423,3 +423,24 @@ class McpToolPin(Base):
         Index("idx_mcp_pin_ns_server", "namespace", "server_id"),
         Index("idx_mcp_pin_last_seen", "last_seen_at"),
     )
+
+
+class SiemForwardCursor(Base):
+    """Where the SIEM forwarder got to, durably.
+
+    The cursor lived only in `AuditForwarder._cursor_ts`, initialized to None. So every API restart
+    re-forwarded the audit log from row ONE: the whole history duplicated into the collector on each
+    restart, inflating alert counts, block-rate dashboards and any retention-based compliance report
+    built on that stream — while `nrvq.siem.forwarded count=N` logged success throughout.
+
+    Skipping instead of duplicating would be no better on an audit-evidence path (silently dropped
+    evidence), so the cursor is persisted rather than defaulted either way. One row per forwarder
+    identity; `id` is a fixed key because there is exactly one forwarder per deployment today, and a
+    named key leaves room for more without a migration.
+    """
+
+    __tablename__ = "siem_forward_cursor"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default="default")
+    cursor_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)

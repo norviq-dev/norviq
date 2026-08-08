@@ -757,7 +757,19 @@ class PolicyLoader:
         create/delete path invalidate ns-wide here; otherwise a `__baseline__` that newly blocks a tool would
         be served as the cached `allow` for ~TTL seconds). A concrete class scope stays narrowly scoped.
         """
-        ns_wide = agent_class.startswith("__")  # __baseline__/__guardrail__/__pack__* affect every class in the ns
+        # Namespace-wide scopes: the reserved overlays, AND the two policy TIERS added since this
+        # function was written. `namespace:<ns>` applies to every call in the namespace by definition,
+        # and `deployment:<name>` applies to every agent class running in that workload — neither is a
+        # concrete class, and eval results are cached per CLASS, so invalidating the literal tier key hit
+        # a scope nothing caches under. Saving either left every affected class serving its stale cached
+        # decision for the full eval TTL, while the console said "effective on the next matching tool
+        # call". This is the same phantom-scope bug the `<class>__remediation__` note below describes,
+        # reached by the two keys the tier work introduced.
+        ns_wide = (
+            agent_class.startswith("__")           # __baseline__/__guardrail__/__pack__*
+            or agent_class.startswith("namespace:")  # namespace tier
+            or agent_class.startswith("deployment:")  # workload tier
+        )
         # A per-class compliance-remediation overlay is stored under the
         # compound key "<class>__remediation__", which does NOT start with "__" — but its rego is a tighten-only
         # overlay the evaluator BLENDS INTO the BASE class's decision, and eval results are cached under the BASE

@@ -637,7 +637,13 @@ describe("builderCompile — not condition (Phase 2b)", () => {
     ]);
     const result = compileGraph(graph);
     expect(result.errors).toEqual([]);
-    expect(result.rego).toContain('not {"drop_table"}[input.tool_name]');
+    // toolIn now matches the LOWER-CASED raw name OR the engine's normalized skeleton (set
+    // intersection, because a rule body is AND-only and this needs OR). It used to compare raw
+    // input.tool_name only, so Drop_Table / DROP_TABLE / a homoglyph slipped past an
+    // operator-authored rule while the policy reported Active.
+    expect(result.rego).toContain(
+      'not count(({lower(input.tool_name), lower(input.tool_name_normalized)} & {"drop_table"})) > 0'
+    );
   });
 
   it("negates a trustBelow comparison exactly as the brief specifies", () => {

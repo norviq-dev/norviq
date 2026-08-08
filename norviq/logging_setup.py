@@ -34,7 +34,7 @@ def configure_logging(force: bool = False) -> str:
     """
     global _configured
     if _configured and not force:
-        return logging.getLevelName(logging.getLogger().level)
+        return logging.getLevelName(logging.getLogger("norviq").level)
 
     raw = str(getattr(settings, "log_level", "INFO") or "INFO").strip().upper()
     level = getattr(logging, raw, None)
@@ -44,8 +44,23 @@ def configure_logging(force: bool = False) -> str:
         level = logging.INFO
         raw = "INFO"
 
-    logging.basicConfig(level=level, format="%(message)s")
-    logging.getLogger().setLevel(level)
+    # Configure the NORVIQ logger tree, not the root. basicConfig+root.setLevel turned ON third-party
+    # stdlib INFO logging that had never been enabled before: httpx started printing every request URL
+    # (including the SIEM webhook URL, verbatim, on every batch), and the API pod's log grew by about a
+    # quarter at the DEFAULT setting. A knob added so operators could NARROW what leaves the pod must
+    # not widen it when nobody touches it.
+    #
+    # A handler is attached once so records still reach stdout without root's implicit lastResort.
+    nrvq_logger = logging.getLogger("norviq")
+    nrvq_logger.setLevel(level)
+    if not nrvq_logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        nrvq_logger.addHandler(handler)
+    # Third-party loggers keep whatever the runtime gave them (WARNING by default) unless the operator
+    # explicitly asks for DEBUG, where seeing the transport is the point.
+    if level <= logging.DEBUG:
+        logging.getLogger().setLevel(level)
     structlog.configure(
         wrapper_class=structlog.make_filtering_bound_logger(level),
         cache_logger_on_first_use=True,

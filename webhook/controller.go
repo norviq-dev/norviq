@@ -826,11 +826,39 @@ func (c *Controller) updatePolicyStatus(ctx context.Context, u *unstructured.Uns
 	}
 }
 
+// reservedDeleteClasses mirrors _RESERVED_DELETE_CLASSES in norviq/api/routers/policies.py. The API
+// refuses a plain DELETE of these "managed" scopes with a 422.
+var reservedDeleteClasses = map[string]bool{
+	"__baseline__": true, "__pack__": true, "__pack_override__": true,
+	"__pack_weaken__": true, "__guardrail__": true,
+}
+
+// deletePathFor builds the API delete path, opting into confirm_managed for scopes the API treats as
+// operator-managed.
+//
+// A cluster-priority namespace baseline is re-keyed to <targetNs>:__baseline__ on the way IN
+// (namespaceBaselineKey) and that is a reserved scope on the way OUT — so deleting the CR had the API
+// answer 422 "managed scope and cannot be deleted", the controller treat it as a failed delete, and
+// forceFinalizeAfterTimeout eventually drop the finalizer anyway. The CR vanished from kubectl and the
+// baseline kept enforcing, permanently, with nothing left to delete. That is the failure NRVQ-WHK-4043
+// above calls the worst one, reached through a different door.
+//
+// confirm_managed is the API's supported revert for exactly this, and the controller is a legitimate
+// caller: the CR IS the source of truth for a CR-backed baseline, so removing the CR must remove the
+// policy. Sent only for reserved scopes; every other delete is byte-identical to before.
+func deletePathFor(namespace, class string) string {
+	base := fmt.Sprintf("/api/v1/policies/%s/%s", namespace, class)
+	if reservedDeleteClasses[class] {
+		return base + "?confirm_managed=true"
+	}
+	return base
+}
+
 func (c *Controller) reconcileDeletingPolicy(ctx context.Context, u *unstructured.Unstructured) {
 	name := u.GetName()
 	namespace := u.GetNamespace()
-	delNs, delClass := policyStorageKey(u)
-	deletePath := fmt.Sprintf("/api/v1/policies/%s/%s", delNs, delClass)
+	delNs, delClass := policyStorageKey(u, c.adminPolicyNamespace)
+	deletePath := deletePathFor(delNs, delClass)
 	if err := c.syncDelete(ctx, deletePath); err != nil {
 		if c.forceFinalizeAfterTimeout(ctx, u, err) {
 			return
@@ -928,8 +956,8 @@ func (c *Controller) handlePolicyDelete(obj interface{}) {
 		go func() {
 			defer c.wg.Done()
 			defer func() { <-c.syncSemaphore }()
-			delNs, delClass := policyStorageKey(u)
-			deletePath := fmt.Sprintf("/api/v1/policies/%s/%s", delNs, delClass)
+			delNs, delClass := policyStorageKey(u, c.adminPolicyNamespace)
+			deletePath := deletePathFor(delNs, delClass)
 			if err := c.syncDelete(context.Background(), deletePath); err != nil {
 				slog.Error("NRVQ-WHK-4031: API delete failed", "policy", name, "error", err)
 				return
@@ -977,6 +1005,17 @@ func (c *Controller) buildPolicySyncPayload(u *unstructured.Unstructured) (polic
 	// engine's no-policy baseline fallback (evaluator._collect_candidates) resolves it; otherwise it
 	// lands under the admin namespace + policy-name key and is unreachable, leaving unseeded agent
 	// classes to deny-by-default once NRVQ_NO_POLICY_DECISION=deny is in effect.
+	// A SCOPED cross-namespace target (admin-namespace CR naming another namespace plus an agentClass
+	// or a workload) must be stored under the TARGET namespace, because that is the namespace the
+	// evaluator resolves candidates in. validateTarget admits this shape and its own error text
+	// advertises it, but the payload kept the CR's namespace — so the policy landed at
+	// <adminNs>:<class> while every call looked for <targetNs>:<class>. Ready, listed, inert.
+	// clusterPriority baselines are handled by namespaceBaselineKey just below and keep their own path.
+	if targetNs := crossNamespaceTargetNamespace(u, c.adminPolicyNamespace); targetNs != "" {
+		payload.Namespace = targetNs
+		slog.Info("NRVQ-WHK-4044: scoped cross-namespace policy keyed to target namespace",
+			"policy", name, "namespace", targetNs)
+	}
 	baselineNs, baselineClass, isNamespaceBaseline := namespaceBaselineKey(u)
 	if isNamespaceBaseline {
 		payload.Namespace = baselineNs
@@ -1041,10 +1080,15 @@ const baselineFallbackPriority = 1
 //
 // Precedence must match the Python exactly: agentClass, then workload kind+name, then target namespace,
 // then metadata.name as the untargeted fallback.
-func policyStorageKey(u *unstructured.Unstructured) (ns, class string) {
+func policyStorageKey(u *unstructured.Unstructured, adminPolicyNamespace string) (ns, class string) {
 	namespace := u.GetNamespace()
 	if bns, bclass, ok := namespaceBaselineKey(u); ok {
 		return bns, bclass
+	}
+	// Must mirror buildPolicySyncPayload's cross-namespace re-key, or create and delete disagree again —
+	// the same mismatch that let a deleted CR leave its policy enforcing.
+	if targetNs := crossNamespaceTargetNamespace(u, adminPolicyNamespace); targetNs != "" {
+		namespace = targetNs
 	}
 	spec, _, _ := unstructured.NestedMap(u.Object, "spec")
 	target, _ := spec["target"].(map[string]interface{})
@@ -1064,6 +1108,42 @@ func policyStorageKey(u *unstructured.Unstructured) (ns, class string) {
 		}
 	}
 	return namespace, u.GetName()
+}
+
+// crossNamespaceTargetNamespace returns the namespace a SCOPED cross-namespace policy must be stored
+// under, or "" when the CR is not that shape. Scoped means: authored in the admin namespace, naming a
+// different target namespace, AND narrowed by an agentClass or a workload kind+name — the two shapes
+// validateTarget admits without clusterPriority. A whole-namespace cluster baseline is NOT this: it
+// goes through namespaceBaselineKey, which also re-keys the agent class to __baseline__.
+func crossNamespaceTargetNamespace(u *unstructured.Unstructured, adminPolicyNamespace string) string {
+	if adminPolicyNamespace == "" {
+		adminPolicyNamespace = "norviq"
+	}
+	if u.GetNamespace() != adminPolicyNamespace {
+		return ""
+	}
+	spec, _, _ := unstructured.NestedMap(u.Object, "spec")
+	if spec == nil {
+		return ""
+	}
+	if _, hasClusterPriority := spec["clusterPriority"]; hasClusterPriority {
+		return "" // baseline path owns this
+	}
+	target, _ := spec["target"].(map[string]interface{})
+	if target == nil {
+		return ""
+	}
+	targetNs, _ := target["namespace"].(string)
+	if targetNs == "" || targetNs == u.GetNamespace() {
+		return ""
+	}
+	agentClass, _ := target["agentClass"].(string)
+	kind, _ := target["kind"].(string)
+	wlName, _ := target["name"].(string)
+	if agentClass != "" || (kind != "" && wlName != "") {
+		return targetNs
+	}
+	return ""
 }
 
 func namespaceBaselineKey(u *unstructured.Unstructured) (ns, class string, ok bool) {
@@ -1212,6 +1292,10 @@ func validateTarget(namespace, adminPolicyNamespace string, target map[string]in
 		if hasClusterPriority {
 			return nil
 		}
+		// These two shapes are SUPPORTED — the error text below advertises them — and they are keyed
+		// to the target namespace by crossNamespaceTargetNamespace() in buildPolicySyncPayload. Before
+		// that, payload.Namespace was the CR's OWN namespace while the evaluator looked the policy up
+		// under the TARGET namespace, so the CR reported phase=Active and decided nothing, forever.
 		if ac, ok := target["agentClass"].(string); ok && ac != "" {
 			return nil
 		}

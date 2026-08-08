@@ -132,7 +132,12 @@ async def list_agents(
 
 # Live-trust fields overlaid from the warm cache onto the authoritative registry row (everything else —
 # spiffe/ns/class/last_seen/synthetic — stays from the registry, the source of truth for the roster).
-_LIVE_TRUST_FIELDS = ("score", "category", "violation_count", "signals", "dominant_signal", "recommendation")
+# violation_count is DELIBERATELY not overlaid. _safe_set_trust builds the cached TrustScore without
+# one, so it is always 0 there — overlaying it hid the registry's real count for the whole 30s cache TTL,
+# i.e. for exactly the agent being blocked right now, and the number only surfaced once the agent went
+# QUIET. The Agent Monitor's amber(>3)/red(>8) thresholds were unreachable during an incident, which is
+# the only time anyone looks. The registry row is the source of truth for it.
+_LIVE_TRUST_FIELDS = ("score", "category", "signals", "dominant_signal", "recommendation")
 
 
 def _merge_roster(registry_rows: list[dict], warm_rows: list[dict]) -> list[dict]:

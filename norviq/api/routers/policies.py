@@ -971,24 +971,55 @@ async def rollback_policy(
     return {"rolled_back_to": body.target_version, "rego_length": len(rego)}
 
 
+def _sample_probe_input(evaluator, namespace: str, agent_class: str) -> dict:
+    """The synthetic probe call, expressed through the evaluator's own input builder."""
+    build = getattr(evaluator, "_build_input", None)
+    if not callable(build):
+        # Capability check, matching _opa_input_from_record: the dry-run suite drives this with fakes
+        # that implement only _evaluate_opa, and raising here would turn every validation into an error.
+        return {
+            "tool_name": "search_kb",
+            "tool_params": {"query": "dry-run probe"},
+            "agent": {
+                "spiffe_id": f"spiffe://norviq/ns/{namespace}/sa/{agent_class}",
+                "namespace": namespace,
+                "agent_class": agent_class,
+            },
+            "trust_score": 0.8,
+            "trust_category": "high",
+            "session_id": "dry-run",
+            "call_depth": 0,
+        }
+    from norviq.engine.trust import TrustResult
+    from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
+
+    event = ToolCallEvent(
+        tool_name="search_kb",
+        tool_params={"query": "dry-run probe"},
+        agent_identity=AgentIdentity(
+            spiffe_id=f"spiffe://norviq/ns/{namespace}/sa/{agent_class}",
+            namespace=namespace,
+            agent_class=agent_class,
+        ),
+        session_id="dry-run",
+    )
+    return build(event, TrustResult(
+        score=0.8, category=_engine_trust_category(0.8), signals={}, weights={},
+        dominant_signal="probe", recommendation="dry-run validation probe",
+    ))
+
+
 async def _validate_rego(evaluator, body: PolicyCreate) -> tuple[bool, list[str], dict | None]:
     """Compile + sample-evaluate the submitted rego via OPA; return (valid, errors, decision)."""
     errors: list[str] = []
     namespace = body.namespace or "default"
     agent_class = body.agent_class or "customer-support"
-    sample_input = {
-        "tool_name": "search_kb",
-        "tool_params": {"query": "dry-run probe"},
-        "agent": {
-            "spiffe_id": f"spiffe://norviq/ns/{namespace}/sa/{agent_class}",
-            "namespace": namespace,
-            "agent_class": agent_class,
-        },
-        "trust_score": 0.8,
-        "trust_category": "high",
-        "session_id": "dry-run",
-        "call_depth": 0,
-    }
+    # Built by the EVALUATOR, not by hand. The replay half of dry-run was converted to _build_input;
+    # this half was left hand-built and still omitted `derived`, `mcp` and `direction` — so a policy
+    # whose block arm keys on derived.verb, mcp.pin_status or direction produced no decision here, and
+    # `sample_decision` (the "here is what your policy does" readout, and the only thing that sets
+    # valid/errors) reported it as doing nothing. Same defect, same file, one function along.
+    sample_input = _sample_probe_input(evaluator, namespace, agent_class)
     decision: dict | None = None
     try:
         # Reuse the same OPA path real evaluation uses: this both compiles the rego and
@@ -1007,6 +1038,21 @@ async def _validate_rego(evaluator, body: PolicyCreate) -> tuple[bool, list[str]
 
 
 _DRYRUN_REPLAY_CAP = 500  # bound the replay so a busy namespace can't make dry-run unbounded
+
+
+def _engine_trust_category(score: float) -> str:
+    """The tier the ENGINE would assign, so dry-run and enforcement cannot disagree.
+
+    Delegates to TrustCalculator so the boundaries (0.7/0.4, and any per-namespace override) live in
+    one place. Two ladders is exactly the defect this replaces.
+    """
+    from norviq.engine.trust import TrustCalculator
+
+    # _categorize needs no instance state (it reads only the score and optional threshold overrides),
+    # but TrustCalculator's __init__ wants a cache and two stores. Call it unbound so the ONE
+    # implementation of the boundaries is used without standing up collaborators a dry-run has no use
+    # for. If that ever stops being true this raises loudly rather than silently forking the ladder.
+    return TrustCalculator._categorize(None, float(score))  # type: ignore[arg-type]
 
 
 def _opa_input_from_record(rec: AuditLogEntry, evaluator=None) -> dict:
@@ -1055,8 +1101,17 @@ def _opa_input_from_record(rec: AuditLogEntry, evaluator=None) -> dict:
             ),
             session_id=rec.session_id or "dry-run",
             mcp=payload.get("mcp") or {},
+            # The record knows the depth the call was made at. Replaying every row at 0 measured any
+            # candidate touching input.call_depth — the OWASP-LLM08 chain-depth shape — against a
+            # constant and reported "safe to deploy".
+            call_depth=int(payload.get("call_depth") or 0),
         )
-        category = "high" if trust >= 0.75 else "medium" if trust >= 0.5 else "low"
+        # Use the ENGINE's own categorizer, not a second ladder. This recomputed 0.75/0.5 while
+        # enforcement uses 0.7/0.4 (TrustCalculator._categorize) AND honours a per-namespace
+        # trust_threshold override — so a candidate keyed on `trust_category` got the OPPOSITE verdict
+        # from the dry-run for every call whose trust sits in [0.4,0.5) or [0.7,0.75). "Would this rule
+        # have caught it?" answered wrong in both directions.
+        category = _engine_trust_category(trust)
         return evaluator._build_input(event, TrustResult(
             score=trust, category=category, signals={}, weights={},
             dominant_signal="replay", recommendation="dry-run replay of a stored record",
@@ -1075,7 +1130,7 @@ def _opa_input_from_record(rec: AuditLogEntry, evaluator=None) -> dict:
             "agent_class": rec.agent_class,
         },
         "trust_score": trust,
-        "trust_category": "high" if trust >= 0.75 else "medium" if trust >= 0.5 else "low",
+        "trust_category": _engine_trust_category(trust),
         "session_id": rec.session_id or "dry-run",
         "call_depth": 0,
     }

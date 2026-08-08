@@ -80,7 +80,13 @@ def test_log_level_is_applied(monkeypatch, level, expected) -> None:
 
     monkeypatch.setattr(settings, "log_level", level)
     assert configure_logging(force=True) == level
-    assert logging.getLogger().level == expected
+    # Asserted on the NORVIQ tree, not root. The first version of this fix used basicConfig + root
+    # setLevel, which turned ON third-party stdlib INFO logging that had never been enabled — httpx
+    # started printing every request URL, including the SIEM webhook, and the API log grew ~26% at the
+    # DEFAULT setting. A knob added so operators could narrow what leaves the pod must not widen it.
+    assert logging.getLogger("norviq").level == expected
+    if expected > logging.DEBUG:
+        assert logging.getLogger("httpx").getEffectiveLevel() > logging.INFO
 
 
 def test_a_nonsense_level_falls_back_to_info_not_debug(monkeypatch) -> None:
@@ -89,7 +95,7 @@ def test_a_nonsense_level_falls_back_to_info_not_debug(monkeypatch) -> None:
 
     monkeypatch.setattr(settings, "log_level", "VERBOSE-ISH")
     assert configure_logging(force=True) == "INFO"
-    assert logging.getLogger().level == logging.INFO
+    assert logging.getLogger("norviq").level == logging.INFO
 
 
 # ---- the Overview would-block prefix ------------------------------------------------------------

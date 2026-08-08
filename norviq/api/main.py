@@ -24,6 +24,7 @@ from norviq.fleet_puller import FleetPolicyPuller
 from norviq.api.routers import attack_graph_compute, agents, audit, auth_login, cluster_info, coverage, deployments, evaluate, fleet_enroll, graph, graphs, health, intents, keys, mcp, me, mitre, packs, policies, redteam, search, settings_router, system_health, threats, tools, version
 from norviq.config import settings
 from norviq.logging_setup import configure_logging
+from norviq.api.auth import warn_if_identity_binding_is_partial
 from norviq.engine.audit_emitter import AuditEmitter
 from norviq.engine.cache import RedisCache
 from norviq.engine.evaluator import OPAEvaluator
@@ -90,6 +91,8 @@ async def lifespan(app: FastAPI):
     applied_level = configure_logging()
     setup_telemetry()
     log.info("nrvq.api.log_level_applied", level=applied_level, code="NRVQ-API-7100")
+    # Says so once when the hardened posture cannot actually bind spiffe_id (workload-api mode).
+    warn_if_identity_binding_is_partial()
     # A weak JWT secret means forgeable admin tokens. "Weak" = the shipped default, empty, or too
     # short — checking all three so an unset/blank NRVQ_API_SECRET_KEY can't silently ship a forgeable
     # key when require_strong_secret is on (fail-safe: refuse to start rather than run insecure).

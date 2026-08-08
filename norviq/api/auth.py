@@ -381,10 +381,79 @@ _REQUIRED_BOUND_FIELDS = ("agent_class", "spiffe_id")
 # internal mTLS client certificate — nginx already verifies it and forwards X-Nrvq-Client-Verify /
 # X-Nrvq-Client-Subject — which is a separate change, not this one.
 def _required_bound_fields() -> tuple[str, ...]:
-    """The bound-identity fields a machine principal must carry, for THIS deployment's SPIFFE mode."""
+    """The bound-identity fields a machine principal must carry, for THIS deployment's SPIFFE mode.
+
+    workload-api mode drops `spiffe_id` from the REQUIRED set, and that is not a preference — the
+    injector cannot mint the claim because a SPIRE-issued SVID's trust domain is not ours to predict
+    (webhook/injector.go only binds it in "mock" mode, where the id is deterministic). Minting a guess
+    would 403 every tool call.
+
+    But the relaxation has a consequence the hardened posture does not advertise: with no spiffe_id
+    claim, scoped_identity's binding loop skips the field, so the BODY's spiffe_id passes through — and
+    spiffe_id is the key for the trust score, the per-agent rate limit and the agent_frozen: admin
+    kill-switch. An operator who deploys SPIRE + auth_require_bound_agent_identity=true believes
+    identity is attested end to end; for the SPIFFE id specifically it is not.
+
+    What is done about it, since the claim genuinely cannot be minted:
+      * `_reject_cross_namespace_spiffe` below still pins a body-supplied SVID to the caller's OWN
+        namespace claim, so the hole is bounded to intra-namespace rather than cross-tenant;
+      * `warn_if_identity_binding_is_partial` says so once, loudly, at startup, instead of letting the
+        posture read as complete.
+    """
     if str(getattr(settings, "spiffe_mode", "mock")).lower() == "workload-api":
         return tuple(f for f in _REQUIRED_BOUND_FIELDS if f != "spiffe_id")
     return _REQUIRED_BOUND_FIELDS
+
+
+def warn_if_identity_binding_is_partial() -> bool:
+    """Say once, at startup, when the strict posture cannot actually bind spiffe_id. Returns True then."""
+    mode = str(getattr(settings, "spiffe_mode", "mock")).lower()
+    strict = bool(getattr(settings, "auth_require_bound_agent_identity", False))
+    if mode == "workload-api" and strict:
+        log.warning(
+            "nrvq.auth.identity_binding_partial",
+            detail="spiffe_mode=workload-api: the sidecar token carries NO spiffe_id claim (a SPIRE "
+                   "SVID is not predictable at injection), so a service credential's SPIFFE id comes "
+                   "from the request body. It is pinned to the token's own namespace, but WITHIN that "
+                   "namespace the trust score, per-agent rate limit and the agent_frozen kill-switch "
+                   "are keyed on a value the caller supplies. Treat the admin freeze as advisory here, "
+                   "and bind identity at the transport instead (internal mTLS).",
+            code="NRVQ-AUTH-14022",
+        )
+        return True
+    return False
+
+
+def _reject_cross_namespace_spiffe(user: dict, identity: dict) -> None:
+    """Pin a body-supplied SPIFFE id to the caller's OWN namespace claim.
+
+    Only reachable when the credential has no spiffe_id claim to bind against (workload-api mode). The
+    id still is not attested, but it can no longer name ANOTHER tenant's agent — which is what turned a
+    missing claim into cross-tenant freeze evasion. Uses the engine's strict parser, the same one
+    attested_namespace uses, so `spiffe://evil/ns/victim/sa/x` does not qualify as a namespace claim.
+    """
+    if str(user.get("role", "")).lower() != "service":
+        return
+    claimed_ns = str(user.get("namespace", "") or "")
+    body_id = str(identity.get("spiffe_id", "") or "")
+    if not claimed_ns or not body_id:
+        return
+    from norviq.engine.identity import _parse_norviq_spiffe_id
+
+    parsed = _parse_norviq_spiffe_id(body_id)
+    if parsed is None:
+        return
+    svid_ns, _sa = parsed
+    if svid_ns != claimed_ns:
+        log.warning(
+            "nrvq.auth.spiffe_namespace_mismatch",
+            sub=user.get("sub"), claim_namespace=claimed_ns, requested=body_id,
+            code="NRVQ-AUTH-14023",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="SPIFFE id names a different namespace than this credential",
+        )
 # Fields that only ADD a policy candidate. For these, "unclaimed" resolves to empty (drop the tier)
 # rather than to the body's value — clearing an additive tier can only ever be more restrictive.
 _ADDITIVE_TIER_FIELDS = ("workload",)
@@ -466,6 +535,10 @@ def scoped_identity(user: dict, agent_identity: dict | None) -> dict:
                     code="NRVQ-AUTH-14021",
                 )
                 identity[field] = ""
+    # With no spiffe_id claim to bind against (workload-api mode), at least stop the body naming
+    # another tenant's agent — the difference between an unattested id and a cross-tenant one.
+    if "spiffe_id" not in bound:
+        _reject_cross_namespace_spiffe(user, identity)
     if role == "service":
         missing = [f for f in _required_bound_fields() if f not in bound]
         if missing and settings.auth_require_bound_agent_identity:

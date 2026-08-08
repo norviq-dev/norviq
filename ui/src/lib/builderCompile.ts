@@ -1357,8 +1357,17 @@ function compileConditionLine(
       return `${fn[cond.target]}(${jsonArray(kw)})`;
     }
     case "toolIn": {
-      const tools = normalizeTools(cond.tools);
-      return `${jsonSet(tools)}[input.tool_name]`;
+      // Match the LOWER-CASED raw name OR the engine's normalized skeleton, which is what the server
+      // generator compares against (threat_intent.py uses input.tool_name_normalized).
+      //
+      // This matched raw `input.tool_name` only, so an operator who picked the "Tool name is one of"
+      // chip and listed send_email got a policy that blocked send_email and allowed Send_Email,
+      // SEND_EMAIL, and the homoglyph sеnd_email — the exact bypasses tool_name_normalized exists to
+      // close. The rule saved, validated and reported Active, so nothing on screen said otherwise.
+      //
+      // Set intersection keeps it one expression (a rule body is AND-only, and this needs OR).
+      const tools = normalizeTools(cond.tools).map((t) => t.toLowerCase());
+      return `count(({lower(input.tool_name), lower(input.tool_name_normalized)} & ${jsonSet(tools)})) > 0`;
     }
     case "trustBelow":
       // `input.trust_score`, NOT `input.agent.trust_score`. evaluator.py's _build_input puts

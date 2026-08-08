@@ -98,6 +98,11 @@ def _encode_batch(rows: list[AuditLogEntry]) -> tuple[str, str]:
     )
 
 class AuditForwarder:
+    # One row, one forwarder per deployment today; a named key leaves room for more without a migration.
+    _CURSOR_ID = "default"
+    # Bounds one poll so a huge backlog drains steadily instead of monopolising the loop forever.
+    _MAX_BATCHES_PER_POLL = 20
+
     """Periodically POSTs new audit rows to a SIEM endpoint (cursor by timestamp).
 
     Wire format follows `siem.format` — `ndjson` (default) or `syslog` (RFC5424). See `_encode_batch`.
@@ -111,6 +116,7 @@ class AuditForwarder:
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self._cursor_ts = None
+        self._cursor_loaded = False
 
     async def start(self) -> None:
         """Launch the background poll loop when enabled and configured (else a no-op)."""
@@ -138,7 +144,26 @@ class AuditForwarder:
                 pass
 
     async def forward_once(self) -> int:
-        """Fetch audit rows newer than the cursor, POST them, advance the cursor. Returns count."""
+        """Forward every audit row newer than the cursor, in batches, and persist the cursor.
+
+        Two defects lived here. The cursor was in-memory only, so each API restart re-forwarded the
+        audit log from row ONE — the whole history duplicated into the collector, while the INFO
+        success line said everything was fine. And this forwarded ONE batch per poll: 500 rows every
+        siem_poll_interval_s (30s by default) is a hard 16.7 rows/sec ceiling, so any namespace busier
+        than that fell permanently behind and the gap only ever grew. Now it drains until caught up,
+        bounded so one call cannot spin forever.
+        """
+        await self._load_cursor()
+        total = 0
+        for _ in range(self._MAX_BATCHES_PER_POLL):
+            sent = await self._forward_batch()
+            total += sent
+            if sent < _BATCH:
+                break
+        return total
+
+    async def _forward_batch(self) -> int:
+        """Forward at most one batch. Returns how many rows went."""
         rows = await self._fetch_new()
         if not rows:
             return 0
@@ -148,8 +173,51 @@ class AuditForwarder:
         )
         response.raise_for_status()
         self._cursor_ts = rows[-1].timestamp_utc
+        await self._save_cursor()
         log.info("nrvq.siem.forwarded", count=len(rows), code="NRVQ-SIEM-14000")
         return len(rows)
+
+    async def _load_cursor(self) -> None:
+        """Read the persisted cursor once per process. Best-effort: a DB hiccup must not stop forwarding."""
+        if self._cursor_loaded:
+            return
+        self._cursor_loaded = True
+        try:
+            from norviq.api.db.models import SiemForwardCursor
+
+            provider = self._session_factory()
+            session = await provider.__anext__()
+            try:
+                row = await session.get(SiemForwardCursor, self._CURSOR_ID)
+                if row is not None and row.cursor_ts is not None:
+                    self._cursor_ts = row.cursor_ts
+                    log.info("nrvq.siem.cursor_restored", cursor=str(row.cursor_ts), code="NRVQ-SIEM-14003")
+            finally:
+                await provider.aclose()
+        except Exception as exc:
+            # Loud: starting from nothing means re-forwarding history, which is the defect this closes.
+            log.warning("nrvq.siem.cursor_load_failed", error=str(exc), code="NRVQ-SIEM-14004")
+
+    async def _save_cursor(self) -> None:
+        """Persist the cursor after a successful POST, so a restart resumes instead of replaying."""
+        try:
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+            from norviq.api.db.models import SiemForwardCursor
+
+            provider = self._session_factory()
+            session = await provider.__anext__()
+            try:
+                stmt = pg_insert(SiemForwardCursor).values(id=self._CURSOR_ID, cursor_ts=self._cursor_ts)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["id"], set_={"cursor_ts": self._cursor_ts},
+                )
+                await session.execute(stmt)
+                await session.commit()
+            finally:
+                await provider.aclose()
+        except Exception as exc:
+            log.warning("nrvq.siem.cursor_save_failed", error=str(exc), code="NRVQ-SIEM-14005")
 
     async def _fetch_new(self) -> list[AuditLogEntry]:
         """Read the next batch of audit rows after the cursor, ordered oldest-first."""

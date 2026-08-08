@@ -335,6 +335,15 @@ class InvalidSpiffeIdentity(ValueError):
     """Raised when an agent's SPIFFE id fails format validation (named fallback attribution)."""
 
 
+def _is_synthetic_framework(framework: str) -> bool:
+    """True for traffic the product generated about itself (red-team simulation, probes).
+
+    Kept next to its only caller rather than imported from api.synthetic: the engine must not depend on
+    the API layer, and this is the framework half of that classifier, which is the stable half.
+    """
+    return str(framework or "").strip().lower() in {"redteam", "red-team", "policy-tester", "probe"}
+
+
 class OPAEvaluator:
     """Core evaluator for policy decisions with cache-first execution."""
 
@@ -577,21 +586,60 @@ class OPAEvaluator:
             log.error("nrvq.engine.timeout", event_id=event.event_id, elapsed_ms=elapsed_ms, code="NRVQ-ENG-2020")
             decision = self._timeout_decision(event, elapsed_ms)
             self._record_telemetry(event, decision, start, cache_hit, span, timer)
+            # Register the agent on the FAIL-CLOSED path too. These three branches produce the blocks
+            # that most strongly indicate an attack or an engine fault — a malformed/spoofed SPIFFE id,
+            # or evaluations timing out — and none of them counted a violation or even created a
+            # registry row, so an agent that ONLY ever trips them never appeared on the Agent Monitor
+            # at all. Best-effort and fire-and-forget, exactly like the happy path: a registry write
+            # must never turn a fail-closed block into an error.
+            self._register_fail_closed(event, decision)
             return decision
         except InvalidSpiffeIdentity:
             elapsed_ms = (time.monotonic() - start) * 1000
             log.warning("nrvq.engine.invalid_identity", event_id=event.event_id, code="NRVQ-ENG-2006")
             decision = self._invalid_identity_decision(event, elapsed_ms)
             self._record_telemetry(event, decision, start, cache_hit, span, timer)
+            # Register the agent on the FAIL-CLOSED path too. These three branches produce the blocks
+            # that most strongly indicate an attack or an engine fault — a malformed/spoofed SPIFFE id,
+            # or evaluations timing out — and none of them counted a violation or even created a
+            # registry row, so an agent that ONLY ever trips them never appeared on the Agent Monitor
+            # at all. Best-effort and fire-and-forget, exactly like the happy path: a registry write
+            # must never turn a fail-closed block into an error.
+            self._register_fail_closed(event, decision)
             return decision
         except Exception as exc:
             elapsed_ms = (time.monotonic() - start) * 1000
             log.error("nrvq.engine.error", event_id=event.event_id, error=str(exc), code="NRVQ-ENG-2000")
             decision = self._ensure_block_attribution(self._fallback_decision(event, elapsed_ms), event.event_id)
             self._record_telemetry(event, decision, start, cache_hit, span, timer)
+            # Register the agent on the FAIL-CLOSED path too. These three branches produce the blocks
+            # that most strongly indicate an attack or an engine fault — a malformed/spoofed SPIFFE id,
+            # or evaluations timing out — and none of them counted a violation or even created a
+            # registry row, so an agent that ONLY ever trips them never appeared on the Agent Monitor
+            # at all. Best-effort and fire-and-forget, exactly like the happy path: a registry write
+            # must never turn a fail-closed block into an error.
+            self._register_fail_closed(event, decision)
             return decision
         finally:
             span.end()
+
+    def _register_fail_closed(self, event: ToolCallEvent, decision: PolicyDecision) -> None:
+        """Queue a registry write for a decision made on the fail-closed path.
+
+        No trust was computed on these branches (that is why they are fail-closed), so the row carries
+        the identity and the violation, not a recomputed score. Uses the same background queue as the
+        happy path so it cannot add latency to a call that has already failed.
+        """
+        try:
+            from norviq.engine.trust import TrustResult
+
+            placeholder = TrustResult(
+                score=0.0, category="low", signals={}, weights={},
+                dominant_signal="fail_closed", recommendation=str(decision.rule_id or "fail_closed"),
+            )
+            self._queue_background(self._safe_register_agent(event, placeholder, decision))
+        except Exception as exc:  # pragma: no cover - never let bookkeeping break a fail-closed block
+            log.warning("nrvq.engine.fail_closed_register_failed", error=str(exc), code="NRVQ-ENG-2061")
 
     def _record_telemetry(
         self,
@@ -1505,7 +1553,16 @@ class OPAEvaluator:
                     # A blocked or escalated call is what "violation" means on the Agent Monitor. The
                     # count was never incremented by anything, so its column could not move off 0 and
                     # its amber/red thresholds were unreachable.
-                    violation=str(getattr(decision, "decision", "")) in ("block", "escalate"),
+                    #
+                    # SYNTHETIC TRAFFIC IS EXCLUDED. The red-team simulator builds its events with the
+                    # REAL agent's SVID (redteam.py _build_event), so one admin "Run suite" click wrote
+                    # ~26-34 fabricated violations onto every governed agent in the namespace and put
+                    # the whole fleet in the red band for attacks that never happened. Same framework
+                    # marker the audit view already uses to separate simulated from real.
+                    violation=(
+                        str(getattr(decision, "decision", "")) in ("block", "escalate")
+                        and not _is_synthetic_framework(getattr(event, "framework", ""))
+                    ),
                 )
                 await session.commit()
             finally:
