@@ -125,7 +125,9 @@ _JUSTIFIED_SILENT_HANDLERS: dict[tuple[str, str], str] = {
         "Resets the lockout counter after a SUCCESSFUL login. Failing to clear can only leave a stale "
         "count that expires on its own window — it cannot grant access."
     ),
-    ("api/audit_hub.py", "AuditHub.publish"): (
+    # Renamed from AuditHub.publish when cross-process fan-out was added; the drop semantics and the
+    # justification are unchanged — this is still the local, per-process delivery.
+    ("api/audit_hub.py", "AuditHub.publish_local"): (
         "Live-UI fan-out only. A full subscriber queue drops that subscriber's copy of the event; the "
         "DURABLE audit record is the Postgres row written by AuditEmitter, which is not best-effort."
     ),

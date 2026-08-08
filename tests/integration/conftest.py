@@ -43,10 +43,27 @@ def auth_headers(auth_token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {auth_token}"}
 
 
+# Transport budgets, separated on purpose.
+#
+# DEFAULT_TIMEOUT_S stays tight so a genuinely HUNG endpoint fails fast and loudly — that is what this
+# number is for, and raising it globally would hide exactly the hangs it exists to catch.
+#
+# SLOW_ENDPOINT_TIMEOUT_S is for the handful of calls that are legitimately heavy (a whole-cluster
+# recompute). Those were failing against a REMOTE cluster on the transport budget, not on behaviour:
+# POST /attack-paths/compute across every namespace measured 9.86s against the 10.0s default on a
+# cluster holding 676 paths in `default` alone. A test that fails because a correct answer took 9.9
+# seconds is asserting performance while claiming to assert correctness, and it will keep flaking on
+# any cluster bigger or further away than a laptop's.
+#
+# Both are env-tunable so CI can tighten or a slow link can loosen without editing tests.
+DEFAULT_TIMEOUT_S = float(os.environ.get("NRVQ_TEST_TIMEOUT_S", "10"))
+SLOW_ENDPOINT_TIMEOUT_S = float(os.environ.get("NRVQ_TEST_SLOW_TIMEOUT_S", "120"))
+
+
 @pytest.fixture
 async def api_client(api_url: str):
     """HTTP client pointed at local API. Skips test if API unreachable."""
-    async with httpx.AsyncClient(base_url=api_url, timeout=10.0) as client:
+    async with httpx.AsyncClient(base_url=api_url, timeout=DEFAULT_TIMEOUT_S) as client:
         try:
             health = await client.get("/healthz")
             if health.status_code != 200:

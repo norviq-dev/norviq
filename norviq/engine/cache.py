@@ -20,6 +20,8 @@ from norviq.telemetry.metrics import record_cache_hit, record_cache_miss
 
 log = structlog.get_logger()
 POLICY_EVENTS_CHANNEL = "norviq:policy_events"
+# Live audit fan-out across API workers/replicas — see publish_audit_record.
+AUDIT_RECORDS_CHANNEL = "norviq:audit_records"
 
 
 def _hash_seg(segment: str) -> str:
@@ -415,6 +417,47 @@ class RedisCache:
             }
         )
         await self._client().publish(POLICY_EVENTS_CHANNEL, payload)
+
+    async def publish_audit_record(self, record: dict, origin: str = "") -> None:
+        """Fan one live audit record to every OTHER API process.
+
+        The /ws/audit hub is in-process (audit_hub.AuditHub), and the API runs `api.workers: 4` by
+        default across `api.replicas: 2` — eight independent processes. A browser's websocket is served
+        by ONE of them, and a tool call is evaluated by whichever the load balancer picked, so the live
+        Audit Log showed roughly one decision in eight and gave no sign the rest existed. On a product
+        whose job is to show what enforcement did, a live view that silently drops most of it is worse
+        than not having one.
+
+        Reuses the pub/sub the policy path already relies on for exactly this reason. `origin` is the
+        publishing process id so a subscriber can skip its own echo — Redis delivers to every
+        subscriber including the publisher, and the publisher has already fanned out locally.
+        """
+        try:
+            await self._client().publish(AUDIT_RECORDS_CHANNEL, json.dumps({"origin": origin, "record": record}))
+        except Exception as exc:  # never let the live feed break a decision
+            log.warning("nrvq.cache.audit_publish_failed", error=str(exc), code="NRVQ-DB-9036")
+
+    async def listen_audit_records(self, callback) -> None:
+        """Subscribe to peer audit records and hand each to `callback(record, origin)`."""
+        pubsub = self._pool.pubsub()
+        await pubsub.subscribe(AUDIT_RECORDS_CHANNEL)
+        log.info("nrvq.cache.audit_records_listening", channel=AUDIT_RECORDS_CHANNEL, code="NRVQ-DB-9037")
+        async for message in pubsub.listen():
+            if message.get("type") != "message":
+                continue
+            data = message["data"]
+            if isinstance(data, bytes):
+                data = data.decode()
+            try:
+                payload = json.loads(data)
+            except Exception as exc:
+                # Not silent: anything non-JSON on this channel means a peer is publishing a shape this
+                # process does not understand — a version skew worth seeing, not a record to drop quietly.
+                log.warning("nrvq.cache.audit_record_undecodable", error=str(exc), code="NRVQ-DB-9038")
+                continue
+            record = payload.get("record")
+            if isinstance(record, dict):
+                await callback(record, str(payload.get("origin") or ""))
 
     async def listen_policy_events(self, callback) -> None:
         """Listen for policy invalidation events from other replicas."""

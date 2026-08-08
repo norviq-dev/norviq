@@ -13,7 +13,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-from norviq.api.audit_hub import AuditHub
+from norviq.api.audit_hub import AuditHub, bind_peer_publisher
 from norviq.api.audit_retention import RetentionPruner
 from norviq.api.db.session import close_db, create_tables, ensure_schema_compatibility, get_session, init_db
 from norviq.api.path_timing import PathTimingMiddleware
@@ -173,6 +173,31 @@ async def lifespan(app: FastAPI):
                 await asyncio.sleep(2)
 
     app.state.policy_sync_task = asyncio.create_task(_policy_sync_loop())
+
+    # LIVE AUDIT FAN-OUT across API processes. The /ws/audit hub is per-process and the API runs
+    # `api.workers: 4` across `api.replicas: 2` by default — eight of them. A browser's socket lives in
+    # one process; a tool call is evaluated by whichever the load balancer picked, so the live Audit Log
+    # showed roughly one decision in eight and said nothing about the rest. Measured on a live cluster:
+    # workers=4 delivered the broadcast on ~1 run in 5; workers=1 delivered 5/5.
+    #
+    # Same pub/sub the policy path already uses, same reconnect discipline, and the publisher is bound
+    # only when a cache exists so a Redis-less deployment keeps the old single-process behaviour rather
+    # than failing.
+    async def _on_peer_audit_record(record: dict, origin: str) -> None:
+        await app.state.audit_hub.deliver_from_peer(record, origin)
+
+    async def _audit_fanout_loop() -> None:
+        while True:
+            try:
+                await app.state.cache.listen_audit_records(_on_peer_audit_record)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log.error("nrvq.startup.audit_fanout_dropped", error=str(exc), code="NRVQ-API-7102")
+                await asyncio.sleep(2)
+
+    bind_peer_publisher(app.state.cache.publish_audit_record)
+    app.state.audit_fanout_task = asyncio.create_task(_audit_fanout_loop())
     # Seed the per-ns posture mirror from persisted NamespaceSettings so pre-existing rows
     # enforce after a restart / Redis flush (best-effort; the evaluator falls back to global config on a miss).
     try:
