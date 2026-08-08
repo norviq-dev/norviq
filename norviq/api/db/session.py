@@ -119,6 +119,8 @@ async def init_db() -> None:
 # Waiting for a peer to finish creating the schema is the NORMAL path here, not a fault, so it must not
 # be fatal. Retry with backoff and let the lock do its job; by the second attempt the tables exist and
 # create_all no-ops in milliseconds.
+# Sized for "seven peers ahead of me, each doing an idempotent create_all", not for a healthy query.
+_SCHEMA_INIT_COMMAND_TIMEOUT_S = 180.0
 _SCHEMA_INIT_ATTEMPTS = 5
 _SCHEMA_INIT_BACKOFF_S = 3.0
 
@@ -148,6 +150,26 @@ async def create_tables() -> None:
     raise last_exc if last_exc else RuntimeError("schema init failed")
 
 
+async def _schema_engine() -> AsyncEngine:
+    """A throwaway engine for schema init ONLY, with a budget sized for waiting on the lock.
+
+    The killer was a CLIENT-side timeout, so no server setting could fix it: `_build_connect_args`
+    puts asyncpg's `command_timeout` (NRVQ_DB_COMMAND_TIMEOUT, 10s) on every connection, and
+    `pg_advisory_xact_lock` BLOCKS — so a process queueing behind seven peers is killed by its own
+    client long before Postgres would ever have refused it. Retrying at the application layer helped
+    but could not fix the root: each retry re-entered the same 10s ceiling.
+
+    Schema init is a once-per-process startup step on its own connection, so a generous budget here
+    costs nothing at steady state and is disposed immediately after. NullPool because this engine
+    exists for one transaction.
+    """
+    from sqlalchemy.pool import NullPool
+
+    connect_args = dict(_build_connect_args())
+    connect_args["command_timeout"] = _SCHEMA_INIT_COMMAND_TIMEOUT_S
+    return create_async_engine(_async_pg_url(), poolclass=NullPool, connect_args=connect_args)
+
+
 async def _create_tables_once() -> None:
     """One schema-init attempt. Raises TimeoutError when a peer holds the lock too long."""
     from norviq.api.db.models import Base
@@ -155,8 +177,9 @@ async def _create_tables_once() -> None:
     if _engine is None:
         raise RuntimeError("Database not initialized. Call init_db() first.")
     log.info("nrvq.startup.create_tables.begin", code="NRVQ-DB-DEBUG-2A")
+    engine = await _schema_engine()
     try:
-        async with _engine.begin() as conn:
+        async with engine.begin() as conn:
             log.info("nrvq.startup.create_tables.connection_acquired", code="NRVQ-DB-DEBUG-2B")
             # Serialize schema init across replicas. `create_all` checks "does this table exist?" and
             # then creates it, which is not atomic: the chart runs 2 API replicas by default, both boot
@@ -265,6 +288,10 @@ async def _create_tables_once() -> None:
             code="NRVQ-DB-DEBUG-2-ERR",
         )
         raise
+    finally:
+        # Disposed on every path: this engine exists for one transaction, and leaking a connection per
+        # retry across eight processes is how a fix for contention becomes a cause of it.
+        await engine.dispose()
 
 
 async def ensure_schema_compatibility() -> None:

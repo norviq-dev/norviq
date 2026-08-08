@@ -83,3 +83,26 @@ def test_the_advisory_lock_itself_is_still_taken() -> None:
     calls race and one loses on pg_type_typname_nsp_index."""
     src = inspect.getsource(dbsession._create_tables_once)
     assert "pg_advisory_xact_lock" in src
+
+
+def test_schema_init_uses_its_own_connection_budget() -> None:
+    """The killer was a CLIENT-side timeout, so no server setting could have fixed it.
+
+    `_build_connect_args` puts asyncpg's `command_timeout` (NRVQ_DB_COMMAND_TIMEOUT, 10s) on every
+    connection, and `pg_advisory_xact_lock` BLOCKS — so a process queueing behind seven peers is killed
+    by its own client long before Postgres would refuse it. Application-level retry alone could not fix
+    that: every retry re-entered the same 10s ceiling, which is exactly what the live pod showed (20
+    contention retries logged across 4 restarts, then exit).
+    """
+    src = inspect.getsource(dbsession._schema_engine)
+    assert 'connect_args["command_timeout"] = _SCHEMA_INIT_COMMAND_TIMEOUT_S' in src
+    assert dbsession._SCHEMA_INIT_COMMAND_TIMEOUT_S >= 60, (
+        "too tight to outlast seven peers each running an idempotent create_all"
+    )
+
+
+def test_the_throwaway_engine_is_always_disposed() -> None:
+    """One transaction per process, but leaking a connection per retry across eight processes would
+    turn the fix for contention into a cause of it."""
+    src = inspect.getsource(dbsession._create_tables_once)
+    assert "finally:" in src and "await engine.dispose()" in src
