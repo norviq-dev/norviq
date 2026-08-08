@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from datetime import datetime, timezone
 import traceback
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -106,8 +108,48 @@ async def init_db() -> None:
     log.info("nrvq.db.connected", pool_size=settings.pg_pool_size, code="NRVQ-DB-9000")
 
 
+# Schema init contends across EVERY api process, not every pod. The chart runs api.workers: 4 across
+# api.replicas: 2, so eight processes call create_tables() at once and seven of them queue on one
+# advisory lock — while the connection carries the ordinary NRVQ_DB_COMMAND_TIMEOUT (10s by default).
+# On the run that first creates a new table the holder takes long enough that the waiters blow that
+# budget, get asyncpg's TimeoutError, and uvicorn exits: "Application startup failed. Exiting." The pod
+# then CrashLoopBackOffs, and because every restart re-enters the same contention it does not reliably
+# self-heal — observed on AKS as two of three api pods stuck at 7 restarts.
+#
+# Waiting for a peer to finish creating the schema is the NORMAL path here, not a fault, so it must not
+# be fatal. Retry with backoff and let the lock do its job; by the second attempt the tables exist and
+# create_all no-ops in milliseconds.
+_SCHEMA_INIT_ATTEMPTS = 5
+_SCHEMA_INIT_BACKOFF_S = 3.0
+
+
 async def create_tables() -> None:
-    """Create schema and current-month audit partition."""
+    """Create schema and current-month audit partition, tolerating peer contention."""
+    last_exc: Exception | None = None
+    for attempt in range(1, _SCHEMA_INIT_ATTEMPTS + 1):
+        try:
+            await _create_tables_once()
+            return
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            # Someone else holds the schema lock. That is the design working, not a failure.
+            last_exc = exc
+            log.warning(
+                "nrvq.startup.create_tables.lock_contended",
+                attempt=attempt, of=_SCHEMA_INIT_ATTEMPTS,
+                detail="another api process is initialising the schema; retrying rather than exiting",
+                code="NRVQ-DB-9039",
+            )
+            if attempt < _SCHEMA_INIT_ATTEMPTS:
+                await asyncio.sleep(_SCHEMA_INIT_BACKOFF_S * attempt)
+    log.error(
+        "nrvq.startup.create_tables.lock_exhausted",
+        attempts=_SCHEMA_INIT_ATTEMPTS, error=str(last_exc), code="NRVQ-DB-9040",
+    )
+    raise last_exc if last_exc else RuntimeError("schema init failed")
+
+
+async def _create_tables_once() -> None:
+    """One schema-init attempt. Raises TimeoutError when a peer holds the lock too long."""
     from norviq.api.db.models import Base
 
     if _engine is None:
