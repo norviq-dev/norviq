@@ -48,7 +48,7 @@ func TestSidecarTokenAgentClassClaimMatchesInjectedEnv(t *testing.T) {
 	cfg.SidecarMode = "proxy" // thin-proxy path is the one that mints a token
 
 	const agentClass = "customer-support"
-	env := sidecarEnv(agentClass, "team-a", cfg)
+	env := sidecarEnv(agentClass, "team-a", "", cfg)
 
 	gotClass, ok := sidecarEnvValue(env, "NRVQ_AGENT_CLASS")
 	if !ok {
@@ -86,7 +86,7 @@ func TestSidecarTokenSpiffeClaimMatchesMockResolver(t *testing.T) {
 	cfg.SidecarMode = "proxy"
 	cfg.SpiffeMode = "mock"
 
-	env := sidecarEnv("customer-support", "team-a", cfg)
+	env := sidecarEnv("customer-support", "team-a", "", cfg)
 	token, ok := sidecarEnvValue(env, "NRVQ_API_TOKEN")
 	if !ok || token == "" {
 		t.Fatal("no sidecar token minted")
@@ -107,7 +107,7 @@ func TestSidecarTokenWorkloadApiModeLeavesSpiffeUnbound(t *testing.T) {
 	cfg.SidecarMode = "proxy"
 	cfg.SpiffeMode = "workload-api"
 
-	env := sidecarEnv("customer-support", "team-a", cfg)
+	env := sidecarEnv("customer-support", "team-a", "", cfg)
 	token, _ := sidecarEnvValue(env, "NRVQ_API_TOKEN")
 	if _, present := sidecarTokenClaims(t, token)["spiffe_id"]; present {
 		t.Fatal("spiffe_id claim must be absent in workload-api mode (SVID-derived, not predictable)")
@@ -122,7 +122,7 @@ func TestSidecarTokenUnlabeledPodStaysUnbound(t *testing.T) {
 	cfg.ApiSecret = "test-secret-for-mint-only-not-a-real-key"
 	cfg.SidecarMode = "proxy"
 
-	env := sidecarEnv("", "team-a", cfg)
+	env := sidecarEnv("", "team-a", "", cfg)
 	gotClass, _ := sidecarEnvValue(env, "NRVQ_AGENT_CLASS")
 	if gotClass != "" {
 		t.Fatalf("NRVQ_AGENT_CLASS = %q, want empty for an unlabeled pod", gotClass)

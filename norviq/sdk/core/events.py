@@ -20,8 +20,14 @@ class AgentIdentity(BaseModel):
     pod_name: str = ""
     cluster_id: str = ""
     # The workload (Deployment) this agent runs as, so a WORKLOAD-tier policy (target deployment:<name>)
-    # can match it. Optional — populated by the sidecar/SDK from the Deployment name; when empty, the
-    # workload tier simply doesn't apply (we never guess a workload from the pod name).
+    # can match it. Populated by the injected sidecar from NRVQ_WORKLOAD, which the admission webhook
+    # derives from the pod's OWNER reference (workloadFromPod, webhook/injector.go) or an explicit
+    # norviq.io/workload label — never from the pod name, which would be a guess. When empty the workload
+    # tier simply doesn't apply.
+    #
+    # This comment used to claim it was "populated by the sidecar/SDK" while NOTHING set it: every
+    # production AgentIdentity construction left it "", so the whole workload tier was inert even though
+    # policies targeting it saved, synced and reported Active.
     workload: str = ""
 
 

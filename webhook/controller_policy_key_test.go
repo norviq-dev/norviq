@@ -135,3 +135,28 @@ func indexFrom(s, sub string, from int) int {
 	}
 	return -1
 }
+
+// The CRD used to offer four workload kinds and the engine resolves one. A StatefulSet target synced
+// clean, went phase=Active and decided nothing — the silent no-op this whole sweep is about. It is now
+// refused at admission with a reason, and the CRD enum refuses it a layer earlier.
+func TestValidateTargetRejectsUnenforceableWorkloadKinds(t *testing.T) {
+	for _, kind := range []string{"StatefulSet", "DaemonSet", "ReplicaSet", "Rollout"} {
+		err := validateTarget("analytics", "norviq", map[string]interface{}{
+			"kind": kind, "name": "billing-api", "namespace": "analytics",
+		}, false)
+		if err == nil {
+			t.Errorf("kind %q was admitted; the engine resolves only deployment:<name>, so it would "+
+				"report Active and decide nothing", kind)
+		}
+	}
+}
+
+func TestValidateTargetAdmitsDeployment(t *testing.T) {
+	for _, kind := range []string{"Deployment", "deployment"} {
+		if err := validateTarget("analytics", "norviq", map[string]interface{}{
+			"kind": kind, "name": "billing-api", "namespace": "analytics",
+		}, false); err != nil {
+			t.Errorf("kind %q must be admitted, got %v", kind, err)
+		}
+	}
+}

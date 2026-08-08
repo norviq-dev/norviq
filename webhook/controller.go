@@ -664,10 +664,15 @@ func (c *Controller) processClass(u *unstructured.Unstructured) {
 			policyCount++
 		}
 	}
+	// agentCount and averageTrustScore are NOT written. They were int64(0)/float64(0) literals on every
+	// reconcile, sitting behind the DEFAULT printer columns "Agents" and "Avg-Trust" — next to a real
+	// policyCount, which made the zeros look measured. `kubectl get nrvqclass` therefore told an operator
+	// that a class with dozens of live agents had none, and that its fleet trust was 0.0 on a 0..1 scale
+	// where 0.7 is the threshold. Same defect as the Blocks-24h column, same resolution: the controller
+	// cannot compute either number (it has no agent registry access and never queries the API), so it
+	// writes neither and the columns are gone. Real values: the Agent Monitor, GET /api/v1/agents.
 	status := map[string]interface{}{
-		"agentCount":        int64(0),
-		"averageTrustScore": float64(0),
-		"policyCount":       policyCount,
+		"policyCount": policyCount,
 	}
 	if err := c.updateStatusWithRetry(context.Background(), classGVR, "", u.GetName(), status); err != nil {
 		slog.Warn("NRVQ-WHK-4038: class status update failed", "class", u.GetName(), "error", err)
@@ -713,11 +718,13 @@ func (c *Controller) processConfig(u *unstructured.Unstructured) {
 	for _, item := range policies {
 		namespaceSet[item.GetNamespace()] = struct{}{}
 	}
+	// totalAgents omitted for the same reason as NrvqClass.agentCount: a hard-coded 0 next to a correct
+	// totalPolicies reads as measured. activeNamespaces and totalPolicies ARE counted from the live
+	// policy list above, so they stay.
 	status := map[string]interface{}{
 		"appliedAt":        time.Now().UTC().Format(time.RFC3339),
 		"activeNamespaces": int64(len(namespaceSet)),
 		"totalPolicies":    int64(len(policies)),
-		"totalAgents":      int64(0),
 	}
 	if err := c.updateStatusWithRetry(context.Background(), configGVR, "", u.GetName(), status); err != nil {
 		slog.Warn("NRVQ-WHK-4039: config status update failed", "config", u.GetName(), "error", err)
@@ -1177,6 +1184,16 @@ func validateTarget(namespace, adminPolicyNamespace string, target map[string]in
 	}
 	if len(target) == 0 {
 		return fmt.Errorf("target must specify agentClass, namespace, or workload kind+name")
+	}
+	// Checked FIRST, before any branch that can return nil. The evaluator resolves exactly one workload
+	// key shape, `deployment:<name>` (_collect_candidates), but the CRD used to offer StatefulSet,
+	// DaemonSet and ReplicaSet: all three synced clean, went phase=Active and decided nothing, forever,
+	// with every surface reporting them healthy. Refusing with a reason beats admitting a silent no-op.
+	if kind, _ := target["kind"].(string); strings.TrimSpace(kind) != "" {
+		if !strings.EqualFold(strings.TrimSpace(kind), "Deployment") {
+			return fmt.Errorf("workload target kind %q is not enforceable: the engine resolves only "+
+				"Deployment workload policies (loader key deployment:<name>)", kind)
+		}
 	}
 	targetNs, ok := target["namespace"].(string)
 	if namespace == adminPolicyNamespace && targetNs != "" && targetNs != namespace {

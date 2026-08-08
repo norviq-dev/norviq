@@ -170,6 +170,13 @@ class SPIFFEResolver:
             service_account=service_account,
             agent_class=os.environ.get("NRVQ_AGENT_CLASS", "default"),
             pod_name=os.environ.get("HOSTNAME", "unknown-pod"),
+            # The Deployment this pod belongs to, injected as NRVQ_WORKLOAD by the admission webhook
+            # (workloadFromPod, webhook/injector.go) from the pod's OWNER reference — not from its name.
+            # Nothing set this before, on any production path, so `_collect_candidates`' workload tier
+            # (`<ns>:deployment:<workload>`) never matched a single call while the console, the CRD and
+            # the CLI all offered workload-scoped policies and reported them Active. Absent when the pod
+            # has no resolvable owner, in which case the tier correctly does not apply.
+            workload=os.environ.get("NRVQ_WORKLOAD", ""),
         )
 
     def _mock_resolve(self) -> AgentIdentity:
@@ -185,6 +192,7 @@ class SPIFFEResolver:
             service_account=service_account,
             agent_class=agent_class,
             pod_name=pod_name,
+            workload=os.environ.get("NRVQ_WORKLOAD", ""),
         )
 
     def _fallback_identity(self) -> AgentIdentity:

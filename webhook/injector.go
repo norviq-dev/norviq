@@ -24,6 +24,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+const workloadLabel = "norviq.io/workload"
+
 type Injector struct {
 	cfg             Config
 	sidecarTemplate map[string]interface{}
@@ -71,7 +73,7 @@ func (inj *Injector) CreatePatch(pod *corev1.Pod, agentClass string, namespace s
 		return nil, fmt.Errorf("unauthorized sidecar image")
 	}
 	patches := make([]patchOp, 0, 8)
-	patches = append(patches, patchOp{Op: "add", Path: "/spec/containers/-", Value: inj.buildSidecar(agentClass, namespace)})
+	patches = append(patches, patchOp{Op: "add", Path: "/spec/containers/-", Value: inj.buildSidecar(agentClass, namespace, workloadFromPod(pod))})
 	patches = append(patches, volumePatch(len(pod.Spec.Volumes) > 0, inj.sharedVolume))
 	// The sidecar runs with readOnlyRootFilesystem, but the internal-mTLS path must materialize the
 	// client cert/key on disk (stdlib load_cert_chain reads files only — see remote_evaluator.py).
@@ -265,10 +267,67 @@ func envState(containers []corev1.Container) []containerPatchState {
 	return result
 }
 
-func (inj *Injector) buildSidecar(agentClass string, namespace string) map[string]interface{} {
+// workloadFromPod resolves the Deployment a pod belongs to, so the sidecar can name it and a
+// WORKLOAD-tier policy (loader key `deployment:<name>`) can actually match.
+//
+// Nothing populated this before. AgentIdentity.workload existed, the evaluator read it
+// (evaluator.py:1963 builds `<ns>:deployment:<workload>`), the console offered a Workload tier, the CRD
+// accepted `target.kind/name` and `norviq policy apply --target-type workload` wrote the row — and the
+// field was empty on every request from every production path, so the tier never matched a single call.
+// Authored, persisted, "Ready", and inert.
+//
+// Derived from the OWNER, never from the pod name. A pod created by a Deployment is owned by a
+// ReplicaSet named `<deployment>-<pod-template-hash>`, so stripping the hash segment is a fact about
+// the object graph rather than a guess about naming — which is what the SDK's own note
+// (sdk/core/events.py) rules out. A bare pod has no owner and gets no workload: the tier then does not
+// apply, which is the correct outcome, not a default.
+//
+// An explicit `norviq.io/workload` label always wins, for the cases the ownership chain cannot express
+// (a bare pod, a CRD-managed workload, an Argo Rollout).
+func workloadFromPod(pod *corev1.Pod) string {
+	if pod == nil {
+		return ""
+	}
+	if explicit := strings.TrimSpace(pod.Labels[workloadLabel]); explicit != "" {
+		return explicit
+	}
+	for _, ref := range pod.OwnerReferences {
+		switch ref.Kind {
+		case "ReplicaSet":
+			if name := stripPodTemplateHash(ref.Name); name != "" {
+				return name
+			}
+		case "Deployment", "StatefulSet", "DaemonSet", "Job":
+			return ref.Name
+		}
+	}
+	return ""
+}
+
+// stripPodTemplateHash turns `checkout-7d9f8b5c4` into `checkout`. The suffix is only removed when it
+// actually looks like a pod-template-hash, so a Deployment genuinely named `billing-api` is never
+// truncated to `billing` by a ReplicaSet whose name we failed to recognise.
+func stripPodTemplateHash(rsName string) string {
+	idx := strings.LastIndex(rsName, "-")
+	if idx <= 0 || idx == len(rsName)-1 {
+		return rsName
+	}
+	suffix := rsName[idx+1:]
+	if len(suffix) < 5 || len(suffix) > 10 {
+		return rsName
+	}
+	for _, r := range suffix {
+		if !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') {
+			return rsName
+		}
+	}
+	return rsName[:idx]
+}
+
+func (inj *Injector) buildSidecar(agentClass string, namespace string, workload string) map[string]interface{} {
 	sidecar := cloneMap(inj.sidecarTemplate)
 	sidecar["image"] = inj.cfg.Runtime.SidecarImage(inj.cfg.SidecarImage)
-	sidecar["env"] = sidecarEnv(agentClass, namespace, inj.cfg)
+	sidecar["env"] = sidecarEnv(agentClass, namespace, workload, inj.cfg)
 	return sidecar
 }
 
@@ -300,13 +359,19 @@ func newSidecarTemplate(cfg Config) map[string]interface{} {
 // modes; proxy mode (the default) adds the central API URL + a namespace-scoped service JWT and needs
 // no Redis/OPA/Postgres; embedded mode passes the cluster datastore wiring through from the webhook's env.
 // NRVQ_NAMESPACE is always set to the pod's namespace so mock identity resolves the real tenant.
-func sidecarEnv(agentClass string, namespace string, cfg Config) []map[string]interface{} {
+func sidecarEnv(agentClass string, namespace string, workload string, cfg Config) []map[string]interface{} {
 	env := []map[string]interface{}{
 		{"name": "NRVQ_AGENT_CLASS", "value": agentClass},
 		{"name": "NRVQ_NAMESPACE", "value": namespace},
 		{"name": "NRVQ_HTTP_FALLBACK_PORT", "value": fmt.Sprintf("%d", cfg.SidecarPort)},
 		{"name": "NRVQ_SOCKET_PATH", "value": socketFilePath},
 		{"name": "NRVQ_SIDECAR_MODE", "value": sidecarMode(cfg)},
+	}
+	// Only set when the owner chain (or an explicit label) actually named a workload. Setting it empty
+	// would be indistinguishable from "resolved to nothing", and the workload tier must stay inapplicable
+	// rather than match a "" key.
+	if workload != "" {
+		env = append(env, map[string]interface{}{"name": "NRVQ_WORKLOAD", "value": workload})
 	}
 	if sidecarMode(cfg) == "embedded" {
 		// Air-gapped/edge: the sidecar runs its own engine and needs the datastore wiring. OPA runs as a

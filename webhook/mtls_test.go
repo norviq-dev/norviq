@@ -174,7 +174,7 @@ func TestBuildAPIHTTPClient_TLSOnMissingCAErrors(t *testing.T) {
 
 func TestSidecarEnv_TLSOffByteIdentical(t *testing.T) {
 	cfg := LoadConfig() // InternalTLS defaults false
-	env := sidecarEnv("sales", "default", cfg)
+	env := sidecarEnv("sales", "default", "", cfg)
 	for _, e := range env {
 		name, _ := e["name"].(string)
 		switch name {
@@ -199,7 +199,7 @@ func TestSidecarEnv_TLSOnAddsMTLSEnvAndUpgradesURL(t *testing.T) {
 		ApiSecret:   "test-secret",
 		SidecarMode: "proxy",
 	}
-	env := sidecarEnv("sales", "team-beta", cfg)
+	env := sidecarEnv("sales", "team-beta", "", cfg)
 
 	got := map[string]string{}
 	for _, e := range env {
@@ -248,7 +248,7 @@ func TestSidecarEnv_TLSOnAlreadyHTTPSPreserved(t *testing.T) {
 		ApiSecret:   "test-secret",
 		SidecarMode: "proxy",
 	}
-	env := sidecarEnv("sales", "ns", cfg)
+	env := sidecarEnv("sales", "ns", "", cfg)
 	for _, e := range env {
 		if e["name"] == "NRVQ_API_URL" {
 			if v, _ := e["value"].(string); v != "https://custom-api:9443" {

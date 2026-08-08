@@ -61,7 +61,15 @@ spec:
                       description: Apply to all agents in this namespace
                     kind:
                       type: string
-                      enum: ["Deployment", "StatefulSet", "DaemonSet", "ReplicaSet"]
+                      enum: ["Deployment"]
+                      description: >-
+                        Deployment only. This enum previously offered StatefulSet, DaemonSet and
+                        ReplicaSet; all three were accepted, synced clean and reported phase=Active
+                        while the evaluator resolved none of them — it builds exactly one workload key,
+                        `deployment:<name>` (_collect_candidates), so such a policy decided nothing,
+                        forever, with every surface reporting it healthy. Offering a value the engine
+                        cannot enforce is worse than rejecting it, so the CRD now rejects it at
+                        admission with a message instead.
                     name:
                       type: string
                       maxLength: 63
