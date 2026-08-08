@@ -106,3 +106,30 @@ def test_the_throwaway_engine_is_always_disposed() -> None:
     turn the fix for contention into a cause of it."""
     src = inspect.getsource(dbsession._create_tables_once)
     assert "finally:" in src and "await engine.dispose()" in src
+
+
+def test_schema_compat_shares_the_lock_and_the_budget() -> None:
+    """The timeout MOVED here the moment create_tables was fixed.
+
+    ensure_schema_compatibility runs 16 idempotent ALTERs, each taking a table lock, and eight api
+    processes run them at once on startup. On the main engine they queued against the ordinary 10s
+    client command_timeout and the pod exited "Application startup failed" all over again — observed
+    live, with create_tables.complete logged immediately before the traceback.
+
+    Sharing the advisory lock is what removes the contention rather than merely surviving it: eight
+    processes serialise on one cheap lock instead of thrashing table locks across sixteen ALTERs.
+    """
+    src = inspect.getsource(dbsession.ensure_schema_compatibility)
+    assert "_schema_engine()" in src, "schema-compat is back on the 10s main-engine budget"
+    assert "pg_advisory_xact_lock" in src, "schema-compat no longer serialises with its peers"
+    assert "await engine.dispose()" in src, "the throwaway engine leaks a connection per process"
+
+
+def test_the_draft_backfill_stays_inside_the_locked_transaction() -> None:
+    """It reads a column the ALTERs above may have just added; outside the transaction it would race
+    the statements that create what it touches."""
+    src = inspect.getsource(dbsession.ensure_schema_compatibility)
+    lock_at = src.index("pg_advisory_xact_lock")
+    update_at = src.index("UPDATE intent_drafts")
+    dispose_at = src.index("await engine.dispose()")
+    assert lock_at < update_at < dispose_at

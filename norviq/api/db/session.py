@@ -333,17 +333,35 @@ async def ensure_schema_compatibility() -> None:
         "ALTER TABLE agent_registry ADD COLUMN IF NOT EXISTS frozen BOOLEAN NOT NULL DEFAULT false",
         "ALTER TABLE agent_registry ADD COLUMN IF NOT EXISTS trust_cap DOUBLE PRECISION",
     )
-    async with _engine.begin() as conn:
-        for statement in statements:
-            await conn.execute(text(statement))
-        # RETENTION backfill: drafts created before the expires_at column existed have NULL expiry and the
-        # GC's WHERE clause (expires_at IS NOT NULL) never touches them — stamp them with the normal TTL
-        # from their created_at so they age out like every other draft. Idempotent (only fills NULLs).
-        await conn.execute(
-            text("UPDATE intent_drafts SET expires_at = created_at + make_interval(days => :d) "
-                 "WHERE expires_at IS NULL"),
-            {"d": int(settings.draft_ttl_days)},
-        )
+    # Same treatment as create_tables, and for the same reason — the timeout simply moved one function
+    # along when create_tables was fixed. These are 16 idempotent ALTERs, and eight api processes
+    # (workers x replicas) run them at once on startup; each ALTER takes a table lock, so they queue,
+    # and on the main engine they queue against the ordinary 10s client command_timeout. Observed live:
+    # create_tables completed, then this raised TimeoutError and the pod exited "Application startup
+    # failed" all over again.
+    #
+    # Sharing the ADVISORY LOCK is the part that actually removes the contention rather than surviving
+    # it: the eight processes now serialise on one cheap lock instead of eight-way lock-thrashing over
+    # sixteen ALTERs, and whoever runs second finds every column present and no-ops.
+    engine = await _schema_engine()
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _SCHEMA_INIT_LOCK})
+            for statement in statements:
+                await conn.execute(text(statement))
+            # RETENTION backfill: drafts created before the expires_at column existed have NULL expiry
+            # and the GC's WHERE clause (expires_at IS NOT NULL) never touches them — stamp them with
+            # the normal TTL from their created_at so they age out like every other draft. Idempotent
+            # (only fills NULLs). Stays INSIDE the locked transaction: it reads a column the ALTERs
+            # above may have just added, so running it outside would race the very statements that
+            # create what it touches.
+            await conn.execute(
+                text("UPDATE intent_drafts SET expires_at = created_at + make_interval(days => :d) "
+                     "WHERE expires_at IS NULL"),
+                {"d": int(settings.draft_ttl_days)},
+            )
+    finally:
+        await engine.dispose()
     log.info("nrvq.db.schema_compat_applied", statements=len(statements), code="NRVQ-DB-9003")
 
 
