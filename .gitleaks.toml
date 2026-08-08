@@ -21,6 +21,15 @@ paths = [
   # `_test.rego` is not a loose glob — it is the suffix `opa test` itself requires, so this can only
   # ever match a test file.
   '''.*_test\.rego$''',
+  # UI unit tests: the analog of the `tests/.*` entry above, for the half of the test tree that lives
+  # under ui/. These files build syntactically-valid dev JWTs (header.payload.signature) so that
+  # getToken()/tokenSubject() take their real code paths instead of the unauthenticated branch — e.g.
+  # Header.test.tsx's `eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZG1pbiJ9.sig`, whose signature segment is the
+  # literal string "sig". A structurally-invalid stand-in would not exercise the parser, which is the
+  # whole point of the fixture. Deliberately does NOT cover ui/tests/e2e/*.spec.ts: those specs talk to
+  # a live cluster and read real credentials from the environment, so they are the files where a
+  # pasted-in secret would actually matter and must keep alarming.
+  '''ui/.*\.test\.tsx?$''',
 ]
 # Common non-secret placeholders used in dev/kind (e.g. norviq-redis-password).
 regexes = [

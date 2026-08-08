@@ -130,7 +130,12 @@ async function postSuite(page: Page, query: string, minTargets = 1): Promise<any
 test.describe.configure({ mode: "serial" });
 test.describe("results table bounded at the VIEW on a large run (served DOM)", () => {
   test("≥300-result run mounts ≤50 <tr>, pager pages, filter filters", async ({ page }) => {
-    test.setTimeout(180000);
+    // This test DRIVES a full-namespace suite run and then asserts the pager. The run is the bulk of
+    // the budget: measured at ~13s on kind and ~168s on AKS through a port-forward, against a 180s
+    // total — so on any remote cluster the pager assertions inherit whatever is left, which is
+    // nothing. It failed there while passing on kind, which is the signature of a clock, not a defect.
+    // Env-tunable so a slow link can raise it without editing the spec.
+    test.setTimeout(Number(process.env.NRVQ_E2E_PAGER_TIMEOUT_MS || 420000));
     await page.goto("/redteam");
     await waitForApp(page);
 
