@@ -378,7 +378,9 @@ norm_name_tokens = [t | t := split(strings.replace_n(name_split_map, input.tool_
 # call's own recipient. Keys mirror the registry's egress set minus `to`/`email` (mail-read selectors).
 # The lead is read off the RAW name only — that is the string the registry classified — so a confusable
 # spelling can add sink evidence below but can never EARN the exemption.
-destination_keys = {{"destination", "recipient", "url", "endpoint", "webhook", "callback"}}
+# Revokes the retrieval-lead exemption. 'to' was absent, which is the address field of every mail tool
+# there is, so a retrieval-NAMED mail tool addressed by to= exfiltrated with the egress toggle ON.
+destination_keys = {{"destination", "recipient", "url", "endpoint", "webhook", "callback", "to", "cc", "bcc", "email", "email_address", "address", "phone", "channel", "target", "dest", "uri", "host", "remote", "peer", "chat_id", "conversation_id", "thread_id", "receiver", "send_to", "mailto"}}
 names_a_destination {{ walk(input.tool_params, [p, _]); k := p[count(p) - 1]; is_string(k); destination_keys[lower(k)] }}
 {_rego_str_set("retrieval_lead_verbs", RETRIEVAL_LEAD_VERBS)}
 is_retrieval_lead {{ retrieval_lead_verbs[tool_name_tokens[0]]; not names_a_destination }}

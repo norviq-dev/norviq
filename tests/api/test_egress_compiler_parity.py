@@ -78,9 +78,27 @@ def test_builder_matches_egress_action_tokens_as_whole_tokens() -> None:
     assert "egress_action_tokens[norm_name_tokens[_]]" in src
 
 
+def _destination_keys(text: str) -> set[str]:
+    m = re.search(r"destination_keys = \{\{?(.*?)\}\}?", text, re.S)
+    assert m, "destination_keys block not found"
+    return set(re.findall(r'"([^"]+)"', m.group(1)))
+
+
 def test_both_sides_agree_on_the_destination_key_escape_hatch() -> None:
-    """`names_a_destination` is what stops the retrieval-lead exemption from whitelisting a call that
-    plainly names where it is sending data."""
-    src = _builder_src()
-    for key in ("destination", "recipient", "url", "endpoint", "webhook", "callback"):
-        assert f'"{key}"' in src, f"destination key {key!r} missing from the builder's egress block"
+    """`names_a_destination` is what revokes the retrieval-lead exemption for a call that plainly names
+    where it is sending data — and the two compilers must revoke it on the same parameter shapes."""
+    builder = _destination_keys(_builder_src())
+    server = _destination_keys((ROOT / "norviq/api/threat_intent.py").read_text())
+    assert builder == server, (
+        f"destination-key drift — only in builder: {sorted(builder - server)}; "
+        f"only in server: {sorted(server - builder)}"
+    )
+
+
+def test_mail_address_parameters_revoke_the_retrieval_exemption() -> None:
+    """The hole both compilers shared: `to` was absent, so a retrieval-NAMED mail tool addressed by
+    `to=` kept its exemption and exfiltrated with the egress toggle ON. Widening can only tighten —
+    more shapes revoke the exemption, none grant it."""
+    keys = _destination_keys(_builder_src())
+    for key in ("to", "cc", "bcc", "email", "address", "channel", "target"):
+        assert key in keys, f"{key!r} does not revoke the retrieval-lead exemption"

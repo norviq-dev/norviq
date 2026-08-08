@@ -3,6 +3,8 @@
 
 """Framework-agnostic tool-call interceptor."""
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from time import perf_counter
 from typing import Any, Protocol
 
@@ -39,6 +41,38 @@ class SupportsEvaluate(Protocol):
         ...
 
 
+# In-process tool-call nesting depth. This is AUTHORITATIVE where it applies — the SDK adapters wrap
+# tool EXECUTION, so a tool invoked from inside another tool is measurably deeper, and nothing the agent
+# says can under-report it. It is the counterpart to the caller-reported depth the sidecar PEPs forward
+# (norviq/sidecar/proxy.py _coerce_depth), which is all a cross-process proxy can know.
+#
+# Before this, every adapter called intercept_or_raise with keyword args and none passed call_depth, so
+# the parameter's 0 default won on every path. `chain_depth_limit` — shipped ENABLED in the default
+# comprehensive policy and the strict preset, exercised by the Policy Tester, reported PASSED by the
+# red-team suite — could not fire on a single real call, and ChainDepthSignal (10% of the trust weight)
+# scored all production traffic at depth 0.
+_CALL_DEPTH: ContextVar[int] = ContextVar("nrvq_call_depth", default=0)
+
+
+def current_call_depth() -> int:
+    """The nesting depth of the tool call currently executing in this context."""
+    return _CALL_DEPTH.get()
+
+
+@contextmanager
+def depth_scope():
+    """Mark the execution of one tool call, so anything it invokes reports one level deeper.
+
+    Adapters that wrap tool execution should hold this for the duration of the tool body. Uses a
+    ContextVar token so concurrent agent tasks each carry their own depth rather than sharing a counter.
+    """
+    token = _CALL_DEPTH.set(_CALL_DEPTH.get() + 1)
+    try:
+        yield
+    finally:
+        _CALL_DEPTH.reset(token)
+
+
 class ToolInterceptor:
     """Generic tool call interceptor for policy evaluation."""
 
@@ -69,6 +103,11 @@ class ToolInterceptor:
         # everything outside the engine (identity resolve, the round trip to reach it, response handling).
         # In proxy mode that excluded part is the cross-pod hop, i.e. the term that dominates the tail.
         _t0 = perf_counter()
+        # A caller that states a depth wins (the sidecar forwards what its client reported, and the
+        # red-team runner sets it explicitly). Otherwise fall back to the ambient in-process depth,
+        # which is what makes nested SDK tool calls report honestly without every adapter threading it.
+        if not call_depth:
+            call_depth = current_call_depth()
         resolved = identity or await self._resolver.resolve()
         event = ToolCallEvent(
             tool_name=tool_name,

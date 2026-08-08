@@ -36,18 +36,46 @@ _SYSLOG_SEVERITY = {"block": 4, "escalate": 4, "audit": 5, "allow": 6}
 _SYSLOG_FACILITY = 16  # local0
 
 
+# RFC5424 header fields are PRINTUSASCII (33..126) with no spaces, and each has a length cap. Anything
+# else must be replaced, not passed through.
+_SYSLOG_NILVALUE = "-"
+
+
+def _syslog_field(value: object, max_len: int) -> str:
+    """Sanitize one RFC5424 header field.
+
+    THIS IS A SECURITY BOUNDARY, and it was missing. `agent_class` was interpolated raw into PROCID —
+    and agent_class is caller-influenced (the pod label, and the body on unbound paths). A value
+    containing a space, a newline, or a crafted `<PRI>1 ...` prefix let a caller terminate the field,
+    or the whole frame, and inject fabricated events into the SIEM stream: forged blocks, or a forged
+    allow that buries a real one. That is worse than the gap this format was added to close, because
+    the header fields had just been given real semantics (PRI from the decision, MSGID = decision,
+    HOSTNAME = namespace) precisely so on-call rules could trigger on them.
+
+    Space is the field separator and newline is the frame separator, so both are fatal; everything
+    outside printable US-ASCII is dropped to `_` rather than guessed at. An empty or fully-scrubbed
+    value becomes the RFC's NILVALUE.
+    """
+    raw = str(value or "")
+    cleaned = "".join(ch if 33 <= ord(ch) <= 126 else "_" for ch in raw)[:max_len]
+    return cleaned or _SYSLOG_NILVALUE
+
+
 def _syslog_line(row: AuditLogEntry) -> str:
     """One RFC5424 frame: <PRI>1 TIMESTAMP HOST APP PROCID MSGID SD MSG."""
     doc = _to_dict(row)
     severity = _SYSLOG_SEVERITY.get(str(doc.get("decision", "")).lower(), 6)
     pri = _SYSLOG_FACILITY * 8 + severity
     ts = getattr(row, "timestamp_utc", None)
-    stamp = ts.isoformat() if ts is not None else "-"
-    host = str(doc.get("namespace") or "-") or "-"
-    msgid = str(doc.get("decision") or "-") or "-"
-    procid = str(doc.get("agent_class") or "-") or "-"
+    # RFC5424 TIMESTAMP is RFC3339 and must not carry a space; isoformat() on a tz-aware datetime is
+    # already compliant, but a naive or odd value must not be allowed to break framing either.
+    stamp = _syslog_field(ts.isoformat(), 64) if ts is not None else _SYSLOG_NILVALUE
+    host = _syslog_field(doc.get("namespace"), 255)
+    procid = _syslog_field(doc.get("agent_class"), 128)
+    msgid = _syslog_field(doc.get("decision"), 32)
     # The event itself stays JSON in MSG: a collector that parses RFC5424 gets real framing and
     # severity, and the payload remains machine-readable rather than being flattened into prose.
+    # json.dumps escapes newlines, so MSG cannot terminate the frame.
     return f"<{pri}>1 {stamp} {host} norviq {procid} {msgid} - " + json.dumps(doc, separators=(",", ":"))
 
 

@@ -50,6 +50,7 @@ from norviq.mcp.scanner import (
     scan_untrusted_content,
 )
 from norviq.sdk.core.decisions import PolicyDecision
+from norviq.sdk.core.interceptor import current_call_depth
 from norviq.sdk.core.interceptor import ToolInterceptor
 from norviq.telemetry.metrics import record_path_phase
 
@@ -550,6 +551,11 @@ class McpFirewall:
             tool_params=params,
             session_id=self._session_id,
             framework="mcp",
+            # Ambient in-process depth: an MCP tool invoked from inside another governed tool call is
+            # measurably deeper. This PEP passed nothing, so chain_depth_limit could never fire on MCP
+            # traffic either. current_call_depth() returns 0 for a top-level call, which is the value
+            # that used to be sent unconditionally — so nothing regresses for the flat case.
+            call_depth=current_call_depth(),
             mcp=self._mcp_context(tool_name, surface),
         )
         ms = (perf_counter() - t0) * 1000.0

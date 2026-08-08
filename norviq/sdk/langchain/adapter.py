@@ -18,6 +18,7 @@ from typing import Any, Union, get_args, get_origin, get_type_hints
 import structlog
 
 from norviq.sdk.core.interceptor import ToolInterceptor
+from norviq.sdk.core.interceptor import depth_scope
 from norviq.sdk.core.wrapping import _output_dlp, _run_sync, _tool_params, callable_signature
 
 log = structlog.get_logger()
@@ -772,7 +773,8 @@ def protect(
                 )
             )
             log.info("nrvq.langchain.allowed", tool=_name, code="NRVQ-SDK-1030")
-            return _output_dlp(_name, _orig(*args, **kwargs))
+            with depth_scope():
+                return _output_dlp(_name, _orig(*args, **kwargs))
 
         _mirror_signature(sync_wrapper, original_run)
         tool._run = sync_wrapper  # type: ignore[method-assign]
@@ -791,7 +793,8 @@ def protect(
                     framework="langchain",
                 )
                 log.info("nrvq.langchain.allowed", tool=_name, code="NRVQ-SDK-1030")
-                return _output_dlp(_name, await _orig(*args, **kwargs))
+                with depth_scope():
+                    return _output_dlp(_name, await _orig(*args, **kwargs))
 
             _mirror_signature(async_wrapper, original_arun)
             tool._arun = async_wrapper  # type: ignore[method-assign]
