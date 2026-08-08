@@ -127,7 +127,7 @@ func (inj *Injector) mcpPatchOps(pod *corev1.Pod, agentClass, namespace string) 
 	ops := make([]patchOp, 0, len(targets)*4+2)
 	// After the sidecar's volume adds, /spec/volumes always exists -> append.
 	ops = append(ops, volumePatch(true, mcpVolumeTemplate()))
-	ops = append(ops, mcpPatches(inj.cfg, targets, namespace, agentClass)...)
+	ops = append(ops, mcpPatches(inj.cfg, targets, namespace, agentClass, workloadFromPod(pod))...)
 	// The delivery init container is emitted LAST and PREPENDED, and both halves of that matter.
 	//
 	// Prepended, because init containers run in order: appending it put the payload copy AFTER an
@@ -389,7 +389,7 @@ func sidecarEnv(agentClass string, namespace string, workload string, cfg Config
 		apiURL := cfg.ApiURL
 		tlsEnv, tlsOn := buildSidecarTLSEnv(cfg, namespace, &apiURL)
 		env = append(env, map[string]interface{}{"name": "NRVQ_API_URL", "value": apiURL})
-		if tok := mintSidecarToken(cfg, namespace, agentClass); tok != "" {
+		if tok := mintSidecarToken(cfg, namespace, agentClass, workload); tok != "" {
 			env = append(env, map[string]interface{}{"name": "NRVQ_API_TOKEN", "value": tok})
 		} else {
 			slog.Warn("NRVQ-WHK-4037: no API secret to mint sidecar token; thin-proxy sidecar will fail closed",
@@ -429,7 +429,7 @@ func appendIfSet(env []map[string]interface{}, name, value string) []map[string]
 // mintSidecarToken issues the namespace-scoped role=service JWT the thin-proxy sidecar presents to
 // /evaluate. The token is baked into the pod env (cannot self-refresh), hence the long TTL; mTLS +
 // short-lived tokens are the documented fast-follow. Returns "" if no signing secret is set.
-func mintSidecarToken(cfg Config, namespace string, agentClass string) string {
+func mintSidecarToken(cfg Config, namespace string, agentClass string, workload string) string {
 	if cfg.ApiSecret == "" {
 		return ""
 	}
@@ -459,6 +459,22 @@ func mintSidecarToken(cfg Config, namespace string, agentClass string) string {
 	// tool call, so the field is left unbound (the SVID is separately attested at the source).
 	if cfg.SpiffeMode == "mock" {
 		claims["spiffe_id"] = fmt.Sprintf("spiffe://norviq/ns/%s/sa/default", namespace)
+	}
+	// Bind the workload the pod was ADMITTED as, so the workload policy tier can actually apply.
+	//
+	// api/auth.py scoped_identity treats `workload` as an ADDITIVE tier field: for any BOUND credential
+	// it clears whatever the body sent unless the token itself carries a matching claim, because a
+	// namespace-scoped sidecar must not be able to name any deployment and pull in that tier's program.
+	// The control is right; the consequence was that the tier could never apply to real traffic at all —
+	// its own comment said "no issuer mints a workload claim today", and none did. So injecting
+	// NRVQ_WORKLOAD alone was not enough: the sidecar sent it and the API discarded it on arrival.
+	//
+	// This is the issuer. The value is not the sidecar's to choose — it is derived at admission from the
+	// pod's OWNER reference (workloadFromPod), so binding it here grants exactly the tier the pod is
+	// entitled to and no other. Omitted when nothing resolved, which leaves the field unbound and the
+	// tier inapplicable, exactly as before.
+	if workload != "" {
+		claims["workload"] = workload
 	}
 	tok, err := signHS256JWT(cfg.ApiSecret, claims)
 	if err != nil {

@@ -357,7 +357,10 @@ def attested_namespace(user: dict, requested: str | None = None) -> str:
 _BOUND_IDENTITY_FIELDS = ("agent_class", "spiffe_id", "workload")
 # What the strict ratchet demands of a MACHINE principal. Per-field on purpose: a token bound on
 # agent_class but not spiffe_id would otherwise satisfy an "is it bound at all?" test while leaving the
-# kill-switch evadable. `workload` is excluded because no issuer mints it for the sidecar path.
+# kill-switch evadable. `workload` stays OPTIONAL rather than required: the injector mints it now
+# (mintSidecarToken, webhook/injector.go) but only when the pod has a resolvable owner, so a bare pod
+# or a CRD-managed workload legitimately has no claim — requiring one would fail those closed for a
+# tier that simply does not apply to them.
 _REQUIRED_BOUND_FIELDS = ("agent_class", "spiffe_id")
 
 # ...but `spiffe_id` is only MINTABLE in mock mode, so demanding it unconditionally made the ratchet
@@ -443,8 +446,15 @@ def scoped_identity(user: dict, agent_identity: dict | None) -> dict:
     # A provisioned (bound) credential may not self-select an ADDITIVE policy tier it was not issued for.
     # `workload` only ever ADDS the f"{namespace}:deployment:{workload}" candidate, so clearing it is
     # always the safe direction (the tier simply doesn't apply) — unlike agent_class, where clearing would
-    # DOWNGRADE to the baseline. No issuer mints a workload claim today, so without this a bound sidecar
-    # could still name any deployment and pull in that tier's program.
+    # DOWNGRADE to the baseline. Without this a bound sidecar could name any deployment and pull in that
+    # tier's program.
+    #
+    # This used to read "no issuer mints a workload claim today", and that was the whole reason the
+    # workload tier never applied to real traffic: the sidecar sent a workload and this discarded it on
+    # arrival, so a policy targeting a Deployment saved, synced, reported Active and decided nothing.
+    # The injector is the issuer now (mintSidecarToken), and the value is not the sidecar's to choose —
+    # it is derived at admission from the pod's OWNER reference, so a bound token grants exactly the tier
+    # its pod is entitled to. The clearing below still applies to any credential without the claim.
     if bound:
         for field in _ADDITIVE_TIER_FIELDS:
             if field not in bound and identity.get(field):

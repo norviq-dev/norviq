@@ -169,12 +169,12 @@ func mcpWrappedCommand(target mcpTarget) []string {
 
 // mcpPatches rewrites each target container and mounts the proxy volume into it. The pod-level
 // additions (the volume and the init container that fills it) are emitted by the caller.
-func mcpPatches(cfg Config, targets []mcpTarget, namespace, agentClass string) []patchOp {
+func mcpPatches(cfg Config, targets []mcpTarget, namespace, agentClass, workload string) []patchOp {
 	patches := make([]patchOp, 0, len(targets)*4)
 	// Computed ONCE. Under auto-mTLS mcpEnv mints an RSA-2048 client certificate, and building it
 	// inside the loop meant a pod with N MCP containers minted N certs on the admission hot path —
 	// and gave sibling containers different credentials for no reason.
-	env := mcpEnv(cfg, namespace, agentClass)
+	env := mcpEnv(cfg, namespace, agentClass, workload)
 	for _, target := range targets {
 		base := fmt.Sprintf("/spec/%s/%d", target.Kind, target.Index)
 		// "add" on an existing object member REPLACES it (RFC 6902 §4.1), so this is an upsert and
@@ -203,7 +203,7 @@ func mcpPatches(cfg Config, targets []mcpTarget, namespace, agentClass string) [
 // uses — NRVQ_API_URL plus a namespace-scoped service JWT — because the MCP proxy calls the identical
 // /evaluate endpoint through the identical PolicyEngineClient. Nothing here is MCP-specific except
 // the pin backend.
-func mcpEnv(cfg Config, namespace, agentClass string) []map[string]interface{} {
+func mcpEnv(cfg Config, namespace, agentClass, workload string) []map[string]interface{} {
 	apiURL := cfg.ApiURL
 	tlsEnv, tlsOn := buildSidecarTLSEnv(cfg, namespace, &apiURL)
 	env := []map[string]interface{}{
@@ -213,7 +213,7 @@ func mcpEnv(cfg Config, namespace, agentClass string) []map[string]interface{} {
 		{"name": "NRVQ_MCP_PIN_STORE", "value": cfg.McpPinStore},
 		{"name": "NRVQ_MCP_PIN_MODE", "value": cfg.McpPinMode},
 	}
-	if tok := mintSidecarToken(cfg, namespace, agentClass); tok != "" {
+	if tok := mintSidecarToken(cfg, namespace, agentClass, workload); tok != "" {
 		env = append(env, map[string]interface{}{"name": "NRVQ_API_TOKEN", "value": tok})
 	}
 	if tlsOn {

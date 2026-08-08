@@ -4,6 +4,9 @@
 package main
 
 import (
+	"encoding/base64"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -86,4 +89,47 @@ func TestSidecarEnvOmitsWorkloadWhenUnresolved(t *testing.T) {
 	if _, ok := has(sidecarEnv("support", "team-a", "", cfg), "NRVQ_WORKLOAD"); ok {
 		t.Fatal("NRVQ_WORKLOAD must not be set at all when no workload resolved")
 	}
+}
+
+// The other half of the chain, and the one that made injecting NRVQ_WORKLOAD insufficient on its own:
+// api/auth.py scoped_identity treats `workload` as an ADDITIVE tier field and CLEARS whatever the body
+// sent unless the token carries a matching claim — so the sidecar sent the workload and the API threw
+// it away on arrival. Its comment said "no issuer mints a workload claim today"; nothing did. The
+// injector is the issuer, and the value is derived at admission from the pod's owner, so a bound token
+// grants exactly the tier its own pod is entitled to and no other.
+func TestSidecarTokenBindsTheWorkloadClaim(t *testing.T) {
+	cfg := Config{ApiSecret: "test-secret-at-least-16-chars", SpiffeMode: "mock", SidecarTokenTTLHours: 1}
+
+	claims := decodeJWTClaims(t, mintSidecarToken(cfg, "agents", "payments", "checkout-svc"))
+	if claims["workload"] != "checkout-svc" {
+		t.Fatalf("workload claim = %v, want checkout-svc — without it the API clears the field and the "+
+			"workload tier never applies", claims["workload"])
+	}
+
+	// No resolvable owner -> no claim, leaving the field unbound and the tier inapplicable, which is
+	// the correct outcome rather than a default.
+	bare := decodeJWTClaims(t, mintSidecarToken(cfg, "agents", "payments", ""))
+	if _, present := bare["workload"]; present {
+		t.Fatal("workload claim must be OMITTED when nothing resolved, not sent empty")
+	}
+}
+
+func decodeJWTClaims(t *testing.T, token string) map[string]interface{} {
+	t.Helper()
+	if token == "" {
+		t.Fatal("mintSidecarToken returned empty")
+	}
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatalf("not a JWT: %d parts", len(parts))
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode claims: %v", err)
+	}
+	var claims map[string]interface{}
+	if err := json.Unmarshal(raw, &claims); err != nil {
+		t.Fatalf("unmarshal claims: %v", err)
+	}
+	return claims
 }
