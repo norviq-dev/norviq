@@ -36,6 +36,10 @@ export interface AssetNode {
     agent_class?: string;
     spiffe_id?: string;
     trust_score?: number;
+    // The tier the SERVER assigned (asset_graph._trust_category: >=0.7 high, >=0.4 medium, else low).
+    // Shipped all along and dropped by the model, so the inspector re-derived a tier from its own
+    // >=0.75 / >=0.5 ladder and disagreed with the engine about the same identity.
+    trust_category?: string;
     risk_level?: "low" | "medium" | "high" | "critical";
     tool_call_count?: number;
     last_seen?: string;

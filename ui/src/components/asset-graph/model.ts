@@ -40,6 +40,11 @@ export interface ViewNode {
   risk: "low" | "medium" | "high" | "critical";
   calls: number;
   trust?: number;
+  // The category the SERVER assigned (asset_graph._trust_category: >=0.7 high, >=0.4 medium, else
+  // low). Carried through so the console stops re-deriving a tier from thresholds the engine does not
+  // use — the inspector had its own >=0.75/>=0.5 ladder, so an identity the engine, the Agent Monitor
+  // and the alert bell all called high trust rendered as "Medium" in amber here.
+  trustCategory?: string;
   spiffe?: string;
   lastSeen?: string; // ISO
   awaiting: boolean;
@@ -186,6 +191,7 @@ export function buildModel(nodes: AssetNode[], edges: AssetEdge[]): ViewModel {
     risk: riskOf(n),
     calls: callsOf(n),
     trust: n.properties.trust_score,
+    trustCategory: n.properties.trust_category,
     spiffe: n.properties.spiffe_id ?? (n.type === "agent" && n.id.includes("spiffe://") ? n.id.replace(/^.*?(spiffe:\/\/)/, "$1").replace(/#.*$/, "") : undefined),
     lastSeen: lastSeenOf(n),
     awaiting:

@@ -906,8 +906,20 @@ func (c *Controller) handlePolicyDelete(obj interface{}) {
 	}
 	name := u.GetName()
 	namespace := u.GetNamespace()
-	if annotations := u.GetAnnotations(); annotations != nil && (annotations[deleteSyncedAnnotation] == "true" || annotations[deleteSyncedAnnotation] == "timeout-forced") {
+	// Skip ONLY when the API delete actually succeeded. "timeout-forced" is the opposite claim: it is
+	// stamped by forceFinalizeAfterTimeout when the API delete kept FAILING and we removed the finalizer
+	// anyway so the CR would not wedge. Treating the two the same threw away the last chance to remove
+	// the policy — so `kubectl delete` returned cleanly, `kubectl get` showed the policy gone, and it
+	// stayed loaded in the engine deciding every matching call, permanently and invisibly. Worst when
+	// the policy was deleted precisely BECAUSE it was wrong.
+	//
+	// This handler is the final delete event for the object, so a best-effort retry here costs one call
+	// and is the only remaining opportunity.
+	if annotations := u.GetAnnotations(); annotations != nil && annotations[deleteSyncedAnnotation] == "true" {
 		return
+	} else if annotations != nil && annotations[deleteSyncedAnnotation] == "timeout-forced" {
+		slog.Warn("NRVQ-WHK-4043: retrying API delete for a force-finalized policy — it is still loaded "+
+			"in the engine until this succeeds", "policy", name, "namespace", namespace)
 	}
 
 	select {

@@ -1009,25 +1009,73 @@ async def _validate_rego(evaluator, body: PolicyCreate) -> tuple[bool, list[str]
 _DRYRUN_REPLAY_CAP = 500  # bound the replay so a busy namespace can't make dry-run unbounded
 
 
-def _opa_input_from_record(rec: AuditLogEntry) -> dict:
+def _opa_input_from_record(rec: AuditLogEntry, evaluator=None) -> dict:
     """Reconstruct the evaluator's OPA input from a stored audit record so the CANDIDATE rego can be
-    replayed against the call it saw. tool_params come from the (optionally masked) payload — a
-    class/tool-name-keyed policy replays exactly; a param-content rule under-fires on masked params
-    (an honest limitation surfaced in the response)."""
+    replayed against the call it saw.
+
+    PARITY IS THE POINT, and this function used to break it. It hand-built the input dict and omitted
+    `derived`, `mcp` and `direction` — three facts the evaluator publishes and policies are explicitly
+    encouraged to use (`derived.verb` is how "block every sink" is written without enumerating tool
+    names). A candidate keyed on any of them saw them undefined here, so it fired on nothing and the
+    dry-run reported `would_block: 0` and "safe to deploy" for a policy that blocks those exact calls
+    in production. Read the other way round, a security engineer asking "would this have caught
+    yesterday's exfiltration?" was shown zero and concluded the rule did not work.
+
+    So the input is now built by the evaluator's OWN `_build_input`, from a ToolCallEvent
+    reconstructed out of the record — the same code path production uses, rather than a second
+    implementation that can drift from it. `_derived_input` is a pure function of the event, so the
+    derived block is reproduced exactly.
+
+    Honest limits, unchanged: tool_params come from the (optionally masked) payload, so a param-content
+    rule under-fires on masked params; and `mcp` is only as complete as what the record preserved.
+    Both are surfaced in the response rather than papered over.
+    """
     payload = rec.payload if isinstance(rec.payload, dict) else {}
     params = payload.get("masked_params") or payload.get("tool_params") or {}
+    params = params if isinstance(params, dict) else {}
+    trust = float(rec.trust_score or 0.0)
+
+    # Capability check, not a None check: the replay suite drives this with lightweight fake
+    # evaluators that implement only `_evaluate_opa`. Asking for `_build_input` on one of those raised,
+    # every record counted as an eval error, and total_records_checked went to 0 — a dry-run reporting
+    # "nothing to check" is the same class of lie this fix exists to remove, so it must degrade to the
+    # legacy shape rather than throw. tests/api/test_dryrun_input_parity.py asserts the REAL evaluator
+    # takes the branch below and produces the full document.
+    if callable(getattr(evaluator, "_build_input", None)):
+        from norviq.engine.trust import TrustResult
+        from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
+
+        event = ToolCallEvent(
+            tool_name=rec.tool_name,
+            tool_params=params,
+            agent_identity=AgentIdentity(
+                spiffe_id=rec.agent_id or "spiffe://norviq/ns/unknown/sa/unknown",
+                namespace=rec.namespace or "default",
+                agent_class=rec.agent_class or "",
+            ),
+            session_id=rec.session_id or "dry-run",
+            mcp=payload.get("mcp") or {},
+        )
+        category = "high" if trust >= 0.75 else "medium" if trust >= 0.5 else "low"
+        return evaluator._build_input(event, TrustResult(
+            score=trust, category=category, signals={}, weights={},
+            dominant_signal="replay", recommendation="dry-run replay of a stored record",
+        ))
+
+    # Fallback for callers without an evaluator (unit tests). Keeps the historical shape; the
+    # evaluator path above is what the replay actually uses.
     return {
         "tool_name": rec.tool_name,
-        "tool_name_normalized": rec.tool_name,  # skeleton parity not reconstructable from the record; name is exact
-        "tool_params": params if isinstance(params, dict) else {},
-        "tool_params_normalized": params if isinstance(params, dict) else {},
+        "tool_name_normalized": rec.tool_name,
+        "tool_params": params,
+        "tool_params_normalized": params,
         "agent": {
             "spiffe_id": rec.agent_id,
             "namespace": rec.namespace,
             "agent_class": rec.agent_class,
         },
-        "trust_score": float(rec.trust_score or 0.0),
-        "trust_category": "high" if (rec.trust_score or 0) >= 0.75 else "medium" if (rec.trust_score or 0) >= 0.5 else "low",
+        "trust_score": trust,
+        "trust_category": "high" if trust >= 0.75 else "medium" if trust >= 0.5 else "low",
         "session_id": rec.session_id or "dry-run",
         "call_depth": 0,
     }
@@ -1078,7 +1126,7 @@ async def _replay_recent(evaluator, session, body: PolicyCreate, since) -> dict:
             synthetic_skipped += 1
             continue
         try:
-            dec = await evaluator._evaluate_opa(dry_key, ns, rec.agent_class, _opa_input_from_record(rec), body.rego_source)
+            dec = await evaluator._evaluate_opa(dry_key, ns, rec.agent_class, _opa_input_from_record(rec, evaluator), body.rego_source)
         except Exception:
             # A single bad record never sinks the whole simulation — but it is not a record that came
             # back clean either, so it is COUNTED and reported rather than averaged into the denominator.

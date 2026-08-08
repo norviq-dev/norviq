@@ -91,8 +91,33 @@ export function AssetNodeDetail({ node, model, reach, cluster, side, onClose }: 
     }
   }
   const trust = node.trust;
-  const trustLabel = trust === undefined ? "" : trust >= 0.75 ? "High" : trust >= 0.5 ? "Medium" : "Low";
-  const trustColor = trust === undefined ? "#a0a0a0" : trust >= 0.75 ? DECISION_COLORS.allow : trust >= 0.5 ? DECISION_COLORS.mixed : DECISION_COLORS.blocked;
+  // Prefer the category the SERVER assigned. This used to re-derive the tier from >=0.75 / >=0.5,
+  // while the engine categorises at >=0.7 / >=0.4 (asset_graph._trust_category) — so a 0.72 identity
+  // that the engine, the Agent Monitor and the alert bell all treat as HIGH was painted "Medium" in
+  // amber here, and on a cluster with a raised trust threshold the error ran the other way, showing
+  // green "High" for an identity the engine had already demoted and was escalating on. Two components
+  // deciding the same thing with different constants; there is now one source, and the local ladder
+  // is only a fallback for nodes predating the field.
+  const serverTier = node.trustCategory?.toLowerCase();
+  const tier: "high" | "medium" | "low" | undefined =
+    serverTier === "high" || serverTier === "medium" || serverTier === "low"
+      ? serverTier
+      : trust === undefined
+        ? undefined
+        : trust >= 0.7
+          ? "high"
+          : trust >= 0.4
+            ? "medium"
+            : "low";
+  const trustLabel = tier === undefined ? "" : tier === "high" ? "High" : tier === "medium" ? "Medium" : "Low";
+  const trustColor =
+    tier === undefined
+      ? "#a0a0a0"
+      : tier === "high"
+        ? DECISION_COLORS.allow
+        : tier === "medium"
+          ? DECISION_COLORS.mixed
+          : DECISION_COLORS.blocked;
   const conns = model.edges
     .filter((e): e is ViewEdge => e.type !== "belongs_to" && (e.s === node.id || e.t === node.id))
     .map((e) => {

@@ -569,9 +569,16 @@ export function PolicySheet({
   const isNew = policy.current_version == null;
   const currentMode = policy.mode ?? policy.enforcement_mode ?? "block";
   const enforcementChanged = !isNew && currentMode !== enforcement;
-  // Block keywords ARE enforced: on Apply they generate the block policy via composerRego (below). The
-  // former rate-limit / trust-threshold inputs were preview-only AND redundant with the namespace-scoped
-  // controls in Target Settings / Settings, so they were removed rather than shipped as dead inputs.
+  // Block keywords are enforced ONLY when creating a brand-new class policy: Apply passes
+  // composerRego(...) just for `isNew`, and passes `undefined` otherwise. For an EXISTING policy the
+  // keyword box was read, rendered, and then dropped on the floor — while the helper text said
+  // "Applied" and the result panel reported "enforcement block ... Effective immediately on the next
+  // tool call" over a rego that had not changed by a byte.
+  //
+  // Regenerating rego for an existing policy is NOT the fix: it would overwrite whatever the operator
+  // (or the builder, or a preset) authored with a generated keyword rule, which is a far worse
+  // outcome than an ignored box. So the control is only offered where it actually works, and existing
+  // policies are pointed at the surfaces that do edit their rego.
   const [keywords, setKeywords] = useState("secret,token,password");
   const keywordList = keywords.split(",").map((k) => k.trim()).filter(Boolean);
   const yamlPreview = `apiVersion: norviq.io/v1
@@ -624,15 +631,31 @@ spec:
         </div>
         {paramsOpen && (
           <div style={{ marginTop: 8 }}>
-            <div className="field-row">
-              <label className="field-label">Block keywords</label>
-              <input className="input mono" value={keywords} onChange={(e) => setKeywords(e.target.value)} />
-            </div>
-            <div className="panel-sub" style={{ marginTop: 6, color: "var(--text-muted)" }}>
-              Applied — these generate the block policy below. Rate limit and trust threshold are
-              namespace-wide and live in Settings → General (Tuning defaults); Target Settings holds
-              the enforcement mode and change control.
-            </div>
+            {isNew ? (
+              <>
+                <div className="field-row">
+                  <label className="field-label">Block keywords</label>
+                  <input
+                    className="input mono"
+                    data-testid="policy-block-keywords"
+                    value={keywords}
+                    onChange={(e) => setKeywords(e.target.value)}
+                  />
+                </div>
+                <div className="panel-sub" style={{ marginTop: 6, color: "var(--text-muted)" }}>
+                  Applied — these generate the block policy below. Rate limit and trust threshold are
+                  namespace-wide and live in Settings → General (Tuning defaults); Target Settings holds
+                  the enforcement mode and change control.
+                </div>
+              </>
+            ) : (
+              <div className="panel-sub" data-testid="policy-block-keywords-unavailable" style={{ color: "var(--text-muted)" }}>
+                Keyword rules for an existing policy live in its Rego. Apply here changes the
+                enforcement mode and re-loads the saved policy — it does not rewrite the rule set, so a
+                keyword typed here would have no effect. Edit the policy in the Builder or the Rego
+                editor to change what it blocks.
+              </div>
+            )}
           </div>
         )}
 

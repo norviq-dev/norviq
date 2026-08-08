@@ -438,6 +438,17 @@ class ControlPlanePinStore:
                 last_digest=row.get("last_digest", ""),
             )
             self._pins[record.pin] = record
+        # RECOVERY. `_degraded` was a one-way latch: set on any load failure and never cleared, while
+        # `flush` returns early whenever it is set. So a single transient control-plane blip silenced
+        # this server's pin reporting PERMANENTLY — the console kept showing health "ok" and a stale
+        # last_seen_at, and a later Gate-A rug pull the proxy detected locally was never reported. The
+        # blip is transient; the silence was not. This load just succeeded, which is exactly the
+        # evidence that the control plane is reachable again, so clear it here (start_refresh re-loads
+        # on an interval, which makes recovery automatic rather than restart-only).
+        if self._degraded:
+            log.info("nrvq.mcp.pins.control_plane_recovered", server=self._server_id,
+                     code="NRVQ-MCP-5048")
+        self._degraded = False
         log.info("nrvq.mcp.pins.loaded_from_control_plane", server=self._server_id,
                  count=len(self._pins), code="NRVQ-MCP-5047")
 
