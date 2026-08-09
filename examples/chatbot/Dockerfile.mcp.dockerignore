@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+#
+# Per-Dockerfile ignore list. BuildKit prefers "<dockerfile>.dockerignore" over the context root's
+# .dockerignore, so this file REPLACES the root one for `-f examples/chatbot/Dockerfile.mcp` builds
+# and has no effect on any other image.
+#
+# It exists because the root .dockerignore excludes `examples/` wholesale (line 28, under a comment
+# claiming "none are COPY'd by any Dockerfile" -- which stopped being true when the chatbot example
+# arrived). Without an override the build fails at COPY with "/examples/chatbot/demo_mcp: not
+# found", which reads like a typo in the Dockerfile rather than an ignore rule.
+#
+# Written as deny-all-then-allow rather than as `!examples/chatbot/`, and that is the security-
+# relevant half. Excluding a path from the ROOT .dockerignore stops it being COPY'd; it does not
+# stop it being SENT to the daemon as part of the context. The root file carries a long comment
+# about exactly that risk for `.secrets/`. Starting from `*` means this build's context is two
+# paths and nothing else -- no .git, no .venv, no .env, no .secrets/, no node_modules -- so there is
+# no credential in it to leak and no future `COPY . .` that could bake one in.
+*
+!examples/chatbot/requirements-mcp.txt
+!examples/chatbot/demo_mcp
+
+# After the re-include, because the last matching pattern wins. The root .dockerignore carries a
+# blanket `**/__pycache__` that this file replaced, and re-including a source directory brings the
+# developer's bytecode with it -- CPython 3.12 on the host writes .pyc that CPython 3.12 in the
+# image will happily load, so a stale cache can outlive an edit to the .py beside it.
+examples/chatbot/demo_mcp/**/__pycache__

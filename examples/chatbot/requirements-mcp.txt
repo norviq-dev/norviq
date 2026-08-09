@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+#
+# Dependencies for the demo MCP servers (examples/chatbot/demo_mcp) and nothing else.
+#
+# This list is short on purpose. These are plain MCP servers: they hold no Norviq code, no LLM
+# client and no agent framework, because the firewall that governs them runs in the CALLER's pod.
+# Anything added here is something a third-party MCP server would not have had, and the demo's
+# whole claim is that Norviq governs servers that were not built for it.
+#
+# The floor and the cap match pyproject.toml's `mcp` extra deliberately: the firewall sidecar and
+# these servers must agree on the protocol revision, and a split between them would surface as a
+# transport error that reads like a policy failure.
+mcp>=1.28.1,<2
+
+# starlette is already a transitive dependency of `mcp`, but servers.py imports Request/Response
+# directly for the /health and /_calls routes. Depending on it explicitly is the difference between
+# "our import" and "someone else's import that happens to be installed".
+starlette>=0.37

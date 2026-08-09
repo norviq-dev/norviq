@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+#
+# Per-Dockerfile ignore list for `-f examples/chatbot/Dockerfile`. BuildKit prefers
+# "<dockerfile>.dockerignore" over the context root's .dockerignore, so this file REPLACES the root
+# one for this image only and cannot affect the other five.
+#
+# It exists because the root .dockerignore excludes `examples/` and `*.md`, so this build fails
+# today at three separate COPY lines -- `pyproject.toml README.md`, `requirements.txt` and
+# `examples/chatbot/` -- with "not found", which reads like a typo in the Dockerfile rather than an
+# ignore rule. Its sibling Dockerfile.mcp.dockerignore was added for the same reason.
+#
+# Deny-all-then-allow, NOT `!examples/chatbot/` bolted onto the root file, and the reason is the
+# .env two lines below. Un-ignoring the directory in the ROOT file would re-include it for every
+# image built from this context, and because `!` re-inclusion is last-match-wins it would override
+# the root file's own `.env` / `.secrets/` lines -- reversing the exact protection those lines were
+# added to provide.
+*
+!pyproject.toml
+!README.md
+!norviq
+!examples/chatbot
+
+# --- Re-exclusions. These MUST stay below the `!` lines: last matching pattern wins. ---
+
+# THE IMPORTANT ONE. examples/chatbot/.env holds a real GROQ_API_KEY and a real NRVQ_API_TOKEN (it
+# is gitignored, so it is present on developer machines and invisible to code review). `COPY
+# examples/chatbot/ .` would bake it into a layer of an image that gets pushed to a registry, and
+# app.py calls load_dotenv() at import, so it would also be READ at runtime: any variable the pod
+# does not set -- NRVQ_CHATBOT_SYSTEM_PROMPT is one deployment.yaml omits -- would be silently
+# supplied by the build machine's file instead of the pod's spec. The pod must get its identity
+# from secretKeyRef and nowhere else.
+examples/chatbot/.env
+examples/chatbot/.env.*
+
+# The developer's bytecode. CPython 3.12 on this host writes .pyc that CPython 3.12 in the image
+# will load, so a stale cache can outlive an edit to the .py beside it. The root .dockerignore
+# carries this rule; replacing that file means restating it.
+**/__pycache__
+
+# Deployment manifests and build files are inputs to the operator's workflow, not to the running
+# container. Excluding them keeps `COPY examples/chatbot/ .` from shipping a k8s/ directory that
+# only invites someone to think the image applies its own manifests.
+examples/chatbot/k8s
+examples/chatbot/Dockerfile
+examples/chatbot/Dockerfile.*

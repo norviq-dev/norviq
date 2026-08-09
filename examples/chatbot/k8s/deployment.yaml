@@ -1,5 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
+#
+# One pod, four containers: the agent plus one Norviq MCP firewall per upstream MCP server.
+#
+# WHY THE FIREWALL IS HERE AND NOT NEXT TO THE SERVERS. The sidecars sit on the CLIENT side, in the
+# agent's pod, deliberately. The question this demo answers is "what is THIS AGENT allowed to call",
+# and the proxy's own attested identity is the caller's identity only when the proxy runs where the
+# caller runs (norviq/mcp/http.py, "IDENTITY IN HTTP MODE"). Move these next to mcp-kb/crm/ops and
+# you are governing "what may this SERVER be asked to do by anyone" -- a different, weaker question,
+# and one that would force the proxy to attest callers over the network instead of being them.
+#
+# Each sidecar binds LOOPBACK ONLY. That is what makes the firewall unavoidable rather than
+# advisory: the agent's only route to a tool is 127.0.0.1:910x, and no other pod can reach these
+# ports at all. Binding 0.0.0.0 would turn each one into a cluster-reachable proxy that adjudicates
+# calls under this pod's identity on behalf of any caller that finds it.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -52,6 +66,19 @@ spec:
               value: chatbot-prod
             - name: NRVQ_AGENT_CLASS
               value: customer-support
+            # The agent's MCP endpoints. These point at the LOOPBACK sidecars below, never at the
+            # mcp-* Services -- pointing them at the Services would still work and would silently
+            # skip both gates, which is the single easiest way to make this demo prove nothing.
+            #
+            # Deliberately NOT prefixed NRVQ_: norviq/config.py binds env_prefix="NRVQ_", so
+            # NRVQ_MCP_KB_URL reads as an SDK setting that does not exist. It would be swallowed by
+            # extra="ignore" and look configured while doing nothing.
+            - name: CHATBOT_MCP_KB_URL
+              value: "http://127.0.0.1:9101/mcp"
+            - name: CHATBOT_MCP_CRM_URL
+              value: "http://127.0.0.1:9102/mcp"
+            - name: CHATBOT_MCP_OPS_URL
+              value: "http://127.0.0.1:9103/mcp"
           readinessProbe:
             httpGet:
               path: /health
@@ -63,3 +90,208 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
+          securityContext:
+            runAsNonRoot: true
+            # Matches the image's `USER 65534`, pinned numerically so kubelet can actually verify
+            # runAsNonRoot (a name-based USER fails admission as "non-numeric user").
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+            # readOnlyRootFilesystem is deliberately NOT set on this container, same call as the api
+            # container in helm/norviq/templates/api-deployment.yaml: the framework stack under it
+            # (LangChain/LangGraph and the Groq client) writes caches at import and at first call,
+            # and pinning that down is a per-library scavenger hunt whose payoff here is small. The
+            # CIS-critical controls are applied. The sidecars below DO take it -- they are a much
+            # smaller, fully known process.
+
+        # ---------------------------------------------------------------- MCP firewalls
+        # Three sidecars, one per upstream server, each running the EXISTING engine image -- no new
+        # build. Verified in this image: `python -c "import norviq.mcp.http"` succeeds and
+        # `python -m norviq.mcp --help` prints usage.
+        #
+        # Why one per server rather than a single multiplexing proxy: --server-id keys the definition
+        # PINS (norviq/mcp/pins.py). Pins are what make a rug pull detectable -- an upstream that
+        # changes a tool's description or schema after approval. One proxy fronting three servers
+        # would have to invent a namespacing scheme for those pins, and any collision between two
+        # servers' identically-named tools would let one server's approved definition vouch for
+        # another's. Three processes keep that a structural impossibility instead of a bug class.
+        #
+        # NO KUBELET PROBES ON THESE CONTAINERS -- deliberate, and load-bearing. A kubelet
+        # httpGet/tcpSocket probe dials the POD IP, never loopback, so any probe here would be
+        # refused the moment the proxy binds 127.0.0.1 and would hold the whole pod NotReady
+        # forever. This is the same trade already made for the OPA sidecar in
+        # helm/norviq/templates/api-deployment.yaml, for the same reason. The proxy also serves only
+        # /mcp (POST/GET/DELETE) -- there is no /health route to probe even if the address worked.
+        # Liveness is covered indirectly: a dead sidecar makes every tool call from the agent fail,
+        # which the chatbot surfaces immediately. Trade-off accepted: a wedged-but-listening proxy is
+        # not auto-restarted.
+        - name: mcp-fw-kb
+          # Tag, not digest, so the operator can substitute a rebuilt engine without editing a hash.
+          # Pin it to a digest if you want this pod to be reproducible across a tag re-push.
+          image: ghcr.io/norviq-dev/norviq-engine-dev:engine-76cc47784dd5adbeff9d55faab0f4121003e38ac
+          imagePullPolicy: IfNotPresent
+          # `command` AND `args`, not args alone. The engine image declares no ENTRYPOINT -- only
+          # CMD ["python","-m","norviq.sidecar"] -- so `args` by itself would replace CMD and happen
+          # to work today, then break silently into a sidecar-instead-of-firewall the moment anyone
+          # adds an ENTRYPOINT to that image. Overriding both leaves nothing inherited to change.
+          command: ["python", "-m", "norviq.mcp"]
+          args:
+            - "--http"
+            - "--listen"
+            - "127.0.0.1:9101"
+            - "--upstream"
+            - "http://mcp-kb.chatbot-prod.svc.cluster.local:8080/mcp"
+            - "--server-id"
+            - "kb"
+          env:
+            # The same four values the chatbot carries. This is the point: the sidecar's decisions
+            # must be attributed to the SAME identity as the agent's, or the policy targeting
+            # (chatbot-prod, customer-support) would not cover them and the two gates would be
+            # adjudicated against different rules than the ones under review.
+            - name: NRVQ_POLICY_ENGINE_URL
+              value: "http://norviq-api.norviq:8080"
+            - name: NRVQ_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: chatbot-secrets
+                  key: NRVQ_API_TOKEN
+            - name: NRVQ_NAMESPACE
+              value: chatbot-prod
+            - name: NRVQ_AGENT_CLASS
+              value: customer-support
+            # Set EXPLICITLY. The default is "memory", which http.py refuses on this transport and
+            # auto-upgrades to control-plane while logging a warning on every start
+            # (NRVQ-MCP-5065). Naming it here silences a warning that would otherwise read like a
+            # misconfiguration, and records that pins living in the control plane -- durable,
+            # cross-pod, operator-visible -- is a choice rather than a fallback.
+            - name: NRVQ_MCP_PIN_STORE
+              value: "control-plane"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999          # the engine image's pinned numeric uid (Dockerfile.engine)
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+            # Safe on this container: with the control-plane pin store the proxy keeps no local
+            # state at all (norviq/mcp/pins.py -- pins are held by the API and refreshed on a
+            # timer). Switching NRVQ_MCP_PIN_STORE to "file" would need a writable NRVQ_MCP_PIN_PATH
+            # on a volume that survives a restart, and this line would have to come off.
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp-fw-kb
+              mountPath: /tmp
+
+        - name: mcp-fw-crm
+          image: ghcr.io/norviq-dev/norviq-engine-dev:engine-76cc47784dd5adbeff9d55faab0f4121003e38ac
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "norviq.mcp"]     # see mcp-fw-kb for why command AND args
+          args:
+            - "--http"
+            - "--listen"
+            - "127.0.0.1:9102"
+            - "--upstream"
+            - "http://mcp-crm.chatbot-prod.svc.cluster.local:8080/mcp"
+            - "--server-id"
+            - "crm"
+          env:
+            - name: NRVQ_POLICY_ENGINE_URL
+              value: "http://norviq-api.norviq:8080"
+            - name: NRVQ_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: chatbot-secrets
+                  key: NRVQ_API_TOKEN
+            - name: NRVQ_NAMESPACE
+              value: chatbot-prod
+            - name: NRVQ_AGENT_CLASS
+              value: customer-support
+            - name: NRVQ_MCP_PIN_STORE
+              value: "control-plane"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp-fw-crm
+              mountPath: /tmp
+
+        - name: mcp-fw-ops
+          image: ghcr.io/norviq-dev/norviq-engine-dev:engine-76cc47784dd5adbeff9d55faab0f4121003e38ac
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "norviq.mcp"]     # see mcp-fw-kb for why command AND args
+          args:
+            - "--http"
+            - "--listen"
+            - "127.0.0.1:9103"
+            - "--upstream"
+            - "http://mcp-ops.chatbot-prod.svc.cluster.local:8080/mcp"
+            - "--server-id"
+            - "ops"
+          env:
+            - name: NRVQ_POLICY_ENGINE_URL
+              value: "http://norviq-api.norviq:8080"
+            - name: NRVQ_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: chatbot-secrets
+                  key: NRVQ_API_TOKEN
+            - name: NRVQ_NAMESPACE
+              value: chatbot-prod
+            - name: NRVQ_AGENT_CLASS
+              value: customer-support
+            - name: NRVQ_MCP_PIN_STORE
+              value: "control-plane"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp-fw-ops
+              mountPath: /tmp
+
+      # One emptyDir per sidecar rather than one shared /tmp. Three processes sharing a writable
+      # directory is a needless same-pod side channel between the governors of three different
+      # upstreams, and it costs nothing to keep them separate.
+      volumes:
+        - name: tmp-fw-kb
+          emptyDir: {}
+        - name: tmp-fw-crm
+          emptyDir: {}
+        - name: tmp-fw-ops
+          emptyDir: {}

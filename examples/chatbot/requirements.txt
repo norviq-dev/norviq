@@ -7,3 +7,9 @@
 langchain-groq>=0.2.0
 fastapi>=0.111.0
 uvicorn>=0.30.0
+# The official MCP client, used by mcp_tools.py to speak streamable-HTTP to the firewall sidecars.
+# Deliberately the protocol SDK and not langchain-mcp-adapters: that package flattens an `isError`
+# result into a generic ToolException and drops `_meta`, which is exactly where the firewall puts
+# the gate, the rule id and the server — the whole structured denial this demo exists to show.
+mcp>=1.9.0
+python-dotenv>=1.0.0

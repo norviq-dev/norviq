@@ -1,0 +1,151 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+#
+# The "ops" MCP server: execute_sql / delete_record / send_email / export_customers. These are the
+# sinks the policy is supposed to BLOCK, and this server is what makes a block provable.
+#
+# Every tool here returns a "[SIMULATED] ..." string AND increments a process-local counter exposed
+# at GET /_calls. That counter is the whole point: a blocked call and an executed-then-discarded
+# call produce indistinguishable HTTP responses, so a response body can never prove non-execution.
+# /_calls is read from OUTSIDE the pod's request path, so a test asserts the counter did not move
+# and thereby proves the call never reached the tool body. Do not "simplify" this away by trusting
+# the error string the firewall returns -- that string is exactly what an evasion would forge.
+#
+# THE COUNTER IS PER-POD AND IN MEMORY. `replicas: 1` below is therefore load-bearing, not a
+# resource decision: a second replica would split the counter across pods and a test that read one
+# pod's /_calls while the call landed on the other would report a false "blocked". If you scale
+# this, the counter has to move somewhere shared first.
+#
+# Deployment + Service + NetworkPolicy live in ONE file per server on purpose -- see mcp-kb.yaml for
+# why a single shared NetworkPolicy fails open during partial teardown.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-ops
+  namespace: chatbot-prod
+  labels:
+    app: mcp-ops
+    app.kubernetes.io/part-of: norviq-examples
+    app.kubernetes.io/component: mcp-server
+spec:
+  replicas: 1        # load-bearing -- see the /_calls note in the file header before changing it
+  selector:
+    matchLabels:
+      app: mcp-ops
+  template:
+    metadata:
+      labels:
+        app: mcp-ops
+        app.kubernetes.io/part-of: norviq-examples
+        app.kubernetes.io/component: mcp-server
+    spec:
+      # This pod never calls the Kubernetes API. It is also the pod hosting the tools an attacker
+      # most wants to reach, so a mounted ServiceAccount token here would be the shortest path from
+      # "the model was talked into calling execute_sql" to a real cluster credential.
+      automountServiceAccountToken: false
+      containers:
+        - name: mcp
+          # Placeholder tag -- substitute at apply time, do NOT commit a real tag here (see k8s/README.md).
+          # One image serves all three servers; --server selects the tool surface.
+          image: ghcr.io/norviq-dev/norviq-demo-mcp:REPLACE_ME
+          imagePullPolicy: IfNotPresent
+          # `args` APPENDS to the image's ENTRYPOINT and REPLACES CMD -- see mcp-kb.yaml for the
+          # crashloop this causes if the image ships its server selection in CMD with no ENTRYPOINT.
+          args: ["--server", "ops"]
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 250m
+              memory: 192Mi
+          securityContext:
+            runAsNonRoot: true
+            # Numeric uid, set here rather than inherited from the image -- see mcp-kb.yaml.
+            runAsUser: 65534
+            runAsGroup: 65534
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+            # Nothing here writes to disk -- the tools return strings and bump an in-memory counter.
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-ops
+  namespace: chatbot-prod
+  labels:
+    app: mcp-ops
+    app.kubernetes.io/part-of: norviq-examples
+spec:
+  # Name is load-bearing: the chatbot pod's firewall sidecar dials
+  # mcp-ops.chatbot-prod.svc.cluster.local from a literal --upstream flag. See mcp-kb.yaml.
+  #
+  # This Service also carries /_calls on the same port. Reaching it is how a test reads the counter
+  # (`kubectl port-forward svc/mcp-ops 8080:8080` -- see k8s/README.md), which is why the port is
+  # exposed at all rather than the pod being talked to only through the firewall.
+  selector:
+    app: mcp-ops
+  ports:
+    - port: 8080
+      targetPort: http
+      name: http
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcp-ops-ingress
+  namespace: chatbot-prod
+  labels:
+    app: mcp-ops
+    app.kubernetes.io/part-of: norviq-examples
+spec:
+  # Only the chatbot pod may reach this server. It matters most here: mcp-ops is the pod whose tools
+  # the policy exists to block, so a second path to it is a bypass of the entire demo.
+  #
+  # NOT ENFORCED ON THE CURRENT AKS CLUSTER (networkPolicy=none, measured 2026-08-08). The full
+  # measurement and the remediation are in mcp-kb.yaml and k8s/README.md. Applied for reviewability,
+  # not currently a control.
+  #
+  # Note the interaction with reading /_calls: `kubectl port-forward` is proxied by the API server
+  # via the kubelet, NOT by a pod, so it does not match the podSelector below. Once a policy engine
+  # IS enforcing, verify port-forward still reaches this pod before concluding the counter is broken.
+  podSelector:
+    matchLabels:
+      app: mcp-ops
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: demo-chatbot
+      ports:
+        - protocol: TCP
+          port: 8080

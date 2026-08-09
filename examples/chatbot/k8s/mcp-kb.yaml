@@ -1,0 +1,157 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+#
+# The "kb" MCP server: search_kb / get_article. Read-only and safe by construction -- it exists so
+# the demo has a control group. A policy that blocks everything proves nothing; the interesting
+# result is that kb stays callable while ops does not.
+#
+# Deployment + Service + NetworkPolicy live in ONE file per server on purpose. The obvious
+# alternative -- a single NetworkPolicy selecting all three servers by a shared label -- fails open
+# during partial teardown: `kubectl delete -f mcp-ops.yaml` would drop the ingress lock for kb and
+# crm while they are still serving. Co-locating the policy with the workload it protects means the
+# lock and the thing being locked are always created and destroyed together.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-kb
+  namespace: chatbot-prod
+  labels:
+    app: mcp-kb
+    app.kubernetes.io/part-of: norviq-examples
+    app.kubernetes.io/component: mcp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-kb
+  template:
+    metadata:
+      labels:
+        app: mcp-kb
+        app.kubernetes.io/part-of: norviq-examples
+        app.kubernetes.io/component: mcp-server
+    spec:
+      # This pod never calls the Kubernetes API. Mounting a ServiceAccount token anyway would hand a
+      # cluster credential to the process the demo deliberately points untrusted model output at.
+      automountServiceAccountToken: false
+      containers:
+        - name: mcp
+          # Placeholder tag -- substitute at apply time, do NOT commit a real tag here (see k8s/README.md).
+          # One image serves all three servers; --server selects the tool surface.
+          image: ghcr.io/norviq-dev/norviq-demo-mcp:REPLACE_ME
+          imagePullPolicy: IfNotPresent
+          # `args` APPENDS to the image's ENTRYPOINT. It replaces CMD outright, so if the image ships
+          # its server selection in CMD with no ENTRYPOINT, this line becomes the whole command and
+          # the container crashloops on "--server: not found". The image must declare
+          # ENTRYPOINT ["python", "-m", "mcp_server"] (or equivalent) for this to work.
+          args: ["--server", "kb"]
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 250m
+              memory: 192Mi
+          securityContext:
+            runAsNonRoot: true
+            # Pinned NUMERICALLY here rather than inherited from the image's USER line. kubelet can
+            # only verify runAsNonRoot against a numeric uid -- a name-based `USER mcp` in the image
+            # fails admission with "non-numeric user" (same reason Dockerfile.engine pins 999).
+            # Setting it in the manifest also means a rebuilt image that forgot USER cannot silently
+            # start running as root under a securityContext that claims otherwise.
+            runAsUser: 65534
+            runAsGroup: 65534
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+            # Safe here: the server holds its canned data and its /_calls counter in process memory
+            # and writes nothing. /tmp is mounted writable below because CPython still wants a
+            # scratch dir for a handful of stdlib paths, and discovering that via a crashloop in the
+            # middle of a demo is a bad trade for one emptyDir.
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-kb
+  namespace: chatbot-prod
+  labels:
+    app: mcp-kb
+    app.kubernetes.io/part-of: norviq-examples
+spec:
+  # The Service name is load-bearing and is NOT free to change. The firewall sidecar in the chatbot
+  # pod dials this by a literal FQDN baked into its --upstream flag
+  # (mcp-kb.chatbot-prod.svc.cluster.local). Rename the Service and the sidecar gets a DNS failure
+  # that surfaces to the user as an unhelpful "tool unavailable" -- nothing points at the Service.
+  selector:
+    app: mcp-kb
+  ports:
+    - port: 8080
+      targetPort: http
+      name: http
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcp-kb-ingress
+  namespace: chatbot-prod
+  labels:
+    app: mcp-kb
+    app.kubernetes.io/part-of: norviq-examples
+spec:
+  # Only the chatbot pod may reach this server. The point is the firewall's placement: the sidecar
+  # sits on the CLIENT side, so anything that can reach mcp-kb directly has routed around Gate B
+  # entirely. This policy is what makes "the agent's only path to a tool runs through the firewall"
+  # a network fact rather than a convention.
+  #
+  # NOT ENFORCED ON THE CURRENT AKS CLUSTER. Measured 2026-08-08 against cluster `norviq` in
+  # rg-opsai-dev-eastus-001:
+  #   az aks show -g rg-opsai-dev-eastus-001 -n norviq --query networkProfile
+  #   -> networkPlugin=azure, networkPluginMode=overlay, networkPolicy=none, networkDataplane=azure
+  # networkPolicy=none means the API server accepts this object and NOTHING enforces it -- the same
+  # silent no-op kindnet gives you (docs/security-model.md:50). It is applied anyway so the intent is
+  # reviewable and so it starts working the moment a policy engine is turned on. Do not cite it as a
+  # control in its current state. See k8s/README.md for how to check and how to enable one.
+  #
+  # If you DO enable enforcement: re-check that the kubelet's /health probe still passes. Probe
+  # traffic originates on the node, not from a pod, so no `from` selector here can match it and
+  # whether it survives depends on the CNI's host-traffic failsafe. A pod that goes NotReady
+  # immediately after a policy engine is switched on is this, not the app.
+  podSelector:
+    matchLabels:
+      app: mcp-kb
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: demo-chatbot
+      ports:
+        - protocol: TCP
+          port: 8080
