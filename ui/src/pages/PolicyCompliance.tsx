@@ -522,18 +522,18 @@ export function PolicyCompliance() {
                   return (
                     <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
                       <Link
-                        className="btn btn-outline"
+                        className="btn btn-outline btn-sm"
                         data-testid={`pc-open-policy-${row.key}`}
                         to={`/policies/catalog?ns=${encodeURIComponent(row.namespace)}&agent_class=${encodeURIComponent(row.agentClass)}`}
                       >
-                        Open policy
+                        Policy
                       </Link>
                       <Link
-                        className="btn btn-outline"
+                        className="btn btn-outline btn-sm"
                         data-testid={`pc-open-audit-${row.key}`}
                         to={`/audit?ns=${encodeURIComponent(row.namespace)}&range=${encodeURIComponent(range)}&agent=${encodeURIComponent(row.agentClass)}`}
                       >
-                        View in Audit Log
+                        Audit log
                       </Link>
                     </div>
                   );
