@@ -115,8 +115,11 @@ spec:
               value: {{ .Values.webhook.injection.sidecarMode | default "proxy" | quote }}
             # Outage posture stamped into every injected sidecar (see values.yaml for the full contract).
             # Only applies when the engine is genuinely unreachable; a 4xx always blocks.
+            # Must track config.py's sdk_fallback_mode — this value is stamped into every injected
+            # sidecar and silently wins over the Python default, so a divergence makes that default
+            # decorative on every real install.
             - name: NRVQ_SDK_FALLBACK_MODE
-              value: {{ .Values.webhook.injection.fallbackMode | default "block" | quote }}
+              value: {{ .Values.webhook.injection.fallbackMode | default "allow" | quote }}
             {{- if eq (.Values.webhook.injection.sidecarMode | default "proxy") "embedded" }}
             # Embedded sidecars run their own RedisCache + OPA(subprocess) + PolicyLoader, so the injector
             # must propagate the datastore wiring. The thin-proxy default needs none of this.

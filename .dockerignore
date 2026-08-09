@@ -17,8 +17,13 @@ architecture/
 registry/
 ui/dist
 
-# Public-release build-context trimming (none are COPY'd by any Dockerfile)
+# Public-release build-context trimming
 webhook/
+# ...except the presets, which the API and engine images DO copy: norviq/api/baseline.py reads them to
+# recompile a namespace's baseline control set. The comment above used to say "none are COPY'd by any
+# Dockerfile" and that stopped being true — the build failed loudly here rather than silently shipping
+# an image whose baseline endpoint raises FileNotFoundError, which is the right way round.
+!webhook/presets/
 docs/
 portal/
 .reviews/

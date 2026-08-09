@@ -408,16 +408,22 @@ webhook:
         limits:   { cpu: 2000m, memory: 384Mi }
     # DATA-PLANE posture: what a GOVERNED AGENT does when the central engine is unreachable. Distinct
     # from failurePolicy below, which is the ADMISSION posture (whether a pod may be created at all).
-    #   "block" (DEFAULT) = fail-CLOSED. The agent keeps talking, but every tool call is refused for as
-    #     long as the engine is down. Correct for an enforcement product: no ungoverned tool calls, ever.
-    #   "allow"           = fail-OPEN. Tool calls are forwarded UNGOVERNED during an outage, so the agent
-    #     keeps working. Each one is audited as rule_id=thin_proxy_fail_open — never as a policy allow.
+    #   "allow" (DEFAULT) = fail-OPEN. Tool calls are forwarded during an outage so the customer's
+    #     agents keep working. Each one is audited as rule_id=thin_proxy_fail_open — never as a policy
+    #     allow — so "we went unjudged" is countable and alertable rather than silent.
+    #   "block"           = fail-CLOSED. No ungoverned tool call, ever, at the cost of taking every
+    #     agent in the cluster down with us for as long as the engine is down.
     # This applies ONLY to a genuine outage (5xx / timeout / connection error). A 4xx is the engine
     # ANSWERING with a refusal — an expired token, a malformed request — and ALWAYS blocks regardless of
-    # this setting, so choosing "allow" cannot turn a revoked credential into a silent bypass.
-    # Before reaching for "allow": both data-plane paths already retry with backoff, which covers the
-    # common cases (rolling restarts, brief blips). "allow" is for tolerating a SUSTAINED outage.
-    fallbackMode: block
+    # this setting, so "allow" cannot turn a revoked credential into a silent bypass.
+    # Both data-plane paths retry with backoff first, so this only decides what happens after a
+    # SUSTAINED outage, not during a rolling restart or a brief blip.
+    #
+    # Defaulted to block until it was measured against the product's actual posture: Norviq sits in the
+    # request path of production agents, and a security control whose failure mode is a customer outage
+    # gets removed from that path, which protects nobody. Must track config.py's sdk_fallback_mode —
+    # this value is stamped into every injected sidecar and silently wins over the Python default.
+    fallbackMode: allow
     # Gate admission on the pod's agent-class label instead of the whole namespace (DEFAULT true).
     # Without this, `norviq-injection=enabled` on a namespace routes EVERY pod created there through the
     # injector — the namespace's database, ingress controller, batch jobs — so with failurePolicy: Fail a
@@ -703,7 +709,18 @@ config:
       limits: { memory: 64Mi }
   logLevel: INFO
   enforcementMode: block
-  noPolicyDecision: deny   # No-policy namespace -> deny in block mode ("allow" restores fail-open)
+  # What a namespace with NO policy loaded does. "allow" (default) | "deny".
+  #
+  # A namespace nobody has written a policy for is not governed, so there is no customer decision to
+  # enforce and the call proceeds. Set "deny" for namespaces you have deliberately locked down —
+  # deny-by-default is then an explicit choice rather than the silent consequence of having installed
+  # the chart and not configured anything yet.
+  #
+  # This said `deny`, which silently OVERRODE the code default in norviq/config.py: a fresh install
+  # into a namespace with no policy took that namespace's tool calls to zero. Two places holding one
+  # concept, and the chart is the one that wins — changing only the Python default did nothing on a
+  # real cluster.
+  noPolicyDecision: allow
   # OPA evaluation runtime: "server" (HTTP to the sidecar) or "subprocess" (per-call fork, rollback).
   opaMode: server
   # Refuse to start (fail-closed) on a weak/default/short JWT secret or the default admin
