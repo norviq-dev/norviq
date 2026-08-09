@@ -3,6 +3,7 @@
 
 import {
   BadgeCheck,
+  ClipboardCheck,
   Crosshair,
   BarChart3,
   Beaker,
@@ -73,11 +74,16 @@ const PANEL_CONFIG: Record<Section, { title: string; groups: Group[] }> = {
           { to: "/redteam", label: "Red Team", icon: Swords }
         ]
       },
-      // Compliance is a top-level page (framework coverage / MITRE ATLAS).
+      // Compliance is a top-level page (framework coverage / MITRE ATLAS). Policy Compliance is its
+      // sibling and answers a different question — not "which frameworks do we cover" but "are the
+      // policies THIS customer wrote actually being met, and by which agent classes".
       {
         id: "compliance",
         label: "COMPLIANCE",
-        items: [{ to: "/compliance", label: "Compliance", icon: BadgeCheck }]
+        items: [
+          { to: "/compliance", label: "Compliance", icon: BadgeCheck },
+          { to: "/compliance/policies", label: "Policy Compliance", icon: ClipboardCheck }
+        ]
       },
       // Fleet is multi-cluster MANAGEMENT (opt-in) — it belongs in Security Operations, not Analytics. Only
       // shown when a fleet-api hub is configured.

@@ -29,6 +29,7 @@ const RedTeam = lazy(() => import("./pages/RedTeam"));
 const AssetGraph = lazy(() => import("./pages/AssetGraph"));
 const AttackGraph = lazy(() => import("./pages/AttackGraph").then((m) => ({ default: m.AttackGraph })));
 const Compliance = lazy(() => import("./pages/Compliance").then((m) => ({ default: m.Compliance })));
+const PolicyCompliance = lazy(() => import("./pages/PolicyCompliance").then((m) => ({ default: m.PolicyCompliance })));
 const AccountSettings = lazy(() =>
   import("./pages/AccountSettings").then((m) => ({ default: m.AccountSettings }))
 );
@@ -98,6 +99,9 @@ function App() {
             <Route path="/threats/graph" element={<ClusterScoped page="Attack Graph"><AttackGraph /></ClusterScoped>} />
             {/* Compliance is now a top-level page; the old MITRE route redirects to it. */}
             <Route path="/compliance" element={<ClusterScoped page="Compliance"><Compliance /></ClusterScoped>} />
+            {/* Sibling of /compliance, not a tab on it: that page scores FRAMEWORK coverage (ATLAS,
+                OWASP), this one scores the customer's own policies against their own traffic. */}
+            <Route path="/compliance/policies" element={<ClusterScoped page="Policy Compliance"><PolicyCompliance /></ClusterScoped>} />
             <Route path="/threats/mitre" element={<Navigate to="/compliance" replace />} />
             <Route path="/settings" element={<Navigate to="/settings/general" replace />} />
             <Route path="/settings/account" element={<AccountSettings />} />

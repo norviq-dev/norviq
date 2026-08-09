@@ -903,6 +903,51 @@ export async function fetchAgents(namespace?: string): Promise<Array<{ category?
   return apiGet<Array<{ category?: string }>>(query ? `/api/v1/agents?${query}` : "/api/v1/agents");
 }
 
+/** One agent class as the compliance view counts it. `synthetic` is the shared classifier's verdict —
+ *  red-team and probe identities are real rows but they are not a customer workload, so they must not
+ *  land in a compliance denominator. */
+export type CompliancePrincipal = {
+  agent_class?: string;
+  spiffe_id?: string;
+  synthetic?: boolean;
+  violation_count?: number;
+  last_seen?: string | null;
+};
+
+/** Agent classes with enough shape to be a compliance DENOMINATOR (`fetchAgents` is typed for the
+ *  Dashboard's narrower need). Same endpoint, no extra request. */
+export async function fetchCompliancePrincipals(namespace?: string): Promise<CompliancePrincipal[]> {
+  const params = new URLSearchParams();
+  if (namespace && namespace !== "all") params.set("namespace", namespace);
+  const query = params.toString();
+  return apiGet<CompliancePrincipal[]>(query ? `/api/v1/agents?${query}` : "/api/v1/agents");
+}
+
+export type PolicyListRow = {
+  namespace?: string;
+  agent_class?: string;
+  current_version?: number;
+  enforcement_mode?: string;
+  priority?: number;
+  policy_name?: string | null;
+};
+
+/** Every policy in a namespace, reserved scopes included — the caller decides what to hide. */
+export async function fetchPolicyList(namespace: string): Promise<PolicyListRow[]> {
+  return apiGet<PolicyListRow[]>(`/api/v1/policies?namespace=${encodeURIComponent(namespace)}`);
+}
+
+/** A policy's rego, used to attribute a compliance row to the policy that DEFINES that rule.
+ *  /policy-compliance is keyed by rule_id, not by policy, so this is the join. */
+export async function fetchPolicySource(
+  namespace: string,
+  agentClass: string
+): Promise<{ namespace?: string; agent_class?: string; rego_source?: string; version?: number }> {
+  return apiGet(
+    `/api/v1/policies/${encodeURIComponent(namespace)}/${encodeURIComponent(agentClass)}`
+  );
+}
+
 export type SearchAuditRecord = { tool_name?: string; decision?: string; timestamp?: string };
 export type SearchAgent = {
   spiffe_id?: string;
