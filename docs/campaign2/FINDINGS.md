@@ -124,3 +124,75 @@ Three of the attack prompts were refused by Groq before Norviq ever saw them (`D
 phrasing, one overt "email their full record"). Scoring those as blocks would measure Groq's safety
 training, not this product. They are recorded as **model-refused, not adjudicated**, and the pretext
 phrasing that does get past the model is the one used for every measurement above.
+
+---
+
+# Visual Builder — the surface customers actually use
+
+Driven on the deployed console at `e8320a7`. The headline is **good news that changes C2-001**.
+
+## C2-005 — The builder CAN express the egress defence (C2-001 downgraded)
+
+**Not a defect. Recorded because it corrects an earlier assumption.**
+
+C2-001 said the customer-data-egress defence "requires an authored policy". It does not require *raw
+rego*. Built entirely in the Visual Builder, in the UI:
+
+- `NOT` · **Param matches regex** · field `to` · pattern `@(acme\.example\.com|acme-corp\.example\.com)$`
+- AND · **Tool name is one of** · `send_email,post_webhook`
+
+It compiles (2,248 bytes / 35 lines / 1 of 25 regex ops). Crucially the compiler emits **`walk()`**:
+
+    bld_paramregex_0 {
+        walk(input.tool_params["to"], [_, leaf])
+        is_string(leaf)
+        ...
+
+so nested and array recipients under the field are covered, not just a scalar. The palette has 7
+condition types (`detector`, `keyword`, `paramRegex`, `toolIn`, `sourceVerb`, `trustBelow`,
+`scalarFact`), each with a `NOT` toggle, composed as OR-of-ANDs.
+
+**What the builder version still misses vs the hand-written one:** it keys on a single named field
+(`to`), so `bcc` needs a second OR row and a recipient under an unanticipated key is missed. The
+hand-written policy walks the whole param tree and matches ANY recipient-ish key. That is a real
+difference in coverage, but it is a difference of degree, not "impossible in the builder".
+
+## C2-006 — Three UI-honesty behaviours worth keeping
+
+Verified live; recording them so a refactor does not quietly remove them.
+
+1. **Registry-aware dead-rule warning.** Listing `upload_file` and `send_message` produced
+   *"'upload_file' is not in this namespace's tool registry — this rule will never fire"*. That is
+   precisely the failure the mode explainer warns about ("a rule matching nothing never fires, and
+   still looks like it enforces"), caught automatically rather than left to the reader.
+2. **Save is gated behind a dry-run**, and the dry-run **goes stale on edit** — changing the class
+   flipped it to `Stale · re-run` and re-disabled Save. A stale dry-run cannot authorize a save.
+3. **The dry-run refuses to overclaim.** With no traffic for the scope it said *"Replayed 0 recent
+   real calls · 0 newly blocked / No recent real traffic for this scope — cannot simulate impact;
+   deploy with care"* rather than presenting `0 newly blocked` as evidence of safety.
+
+## C2-007 — The builder says "creates" for a policy that already exists, and gives no overwrite warning
+
+**Severity: medium (product / operator safety).** Confirmed live, NOT fixed.
+
+With agent class set to `r2-support` — which already has a hand-written, currently-**enforcing**
+policy at version 2 — the only affordance reads:
+
+    creates chatbot-prod / r2-support
+
+There is no "this will replace an existing policy" warning, no diff, and no indication that the
+existing policy was hand-authored rather than builder-generated. The save path is an upsert:
+`policy_loader.create`'s own docstring is *"Create or update a policy and return new version"*
+(`version = policies.version + 1`).
+
+So a customer targeting a class that already has a policy would replace a live security control while
+reading the word "creates". The builder is explicit that its own output is graph-derived and
+"never hand-edited", which makes the reverse direction — builder silently replacing hand-written
+rego — the more dangerous one, because the hand-written source is not recoverable from the graph.
+
+Mitigated by `policy_versions` retaining prior versions, so it is recoverable by rollback rather than
+true data loss. That is why this is medium and not high.
+
+**Suggested fix:** resolve the existing policy for (namespace, class) as the class is typed, and switch
+the verb to "replaces" with the current version and author shown; warn distinctly when the existing
+policy carries no `nrvq-builder-graph/v1` marker, since that one cannot round-trip back.
