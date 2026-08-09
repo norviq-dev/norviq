@@ -41,11 +41,27 @@ def test_every_control_has_operator_facing_copy() -> None:
 
 
 def test_all_deny_reproduces_the_presets_own_heads() -> None:
-    """Parity: `deny` everywhere must register exactly what the preset registers."""
+    """Parity: `deny` everywhere registers exactly what the preset registers — with ONE deliberate
+    exception, stated here rather than hidden.
+
+    A control the preset authors as `audits[...]` is PROMOTED to `blocks[...]` at deny. Restoring its
+    original set instead meant it could never block while the API reported it as enforcing, so the
+    exception exists to make the setting honest. Every block/escalate control is still byte-identical,
+    which is what the "changing an effect cannot change a detector" argument actually rests on.
+    """
     original = {(h.set_name, h.control_id, h.guard) for h in baseline.controls_for(PRESET)}
+    audit_authored = {h.control_id for h in baseline.controls_for(PRESET) if h.set_name == "audits"}
+    expected = {
+        ("blocks" if cid in audit_authored else s, cid, g) for (s, cid, g) in original
+    }
     compiled = baseline.compile(PRESET, {cid: "deny" for cid in baseline.control_ids(PRESET)})
     _, region, _ = baseline._split_region(compiled)
-    assert {(h.set_name, h.control_id, h.guard) for h in baseline.parse_heads(region)} == original
+    assert {(h.set_name, h.control_id, h.guard) for h in baseline.parse_heads(region)} == expected
+
+    # The guards — the actual detection — are untouched for every control, promoted or not.
+    assert {(cid, g) for (_, cid, g) in original} == {
+        (h.control_id, h.guard) for h in baseline.parse_heads(region)
+    }
 
 
 def test_everything_outside_the_controls_region_is_untouched() -> None:
@@ -134,3 +150,35 @@ def test_describe_surfaces_the_false_positive_caveats() -> None:
     assert "1 in 8" in by_id["deny_shell_execution"]["caveat"]
     assert "SSN" in by_id["pii_detection"]["caveat"]
     assert by_id["deny_shell_execution"]["effect"] == "monitor"
+
+
+def test_an_audit_authored_control_can_actually_be_promoted_to_deny() -> None:
+    """BUG: `deny` restored the head's ORIGINAL set, so a control the preset authors as an audit went
+    straight back into audits[] and could never block — while the API reported it under "enforcing"
+    and the console showed effect="deny". Being told twice that a control is enforcing while the call
+    proceeds is worse than not offering the setting.
+
+    `scope_violation_dangerous_tool` is the one in the shipped preset; asserted by shape rather than by
+    name so a second audit-authored control added later is covered too.
+    """
+    audit_authored = {h.control_id for h in baseline.controls_for(PRESET) if h.set_name == "audits"}
+    assert audit_authored, "fixture assumption changed — no audit-authored control in the preset"
+
+    compiled = baseline.compile(PRESET, {cid: "deny" for cid in baseline.control_ids(PRESET)})
+    _, region, _ = baseline._split_region(compiled)
+    by_id: dict[str, set[str]] = {}
+    for head in baseline.parse_heads(region):
+        by_id.setdefault(head.control_id, set()).add(head.set_name)
+
+    for cid in audit_authored:
+        assert by_id[cid] == {"blocks"}, f"{cid} at deny is still an audit — it cannot block"
+
+
+def test_an_audit_authored_control_still_only_records_at_monitor() -> None:
+    """The other half: promoting it must be possible, and NOT promoting it must change nothing."""
+    audit_authored = {h.control_id for h in baseline.controls_for(PRESET) if h.set_name == "audits"}
+    compiled = baseline.compile(PRESET, {cid: "monitor" for cid in baseline.control_ids(PRESET)})
+    _, region, _ = baseline._split_region(compiled)
+    for head in baseline.parse_heads(region):
+        if head.control_id in audit_authored:
+            assert head.set_name == "audits"

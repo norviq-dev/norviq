@@ -201,3 +201,74 @@ async def test_no_override_leaves_computed_untouched():
 async def test_freeze_beats_override():
     r = await _FakeCalc(computed=0.85, override=0.60, frozen=True).calculate(_ti())
     assert r.score == 0.0 and r.category == "frozen"
+
+
+# --- monitor mode on the EXCEPTION paths (the blocker the campaign found) -------------------------
+#
+# `_apply_posture` has only three call sites and all three are on the happy path, ABOVE the try. The
+# three exception handlers in `evaluate()` built their decision and returned it directly, so monitor
+# mode never ran on them. Narrowing the exempt set changed nothing for these: they were not softened
+# because they were exempt, they were not softened because the softening never executed.
+#
+# That made monitor mode's promise false exactly where it matters most — a namespace configured to
+# interrupt nothing still dropped customer traffic whenever OUR engine timed out or faulted.
+
+class _StubCache:
+    """Minimal cache: _resolve_posture only needs get_ns_settings."""
+
+    def __init__(self, mode: str | None) -> None:
+        self._mode = mode
+
+    async def get_ns_settings(self, _ns: str):
+        return {"enforcement_mode": self._mode} if self._mode else None
+
+
+class _BoomCache:
+    async def get_ns_settings(self, _ns: str):
+        raise RuntimeError("redis down")
+
+
+def _event():
+    from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
+
+    return ToolCallEvent(
+        tool_name="get_order", tool_params={"order_id": "ORD-1"},
+        agent_identity=AgentIdentity(spiffe_id="spiffe://n/ns/cmp/sa/a", namespace="cmp"),
+    )
+
+
+@pytest.mark.parametrize("rule_id", ["evaluator_timeout", "evaluator_fallback", "invalid_spiffe_identity"])
+async def test_failure_path_decisions_soften_under_monitor(rule_id: str) -> None:
+    ev = OPAEvaluator(_StubCache("audit"))  # type: ignore[arg-type]
+    out = await ev._soften_failure_for_posture(_dec("block", rule_id), _event())
+    assert out.decision == "audit", f"{rule_id} still interrupts traffic in a monitor namespace"
+    assert out.rule_id == f"monitor_would_block:{rule_id}"
+
+
+@pytest.mark.parametrize("rule_id", ["evaluator_timeout", "evaluator_fallback", "invalid_spiffe_identity"])
+async def test_failure_path_decisions_stay_hard_without_monitor(rule_id: str) -> None:
+    """An enforcing namespace is unchanged — this must not become a blanket fail-open."""
+    ev = OPAEvaluator(_StubCache(None))  # type: ignore[arg-type]
+    out = await ev._soften_failure_for_posture(_dec("block", rule_id), _event())
+    assert out.decision == "block" and out.rule_id == rule_id
+
+
+async def test_unreadable_posture_keeps_the_hard_verdict() -> None:
+    """Redis is often the reason we are in the handler at all. If we cannot establish that the
+    customer asked for monitor, we must not assume it."""
+    ev = OPAEvaluator(_BoomCache())  # type: ignore[arg-type]
+    out = await ev._soften_failure_for_posture(_dec("block", "evaluator_fallback"), _event())
+    assert out.decision == "block"
+
+
+def test_the_handlers_actually_call_the_softener() -> None:
+    """Guards the WIRING, which is the half that was missing. The helper existing and being correct
+    is worthless if `evaluate()`'s handlers still return their decision directly."""
+    import inspect
+
+    from norviq.engine import evaluator as mod
+
+    src = inspect.getsource(mod.OPAEvaluator.evaluate)
+    assert src.count("_soften_failure_for_posture") == 3, (
+        "expected all three exception handlers (timeout, invalid identity, generic) to soften"
+    )

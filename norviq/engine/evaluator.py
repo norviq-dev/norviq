@@ -604,7 +604,7 @@ class OPAEvaluator:
         except asyncio.TimeoutError:
             elapsed_ms = (time.monotonic() - start) * 1000
             log.error("nrvq.engine.timeout", event_id=event.event_id, elapsed_ms=elapsed_ms, code="NRVQ-ENG-2020")
-            decision = self._timeout_decision(event, elapsed_ms)
+            decision = await self._soften_failure_for_posture(self._timeout_decision(event, elapsed_ms), event)
             self._record_telemetry(event, decision, start, cache_hit, span, timer)
             # Register the agent on the FAIL-CLOSED path too. These three branches produce the blocks
             # that most strongly indicate an attack or an engine fault — a malformed/spoofed SPIFFE id,
@@ -617,7 +617,9 @@ class OPAEvaluator:
         except InvalidSpiffeIdentity:
             elapsed_ms = (time.monotonic() - start) * 1000
             log.warning("nrvq.engine.invalid_identity", event_id=event.event_id, code="NRVQ-ENG-2006")
-            decision = self._invalid_identity_decision(event, elapsed_ms)
+            decision = await self._soften_failure_for_posture(
+                self._invalid_identity_decision(event, elapsed_ms), event
+            )
             self._record_telemetry(event, decision, start, cache_hit, span, timer)
             # Register the agent on the FAIL-CLOSED path too. These three branches produce the blocks
             # that most strongly indicate an attack or an engine fault — a malformed/spoofed SPIFFE id,
@@ -630,7 +632,9 @@ class OPAEvaluator:
         except Exception as exc:
             elapsed_ms = (time.monotonic() - start) * 1000
             log.error("nrvq.engine.error", event_id=event.event_id, error=str(exc), code="NRVQ-ENG-2000")
-            decision = self._ensure_block_attribution(self._fallback_decision(event, elapsed_ms), event.event_id)
+            decision = await self._soften_failure_for_posture(
+                self._ensure_block_attribution(self._fallback_decision(event, elapsed_ms), event.event_id), event
+            )
             self._record_telemetry(event, decision, start, cache_hit, span, timer)
             # Register the agent on the FAIL-CLOSED path too. These three branches produce the blocks
             # that most strongly indicate an attack or an engine fault — a malformed/spoofed SPIFFE id,
@@ -642,6 +646,37 @@ class OPAEvaluator:
             return decision
         finally:
             span.end()
+
+    async def _soften_failure_for_posture(
+        self, decision: PolicyDecision, event: ToolCallEvent
+    ) -> PolicyDecision:
+        """Apply namespace monitor mode to a decision minted on an EXCEPTION path.
+
+        The three handlers in `evaluate()` build their decision and return it directly, so they never
+        reached `_apply_posture` — the only three call sites are all on the happy path, above the
+        `try`. The exempt set was narrowed so that `evaluator_timeout`, `evaluator_fallback` and
+        `invalid_spiffe_identity` would soften, and it changed nothing for them: they are not softened
+        because they are exempt, they are not softened because the softening never runs.
+
+        That made monitor mode's promise false exactly where it matters most. A namespace configured
+        to interrupt nothing still dropped customer traffic whenever OUR engine timed out or faulted —
+        and an engine fault is the case an operator has least control over and most needs to survive.
+
+        Resolving posture here can itself fail (Redis is often the reason we are in this handler at
+        all). `_resolve_posture` already swallows a mirror error and falls back to the global posture,
+        but this wraps it anyway: if we cannot establish that the customer asked for monitor, we must
+        not assume it. Unknown posture keeps the hard verdict.
+        """
+        try:
+            posture = await self._resolve_posture(event.agent_identity.namespace)
+        except Exception as exc:  # noqa: BLE001 — cannot read the posture, so cannot claim monitor
+            log.warning(
+                "nrvq.engine.posture.unreadable_on_failure_path",
+                event_id=event.event_id, error=str(exc), rule_id=decision.rule_id,
+                code="NRVQ-ENG-2061",
+            )
+            return decision
+        return self._apply_posture(decision, posture, event.event_id)
 
     def _register_fail_closed(self, event: ToolCallEvent, decision: PolicyDecision) -> None:
         """Queue a registry write for a decision made on the fail-closed path.

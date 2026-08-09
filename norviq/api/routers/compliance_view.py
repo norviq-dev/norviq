@@ -32,6 +32,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from norviq.api import baseline as baseline_lib
 from norviq.api.auth import get_current_user, read_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
@@ -65,6 +66,34 @@ def _strip_prefix(rule_id: str) -> str | None:
     return None
 
 
+def _control_for(row_decision: str, rule_id: str, known: frozenset[str]) -> str | None:
+    """The control a row is evidence about, or None.
+
+    TWO shapes reach the audit log, and counting only the first is how this endpoint reported 7 of 33
+    would-blocks on a live cluster:
+
+      1. PREFIXED — `policy_audit_would_block:deny_sql_injection`. A hard `block` that was SOFTENED,
+         either by the policy's own audit mode or by namespace monitor posture.
+      2. BARE + decision=audit — `deny_sql_injection`. The rego itself decided `audit`, because the
+         baseline compiler put that control's head in `audits[]`. Nothing softened it, so nothing
+         prefixed it.
+
+    Shape 2 is the NORMAL case for this product now: every baseline control ships on `monitor`, which
+    is implemented precisely by emitting an `audits[]` head. So this endpoint was blind to the default
+    configuration of the feature it exists to serve — it looked correct on a fresh install and emptied
+    out the moment a customer used it.
+
+    A bare id counts only when it names a control we actually ship. `default_allow` and a hand-written
+    policy's own rule id are audits too, and neither is evidence about promoting a baseline control.
+    """
+    stripped = _strip_prefix(rule_id)
+    if stripped is not None:
+        return stripped
+    if row_decision == "audit" and rule_id in known:
+        return rule_id
+    return None
+
+
 @router.get("/policy-compliance")
 async def policy_compliance(
     namespace: str | None = Query(default=None),
@@ -75,6 +104,16 @@ async def policy_compliance(
     """Non-compliant traffic grouped by the control that flagged it (RBAC-scoped, real traffic only)."""
     namespace = read_namespace(user, namespace)
     since = datetime.now(timezone.utc) - timedelta(hours=_RANGE_HOURS[range])
+
+    # The shipped control ids, so a BARE audit rule_id can be recognised as a baseline control rather
+    # than a hand-written policy's own rule. Best-effort: if the presets cannot be read (an image that
+    # did not COPY them), fall back to prefixed-only rather than failing the whole read — a partial
+    # answer beats a 500 on a page an operator opens during an incident.
+    try:
+        known_controls = frozenset(baseline_lib.control_ids("strict"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("nrvq.api.policy_compliance.controls_unavailable", error=str(exc), code="NRVQ-API-7114")
+        known_controls = frozenset()
 
     query = select(AuditLogEntry).where(AuditLogEntry.timestamp_utc >= since)
     if namespace:
@@ -97,7 +136,7 @@ async def policy_compliance(
             excluded += 1
             continue
         scanned += 1
-        control_id = _strip_prefix(str(row.rule_id or ""))
+        control_id = _control_for(str(row.decision or ""), str(row.rule_id or ""), known_controls)
         if control_id is None:
             continue
         entry = controls[control_id]

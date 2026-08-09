@@ -333,7 +333,21 @@ def compile(preset: str, effects: dict[str, str] | None = None) -> str:  # noqa:
         # `monitor` sends every head for the control to audits[], including one that was originally an
         # escalate. Preserving the escalate/block distinction under monitor would be a distinction
         # without a difference — both proceed — while giving the operator two ways to read one setting.
-        target = "audits" if effect == "monitor" else head.set_name
+        #
+        # `deny` restores the head's ORIGINAL set, except for a control the preset already registers as
+        # an audit. `scope_violation_dangerous_tool` is authored `audits[...]`, so "restore the original
+        # set" put it straight back in audits[] and it could never block — while PUT reported it under
+        # "enforcing" and GET showed effect="deny". The operator was told twice that it was enforcing
+        # while the call went through, which is worse than not offering the setting at all.
+        #
+        # An audit-authored control promoted to deny becomes a real block. That is what the operator
+        # asked for, and the alternative (silently refusing the promotion) is the lie we just removed.
+        if effect == "monitor":
+            target = "audits"
+        elif head.set_name == "audits":
+            target = "blocks"
+        else:
+            target = head.set_name
         emitted[target].append(f'{target}["{head.control_id}"] {{ {head.guard} }}')
 
     lines: list[str] = [

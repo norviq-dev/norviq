@@ -167,3 +167,52 @@ def test_scanned_distinguishes_compliant_from_idle() -> None:
 
     busy = _get([_row("default_allow", decision="allow") for _ in range(25)])
     assert busy["controls"] == [] and busy["scanned"] == 25
+
+
+# --- the blocker the campaign found -----------------------------------------------------------------
+#
+# A control at `monitor` is implemented by putting its head in `audits[]`, so the REGO decides `audit`
+# on its own and nothing prefixes the rule_id. This endpoint only counted prefixed ids, so it was
+# blind to the default configuration of the feature it exists to serve: on a live cluster it reported
+# 7 of 33 would-blocks. It looked correct on a fresh install and emptied out the moment a customer
+# used the feature.
+
+def test_counts_a_bare_audit_rule_id_from_a_monitor_control() -> None:
+    body = _get([
+        _row("deny_sql_injection", decision="audit"),
+        _row("deny_sql_injection", decision="audit", tool="run_report"),
+    ])
+    assert body["controls"][0]["control_id"] == "deny_sql_injection"
+    assert body["controls"][0]["count"] == 2
+
+
+def test_a_bare_id_and_a_prefixed_id_are_the_same_control() -> None:
+    """Both shapes occur together: whether a control is softened depends on the POLICY's mode, which
+    can differ between the chart's baseline and a customer-tuned one on the same key."""
+    body = _get([
+        _row("deny_sql_injection", decision="audit"),
+        _row("policy_audit_would_block:deny_sql_injection"),
+    ])
+    assert len(body["controls"]) == 1
+    assert body["controls"][0]["count"] == 2
+
+
+def test_a_bare_audit_that_is_not_a_shipped_control_is_ignored() -> None:
+    """`default_allow` and a hand-written policy's own rule are audits too, and neither is evidence
+    about promoting a BASELINE control. Counting them would invent a control that does not exist."""
+    body = _get([
+        _row("default_allow", decision="audit"),
+        _row("my_custom_org_rule", decision="audit"),
+        _row("pii_detection", decision="audit"),
+    ])
+    assert [c["control_id"] for c in body["controls"]] == ["pii_detection"]
+
+
+def test_a_bare_control_id_that_actually_BLOCKED_is_still_not_counted() -> None:
+    """The bare-id path must not undo the already-enforcing exclusion: at `deny` the same control
+    emits the same bare id with decision=block, and that is not evidence about promoting it."""
+    body = _get([
+        _row("deny_sql_injection", decision="block"),
+        _row("deny_sql_injection", decision="audit"),
+    ])
+    assert body["controls"][0]["count"] == 1
