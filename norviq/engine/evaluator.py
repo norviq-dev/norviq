@@ -2266,7 +2266,6 @@ class OPAEvaluator:
         construction (_collect_candidates/_collect_candidates_union), never re-derived from the key string. A
         real agent_class whose own base policy happens to end in a reserved suffix (e.g. "...__remediation__")
         is therefore never misclassified as an overlay and always keeps its priority-based precedence."""
-        rank = {"block": 0, "escalate": 1, "audit": 2, "allow": 3}
         overlay = [r for r in results if r.get("overlay")]
         base = [r for r in results if not r.get("overlay")]
         base_winner = self._resolve_precedence(base) if base else None
@@ -2275,9 +2274,27 @@ class OPAEvaluator:
             return overlay_winner
         if overlay_winner is None:
             return base_winner
-        overlay_rank = rank.get(overlay_winner["decision"].decision, 3)
-        base_rank = rank.get(base_winner["decision"].decision, 3)
-        return overlay_winner if overlay_rank < base_rank else base_winner
+        # Compare EFFECTIVE decisions, not raw ones. A `block` from a policy saved in audit mode is
+        # softened to `audit` moments later by `_apply_policy_mode`, so treating it as a block here
+        # makes two layers look equally strict when only one of them will actually stop the call — and
+        # a tie returns the BASE. Measured the moment the controls tier became a floor: the chart's
+        # `__baseline__` (audit mode) and the controls floor (block mode) both said block, the tie handed
+        # attribution to the baseline, and a control the operator had set to Enforce came back as
+        # `policy_audit_would_block:` — enforcement silently lost to a tiebreak.
+        return overlay_winner if self._effective_rank(overlay_winner) < self._effective_rank(base_winner) else base_winner
+
+    @staticmethod
+    def _effective_rank(item: dict) -> int:
+        """Restrictiveness AFTER the policy's own enforcement mode is taken into account.
+
+        `_apply_policy_mode` turns a block/escalate from an `audit`-mode policy into an `audit`, so that
+        is what the layer is really worth when two layers are compared.
+        """
+        rank = {"block": 0, "escalate": 1, "audit": 2, "allow": 3}
+        decision = str(item["decision"].decision)
+        if str(item.get("enforcement_mode", "block")) == "audit" and decision in ("block", "escalate"):
+            decision = "audit"
+        return rank.get(decision, 3)
 
     @staticmethod
     def _is_overlay(key: str) -> bool:

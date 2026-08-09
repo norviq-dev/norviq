@@ -157,3 +157,46 @@ def test_the_floor_does_not_fire_when_the_control_is_off() -> None:
     # An `off` control emits no head at all, so it contributes no candidate decision. Modelled here as
     # an allow: it must leave the class policy exactly as it was.
     assert _winner([_r("ns:support", "allow", 100), _r("ns:__controls__", "allow", 2, overlay=True)]) == "allow"
+
+
+# --- ties are broken on the EFFECTIVE decision, not the raw one -------------------------------------
+
+def _rm(key: str, decision: str, priority: int, mode: str, overlay: bool) -> dict:
+    return {"key": key, "decision": SimpleNamespace(decision=decision), "priority": priority,
+            "enforcement_mode": mode, "overlay": overlay}
+
+
+def test_a_hard_floor_block_beats_an_audit_mode_base_block() -> None:
+    """A `block` from an audit-mode policy is softened to `audit` by _apply_policy_mode moments later,
+    so it is not really a block. Ranking it as one made two layers look equally strict when only one
+    would stop the call — and a tie returns the BASE.
+
+    Caught live the moment the controls tier became a floor: the chart's `__baseline__` (audit mode)
+    and the controls floor (block mode) both said block, the tie handed attribution to the baseline,
+    and a control set to Enforce came back as `policy_audit_would_block:` for a class that had no
+    policy of its own. The floor fixed one hole and a tiebreak quietly opened another.
+    """
+    winner = _ev._resolve_with_packs([
+        _rm("ns:__baseline__", "block", 1, "audit", False),
+        _rm("ns:__controls__", "block", 2, "block", True),
+    ])
+    assert winner["key"] == "ns:__controls__"
+    assert winner["enforcement_mode"] == "block"
+
+
+def test_an_audit_mode_overlay_does_not_steal_a_hard_base_block() -> None:
+    # Symmetry: the same reasoning must not let a soft overlay outrank a base that really blocks.
+    winner = _ev._resolve_with_packs([
+        _rm("ns:support", "block", 100, "block", False),
+        _rm("ns:__controls__", "block", 2, "audit", True),
+    ])
+    assert winner["key"] == "ns:support"
+
+
+def test_effective_rank_only_softens_block_and_escalate() -> None:
+    # An audit-mode policy that decided `allow` is still an allow — softening is not a downgrade of
+    # everything, only of the two decisions that would have interrupted the call.
+    assert _ev._effective_rank(_rm("k", "allow", 1, "audit", False)) == 3
+    assert _ev._effective_rank(_rm("k", "audit", 1, "audit", False)) == 2
+    assert _ev._effective_rank(_rm("k", "block", 1, "audit", False)) == 2
+    assert _ev._effective_rank(_rm("k", "block", 1, "block", False)) == 0
