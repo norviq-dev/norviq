@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import {
-  fetchAuditRecords,
+  fetchBaselineControls,
   fetchCompliancePrincipals,
   fetchPolicyCompliance,
   fetchPolicyList,
@@ -22,6 +22,9 @@ import { useApp } from "../store/AppContext";
 // the customer authored, so they do not belong in a view whose whole subject is "your own policies".
 // `<class>__remediation__` is the per-class overlay the compliance flow itself writes.
 const RESERVED = new Set(["__baseline__", "__controls__", "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__"]);
+// baseline_router._CONTROLS_PRIORITY — the tier the shipped detectors are materialised at.
+const CONTROLS_TIER_PRIORITY = 2;
+
 const isReserved = (agentClass: string) => RESERVED.has(agentClass) || agentClass.endsWith("__remediation__");
 
 // Every rule id a policy DEFINES. /policy-compliance is keyed by rule_id and knows nothing about which
@@ -51,6 +54,10 @@ type PolicyRow = {
   totalPrincipals: number;
   /** null === not computable (unreadable rego, or no principals to measure against). */
   compliancePct: number | null;
+  priority: number;
+  /** Base tiers resolve by HIGHEST PRIORITY OUTRIGHT, so a class policy above the controls tier
+   *  means the shipped controls do not run for that class at all. Proven on a live cluster. */
+  masksBaseline: boolean;
   calls: number;
   state: "Compliant" | "Non-compliant" | "Not evaluated" | "Unknown";
 };
@@ -177,6 +184,9 @@ export function PolicyCompliance() {
         compliancePct = Math.round(((total - nonCompliant.length) / total) * 100);
         state = nonCompliant.length === 0 ? "Compliant" : "Non-compliant";
       }
+      // The controls tier is priority 2 (baseline_router._CONTROLS_PRIORITY). Anything above it wins
+      // outright, so the shipped controls never run for this class.
+      const priority = policy.priority ?? 100;
       return {
         key: agentClass,
         name: policy.policy_name || agentClass,
@@ -192,12 +202,15 @@ export function PolicyCompliance() {
         nonCompliant,
         totalPrincipals: total,
         compliancePct,
+        priority,
+        masksBaseline: priority > CONTROLS_TIER_PRIORITY,
         calls,
         state
       };
     });
   }, [policies.data, byRule, realPrincipals, namespace, evidenceUnreadable]);
 
+  const maskingRows = rows.filter((r) => r.masksBaseline);
   const measurable = rows.filter((r) => r.compliancePct !== null);
   const nonCompliantRows = rows.filter((r) => r.state === "Non-compliant");
   // Overall = principals clean across EVERY policy, matching Azure's resource-level roll-up.
@@ -219,17 +232,15 @@ export function PolicyCompliance() {
 
   const selectedRow = rows.find((r) => r.key === selected) ?? null;
 
-  const audit = useApi(
-    () =>
-      fetchAuditRecords({
-        namespace,
-        range,
-        limit: 25,
-        ...(selectedRow ? { agent_class: selectedRow.agentClass } : {})
-      } as Parameters<typeof fetchAuditRecords>[0]),
-    [namespace, range, selectedRow?.agentClass],
-    { cacheKey: `pc:audit:${namespace}:${range}:${selectedRow?.agentClass ?? "all"}`, staleTimeMs: 20_000 }
-  );
+  // What a class policy is switching OFF. The controls tier sits at priority 2 and base tiers resolve
+  // by highest priority OUTRIGHT, so any class policy above it takes the whole shipped detector set
+  // out of play for that class.
+  const controls = useApi(() => fetchBaselineControls(namespace), [namespace], {
+    cacheKey: `pc:controls:${namespace}`,
+    staleTimeMs: 30_000
+  });
+  const activeControlCount = (controls.data?.controls ?? []).filter((c) => c.effect !== "off").length;
+  const enforcingControlCount = (controls.data?.controls ?? []).filter((c) => c.effect === "deny").length;
 
   return (
     <div className="page-enter stack">
@@ -313,6 +324,37 @@ export function PolicyCompliance() {
         />
       </div>
 
+      {/* The finding this page exists to surface, proven live: same SSN payload, `r2-support` (which
+          has a class policy) ALLOWED it while a class with no policy was BLOCKED by pii_detection.
+          Base tiers resolve by highest priority OUTRIGHT, so writing one class policy switches the
+          whole shipped detector set off for that class — and until now nothing said so anywhere. */}
+      {maskingRows.length > 0 && activeControlCount > 0 && (
+        <div
+          data-testid="pc-baseline-masked"
+          style={{
+            padding: "10px 14px",
+            border: "1px solid #4a3a1a",
+            background: "rgba(255,176,32,0.08)",
+            borderRadius: 10,
+            fontSize: 12,
+            color: "var(--escalate)"
+          }}
+        >
+          <b>
+            {maskingRows.length} {maskingRows.length === 1 ? "policy supersedes" : "policies supersede"} the shipped
+            baseline controls
+          </b>{" "}
+          <span style={{ color: "var(--text-secondary)" }}>
+            — {maskingRows.map((r) => r.agentClass).join(", ")}. Base tiers resolve by highest priority outright, so
+            the {activeControlCount} active control{activeControlCount === 1 ? "" : "s"}
+            {enforcingControlCount > 0 ? ` (${enforcingControlCount} enforcing)` : ""} on Target Settings do not run
+            for {maskingRows.length === 1 ? "that class" : "those classes"} at all. Anything you still need must be
+            written into the policy itself.
+          </span>{" "}
+          <Link to="/policies/targets">Review controls</Link>
+        </div>
+      )}
+
       {/* ---- Per-policy compliance ---- */}
       <Panel
         title="Policy compliance"
@@ -347,6 +389,15 @@ export function PolicyCompliance() {
                     {(r as unknown as PolicyRow).version !== null && (
                       <span style={{ color: "var(--text-muted)", marginLeft: 6, fontSize: 11 }}>
                         v{(r as unknown as PolicyRow).version}
+                      </span>
+                    )}
+                    {(r as unknown as PolicyRow).masksBaseline && activeControlCount > 0 && (
+                      <span
+                        data-testid={`pc-masks-${(r as unknown as PolicyRow).key}`}
+                        title="Base tiers resolve by highest priority outright, so the shipped controls do not run for this class."
+                        style={{ color: "var(--escalate)", marginLeft: 8, fontSize: 10, whiteSpace: "nowrap" }}
+                      >
+                        supersedes baseline
                       </span>
                     )}
                   </span>
@@ -445,10 +496,10 @@ export function PolicyCompliance() {
                     </div>
                   </div>
                   <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexShrink: 0 }}>
-                    <Link className="btn-kit" to={`/policies/catalog?ns=${encodeURIComponent(namespace)}`}>
+                    <Link className="btn btn-outline" to={`/policies/catalog?ns=${encodeURIComponent(namespace)}`}>
                       Open policy
                     </Link>
-                    <Link className="btn-kit" to={`/audit?ns=${encodeURIComponent(namespace)}`}>
+                    <Link className="btn btn-outline" to={`/audit?ns=${encodeURIComponent(namespace)}`}>
                       View in Audit Log
                     </Link>
                   </div>
@@ -459,54 +510,48 @@ export function PolicyCompliance() {
         )}
       </Panel>
 
-      {/* ---- Audit evidence ---- */}
+      {/* ---- Evidence: a REDIRECT, not a second Audit Log ----
+           A 25-row table here was a worse copy of a page that already does filtering, tailing,
+           export and redteam separation. Deep-link into the real one instead, pre-filtered to the
+           exact class and rule, so the operator lands on the evidence rather than on a search box. */}
       <Panel
-        title="Audit log"
-        sub={
-          selectedRow ? (
+        title="Evidence"
+        sub="Every decision behind these numbers lives in the Audit Log. These links open it already filtered."
+      >
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <Link
+            className="btn btn-outline"
+            data-testid="pc-evidence-all"
+            to={`/audit?ns=${encodeURIComponent(namespace)}&range=${encodeURIComponent(range)}`}
+          >
+            All decisions in {namespace}
+          </Link>
+          {selectedRow ? (
             <>
-              Evidence for <b>{selectedRow.name}</b> — select the row again to clear.
+              <Link
+                className="btn btn-outline"
+                data-testid="pc-evidence-class"
+                to={`/audit?ns=${encodeURIComponent(namespace)}&range=${encodeURIComponent(range)}&agent=${encodeURIComponent(selectedRow.agentClass)}`}
+              >
+                {selectedRow.agentClass} only
+              </Link>
+              {(selectedRow.ruleIds ?? []).map((id) => (
+                <Link
+                  key={id}
+                  className="btn btn-outline"
+                  data-testid={`pc-evidence-rule-${id}`}
+                  to={`/audit?ns=${encodeURIComponent(namespace)}&range=${encodeURIComponent(range)}&rule=${encodeURIComponent(id)}`}
+                >
+                  rule: {id}
+                </Link>
+              ))}
             </>
           ) : (
-            "Recent decisions in this namespace. Select a policy row above to narrow this to its agent class."
-          )
-        }
-        action={
-          <Link className="btn-kit" to={`/audit?ns=${encodeURIComponent(namespace)}`}>
-            Full Audit Log
-          </Link>
-        }
-      >
-        {audit.error ? (
-          <div data-testid="pc-audit-unreadable" style={{ fontSize: 12, color: "var(--escalate, #FFB020)" }}>
-            Audit records could not be read — <b>unknown, not &ldquo;no activity&rdquo;</b>.
-          </div>
-        ) : (audit.data ?? []).length === 0 ? (
-          <div data-testid="pc-audit-empty" style={{ fontSize: 13, color: "var(--text-muted)" }}>
-            No audit records in this window.
-          </div>
-        ) : (
-          <DataTable
-            rowKey={(r) => String((r as { id?: string }).id ?? `${(r as { timestamp?: string }).timestamp}`)}
-            rows={(audit.data ?? []) as unknown as Array<Record<string, unknown>>}
-            columns={[
-              { key: "timestamp", title: "Time", render: (v) => <span style={{ fontSize: 11 }}>{String(v ?? "").slice(0, 19).replace("T", " ")}</span> },
-              { key: "agent_class", title: "Agent class" },
-              { key: "tool_name", title: "Tool" },
-              {
-                key: "decision",
-                title: "Decision",
-                render: (v) => {
-                  const d = String(v ?? "");
-                  const colour =
-                    d === "block" ? "var(--block, #FF3B5C)" : d === "audit" || d === "escalate" ? "var(--escalate, #FFB020)" : "var(--allow, #00E5A0)";
-                  return <span style={{ color: colour, fontSize: 12 }}>{d}</span>;
-                }
-              },
-              { key: "rule_id", title: "Rule", render: (v) => <code style={{ fontSize: 11 }}>{String(v ?? "")}</code> }
-            ]}
-          />
-        )}
+            <span style={{ fontSize: 12, color: "var(--text-muted)", alignSelf: "center" }}>
+              Select a policy above for per-class and per-rule links.
+            </span>
+          )}
+        </div>
       </Panel>
     </div>
   );

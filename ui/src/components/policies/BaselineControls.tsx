@@ -240,7 +240,7 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
           <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 12 }}>
             <button
               data-testid="baseline-save"
-              className="btn-kit"
+              className="btn btn-primary"
               disabled={!isAdmin || !dirty || saving || !canMutate}
               title={blockedReason ?? undefined}
               onClick={save}

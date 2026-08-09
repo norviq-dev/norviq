@@ -37,6 +37,7 @@ function mockAll(opts: {
   sources?: Record<string, string>;
   complianceError?: boolean;
   sourceError?: string;
+  controlsCatalog?: unknown[];
 }) {
   const {
     controls = [],
@@ -70,7 +71,14 @@ function mockAll(opts: {
     if (opts.sourceError && cls === opts.sourceError) throw new Error("500");
     return { rego_source: sources[cls] ?? "" } as never;
   });
-  vi.spyOn(client, "fetchAuditRecords").mockResolvedValue([] as never);
+  vi.spyOn(client, "fetchBaselineControls").mockResolvedValue({
+    namespace: "chatbot-prod", preset: "strict", default_effect: "monitor",
+    effects: ["off", "monitor", "deny"], counts: { off: 0, monitor: 13, deny: 1 },
+    controls: opts.controlsCatalog ?? [
+      { id: "pii_detection", title: "PII egress", description: "", effect: "deny" },
+      { id: "deny_sql_injection", title: "SQL injection", description: "", effect: "monitor" }
+    ]
+  } as never);
 }
 
 function control(id: string, classes: string[], count = classes.length) {
@@ -298,22 +306,58 @@ describe("scope and evidence", () => {
     expect(screen.queryByTestId("pc-row-support__remediation__")).toBeNull();
   });
 
-  it("narrows the audit evidence to the selected policy's agent class", async () => {
+
+});
+
+describe("evidence is a redirect, not a second Audit Log", () => {
+  it("deep-links into the Audit Log for the namespace, and per class/rule once a policy is picked", async () => {
+    // A 25-row table here was a worse copy of a page that already filters, tails, exports and
+    // separates redteam traffic. Land the operator ON the evidence instead of on a search box.
     mockAll({ controls: [control("customer_data_to_untrusted_recipient", ["r2-support"])] });
     renderPage();
-    const row = await screen.findByTestId("pc-row-r2-support");
-    await userEvent.click(row);
-    await waitFor(() => {
-      expect(client.fetchAuditRecords).toHaveBeenCalledWith(
-        expect.objectContaining({ agent_class: "r2-support", namespace: "chatbot-prod" })
-      );
-    });
+    const all = await screen.findByTestId("pc-evidence-all");
+    expect(all.getAttribute("href")).toContain("/audit?ns=chatbot-prod");
+    expect(screen.queryByTestId("pc-evidence-class")).toBeNull();
+
+    await userEvent.click(screen.getByTestId("pc-row-r2-support"));
+    const cls = await screen.findByTestId("pc-evidence-class");
+    expect(cls.getAttribute("href")).toContain("agent=r2-support");
+    const rule = screen.getByTestId("pc-evidence-rule-customer_data_to_untrusted_recipient");
+    expect(rule.getAttribute("href")).toContain("rule=customer_data_to_untrusted_recipient");
+  });
+});
+
+describe("baseline masking", () => {
+  it("warns that a class policy switches the shipped controls off for its class", async () => {
+    // Proven on a live cluster with the SAME SSN payload: `r2-support` (which has a class policy at
+    // priority 100) returned allow/cde_default_allow, while a class with no policy returned
+    // block/pii_detection. Base tiers resolve by highest priority OUTRIGHT. Until this banner, an
+    // operator could set PII egress to Enforce, read "1 enforcing", and have it apply to nothing.
+    mockAll({ policies: [{ agent_class: "r2-support", enforcement_mode: "block", current_version: 2, priority: 100 }] });
+    renderPage();
+    const warn = await screen.findByTestId("pc-baseline-masked");
+    expect(warn.textContent).toContain("supersedes");
+    expect(warn.textContent).toContain("r2-support");
+    expect(warn.textContent).toContain("2 active controls");
+    expect(warn.textContent).toContain("1 enforcing");
+    expect(screen.getByTestId("pc-masks-r2-support")).toBeInTheDocument();
   });
 
-  it("renders unreadable audit records as unknown rather than 'no activity'", async () => {
-    mockAll({});
-    vi.spyOn(client, "fetchAuditRecords").mockRejectedValue(new Error("500"));
+  it("stays silent for a policy at or below the controls tier", async () => {
+    mockAll({ policies: [{ agent_class: "r2-support", enforcement_mode: "block", current_version: 2, priority: 2 }] });
     renderPage();
-    expect(await screen.findByTestId("pc-audit-unreadable")).toHaveTextContent("unknown");
+    await screen.findByTestId("pc-row-r2-support");
+    expect(screen.queryByTestId("pc-baseline-masked")).toBeNull();
+    expect(screen.queryByTestId("pc-masks-r2-support")).toBeNull();
+  });
+
+  it("stays silent when every control is off — nothing is being masked", async () => {
+    mockAll({
+      policies: [{ agent_class: "r2-support", enforcement_mode: "block", current_version: 2, priority: 100 }],
+      controlsCatalog: [{ id: "pii_detection", title: "PII egress", description: "", effect: "off" }]
+    });
+    renderPage();
+    await screen.findByTestId("pc-row-r2-support");
+    expect(screen.queryByTestId("pc-baseline-masked")).toBeNull();
   });
 });
