@@ -131,31 +131,58 @@ phrasing that does get past the model is the one used for every measurement abov
 
 Driven on the deployed console at `e8320a7`. The headline is **good news that changes C2-001**.
 
-## C2-005 — The builder CAN express the egress defence (C2-001 downgraded)
+## C2-005 — CORRECTED: the builder does NOT express the egress defence
 
-**Not a defect. Recorded because it corrects an earlier assumption.**
+**I got this wrong first, and the correction matters more than the original claim.**
 
-C2-001 said the customer-data-egress defence "requires an authored policy". It does not require *raw
-rego*. Built entirely in the Visual Builder, in the UI:
+My first pass built `NOT paramRegex(to, trusted-domains) AND toolIn(send_email, post_webhook)` in the
+UI, saw it compile and the dry-run return `valid`, and reported it as a working defence. It was not.
+I never measured it. The dry-run itself said it had replayed **0 calls**, which is precisely the
+signal that nothing had been proven.
 
-- `NOT` · **Param matches regex** · field `to` · pattern `@(acme\.example\.com|acme-corp\.example\.com)$`
-- AND · **Tool name is one of** · `send_email,post_webhook`
+Saved to a scratch class and run through real `opa eval`, the policy was **exactly inverted**:
 
-It compiles (2,248 bytes / 35 lines / 1 of 25 regex ops). Crucially the compiler emits **`walk()`**:
+| input | builder policy | hand-written policy |
+|---|---|---|
+| recipient = attacker domain | **`allow`** | `block` |
+| recipient = trusted domain | **`block`** | `allow` |
 
-    bld_paramregex_0 {
-        walk(input.tool_params["to"], [_, leaf])
-        is_string(leaf)
-        ...
+It permitted every exfiltration and blocked all legitimate internal mail.
 
-so nested and array recipients under the field are covered, not just a scalar. The palette has 7
-condition types (`detector`, `keyword`, `paramRegex`, `toolIn`, `sourceVerb`, `trustBelow`,
-`scalarFact`), each with a `NOT` toggle, composed as OR-of-ANDs.
+**Cause: mine, not the product's.** The embedded graph showed a bare `paramRegex` with no `not`
+wrapper — my synthetic `.click()` on the NOT toggle never committed to React state. Re-clicked as a
+real mouse event, the toggle sets `aria-pressed="true"` correctly, and `builderCompile.ts:1413` handles
+`not` deliberately, including a documented fix for guard-placement inverting into a bypass. The
+negation path is sound.
 
-**What the builder version still misses vs the hand-written one:** it keys on a single named field
-(`to`), so `bcc` needs a second OR row and a recipient under an unanticipated key is missed. The
-hand-written policy walks the whole param tree and matches ANY recipient-ish key. That is a real
-difference in coverage, but it is a difference of degree, not "impossible in the builder".
+**What IS a product finding:** an exactly-inverted security policy passed the dry-run and saved as
+`ENFORCING v1`. The dry-run was honest about its own limits ("cannot simulate impact; deploy with
+care") but nothing else stood between a customer and an enforcing control that does the opposite of
+what its own rule id and reason string say. A rule named `cls_block_to` with reason "Blocked: customer
+data addressed to a domain the company does not control" was saved while blocking the opposite set.
+
+**And on the original question, the deeper analysis says no.** Thirteen agents mapped the builder
+against the real `compileGraph` and real OPA; two of three independent lenses returned
+`not_expressible`, one `partially_expressible`. The blockers that survived adversarial verification:
+
+- **The compiler can never bind a walk's PATH and VALUE in one rule body.** Every rules-mode walk
+  discards one half — `walk(input.tool_params["to"], [_, leaf])` keeps the leaf and throws away the
+  path. Matching "any recipient-shaped key" is therefore not expressible; only literal named keys are.
+- **`collectionFact` and `numericFact` are absent from the rules-mode palette** for want of an editor
+  (`BuilderSheet.tsx:671`), and they are the ONLY condition kinds that can read `destinations.emails`.
+  Rules mode is the default and the only mode that blocks on top of existing allows.
+- **`destinations.emails` cannot tell a recipient from the body.** The engine harvests addresses from
+  every string in the call (`evaluator.py:1369-1425`), so using it reproduces exactly the false
+  positive the hand-written policy was designed to avoid — a customer record containing the customer's
+  own address would block an internal forward.
+- **No domain or suffix operator over a collection** — `FACT_OPS_BY_KIND.collection` is
+  `["noneOf","subsetOf","anyOf","maxCount"]`, exact-string membership only.
+- **Array elements are never addressable**, so `cc[0]` — the campaign's first evasion — is unreachable.
+
+The strongest thing a customer can actually build is an allowlist-mode policy enumerating every
+permitted tool with `destinations.emails subsetOf [every trusted mailbox, individually]`. Measured
+with real OPA it does block the direct, cc and bcc attacks — but it requires listing individual
+addresses rather than domains, and it replaces the class's whole policy rather than tightening it.
 
 ## C2-006 — Three UI-honesty behaviours worth keeping
 
