@@ -113,8 +113,16 @@ var finalizerMaxAge = 15 * time.Minute
 // build a patch, and the pod is DENIED — enabling injection stopped tenant workloads from starting.
 // It stayed hidden because the checked-in chart carries `-latest` tags, which this pattern accepted,
 // so every render-based test and every local install passed.
+// The `-dev` package is the project's own pre-release image host, and excluding it meant a release
+// candidate's sidecar could never be exercised on a cluster: NRVQ_SIDECAR_IMAGE was rejected, the
+// injector fell back to `norviq-engine:engine-latest` (NRVQ-WHK-4062), and every "we validated
+// injection on AKS" claim actually covered main's sidecar, not the candidate's. Observed live —
+// three agent pods running a build three weeks older than the one under test.
+//
+// Widened by exactly one alternative. The anchors and the tag/digest suffix are unchanged, so this
+// still refuses a third-party registry, a lookalike org, and a bare repository with no tag.
 var allowedSidecarImagePattern = regexp.MustCompile(
-	`^(norviq/norviq-engine|docker\.io/norviq/norviq-engine|ghcr\.io/norviq-dev/norviq-engine)` +
+	`^(norviq/norviq-engine|docker\.io/norviq/norviq-engine|ghcr\.io/norviq-dev/norviq-engine|ghcr\.io/norviq-dev/norviq-engine-dev)` +
 		`(?::[a-zA-Z0-9._-]+|@sha256:[0-9a-f]{64})$`)
 
 type policySyncRequest struct {
