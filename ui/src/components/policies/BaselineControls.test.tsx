@@ -71,6 +71,12 @@ function mockFetch(data: unknown = CONTROLS) {
   return vi.spyOn(client, "fetchBaselineControls").mockResolvedValue(data as never);
 }
 
+function mockCompliance(controls: unknown[], scanned = 1200) {
+  return vi.spyOn(client, "fetchPolicyCompliance").mockResolvedValue({
+    namespace: "chatbot-prod", range: "7d", scanned, excluded_synthetic: 0, controls,
+  } as never);
+}
+
 describe("baseline controls", () => {
   it("renders one row per control with its current effect", async () => {
     mockFetch();
@@ -150,6 +156,36 @@ describe("baseline controls", () => {
     renderPanel({ namespace: "chatbot-prod", isAdmin: false });
     expect(await screen.findByTestId("baseline-deny_shell_execution-deny")).toBeDisabled();
     expect(screen.getByTestId("baseline-save")).toBeDisabled();
+  });
+
+  it("shows what promoting a control would have cost, on the control's own row", async () => {
+    // "Promote this to Enforce" is a question about what will break. Answering it two screens away
+    // means it does not get answered.
+    mockFetch();
+    mockCompliance([{
+      control_id: "deny_shell_execution", count: 1432,
+      agent_classes: [{ name: "cmp-support", count: 1400 }, { name: "cmp-finance", count: 32 }],
+      tools: [{ name: "get_order", count: 1200 }], namespaces: ["chatbot-prod"],
+      first_seen: null, last_seen: null, samples: [],
+    }]);
+    renderPanel({ namespace: "chatbot-prod", isAdmin: true });
+    const impact = await screen.findByTestId("baseline-impact-deny_shell_execution");
+    expect(impact.textContent).toContain("1,432");
+    expect(impact.textContent).toContain("2 agent classes");
+    expect(impact.textContent).toContain("get_order");
+    // A quiet control gets no line at all — "0 calls" on every row trains people to stop reading it.
+    expect(screen.queryByTestId("baseline-impact-pii_detection")).toBeNull();
+  });
+
+  it("distinguishes 'compliant' from 'nothing has happened here yet'", async () => {
+    // Zero non-compliant out of ZERO traffic is idle; out of 40,000 it is compliant. Rendering an
+    // idle namespace as a clean bill of health is the exact lie `scanned` exists to prevent.
+    mockFetch();
+    mockCompliance([], 0);
+    renderPanel({ namespace: "chatbot-prod", isAdmin: true });
+    const scanned = await screen.findByTestId("baseline-scanned");
+    expect(scanned).toHaveAttribute("data-scanned", "0");
+    expect(scanned.textContent).toContain("nothing measured yet");
   });
 
   it("refuses to write when the aggregate 'all namespaces' scope is selected", async () => {

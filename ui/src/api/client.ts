@@ -271,6 +271,36 @@ export async function saveBaselineControls(
   return apiSend<BaselineUpdateResult>("/api/v1/baseline/controls", "PUT", { namespace, effects });
 }
 
+export type ComplianceControl = {
+  control_id: string;
+  count: number;
+  agent_classes: { name: string; count: number }[];
+  tools: { name: string; count: number }[];
+  namespaces: string[];
+  first_seen: string | null;
+  last_seen: string | null;
+  samples: { tool_name: string; agent_class: string; at: string | null }[];
+};
+
+export type PolicyCompliance = {
+  namespace: string;
+  range: string;
+  /** Real-traffic calls examined. Zero non-compliant out of ZERO is "idle", out of 40,000 is
+   *  "compliant" — without this the console cannot tell those apart. */
+  scanned: number;
+  excluded_synthetic: number;
+  controls: ComplianceControl[];
+};
+
+/** Non-compliant traffic grouped by the control that flagged it. */
+export async function fetchPolicyCompliance(namespace?: string, range?: string): Promise<PolicyCompliance> {
+  const params = new URLSearchParams();
+  if (namespace && namespace !== "all") params.set("namespace", namespace);
+  if (range) params.set("range", range);
+  const query = params.toString();
+  return apiGet<PolicyCompliance>(query ? `/api/v1/policy-compliance?${query}` : "/api/v1/policy-compliance");
+}
+
 export type PolicyPack = {
   id: string;
   sector: string;

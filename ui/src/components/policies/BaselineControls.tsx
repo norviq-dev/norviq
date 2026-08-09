@@ -15,6 +15,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   fetchBaselineControls,
+  fetchPolicyCompliance,
   saveBaselineControls,
   type BaselineEffect,
 } from "../../api/client";
@@ -40,6 +41,12 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
   const controls = useApi(() => fetchBaselineControls(namespace), [namespace], {
     cacheKey: `baseline-controls:${namespace}`,
     staleTimeMs: 15_000,
+  });
+  // Blast radius, rendered against the control it belongs to. "Promote this to Enforce" is a question
+  // about what will break, and answering it two screens away means it does not get answered.
+  const compliance = useApi(() => fetchPolicyCompliance(namespace, "7d"), [namespace], {
+    cacheKey: `baseline-compliance:${namespace}`,
+    staleTimeMs: 30_000,
   });
   const { canMutate, blockedReason } = useMutationScope();
 
@@ -68,6 +75,21 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
     for (const c of rows) out[effectFor(c.id, c.effect)] += 1;
     return out;
   }, [rows, pending]);
+
+  const impact = useMemo(() => {
+    const out = new Map<string, { count: number; classes: number; topTool: string }>();
+    for (const c of compliance.data?.controls ?? []) {
+      out.set(c.control_id, {
+        count: c.count,
+        classes: c.agent_classes.length,
+        topTool: c.tools[0]?.name ?? "",
+      });
+    }
+    return out;
+  }, [compliance.data]);
+  // Distinguishes "compliant" from "nothing has happened here yet". Rendering an idle namespace as a
+  // clean bill of health is the exact lie this number exists to prevent.
+  const scanned = compliance.data?.scanned ?? null;
 
   const save = async () => {
     if (!canMutate) {
@@ -120,10 +142,17 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
 
       {!controls.loading && !controls.error && rows.length > 0 && (
         <>
-          <div data-testid="baseline-counts" style={{ display: "flex", gap: 14, fontSize: 12, marginBottom: 10 }}>
+          <div data-testid="baseline-counts" style={{ display: "flex", gap: 14, fontSize: 12, marginBottom: 10, flexWrap: "wrap" }}>
             <span style={{ color: "var(--block, #ff5c7c)" }}>{counts.deny} enforcing</span>
             <span style={{ color: "var(--text-secondary)" }}>{counts.monitor} monitoring</span>
             <span style={{ color: "var(--text-muted)" }}>{counts.off} off</span>
+            {scanned !== null && (
+              <span data-testid="baseline-scanned" data-scanned={scanned} style={{ color: "var(--text-muted)" }}>
+                {scanned === 0
+                  ? "· no traffic in the last 7d — nothing measured yet"
+                  : `· ${scanned.toLocaleString()} calls examined over 7d`}
+              </span>
+            )}
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -153,6 +182,17 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
                     {c.caveat && (
                       <div data-testid={`baseline-caveat-${c.id}`} style={{ fontSize: 11, color: "var(--escalate)", marginTop: 4, maxWidth: 560 }}>
                         {c.caveat}
+                      </div>
+                    )}
+                    {/* What promoting this control would actually have cost over the last 7 days.
+                        Only rendered when the control HAS flagged something — a "0 calls" line on
+                        every quiet control is noise that trains people to stop reading this row. */}
+                    {impact.has(c.id) && (
+                      <div data-testid={`baseline-impact-${c.id}`} style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 4 }}>
+                        <b>{impact.get(c.id)!.count.toLocaleString()}</b> call
+                        {impact.get(c.id)!.count === 1 ? "" : "s"} in the last 7d would have been blocked
+                        {impact.get(c.id)!.classes > 0 && ` — ${impact.get(c.id)!.classes} agent class${impact.get(c.id)!.classes === 1 ? "" : "es"}`}
+                        {impact.get(c.id)!.topTool && `, mostly ${impact.get(c.id)!.topTool}`}
                       </div>
                     )}
                   </div>

@@ -21,7 +21,7 @@ from norviq.api.rate_limit import RateLimitMiddleware
 from norviq.api.siem import AuditForwarder
 from norviq.fleet_relay import FleetRelayForwarder
 from norviq.fleet_puller import FleetPolicyPuller
-from norviq.api.routers import attack_graph_compute, agents, audit, auth_login, baseline_router, cluster_info, coverage, deployments, evaluate, fleet_enroll, graph, graphs, health, intents, keys, mcp, me, mitre, packs, policies, redteam, search, settings_router, system_health, threats, tools, version
+from norviq.api.routers import attack_graph_compute, agents, audit, auth_login, baseline_router, cluster_info, compliance_view, coverage, deployments, evaluate, fleet_enroll, graph, graphs, health, intents, keys, mcp, me, mitre, packs, policies, redteam, search, settings_router, system_health, threats, tools, version
 from norviq.config import settings
 from norviq.logging_setup import configure_logging
 from norviq.api.auth import warn_if_identity_binding_is_partial
@@ -308,6 +308,7 @@ def create_app() -> FastAPI:
     app.include_router(search.router, prefix="/api/v1", tags=["search"])  # ⌘K backing endpoint
     app.include_router(packs.router, prefix="/api/v1", tags=["packs"])
     app.include_router(baseline_router.router, prefix="/api/v1", tags=["baseline"])
+    app.include_router(compliance_view.router, prefix="/api/v1", tags=["compliance"])
     app.include_router(fleet_enroll.router, prefix="/api/v1", tags=["fleet-enroll"])
     app.state.audit_hub = AuditHub()
 
