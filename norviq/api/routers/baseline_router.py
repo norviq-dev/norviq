@@ -5,12 +5,12 @@
 
 GET /baseline/controls?namespace=  -> every control, what it catches, its false-positive caveat, and
                                       its current effect in that namespace.
-PUT /baseline/controls   (admin)   -> set effects, recompile, materialize as (namespace,'__baseline__').
+PUT /baseline/controls   (admin)   -> set effects, recompile, materialize as (namespace,'__controls__').
 
 The shape deliberately mirrors `routers/packs.py`: read a per-namespace table, recompile a rego module
 from it, write it to a reserved scope through the normal loader path, invalidate the namespace's eval
-cache. Nothing new is introduced into the precedence model — `__baseline__` is the same scope the
-chart's cluster baseline already uses.
+cache. It gets its OWN reserved scope, `__controls__`, collected as a base tier just above the
+chart's `__baseline__` — sharing that key meant a helm upgrade silently reverted the customer.
 
 Every control ships at `monitor`, so a fresh namespace evaluates everything and drops nothing. This
 route is how a customer promotes a control to `deny` once they can see, in the compliance view, what
@@ -35,13 +35,25 @@ from norviq.api.routers.settings_router import assert_apply_allowed  # shared dr
 log = structlog.get_logger()
 router = APIRouter()
 
-_BASELINE_KEY = "__baseline__"
+# The customer's tuned controls live on their OWN key, not on `__baseline__`.
+#
+# Both wrote `__baseline__` at first, which read as elegant — "the same reserved scope the chart
+# already uses, so precedence gains no new concepts" — and was wrong, because the chart already OWNS
+# that key. Its NrvqPolicy CR is reconciled by the webhook controller, so a `helm upgrade` or any CR
+# resync silently reverted every control a customer had tuned. Worse, the two writers set different
+# `enforcement_mode` values on one key, so the same probe returned a prefixed rule_id on one run and a
+# bare one on the next — non-reproducible enforcement, which is harder to trust than either behaviour.
+_CONTROLS_KEY = "__controls__"
 _DEFAULT_PRESET = "strict"
 
-# Matches the chart's baseline (helm/norviq/values.yaml: baselineClusterPolicy.clusterPriority is the
-# AUTHORIZATION token; the controller forces the stored priority to 1). A baseline is a floor that any
-# authored policy can outrank, not a ceiling — see evaluator._resolve_precedence.
-_BASELINE_PRIORITY = 1
+# One above the chart's baseline, which the controller forces to priority 1.
+#
+# Base tiers resolve by highest priority outright (evaluator._resolve_precedence), so an explicit "I
+# tuned these controls" beats the chart's default posture, while an agent-class policy — authored at
+# 100+ — still outranks both exactly as it did before. Deliberately NOT in the cluster band (>=500):
+# this is a namespace's own tuning, not a cluster-wide floor, and putting it there would let it
+# outrank policies a tenant wrote for themselves.
+_CONTROLS_PRIORITY = 2
 
 
 class ControlEffects(BaseModel):
@@ -70,10 +82,10 @@ async def _materialize(request: Request, namespace: str, preset: str, effects: d
     loader = request.app.state.loader
     await loader.create(
         namespace,
-        _BASELINE_KEY,
+        _CONTROLS_KEY,
         rego,
         saved_by="baseline-controls",
-        priority=_BASELINE_PRIORITY,
+        priority=_CONTROLS_PRIORITY,
         # The MODULE carries each control's effect now, so the policy itself always runs in block
         # mode. A control set to `monitor` registers as an `audits[...]` head and already decides
         # "audit" on its own; softening the whole policy on top would make `deny` unreachable and
@@ -81,8 +93,8 @@ async def _materialize(request: Request, namespace: str, preset: str, effects: d
         enforcement_mode="block",
         policy_name=f"baseline-controls:{preset}",
     )
-    # A baseline applies to EVERY agent class in the namespace, so clear the whole namespace's eval
-    # cache — loader.create only invalidates the (ns,__baseline__) scope, and a cached decision from
+    # The controls apply to EVERY agent class in the namespace, so clear the whole namespace's eval
+    # cache — loader.create only invalidates the (ns,__controls__) scope, and a cached decision from
     # before the change would keep enforcing the old effect for up to redis_ttl_eval_s.
     cache = getattr(loader, "_cache", None)
     if cache is not None:

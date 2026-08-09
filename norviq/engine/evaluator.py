@@ -2067,6 +2067,20 @@ class OPAEvaluator:
                                    "enforcement_mode": loaded.get("enforcement_mode", "block")})
 
         await _append_policy(namespace, agent_class)
+        # The customer's tuned baseline CONTROLS, kept on their own key rather than sharing
+        # `__baseline__` with the chart's cluster guard.
+        #
+        # Both used to write `<ns>:__baseline__`. The chart's NrvqPolicy CR is reconciled by the
+        # webhook controller, so a `helm upgrade` — or any CR resync — silently reverted every control
+        # a customer had tuned, and the two writers produced different `enforcement_mode` values on the
+        # same key, which made the SAME probe return a prefixed rule_id on one run and a bare one on
+        # the next. Non-reproducible enforcement is worse than either behaviour on its own.
+        #
+        # Collected as a BASE tier at a higher priority than `__baseline__` (see
+        # baseline_router._CONTROLS_PRIORITY): base tiers resolve by highest priority outright, so an
+        # explicit "I tuned these controls" beats the chart's default posture, and an agent-class
+        # policy still outranks both exactly as before.
+        await _append_policy(namespace, "__controls__")
         await _append_policy(namespace, "__baseline__")
         await _append_policy("__cluster__", "__baseline__")
         # The catalog advertises WORKLOAD and NAMESPACE tiers (resolve_policy_key mints
@@ -2174,6 +2188,11 @@ class OPAEvaluator:
 
         for ns in await self._loader.namespaces_for_class(agent_class):
             await _append_policy(ns, agent_class)
+            # Mirror the concrete-namespace collection. Omitting it here would make the console's
+            # global "All namespaces" picker report a different winning layer than the one a real
+            # agent actually gets — a tuned control would be invisible in exactly the view an operator
+            # uses to check their tuning took effect.
+            await _append_policy(ns, "__controls__")
             await _append_policy(ns, "__baseline__")
             for overlay in ("__pack__", "__guardrail__", "__pack_override__", "__pack_weaken__"):
                 _append_overlay(f"{ns}:{overlay}")

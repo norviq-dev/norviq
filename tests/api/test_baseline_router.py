@@ -147,7 +147,12 @@ def test_put_materializes_a_recompiled_baseline() -> None:
     assert len(loader.created) == 1
     written = loader.created[0]
     assert written["ns"] == "default"
-    assert written["agent_class"] == "__baseline__"
+    # NOT `__baseline__`. Sharing that key with the chart's cluster guard meant the webhook controller
+    # reverted every tuned control on the next CR resync, and the two writers set different
+    # enforcement_modes on one key — so the same probe returned a prefixed rule_id on one run and a
+    # bare one on the next.
+    assert written["agent_class"] == "__controls__"
+    assert written["priority"] == 2, "must outrank the chart baseline (priority 1) but not a class policy"
     assert 'blocks["deny_sql_injection"]' in written["rego"]
     # everything else stayed at monitor -> registered as audits, not blocks
     assert 'audits["llm01_prompt_injection"]' in written["rego"]
@@ -224,3 +229,43 @@ def test_invalid_effect_is_422() -> None:
 def test_a_viewer_can_still_read_the_catalog() -> None:
     client, _, _ = _client(rows=[])
     assert client.get("/api/v1/baseline/controls", headers=_h(role="viewer")).status_code == 200
+
+
+def test_the_controls_scope_is_never_the_chart_baseline() -> None:
+    """The collision guard, stated as an invariant rather than a single assertion.
+
+    The chart's NrvqPolicy CR owns `<ns>:__baseline__` and the webhook controller reconciles it, so
+    anything else writing that key gets silently reverted on the next `helm upgrade`. Measured live:
+    a tuned control survived 30s, then the same probe returned a different rule_id shape after a
+    resync — non-reproducible enforcement, which is worse than either behaviour on its own.
+    """
+    from norviq.api.routers import baseline_router
+
+    assert baseline_router._CONTROLS_KEY == "__controls__"
+    assert baseline_router._CONTROLS_KEY != "__baseline__"
+    # Above the chart's baseline (forced to 1 by the controller), below any agent-class policy (100+),
+    # and outside the cluster band (>=500) so a namespace's own tuning cannot outrank a tenant policy.
+    assert baseline_router._CONTROLS_PRIORITY == 2
+
+
+def test_the_evaluator_actually_collects_the_controls_scope() -> None:
+    """Guards the WIRING. A key nothing looks up is a policy that silently enforces nothing — this
+    codebase already ships one of those (`__cluster__:__baseline__`), and it is read on every call
+    while no shipped write path can populate it.
+    """
+    import inspect
+
+    from norviq.engine import evaluator as mod
+
+    for fn in (mod.OPAEvaluator._collect_candidates, mod.OPAEvaluator._collect_candidates_union):
+        src = inspect.getsource(fn)
+        assert '"__controls__"' in src, f"{fn.__name__} does not collect the controls scope"
+
+
+def test_the_controls_scope_is_reserved_from_the_generic_policy_api() -> None:
+    """A direct create would bypass the baseline compiler, so the console would show control effects
+    that no longer describe the module actually enforcing."""
+    from norviq.api.routers import policies
+
+    assert "__controls__" in policies._RESERVED_DELETE_CLASSES
+    assert "__controls__" in policies._NAMESPACE_WIDE_SCOPES
