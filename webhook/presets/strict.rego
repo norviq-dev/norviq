@@ -708,6 +708,20 @@ scope_violation_dangerous_tool {
 }
 
 # --- partial-set triggers (rule_id -> guard) ---
+#
+# >>> CONTROLS-BEGIN
+# Everything between these markers is the CONTROL REGISTRATION section, and it is the only part of
+# this file the baseline compiler (norviq/api/baseline.py) rewrites. Each line binds one control id to
+# one guard; the detector predicates above are a shared library and are never touched.
+#
+# A control's effect is purely which set its head registers into:
+#   deny    -> blocks[...]  (or escalates[...], preserving the head's original severity)
+#   monitor -> audits[...]  — evaluated, recorded as non-compliant, call proceeds
+#   off     -> omitted entirely
+#
+# So changing what a control DOES never changes how it DETECTS. Keep every head on a single line in
+# the form `set["control_id"] { guard }` — the compiler parses this region line by line, and a head
+# split across lines is silently dropped, which would turn a control off without saying so.
 blocks["llm01_prompt_injection"] { injection_detected }
 blocks["deny_sql_injection"] { sql_injection_detected }
 blocks["deny_shell_execution"] { shell_injection_detected }
@@ -738,6 +752,13 @@ blocks["strict_default_block"] { startswith(lower(input.tool_name), "erase_") }
 escalates["llm06_excessive_agency"] { elevated_tools[input.tool_name] }
 
 audits["scope_violation_dangerous_tool"] { scope_violation_dangerous_tool }
+
+# Moved here from beside its predicate (~line 800) so every registration head lives in one region.
+# The predicate `_sql_metachar_only_block` stays where it is with the rest of the SQL detectors; only
+# the binding moved. A head outside these markers would be invisible to the compiler, so its control
+# could never be toggled and would silently keep enforcing at whatever severity it was written with.
+blocks["deny_sql_multi_statement"] { _sql_metachar_only_block }
+# >>> CONTROLS-END
 
 # reason text per rule_id. default_allow + the engine fallback are included for completeness.
 reasons = {
@@ -798,8 +819,6 @@ _sql_metachar_only_block {
     shell_injection_detected
     not _genuine_shell_marker_present
 }
-blocks["deny_sql_multi_statement"] { _sql_metachar_only_block }
-
 _shell_shadowed_by_sql(id) { id == "deny_shell_execution"; sql_injection_detected }
 _shell_shadowed_by_sql(id) { id == "deny_shell_execution"; _sql_metachar_only_block }
 rule_id = sort([id | blocks[id]; not _shell_shadowed_by_sql(id)])[0] { block_fired }

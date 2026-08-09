@@ -10,16 +10,26 @@ where the honest limits of the current design are.
 
 Norviq is a policy enforcement point (PEP) for LLM agent tool calls: it enforces per-identity
 allow/block/escalate/audit decisions on the *inputs* of a tool call (`tool_name` + `tool_params`)
-before the tool body runs. The core security property is **fail-closed evaluation** — if OPA errors,
-times out, the caller's SPIFFE identity is malformed, or no policy is loaded for an enforcing
-namespace, the call is **blocked**, never silently allowed. See [Concepts → Decisions](concepts.md#decisions)
-for the full list of named fail-closed paths. Three worth stating explicitly here, because each is a
-place where a naive implementation fails *open*:
+before the tool body runs.
+
+The governing principle is that **a block is something a customer asked for**. Norviq sits in the
+request path of production agents, so traffic flows by default and the policies you author are the
+defense. A control that drops legitimate traffic nobody asked it to drop is not a strong security
+posture — it is an outage wearing a security-shaped `rule_id`, and it gets removed from the request
+path, which protects nobody.
+
+Within a namespace the customer *has* chosen to enforce, evaluation is **fail-closed**: if OPA errors,
+times out, or the caller's SPIFFE identity is malformed, the call is blocked rather than silently
+allowed. See [Concepts → Decisions](concepts.md#decisions) for the full list of named fail-closed
+paths. Three worth stating explicitly, because each is a place where a naive implementation fails
+*open* — and one of them is where the two principles above genuinely conflict:
 
 - **Unknown agent class / no policy loaded** → `block`, `rule_id=no_policy_loaded`
-  (`norviq/engine/evaluator.py::_no_policy_decision`), whenever `enforcement_mode=block` and
-  `no_policy_decision=deny` — both the shipped defaults. An unrecognised `(namespace, agent_class)` is
-  denied, not waved through on the theory that "no rule matched".
+  (`norviq/engine/evaluator.py::_no_policy_decision`), whenever `enforcement_mode=block` **and**
+  `no_policy_decision=deny`. `no_policy_decision` ships as **`allow`**: a namespace nobody has written
+  a policy for is not governed, so there is no customer decision to enforce and the call proceeds.
+  Set it to `deny` for namespaces you have decided to lock down — deny-by-default is then an explicit
+  choice rather than the silent consequence of not having configured anything yet.
 - **Policy subsystem not yet warm** → `block`, `rule_id=policy_load_pending`, kept as a *distinct* reason
   so a startup race is never silently mistaken for a genuine "this tenant has no policies" state.
 - **Any sidecar-side error** → `drop`. An undecodable body, a JSON body that is not an object, or an

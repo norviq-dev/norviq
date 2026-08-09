@@ -231,9 +231,25 @@ def test_at_least_one_infra_rule_id_has_a_producer_that_can_reach_the_audit_log(
     engine_source = open(engine_evaluator.__file__, encoding="utf-8").read()
     for rule_id in sorted(api_written):
         assert f'"rule_id": "{rule_id}"' in engine_source, f"{rule_id} is no longer minted by the engine"
-    # ...and they must stay hard verdicts: a monitor-mode namespace that softened them to `audit`
-    # would erase the very evidence this route reads.
-    assert api_written <= engine_evaluator._POSTURE_EXEMPT_RULES
+
+    # This used to assert `api_written <= _POSTURE_EXEMPT_RULES` — i.e. that these verdicts stay HARD,
+    # because a monitor-mode namespace softening them to `audit` would erase the evidence this route
+    # reads. The concern was right; the remedy was wrong. Keeping them hard meant an engine fault kept
+    # dropping customer traffic in a namespace whose entire configuration said "do not drop traffic".
+    #
+    # They now soften like everything else, and the route reads the softened forms too. The invariant
+    # worth guarding is therefore no longer "these never soften" but "however they are stored, this
+    # route still sees them" — which is what the variant map has to cover.
+    from norviq.api.routers.system_health import _INFRA_RULE_VARIANTS
+
+    for rule_id in sorted(api_written):
+        assert _INFRA_RULE_VARIANTS.get(rule_id) == rule_id
+        for prefix in engine_evaluator.WOULD_BLOCK_RULE_PREFIXES:
+            softened = f"{prefix}{rule_id}"
+            assert _INFRA_RULE_VARIANTS.get(softened) == rule_id, (
+                f"a monitor-mode {rule_id} is stored as {softened!r} and would go unseen — "
+                "the outage banner would go dark in exactly the namespaces running monitor mode"
+            )
 
     # The premise, asserted rather than assumed: thin-proxy mode has no emitter to write with.
     proxy_source = open(sidecar_proxy.__file__, encoding="utf-8").read()

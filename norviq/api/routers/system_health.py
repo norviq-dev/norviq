@@ -47,6 +47,7 @@ from norviq.api.auth import get_current_user
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
 from norviq.api.synthetic import audit_row_is_non_real  # the ONE shared real-traffic filter (do not fork)
+from norviq.engine.evaluator import WOULD_BLOCK_RULE_PREFIXES
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -106,6 +107,22 @@ _INFRA_RULE_IDS = {
 }
 
 
+# An infra verdict recorded in a MONITOR-mode namespace is stored prefixed
+# (`monitor_would_block:evaluator_error`), because monitor mode now softens operational blocks rather
+# than dropping the customer's traffic. This route matched rule_ids exactly, so that softening would
+# have taken the outage banner dark in precisely the namespaces most likely to be running monitor
+# mode — trading "we no longer drop traffic during an engine fault" for "you can no longer see the
+# engine fault", which is the worse of the two.
+#
+# The evidence is unchanged; only the key is decorated. So match every stored form and fold it back to
+# the bare id. A softened verdict is still an outage — the operator needs it in the banner either way.
+_INFRA_RULE_VARIANTS: dict[str, str] = {
+    variant: rule_id
+    for rule_id in _INFRA_RULE_IDS
+    for variant in (rule_id, *(f"{prefix}{rule_id}" for prefix in WOULD_BLOCK_RULE_PREFIXES))
+}
+
+
 def _issue(rule_id: str, count: int, last_seen: datetime, namespaces: list[str]) -> dict:
     severity, title, detail, remediation = _INFRA_RULE_IDS[rule_id]
     return {
@@ -143,17 +160,29 @@ async def system_health(
             func.array_agg(func.distinct(AuditLogEntry.namespace)).label("namespaces"),
         )
         .where(AuditLogEntry.timestamp_utc >= since)
-        .where(AuditLogEntry.rule_id.in_(_INFRA_RULE_IDS.keys()))
+        .where(AuditLogEntry.rule_id.in_(_INFRA_RULE_VARIANTS.keys()))
         .group_by(AuditLogEntry.rule_id)
     )
     if role != "admin" and claim_ns:
         stmt = stmt.where(AuditLogEntry.namespace == claim_ns)
 
     rows = (await session.execute(stmt)).all()
+    # One underlying rule can now arrive as up to three grouped rows (bare + the two would-block
+    # forms), so fold them together before rendering or the banner would show the same outage
+    # several times with a split count.
+    folded: dict[str, dict] = {}
+    for row in rows:
+        rule_id = _INFRA_RULE_VARIANTS.get(row.rule_id)
+        if rule_id is None:
+            continue
+        agg = folded.setdefault(rule_id, {"n": 0, "last_seen": None, "namespaces": set()})
+        agg["n"] += int(row.n)
+        if row.last_seen and (agg["last_seen"] is None or row.last_seen > agg["last_seen"]):
+            agg["last_seen"] = row.last_seen
+        agg["namespaces"].update(ns for ns in (row.namespaces or []) if ns)
     issues = [
-        _issue(row.rule_id, int(row.n), row.last_seen, sorted(ns for ns in (row.namespaces or []) if ns))
-        for row in rows
-        if row.rule_id in _INFRA_RULE_IDS
+        _issue(rule_id, agg["n"], agg["last_seen"], sorted(agg["namespaces"]))
+        for rule_id, agg in folded.items()
     ]
     # Most-recent first so the banner leads with what is happening now.
     issues.sort(key=lambda i: (i["last_seen"] or ""), reverse=True)

@@ -89,7 +89,14 @@ async def test_4xx_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def test_persistent_failure_still_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Retry is a resilience layer, not a change of posture: a real outage still blocks."""
+    """Retry is a resilience layer, not a change of posture: under fail-closed, an outage blocks.
+
+    The posture is now set explicitly. This test is about the RETRY CONTRACT — that every attempt is
+    spent and the configured posture is then applied once — and it only ever asserted `block` because
+    that used to be the default. Leaving it implicit made it a second, accidental pin on the shipped
+    default, which is why it broke when the default moved rather than when retry behaviour changed.
+    """
+    monkeypatch.setattr(settings, "sdk_fallback_mode", "block", raising=False)
     calls = {"n": 0}
 
     async def handler(_: httpx.Request) -> httpx.Response:
@@ -101,6 +108,23 @@ async def test_persistent_failure_still_fails_closed(monkeypatch: pytest.MonkeyP
     assert decision.decision == "block"
     assert decision.rule_id == "thin_proxy_fail_closed"
     assert calls["n"] == settings.sdk_retry_max_attempts + 1
+    await ev.close()
+
+
+async def test_persistent_failure_honours_the_default_fail_open_posture(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same retry contract, default posture: every attempt is spent, then the call is let through."""
+    assert settings.sdk_fallback_mode == "allow"  # the shipped default
+    calls = {"n": 0}
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.ConnectError("connection refused")
+
+    ev = _evaluator(handler, monkeypatch)
+    decision = await ev.evaluate(_event())
+    assert decision.decision == "allow"
+    assert decision.rule_id == "thin_proxy_fail_open"
+    assert calls["n"] == settings.sdk_retry_max_attempts + 1, "retries must not be skipped when failing open"
     await ev.close()
 
 

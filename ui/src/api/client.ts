@@ -225,6 +225,52 @@ export async function saveSettings(
 }
 
 // --- Sector policy packs ---
+/** How a baseline control behaves. `monitor` evaluates and records without interrupting the call. */
+export type BaselineEffect = "off" | "monitor" | "deny";
+
+export type BaselineControl = {
+  id: string;
+  title: string;
+  description: string;
+  /** Known false-positive mode, shown before an operator promotes the control to `deny`. Often "". */
+  caveat: string;
+  effect: BaselineEffect;
+  default_effect: BaselineEffect;
+};
+
+export type BaselineControls = {
+  namespace: string;
+  preset: string;
+  default_effect: BaselineEffect;
+  effects: BaselineEffect[];
+  counts: Record<BaselineEffect, number>;
+  controls: BaselineControl[];
+};
+
+/** Every baseline control with its current effect in a namespace. */
+export async function fetchBaselineControls(namespace?: string): Promise<BaselineControls> {
+  const params = new URLSearchParams();
+  if (namespace && namespace !== "all") params.set("namespace", namespace);
+  const query = params.toString();
+  return apiGet<BaselineControls>(query ? `/api/v1/baseline/controls?${query}` : "/api/v1/baseline/controls");
+}
+
+export type BaselineUpdateResult = {
+  namespace: string;
+  preset: string;
+  effects: Record<string, BaselineEffect>;
+  enforcing: string[];
+  disabled: string[];
+};
+
+/** Set baseline control effects for a namespace and re-materialize the baseline (admin-only). */
+export async function saveBaselineControls(
+  namespace: string,
+  effects: Record<string, BaselineEffect>,
+): Promise<BaselineUpdateResult> {
+  return apiSend<BaselineUpdateResult>("/api/v1/baseline/controls", "PUT", { namespace, effects });
+}
+
 export type PolicyPack = {
   id: string;
   sector: string;

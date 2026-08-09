@@ -62,12 +62,23 @@ accepts anything satisfying `SupportsEvaluate` (`async def evaluate(self, event:
 sidecar/API themselves) or the out-of-cluster HTTP `PolicyEngineClient` shown above — swap
 either in without changing adapter code.
 
-## 3. Fail-closed behavior
+## 3. Behavior when the engine is unavailable
 
-- **`sdk_fallback_mode`** (default `"block"`) — if the policy engine is unreachable, times
-  out, or errors, `PolicyEngineClient` returns a fallback `PolicyDecision` using this mode
-  instead of raising an unhandled error. Fail-closed by default: the tool call is blocked, not
-  silently allowed.
+- **`sdk_fallback_mode`** (default `"allow"`) — if the policy engine is unreachable, times out,
+  or errors, `PolicyEngineClient` returns a fallback `PolicyDecision` using this mode instead of
+  raising an unhandled error.
+
+  It defaults to `allow` so a Norviq outage does not take your agents down with it. This is a real
+  trade: for the duration of the outage, calls proceed without a policy decision. What makes it
+  workable is that those calls are **marked** — the fallback carries `rule_id="engine_unavailable_fallback"`
+  (`thin_proxy_fail_open` on the sidecar path), so you can count them, alert on them, and see exactly
+  which calls went unjudged and for how long. Set `sdk_fallback_mode=block` if your environment would
+  rather stop agents than let a call through unjudged.
+
+  **A 4xx is never a fallback.** If the engine answers and refuses — expired token, malformed request —
+  the call is blocked regardless of this setting (`rule_id="engine_rejected_request"`). Otherwise
+  `fallback=allow` would turn every 401 into an allow, and a revoked credential would become a total
+  governance bypass.
 - **Retries + circuit breaker** — `PolicyEngineClient` retries transient failures with
   exponential backoff (`sdk_retry_max_attempts`, `sdk_retry_backoff_base_ms`), then opens a
   circuit breaker (`sdk_circuit_fail_threshold`, `sdk_circuit_reset_after_ms`) so a degraded

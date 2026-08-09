@@ -7,8 +7,8 @@ Pure-logic units for the two engine-side wirings — no Redis, no OPA. They fail
 methods/params don't exist and pass on the correct code.
 
 - `_apply_posture`: namespace monitor (audit) mode softens a would-block/escalate to an allow-but-log `audit`
-  decision, fires ONLY on an explicit per-ns override, exempts the incident-response/engine-health/rate rules,
-  and NEVER tightens.
+  decision, fires ONLY on an explicit per-ns override, exempts only the incident-response and resource-control
+  rules, and NEVER tightens.
 - `_categorize`/`_tiers`: per-ns trust_threshold moves the tiers; no-override keeps the bit-identical 0.7/0.4
   boundaries.
 - the min() trust CAP (verified in calculator.calculate via a fake pipeline) only LOWERS effective trust.
@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import pytest
 
-from norviq.engine.evaluator import OPAEvaluator, _POSTURE_EXEMPT_RULES
+from norviq.config import settings
+from norviq.engine.evaluator import _BASE_POSTURE_EXEMPT_RULES, OPAEvaluator, _posture_exempt_rules
 from norviq.engine.trust.calculator import TrustCalculator
 from norviq.sdk.core.decisions import PolicyDecision
 
@@ -58,18 +59,50 @@ def test_no_override_does_not_soften():
     assert out.decision == "block" and out.rule_id == "e_block_tool"
 
 
-@pytest.mark.parametrize("exempt", sorted(_POSTURE_EXEMPT_RULES))
-def test_monitor_exempts_incident_and_engine_health_rules(exempt):
+@pytest.mark.parametrize("exempt", sorted(_posture_exempt_rules()))
+def test_monitor_exempts_incident_response_and_resource_control(exempt):
     ev = _ev()
     posture = {"monitor": True, "trust_threshold": None, "rate_limit": 60}
     out = ev._apply_posture(_dec("block", exempt), posture, "evt")
-    assert out.decision == "block" and out.rule_id == exempt        # freeze / not-ready / rate-limit stay hard
+    assert out.decision == "block" and out.rule_id == exempt        # freeze / throttle stay hard
+
+
+# The behavioural change this stage exists for. These four USED to stay hard in monitor mode, which
+# meant a namespace configured specifically to not drop customer traffic still dropped it whenever our
+# own engine had a bad moment — a cold replica, an OPA fault, a malformed payload. Monitor mode is a
+# promise that nothing is interrupted; an engine fault is our problem to raise, not their outage.
+@pytest.mark.parametrize(
+    "operational",
+    ["policy_load_pending", "evaluator_error", "evaluator_invalid_payload", "evaluator_timeout"],
+)
+def test_monitor_softens_operational_blocks(operational):
+    ev = _ev()
+    posture = {"monitor": True, "trust_threshold": None, "rate_limit": 60}
+    out = ev._apply_posture(_dec("block", operational), posture, "evt")
+    assert out.decision == "audit", f"{operational} still interrupts traffic in monitor mode"
+    assert out.rule_id == f"monitor_would_block:{operational}"   # recorded, not silently dropped
 
 
 def test_exempt_set_contents():
-    assert _POSTURE_EXEMPT_RULES == {
-        "trust_frozen", "policy_load_pending", "evaluator_error", "evaluator_invalid_payload", "rate_limit_exceeded"
-    }
+    """Two rules, and each earns its place for a different reason than 'it is a block'.
+
+    `trust_frozen` is an operator's incident-response kill switch and must outrank posture.
+    `rate_limit_exceeded` protects the customer's own backend — "do not block on policy" is not a
+    request for unbounded call volume.
+    """
+    assert _BASE_POSTURE_EXEMPT_RULES == {"trust_frozen"}
+    assert _posture_exempt_rules() == {"trust_frozen", "rate_limit_exceeded"}  # default config
+    for gone in ("policy_load_pending", "evaluator_error", "evaluator_invalid_payload"):
+        assert gone not in _posture_exempt_rules(), f"{gone} must soften — monitor mode must not drop traffic"
+
+
+def test_rate_limit_can_be_made_to_soften_too(monkeypatch):
+    """For operators who want monitor mode to mean literally nothing is ever refused."""
+    monkeypatch.setattr(settings, "monitor_exempt_rate_limit", False, raising=False)
+    assert _posture_exempt_rules() == {"trust_frozen"}
+    ev = _ev()
+    out = ev._apply_posture(_dec("block", "rate_limit_exceeded"), {"monitor": True}, "evt")
+    assert out.decision == "audit"
 
 
 # --- trust_threshold tiers (_categorize / _tiers) ------------------------------------------------

@@ -13,6 +13,7 @@ import {
   saveSettings
 } from "../api/client";
 import { Link } from "react-router-dom";
+import { BaselineControls } from "../components/policies/BaselineControls";
 import { PageHead } from "../components/common/PageHead";
 import { Panel } from "../components/common/Panel";
 import { useApi, invalidateApiCache } from "../hooks/useApi";
@@ -232,6 +233,10 @@ export function TargetSettings() {
           </span>
         </div>
       </Panel>
+      {/* The baseline itself, control by control. Sits below the namespace knobs because those decide
+          the POSTURE (does this namespace enforce at all) while these decide WHAT it enforces —
+          reading top-down gives an operator the two questions in the order they actually ask them. */}
+      <BaselineControls namespace={namespace} isAdmin={isAdmin} />
     </div>
   );
 }

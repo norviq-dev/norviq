@@ -321,14 +321,34 @@ _SQL_TABLE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Rule_ids that namespace monitor (audit) mode must NOT soften — they stay hard even when a
-# namespace is set to visibility-only. An admin trust freeze is an incident-response kill switch that must outrank
-# namespace posture; a not-ready / engine-error / invalid-payload block is an engine-health signal, not a policy
-# decision to monitor away; and the rate-limit throttle is a resource control. This matches the GLOBAL audit mode,
-# which likewise never weakens these.
-_POSTURE_EXEMPT_RULES = frozenset(
-    {"trust_frozen", "policy_load_pending", "evaluator_error", "evaluator_invalid_payload", "rate_limit_exceeded"}
-)
+# Rule_ids that namespace monitor (audit) mode must NOT soften — they stay hard even when a namespace
+# is set to visibility-only.
+#
+# Monitor mode is a PROMISE: "evaluate everything, record non-compliance, interrupt nothing." An
+# operator turns it on precisely because they cannot yet afford to drop traffic. This set used to also
+# contain `policy_load_pending`, `evaluator_error` and `evaluator_invalid_payload`, which broke that
+# promise in the worst possible way — a cold replica, an OPA fault or a malformed payload dropped
+# customer traffic in a namespace whose whole configuration said "do not drop customer traffic". The
+# reasoning was that those are engine-health signals rather than policy decisions and so should not be
+# "monitored away". True, and beside the point: the customer is not asking us to monitor an engine
+# fault, they are telling us not to break their agents. An outage in OUR engine is our problem to fix
+# and our signal to raise — not a reason to take their production down. They remain loudly logged and
+# distinctly attributed; they simply no longer drop the call when the namespace says not to.
+#
+# The two that remain are not automatic judgements about a call, which is what monitor mode governs:
+#   * `trust_frozen`     — an admin explicitly froze this agent. Incident response outranks posture;
+#                          an operator who froze an agent five minutes ago expects it to stay frozen.
+#   * `rate_limit_exceeded` — a resource control protecting the customer's OWN backend. "Do not block
+#                          on policy" is not a request for unbounded call volume. Configurable via
+#                          `monitor_exempt_rate_limit` for operators who want even this to soften.
+_BASE_POSTURE_EXEMPT_RULES = frozenset({"trust_frozen"})
+
+
+def _posture_exempt_rules() -> frozenset[str]:
+    """Rules monitor mode leaves hard, resolved per call so the setting is live-togglable."""
+    if settings.monitor_exempt_rate_limit:
+        return _BASE_POSTURE_EXEMPT_RULES | {"rate_limit_exceeded"}
+    return _BASE_POSTURE_EXEMPT_RULES
 
 
 class InvalidSpiffeIdentity(ValueError):
@@ -784,15 +804,15 @@ class OPAEvaluator:
         weaken the base policy it sits on.
 
         Exempt rules stay hard, matching `_apply_posture`: an admin trust freeze is an incident-response
-        kill switch that must outrank a policy's own mode, and engine-health / rate-limit blocks are not
-        policy decisions to be monitored away.
+        kill switch that must outrank a policy's own mode, and the rate-limit throttle is a resource
+        control rather than a judgement about the call.
         """
         decision = winner["decision"]
         if str(winner.get("enforcement_mode", "block")) != "audit":
             return decision
         if decision.decision not in ("block", "escalate"):
             return decision
-        if decision.rule_id in _POSTURE_EXEMPT_RULES:
+        if decision.rule_id in _posture_exempt_rules():
             return decision
         log.info(
             "nrvq.engine.policy_mode.audit_softened",
@@ -809,14 +829,17 @@ class OPAEvaluator:
     def _apply_posture(self, decision: PolicyDecision, posture: dict, event_id: str) -> PolicyDecision:
         """Namespace monitor mode softens a would-block/escalate to an allow-but-log `audit`
         decision (visibility only). Fires ONLY on an explicit per-ns enforcement_mode='audit'. Never tightens.
-        Exempt rule_ids stay hard (parity with the global audit mode, which does not weaken these): an admin trust
-        freeze is an incident-response kill switch that must outrank namespace posture; engine-health/not-ready
-        blocks and the rate-limit throttle are not policy decisions to be monitored away."""
+
+        Monitor mode is a promise that nothing gets interrupted, so operational blocks — a cold replica
+        (`policy_load_pending`), an OPA fault (`evaluator_error`), a malformed payload
+        (`evaluator_invalid_payload`) — now soften like everything else. They used to stay hard, which
+        meant a namespace configured specifically to not drop traffic still dropped it whenever OUR
+        engine had a bad moment. See `_BASE_POSTURE_EXEMPT_RULES` for the two that remain and why."""
         if not posture.get("monitor"):
             return decision
         if decision.decision not in ("block", "escalate"):
             return decision
-        if decision.rule_id in _POSTURE_EXEMPT_RULES:
+        if decision.rule_id in _posture_exempt_rules():
             return decision
         log.info("nrvq.engine.posture.monitor_softened", event_id=event_id, orig_decision=decision.decision,
                  orig_rule=decision.rule_id, code="NRVQ-ENG-2059")

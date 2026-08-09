@@ -150,6 +150,28 @@ class NamespacePack(Base):
     enabled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
+class NamespaceBaselineControl(Base):
+    """One baseline control's effect in a namespace: off | monitor | deny.
+
+    Only ROWS THAT DIFFER from the shipped default are stored. A namespace with no rows is running
+    every control at `monitor` — evaluating everything, dropping nothing — which is what a fresh
+    install should be, and it means enrolling a namespace costs no writes at all.
+
+    Sparse storage also keeps the default LIVE rather than frozen at install time: if a later release
+    ships a new control, existing namespaces pick it up at its default instead of silently running
+    without it because their stored map predates it. Materialized into the namespace's
+    (namespace, '__baseline__') policy by norviq/api/baseline.py, exactly as packs are.
+    """
+
+    __tablename__ = "namespace_baseline_controls"
+    namespace: Mapped[str] = mapped_column(String(255), primary_key=True)
+    control_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    effect: Mapped[str] = mapped_column(String(16), default="monitor")
+    preset: Mapped[str] = mapped_column(String(32), default="strict")
+    set_by: Mapped[str] = mapped_column(String(255), default="")
+    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class ApiKey(Base):
     """Issued API key. Only the salted hash is stored — the secret is shown once at creation.
     Carries a role + namespace so a presented key authenticates as a scoped principal."""

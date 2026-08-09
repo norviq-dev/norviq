@@ -54,12 +54,53 @@ class NorviqSettings(BaseSettings):
     # Default matches the in-cluster central API service (same target as api_url).
     policy_engine_url: str = "http://norviq-api:8080"
     enforcement_mode: str = "block"
-    # Decision when an enforcing namespace has NO policy loaded (deny-by-default for a PEP).
-    # "deny" (default) blocks unconfigured namespaces in block mode; "allow" restores fail-open behavior.
+    # Decision when an enforcing namespace has NO policy loaded.
+    #
+    # "allow" (default) — a namespace nobody has written a policy for is NOT governed, so there is no
+    # customer decision to enforce and the call proceeds. "deny" restores the old deny-by-default PEP.
     # Only applies in enforcement_mode="block"; audit/monitor mode always allows (visibility only).
-    no_policy_decision: str = "deny"
+    #
+    # This defaulted to "deny", which read as the safe choice and was not. Norviq sits in the request
+    # path of a customer's production agents: with "deny", installing the chart into a namespace and
+    # not yet writing a policy took that namespace's tool calls to zero. The product's contract is
+    # "traffic flows; the policies you author are the defense" — a namespace with no policy has no
+    # defense the customer asked for, and inventing one by refusing everything is not a security
+    # posture, it is an outage with a security-shaped rule_id.
+    #
+    # Deny-by-default is still the right choice for a namespace the customer HAS decided to lock down.
+    # That decision now has an explicit home — a baseline control set at `deny` — rather than being
+    # the silent consequence of not having configured anything yet.
+    no_policy_decision: str = "allow"
+    # Whether the per-identity rate-limit throttle stays HARD in monitor (audit) mode.
+    #
+    # True (default) — a namespace set to monitor still throttles. "Do not block on policy" is a
+    # statement about policy judgements, not a request for unbounded call volume, and the limiter
+    # protects the customer's own backend from a looping agent.
+    # False — even the throttle softens, for operators who want monitor mode to mean literally
+    # nothing is ever refused.
+    #
+    # Read per call rather than captured at import so flipping it takes effect without a restart.
+    monitor_exempt_rate_limit: bool = True
     sdk_timeout_ms: int = 5000
-    sdk_fallback_mode: str = "block"
+    # What a PEP does when the engine is GENUINELY unavailable — 5xx, timeout, connect error, or an
+    # open circuit. A 4xx never reaches here: the engine answered and refused, so it always blocks
+    # regardless of this setting (see EngineClient._handle_http_error).
+    #
+    # "allow" (default) — the customer's agents keep working through a Norviq outage.
+    # "block" — no call proceeds unjudged, at the cost of taking the agents down with us.
+    #
+    # This is the one place where "never drop customer traffic" and "never allow ungoverned traffic"
+    # genuinely conflict, and it is worth being honest that defaulting to "allow" is a real trade: for
+    # the duration of an outage, calls proceed without a policy decision. It is defaulted that way
+    # because the alternative makes Norviq a single point of failure for every agent in the cluster —
+    # our unavailability becomes the customer's incident, and a security control whose failure mode is
+    # a production outage gets removed from the request path, which protects nobody.
+    #
+    # The mitigation is visibility, not silence: the fallback is a distinct rule_id
+    # (`engine_unavailable_fallback`), so an operator can count it, alert on it, and see exactly which
+    # calls went unjudged and for how long. An allow that is indistinguishable from a normal allow
+    # would be the unacceptable version of this default.
+    sdk_fallback_mode: str = "allow"
     sdk_retry_max_attempts: int = 2
     sdk_retry_backoff_base_ms: int = 100
     sdk_circuit_fail_threshold: int = 3

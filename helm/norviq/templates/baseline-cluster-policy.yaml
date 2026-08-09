@@ -1,11 +1,16 @@
 {{- if .Values.baselineClusterPolicy.enabled }}
 {{- if not .Values.policyQuotaNamespaces }}
 {{- /*
-  Fail-closed config: the baseline guard renders ONE NrvqPolicy per namespace in
-  policyQuotaNamespaces. With that list empty, `enabled: true` would render ZERO baselines — every
-  agent class would run WITHOUT the fail-closed cluster baseline (injection/threat protection), while
-  NOTES.txt claims a baseline "installed by default". Two safe defaults combining into a silent security
-  gap is refused here: fail the install loudly instead of shipping the gap.
+  The baseline guard renders ONE NrvqPolicy per namespace in policyQuotaNamespaces. With that list
+  empty, `enabled: true` would render ZERO baselines — every agent class would run with no baseline
+  at all (no injection/threat detection, not even observing it), while NOTES.txt claims a baseline
+  "installed by default". Two safe-looking defaults combining into a silent gap is refused here: fail
+  the install loudly instead of shipping it.
+
+  Note this guard is about the baseline EXISTING, not about it blocking. It renders in
+  `baselineClusterPolicy.enforcementMode`, which defaults to `audit`: the controls evaluate and record
+  non-compliance, and calls proceed. Rendering zero baselines is still wrong under that default — the
+  customer loses the visibility the audit posture exists to give them.
 */ -}}
 {{- fail "\n\nbaselineClusterPolicy.enabled=true but policyQuotaNamespaces is EMPTY.\nNo baseline guard would be rendered, leaving every agent class without the fail-closed cluster baseline.\nEither:\n  - set policyQuotaNamespaces to your tenant namespaces (the baseline renders one per namespace), for example:\n      --set policyQuotaNamespaces='{default,chatbot-prod}'\n    or\n  - set baselineClusterPolicy.enabled=false to explicitly run WITHOUT a cluster baseline (not recommended).\n" }}
 {{- end }}
@@ -20,7 +25,7 @@ metadata:
 spec:
   target:
     namespace: {{ $ns }}
-  enforcementMode: block
+  enforcementMode: {{ $.Values.baselineClusterPolicy.enforcementMode | default "audit" }}
   preset: {{ $.Values.baselineClusterPolicy.preset }}
   clusterPriority: {{ $.Values.baselineClusterPolicy.clusterPriority }}
 ---

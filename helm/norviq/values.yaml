@@ -69,6 +69,21 @@ baselineClusterPolicy:
   name: baseline-cluster-guard
   clusterPriority: 900
   preset: strict
+  # audit (default) — every baseline control EVALUATES and records a non-compliance event, and the
+  # call proceeds. block — the baseline refuses the call outright.
+  #
+  # This shipped as `block`, which meant installing the chart silently put 22 block rules in front of
+  # every tool call in every tenant namespace, on day one, before the customer had written a single
+  # policy or seen a single decision. The failure mode is not theoretical: `deny_shell_execution`
+  # fires on roughly 1 in 8 ordinary alphanumeric identifiers (the base64 fan-out decodes an order id
+  # to random bytes and matches `|` in them), so a stock install drops a real fraction of a support
+  # bot's legitimate lookups and attributes it to shell injection.
+  #
+  # Defaulting to `audit` inverts the install experience: Norviq arrives observing, the customer sees
+  # in the compliance view exactly what WOULD be blocked and by which control, and promotes controls
+  # to enforcement when the blast radius is known. Set to `block` here to restore the old posture
+  # cluster-wide, or promote individual controls via the baseline controls API.
+  enforcementMode: audit
 
 images:
   # Registry prefix (trailing slash) prepended to every component repository. Defaults to the

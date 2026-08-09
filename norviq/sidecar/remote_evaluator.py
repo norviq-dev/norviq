@@ -209,7 +209,9 @@ class RemoteEvaluator:
         # Every attempt failed. A 4xx means the engine ANSWERED and refused us (bad/expired token,
         # malformed request) — that is never an outage and must never fail open, or a revoked
         # credential silently becomes a governance bypass. Only genuine unreachability (5xx, timeout,
-        # connect error) honours the operator's configured posture, which defaults to block.
+        # connect error) honours the operator's configured posture, which now defaults to ALLOW so a
+        # Norviq outage does not take the customer's agents down with it (see config.sdk_fallback_mode).
+        # Both branches carry a distinct rule_id, so "we went unjudged" is countable rather than silent.
         refused = isinstance(last_exc, httpx.HTTPStatusError) and last_exc.response.status_code < 500
         mode = "block" if refused else settings.sdk_fallback_mode
         if mode == "allow":
