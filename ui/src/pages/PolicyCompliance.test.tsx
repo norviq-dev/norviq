@@ -343,37 +343,17 @@ describe("evidence is a redirect, not a second Audit Log", () => {
   });
 });
 
-describe("baseline masking", () => {
-  it("warns that a class policy switches the shipped controls off for its class", async () => {
-    // Proven on a live cluster with the SAME SSN payload: `r2-support` (which has a class policy at
-    // priority 100) returned allow/cde_default_allow, while a class with no policy returned
-    // block/pii_detection. Base tiers resolve by highest priority OUTRIGHT. Until this banner, an
-    // operator could set PII egress to Enforce, read "1 enforcing", and have it apply to nothing.
+describe("baseline controls are a floor, so nothing supersedes them", () => {
+  it("does not warn that a class policy switches the shipped controls off", async () => {
+    // It used to, and the warning was true: the controls tier was a base tier at priority 2, so a
+    // class policy at 100 outranked it and the shipped detectors stopped running for that class.
+    // The engine now collects the tier as a tighten-only floor (see
+    // tests/engine/test_pack_precedence.py), so the condition no longer exists — and a banner that
+    // outlives the defect it described is just a false alarm on a security page.
     mockAll({ policies: [{ agent_class: "r2-support", enforcement_mode: "block", current_version: 2, priority: 100 }] });
-    renderPage();
-    const warn = await screen.findByTestId("pc-baseline-masked");
-    expect(warn.textContent).toContain("supersedes");
-    expect(warn.textContent).toContain("r2-support");
-    expect(warn.textContent).toContain("2 active controls");
-    expect(warn.textContent).toContain("1 enforcing");
-    expect(screen.getByTestId("pc-masks-r2-support")).toBeInTheDocument();
-  });
-
-  it("stays silent for a policy at or below the controls tier", async () => {
-    mockAll({ policies: [{ agent_class: "r2-support", enforcement_mode: "block", current_version: 2, priority: 2 }] });
     renderPage();
     await screen.findByTestId("pc-row-r2-support");
     expect(screen.queryByTestId("pc-baseline-masked")).toBeNull();
     expect(screen.queryByTestId("pc-masks-r2-support")).toBeNull();
-  });
-
-  it("stays silent when every control is off — nothing is being masked", async () => {
-    mockAll({
-      policies: [{ agent_class: "r2-support", enforcement_mode: "block", current_version: 2, priority: 100 }],
-      controlsCatalog: [{ id: "pii_detection", title: "PII egress", description: "", effect: "off" }]
-    });
-    renderPage();
-    await screen.findByTestId("pc-row-r2-support");
-    expect(screen.queryByTestId("pc-baseline-masked")).toBeNull();
   });
 });

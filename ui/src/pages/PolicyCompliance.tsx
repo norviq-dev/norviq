@@ -24,9 +24,6 @@ import { useApp } from "../store/AppContext";
 // the customer authored, so they do not belong in a view whose whole subject is "your own policies".
 // `<class>__remediation__` is the per-class overlay the compliance flow itself writes.
 const RESERVED = new Set(["__baseline__", "__controls__", "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__"]);
-// baseline_router._CONTROLS_PRIORITY — the tier the shipped detectors are materialised at.
-const CONTROLS_TIER_PRIORITY = 2;
-
 const isReserved = (agentClass: string) => RESERVED.has(agentClass) || agentClass.endsWith("__remediation__");
 
 // Every rule id a policy DEFINES. /policy-compliance is keyed by rule_id and knows nothing about which
@@ -58,9 +55,6 @@ type PolicyRow = {
   /** null === not computable (unreadable rego, or no principals to measure against). */
   compliancePct: number | null;
   priority: number;
-  /** Base tiers resolve by HIGHEST PRIORITY OUTRIGHT, so a class policy above the controls tier
-   *  means the shipped controls do not run for that class at all. Proven on a live cluster. */
-  masksBaseline: boolean;
   calls: number;
   state: "Compliant" | "Non-compliant" | "Not evaluated" | "Unknown";
 };
@@ -187,8 +181,6 @@ export function PolicyCompliance() {
         compliancePct = Math.round(((total - nonCompliant.length) / total) * 100);
         state = nonCompliant.length === 0 ? "Compliant" : "Non-compliant";
       }
-      // The controls tier is priority 2 (baseline_router._CONTROLS_PRIORITY). Anything above it wins
-      // outright, so the shipped controls never run for this class.
       const priority = policy.priority ?? 100;
       return {
         key: agentClass,
@@ -207,14 +199,12 @@ export function PolicyCompliance() {
         totalPrincipals: total,
         compliancePct,
         priority,
-        masksBaseline: priority > CONTROLS_TIER_PRIORITY,
         calls,
         state
       };
     });
   }, [policies.data, byRule, realPrincipals, namespace, evidenceUnreadable]);
 
-  const maskingRows = rows.filter((r) => r.masksBaseline);
   const measurable = rows.filter((r) => r.compliancePct !== null);
   const nonCompliantRows = rows.filter((r) => r.state === "Non-compliant");
   // Overall = principals clean across EVERY policy, matching Azure's resource-level roll-up.
@@ -363,37 +353,6 @@ export function PolicyCompliance() {
         )}
       </div>
 
-      {/* The finding this page exists to surface, proven live: same SSN payload, `r2-support` (which
-          has a class policy) ALLOWED it while a class with no policy was BLOCKED by pii_detection.
-          Base tiers resolve by highest priority OUTRIGHT, so writing one class policy switches the
-          whole shipped detector set off for that class — and until now nothing said so anywhere. */}
-      {maskingRows.length > 0 && activeControlCount > 0 && (
-        <div
-          data-testid="pc-baseline-masked"
-          style={{
-            padding: "10px 14px",
-            border: "1px solid #4a3a1a",
-            background: "rgba(255,176,32,0.08)",
-            borderRadius: 10,
-            fontSize: 12,
-            color: "var(--escalate)"
-          }}
-        >
-          <b>
-            {maskingRows.length} {maskingRows.length === 1 ? "policy supersedes" : "policies supersede"} the shipped
-            baseline controls
-          </b>{" "}
-          <span style={{ color: "var(--text-secondary)" }}>
-            — {maskingRows.map((r) => r.agentClass).join(", ")}. Base tiers resolve by highest priority outright, so
-            the {activeControlCount} active control{activeControlCount === 1 ? "" : "s"}
-            {enforcingControlCount > 0 ? ` (${enforcingControlCount} enforcing)` : ""} on Target Settings do not run
-            for {maskingRows.length === 1 ? "that class" : "those classes"} at all. Anything you still need must be
-            written into the policy itself.
-          </span>{" "}
-          <Link to="/policies/targets">Review controls</Link>
-        </div>
-      )}
-
       {/* ---- Per-policy compliance ---- */}
       <Panel
         title="Policy compliance"
@@ -428,15 +387,6 @@ export function PolicyCompliance() {
                     {(r as unknown as PolicyRow).version !== null && (
                       <span style={{ color: "var(--text-muted)", marginLeft: 6, fontSize: 11 }}>
                         v{(r as unknown as PolicyRow).version}
-                      </span>
-                    )}
-                    {(r as unknown as PolicyRow).masksBaseline && activeControlCount > 0 && (
-                      <span
-                        data-testid={`pc-masks-${(r as unknown as PolicyRow).key}`}
-                        title="Base tiers resolve by highest priority outright, so the shipped controls do not run for this class."
-                        style={{ color: "var(--escalate)", marginLeft: 8, fontSize: 10, whiteSpace: "nowrap" }}
-                      >
-                        supersedes baseline
                       </span>
                     )}
                   </span>
