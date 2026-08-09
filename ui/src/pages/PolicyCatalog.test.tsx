@@ -60,6 +60,41 @@ function renderPage(initialEntries: string[] = ["/"]) {
   );
 }
 
+describe("deep link from Policy Compliance", () => {
+  it("opens the policy named in the URL rather than whichever is listed first", async () => {
+    let fetchedDetail = "";
+    // Policy Compliance's remediation table links here with ?ns=&agent_class= for a NAMED
+    // non-compliant policy. The params were previously ignored, so the operator clicked "Open policy"
+    // and landed on whatever the editor selected first — on a multi-tenant list, someone else's.
+    server.use(
+      http.get("/api/v1/policies", () =>
+        HttpResponse.json([
+          { namespace: "other-ns", agent_class: "customer-support", current_version: 1, rego_length: 10, priority: 700, target_type: "class" },
+          { namespace: "default", agent_class: "billing", current_version: 3, rego_length: 20, priority: 700, target_type: "class" }
+        ])
+      ),
+      http.get("/api/v1/deployments", () => HttpResponse.json([])),
+      http.get("/api/v1/policies/default/billing", () => {
+        fetchedDetail = "default/billing";
+        return HttpResponse.json({ namespace: "default", agent_class: "billing", rego_source: "package norviq.billing\n", version: 3 });
+      }),
+      http.get("/api/v1/policies/other-ns/customer-support", () => {
+        fetchedDetail = "other-ns/customer-support";
+        return HttpResponse.json({ namespace: "other-ns", agent_class: "customer-support", rego_source: "package x\n", version: 1 });
+      }),
+      http.get("/api/v1/policies/other-ns/customer-support/versions", () => HttpResponse.json([])),
+      http.get("/api/v1/policies/default/billing/versions", () => HttpResponse.json([]))
+    );
+    renderPage(["/policies/catalog?ns=default&agent_class=billing"]);
+    // The detail actually fetched is the contract: it is what Save and Apply will target. Asserting
+    // on rendered text alone would pass while the editor silently held another tenant's policy.
+    // The detail FETCHED is the whole contract — it is what Save and Apply will target. Asserting on
+    // a rendered filename instead would pass while the editor silently held another tenant's policy.
+    await waitFor(() => expect(fetchedDetail).toBe("default/billing"));
+    expect(fetchedDetail).not.toBe("other-ns/customer-support");
+  });
+});
+
 describe("PolicyCatalog (#3 / #4)", () => {
   it("opens the class policy in the editor (Monaco mounts) and groups it under Agent-Class", async () => {
     seedHandlers("class");

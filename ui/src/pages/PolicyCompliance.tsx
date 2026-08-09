@@ -7,14 +7,16 @@ import {
   fetchPolicyCompliance,
   fetchPolicyList,
   fetchPolicySource,
+  fetchVolume,
   type CompliancePrincipal,
   type PolicyListRow
 } from "../api/client";
 import { DataTable } from "../components/common/DataTable";
 import { DonutChart } from "../components/common/DonutChart";
+import { ScoreGauge } from "../components/common/ScoreGauge";
+import { VolumeChart } from "../components/charts/VolumeChart";
 import { PageHead } from "../components/common/PageHead";
 import { Panel } from "../components/common/Panel";
-import { StatTile } from "../components/common/StatTile";
 import { useApi } from "../hooks/useApi";
 import { useApp } from "../store/AppContext";
 
@@ -45,6 +47,7 @@ type PolicyRow = {
   key: string;
   name: string;
   agentClass: string;
+  namespace: string;
   scope: string;
   mode: string;
   version: number | null;
@@ -195,6 +198,7 @@ export function PolicyCompliance() {
         // policies from every namespace, so stamping the current selection onto each row labelled a
         // policy with a namespace it does not live in — and the detail fetch then 404s, which is how
         // this surfaced: a row that claimed chatbot-prod, and a 404 fetching chatbot-prod/<class>.
+        namespace: policy.namespace ?? namespace,
         scope: `${policy.namespace ?? namespace} / ${agentClass}`,
         mode: policy.enforcement_mode ?? "—",
         version: policy.current_version ?? null,
@@ -239,6 +243,12 @@ export function PolicyCompliance() {
     cacheKey: `pc:controls:${namespace}`,
     staleTimeMs: 30_000
   });
+  // Calls examined deserves a shape, not just a number: the same window, split allow vs block, is
+  // what tells an operator whether 9,000 calls is steady traffic or one spike.
+  const volume = useApi(() => fetchVolume(range, namespace), [namespace, range], {
+    cacheKey: `pc:volume:${namespace}:${range}`,
+    staleTimeMs: 30_000
+  });
   const activeControlCount = (controls.data?.controls ?? []).filter((c) => c.effect !== "off").length;
   const enforcingControlCount = (controls.data?.controls ?? []).filter((c) => c.effect === "deny").length;
 
@@ -274,25 +284,29 @@ export function PolicyCompliance() {
 
       {/* ---- Azure's four summary tiles ---- */}
       <div className="grid-kit g4">
-        <Panel pad>
-          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Overall resource compliance</div>
-          <div data-testid="pc-overall" data-pct={overallPct ?? "unknown"} style={{ fontSize: 34, fontWeight: 600, marginTop: 4 }}>
-            {overallPct === null ? "—" : `${overallPct}%`}
+        {/* Every card carries a visual. A card that is only a number is a number that could have been
+            a sentence, and four of them in a row read as a form rather than a dashboard. */}
+        {overallPct === null ? (
+          <Panel pad title="Overall resource compliance">
+            <div data-testid="pc-overall" data-pct="unknown" style={{ fontSize: 34, fontWeight: 600 }}>
+              —
+            </div>
+            <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+              {evidenceUnreadable
+                ? "compliance evidence unavailable"
+                : "no agent classes seen yet"}
+            </div>
+          </Panel>
+        ) : (
+          <div data-testid="pc-overall" data-pct={overallPct}>
+            <ScoreGauge
+              score={overallPct}
+              title="Overall resource compliance"
+              sub={`${compliantPrincipals} out of ${totalPrincipals} agent classes`}
+            />
           </div>
-          {/* The subline must agree with the headline. It read "53 out of 53" under a "—" while the
-              evidence feed was unreadable, which is a stronger claim than the number it sits beneath. */}
-          <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
-            {evidenceUnreadable
-              ? "compliance evidence unavailable"
-              : totalPrincipals === 0
-                ? "no agent classes seen yet"
-                : `${compliantPrincipals} out of ${totalPrincipals}`}
-          </div>
-        </Panel>
+        )}
 
-        {/* DonutChart renders its OWN Panel and defaults its title to "Trust Distribution" — wrapping
-            it gave two nested panels with two competing headings, and the chart announced itself as a
-            different metric on a compliance page. Let it own the panel, and name it. */}
         {totalPrincipals === 0 ? (
           <Panel pad title="Resources by compliance state">
             <div data-testid="pc-donut-empty" style={{ fontSize: 12, color: "var(--text-muted)" }}>
@@ -309,19 +323,44 @@ export function PolicyCompliance() {
           />
         )}
 
-        <StatTile
-          label="Non-compliant policies"
-          value={`${nonCompliantRows.length}`}
-          sub={`out of ${rows.length}`}
-          color={nonCompliantRows.length > 0 ? "var(--block, #FF3B5C)" : undefined}
-        />
+        {rows.length === 0 ? (
+          <Panel pad title="Policies by state">
+            <div data-testid="pc-policy-donut-empty" style={{ fontSize: 12, color: "var(--text-muted)" }}>
+              No policies of your own here.
+            </div>
+          </Panel>
+        ) : (
+          <div data-testid="pc-policy-donut" data-noncompliant={nonCompliantRows.length} data-total={rows.length}>
+            <DonutChart
+              title="Policies by state"
+              data={[
+                { name: "Compliant", value: rows.filter((r) => r.state === "Compliant").length },
+                { name: "Non-compliant", value: nonCompliantRows.length },
+                { name: "Not evaluated", value: rows.filter((r) => r.state !== "Compliant" && r.state !== "Non-compliant").length }
+              ]}
+            />
+          </div>
+        )}
 
-        {/* The honesty number: zero non-compliant out of ZERO traffic is idle, not clean. */}
-        <StatTile
-          label="Calls examined"
-          value={scanned === null ? "—" : scanned.toLocaleString()}
-          sub={scanned === 0 ? "no real traffic in this window" : `over the last ${range}`}
-        />
+        {/* Calls examined — the honesty number, now with the shape of the traffic behind it. */}
+        {(volume.data ?? []).length > 0 ? (
+          <div data-testid="pc-volume" data-scanned={scanned ?? "unknown"}>
+            <VolumeChart
+              title={scanned === null ? "Calls examined — unknown" : `Calls examined · ${scanned.toLocaleString()}`}
+              data={volume.data ?? []}
+              labels={["Allowed", "Blocked"]}
+            />
+          </div>
+        ) : (
+          <Panel pad title="Calls examined">
+            <div data-testid="pc-scanned" data-scanned={scanned ?? "unknown"} style={{ fontSize: 34, fontWeight: 600 }}>
+              {scanned === null ? "—" : scanned.toLocaleString()}
+            </div>
+            <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+              {scanned === 0 ? "no real traffic in this window" : `over the last ${range}`}
+            </div>
+          </Panel>
+        )}
       </div>
 
       {/* The finding this page exists to surface, proven live: same SSN payload, `r2-support` (which
@@ -450,62 +489,114 @@ export function PolicyCompliance() {
         )}
       </Panel>
 
-      {/* ---- Remediation (Azure's "Policies to remediate") ---- */}
+      {/* ---- Remediation — Azure's "Policies to remediate" columns ----
+           Policy definition | Assignment | Resources to remediate | Scope. The analogy holds because
+           each column has a real referent here: the rego rule is the definition, the (namespace,
+           agent_class) row is the assignment, the agent classes are the resources, and the scope is
+           where the row is written. What Azure has and this does NOT is a remediation TASK — nothing
+           on this page mutates anything, and the copy says so rather than implying a fix button. */}
       <Panel
         title="Remediation"
-        sub="What to do about each non-compliant policy. Nothing here changes enforcement on its own."
-        style={{ marginBottom: 16 }}
+        sub="Non-compliant policies and what each one needs. Nothing here changes enforcement on its own."
       >
         {nonCompliantRows.length === 0 ? (
           <div data-testid="pc-remediation-empty" style={{ fontSize: 13, color: "var(--text-muted)" }}>
             {rows.length === 0
               ? "No policies to remediate."
-              : // "Nothing to remediate" is a CLEARANCE, and it must not be issued while any policy's
-                // state is still unknown. Caught in the browser: mid-load every row read Unknown while
-                // this line already said "every policy is compliant" — an all-clear over data that had
-                // not arrived, which is exactly the reading an operator would stop at.
-                loading || evidenceUnreadable || rows.some((r) => r.state === "Unknown")
+              : loading || evidenceUnreadable || rows.some((r) => r.state === "Unknown")
                 ? "Compliance is not fully known yet — this is not an all-clear."
                 : totalPrincipals === 0
                   ? "No agent classes have run yet, so nothing has been evaluated."
                   : "Nothing to remediate — every policy is compliant across all agent classes."}
           </div>
         ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {nonCompliantRows.map((r) => (
-              <div
-                key={r.key}
-                data-testid={`pc-remediate-${r.key}`}
-                style={{ border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px" }}
-              >
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600 }}>{r.name}</div>
-                    <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 2 }}>
-                      {r.nonCompliant.length} of {r.totalPrincipals} agent class
-                      {r.totalPrincipals === 1 ? "" : "es"} non-compliant · {r.calls.toLocaleString()} call
-                      {r.calls === 1 ? "" : "s"} flagged
+          <DataTable
+            rowKey="key"
+            rows={nonCompliantRows as unknown as Array<Record<string, unknown>>}
+            columns={[
+              {
+                key: "name",
+                title: "Policy definition",
+                render: (_v, r) => {
+                  const row = r as unknown as PolicyRow;
+                  return (
+                    <div data-testid={`pc-remediate-${row.key}`}>
+                      <div style={{ fontSize: 13 }}>{row.name}</div>
+                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                        {(row.ruleIds ?? []).length} rule{(row.ruleIds ?? []).length === 1 ? "" : "s"}
+                        {row.ruleIds?.length ? ` · ${row.ruleIds.join(", ")}` : ""}
+                      </div>
                     </div>
-                    <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>
-                      {r.nonCompliant.join(", ")}
+                  );
+                }
+              },
+              {
+                key: "mode",
+                title: "Assignment",
+                render: (_v, r) => {
+                  const row = r as unknown as PolicyRow;
+                  return (
+                    <div>
+                      <code style={{ fontSize: 11 }}>{row.agentClass}</code>
+                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                        v{row.version} · {row.mode} · priority {row.priority}
+                      </div>
                     </div>
-                    <div style={{ fontSize: 11, color: "var(--escalate, #FFB020)", marginTop: 6, maxWidth: 620 }}>
-                      {r.mode === "block"
-                        ? "This policy is enforcing, so these calls were refused. Remediate the workload, or add an exception if the traffic is legitimate."
-                        : "This policy is in audit, so these calls PROCEEDED and were only recorded. Promote it to block in Policy Catalog once the count above looks right."}
+                  );
+                }
+              },
+              {
+                key: "nonCompliant",
+                title: "Resources to remediate",
+                render: (_v, r) => {
+                  const row = r as unknown as PolicyRow;
+                  return (
+                    <div>
+                      <div style={{ fontSize: 13 }}>
+                        {row.nonCompliant.length} of {row.totalPrincipals}
+                      </div>
+                      <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                        {row.nonCompliant.join(", ")} · {row.calls.toLocaleString()} call
+                        {row.calls === 1 ? "" : "s"} flagged
+                      </div>
                     </div>
-                  </div>
-                  <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexShrink: 0 }}>
-                    <Link className="btn btn-outline" to={`/policies/catalog?ns=${encodeURIComponent(namespace)}`}>
-                      Open policy
-                    </Link>
-                    <Link className="btn btn-outline" to={`/audit?ns=${encodeURIComponent(namespace)}`}>
-                      View in Audit Log
-                    </Link>
-                  </div>
-                </div>
-              </div>
-            ))}
+                  );
+                }
+              },
+              { key: "scope", title: "Scope", render: (v) => <code style={{ fontSize: 11 }}>{String(v)}</code> },
+              {
+                key: "state",
+                title: "",
+                render: (_v, r) => {
+                  const row = r as unknown as PolicyRow;
+                  return (
+                    <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                      <Link
+                        className="btn btn-outline"
+                        data-testid={`pc-open-policy-${row.key}`}
+                        to={`/policies/catalog?ns=${encodeURIComponent(row.namespace)}&agent_class=${encodeURIComponent(row.agentClass)}`}
+                      >
+                        Open policy
+                      </Link>
+                      <Link
+                        className="btn btn-outline"
+                        data-testid={`pc-open-audit-${row.key}`}
+                        to={`/audit?ns=${encodeURIComponent(row.namespace)}&range=${encodeURIComponent(range)}&agent=${encodeURIComponent(row.agentClass)}`}
+                      >
+                        View in Audit Log
+                      </Link>
+                    </div>
+                  );
+                }
+              }
+            ]}
+          />
+        )}
+        {nonCompliantRows.length > 0 && (
+          <div style={{ fontSize: 11, color: "var(--escalate)", marginTop: 10, maxWidth: 720 }}>
+            {nonCompliantRows.some((r) => r.mode !== "block")
+              ? "A policy in audit RECORDED these calls and let them through — promote it in Policy Catalog once the counts look right."
+              : "These policies are enforcing, so the calls above were refused. Remediate the workload, or add an exception if the traffic is legitimate."}
           </div>
         )}
       </Panel>

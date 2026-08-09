@@ -7,7 +7,7 @@
  * console cares about most — rendering an unreadable surface as a clean bill of health.
  */
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -71,6 +71,7 @@ function mockAll(opts: {
     if (opts.sourceError && cls === opts.sourceError) throw new Error("500");
     return { rego_source: sources[cls] ?? "" } as never;
   });
+  vi.spyOn(client, "fetchVolume").mockResolvedValue([] as never);
   vi.spyOn(client, "fetchBaselineControls").mockResolvedValue({
     namespace: "chatbot-prod", preset: "strict", default_effect: "monitor",
     effects: ["off", "monitor", "deny"], counts: { off: 0, monitor: 13, deny: 1 },
@@ -165,9 +166,13 @@ describe("policy compliance percentage", () => {
       ]
     });
     renderPage();
-    const overall = await screen.findByTestId("pc-overall");
-    expect(overall).toHaveAttribute("data-pct", "50");
-    expect(overall.textContent).toContain("50%");
+    // Wait on the ATTRIBUTE, not the element: `pc-overall` exists in the loading branch too (carrying
+    // data-pct="unknown"), so findByTestId resolves before the data lands.
+    await waitFor(() => expect(screen.getByTestId("pc-overall")).toHaveAttribute("data-pct", "50"));
+    const overall = screen.getByTestId("pc-overall");
+    // The number itself is rendered by ScoreGauge into a canvas, so `data-pct` is the contract —
+    // which is exactly why this page puts raw values on data attributes rather than in text.
+    expect(overall.textContent).toContain("1 out of 2");
   });
 });
 
@@ -214,11 +219,22 @@ describe("remediation", () => {
       ]
     });
     renderPage();
-    const blocking = await screen.findByTestId("pc-remediate-r2-support");
-    // enforcement_mode=block -> the calls were refused
-    expect(blocking.textContent).toContain("were refused");
-    // enforcement_mode=audit -> the calls PROCEEDED, which is the thing an operator must not misread
-    expect(screen.getByTestId("pc-remediate-billing").textContent).toContain("PROCEEDED");
+    await waitFor(() => expect(screen.getByTestId("pc-remediate-r2-support")).toBeInTheDocument());
+    expect(screen.getByTestId("pc-remediate-billing")).toBeInTheDocument();
+    // The consequence is stated once under the table rather than repeated per row, and it leads with
+    // the DANGEROUS case: if any listed policy is in audit, those calls proceeded, and that is the
+    // sentence an operator must not miss while scanning a table of red counts.
+    expect(screen.getByText(/RECORDED these calls and let them through/)).toBeInTheDocument();
+
+    // Azure's four columns, each with a real referent here. Scoped to the remediation table — the
+    // compliance table above also has a Scope column, and an unscoped query matches both.
+    const remediationTable = screen.getByTestId("pc-remediate-r2-support").closest("table") as HTMLElement;
+    for (const heading of ["Policy definition", "Assignment", "Resources to remediate", "Scope"]) {
+      expect(within(remediationTable).getByRole("columnheader", { name: heading })).toBeInTheDocument();
+    }
+    // and the actions deep-link to the row's OWN namespace and class
+    expect(screen.getByTestId("pc-open-policy-r2-support").getAttribute("href")).toContain("agent_class=r2-support");
+    expect(screen.getByTestId("pc-open-audit-r2-support").getAttribute("href")).toContain("agent=r2-support");
   });
 
   it("says nothing to remediate only when policies exist and all are clean", async () => {

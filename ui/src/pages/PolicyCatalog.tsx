@@ -1244,7 +1244,19 @@ export function PolicyCatalog() {
   }, [handoffGraph]);
   const [restoreV, setRestoreV] = useState<number | null>(null);
   const [viewV, setViewV] = useState<number | null>(null); // Version whose rego is expanded read-only
-  const [activeFile, setActiveFile] = useState<string | null>(null);
+  // Seeded from the URL so a deep link can OPEN a specific policy, not just the page.
+  //
+  // Policy Compliance links here with ?ns=<namespace>&agent_class=<class> from its remediation table.
+  // Before this the params were simply ignored: the operator clicked "Open policy" on a named
+  // non-compliant policy and landed on whatever the editor happened to select first, which on a
+  // multi-tenant list is somebody else's policy. Keyed the same way the file list is
+  // (`policyFileKey` = namespace/class), because two namespaces routinely run the same class name.
+  const [activeFile, setActiveFile] = useState<string | null>(() => {
+    const cls = searchParams.get("agent_class");
+    if (!cls) return null;
+    const ns = searchParams.get("ns") ?? searchParams.get("namespace");
+    return ns ? `${ns}/${cls}` : null;
+  });
   const [regoDraft, setRegoDraft] = useState("");
   const [editorStatus, setEditorStatus] = useState<"saved" | "unsaved" | `syntax:${number}`>("saved");
   const [dryRunResult, setDryRunResult] = useState<DryRunResult | null>(null);
