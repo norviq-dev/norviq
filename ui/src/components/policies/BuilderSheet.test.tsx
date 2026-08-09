@@ -142,10 +142,51 @@ describe("BuilderSheet", () => {
     await waitFor(() => expect(screen.getByTestId("builder-save-btn")).not.toBeDisabled());
   });
 
-  it("re-locks Save after the graph changes post-dry-run (staleness), even though the earlier dry-run was valid", async () => {
+  // --- the gate a shipped inverted policy walked straight through -------------------------------
+  //
+  // Measured, not theorised. A policy authored in this sheet was saved as ENFORCING while doing the
+  // exact OPPOSITE of what its own rule id and reason string claimed — it allowed the attack and
+  // blocked the benign traffic, because a negation was dropped. Everything on screen was green:
+  // valid rego, a `valid` dry-run, Save enabled. The single true signal was "Replayed 0 recent real
+  // calls", and it was the one thing that carried no weight.
+
+  it("blocks Save when the dry-run replayed nothing, until the operator says so out loud", async () => {
     server.use(
       http.post("/api/v1/policies/dry-run", () =>
         HttpResponse.json({ valid: true, errors: [], total_records_checked: 0, newly_blocked: 0, recommendation: "n/a" })
+      )
+    );
+    renderSheet();
+    buildValidRule();
+    await waitFor(() => expect(screen.getByTestId("builder-dryrun-btn")).not.toBeDisabled());
+    fireEvent.click(screen.getByTestId("builder-dryrun-btn"));
+
+    // valid, but it proved only that the rego compiles — it tested the policy against nothing.
+    await waitFor(() => expect(screen.getByTestId("builder-unmeasured-ack")).toBeInTheDocument());
+    expect(screen.getByTestId("builder-save-btn")).toBeDisabled();
+
+    fireEvent.click(screen.getByTestId("builder-unmeasured-ack-input"));
+    await waitFor(() => expect(screen.getByTestId("builder-save-btn")).not.toBeDisabled());
+  });
+
+  it("does not ask for the acknowledgement when the dry-run actually replayed traffic", async () => {
+    server.use(
+      http.post("/api/v1/policies/dry-run", () =>
+        HttpResponse.json({ valid: true, errors: [], total_records_checked: 12, newly_blocked: 0, recommendation: "n/a" })
+      )
+    );
+    renderSheet();
+    buildValidRule();
+    await waitFor(() => expect(screen.getByTestId("builder-dryrun-btn")).not.toBeDisabled());
+    fireEvent.click(screen.getByTestId("builder-dryrun-btn"));
+    await waitFor(() => expect(screen.getByTestId("builder-save-btn")).not.toBeDisabled());
+    expect(screen.queryByTestId("builder-unmeasured-ack")).toBeNull();
+  });
+
+  it("re-locks Save after the graph changes post-dry-run (staleness), even though the earlier dry-run was valid", async () => {
+    server.use(
+      http.post("/api/v1/policies/dry-run", () =>
+        HttpResponse.json({ valid: true, errors: [], total_records_checked: 5, newly_blocked: 0, recommendation: "n/a" })
       )
     );
     renderSheet();
@@ -228,7 +269,7 @@ describe("BuilderSheet — unsaved-changes guard on close", () => {
   it("does NOT prompt after a successful Save & enforce, even though the sheet still has a class + a rule", async () => {
     server.use(
       http.post("/api/v1/policies/dry-run", () =>
-        HttpResponse.json({ valid: true, errors: [], total_records_checked: 0, newly_blocked: 0, recommendation: "n/a" })
+        HttpResponse.json({ valid: true, errors: [], total_records_checked: 5, newly_blocked: 0, recommendation: "n/a" })
       ),
       http.post("/api/v1/policies", () => HttpResponse.json({ version: 1 })),
       // verifyPolicyApplied's convergence poll — resolve on the very first tick so no timers linger.
@@ -866,7 +907,7 @@ describe("BuilderSheet — tool-name autocomplete + unknown-tool warning (Phase 
       http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
       http.get("/api/v1/tools", () => HttpResponse.json([registryEntry("delete_kb"), registryEntry("search_kb")])),
       http.post("/api/v1/policies/dry-run", () =>
-        HttpResponse.json({ valid: true, errors: [], total_records_checked: 0, newly_blocked: 0, recommendation: "n/a" })
+        HttpResponse.json({ valid: true, errors: [], total_records_checked: 5, newly_blocked: 0, recommendation: "n/a" })
       )
     );
 

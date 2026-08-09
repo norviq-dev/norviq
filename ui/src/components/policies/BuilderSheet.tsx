@@ -1831,6 +1831,9 @@ export function BuilderSheet({
   // The exact rego a dry-run was computed against — a recompile (any graph edit) makes this stale, the
   // same staleness doctrine PolicyCatalog's raw editor uses for its own dry-run panel.
   const [dryRunRego, setDryRunRego] = useState<string | null>(null);
+  // Cleared on every re-run and every edit below: an acknowledgement is about ONE measured result, so
+  // carrying it across a change would let a stale tick authorise a policy nobody looked at.
+  const [unmeasuredAcknowledged, setUnmeasuredAcknowledged] = useState(false);
   const [saving, setSaving] = useState(false);
   const [applyResult, setApplyResult] = useState<ApplyResult | null>(null);
 
@@ -2051,7 +2054,22 @@ export function BuilderSheet({
   // namespace (class/namespace: it's where the row is written; workload: it's also baked into the
   // guard and the loader key), so this ANDs in regardless of tier.
   const canDryRun = scopeReady && namespaceReady && !hasErrors && !dryRunLoading;
-  const canSave = scopeReady && namespaceReady && !hasErrors && dryRunResult?.valid === true && !dryRunStale && !saving;
+  // A dry-run that replayed NOTHING has not tested the policy — it has only proved the rego compiles.
+  //
+  // Measured, not theorised: a policy authored here was saved as ENFORCING while doing the exact
+  // OPPOSITE of what its own rule id and reason string said (it allowed the attack and blocked the
+  // benign traffic — a dropped negation). Everything on screen was green: valid rego, `valid` dry-run,
+  // Save enabled. The one true signal was "Replayed 0 recent real calls", and it was the one thing
+  // that carried no weight. So when the run measured nothing, the operator has to say so out loud.
+  const dryRunMeasuredNothing = dryRunResult?.valid === true && replayUnmeasured;
+  const canSave =
+    scopeReady &&
+    namespaceReady &&
+    !hasErrors &&
+    dryRunResult?.valid === true &&
+    !dryRunStale &&
+    !saving &&
+    (!dryRunMeasuredNothing || unmeasuredAcknowledged);
   // Meaningful unsaved content (some scope identifier typed for whichever tier is selected, at least
   // one rule added, or — in allowlist mode — at least one tool added) with no successful save since
   // the last edit — this is what requestClose() checks before discarding the graph.
@@ -2095,7 +2113,9 @@ export function BuilderSheet({
             ? "The policy changed since the last dry-run — re-run it."
             : dryRunResult?.valid !== true
               ? "Run a dry-run first — save is blocked until it passes."
-              : undefined
+              : dryRunMeasuredNothing && !unmeasuredAcknowledged
+                ? "The dry-run replayed no real calls, so this policy is untested. Confirm below to save it anyway."
+                : undefined
     : undefined;
 
   const step1State: "active" | "done" = step1Valid ? "done" : "active";
@@ -2138,6 +2158,9 @@ export function BuilderSheet({
       });
       setDryRunResult(result);
       setDryRunRego(ranAgainst);
+      // A fresh measurement retires the previous acknowledgement — the operator is confirming THIS
+      // result, not a habit of ticking the box.
+      setUnmeasuredAcknowledged(false);
     } catch {
       // Never fabricate a zero-impact result on a swallowed failure — null it and surface an error.
       setDryRunResult(null);
@@ -3340,6 +3363,22 @@ export function BuilderSheet({
                       hover that would show its tooltip — so every reason living only in `title` was
                       unreachable at exactly the moment it was needed, and the operator was left with a
                       greyed primary button and nothing to act on. */}
+                  {/* The one signal that mattered on the run that shipped an inverted policy. It was
+                      present and it was ignorable, so now it is a gate rather than a caption. */}
+                  {dryRunMeasuredNothing && (
+                    <label
+                      data-testid="builder-unmeasured-ack"
+                      style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--escalate)", maxWidth: 300 }}
+                    >
+                      <input
+                        type="checkbox"
+                        data-testid="builder-unmeasured-ack-input"
+                        checked={unmeasuredAcknowledged}
+                        onChange={(e) => setUnmeasuredAcknowledged(e.target.checked)}
+                      />
+                      Enforce untested — no real call was replayed against this policy.
+                    </label>
+                  )}
                   <InlineDisabledReason reason={saveBlockedReason}>
                     <KitButton
                       variant="primary"

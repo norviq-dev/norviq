@@ -82,8 +82,11 @@ function ComplianceBar({ pct, compliant, total }: { pct: number | null; complian
 }
 
 export function PolicyCompliance() {
-  const { namespace } = useApp();
-  const [range, setRange] = useState("7d");
+  // `routeMeta.isTimeScoped` already returns true for /compliance/*, so the GLOBAL header range
+  // selector drives this page. Adding an in-page picker gave two range controls on one screen that
+  // did not agree — the header said 24h while the page said 7d.
+  const { namespace, timeRange } = useApp();
+  const range = timeRange;
   const [selected, setSelected] = useState<string | null>(null);
 
   const compliance = useApi(() => fetchPolicyCompliance(namespace, range), [namespace, range], {
@@ -229,27 +232,13 @@ export function PolicyCompliance() {
   );
 
   return (
-    <div className="page-enter" style={{ color: "#ededf0", fontFamily: "'Outfit', system-ui, sans-serif" }}>
+    <div className="page-enter stack">
       <PageHead
         title="Policy Compliance"
         subtitle={
           <>
             Showing: <b>{namespace}</b> · policies you authored · last {range}
           </>
-        }
-        actions={
-          <div className="tabs-kit" style={{ display: "flex" }}>
-            {["24h", "7d", "30d"].map((r) => (
-              <button
-                key={r}
-                data-testid={`pc-range-${r}`}
-                className={`tab-kit${range === r ? " active" : ""}`}
-                onClick={() => setRange(r)}
-              >
-                {r}
-              </button>
-            ))}
-          </div>
         }
       />
 
@@ -273,7 +262,7 @@ export function PolicyCompliance() {
       )}
 
       {/* ---- Azure's four summary tiles ---- */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 12, marginBottom: 16 }}>
+      <div className="grid-kit g4">
         <Panel pad>
           <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Overall resource compliance</div>
           <div data-testid="pc-overall" data-pct={overallPct ?? "unknown"} style={{ fontSize: 34, fontWeight: 600, marginTop: 4 }}>
