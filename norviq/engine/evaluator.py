@@ -2066,6 +2066,29 @@ class OPAEvaluator:
                 candidates.append({"key": key, "rego": loaded["rego"], "priority": loaded["priority"],
                                    "enforcement_mode": loaded.get("enforcement_mode", "block")})
 
+        async def _append_controls_floor(target_namespace: str) -> None:
+            """The tuned baseline controls, tagged as a tighten-only overlay so they act as a FLOOR.
+
+            Same lookup as `_append_policy` (in-memory first, then the DB), but tagged `overlay: True` at
+            CONSTRUCTION — which is the only source of overlay-ness the resolver trusts. The key is a fixed
+            reserved literal, so unlike the string-suffix heuristic there is no way a real agent class can
+            collide with it.
+            """
+            key = f"{target_namespace}:__controls__"
+            entry = self._loader._policies.get(key) or await self._loader.load_from_db(
+                target_namespace, "__controls__"
+            )
+            if entry:
+                candidates.append(
+                    {
+                        "key": key,
+                        "rego": entry["rego"],
+                        "priority": entry["priority"],
+                        "enforcement_mode": entry.get("enforcement_mode", "block"),
+                        "overlay": True,
+                    }
+                )
+
         await _append_policy(namespace, agent_class)
         # The customer's tuned baseline CONTROLS, kept on their own key rather than sharing
         # `__baseline__` with the chart's cluster guard.
@@ -2076,11 +2099,27 @@ class OPAEvaluator:
         # same key, which made the SAME probe return a prefixed rule_id on one run and a bare one on
         # the next. Non-reproducible enforcement is worse than either behaviour on its own.
         #
-        # Collected as a BASE tier at a higher priority than `__baseline__` (see
-        # baseline_router._CONTROLS_PRIORITY): base tiers resolve by highest priority outright, so an
-        # explicit "I tuned these controls" beats the chart's default posture, and an agent-class
-        # policy still outranks both exactly as before.
-        await _append_policy(namespace, "__controls__")
+        # Collected as a tighten-only FLOOR, not a base tier.
+        #
+        # It was a base tier, and base tiers resolve by highest priority OUTRIGHT — so an agent-class
+        # policy authored at 100 beat the controls tier at 2 and its decision was DISCARDED. Measured on
+        # a live cluster with `pii_detection` set to Enforce and one SSN payload:
+        #
+        #     r2-support    (has a class policy)   allow   cde_default_allow
+        #     anything-else (no class policy)      block   pii_detection
+        #
+        # Writing a single class policy silently switched all fourteen shipped detectors off for that
+        # class, while Target Settings still read "1 enforcing" — truthfully, about a control that no
+        # longer applied to the class the operator cared most about. A detector an operator explicitly
+        # promoted to Enforce must not be removable as a side effect of authoring an unrelated policy.
+        #
+        # As an overlay it is tighten-only (`_resolve_with_packs` takes it only when it is STRICTER than
+        # the base winner), and it lands in the HARD partition of `_resolve_overlay` — so a
+        # `__pack_weaken__` can never relax it either. Priority becomes irrelevant, which is what "floor"
+        # means. Note this also restores MONITORING on classes that have their own policy: `audit` is
+        # stricter than `allow`, and audit never interrupts a call, so the record comes back with no
+        # availability cost.
+        await _append_controls_floor(namespace)
         await _append_policy(namespace, "__baseline__")
         await _append_policy("__cluster__", "__baseline__")
         # The catalog advertises WORKLOAD and NAMESPACE tiers (resolve_policy_key mints
@@ -2186,13 +2225,25 @@ class OPAEvaluator:
             candidates.append({"key": key, "rego": entry["rego"], "priority": entry["priority"], "overlay": True})
             seen.add(key)
 
+        def _append_controls_overlay(ns: str) -> None:
+            key = f"{ns}:__controls__"
+            if key in self._loader._policies and key not in seen:
+                entry = self._loader._policies[key]
+                candidates.append({"key": key, "rego": entry["rego"], "priority": entry["priority"],
+                                   "enforcement_mode": entry.get("enforcement_mode", "block"), "overlay": True})
+                seen.add(key)
+
         for ns in await self._loader.namespaces_for_class(agent_class):
             await _append_policy(ns, agent_class)
             # Mirror the concrete-namespace collection. Omitting it here would make the console's
             # global "All namespaces" picker report a different winning layer than the one a real
             # agent actually gets — a tuned control would be invisible in exactly the view an operator
             # uses to check their tuning took effect.
-            await _append_policy(ns, "__controls__")
+            # Tighten-only FLOOR here too — see _collect_candidates. If the union path left this a base
+            # tier, the console's "All namespaces" view would report a different winning layer than the
+            # one a real agent actually gets, which is precisely the view an operator uses to check that
+            # their tuning took effect.
+            _append_controls_overlay(ns)
             await _append_policy(ns, "__baseline__")
             for overlay in ("__pack__", "__guardrail__", "__pack_override__", "__pack_weaken__"):
                 _append_overlay(f"{ns}:{overlay}")

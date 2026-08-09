@@ -106,3 +106,54 @@ def test_weaken_relaxes_pack_only_when_base_permits() -> None:
 def test_weaken_can_still_tighten() -> None:
     # a weaken overlay that BLOCKS still tightens an allow (it supersedes the pack overlay but base floor still applies).
     assert _winner([_r("ns:cs", "allow", 700), _r("ns:__pack_weaken__", "block", 805)]) == "block"
+
+
+# --- the baseline controls tier is a FLOOR ----------------------------------------------------------
+#
+# Measured on a live cluster before this was changed. `pii_detection` set to Enforce in a namespace,
+# one SSN payload, two agent classes:
+#
+#     r2-support    (has a class policy @100)   allow   cde_default_allow
+#     anything-else (no class policy)           block   pii_detection
+#
+# The controls tier was a BASE tier at priority 2, and base tiers resolve by highest priority
+# OUTRIGHT — so a class policy authored at 100 discarded the controls' block entirely. Writing one
+# unrelated policy silently switched all fourteen shipped detectors off for that class, while Target
+# Settings still read "1 enforcing": true about the control's setting, and false about its reach.
+#
+# Tagged as an overlay the tier is tighten-only, so priority stops being the mechanism.
+
+def test_controls_block_survives_a_higher_priority_class_policy_allow() -> None:
+    # THE regression. Class policy at 100 allows; the controls floor at 2 blocks -> block.
+    assert _winner([_r("ns:support", "allow", 100), _r("ns:__controls__", "block", 2, overlay=True)]) == "block"
+
+
+def test_controls_audit_survives_a_class_policy_allow() -> None:
+    # A control on Monitor must keep RECORDING on a class that has its own policy, or the compliance
+    # view under-counts precisely the classes an operator has bothered to write policy for. `audit`
+    # never interrupts a call, so restoring it costs nothing in availability.
+    assert _winner([_r("ns:support", "allow", 100), _r("ns:__controls__", "audit", 2, overlay=True)]) == "audit"
+
+
+def test_controls_never_weaken_a_stricter_class_policy() -> None:
+    # Tighten-only cuts both ways: a control left on Monitor must not downgrade a class policy that
+    # blocks. This is the property that makes the floor safe to turn on for existing customers.
+    assert _winner([_r("ns:support", "block", 100), _r("ns:__controls__", "audit", 2, overlay=True)]) == "block"
+    assert _winner([_r("ns:support", "block", 100), _r("ns:__controls__", "allow", 2, overlay=True)]) == "block"
+
+
+def test_a_pack_weaken_cannot_relax_the_controls_floor() -> None:
+    # __pack_weaken__ exists to dial back a sector pack's own addition. A control the operator
+    # explicitly promoted to Enforce is not a pack's addition, and must survive it — the controls key
+    # lands in the HARD partition of _resolve_overlay, which has no weaken exception.
+    assert _winner([
+        _r("ns:support", "allow", 100),
+        _r("ns:__controls__", "block", 2, overlay=True),
+        _r("ns:__pack_weaken__", "allow", 900),
+    ]) == "block"
+
+
+def test_the_floor_does_not_fire_when_the_control_is_off() -> None:
+    # An `off` control emits no head at all, so it contributes no candidate decision. Modelled here as
+    # an allow: it must leave the class policy exactly as it was.
+    assert _winner([_r("ns:support", "allow", 100), _r("ns:__controls__", "allow", 2, overlay=True)]) == "allow"

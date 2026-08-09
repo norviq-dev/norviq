@@ -284,6 +284,10 @@ def test_the_evaluator_actually_collects_the_controls_scope() -> None:
     """Guards the WIRING. A key nothing looks up is a policy that silently enforces nothing — this
     codebase already ships one of those (`__cluster__:__baseline__`), and it is read on every call
     while no shipped write path can populate it.
+
+    Matches the bare key rather than a quoted literal: the collector builds it with an f-string
+    (`f"{ns}:__controls__"`), so pinning `'"__controls__"'` broke the moment the lookup moved into a
+    helper — a test failing on its own string-matching mechanism rather than on the behaviour.
     """
     import inspect
 
@@ -291,7 +295,32 @@ def test_the_evaluator_actually_collects_the_controls_scope() -> None:
 
     for fn in (mod.OPAEvaluator._collect_candidates, mod.OPAEvaluator._collect_candidates_union):
         src = inspect.getsource(fn)
-        assert '"__controls__"' in src, f"{fn.__name__} does not collect the controls scope"
+        assert "__controls__" in src, f"{fn.__name__} does not collect the controls scope"
+
+
+def test_the_controls_scope_is_collected_as_a_tighten_only_floor() -> None:
+    """The controls tier must be tagged `overlay: True`, which is what makes it a FLOOR.
+
+    It used to be a base tier, and base tiers resolve by highest priority OUTRIGHT — so a class policy
+    at 100 beat the controls tier at 2 and its decision was discarded. Measured live with
+    `pii_detection` at Enforce and one SSN payload: the class WITH a policy was allowed, the class
+    without it was blocked. Writing one unrelated policy switched all fourteen shipped detectors off
+    for that class while the console still read "1 enforcing".
+
+    Tagged as an overlay it can only ever TIGHTEN (`_resolve_with_packs`), and it lands in the HARD
+    partition of `_resolve_overlay`, so a `__pack_weaken__` cannot relax it either.
+    """
+    import inspect
+
+    from norviq.engine import evaluator as mod
+
+    for fn in (mod.OPAEvaluator._collect_candidates, mod.OPAEvaluator._collect_candidates_union):
+        src = inspect.getsource(fn)
+        # the controls append site must carry the overlay flag
+        controls_block = src[src.index("__controls__") - 600 : src.index("__controls__") + 600]
+        assert '"overlay": True' in controls_block, (
+            f"{fn.__name__} collects __controls__ without the overlay flag — it would be outrankable again"
+        )
 
 
 def test_the_controls_scope_is_reserved_from_the_generic_policy_api() -> None:
