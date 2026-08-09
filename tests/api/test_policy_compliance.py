@@ -208,6 +208,35 @@ def test_a_bare_audit_that_is_not_a_shipped_control_is_ignored() -> None:
     assert [c["control_id"] for c in body["controls"]] == ["pii_detection"]
 
 
+def test_engine_faults_are_not_reported_as_non_compliant_traffic() -> None:
+    """`evaluator_error` is minted by the engine when it FAILS, not by a policy.
+
+    Monitor mode softens an operational block exactly like a real one, so these arrive here wearing
+    the same `monitor_would_block:` prefix as a genuine control. Counting them renders an availability
+    incident as a policy decision: a live namespace showed "38 calls would have been blocked" under a
+    heading about policies the customer wrote, when the truth was that the evaluator errored 38 times.
+    /system-health already states it in those terms and says what to do about it.
+    """
+    body = _get([
+        _row("monitor_would_block:evaluator_error"),
+        _row("policy_audit_would_block:evaluator_error"),
+        _row("monitor_would_block:thin_proxy_fail_open"),
+        _row("policy_audit_would_block:deny_sql_injection"),
+    ])
+    assert [c["control_id"] for c in body["controls"]] == ["deny_sql_injection"]
+    # Still counted as examined — they ARE real traffic, they are just not policy evidence.
+    assert body["scanned"] == 4
+
+
+def test_the_infra_exclusion_uses_the_same_list_system_health_renders() -> None:
+    """Two hand-maintained copies would drift, and the drift is silent in both directions: a new fault
+    id would show up as a fake control here, or vanish from the outage banner there."""
+    from norviq.api.routers.system_health import _INFRA_RULE_IDS, INFRA_RULE_IDS
+
+    assert INFRA_RULE_IDS == frozenset(_INFRA_RULE_IDS)
+    assert "evaluator_error" in INFRA_RULE_IDS
+
+
 def test_a_bare_control_id_that_actually_BLOCKED_is_still_not_counted() -> None:
     """The bare-id path must not undo the already-enforcing exclusion: at `deny` the same control
     emits the same bare id with decision=block, and that is not evidence about promoting it."""

@@ -122,6 +122,15 @@ _INFRA_RULE_VARIANTS: dict[str, str] = {
     for variant in (rule_id, *(f"{prefix}{rule_id}" for prefix in WOULD_BLOCK_RULE_PREFIXES))
 }
 
+# Public: the rule ids the ENGINE mints for its own failures, as distinct from any policy decision.
+#
+# Exported because other surfaces must be able to exclude them. Monitor mode softens an operational
+# block exactly like a real one, so these arrive elsewhere wearing the same `monitor_would_block:`
+# prefix as a genuine control — and a compliance view that counts them tells the operator "38 calls
+# would have been blocked" when the truth is "the evaluator errored 38 times". One list, here, next to
+# the copy that explains each one.
+INFRA_RULE_IDS: frozenset[str] = frozenset(_INFRA_RULE_IDS)
+
 
 def _issue(rule_id: str, count: int, last_seen: datetime, namespaces: list[str]) -> dict:
     severity, title, detail, remediation = _INFRA_RULE_IDS[rule_id]

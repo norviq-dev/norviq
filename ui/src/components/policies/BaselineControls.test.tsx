@@ -177,6 +177,54 @@ describe("baseline controls", () => {
     expect(screen.queryByTestId("baseline-impact-pii_detection")).toBeNull();
   });
 
+  it("surfaces non-compliance from the customer's OWN policies, not just the shipped controls", async () => {
+    // The gap this closes: /policy-compliance returns every rule that flagged traffic, but the panel
+    // only read it through `impact.get(c.id)` while iterating the 14 shipped controls, so a rule from
+    // a policy the customer wrote was fetched and silently discarded. That removed the entire point of
+    // trialling a custom policy in audit mode — it records what it WOULD have blocked and the console
+    // showed none of it. Found on a live cluster: a custom egress rule caught a real exfiltration,
+    // the API reported count=1, and there was nowhere in the UI to see it.
+    mockFetch();
+    mockCompliance([
+      {
+        control_id: "deny_shell_execution", count: 1432,
+        agent_classes: [{ name: "cmp-support", count: 1432 }],
+        tools: [{ name: "get_order", count: 1200 }], namespaces: ["chatbot-prod"],
+        first_seen: null, last_seen: null, samples: [],
+      },
+      {
+        control_id: "customer_data_to_untrusted_recipient", count: 3,
+        agent_classes: [{ name: "r2-support", count: 3 }],
+        tools: [{ name: "send_email", count: 3 }], namespaces: ["chatbot-prod"],
+        first_seen: null, last_seen: null, samples: [],
+      },
+    ]);
+    renderPanel({ namespace: "chatbot-prod", isAdmin: true });
+
+    const custom = await screen.findByTestId("custom-rule-customer_data_to_untrusted_recipient");
+    expect(custom.textContent).toContain("3 calls would have been blocked");
+    expect(custom.textContent).toContain("send_email");
+
+    // A shipped control keeps rendering on its OWN row and must not be duplicated into this section —
+    // the two lists answer different questions and share one response.
+    expect(screen.queryByTestId("custom-rule-deny_shell_execution")).toBeNull();
+    expect(await screen.findByTestId("baseline-impact-deny_shell_execution")).toBeInTheDocument();
+  });
+
+  it("hides the custom-rule section entirely when only shipped controls flagged traffic", async () => {
+    // An empty "Your own policies" heading reads as a broken feature, not as "you have none".
+    mockFetch();
+    mockCompliance([{
+      control_id: "pii_detection", count: 7,
+      agent_classes: [{ name: "cmp-support", count: 7 }],
+      tools: [{ name: "send_email", count: 7 }], namespaces: ["chatbot-prod"],
+      first_seen: null, last_seen: null, samples: [],
+    }]);
+    renderPanel({ namespace: "chatbot-prod", isAdmin: true });
+    await screen.findByTestId("baseline-impact-pii_detection");
+    expect(screen.queryByTestId("custom-rule-compliance")).toBeNull();
+  });
+
   it("distinguishes 'compliant' from 'nothing has happened here yet'", async () => {
     // Zero non-compliant out of ZERO traffic is idle; out of 40,000 it is compliant. Rendering an
     // idle namespace as a clean bill of health is the exact lie `scanned` exists to prevent.

@@ -36,6 +36,7 @@ from norviq.api import baseline as baseline_lib
 from norviq.api.auth import get_current_user, read_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
+from norviq.api.routers.system_health import INFRA_RULE_IDS  # engine faults, not policy decisions
 from norviq.api.synthetic import is_synthetic_identity  # the ONE shared classifier (do not fork)
 from norviq.engine.evaluator import WOULD_BLOCK_RULE_PREFIXES
 
@@ -85,10 +86,17 @@ def _control_for(row_decision: str, rule_id: str, known: frozenset[str]) -> str 
 
     A bare id counts only when it names a control we actually ship. `default_allow` and a hand-written
     policy's own rule id are audits too, and neither is evidence about promoting a baseline control.
+
+    INFRA rules are excluded outright. `evaluator_error` and friends are minted by the engine when it
+    fails, not by any policy, and monitor mode softens them exactly like a real block — so they arrive
+    here wearing the same `monitor_would_block:` prefix as a genuine control. Reporting them as
+    non-compliant traffic reads an availability incident as a policy decision ("38 calls would have
+    been blocked" was really "the evaluator errored 38 times"). They already have a home on
+    /system-health, which states the outage in those terms and tells the operator what to do.
     """
     stripped = _strip_prefix(rule_id)
     if stripped is not None:
-        return stripped
+        return None if stripped in INFRA_RULE_IDS else stripped
     if row_decision == "audit" and rule_id in known:
         return rule_id
     return None

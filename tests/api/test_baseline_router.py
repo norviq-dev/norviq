@@ -124,6 +124,38 @@ def test_catalog_surfaces_the_false_positive_caveat() -> None:
     assert "1 in 8" in shell["caveat"]
 
 
+def test_the_chain_depth_caveat_matches_the_adapters_that_actually_report_depth() -> None:
+    """A caveat makes a factual claim about the code, so pin it to the code, not to a string.
+
+    This shipped saying "Only four of the five SDK adapters report call depth today" and then listed
+    the four that do NOT — self-contradictory, and inverted: exactly one adapter opens `depth_scope()`.
+    An operator reading it would conclude the control covers most of their fleet when it covers a
+    fifth of it, which is the opposite of what a caveat is for. Prose review did not catch it (I wrote
+    it and read it several times); tying the number to the filesystem does, and it fails the moment
+    someone adds depth to CrewAI without updating the copy.
+    """
+    from pathlib import Path
+
+    from norviq.api import baseline as baseline_lib
+
+    sdk = Path(baseline_lib.__file__).resolve().parents[1] / "sdk"
+    frameworks = {
+        p.name for p in sdk.iterdir()
+        if p.is_dir() and p.name not in {"core", "client", "__pycache__"} and not p.name.startswith(".")
+    }
+    reporting = {f for f in frameworks if "depth_scope" in (sdk / f / "adapter.py").read_text()}
+
+    assert len(frameworks) == 5, f"adapter count changed: {sorted(frameworks)} — revisit the caveat"
+    assert reporting == {"langchain"}, f"depth coverage changed: {sorted(reporting)} — update the caveat"
+
+    caveat = baseline_lib._CONTROL_COPY["chain_depth_limit"].caveat
+    assert "Only LangChain" in caveat
+    # every non-reporting framework must be named, so the operator can check their own fleet
+    for missing in frameworks - reporting:
+        label = {"semantic_kernel": "Semantic Kernel"}.get(missing, missing.capitalize())
+        assert label.lower() in caveat.lower(), f"{label} reports depth 0 but the caveat does not say so"
+
+
 def test_catalog_reflects_stored_deviations() -> None:
     client, _, _ = _client(rows=[_row("deny_shell_execution", "off"), _row("pii_detection", "deny")])
     body = client.get("/api/v1/baseline/controls", headers=_h()).json()

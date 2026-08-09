@@ -163,7 +163,7 @@ _CONTROL_COPY: dict[str, Control] = {
         "chain_depth_limit",
         "Tool-chain depth",
         "Catches runaway tool-calling chains beyond the configured depth.",
-        caveat="Only four of the five SDK adapters report call depth today; under CrewAI, AutoGen, "
+        caveat="Only LangChain reports call depth today — one adapter of five. Under CrewAI, AutoGen, "
         "LangGraph and Semantic Kernel a nested call reports depth 0, so this control cannot fire "
         "on that traffic even at deny.",
     ),

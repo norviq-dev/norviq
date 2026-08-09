@@ -91,6 +91,25 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
   // clean bill of health is the exact lie this number exists to prevent.
   const scanned = compliance.data?.scanned ?? null;
 
+  // Non-compliance from the customer's OWN policies, which has nowhere else to go.
+  //
+  // /policy-compliance returns every rule that flagged traffic, but this component only ever read it
+  // through `impact.get(c.id)` while iterating the 14 shipped controls — so a rule from a policy the
+  // customer wrote was fetched, stored in the map, and never looked up. That silently removed the
+  // whole point of trialling a custom policy in monitor mode: it records what it WOULD have blocked,
+  // and the console showed none of it. Same data, same request, just rendered.
+  const customRows = useMemo(() => {
+    const baseline = new Set(rows.map((c) => c.id));
+    return (compliance.data?.controls ?? [])
+      .filter((c) => !baseline.has(c.control_id))
+      .map((c) => ({
+        id: c.control_id,
+        count: c.count,
+        classes: c.agent_classes.length,
+        topTool: c.tools[0]?.name ?? "",
+      }));
+  }, [compliance.data, rows]);
+
   const save = async () => {
     if (!canMutate) {
       setMsg(blockedReason);
@@ -233,6 +252,36 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
               <span style={{ fontSize: 11, color: "var(--text-muted)" }}>Read-only — an admin can change these.</span>
             )}
           </div>
+
+          {customRows.length > 0 && (
+            <div data-testid="custom-rule-compliance" style={{ marginTop: 20, paddingTop: 14, borderTop: "1px solid var(--border)" }}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>Your own policies</div>
+              <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 2, marginBottom: 10, maxWidth: 620 }}>
+                Rules from policies you wrote that flagged real traffic without stopping it — because the
+                policy is in <b>audit</b> mode, or this namespace is in Monitor. Set the mode on the policy
+                itself in Policy Catalog; the toggles above only govern the shipped controls.
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {customRows.map((c) => (
+                  <div
+                    key={c.id}
+                    data-testid={`custom-rule-${c.id}`}
+                    style={{
+                      display: "flex", gap: 12, alignItems: "baseline", justifyContent: "space-between",
+                      padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 8,
+                    }}
+                  >
+                    <code style={{ fontSize: 12 }}>{c.id}</code>
+                    <div style={{ fontSize: 11, color: "var(--text-secondary)", flexShrink: 0 }}>
+                      <b>{c.count.toLocaleString()}</b> call{c.count === 1 ? "" : "s"} would have been blocked
+                      {c.classes > 0 && ` — ${c.classes} agent class${c.classes === 1 ? "" : "es"}`}
+                      {c.topTool && `, mostly ${c.topTool}`}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </>
       )}
     </Panel>
