@@ -419,3 +419,57 @@ lesson, the rule is now two-sided:
 
 * a block with **no audit row** is a degraded proxy or a schema refusal, never a defence;
 * a block with an **empty rule_id** is a gate refusal, not a policy decision.
+
+---
+
+# Framework matrix — what each adapter actually sends to the engine
+
+Measured at the interceptor boundary, not by driving five chat UIs: five UIs would measure five LLMs'
+willingness to comply, which is a property of Groq, not of this product.
+
+| framework | call_depth | tool_params fidelity |
+|---|---|---|
+| langchain | **authoritative** (`depth_scope()`) | passes through |
+| langgraph | always 0 | normalised — JSON string parsed, non-dict wrapped (**SEED-05, fixed**) |
+| crewai | always 0 | passes through |
+| autogen | always 0 | passes through |
+| semantic_kernel | always 0 | passes through |
+
+**SEED-04 stands and is now precisely quantified:** one adapter of five opens `depth_scope()`, so
+`chain_depth_limit` cannot fire on 80% of framework traffic even at Enforce. The console says exactly
+this on the control's caveat, which is the part that matters.
+
+**A false positive of my own, recorded because the correction is the useful part.** My first sweep
+flagged `semantic_kernel` as carrying SEED-05, on the strength of an `else {}` in its argument
+extractor. It does not: `KernelArguments` is a `dict` subclass, so `dict(arguments)` is correct, the
+`else {}` is the genuinely-empty case, and the non-iterable path already has a test
+(`_UnIterableArguments`). I was one command from "fixing" working code. A string-match heuristic over
+source is evidence to check, never a finding.
+
+---
+
+# Consolidated tracker — everything open after the watched run
+
+## Fixed during this campaign
+BUG-011 · BUG-014 · BUG-016 · BUG-022 · BUG-023 · BUG-024 · BUG-026 · BUG-028 · SEED-05 ·
+C2-002 · C2-003 · C2-004 · C2-005 · C2-008 · C2-009 · plus the audit-log counter and the
+remediation-counts-the-wrong-violations defect found by watching.
+
+## Open — batch these
+| id | severity | what |
+|---|---|---|
+| C2-011 | high | `export_customers` to any URL is ungoverned — SSRF to `169.254.169.254` and a drop host both `allow` |
+| C2-013 | high | no destination-keyed control exists for tools OUTSIDE a hand-written allowlist (the generalisation of C2-011) |
+| C2-012 | medium | homoglyph tool name (`sеnd_email`, U+0435) matches no tool-name control |
+| C2-014 | medium | oversized payload (20 KB) — `param_bytes` fact exists, no control consumes it |
+| C2-015 | medium | schema violation via an extra argument (`__proto__`) is forwarded; only type mismatch is refused |
+| C2-016 | low | supply-chain phrasing in a query param does not trip `llm05_supply_chain` (it is tool-name keyed) |
+| SEED-04 | major | `call_depth` is 0 on four of five adapters |
+| BUG-004/005/006 | major | the false-positive family: `;` in prose, ISO dates as SSNs, `[A-Z]{2}\d{7}` |
+| BUG-013 · BUG-018 | major | both plans rejected by adversarial review as unsafe as written |
+| BUG-009/010/012/015/017/019/020/021/027 | mixed | untouched this run |
+
+## Caught correctly — no action
+Unicode zero-width AND Cyrillic homoglyph inside SQL both tripped `deny_sql_injection`; nested
+double-base64 tripped `base64_decoded_threat`; indirect injection via tool output tripped
+`llm01_prompt_injection`; two benign controls stayed `allow` with no false positive.
