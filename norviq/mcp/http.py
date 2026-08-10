@@ -110,6 +110,8 @@ class HttpProxy:
             mode=settings.mcp_pin_mode,
         )
         self._lock = asyncio.Lock()
+        # The control-plane recovery loop (BUG-026). None until a load actually fails.
+        self._pin_retry_task: asyncio.Task | None = None
 
     async def _install_pin_store(self) -> None:
         """Swap in the durable, cross-pod store before the listener accepts anything.
@@ -118,9 +120,23 @@ class HttpProxy:
         Failure to reach the control plane degrades to the local store WITH A LOUD LOG, matching the
         documented posture in `ControlPlanePinStore`: Gate B still evaluates every call, so what is
         lost is cross-pod drift detection, not enforcement. Silence would be the unacceptable part.
+
+        On failure it now KEEPS TRYING. This ran once, and a proxy that started while the control
+        plane was briefly unavailable stayed degraded for its whole process lifetime — no retry, no
+        second chance, and the only evidence one line in a log at startup. Observed for real: three
+        proxies ran for eleven hours across several API rollouts, lost the control plane, and refused
+        every `tools/call` at Gate A. Nothing reached the engine, nothing reached the audit log, and
+        the chat UI showed a red BLOCK badge — so a red-team run would have been scored as a defence
+        that never happened. A restart was the only cure and nothing said so.
         """
         if self._pin_store_kind != "control-plane":
             return
+        if await self._try_install_pin_store():
+            return
+        self._schedule_pin_store_retry()
+
+    async def _try_install_pin_store(self) -> bool:
+        """One attempt. True when the durable store is live and installed."""
         namespace = getattr(settings, "namespace", "") or ""
         store = ControlPlanePinStore(
             namespace=namespace,
@@ -138,10 +154,34 @@ class HttpProxy:
                 "nrvq.mcp.http.pin_store_degraded",
                 error=str(exc), server_id=self._server_id, code="NRVQ-MCP-5046",
                 hint="cross-pod drift detection is unavailable until the control plane is reachable; "
-                     "enforcement is unaffected",
+                     "enforcement is unaffected; retrying in the background",
             )
-            return
+            return False
         self._pins = PinRegistry(store=store, mode=settings.mcp_pin_mode)
+        return True
+
+    def _schedule_pin_store_retry(self) -> None:
+        """Start the recovery loop, once. Idempotent so repeated failures cannot fan out tasks."""
+        if self._pin_retry_task is not None and not self._pin_retry_task.done():
+            return
+        self._pin_retry_task = asyncio.create_task(self._retry_pin_store())
+
+    async def _retry_pin_store(self) -> None:
+        """Re-attempt until the control plane answers, then say so out loud.
+
+        The recovery log matters as much as the recovery: an operator who saw the degraded line needs
+        to know it ended, and "no further errors" is not evidence of that.
+        """
+        delay = max(1, int(settings.mcp_pin_refresh_s))
+        while True:
+            await asyncio.sleep(delay)
+            if await self._try_install_pin_store():
+                log.info(
+                    "nrvq.mcp.http.pin_store_recovered",
+                    server_id=self._server_id, code="NRVQ-MCP-5047",
+                    hint="cross-pod drift detection is live again",
+                )
+                return
 
     # ------------------------------------------------------------------ wiring
     async def _firewall_for_caller(self) -> McpFirewall:
@@ -345,6 +385,8 @@ class HttpProxy:
         try:
             await uvicorn.Server(config).serve()
         finally:
+            if self._pin_retry_task is not None:
+                self._pin_retry_task.cancel()
             await self._client.aclose()
             with contextlib.suppress(Exception):
                 await self._engine.close()
