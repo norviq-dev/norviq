@@ -3,6 +3,7 @@
 
 """LangGraph adapter for Norviq tool interception."""
 
+import json
 from typing import Any
 
 import structlog
@@ -57,6 +58,35 @@ def _apply_output_dlp(result: Any) -> None:
         log.warning("nrvq.langgraph.output_dlp_failed", error=str(exc), code="NRVQ-SDK-1043")
 
 
+def _normalise_tool_args(args: Any) -> dict[str, Any]:
+    """Whatever LangGraph handed us, as something the engine can actually inspect.
+
+    This was ``args if isinstance(args, dict) else {}``, and the else branch was the whole bug: a tool
+    call in the OpenAI shape carries its arguments as a JSON STRING, so the payload was replaced with
+    an empty dict before it ever reached the interceptor. Every per-argument control walks
+    ``tool_params`` -- the PII, secret, SQL and shell detectors, every ``param_paths`` clause, the
+    destination and recipient facts -- so under LangGraph all of them were inert while the console
+    showed a clean allow. A framework that looks compliant because nothing was inspected is the worst
+    of the three possible outcomes, and it is the one a campaign scores as a pass.
+
+    A non-dict that is not JSON is WRAPPED rather than dropped. The argument NAME is unknowable there,
+    but the content is not, and the content detectors walk values regardless of key -- so a secret
+    passed as a bare string is still caught. Dropping it silently was the failure; inventing a
+    plausible key name would be a different lie.
+    """
+    if isinstance(args, dict):
+        return args
+    if args is None:
+        return {}
+    if isinstance(args, str):
+        try:
+            parsed = json.loads(args)
+        except (ValueError, TypeError):
+            return {"_nrvq_unparsed_args": args}
+        return parsed if isinstance(parsed, dict) else {"_nrvq_unparsed_args": parsed}
+    return {"_nrvq_unparsed_args": args}
+
+
 class GuardedToolNode:
     """LangGraph ToolNode wrapper with Norviq policy enforcement."""
 
@@ -94,11 +124,11 @@ class GuardedToolNode:
             return await self._node.ainvoke(state)
         for call in calls:
             name = str(_tool_call_field(call, "name", ""))
-            args = _tool_call_field(call, "args", {})
+            args = _normalise_tool_args(_tool_call_field(call, "args", {}))
             try:
                 await self._interceptor.intercept_or_raise(
                     tool_name=name,
-                    tool_params=args if isinstance(args, dict) else {},
+                    tool_params=args,
                     session_id=self._session_id,
                     framework="langgraph",
                 )

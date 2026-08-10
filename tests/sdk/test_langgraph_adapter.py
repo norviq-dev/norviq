@@ -15,6 +15,7 @@ from norviq.exceptions import NorviqBlockError
 from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.langchain.adapter import declared_tool_schemas, forget_declared_tool_schemas
 from norviq.sdk.langgraph.adapter import GuardedToolNode
+from norviq.sdk.langgraph.adapter import _normalise_tool_args
 
 
 class _FakeToolNode:
@@ -281,3 +282,38 @@ def test_guarded_tool_node_works_as_state_graph_node() -> None:
     assert compiled is not None
     assert prebuilt is not None
     assert messages is not None
+
+
+# --- SEED-05: LangGraph sent {} for anything that was not already a dict -----------------------------
+#
+# A tool call in the OpenAI shape carries its arguments as a JSON STRING. `args if isinstance(args,
+# dict) else {}` replaced the whole payload with an empty dict before the interceptor saw it, so every
+# per-argument control was inert under this framework while the console showed a clean allow. That is
+# worse than an outright gap: a campaign scores it as a pass.
+
+
+def test_a_json_string_payload_reaches_the_engine() -> None:
+    assert _normalise_tool_args('{"to": "x@evil.example", "body": "SSN 123-45-6789"}') == {
+        "to": "x@evil.example", "body": "SSN 123-45-6789",
+    }
+
+
+def test_a_dict_payload_is_untouched() -> None:
+    assert _normalise_tool_args({"a": 1}) == {"a": 1}
+
+
+def test_an_unparseable_payload_is_wrapped_not_dropped() -> None:
+    """The argument NAME is unknowable, but the content is not — and the content detectors walk values
+    regardless of key, so a secret passed as a bare string is still caught. Dropping it silently was
+    the failure; inventing a plausible key name would be a different lie."""
+    out = _normalise_tool_args("SSN 123-45-6789")
+    assert list(out.values()) == ["SSN 123-45-6789"]
+
+
+def test_a_json_scalar_or_list_is_wrapped_too() -> None:
+    assert list(_normalise_tool_args('["a@evil.example"]').values()) == [["a@evil.example"]]
+    assert list(_normalise_tool_args("42").values()) == [42]
+
+
+def test_absent_args_stay_empty_rather_than_inventing_a_key() -> None:
+    assert _normalise_tool_args(None) == {}
