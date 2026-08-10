@@ -162,6 +162,18 @@ _INFRA_RULE_VARIANTS: dict[str, str] = {
 INFRA_RULE_IDS: frozenset[str] = frozenset(_INFRA_RULE_IDS)
 
 
+def infra_rule_for(rule_id: str) -> str | None:
+    """The bare infrastructure rule a stored rule_id names, or None.
+
+    One resolver, because the "is this an engine fault" question is now asked from three places and
+    each fork got the softening wrong in its own way: this route matched exactly and went dark under
+    monitor, /audit/stats matched exactly and undercounted engine errors, and /policy-compliance
+    reported them as policy non-compliance. The stored spelling depends on whether the verdict was
+    softened, which is a detail none of the callers should have to know.
+    """
+    return _INFRA_RULE_VARIANTS.get(rule_id)
+
+
 def _issue(rule_id: str, count: int, last_seen: datetime, namespaces: list[str]) -> dict:
     severity, title, detail, remediation = _INFRA_RULE_IDS[rule_id]
     return {

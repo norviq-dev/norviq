@@ -703,6 +703,42 @@ def test_stats_counts_would_blocks_in_monitor_mode() -> None:
         client.close()
 
 
+def test_stats_engine_errors_survive_monitor_mode_softening() -> None:
+    """BUG-016. `engine_errors` matched `evaluator_error` EXACTLY.
+
+    The moment a namespace ran monitor mode the stored id became
+    `monitor_would_block:evaluator_error`, so the Overview's engine-health number read a confident 0
+    during an actual engine fault — the softening that protects customer traffic also hid the reason
+    it was needed. Timeouts and the unhandled-fault path were never counted at all, in any mode.
+    """
+    def _row(decision: str, rule_id: str):
+        return SimpleNamespace(
+            id=uuid4(), event_id=uuid4(), tool_name="execute_sql", decision=decision,
+            agent_id="spiffe://example/ns/default/sa/a", agent_class="report-gen", namespace="default",
+            rule_id=rule_id, reason="test", framework="langchain", trust_score=0.5, latency_ms=10.0,
+            timestamp_utc=datetime.now(timezone.utc), payload={},
+        )
+
+    rows = [
+        _row("block", "evaluator_error"),                          # hard, already counted
+        _row("audit", "monitor_would_block:evaluator_error"),      # softened — was invisible
+        _row("block", "evaluator_timeout"),                        # never counted at all
+        _row("audit", "monitor_would_block:evaluator_timeout"),
+        _row("block", "evaluator_fallback"),
+        _row("block", "deny_sql_injection"),                       # a real policy block is NOT a fault
+        _row("allow", "default_allow"),
+    ]
+    client = _client()
+    _override_session(client, FakeSession(rows))
+    try:
+        stats = client.get("/api/v1/audit/stats", headers=_auth_headers()).json()
+        assert stats["engine_errors"] == 5, stats
+        # and a policy doing its job must never inflate an engine-health number
+        assert stats["blocked"] == 4, stats
+    finally:
+        client.close()
+
+
 def test_volume_bucket_width_follows_range() -> None:
     """Bucket WIDTH must follow `range`, not always be an hour.
 

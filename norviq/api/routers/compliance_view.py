@@ -36,7 +36,7 @@ from norviq.api import baseline as baseline_lib
 from norviq.api.auth import get_current_user, read_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
-from norviq.api.routers.system_health import INFRA_RULE_IDS  # engine faults, not policy decisions
+from norviq.api.routers.system_health import infra_rule_for  # one resolver, shared with /audit/stats
 from norviq.api.synthetic import is_synthetic_identity  # the ONE shared classifier (do not fork)
 from norviq.engine.evaluator import WOULD_BLOCK_RULE_PREFIXES
 
@@ -96,7 +96,7 @@ def _control_for(row_decision: str, rule_id: str, known: frozenset[str]) -> str 
     """
     stripped = _strip_prefix(rule_id)
     if stripped is not None:
-        return None if stripped in INFRA_RULE_IDS else stripped
+        return None if infra_rule_for(stripped) is not None else stripped
     if row_decision == "audit" and rule_id in known:
         return rule_id
     return None

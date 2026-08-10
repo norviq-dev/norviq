@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from norviq.api.auth import get_current_user, read_namespace, scoped_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
+from norviq.api.routers.system_health import infra_rule_for  # ONE resolver for 'is this an engine fault'
 from norviq.api.synthetic import audit_row_is_non_real, is_synthetic_identity  # the ONE shared synthetic/probe classifier (do not fork)
 from norviq.config import settings
 from norviq.engine.evaluator import WOULD_BLOCK_RULE_PREFIXES  # softened-would-block rule_id prefixes (do not fork)
@@ -246,7 +247,12 @@ async def audit_stats(
             blocked += n
         if str(rule_id or "").startswith(WOULD_BLOCK_RULE_PREFIXES):
             would_blocked += n
-        if rule_id == "evaluator_error":
+        # Prefix-aware, and across the whole engine-fault family rather than one id. It matched
+        # `evaluator_error` EXACTLY, so the moment a namespace ran monitor mode the stored id became
+        # `monitor_would_block:evaluator_error` and the engine-health signal on the Overview read zero
+        # during an actual engine fault — the softening that protects customer traffic also hid the
+        # reason it was needed. Timeouts and the unhandled-fault path were never counted at all.
+        if infra_rule_for(str(rule_id or "")) is not None:
             engine_errors += n
         tool_counts[str(tool_name or "")] = tool_counts.get(str(tool_name or ""), 0) + n
         latency_sum += float(lat_sum or 0.0)
