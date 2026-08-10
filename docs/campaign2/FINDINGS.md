@@ -937,3 +937,43 @@ random bytes you get from base64-decoding an ordinary English sentence is no evi
 The fix is already written and already in the same file, being used correctly by the rule next door.
 Expected effect: the base64 FP curve collapses to ~0 while every real encoded payload
 (`base64("rm -rf /")` and friends) still matches, because those are what the multi-byte list is made of.
+
+## C2-019 — VERIFIED LIVE (2026-08-10)
+
+Webhook `webhook-50ebb70e` deployed to AKS; workload pod rolled to pick up the new admission.
+
+| check | result |
+|---|---|
+| `NRVQ_API_TOKEN` | `secretKeyRef -> norviq-sidecar-finance-agent/NRVQ_API_TOKEN` |
+| `NRVQ_CLIENT_CERT_PEM` | `secretKeyRef -> …/NRVQ_CLIENT_CERT_PEM` |
+| `NRVQ_CLIENT_KEY_PEM` | `secretKeyRef -> …/NRVQ_CLIENT_KEY_PEM` |
+| `NRVQ_API_CA_PEM` | literal, 1204 bytes — correct, a CA cert is public |
+| Secret created by the webhook | 3 keys + `norviq.io/minted-at: 2026-08-10T22:19:27Z` |
+| **private keys in the pod spec** | **0** (was 1 the same morning — I printed one out of that spec) |
+| sidecar startup | `mtls_enabled` -> `ready`, **0 restarts** |
+| `view` ClusterRole | pods=True, secrets=False |
+
+The startup log is the part that matters beyond shape: `remote_evaluator.mtls_enabled` means the
+client cert AND private key were read out of the Secret and used to build a working TLS context, and
+`remote_evaluator.ready` means the token authenticated. A Secret-delivered credential that merely
+existed but did not work would have shown as a running pod failing every call closed.
+
+**Still unverified live:** C2-023, C2-022, C2-012 (all carried in the api/engine images) and C2-020
+(api). Those three images did not roll — see the deploy note below.
+
+### The deploy conflict, and why it is worth remembering
+
+`helm upgrade` to revision 34 **failed** on a server-side-apply field-manager conflict:
+
+```
+conflict with "kubectl-set" using apps/v1: .spec.template.spec.containers[name="api"].image
+```
+
+An earlier out-of-band `kubectl set image` on api/engine/ui made `kubectl-set` the owning field
+manager for `.image`, and helm will not take a field back from another manager. The webhook was
+untouched by that, so it rolled cleanly — which is why the highest-severity fix could be verified
+while the other three could not.
+
+This is also the second time this campaign that out-of-band cluster state has bitten: the same three
+Deployments were running images helm had no record of. Worth a rule: **deploy through helm or through
+kubectl, not both.**

@@ -168,10 +168,18 @@ directly.
       - **Rotation survives** because the Secret is rewritten every admission and its name is
         deterministic (hash suffix guards collisions). Created-if-absent would have broken rotation.
 
-      > **STILL OWED — verify on a live cluster.** Needs a webhook rebuild + deploy → **ask San**.
-      > Check: injected pod's env uses `secretKeyRef`; the Secret exists in the pod's namespace;
-      > `kubectl auth can-i get secrets --as=system:serviceaccount:...` reflects the namespaced Role;
-      > a pod replacement still yields a NEW token with a later `iat` (rotation regression).
+      > **✅ VERIFIED LIVE on AKS, 2026-08-10** (webhook `webhook-50ebb70e`, pod
+      > `analytics/finance-agent-8458567cbf-287q6`):
+      > - `NRVQ_API_TOKEN`, `NRVQ_CLIENT_CERT_PEM`, `NRVQ_CLIENT_KEY_PEM` → all `secretKeyRef` ->
+      >   `norviq-sidecar-finance-agent`. `NRVQ_API_CA_PEM` correctly still a literal.
+      > - Secret created by the webhook with exactly those 3 keys + a `norviq.io/minted-at` annotation.
+      > - **`grep -c "BEGIN RSA PRIVATE KEY"` on the pod spec = 0** (it was 1 that morning — I printed
+      >   a full key out of that same spec).
+      > - Credential WORKS, not just present: sidecar logged `remote_evaluator.mtls_enabled` then
+      >   `remote_evaluator.ready`, 0 restarts. The cert+key were read from the Secret and built a
+      >   live TLS context.
+      > - `view` ClusterRole on this cluster: pods=True, secrets=False -> the exposure is closed.
+      > - RBAC Roles present in `analytics`, `chatbot-prod`, `default` with `[get create update]`.
 
 - [ ] **Revocation is still missing (part of C2-019, NOT fixed).** `norviq/api/session_revocation.py`
       exists but its only caller is `auth_login.py:174` (interactive logout). No admin revoke endpoint,
