@@ -44,29 +44,34 @@ Resume the attack campaign after tier 2 lands (see Work queue).
 
 Tiers are ordered. Do not reorder without a reason recorded here.
 
-### Tier 1 — safety invariants (small, unambiguous)
+### Tier 1 — safety invariants — ✅ DONE, commit `e741d6e`
 
-- [ ] **`_gate_answer` breaks "monitor never interrupts".** `norviq/mcp/firewall.py:1477` tests
-      `decision.decision == "allow"`. Its three siblings (`:821`, `:881`, `:921`) use
-      `decision.is_allowed()`, which admits `("allow", "audit")` —
-      `norviq/sdk/core/decisions.py:35-37`. `tests/mcp/test_firewall.py:127-132` states the doctrine:
-      "`audit` is an ALLOW that is recorded. Treating it as a block would break visibility-only mode."
-      So on the MCP **answer plane** an `audit` decision is refused: monitor mode interrupts customer
-      traffic, and a monitor-softened engine fault (`monitor_would_block:evaluator_timeout`, decision
-      `audit`) is refused with text blaming "policy". Reached unconditionally from `firewall.py:409-413`
-      on any client message carrying `inputResponses`.
-      **Fix:** use `is_allowed()`, add a test covering an `audit` decision on the answer plane, and
-      **sweep the repo for other forked allow-checks** — this is the copy-only-one-copy pattern.
-- [ ] **C2-002 is incomplete.** `norviq/api/routers/compliance_view.py:120` honours a bare audit
-      rule_id only when it is one of the 14 shipped controls. Verified: `pii_detection`/audit →
-      counted; `refund_over_limit`/audit → **dropped**. The Visual Builder ships `audit` as a
-      first-class rule decision (`ui/src/components/policies/BuilderSheet.tsx:603`,
-      `ui/src/lib/builderCompile.ts:264`), so a customer trialling their OWN policy in monitor mode
-      emits exactly that shape — and the "Your own policies" section added for C2-002
-      (`ui/src/components/policies/BaselineControls.tsx`) renders zero for the case it exists to serve.
-      **Fix:** the exclusion is correct for the blast-radius question the docstring describes; the
-      mistake is one filter serving two opposite questions. Add a **second bucket** (same shape as
-      `_enforced_violation_for`), do not change the existing filter.
+All three were the same shape: a surface deciding on the literal decision string instead of on
+whether the call proceeds. **2713 passed, ruff clean, UI tsc+eslint clean.**
+
+- [x] **`_gate_answer`** (`norviq/mcp/firewall.py`) now uses `is_allowed()`. It was the one gate of
+      four in that file comparing the string by hand. There were **no answer-plane tests at all**,
+      which is how it survived; added four, and verified the two `audit` ones FAIL against the old
+      line while the two enforcement ones pass either way.
+- [x] **`_evaluate_step`** (`norviq/engine/attack_graph.py`) now maps `block|escalate → would_block`
+      and `allow|audit → would_allow`. `audit` used to fall into the `no_policy` tail — the least
+      alarming bucket — which under the all-monitor shipped default meant a control that fired on a
+      dangerous call was reported as "nothing evaluated this", and silently disarmed the
+      dangerous-tool risk check at `:416`. Verified the new tests fail against the old mapping.
+- [x] **C2-002 completed** (`norviq/api/routers/compliance_view.py`): new `_own_policy_control_for`
+      bucket, so a customer's own monitor-mode rule is reported. The existing filter was NOT loosened
+      — the blast-radius number stays honest. The response now carries **`origin: "baseline"|"custom"`**
+      (also added to `ComplianceControl` in `ui/src/api/client.ts`, optional for back-compat).
+- [x] **Sweep done.** Four hand-comparisons to `"allow"` exist in `norviq/`. Two were bugs (above).
+      The other two are DELIBERATE — do not "fix" them:
+      - `evaluator.py:788` `_maybe_rate_limit` — must gate on a genuine resource grant; the docstring
+        says never to flip block/escalate/audit into a throttle.
+      - `evaluator.py:1009` trust override — deliberately does not escalate a call a control already
+        flagged, which would turn a monitor-mode observation into an interruption.
+
+**Follow-up worth doing (not blocking):** `BaselineControls.tsx:104` still derives custom rows via
+`!baseline.has(c.control_id)`. That is correct and still works, but it could now read `origin`
+directly.
 
 ### Tier 2 — the instrument (must land before any further attack testing)
 
@@ -207,3 +212,7 @@ Append one line per landed change. Newest last.
   `non_policy_rule_for`). Filed C2-022, C2-023. Rate-abuse family measured live.
 - 2026-08-10 — backlog reconciliation run; two overturns verified and promoted to Tier 1. Decision
   taken: stop attack testing, fix first.
+- 2026-08-10 `e741d6e` — **Tier 1 DONE.** `_gate_answer` uses `is_allowed()`; attack-graph step
+  verdict maps on whether the call proceeds; `_own_policy_control_for` bucket + `origin` field.
+  Each fix verified to fail its own test when reverted. 2713 passed, all gates clean.
+  **NEXT: Tier 2 — C2-023 then C2-022.**

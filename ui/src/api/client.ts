@@ -273,6 +273,14 @@ export async function saveBaselineControls(
 
 export type ComplianceControl = {
   control_id: string;
+  /** Whether this row is one of the 14 shipped controls or a rule from a policy the customer wrote.
+   *
+   *  Stated by the server rather than re-derived here. Only a shipped control has a Promote action
+   *  behind it, so a consumer that guesses wrong offers a button that cannot work — and the endpoint
+   *  now deliberately returns both populations, because a customer trialling their own policy in
+   *  monitor mode had no other way to see what it caught. Optional for now: a pre-`origin` API still
+   *  answers this endpoint, and `baseline.has(control_id)` below remains a correct fallback. */
+  origin?: "baseline" | "custom";
   /** WOULD-block population: what promoting this control would newly break. */
   count: number;
   /** Violations it ALREADY refused. The two answer opposite questions — see compliance_view.py. */

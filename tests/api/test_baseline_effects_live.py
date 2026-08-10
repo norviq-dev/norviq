@@ -33,7 +33,16 @@ _QUERY_RULE = "data.norviq.presets.strict.rule_id"
 # containing '|' and the shell rule then matches.
 _SQL_ATTACK = {"tool_name": "run_report", "tool_params": {"q": "drop table users"}}
 _BENIGN = {"tool_name": "get_order", "tool_params": {"order_id": "ORD-002"}}
-_FALSE_POSITIVE = {"tool_name": "get_order", "tool_params": {"order_id": "fKtHF4vU"}}
+# A legitimate lookup that a shipped control misfires on. The VEHICLE changed once, deliberately:
+# it used to be `order_id="fKtHF4vU"`, an 8-char identifier that `deny_shell_execution` misfired on
+# at roughly 1 in 8 — because the decoded arm of that rule matched bare shell metacharacters against
+# base64-decoded bytes. C2-023 fixed the detector, so that payload is correctly allowed now and no
+# longer demonstrates anything.
+#
+# Retargeted to the date->SSN misfire (BUG-005), which is still open and is 100% deterministic rather
+# than 1-in-8: `pii_value_detected` matches `^(\d{3}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2}|[A-Z]{2}\d{7})$`,
+# so EVERY ISO-8601 date parameter is classified as a US SSN. A stronger fixture for the same claim.
+_FALSE_POSITIVE = {"tool_name": "get_order", "tool_params": {"delivery_date": "2026-08-10"}}
 
 
 def _compile_to_disk(effect: str, tmp: Path) -> Path:
@@ -90,25 +99,28 @@ def test_a_benign_call_is_allowed_under_every_effect(effect: str) -> None:
 def test_the_shell_false_positive_is_recorded_not_dropped_under_the_default() -> None:
     """The result this feature exists to produce.
 
-    `get_order(order_id="fKtHF4vU")` is a legitimate lookup that `deny_shell_execution` misfires on,
-    at roughly 1 in 8 for identifiers of this shape. Under the OLD shipped posture — strict, block
-    mode, on every tenant namespace — that call was dropped and the audit trail blamed shell
-    injection. Under the new default it proceeds and is recorded as non-compliant instead.
+    `get_order(delivery_date="2026-08-10")` is a legitimate lookup that `pii_detection` misfires on,
+    for EVERY ISO-8601 date (BUG-005, still open). Under the OLD shipped posture — strict, block mode,
+    on every tenant namespace — that call was dropped and the audit trail blamed an SSN. Under the new
+    default it proceeds and is recorded as non-compliant instead.
 
     This does not fix the detector; the false positive is tracked separately. It makes it non-fatal,
     which is the difference between a product a customer can install and one they cannot.
+
+    The fixture moved from the shell misfire to the date misfire when C2-023 fixed the former — see
+    the `_FALSE_POSITIVE` comment. The claim under test is unchanged.
     """
     with tempfile.TemporaryDirectory() as td:
         monitor = _compile_to_disk("monitor", Path(td))
         assert _eval(monitor, _QUERY_DECISION, _FALSE_POSITIVE) == "audit"
-        assert _eval(monitor, _QUERY_RULE, _FALSE_POSITIVE) == "deny_shell_execution"
+        assert _eval(monitor, _QUERY_RULE, _FALSE_POSITIVE) == "pii_detection"
 
         # And the escape hatch works: an operator who cannot tolerate the noise turns that one control
         # off while keeping the rest ENFORCING. Every other control is named explicitly here, because
         # a partial map defaults the unnamed ones to `monitor` (see the next test) — which would make
         # the isolation claim below pass for the wrong reason.
         effects = {cid: "deny" for cid in baseline.control_ids("strict")}
-        effects["deny_shell_execution"] = "off"
+        effects["pii_detection"] = "off"
         off = Path(td) / "shell_off.rego"
         off.write_text(baseline.compile("strict", effects), encoding="utf-8")
 
@@ -128,7 +140,9 @@ def test_a_partial_effect_map_leaves_the_rest_at_the_default() -> None:
     """
     with tempfile.TemporaryDirectory() as td:
         rego = Path(td) / "partial.rego"
-        rego.write_text(baseline.compile("strict", {"deny_shell_execution": "off"}), encoding="utf-8")
+        # The named control must be the one _FALSE_POSITIVE actually trips, or "the one named" is
+        # allowed for the wrong reason and this test proves nothing.
+        rego.write_text(baseline.compile("strict", {"pii_detection": "off"}), encoding="utf-8")
         assert _eval(rego, _QUERY_DECISION, _FALSE_POSITIVE) == "allow"     # the one named
         assert _eval(rego, _QUERY_DECISION, _SQL_ATTACK) == "audit"        # the rest: default monitor
 

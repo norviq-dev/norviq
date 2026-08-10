@@ -187,8 +187,28 @@ sql_syntax_context(val, pattern) { startswith(trim_space(val), pattern) }
 sql_syntax_context(val, _) { contains(val, ";") }
 
 # Shell injection
+#
+# TWO lists, because raw text and DECODED BYTES are not the same evidence and must not share a
+# pattern set. A "|" in a parameter a human typed is weak-but-real evidence of a shell pipe. A "|"
+# among the ~9 bytes you get from base64-decoding an ordinary English phrase is no evidence at all —
+# it is one byte in 256 coming up 0x7C.
+#
+# This is measured, not theoretical. `shell_injection_detected`'s decoded arm used to reuse the RAW
+# list (then named `shell_patterns_decoded`, one transposition away from the correct
+# `decoded_shell_patterns` below and easily mistaken for it), and that single reuse produced the whole
+# base64 false-positive curve both red-team campaigns recorded: 4.0% at 8 chars, 32.0% at 64, 12.7%
+# overall, and 2.5% reproduced on plain English prose.
+#
+# Traced end to end: {"note": "benign call 18"} -> b64_candidate_clean strips the spaces ->
+# `benigncall18` clears the >=8 length gate, the charset gate and the not-all-digits gate -> decodes
+# to 6d e9 e2 82 77 1a 96 5d 7c -> the final byte 0x7C is "|" -> deny_shell_execution. The customer
+# wrote a sentence; the control reported a shell injection.
+#
+# So the decoded arm matches MULTI-BYTE indicators only — the same list the dedicated
+# `base64_decoded_threat` rule below already uses correctly, which is why THAT rule never had this
+# problem. A real encoded payload still matches: base64("rm -rf /") decodes to "rm -rf /". Bare
+# metacharacters stay on the raw arm, where they mean something.
 shell_patterns = ["|", ";", "$(", "`", "rm -rf", "/etc/passwd", "/etc/shadow"]
-shell_patterns_decoded = ["|", "$(", "`", "rm -rf", "/etc/passwd", "/etc/shadow", "nc -e", "wget ", "curl "]
 
 shell_injection_detected {
     val := security_scan_texts_raw[_]
@@ -197,7 +217,7 @@ shell_injection_detected {
 }
 shell_injection_detected {
     val := lower(security_scan_decoded_raw[_])
-    pattern := shell_patterns_decoded[_]
+    pattern := decoded_shell_patterns[_]
     contains(val, pattern)
 }
 

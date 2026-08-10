@@ -182,8 +182,22 @@ sql_syntax_context(val, pattern) { startswith(trim_space(val), pattern) }
 sql_syntax_context(val, _) { contains(val, ";") }
 
 # Shell injection
+#
+# TWO lists, because raw text and DECODED BYTES are not the same evidence. A "|" in a parameter a
+# human typed is weak-but-real evidence of a shell pipe; a "|" among the ~9 bytes you get from
+# base64-decoding an ordinary English phrase is one byte in 256 coming up 0x7C, and no evidence at all.
+#
+# The decoded arm used to reuse the RAW list, and that single reuse produced the entire base64
+# false-positive curve both red-team campaigns measured (4.0% @8 chars, 32.0% @64, 12.7% overall).
+# Traced to the byte: {"note": "benign call 18"} -> candidate `benigncall18` -> decodes to bytes
+# ending 0x7C -> deny_shell_execution on a plain English sentence.
+#
+# See the fuller note in webhook/presets/strict.rego, which inlines this file. Keeping both copies
+# fixed matters more than usual here: this pair is the documented drift hazard, and the parity test
+# only compares DECISIONS, so a divergence that happens not to flip a decision on the fixtures would
+# pass. The decoded arm matches MULTI-BYTE indicators only — the same `decoded_shell_patterns` the
+# dedicated base64_decoded_threat rule already uses, which is why that rule never had this problem.
 shell_patterns = ["|", ";", "$(", "`", "rm -rf", "/etc/passwd", "/etc/shadow"]
-shell_patterns_decoded = ["|", "$(", "`", "rm -rf", "/etc/passwd", "/etc/shadow", "nc -e", "wget ", "curl "]
 
 shell_injection_detected {
     val := security_scan_texts_raw[_]
@@ -192,7 +206,7 @@ shell_injection_detected {
 }
 shell_injection_detected {
     val := lower(security_scan_decoded_raw[_])
-    pattern := shell_patterns_decoded[_]
+    pattern := decoded_shell_patterns[_]
     contains(val, pattern)
 }
 
