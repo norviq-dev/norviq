@@ -296,6 +296,22 @@ tool_name_tokens = [t | t := split(strings.replace_n(name_split_map, input.tool_
 # parses the CONTROLS region as rule heads only and refuses anything else outright
 # ("unparsable line in CONTROLS region") — which is the right way for it to fail, but it means a
 # helper definition has to live outside the markers.
+# The SAME tokens, over the confusable-folded name. `skeleton()` (published by the engine as
+# `input.tool_name_normalized`, evaluator.py) NFKC-normalizes, strips combining marks and zero-width /
+# format characters, and maps Cyrillic/Greek look-alikes to their ASCII prototype.
+#
+# Without this, every name-keyed control above is defeated by one non-ASCII character. Verified
+# against the compiled baseline: `delete_records` blocks, but `d<Cyrillic-e>lete_records` and a
+# zero-width-space variant both returned `allow / default_allow` (C2-012). Uppercase was already
+# covered by `lower()`; a homoglyph was not.
+#
+# Additive, like the token arm it mirrors, so it can only ADD blocks. `object.get` falls back to the
+# raw name so an engine predating the fact behaves exactly as before rather than erroring.
+tool_name_normalized_tokens = [t |
+    t := split(strings.replace_n(name_split_map, object.get(input, "tool_name_normalized", input.tool_name)), "_")[_]
+    t != ""
+]
+
 destructive_name_tokens = {"delete", "drop", "truncate", "destroy", "wipe", "purge", "erase"}
 
 # AND THE LEAD SPEAKS ONLY FOR THE NAME. `classify_tool` falls back to `_classify_params` when NO name
@@ -797,6 +813,7 @@ blocks["strict_default_block"] { startswith(lower(input.tool_name), "erase_") }
 # `undelete_`, `delete_candidates_report` style NOUNS are the only residual, and this control's
 # shipped caveat already documents that it matches on the name with no regard to arguments.
 blocks["strict_default_block"] { destructive_name_tokens[lower(tool_name_tokens[_])] }
+blocks["strict_default_block"] { destructive_name_tokens[lower(tool_name_normalized_tokens[_])] }
 
 escalates["llm06_excessive_agency"] { elevated_tools[input.tool_name] }
 

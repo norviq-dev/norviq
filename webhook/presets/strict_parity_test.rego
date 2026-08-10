@@ -271,3 +271,47 @@ test_a_read_tool_the_classifier_over_classifies_is_not_blocked_by_the_token_arm 
         "tool_name": "run_query", "tool_params": {"query": "select 1"},
     })
 }
+
+# ---------------------------------------------------------------------------------------------
+# C2-012 — a homoglyph or zero-width character must not defeat a name-keyed control.
+#
+# Verified against the compiled baseline BEFORE this arm existed: `delete_records` blocked, but
+# `dеlete_records` (Cyrillic е U+0435) and a zero-width-space variant both returned
+# `allow / default_allow`. Uppercase was already covered by lower(); a homoglyph was not.
+#
+# The engine publishes `input.tool_name_normalized` = skeleton(tool_name) — NFKC, combining marks and
+# zero-width/format chars stripped, Cyrillic/Greek look-alikes folded to their ASCII prototype. The
+# fact already existed and the presets simply never read it.
+
+test_a_cyrillic_homoglyph_in_the_tool_name_is_blocked {
+    strict.decision == "block" with input as _norm({
+        "tool_name": "dеlete_records",
+        "tool_name_normalized": "delete_records",
+        "tool_params": {"t": "all"},
+    })
+}
+
+test_a_zero_width_space_in_the_tool_name_is_blocked {
+    strict.decision == "block" with input as _norm({
+        "tool_name": "de​lete_records",
+        "tool_name_normalized": "delete_records",
+        "tool_params": {"t": "all"},
+    })
+}
+
+# A benign read whose normalized form is still benign must stay allowed — the arm must not simply
+# widen everything.
+test_the_normalized_arm_does_not_sweep_in_reads {
+    strict.decision == "allow" with input as _norm({
+        "tool_name": "get_customer",
+        "tool_name_normalized": "get_customer",
+        "tool_params": {"id": "C001"},
+    })
+}
+
+# An engine predating the fact must behave exactly as before rather than erroring.
+test_absent_tool_name_normalized_falls_back_to_the_raw_name {
+    strict.decision == "block" with input as _norm({
+        "tool_name": "delete_records", "tool_params": {"t": "all"},
+    })
+}

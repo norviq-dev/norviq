@@ -235,8 +235,25 @@ destructive_verb_tool {
 #
 # Kept in sync with webhook/presets/strict.rego's `strict_default_block` arms — this pair is the
 # documented drift hazard, and the parity test only compares DECISIONS.
+# The SAME tokens, over the confusable-folded name. `skeleton()` (published by the engine as
+# `input.tool_name_normalized`, evaluator.py) NFKC-normalizes, strips combining marks and zero-width /
+# format characters, and maps Cyrillic/Greek look-alikes to their ASCII prototype.
+#
+# Without this, every name-keyed control above is defeated by one non-ASCII character. Verified
+# against the compiled baseline: `delete_records` blocks, but `d<Cyrillic-e>lete_records` and a
+# zero-width-space variant both returned `allow / default_allow` (C2-012). Uppercase was already
+# covered by `lower()`; a homoglyph was not.
+#
+# Additive, like the token arm it mirrors, so it can only ADD blocks. `object.get` falls back to the
+# raw name so an engine predating the fact behaves exactly as before rather than erroring.
+tool_name_normalized_tokens = [t |
+    t := split(strings.replace_n(name_split_map, object.get(input, "tool_name_normalized", input.tool_name)), "_")[_]
+    t != ""
+]
+
 destructive_name_tokens = {"delete", "drop", "truncate", "destroy", "wipe", "purge", "erase"}
 destructive_verb_tool { destructive_name_tokens[lower(tool_name_tokens[_])] }
+destructive_verb_tool { destructive_name_tokens[lower(tool_name_normalized_tokens[_])] }
 
 # Data leakage
 external_tools = {"send_email", "post_webhook", "upload_file"}
