@@ -316,3 +316,35 @@ Both directions proven on the live cluster with purpose-built policies in `r2-la
 | enforcing allowlist @100 over a blocking namespace policy @50 | `allow` / `class_allowlist_allow` |
 
 The first is the fix. The second is the guard rail — the contract the easy fix would have broken.
+
+---
+
+# Pre-campaign fixes — clearing the bugs that would have corrupted the signal
+
+Everything below was fixed BEFORE driving the campaign, on the principle that a wrong signal is worse
+than a known gap: it gets scored as a defence that never happened.
+
+| id | what it would have done to the campaign | state |
+|---|---|---|
+| BUG-011 | scored every monitored DETECTION as a miss — near-0% against a policy matching every attack | fixed |
+| BUG-026 | a degraded proxy refuses at Gate A and shows a red BLOCK badge with no audit row | fixed |
+| SEED-05 | LangGraph inspected NOTHING, so that framework would have scored a clean pass | fixed |
+| BUG-014 | a rule trialled in audit mode disarmed the policy actually enforcing | fixed |
+| BUG-016 | engine faults invisible in the Overview's health number under monitor | fixed |
+| BUG-022/023/024 | samples contradicting their own counts, a mislabelled exclusion number | fixed |
+| BUG-028 | a latency-caused outage could not raise the banner | fixed |
+| C2-005 | the Visual Builder could not express the egress defence at all | fixed |
+
+## The rule that came out of all of it
+
+**A block with no corresponding audit row is a degraded proxy, not a defence.** BUG-026 fooled me for
+a full turn — the chat UI showed `Norviq BLOCK`, the proxy had lost its control plane hours earlier,
+and nothing had reached the engine. Every scored run must cross-check the audit log, not the badge.
+
+## Notable: six fix plans, zero applied as written
+
+An adversarial review of the proposed fixes cleared NONE of them, and the objections were real:
+one plan would have rendered an `escalate` (a call held for human approval) as "control not
+installed"; another proposed a test that could not pass; another carried a comment that would have led
+a maintainer to score `invalid_spiffe_identity` — a spoofed identity, i.e. a red-team payload — as a
+detection. The fixes above were written by hand afterwards, incorporating those corrections.
