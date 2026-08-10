@@ -223,3 +223,65 @@ true data loss. That is why this is medium and not high.
 **Suggested fix:** resolve the existing policy for (namespace, class) as the class is typed, and switch
 the verb to "replaces" with the current version and author shown; warn distinctly when the existing
 policy carries no `nrvq-builder-graph/v1` marker, since that one cannot round-trip back.
+
+---
+
+## C2-008 — A class policy silently switched off every shipped control for its class
+
+**Severity: high (security).** **Fixed** — `c7207f3`, `451d006`.
+
+`__controls__` was collected as a BASE tier at priority 2, and base tiers resolve by highest priority
+outright (`_resolve_precedence` returns `results[0]`; "most restrictive wins" is only a tiebreak WITHIN
+a priority). A class policy authored at 100 therefore discarded the controls' decision entirely.
+
+Measured live with `pii_detection` at Enforce and one SSN payload:
+
+    r2-support    (has a class policy @100)   allow   cde_default_allow
+    anything-else (no class policy)           block   pii_detection
+
+Writing one unrelated policy took all fourteen shipped detectors out of the enforcement path for that
+class, while Target Settings read "1 enforcing" — true about the control's setting, false about its
+reach, and invisible either way. Azure Policy has a name for the shape (`Conflicting`); that is where
+the idea to look came from.
+
+Fixed by reclassification rather than new machinery: the tier is now tagged `overlay: True`, so
+`_resolve_with_packs` takes it only when STRICTER, and it lands in the HARD partition of
+`_resolve_overlay` where a `__pack_weaken__` cannot relax it. Tighten-only cuts both ways, which is
+what makes it safe to enable for existing customers: a control on Monitor can never downgrade a class
+policy that blocks. Monitored controls also start recording again on classes that have their own
+policy — `audit` is stricter than `allow` and never interrupts — so the compliance view stops
+under-counting exactly the classes an operator bothered to write policy for.
+
+**The fix opened a second hole, caught on the next deploy.** The chart's `__baseline__` (audit mode)
+and the controls floor (block mode) both decided block; the comparison used RAW decisions; the tie
+returned the base; and a control set to Enforce came back as `policy_audit_would_block:` for classes
+with no policy. A block from an audit-mode policy is softened moments later, so it was never worth a
+block in the comparison. `_effective_rank` accounts for the mode before ranking.
+
+Final state, live:
+
+| case | before | after |
+|---|---|---|
+| SSN, class WITH a policy | `allow` | **`block` / pii_detection** |
+| SSN, class with NO policy | `block` | **`block` / pii_detection** |
+| benign, either class | `allow` | `allow` |
+| exfil to attacker domain | `block` | `block` / customer_data_to_untrusted_recipient |
+
+---
+
+## C2-009 — BUG-026 reproduced: the MCP proxies never recover the control plane
+
+**Severity: medium (operability).** **NOT fixed** — worked around by restarting the proxies.
+
+Campaign 1 filed this from source reading (`norviq/mcp/http.py:114-144` has no retry timer). It
+reproduced on its own here: the three firewall processes ran for 11h26m across several API and engine
+redeploys, lost the control plane, and never recovered. Every `tools/call` was refused at Gate A —
+before any policy ran, so **nothing reached the engine and nothing appeared in the audit log**.
+
+The failure mode is nasty for a red-team campaign specifically: the chatbot showed a red
+`Norviq BLOCK` badge, so a run would be scored as a successful defence when in fact the proxy was
+broken and no policy had been consulted. I misread it that way myself for one turn, and then wrongly
+blamed the chatbot's badge — the badge was correct, the substrate was not.
+
+**Detection rule for the campaign:** a block with NO corresponding audit row is a degraded proxy, not
+an enforcement win. Restarting the proxies restores it; the real fix is a retry timer.
