@@ -39,13 +39,14 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import structlog
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from norviq.api.auth import get_current_user
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
+from norviq.api import sidecar_expiry
 from norviq.api.synthetic import audit_row_is_non_real  # the ONE shared real-traffic filter (do not fork)
 from norviq.engine.evaluator import WOULD_BLOCK_RULE_PREFIXES
 
@@ -234,6 +235,7 @@ def _issue(rule_id: str, count: int, last_seen: datetime, namespaces: list[str])
 
 @router.get("/system-health")
 async def system_health(
+    request: Request = None,  # type: ignore[assignment]
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
@@ -280,6 +282,18 @@ async def system_health(
     ]
     # Most-recent first so the banner leads with what is happening now.
     issues.sort(key=lambda i: (i["last_seen"] or ""), reverse=True)
+
+    # Then the FOREWARNING band (C2-020), appended after the live incidents so a "will break on
+    # Tuesday" never outranks a "is broken now". This is the one entry here that is not derived from
+    # the audit log, because the thing it reports has not happened yet and therefore wrote no rows —
+    # which is precisely why the product could only ever diagnose this cliff in retrospect.
+    cache = getattr(getattr(request, "app", None), "state", None)
+    cache = getattr(cache, "cache", None) if cache is not None else None
+    expiry_scope = claim_ns if (role != "admin" and claim_ns) else None
+    expiring = await sidecar_expiry.expiring_soon(cache, expiry_scope)
+    expiry_issue = sidecar_expiry.issue_for(expiring)
+    if expiry_issue is not None:
+        issues.append(expiry_issue)
 
     if issues:
         log.warning(

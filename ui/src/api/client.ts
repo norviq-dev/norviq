@@ -181,7 +181,13 @@ export type SystemIssue = {
   affected_calls: number;
   namespaces: string[];
   last_seen: string | null;
-  window_minutes: number;
+  /** Null on a FOREWARNING band. Every other issue here is derived from decisions recorded in a
+   *  window; `sidecar_credential_expiring` reports something that has not happened yet and therefore
+   *  wrote no rows, so it has no window to state. */
+  window_minutes: number | null;
+  /** Present only on `sidecar_credential_expiring`: the workloads whose injected credential expires
+   *  soon. Nothing renews these in place, so the remedy is to roll the Deployment. */
+  expiring?: { namespace: string; workload: string; expires_at: number; days_left: number }[];
 };
 
 export type SystemHealth = {

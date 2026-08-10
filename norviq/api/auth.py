@@ -21,6 +21,7 @@ from jwt import PyJWTError as JWTError
 
 from norviq.api.jwks import get_jwks_client
 from norviq.api.session_revocation import is_revoked, token_hash
+from norviq.api.sidecar_expiry import observe as observe_sidecar_expiry
 from norviq.config import settings
 from norviq.telemetry.metrics import record_path_phase
 
@@ -201,6 +202,11 @@ async def _authenticate(
             code="NRVQ-AUTH-14016",
         )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session has been logged out")
+    # Forewarn the 30-day sidecar credential cliff (C2-020). Placed AFTER the revocation check so a
+    # revoked credential is never recorded as a live one, and best-effort by construction — see
+    # sidecar_expiry.observe, which writes nothing at all until a SERVICE token is inside the warning
+    # window and swallows every error. An auth path must not fail because a reporting write did.
+    await observe_sidecar_expiry(cache, claims)
     # A token minted with must_change=True (the seeded default admin, or any account after an
     # `admin_reset` — i.e. still on a KNOWN/default password) is fail-closed here: block everything
     # except the small set of routes needed to actually clear the flag (change-password) or exit the
