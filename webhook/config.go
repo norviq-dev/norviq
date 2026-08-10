@@ -69,8 +69,18 @@ type Config struct {
 	// (signed by CACertFile/CAKeyFile, mounted from secret norviq-internal-ca) so the sidecar does
 	// mTLS to https://norviq-api:8443. Default off -> current plaintext behavior, byte-identical.
 	InternalTLS bool
-	CACertFile  string
-	CAKeyFile   string
+	// SidecarSecretEnabled delivers the sidecar's credentials via a Secret + secretKeyRef instead of
+	// literal pod env (C2-019). On by default: a credential in a pod spec is readable by anyone with
+	// the built-in `view` role, which deliberately excludes Secrets. Falls back to literal env
+	// automatically if the webhook cannot write the Secret, so enabling it cannot stop scheduling.
+	SidecarSecretEnabled bool
+	// SidecarSecretRequired turns that fallback into a refusal. Off by default — this webhook runs
+	// failurePolicy: Fail, so failing admission stops ALL pod creation in injection-labelled
+	// namespaces, and that is a worse outcome than the exposure for most operators. On for those who
+	// would rather not schedule than ship a token in a pod spec.
+	SidecarSecretRequired bool
+	CACertFile            string
+	CAKeyFile             string
 	// MCP action-firewall injection. When McpInject is true, every container named by the pod's
 	// norviq.io/mcp-servers annotation has its command rewritten to run UNDER the MCP proxy
 	// (norviq/mcp/__main__.py), so Model Context Protocol traffic is governed with no change to the
@@ -115,33 +125,35 @@ func LoadConfig() Config {
 		// Unify the opt-in/out label key with the MutatingWebhookConfiguration namespaceSelector
 		// (norviq-injection). The namespace opts in (MWC selector); a pod opts OUT with
 		// norviq-injection=disabled. Default flipped from the legacy "norviq" key.
-		EnableLabel:          envStr("NRVQ_ENABLE_LABEL", "norviq-injection"),
-		EnableValue:          envStr("NRVQ_ENABLE_VALUE", "enabled"),
-		AgentClassLabel:      envStr("NRVQ_AGENT_CLASS_LABEL", "norviq.io/agent-class"),
-		AdminPolicyNamespace: envStr("NRVQ_ADMIN_POLICY_NAMESPACE", "norviq"),
-		LogLevel:             slog.LevelInfo,
-		Runtime:              runtime,
-		AllowPodOptOut:       envBool("NRVQ_ALLOW_POD_OPT_OUT", true),
-		SpiffeInject:         envBool("NRVQ_SPIFFE_INJECT", false),
-		SpiffeMode:           envStr("NRVQ_SPIFFE_MODE", "mock"),
-		SpiffeSocket:         envStr("NRVQ_SPIFFE_SOCKET", "/spiffe-workload-api/spire-agent.sock"),
-		SidecarMode:          envStr("NRVQ_SIDECAR_MODE", "proxy"),
-		FallbackMode:         envStr("NRVQ_SDK_FALLBACK_MODE", "block"),
-		ApiURL:               envStr("NRVQ_API_URL", "http://norviq-api:8080"),
-		ApiSecret:            envStr("NRVQ_API_SECRET_KEY", envStr("NRVQ_API_TOKEN", "")),
-		SidecarTokenTTLHours: envInt("NRVQ_SIDECAR_TOKEN_TTL_HOURS", 720),
-		RedisURL:             envStr("NRVQ_REDIS_URL", ""),
-		PgURL:                envStr("NRVQ_PG_URL", ""),
-		DBSSLMode:            envStr("NRVQ_DB_SSL_MODE", "require"),
-		OpaMode:              envStr("NRVQ_SIDECAR_OPA_MODE", "subprocess"),
-		InternalTLS:          envBool("NRVQ_INTERNAL_TLS", false),
-		CACertFile:           envStr("NRVQ_CA_CERT_FILE", ""),
-		CAKeyFile:            envStr("NRVQ_CA_KEY_FILE", ""),
-		McpInject:            envBool("NRVQ_MCP_INJECT", false),
-		McpProxyImage:        envStr("NRVQ_MCP_PROXY_IMAGE", ""),
-		McpProxySourcePath:   envStr("NRVQ_MCP_PROXY_SOURCE_PATH", "/opt/norviq/mcp-proxy"),
-		McpPinStore:          envStr("NRVQ_MCP_PIN_STORE", "control-plane"),
-		McpPinMode:           envStr("NRVQ_MCP_PIN_MODE", "tofu"),
+		EnableLabel:           envStr("NRVQ_ENABLE_LABEL", "norviq-injection"),
+		EnableValue:           envStr("NRVQ_ENABLE_VALUE", "enabled"),
+		AgentClassLabel:       envStr("NRVQ_AGENT_CLASS_LABEL", "norviq.io/agent-class"),
+		AdminPolicyNamespace:  envStr("NRVQ_ADMIN_POLICY_NAMESPACE", "norviq"),
+		LogLevel:              slog.LevelInfo,
+		Runtime:               runtime,
+		AllowPodOptOut:        envBool("NRVQ_ALLOW_POD_OPT_OUT", true),
+		SpiffeInject:          envBool("NRVQ_SPIFFE_INJECT", false),
+		SpiffeMode:            envStr("NRVQ_SPIFFE_MODE", "mock"),
+		SpiffeSocket:          envStr("NRVQ_SPIFFE_SOCKET", "/spiffe-workload-api/spire-agent.sock"),
+		SidecarMode:           envStr("NRVQ_SIDECAR_MODE", "proxy"),
+		FallbackMode:          envStr("NRVQ_SDK_FALLBACK_MODE", "block"),
+		ApiURL:                envStr("NRVQ_API_URL", "http://norviq-api:8080"),
+		ApiSecret:             envStr("NRVQ_API_SECRET_KEY", envStr("NRVQ_API_TOKEN", "")),
+		SidecarTokenTTLHours:  envInt("NRVQ_SIDECAR_TOKEN_TTL_HOURS", 720),
+		RedisURL:              envStr("NRVQ_REDIS_URL", ""),
+		PgURL:                 envStr("NRVQ_PG_URL", ""),
+		DBSSLMode:             envStr("NRVQ_DB_SSL_MODE", "require"),
+		OpaMode:               envStr("NRVQ_SIDECAR_OPA_MODE", "subprocess"),
+		InternalTLS:           envBool("NRVQ_INTERNAL_TLS", false),
+		SidecarSecretEnabled:  envBool("NRVQ_SIDECAR_SECRET_ENABLED", true),
+		SidecarSecretRequired: envBool("NRVQ_SIDECAR_SECRET_REQUIRED", false),
+		CACertFile:            envStr("NRVQ_CA_CERT_FILE", ""),
+		CAKeyFile:             envStr("NRVQ_CA_KEY_FILE", ""),
+		McpInject:             envBool("NRVQ_MCP_INJECT", false),
+		McpProxyImage:         envStr("NRVQ_MCP_PROXY_IMAGE", ""),
+		McpProxySourcePath:    envStr("NRVQ_MCP_PROXY_SOURCE_PATH", "/opt/norviq/mcp-proxy"),
+		McpPinStore:           envStr("NRVQ_MCP_PIN_STORE", "control-plane"),
+		McpPinMode:            envStr("NRVQ_MCP_PIN_MODE", "tofu"),
 	}
 	// VALIDATE THE CONFIGURED IMAGE HERE, where the misconfiguration is made — not at pod admission,
 	// where it presents as a cluster outage.

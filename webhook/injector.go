@@ -30,7 +30,33 @@ type Injector struct {
 	cfg             Config
 	sidecarTemplate map[string]interface{}
 	sharedVolume    map[string]interface{}
+	// lastSecretError records the most recent Secret-write failure so the handler can honour
+	// SidecarSecretRequired. Only ever read immediately after CreatePatch on the same goroutine.
+	lastSecretError error
+	// secrets delivers the sidecar's credentials through a Secret instead of literal pod env (C2-019).
+	// nil means "not configured" and preserves the previous literal-env behaviour exactly, so an
+	// operator who has not granted the webhook Secret write is not left unable to schedule pods.
+	secrets SecretWriter
 }
+
+// PatchOptions carries per-request facts the patch builder needs. Variadic at every call site so the
+// existing callers and their tests are untouched — a zero PatchOptions is the old behaviour.
+type PatchOptions struct {
+	// DryRun suppresses SIDE EFFECTS while still producing the same patch. The admission handler used
+	// to only LOG dry-run, which was correct while injection had none; writing a Secret is one.
+	DryRun bool
+}
+
+func firstOption(opts []PatchOptions) PatchOptions {
+	if len(opts) > 0 {
+		return opts[0]
+	}
+	return PatchOptions{}
+}
+
+// SetSecretWriter enables Secret-backed credential delivery. Separate from NewInjector so wiring a
+// Kubernetes client stays the caller's decision and NewInjector's signature does not change.
+func (inj *Injector) SetSecretWriter(w SecretWriter) { inj.secrets = w }
 
 const socketMountPath = "/var/run/norviq"
 const socketFilePath = "/var/run/norviq/norviq-proxy.sock"
@@ -66,14 +92,14 @@ func NewInjector(cfg Config) *Injector {
 	}
 }
 
-func (inj *Injector) CreatePatch(pod *corev1.Pod, agentClass string, namespace string) ([]byte, error) {
+func (inj *Injector) CreatePatch(pod *corev1.Pod, agentClass string, namespace string, opts ...PatchOptions) ([]byte, error) {
 	image := inj.cfg.Runtime.SidecarImage(inj.cfg.SidecarImage)
 	if !inj.validateImage(image) {
 		slog.Error("NRVQ-WHK-4033: blocked unauthorized sidecar image", "image", image)
 		return nil, fmt.Errorf("unauthorized sidecar image")
 	}
 	patches := make([]patchOp, 0, 8)
-	patches = append(patches, patchOp{Op: "add", Path: "/spec/containers/-", Value: inj.buildSidecar(agentClass, namespace, workloadFromPod(pod))})
+	patches = append(patches, patchOp{Op: "add", Path: "/spec/containers/-", Value: inj.buildSidecar(agentClass, namespace, workloadFromPod(pod), firstOption(opts))})
 	patches = append(patches, volumePatch(len(pod.Spec.Volumes) > 0, inj.sharedVolume))
 	// The sidecar runs with readOnlyRootFilesystem, but the internal-mTLS path must materialize the
 	// client cert/key on disk (stdlib load_cert_chain reads files only — see remote_evaluator.py).
@@ -324,10 +350,11 @@ func stripPodTemplateHash(rsName string) string {
 	return rsName[:idx]
 }
 
-func (inj *Injector) buildSidecar(agentClass string, namespace string, workload string) map[string]interface{} {
+func (inj *Injector) buildSidecar(agentClass string, namespace string, workload string, opts ...PatchOptions) map[string]interface{} {
 	sidecar := cloneMap(inj.sidecarTemplate)
 	sidecar["image"] = inj.cfg.Runtime.SidecarImage(inj.cfg.SidecarImage)
-	sidecar["env"] = sidecarEnv(agentClass, namespace, workload, inj.cfg)
+	sidecar["env"] = inj.credentialEnv(namespace, workload, agentClass,
+		sidecarEnv(agentClass, namespace, workload, inj.cfg), firstOption(opts))
 	return sidecar
 }
 

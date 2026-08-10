@@ -21,6 +21,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 )
 
 type Handler struct {
@@ -43,7 +45,24 @@ var systemExcludedNamespaces = map[string]bool{
 }
 
 func NewHandler(cfg Config) *Handler {
-	return &Handler{cfg: cfg, injector: NewInjector(cfg)}
+	inj := NewInjector(cfg)
+	// Secret-backed credentials need an API client. Built here rather than in main so it is present
+	// for every construction path, and best-effort: OUTSIDE a cluster (unit tests, local runs)
+	// InClusterConfig fails and the writer stays nil, which is exactly the previous literal-env
+	// behaviour. A webhook that refused to start without Secret write would be a worse default than
+	// the exposure it closes.
+	if cfg.SidecarSecretEnabled {
+		if rc, err := rest.InClusterConfig(); err != nil {
+			slog.Info("NRVQ-WHK-4050: no in-cluster config; sidecar credentials stay in pod env",
+				"error", err)
+		} else if dc, err := dynamic.NewForConfig(rc); err != nil {
+			slog.Error("NRVQ-WHK-4051: dynamic client init failed; sidecar credentials stay in pod env",
+				"error", err)
+		} else {
+			inj.SetSecretWriter(NewSecretWriter(dc))
+		}
+	}
+	return &Handler{cfg: cfg, injector: inj}
 }
 
 func (h *Handler) Healthz(w http.ResponseWriter, _ *http.Request) {
@@ -246,7 +265,8 @@ func (h *Handler) patchResponse(req *admissionv1.AdmissionRequest, pod *corev1.P
 		slog.Warn("NRVQ-WHK-4015: invalid agent class label, injecting with empty class", "value", agentClass, "pod", pod.Name, "namespace", req.Namespace)
 		agentClass = ""
 	}
-	patch, err := h.injector.CreatePatch(pod, agentClass, req.Namespace)
+	dryRun := req.DryRun != nil && *req.DryRun
+	patch, err := h.injector.CreatePatch(pod, agentClass, req.Namespace, PatchOptions{DryRun: dryRun})
 	if err != nil {
 		// A pod whose own MCP annotation cannot be honored gets the reason back: the fix is always in
 		// the pod spec (a misnamed container, or one with no explicit command), and a generic failure
@@ -277,8 +297,23 @@ func (h *Handler) patchResponse(req *admissionv1.AdmissionRequest, pod *corev1.P
 					" image allowlist.", err)},
 		}
 	}
-	if req.DryRun != nil && *req.DryRun {
+	if dryRun {
 		slog.Info("NRVQ-WHK-4012: dry-run injection", "pod", pod.Name, "namespace", req.Namespace)
+	}
+	// The credential could not be moved out of the pod spec and this operator asked us not to ship one
+	// there. Only the handler can refuse, so the injector records the fault and the decision lives here.
+	if h.cfg.SidecarSecretRequired && h.injector.lastSecretError != nil {
+		slog.Error("NRVQ-WHK-4052: refusing admission — sidecar credential Secret unavailable and"+
+			" NRVQ_SIDECAR_SECRET_REQUIRED=true", "namespace", req.Namespace,
+			"error", h.injector.lastSecretError)
+		return &admissionv1.AdmissionResponse{
+			Allowed: false,
+			Result: &metav1.Status{Message: fmt.Sprintf(
+				"norviq: could not write the sidecar credential Secret (%v), and"+
+					" NRVQ_SIDECAR_SECRET_REQUIRED=true forbids falling back to a literal pod-env"+
+					" credential. Check the webhook's RBAC for secrets in namespace %q.",
+				h.injector.lastSecretError, req.Namespace)},
+		}
 	}
 	slog.Info("NRVQ-WHK-4003: sidecar injected", "pod", pod.Name, "latency_us", time.Since(start).Microseconds())
 	patchType := admissionv1.PatchTypeJSONPatch

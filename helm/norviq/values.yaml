@@ -335,6 +335,23 @@ webhook:
     # nothing per-pod). "embedded" = the sidecar runs its own RedisCache+OPA(subprocess)+PolicyLoader
     # for air-gapped/edge (the chart then wires NRVQ_REDIS_URL/NRVQ_PG_URL through to the injector).
     sidecarMode: proxy
+    # Deliver the injected sidecar's credentials (NRVQ_API_TOKEN + the mTLS client cert/key) through a
+    # Secret + valueFrom.secretKeyRef instead of literal `value:` entries in the pod spec.
+    #
+    # WHY it matters: Kubernetes deliberately excludes Secrets from the built-in `view` ClusterRole
+    # (`view` grants `get pods`, not `get secrets`), so a credential in the pod spec is readable by
+    # anyone a read-only grant was considered safe for. It also lands in etcd, `kubectl describe`, and
+    # any GitOps diff.
+    #
+    # Needs namespaced Secret write for the webhook — a Role+RoleBinding is rendered in each namespace
+    # below (NOT a ClusterRole; see webhook-secret-rbac.yaml for the reasoning). If the webhook cannot
+    # write the Secret it FALLS BACK to literal pod env and logs NRVQ-WHK-4049 rather than refusing to
+    # schedule, because this webhook runs failurePolicy: Fail. Set `required: true` to refuse instead.
+    credentialSecret:
+      enabled: true
+      required: false
+      # Namespaces labelled norviq-injection=enabled. Defaults to policyQuotaNamespaces.
+      namespaces: []
     # MCP action-firewall injection — the same zero-code-change deal the sidecar gives the SDK, for
     # Model Context Protocol traffic. A pod opts in per container:
     #

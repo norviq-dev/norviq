@@ -113,6 +113,10 @@ spec:
             # local engine for air-gapped/edge (needs the datastore wiring below).
             - name: NRVQ_SIDECAR_MODE
               value: {{ .Values.webhook.injection.sidecarMode | default "proxy" | quote }}
+            - name: NRVQ_SIDECAR_SECRET_ENABLED
+              value: {{ .Values.webhook.injection.credentialSecret.enabled | quote }}
+            - name: NRVQ_SIDECAR_SECRET_REQUIRED
+              value: {{ .Values.webhook.injection.credentialSecret.required | quote }}
             # Outage posture stamped into every injected sidecar (see values.yaml for the full contract).
             # Only applies when the engine is genuinely unreachable; a 4xx always blocks.
             # Must track config.py's sdk_fallback_mode — this value is stamped into every injected
