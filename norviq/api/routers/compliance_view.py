@@ -67,6 +67,26 @@ def _strip_prefix(rule_id: str) -> str | None:
     return None
 
 
+def _enforced_violation_for(row_decision: str, rule_id: str, known: frozenset[str]) -> str | None:
+    """The control a row VIOLATED and was refused by, or None.
+
+    The sibling of `_control_for`, and it exists because the two consumers of this endpoint ask
+    opposite questions of the same rows.
+
+    Baseline blast radius asks "if I promote this control, what breaks?" — and a call the control
+    ALREADY blocked is not evidence about that, so `_control_for` excludes it. Remediation asks "which
+    resources are violating this policy?" — and there a blocked call is the strongest evidence there
+    is. Observed live: a policy that had refused four real exfiltration attempts reported "1 resource
+    to remediate, 1 call flagged", the 1 being an old monitor-mode row. The four actual violations,
+    the ones an operator would want to go and fix, were invisible.
+    """
+    if row_decision not in ("block", "escalate"):
+        return None
+    if infra_rule_for(rule_id) is not None:
+        return None
+    return rule_id if rule_id and rule_id != "default_allow" else None
+
+
 def _control_for(row_decision: str, rule_id: str, known: frozenset[str]) -> str | None:
     """The control a row is evidence about, or None.
 
@@ -129,7 +149,7 @@ async def policy_compliance(
     rows = (await session.execute(query)).scalars().all()
 
     controls: dict[str, dict] = defaultdict(
-        lambda: {"count": 0, "agent_classes": defaultdict(int), "tools": defaultdict(int),
+        lambda: {"count": 0, "enforced": 0, "agent_classes": defaultdict(int), "tools": defaultdict(int),
                  "namespaces": set(), "first_seen": None, "last_seen": None, "samples": []}
     )
     scanned = 0
@@ -151,7 +171,14 @@ async def policy_compliance(
                 excluded += 1
             continue
         scanned += 1
-        control_id = _control_for(str(row.decision or ""), str(row.rule_id or ""), known_controls)
+        decision, rule = str(row.decision or ""), str(row.rule_id or "")
+        enforced_id = _enforced_violation_for(decision, rule, known_controls)
+        if enforced_id is not None:
+            eb = controls[enforced_id]
+            eb["enforced"] += 1
+            eb["agent_classes"][str(row.agent_class or "")] += 0  # keep the class visible, not double-counted
+            eb["namespaces"].add(str(row.namespace or ""))
+        control_id = _control_for(decision, rule, known_controls)
         if control_id is None:
             continue
         entry = controls[control_id]
@@ -180,7 +207,11 @@ async def policy_compliance(
     out = [
         {
             "control_id": cid,
+            # `count` is the WOULD-block population: what promoting this control would newly break.
+            # `enforced` is what it already refused. The two answer opposite questions and must not be
+            # summed into one number by this endpoint — the callers choose.
             "count": e["count"],
+            "enforced": e["enforced"],
             "agent_classes": [{"name": k, "count": v} for k, v in sorted(e["agent_classes"].items(), key=lambda kv: -kv[1])],
             "tools": [{"name": k, "count": v} for k, v in sorted(e["tools"].items(), key=lambda kv: -kv[1])],
             "namespaces": sorted(n for n in e["namespaces"] if n),

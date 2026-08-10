@@ -138,9 +138,17 @@ export function PolicyCompliance() {
   }, [principals.data]);
 
   const byRule = useMemo(() => {
-    const m = new Map<string, { count: number; classes: string[] }>();
+    const m = new Map<string, { count: number; enforced: number; classes: string[] }>();
     for (const c of compliance.data?.controls ?? []) {
-      m.set(c.control_id, { count: c.count, classes: c.agent_classes.map((a) => a.name) });
+      m.set(c.control_id, {
+        count: c.count,
+        // Violations the policy REFUSED. Excluded from `count` on purpose — an already-blocked call
+        // is not evidence about a prospective promotion — but it is exactly what "which resources are
+        // violating this policy" means. Observed live: a policy that had refused four exfiltration
+        // attempts reported "1 call flagged", the 1 being an old monitor-mode row.
+        enforced: c.enforced ?? 0,
+        classes: c.agent_classes.map((a) => a.name),
+      });
     }
     return m;
   }, [compliance.data]);
@@ -161,7 +169,7 @@ export function PolicyCompliance() {
         for (const id of ruleIds) {
           const hit = byRule.get(id);
           if (!hit) continue;
-          calls += hit.count;
+          calls += hit.count + hit.enforced;
           // Only principals we are counting in the denominator can be counted in the numerator, or a
           // synthetic offender would push compliance below 0 out of N.
           for (const cls of hit.classes) if (realPrincipals.has(cls)) offenders.add(cls);

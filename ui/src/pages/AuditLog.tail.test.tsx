@@ -188,6 +188,34 @@ describe("a polled tail row cannot survive the filter it was fetched under", () 
     expect(screen.getByText(/Showing 0 of 0 records/)).toBeInTheDocument();
   });
 
+  it("never prints more rows than its own total — the live tail counts too", async () => {
+    // Observed live while driving the chatbot: "Showing 41 of 39 records". The count comes from a
+    // SEPARATE probe fetch, and the live tail keeps prepending rows after that probe ran, so the
+    // numerator grew past a frozen denominator. Sibling of the "Showing 1 of 0" case above, and it
+    // lands in the same place: on an audit surface, a header that visibly cannot do arithmetic is a
+    // reason to distrust every other number on the page.
+    let served = 0;
+    server.use(
+      http.get("/api/v1/audit/records", ({ request }) => {
+        const url = new URL(request.url);
+        // The count probe asks for a big limit; the page asks for pageSize. Serve the page a row the
+        // probe never saw, which is exactly what a live tail does.
+        const limit = Number(url.searchParams.get("limit") ?? "0");
+        served += 1;
+        if (limit >= 500) return HttpResponse.json([]);        // probe: nothing counted yet
+        return HttpResponse.json([REDTEAM_ROW]);                // page: one row on screen
+      })
+    );
+    renderPage();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(served).toBeGreaterThan(0);
+    const m = (document.body.textContent ?? "").match(/Showing (\d+) of (\d+)/);
+    expect(m, "the count line must render at all").not.toBeNull();
+    expect(Number(m![1])).toBeLessThanOrEqual(Number(m![2]));
+  });
+
   it("drops a tail row fetched under a different namespace", async () => {
     // The tail has no Namespace column, so a row left over from the namespace the operator just left
     // reads as this namespace's traffic — the same defect `offScope` suppresses for the fetched page.

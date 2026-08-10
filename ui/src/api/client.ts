@@ -273,7 +273,10 @@ export async function saveBaselineControls(
 
 export type ComplianceControl = {
   control_id: string;
+  /** WOULD-block population: what promoting this control would newly break. */
   count: number;
+  /** Violations it ALREADY refused. The two answer opposite questions — see compliance_view.py. */
+  enforced?: number;
   agent_classes: { name: string; count: number }[];
   tools: { name: string; count: number }[];
   namespaces: string[];

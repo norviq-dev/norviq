@@ -402,15 +402,26 @@ export function AuditLog() {
     return [...(page === 0 ? live : []), ...(base.data ?? []).filter((r) => !liveIds.has(r.id))];
   }, [streamed, base.data, page, realOnly, decision, debouncedTool, debouncedAgent, rule, framework, selectedNamespace]);
 
-  const totalCount = totalRecords.data?.length ?? 0;
+  const serverCount = totalRecords.data?.length ?? 0;
+  // Rows the LIVE TAIL delivered after the count probe last ran. Without them the header counted a
+  // stale denominator against a growing numerator and rendered "Showing 41 of 39 records" — observed
+  // on a live cluster while driving traffic through the chatbot. It is the sibling of the
+  // "Showing 6 of 0" defect fixed above and lands in the same place: on an audit surface, a header
+  // that visibly cannot do arithmetic is a reason to distrust every other number on the page.
+  //
+  // They are real records the server WOULD now count, so they belong in the denominator, not filtered
+  // out of the numerator. `rows` is the deduped union, so anything above the server page is new.
+  const liveSinceCount = page === 0 ? Math.max(0, rows.length - (base.data?.length ?? 0)) : 0;
+  // Never below what is on screen, whatever the probe says.
+  const totalCount = Math.max(serverCount + liveSinceCount, rows.length);
   // The total-count probe is server-capped at limit=500 (audit/records enforces le=500), so records
   // past offset 500 aren't visible to it — without a fallback totalPages maxes at 10 and Next is disabled at page 10 even
   // though the server offset has no upper bound. When the probe comes back full there are likely more rows
   // than it can see, so fall back to "there IS a next page iff the current page returned a full pageSize"
   // and keep the page/record totals honest (show a trailing "+") once we're past what the probe can count.
-  const countCapped = totalCount >= 500;
+  const countCapped = serverCount >= 500;
   const pageFull = (base.data?.length ?? 0) === pageSize;
-  const knownPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const knownPages = Math.max(1, Math.ceil(serverCount / pageSize));
   const totalPages = Math.max(knownPages, page + 1);
   const canNext = page < knownPages - 1 || (countCapped && pageFull);
   const loading = base.loading || totalRecords.loading;

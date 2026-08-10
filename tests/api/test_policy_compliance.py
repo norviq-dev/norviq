@@ -300,3 +300,49 @@ def test_excluded_synthetic_counts_only_rows_that_would_have_been_reported() -> 
     assert body["excluded_synthetic"] == 2, "only the suppressed would-blocks"
     assert body["scanned"] == 1
     assert body["controls"][0]["count"] == 1
+
+
+# --- the two questions this endpoint is asked, and why they must not share one number ----------------
+#
+# Baseline blast radius asks "if I promote this control, what breaks?" — a call it ALREADY blocks is
+# not evidence about that. Remediation asks "which resources are violating this policy?" — and there a
+# blocked call is the strongest evidence there is.
+#
+# Observed live: a policy that had refused four real exfiltration attempts reported "1 resource to
+# remediate, 1 call flagged", the 1 being an old monitor-mode row. The four actual violations were
+# invisible on the page whose whole job is to list them.
+
+def test_enforced_violations_are_reported_separately_from_would_blocks() -> None:
+    body = _get([
+        _row("customer_data_to_untrusted_recipient", decision="block"),
+        _row("customer_data_to_untrusted_recipient", decision="block"),
+        _row("policy_audit_would_block:customer_data_to_untrusted_recipient"),
+    ])
+    c = next(c for c in body["controls"] if c["control_id"] == "customer_data_to_untrusted_recipient")
+    assert c["count"] == 1, "would-blocks only — promoting this changes nothing about the two it already stopped"
+    assert c["enforced"] == 2, "the violations it actually refused"
+
+
+def test_a_policy_that_only_ever_blocked_still_appears() -> None:
+    """Pre-fix it appeared nowhere: every row was a block, `_control_for` returned None for all of
+    them, and a policy actively refusing attacks rendered as having nothing to say."""
+    body = _get([_row("customer_data_to_untrusted_recipient", decision="block") for _ in range(4)])
+    ids = [c["control_id"] for c in body["controls"]]
+    assert "customer_data_to_untrusted_recipient" in ids
+    c = next(c for c in body["controls"] if c["control_id"] == "customer_data_to_untrusted_recipient")
+    assert c["count"] == 0 and c["enforced"] == 4
+
+
+def test_an_escalate_counts_as_an_enforced_violation() -> None:
+    """The call was held for human approval — it did not reach the tool, and the resource still
+    violated the policy."""
+    body = _get([_row("demo_external_email", decision="escalate")])
+    c = next(c for c in body["controls"] if c["control_id"] == "demo_external_email")
+    assert c["enforced"] == 1
+
+
+def test_an_engine_fault_is_never_an_enforced_violation() -> None:
+    """A fail-closed block carrying an engine fault refused the call, but no policy was violated —
+    counting it would put an outage in a remediation queue."""
+    body = _get([_row("evaluator_timeout", decision="block"), _row("evaluator_error", decision="block")])
+    assert body["controls"] == []
