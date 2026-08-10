@@ -473,3 +473,48 @@ remediation-counts-the-wrong-violations defect found by watching.
 Unicode zero-width AND Cyrillic homoglyph inside SQL both tripped `deny_sql_injection`; nested
 double-base64 tripped `base64_decoded_threat`; indirect injection via tool output tripped
 `llm01_prompt_injection`; two benign controls stayed `allow` with no false positive.
+
+---
+
+# NOT DONE: three frameworks are still untested, and this says so rather than implying otherwise
+
+## What each framework actually received
+
+| framework | what was done | live traffic? |
+|---|---|---|
+| langchain | 3 prompts through the browser, real Groq, real MCP firewall, cross-mapped in the console | **yes** |
+| langgraph | unit tests for the SEED-05 fix | no |
+| crewai | source read only | no |
+| autogen | source read only | no |
+| semantic_kernel | source read only | no |
+
+## Why the shortcut failed, recorded so the next attempt does not repeat it
+
+Three harness designs were tried, all invoking the agent modules in-process and reading
+`capture_decisions()`. All three reported `evaluated=0` for EVERY framework — including langchain,
+which is known-good because it was watched blocking in the browser minutes earlier. A harness that
+reports zero for a case known to be non-zero is measuring itself, so none of its output was recorded
+as a result.
+
+Known contributors, none of them sufficient on their own:
+* the agent modules read `GROQ_API_KEY` / `NRVQ_API_TOKEN` at IMPORT time, so `load_dotenv()` has to
+  run before the import, not before the call (serve.py does this and says why);
+* `crewai` fails to import at all in this venv — `ImportError: Fallback to LiteLLM is not available`;
+* `capture_decisions()` did not observe the SDK path from this entry point, and that was not chased
+  to a root cause.
+
+**The method that is known to work is the one the plan specified and I skipped:** run `serve.py` with
+`NRVQ_CHATBOT_FRAMEWORK=<fw>` on a port, drive it over HTTP, and read the decision off the response —
+the same path the langchain run used. It costs one process per framework and it produces real numbers.
+
+## What is therefore still unknown
+
+The single thing the plan called out as the reason to do this at all: **a block surfaces three
+different ways** — propagated, wrapped (Semantic Kernel's filter pipeline re-wraps), or SWALLOWED by
+the agent loop (CrewAI and AutoGen catch tool errors and continue). Static source reading cannot
+distinguish those, and a harness that only catches `NorviqBlockError` would report CrewAI and AutoGen
+as unenforced when they are not. That distinction remains **unmeasured**.
+
+Everything in the framework matrix above is a source-level fact (does the adapter open `depth_scope()`,
+does it discard non-dict args). Those are true and useful. They are not a live enforcement result and
+must not be read as one.
