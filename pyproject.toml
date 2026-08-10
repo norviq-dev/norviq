@@ -87,7 +87,13 @@ langgraph = ["langgraph>=0.2"]
 # `pip install '.[crewai]'` reads neither uv.lock nor uv's constraints. 1.28.1 fixes
 # CVE-2026-59950 (WebSocket server transport accepts any Host/Origin). Capped below the 2.0
 # major, which crewai does not yet declare support for. See SECURITY.md.
-crewai = ["crewai>=0.80", "mcp>=1.28.1,<2"]
+# `crewai[litellm]`, not bare `crewai`. CrewAI 1.x made LiteLLM an OPTIONAL extra and routes only
+# its SUPPORTED_NATIVE_PROVIDERS (anthropic/aws/azure/bedrock/gemini/google/openai) without it —
+# every other provider, groq included, falls through to a LiteLLM import that is not there and dies
+# at `LLM(...)` construction with `ImportError: Fallback to LiteLLM is not available`. Measured on
+# crewai 1.6.1: the adapter cannot even be IMPORTED, so one of the five advertised frameworks was
+# unverifiable rather than merely untested.
+crewai = ["crewai[litellm]>=1.0", "mcp>=1.28.1,<2"]
 autogen = ["autogen-core>=0.4", "autogen-agentchat>=0.4", "autogen-ext[openai]>=0.4"]
 # MCP action-firewall (norviq/mcp). The PROXY itself needs nothing beyond the base dependencies —
 # it speaks JSON-RPC over pipes and reuses the SDK's httpx engine client, deliberately taking no

@@ -583,3 +583,53 @@ as unenforced when they are not. That distinction remains **unmeasured**.
 Everything in the framework matrix above is a source-level fact (does the adapter open `depth_scope()`,
 does it discard non-dict args). Those are true and useful. They are not a live enforcement result and
 must not be read as one.
+
+---
+
+# Framework GA support — verified, and one real packaging defect
+
+## Versions actually exercised
+
+| framework | installed & driven | declared floor in pyproject |
+|---|---|---|
+| langchain-core | **1.4.9** | `>=0.2` |
+| langgraph | **1.2.9** | `>=0.2` |
+| crewai | **1.6.1** | `>=0.80` -> now `crewai[litellm]>=1.0` |
+| autogen-core / agentchat | **0.7.5** | `>=0.4` |
+| semantic-kernel | **1.36.0** | `>=1.0` |
+
+All five are current GA majors. Four were driven live and all four enforced and surfaced correctly
+(see the framework sweep above). The declared floors sit far below what is tested, which is worth a
+follow-up on its own: `langchain-core>=0.2` permits a version two majors behind anything exercised.
+
+## C2-017 — RESOLVED: CrewAI could not be imported at all
+
+The `crewai` extra declared bare `crewai>=0.80`. **CrewAI 1.x made LiteLLM an optional extra** and
+routes only its `SUPPORTED_NATIVE_PROVIDERS` (anthropic/aws/azure/bedrock/gemini/google/openai)
+natively. Every other provider — groq included, which is what the demo uses — falls through to a
+LiteLLM import that is not installed and dies at `LLM(...)` construction:
+
+    ImportError: Fallback to LiteLLM is not available
+
+So one of five advertised frameworks could not be imported, let alone enforced, on its current GA
+release. The extra is now `crewai[litellm]>=1.0`. With litellm present the module imports, the server
+starts, and all six tools log `nrvq.crewai.protected`.
+
+## C2-018 — CrewAI enforcement is STILL unverified, and the two reasons are both mine
+
+Neither is a CrewAI defect and neither should be read as one:
+
+1. **The model never called a tool.** The live run returned "The verification summary has been
+   emailed", and `Using Tool` appears ZERO times in the server log while all six tools were protected
+   at startup. The reply was a hallucination; there was nothing to intercept. Scored naively that is
+   an unenforced framework, and it is not.
+2. **The direct-invocation probe ran against an unreachable engine.** `sdk_fallback_mode` is `allow`
+   by design under allow-by-default, so the SDK failed OPEN and the tool executed. The AKS API server
+   had gone away mid-run (`dial tcp 20.70.4.122:443: i/o timeout`, then NXDOMAIN on the cluster FQDN).
+
+The probe is written and ready (`t.run(...)` on the protected tool, which is exactly what
+`BaseTool.run` invokes — verified by reading crewai 1.6.1's source). It needs a reachable engine and
+one re-run.
+
+**Environment note:** the cluster became unreachable during this phase. Everything recorded after that
+point is unusable, and nothing from it was written up as a result.
