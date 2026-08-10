@@ -177,7 +177,9 @@ def test_redteam_suite_includes_efficacy_rollup() -> None:
     headers = {"Authorization": f"Bearer {_token()}"}
     body = client.post("/api/v1/redteam/suite", headers=headers).json()
     eff = body["efficacy"]
-    assert set(eff["overall"]) == {"total", "caught", "got_through", "proven_blocking_pct"}
+    assert set(eff["overall"]) == {
+        "total", "caught", "would_block", "got_through", "proven_blocking_pct", "detected_pct",
+    }
     # FakeEvaluator always blocks → every block-expected attack is caught → 100% proven-blocking
     assert eff["overall"]["got_through"] == 0
     assert eff["overall"]["proven_blocking_pct"] == 100.0

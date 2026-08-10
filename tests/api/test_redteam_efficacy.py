@@ -50,9 +50,14 @@ def test_every_attack_maps_to_an_atlas_technique():
         assert (entry["owasp_control"] is not None) == is_owasp
 
 
-def _row(attack_id, agent_class, actual, technique="AML.T0048", tname="T", owasp=None, oname=None, expected="block"):
+def _row(attack_id, agent_class, actual, technique="AML.T0048", tname="T", owasp=None, oname=None,
+         expected="block", rule_id=None):
+    # rule_id defaults to something plausible for the decision, because the scorer now reads it: an
+    # `audit` carrying a control id is a DETECTION, an `allow`/`default_allow` is a genuine miss.
+    if rule_id is None:
+        rule_id = "default_allow" if actual == "allow" else "deny_sql_injection"
     return {
-        "attack_id": attack_id, "agent_class": agent_class, "namespace": "default",
+        "attack_id": attack_id, "agent_class": agent_class, "namespace": "default", "rule_id": rule_id,
         "expected": expected, "actual": actual, "passed": actual == expected,
         "atlas_technique": technique, "atlas_technique_name": tname,
         "owasp_control": owasp, "owasp_control_name": oname,
@@ -128,7 +133,12 @@ def test_efficacy_groups_by_technique_and_owasp():
 
 def test_efficacy_empty_is_zero_not_crash():
     eff = compute_efficacy([])
-    assert eff["overall"] == {"total": 0, "caught": 0, "got_through": 0, "proven_blocking_pct": 0.0}
+    # Exact shape on purpose: a new bucket that an empty run does not report is a column the console
+    # renders as undefined, and adding one has to come here and be stated.
+    assert eff["overall"] == {
+        "total": 0, "caught": 0, "would_block": 0, "got_through": 0,
+        "proven_blocking_pct": 0.0, "detected_pct": 0.0,
+    }
     assert eff["by_technique"] == [] and eff["by_owasp"] == []
 
 
@@ -211,3 +221,68 @@ def test_inapplicable_mcp_attack_is_not_a_miss_and_not_a_bucket():
     assert eff["overall"]["total"] == 0
     assert eff["sector_not_enabled"] == 1
     assert eff["by_vector"] == []
+
+
+# --- BUG-011: a monitored control that DETECTED the attack scored as a miss ---------------------------
+#
+# `caught` read `passed`, which is `actual == expected` with expected "block". Every baseline control
+# now ships on `monitor`, and a monitored control is implemented by emitting an `audits[]` head — so a
+# control that detected the attack and recorded it scored identically to one that never fired. On the
+# shipped default the scorecard reported 0% against a policy that was matching every single attack.
+
+def test_a_monitored_detection_is_neither_caught_nor_got_through():
+    """Three outcomes, because collapsing them either way is a lie an operator would act on.
+
+    Counting an audit as caught claims a defence while the call proceeded — BUG-018 from the other
+    side. Counting it as got-through says nothing detected it, when something did and the operator can
+    promote that control to Enforce in one click.
+    """
+    rows = [
+        _row("A", "billing", "block"),                                        # really blocked
+        _row("B", "billing", "audit", rule_id="monitor_would_block:pii_detection"),  # softened
+        _row("C", "billing", "audit", rule_id="deny_sql_injection"),          # bare monitored control
+        _row("D", "billing", "allow"),                                        # nothing matched
+    ]
+    o = compute_efficacy(rows)["overall"]
+    assert o["total"] == 4
+    assert o["caught"] == 1
+    assert o["would_block"] == 2
+    assert o["got_through"] == 1
+    # PROVEN blocking stays honest — a monitored detection has not proven anything.
+    assert o["proven_blocking_pct"] == 25.0
+    # ...and the number that tells the operator the controls are working sits beside it.
+    assert o["detected_pct"] == 75.0
+
+
+def test_escalate_counts_as_caught_because_the_call_was_stopped():
+    """The firewall holds it for human approval, the interceptor raises, the sidecar drops anything
+    not is_allowed(). The attack did not reach the tool, which is what caught claims."""
+    o = compute_efficacy([_row("A", "billing", "escalate", rule_id="demo_external_email")])["overall"]
+    assert o["caught"] == 1 and o["would_block"] == 0 and o["got_through"] == 0
+
+
+def test_an_engine_fault_is_never_scored_as_a_defence():
+    """A fail-closed block carrying `evaluator_timeout` is the engine failing, not a control working.
+    Scoring it as caught inflates the headline number with an outage — and `passed` was True there, so
+    it did. Faults are tested before the enforced check and stay in the red bucket."""
+    rows = [
+        _row("A", "billing", "block", rule_id="evaluator_timeout"),
+        _row("B", "billing", "block", rule_id="monitor_would_block:evaluator_error"),
+        _row("C", "billing", "block", rule_id="deny_sql_injection"),
+    ]
+    o = compute_efficacy(rows)["overall"]
+    assert o["caught"] == 1, "only the real control block"
+    assert o["got_through"] == 2
+    assert o["proven_blocking_pct"] == round(1 / 3 * 100, 1)
+
+
+def test_the_buckets_still_sum_to_total():
+    """The invariant every table on the Red Team page renders against."""
+    rows = [
+        _row("A", "billing", "block"), _row("B", "billing", "audit"),
+        _row("C", "billing", "allow"), _row("D", "billing", "escalate"),
+        _row("E", "billing", "block", rule_id="evaluator_timeout"),
+    ]
+    eff = compute_efficacy(rows)
+    for bucket in [eff["overall"], *eff["by_technique"]]:
+        assert bucket["caught"] + bucket["would_block"] + bucket["got_through"] == bucket["total"], bucket

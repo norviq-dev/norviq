@@ -26,6 +26,9 @@ import { useApp } from "../store/AppContext";
 
 const ACCENT = "#2ddab8";
 const DANGER = "#ff3b5c";
+// Monitor-mode detections are neither a pass nor a failure — the escalate amber is the palette token
+// this console already uses for "recorded, not enforced".
+const WARN = "#ffb020";
 
 const thStyle: React.CSSProperties = { textAlign: "left", padding: "8px 10px", borderBottom: "1px solid var(--border)", color: "var(--text-muted)", fontWeight: 600, whiteSpace: "nowrap" };
 const tdStyle: React.CSSProperties = { padding: "8px 10px", borderBottom: "1px solid var(--border)", verticalAlign: "top" };
@@ -521,7 +524,7 @@ function Stat({ label, value, color, icon: Icon, testid }: { label: string; valu
   );
 }
 
-function BreakdownTable({ rows, rowTestId }: { rows: Array<{ id: string; name: string; total: number; caught: number; got_through: number; proven_blocking_pct: number }>; rowTestId?: string }) {
+function BreakdownTable({ rows, rowTestId }: { rows: Array<{ id: string; name: string; total: number; caught: number; would_block?: number; got_through: number; proven_blocking_pct: number }>; rowTestId?: string }) {
   if (rows.length === 0) return <div className="panel-sub">No block-expected attacks in this run.</div>;
   return (
     <div style={{ overflowX: "auto" }}>
@@ -530,6 +533,13 @@ function BreakdownTable({ rows, rowTestId }: { rows: Array<{ id: string; name: s
           <tr>
             <th style={thStyle}>Control</th>
             <th style={thStyle}>Caught</th>
+            {/* On the shipped default every control is on Monitor, so this column carries most of the
+                signal: the control DID detect the attack and let the call through on purpose. Without
+                it the row read total N, caught 0, got-through 0 and the three numbers stopped summing
+                — a table that silently disagrees with itself. */}
+            <th style={thStyle} title="Detected by a control that is on Monitor — recorded, call proceeded">
+              Would block
+            </th>
             <th style={thStyle}>Got through</th>
             <th style={thStyle}>Proven-blocking</th>
           </tr>
@@ -543,6 +553,7 @@ function BreakdownTable({ rows, rowTestId }: { rows: Array<{ id: string; name: s
             <tr key={r.id} data-testid="redteam-breakdown-row" data-taxonomy={rowTestId}>
               <td style={tdStyle}><span className="mono">{r.id}</span> · {r.name}</td>
               <td style={tdStyle}>{r.caught}</td>
+              <td style={{ ...tdStyle, color: (r.would_block ?? 0) > 0 ? WARN : undefined }}>{r.would_block ?? 0}</td>
               <td style={{ ...tdStyle, color: r.got_through > 0 ? DANGER : undefined }}>{r.got_through}</td>
               <td style={tdStyle}><b style={{ color: r.proven_blocking_pct === 100 ? ACCENT : "var(--text-primary)" }}>{r.proven_blocking_pct}%</b></td>
             </tr>
