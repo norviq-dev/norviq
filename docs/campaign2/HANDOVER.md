@@ -3,7 +3,7 @@
 **Purpose:** a new session should be able to resume from this file alone. Keep it current — update
 the "Work queue" and "Session log" sections every time something lands. Do not let it go stale.
 
-Last updated: 2026-08-10 — Tiers 1+2 done, C2-019 done. Remaining: C2-020, Tier 2b, Tier 4.
+Last updated: 2026-08-10 — Tiers 1, 2, 2b, 3 DONE. Remaining: C2-013, C2-016, Tier 4 triage, deliverables.
 
 ---
 
@@ -13,19 +13,21 @@ Last updated: 2026-08-10 — Tiers 1+2 done, C2-019 done. Remaining: C2-020, Tie
 **NOT merged to main, NOT pushed, NO new version cut** — all three need San's explicit approval.
 
 **Latest commits:**
+- `2bfd0d0` C2-012: a homoglyph or zero-width name must not defeat a name-keyed control
+- `4d309d3` C2-020: forewarn the 30-day sidecar credential cliff
 - `6354bf3` C2-019: deliver sidecar credentials via Secret, not literal pod env
 - `6dfd55d` C2-022: a destructive tool must not escape by being renamed
 - `b3501c6` C2-023: the decoded arm must not match bare shell metacharacters
 - `e741d6e` tier 1: monitor must never interrupt, on every plane that decides
 - `236a1c3` campaign2: a throttle is not a detection (C2-021), + rate-abuse findings
 
-**Gates last run at `6354bf3` — ALL GREEN:**
-- `.venv/bin/python -m pytest tests --ignore=tests/integration --ignore=tests/attacks -q` → **2717 passed**
+**Gates last run at `2bfd0d0` — ALL GREEN:**
+- `.venv/bin/python -m pytest tests --ignore=tests/integration --ignore=tests/attacks -q` → **2727 passed**
 - `.venv/bin/python -m ruff check norviq tests` → clean
-- `opa test --v0-compatible comprehensive.rego webhook/presets/strict.rego webhook/presets/strict_parity_test.rego` → **22/22**
+- `opa test --v0-compatible comprehensive.rego webhook/presets/strict.rego webhook/presets/strict_parity_test.rego` → **26/26**
   (NOTE: bare `opa test` FAILS on this repo — OPA 1.x defaults to Rego v1, these presets are v0.
    The `--v0-compatible` flag is not optional. Without it you get parse errors on every rule.)
-- `cd ui && npx tsc --noEmit && npx eslint src --max-warnings=0` → clean
+- `cd ui && npx vitest run && npx tsc --noEmit && npx eslint src --max-warnings=0` → **1155 passed**, clean
 - `.venv/bin/python -m pytest tests/helm -q` → **176 passed**
 - `cd webhook && go test ./...` → ok  (NOTE: the go module is at `webhook/go.mod`, NOT the repo root —
   `go build` from the root fails with "cannot find main module")
@@ -132,10 +134,15 @@ directly.
 
 ### Tier 2b — still open, same root cause as C2-022
 
-- [ ] **C2-012 — homoglyph / zero-width tool name evades every name-keyed control.** Fold
-      `input.tool_name` to an ASCII confusable skeleton before matching, mirroring what the engine
-      already does for `tool_params`. Verify with `dеlete_records` (Cyrillic е) and a zero-width-space
-      variant; both currently return `allow / default_allow` against an all-deny baseline.
+- [x] **C2-012 — homoglyph / zero-width tool name — ✅ DONE, commit `2bfd0d0`.**
+      The fix was small because the fact already existed and nobody read it: the engine publishes
+      `input.tool_name_normalized = skeleton(name)` at `evaluator.py:1107`, consumed only by the
+      intent compiler's generated rego — the shipped presets never looked at it. Both presets now
+      tokenise the normalized name alongside the raw one. Additive; `object.get` falls back to the raw
+      name for an engine predating the fact. Verified end to end against the compiled all-deny
+      baseline: Cyrillic-е, zero-width-space and camelCase renames all block; `get_customer` and
+      `run_query` still allow. Four rego tests; the two homoglyph ones fail without the arm.
+
 - [ ] **C2-013 — no destination-keyed control for tools outside a hand-written allowlist.** The
       campaign's headline design finding, proven three times on three surfaces.
 - [ ] **C2-016 — supply-chain phrasing in a query param does not trip `llm05_supply_chain`** (it is
@@ -171,14 +178,20 @@ directly.
       no CRL for the client certs. So a leaked sidecar credential stays valid for its full 30 days and
       the only lever is rotating `NRVQ_API_SECRET`, which invalidates every token at once.
 
-- [ ] **C2-020 — every injected pod hard-stops at day 30.** Token TTL measured 720h exactly; client
-      cert `webhook/injector.go:553` `now.Add(30*24*time.Hour)`. No renewal loop in `webhook/`, no
-      refresh in `norviq/sidecar/`. At expiry the API answers 401 (verified live) → `remote_evaluator.py:215`
-      sets `refused=True`, overriding `sdk_fallback_mode` → fails closed. **That behaviour is correct**
-      (a refused credential must not become a bypass) — the defect is that nothing renews and nothing
-      forewarns. `/system-health` diagnoses it only once the outage starts.
-      **Fix:** surface days-to-expiry as a warning band well before the cliff; consider having the
-      controller roll pods approaching expiry (rotation IS pod replacement, already proven to work).
+- [x] **C2-020 — day-30 cliff forewarned — ✅ DONE, commit `4d309d3`.**
+      New `norviq/api/sidecar_expiry.py`; `/system-health` gains a `warning` band. Observed where the
+      API already decodes the token (`auth._authenticate`), AFTER the revocation check.
+      **Behaviour that must be preserved:** SERVICE tokens only; nothing written until inside the
+      7-day window (zero writes on the hot path in steady state); `nx=True` bounds it to one key per
+      (namespace, workload); TTL is the credential's own remaining lifetime; every function is
+      best-effort — `observe()` runs in the AUTH path and must never fail a login, `expiring_soon()`
+      degrades to `[]` so /system-health cannot 500 over its least important band. The band is
+      `warning` and appended AFTER live incidents so "will break Tuesday" never outranks "is broken".
+      UI needed no component change (the banner already renders non-critical); `SystemIssue.window_minutes`
+      is now nullable + an optional `expiring` list.
+      **The expiry behaviour itself is CORRECT and must not be "fixed":** at expiry the API answers
+      401, a 4xx overrides `sdk_fallback_mode`, and the sidecar fails CLOSED. Auto-rolling pods was
+      considered and NOT done — evicting customer workloads from a controller is a much riskier change.
 
 ### Tier 4 — triage the reconciled backlog, then fix
 
@@ -289,4 +302,8 @@ Append one line per landed change. Newest last.
 - 2026-08-10 `6354bf3` — **C2-019 DONE.** Credentials moved to a Secret; namespaced RBAC; fail-soft;
   dry-run side-effect free; rotation preserved. A `fail`-on-missing-namespaces guard was reverted
   after 11 chart tests showed that configuration is mainstream — reasoning kept in the template.
-  **NEXT: C2-020 (expiry forewarning) then Tier 2b (C2-012 name skeleton), then Tier 4 triage.**
+- 2026-08-10 `4d309d3` — **C2-020 DONE.** Expiry forewarning band on /system-health.
+- 2026-08-10 `2bfd0d0` — **C2-012 DONE.** Presets now read `input.tool_name_normalized`, a fact the
+  engine had been publishing all along.
+  **NEXT: C2-013 (destination-keyed control — the campaign's headline design finding), C2-016, then
+  the Tier 4 triage of the biased reconciliation list, then the three missing deliverables.**
