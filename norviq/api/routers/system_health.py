@@ -174,6 +174,49 @@ def infra_rule_for(rule_id: str) -> str | None:
     return _INFRA_RULE_VARIANTS.get(rule_id)
 
 
+# Not an engine fault, but not a policy decision either — and the distinction between those two
+# questions is the whole reason this is a separate set.
+#
+# `rate_limit_exceeded` is minted by `evaluator._maybe_rate_limit`, a namespace-wide DoS backstop. It
+# is deliberately NOT in _INFRA_RULE_IDS: the limiter working is not an outage, and putting it there
+# would raise a critical "Norviq is down" banner every time a busy agent hit its ceiling.
+#
+# But it is equally not a rule that adjudicated anything. `_maybe_rate_limit` fires ONLY when the
+# resolved decision is already `allow` — so a throttled call is one the policy stack examined and
+# permitted, refused afterwards purely on volume. Measured live on AKS: 80 non-read calls from one
+# SPIFFE id produced 60 `allow / default_allow` then 18 `block / rate_limit_exceeded`. Every one of
+# those 18 was a policy MISS wearing a block's clothing.
+#
+# That mattered on three surfaces at once, all of which asked "is this a policy decision?" and got
+# yes: red-team efficacy scored a throttle as `caught` (so `proven_blocking_pct` rose the harder the
+# suite was driven — a number that improves with test pacing and with WORSE coverage, since only
+# allows can be throttled); policy compliance offered `rate_limit_exceeded` as a promotable control;
+# and remediation listed it as a policy with resources to go and fix.
+_NON_POLICY_EXTRA_RULE_IDS = frozenset({"rate_limit_exceeded"})
+
+_NON_POLICY_VARIANTS: dict[str, str] = {
+    **_INFRA_RULE_VARIANTS,
+    **{
+        variant: rule_id
+        for rule_id in _NON_POLICY_EXTRA_RULE_IDS
+        for variant in (rule_id, *(f"{prefix}{rule_id}" for prefix in WOULD_BLOCK_RULE_PREFIXES))
+    },
+}
+
+# Public: every rule_id that did NOT come from a customer policy — engine faults plus the throttle.
+NON_POLICY_RULE_IDS: frozenset[str] = INFRA_RULE_IDS | _NON_POLICY_EXTRA_RULE_IDS
+
+
+def non_policy_rule_for(rule_id: str) -> str | None:
+    """The bare non-policy rule a stored rule_id names, or None.
+
+    Use this — not `infra_rule_for` — wherever the question is "did a POLICY decide this?". Use
+    `infra_rule_for` only where the question is "is Norviq broken?" (the outage banner, and
+    /audit/stats' engine-error count, which must not absorb a working rate limiter).
+    """
+    return _NON_POLICY_VARIANTS.get(rule_id)
+
+
 def _issue(rule_id: str, count: int, last_seen: datetime, namespaces: list[str]) -> dict:
     severity, title, detail, remediation = _INFRA_RULE_IDS[rule_id]
     return {

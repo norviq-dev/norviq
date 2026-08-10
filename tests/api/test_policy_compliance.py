@@ -346,3 +346,40 @@ def test_an_engine_fault_is_never_an_enforced_violation() -> None:
     counting it would put an outage in a remediation queue."""
     body = _get([_row("evaluator_timeout", decision="block"), _row("evaluator_error", decision="block")])
     assert body["controls"] == []
+
+
+def test_throttle_is_not_a_policy_decision_on_any_surface():
+    """A `rate_limit_exceeded` row must not be scored as a detection, a promotable control, or a
+    resource to remediate.
+
+    The engine's rate limiter fires ONLY on a decision that already resolved to `allow`
+    (`evaluator._maybe_rate_limit`), so a throttled call is one the policy stack examined and
+    permitted, refused afterwards on volume alone. Measured live on AKS: 80 non-read calls from one
+    SPIFFE id gave 60 `allow / default_allow` then 18 `block / rate_limit_exceeded`.
+
+    All three surfaces asked "is this a policy decision?" via `infra_rule_for` and got yes, because a
+    throttle is deliberately not an infra fault (it must not raise an outage banner). The consequence
+    on efficacy was perverse: `proven_blocking_pct` rose the harder a suite was driven, and rose as
+    coverage got WORSE, since only an allow is eligible to be throttled.
+    """
+    from norviq.api.redteam_efficacy import _row_outcome
+    from norviq.api.routers.compliance_view import _control_for, _enforced_violation_for
+    from norviq.api.routers.system_health import infra_rule_for, non_policy_rule_for
+
+    # Not an infra fault: the limiter working is not an outage, so the banner must stay dark.
+    assert infra_rule_for("rate_limit_exceeded") is None
+
+    # But not a policy decision either, in every stored spelling monitor mode can produce.
+    for stored in (
+        "rate_limit_exceeded",
+        "monitor_would_block:rate_limit_exceeded",
+        "policy_audit_would_block:rate_limit_exceeded",
+    ):
+        assert non_policy_rule_for(stored) == "rate_limit_exceeded", stored
+        assert _control_for("audit", stored, frozenset()) is None, stored
+        assert _enforced_violation_for("block", stored, frozenset()) is None, stored
+
+    assert _row_outcome({"rule_id": "rate_limit_exceeded", "actual": "block"}) == "got_through"
+
+    # A real control at the same decision is still caught — the exclusion must be surgical.
+    assert _row_outcome({"rule_id": "pii_detection", "actual": "block"}) == "caught"

@@ -813,3 +813,127 @@ the mechanism already exists and is proven — see the C2-019 rotation table).
 
 **Rotation itself is proven.** Replacing a pod mints a genuinely new token, key and cert with a later
 `iat` and an unchanged identity — the table under C2-019 has the fingerprints.
+
+# Rate abuse — the last attack family
+
+## C2-021 — FIXED: a throttle was scored as a policy decision on three surfaces
+
+**Severity: high (measurement).** A measurement defect, so it stopped the line and was fixed here.
+
+The engine's rate limiter (`evaluator._maybe_rate_limit`) mints `block / rate_limit_exceeded`. It is
+deliberately **not** in `_INFRA_RULE_IDS` — the limiter working is not an outage, and putting it there
+would raise a critical "Norviq is down" banner every time a busy agent hit its ceiling. The
+consequence was that all three consumers asked "is this a policy decision?" via `infra_rule_for` and
+got **yes**:
+
+| surface | before | why it is wrong |
+|---|---|---|
+| `redteam_efficacy._row_outcome` | `caught` | counted as PROVEN blocking |
+| `compliance_view._control_for` | `rate_limit_exceeded` | offered as a promotable control |
+| `compliance_view._enforced_violation_for` | `rate_limit_exceeded` | listed as a policy with resources to remediate |
+
+The efficacy one is the bad one, because `_maybe_rate_limit` fires **only when the resolved decision is
+already `allow`**. A throttled call is one the policy stack examined and permitted, refused afterwards
+purely on volume. So `proven_blocking_pct` was a function of how hard the suite was driven — and it
+rose as coverage got **worse**, since only an allow is eligible to be throttled. A metric that
+improves when the product gets worse.
+
+Measured live on AKS before the fix (`analytics`, one SPIFFE id, 80 non-read calls in 56s):
+
+```
+ 60  allow / default_allow
+ 18  block / rate_limit_exceeded     <- would have scored as 18 detections
+  2  audit / policy_audit_would_block:deny_shell_execution   (see C2-023)
+first throttle at call 63   (60 allows + 2 audits, then the 61st allow)
+```
+
+**Fixed** with a sibling resolver rather than a fourth fork of the question:
+`system_health.non_policy_rule_for()` covers engine faults **plus** the throttle, in every stored
+spelling monitor mode can produce. `infra_rule_for` stays exactly as it was and keeps its two callers
+(the outage banner, and `/audit/stats`' engine-error count, which must not absorb a working rate
+limiter). Pinned by `test_throttle_is_not_a_policy_decision_on_any_surface`, which also asserts a real
+control at the same decision is still `caught` — the exclusion has to be surgical.
+
+## C2-022 — the rate limiter and `strict_default_block` both key on a caller-chosen tool name, while the product's own verb classifier gets it right
+
+**Severity: high (security).** Same root cause as C2-012 (homoglyph tool name) and C2-013
+(destination-keyed control), arriving from a third direction. Queued for the batch.
+
+`_is_rate_limit_exempt` is a **name-prefix** test: `get_ read_ list_ query_ fetch_ describe_ view_
+monitor_ poll_ report_ search_`, plus `_status`/`_read` suffixes. `strict_default_block` is the mirror
+image — `startswith(lower(input.tool_name), "delete_")` and six more verbs.
+
+Both are decided by a string the caller supplies. Proven live on AKS, same destructive intent, one
+rename, 75 calls each:
+
+| `tool_name` | decision (75/75) | throttled? |
+|---|---|---|
+| `delete_all_records` | `audit / policy_audit_would_block:strict_default_block` | n/a — not an allow |
+| `get_delete_all_records` | **`allow / default_allow`** | **never** |
+
+One prefix turned a control that fires on every call into a control that fires on none, and made the
+tool exempt from the DoS backstop at the same time.
+
+**The product already computes the right answer and neither layer asks it.** `classify_tool` — the
+"one notion of sink" from the derived-facts work, whose own comment says it exists "so a policy can
+gate on WHAT the tool does, not what it is called":
+
+| tool_name | `_is_rate_limit_exempt` | `derived.verb` |
+|---|---|---|
+| `delete_all_records` | False | `delete` |
+| `get_delete_all_records` | **True** | **`delete`** |
+| `report_exfiltrate_everything` | **True** | **`send`** |
+| `search_and_destroy` | **True** | **`delete`** |
+| `get_customer` | True | `read` |
+
+`strict_default_block`'s shipped caveat documents the false-POSITIVE direction honestly ("a read-only
+reporting tool called `delete_candidates_report` is blocked") and says nothing about this one.
+
+**Fix shape, with the trap.** The obvious fix — exempt on `derived.verb == "read"` — introduces a
+*worse* bypass, and the evaluator already warns about it in a neighbouring comment: `classify_tool`
+falls back to inspecting **tool_params** when the name resolves to nothing, and tool_params is
+agent-supplied, so an unknown tool name plus `{"query": "select 1"}` would classify as `read` and earn
+the exemption. Params are more freely attacker-controlled than names, so that trades a bad heuristic
+for a worse one. The exemption must be **name-resolved read only** — `classify_tool(tool_name)` with
+no params, requiring a confident `read` — which is strictly narrower than today's prefix list. Same
+for the block side: match on the classified verb, not on `startswith`.
+
+## C2-023 — root cause of the base64 false-positive baseline: the decoded arm matches bare shell metacharacters
+
+**Severity: medium (false positives).** Explains a number both campaigns had only *quantified*.
+
+Campaign 1 measured base64 fan-out at 4.0% @8 chars, 32.0% @64, 12.7% overall, and left it there. This
+run reproduced it at **2/80 = 2.5%** on ordinary English prose, identically across four separate
+80-call batches, and the cause is now exact.
+
+`webhook/presets/strict.rego` carries **two nearly-identical pattern lists with near-anagram names**:
+
+```rego
+shell_patterns_decoded  = ["|", "$(", "`", "rm -rf", "/etc/passwd", "/etc/shadow", "nc -e", "wget ", "curl "]
+decoded_shell_patterns  = [          "rm -rf", "/etc/passwd", "/etc/shadow", "wget ", "curl ", "nc -e"]
+```
+
+They differ by exactly the three **bare metacharacters**. `base64_decoded_threat` — the rule written
+for decoded content — uses the correct one. The decoded arm of `shell_injection_detected` uses the
+other, applying raw-prose patterns to random decoded bytes.
+
+Traced end to end. `b64_candidate_clean` strips whitespace, so the payload `{"note": "benign call 18"}`
+becomes the candidate `benigncall18` (12 chars: passes the ≥8 length gate, the `^[A-Za-z0-9+/]+$`
+charset gate, and the not-all-digits gate), which decodes to:
+
+```
+'benign call 18' -> b'm\xe9\xe2\x82w\x1a\x96]|'   <- final byte 0x7C  = "|"  -> deny_shell_execution
+'benign call 58' -> b'm\xe9\xe2\x82w\x1a\x96^|'   <- final byte 0x7C  = "|"  -> deny_shell_execution
+'benign call 8'  -> b'm\xe9\xe2\x82w\x1a\x96_'    <- no hit
+'benign call 28' -> b'm\xe9\xe2\x82w\x1a\x96\xbc' <- no hit
+```
+
+The arithmetic matches the measured rate: ~1/256 per decoded byte for `|` alone, ~9 decoded bytes per
+candidate, ≈3.5% — against 2.5% observed here and 4.0% @8 in Campaign 1. **The entire fan-out curve is
+this one list.** A `|` in prose is weak-but-real evidence of shell injection; a `|` among the nine
+random bytes you get from base64-decoding an ordinary English sentence is no evidence at all.
+
+**Fix shape** (queued): the decoded arm uses `decoded_shell_patterns` — multi-byte indicators only.
+The fix is already written and already in the same file, being used correctly by the rule next door.
+Expected effect: the base64 FP curve collapses to ~0 while every real encoded payload
+(`base64("rm -rf /")` and friends) still matches, because those are what the multi-byte list is made of.

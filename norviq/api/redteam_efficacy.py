@@ -21,7 +21,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from norviq.api.routers.system_health import infra_rule_for  # an engine fault is not a detection
+from norviq.api.routers.system_health import non_policy_rule_for  # a fault or a throttle is not a detection
 from norviq.api.synthetic import is_synthetic_identity
 from norviq.redteam.vectors import VECTORS_BY_ID, EVALUATE_REACHABLE, coverage_denominators
 
@@ -130,9 +130,17 @@ def _row_outcome(r: dict[str, Any]) -> str:
     An engine fault is never a detection. A fail-closed `block` carrying `evaluator_timeout` is the
     engine failing, not a control working, and scoring it as caught inflates the headline number with
     an outage — so faults are tested BEFORE the enforced check and left in the red bucket.
+
+    A THROTTLE is never a detection either, for the same reason and with a nastier failure mode. The
+    engine's rate limiter fires only on a decision that already resolved to `allow`, so a
+    `block / rate_limit_exceeded` row is a call the policy stack examined and permitted, refused
+    afterwards on volume alone. Scoring it as caught made `proven_blocking_pct` a function of how hard
+    the suite was driven rather than of policy quality — and, worse, made it rise as coverage got
+    WORSE, since only an allow is eligible to be throttled. The check is `non_policy_rule_for`, which
+    covers faults and the throttle together.
     """
     rule_id = str(r.get("rule_id") or "")
-    if infra_rule_for(rule_id) is not None:
+    if non_policy_rule_for(rule_id) is not None:
         return "got_through"
     actual = str(r.get("actual") or "")
     if actual in _ENFORCED_DECISIONS:
