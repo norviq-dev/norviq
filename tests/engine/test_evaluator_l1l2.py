@@ -126,3 +126,47 @@ async def test_policy_invalidation_clears_the_inproc_eval_cache(l1l2_evaluator: 
     assert len(ev._inproc_eval_cache) >= 1
     await ev._cache.invalidate_eval_scope("tenant-a", "support")   # fires the registered clear hook
     assert len(ev._inproc_eval_cache) == 0
+
+
+class TestRateLimitExemptionRequiresTheClassifierToAgree:
+    """C2-022: the exemption was opt-out-able by renaming the tool.
+
+    `evaluator_rate_limit_read_prefixes` contains `get_`, `report_`, `search_` and eight more, and the
+    tool name is a string the CALLER supplies — so prefixing a destructive tool bought exemption from
+    the DoS backstop. Measured live on AKS: `get_delete_all_records` ran 75/75 calls with no throttle.
+
+    The name still gates, but it must now agree with `classify_tool`. Strictly narrower than before:
+    a genuine read stays exempt, a tool that was exempt only because of how it was spelled does not.
+    """
+
+    @staticmethod
+    def _exempt(name: str) -> bool:
+        from norviq.engine.evaluator import OPAEvaluator
+        return OPAEvaluator._is_rate_limit_exempt(name)
+
+    def test_a_renamed_destructive_tool_is_no_longer_exempt(self):
+        assert self._exempt("get_delete_all_records") is False
+        assert self._exempt("search_and_destroy") is False
+        assert self._exempt("report_exfiltrate_everything") is False
+
+    def test_a_genuine_read_is_still_exempt(self):
+        assert self._exempt("get_customer") is True
+
+    def test_a_non_read_name_is_still_not_exempt(self):
+        assert self._exempt("send_email") is False
+        assert self._exempt("delete_all_records") is False
+
+    def test_params_are_never_consulted(self):
+        """The signature takes only a name — passing tool_params would open a worse hole.
+
+        `classify_tool` falls back to inspecting tool_params when the NAME resolves to nothing, and
+        tool_params is agent-supplied: an unknown name plus `{"query": "select 1"}` would classify as
+        `read` and earn the exemption. That trades a caller-controlled name for a caller-controlled
+        payload, which is more freely chosen. An unresolved name yields `unknown`, which is not
+        `read`, so it is rate-limited. Fail toward throttling.
+        """
+        import inspect
+        from norviq.engine.evaluator import OPAEvaluator
+        params = inspect.signature(OPAEvaluator._is_rate_limit_exempt).parameters
+        assert list(params) == ["tool_name"], "no tool_params parameter may be added here"
+        assert self._exempt("acme_widget") is False  # unresolved name -> unknown -> not exempt

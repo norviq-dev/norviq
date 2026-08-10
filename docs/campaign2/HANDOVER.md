@@ -3,23 +3,28 @@
 **Purpose:** a new session should be able to resume from this file alone. Keep it current — update
 the "Work queue" and "Session log" sections every time something lands. Do not let it go stale.
 
-Last updated: 2026-08-10, after the backlog reconciliation.
+Last updated: 2026-08-10 — Tier 1 done, Tier 2 half done (C2-023 landed, C2-022 next).
 
 ---
 
 ## Where things stand
 
-**Branch:** `integrate/mcp-and-builder`. ~35 unpushed commits. Version 0.2.0, no tag at HEAD.
+**Branch:** `integrate/mcp-and-builder`. ~38 unpushed commits. Version 0.2.0, no tag at HEAD.
 **NOT merged to main, NOT pushed, NO new version cut** — all three need San's explicit approval.
 
 **Latest commits:**
+- `b3501c6` C2-023: the decoded arm must not match bare shell metacharacters
+- `e741d6e` tier 1: monitor must never interrupt, on every plane that decides
 - `236a1c3` campaign2: a throttle is not a detection (C2-021), + rate-abuse findings
 - `e1030dd` campaign2: file C2-019/C2-020, resolve SEED-06 from live evidence
-- `3ad6c8c` C2-018 resolved — all five frameworks verified enforcing on current GA
-- `00a674c` crewai[litellm] dependency fix
 
-**Gates last run:** `.venv/bin/python -m pytest tests --ignore=tests/integration --ignore=tests/attacks -q`
-→ **2705 passed** at `236a1c3`. Ruff clean on touched files.
+**Gates last run at `b3501c6` — ALL GREEN:**
+- `.venv/bin/python -m pytest tests --ignore=tests/integration --ignore=tests/attacks -q` → **2713 passed**
+- `.venv/bin/python -m ruff check norviq tests` → clean
+- `opa test --v0-compatible comprehensive.rego webhook/presets/strict.rego webhook/presets/strict_parity_test.rego` → **17/17**
+  (NOTE: bare `opa test` FAILS on this repo — OPA 1.x defaults to Rego v1, these presets are v0.
+   The `--v0-compatible` flag is not optional. Without it you get parse errors on every rule.)
+- `cd ui && npx tsc --noEmit && npx eslint src --max-warnings=0` → clean
 
 ### Decision in force (2026-08-10)
 
@@ -75,16 +80,20 @@ directly.
 
 ### Tier 2 — the instrument (must land before any further attack testing)
 
-- [ ] **C2-023 — base64 false-positive root cause.** `webhook/presets/strict.rego` has two
-      near-anagram lists differing by exactly the three bare metacharacters:
-      `shell_patterns_decoded = ["|", "$(", "`", "rm -rf", …]` vs
-      `decoded_shell_patterns = ["rm -rf", "/etc/passwd", "/etc/shadow", "wget ", "curl ", "nc -e"]`.
-      `base64_decoded_threat` uses the correct one; the decoded arm of `shell_injection_detected`
-      (`strict.rego:198-202`) uses the other, matching `|` against random decoded bytes.
-      Traced to the byte: `"benign call 18"` → whitespace-stripped candidate `benigncall12chars` →
-      decodes to bytes ending `0x7C`. Predicted ~3.5%, observed 2.5% here, 4.0% @8 in Campaign 1.
-      **Fix:** decoded arm uses `decoded_shell_patterns`. Expect the FP curve to collapse to ~0 while
-      real encoded payloads still match. **Re-run the FP baseline afterwards to confirm it moved.**
+- [x] **C2-023 — base64 false-positive root cause — ✅ DONE, commit `b3501c6`.**
+      The decoded arm of `shell_injection_detected` now uses `decoded_shell_patterns` (multi-byte
+      indicators only) instead of the raw list containing `|`, backtick and `$(`.
+      **Fixed in BOTH copies** — `comprehensive.rego` had the identical construct and lives at the
+      REPO ROOT, so a `webhook/presets/*.rego` sweep misses it (my first one did). The parity test
+      only compares DECISIONS, so a divergence that happens not to flip a decision on the fixtures
+      would pass. Five rego tests pin both directions; verified the two prose tests FAIL against the
+      old list. `opa test --v0-compatible` 17/17.
+      > **STILL OWED — re-measure the FP baseline LIVE.** The AKS cluster runs the pre-fix image, so
+      > the 2.5%-on-prose figure has not been re-taken. Needs a rebuild+deploy → **ask San first**.
+      > Expected: the base64 FP curve collapses to ~0 and `deny_shell_execution` stops firing on
+      > prose. Repro: 80 `/evaluate` calls with `{"note": "benign call N"}`; previously tripped at
+      > n=18 and n=58 (see the `/evaluate` request shape below — `agent_identity.namespace` is
+      > required or you get 422, not a decision).
 - [ ] **C2-022 — name-keyed controls.** `_is_rate_limit_exempt` (evaluator.py:911) is a name-prefix
       test; `strict_default_block` (strict.rego:740-745) is `startswith`. Both decided by a
       caller-supplied string. Proven live: `delete_all_records` caught 75/75;
@@ -215,4 +224,8 @@ Append one line per landed change. Newest last.
 - 2026-08-10 `e741d6e` — **Tier 1 DONE.** `_gate_answer` uses `is_allowed()`; attack-graph step
   verdict maps on whether the call proceeds; `_own_policy_control_for` bucket + `origin` field.
   Each fix verified to fail its own test when reverted. 2713 passed, all gates clean.
-  **NEXT: Tier 2 — C2-023 then C2-022.**
+- 2026-08-10 `b3501c6` — **C2-023 DONE** (Tier 2, first half). Decoded arm narrowed to multi-byte
+  indicators, in BOTH strict.rego and comprehensive.rego. One existing test used the now-fixed shell
+  misfire as its vehicle for "monitor records a false positive rather than dropping it"; retargeted
+  to the date→SSN misfire (BUG-005, still open, 100% deterministic) rather than weakened.
+  **NEXT: C2-022 — read THE TRAP in its work-queue entry before starting.**

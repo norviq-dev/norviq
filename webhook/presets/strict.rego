@@ -291,6 +291,13 @@ egress_verb_tool { object.get(input.derived, "verb", "") == "send"; not retrieva
 name_split_map = {"A": "_a", "B": "_b", "C": "_c", "D": "_d", "E": "_e", "F": "_f", "G": "_g", "H": "_h", "I": "_i", "J": "_j", "K": "_k", "L": "_l", "M": "_m", "N": "_n", "O": "_o", "P": "_p", "Q": "_q", "R": "_r", "S": "_s", "T": "_t", "U": "_u", "V": "_v", "W": "_w", "X": "_x", "Y": "_y", "Z": "_z", "-": "_", ".": "_", ":": "_", "/": "_"}
 tool_name_tokens = [t | t := split(strings.replace_n(name_split_map, input.tool_name), "_")[_]; t != ""]
 
+# Destructive verbs, matched as whole TOKENS anywhere in the name by the `strict_default_block` arm
+# down in the CONTROLS region. Defined HERE rather than beside that arm because the baseline compiler
+# parses the CONTROLS region as rule heads only and refuses anything else outright
+# ("unparsable line in CONTROLS region") — which is the right way for it to fail, but it means a
+# helper definition has to live outside the markers.
+destructive_name_tokens = {"delete", "drop", "truncate", "destroy", "wipe", "purge", "erase"}
+
 # AND THE LEAD SPEAKS ONLY FOR THE NAME. `classify_tool` falls back to `_classify_params` when NO name
 # token matches the lexicon, so a call carrying a destination-shaped ARGUMENT is published as
 # verb="send" because of its PAYLOAD, not its name — and `browse`/`preview` are not in that lexicon.
@@ -768,6 +775,28 @@ blocks["strict_default_block"] { startswith(lower(input.tool_name), "destroy_") 
 blocks["strict_default_block"] { startswith(lower(input.tool_name), "wipe_") }
 blocks["strict_default_block"] { startswith(lower(input.tool_name), "purge_") }
 blocks["strict_default_block"] { startswith(lower(input.tool_name), "erase_") }
+# ...and the same verb ANYWHERE in the name, not only at the front. Every arm above is `startswith`
+# on a caller-supplied string, so the control was opt-out-able by rename: measured live on AKS,
+# `delete_all_records` was caught on 75/75 calls and `get_delete_all_records` was allowed on 75/75.
+# One prefix turned a control that fires on every call into one that fires on none. Same root cause
+# as the homoglyph tool name (C2-012) and the destination-keyed control (C2-013): a name the attacker
+# writes was the whole input.
+#
+# NOT keyed on `derived.verb`, and that is the point worth keeping. Keying the BLOCK on the classifier
+# looks obvious and is wrong: `classify_tool` takes the WORST verb over all name tokens, so it
+# over-classifies — `classify_tool("run_query")` and `classify_tool("execute_sql")` both return
+# `delete`. An arm blocking `verb == "delete"` therefore refuses ordinary read tools, which
+# tests/engine/test_capability.py::test_reads_are_not_swept_up_by_the_wider_lexicon caught immediately.
+# Over-classification is safe where it NARROWS (the rate-limit exemption asks for `read`, so a
+# mislabelled read is merely throttled) and unsafe where it BLOCKS. Different direction, different
+# rule.
+#
+# So: whole TOKENS over `tool_name_tokens`, the same primitive and the same reasoning the egress
+# section above uses — which also means `getDeleteAllRecords` cannot dodge it by dropping the
+# underscores, since `name_split_map` splits camelCase first. Whole tokens rather than substrings so
+# `undelete_`, `delete_candidates_report` style NOUNS are the only residual, and this control's
+# shipped caveat already documents that it matches on the name with no regard to arguments.
+blocks["strict_default_block"] { destructive_name_tokens[lower(tool_name_tokens[_])] }
 
 escalates["llm06_excessive_agency"] { elevated_tools[input.tool_name] }
 

@@ -909,13 +909,48 @@ class OPAEvaluator:
 
     @staticmethod
     def _is_rate_limit_exempt(tool_name: str) -> bool:
-        """Read-like tools are exempt from the per-identity rate limiter (benign read spike not denied)."""
+        """Read-like tools are exempt from the per-identity rate limiter (benign read spike not denied).
+
+        Exemption requires the CLASSIFIER to call it a read, not merely a matching name prefix.
+
+        The prefix test alone was opt-out-able by the caller. `evaluator_rate_limit_read_prefixes`
+        contains `get_`, `report_`, `search_` and eight more, and the tool name is a string the caller
+        supplies — so prefixing a destructive tool bought exemption from the DoS backstop. Measured
+        live on AKS: `delete_all_records` was caught by `strict_default_block` on 75/75 calls;
+        `get_delete_all_records` was allowed on 75/75 and never throttled. `classify_tool` calls both
+        of them `delete`.
+
+        So the name still gates (see below for why), but it must now AGREE with the classifier. The
+        product already computes this and this function simply was not asking: `classify_tool` is the
+        "one notion of sink" whose own comment says it exists so policy can gate on what a tool DOES,
+        not what it is called.
+
+        WHY `classify_tool(name)` WITH NO PARAMS. Passing `tool_params` here would open a worse hole
+        than the one being closed, and the evaluator warns about it a few hundred lines up: the
+        classifier falls back to inspecting tool_params when the NAME resolves to nothing, and
+        tool_params is agent-supplied. An unknown tool name plus `{"query": "select 1"}` would then
+        classify as `read` and earn the exemption — trading a caller-controlled name for a
+        caller-controlled payload, which is strictly more freely chosen. Name-only means an unresolved
+        name returns `unknown`, which is not `read`, so it is rate-limited. Fail toward throttling.
+
+        Net effect: strictly NARROWER than before. Every tool that was exempt and is genuinely a read
+        stays exempt; the ones that were exempt only because of how they were spelled no longer are.
+        """
         if not settings.evaluator_rate_limit_read_exempt:
             return False
         name = (tool_name or "").lower()
-        if name.endswith("_status") or name.endswith("_read"):
-            return True
-        return any(name.startswith(p) for p in settings.evaluator_rate_limit_read_prefixes)
+        if not (
+            name.endswith("_status")
+            or name.endswith("_read")
+            or any(name.startswith(p) for p in settings.evaluator_rate_limit_read_prefixes)
+        ):
+            return False
+        try:
+            verb, _risk = classify_tool(tool_name)
+        except Exception:  # noqa: BLE001 — a classifier fault must not grant an exemption
+            log.warning("nrvq.engine.rate_limit.classify_failed", tool=tool_name, code="NRVQ-ENG-2061")
+            return False
+        return str(getattr(verb, "value", verb)) == "read"
 
     @staticmethod
     def _ensure_block_attribution(decision: PolicyDecision, event_id: str) -> PolicyDecision:
