@@ -174,12 +174,23 @@ def test_only_infrastructure_rule_ids_qualify_as_incidents() -> None:
         "thin_proxy_fail_closed",
         "thin_proxy_fail_open",
         "engine_rejected_request",
-        # Added: the two verdicts the ENGINE mints and the API's own emitter persists. Without them
-        # this route keyed exclusively on ids no code path can write while the incident is happening,
-        # so it could never substantiate an outage at all — see the producer test below.
+        # The verdicts the ENGINE mints and the API's own emitter persists. Without them this route
+        # keyed exclusively on ids no code path can write while the incident is happening, so it could
+        # never substantiate an outage at all — see the producer test below.
         "evaluator_error",
         "policy_load_pending",
+        # Added later, and the omission mattered: these are the SAME shape as `evaluator_error` — a
+        # fail-closed refusal of real traffic with no rule behind it — and they were absent, so the
+        # outage an operator is most likely to actually have (the engine slowing under load rather
+        # than falling over) was the one the banner could not show.
+        "evaluator_timeout",
+        "evaluator_fallback",
     }
+    # `invalid_spiffe_identity` stays OUT on purpose, and this asserts the judgement rather than
+    # leaving it to be re-litigated: it names a CALLER fault, and one spoof attempt raising
+    # "Norviq is down" is the misdirection this module's docstring exists to prevent. The fleet-wide
+    # version of that failure already has a key here as `engine_rejected_request`.
+    assert "invalid_spiffe_identity" not in _INFRA_RULE_IDS
     # Every entry must carry a severity, a title, a detail and a remediation — an alarm with no
     # next step is just noise on a dashboard.
     for rule_id, spec in _INFRA_RULE_IDS.items():

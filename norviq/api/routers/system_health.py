@@ -101,6 +101,30 @@ _INFRA_RULE_IDS = {
         "fail-closed. These are engine errors, not policy decisions — no rule denied them.",
         "Check the OPA container/sidecar and norviq-engine logs (NRVQ-ENG-2057) for the failing query.",
     ),
+    # The engine could not decide IN TIME. Same shape as `evaluator_error` and it was missing: a
+    # fail-closed refusal of real traffic caused entirely by engine latency, with no rule behind it.
+    # Excluding it meant the one outage an operator is most likely to actually have — the engine
+    # slowing down under load rather than falling over — was the one the banner could not show.
+    "evaluator_timeout": (
+        "critical",
+        "Tool calls are timing out in the engine",
+        "The policy engine is reachable but not answering within the evaluation budget, so calls are "
+        "being refused fail-closed. These are timeouts, not policy decisions — no rule denied them.",
+        "Check norviq-engine and OPA latency and CPU, and the sdk_timeout_ms budget for this deployment.",
+    ),
+    # The generic fail-closed path: evaluation raised something unhandled. Rarer than the two above and
+    # for that reason MORE interesting — it is the one that means nobody has seen this failure before.
+    "evaluator_fallback": (
+        "critical",
+        "Tool calls are being refused by an unhandled engine fault",
+        "Evaluation failed in a way the engine did not classify, so calls are being refused "
+        "fail-closed. No rule denied them.",
+        "Check norviq-engine logs for the unhandled exception (NRVQ-ENG-2003) around this window.",
+    ),
+    # DELIBERATELY ABSENT: `invalid_spiffe_identity`. It names a CALLER fault — a malformed or forged
+    # identity — and a single spoof attempt raising "Norviq is down" is exactly the misdirection this
+    # module's docstring warns about. The fleet-wide version of that failure (every sidecar suddenly
+    # unable to authenticate) already has a key here in `engine_rejected_request`.
     # The policy subsystem had not finished warming when the call arrived. Transient at rollout; if it
     # persists, policy never loaded and everything governed is being refused.
     "policy_load_pending": (
