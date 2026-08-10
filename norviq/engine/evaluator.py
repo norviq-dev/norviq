@@ -2362,15 +2362,44 @@ class OPAEvaluator:
         return results[0]
 
     def _resolve_precedence(self, results: list[dict]) -> dict:
-        """Highest priority wins; most restrictive wins on ties."""
+        """Highest priority wins among ENFORCING layers; an audit-mode layer can only tighten.
+
+        Priority still decides, and deliberately so: a per-class allowlist authored at 200 is meant to
+        loosen a baseline at 1, and "most restrictive wins" across base tiers would take that away.
+
+        What it must NOT do is let a policy saved in `audit` mode DISARM one that enforces. An
+        audit-mode policy is not making an enforcement decision — it is observing, and
+        `_apply_policy_mode` softens its block to an audit moments later. Ranked by priority alongside
+        real decisions it won anyway, and the lower-priority policy that would actually have blocked
+        was discarded: trialling a rule the documented safe way switched enforcement off. That is
+        BUG-014, and it is the same shape as the base-vs-floor tie fixed alongside it — the engine was
+        reasoning about effective decisions in one place and raw decisions in the other.
+
+        So audit-mode layers are partitioned out and re-applied as tighten-only observers, exactly like
+        an overlay: they can raise an `allow` to `audit` (recording without interrupting, which is what
+        monitor mode is for) and can never lower a `block`.
+        """
         decision_rank = {"block": 0, "escalate": 1, "audit": 2, "allow": 3}
-        results.sort(
-            key=lambda item: (
-                -int(item["priority"]),
-                decision_rank.get(item["decision"].decision, 3),
+
+        def by_priority(items: list[dict]) -> dict:
+            items.sort(
+                key=lambda item: (
+                    -int(item["priority"]),
+                    decision_rank.get(item["decision"].decision, 3),
+                )
             )
-        )
-        return results[0]
+            return items[0]
+
+        observing = [r for r in results if str(r.get("enforcement_mode", "block")) == "audit"]
+        enforcing = [r for r in results if str(r.get("enforcement_mode", "block")) != "audit"]
+        # Nothing enforcing: the observation IS the decision, and still gets softened downstream.
+        if not enforcing:
+            return by_priority(results)
+        winner = by_priority(enforcing)
+        if not observing:
+            return winner
+        observer = by_priority(observing)
+        return observer if self._effective_rank(observer) < self._effective_rank(winner) else winner
 
     def _fallback_decision(self, event: ToolCallEvent, elapsed_ms: float) -> PolicyDecision:
         """Return fail-closed fallback decision when evaluation fails."""

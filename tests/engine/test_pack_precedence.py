@@ -200,3 +200,58 @@ def test_effective_rank_only_softens_block_and_escalate() -> None:
     assert _ev._effective_rank(_rm("k", "audit", 1, "audit", False)) == 2
     assert _ev._effective_rank(_rm("k", "block", 1, "audit", False)) == 2
     assert _ev._effective_rank(_rm("k", "block", 1, "block", False)) == 0
+
+
+# --- BUG-014: an audit-mode layer must OBSERVE, never disarm ----------------------------------------
+#
+# `audit` is the documented safe way to trial a rule. Ranked by priority alongside real decisions, a
+# higher-priority audit-mode policy won precedence anyway and `_apply_policy_mode` then softened its
+# block to an audit — discarding a lower-priority policy that would actually have blocked. Trialling a
+# rule the safe way was what switched enforcement off.
+#
+# Same shape as the base-vs-floor tie fixed alongside it: the engine reasoned about EFFECTIVE decisions
+# in one place and raw decisions in the other.
+
+def test_an_audit_mode_policy_cannot_disarm_a_lower_priority_enforcing_one() -> None:
+    winner = _ev._resolve_with_packs([
+        _rm("ns:support", "block", 200, "audit", False),      # the trial rule, higher priority
+        _rm("ns:__baseline__", "block", 100, "block", False),  # the policy actually enforcing
+    ])
+    assert winner["key"] == "ns:__baseline__"
+    assert winner["enforcement_mode"] == "block"
+
+
+def test_an_audit_mode_policy_still_tightens_an_allow_to_audit() -> None:
+    # Monitor mode's entire purpose: record a call the enforcing layer permits, without interrupting
+    # it. `audit` is stricter than `allow`, so the observation survives.
+    winner = _ev._resolve_with_packs([
+        _rm("ns:support", "block", 200, "audit", False),
+        _rm("ns:__baseline__", "allow", 100, "block", False),
+    ])
+    assert winner["key"] == "ns:support"
+
+
+def test_priority_still_lets_a_higher_tier_LOOSEN_when_it_is_really_enforcing() -> None:
+    # The headline precedence contract, and the reason this is not simply most-restrictive-wins: a
+    # per-class allowlist authored at 200 is MEANT to loosen a baseline at 1.
+    winner = _ev._resolve_with_packs([
+        _rm("ns:support", "allow", 200, "block", False),
+        _rm("ns:__baseline__", "block", 1, "block", False),
+    ])
+    assert winner["key"] == "ns:support"
+    assert winner["decision"].decision == "allow"
+
+
+def test_a_lone_audit_policy_still_produces_its_own_decision() -> None:
+    # With nothing enforcing, the observation IS the decision — it is softened downstream by
+    # _apply_policy_mode, which is how a would-block gets recorded at all.
+    winner = _ev._resolve_with_packs([_rm("ns:support", "block", 200, "audit", False)])
+    assert winner["key"] == "ns:support"
+
+
+def test_two_audit_policies_resolve_between_themselves_by_priority() -> None:
+    winner = _ev._resolve_with_packs([
+        _rm("ns:low", "block", 10, "audit", False),
+        _rm("ns:high", "block", 900, "audit", False),
+    ])
+    assert winner["key"] == "ns:high"
