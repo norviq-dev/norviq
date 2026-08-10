@@ -251,8 +251,15 @@ def test_destinations_surface_a_non_https_scheme_rather_than_normalising_it() ->
 
 
 def test_destinations_are_empty_not_missing_when_the_call_has_none() -> None:
+    """Every list PRESENT and empty, never absent — a missing key takes `subsetOf` vacuously true.
+
+    Pinned as an exact shape on purpose: adding a destination fact has to come here and be stated,
+    because a new list that is absent rather than empty is the same fail-open bug wearing a new name.
+    """
     d = _derived("q", {"query": "SELECT 1"})
-    assert d["destinations"] == {"emails": [], "urls": [], "hosts": [], "schemes": []}
+    assert d["destinations"] == {
+        "emails": [], "urls": [], "hosts": [], "schemes": [], "recipient_domains": [],
+    }
 
 
 # --- data_classes: classifies the REQUEST, which nothing did before ----------------------------------
@@ -336,3 +343,68 @@ def test_existing_fields_are_byte_identical_after_the_extension() -> None:
     assert d["tool_kind"] == "sql"
     assert d["sql_normalized"] == "select * from orders"
     assert d["sql_statements"] == ["select * from orders"]
+
+
+# --- destinations.recipient_domains: WHO it was sent to, not every address in the payload ------------
+#
+# `destinations.emails` harvests every address anywhere in the call, so an exfiltration to an attacker
+# mailbox and an internal forward of the SAME customer record produce identical lists — a customer
+# record legitimately contains the customer's own address. Measured on a live cluster, and it is why a
+# correct customer-data egress policy could not be written against that fact at all.
+#
+# Domains rather than addresses because that is the unit an operator can maintain: a policy naming
+# every individual mailbox fails open the day someone is hired. Exact set membership over domains is
+# then enough, which is what makes this expressible in the Visual Builder and not only in raw rego.
+
+def test_recipient_domains_reports_the_recipient_not_the_body() -> None:
+    d = _derived("send_email", {
+        "to": "newcontact@mail-relay.example.net",
+        "body": "Name: Ada Lovelace, email ada@gmail.example.com",
+    })
+    assert d["destinations"]["recipient_domains"] == ["mail-relay.example.net"]
+
+
+def test_an_address_in_the_body_is_not_a_recipient() -> None:
+    """THE distinction. Forwarding a customer record internally must not read as egress to the
+    customer's own mail provider — the same call shape that `destinations.emails` cannot tell apart."""
+    d = _derived("send_email", {
+        "to": "agent@acme.example.com",
+        "body": "Name: Ada Lovelace, email ada@gmail.example.com",
+    })
+    assert d["destinations"]["recipient_domains"] == ["acme.example.com"]
+    # and the older fact still cannot tell them apart, which is the reason this one exists
+    assert "gmail.example.com" in " ".join(d["destinations"]["emails"])
+
+
+def test_cc_and_bcc_and_nested_arrays_are_recipients() -> None:
+    assert _derived("post_webhook", {"payload": {"cc": ["ops@acme.example.com", "drop@evil.example.org"]}}) \
+        ["destinations"]["recipient_domains"] == ["acme.example.com", "evil.example.org"]
+    assert _derived("send_email", {"to": "agent@acme.example.com", "bcc": "exfil@evil.example.org"}) \
+        ["destinations"]["recipient_domains"] == ["acme.example.com", "evil.example.org"]
+
+
+def test_domains_are_normalised_so_an_allowlist_cannot_be_sidestepped() -> None:
+    # Case and a root dot are the two cheap evasions against exact set membership.
+    d = _derived("send_email", {"to": "X@MAIL-RELAY.EXAMPLE.NET."})
+    assert d["destinations"]["recipient_domains"] == ["mail-relay.example.net"]
+
+
+def test_camel_case_recipient_keys_are_recognised() -> None:
+    d = _derived("send_email", {"sendTo": "x@evil.example.org"})
+    assert d["destinations"]["recipient_domains"] == ["evil.example.org"]
+
+
+def test_a_network_destination_key_is_not_a_recipient() -> None:
+    """Deliberately narrower than _DESTINATION_KEY_TOKENS: `url`/`host`/`endpoint` describe where a
+    request goes, not who receives a message. Folding them in would put an API host into a list an
+    operator reads as "mailboxes this agent wrote to"."""
+    d = _derived("post_webhook", {"url": "https://evil.example.org/x", "note": "mail a@evil.example.org"})
+    assert d["destinations"]["recipient_domains"] == []
+
+
+def test_the_other_destination_facts_are_untouched() -> None:
+    """Additive: this must not change what an existing policy sees."""
+    d = _derived("post_webhook", {"url": "https://api.acme.com/v1", "to": "a@acme.example.com"})
+    assert d["destinations"]["hosts"] == ["api.acme.com"]
+    assert d["destinations"]["schemes"] == ["https"]
+    assert d["destinations"]["recipient_domains"] == ["acme.example.com"]

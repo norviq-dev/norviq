@@ -320,7 +320,8 @@ const FACT_FIELD_LABEL: Record<string, string> = {
   sql_tables: "SQL tables",
   sql_statements: "SQL statements",
   param_values: "any parameter value",
-  "destinations.emails": "recipient addresses",
+  "destinations.emails": "any address in the call",
+  "destinations.recipient_domains": "recipient domains",
   "destinations.urls": "destination URLs",
   "destinations.hosts": "destination hosts",
   "destinations.schemes": "URL schemes",
@@ -357,7 +358,8 @@ function factFieldLabel(field: string): string {
 
 const FACT_FIELD_HINT: Record<string, string> = {
   data_classes: "secret, pci, pii — matched wherever in the payload it sits, not just one argument",
-  "destinations.emails": "every address found anywhere in the call, so it cannot be moved to another field",
+  "destinations.emails": "every address found ANYWHERE in the call, including the message body — use recipient domains to say who it was sent to",
+  "destinations.recipient_domains": "the domains of addresses under to/cc/bcc, so a customer address quoted in the body is not counted",
   "destinations.hosts": "every URL host found anywhere in the call",
   sql_tables: "the tables the SQL actually touches",
   param_bytes: "a volume guard, e.g. 65536"

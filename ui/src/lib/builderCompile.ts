@@ -1141,6 +1141,12 @@ export const COLLECTION_FIELD_EXPR: Record<BuilderCollectionFactField, string> =
   sql_statements: "input.derived.sql_statements",
   param_values: "input.derived.param_values",
   "destinations.emails": 'input.derived.destinations.emails',
+  // Key-aware: the DOMAINS of addresses under a recipient-shaped key (to/cc/bcc/...), lower-cased by
+  // the extractor. `destinations.emails` cannot express a customer-data egress rule because it also
+  // harvests addresses out of the message body — an internal forward of a customer record and an
+  // exfiltration to an attacker mailbox produce the same list. Domains rather than addresses because
+  // that is the unit an operator can maintain, and it makes exact set membership sufficient.
+  "destinations.recipient_domains": 'input.derived.destinations.recipient_domains',
   "destinations.urls": 'input.derived.destinations.urls',
   "destinations.hosts": 'input.derived.destinations.hosts',
   "destinations.schemes": 'input.derived.destinations.schemes'

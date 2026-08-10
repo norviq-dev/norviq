@@ -83,6 +83,7 @@ const COLLECTION_FACT_FIELDS = new Set([
   "sql_statements",
   "param_values",
   "destinations.emails",
+  "destinations.recipient_domains",
   "destinations.urls",
   "destinations.hosts",
   "destinations.schemes"

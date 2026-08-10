@@ -190,6 +190,29 @@ _IPV6_CHARS_RE = re.compile(r"^[0-9A-Fa-f:.]{2,45}$")
 # `target`, `path`, `file` — because `copy({"to": "b.txt"})` is ordinary traffic and harvesting `b.txt`
 # as a host is precisely the over-block this set exists to avoid. Measured against the 601 distinct
 # argument/key names this repo uses: 24 match, and none of them holds a filename.
+# Keys that name WHO a message is addressed to, as opposed to a network location.
+#
+# Deliberately NARROWER than _DESTINATION_KEY_TOKENS: `url`, `host`, `endpoint` and friends describe
+# where a request goes, not who receives a message, and folding them in here would put an API host in
+# a list an operator reads as "mailboxes this agent wrote to".
+#
+# This exists because `destinations.emails` cannot answer the question a customer-data egress policy
+# actually asks. It harvests every address ANYWHERE in the call, so a customer record that legitimately
+# contains the customer's own address is indistinguishable from a recipient — measured on a live
+# cluster: an exfiltration to an attacker mailbox and an internal forward of the same record produce
+# the same `destinations.emails`. The recipient is the half of the signal the VALUE cannot carry; only
+# the key knows it.
+_RECIPIENT_KEY_TOKENS = frozenset(
+    """to cc bcc recipient recipients addressee addressees mailto sendto""".split()
+)
+
+
+def _key_names_a_recipient(key: str) -> bool:
+    """True when the ARGUMENT NAME itself asserts a message recipient (see _RECIPIENT_KEY_TOKENS)."""
+    spaced = _KEY_CAMEL_RE.sub(" ", str(key or ""))
+    return any(t.lower() in _RECIPIENT_KEY_TOKENS for t in _KEY_SPLIT_RE.split(spaced) if t)
+
+
 _DESTINATION_KEY_TOKENS = frozenset(
     """host hosts hostname hostnames url urls uri uris endpoint endpoints domain domains fqdn netloc
        webhook webhooks callback callbacks origin origins server servers destination destinations dest
@@ -1202,7 +1225,12 @@ class OPAEvaluator:
             # deny-by-default the destination IS the control: "may email acme.com" needs no detector
             # for what is being sent, which is the gap a detector list can never close (§11.5 — the
             # strict preset blocked a card number and let a real AWS key through to an attacker).
-            "destinations": self._destinations(values, self._destination_keyed_hosts(event.tool_params)),
+            "destinations": {
+                **self._destinations(values, self._destination_keyed_hosts(event.tool_params)),
+                # Key-aware, so a policy can name WHO a message went to rather than every
+                # address the payload happens to contain. See _recipient_domains.
+                "recipient_domains": self._recipient_domains(event.tool_params),
+            },
             # Classes of sensitive data carried by the REQUEST. Output DLP already masks responses;
             # nothing classified the outbound direction, so "this call must not carry a secret" was
             # unexpressible. Reuses the masking module's patterns rather than forking a second set.
@@ -1365,6 +1393,61 @@ class OPAEvaluator:
 
         walk(node, "", 0)
         return found
+
+    def _recipient_domains(self, node: object) -> list[str]:
+        """Lower-cased DOMAINS of addresses sitting under a key that names a recipient.
+
+        The fact `destinations.emails` cannot answer "who is this being sent to", because it harvests
+        every address anywhere in the call: a customer record legitimately contains the customer's own
+        address, so an exfiltration to an attacker mailbox and an internal forward of the same record
+        produce identical lists. Measured on a live cluster — that ambiguity is why a correct
+        customer-data egress policy could not be written against it.
+
+        DOMAINS, not addresses, because that is the unit an operator can actually allowlist. A policy
+        naming every individual mailbox is unmaintainable and silently fails open the day someone is
+        hired; `recipient_domains subsetOf ["acme.example.com"]` states the real intent and keeps
+        stating it. Exact set membership is then enough — no suffix or regex operator is needed, which
+        is what makes this expressible in the Visual Builder rather than only in raw rego.
+
+        Same walk, depth cap and budget discipline as `_destination_keyed_hosts`, and bounded on the
+        DOMAIN for the same reason: 64 spellings of one already-allowlisted mailbox collapse to a
+        single entry, so counting raw values would let an alias evict the real recipient and take a
+        `subsetOf` allowlist vacuously true.
+        """
+        found: set[str] = set()
+
+        def walk(value: object, key: str, depth: int) -> None:
+            if depth > self._MAX_PATH_DEPTH or len(found) >= self._MAX_DESTINATIONS:
+                return
+            if isinstance(value, dict):
+                for child_key, child in value.items():
+                    walk(child, str(child_key), depth + 1)
+                    if len(found) >= self._MAX_DESTINATIONS:
+                        return
+                return
+            if isinstance(value, (list, tuple)):
+                for child in value:
+                    # A list inherits the key that held it — `{"cc": ["a@x", "b@y"]}` is two
+                    # recipients, and the array index carries no meaning of its own.
+                    walk(child, key, depth + 1)
+                    if len(found) >= self._MAX_DESTINATIONS:
+                        return
+                return
+            if isinstance(value, str) and _key_names_a_recipient(key):
+                candidate = value.strip()
+                if len(candidate) > self._MAX_PATH_VALUE_LEN:
+                    return
+                for addr in _emails(candidate):
+                    # `Ada@ACME.example.com.` and `ada@acme.example.com` are one domain; an allowlist
+                    # naming the second must not be sidestepped by case or a root dot.
+                    domain = addr.rsplit("@", 1)[-1].lower().rstrip(".")
+                    if domain:
+                        found.add(domain)
+                    if len(found) >= self._MAX_DESTINATIONS:
+                        return
+
+        walk(node, "", 0)
+        return sorted(found)[: self._MAX_DESTINATIONS]
 
     def _destinations(self, values: list, dest_keyed: set[str] | frozenset[str] = frozenset()) -> dict:
         """Emails, URLs, hosts and schemes found anywhere in the params.

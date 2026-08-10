@@ -136,6 +136,7 @@ export type BuilderCollectionFactField =
   | "sql_statements"
   | "param_values"
   | "destinations.emails"
+  | "destinations.recipient_domains"
   | "destinations.urls"
   | "destinations.hosts"
   | "destinations.schemes";
