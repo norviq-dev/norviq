@@ -245,3 +245,58 @@ def test_a_bare_control_id_that_actually_BLOCKED_is_still_not_counted() -> None:
         _row("deny_sql_injection", decision="audit"),
     ])
     assert body["controls"][0]["count"] == 1
+
+
+# --- BUG-023: samples must not contradict the counts they sit beside ---------------------------------
+
+def test_samples_are_the_most_recent_not_the_first_the_database_returned() -> None:
+    """Observed live: a control showed 13 of 18 hits from one tool while 4 of its 5 samples named a
+    different one. There was no ORDER BY, so the samples were whatever the scan reached first — and a
+    sample that misrepresents the pattern is worse than no sample, because it is the part an operator
+    reads INSTEAD of the aggregate."""
+    rows = [_row("policy_audit_would_block:pii_detection", tool="old_tool", minutes_ago=500 - i) for i in range(20)]
+    rows += [_row("policy_audit_would_block:pii_detection", tool="recent_tool", minutes_ago=i) for i in range(5)]
+    body = _get(rows)
+    control = body["controls"][0]
+    assert control["count"] == 25
+    assert {s["tool_name"] for s in control["samples"]} == {"recent_tool"}
+
+
+def test_samples_survive_a_row_with_no_timestamp() -> None:
+    """A null timestamp must not crash the sort or evict every real sample."""
+    rows = [_row("policy_audit_would_block:pii_detection", tool="dated", minutes_ago=1)]
+    undated = _row("policy_audit_would_block:pii_detection", tool="undated")
+    undated.timestamp_utc = None
+    body = _get(rows + [undated])
+    assert body["controls"][0]["count"] == 2
+    assert "dated" in {s["tool_name"] for s in body["controls"][0]["samples"]}
+
+
+def test_a_sample_carries_no_internal_sort_key() -> None:
+    """The sort key is an implementation detail; leaking `_ts` would put a datetime in the JSON."""
+    body = _get([_row("policy_audit_would_block:pii_detection")])
+    assert set(body["controls"][0]["samples"][0]) == {"tool_name", "agent_class", "at"}
+
+
+# --- BUG-024: excluded_synthetic must count what was actually SUPPRESSED -----------------------------
+
+def test_excluded_synthetic_counts_only_rows_that_would_have_been_reported() -> None:
+    """It incremented on EVERY excluded row, so a 30d window read "scanned 5930, excluded 21338" —
+    78% of the window apparently withheld, when almost none of it was a would-block. The arithmetic
+    was right and the label was wrong, and the label is the part that gets acted on: an operator reads
+    it as "how much evidence am I not being shown"."""
+    rows = [
+        # synthetic AND a would-block -> genuinely suppressed, counts
+        _row("policy_audit_would_block:pii_detection", framework="redteam"),
+        _row("policy_audit_would_block:pii_detection", cls="probe-scanner"),
+        # synthetic but NOT evidence about any control -> excluding it withholds nothing
+        _row("default_allow", decision="allow", framework="redteam"),
+        _row("default_allow", decision="allow", cls="probe-scanner"),
+        _row("deny_sql_injection", decision="block", framework="redteam"),
+        # real traffic, unaffected
+        _row("policy_audit_would_block:pii_detection"),
+    ]
+    body = _get(rows)
+    assert body["excluded_synthetic"] == 2, "only the suppressed would-blocks"
+    assert body["scanned"] == 1
+    assert body["controls"][0]["count"] == 1

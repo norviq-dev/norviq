@@ -766,7 +766,7 @@ class OPAEvaluator:
         # Throttle on the ALLOW footing (not just the no-policy `default_allow` rule) so the per-ns
         # rate_limit backstop applies to every explicitly-governed allow class too. rate_limit_exceeded is
         # exempt from monitor softening (a throttle is a resource control, not a policy decision) — the posture
-        # pass inside _maybe_rate_limit leaves it untouched via _POSTURE_EXEMPT_RULES.
+        # pass inside _maybe_rate_limit leaves it untouched via _posture_exempt_rules().
         throttled = await self._maybe_rate_limit(event, cached, start, posture)
         if throttled is not None:
             return throttled

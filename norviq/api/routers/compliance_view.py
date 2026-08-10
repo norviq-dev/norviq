@@ -141,7 +141,14 @@ async def policy_compliance(
         if str(getattr(row, "framework", "") or "") == "redteam" or is_synthetic_identity(
             str(getattr(row, "agent_class", "") or "")
         ):
-            excluded += 1
+            # Count only what the exclusion actually SUPPRESSED — a synthetic row that would have
+            # landed in a control. It used to increment on every excluded row, so a 30d window read
+            # "scanned 5930, excluded 21338": 78% of the window apparently withheld, when almost none
+            # of it was a would-block and the number an operator was reading it as ("how much
+            # evidence am I not being shown") was off by three orders of magnitude. The arithmetic was
+            # right; the label was not, and the label is what gets acted on.
+            if _control_for(str(row.decision or ""), str(row.rule_id or ""), known_controls) is not None:
+                excluded += 1
             continue
         scanned += 1
         control_id = _control_for(str(row.decision or ""), str(row.rule_id or ""), known_controls)
@@ -158,12 +165,17 @@ async def policy_compliance(
                 entry["first_seen"] = ts
             if entry["last_seen"] is None or ts > entry["last_seen"]:
                 entry["last_seen"] = ts
-        if len(entry["samples"]) < _MAX_SAMPLES:
-            entry["samples"].append({
-                "tool_name": str(row.tool_name or ""),
-                "agent_class": str(row.agent_class or ""),
-                "at": ts.isoformat() if ts is not None else None,
-            })
+        # Collect them all; the newest _MAX_SAMPLES are selected after the scan. Taking the first
+        # five in DB order made the samples contradict the counts they sit beside: one control showed
+        # 13 of 18 hits from a single tool while 4 of its 5 samples named a different one. A sample
+        # that misrepresents the pattern is worse than no sample — it is the part an operator reads
+        # instead of the aggregate.
+        entry["samples"].append({
+            "tool_name": str(row.tool_name or ""),
+            "agent_class": str(row.agent_class or ""),
+            "at": ts.isoformat() if ts is not None else None,
+            "_ts": ts,
+        })
 
     out = [
         {
@@ -174,7 +186,15 @@ async def policy_compliance(
             "namespaces": sorted(n for n in e["namespaces"] if n),
             "first_seen": e["first_seen"].isoformat() if e["first_seen"] else None,
             "last_seen": e["last_seen"].isoformat() if e["last_seen"] else None,
-            "samples": e["samples"],
+            # Newest first, then capped — see the collection comment above.
+            "samples": [
+                {k: v for k, v in sample.items() if k != "_ts"}
+                for sample in sorted(
+                    e["samples"],
+                    key=lambda x: (x["_ts"] is not None, x["_ts"]),
+                    reverse=True,
+                )[:_MAX_SAMPLES]
+            ],
         }
         for cid, e in controls.items()
     ]

@@ -86,8 +86,14 @@ _INFRA_RULE_IDS = {
     # --- the substantiable half: written by the ENGINE, carried out through the API's own emitter, so
     # --- the record exists precisely because the API was up to write it.
     # OPA evaluation failed persistently. The engine answered the sidecar, then could not decide, and
-    # fail-closed blocked the call. Never a policy verdict — `_POSTURE_EXEMPT_RULES` keeps it hard even
-    # in monitor mode, so it is always a genuine refusal of real traffic.
+    # fail-closed blocked the call. Never a policy verdict — no rule denied it.
+    #
+    # It does NOT stay hard in monitor mode, and this comment used to say it did, naming a symbol
+    # (`_POSTURE_EXEMPT_RULES`) that no longer exists. Monitor mode softens it deliberately — the whole
+    # point of allow-by-default is that an engine fault must not drop customer traffic — which is
+    # exactly why `_INFRA_RULE_VARIANTS` below folds the softened `monitor_would_block:` spelling back
+    # to the bare id: the banner has to survive the softening, or this view goes dark in precisely the
+    # namespaces most likely to be running monitor.
     "evaluator_error": (
         "critical",
         "Tool calls are being blocked by an engine fault",
