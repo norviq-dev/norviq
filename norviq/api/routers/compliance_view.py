@@ -122,6 +122,43 @@ def _control_for(row_decision: str, rule_id: str, known: frozenset[str]) -> str 
     return None
 
 
+def _own_policy_control_for(row_decision: str, rule_id: str, known: frozenset[str]) -> str | None:
+    """A CUSTOMER-AUTHORED rule that flagged this row in monitor mode, or None.
+
+    The third sibling of `_control_for` / `_enforced_violation_for`, and it exists because the bare-id
+    branch above deliberately admits only the 14 shipped control ids — correct for the question that
+    branch answers ("if I promote this baseline control, what breaks?"), where a hand-written policy's
+    own rule id is not evidence.
+
+    It is wrong for the OTHER consumer. The Visual Builder ships `audit` as a first-class rule decision
+    (`BuilderSheet.tsx` DECISIONS, `builderCompile.ts` emits an `audits[...]` head with the customer's
+    own rule id), so a customer trialling their own policy in monitor mode emits a BARE audit id that
+    is not a shipped control — and `_control_for` correctly returns None for it. The console's "Your
+    own policies" section, added so that trialling a custom policy is visible at all, then rendered
+    zero for precisely the case it was built to serve: the rows were read, counted in `scanned`, and
+    discarded.
+
+    Measured: 12 bare `refund_over_limit` audit rows plus 2 prefixed ones reported a count of 2.
+
+    So this is one filter that had to answer two opposite questions. Adding a bucket rather than
+    loosening `_control_for` keeps the blast-radius number honest — the same resolution already used
+    for `_enforced_violation_for`.
+
+    Prefixed shapes are NOT handled here: `monitor_would_block:` / `policy_audit_would_block:` already
+    reach `_control_for`, which returns the stripped id for any non-shipped rule. Claiming them here
+    too would double-count the customer's own policy against itself.
+    """
+    if row_decision != "audit":
+        return None
+    if _strip_prefix(rule_id) is not None:  # already claimed by _control_for
+        return None
+    if non_policy_rule_for(rule_id) is not None:
+        return None
+    if not rule_id or rule_id == "default_allow" or rule_id in known:
+        return None
+    return rule_id
+
+
 @router.get("/policy-compliance")
 async def policy_compliance(
     namespace: str | None = Query(default=None),
@@ -167,7 +204,11 @@ async def policy_compliance(
             # of it was a would-block and the number an operator was reading it as ("how much
             # evidence am I not being shown") was off by three orders of magnitude. The arithmetic was
             # right; the label was not, and the label is what gets acted on.
-            if _control_for(str(row.decision or ""), str(row.rule_id or ""), known_controls) is not None:
+            _d, _r = str(row.decision or ""), str(row.rule_id or "")
+            if (
+                _control_for(_d, _r, known_controls) is not None
+                or _own_policy_control_for(_d, _r, known_controls) is not None
+            ):
                 excluded += 1
             continue
         scanned += 1
@@ -178,7 +219,12 @@ async def policy_compliance(
             eb["enforced"] += 1
             eb["agent_classes"][str(row.agent_class or "")] += 0  # keep the class visible, not double-counted
             eb["namespaces"].add(str(row.namespace or ""))
-        control_id = _control_for(decision, rule, known_controls)
+        # Shipped control first, then the customer's own monitor-mode rule. The two are mutually
+        # exclusive by construction (`_own_policy_control_for` declines anything `_control_for`
+        # claims), so this cannot double-count a row.
+        control_id = _control_for(decision, rule, known_controls) or _own_policy_control_for(
+            decision, rule, known_controls
+        )
         if control_id is None:
             continue
         entry = controls[control_id]
@@ -207,6 +253,16 @@ async def policy_compliance(
     out = [
         {
             "control_id": cid,
+            # Which KIND of rule this row is, stated rather than left for each consumer to re-derive.
+            #
+            # This endpoint now returns two populations: the 14 shipped controls, and rules from
+            # policies the customer wrote themselves (see `_own_policy_control_for`). A consumer that
+            # cannot tell them apart will present a hand-written rule as though it were a baseline
+            # control with a Promote button behind it — the failure the older
+            # "a bare non-shipped audit is ignored" test existed to prevent, and it was right to
+            # worry. Omitting the row is one way to prevent it; SAYING WHICH IT IS is the other, and
+            # it is the one that lets a customer see their own monitor-mode trial at all.
+            "origin": "baseline" if cid in known_controls else "custom",
             # `count` is the WOULD-block population: what promoting this control would newly break.
             # `enforced` is what it already refused. The two answer opposite questions and must not be
             # summed into one number by this endpoint — the callers choose.

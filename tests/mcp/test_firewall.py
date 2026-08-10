@@ -658,3 +658,56 @@ async def test_an_ordinary_list_changed_notification_is_untouched():
     msg = _msg({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"})
     result = await fw.on_server_message(msg)
     assert result.forward == msg.framed
+
+
+# ---------------------------------------------------------------- ANSWER PLANE (MRTR)
+# There were NO tests on this plane, which is how the bug below survived: the answer gate was the one
+# of four in firewall.py that compared `decision.decision == "allow"` by hand instead of calling
+# `is_allowed()`, and nothing exercised it with an `audit` decision.
+
+
+def _answer(name: str, answers: dict, mid: int = 7) -> P.JsonRpcMessage:
+    """A retry carrying `inputResponses` — the shape that reaches the answer gate."""
+    return _msg({"jsonrpc": "2.0", "id": mid, "method": "tools/call",
+                 "params": {"name": name, "arguments": {}, "inputResponses": answers}})
+
+
+async def test_audit_on_the_answer_plane_is_forwarded_not_refused():
+    """Monitor mode must never interrupt — on THIS plane too.
+
+    `is_allowed()` admits `audit` because an audited call is an allow that is recorded; that is what
+    visibility-only mode is made of, and `test_audit_decision_is_forwarded` pins it for the call gate.
+    The answer gate compared the string instead, so a namespace configured to interrupt nothing still
+    had its answers refused with `-32001 policy denied`.
+
+    Worse, monitor mode softens an ENGINE FAULT to `audit` as well, so an evaluator timeout came back
+    to the customer as "Norviq policy refused to answer" — blaming a policy for our own outage.
+    """
+    fw, _ = _firewall("audit")
+    result = await fw.on_client_message(_answer("search_docs", {"q": "x"}))
+    # None means "permitted — fall through to the ordinary call gate", which is the pass condition.
+    assert result is None or not result.blocked, (
+        "an audit decision must not be refused on the answer plane"
+    )
+
+
+async def test_a_monitor_softened_engine_fault_does_not_refuse_an_answer():
+    """The concrete shape a monitor-mode namespace produces when OUR engine faults."""
+    fw, ev = _firewall("audit")
+    ev.rule_id = "monitor_would_block:evaluator_timeout"
+    result = await fw.on_client_message(_answer("search_docs", {"q": "x"}))
+    assert result is None or not result.blocked
+
+
+async def test_block_on_the_answer_plane_is_still_refused():
+    """The gate must still work — the fix has to be surgical, not a hole."""
+    fw, _ = _firewall("block")
+    result = await fw.on_client_message(_answer("send_email", {"body": "secrets"}))
+    assert result is not None and result.blocked
+    assert result.forward is None, "a denied answer must not reach the upstream server"
+
+
+async def test_escalate_on_the_answer_plane_is_still_withheld():
+    fw, _ = _firewall("escalate")
+    result = await fw.on_client_message(_answer("send_email", {"body": "x"}))
+    assert result is not None and result.blocked

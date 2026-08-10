@@ -197,15 +197,34 @@ def test_a_bare_id_and_a_prefixed_id_are_the_same_control() -> None:
     assert body["controls"][0]["count"] == 2
 
 
-def test_a_bare_audit_that_is_not_a_shipped_control_is_ignored() -> None:
-    """`default_allow` and a hand-written policy's own rule are audits too, and neither is evidence
-    about promoting a BASELINE control. Counting them would invent a control that does not exist."""
+def test_a_bare_audit_is_labelled_by_origin_never_passed_off_as_a_shipped_control() -> None:
+    """A hand-written rule in monitor mode is REPORTED, and marked `custom`; `default_allow` never is.
+
+    This test used to assert that a bare non-shipped audit id was dropped entirely, on the grounds
+    that "counting them would invent a control that does not exist". That concern is real and is kept
+    below — but dropping the row also made the console's "Your own policies" section render zero for
+    exactly the case it was built to serve, because a customer trialling a policy in monitor mode is
+    the one who emits this shape (the Visual Builder ships `audit` as a first-class rule decision).
+    The rows were read, counted in `scanned`, and discarded.
+
+    So the row is returned and the response SAYS which kind it is. That satisfies the original worry
+    without hiding the customer's own evidence from them: a consumer can no longer mistake a
+    hand-written rule for a promotable baseline control, because it does not have to guess.
+
+    `default_allow` is still excluded outright — it is the ABSENCE of a match, not a rule.
+    """
     body = _get([
         _row("default_allow", decision="audit"),
         _row("my_custom_org_rule", decision="audit"),
         _row("pii_detection", decision="audit"),
     ])
-    assert [c["control_id"] for c in body["controls"]] == ["pii_detection"]
+    by_id = {c["control_id"]: c for c in body["controls"]}
+    assert "default_allow" not in by_id
+    assert by_id["pii_detection"]["origin"] == "baseline"
+    assert by_id["my_custom_org_rule"]["origin"] == "custom"
+    # Exactly one row each — the two buckets must stay mutually exclusive.
+    assert by_id["my_custom_org_rule"]["count"] == 1
+    assert sorted(by_id) == ["my_custom_org_rule", "pii_detection"]
 
 
 def test_engine_faults_are_not_reported_as_non_compliant_traffic() -> None:
@@ -383,3 +402,44 @@ def test_throttle_is_not_a_policy_decision_on_any_surface():
 
     # A real control at the same decision is still caught — the exclusion must be surgical.
     assert _row_outcome({"rule_id": "pii_detection", "actual": "block"}) == "caught"
+
+
+def test_a_customers_own_monitor_mode_rule_is_reported():
+    """A bare audit rule_id from a policy the CUSTOMER wrote must reach /policy-compliance.
+
+    The bare-id branch of `_control_for` admits only the 14 shipped control ids — correct for the
+    question it answers ("if I promote this baseline control, what breaks?"), where a hand-written
+    rule is not evidence. But the Visual Builder ships `audit` as a first-class rule decision, so a
+    customer trialling their own policy in monitor mode emits exactly that shape, and the console's
+    "Your own policies" section rendered zero for the case it exists to serve — the rows were read,
+    counted in `scanned`, and discarded. Measured: 12 bare rows + 2 prefixed reported a count of 2.
+
+    Fixed with a second bucket rather than by loosening `_control_for`, so the blast-radius number
+    stays honest. The two must remain mutually exclusive or a row is counted twice.
+    """
+    from norviq.api import baseline as baseline_lib
+    from norviq.api.routers.compliance_view import _control_for, _own_policy_control_for
+
+    known = frozenset(baseline_lib.control_ids("strict"))
+    assert known, "shipped controls must load, or this test proves nothing"
+
+    # The customer's own rule, authored in monitor mode.
+    assert _control_for("audit", "refund_over_limit", known) is None
+    assert _own_policy_control_for("audit", "refund_over_limit", known) == "refund_over_limit"
+
+    # A shipped control is claimed by _control_for and DECLINED here — never both.
+    shipped = next(iter(known))
+    assert _control_for("audit", shipped, known) == shipped
+    assert _own_policy_control_for("audit", shipped, known) is None
+
+    # Prefixed shapes already reach _control_for; claiming them here would double-count.
+    for stored in ("monitor_would_block:refund_over_limit", "policy_audit_would_block:refund_over_limit"):
+        assert _control_for("audit", stored, known) == "refund_over_limit"
+        assert _own_policy_control_for("audit", stored, known) is None
+
+    # Neither a non-audit row, nor noise, nor a throttle is a customer policy.
+    assert _own_policy_control_for("allow", "refund_over_limit", known) is None
+    assert _own_policy_control_for("audit", "default_allow", known) is None
+    assert _own_policy_control_for("audit", "", known) is None
+    assert _own_policy_control_for("audit", "rate_limit_exceeded", known) is None
+    assert _own_policy_control_for("audit", "evaluator_error", known) is None

@@ -1466,6 +1466,18 @@ class McpFirewall:
 
         Returns None to fall through to the ordinary call gate when the answer is permitted, so a
         retry is still governed as the `tools/call` it also is — one message, two planes.
+
+        Permission is `is_allowed()`, NOT `decision == "allow"`. This gate was the one of four in this
+        file that compared the string by hand (the other three — the call, discover and result gates —
+        always used the predicate), and `is_allowed()` admits `audit` on purpose: an audited call is an
+        ALLOW that is recorded, which is exactly what visibility-only mode is made of.
+
+        Comparing the string here inverted that for this plane alone. Monitor mode is implemented by
+        softening a verdict to `audit`, so a namespace configured to interrupt nothing still had its
+        answers refused — and a monitor-softened ENGINE FAULT arrived as
+        `audit / monitor_would_block:evaluator_timeout` and came back to the customer as "Norviq policy
+        refused", blaming a policy for our own outage. The path is unconditional: `_gate_answer` fires
+        on any client message carrying `inputResponses`, ahead of the call gate.
         """
         answers = self._answer_payload(msg)
         params = msg.params if isinstance(msg.params, dict) else {}
@@ -1474,7 +1486,7 @@ class McpFirewall:
             {P.INPUT_RESPONSES: answers, P.REQUEST_STATE: params.get(P.REQUEST_STATE)},
             surface="answer",
         )
-        if decision.decision == "allow":
+        if decision.is_allowed():
             self._bump("answer_allowed")
             return None
         self._bump("answer_denied")
