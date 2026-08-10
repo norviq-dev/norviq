@@ -3,7 +3,7 @@
 **Purpose:** a new session should be able to resume from this file alone. Keep it current — update
 the "Work queue" and "Session log" sections every time something lands. Do not let it go stale.
 
-Last updated: 2026-08-10 — Tier 1 done, Tier 2 done (C2-023 + C2-022). Tier 2b / Tier 3 next.
+Last updated: 2026-08-10 — Tiers 1+2 done, C2-019 done. Remaining: C2-020, Tier 2b, Tier 4.
 
 ---
 
@@ -13,18 +13,24 @@ Last updated: 2026-08-10 — Tier 1 done, Tier 2 done (C2-023 + C2-022). Tier 2b
 **NOT merged to main, NOT pushed, NO new version cut** — all three need San's explicit approval.
 
 **Latest commits:**
+- `6354bf3` C2-019: deliver sidecar credentials via Secret, not literal pod env
 - `6dfd55d` C2-022: a destructive tool must not escape by being renamed
 - `b3501c6` C2-023: the decoded arm must not match bare shell metacharacters
 - `e741d6e` tier 1: monitor must never interrupt, on every plane that decides
 - `236a1c3` campaign2: a throttle is not a detection (C2-021), + rate-abuse findings
 
-**Gates last run at `6dfd55d` — ALL GREEN:**
+**Gates last run at `6354bf3` — ALL GREEN:**
 - `.venv/bin/python -m pytest tests --ignore=tests/integration --ignore=tests/attacks -q` → **2717 passed**
 - `.venv/bin/python -m ruff check norviq tests` → clean
 - `opa test --v0-compatible comprehensive.rego webhook/presets/strict.rego webhook/presets/strict_parity_test.rego` → **22/22**
   (NOTE: bare `opa test` FAILS on this repo — OPA 1.x defaults to Rego v1, these presets are v0.
    The `--v0-compatible` flag is not optional. Without it you get parse errors on every rule.)
 - `cd ui && npx tsc --noEmit && npx eslint src --max-warnings=0` → clean
+- `.venv/bin/python -m pytest tests/helm -q` → **176 passed**
+- `cd webhook && go test ./...` → ok  (NOTE: the go module is at `webhook/go.mod`, NOT the repo root —
+  `go build` from the root fails with "cannot find main module")
+- Pre-existing `gofmt` drift in `webhook/controller_retry_test.go` and
+  `handler_injection_integrity_test.go` — NOT mine, left alone deliberately.
 
 ### Decision in force (2026-08-10)
 
@@ -137,14 +143,34 @@ directly.
 
 ### Tier 3 — high-severity infrastructure
 
-- [ ] **C2-019 — injected credentials are literal pod env.** `webhook/injector.go:515` (and `:393` for
-      the token) emit `{"name": …, "value": …}`. Kubernetes deliberately excludes Secrets from the
-      built-in `view` ClusterRole (verified on this cluster: `view` grants `get pods`, not
-      `get secrets`), so a read-only grant yields a working 30-day workload JWT.
-      **Fix:** webhook creates/patches a per-pod or per-namespace Secret and injects
-      `valueFrom.secretKeyRef`. No sidecar change needed — same env var either way.
-      Also: nothing **revokes**. `norviq/api/session_revocation.py` exists but its only caller is
-      `auth_login.py:174` (interactive logout). No admin revoke endpoint, no CRL.
+- [x] **C2-019 — credentials out of the pod spec — ✅ DONE, commit `6354bf3`.**
+      New `webhook/sidecar_secret.go`: the injector writes a Secret and emits `valueFrom.secretKeyRef`
+      for `NRVQ_API_TOKEN` / `NRVQ_CLIENT_CERT_PEM` / `NRVQ_CLIENT_KEY_PEM`. `NRVQ_API_CA_PEM` stays
+      literal (a CA cert is public by construction). Sidecar unchanged — same env vars either way.
+      Namespaced Role+RoleBinding per configured namespace (`webhook-secret-rbac.yaml`),
+      `get/create/update` only — deliberately NOT a ClusterRole, reasoning in the file.
+      Values: `webhook.injection.credentialSecret.{enabled,required,namespaces}`.
+      Six tests; the three behavioural ones verified to FAIL when the transform is reverted.
+
+      **Design points that must not be casually "simplified":**
+      - **Fail SOFT.** `failurePolicy: Fail` means this webhook gates ALL pod creation in labelled
+        namespaces. A Secret-write failure falls back to literal env + `NRVQ-WHK-4049` at ERROR.
+        `NRVQ_SIDECAR_SECRET_REQUIRED=true` inverts it. 3s timeout on the write.
+      - **Dry-run must not write** but must preview the same shape. `req.DryRun` used to only log;
+        that was fine until injection had a side effect. `PatchOptions{DryRun}` is threaded through.
+      - **Rotation survives** because the Secret is rewritten every admission and its name is
+        deterministic (hash suffix guards collisions). Created-if-absent would have broken rotation.
+
+      > **STILL OWED — verify on a live cluster.** Needs a webhook rebuild + deploy → **ask San**.
+      > Check: injected pod's env uses `secretKeyRef`; the Secret exists in the pod's namespace;
+      > `kubectl auth can-i get secrets --as=system:serviceaccount:...` reflects the namespaced Role;
+      > a pod replacement still yields a NEW token with a later `iat` (rotation regression).
+
+- [ ] **Revocation is still missing (part of C2-019, NOT fixed).** `norviq/api/session_revocation.py`
+      exists but its only caller is `auth_login.py:174` (interactive logout). No admin revoke endpoint,
+      no CRL for the client certs. So a leaked sidecar credential stays valid for its full 30 days and
+      the only lever is rotating `NRVQ_API_SECRET`, which invalidates every token at once.
+
 - [ ] **C2-020 — every injected pod hard-stops at day 30.** Token TTL measured 720h exactly; client
       cert `webhook/injector.go:553` `now.Add(30*24*time.Hour)`. No renewal loop in `webhook/`, no
       refresh in `norviq/sidecar/`. At expiry the API answers 401 (verified live) → `remote_evaluator.py:215`
@@ -260,5 +286,7 @@ Append one line per landed change. Newest last.
   the classifier takes the worst verb over all tokens; and a helper definition inside the
   CONTROLS markers breaks the baseline compiler. Also **corrected an earlier claim in this file** —
   C2-012 is NOT closed by this fix; homoglyph and zero-width names still evade.
-  **NEXT: Tier 2b (C2-012 name skeleton) or Tier 3 (C2-019 secretKeyRef). Both are open;
-  C2-019 is the higher severity.**
+- 2026-08-10 `6354bf3` — **C2-019 DONE.** Credentials moved to a Secret; namespaced RBAC; fail-soft;
+  dry-run side-effect free; rotation preserved. A `fail`-on-missing-namespaces guard was reverted
+  after 11 chart tests showed that configuration is mainstream — reasoning kept in the template.
+  **NEXT: C2-020 (expiry forewarning) then Tier 2b (C2-012 name skeleton), then Tier 4 triage.**
