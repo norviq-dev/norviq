@@ -652,3 +652,164 @@ context-local recorder, and CrewAI raises a bare `NorviqBlockError` straight out
 This is also the fifth independent confirmation of the controls FLOOR (C2-008): `customer-support` has
 no class policy of its own, and `pii_detection` at Enforce reached it through every adapter.
 
+
+## C2-019 — the sidecar's credentials are injected as plaintext pod env, which routes around the one RBAC boundary Kubernetes draws for secrets
+
+**Severity: high.** Found while doing the Phase 6 injection read-out on `analytics/finance-agent-8458567cbf-xd6k5`.
+
+`webhook/injector.go` delivers three secrets to every injected sidecar as **literal env values in the
+pod spec** — not a Secret, not a `secretKeyRef`, not a projected volume:
+
+| env var | bytes | what it is |
+|---|---|---|
+| `NRVQ_API_TOKEN` | 359 | HS256 service JWT — **this is the authz credential**, claims `namespace`, `agent_class`, `workload`, `spiffe_id`, `role=service`, 30d TTL |
+| `NRVQ_CLIENT_KEY_PEM` | 1675 | RSA private key for internal mTLS (defence in depth) |
+| `NRVQ_CLIENT_CERT_PEM` | 1184 | the matching leaf, `CN=norviq-sidecar`, `OU=<namespace>`, 30d |
+
+`mintClientCert`'s own comment states the mechanism plainly — "Both PEMs are returned as strings so
+the injector can deliver them to the sidecar via pod env" — so this is deliberate, not an oversight.
+That does not make it safe, because of what it costs:
+
+**Kubernetes deliberately excludes Secrets from the built-in `view` ClusterRole.** Verified on this
+cluster: `view` grants `get pods` and does **not** grant `get secrets`. That exclusion is the entire
+reason `view` is considered a safe read-only grant to hand an auditor, an SRE, a dashboard, or a
+CI service account. Putting the credential in the pod spec puts it on the *other* side of that line:
+
+```
+kubectl get pod <any injected pod> -o yaml     # needs only `view`
+  -> a working 30-day workload JWT for that namespace, agent class and workload
+```
+
+The JWT is the part that matters. mTLS here is explicitly "defense in depth ... alongside the JWT",
+and `api/auth.py scoped_identity` derives the policy tier from the token's claims — so holding it is
+holding the workload's identity, including the `workload` claim the webhook mints precisely *because*
+the API refuses to accept an unbound one from the body. The control that stops a sidecar naming any
+deployment it likes is bypassed by reading the token of the deployment you want.
+
+Secondary exposure, same root cause: pod specs are stored in etcd (unencrypted unless the cluster
+enables encryption-at-rest), appear in `kubectl describe`, in any GitOps diff, and in any controller
+or log pipeline that captures pod objects.
+
+**Fix shape** (queued for the batch, not a measurement defect so it does not stop the line): the
+webhook already has the API secret and CA key, so it can create/patch a per-pod (or per-namespace)
+Secret and inject `valueFrom.secretKeyRef` instead of `value`. That restores the `view` boundary with
+no change to the sidecar, which reads the same env var either way.
+
+### Rotation forward works; there is no revocation
+
+Verified live by replacing `analytics/finance-agent-8458567cbf-xd6k5` and fingerprinting both pods
+(sha256 prefixes, never the material):
+
+| | before (`…-xd6k5`) | after (`…-m9nnj`) | |
+|---|---|---|---|
+| token | `338472b5f436` | `bd20625f1fcc` | changed |
+| client key | `13f286801e93` | `73d3a69075c3` | changed |
+| client cert | `99b707f5b9f2` | `d8368fa882b0` | changed |
+| `iat` | 2026-08-10T13:43:55Z | 2026-08-10T14:07:53Z | later |
+| `exp` | 2026-09-09T13:43:55Z | 2026-09-09T14:07:53Z | 30d TTL preserved |
+| `workload`/`agent_class`/`namespace` | finance-agent / finance-ops / analytics | *identical* | identity stable |
+
+That is the correct shape: replacement rotates the *credential* and preserves the *identity*, and the
+replacement went through admission (2 containers, freshly injected) rather than reusing a cached spec.
+
+**But rotation is not revocation, and nothing revokes.** `webhook/` contains no revoke call, so pod
+teardown leaves the old token cryptographically valid for the remainder of its 30 days. A denylist
+does exist (`norviq/api/session_revocation.py`, keyed on SHA-256 of the raw token) — but its only
+caller is `auth_login.py:174`, i.e. interactive logout. There is no admin revoke endpoint and no
+CRL for the client certs either. So the only way to invalidate a leaked sidecar credential today is
+to rotate `NRVQ_API_SECRET`, which invalidates *every* token at once. Combined with the `view`-role
+exposure above, that is a 30-day window per credential with no targeted way to close it.
+
+**Correction to my own exposure note.** My first read-out redacted `NRVQ_API_TOKEN` (printed as
+`<literal>`) but printed `NRVQ_CLIENT_CERT_PEM` and `NRVQ_CLIENT_KEY_PEM` in full. So what reached the
+transcript is the mTLS key pair, **not** the token. That materially limits it: mTLS here is explicitly
+defence in depth *alongside* the JWT, and `scoped_identity` derives the tier from token claims, so the
+key alone authenticates nothing. It is namespace-scoped to `analytics` on the dev cluster, the pod
+holding it has been replaced, and it expires 2026-09-09. Low impact, and no action needed beyond
+noting it — but it is exactly the exposure C2-019 describes, reached by accident in under a minute,
+which is the point.
+
+### What the injection read-out otherwise confirmed (all correct)
+
+- 1-container Deployment -> 2-container Pod: `agent, norviq-sidecar` on all three injected pods.
+- `NRVQ_AGENT_CLASS=finance-ops`, `NRVQ_NAMESPACE=analytics`, `NRVQ_WORKLOAD=finance-agent` — correct,
+  and derived at admission from the pod's owner reference, not from anything the pod asked for.
+- **The `workload` claim is genuinely bound in the token** (`workload = finance-agent`). This is the
+  half of the workload tier that was inert before: the API discarded an unbound `workload`, so the
+  tier could never apply to real traffic. It applies now.
+- `spiffe_id = spiffe://norviq/ns/analytics/sa/default`, `role = service`, `sub = norviq-sidecar`.
+- Image `ghcr.io/norviq-dev/norviq-engine-dev:engine-7ccbb3fca...` — passes the immutable-tag guard
+  (`isMutableTag` refuses `:latest`/`*-latest`). Note this is a content-derived **tag**, not a
+  `@sha256:` digest, so it is immutable by convention and registry write-access, not by construction.
+
+## SEED-06 — RESOLVED: cert rotation is safe where it was feared, and unsafe where nobody was looking
+
+SEED-06 was carried unverified through two campaigns as "with `failurePolicy: Fail`, a stale caBundle
+blocks all pod creation in injection-labelled namespaces". Verified live at last. **The feared failure
+is handled by design. A different one, on the same theme, is not.**
+
+### The caBundle scenario — not a defect
+
+| | |
+|---|---|
+| webhook serving cert (`norviq-webhook-tls`) | `CN=norviq-webhook.norviq.svc`, self-signed, 2026-08-01 → **2036-07-29** |
+| `caBundle` on `mutatingwebhookconfiguration/norviq-sidecar-injector` | same subject, same dates |
+| SHA-256 fingerprints | **identical** — the caBundle *is* the serving cert (self-signed, its own CA) |
+| internal CA (`norviq-internal-ca`, signs sidecar client certs) | `CN=Norviq Internal CA`, → 2036-07-29 |
+
+`helm/norviq/templates/webhook-cert-job.yaml` is idempotent *and* reasons about precisely this
+divergence in its own comments: if the serving-cert secret already exists it REUSES it rather than
+reminting, "because reminting would diverge the caBundle from the cert the running webhook already
+loaded -> API-server TLS" failure. It then patches the caBundle from whichever cert it settled on, and
+the hook weights order the two steps (`-5` for the secret, `0` for the patch) so the patch cannot run
+before the `MutatingWebhookConfiguration` exists. `tests/helm/test_hook_ordering.py` pins it.
+
+So there is no timer here and no re-install hazard: 10-year certs that nothing rotates cannot drift
+apart. (There being no rotation *story* at all for a 10-year cert is worth a ticket eventually, but it
+is not a live risk and not this release's problem.)
+
+## C2-020 — every injected pod hard-stops at day 30, and nothing renews or forewarns
+
+**Severity: high (availability).** This is the rotation defect SEED-06 was pointing at from the wrong angle.
+
+Both credentials the webhook injects are **30-day** and are baked into the pod spec at admission:
+
+- `NRVQ_API_TOKEN` — measured `iat` → `exp` = **720h exactly** on the live pod.
+- `NRVQ_CLIENT_KEY_PEM`/`CERT` — `webhook/injector.go:553`, `NotAfter: now.Add(30 * 24 * time.Hour)`.
+
+Pod env is immutable for the pod's lifetime, and there is **no renewal path on either side**: no
+rotation/renew loop anywhere in `webhook/`, and nothing in `norviq/sidecar/` re-reads or refreshes a
+credential (`proxy.py` reloads *policy*, not identity). So on day 30 a still-running pod is holding
+two expired credentials with no way to obtain new ones.
+
+What happens then is, to be clear, the *correct* behaviour — `remote_evaluator.py:209-235` is careful
+about it, and I confirmed the premise live rather than reading it:
+
+```
+POST /api/v1/evaluate  with a token the API won't accept  ->  HTTP 401   (both malformed and expired-shaped)
+```
+
+A 4xx sets `refused = True`, which overrides `sdk_fallback_mode` and returns
+`block / thin_proxy_fail_closed`. The comment says why, and it is right: "a revoked credential
+silently becomes a governance bypass" otherwise. **Good — this is not a security hole.**
+
+It is an availability cliff instead. At day 30 every tool call from that pod is refused, and the
+product's headline posture is that a Norviq problem must not take the customer's agents down
+(`sdk_fallback_mode` defaults to `allow` for exactly that reason). Here a Norviq lifecycle omission —
+nothing renews a credential Norviq itself issued — does take them down, and the one posture knob a
+customer has does not apply, by design.
+
+Mitigating: `/system-health` already classifies this correctly once it starts. `engine_rejected_request`
+is `critical`, reads "typically an expired or wrong sidecar token ... this never fails open", and its
+remediation is "restart affected pods" — the actual fix. So the product diagnoses the outage properly.
+
+**What is missing is forewarning.** Nothing anywhere reads a token's `exp` or a cert's `NotAfter` and
+says "12 injected pods lose their credentials in 3 days". The first signal is the outage.
+
+**Fix shape** (queued): the webhook admission path already knows every injected pod's `exp` — surface
+days-to-expiry as a `warning` band on `/system-health` well before the cliff, and consider having the
+controller evict/roll pods approaching expiry so renewal is automatic (rotation is pod replacement, so
+the mechanism already exists and is proven — see the C2-019 rotation table).
+
+**Rotation itself is proven.** Replacing a pod mints a genuinely new token, key and cert with a later
+`iat` and an unchanged identity — the table under C2-019 has the fingerprints.
