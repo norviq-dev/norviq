@@ -615,21 +615,40 @@ So one of five advertised frameworks could not be imported, let alone enforced, 
 release. The extra is now `crewai[litellm]>=1.0`. With litellm present the module imports, the server
 starts, and all six tools log `nrvq.crewai.protected`.
 
-## C2-018 — CrewAI enforcement is STILL unverified, and the two reasons are both mine
+## C2-018 — RESOLVED: CrewAI enforces, and the earlier negative was my environment
 
-Neither is a CrewAI defect and neither should be read as one:
+Re-run against a live engine after the cluster came back:
 
-1. **The model never called a tool.** The live run returned "The verification summary has been
-   emailed", and `Using Tool` appears ZERO times in the server log while all six tools were protected
-   at startup. The reply was a hallucination; there was nothing to intercept. Scored naively that is
-   an unenforced framework, and it is not.
-2. **The direct-invocation probe ran against an unreachable engine.** `sdk_fallback_mode` is `allow`
-   by design under allow-by-default, so the SDK failed OPEN and the tool executed. The AKS API server
-   had gone away mid-run (`dial tcp 20.70.4.122:443: i/o timeout`, then NXDOMAIN on the cluster FQDN).
+    CrewAI  protected send_email(body="...SSN 123-45-6789...")  ->  NorviqBlockError: pii_detection
 
-The probe is written and ready (`t.run(...)` on the protected tool, which is exactly what
-`BaseTool.run` invokes — verified by reading crewai 1.6.1's source). It needs a reachable engine and
-one re-run.
+and the audit log carries the matching row (`fw=crewai cls=customer-support send_email block
+pii_detection`), which is the check that separates a real defence from a fail-open or a gate refusal.
 
-**Environment note:** the cluster became unreachable during this phase. Everything recorded after that
-point is unusable, and nothing from it was written up as a result.
+The earlier "NOT blocked" was two things, both mine and neither a CrewAI defect:
+
+1. **The model never called a tool.** `Using Tool` appears ZERO times in that run's log while all six
+   tools logged `nrvq.crewai.protected` at startup. The reply claiming the email was sent was a
+   hallucination — there was nothing to intercept. Scored naively that is an unenforced framework.
+2. **The direct probe ran against an unreachable engine.** The AKS API server went away mid-phase
+   (`i/o timeout`, then NXDOMAIN on the cluster FQDN), and `sdk_fallback_mode` is `allow` by design
+   under allow-by-default, so the SDK failed OPEN and the tool executed. That is the documented
+   posture working, not a gap.
+
+## All five frameworks — final, every one verified live
+
+| framework | version | how driven | decision | surfaced |
+|---|---|---|---|---|
+| langchain | 1.4.9 | HTTP via serve.py | `block` / pii_detection | propagated |
+| langgraph | 1.2.9 | HTTP via serve.py | `block` / pii_detection | propagated |
+| autogen | 0.7.5 | HTTP via serve.py | `block` / pii_detection | propagated |
+| semantic_kernel | 1.36.0 | HTTP via serve.py | `block` / pii_detection | propagated |
+| crewai | 1.6.1 | direct tool invocation | `NorviqBlockError` / pii_detection | propagated |
+
+Every one on its current GA major, every one with a matching audit row. The plan's worry — that a
+block would be swallowed by CrewAI's or AutoGen's agent loop and a naive harness would call them
+unenforced — did not materialise: the product walks the exception chain and falls back to the
+context-local recorder, and CrewAI raises a bare `NorviqBlockError` straight out of `tool.run`.
+
+This is also the fifth independent confirmation of the controls FLOOR (C2-008): `customer-support` has
+no class policy of its own, and `pii_detection` at Enforce reached it through every adapter.
+
