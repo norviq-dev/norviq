@@ -3,7 +3,7 @@
 **Purpose:** a new session should be able to resume from this file alone. Keep it current — update
 the "Work queue" and "Session log" sections every time something lands. Do not let it go stale.
 
-Last updated: 2026-08-10 — Tier 1 done, Tier 2 half done (C2-023 landed, C2-022 next).
+Last updated: 2026-08-10 — Tier 1 done, Tier 2 done (C2-023 + C2-022). Tier 2b / Tier 3 next.
 
 ---
 
@@ -13,15 +13,15 @@ Last updated: 2026-08-10 — Tier 1 done, Tier 2 half done (C2-023 landed, C2-02
 **NOT merged to main, NOT pushed, NO new version cut** — all three need San's explicit approval.
 
 **Latest commits:**
+- `6dfd55d` C2-022: a destructive tool must not escape by being renamed
 - `b3501c6` C2-023: the decoded arm must not match bare shell metacharacters
 - `e741d6e` tier 1: monitor must never interrupt, on every plane that decides
 - `236a1c3` campaign2: a throttle is not a detection (C2-021), + rate-abuse findings
-- `e1030dd` campaign2: file C2-019/C2-020, resolve SEED-06 from live evidence
 
-**Gates last run at `b3501c6` — ALL GREEN:**
-- `.venv/bin/python -m pytest tests --ignore=tests/integration --ignore=tests/attacks -q` → **2713 passed**
+**Gates last run at `6dfd55d` — ALL GREEN:**
+- `.venv/bin/python -m pytest tests --ignore=tests/integration --ignore=tests/attacks -q` → **2717 passed**
 - `.venv/bin/python -m ruff check norviq tests` → clean
-- `opa test --v0-compatible comprehensive.rego webhook/presets/strict.rego webhook/presets/strict_parity_test.rego` → **17/17**
+- `opa test --v0-compatible comprehensive.rego webhook/presets/strict.rego webhook/presets/strict_parity_test.rego` → **22/22**
   (NOTE: bare `opa test` FAILS on this repo — OPA 1.x defaults to Rego v1, these presets are v0.
    The `--v0-compatible` flag is not optional. Without it you get parse errors on every rule.)
 - `cd ui && npx tsc --noEmit && npx eslint src --max-warnings=0` → clean
@@ -94,19 +94,46 @@ directly.
       > prose. Repro: 80 `/evaluate` calls with `{"note": "benign call N"}`; previously tripped at
       > n=18 and n=58 (see the `/evaluate` request shape below — `agent_identity.namespace` is
       > required or you get 422, not a decision).
-- [ ] **C2-022 — name-keyed controls.** `_is_rate_limit_exempt` (evaluator.py:911) is a name-prefix
-      test; `strict_default_block` (strict.rego:740-745) is `startswith`. Both decided by a
-      caller-supplied string. Proven live: `delete_all_records` caught 75/75;
-      `get_delete_all_records` allowed 75/75 and never throttled. `classify_tool` says `delete` for
-      both.
-      **THE TRAP — do not skip.** The obvious fix (exempt on `derived.verb == "read"`) is *worse*:
-      `classify_tool` falls back to inspecting **agent-supplied `tool_params`** when the name resolves
-      to nothing, so an unknown name + `{"query": "select 1"}` classifies as `read` and earns the
-      exemption. The evaluator already warns about this in a neighbouring comment. Use
-      **name-resolved read only** — `classify_tool(tool_name)` with NO params, requiring a confident
-      `read` — which is strictly narrower than today's prefix list.
-      Landing this should also close **C2-012** (homoglyph tool name), **C2-013** (destination-keyed
-      control), **C2-016** (supply-chain phrasing) — all the same root cause. Confirm each.
+- [x] **C2-022 — name-keyed controls — ✅ DONE, commit `6dfd55d`.**
+      Rate limiter: the name still gates but must AGREE with `classify_tool`, called with **no params**
+      (passing them would let an unknown name + `{"query": "select 1"}` classify as `read` and earn the
+      exemption — a caller-controlled payload is worse than a caller-controlled name).
+      Presets: destructive verbs matched as whole TOKENS anywhere in the name, in BOTH strict.rego and
+      comprehensive.rego. `getDeleteAllRecords` is caught too, since `name_split_map` splits camelCase.
+
+      Re-measured against the compiled baseline: `delete_all_records`, `get_delete_all_records`,
+      `getDeleteAllRecords`, `search_and_destroy` → all **block**; `run_query`, `get_customer` → allow;
+      `get_customer` still rate-exempt, `get_delete_all_records` no longer is.
+
+      **Two traps hit while doing this — recorded so nobody re-walks them:**
+      1. Keying the BLOCK on `derived.verb` is WRONG and I tried it first. `classify_tool` takes the
+         worst verb over all name tokens and over-classifies: `run_query` and `execute_sql` both come
+         back `delete`, so a verb-keyed block refuses ordinary read tools.
+         `tests/engine/test_capability.py::test_reads_are_not_swept_up_by_the_wider_lexicon` catches it.
+         **Over-classification is safe where it NARROWS, unsafe where it BLOCKS.**
+      2. A helper `x = {...}` defined inside the `>>> CONTROLS-BEGIN/END` markers breaks the baseline
+         compiler outright (`ValueError: unparsable line in CONTROLS region`) and took 38 tests down.
+         That region is rule HEADS only. Put helpers outside the markers.
+
+      > **SCOPE CORRECTION — this did NOT close C2-012, contrary to what this file previously said.**
+      > Verified against the compiled baseline: `dеlete_records` (Cyrillic е) and a zero-width-space
+      > variant both still return `allow / default_allow`. Uppercase IS covered (`lower()`).
+      > C2-012 needs the tool **NAME** folded to an ASCII confusable skeleton — the engine already does
+      > exactly that for `tool_params` ("Confusable skeleton (homoglyph/zero-width)" note in
+      > strict.rego) but not for the name. **That is the fix shape; C2-012 stays OPEN.**
+      > C2-013 (destination-keyed) and C2-016 (supply-chain) are also untouched by this — both still
+      > open, and neither was ever really the same fix, only the same root cause.
+
+### Tier 2b — still open, same root cause as C2-022
+
+- [ ] **C2-012 — homoglyph / zero-width tool name evades every name-keyed control.** Fold
+      `input.tool_name` to an ASCII confusable skeleton before matching, mirroring what the engine
+      already does for `tool_params`. Verify with `dеlete_records` (Cyrillic е) and a zero-width-space
+      variant; both currently return `allow / default_allow` against an all-deny baseline.
+- [ ] **C2-013 — no destination-keyed control for tools outside a hand-written allowlist.** The
+      campaign's headline design finding, proven three times on three surfaces.
+- [ ] **C2-016 — supply-chain phrasing in a query param does not trip `llm05_supply_chain`** (it is
+      tool-name keyed).
 
 ### Tier 3 — high-severity infrastructure
 
@@ -228,4 +255,10 @@ Append one line per landed change. Newest last.
   indicators, in BOTH strict.rego and comprehensive.rego. One existing test used the now-fixed shell
   misfire as its vehicle for "monitor records a false positive rather than dropping it"; retargeted
   to the date→SSN misfire (BUG-005, still open, 100% deterministic) rather than weakened.
-  **NEXT: C2-022 — read THE TRAP in its work-queue entry before starting.**
+- 2026-08-10 `6dfd55d` — **C2-022 DONE** (Tier 2 complete). Rename bypass closed on both halves.
+  Two traps hit and recorded in the work-queue entry: a verb-keyed BLOCK over-blocks reads because
+  the classifier takes the worst verb over all tokens; and a helper definition inside the
+  CONTROLS markers breaks the baseline compiler. Also **corrected an earlier claim in this file** —
+  C2-012 is NOT closed by this fix; homoglyph and zero-width names still evade.
+  **NEXT: Tier 2b (C2-012 name skeleton) or Tier 3 (C2-019 secretKeyRef). Both are open;
+  C2-019 is the higher severity.**
