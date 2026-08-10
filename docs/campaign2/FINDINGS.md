@@ -285,3 +285,34 @@ blamed the chatbot's badge — the badge was correct, the substrate was not.
 
 **Detection rule for the campaign:** a block with NO corresponding audit row is a degraded proxy, not
 an enforcement win. Restarting the proxies restores it; the real fix is a retry timer.
+
+---
+
+## C2-010 — BUG-014 closed: an audit-mode policy observed instead of disarming
+
+**Severity: high (security).** **Fixed** — `449dd42`.
+
+Carried over from Campaign 1 and left open until now. `audit` is the documented safe way to trial a
+rule, and it was the thing that switched enforcement off: a higher-priority policy saved in audit mode
+won priority precedence anyway, `_apply_policy_mode` softened its block to an audit, and the
+lower-priority policy that would actually have blocked was discarded.
+
+The same shape as C2-008's tie: the engine reasoned about EFFECTIVE decisions in `_resolve_with_packs`
+and RAW decisions in `_resolve_precedence`. Leaving it half-consistent was worse than either state.
+
+**The fix is deliberately NOT most-restrictive-wins across base tiers.** That was the easy change and
+it would have broken the headline precedence contract — a per-class allowlist authored at 200 is MEANT
+to loosen a baseline at 1. The narrower truth is that an audit-mode layer is not making an enforcement
+decision at all; it is observing. So audit-mode layers are partitioned out and re-applied as
+tighten-only observers: they raise an `allow` to `audit` (recording without interrupting, which is the
+whole point of monitor mode) and can never lower a `block`. With nothing enforcing, the observation is
+still the decision, so a lone audit policy keeps producing the would-block row.
+
+Both directions proven on the live cluster with purpose-built policies in `r2-lab` (since removed):
+
+| scenario | result |
+|---|---|
+| audit-mode trial rule @100 over an enforcing namespace policy @50 | `block` / `ns_enforcing_rule` |
+| enforcing allowlist @100 over a blocking namespace policy @50 | `allow` / `class_allowlist_allow` |
+
+The first is the fix. The second is the guard rail — the contract the easy fix would have broken.
