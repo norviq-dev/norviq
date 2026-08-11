@@ -34,7 +34,20 @@ Version 0.2.0, **no tag at HEAD**. **Still NOT merged to main and NO version cut
 > WOULD publish it.** The branch names suggest it was cleaned off the main line and left on backups.
 > San's call — do not push those branches, and consider rotating the value regardless.
 
-> **UI test flake, ~1 in 5.** One vitest FILE failed on the first gate run and passed on the next
+> **KNOWN DEBT — `Dashboard.test.tsx` "does NOT assert the Monitor mechanism…" needs a 90s per-test
+> timeout in CI.** NOT root-caused, and not a product defect. It needs >30s on a 2-core GitHub runner
+> while the whole 25-test file finishes in ~2s locally on 10 cores. Testing-library's failure dump
+> CONTAINED the element it said was missing, so the render happens — just far too slowly there.
+> **Four theories ruled out** (all written into the test itself): a sync/async race between the two
+> feeds; state leaking between tests (`timeRange` is not persisted, and the file already clears
+> `nrvq_namespace` + the api cache); worker starvation (the workflow ALREADY passes
+> `--no-file-parallelism`, and its comment records that raising the async budget "moved the symptom
+> rather than removing it"); and useApi's bounded empty-retry (only `/audit/stats` is configured for
+> it, and this test mocks it non-empty). Next thing to try: split this one test into its own file, on
+> the theory that 25 full Dashboard renders in one jsdom accumulate. The timeout does not weaken the
+> assertion — the element still has to appear.
+
+> **Earlier note, superseded by the above:** UI test flake, ~1 in 5. One vitest FILE failed on the first gate run and passed on the next
 > four. The failing run never printed which file, and the jsdom `Not implemented: navigation` noise
 > appears in GREEN runs too, so it is ambient rather than the cause. Not a regression (tsc, eslint and
 > build were clean, and 4/5 runs are green) — but a flake that hides its own name will be painful to

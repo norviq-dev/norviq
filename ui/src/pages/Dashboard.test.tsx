@@ -655,7 +655,12 @@ describe("Overview block feeds are Monitor-aware", () => {
   // a feed whose zero was a genuine measurement, and printed "0 would-blocks were logged in this range" in
   // the same breath as "this feed is structurally empty, not a measured zero".
   // -------------------------------------------------------------------------------------------------
-  it("does NOT assert the Monitor mechanism when the engine's own posture could not be read", async () => {
+  // KNOWN TEST-HARNESS DEBT, not a product defect. See the block comment inside for the four
+  // theories already ruled out. This test needs >30s on a 2-core CI runner while the whole 25-test
+  // file completes in 2.3s locally on 10 cores, and I did not root-cause the 10x. The explicit
+  // per-test timeout stops a green product failing its gate; it does NOT weaken the assertion — if
+  // the element never renders, this still fails, just later. Tracked in docs/campaign2/HANDOVER.md.
+  it("does NOT assert the Monitor mechanism when the engine's own posture could not be read", { timeout: 90_000 }, async () => {
     server.use(
       http.get("*/api/v1/settings", () => HttpResponse.json({ enforcement_mode: "audit", apply_mode: "enforce" })),
       // The engine's field is unreadable. This namespace may well be enforcing.
