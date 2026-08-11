@@ -3,7 +3,8 @@
 **Purpose:** a new session should be able to resume from this file alone. Keep it current — update
 the "Work queue" and "Session log" sections every time something lands. Do not let it go stale.
 
-Last updated: 2026-08-10 — Tiers 1, 2, 2b, 3 DONE. Remaining: C2-013, C2-016, Tier 4 triage, deliverables.
+Last updated: 2026-08-10 — Tiers 1, 2, 2b, 3 DONE **and VERIFIED LIVE on AKS**.
+Remaining: C2-013, C2-016, Tier 4 triage, the three deliverables, and resuming the attack campaign.
 
 ---
 
@@ -33,6 +34,48 @@ Last updated: 2026-08-10 — Tiers 1, 2, 2b, 3 DONE. Remaining: C2-013, C2-016, 
   `go build` from the root fails with "cannot find main module")
 - Pre-existing `gofmt` drift in `webhook/controller_retry_test.go` and
   `handler_injection_integrity_test.go` — NOT mine, left alone deliberately.
+
+### Deployed state (2026-08-10)
+
+**AKS is running the fixed build.** helm release `norviq` **revision 36, status `deployed`**, all
+components at `50ebb70e4c07f54baaea286f8f42bbcd231ae0f4` except `ui`, which is intentionally left at
+`ui-daa7532…` (the only UI change was a TypeScript type, erased at build time — no runtime delta).
+
+Images are in the DEV package `ghcr.io/norviq-dev/norviq-engine-dev` via `scripts/push_dev_image.sh`.
+
+> **TRAP — server-side-apply field-manager conflict.** `helm upgrade` FAILED twice with
+> `conflict with "kubectl-set" using apps/v1: .spec.template.spec.containers[...].image`. An earlier
+> out-of-band `kubectl set image` made `kubectl-set` the owner of `.image`, and helm will not take a
+> field back from another manager. The webhook was never set that way, so it rolled cleanly — which
+> is the only reason C2-019 could be verified while the others could not.
+> **Fix that worked:** `kubectl set image` the deployments to the SAME tag helm wants (values then
+> match, so SSA co-owns instead of conflicting), then re-run `helm upgrade`. For `ui`, the reverse —
+> point helm at the tag that is actually running.
+> **Rule: deploy through helm OR kubectl, not both.** This has now bitten twice.
+
+### The four fixes, VERIFIED LIVE (2026-08-10, after the rollout)
+
+| finding | before | after |
+|---|---|---|
+| **C2-023** base64 FP on prose | 2 of 80 tripped `deny_shell_execution` (n=18, n=58) | **0 of 80** |
+| **C2-022** rename evasion | `get_delete_all_records` allowed 75/75 | **flagged** `strict_default_block` |
+| **C2-022** camelCase | (not previously reachable) | **flagged** |
+| **C2-012** Cyrillic-е | `allow / default_allow` | **flagged** |
+| **C2-012** zero-width | `allow / default_allow` | **flagged** |
+| benign `get_customer` / `run_query` | allow | **still allow** — no over-block |
+| **C2-019** pod-spec credentials | token + cert + key were literal values | **all `secretKeyRef`**; 0 private keys in the spec |
+| **C2-020** `/system-health` | n/a | serves the new path, `status=ok`, no band |
+
+Note on the controls' shape: they ship on **monitor**, so a detection reads as
+`audit / policy_audit_would_block:strict_default_block`, not `block`. What changed is that the rule
+FIRES at all — pre-fix it did not fire on any of the four evasions.
+
+**C2-020's band is confirmed reachable but NOT exercised:** a freshly rolled fleet has ~30 days of
+credential left, so no band is the CORRECT result. The live run proves the endpoint serves the new
+code without erroring; only the unit tests cover the populated case. Do not record it as more.
+
+Verification script (re-runnable): `scratchpad/verify_live.py` — but it lives in a session-scoped
+temp dir, so copy it somewhere durable before relying on it.
 
 ### Decision in force (2026-08-10)
 
@@ -241,6 +284,9 @@ Per-agent journal:
 
 ## Environment
 
+- **Local kind is STOPPED** (`docker stop norviq-local-control-plane`, 2026-08-10) — everything is on
+  AKS now. Restart with `docker start norviq-local-control-plane`; the cluster and its seeded state
+  are intact, NOT deleted. `kubectl config current-context` is unset, so ALWAYS pass `--context norviq`.
 - **Cluster:** AKS, kubectl context `norviq`. Namespaces with `norviq-injection=enabled`:
   `analytics`, `chatbot-prod`, `default`.
 - **Port-forwards** (re-establish if dropped):
@@ -313,5 +359,8 @@ Append one line per landed change. Newest last.
 - 2026-08-10 `4d309d3` — **C2-020 DONE.** Expiry forewarning band on /system-health.
 - 2026-08-10 `2bfd0d0` — **C2-012 DONE.** Presets now read `input.tool_name_normalized`, a fact the
   engine had been publishing all along.
-  **NEXT: C2-013 (destination-keyed control — the campaign's headline design finding), C2-016, then
-  the Tier 4 triage of the biased reconciliation list, then the three missing deliverables.**
+- 2026-08-10 — **BUILT, DEPLOYED AND VERIFIED LIVE.** api/engine/webhook at `50ebb70e`, helm rev 36
+  `deployed`. All four fixes confirmed on the cluster (table above). Local kind stopped.
+  **NEXT: the attack campaign can now RESUME on a clean instrument — that was the whole point of the
+  Tier 2 pause. Then C2-013 (the headline design finding, still unfixed), C2-016, the Tier 4 triage,
+  and the three missing deliverables.**
