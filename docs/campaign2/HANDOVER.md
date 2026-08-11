@@ -412,7 +412,17 @@ Append one line per landed change. Newest last.
   regexed the SOURCE TEXT and broke on the refactor; rewritten to assert the PROPERTY instead, which
   is stronger and survives future refactors — not weakened, and the reason is in its docstring.
 
-  **NEXT for C2-013: only the endpoint + console remain (see the design doc's "What is left").** Round 2's real lesson is
+  **NEXT for C2-013: only the endpoint + console remain (see the design doc's "What is left").**
+- 2026-08-10 — **`__egress__` RESERVED from the generic policy API** (`policies.py`, all three lists).
+  It was in none of them, so a direct create would bypass the compiler while still being collected as
+  a HARD tighten-only overlay, and a direct delete could remove it. Same reasoning already documented
+  for `__controls__`, plus one more: the console's allowlist view reads the embedded header, so a
+  hand-written module at that scope could not be described at all.
+- 2026-08-10 — **CUT READINESS EVALUATED -> `docs/campaign2/RELEASE-READINESS.md`.**
+  **Exactly ONE blocker: nothing has been through CI.** Everything else ships as a documented known
+  issue. Correction recorded there: "C2-024/egress not live on AKS" was NEVER a cut blocker —
+  `release.yml` builds images FROM THE TAG, so every committed fix ships automatically; absence from
+  the dev cluster only constrains further testing. Round 2's real lesson is
   that C2-012/C2-022/C2-024 are ENUMERATION, not generalisation: each fixed the evasions in front of
   it and the next round found one more separator. Keying on a semantic fact instead of the spelling of
   a caller-supplied string is the only thing that ends that loop. Then C2-016, the Tier 4 triage, and

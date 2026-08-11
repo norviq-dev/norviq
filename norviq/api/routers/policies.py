@@ -32,7 +32,7 @@ router = APIRouter()
 # only blocks the pack scopes — delete forbids the entire managed set, since a delete is destructive and there is
 # no legitimate UI path to remove a managed scope (they are re-materialized from their own sources). The reserved
 # `__cluster__` namespace (the cluster-wide baseline) is likewise undeletable.
-_RESERVED_DELETE_CLASSES = ("__baseline__", "__controls__", "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__")
+_RESERVED_DELETE_CLASSES = ("__baseline__", "__controls__", "__egress__", "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__")
 _RESERVED_NAMESPACES = ("__cluster__",)
 # CONSOLE VIEW SENTINELS — not namespaces. The console's global picker sends `namespace="all"` to mean
 # "aggregate every namespace" (see evaluator._collect_candidates / policy_loader.namespaces_for_class, which
@@ -268,7 +268,7 @@ async def _policy_match_counts(namespace: str | None) -> dict[tuple[str, str], i
 # RFC-1123 ServiceAccount name, so `audit_log.agent_class` can never hold one — looking them up in a
 # (namespace, agent_class)-keyed map returns 0 forever, and 0 is what paints the amber "Loaded — no
 # matching workload" dot on the most broadly-scoped controls in the product.
-_NAMESPACE_WIDE_SCOPES = ("__baseline__", "__controls__", "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__")
+_NAMESPACE_WIDE_SCOPES = ("__baseline__", "__controls__", "__egress__", "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__")
 _OVERLAY_SUFFIX = "__remediation__"
 
 
@@ -471,9 +471,13 @@ async def create_policy(body: PolicyCreate, request: Request, user: dict = Depen
     # here either — it follows the `__guardrail__` precedent (directly writable via this endpoint), which is
     # how the Policy Catalog's "Review & Apply" of a compliance draft persists it (see mitre.py
     # `_generate_remediation_draft`). It is still reserved from raw DELETE (see `_reserved_scope_delete_error`).
+    # `__egress__` joins them for the same reason and one more: it is collected as a HARD tighten-only
+    # overlay (evaluator._collect_candidates), so a hand-written module at that scope would enforce
+    # with the weight of an operator guardrail while the console's allowlist view — which reads the
+    # embedded `# nrvq-egress-allowlist/v1:` header — could not describe it at all.
     # `__controls__` joins them: a direct create would bypass the baseline compiler entirely, so the
     # console would show control effects that no longer describe the module actually enforcing.
-    if agent_class in ("__pack__", "__pack_override__", "__pack_weaken__", "__controls__"):
+    if agent_class in ("__pack__", "__pack_override__", "__pack_weaken__", "__controls__", "__egress__"):
         log.warning("nrvq.api.policy.reserved_scope", namespace=body.namespace, agent_class=agent_class,
                     code="NRVQ-API-7016")
         raise HTTPException(
