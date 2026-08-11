@@ -183,8 +183,12 @@ describe("AttackGraph page", () => {
     expect(toolNode).toBeDefined();
     fireEvent.click(toolNode);
 
-    const denials = await screen.findByText(/^Denials · /);
-    expect(denials).toHaveTextContent("Denials · 30d");
+    // Wait for the CHANGED label, not for "a label". `findByText(/^Denials · /)` is satisfied by the
+    // PRE-change element — "Denials · 24h" matches that regex — so it resolved immediately and the
+    // assertion below then read the stale node. Locally the re-render happened to land first; in CI it
+    // did not, and the failure read "Expected: Denials · 30d / Received: Denials · 24h", which looks
+    // like a product bug and is really the query not waiting for the thing under test.
+    const denials = await screen.findByText("Denials · 30d");
     expect(denials.textContent).not.toContain("24h");
   });
 
