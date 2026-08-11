@@ -5,9 +5,9 @@ OPA). The API endpoint and console surface are NOT.** The storage question below
 (c), the allowlist is compiled into a policy module and round-trips through an embedded header, so no
 schema change and no manual DDL. What remains is plumbing, listed under "What is left" at the bottom.
 
-Original status note, kept because the reasoning still stands: Everything below was measured against the code on 2026-08-10,
-not inferred. Read the "Blocker" section before starting — one of them needs a decision that is not
-the implementer's to make.
+Everything below was measured against the code on 2026-08-10, not inferred. The "Blocker" section is
+kept because its reasoning still stands and explains WHY the storage looks the way it does — but it
+is RESOLVED: option (c) was taken, so there is no schema change and no DDL to coordinate.
 
 ## The finding, restated
 
@@ -50,7 +50,12 @@ only the operator has. Hence: config.
 The hand-written policy proves the DEFENCE works. What is missing is shipping it as a control an
 operator can turn on without authoring rego.
 
-## What is missing (the actual work)
+## What was missing (kept for the reasoning; items 1–2 are now moot)
+
+> Items 1 and 2 below described a settings-column design that was NOT taken — the allowlist is
+> compiled into a policy module instead, so no config channel and no new column are needed. Left in
+> place because the trap they document (`_ENGINE_POSTURE_FIELDS`, `violation_penalty`) is real and
+> will bite the next person who reaches for a settings field.
 
 1. **A config channel.** Namespace settings are read by the evaluator for POSTURE only
    (`_resolve_posture` -> `get_ns_settings`) and are **never published into the OPA input document**.
