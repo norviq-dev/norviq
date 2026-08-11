@@ -681,8 +681,14 @@ describe("Overview block feeds are Monitor-aware", () => {
     await waitFor(() => expect(screen.getByTestId("coverage-categories-unavailable")).toBeInTheDocument());
 
     // FAIL-ON-BUG: both feeds rendered the confirmed-Monitor sentence off the settings fallback.
+    //
+    // BOTH are awaited. `top` used to be a synchronous getByTestId on the line after `recent` was
+    // awaited, which assumed the two feeds settle in the same tick — they are independent queries and
+    // do not. That raced at roughly 1 in 5: green locally four runs out of five, then a 15s timeout in
+    // CI. Awaiting each one changes nothing about what is asserted; every expectation below is
+    // untouched, and the bug this test exists to catch still fails it.
     const recent = await screen.findByTestId("recent-blocked-monitor-empty-unconfirmed");
-    const top = screen.getByTestId("top-blocked-monitor-empty-unconfirmed");
+    const top = await screen.findByTestId("top-blocked-monitor-empty-unconfirmed");
     expect(screen.queryByTestId("recent-blocked-monitor-empty")).toBeNull();
     expect(screen.queryByTestId("top-blocked-monitor-empty")).toBeNull();
     for (const el of [recent, top]) {

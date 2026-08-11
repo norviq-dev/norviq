@@ -91,11 +91,19 @@ jobs:
       #
       # No `--platform`: pinning it produces `exec format error` on a runner whose arch differs from
       # the pin, and the failure surfaces as a CrashLoopBackOff with no useful message.
+      #
+      # The webhook is the ODD ONE OUT and the loop used to assume it was not: its Dockerfile lives at
+      # `webhook/Dockerfile` with `webhook/` as the build CONTEXT, not `Dockerfile.webhook` at the root
+      # like the other four. `docker build -f Dockerfile.webhook .` therefore failed with
+      # "failed to read dockerfile: open Dockerfile.webhook: no such file or directory" and took this
+      # whole job down before a single test ran. scripts/push_dev_image.sh already carries the correct
+      # per-component mapping; this mirrors it rather than inventing a second one.
       - name: Build and load the five images
         run: |
-          for img in api ui engine webhook bootstrap; do
+          for img in api ui engine bootstrap; do
             docker build -t "norviq/norviq-engine:${img}-latest" -f "Dockerfile.${img}" .
           done
+          docker build -t "norviq/norviq-engine:webhook-latest" -f webhook/Dockerfile webhook
           kind load docker-image --name norviq-local \
             norviq/norviq-engine:api-latest \
             norviq/norviq-engine:ui-latest \
