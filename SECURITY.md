@@ -121,6 +121,7 @@ take `.[spiffe]`, and `framework-compat.yml` installs one framework at a time.
 
 | CVE | Package (source) | Why unfixable-by-bump | Why not exploitable here |
 |-----|------------------|-----------------------|--------------------------|
+| CVE-2024-6825 | `litellm` (via `crewai[litellm]`) | Not closable by a bump — 1.96.1 is the newest release and publishes **no wheel for Python >= 3.11**, this project's floor, so `uv lock` refuses it and pins 1.96.0. | Reaches the tree only through the **optional** `norviq[crewai]` extra and is in **no shipped image** — `Dockerfile.api` / `Dockerfile.engine` install `.[spiffe]` only. Re-check when litellm ships a cp311 wheel above 1.96.1. |
 | CVE-2026-45829 | `chromadb` (via `crewai`) | No fixed release exists — the latest version is still affected. | It is a pre-auth RCE in the **ChromaDB HTTP server**; CrewAI uses chromadb as an **embedded client**, so the vulnerable server path is never started. |
 | CVE-2026-26030 | `semantic-kernel` | The fix (`>=1.39.4`) pulls a **pre-release** `azure-ai-agents` dependency, which we will not ship in a lockfile. | RCE is in the `InMemoryVectorStore` filter-lambda path, which the Norviq semantic-kernel adapter does not use. |
 | CVE-2026-25592 | `semantic-kernel` | This is a **.NET** CVE (fixed in .NET Core `1.71.0`); FOSSA maps it onto the pip package, where no release clears it. | The affected `[KernelFunction] DownloadFileAsync` helper exists only in the .NET SDK, not the Python package we depend on. |

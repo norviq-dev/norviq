@@ -92,6 +92,13 @@ jobs:
           # CVE assigned, so a CVE-only allow-list structurally could not express it — which is how a
           # vulnerability documented as accepted in SECURITY.md kept failing this gate anyway.
           ACCEPTED_CVES = {
+              "CVE-2024-6825",   # litellm (via crewai[litellm]): NOT closable by a bump — 1.96.1 is the
+                                 #   newest release and ships NO wheel for this project's Python floor
+                                 #   (>=3.11), so `uv lock` refuses it outright and pins 1.96.0. Same
+                                 #   reachability class as the three below: it arrives only through the
+                                 #   OPTIONAL `norviq[crewai]` extra and is in NO shipped image
+                                 #   (Dockerfile.api / Dockerfile.engine install `.[spiffe]` only).
+                                 #   Re-check when litellm publishes a cp311 wheel above 1.96.1.
               "CVE-2026-45829",  # chromadb (via crewai): Python-SERVER pre-auth RCE; no fixed release exists
                                  #   (latest still affected); crewai uses chromadb as an embedded client, not
                                  #   an exposed server, so the pre-auth server path is not reachable here.

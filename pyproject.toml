@@ -108,6 +108,12 @@ langgraph = ["langgraph>=0.2"]
 # at `LLM(...)` construction with `ImportError: Fallback to LiteLLM is not available`. Measured on
 # crewai 1.6.1: the adapter cannot even be IMPORTED, so one of the five advertised frameworks was
 # unverifiable rather than merely untested.
+# litellm carries CVE-2024-6825 and it is NOT closable by a bump: 1.96.1 is the newest release and
+# ships no wheel for this project's Python floor (>=3.11), so `uv lock` refuses it outright.
+# It is therefore an ACCEPTED exception, on the same grounds as the other three python entries:
+# reachable only through this OPTIONAL extra and never present in a shipped image
+# (Dockerfile.api / Dockerfile.engine install `.[spiffe]` only). Recorded in SECURITY.md and
+# ACCEPTED_CVES in .github/workflows/fossa.yml, which must stay in lockstep.
 crewai = ["crewai[litellm]>=1.0", "mcp>=1.28.1,<2"]
 autogen = ["autogen-core>=0.4", "autogen-agentchat>=0.4", "autogen-ext[openai]>=0.4"]
 # MCP action-firewall (norviq/mcp). The PROXY itself needs nothing beyond the base dependencies —
