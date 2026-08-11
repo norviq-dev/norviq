@@ -3,7 +3,47 @@
 **Purpose:** a new session should be able to resume from this file alone. Keep it current — update
 the "Work queue" and "Session log" sections every time something lands. Do not let it go stale.
 
-Last updated: 2026-08-10 — **PUSHED** (095be99). Pre-release gate 8/8 clear. One blocker left: CI must go green.
+Last updated: 2026-08-11 — PR #97 open. **verify (fresh) + verify (upgrade) PASS** — the
+release-artifact gate is green. Three checks still red; see "CI state" below.
+
+### CI state on PR #97 (2026-08-11)
+
+**GREEN:** verify (fresh), verify (upgrade), fossa, python-sast, ts-sast, secrets, iac, deps-audit,
+pytest, all five framework-compat.
+
+**RED, and what each actually is:**
+
+1. **`Security Analysis`** — the FOSSA **GitHub App**, which reads the project's **UI ignore list**,
+   NOT `ACCEPTED_CVES` in fossa.yml. Needs CVE-2024-6825 marked *Ignored* in the FOSSA console.
+   **San's action — a console change, not a repo one.** The `fossa` JOB is green.
+2. **`vitest`** — one test of 1155 (`Dashboard.test.tsx`, the Monitor-mechanism one). Known harness
+   debt with a 90s timeout and four ruled-out theories recorded in the test. Not a product defect.
+3. **`L3 + L4`** — **ROOT CAUSE UNRESOLVED.** The seeder gets 404 on its declared-tools endpoints
+   (`/api/v1/mcp/pins/observe` among them). My first hypothesis (main-built images) is WRONG: this job
+   BUILDS the five images from source, so it runs branch code. My second probe suggested the mcp
+   router was unmounted — that probe was ALSO INVALID, because `include_router` runs inside a factory
+   function, so module-level `app.routes` is empty before startup. `main.py:299` does include it.
+   **Start here:** run the app through `TestClient` (which triggers startup) and list the real routes,
+   then compare against what `scripts/kind-e2e/seed.py` posts to. Do not trust a bare-import probe.
+
+### Dependency work done here (both were MY regressions, both resolved)
+
+* aiohttp/cryptography/pyopenssl bumped to close 4 CVEs — and note **pyproject alone was inert**:
+  FOSSA resolves from `uv.lock`, pip from pyproject, and neither implies the other. Both must move.
+* The relock pulled **litellm** into the graph and broke `fossa`. Bump attempted first per the project
+  rule; litellm 1.96.1 ships **no cp311 wheel**, so uv refuses it. Accepted in BOTH `ACCEPTED_CVES`
+  and the SECURITY.md table (they must stay in lockstep), on the same reachability grounds as the
+  existing three: optional `norviq[crewai]` extra, in no shipped image.
+
+### The release gate got STRICTER, and is validated
+
+`verify_release.py` expected `execute_sql -> block`, which was the pre-allow-by-default contract; a
+stock install now RECORDS (`audit` + `strict_default_block`). It asserts both halves: the stock
+install records (rule_id checked, since `audit`+`default_allow` means nothing fired), and the call
+BLOCKS once the control is promoted to deny. A 404 on the promote endpoint reports **[SKIP]** only
+when a `GET` probe shows the whole router is absent — `GET` ok + `PUT` 404 still FAILS.
+Validated live against the branch API on AKS: promote produced `block / strict_default_block`, then
+was restored to monitor.
 Remaining: C2-013, C2-016, Tier 4 triage, the three deliverables, and resuming the attack campaign.
 
 ---
