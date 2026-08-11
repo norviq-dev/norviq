@@ -1,6 +1,11 @@
 # C2-013 — a destination-keyed control, and why it is a feature rather than a fix
 
-**Status: designed, NOT implemented.** Everything below was measured against the code on 2026-08-10,
+**Status: the COMPILER is built and tested (`norviq/api/egress_allowlist.py`, 22 tests through real
+OPA). The API endpoint and console surface are NOT.** The storage question below is ANSWERED — option
+(c), the allowlist is compiled into a policy module and round-trips through an embedded header, so no
+schema change and no manual DDL. What remains is plumbing, listed under "What is left" at the bottom.
+
+Original status note, kept because the reasoning still stands: Everything below was measured against the code on 2026-08-10,
 not inferred. Read the "Blocker" section before starting — one of them needs a decision that is not
 the implementer's to make.
 
@@ -110,3 +115,31 @@ radius, then promote) and it gives the operator the one thing they cannot produc
 
 Until (2) lands, the honest answer for a customer is: **this requires an authored policy, and here is
 one that works** — which is what C2-001 already says.
+
+
+---
+
+# What is left (added after the compiler landed)
+
+`norviq/api/egress_allowlist.py` gives you `compile(domains, decision=…) -> rego`,
+`parse(rego) -> {domains, decision}` and `normalise(domains)`. Verified through real OPA, including
+the case that matters most: `.acme.com` allows `mail.acme.com` and the apex `acme.com` but NOT
+`evil-acme.com` — a lookalike an attacker can register today, which a naive suffix match would have
+handed the allowlist.
+
+Still to do, in order:
+
+1. **`GET/PUT /baseline/egress-allowlist`** — mirror `baseline_router.py` almost exactly: read the
+   stored `__egress__` policy, `parse()` it for display, `compile()` on write, and materialise through
+   the SAME loader path (`_materialize`) so cache invalidation is handled for you. Reserve the scope
+   the way `__controls__` is reserved.
+2. **Precedence.** `__egress__` is a new reserved scope and MUST be classified deliberately in
+   `evaluator._collect_candidates`. It is a tighten-only OVERLAY, not a base tier — the same call the
+   controls floor needed (C2-008). Getting this wrong lets a class policy at a higher priority discard
+   it, which is the exact bug C2-008 was.
+3. **Console surface** — a domain-list editor, plus the discovery view: with an empty allowlist this
+   module flags every destination, and that list IS the report an operator needs. Render it as
+   "destinations seen", not as N violations.
+4. **Re-run the C2-001 chain end to end** — the real prompt through the chatbot AND the paired
+   direct-MCP call — and watch it flip. Only then retire `customer-data-egress.rego` as the documented
+   workaround.

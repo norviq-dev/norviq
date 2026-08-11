@@ -381,7 +381,18 @@ Append one line per landed change. Newest last.
   **provably does not work** — `data_classes` returns `[]` for a customer name and address, because
   its `pii` means SSN-shaped only. Building it would look like a fix and miss the exact payload.
 
-  **NEXT: C2-013 needs San's call on storage (see the doc), then it is 4 layers of work.** Round 2's real lesson is
+- 2026-08-10 — **C2-013 storage question ANSWERED and the compiler BUILT**:
+  `norviq/api/egress_allowlist.py` + 22 tests, all through real OPA (`--v0-compatible` — bare
+  `opa eval` fails on this repo's v0 rego). The allowlist is compiled INTO a policy module and
+  round-trips via an embedded `# nrvq-egress-allowlist/v1:` header, the same trick the Visual Builder
+  uses — **so no schema change and no manual DDL against the live Postgres.**
+  Empty allowlist = DISCOVERY (flags every destination, always `audit`, never `block`), because
+  "empty = inert" is the same false assurance C2-001 is about.
+
+  **NEXT for C2-013 (see the design doc's "What is left"): the endpoint, then PRECEDENCE — `__egress__`
+  is a new reserved scope and must be classified as a tighten-only OVERLAY in
+  `evaluator._collect_candidates`, exactly like the controls floor. Getting that wrong reproduces
+  C2-008, where a class policy silently discarded every shipped control.** Round 2's real lesson is
   that C2-012/C2-022/C2-024 are ENUMERATION, not generalisation: each fixed the evasions in front of
   it and the next round found one more separator. Keying on a semantic fact instead of the spelling of
   a caller-supplied string is the only thing that ends that loop. Then C2-016, the Tier 4 triage, and
