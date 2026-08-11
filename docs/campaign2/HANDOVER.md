@@ -280,14 +280,14 @@ Per-agent journal:
   the values two Campaign 1 subagents exposed belong to THIS dev cluster only — nothing ships with
   them and no customer inherits them. Rotate as hygiene whenever convenient; it gates nothing.
 
-- [ ] **WORTH CHECKING — the self-heal is applied to the JWT secret but not to pg/redis.**
-  `api.secretKey` reuses a deployed value only if it is NOT the weak literal and is >=16 chars,
-  otherwise it regenerates, and its own comment says why: "perpetuating a known weak secret across an
-  upgrade would defeat the purpose". `postgresql.password`/`redis.password` have no equivalent check —
-  once the legacy literal is written it is reused on every subsequent upgrade, permanently.
-  Reachable only for an install whose secret predates the key, so possibly dead code pre-1.0.
-  **Not confirmed live — trace whether any released version shipped without `NRVQ_PG_PASSWORD`
-  before filing it.**
+- [x] **RESOLVED, not a finding — the pg/redis self-heal asymmetry.** Traced 2026-08-10: the
+  legacy-literal branch fires only when an existing secret LACKS `NRVQ_PG_PASSWORD`, and **every
+  released tag v0.1.0–v0.1.10 already ships that key** (counted per tag). So no released chart can
+  produce a secret that reaches it — dead code for any real install. The asymmetry with
+  `api.secretKey` (which does self-heal off a weak value) is real but unreachable. Closed.
+  > zsh trap worth knowing: `git show "$t:helm/..."` applies the `:h` history modifier and silently
+  > mangles the ref, so the first per-tag count came back 0 for EVERY tag including HEAD. Use
+  > `"${t}:helm/..."`. `scripts/push_dev_image.sh` documents the same trap — "braces are load-bearing".
 - One sidecar mTLS **client key** (namespace `analytics`, pod `finance-agent-…-xd6k5`, expires
   2026-09-09) was printed in full in a session transcript on 2026-08-10 while reading a pod spec.
   Low impact — mTLS is defence-in-depth alongside the JWT and authenticates nothing on its own — and
@@ -402,10 +402,17 @@ Append one line per landed change. Newest last.
   Empty allowlist = DISCOVERY (flags every destination, always `audit`, never `block`), because
   "empty = inert" is the same false assurance C2-001 is about.
 
-  **NEXT for C2-013 (see the design doc's "What is left"): the endpoint, then PRECEDENCE — `__egress__`
-  is a new reserved scope and must be classified as a tighten-only OVERLAY in
-  `evaluator._collect_candidates`, exactly like the controls floor. Getting that wrong reproduces
-  C2-008, where a class policy silently discarded every shipped control.** Round 2's real lesson is
+- 2026-08-10 — **C2-013 PRECEDENCE DONE.** `__egress__` is now collected as a tighten-only overlay in
+  BOTH `_collect_candidates` and `_collect_candidates_union`. The appender was PARAMETERISED by scope
+  rather than copied — this codebase has shipped a fix into one of two copies repeatedly (shell
+  pattern lists, the MCP allow-check, the preset pair). It lands in the HARD partition for free:
+  `_resolve_overlay` partitions the pack family by suffix and treats everything else as hard.
+  5 new precedence tests; verified 3 FAIL if the scope is collected without `overlay: True`.
+  One brittle pre-existing test (`test_the_controls_scope_is_collected_as_a_tighten_only_floor`)
+  regexed the SOURCE TEXT and broke on the refactor; rewritten to assert the PROPERTY instead, which
+  is stronger and survives future refactors — not weakened, and the reason is in its docstring.
+
+  **NEXT for C2-013: only the endpoint + console remain (see the design doc's "What is left").** Round 2's real lesson is
   that C2-012/C2-022/C2-024 are ENUMERATION, not generalisation: each fixed the evasions in front of
   it and the next round found one more separator. Keying on a semantic fact instead of the spelling of
   a caller-supplied string is the only thing that ends that loop. Then C2-016, the Tier 4 triage, and

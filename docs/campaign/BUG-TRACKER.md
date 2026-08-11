@@ -1,5 +1,16 @@
 # BUG TRACKER — rev 30 campaign
 
+> **⚠ THIS TRACKER IS STALE — DO NOT READ THE STATUS COLUMN AS TRUTH.**
+> Last reconciled: never. Many rows below say OPEN but were fixed during Campaign 2 (BUG-001/002/003,
+> 011, 014, 016, 022, 023, 024, 025, 026, 028 at minimum). A 13-agent reconciliation against the
+> CURRENT code ran on 2026-08-10 and its raw output is referenced from
+> `docs/campaign2/HANDOVER.md` (Tier 4) — but that run was deliberately biased toward reporting OPEN,
+> so its counts are a conservative floor and NOT a measurement either.
+> **The true open list does not exist yet.** Producing it is the Tier 4 task in the Campaign 2
+> handover. Until then, verify any row here against the code before acting on it.
+
+
+
 One row per **surviving** finding. Findings that did not survive independent re-verification are
 not listed here; the count and titles are in `LEDGER.md` §5.
 

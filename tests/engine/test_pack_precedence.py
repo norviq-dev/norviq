@@ -255,3 +255,49 @@ def test_two_audit_policies_resolve_between_themselves_by_priority() -> None:
         _rm("ns:high", "block", 900, "audit", False),
     ])
     assert winner["key"] == "ns:high"
+
+
+# ---------------------------------------------------------------------------------------------
+# C2-013 — the compiled egress allowlist (`__egress__`) is a tighten-only overlay, exactly like the
+# controls floor. This is the half of C2-013 that is easy to forget and expensive to get wrong: a new
+# reserved scope that is NOT tagged as an overlay resolves as an ordinary base tier, so a per-class
+# policy at a higher priority discards it outright. That is precisely C2-008, where a single class
+# policy silently switched off every shipped control for its class.
+
+
+def test_egress_block_survives_a_higher_priority_class_policy_allow() -> None:
+    """The C2-008 shape, aimed at the new scope: priority is not the mechanism for an overlay."""
+    assert _winner([_r("ns:support", "allow", 100), _r("ns:__egress__", "block", 2, overlay=True)]) == "block"
+
+
+def test_egress_audit_survives_a_class_policy_allow() -> None:
+    """Discovery mode emits `audit`. If a class policy's allow could bury it, the destination
+    inventory an operator needs before writing an allowlist would silently be empty."""
+    assert _winner([_r("ns:support", "allow", 100), _r("ns:__egress__", "audit", 2, overlay=True)]) == "audit"
+
+
+def test_egress_never_weakens_a_stricter_class_policy() -> None:
+    """Tighten-ONLY. An allowed destination must not downgrade someone else's block."""
+    assert _winner([_r("ns:support", "block", 100), _r("ns:__egress__", "audit", 2, overlay=True)]) == "block"
+
+
+def test_a_pack_weaken_cannot_relax_the_egress_overlay() -> None:
+    """`__pack_weaken__` exists to dial back a sector pack's own restriction, never an operator's
+    destination rules. `_resolve_overlay` partitions the pack family by key suffix and treats
+    EVERYTHING ELSE as hard, so `__egress__` lands in the hard partition without extra wiring — this
+    test is what stops a future refactor of that partition from quietly moving it.
+    """
+    assert _winner([
+        _r("ns:__pack__", "allow", 800),
+        _r("ns:__pack_weaken__", "allow", 900),
+        _r("ns:__egress__", "block", 2, overlay=True),
+    ]) == "block"
+
+
+def test_egress_and_controls_compose_most_restrictive() -> None:
+    """Two hard overlays together: the stricter one wins, and neither disarms the other."""
+    assert _winner([
+        _r("ns:support", "allow", 100),
+        _r("ns:__controls__", "audit", 2, overlay=True),
+        _r("ns:__egress__", "block", 2, overlay=True),
+    ]) == "block"

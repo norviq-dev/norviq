@@ -2184,17 +2184,26 @@ class OPAEvaluator:
                 candidates.append({"key": key, "rego": loaded["rego"], "priority": loaded["priority"],
                                    "enforcement_mode": loaded.get("enforcement_mode", "block")})
 
-        async def _append_controls_floor(target_namespace: str) -> None:
-            """The tuned baseline controls, tagged as a tighten-only overlay so they act as a FLOOR.
+        async def _append_controls_floor(target_namespace: str, scope: str = "__controls__") -> None:
+            """A reserved-scope module, tagged as a tighten-only overlay so it acts as a FLOOR.
 
             Same lookup as `_append_policy` (in-memory first, then the DB), but tagged `overlay: True` at
             CONSTRUCTION — which is the only source of overlay-ness the resolver trusts. The key is a fixed
             reserved literal, so unlike the string-suffix heuristic there is no way a real agent class can
             collide with it.
+
+            Parameterised by scope rather than copied per reserved module. `__egress__` (the compiled
+            destination allowlist, C2-013) needs byte-identical treatment to `__controls__`, and this
+            codebase has repeatedly shipped a fix into one of two copies — the shell pattern lists, the
+            MCP allow-check, the preset pair. One appender, two call sites.
+
+            Landing in the HARD partition needs no extra work: `_resolve_overlay` partitions the PACK
+            family by key suffix and treats EVERYTHING ELSE as hard, so a `__pack_weaken__` can never
+            relax either of these.
             """
-            key = f"{target_namespace}:__controls__"
+            key = f"{target_namespace}:{scope}"
             entry = self._loader._policies.get(key) or await self._loader.load_from_db(
-                target_namespace, "__controls__"
+                target_namespace, scope
             )
             if entry:
                 candidates.append(
@@ -2238,6 +2247,10 @@ class OPAEvaluator:
         # stricter than `allow`, and audit never interrupts a call, so the record comes back with no
         # availability cost.
         await _append_controls_floor(namespace)
+        # The compiled egress allowlist (C2-013). A tighten-only overlay for the same reason the
+        # controls floor is one: a per-class policy at a higher priority must not be able to discard
+        # the operator's destination rules, which is exactly what C2-008 was.
+        await _append_controls_floor(namespace, "__egress__")
         await _append_policy(namespace, "__baseline__")
         await _append_policy("__cluster__", "__baseline__")
         # The catalog advertises WORKLOAD and NAMESPACE tiers (resolve_policy_key mints
@@ -2343,8 +2356,8 @@ class OPAEvaluator:
             candidates.append({"key": key, "rego": entry["rego"], "priority": entry["priority"], "overlay": True})
             seen.add(key)
 
-        def _append_controls_overlay(ns: str) -> None:
-            key = f"{ns}:__controls__"
+        def _append_controls_overlay(ns: str, scope: str = "__controls__") -> None:
+            key = f"{ns}:{scope}"
             if key in self._loader._policies and key not in seen:
                 entry = self._loader._policies[key]
                 candidates.append({"key": key, "rego": entry["rego"], "priority": entry["priority"],
@@ -2362,6 +2375,7 @@ class OPAEvaluator:
             # one a real agent actually gets, which is precisely the view an operator uses to check that
             # their tuning took effect.
             _append_controls_overlay(ns)
+            _append_controls_overlay(ns, "__egress__")
             await _append_policy(ns, "__baseline__")
             for overlay in ("__pack__", "__guardrail__", "__pack_override__", "__pack_weaken__"):
                 _append_overlay(f"{ns}:{overlay}")

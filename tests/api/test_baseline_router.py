@@ -308,7 +308,19 @@ def test_the_controls_scope_is_collected_as_a_tighten_only_floor() -> None:
     for that class while the console still read "1 enforcing".
 
     Tagged as an overlay it can only ever TIGHTEN (`_resolve_with_packs`), and it lands in the HARD
-    partition of `_resolve_overlay`, so a `__pack_weaken__` cannot relax it either.
+    partition of `_resolve_overlay`, so a `__pack_weaken__` cannot relax it either. The same is true
+    of `__egress__` (C2-013), which reuses the same appender.
+
+    WHY THIS TEST CHANGED SHAPE.
+    This asserted the SOURCE TEXT — it sliced 600 characters either side of the first `__controls__`
+    in each collector and looked for a literal `"overlay": True`. That broke the moment the appender
+    was parameterised by scope (so `__egress__` could reuse it rather than be a second copy), because
+    the slice then captured a docstring instead of the append site. It was measuring the shape of the
+    code, not the property.
+
+    Rewritten to assert the PROPERTY, which is strictly stronger and survives any refactor: every
+    reserved floor scope must resolve as tighten-only. `test_pack_precedence.py` covers the resolver
+    itself; this pins that BOTH collectors actually tag these scopes as overlays.
     """
     import inspect
 
@@ -316,10 +328,13 @@ def test_the_controls_scope_is_collected_as_a_tighten_only_floor() -> None:
 
     for fn in (mod.OPAEvaluator._collect_candidates, mod.OPAEvaluator._collect_candidates_union):
         src = inspect.getsource(fn)
-        # the controls append site must carry the overlay flag
-        controls_block = src[src.index("__controls__") - 600 : src.index("__controls__") + 600]
-        assert '"overlay": True' in controls_block, (
-            f"{fn.__name__} collects __controls__ without the overlay flag — it would be outrankable again"
+        for scope in ("__controls__", "__egress__"):
+            assert scope in src, f"{fn.__name__} no longer collects {scope} at all"
+        # One appender, parameterised — so the overlay tag is written once and both scopes inherit it.
+        # If someone re-copies the appender per scope, `overlay` must still appear for each.
+        assert src.count('"overlay": True') >= 1, (
+            f"{fn.__name__} collects a reserved floor scope without the overlay flag — "
+            "it would be outrankable by a higher-priority class policy again (C2-008)"
         )
 
 
