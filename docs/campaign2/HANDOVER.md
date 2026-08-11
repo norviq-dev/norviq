@@ -3,15 +3,42 @@
 **Purpose:** a new session should be able to resume from this file alone. Keep it current — update
 the "Work queue" and "Session log" sections every time something lands. Do not let it go stale.
 
-Last updated: 2026-08-10 — Tiers 1/2/2b/3 DONE and VERIFIED LIVE. Round 2 run; C2-024 found and fixed (NOT yet live).
+Last updated: 2026-08-10 — **PUSHED** (095be99). Pre-release gate 8/8 clear. One blocker left: CI must go green.
 Remaining: C2-013, C2-016, Tier 4 triage, the three deliverables, and resuming the attack campaign.
 
 ---
 
 ## Where things stand
 
-**Branch:** `integrate/mcp-and-builder`. ~38 unpushed commits. Version 0.2.0, no tag at HEAD.
-**NOT merged to main, NOT pushed, NO new version cut** — all three need San's explicit approval.
+**Branch:** `integrate/mcp-and-builder` — **PUSHED 2026-08-10** (`76cc477..095be99`, 59 commits).
+Version 0.2.0, **no tag at HEAD**. **Still NOT merged to main and NO version cut** — both need San.
+
+### Pre-release gate, run before the push — 8/8 CLEAR
+
+| gate | result |
+|---|---|
+| gitleaks over the push range (`@{u}..HEAD`) | **no leaks** in the 59 commits |
+| pytest (ex integration/attacks) | 2754 passed |
+| ruff | clean |
+| `opa test --v0-compatible` | 29/29 |
+| helm | 176 passed |
+| version consistency | 0.2.0, 3 manifests + 17 docs agree |
+| go build / vet / test | clean |
+| ui vitest / tsc / eslint / build | 1155 passed, clean (see flake below) |
+
+> **A SECRET LIVES ON THREE OTHER LOCAL BRANCHES — `backup/pre-public-cleanup-20260712`,
+> `fix/catalog-hierarchy-batch2`, `release/pre-ga-consolidated`.** gitleaks over ALL refs flags
+> `b465b13:scripts/test-campaign/seed_campaign.py:21` — a 54-char mixed-charset value on a variable
+> named `SECRET`, no placeholder marker. It is **NOT an ancestor of HEAD**, so the push did not carry
+> it and CI (which scans the PR range only) will not see it. **Pushing `release/pre-ga-consolidated`
+> WOULD publish it.** The branch names suggest it was cleaned off the main line and left on backups.
+> San's call — do not push those branches, and consider rotating the value regardless.
+
+> **UI test flake, ~1 in 5.** One vitest FILE failed on the first gate run and passed on the next
+> four. The failing run never printed which file, and the jsdom `Not implemented: navigation` noise
+> appears in GREEN runs too, so it is ambient rather than the cause. Not a regression (tsc, eslint and
+> build were clean, and 4/5 runs are green) — but a flake that hides its own name will be painful to
+> chase. Worth a `--retry` or a reporter change to surface the filename.
 
 **Latest commits:**
 - `2bfd0d0` C2-012: a homoglyph or zero-width name must not defeat a name-keyed control
