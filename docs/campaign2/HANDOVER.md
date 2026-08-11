@@ -371,7 +371,17 @@ Append one line per landed change. Newest last.
   > **C2-024 IS NOT LIVE.** The presets ship inside the api/engine images, so it needs the next
   > build+deploy. Everything else in the queue below is code-only until then.
 
-  **NEXT: C2-013 — the headline design finding, and now the clear priority.** Round 2's real lesson is
+- 2026-08-10 — **C2-013 DESIGNED, NOT BUILT** -> `docs/campaign2/C2-013-DESIGN.md`. Stopped
+  deliberately at a decision that is not mine: **there is no migration tooling** (`create_all` creates
+  missing TABLES, never adds a column to an existing one), so a new `NamespaceSettings` column would
+  work on a fresh DB and silently not exist on the live Postgres. Three options costed in the doc;
+  recommendation is to carry the allowlist as POLICY data rather than a settings column for now, and
+  introduce migration tooling before GA.
+  Also measured and recorded there: the cheap config-free version (`data_classes` + egress sink)
+  **provably does not work** — `data_classes` returns `[]` for a customer name and address, because
+  its `pii` means SSN-shaped only. Building it would look like a fix and miss the exact payload.
+
+  **NEXT: C2-013 needs San's call on storage (see the doc), then it is 4 layers of work.** Round 2's real lesson is
   that C2-012/C2-022/C2-024 are ENUMERATION, not generalisation: each fixed the evasions in front of
   it and the next round found one more separator. Keying on a semantic fact instead of the spelling of
   a caller-supplied string is the only thing that ends that loop. Then C2-016, the Tier 4 triage, and
