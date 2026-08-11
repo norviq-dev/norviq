@@ -273,8 +273,21 @@ Per-agent journal:
 
 ## SECURITY — outstanding, San's action
 
-- **Postgres and Redis credentials must be rotated.** Two separate Campaign 1 subagents exposed them.
-  Still not done. An assistant must not rotate live credentials — this is San's.
+- **Postgres/Redis rotation is NOT a release blocker.** Corrected 2026-08-10 after reading
+  `helm/norviq/templates/secret.yaml`: with `postgresql.password`/`redis.password` empty (the default)
+  a FRESH install gets `randAlphaNum 32`. The literal `norviq-pg-password` is reachable only on the
+  MIGRATION path (an existing secret that predates the `NRVQ_PG_PASSWORD` key), never on install. So
+  the values two Campaign 1 subagents exposed belong to THIS dev cluster only — nothing ships with
+  them and no customer inherits them. Rotate as hygiene whenever convenient; it gates nothing.
+
+- [ ] **WORTH CHECKING — the self-heal is applied to the JWT secret but not to pg/redis.**
+  `api.secretKey` reuses a deployed value only if it is NOT the weak literal and is >=16 chars,
+  otherwise it regenerates, and its own comment says why: "perpetuating a known weak secret across an
+  upgrade would defeat the purpose". `postgresql.password`/`redis.password` have no equivalent check —
+  once the legacy literal is written it is reused on every subsequent upgrade, permanently.
+  Reachable only for an install whose secret predates the key, so possibly dead code pre-1.0.
+  **Not confirmed live — trace whether any released version shipped without `NRVQ_PG_PASSWORD`
+  before filing it.**
 - One sidecar mTLS **client key** (namespace `analytics`, pod `finance-agent-…-xd6k5`, expires
   2026-09-09) was printed in full in a session transcript on 2026-08-10 while reading a pod spec.
   Low impact — mTLS is defence-in-depth alongside the JWT and authenticates nothing on its own — and
