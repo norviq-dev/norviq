@@ -18,7 +18,30 @@ pytest, all five framework-compat.
    **San's action — a console change, not a repo one.** The `fossa` JOB is green.
 2. **`vitest`** — one test of 1155 (`Dashboard.test.tsx`, the Monitor-mechanism one). Known harness
    debt with a 90s timeout and four ruled-out theories recorded in the test. Not a product defect.
-3. **`L3 + L4`** — **ROOT CAUSE UNRESOLVED.** The seeder gets 404 on its declared-tools endpoints
+3. **`L3 + L4`** — **RESOLVED: a SEEDER defect, not a product bug.** Settled by querying the RUNNING
+   branch API rather than probing an imported `app` object:
+
+   ```
+   GET /api/v1/mcp/pins/observe -> 405   (route EXISTS; GET is the wrong method — it is a POST)
+   GET /api/v1/mcp/servers      -> 200
+   GET /api/v1/tools            -> 200
+   ```
+
+   The MCP surface is fully served. `scripts/kind-e2e/seed.py` is calling paths/methods that do not
+   match, so its 404s are its own. Fix the seeder, not the API.
+
+   **Three probing mistakes to avoid repeating** — all of mine, in order:
+   (a) `git show "$t:helm/..."` in zsh applies the `:h` history modifier and mangles the ref (braces
+       required); (b) importing `norviq.api.main` picked up a STALE COPY at `/private/tmp/norviq`
+       until PYTHONPATH was pinned; (c) even from the right package, module-level `app` has only 7
+       routes — the routers are registered in a factory, so a bare import can never answer "is this
+       route served". **Ask the running API.**
+
+   Also learned in passing, and worth keeping: the app REFUSES TO START on a weak
+   `NRVQ_API_SECRET_KEY` or a default admin password when `NRVQ_REQUIRE_STRONG_SECRET` is on. Both
+   fail-closed checks behaved correctly.
+
+   ~~ROOT CAUSE UNRESOLVED~~ The seeder gets 404 on its declared-tools endpoints
    (`/api/v1/mcp/pins/observe` among them). My first hypothesis (main-built images) is WRONG: this job
    BUILDS the five images from source, so it runs branch code. My second probe suggested the mcp
    router was unmounted — that probe was ALSO INVALID, because `include_router` runs inside a factory
