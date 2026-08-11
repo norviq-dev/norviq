@@ -255,17 +255,45 @@ def check_enforcement(ctx: str) -> str:
 
         identity = {"namespace": TENANT, "agent_class": "chatbot",
                     "spiffe_id": f"spiffe://norviq/ns/{TENANT}/sa/chatbot", "workload": "chatbot"}
-        for tool, params, want in [
-            ("search_kb", {"q": "refund policy"}, "allow"),
-            ("execute_sql", {"query": "SELECT * FROM users"}, "block"),
+        # A STOCK install ships all 14 baseline controls on `monitor`, so a high-risk tool is
+        # RECORDED, not refused: `audit` + `policy_audit_would_block:strict_default_block`. This
+        # check asserted `block`, which was the contract BEFORE the allow-by-default work, and it
+        # failed the release gate on correct behaviour.
+        #
+        # Relaxing it to `audit` alone would be worse than the stale expectation, because this gate
+        # exists to prove the artifact ENFORCES — and "the control fired but nothing was stopped" is
+        # exactly the false assurance this product's own findings are about. So both halves are
+        # checked: the shipped default RECORDS, and the same call BLOCKS once the operator promotes
+        # the control. That is the monitor -> promote story the product actually ships.
+        def _evaluate(tool: str, params: dict) -> dict:
+            return _api(port, "/api/v1/evaluate", token,
+                        {"tool_name": tool, "tool_params": params, "agent_identity": identity})
+
+        for tool, params, want, want_rule in [
+            ("search_kb", {"q": "refund policy"}, "allow", "default_allow"),
+            ("execute_sql", {"query": "SELECT * FROM users"}, "audit", "strict_default_block"),
         ]:
             try:
-                d = _api(port, "/api/v1/evaluate", token,
-                         {"tool_name": tool, "tool_params": params, "agent_identity": identity})
-                got = d.get("decision")
-                check(f"evaluate {tool} -> {want}", got == want, f"got {got} ({d.get('rule_id')})")
+                d = _evaluate(tool, params)
+                got, rule = d.get("decision"), str(d.get("rule_id") or "")
+                # The rule_id matters as much as the decision: an `audit` carrying `default_allow`
+                # would mean NOTHING fired, which is a miss wearing a detection's clothing.
+                check(f"evaluate {tool} -> {want} ({want_rule})",
+                      got == want and want_rule in rule, f"got {got} ({rule})")
             except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
                 check(f"evaluate {tool} -> {want}", False, str(exc))
+
+        # …and it must actually stop the call once promoted. Without this, the gate would pass on an
+        # artifact that can only ever observe.
+        try:
+            _api(port, "/api/v1/baseline/controls", token,
+                 {"namespace": TENANT, "effects": {"strict_default_block": "deny"}}, method="PUT")
+            d = _evaluate("execute_sql", {"query": "SELECT * FROM users"})
+            got = d.get("decision")
+            check("execute_sql BLOCKS once strict_default_block is promoted to deny",
+                  got == "block", f"got {got} ({d.get('rule_id')})")
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+            check("execute_sql BLOCKS once strict_default_block is promoted to deny", False, str(exc))
         return token
     finally:
         pf.terminate()
