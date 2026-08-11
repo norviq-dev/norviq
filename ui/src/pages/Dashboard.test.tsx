@@ -682,13 +682,30 @@ describe("Overview block feeds are Monitor-aware", () => {
 
     // FAIL-ON-BUG: both feeds rendered the confirmed-Monitor sentence off the settings fallback.
     //
-    // BOTH are awaited. `top` used to be a synchronous getByTestId on the line after `recent` was
-    // awaited, which assumed the two feeds settle in the same tick — they are independent queries and
-    // do not. That raced at roughly 1 in 5: green locally four runs out of five, then a 15s timeout in
-    // CI. Awaiting each one changes nothing about what is asserted; every expectation below is
-    // untouched, and the bug this test exists to catch still fails it.
-    const recent = await screen.findByTestId("recent-blocked-monitor-empty-unconfirmed");
-    const top = await screen.findByTestId("top-blocked-monitor-empty-unconfirmed");
+    // Both are awaited (the second used to be a synchronous getByTestId assuming two independent
+    // queries settle in the same tick — they do not), and both get explicit headroom past the 15s
+    // `asyncUtilTimeout` in src/test/setup.ts.
+    //
+    // WHY THE HEADROOM, and what is NOT known. This timed out at exactly 15s on a 2-core CI runner
+    // while passing 6/6 locally on 10 cores. The decisive detail is that testing-library's failure
+    // DUMP CONTAINED the element it said it could not find — so the render landed either side of the
+    // deadline, rather than never happening. It is a slow render, not a wrong one.
+    //
+    // Ruled out, so nobody re-walks them: (1) a sync/async race between the two feeds — fixed, still
+    // failed; (2) state leaking between tests — `timeRange` is not persisted at all, and the file
+    // already clears `nrvq_namespace` and the api cache; (3) worker starvation from parallel files —
+    // the workflow already passes `--no-file-parallelism`, and its comment records that raising the
+    // async budget "moved the symptom rather than removing it"; (4) the bounded empty-retry in
+    // useApi — the only feed configured for it is `/audit/stats` (emptyRetries 4 x 1200ms), which
+    // this test mocks as `total: 2000`, so it is not empty and never retries.
+    //
+    // What remains is the runner being slow in a way no single timeout bounds, which is the same
+    // conclusion .github/workflows/test.yml already reached. The timeout is therefore an honest
+    // statement of the observed cost, not a mask: the assertions below are untouched, and if the
+    // element genuinely never renders this still fails — just after 30s instead of 15s.
+    const wait = { timeout: 30_000 };
+    const recent = await screen.findByTestId("recent-blocked-monitor-empty-unconfirmed", {}, wait);
+    const top = await screen.findByTestId("top-blocked-monitor-empty-unconfirmed", {}, wait);
     expect(screen.queryByTestId("recent-blocked-monitor-empty")).toBeNull();
     expect(screen.queryByTestId("top-blocked-monitor-empty")).toBeNull();
     for (const el of [recent, top]) {
