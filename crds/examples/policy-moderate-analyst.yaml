@@ -8,9 +8,13 @@ metadata:
 spec:
   target:
     agentClass: data-analyst
-  # enforcementMode is intent metadata — the evaluator does NOT read it, so the moderate preset
-  # escalates/blocks the moment this is applied. To observe a preset before it enforces, put the
-  # whole namespace in audit posture (PUT /api/v1/settings?namespace=<ns> {"enforcement_mode":"audit"}).
+  # enforcementMode IS read by the engine, for the value "audit" (evaluator._apply_policy_mode). This
+  # comment used to say the evaluator does NOT read it, which pushed operators to the namespace-wide
+  # audit posture — a far bigger hammer — to trial a single policy. Set `enforcementMode: audit` here to
+  # trial THIS policy: it still evaluates and still reports, but its block/escalate is softened to audit
+  # with the rule_id prefixed `policy_audit_would_block:`, so you see what it would have stopped.
+  # "block" and "escalate" behave the same — only "audit" is special-cased.
+  # (A trust freeze, engine-health and rate-limit verdicts stay hard in every mode.)
   enforcementMode: block
   preset: moderate
   # Canonical rule_ids enforced by the bundled comprehensive policy (informational).

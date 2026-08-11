@@ -35,6 +35,35 @@ async function ev(page: Page, ns: string, cls: string, tool: string, params: Rec
   });
   return { decision: r.body?.decision, rule_id: r.body?.rule_id };
 }
+/**
+ * Evaluate until the just-pushed policy is the one answering, then return the decision.
+ *
+ * A policy push is not synchronous with the ENGINE's view of it: `POST /policies` returns when the
+ * policy is stored, and the loader picks it up on its own schedule. Every assertion in this file used
+ * to fire in the next breath, and varied `tool_params` only defeats the DECISION cache — it does
+ * nothing about load latency. On kind the window was short enough to hide; on a slower cluster the
+ * evaluate lands inside it and reports the PREVIOUS version, so `v2 -> allow` fails with `block`
+ * and reads as "rollback is broken" when nothing has rolled back yet.
+ *
+ * Params are made unique per attempt so no poll iteration can be served from the decision cache —
+ * otherwise this would poll a cached answer and conclude nothing changed.
+ *
+ * The repo's own rule, applied: poll, never sleep-once, after a policy push.
+ */
+async function evUntil(
+  page: Page, ns: string, cls: string, tool: string,
+  want: { decision?: string; rule_id?: string }, timeout = 30_000
+) {
+  let last: { decision?: string; rule_id?: string } = {};
+  let n = 0;
+  await expect
+    .poll(async () => {
+      last = await ev(page, ns, cls, tool, { p: `poll-${Date.now()}-${n++}` });
+      return want.rule_id ? last.rule_id : last.decision;
+    }, { timeout, message: `policy never became live; last was ${JSON.stringify(last)}` })
+    .toBe(want.rule_id ?? want.decision);
+  return last;
+}
 // permissive base: allows everything EXCEPT a dummy tool (the dummy block rule satisfies create-validation).
 const BASE = [
   "package norviq.base", 'default decision="allow"', 'default rule_id="fb_base_allow"', 'default reason="a"',
@@ -83,7 +112,13 @@ test.describe("Apply-per-surface enforcement — each surface flips /evaluate on
 
   test("OVERRIDE (tighten-only) enforces, and REVERT (?namespace=) truly un-loads it", async ({ page }) => {
     const NS = "fbe-ovr", C = "fbe-a";
-    const OVR = ["package norviq.packoverride", 'decision = "block" { input.tool_name == "export_all" }',
+    // `default decision = "allow"` is REQUIRED. `assert_decision_resolver` (policies.py) rejects a module
+    // that defines a conditional `decision` without a default — the silent-allow guard: without it a
+    // non-matching call yields an UNDEFINED decision rather than an explicit one. This fixture predates
+    // that check and so 422'd on every run. The shipped OVERRIDE_TEMPLATE (PolicyPacks.tsx:36) carries
+    // the same line, which is the proof the product accepts this shape.
+    const OVR = ["package norviq.packoverride", 'default decision = "allow"',
+      'decision = "block" { input.tool_name == "export_all" }',
       'rule_id = "pack_override_block" { decision == "block" }', 'reason = "r" { decision == "block" }'].join("\n");
     try {
       await mkBase(page, NS, C);
@@ -108,13 +143,15 @@ test.describe("Apply-per-surface enforcement — each surface flips /evaluate on
       'reason="b" { input.tool_name=="__never__" }'].join("\n");
     try {
       expect((await api(page, "/api/v1/policies", "POST", { namespace: NS, agent_class: C, rego_source: V1, enforcement_mode: "block" })).status).toBe(200);
-      expect((await ev(page, NS, C, "delete_database", { p: 1 })).rule_id).toBe("rb_block_delete");
+      await evUntil(page, NS, C, "delete_database", { rule_id: "rb_block_delete" });   // v1 live
       expect((await api(page, "/api/v1/policies", "POST", { namespace: NS, agent_class: C, rego_source: V2, enforcement_mode: "block" })).status).toBe(200);
-      expect((await ev(page, NS, C, "delete_database", { p: 2 })).decision).toBe("allow");   // v2
+      await evUntil(page, NS, C, "delete_database", { decision: "allow" });            // v2 live
       expect((await api(page, `/api/v1/policies/${NS}/${C}/rollback`, "POST", { target_version: 1 })).status).toBe(200);
-      const back = await ev(page, NS, C, "delete_database", { p: 3 });                          // cache-miss
+      // Rollback is the same push-then-load path, so it needs the same patience. Asserting the
+      // rule_id (not just "block") is what proves the TARGET VERSION came back rather than some
+      // other rule happening to block.
+      const back = await evUntil(page, NS, C, "delete_database", { rule_id: "rb_block_delete" });
       expect(back.decision).toBe("block");
-      expect(back.rule_id).toBe("rb_block_delete");
     } finally { await rmPolicy(page, NS, C); }
   });
 

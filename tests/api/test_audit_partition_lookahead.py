@@ -24,7 +24,6 @@ import datetime as dt
 from norviq.api.db.session import (
     PARTITION_LOOKAHEAD_MONTHS,
     _month_window,
-    _partition_bounds,
     _partition_months,
 )
 
@@ -69,11 +68,6 @@ def test_partition_names_are_unique_and_month_shaped() -> None:
         assert len(year) == 4 and 1 <= int(month) <= 12
 
 
-def test_partition_bounds_still_returns_the_current_month() -> None:
-    """Back-compat: the single-window helper must agree with the first look-ahead window."""
-    assert _partition_bounds() == _partition_months()[0]
-
-
 def test_startup_creates_a_default_partition_backstop() -> None:
     """Even if look-ahead maintenance lapses, writes must never be rejected.
 
@@ -83,8 +77,16 @@ def test_startup_creates_a_default_partition_backstop() -> None:
 
     from norviq.api.db import session as session_mod
 
-    src = inspect.getsource(session_mod.create_tables)
+    # Inspect the MODULE, not one function. The DDL moved from create_tables() into
+    # _create_tables_once() when schema init gained a retry for advisory-lock contention, and pinning
+    # the guard to a single function name made a pure refactor look like a lost backstop. The invariant
+    # is "the startup schema path provisions these", not "this exact function does".
+    src = inspect.getsource(session_mod)
     assert "PARTITION OF audit_log DEFAULT" in src, (
-        "create_tables must provision a DEFAULT partition as the hard backstop"
+        "the startup schema path must provision a DEFAULT partition as the hard backstop"
     )
-    assert "_partition_months()" in src, "create_tables must provision the rolling look-ahead window"
+    assert "_partition_months()" in src, (
+        "the startup schema path must provision the rolling look-ahead window"
+    )
+    # ...and it must still be reached from create_tables(), not stranded in dead code.
+    assert "_create_tables_once" in inspect.getsource(session_mod.create_tables)

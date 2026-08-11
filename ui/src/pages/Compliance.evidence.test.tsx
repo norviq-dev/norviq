@@ -24,6 +24,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { Compliance } from "./Compliance";
 import { AppProvider, useApp } from "../store/AppContext";
 import { clearApiCache } from "../hooks/useApi";
+// Compliance no longer runs a private toast — it pushes into the shared ToastProvider (Shell mounts it
+// in the real app, App.tsx: <Shell><Compliance/></Shell>), so every render here has to supply one too.
+import { ToastProvider } from "../components/common/Toast";
 
 const server = setupServer();
 beforeAll(() => server.listen({ onUnhandledRequest: "bypass" }));
@@ -99,7 +102,9 @@ function renderPage(initialEntry = "/") {
   return render(
     <MemoryRouter initialEntries={[initialEntry]}>
       <AppProvider>
+        <ToastProvider>
         <Compliance />
+              </ToastProvider>
       </AppProvider>
     </MemoryRouter>
   );
@@ -255,9 +260,11 @@ describe("Compliance batch class-scope — genClassMode reset on namespace chang
     render(
       <MemoryRouter initialEntries={["/?ns=team-a"]}>
         <AppProvider>
+        <ToastProvider>
           <NsSwitcher />
           <Compliance />
-        </AppProvider>
+                </ToastProvider>
+      </AppProvider>
       </MemoryRouter>
     );
 
@@ -287,5 +294,67 @@ describe("Compliance batch class-scope — genClassMode reset on namespace chang
     expect(batchBody!.namespace).toBe("team-b");
     expect(batchBody!.class_mode).toBe("affected");
     expect(batchBody!.technique_ids).toEqual(["AML.T0200"]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
+// A FAILED evidence export must not arrive in the pixels of a successful one, and must not expire.
+//
+// This page ran its own private toast: ONE hard-coded accent-green border (`1px solid #2ddab866` — the
+// same card that says "Audit-evidence pack exported (JSON)"), no `role`, no dismiss control, and an
+// unconditional `setTimeout(…, 3500)` regardless of outcome. "Export failed", "Draft failed" and "Batch
+// generate failed" were all routed into it, so a failure to produce the auditor's evidence pack showed up
+// green in the corner and erased itself 3.5 seconds later, leaving no trace anywhere on the page.
+// Toast.tsx is the shared surface and states the convention: "no fetch result may be silently dropped …
+// error/warning toasts are STICKY until dismissed so a failed or partial outcome can't expire unseen".
+// ---------------------------------------------------------------------------------------------------
+describe("Compliance mutation feedback uses the ONE shared toast surface", () => {
+  function coverage() {
+    return [
+      http.get("/api/v1/compliance/:framework/coverage", ({ params }) =>
+        HttpResponse.json(params.framework === "owasp" ? owaspEmptyPayload() : atlasTwoRulePayload())
+      ),
+      emptyTrend("atlas")
+    ];
+  }
+  async function openDetailAndExport() {
+    const openButtons = await screen.findAllByText("Open coverage detail →");
+    fireEvent.click(openButtons[0]);
+    fireEvent.click(await screen.findByRole("button", { name: /Export audit-evidence pack/ }));
+  }
+
+  it("a failed export is a STICKY, block-red, announced, dismissible alert — not a green card on a 3.5s fuse", async () => {
+    server.use(...coverage(), http.get("*/api/v1/compliance/:framework/export", () => new HttpResponse("boom", { status: 500 })));
+    renderPage();
+    await openDetailAndExport();
+
+    // FAIL-ON-BUG: pre-fix nothing was ever pushed into the shared stack — the failure went into the
+    // page's private green card instead.
+    const toast = await screen.findByTestId("toast-error");
+    expect(toast).toHaveTextContent(/Export failed: 500/);
+    expect(toast).toHaveAttribute("role", "alert");                       // announced to a screen reader
+    expect(toast).toHaveStyle({ border: "1px solid var(--block)" });      // block-red, not accent-green
+    const dismiss = within(screen.getByTestId("toast-stack")).getByRole("button", { name: /Dismiss notification/i });
+
+    // STICKY: the shared provider auto-dismisses success/info after 6s and never auto-dismisses an error.
+    // Pre-fix the private toast erased itself after 3500ms whatever the outcome.
+    await new Promise((r) => setTimeout(r, 4200));
+    expect(screen.getByTestId("toast-error")).toHaveTextContent(/Export failed: 500/);
+
+    fireEvent.click(dismiss);
+    await waitFor(() => expect(screen.queryByTestId("toast-error")).toBeNull());
+  });
+
+  it("a SUCCESSFUL export still reports success (the rewiring did not turn every outcome red)", async () => {
+    server.use(
+      ...coverage(),
+      http.get("*/api/v1/compliance/:framework/export", () => HttpResponse.json({ ok: true }))
+    );
+    renderPage();
+    await openDetailAndExport();
+
+    const toast = await screen.findByTestId("toast-success");
+    expect(toast).toHaveTextContent(/Audit-evidence pack exported \(JSON\)/i);
+    expect(screen.queryByTestId("toast-error")).toBeNull();
   });
 });

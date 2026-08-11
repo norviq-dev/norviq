@@ -62,6 +62,56 @@ def test_promotion_does_not_override_a_confidently_classified_tool() -> None:
     assert ev._derived_input(_event("milvus_delete"))["verb"] == "delete"
 
 
+def test_a_promotion_cannot_demote_a_classified_sink() -> None:
+    """The promotion may FILL IN an unknown; it may not contradict the classifier.
+
+    One POST — {"ns":"analytics","tool_name":"slack_post_message","verb":"read"} — used to make a
+    classified sink stop being a sink. `derived.verb == "read"` satisfies `learned_read` and falsifies
+    `is_egress` at the same time, so an AWS key went out through both baseline policies as
+    ("allow","default_allow"), and the generated intent policy with readonly+egress ON flipped from
+    ("block","intent_refinement_mismatch") to allow. The candidate LISTING only offers tools the
+    classifier could not resolve; the write path never re-checked that, so the enforcement point has to.
+    """
+    ev = _ev({("analytics", "slack_post_message"): "read"})
+    derived = ev._derived_input(_event("slack_post_message", "analytics"))
+    assert derived["verb"] == "send"
+
+
+def test_a_promotion_cannot_demote_a_classified_tool_in_any_direction() -> None:
+    # Not only egress: an override must never be able to answer "what does this tool do" with less
+    # than the classifier already knows, whichever verb it names.
+    ev = _ev({("analytics", "milvus_delete"): "read", ("analytics", "milvus_search"): "send"})
+    assert ev._derived_input(_event("milvus_delete", "analytics"))["verb"] == "delete"
+    assert ev._derived_input(_event("milvus_search", "analytics"))["verb"] == "read"
+
+
+def test_agent_supplied_params_cannot_cancel_a_promotion() -> None:
+    """The other direction of the same invariant, and it was open.
+
+    `classify_tool` falls back to inspecting TOOL_PARAMS when the NAME resolves nothing — and the
+    promotion queue only ever offers tools whose name resolves nothing, so that fallback is live for
+    every promoted tool. Guarding the override on "the classifier returned unknown" therefore handed
+    the agent a cancel button: `zx9_vector_op` promoted to `delete` came back as `read` the moment the
+    caller added `{"query": "select 1 from orders"}` to the call, because the payload had classified
+    it. One attacker-chosen argument undid an admin decision, in the weakening direction — which is
+    the same defect as the demotion the promotion guard was added to stop.
+    """
+    ev = _ev({("chatbot-prod", "zx9_vector_op"): "delete"})
+    event = _event("zx9_vector_op")
+    event.tool_params = {"query": "select 1 from orders"}
+    assert ev._derived_input(event)["verb"] == "delete"
+
+
+def test_a_promotion_cannot_bury_what_the_payload_itself_shows() -> None:
+    """And symmetrically: when the name says nothing, an admin's `read` must not erase a DROP sitting
+    in the arguments. The two readings are of the same call and the more consequential one is
+    published, so neither side of the disagreement is a way to weaken the other."""
+    ev = _ev({("chatbot-prod", "zx9_vector_op"): "read"})
+    event = _event("zx9_vector_op")
+    event.tool_params = {"sql": "DROP TABLE users"}
+    assert ev._derived_input(event)["verb"] == "delete"
+
+
 def test_uninitialised_map_degrades_to_classification() -> None:
     """An evaluator whose map was never warmed must fall back, not raise. Degrading to classification is
     the safe direction — the worst case is `unknown`, which deny-by-default denies; raising on the hot

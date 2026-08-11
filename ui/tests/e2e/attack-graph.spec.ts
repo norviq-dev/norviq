@@ -360,8 +360,11 @@ test.describe("Attack Graph", () => {
     const evalReq = page.waitForRequest(
       (r) => r.url().includes("/api/v1/evaluate") && r.method() === "POST"
     );
-    // The panel-head "Simulate path" button (primary) is always present when a path is selected.
-    await page.getByRole("button", { name: "Simulate path" }).click();
+    // The CTA reads "Simulate (preview)" (AttackPathDetail.tsx:179) — the "(preview)" is load-bearing,
+    // since the action fires REAL /evaluate calls but enforces nothing. Matched EXACTLY: a loose /simulate/i
+    // resolves to 41 elements on this page (every per-hop control carries the word), which trips
+    // strict mode — precision beats robustness when the loose form is ambiguous.
+    await page.getByRole("button", { name: "Simulate (preview)" }).click();
     const req = await evalReq;
     const body = req.postDataJSON() as { framework?: string; tool_name?: string };
     // Simulate tags its calls with framework "attack-graph" (so the audit-PEP test can exclude them).

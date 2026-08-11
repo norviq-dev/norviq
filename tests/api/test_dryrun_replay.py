@@ -38,6 +38,26 @@ class _FakeSession:
         return _FakeScalarResult(self._rows)
 
 
+# A candidate that passes `validate_policy_create` (declared default + a real block resolver), so the
+# route-level tests below exercise the REPLAY path rather than dying in write-time validation.
+_VALID_REGO = """package norviq.policy
+
+default decision = "allow"
+
+decision = "block" {
+    input.tool_name == "delete_kb"
+}
+
+rule_id = "deny_delete_kb" {
+    input.tool_name == "delete_kb"
+}
+
+reason = "delete_kb is not granted" {
+    input.tool_name == "delete_kb"
+}
+"""
+
+
 class _FakeEvaluator:
     """Decides by a tool_name → decision map, mirroring a candidate rego that blocks specific tools."""
 
@@ -108,3 +128,115 @@ class TestReplay:
         out = await _replay_recent(ev, _FakeSession([]), body, datetime.now(timezone.utc))
         assert out["total_records_checked"] == 0
         assert out["newly_blocked"] == 0
+
+
+@pytest.mark.asyncio
+class TestCheckedCountsOnlyWhatWasReplayed:
+    """`total_records_checked` is the denominator the console prints ("Replayed N recent real calls"),
+    the one its `replayUnmeasured` guard tests against 0, and the one the route's recommendation divides
+    by. A row that was FETCHED but never evaluated was not measured, so counting it there manufactures
+    an all-clear ("safe to deploy") out of a replay that examined nothing."""
+
+    async def test_synthetic_only_window_reports_zero_checked_not_the_fetched_count(self):
+        # A class-less (namespace-tier) policy replays the WHOLE namespace — exactly where another
+        # class's Policy-Tester sessions land. Every row is skipped; NOTHING was simulated.
+        rows = [_rec("search_kb", "allow", agent_class=f"policy-tester-{i}") for i in range(120)]
+        ev = _FakeEvaluator(lambda t: "block")
+        body = PolicyCreate(namespace="analytics", agent_class="", rego_source="package x")
+        out = await _replay_recent(ev, _FakeSession(rows), body, datetime.now(timezone.utc))
+        assert ev.calls == 0, "no record was evaluated"
+        assert out["total_records_checked"] == 0  # was 120 — an all-clear over zero evaluations
+        assert out["records_fetched"] == 120
+        assert out["synthetic_skipped"] == 120
+        assert out["block_rate_pct"] == 0
+
+    async def test_block_rate_denominator_excludes_skipped_rows(self):
+        # 100 skipped Policy-Tester rows + 20 real rows the candidate blocks. The true impact is
+        # 20 of 20 (100%); counting the skipped rows reported 20 of 120 (16.7%) — a 6x understatement.
+        rows = [_rec("search_kb", "allow", agent_class=f"policy-tester-{i}") for i in range(100)]
+        rows += [_rec("delete_kb", "allow") for _ in range(20)]
+        ev = _FakeEvaluator(lambda t: "block" if t == "delete_kb" else "allow")
+        body = PolicyCreate(namespace="analytics", agent_class="", rego_source="package x")
+        out = await _replay_recent(ev, _FakeSession(rows), body, datetime.now(timezone.utc))
+        assert out["total_records_checked"] == 20
+        assert out["newly_blocked"] == 20
+        assert out["block_rate_pct"] == 100.0
+
+    async def test_evaluator_failures_are_counted_and_never_read_as_clean(self):
+        # OPA is down: every record raises. "The evaluator answered for nothing" must not be spelled
+        # the same way as "the candidate blocks nothing".
+        class _Exploding(_FakeEvaluator):
+            async def _evaluate_opa(self, *a, **k):
+                self.calls += 1
+                raise RuntimeError("opa unreachable")
+
+        rows = [_rec("delete_kb", "allow") for _ in range(10)]
+        ev = _Exploding(lambda t: "allow")
+        body = PolicyCreate(namespace="analytics", agent_class="report-gen", rego_source="package x")
+        out = await _replay_recent(ev, _FakeSession(rows), body, datetime.now(timezone.utc))
+        assert ev.calls == 10
+        assert out["total_records_checked"] == 0  # was 10 → "safe to deploy"
+        assert out["eval_errors"] == 10
+        assert out["records_fetched"] == 10
+
+    async def test_partial_evaluator_failure_is_visible_not_averaged_away(self):
+        rows = [_rec("delete_kb", "allow"), _rec("boom", "allow"), _rec("search_kb", "allow")]
+
+        class _HalfExploding(_FakeEvaluator):
+            async def _evaluate_opa(self, key, ns, cls, opa_input, rego):
+                if opa_input["tool_name"] == "boom":
+                    raise RuntimeError("opa hiccup")
+                return await _FakeEvaluator._evaluate_opa(self, key, ns, cls, opa_input, rego)
+
+        ev = _HalfExploding(lambda t: "block" if t == "delete_kb" else "allow")
+        body = PolicyCreate(namespace="analytics", agent_class="report-gen", rego_source="package x")
+        out = await _replay_recent(ev, _FakeSession(rows), body, datetime.now(timezone.utc))
+        assert out["total_records_checked"] == 2
+        assert out["eval_errors"] == 1
+        assert out["records_fetched"] == 3
+        assert out["newly_blocked"] == 1
+
+
+@pytest.mark.asyncio
+class TestRecommendationCannotClearAnUnmeasuredReplay:
+    """The route's headline sentence is what the operator reads before clicking "Save & enforce"
+    (canSave opens on `valid === true`). It must never say "safe to deploy" off a replay that
+    evaluated nothing."""
+
+    @staticmethod
+    async def _run(rows, decide, *, agent_class="", exploding=False):
+        from types import SimpleNamespace as NS
+
+        from norviq.api.routers.policies import dry_run_policy
+
+        class _Ev(_FakeEvaluator):
+            async def _evaluate_opa(self, key, ns, cls, opa_input, rego):
+                # `_validate_rego` probes with a synthetic "search_kb" sample first; it must compile.
+                if str(key).startswith("dryrun:") and opa_input.get("session_id") == "dry-run" and not rows:
+                    return {"decision": "allow", "rule_id": "ok", "reason": ""}
+                if exploding and opa_input.get("session_id") != "dry-run":
+                    raise RuntimeError("opa unreachable")
+                self.calls += 1
+                return {"decision": decide(opa_input["tool_name"]), "rule_id": "r", "reason": ""}
+
+        ev = _Ev(decide)
+        request = NS(app=NS(state=NS(evaluator=ev)))
+        body = PolicyCreate(namespace="analytics", agent_class=agent_class, rego_source=_VALID_REGO)
+        return await dry_run_policy(
+            body, request, session=_FakeSession(rows), user={"role": "admin", "sub": "t"}, _target=None
+        )
+
+    async def test_all_synthetic_replay_says_cannot_simulate_not_safe_to_deploy(self):
+        rows = [_rec("search_kb", "allow", agent_class=f"policy-tester-{i}") for i in range(120)]
+        out = await self._run(rows, lambda t: "block")
+        assert out["total_records_checked"] == 0
+        assert "safe to deploy" not in out["recommendation"]
+        assert "cannot simulate impact" in out["recommendation"]
+
+    async def test_total_evaluator_failure_names_the_engine_not_absent_traffic(self):
+        rows = [_rec("delete_kb", "allow") for _ in range(10)]
+        out = await self._run(rows, lambda t: "allow", agent_class="report-gen", exploding=True)
+        assert out["total_records_checked"] == 0
+        assert out["eval_errors"] == 10
+        assert "safe to deploy" not in out["recommendation"]
+        assert "evaluator failed" in out["recommendation"]

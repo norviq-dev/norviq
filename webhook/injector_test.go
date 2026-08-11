@@ -110,7 +110,7 @@ func TestMutate_ExistingVolumes(t *testing.T) {
 
 func TestInjector_SecurityContext(t *testing.T) {
 	inj := NewInjector(LoadConfig())
-	sidecar := inj.buildSidecar("sales", "default")
+	sidecar := inj.buildSidecar("sales", "default", "")
 	sec := sidecar["securityContext"].(map[string]interface{})
 	if sec["runAsNonRoot"] != true {
 		t.Fatal("expected runAsNonRoot true")
@@ -123,7 +123,7 @@ func TestInjector_SecurityContext(t *testing.T) {
 
 func TestInjector_ResourceLimits(t *testing.T) {
 	inj := NewInjector(LoadConfig())
-	sidecar := inj.buildSidecar("sales", "default")
+	sidecar := inj.buildSidecar("sales", "default", "")
 	resources := sidecar["resources"].(map[string]interface{})
 	requests := resources["requests"].(map[string]string)
 	limits := resources["limits"].(map[string]string)
@@ -257,7 +257,7 @@ func TestSidecarEnvProxyModeWiring(t *testing.T) {
 	cfg.SidecarMode = "proxy"
 	cfg.ApiURL = "http://norviq-api:8080"
 	cfg.ApiSecret = "test-secret"
-	env := sidecarEnv("customer-support", "tenant-b", cfg)
+	env := sidecarEnv("customer-support", "tenant-b", "", cfg)
 	got := map[string]string{}
 	for _, e := range env {
 		got[e["name"].(string)] = e["value"].(string)
@@ -285,7 +285,7 @@ func TestSidecarEnvEmbeddedModeWiring(t *testing.T) {
 	cfg.RedisURL = "redis://norviq-redis:6379"
 	cfg.PgURL = "postgresql://norviq:pw@norviq-postgresql:5432/norviq"
 	cfg.OpaMode = "subprocess"
-	env := sidecarEnv("customer-support", "default", cfg)
+	env := sidecarEnv("customer-support", "default", "", cfg)
 	got := map[string]string{}
 	for _, e := range env {
 		got[e["name"].(string)] = e["value"].(string)

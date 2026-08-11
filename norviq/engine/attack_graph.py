@@ -217,7 +217,11 @@ class AttackGraphEngine:
             nodes[node_id] = {
                 "id": node_id,
                 "type": str(node.get("type", "data")),
-                "name": str(node.get("name", node_id)),
+                # Snapshot nodes carry `label` (GraphNode.label); they have never had a `name` key, so
+                # this read always fell through to node_id. Every stored path therefore came out with
+                # mitre_techniques: [] and no destructive-tool terminal — which reads as "this path maps
+                # to no ATLAS technique" rather than "the lookup used the wrong key".
+                "name": str(node.get("label") or node.get("name") or node_id),
                 "properties": dict(node.get("properties") or {}),
             }
         return nodes
@@ -369,9 +373,24 @@ class AttackGraphEngine:
 
         try:
             decision = await self.evaluator.evaluate(event)
-            if decision.decision == "block":
+            # Map on whether the call PROCEEDS, not on the literal string, or the shipped default
+            # configuration lands in the wrong bucket.
+            #
+            # `escalate` groups with `block`: the call is held for human approval, so the path is not
+            # traversable unattended. That is already this repo's convention — `redteam_efficacy`
+            # defines _ENFORCED_DECISIONS as {block, escalate} for the same reason.
+            #
+            # `audit` groups with `allow`: the call RUNS. It used to fall to the `no_policy` tail, and
+            # `no_policy` is the least alarming of the three — so a control that fired and recorded a
+            # dangerous call was reported as "nothing evaluated this". Every baseline control now ships
+            # on `monitor`, which is implemented by emitting an `audits[]` head, so that was not an edge
+            # case: it was the default install. It also silently disarmed the risk check below, which
+            # keys on `would_allow and node_name in DANGEROUS_TOOLS` — an audited dangerous tool
+            # matched neither arm and raised nothing. Same defect as BUG-011 and C2-021, on a third
+            # surface: a monitored detection scored as though no control existed.
+            if decision.decision in ("block", "escalate"):
                 return ("would_block", decision.rule_id or "")
-            if decision.decision == "allow":
+            if decision.is_allowed():  # allow | audit
                 return ("would_allow", decision.rule_id or "default_allow")
             return ("no_policy", decision.rule_id or "")
         except Exception as exc:

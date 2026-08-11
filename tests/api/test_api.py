@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -452,19 +452,34 @@ async def test_policy_create_regex_text_literal_allowed(real_db: None) -> None:
 
 
 async def test_policy_create_uses_policy_name_when_agent_class_empty(real_db: None) -> None:
-    """Use policy_name as storage key for non-agentClass policy payloads."""
+    """A TARGET outranks policy_name; policy_name keys only the untargeted case.
+
+    This test used to send both a `policy_name` and a namespace `target` and assert the key was
+    `payments-baseline`. That was pinning a defect: the controller sets policy_name on every CR, so
+    preferring it stored the policy at `payments:payments-baseline` — a key
+    `evaluator._collect_candidates` never looks up — and the policy never took part in a decision
+    while reporting itself healthy. See `resolve_policy_key` and tests/api/test_policy_key_targets.py.
+    """
+    rego = ('package norviq\ndefault decision = "allow"\n'
+            'decision = "block" { input.tool_name == "danger" }\nrule_id = "r"\nreason = "x"')
     client = _client()
     try:
-        body = {
-            "namespace": "payments",
-            "agent_class": "",
-            "policy_name": "payments-baseline",
-            "target": {"namespace": "payments"},
-            "rego_source": 'package norviq\ndefault decision = "allow"\ndecision = "block" { input.tool_name == "danger" }\nrule_id = "r"\nreason = "x"',
+        targeted = {
+            "namespace": "payments", "agent_class": "", "policy_name": "payments-baseline",
+            "target": {"namespace": "payments"}, "rego_source": rego,
         }
-        response = client.post("/api/v1/policies", json=body, headers=_auth_headers())
+        response = client.post("/api/v1/policies", json=targeted, headers=_auth_headers())
         assert response.status_code == 200
-        assert response.json()["agent_class"] == "payments-baseline"
+        # the key the engine actually looks up for the namespace tier
+        assert response.json()["agent_class"] == "namespace:payments"
+
+        untargeted = {
+            "namespace": "payments", "agent_class": "", "policy_name": "payments-named",
+            "rego_source": rego,
+        }
+        response = client.post("/api/v1/policies", json=untargeted, headers=_auth_headers())
+        assert response.status_code == 200
+        assert response.json()["agent_class"] == "payments-named"
     finally:
         client.close()
 
@@ -651,6 +666,131 @@ def test_volume() -> None:
         client.close()
 
 
+def test_stats_counts_would_blocks_in_monitor_mode() -> None:
+    """Monitor mode must not report "nothing was stopped".
+
+    A monitored namespace emits NO `block` decision at all — the engine softens every would-block to an
+    `audit` decision stamped `monitor_would_block:` / `policy_audit_would_block:`. /audit/stats counted
+    only `decision == "block"`, so the Overview tile (which correctly relabels itself "Would-block")
+    reported a confident 0 for a namespace whose policy was matching constantly. `blocked` must stay
+    strictly live blocks so an ENFORCING namespace's number keeps its meaning.
+    """
+    def _row(decision: str, rule_id: str):
+        return SimpleNamespace(
+            id=uuid4(), event_id=uuid4(), tool_name="execute_sql", decision=decision,
+            agent_id="spiffe://example/ns/default/sa/a", agent_class="report-gen", namespace="default",
+            rule_id=rule_id, reason="test", framework="langchain", trust_score=0.5, latency_ms=10.0,
+            timestamp_utc=datetime.now(timezone.utc), payload={},
+        )
+
+    rows = [
+        _row("audit", "monitor_would_block:deny_sql_injection"),
+        _row("audit", "monitor_would_block:deny_sql_injection"),
+        _row("audit", "policy_audit_would_block:pii_detection"),
+        _row("audit", "namespace_audit_note"),  # an `audit` row that is NOT a softened would-block
+        _row("allow", "default_allow"),
+    ]
+
+    client = _client()
+    _override_session(client, FakeSession(rows))
+    try:
+        stats = client.get("/api/v1/audit/stats", headers=_auth_headers()).json()
+        assert stats["would_blocked"] == 3, stats  # pre-fix: the tile had no such number at all
+        assert stats["blocked"] == 0, "monitor mode emits no live block — this must NOT be inflated"
+        assert stats["total"] == 5
+        assert stats["would_block_rate_pct"] == 60.0  # 3/5 — the relabelled rate must match the tile
+    finally:
+        client.close()
+
+
+def test_stats_engine_errors_survive_monitor_mode_softening() -> None:
+    """BUG-016. `engine_errors` matched `evaluator_error` EXACTLY.
+
+    The moment a namespace ran monitor mode the stored id became
+    `monitor_would_block:evaluator_error`, so the Overview's engine-health number read a confident 0
+    during an actual engine fault — the softening that protects customer traffic also hid the reason
+    it was needed. Timeouts and the unhandled-fault path were never counted at all, in any mode.
+    """
+    def _row(decision: str, rule_id: str):
+        return SimpleNamespace(
+            id=uuid4(), event_id=uuid4(), tool_name="execute_sql", decision=decision,
+            agent_id="spiffe://example/ns/default/sa/a", agent_class="report-gen", namespace="default",
+            rule_id=rule_id, reason="test", framework="langchain", trust_score=0.5, latency_ms=10.0,
+            timestamp_utc=datetime.now(timezone.utc), payload={},
+        )
+
+    rows = [
+        _row("block", "evaluator_error"),                          # hard, already counted
+        _row("audit", "monitor_would_block:evaluator_error"),      # softened — was invisible
+        _row("block", "evaluator_timeout"),                        # never counted at all
+        _row("audit", "monitor_would_block:evaluator_timeout"),
+        _row("block", "evaluator_fallback"),
+        _row("block", "deny_sql_injection"),                       # a real policy block is NOT a fault
+        _row("allow", "default_allow"),
+    ]
+    client = _client()
+    _override_session(client, FakeSession(rows))
+    try:
+        stats = client.get("/api/v1/audit/stats", headers=_auth_headers()).json()
+        assert stats["engine_errors"] == 5, stats
+        # and a policy doing its job must never inflate an engine-health number
+        assert stats["blocked"] == 4, stats
+    finally:
+        client.close()
+
+
+def test_volume_bucket_width_follows_range() -> None:
+    """Bucket WIDTH must follow `range`, not always be an hour.
+
+    Every range used to bucket by hour, so `1h` collapsed to a single point no matter how the traffic
+    was distributed. One point is worse than coarse: the UI's line series has no segment to draw, so the
+    chart rendered blank while its tooltip still reported real numbers. Three calls ten minutes apart
+    must read as three points on the 1h view and collapse on a wide range.
+    """
+    now = datetime.now(timezone.utc)
+    rows = [
+        SimpleNamespace(
+            id=uuid4(),
+            event_id=uuid4(),
+            tool_name="tool.alpha",
+            decision="allow",
+            agent_id="spiffe://example/ns/default/sa/a",
+            agent_class="planner",  # non-synthetic: the volume route drops probe classes
+            namespace="default",
+            rule_id="allow",
+            reason="test",
+            framework="langchain",  # not "redteam", else the row is excluded as non-real
+            trust_score=0.5,
+            latency_ms=12.3,
+            timestamp_utc=now - timedelta(minutes=offset),
+            payload={"ok": True},
+        )
+        # 10 minutes apart is wider than the 5-minute bucket used for `1h`, so these can never
+        # share a bucket — no boundary-alignment flake.
+        for offset in (0, 10, 20)
+    ]
+
+    client = _client()
+    _override_session(client, FakeSession(rows))
+    try:
+        fine = client.get("/api/v1/audit/volume?range=1h", headers=_auth_headers()).json()
+        assert len(fine) == 3, f"1h must resolve to 5-minute buckets, got {fine}"
+        assert sum(b["allow"] for b in fine) == 3  # no row dropped by the finer bucketing
+    finally:
+        client.close()
+
+    client = _client()
+    _override_session(client, FakeSession(rows))
+    try:
+        coarse = client.get("/api/v1/audit/volume?range=30d", headers=_auth_headers()).json()
+        # A wide range must aggregate rather than emit one point per call. Compared relatively so the
+        # assertion cannot flake when the sample happens to straddle midnight.
+        assert len(coarse) < len(fine), f"30d must bucket coarser than 1h, got {coarse}"
+        assert sum(b["allow"] for b in coarse) == 3
+    finally:
+        client.close()
+
+
 def test_dry_run() -> None:
     """Preview policy impact in dry-run endpoint."""
     row = SimpleNamespace(
@@ -663,6 +803,13 @@ def test_dry_run() -> None:
         namespace="default",
         rule_id="deny",
         reason="test",
+        # `_opa_input_from_record` reads `rec.session_id` and `rec.framework`. Without them the row
+        # raised AttributeError INSIDE the replay loop, was swallowed by its `except Exception: continue`,
+        # and the assertion below still passed because `total_records_checked` was `len(rows)` — the
+        # fetched count, not the replayed one. The fixture could not produce the state its assertion
+        # claimed: it certified a replay of one record while replaying none.
+        session_id="s-dry-run",
+        framework="sidecar",
         trust_score=0.5,
         latency_ms=12.3,
         timestamp_utc=datetime.now(timezone.utc),
@@ -685,6 +832,9 @@ def test_dry_run() -> None:
         assert data["valid"] is True  # dry-run now actually validates the submitted rego
         assert data["errors"] == []
         assert data["total_records_checked"] == 1
+        # ...and the record was genuinely evaluated, not merely fetched.
+        assert data["eval_errors"] == 0
+        assert data["records_fetched"] == 1
     finally:
         client.app.dependency_overrides.clear()
         client.close()

@@ -303,3 +303,129 @@ def test_def038_export_pack_carries_per_rule_blocked():
     ctrl = next(c for c in pack["controls"] if c["technique_id"] == _T)
     assert ctrl["blocked_by_rule"] == {_RULE_A: 25, _RULE_B: 15}, \
         "the evidence export must attribute blocks per rule (docstring promises 'per-rule blocked counts')"
+
+
+# --------------------------------------------------------------------------------------------------
+# "ENFORCED" must mean a rule is DEFINED, and must not be read as block evidence
+# --------------------------------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_rule_named_only_in_a_comment_does_not_make_a_technique_enforced():
+    """Coverage was decided by `rule_id in rego_blob` — raw substring containment over the
+    concatenation of every loaded policy. A `#` comment mentioning a rule enforces nothing, but
+    satisfied the test, so a technique could read ENFORCED in the donut, the legend, and the exported
+    auditor evidence pack with no rule behind it at all."""
+    rego = f"package norviq.decoy\n\ndefault decision = \"allow\"\n# TODO: reinstate {_RULE_A} and {_RULE_B}\n"
+    cov = await mitre._compute_coverage(_Request(_Loader(rego)), _StubSession([]), "default", "24h", "atlas")
+    tech = next(t for t in cov["techniques"] if t["technique_id"] == _T)
+    assert tech["covered_policies"] == []
+    assert tech["status"] == "gap"
+
+
+@pytest.mark.asyncio
+async def test_a_rule_named_inside_prose_does_not_make_a_technique_enforced():
+    """Same defect, the form a comment strip alone would miss: the name inside a reason string on a
+    live code line. A rule is present when it is DEFINED (`blocks["id"]` / `rule_id = "id"`), which is
+    always the quoted id — never when it merely appears inside some other string."""
+    rego = f'package norviq.decoy\n\ndefault decision = "allow"\nnote := "superseded by {_RULE_A}"  # {_RULE_B}\n'
+    cov = await mitre._compute_coverage(_Request(_Loader(rego)), _StubSession([]), "default", "24h", "atlas")
+    tech = next(t for t in cov["techniques"] if t["technique_id"] == _T)
+    assert tech["covered_policies"] == []
+    assert tech["status"] == "gap"
+
+
+@pytest.mark.asyncio
+async def test_a_really_defined_rule_still_counts_as_enforced():
+    """The control for the two above: tightening the test must not lose a single real rule."""
+    cov = await mitre._compute_coverage(
+        _Request(_Loader(_rego_covering_both())), _StubSession([]), "default", "24h", "atlas"
+    )
+    tech = next(t for t in cov["techniques"] if t["technique_id"] == _T)
+    assert tech["status"] == "enforced"
+    assert sorted(tech["covered_policies"]) == sorted([_RULE_A, _RULE_B])
+
+
+@pytest.mark.asyncio
+async def test_enforced_is_rules_present_and_says_so_rather_than_implying_block_evidence():
+    """`status` is decided from the loaded rego and never consults the block counts the same loop
+    computes, so "enforced" carries no evidence that anything was ever blocked — and in a monitor-mode
+    namespace, where the evaluator softens block->audit, it never can. The sibling /coverage route over
+    the same rego ships `basis: "rules_present"` and documents that "'present' is NOT 'effective'";
+    this route shipped the bare word with no such qualifier, under console copy asserting "backed by a
+    live policy AND block evidence". `basis` + `proven` are what make that copy checkable."""
+    cov = await mitre._compute_coverage(
+        _Request(_Loader(_rego_covering_both())), _StubSession([]), "default", "24h", "atlas"
+    )
+    assert cov["basis"] == "rules_present"
+    tech = next(t for t in cov["techniques"] if t["technique_id"] == _T)
+    assert tech["status"] == "enforced"
+    assert tech["blocked"] == 0
+    assert tech["proven"] is False  # enforced, but NOT backed by block evidence
+    assert cov["enforced"] >= 1
+    assert cov["proven"] == 0  # not one enforced technique has block evidence in this window
+
+
+@pytest.mark.asyncio
+async def test_proven_counts_only_techniques_whose_rules_actually_acted():
+    cov = await mitre._compute_coverage(
+        _Request(_Loader(_rego_covering_both())),
+        _StubSession([(_RULE_A, "block", 25)]),
+        "default", "24h", "atlas",
+    )
+    tech = next(t for t in cov["techniques"] if t["technique_id"] == _T)
+    assert tech["proven"] is True
+    assert cov["proven"] == sum(
+        1 for t in cov["techniques"] if t["status"] == "enforced" and t["blocked"] > 0
+    )
+    assert cov["proven"] <= cov["enforced"]
+
+
+# --------------------------------------------------------------------------------------------------
+# ...and tightening "present" must not break the product's OWN way of becoming present
+# --------------------------------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_applying_the_generated_remediation_overlay_closes_its_gap():
+    """The Compliance page offers "Generate enforcing policy" on a gap technique; the operator reviews
+    it and applies it to the `<class>__remediation__` key, and the technique is supposed to flip to
+    ENFORCED. That overlay is `generate_remediation_rego`, and it names the mapped rule ONLY as the
+    last segment of a namespaced block id — `blocks["remediation:<fw>:<control>:<rule_id>"]` — plus in
+    two `#` comments. A presence test anchored on the BARE quoted id matches neither (the comments are
+    stripped, and the compound literal has `:` where the opening quote would have to be), so the
+    remediation loop could never close: apply the overlay, still a gap, generate again.
+
+    Built from the real generator, never a hand-written approximation of its output."""
+    from norviq.api.threat_intent import generate_remediation_overlay_rego
+
+    overlay = generate_remediation_overlay_rego(
+        "customer-support",
+        [{"framework": "atlas", "control_id": _T, "control_name": "Exploit", "rule_ids": [_RULE_A, _RULE_B]}],
+    )
+    # premise: the generator really does emit the compound form and no bare quoted id.
+    assert f'blocks["remediation:atlas:{_T}:{_RULE_A}"]' in overlay
+
+    cov = await mitre._compute_coverage(
+        _Request(_Loader(overlay)), _StubSession([]), "default", "24h", "atlas"
+    )
+    tech = next(t for t in cov["techniques"] if t["technique_id"] == _T)
+    assert tech["status"] == "enforced", "applying the product's own remediation overlay must close the gap"
+    assert sorted(tech["covered_policies"]) == sorted([_RULE_A, _RULE_B])
+    # and it is still only RULES-PRESENT — no block evidence was recorded.
+    assert tech["proven"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_namespaced_id_that_merely_ENDS_in_prose_is_still_not_a_control():
+    """The control for the test above: accepting `...:<rule_id>` must not re-open the prose hole. A
+    literal that merely CONTAINS the id, or ends with it after a space rather than a colon segment
+    boundary, is not a definition."""
+    rego = (
+        'package norviq.decoy\n\n'
+        'default decision = "allow"\n'
+        f'note := "superseded by {_RULE_A}"\n'
+        f'other := "{_RULE_B} was removed"\n'
+    )
+    cov = await mitre._compute_coverage(_Request(_Loader(rego)), _StubSession([]), "default", "24h", "atlas")
+    tech = next(t for t in cov["techniques"] if t["technique_id"] == _T)
+    assert tech["covered_policies"] == []
+    assert tech["status"] == "gap"

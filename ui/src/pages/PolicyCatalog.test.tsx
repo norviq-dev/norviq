@@ -7,6 +7,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import { PolicyCatalog } from "./PolicyCatalog";
 import { AppProvider } from "../store/AppContext";
 import { clearApiCache } from "../hooks/useApi";
+import { compileGraph } from "../lib/builderCompile";
+import type { BuilderGraph } from "../lib/builderGraph";
 
 // Monaco can't mount in jsdom — stub it so we can assert the editor surfaced.
 vi.mock("@monaco-editor/react", () => ({
@@ -58,6 +60,41 @@ function renderPage(initialEntries: string[] = ["/"]) {
   );
 }
 
+describe("deep link from Policy Compliance", () => {
+  it("opens the policy named in the URL rather than whichever is listed first", async () => {
+    let fetchedDetail = "";
+    // Policy Compliance's remediation table links here with ?ns=&agent_class= for a NAMED
+    // non-compliant policy. The params were previously ignored, so the operator clicked "Open policy"
+    // and landed on whatever the editor selected first — on a multi-tenant list, someone else's.
+    server.use(
+      http.get("/api/v1/policies", () =>
+        HttpResponse.json([
+          { namespace: "other-ns", agent_class: "customer-support", current_version: 1, rego_length: 10, priority: 700, target_type: "class" },
+          { namespace: "default", agent_class: "billing", current_version: 3, rego_length: 20, priority: 700, target_type: "class" }
+        ])
+      ),
+      http.get("/api/v1/deployments", () => HttpResponse.json([])),
+      http.get("/api/v1/policies/default/billing", () => {
+        fetchedDetail = "default/billing";
+        return HttpResponse.json({ namespace: "default", agent_class: "billing", rego_source: "package norviq.billing\n", version: 3 });
+      }),
+      http.get("/api/v1/policies/other-ns/customer-support", () => {
+        fetchedDetail = "other-ns/customer-support";
+        return HttpResponse.json({ namespace: "other-ns", agent_class: "customer-support", rego_source: "package x\n", version: 1 });
+      }),
+      http.get("/api/v1/policies/other-ns/customer-support/versions", () => HttpResponse.json([])),
+      http.get("/api/v1/policies/default/billing/versions", () => HttpResponse.json([]))
+    );
+    renderPage(["/policies/catalog?ns=default&agent_class=billing"]);
+    // The detail actually fetched is the contract: it is what Save and Apply will target. Asserting
+    // on rendered text alone would pass while the editor silently held another tenant's policy.
+    // The detail FETCHED is the whole contract — it is what Save and Apply will target. Asserting on
+    // a rendered filename instead would pass while the editor silently held another tenant's policy.
+    await waitFor(() => expect(fetchedDetail).toBe("default/billing"));
+    expect(fetchedDetail).not.toBe("other-ns/customer-support");
+  });
+});
+
 describe("PolicyCatalog (#3 / #4)", () => {
   it("opens the class policy in the editor (Monaco mounts) and groups it under Agent-Class", async () => {
     seedHandlers("class");
@@ -79,28 +116,46 @@ describe("PolicyCatalog (#3 / #4)", () => {
     expect(screen.getByTestId("active-policies-mode")).toHaveTextContent(/Enforcing/i);
   });
 
-  it("UX-CREATE bridge: 'Edit as raw rego' hands the composer's generated rego to the raw editor", async () => {
+  // Phase 2f consolidation: the top create menu is exactly two entry points — the form-based Visual
+  // Builder (BuilderSheet) and "Advanced (raw rego)" (the existing startNewPolicy raw-editor path). The
+  // GUIDED composer's own create button and the React Flow CANVAS create button are both cut (both
+  // compiled to identical rego over the same compiler, so nothing was lost — see BuilderSheet.tsx /
+  // the deleted React Flow canvas builder). The guided composer's "Edit as raw rego" bridge (formerly covered by
+  // a "UX-CREATE bridge" test here) was only reachable from that now-removed button, so it went with it.
+  it("UX-CREATE (Phase 2f): the create menu is exactly Visual Builder + Advanced (raw rego) — no guided, no canvas", async () => {
     seedHandlers("class");
     renderPage();
     await screen.findAllByText("customer-support.rego");
 
-    // Open the GUIDED composer, name a brand-new class.
-    fireEvent.click(screen.getByRole("button", { name: /new policy \(guided\)/i }));
-    const classInput = await screen.findByPlaceholderText(/e\.g\. customer-support/i);
-    fireEvent.change(classInput, { target: { value: "billing-bot" } });
+    expect(screen.getByRole("button", { name: /^visual builder$/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /advanced \(raw rego\)/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /new policy \(guided\)/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /new policy \(canvas\)/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /new policy \(visual builder\)/i })).not.toBeInTheDocument();
+  });
 
-    // Bridge into the raw editor.
-    fireEvent.click(screen.getByRole("button", { name: /edit as raw rego/i }));
+  it("UX-CREATE (Phase 2f): 'Advanced (raw rego)' opens the raw editor seeded with a fresh, unsaved policy", async () => {
+    seedHandlers("class");
+    renderPage();
+    await screen.findAllByText("customer-support.rego");
 
-    // The composer closed and the raw editor now holds the COMPOSER-GENERATED rego for that class,
-    // scoped to the class (package token is derived from it) — a guided draft graduated into raw authoring.
+    fireEvent.click(screen.getByRole("button", { name: /advanced \(raw rego\)/i }));
+
+    // startNewPolicy() lands on the editor tab with the new-policy template seeded — same behavior as
+    // the pre-existing sidebar "New policy (raw rego)" entry point, just reachable from the top menu too.
     await waitFor(() => {
       const editor = screen.getByTestId("monaco-editor");
-      expect(editor).toHaveTextContent(/GENERATED by the New Policy composer/i);
-      expect(editor).toHaveTextContent(/billing-bot/);
+      expect(editor).toHaveTextContent(/package norviq/i);
     });
-    // Sidebar reflects raw-authoring mode.
-    expect(screen.getByText("New policy (raw rego)")).toBeInTheDocument();
+  });
+
+  it("UX-CREATE (Phase 2f): 'Visual Builder' opens the BuilderSheet", async () => {
+    seedHandlers("class");
+    renderPage();
+    await screen.findAllByText("customer-support.rego");
+
+    fireEvent.click(screen.getByRole("button", { name: /^visual builder$/i }));
+    expect(await screen.findByTestId("builder-sheet")).toBeInTheDocument();
   });
 
   it("'View rego' expands each version's OWN source read-only", async () => {
@@ -592,5 +647,155 @@ describe("PolicyCatalog — create (raw rego) / delete (guardrails)", () => {
     // (expectedVersion set -> localVerifying -> "Verifying — confirming the new version is loaded…").
     expect(await screen.findByText(/Saved default\/customer-support/)).toBeInTheDocument();
     expect(await screen.findByText(/Verifying — confirming the new version is loaded/i)).toBeInTheDocument();
+  });
+});
+
+// Phase 2b: the detachment badge (builderCompile.ts's detachmentStatusOf) on the raw editor's loaded
+// policy — "detached" when the builder header is present but a hand edit no longer matches the embedded
+// graph hash. seedHandlers' default rego ("package norviz.strict\n") has no builder header at all
+// ("not-builder"), so this suite overrides the policy-detail handler with real builder-compiled +
+// hand-mutated rego to exercise the "detached" path specifically.
+function mutatedBuilderRego(): string {
+  const graph: BuilderGraph = {
+    schemaVersion: 1,
+    scope: { kind: "class", agentClass: "customer-support" },
+    rules: [
+      {
+        id: "r1",
+        decision: "block",
+        ruleId: "block_sql",
+        reason: "SQL injection blocked",
+        conditions: [[{ type: "detector", detector: "sql_injection" }]]
+      }
+    ],
+    defaults: { decision: "allow", reason: "no match" }
+  };
+  const { rego, errors } = compileGraph(graph);
+  if (errors.length > 0) throw new Error("fixture graph failed to compile");
+  // Hand-mutate one body byte well after the header/hash lines — simulates a post-generation hand edit,
+  // same technique builderCompile.test.ts's own detachmentStatusOf "detached" test uses.
+  const needle = 'blocks["block_sql"]';
+  const idx = rego.indexOf(needle);
+  if (idx < 0) throw new Error("fixture needle not found in compiled rego");
+  return rego.slice(0, idx) + 'blocks["block_SQL"]' + rego.slice(idx + needle.length);
+}
+
+describe("PolicyCatalog — Phase 2b detachment badge", () => {
+  it("shows the 'Hand-edited — detached' badge for a builder-generated policy whose body no longer matches its embedded graph hash", async () => {
+    seedHandlers("class");
+    server.use(
+      http.get("/api/v1/policies/default/customer-support", () =>
+        HttpResponse.json({ namespace: "default", agent_class: "customer-support", rego_source: mutatedBuilderRego(), version: 1 })
+      )
+    );
+    renderPage();
+    await screen.findAllByText("customer-support.rego");
+
+    const badge = await screen.findByTestId("builder-detachment-badge");
+    expect(badge).toHaveAttribute("data-status", "detached");
+    expect(badge).toHaveTextContent(/hand-edited/i);
+    expect(badge).toHaveTextContent(/detached from its visual graph/i);
+  });
+
+  it("shows no detachment badge for a hand-authored policy with no builder header (the seeded default)", async () => {
+    seedHandlers("class"); // default rego_source: "package norviz.strict\n" — never built visually
+    renderPage();
+    await screen.findAllByText("customer-support.rego");
+    expect(screen.queryByTestId("builder-detachment-badge")).not.toBeInTheDocument();
+  });
+});
+
+
+// ------------------------------------------------------------------------------------------------
+// A DESTRUCTIVE CONFIRM'S TARGET IS FIXED THE MOMENT IT OPENS.
+//
+// The confirm was a hand-rolled `.sheet-overlay` + `.confirm-modal` pair: no role="dialog", no
+// aria-modal, no Escape listener, and focus never moved into it — it stayed on the trash button
+// BEHIND the dim overlay, at the far end of the page from the dialog's own buttons. So Tab walked the
+// policy list underneath, and Enter on a second row's trash fired `setDeleteTarget(otherPolicy)` while
+// the confirm was already up. The dialog stayed mounted, the red "removes it from every layer /
+// cannot be undone" warning stayed word-for-word identical, and the only thing that changed was one
+// line of title text. "Delete policy" then destroyed a different enforcing policy.
+//
+// Two same-namespace class policies is the exact estate that makes it invisible: the rows differ only
+// by class name, and the warning never mentions which one it is about.
+// ------------------------------------------------------------------------------------------------
+describe("the delete confirm cannot be re-aimed while it is open", () => {
+  function seedTwo() {
+    server.use(
+      http.get("/api/v1/policies", () =>
+        HttpResponse.json([
+          { namespace: "payments", agent_class: "checkout-agent", target_type: "class", current_version: 3, rego_length: 120, priority: 700 },
+          { namespace: "payments", agent_class: "refunds-agent", target_type: "class", current_version: 2, rego_length: 90, priority: 700 }
+        ])
+      ),
+      http.get("/api/v1/deployments", () => HttpResponse.json([])),
+      http.get("/api/v1/policies/payments/:cls", ({ params }) =>
+        HttpResponse.json({ namespace: "payments", agent_class: params.cls, rego_source: "package norviq.strict\n", version: 1 })
+      ),
+      http.get("/api/v1/policies/payments/:cls/versions", () => HttpResponse.json([]))
+    );
+  }
+
+  async function openCatalogConfirm() {
+    seedTwo();
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: /^catalog$/i }));
+    fireEvent.click(await screen.findByTestId("catalog-delete-checkout-agent-payments"));
+    return screen.findByTestId("delete-policy-modal");
+  }
+
+  it("announces itself as a dialog, and moves focus in without arming a destructive control", async () => {
+    const modal = await openCatalogConfirm();
+    expect(modal).toHaveAttribute("role", "dialog");
+    expect(modal).toHaveAttribute("aria-modal", "true");
+
+    // REWRITTEN, and the reason is worth keeping. This assertion previously read
+    //   expect(modal.contains(document.activeElement)).toBe(true);
+    //   expect(document.activeElement).toHaveTextContent(/cancel/i);
+    // under a comment claiming "focus lands on a control INSIDE the dialog — and on Cancel". Neither
+    // line can fail: `Modal` focuses the CARD, so `activeElement` IS `modal`, `contains()` is true of
+    // the node itself, and `toHaveTextContent` matches text carried by ANY descendant — the card
+    // contains the word "Cancel". Two green assertions describing a state the fixture cannot produce.
+    //
+    // What `Modal` actually does is deliberate and documented in its own header: focus goes to the
+    // card, "never a control", because focusing the first button once armed a destructive "Revoke"
+    // under the next Space on a card that scrolls with Space. So this asserts THAT — focus is in the
+    // dialog, it is the card rather than a button, and in particular it is not sitting on the control
+    // that deletes an enforcing policy.
+    expect(document.activeElement).toBe(modal);
+    expect(document.activeElement?.tagName).not.toBe("BUTTON");
+    expect(document.activeElement).not.toBe(screen.getByTestId("delete-policy-confirm"));
+  });
+
+  it("closes on Escape", async () => {
+    // A modal an operator cannot dismiss from the keyboard traps them mid-incident — Modal.tsx's own
+    // header says so, and this confirm was the counter-example.
+    await openCatalogConfirm();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("delete-policy-modal")).not.toBeInTheDocument());
+  });
+
+  it("ignores a second trash button fired from behind the overlay, and deletes what it named", async () => {
+    let deletePath = "";
+    server.use(
+      http.delete("/api/v1/policies/:ns/:cls", ({ params }) => {
+        deletePath = `${params.ns}/${params.cls}`;
+        return HttpResponse.json({ deleted: true });
+      })
+    );
+    const modal = await openCatalogConfirm();
+    expect(modal).toHaveTextContent("payments/checkout-agent");
+
+    // The retarget: the other row's trash is still fully reachable — the overlay only dims it.
+    fireEvent.click(screen.getByTestId("catalog-delete-refunds-agent-payments"));
+
+    // Same dialog, same target. Nothing about this confirm changed under the operator.
+    expect(screen.getByTestId("delete-policy-modal")).toHaveTextContent("payments/checkout-agent");
+    expect(screen.getByTestId("delete-policy-modal").textContent ?? "").not.toContain("refunds-agent");
+
+    // And the destructive action goes where the dialog said it would.
+    fireEvent.click(screen.getByTestId("delete-policy-confirm"));
+    await waitFor(() => expect(deletePath).toBe("payments/checkout-agent"));
   });
 });

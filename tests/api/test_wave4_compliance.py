@@ -176,6 +176,20 @@ class _StubLoader:
         self._policies = {"__cluster__:__baseline__": {"rego": rego}}
 
 
+def _rego_defining(*rule_ids: str) -> str:
+    """A rego blob shaped the way a real policy is: a rule_id is EMITTED as a STRING LITERAL
+    (`blocks["id"]`, `rule_id = "id"`), because that is the only form that can ever put that id on a
+    decision — and therefore the only form coverage may count as a control.
+
+    These fixtures used to list rule ids as bare tokens (`package p\n llm01_prompt_injection ...`),
+    which no policy on earth contains; they passed only because coverage tested raw substring
+    containment, the same laxity that let a `#` comment mark a technique ENFORCED. Rendering the
+    fixture the way the loader really holds it keeps each test asserting exactly what its name says.
+    """
+    body = "\n".join(f'blocks["{r}"] {{ input.tool_name == "x" }}' for r in rule_ids if r)
+    return "package norviq.strict\n\n" + body + "\n"
+
+
 def _coverage_client(rego: str) -> TestClient:
     from norviq.api.db.session import get_session
     from norviq.api.auth import get_current_user
@@ -191,7 +205,7 @@ def _coverage_client(rego: str) -> TestClient:
 def test_coverage_scope_status_and_headline():
     # A rego blob that contains SOME of the enforced rules (prompt-injection + data-leakage), so those
     # techniques are "enforced" and other enforceable ones are "gap".
-    rego = "package norviq.strict\n llm01_prompt_injection deny_shell_execution llm02_data_leakage base64_decoded_threat"
+    rego = _rego_defining("llm01_prompt_injection", "deny_shell_execution", "llm02_data_leakage", "base64_decoded_threat")
     client = _coverage_client(rego)
     resp = client.get("/api/v1/mitre/coverage?range=24h")
     assert resp.status_code == 200
@@ -285,7 +299,7 @@ def test_f1_blocked_is_per_framework_distinct_rules_not_global():
     blocked = {r: (i + 1) * 10 for i, r in enumerate(all_mapped)}  # distinct block count per rule
     blocked["totally_unmapped_noise_rule"] = 9_999  # in NEITHER framework — must never be counted
 
-    rego = "package p\n" + " ".join(all_mapped)  # every mapped rule is "loaded"
+    rego = _rego_defining(*all_mapped)  # every mapped rule is "loaded"
     client = _coverage_client_with_activity(rego, blocked)
 
     a = client.get("/api/v1/mitre/coverage?range=24h&framework=atlas").json()
@@ -356,7 +370,8 @@ def test_owasp_mapping_matches_official_2025_names_and_scopes():
 
 def test_owasp_coverage_is_real_rego_computed_not_the_mock():
     # Loaded rego has the four rules that make LLM01/02/05/06 enforced; LLM07/LLM10 have no rule → gaps.
-    rego = "package norviq.strict llm01_prompt_injection llm02_data_leakage llm06_excessive_agency deny_shell_execution deny_sql_injection base64_decoded_threat"
+    rego = _rego_defining("llm01_prompt_injection", "llm02_data_leakage", "llm06_excessive_agency",
+                          "deny_shell_execution", "deny_sql_injection", "base64_decoded_threat")
     client = _coverage_client(rego)
     body = client.get("/api/v1/mitre/coverage?framework=owasp&range=24h").json()
     assert body["framework"] == "owasp"
@@ -370,7 +385,7 @@ def test_owasp_coverage_is_real_rego_computed_not_the_mock():
 
 
 def test_atlas_still_works_and_unknown_framework_404():
-    client = _coverage_client("package norviq.strict llm01_prompt_injection")
+    client = _coverage_client(_rego_defining("llm01_prompt_injection"))
     atlas = client.get("/api/v1/mitre/coverage?framework=atlas").json()
     assert atlas["framework"] == "atlas" and atlas["techniques"][0]["technique_id"].startswith("AML.T")
     # default (no framework) == atlas
@@ -401,7 +416,7 @@ def test_generate_works_for_owasp_gap():
 def test_f3_framework_neutral_routes_match_mitre_and_alias_holds():
     """/api/v1/compliance/{framework}/* returns the same data as /mitre?framework=…; /mitre stays ATLAS-default
     (back-compat alias); an unknown framework in the path 404s."""
-    rego = "package p\n llm01_prompt_injection deny_shell_execution llm02_data_leakage base64_decoded_threat"
+    rego = _rego_defining("llm01_prompt_injection", "deny_shell_execution", "llm02_data_leakage", "base64_decoded_threat")
     client = _coverage_client(rego)
 
     def strip_volatile(body: dict) -> dict:
@@ -632,7 +647,7 @@ def test_evidence_excludes_synthetic_and_redteam_events_and_reports_the_count():
 
     atlas = _mapping()
     rid = next(iter(_framework_rules(atlas)))
-    rego = "package p\n" + rid  # the rule is loaded → enforced
+    rego = _rego_defining(rid)  # the rule is loaded → enforced
 
     app = create_app()
     app.state.loader = _StubLoader(rego)

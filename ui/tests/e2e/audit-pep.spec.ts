@@ -104,13 +104,28 @@ test.describe("Audit / PEP UI visibility", () => {
 
     // The "Recent Blocked" panel must be present and, after our block, show at least one blocked call.
     await expect(page.getByText("Recent Blocked").first()).toBeVisible();
+
+    // THIS POLL USED TO BE INCAPABLE OF FAILING. It returned
+    //   feedHasTool > 0 || (await page.getByText(/blocked/i).count()) > 0
+    // and the line directly above asserts the literal text "Recent Blocked" is VISIBLE — which matches
+    // the unanchored, case-insensitive /blocked/i. `.count()` applies no visibility or strictness
+    // filter, so the second disjunct was >= 1 on every run and short-circuited the poll true on its
+    // first tick. It is worse than the heading alone: the panel's own EMPTY state ("No blocked tool
+    // calls in the selected range"), the KPI LABEL "Blocked (24h)" beside a value of 0, and the
+    // "Top blocked tools" heading all match too — all rendered before any fetch resolves. A dashboard
+    // that aggregated nothing, showed 0, and never mentioned exec_shell kept this green.
+    //
+    // Both halves now read VALUES. The KPI has a testid carrying the number, and the feed is scoped to
+    // the panel rather than to the whole page.
     await expect
       .poll(
         async () => {
-          // Either the feed lists our tool, or a non-zero blocked KPI is shown somewhere on the page.
-          const feedHasTool = await page.getByText(BLOCK_TOOL).count();
-          const hasBlockedWord = await page.getByText(/blocked/i).count();
-          return feedHasTool > 0 || hasBlockedWord > 0;
+          const feed = page.getByTestId("recent-blocked");
+          const feedHasTool = (await feed.count()) ? await feed.getByText(BLOCK_TOOL).count() : 0;
+          const kpi = page.getByTestId("kpi-blocked");
+          const kpiText = (await kpi.count()) ? ((await kpi.innerText()).match(/\d[\d,]*/)?.[0] ?? "0") : "0";
+          const kpiValue = Number(kpiText.replace(/,/g, ""));
+          return feedHasTool > 0 || kpiValue > 0;
         },
         { timeout: 20_000, message: "Expected the Dashboard to reflect at least one blocked call" }
       )

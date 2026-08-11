@@ -56,7 +56,18 @@ _ROUTE_RULES: tuple[tuple[str, str], ...] = (
     ("/api/v1/evaluate", "evaluate"),
     ("/api/v1/auth/login", "auth_login"),
     ("/api/v1/policies/dry-run", "dry_run"),
-    ("/api/v1/redteam", "redteam"),
+    # ONLY the expensive WRITES. `redteam` is sized at 15/60s because starting a suite fans out to
+    # every agent class x every attack in the catalog — a genuine DoS surface that deserves a tight
+    # ceiling. Classifying the whole `/api/v1/redteam` prefix put the READS in that same bucket, and
+    # the console's landing page calls `/redteam/results/latest` on every boot (Dashboard.tsx, and
+    # Compliance.tsx does it too). Measured over one e2e run: 116 hits on results/latest against 20
+    # actual Red Team page mounts — 83% of them from Overview.
+    #
+    # So roughly fifteen visits to the OVERVIEW page in a minute started 429-ing a real operator's
+    # console, on a guard that exists to stop them hammering the suite runner. Reads now fall through
+    # to `default` (300/60s); the ceiling on the thing actually worth protecting is unchanged.
+    ("/api/v1/redteam/suite", "redteam"),
+    ("/api/v1/redteam/run", "redteam"),
 )
 
 

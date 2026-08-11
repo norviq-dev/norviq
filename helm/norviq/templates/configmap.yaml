@@ -15,10 +15,32 @@ metadata:
   labels:
     {{- include "norviq.labels" . | nindent 4 }}
 data:
+  {{- /*
+    Escape hatch for settings the chart does not expose as a named value.
+
+    `norviq/config.py` carries ~100 tunables; the chart deliberately surfaces only the ones an
+    operator normally needs, and that is the right default. But it left NO way to set the rest short
+    of patching this ConfigMap by hand, which the next `helm upgrade` silently reverts.
+
+    Concretely: running the browser e2e suite against a real cluster trips
+    NRVQ_HTTP_RATE_LIMIT_REDTEAM_PER_WINDOW (15 per 60s) — a DoS guard doing its job against three
+    parallel workers plus the console's own per-page polling. Raising it for a TEST environment is a
+    legitimate deployment choice, and there was no supported way to make it.
+
+    Every key is rendered verbatim, so it is also the documented way to try a new setting before it
+    earns a named value. Named values still win where both are set — this block comes first, and later
+    keys in a ConfigMap override earlier ones.
+  */}}
+  {{- range $key, $value := .Values.config.extraEnv | default dict }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+
   NRVQ_LOG_LEVEL: {{ .Values.config.logLevel | quote }}
   NRVQ_ENFORCEMENT_MODE: {{ .Values.config.enforcementMode | quote }}
-  # Decision when an enforcing namespace has no policy loaded (deny-by-default). "deny" | "allow".
-  NRVQ_NO_POLICY_DECISION: {{ .Values.config.noPolicyDecision | default "deny" | quote }}
+  # Decision when an enforcing namespace has NO policy loaded. "allow" (default) | "deny".
+  # The `default` here must track norviq/config.py's default — it silently wins over it, so a
+  # divergence means the Python setting is decorative on every real install.
+  NRVQ_NO_POLICY_DECISION: {{ .Values.config.noPolicyDecision | default "allow" | quote }}
   NRVQ_REQUIRE_STRONG_SECRET: {{ .Values.config.requireStrongSecret | default false | quote }}
   NRVQ_OPA_MODE: {{ .Values.config.opaMode | default "server" | quote }}
   NRVQ_OPA_URL: {{ printf "http://localhost:%v" .Values.opa.port | quote }}
@@ -45,6 +67,8 @@ data:
   {{- end }}
   NRVQ_TRUST_THRESHOLD: {{ .Values.config.trustThreshold | quote }}
   NRVQ_VIOLATION_PENALTY: {{ .Values.config.violationPenalty | quote }}
+  # Uvicorn worker processes per api pod. See values.yaml `api.workers` for the measurement.
+  NRVQ_API_WORKERS: {{ .Values.api.workers | default 4 | quote }}
   NRVQ_RATE_LIMIT: {{ .Values.config.rateLimit | quote }}
   # X-Forwarded-For trust for rate-limit bucketing: believed only from a trusted PEER (default loopback =
   # the in-pod tls-proxy nginx, which replaces the header), taking the Nth entry from the right.

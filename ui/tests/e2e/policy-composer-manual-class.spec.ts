@@ -1,98 +1,119 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Norviq Contributors
 //
-// New Policy composer MANUAL agent-class entry. Proves the fix end-to-end on the REAL app+engine:
-//   1. The agent-class field is a real editable input (not the old dead-end fake dropdown) and works even
-//      with NO labeled deployment for the class.
-//   2. Driving the composer UI for a brand-new manual class + Confirm Apply CREATES an enforcing policy.
-//   3. The EFFECT is proven by a before/after /evaluate decision-FLIP on the running engine (NOT a 200):
-//      a call for the manual class carrying the configured keyword goes allow → block with the composer rule_id.
+// Authoring a policy for an agent class that has NO labelled deployment, and proving it ENFORCES.
 //
-// The class name is UNIQUE per run (timestamp) so it is guaranteed to have NO matching deployment and NO
-// prior agent registration — the empty-state assertion is deterministic. It never touches customer-support.
+// WHY THIS WAS REWRITTEN RATHER THAN DELETED. It used to drive the guided composer, whose entry point
+// ("New Policy (guided)") was removed in the Phase 2f consolidation — the Visual Builder is now the one
+// authoring surface, with "Advanced (raw rego)" beside it. The spec kept clicking
+// `getByRole("button", { name: "New Policy" })`, and because Playwright's `name` is a case-insensitive
+// SUBSTRING by default that silently matched "New policy (raw rego)" and opened the wrong editor — so
+// it failed looking for `composer-agent-class-input`, which only the retired sheet ever rendered.
+//
+// Deleting it was the tempting fix and would have quietly dropped a guarantee nothing else makes.
+// `builder-scope-p1.spec.ts` drives the same free-text class field but stops at the compiled preview;
+// nothing else proves that a class with NO deployment can be authored in the UI and actually flips a
+// live /evaluate decision. That proof is the point of this file, so it is kept and retargeted.
 
 import { test, expect, waitForApp } from "./fixtures";
-import { type Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
 
 const NS = "default";
-const KEYWORD = "q2probe";
-const TOOL = "q2probe_run";
+const TOOL = "q2probe_tool";
+// Novel per run, so no seeded or baseline policy blocks it and a flip is unambiguously OUR rule.
+const KEYWORD = `q2probe${Date.now()}`;
 
-// Mirror ui/src/lib/composerRego.ts sanitizeClassToken so we can predict the generated rule_id.
-function token(cls: string): string {
-  const t = cls.toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
-  return t || "class";
-}
-
-async function api(page: Page, path: string, method = "GET", body?: unknown): Promise<{ status: number; body: any }> {
-  return page.evaluate(async ({ path, method, body }) => {
-    const t = localStorage.getItem("nrvq_token");
-    const res = await fetch(path, {
-      method,
-      headers: { "Content-Type": "application/json", ...(t ? { Authorization: `Bearer ${t}` } : {}) },
-      body: body === undefined ? undefined : JSON.stringify(body)
-    });
-    return { status: res.status, body: await res.json().catch(() => null) };
-  }, { path, method, body });
-}
 async function ev(page: Page, cls: string, tool: string, params: Record<string, unknown>) {
-  const r = await api(page, "/api/v1/evaluate", "POST", {
-    tool_name: tool, tool_params: params,
-    agent_identity: { spiffe_id: `spiffe://norviq/ns/${NS}/sa/${cls}`, namespace: NS, agent_class: cls },
-    session_id: "q2-composer", trust_score: 0.8, chain_depth: 0
-  });
-  return { decision: r.body?.decision, rule_id: r.body?.rule_id };
+  return page.evaluate(
+    async ({ ns, agentClass, toolName, toolParams }) => {
+      const token = localStorage.getItem("nrvq_token");
+      const res = await fetch("/api/v1/evaluate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({
+          tool_name: toolName,
+          tool_params: toolParams,
+          agent_identity: {
+            spiffe_id: `spiffe://norviq/ns/${ns}/sa/${agentClass}`,
+            namespace: ns,
+            agent_class: agentClass
+          },
+          framework: "sdk"
+        })
+      });
+      return res.json();
+    },
+    { ns: NS, agentClass: cls, toolName: tool, toolParams: params }
+  );
 }
 
-test.describe("composer manual-class entry creates an enforcing policy (real /evaluate flip)", () => {
-  test("manual class with no deployment → Confirm Apply → allow flips to block on the engine", async ({ page }) => {
-    const CLS = `q2-manual-${Date.now()}`;
-    const BLOCK_RULE = `composer_block_${token(CLS)}`;
+test("a manual class with no deployment can be authored in the builder, and it ENFORCES", async ({ page }) => {
+  // Saving drives a dry-run over recorded traffic and then a policy push, and OPA recompiles its whole
+  // module store on that push — legitimately slower than a render-only spec.
+  test.setTimeout(180_000);
+  const CLS = `q2-manual-${Date.now()}`;
 
-    await page.goto("/policies/catalog");
-    await waitForApp(page);
+  // `?ns=` matters: the builder saves against ONE concrete namespace, so with the global scope on
+  // "all" both Dry-run and Save stay disabled — their tooltip says "Pick a concrete target namespace
+  // first". That is correct behaviour (a policy has to land somewhere), it just has to be satisfied.
+  await page.goto(`/policies/catalog?ns=${NS}`);
+  await waitForApp(page);
 
-    // Drive the composer UI for a class that has NO labeled deployment and NO prior registration.
-    await page.getByRole("button", { name: "New Policy" }).click();
-    const classInput = page.getByTestId("composer-agent-class-input");
-    await expect(classInput).toBeVisible();
-    expect(await classInput.evaluate((el) => el.tagName)).toBe("INPUT"); // a real input, not a fake dropdown
-    // with nothing typed, the empty-state invites manual entry rather than dead-ending
-    await expect(page.getByTestId("composer-no-deployments")).toContainText(/Type an agent-class name/i);
-    await classInput.fill(CLS);
-    // still no matching deployment → the empty-state now confirms the manual class is authorable anyway
-    await expect(page.getByTestId("composer-no-deployments")).toContainText(CLS);
+  // BEFORE: nothing is authored for this brand-new class, so the probe call is not blocked by us.
+  const before = await ev(page, CLS, TOOL, { note: `hello ${KEYWORD}` });
+  expect(before.decision).not.toBe("block");
 
-    // BEFORE (baseline): nothing authored for this brand-new class → the keyword call is NOT our block.
-    const before = await ev(page, CLS, TOOL, { note: "hello" });
-    expect(before.rule_id).not.toBe(BLOCK_RULE);
+  await page.getByRole("button", { name: "Visual Builder" }).click();
+  await expect(page.getByTestId("builder-agent-class")).toBeVisible({ timeout: 20_000 });
 
-    // set a NOVEL block keyword so the flip is unambiguously OUR policy (baseline never blocks q2probe)
-    await page.getByText("Custom Parameters").click();
-    const kw = page.locator(".field-row", { hasText: "Block keywords" }).getByRole("textbox");
-    await kw.fill(KEYWORD);
+  // The whole point: a FREE-TEXT class field, not a picker over deployed workloads. A class with no
+  // labelled deployment must still be authorable — you write the policy before the agent ships.
+  const classInput = page.getByTestId("builder-agent-class");
+  expect(await classInput.evaluate((el) => el.tagName)).toBe("INPUT");
+  await classInput.fill(CLS);
 
-    // Apply → review → Confirm Apply creates the policy (create() enforces on the read path).
-    // Scope to the composer sheet — the editor pane also has an "Apply" button on the same page.
-    const sheet = page.locator(".sheet-kit");
-    await sheet.getByRole("button", { name: "Apply" }).click();
-    const [createResp] = await Promise.all([
-      page.waitForResponse((r) => r.url().includes("/api/v1/policies") && r.request().method() === "POST"),
-      sheet.getByRole("button", { name: "Confirm Apply" }).click()
-    ]);
-    expect(createResp.ok()).toBeTruthy();
-    await expect(page.getByText(new RegExp(`Created ${NS}/${CLS}`, "i"))).toBeVisible({ timeout: 8000 });
+  // Tighten-only rules mode: block on a novel keyword.
+  await page.getByTestId("builder-mode-rules").click();
+  await page.getByTestId("builder-add-rule").click();
+  await page.getByTestId("builder-rule-reason-0").fill("q2 probe keyword blocked");
+  await page.getByTestId("builder-add-condition-0-0").click();
+  await page.getByTestId("builder-cond-0-0-0-type").selectOption("keyword");
+  await page.getByTestId("builder-cond-0-0-0-keywords").fill(KEYWORD);
 
-    // AFTER (EFFECT, not a 200): the same call for the manual class is now BLOCKED by the composer policy.
-    const after = await ev(page, CLS, TOOL, { note: "hello" });
-    expect(after.decision).toBe("block");
-    expect(after.rule_id).toBe(BLOCK_RULE);
+  // Save is GATED on a valid dry-run of the CURRENT graph — a gate worth exercising in its own right.
+  await expect(page.getByTestId("builder-save-btn")).toBeDisabled();
+  await page.getByTestId("builder-dryrun-btn").click();
+  await expect(page.getByTestId("builder-dryrun-result")).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByTestId("builder-save-btn")).toBeEnabled({ timeout: 30_000 });
 
-    // control: a benign call with no keyword for the same class is NOT blocked by our policy (tighten-only)
-    const benign = await ev(page, CLS, "list_items", { note: "hello" });
-    expect(benign.rule_id).not.toBe(BLOCK_RULE);
+  const [saveResp] = await Promise.all([
+    page.waitForResponse((r) => r.url().includes("/api/v1/policies") && r.request().method() === "POST", { timeout: 60_000 }),
+    page.getByTestId("builder-save-btn").click()
+  ]);
+  expect(saveResp.ok()).toBeTruthy();
 
-    // cleanup
-    await api(page, `/api/v1/policies/${NS}/${CLS}`, "DELETE");
-  });
+  try {
+    // AFTER — the EFFECT, not a 200. POLLED, never slept once: OPA recompiles its module store on a
+    // policy push and the eval cache holds a decision for a few seconds, so a single immediate read
+    // would be a coin toss.
+    await expect
+      .poll(async () => (await ev(page, CLS, TOOL, { note: `hello ${KEYWORD}` })).decision, { timeout: 40_000 })
+      .toBe("block");
+
+    // Control: tighten-only means a call WITHOUT the keyword is untouched by this policy.
+    const benign = await ev(page, CLS, TOOL, { note: "nothing to see" });
+    expect(benign.decision).not.toBe("block");
+  } finally {
+    // Never leave an enforcing policy behind for a throwaway class.
+    await page.evaluate(
+      async ({ ns, cls }) => {
+        const token = localStorage.getItem("nrvq_token");
+        await fetch(`/api/v1/policies/${ns}/${cls}`, {
+          method: "DELETE",
+          headers: token ? { Authorization: `Bearer ${token}` } : {}
+        });
+      },
+      { ns: NS, cls: CLS }
+    );
+  }
 });

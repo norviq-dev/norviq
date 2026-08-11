@@ -37,6 +37,13 @@ spec:
               type: object
             spec:
               type: object
+              description: >-
+                ADVISORY. The controller consumes NO field of this spec — it reads only the object's EXISTENCE
+                (an NrvqPolicy whose agentClass has no NrvqClass is rejected) and derives status.policyCount by
+                counting NrvqPolicy targets. maxCallsPerMinute, trust settings and every other field here are
+                stored and never read; the real rate limit is config.rateLimit* in values.yaml and the real trust
+                settings are the trust.* helm values. Two kubectl columns that reported uncomputed status fields
+                were removed for the same reason.
               required:
                 - description
                 - allowedTools
@@ -82,25 +89,20 @@ spec:
               properties:
                 agentCount:
                   type: integer
+                  description: >-
+                    RESERVED, not populated. The controller does not compute this. It was previously written as a hard-coded zero on every reconcile and surfaced in a kubectl column, so it reported a number that could not be true. Real values come from the console and the REST API.
                 averageTrustScore:
                   type: number
+                  description: >-
+                    RESERVED, not populated. The controller does not compute this. It was previously written as a hard-coded zero on every reconcile and surfaced in a kubectl column, so it reported a number that could not be true. Real values come from the console and the REST API.
                 policyCount:
                   type: integer
       subresources:
         status: {}
       additionalPrinterColumns:
-        - name: Agents
-          type: integer
-          jsonPath: .status.agentCount
-        - name: Avg-Trust
-          type: number
-          jsonPath: .status.averageTrustScore
         - name: Policies
           type: integer
           jsonPath: .status.policyCount
-        - name: Rate-Limit
-          type: integer
-          jsonPath: .spec.maxCallsPerMinute
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp

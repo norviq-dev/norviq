@@ -54,12 +54,53 @@ class NorviqSettings(BaseSettings):
     # Default matches the in-cluster central API service (same target as api_url).
     policy_engine_url: str = "http://norviq-api:8080"
     enforcement_mode: str = "block"
-    # Decision when an enforcing namespace has NO policy loaded (deny-by-default for a PEP).
-    # "deny" (default) blocks unconfigured namespaces in block mode; "allow" restores fail-open behavior.
+    # Decision when an enforcing namespace has NO policy loaded.
+    #
+    # "allow" (default) — a namespace nobody has written a policy for is NOT governed, so there is no
+    # customer decision to enforce and the call proceeds. "deny" restores the old deny-by-default PEP.
     # Only applies in enforcement_mode="block"; audit/monitor mode always allows (visibility only).
-    no_policy_decision: str = "deny"
+    #
+    # This defaulted to "deny", which read as the safe choice and was not. Norviq sits in the request
+    # path of a customer's production agents: with "deny", installing the chart into a namespace and
+    # not yet writing a policy took that namespace's tool calls to zero. The product's contract is
+    # "traffic flows; the policies you author are the defense" — a namespace with no policy has no
+    # defense the customer asked for, and inventing one by refusing everything is not a security
+    # posture, it is an outage with a security-shaped rule_id.
+    #
+    # Deny-by-default is still the right choice for a namespace the customer HAS decided to lock down.
+    # That decision now has an explicit home — a baseline control set at `deny` — rather than being
+    # the silent consequence of not having configured anything yet.
+    no_policy_decision: str = "allow"
+    # Whether the per-identity rate-limit throttle stays HARD in monitor (audit) mode.
+    #
+    # True (default) — a namespace set to monitor still throttles. "Do not block on policy" is a
+    # statement about policy judgements, not a request for unbounded call volume, and the limiter
+    # protects the customer's own backend from a looping agent.
+    # False — even the throttle softens, for operators who want monitor mode to mean literally
+    # nothing is ever refused.
+    #
+    # Read per call rather than captured at import so flipping it takes effect without a restart.
+    monitor_exempt_rate_limit: bool = True
     sdk_timeout_ms: int = 5000
-    sdk_fallback_mode: str = "block"
+    # What a PEP does when the engine is GENUINELY unavailable — 5xx, timeout, connect error, or an
+    # open circuit. A 4xx never reaches here: the engine answered and refused, so it always blocks
+    # regardless of this setting (see EngineClient._handle_http_error).
+    #
+    # "allow" (default) — the customer's agents keep working through a Norviq outage.
+    # "block" — no call proceeds unjudged, at the cost of taking the agents down with us.
+    #
+    # This is the one place where "never drop customer traffic" and "never allow ungoverned traffic"
+    # genuinely conflict, and it is worth being honest that defaulting to "allow" is a real trade: for
+    # the duration of an outage, calls proceed without a policy decision. It is defaulted that way
+    # because the alternative makes Norviq a single point of failure for every agent in the cluster —
+    # our unavailability becomes the customer's incident, and a security control whose failure mode is
+    # a production outage gets removed from the request path, which protects nobody.
+    #
+    # The mitigation is visibility, not silence: the fallback is a distinct rule_id
+    # (`engine_unavailable_fallback`), so an operator can count it, alert on it, and see exactly which
+    # calls went unjudged and for how long. An allow that is indistinguishable from a normal allow
+    # would be the unacceptable version of this default.
+    sdk_fallback_mode: str = "allow"
     sdk_retry_max_attempts: int = 2
     sdk_retry_backoff_base_ms: int = 100
     sdk_circuit_fail_threshold: int = 3
@@ -73,7 +114,21 @@ class NorviqSettings(BaseSettings):
     # socket/SVID error (no env-var fallback). NRVQ_SPIFFE_MODE; revert to mock with no redeploy.
     spiffe_mode: str = "mock"
     redis_url: str = "redis://localhost:6379"
-    redis_max_connections: int = 20
+    # Sized for the ENFORCEMENT path, not the console. One /evaluate does several Redis round-trips
+    # (trust read, decision cache, behaviour persist), so the pool ceiling is reached at a fraction of
+    # the request concurrency. At 20 it was exhausted by 8 concurrent evaluates on a single-worker pod.
+    redis_max_connections: int = 64
+    # SECONDS TO WAIT for a free connection before giving up. This exists because redis-py's default
+    # pool RAISES `ConnectionError("Too many connections")` the instant it is exhausted rather than
+    # queueing — and the evaluator fails CLOSED on any exception, so a momentary burst did not slow an
+    # agent's tool call down, it REFUSED it. Measured: 3/200 benign calls blocked with rule_id
+    # `evaluator_fallback` at concurrency 8.
+    #
+    # Bounded well inside the evaluator's own 2.0s OPA budget so that a genuinely stuck Redis still
+    # surfaces as the named `evaluator_timeout` block rather than as an anonymous fallback. Waiting is
+    # the right behaviour here: a queued call that answers in 40ms is strictly better than a refused
+    # one, and the 2s ceiling means the wait can never become unbounded.
+    redis_pool_wait_s: float = 1.0
     # Proactively re-validate idle Redis connections (resilience after a Redis restart).
     redis_health_check_interval_s: int = 15
     redis_ttl_policy_s: int = 60
@@ -163,6 +218,57 @@ class NorviqSettings(BaseSettings):
     # OPT-IN, default-OFF output-DLP. Norviq's PEP is INPUT-only; when enabled the SDK adapter scans an
     # allowed tool's RETURN value and redacts PAN/SSN before it propagates (minimal; full output-DLP is roadmap).
     sdk_output_dlp_enabled: bool = False
+    # --- MCP action-firewall (norviq/mcp). Every knob here is inert unless the MCP proxy is running,
+    # so none of it changes any existing deployment's behaviour.
+    #
+    # Output DLP defaults ON here while the SDK's equivalent defaults OFF, and the difference is not an
+    # inconsistency. The SDK returns a tool result to APPLICATION CODE, which may need the raw value and
+    # can be trusted not to leak it; an MCP tool result is pasted straight into the MODEL's context, from
+    # where it reaches the transcript, the provider, and any downstream tool the model then calls. Turning
+    # it on for a NEW surface changes nothing that exists today. NRVQ_MCP_OUTPUT_DLP_ENABLED.
+    mcp_output_dlp_enabled: bool = True
+    # Gate A. Pinning mode: "tofu" (first sight is pinned and allowed, CHANGE is enforced) or "strict"
+    # (first sight is quarantined until an operator approves). See norviq/mcp/pins.py.
+    mcp_pin_mode: str = "tofu"
+    mcp_pin_store: str = "memory"            # memory | file
+    mcp_pin_path: str = ""                   # file store location when mcp_pin_store=file
+    # How often a control-plane-backed proxy re-reads its pins. `load()` was awaited ONCE at startup
+    # and never again, so POST /mcp/pins/revoke changed the DB row and the console while the running
+    # proxy kept its startup copy: the revoked tool stayed listed to the model and stayed callable
+    # until the pod restarted — which is precisely what an operator reaches for revoke to stop.
+    # 30s bounds that window without putting the control plane on any request path (the refresh is a
+    # background task; get()/all() stay pure in-memory). 0 disables it.
+    mcp_pin_refresh_s: int = 30
+    # Scanner severity at/above which a tool definition is REMOVED from the tools/list the model sees
+    # (the payload never reaches the context), vs merely having its description replaced by a stub.
+    mcp_scan_strip_severity: str = "high"
+    mcp_scan_sanitize_severity: str = "medium"
+    # Scan content RETURNED by a server (tool results, resource bodies) for indirect injection. Costs one
+    # regex sweep over the result on the response path; off makes the response path pure passthrough.
+    mcp_scan_responses: bool = True
+    # Evaluate server-initiated sampling/createMessage against policy (denial-of-wallet / confused deputy).
+    mcp_govern_sampling: bool = True
+    # 2026-07-28 lets tool PARAMETERS set outbound HTTP headers (`x-mcp-header`). That is
+    # model-controlled input reaching the header layer — header injection, auth-token smuggling and
+    # SSRF pivoting in one feature, and it is specified behaviour rather than a bug. Default DENY:
+    # a governed workload that genuinely needs it should say so explicitly.
+    # NRVQ_MCP_ALLOW_TOOL_HEADERS.
+    mcp_allow_tool_headers: bool = False
+    # Evaluate resources/read against policy as a read-verb tool call (indirect-injection surface).
+    mcp_govern_resources: bool = True
+    # Refuse a tools/call whose arguments contradict the tool's OWN declared inputSchema — a missing
+    # required argument, a wrong-typed value, or (when the server sets additionalProperties: false)
+    # an argument it never declared. That last one is the residual behind every per-argument
+    # constraint an operator writes: they scope `query`, and the tool also honours `q`.
+    #
+    # ON by default because it enforces the SERVER's own statement about itself rather than a policy
+    # anyone had to author, so the false-positive case is a server whose schema disagrees with its
+    # implementation — which is a bug worth surfacing. Set false for a fleet with known-stale schemas.
+    # Tools with no published schema (the observed-only tier) are unaffected either way.
+    mcp_enforce_schema: bool = True
+    # Upper bound on in-flight request-id bookkeeping per direction. A peer that opens requests and never
+    # completes them would otherwise grow this map without limit; oldest entries are evicted.
+    mcp_max_pending_requests: int = 4096
     pg_url: str = "postgresql://norviq:norviq_dev@localhost:5432/norviq"
     db_ssl_mode: str = Field(
         default="prefer",
@@ -228,6 +334,24 @@ class NorviqSettings(BaseSettings):
     # Opt-in, default OFF: capture MASKED tool_params on the audit record (PAN->****1111,
     # SSN->***-**-6789, secrets->****) for event reconstruction (PCI 10.3) without storing raw PII/PAN.
     audit_capture_masked_params: bool = False
+    # Default ON, and INDEPENDENT of audit_capture_masked_params above: record the ARGUMENT NAMES a
+    # call carried (`param_keys`) — the sorted, de-duplicated set of flattened argument paths, KEYS
+    # ONLY. No value reaches this field, not even a masked one, so the privacy calculus is not the
+    # same one that keeps masked_params off: a key name is a fact about the tool's SCHEMA, which the
+    # operator wrote, not about the payload, which the model chose.
+    #
+    # WHY IT DEFAULTS ON. Without it an audit row records that `issue_refund` was called and nothing
+    # about what it was called WITH, so a rule proposed from traffic can only ever name tools. Two
+    # design partners independently shipped a rule they believed covered a call, and the model emitted
+    # an argument (`amount`) their predicates never mentioned — with no point at which the authoring
+    # surface could have shown them the mismatch. Key names are what closes that, and they are cheap:
+    # bounded by the engine's own path caps, derived in-memory on the audit path, never on the wire.
+    #
+    # The kill switch exists because in a few schemas the key names ARE the sensitive part (a column
+    # name in a medical export, an internal system name). Turning it off returns the audit row to
+    # exactly its pre-existing shape — the field is ABSENT, which readers must render as "arguments
+    # were not captured" and never as "the call carried no arguments". NRVQ_AUDIT_CAPTURE_PARAM_KEYS.
+    audit_capture_param_keys: bool = True
     # Opt-in: HMAC-SHA256 key for the tamper-evident /audit/export?signed=true manifest. Empty =
     # the signed export still hash-chains (integrity) but the manifest signature is null (no shared-key auth).
     audit_export_signing_key: str = ""

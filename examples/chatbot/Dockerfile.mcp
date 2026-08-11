@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+#
+# Build from the REPO ROOT, like examples/chatbot/Dockerfile:
+#   docker build -f examples/chatbot/Dockerfile.mcp -t norviq-demo-mcp:dev .
+#
+# THIS IS NOT A TRIMMED COPY OF examples/chatbot/Dockerfile, and the instinct to make it one is the
+# thing to resist. That image installs the Norviq SDK plus langchain and langgraph because it runs
+# the AGENT. This one runs the SERVERS the agent calls, and they are governed from OUTSIDE, by a
+# firewall sidecar in the agent's pod. Installing the SDK here would put Norviq inside the component
+# the demo needs to be untrusted -- the image would still work, and it would quietly stop
+# demonstrating that Norviq governs MCP servers it does not control. So: no norviq/, no pyproject,
+# no framework extras. Just the official MCP SDK and the three servers.
+FROM python:3.12-slim
+
+# Unbuffered so `kubectl logs` shows the start-up line (server id, listen address, tool names)
+# immediately rather than when a 4KB buffer happens to fill. No bytecode because /app is owned by
+# root and the runtime uid cannot write there anyway; without this Python retries on every import.
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app
+
+# Requirements first so the dependency layer survives edits to the tool descriptions, which is what
+# actually changes while a policy is being tuned.
+COPY examples/chatbot/requirements-mcp.txt ./requirements-mcp.txt
+RUN pip install --no-cache-dir -r requirements-mcp.txt
+
+COPY examples/chatbot/demo_mcp/ ./demo_mcp/
+
+# nobody. Nothing here writes to disk, so there is no directory to chown.
+USER 65534
+EXPOSE 8080
+
+# ENTRYPOINT with no CMD, so `--server` has no default. One image serves three very different tool
+# surfaces -- kb is read-only, ops holds the destructive sinks -- and a default would mean a
+# manifest that forgot its `args:` starts a server anyway, with the wrong catalog under the wrong
+# service name. Failing to start with argparse's "the following arguments are required: --server"
+# is a much cheaper way to find that out. Kubernetes supplies the flag via `args:`.
+ENTRYPOINT ["python", "-m", "demo_mcp"]

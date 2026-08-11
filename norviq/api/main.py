@@ -13,7 +13,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-from norviq.api.audit_hub import AuditHub
+from norviq.api.audit_hub import AuditHub, bind_peer_publisher
 from norviq.api.audit_retention import RetentionPruner
 from norviq.api.db.session import close_db, create_tables, ensure_schema_compatibility, get_session, init_db
 from norviq.api.path_timing import PathTimingMiddleware
@@ -21,8 +21,10 @@ from norviq.api.rate_limit import RateLimitMiddleware
 from norviq.api.siem import AuditForwarder
 from norviq.fleet_relay import FleetRelayForwarder
 from norviq.fleet_puller import FleetPolicyPuller
-from norviq.api.routers import attack_graph_compute, agents, audit, auth_login, cluster_info, coverage, deployments, evaluate, fleet_enroll, graph, graphs, health, keys, me, mitre, packs, policies, redteam, search, settings_router, system_health, threats, version
+from norviq.api.routers import attack_graph_compute, agents, audit, auth_login, baseline_router, cluster_info, compliance_view, coverage, deployments, evaluate, fleet_enroll, graph, graphs, health, intents, keys, mcp, me, mitre, packs, policies, redteam, search, settings_router, system_health, threats, tools, version
 from norviq.config import settings
+from norviq.logging_setup import configure_logging
+from norviq.api.auth import warn_if_identity_binding_is_partial
 from norviq.engine.audit_emitter import AuditEmitter
 from norviq.engine.cache import RedisCache
 from norviq.engine.evaluator import OPAEvaluator
@@ -69,25 +71,28 @@ async def _connect_with_backoff(coro_factory, name: str, retry_code: str, fail_c
             delay *= 2
 
 
-async def run_migrations() -> None:
-    """Apply pending Alembic migrations before cache warm-up."""
-    try:
-        from alembic import command
-        from alembic.config import Config
-
-        cfg = Config("alembic.ini")
-        db_url = settings.pg_url.strip().strip("\"'")
-        cfg.set_main_option("sqlalchemy.url", db_url.replace("+asyncpg", ""))
-        command.upgrade(cfg, "head")
-        log.info("nrvq.db.migrations_applied", code="NRVQ-DB-9032")
-    except Exception as exc:  # pragma: no cover - startup best-effort
-        log.error("nrvq.db.migration_failed", error=str(exc), code="NRVQ-DB-9033")
+# SCHEMA OWNERSHIP: there is no Alembic in this product, deliberately. Schema comes from
+# create_tables() (advisory-lock-serialized create_all) plus ensure_schema_compatibility()'s
+# idempotent ADD COLUMN IF NOT EXISTS statements, both in norviq/api/db/session.py. A run_migrations()
+# used to sit here calling Config("alembic.ini") -> command.upgrade(cfg, "head"), but no alembic.ini,
+# env.py or versions/ has ever existed in this tree and Dockerfile.api copies only norviq/ and
+# policies/. So it raised CommandError on EVERY boot and logged NRVQ-DB-9033 at ERROR — four times per
+# pod at the default worker count. That taught operators to ignore a red startup line, which is the
+# real cost; it also pulled alembic into the wheel and both images for nothing. Removed rather than
+# repaired: adding a migrations tree would mean two systems racing to own the same DDL.
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Run API startup and shutdown lifecycle."""
+    # BEFORE anything logs: NRVQ_LOG_LEVEL was accepted, rendered into the ConfigMap and documented,
+    # while nothing outside the MCP stdio proxy ever configured structlog — so every API/engine/sidecar
+    # process ran at structlog's default and the knob did nothing.
+    applied_level = configure_logging()
     setup_telemetry()
+    log.info("nrvq.api.log_level_applied", level=applied_level, code="NRVQ-API-7100")
+    # Says so once when the hardened posture cannot actually bind spiffe_id (workload-api mode).
+    warn_if_identity_binding_is_partial()
     # A weak JWT secret means forgeable admin tokens. "Weak" = the shipped default, empty, or too
     # short — checking all three so an unset/blank NRVQ_API_SECRET_KEY can't silently ship a forgeable
     # key when require_strong_secret is on (fail-safe: refuse to start rather than run insecure).
@@ -139,9 +144,6 @@ async def lifespan(app: FastAPI):
     await app.state.audit_retention_pruner.start()
     app.state.loader = PolicyLoader(app.state.cache, app.state.evaluator)
     app.state.evaluator.bind_loader(app.state.loader)
-    log.info("nrvq.startup.migrations_starting", code="NRVQ-DB-DEBUG-3")
-    await run_migrations()
-    log.info("nrvq.startup.migrations_done", code="NRVQ-DB-DEBUG-4")
     await ensure_schema_compatibility()
     # Seed the default admin (must_change=True) after the schema exists so a fresh install can log in.
     await auth_login.ensure_default_admin()
@@ -171,6 +173,31 @@ async def lifespan(app: FastAPI):
                 await asyncio.sleep(2)
 
     app.state.policy_sync_task = asyncio.create_task(_policy_sync_loop())
+
+    # LIVE AUDIT FAN-OUT across API processes. The /ws/audit hub is per-process and the API runs
+    # `api.workers: 4` across `api.replicas: 2` by default — eight of them. A browser's socket lives in
+    # one process; a tool call is evaluated by whichever the load balancer picked, so the live Audit Log
+    # showed roughly one decision in eight and said nothing about the rest. Measured on a live cluster:
+    # workers=4 delivered the broadcast on ~1 run in 5; workers=1 delivered 5/5.
+    #
+    # Same pub/sub the policy path already uses, same reconnect discipline, and the publisher is bound
+    # only when a cache exists so a Redis-less deployment keeps the old single-process behaviour rather
+    # than failing.
+    async def _on_peer_audit_record(record: dict, origin: str) -> None:
+        await app.state.audit_hub.deliver_from_peer(record, origin)
+
+    async def _audit_fanout_loop() -> None:
+        while True:
+            try:
+                await app.state.cache.listen_audit_records(_on_peer_audit_record)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log.error("nrvq.startup.audit_fanout_dropped", error=str(exc), code="NRVQ-API-7102")
+                await asyncio.sleep(2)
+
+    bind_peer_publisher(app.state.cache.publish_audit_record)
+    app.state.audit_fanout_task = asyncio.create_task(_audit_fanout_loop())
     # Seed the per-ns posture mirror from persisted NamespaceSettings so pre-existing rows
     # enforce after a restart / Redis flush (best-effort; the evaluator falls back to global config on a miss).
     try:
@@ -267,8 +294,21 @@ def create_app() -> FastAPI:
     app.include_router(settings_router.router, prefix="/api/v1", tags=["settings"])
     app.include_router(version.router, prefix="/api/v1", tags=["version"])
     app.include_router(keys.router, prefix="/api/v1", tags=["keys"])
+    # MCP inventory + tool-definition pins. Read endpoints are tenant-scoped like every other read;
+    # approve/revoke are admin-only; /mcp/pins/observe is the proxy's service-credential write path.
+    app.include_router(mcp.router, prefix="/api/v1", tags=["mcp"])
+    # The tool registry: a read-only projection over the MCP pins (declared, schema-bearing) and audit
+    # traffic (observed, name-only), each row tagged with its own source. It gates nothing — the console
+    # reads it to stop guessing what tools exist, not to restrict what an operator may allowlist.
+    app.include_router(tools.router, prefix="/api/v1", tags=["tools"])
+    # Intent compile / propose / dry-run / draft. There is deliberately no apply endpoint: a draft
+    # lands in `intent_drafts` (which the evaluator never reads) and applying stays the gated
+    # Policies flow, so there is exactly one way to start enforcing.
+    app.include_router(intents.router, prefix="/api/v1", tags=["intents"])
     app.include_router(search.router, prefix="/api/v1", tags=["search"])  # ⌘K backing endpoint
     app.include_router(packs.router, prefix="/api/v1", tags=["packs"])
+    app.include_router(baseline_router.router, prefix="/api/v1", tags=["baseline"])
+    app.include_router(compliance_view.router, prefix="/api/v1", tags=["compliance"])
     app.include_router(fleet_enroll.router, prefix="/api/v1", tags=["fleet-enroll"])
     app.state.audit_hub = AuditHub()
 

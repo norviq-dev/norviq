@@ -21,7 +21,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from norviq.api.routers.system_health import non_policy_rule_for  # a fault or a throttle is not a detection
 from norviq.api.synthetic import is_synthetic_identity
+from norviq.redteam.vectors import VECTORS_BY_ID, EVALUATE_REACHABLE, coverage_denominators
 
 _POLICIES_DIR = Path(__file__).resolve().parent.parent.parent / "policies"
 
@@ -89,17 +91,103 @@ def catalog_entry(attack: Any) -> dict[str, Any]:
         "atlas_technique_name": m["atlas"]["technique_name"],
         "owasp_control": m["owasp"]["control_id"] if m["owasp"] else None,
         "owasp_control_name": m["owasp"]["control_name"] if m["owasp"] else None,
+        "mcp_vector": getattr(attack, "mcp_vector", "") or None,
+        "mcp_vector_title": (
+            VECTORS_BY_ID[attack.mcp_vector].title
+            if getattr(attack, "mcp_vector", "") in VECTORS_BY_ID
+            else None
+        ),
     }
 
 
+# Decisions that actually STOP the call. `escalate` belongs here: the firewall holds the call for human
+# approval, the SDK interceptor raises NorviqEscalateError, and the sidecar proxy drops anything that is
+# not `is_allowed()`. The attack did not reach the tool, which is what "caught" claims.
+_ENFORCED_DECISIONS = frozenset({"block", "escalate"})
+
+
 def _blank_bucket() -> dict[str, int]:
-    return {"total": 0, "caught": 0, "got_through": 0}
+    return {"total": 0, "caught": 0, "would_block": 0, "got_through": 0}
+
+
+def _row_outcome(r: dict[str, Any]) -> str:
+    """caught | would_block | got_through, for a row that expected a block.
+
+    The scorer read `passed` — which is `actual == expected` — so ONLY a hard block counted. Every
+    baseline control now ships on `monitor`, and a monitored control is implemented by emitting an
+    `audits[]` head, so a control that DETECTED the attack and recorded it scored identically to one
+    that never fired. Measured on the shipped default: a run where two of four attacks were detected
+    and audited reported proven_blocking_pct 25.0 with both audits in `got_through`.
+
+    Three outcomes rather than two, because collapsing them either way is a lie an operator would act
+    on. Counting an audit as caught would claim a defence while the call proceeded — the same mistake
+    as BUG-018, arriving from the other side. Counting it as got-through says nothing detected it,
+    when something did and the operator can promote that control to Enforce in one click.
+
+    `proven_blocking_pct` deliberately stays caught/total: what it claims is PROVEN blocking, and a
+    monitored detection has not proven it.
+
+    An engine fault is never a detection. A fail-closed `block` carrying `evaluator_timeout` is the
+    engine failing, not a control working, and scoring it as caught inflates the headline number with
+    an outage — so faults are tested BEFORE the enforced check and left in the red bucket.
+
+    A THROTTLE is never a detection either, for the same reason and with a nastier failure mode. The
+    engine's rate limiter fires only on a decision that already resolved to `allow`, so a
+    `block / rate_limit_exceeded` row is a call the policy stack examined and permitted, refused
+    afterwards on volume alone. Scoring it as caught made `proven_blocking_pct` a function of how hard
+    the suite was driven rather than of policy quality — and, worse, made it rise as coverage got
+    WORSE, since only an allow is eligible to be throttled. The check is `non_policy_rule_for`, which
+    covers faults and the throttle together.
+    """
+    rule_id = str(r.get("rule_id") or "")
+    if non_policy_rule_for(rule_id) is not None:
+        return "got_through"
+    actual = str(r.get("actual") or "")
+    if actual in _ENFORCED_DECISIONS:
+        return "caught"
+    # `audit` with a rule behind it means a control fired and the call was let through on purpose.
+    # `default_allow` is the absence of a match, which is a genuine miss.
+    if actual == "audit" and rule_id and rule_id != "default_allow":
+        return "would_block"
+    return "got_through"
 
 
 def _finalize(bucket: dict[str, Any]) -> dict[str, Any]:
     total, caught = bucket["total"], bucket["caught"]
     bucket["proven_blocking_pct"] = round(caught / total * 100, 1) if total else 0.0
+    # What the controls SAW, enforced or not. Reported beside the proven number rather than folded
+    # into it: on the shipped all-monitor default these differ by design, and an operator reading a
+    # 0% proven score needs to know whether that is "nothing detected it" or "everything detected it
+    # and nothing is promoted yet" — two opposite situations with two opposite next actions.
+    detected = caught + bucket["would_block"]
+    bucket["detected_pct"] = round(detected / total * 100, 1) if total else 0.0
     return bucket
+
+
+def _vector_coverage(exercised: set[str]) -> dict[str, Any]:
+    """What this run measured of the MCP/tool surface, and — the point — what it did not.
+
+    Without this block a scorecard reading 100% across two vectors is indistinguishable from full MCP
+    coverage, while thirty catalogued vectors went untouched. That is the "the console says covered,
+    and it is not" failure the whole product exists to prevent, so the denominator travels with the
+    numerator rather than being available on request.
+
+    The denominators come from the CATALOG, not from the rows, and they are STORED on the run. Only the
+    newest run per namespace keeps its result rows (`redteam_detail_keep_runs`), so a block re-derived
+    from rows would silently vanish from every older run while the rest of the efficacy summary
+    survived. `exercised` counts DISTINCT vectors seen, not rows: five attacks across two vectors is
+    two, because the question is surface coverage, not attack volume.
+
+    PROXY-only vectors are not failures and must never read as such. Most are enforced, several
+    provably (Gate A stripping, the content-hash pin) — they are simply decided before the policy
+    engine, which is the one thing this suite can score.
+    """
+    d = coverage_denominators()
+    return {
+        **d,
+        "exercised": len(exercised),
+        "unexercised_reachable": sorted(EVALUATE_REACHABLE - exercised),
+    }
 
 
 def compute_efficacy(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -115,6 +203,7 @@ def compute_efficacy(results: list[dict[str, Any]]) -> dict[str, Any]:
     overall = _blank_bucket()
     by_technique: dict[str, dict[str, Any]] = {}
     by_owasp: dict[str, dict[str, Any]] = {}
+    by_vector: dict[str, dict[str, Any]] = {}
     non_enforcement = 0
     sector_not_enabled = 0  # sector-pack attacks whose pack isn't enabled — out of scope, NOT a miss
     excluded_synthetic = len(results) - len(considered)
@@ -128,27 +217,42 @@ def compute_efficacy(results: list[dict[str, Any]]) -> dict[str, Any]:
         if r.get("applicable") is False:
             sector_not_enabled += 1
             continue
-        caught = bool(r.get("passed"))
+        outcome = _row_outcome(r)
         overall["total"] += 1
-        overall["caught" if caught else "got_through"] += 1
+        overall[outcome] += 1
 
         tid = r.get("atlas_technique") or "unknown"
         tb = by_technique.setdefault(tid, {**_blank_bucket(), "technique_id": tid,
                                             "technique_name": r.get("atlas_technique_name") or tid})
         tb["total"] += 1
-        tb["caught" if caught else "got_through"] += 1
+        tb[outcome] += 1
 
         cid = r.get("owasp_control")
         if cid:
             ob = by_owasp.setdefault(cid, {**_blank_bucket(), "control_id": cid,
                                            "control_name": r.get("owasp_control_name") or cid})
             ob["total"] += 1
-            ob["caught" if caught else "got_through"] += 1
+            ob[outcome] += 1
+
+        # SKIPPED when absent, following `by_owasp` and NOT `by_technique`. `by_technique` defaults to
+        # "unknown" because every attack is supposed to carry a technique, so that bucket is an alarm
+        # for a broken mapping. An MCP vector is legitimately absent for every attack that predates the
+        # dimension — bucketing those as "unknown" would assert they exercise an unidentified MCP
+        # vector, which is false, and would render one row of ~29xN attacks that dominates the table
+        # and means nothing.
+        vid = r.get("mcp_vector")
+        if vid:
+            vb = by_vector.setdefault(vid, {**_blank_bucket(), "vector_id": vid,
+                                            "vector_title": r.get("mcp_vector_title") or vid})
+            vb["total"] += 1
+            vb[outcome] += 1
 
     return {
         "overall": _finalize(overall),
         "by_technique": [_finalize(v) for v in sorted(by_technique.values(), key=lambda x: x["technique_id"])],
         "by_owasp": [_finalize(v) for v in sorted(by_owasp.values(), key=lambda x: x["control_id"])],
+        "by_vector": [_finalize(v) for v in sorted(by_vector.values(), key=lambda x: x["vector_id"])],
+        "vector_coverage": _vector_coverage(set(by_vector)),
         "non_enforcement": non_enforcement,
         "sector_not_enabled": sector_not_enabled,
         "excluded_synthetic": excluded_synthetic,

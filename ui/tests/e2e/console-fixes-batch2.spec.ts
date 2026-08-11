@@ -36,8 +36,35 @@ test.describe("Asset Graph hull encloses every ring node", () => {
     await page.goto("/asset-graph");
     await waitForApp(page);
     await expect(page.getByTestId("asset-graph-canvas")).toBeVisible();
-    // Let the fit/zoom + circle layout settle so hull `d` and node transforms are final.
-    await page.waitForTimeout(600);
+    // POLL until the layout STOPS MOVING, never sleep once. The d3 fit/zoom + circle layout settles in
+    // a time proportional to the node count, and a fixed 600ms was calibrated against a smaller graph:
+    // once the seeded estate grew to ~85 nodes the wait expired mid-settle and one node was still in
+    // flight, 259px from a hull of radius 141. It presented as a hard geometry failure — "a node is
+    // rendered outside its cluster" — and passed on retry, which is the signature of a sleep-once.
+    //
+    // The wait condition is STABILITY, not the assertion itself: sampling the transforms twice and
+    // waiting for them to agree would be circular if it waited for "all inside". This waits for the
+    // simulation to stop, then asks the question.
+    const transformSig = () =>
+      page.getByTestId("asset-graph-canvas").evaluate((svg) =>
+        Array.from(svg.querySelectorAll("g.ag-node"))
+          .map((g) => g.getAttribute("transform") ?? "")
+          .join("|")
+      );
+    // TWO CONSECUTIVE identical samples, not one. The canvas reaches a quiet moment before its data
+    // has fully landed and then re-lays-out, so a single match can catch that first lull and measure a
+    // layout that is about to change. Requiring the signature to hold twice in a row rides past it.
+    let prev = await transformSig();
+    let stableRuns = 0;
+    await expect
+      .poll(async () => {
+        await page.waitForTimeout(250);
+        const now = await transformSig();
+        stableRuns = now === prev && now.length > 0 ? stableRuns + 1 : 0;
+        prev = now;
+        return stableRuns;
+      }, { timeout: 30_000, message: "asset-graph layout never stopped moving" })
+      .toBeGreaterThanOrEqual(2);
 
     const result = await page.getByTestId("asset-graph-canvas").evaluate((svg) => {
       // Hull circles are <path d="M {cx-r} {cy} a {r} {r} 0 1 0 {2r} 0 a {r} {r} 0 1 0 {-2r} 0">.
@@ -336,7 +363,17 @@ test.describe("Login form — valid admin advances; wrong password shows error +
   }) => {
     const { ctx, page } = await openLogin(browser);
     try {
-      await page.locator("input#nv-user").fill("admin");
+      // NOT `admin`. The failed-attempt lockout is keyed PER USERNAME, and this test exists to fail a
+      // login on purpose — so aiming it at `admin` spends the real operator account's budget and every
+      // later form-login spec in the run gets a 429 that has nothing to do with what it is testing.
+      // The assertions here (the error message, and the username field surviving) are about the login
+      // form's behaviour on bad credentials, which an unknown user exercises identically: the API
+      // deliberately runs a dummy verify for unknown users so the two paths are indistinguishable.
+      // ONE name, read back by the assertion below. Changing the fill without changing the assertion
+      // is how the first version of this fix failed — the same two-places-one-concept mistake this
+      // file's own comments keep warning about.
+      const BAD_USER = "not-a-real-operator";
+      await page.locator("input#nv-user").fill(BAD_USER);
       await page.locator("input#nv-pass").fill("definitely-not-the-password-000");
       await page.getByRole("button", { name: "Sign in", exact: true }).click();
       await page.waitForTimeout(1400); // let /auth/login (401) resolve + the error render
@@ -347,7 +384,7 @@ test.describe("Login form — valid admin advances; wrong password shows error +
       // The invalid-credential error is visible…
       await expect(page.getByText("Invalid username or password.", { exact: true })).toBeVisible({ timeout: 10_000 });
       // …and the username field is NOT cleared (the user keeps their typed username to retry).
-      await expect(page.locator("input#nv-user")).toHaveValue("admin");
+      await expect(page.locator("input#nv-user")).toHaveValue(BAD_USER);
       // Still on the default (sign-in) view, not advanced.
       await expect(page.getByRole("button", { name: "Sign in", exact: true })).toBeVisible();
     } finally {

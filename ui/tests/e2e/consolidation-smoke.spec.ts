@@ -118,13 +118,19 @@ test.describe("CONSOLIDATION — genuine-login integration smoke (features work 
       await expect.poll(async () => (await ev(page, NS, CE, TOOL)).rule_id, { timeout: 20000 }).toBe("custom_block_rule");
       // delete via the catalog row → confirm → the class falls back (its rule stops firing)
       await page.getByRole("button", { name: /^catalog$/i }).click();
-      await page.getByTestId(`catalog-delete-${CE}`).click();
+      // The delete control's testid is NAMESPACE-QUALIFIED (`catalog-delete-<class>-<ns>`) — it was
+      // made unique per row for a11y. `getByTestId` matches exactly, and with no `actionTimeout` set
+      // this did not fail fast: it auto-waited the full 150s for an element that cannot exist.
+      await page.locator(`[data-testid^="catalog-delete-${CE}-"]`).first().click();
       await expect(page.getByTestId("delete-policy-modal")).toContainText(`${NS}/${CE}`);
       await page.getByTestId("delete-policy-confirm").click();
       await expect.poll(async () => (await ev(page, NS, CE, TOOL)).rule_id, { timeout: 20000 }).not.toBe("custom_block_rule");
       deletedViaUI = true; // the UI delete IS the test — no redundant cleanup (a second DELETE would 404)
       // reserved scopes carry no delete affordance
-      await expect(page.getByTestId("catalog-delete-__baseline__")).toHaveCount(0);
+      // Same qualification. As written this asserted a testid the product NEVER emits, so it was
+      // trivially true and proved nothing — the prefix form actually checks that reserved scopes carry
+      // no delete affordance.
+      await expect(page.locator('[data-testid^="catalog-delete-__baseline__-"]')).toHaveCount(0);
     } finally {
       // safety-net cleanup ONLY if the UI delete path didn't complete (avoids a 404 on an already-deleted policy).
       if (!deletedViaUI) await api(page, `/api/v1/policies/${NS}/${CE}`, "DELETE");

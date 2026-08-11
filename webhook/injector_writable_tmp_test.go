@@ -20,7 +20,7 @@ import (
 // guards assert the PAIR: hardened root filesystem AND a writable scratch path, sidecar-private.
 func TestSidecarHasWritableTempDespiteReadOnlyRoot(t *testing.T) {
 	inj := NewInjector(LoadConfig())
-	sidecar := inj.buildSidecar("sales", "default")
+	sidecar := inj.buildSidecar("sales", "default", "")
 
 	sec := sidecar["securityContext"].(map[string]interface{})
 	if sec["readOnlyRootFilesystem"] != true {

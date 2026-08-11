@@ -14,6 +14,7 @@
 import { useEffect, useImperativeHandle, useRef, forwardRef } from "react";
 import * as d3 from "d3";
 import { DECISION_COLORS, NODE_COLORS } from "../../lib/d3-helpers";
+import { lookalikeOf } from "../../lib/predicateSentence";
 import { SEVERITY_COLORS } from "./constants";
 import type { ThreatPath, ThreatStep } from "./types";
 
@@ -29,6 +30,25 @@ function opCaption(st: ThreatStep): { text: string; color: string } | null {
   }
   if (st.inferred_verb) return { text: `observing · ${st.inferred_verb} ${st.inferred_count}/${st.observed_calls}`, color: "#ffcf82" };
   return { text: "unclassified · observing", color: "#a0a0a0" };
+}
+
+/**
+ * Every node id on this canvas is an OBSERVED name — a tool_name an agent registered, an agent
+ * identity, a data source. That is attacker-controlled text, and `exеcute_sql` with a Cyrillic е
+ * (U+0435) renders pixel-identical to `execute_sql` in the console's font. The kill-chain then draws
+ * the impostor exactly as it draws the tool the operator trusts.
+ *
+ * Reuses `lookalikeOf` — the repo's own detector, already behind the Tools page's Homoglyph pill and
+ * the LookalikeNote in the rule surfaces — rather than inventing a second mechanism. `masked` carries
+ * the POSITION (`ex·cute_sql`), which is what a bare codepoint list cannot tell you.
+ *
+ * Amber, not red: red on this canvas means an enforced block, and one signal must not carry two
+ * meanings. Amber is already this canvas's "review this" treatment (the observing captions).
+ */
+function lookalikeCaption(name: string): string | undefined {
+  const l = lookalikeOf(name);
+  if (!l) return undefined;
+  return `⚠ lookalike · ${l.masked} · ${l.codepoints.join(" ")}`;
 }
 
 type HopDec = "allow" | "mixed" | "block" | "would_block";
@@ -56,10 +76,16 @@ interface ChainNode {
    *  observation state ("observing · delete 12/14" / "unclassified · observing"). */
   opText?: string;
   opColor?: string;
+  /** Set when this node's name carries non-ASCII characters an operator cannot see — the name is
+   *  observed traffic, so it is attacker-controlled and must not render as if we authored it. */
+  lookalikeText?: string;
 }
 interface Satellite {
   name: string;
   sensitive: boolean;
+  /** Same reason as ChainNode.lookalikeText: a blast-radius asset name is observed traffic too, and
+   *  `⬥ stripe-keys` with a Cyrillic е is the crown jewel an operator is looking for. */
+  lookalikeText?: string;
   x: number;
   y: number;
   ox: number;
@@ -92,6 +118,13 @@ interface Props {
   allPaths: ThreatPath[];
   /** Which hop index is what-if blocked on this path (-1 = none). */
   whatIfIndex: number;
+  /**
+   * The active Range ("24h" / "7d" / "30d") — the window the server actually counted over
+   * (`RANGE_HOURS[range]` in threats.py). The scope card's denial row used to be hardcoded
+   * "Denials · 24h" while the dropdown drove the query, so a 30-day total was captioned as a day's.
+   * Omit it and the row simply says "Denials" — never a window we cannot vouch for.
+   */
+  range?: string;
   animateBlockedEdges?: boolean;
   onToggleWhatIf: (index: number) => void;
   onScope: (card: ScopeCard | null) => void;
@@ -99,7 +132,7 @@ interface Props {
 
 const rOf = (d: ChainNode) => (d.role === "target" ? 24 : d.role === "source" ? 20 : 18);
 
-function buildScope(nodeId: string, allPaths: ThreatPath[]): ScopeCard | null {
+export function buildScope(nodeId: string, allPaths: ThreatPath[], range?: string): ScopeCard | null {
   const inPaths = allPaths.filter((p) => p.src === nodeId || p.steps.some((st) => st.to === nodeId));
   if (!inPaths.length) return null;
   let kind: "agent" | "tool" | "data" = "agent";
@@ -138,17 +171,23 @@ function buildScope(nodeId: string, allPaths: ThreatPath[]): ScopeCard | null {
   }
   rows.push({ k: "Attack paths", v: inPaths.length + (expl ? ` · ${expl} exploitable` : "") });
   rows.push({ k: "Sensitive downstream", v: String(sens) });
-  if (denies) rows.push({ k: "Denials · 24h", v: String(denies) });
+  // The window is whatever the Range dropdown asked the server for — never a hardcoded "24h" over a
+  // number the server counted across thirty days.
+  if (denies) rows.push({ k: range ? `Denials · ${range}` : "Denials", v: String(denies) });
+  // A node id is observed traffic. If the name carries invisible characters, say so HERE too: the
+  // scope card is the "what can this actually touch" answer, read right before an operator acts on it.
+  const lk = lookalikeCaption(nodeId);
+  if (lk) rows.push({ k: "Name", v: lk });
   return { id: nodeId, kindLabel: kind, kindColor: NODE_COLORS[kind], rows };
 }
 
 export const AttackGraphCanvas = forwardRef<AttackCanvasHandle, Props>(function AttackGraphCanvas(
-  { path, allPaths, whatIfIndex, animateBlockedEdges = true, onToggleWhatIf, onScope },
+  { path, allPaths, whatIfIndex, range, animateBlockedEdges = true, onToggleWhatIf, onScope },
   ref
 ) {
   const svgRef = useRef<SVGSVGElement>(null);
-  const stateRef = useRef({ path, allPaths, whatIfIndex, animateBlockedEdges, onToggleWhatIf, onScope });
-  stateRef.current = { path, allPaths, whatIfIndex, animateBlockedEdges, onToggleWhatIf, onScope };
+  const stateRef = useRef({ path, allPaths, whatIfIndex, range, animateBlockedEdges, onToggleWhatIf, onScope });
+  stateRef.current = { path, allPaths, whatIfIndex, range, animateBlockedEdges, onToggleWhatIf, onScope };
 
   const world = useRef<{
     svg?: d3.Selection<SVGSVGElement, unknown, null, undefined>;
@@ -269,12 +308,14 @@ export const AttackGraphCanvas = forwardRef<AttackCanvasHandle, Props>(function 
     // Fixed VIRTUAL layout (independent of container width); fitView scales it to the canvas.
     // HORIZONTAL kill-chain: agent (left) → tool(s) → crown jewel (right). fitView's viewBox scales the
     // whole chain to the canvas so it is always fully on-screen (no overflow), regardless of hop count.
-    const nodes: ChainNode[] = [{ id: p.src, kind: "agent", role: "source", x: 0, y: 0 }];
+    const nodes: ChainNode[] = [
+      { id: p.src, kind: "agent", role: "source", x: 0, y: 0, lookalikeText: lookalikeCaption(p.src) }
+    ];
     p.steps.forEach((st, i) => {
       const oc = opCaption(st);
       nodes.push({
         id: st.to, kind: st.kind, role: i === p.steps.length - 1 ? "target" : "step", x: 0, y: 0,
-        opText: oc?.text, opColor: oc?.color,
+        opText: oc?.text, opColor: oc?.color, lookalikeText: lookalikeCaption(st.to),
       });
     });
     const n = nodes.length;
@@ -303,11 +344,13 @@ export const AttackGraphCanvas = forwardRef<AttackCanvasHandle, Props>(function 
       const t = m <= 1 ? 0 : -spreadDeg / 2 + spreadDeg * (i / (m - 1));
       const a = ((baseDeg + t) * Math.PI) / 180;
       const x = tgt.x + Math.cos(a) * R, y = tgt.y + Math.sin(a) * R;
-      return { name: it.n, sensitive: !!it.s, x, y, ox: x - tgt.x, oy: y - tgt.y };
+      return { name: it.n, sensitive: !!it.s, lookalikeText: lookalikeCaption(it.n), x, y, ox: x - tgt.x, oy: y - tgt.y };
     });
     w.sats = sats;
     // Include each satellite label's extent (labels sit to the RIGHT of the fan) so fitView never clips them.
-    const labelPts = sats.map((s) => ({ x: s.x + 16 + s.name.length * 6.3, y: s.y }));
+    // The lookalike caption under a satellite is usually the LONGER of the two lines, so measure both —
+    // a clipped warning is a warning that was not shown.
+    const labelPts = sats.map((s) => ({ x: s.x + 16 + Math.max(s.name.length, (s.lookalikeText ?? "").length) * 6.3, y: s.y }));
     w.fitPts = (nodes as Array<{ x: number; y: number }>).concat(sats, labelPts);
 
     w.blastLineSel = w.blastG.selectAll<SVGLineElement, Satellite>("line.bl").data(sats).enter().append("line").attr("class", "bl")
@@ -326,6 +369,17 @@ export const AttackGraphCanvas = forwardRef<AttackCanvasHandle, Props>(function 
       .style("text-rendering", "geometricPrecision")
       .style("filter", "drop-shadow(0 1px 1.5px rgba(0,0,0,0.9))")
       .text((d) => (d.sensitive ? "⬥ " : "") + d.name);
+    // The blast radius is the "what else does this reach" answer, and its entries are OBSERVED asset
+    // names — the same attacker-controlled text as the chain nodes. Marking only the chain left the
+    // fan as an unmarked place to hide a homoglyph of the crown jewel the operator is scanning for.
+    satG.filter((d) => !!d.lookalikeText).append("text")
+      .attr("class", "satlk").attr("font-family", "'Outfit', sans-serif").attr("font-size", 9).attr("font-weight", 650)
+      .attr("fill", "#ffcf82").attr("dy", "1.55em")
+      .attr("text-anchor", (d) => (d.x < tgt.x - 4 ? "end" : "start"))
+      .attr("dx", (d) => (d.x < tgt.x - 4 ? -11 : 11))
+      .style("text-rendering", "geometricPrecision")
+      .style("filter", "drop-shadow(0 1px 1.5px rgba(0,0,0,0.9))")
+      .text((d) => d.lookalikeText!);
 
     // ---- edges: invisible hit line (click a hop → what-if block) + visible line ----
     w.hitSel = w.edgeG.selectAll<SVGLineElement, Edge>("line.hit").data(edges).enter().append("line").attr("class", "hit")
@@ -395,6 +449,16 @@ export const AttackGraphCanvas = forwardRef<AttackCanvasHandle, Props>(function 
       .style("text-rendering", "geometricPrecision")
       .style("filter", "drop-shadow(0 1px 1.5px rgba(0,0,0,0.9))")
       .text((d) => d.opText!);
+    // LOOKALIKE NAME. Sits below the lifecycle caption so the operator reads the name, then what it
+    // does, then "the name is not what it looks like". Without this the kill-chain drew a homoglyph
+    // twin identically to the tool it impersonates.
+    nEnter.filter((d) => !!d.lookalikeText).append("text").attr("class", "lklbl").attr("text-anchor", "middle")
+      .attr("font-family", "'Outfit', sans-serif").attr("font-size", 9.5).attr("font-weight", 650)
+      .attr("fill", "#ffcf82")
+      .attr("x", 0).attr("y", (d) => rOf(d) + (d.opText ? 57 : 44))
+      .style("text-rendering", "geometricPrecision")
+      .style("filter", "drop-shadow(0 1px 1.5px rgba(0,0,0,0.9))")
+      .text((d) => d.lookalikeText!);
 
     nEnter.call(
       d3.drag<SVGGElement, ChainNode>()
@@ -405,7 +469,7 @@ export const AttackGraphCanvas = forwardRef<AttackCanvasHandle, Props>(function 
     );
     // click a node → scope card (what this identity/tool/asset can actually touch, across ALL paths)
     nEnter.style("cursor", "pointer")
-      .on("click", (_ev, d) => stateRef.current.onScope(buildScope(d.id, stateRef.current.allPaths)));
+      .on("click", (_ev, d) => stateRef.current.onScope(buildScope(d.id, stateRef.current.allPaths, stateRef.current.range)));
 
     tick();
     fitView();
@@ -463,11 +527,40 @@ export const AttackGraphCanvas = forwardRef<AttackCanvasHandle, Props>(function 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /**
+   * REDRAW KEY — a cheap signature of everything `draw()` actually paints.
+   *
+   * The dep list used to be `path.id`, and the server's id is
+   * `_short_id(ns, first_node, last_node, len(node_ids))` (threats.py) — deliberately stable across
+   * a Range switch, a Recompute, and a verb promotion, every one of which replaces the CONTENT of
+   * that same id. The page never clears `paths` while refetching, so the canvas is not remounted
+   * either; it kept painting a green solid "9 allowed" hop and an "unclassified · observing" caption
+   * beside an inspector that had already updated to a blocked path with a "delete · learned" chip.
+   * The stale closure also froze `dec`, so which hops were clickable disagreed with the inspector.
+   *
+   * A signature string rather than the `path` object: a new object identity on every parent render
+   * would redraw the d3 world on every keystroke. This changes only when the picture changes.
+   */
+  const drawKey = [
+    path.id,
+    path.src,
+    path.steps
+      .map((s) =>
+        [
+          s.from, s.to, s.kind, s.dec, s.deny, s.allow, s.would_block ?? 0,
+          s.op ?? "", s.op_risk ?? "", s.op_src ?? "",
+          s.inferred_verb ?? "", s.inferred_count ?? 0, s.observed_calls ?? 0
+        ].join(":")
+      )
+      .join("|"),
+    (path.reach ?? []).map((r) => `${r.n}:${r.s}`).join(",")
+  ].join("§");
+
   // redraw whenever the selection, what-if, or graph props change.
   useEffect(() => {
     draw();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path.id, whatIfIndex, animateBlockedEdges]);
+  }, [drawKey, whatIfIndex, animateBlockedEdges]);
 
   return <svg ref={svgRef} style={{ width: "100%", height: "100%", minHeight: 520, display: "block" }} data-testid="attack-graph-canvas" />;
 });

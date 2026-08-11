@@ -395,10 +395,17 @@ func TestHandlePolicy_MalformedObjectNoPanic(t *testing.T) {
 	controller.handlePolicy("unexpected-object", "created")
 }
 
+// The CR below targets agentClass=customer-support, so resolve_policy_key stores it at
+// default:customer-support. This test used to expect the delete at default/chatbot-strict —
+// metadata.name — which means it was asserting a real defect: deleting an agentClass-targeted
+// NrvqPolicy issued a DELETE for a row that does not exist, so the policy stayed in the API and kept
+// enforcing after kubectl reported the CR gone. That predates the targeted-policy key fix; the fix
+// merely widened the same mismatch to workload and namespace targets. Both sides now derive the key
+// through policyStorageKey.
 func TestHandlePolicyDelete_TriggersDeleteSync(t *testing.T) {
 	var deleteCalls int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete && r.URL.Path == "/api/v1/policies/default/chatbot-strict" {
+		if r.Method == http.MethodDelete && r.URL.Path == "/api/v1/policies/default/customer-support" {
 			atomic.AddInt32(&deleteCalls, 1)
 			w.WriteHeader(http.StatusOK)
 			return
@@ -523,18 +530,98 @@ reason = "unit test"`
 	}
 }
 
+// The cap is 25, mirroring validate_rego_source in norviq/api/routers/policies.py. It used to be 5
+// here, which made the controller STRICTER than the API: the shipped strict.rego preset alone carries
+// 23-26 regex ops, so it could never be applied through the CRD path. The old version of this test
+// fed 6 ops and asserted rejection — but that rego also had no `default decision`, so it was rejected
+// for the wrong reason and would have kept passing at any cap. Both bounds are asserted here so the
+// test cannot go vacuous again.
+func regexFloodRego(ops int) string {
+	var b strings.Builder
+	b.WriteString("package norviq\ndefault decision = \"allow\"\n")
+	for i := 0; i < ops; i++ {
+		fmt.Fprintf(&b, "decision = \"block\" { regex.match(\"a%d\", input.tool_name) }\n", i)
+	}
+	b.WriteString("rule_id = \"R-1\"\nreason = \"regex flood test\"")
+	return b.String()
+}
+
 func TestValidateRegoRejectsTooManyRegexOps(t *testing.T) {
-	rego := `package norviq
-decision = "block" { regex.match("a", input.tool_name) }
-decision = "block" { regex.match("b", input.tool_name) }
-decision = "block" { regex.match("c", input.tool_name) }
-decision = "block" { regex.match("d", input.tool_name) }
-decision = "block" { regex.match("e", input.tool_name) }
-decision = "block" { regex.match("f", input.tool_name) }
+	if err := validateRego(regexFloodRego(26)); err == nil {
+		t.Fatal("expected regex operation limit rejection at 26 ops")
+	}
+}
+
+func TestValidateRegoAdmitsRegexOpsUpToTheApiCap(t *testing.T) {
+	// The headroom half: if this starts failing, the controller has drifted BELOW the API's cap again
+	// and CRD-authored policies the API would happily store are being refused at admission.
+	if err := validateRego(regexFloodRego(25)); err != nil {
+		t.Fatalf("25 regex ops must be admitted (API cap is 25), got %v", err)
+	}
+}
+
+// The controller checked neither of these, so such a policy cleared admission and then failed at the
+// API with a 422 — which markDeterministicFailure records once and never retries.
+func TestValidateRegoRejectsForbiddenBuiltins(t *testing.T) {
+	for _, snippet := range []string{
+		`x = http.send({"method": "get"})`,
+		`x = opa.runtime()`,
+		`x = net.lookup_ip_addr("evil.example")`,
+		`x = io.jwt.decode("a.b.c")`,
+		`x = data.norviq.managed.other_tenant.decision`,
+	} {
+		rego := "package norviq\ndefault decision = \"allow\"\n" + snippet +
+			"\ndecision = \"block\" { input.tool_name == \"x\" }\nrule_id = \"R\"\nreason = \"r\""
+		if err := validateRego(rego); err == nil {
+			t.Fatalf("expected rejection for %q", snippet)
+		}
+	}
+}
+
+func TestValidateRegoRejectsCrossPackageDataRead(t *testing.T) {
+	rego := `package norviq.tenant_a
+default decision = "allow"
+decision = "block" { data.norviq.tenant_b.secret }
 rule_id = "R-1"
-reason = "regex flood test"`
+reason = "cross package"`
 	if err := validateRego(rego); err == nil {
-		t.Fatal("expected regex operation limit rejection")
+		t.Fatal("expected cross-package data read rejection")
+	}
+}
+
+func TestValidateRegoAllowsSelfPackageDataRead(t *testing.T) {
+	rego := `package norviq.tenant_a
+default decision = "allow"
+allowed_tools = {"read_file"}
+decision = "block" { not data.norviq.tenant_a.allowed_tools[input.tool_name] }
+rule_id = "R-1"
+reason = "self package"`
+	if err := validateRego(rego); err != nil {
+		t.Fatalf("a module reading its OWN package must be admitted, got %v", err)
+	}
+}
+
+func TestValidateRegoIgnoresForbiddenWordsInsideStringLiterals(t *testing.T) {
+	rego := `package norviq
+default decision = "allow"
+decision = "block" { input.tool_name == "http.send" }
+rule_id = "R-1"
+reason = "mentions http.send and data.norviq.managed in prose only"`
+	if err := validateRego(rego); err != nil {
+		t.Fatalf("forbidden tokens inside string literals must not trip the check, got %v", err)
+	}
+}
+
+// Deny-by-default is the shape two SHIPPED templates use, and the API now admits it. The controller
+// already did; this pins that they stay agreed.
+func TestValidateRegoAdmitsDenyByDefault(t *testing.T) {
+	rego := `package norviq
+default decision = "block"
+decision = "allow" { input.tool_name == "read_file" }
+rule_id = "R-1"
+reason = "deny by default with an allowlist"`
+	if err := validateRego(rego); err != nil {
+		t.Fatalf("deny-by-default must be admitted, got %v", err)
 	}
 }
 
@@ -655,10 +742,12 @@ func TestHandlePolicy_WithFinalizerStillSyncsUpdates(t *testing.T) {
 	}
 }
 
+// Same correction as TestHandlePolicyDelete_TriggersDeleteSync: this CR targets
+// agentClass=customer-support, so that is where the API stores it and where the delete must go.
 func TestHandlePolicy_DeletingWithFinalizerReconcilesDelete(t *testing.T) {
 	var deleteCalls int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete && r.URL.Path == "/api/v1/policies/default/chatbot-strict" {
+		if r.Method == http.MethodDelete && r.URL.Path == "/api/v1/policies/default/customer-support" {
 			atomic.AddInt32(&deleteCalls, 1)
 			w.WriteHeader(http.StatusOK)
 			return

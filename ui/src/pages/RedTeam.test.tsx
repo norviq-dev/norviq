@@ -260,3 +260,126 @@ it("'got-through only' filter shows just the misses (still bounded)", async () =
   expect(screen.getAllByTestId("redteam-attack-row").length).toBe(30);
   expect(screen.getAllByTestId("redteam-row-failed")).toHaveLength(30);
 });
+
+// --- MCP / tool vector dimension -----------------------------------------------------------------
+
+const MCP_VECTOR = "mcp-server-identity-unattested";
+
+function withMcp(overrides: Record<string, unknown> = {}) {
+  const base = latest();
+  const eff = base.efficacy as Record<string, unknown>;
+  return {
+    ...base,
+    results: [
+      ...base.results,
+      {
+        attack_id: "MCP-02", attack_name: "Write via FORGED allowlisted server id", category: "mcp_identity",
+        agent_class: "finance-agent", namespace: "default", expected: "block", actual: "allow",
+        passed: false, rule_id: "default_allow", atlas_technique: "AML.T0010",
+        atlas_technique_name: "ML Supply Chain Compromise", owasp_control: null, owasp_control_name: null,
+        mcp_vector: MCP_VECTOR, mcp_vector_title: "server_id is a self-asserted string"
+      }
+    ],
+    efficacy: {
+      ...eff,
+      by_vector: [
+        { vector_id: MCP_VECTOR, vector_title: "server_id is a self-asserted string", total: 2, caught: 1, got_through: 1, proven_blocking_pct: 50.0 }
+      ],
+      vector_coverage: {
+        catalogued: 39, evaluate_reachable: 4, proxy_only: 29, out_of_scope: 6,
+        exercised: 1, unexercised_reachable: ["resources-read-uri-gate"]
+      },
+      ...overrides
+    }
+  };
+}
+
+function serveMcp(payload: Record<string, unknown>) {
+  server.use(
+    targetsHandler(),
+    http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json(payload)),
+    http.get("*/api/v1/redteam/results", () => HttpResponse.json(historyPayload()))
+  );
+  renderPage();
+}
+
+it("scores MCP vectors as a third breakdown beside ATLAS and OWASP", async () => {
+  serveMcp(withMcp());
+  const panel = await screen.findByTestId("redteam-by-technique");
+  // all three taxonomies live in one panel — the existing tests scope their lookups here
+  expect(within(panel).getByText(/AML\.T0048/)).toBeInTheDocument();
+  expect(within(panel).getByText(/LLM01:2025/)).toBeInTheDocument();
+  const vec = within(panel).getByTestId("redteam-by-vector");
+  expect(within(vec).getByText(new RegExp(MCP_VECTOR))).toBeInTheDocument();
+  expect(within(vec).getByText(/50%/)).toBeInTheDocument();
+});
+
+it("states what the run did NOT measure, not only what it caught", async () => {
+  serveMcp(withMcp());
+  const band = await screen.findByTestId("redteam-mcp-coverage");
+  expect(band).toHaveTextContent(/1 of 39/);
+  expect(band).toHaveTextContent(/29/);
+  // proxy-only vectors are mostly ENFORCED — the copy must not read as failure
+  expect(band).toHaveTextContent(/not measured here/i);
+  expect(band).not.toHaveTextContent(/failed/i);
+  expect(screen.getByTestId("redteam-mcp-unexercised")).toHaveTextContent("resources-read-uri-gate");
+});
+
+it("the coverage band is OUTSIDE the metric cluster", async () => {
+  // Three specs pairwise-check that no two direct children of the cluster overlap at 1440 and 720
+  // wide. A fifth cell there is prohibited, so this asserts the band did not become one.
+  serveMcp(withMcp());
+  await screen.findByTestId("redteam-mcp-coverage");
+  const cluster = screen.getByTestId("redteam-metric-cluster");
+  expect(within(cluster).queryByTestId("redteam-mcp-coverage")).toBeNull();
+  expect(cluster.children.length).toBe(4);
+});
+
+it("tags an MCP row with a chip, never a new column", async () => {
+  serveMcp(withMcp());
+  await screen.findByTestId("redteam-attacks");
+  const rows = screen.getAllByTestId("redteam-attack-row");
+  const chips = screen.getAllByTestId("fw-chip-mcp");
+  expect(chips).toHaveLength(1);                       // only the MCP row is tagged
+  expect(chips[0]).toHaveTextContent(MCP_VECTOR);
+  expect(rows.length).toBeGreaterThan(chips.length);   // the other rows carry no MCP chip
+  // the results table stays closed to new columns
+  expect(screen.queryByRole("columnheader", { name: /^MCP$/ })).toBeNull();
+  expect(screen.getAllByRole("columnheader", { name: "Frameworks" })).toHaveLength(1);
+});
+
+it("renders a run stored before this dimension existed", async () => {
+  // Retention keeps older runs' efficacy blob verbatim; those have neither key. Rendering must not
+  // throw, and must not invent a coverage claim it has no data for.
+  serveMcp(latest());
+  await screen.findByTestId("redteam-scorecard");
+  expect(screen.queryByTestId("redteam-mcp-coverage")).toBeNull();
+  expect(screen.queryByTestId("redteam-by-vector")).toBeNull();
+  expect(screen.getByTestId("redteam-proven-pct")).toHaveTextContent("50%");
+});
+
+it("'got-through only' never lists a row the same table calls not-a-miss", async () => {
+  // The filter was `!passed` while the badge and the scorecard both exclude `applicable: false`, so
+  // filtering to got-through listed rows labelled "not enabled here" and the count disagreed with the
+  // number above it. Surfaced by the MCP identity attacks, which are guardrail-conditional by design.
+  const base = latest();
+  serveMcp({
+    ...base,
+    results: [
+      ...base.results,
+      {
+        attack_id: "MCP-01", attack_name: "Write via unlisted MCP server", category: "mcp_identity",
+        agent_class: "finance-agent", namespace: "default", expected: "block", actual: "allow",
+        passed: false, applicable: false, rule_id: "default_allow",
+        atlas_technique: "AML.T0010", atlas_technique_name: "Supply Chain",
+        mcp_vector: MCP_VECTOR, mcp_vector_title: "server_id is a self-asserted string"
+      }
+    ]
+  });
+  await screen.findByTestId("redteam-attacks");
+  fireEvent.click(within(screen.getByTestId("redteam-failed-filter")).getByRole("checkbox"));
+  const shown = screen.getAllByTestId("redteam-attack-row").length;
+  const failed = screen.getAllByTestId("redteam-row-failed").length;
+  expect(shown).toBe(failed);                       // every listed row really is a miss
+  expect(screen.queryByText(/not enabled here/i)).toBeNull();
+});

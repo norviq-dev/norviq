@@ -20,6 +20,8 @@ from norviq.telemetry.metrics import record_cache_hit, record_cache_miss
 
 log = structlog.get_logger()
 POLICY_EVENTS_CHANNEL = "norviq:policy_events"
+# Live audit fan-out across API workers/replicas — see publish_audit_record.
+AUDIT_RECORDS_CHANNEL = "norviq:audit_records"
 
 
 def _hash_seg(segment: str) -> str:
@@ -81,9 +83,19 @@ class RedisCache:
 
     async def connect(self) -> None:
         """Initialize the Redis client and Lua scripts."""
-        self._redis = aioredis.from_url(
+        # A BLOCKING pool, deliberately. redis-py's default `ConnectionPool` raises
+        # `ConnectionError("Too many connections")` the moment it is exhausted, and the evaluator fails
+        # CLOSED on any exception — so a brief burst did not make an agent's tool call slower, it made
+        # it REFUSED. That showed up as 3/200 benign calls blocked with `evaluator_fallback` at
+        # concurrency 8, which reads as an enforcement bug and is really a pool ceiling.
+        #
+        # `BlockingConnectionPool` queues instead, bounded by `timeout`, which is held well under the
+        # evaluator's 2.0s OPA budget so a truly stuck Redis still lands on the NAMED `evaluator_timeout`
+        # block rather than an anonymous fallback.
+        pool = aioredis.BlockingConnectionPool.from_url(
             self._url,
             max_connections=settings.redis_max_connections,
+            timeout=settings.redis_pool_wait_s,
             decode_responses=True,
             # Resilience: proactively validate idle connections and keep TCP alive so a Redis restart
             # is recovered transparently on the next command (paired with the /readyz drain).
@@ -91,6 +103,7 @@ class RedisCache:
             socket_keepalive=True,
             retry_on_timeout=True,
         )
+        self._redis = aioredis.Redis(connection_pool=pool)
         self._trust_decr_sha = await self._redis.script_load(TRUST_DECREMENT_LUA)
         log.info("nrvq.cache.connected", url=redact_url_credentials(self._url), code="NRVQ-DB-9010")
 
@@ -194,6 +207,35 @@ class RedisCache:
              "namespace": namespace, "agent_class": agent_class}
         )
         return bool(await self._client().set(key, payload, ex=ttl, nx=True))
+
+    async def acquire_lock(self, name: str, holder: str, ttl_s: int) -> str | None:
+        """Take a cross-replica lock, or report who already holds it.
+
+        Returns None when acquired, and the CURRENT HOLDER's value when it was already taken — callers
+        generally need to name the holder in the rejection, not merely refuse.
+
+        `SET key value NX EX ttl` is a single round trip and atomic in Redis, so two API pods racing
+        the same lock cannot both win. The TTL is the whole safety story: a pod that dies mid-work
+        never releases, and without an expiry the lock would wedge that name permanently.
+        """
+        acquired = bool(await self._client().set(f"lock:{name}", holder, ex=ttl_s, nx=True))
+        if acquired:
+            return None
+        current = await self._client().get(f"lock:{name}")
+        # Lost the race AND the holder vanished between SET and GET — treat as acquired-by-nobody and
+        # let the caller proceed rather than refusing on a lock that no longer exists.
+        return current if current is not None else None
+
+    async def release_lock(self, name: str, holder: str) -> None:
+        """Release a lock this holder owns. A lock held by someone else is left alone.
+
+        The ownership check matters after a TTL expiry: if this worker overran and another already
+        took the name, deleting blindly would free a lock that is legitimately held.
+        """
+        key = f"lock:{name}"
+        current = await self._client().get(key)
+        if current == holder:
+            await self._client().delete(key)
 
     async def list_policy_entries(self) -> dict[str, dict]:
         """List all cached policy entries for runtime hydration.
@@ -375,6 +417,47 @@ class RedisCache:
             }
         )
         await self._client().publish(POLICY_EVENTS_CHANNEL, payload)
+
+    async def publish_audit_record(self, record: dict, origin: str = "") -> None:
+        """Fan one live audit record to every OTHER API process.
+
+        The /ws/audit hub is in-process (audit_hub.AuditHub), and the API runs `api.workers: 4` by
+        default across `api.replicas: 2` — eight independent processes. A browser's websocket is served
+        by ONE of them, and a tool call is evaluated by whichever the load balancer picked, so the live
+        Audit Log showed roughly one decision in eight and gave no sign the rest existed. On a product
+        whose job is to show what enforcement did, a live view that silently drops most of it is worse
+        than not having one.
+
+        Reuses the pub/sub the policy path already relies on for exactly this reason. `origin` is the
+        publishing process id so a subscriber can skip its own echo — Redis delivers to every
+        subscriber including the publisher, and the publisher has already fanned out locally.
+        """
+        try:
+            await self._client().publish(AUDIT_RECORDS_CHANNEL, json.dumps({"origin": origin, "record": record}))
+        except Exception as exc:  # never let the live feed break a decision
+            log.warning("nrvq.cache.audit_publish_failed", error=str(exc), code="NRVQ-DB-9036")
+
+    async def listen_audit_records(self, callback) -> None:
+        """Subscribe to peer audit records and hand each to `callback(record, origin)`."""
+        pubsub = self._pool.pubsub()
+        await pubsub.subscribe(AUDIT_RECORDS_CHANNEL)
+        log.info("nrvq.cache.audit_records_listening", channel=AUDIT_RECORDS_CHANNEL, code="NRVQ-DB-9037")
+        async for message in pubsub.listen():
+            if message.get("type") != "message":
+                continue
+            data = message["data"]
+            if isinstance(data, bytes):
+                data = data.decode()
+            try:
+                payload = json.loads(data)
+            except Exception as exc:
+                # Not silent: anything non-JSON on this channel means a peer is publishing a shape this
+                # process does not understand — a version skew worth seeing, not a record to drop quietly.
+                log.warning("nrvq.cache.audit_record_undecodable", error=str(exc), code="NRVQ-DB-9038")
+                continue
+            record = payload.get("record")
+            if isinstance(record, dict):
+                await callback(record, str(payload.get("origin") or ""))
 
     async def listen_policy_events(self, callback) -> None:
         """Listen for policy invalidation events from other replicas."""

@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from norviq.api.auth import get_current_user, read_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
+from norviq.engine.evaluator import WOULD_BLOCK_RULE_PREFIXES
 from norviq.api.routers.mitre import _activity_by_rule
 from norviq.api.synthetic import is_synthetic_identity
 
@@ -52,6 +53,10 @@ def _load_mapping() -> dict[str, list[str]]:
 _RESERVED_CLASS_RE = re.compile(r"^__.*__$")
 _ALLOW_NAMES_RE = re.compile(r'allow_names\s*:=\s*\{([^}]*)\}')
 _QUOTED_RE = re.compile(r'"([^"]+)"')
+# Marker emitted by the intent compiler's header (see its `_HEADER`), carrying the tool names that
+# intent's own predicates can admit, as JSON. Anchored to a comment line so it can never be confused
+# with rego syntax.
+_INTENT_TOOLS_RE = re.compile(r"(?m)^#\s*nrvq:intent-tools\s+(\[.*\])\s*$")
 # The refinement toggles are detectable by the helper rules the generator only emits when the toggle is on.
 _REFINEMENT_MARKERS = {"readonly": "is_read ", "egress": "is_egress ", "scope": "in_scope ", "rate": "rate_within "}
 _LEARNED_RE = re.compile(r'#\s*Learned verbs[^:]*:\s*(.+)')
@@ -75,6 +80,21 @@ def _parse_agent_policy(agent_class: str, rego: str, priority: int, mode: str) -
     am = _ALLOW_NAMES_RE.search(rego or "")
     if am:
         allow_tools = sorted(set(_QUOTED_RE.findall(am.group(1))))
+    else:
+        # An INTENT-compiled policy (norviq/engine/intent/compiler.py) has no `allow_names` set —
+        # its scoping lives in per-rule predicates, and emitting a parallel set just to feed this
+        # parser would put a second, drifting representation of the allowlist next to the real one
+        # (worse: `allow_names` is wired into `in_allowlist` by the OTHER two generators, so a set
+        # here would look like enforcement while being dead). The compiler instead states the
+        # admissible names once, in a header marker derived from those same predicates.
+        im = _INTENT_TOOLS_RE.search(rego or "")
+        if im:
+            try:
+                parsed = json.loads(im.group(1))
+            except ValueError:  # a hand-mangled marker must degrade, never 500 the Overview
+                parsed = []
+            if isinstance(parsed, list):
+                allow_tools = sorted({str(v) for v in parsed})
     refinements = [key for key, marker in _REFINEMENT_MARKERS.items() if marker in (rego or "")]
     learned: list[str] = []
     lm = _LEARNED_RE.search(rego or "")
@@ -139,8 +159,14 @@ async def _agent_class_policies(
             d["observed"] += int(n)
             if str(decision) == "block":
                 d["blocked"] += int(n)
-            # Monitor-mode would-block: decision softened to audit with a would-block rule marker.
-            elif str(decision) == "audit" and str(rule_id or "").startswith("monitor_would_block:"):
+            # Would-block: decision softened to audit with a would-block rule marker. Use the SHARED
+            # tuple, not a literal — this hardcoded "monitor_would_block:" only, so the per-policy audit
+            # path (policy_audit_would_block:, evaluator._apply_policy_mode) was invisible here. An
+            # operator trialling ONE policy with the Monitor badge saw its Overview bar stay grey
+            # "loaded but unproven" no matter how much traffic it would have stopped, while the legend
+            # promised green for "a block, or a Monitor would-block". The constant's own comment says
+            # every softening path must be listed there; forking it defeated exactly that.
+            elif str(decision) == "audit" and str(rule_id or "").startswith(WOULD_BLOCK_RULE_PREFIXES):
                 d["would_block"] += int(n)
     except Exception as exc:  # best-effort; efficacy overlay is optional — but a fault still leaves the
         # efficacy numbers wrong/zeroed, so flag the section degraded rather than showing them as real.

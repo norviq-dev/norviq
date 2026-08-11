@@ -52,10 +52,15 @@ Sidecar injection is ENABLED (mode: {{ .Values.webhook.injection.sidecarMode | d
 auto-bootstrapped by the norviq-webhook-cert hook Job (self-signed cert -> norviq-webhook-tls secret ->
 patched webhook caBundle).
   Opt a namespace in:  kubectl label ns <ns> norviq-injection=enabled
-  Every NEW pod in that namespace gets the Norviq sidecar injected — no per-pod label needed.
+  Then label each AGENT pod:  norviq.io/agent-class=<class>
+  A pod WITHOUT that label is not injected. This is deliberate (webhook.injection.gateOnlyAgentPods,
+  default true): with failurePolicy: Fail, routing every pod in the namespace through the webhook
+  would make a Norviq outage a precondition for starting the namespace's database and ingress too.
+  Set gateOnlyAgentPods=false for the older namespace-wide behaviour.
   Opt a single pod OUT:  set the pod label  norviq-injection=disabled  (or annotation
                          norviq.io/skip-injection=true).
-  Optionally set the agent class:  pod label  norviq.io/agent-class=<class>.
+  The agent-class label above is REQUIRED for injection under the default, and it is also what
+  class-tier policy matches on.
 {{- else }}
 
 Sidecar injection is DISABLED. Turn it on (turnkey, auto-TLS, no cert-manager needed):

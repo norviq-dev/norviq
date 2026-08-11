@@ -16,7 +16,7 @@ Three ready-made overlays ship alongside the defaults:
 - `helm/norviq/values-light.yaml` — smallest viable single-node footprint (one replica of everything,
   PDBs/HPAs/HA/SPIFFE off). Enforcement behaviour is unchanged; only replicas and resources shrink.
 
-Apply an overlay with `helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.10 -n norviq -f values-prod.yaml`
+Apply an overlay with `helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.0 -n norviq -f values-prod.yaml`
 (or `--set` individual keys, which always wins over a `-f` file for the same key).
 
 ## Install-blocking guards (read this first)
@@ -48,7 +48,7 @@ With `enabled: false` the chart **refuses to render** unless you give it an addr
 silently emitted the bundled service name and the API dialled a Service that did not exist.
 
 ```
-helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.10 -n norviq --create-namespace \
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.0 -n norviq --create-namespace \
   --set postgresql.enabled=false --set postgresql.host=mydb.postgres.database.azure.com \
   --set redis.enabled=false      --set redis.host=mycache.redis.cache.windows.net \
   --set postgresql.password=... --set redis.password=...
@@ -63,7 +63,7 @@ credential ever passes through values or the chart's own Secret:
 kubectl -n norviq create secret generic my-pg \
   --from-literal=url='postgresql://user:PW@mydb.example.com:5432/norviq'
 
-helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.10 -n norviq \
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.0 -n norviq \
   --set postgresql.enabled=false --set postgresql.existingSecret=my-pg \
   --set redis.enabled=false      --set redis.existingSecret=my-redis
 ```
@@ -164,7 +164,7 @@ two StatefulSets sit in an admission-rejection loop with nothing pointing at the
 Use datastores you manage — the same thing `values-prod.yaml` already does:
 
 ```bash
-helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.10 -n norviq \
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.0 -n norviq \
   --set openshift.enabled=true \
   --set postgresql.enabled=false --set postgresql.host=<host> \
   --set redis.enabled=false      --set redis.host=<host>
@@ -252,13 +252,12 @@ both Postgres and Redis, which is exactly the embedded shape.
 | Key | Default | What it does |
 |---|---|---|
 | `webhook.enabled` | `true` | Deploys the admission webhook server. |
-| `webhook.validating.enabled` | `false` | Separate validating-admission path (distinct from injection). |
 | `webhook.injection.enabled` | `false` | Turnkey sidecar injection: renders the `MutatingWebhookConfiguration` plus a pre/post-install hook Job that self-signs a TLS cert and patches the webhook's `caBundle` — no cert-manager required. Enable with `--set webhook.injection.enabled=true`, then label target namespaces `norviq-injection=enabled`. |
 | `webhook.injection.sidecarMode` | `proxy` | `proxy` — the injected sidecar POSTs each tool call to the central `norviq-api` `/evaluate` with a namespace-scoped service JWT (DB/OPA stay centralized, nothing per-pod). `embedded` — the sidecar runs its own `RedisCache` + OPA (subprocess) + `PolicyLoader` for air-gapped/edge deployments (the chart then wires `NRVQ_REDIS_URL`/`NRVQ_PG_URL` through to the injector). |
-| `webhook.injection.failurePolicy` | `Fail` | Admission posture for the injector. `Fail` is **fail-closed**: if the injector is unavailable, pod creation in an injection-enabled namespace is rejected, so an agent pod can never start un-guarded. Set `Ignore` (fail-open) only on a dev/eval cluster. The control-plane/kube-system namespaces are excluded from the selector, so this can't self-deadlock. **Note:** `webhook.pdb` is OFF by default — on a multi-node cluster enable it, or a single drain can evict both replicas. `webhook.spread` is on by default and is a soft (`ScheduleAnyway`) constraint, so single-node installs still schedule. |
-| `webhook.injection.gateOnlyAgentPods` | `true` | Gate admission on the pod's own `norviq.io/agent-class` label instead of the whole namespace. Without it, `norviq-injection=enabled` routes **every** pod created in that namespace through the injector — databases, ingress controllers, batch jobs — so with `failurePolicy: Fail` a Norviq outage blocks pod creation for workloads Norviq doesn't even govern. The rule is CREATE-only, so running pods are never touched. **Upgrade care:** agent pods relying on namespace-wide injection *without* an agent-class label stop being injected on their next restart; the console raises an "ungoverned agent pods" warning for exactly that case. |
+| `webhook.injection.failurePolicy` | `Fail` | Admission posture for the injector. `Fail` is **fail-closed**: if the injector is unavailable, creation of a pod the webhook *routes* is rejected, so a routed pod can never start un-guarded. Read that together with `gateOnlyAgentPods` below: under the default, only pods carrying `norviq.io/agent-class` are routed at all, so `Fail` says nothing about an unlabelled pod — that pod is never sent to the injector and starts ungoverned regardless of this setting. Set `Ignore` (fail-open) only on a dev/eval cluster. The control-plane/kube-system namespaces are excluded from the selector, so this can't self-deadlock. **Note:** `webhook.pdb` is OFF by default — on a multi-node cluster enable it, or a single drain can evict both replicas. `webhook.spread` is on by default and is a soft (`ScheduleAnyway`) constraint, so single-node installs still schedule. |
+| `webhook.injection.gateOnlyAgentPods` | `true` | Gate admission on the pod's own `norviq.io/agent-class` label instead of the whole namespace. Without it, `norviq-injection=enabled` routes **every** pod created in that namespace through the injector — databases, ingress controllers, batch jobs — so with `failurePolicy: Fail` a Norviq outage blocks pod creation for workloads Norviq doesn't even govern. The rule is CREATE-only, so running pods are never touched. **Upgrade care:** agent pods relying on namespace-wide injection *without* an agent-class label stop being injected on their next restart, silently — the pod starts fine, it is simply ungoverned. Nothing in the console detects this today (an earlier version of this row claimed it did; it does not). After an upgrade, diff `kubectl get pods -n <ns> -L norviq.io/agent-class` against the pods you expect to be governed. |
 | `webhook.injection.fallbackMode` | `block` | **Data-plane** posture — what a governed agent does when the engine is unreachable (distinct from `failurePolicy`, which is the *admission* posture). `block` fails closed: the agent keeps talking but every tool call is refused while the engine is down. `allow` fails open: calls are forwarded **ungoverned**, audited as `rule_id=thin_proxy_fail_open` — never as a policy allow. Applies **only** to a genuine outage (5xx/timeout/connect). A 4xx is the engine *answering* with a refusal — an expired token, a malformed request — and always blocks regardless, so choosing `allow` cannot turn a revoked credential into a silent bypass. Both data-plane paths already retry with backoff, which covers rolling restarts; `allow` is for tolerating a *sustained* outage. |
-| `webhook.injection.allowPodOptOut` | `true` | Honour the per-pod opt-out (`norviq-injection=disabled` label / `norviq.io/skip-injection` annotation). Set `false` to make injection namespace-uniform so a pod author can't self-exempt their workload from enforcement — pair that with RBAC on pod label/annotation writes. |
+| `webhook.injection.allowPodOptOut` | `true` | Honour the per-pod opt-out (`norviq-injection=disabled` label / `norviq.io/skip-injection` annotation). Set `false` so a pod author can't self-exempt a **routed** pod. It is not namespace-uniform under the default `gateOnlyAgentPods: true`: a pod that omits `norviq.io/agent-class` is never routed, so this setting never applies to it. Closing self-exemption means RBAC on the agent-class label as well as on the opt-out label/annotation. |
 | `images.bootstrap` | `norviq-engine:bootstrap-*` | First-party image for the cert-bootstrap hook Jobs, carrying `openssl` and `curl` — deliberately **not** `kubectl`. Replaces the previous `alpine/k8s`, which shipped kubectl but not openssl and so had to `apk add` at runtime — that needed root, and root is rejected outright by OpenShift's `restricted-v2` SCC. The hooks only GET/PATCH a `MutatingWebhookConfiguration` and apply a Secret, so `curl` with the pod's service-account token does the job without vendoring a Go binary whose CVEs would fail our own image scan. Baking `openssl` in also means the hooks need no network at install time, so they work air-gapped. |
 | `webhook.replicas` | `2` | Webhook server pod count. |
 | `webhook.pdb`/`autoscaling` | off by default | Same HA pattern as api/engine — turn on for multi-node prod (`autoscaling`: `2`–`4` replicas, 70% CPU target). |

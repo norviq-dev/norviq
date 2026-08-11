@@ -10,11 +10,36 @@
 import { useEffect, useImperativeHandle, useRef, useState, forwardRef } from "react";
 import * as d3 from "d3";
 import { NODE_COLORS, RISK_COLORS } from "../../lib/d3-helpers";
+import { lookalikeOf } from "../../lib/predicateSentence";
 import type { FilterState, ViewEdge, ViewGroup, ViewModel, ViewNode } from "./model";
 import { computeSets } from "./model";
 import { HULL_PAD, clampFitScale, clusterGaps, overviewColumns, ringRadius } from "./layout";
 
 const TYPE_R = { agent: 15, tool: 9, data: 8, namespace: 12 } as const;
+
+/**
+ * Every node name on this canvas is OBSERVED traffic — a tool_name an agent registered, an agent
+ * identity, a data source. That is attacker-controlled text, and `exеcute_sql` with a Cyrillic е
+ * (U+0435) is pixel-identical to `execute_sql` in the console's font. Drawn bare, the impostor and
+ * the tool it impersonates appear as two identical captions, which reads as a rendering duplicate
+ * rather than as a second tool the agent is quietly calling — on the one map an operator uses to
+ * answer "what can this agent touch".
+ *
+ * The sibling kill-chain canvas has said this since it shipped (AttackGraphCanvas's
+ * `lookalikeCaption`); this canvas said nothing, so the two screens disagreed about whether one
+ * observed name was trustworthy. Same detector (`lookalikeOf` — the repo's only one), same caption
+ * shape, same amber. The STRING is duplicated from AttackGraphCanvas rather than shared only because
+ * lifting it means editing that file too; the detection — the half that would be dangerous to fork —
+ * is single-sourced. Lift both onto one lib helper when that canvas is next touched.
+ *
+ * Amber, not red: red on these canvases means an enforced block, and one signal must not carry two
+ * meanings.
+ */
+const LOOKALIKE_COLOR = "#ffcf82";
+function lookalikeCaption(name: string): string {
+  const l = lookalikeOf(name);
+  return l ? `⚠ lookalike · ${l.masked} · ${l.codepoints.join(" ")}` : "";
+}
 
 type SimNode = ViewNode & d3.SimulationNodeDatum & {
   fx?: number | null; fy?: number | null;
@@ -368,14 +393,37 @@ export const AssetGraphCanvas = forwardRef<CanvasHandle, Props>(function AssetGr
       .attr("stroke-width", (d) => (d.risk === "critical" ? 2.6 : 2.4))
       .attr("stroke", (d) => RISK_COLORS[d.risk])
       .attr("stroke-opacity", 1);
+    // ONE definition of what a node is captioned, so the lookalike marking below can never describe a
+    // different string than the one on screen (overview mode shows only the last path segment, and the
+    // agent centre's name lives on the hull label instead).
+    const shownName = (d: SimNode): string =>
+      circle && d.kind === "agent" && !d.isIdentity && d.id === d.g
+        ? ""
+        : circle && d.name.includes("/")
+          ? d.name.split("/").pop()!
+          : d.name;
+    const anchorOf = (d: SimNode): string =>
+      circle && d._ring != null ? (Math.cos(d._ring) > 0.12 ? "start" : Math.cos(d._ring) < -0.12 ? "end" : "middle") : "middle";
+    const labelX = (d: SimNode): number => (circle && d._ring != null ? Math.cos(d._ring) * (TYPE_R[d.kind] + 15) : 0);
+    const labelY = (d: SimNode): number =>
+      circle && d._ring != null ? Math.sin(d._ring) * (TYPE_R[d.kind] + 16) + 4 : TYPE_R[d.kind] + (circle ? 20 : 18);
+
     w.node.select<SVGTextElement>(".lbl")
-      .text((d) => (circle && d.kind === "agent" && !d.isIdentity && d.id === d.g ? "" : circle && d.name.includes("/") ? d.name.split("/").pop()! : d.name))
-      .attr("text-anchor", (d) => (circle && d._ring != null ? (Math.cos(d._ring) > 0.12 ? "start" : Math.cos(d._ring) < -0.12 ? "end" : "middle") : "middle"))
-      .attr("x", (d) => (circle && d._ring != null ? Math.cos(d._ring) * (TYPE_R[d.kind] + 15) : 0))
-      .attr("y", (d) => (circle && d._ring != null ? Math.sin(d._ring) * (TYPE_R[d.kind] + 16) + 4 : TYPE_R[d.kind] + (circle ? 20 : 18)))
+      .text(shownName)
+      .attr("text-anchor", anchorOf)
+      .attr("x", labelX)
+      .attr("y", labelY)
       // Regular weight + a soft (non-white) fill for node names; the selected node bumps to medium for emphasis.
       .attr("fill", (d) => (d.id === sel ? "#e8edf5" : "#9aa7bd"))
       .attr("font-weight", (d) => (d.id === sel ? 600 : 400));
+    // THE NAME IS NOT WHAT IT LOOKS LIKE — directly under the name it qualifies. Empty (and so
+    // invisible) for the ASCII case, which is almost every case; empty too where the node draws no
+    // name at all, because the agent centre's name is carried by the hull label, which captions itself.
+    w.node.select<SVGTextElement>(".lklbl")
+      .text((d) => lookalikeCaption(shownName(d)))
+      .attr("text-anchor", anchorOf)
+      .attr("x", labelX)
+      .attr("y", (d) => labelY(d) + 12);
 
     w.link
       .style("display", (d) => (vis[d.source.id] && vis[d.target.id] ? null : "none"))
@@ -567,8 +615,25 @@ export const AssetGraphCanvas = forwardRef<CanvasHandle, Props>(function AssetGr
       .attr("font-family", "'Outfit',sans-serif").attr("text-anchor", "middle").attr("opacity", 0.9)
       // Soft shadow instead of a thick outline (the 4.5px halo read as heavy/blurry).
       .style("filter", "drop-shadow(0 1px 1.5px rgba(0,0,0,0.9))")
-      .style("text-rendering", "geometricPrecision")
-      .text((d) => d.label);
+      .style("text-rendering", "geometricPrecision");
+    // The cluster label is the AGENT's own display name — observed identity text, so it needs the
+    // same marking the node labels get. Written as tspans inside the one <text> so both lines ride
+    // the single transform the tick loop already computes for it, rather than a parallel selection
+    // whose position would have to be kept in sync in two places.
+    w.hullLabel.each(function (gd) {
+      const t = d3.select(this);
+      t.selectAll("tspan").remove();
+      t.append("tspan").attr("x", 0).attr("dy", 0).text(gd.label);
+      const lk = lookalikeCaption(gd.label);
+      if (lk) {
+        t.append("tspan").attr("x", 0).attr("dy", "1.15em")
+          // 11.5 for the same reason as the node caption below: 10.5 x the ~0.85 fit zoom is 8.9px,
+          // under the >= 9px guardrail — a latent failure that only escaped because this hull-label
+          // branch happened not to render in the fixture that caught the node one.
+          .attr("fill", LOOKALIKE_COLOR).attr("font-size", 11.5).attr("font-weight", 600)
+          .text(lk);
+      }
+    });
 
     const nodeSel = nodeG.selectAll<SVGGElement, SimNode>("g").data(nodes).join("g")
       .attr("class", "ag-node")
@@ -592,6 +657,17 @@ export const AssetGraphCanvas = forwardRef<CanvasHandle, Props>(function AssetGr
       .attr("font-family", "'Outfit',sans-serif")
       // NO stroke halo — a paint-order outline (even 2px) thickens the glyphs so 400-weight text reads as
       // bold. A soft drop-shadow keeps it legible over edges without adding weight.
+      .style("filter", "drop-shadow(0 1px 1.5px rgba(0,0,0,0.9))")
+      .style("text-rendering", "geometricPrecision").style("pointer-events", "none");
+    // Lookalike caption slot — text/position set in restyle() alongside the name it sits under.
+    //
+    // 11.5, matching the node label it warns about. It was 10, which at the fit zoom this canvas
+    // settles to (~0.85) renders at 8.5px on screen and trips asset-graph.spec.ts's crisp-render
+    // guardrail (>= 9px effective). That guardrail is not cosmetic here: this caption is the ONLY
+    // thing distinguishing a Cyrillic impostor from the real tool, so it must not be the smallest,
+    // blurriest text on the canvas. Any new label added here must clear 9px AFTER the fit scale.
+    nodeSel.append("text").attr("class", "lklbl").attr("text-anchor", "middle").attr("font-size", 11.5)
+      .attr("font-weight", 600).attr("font-family", "'Outfit',sans-serif").attr("fill", LOOKALIKE_COLOR)
       .style("filter", "drop-shadow(0 1px 1.5px rgba(0,0,0,0.9))")
       .style("text-rendering", "geometricPrecision").style("pointer-events", "none");
     w.node = nodeSel;

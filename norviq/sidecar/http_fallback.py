@@ -11,6 +11,7 @@ import structlog
 from fastapi import FastAPI, Request, Response
 
 from norviq.engine.audit_emitter import AuditEmitter
+from norviq.sidecar.proxy import _coerce_depth
 from norviq.engine.identity import SPIFFEResolver
 from norviq.sdk.core.events import ToolCallEvent
 from norviq.sdk.core.interceptor import ToolInterceptor
@@ -46,8 +47,11 @@ def create_http_fallback(
         tool_name = str(data.get("tool_name", ""))
         tool_params = data.get("tool_params", {})
         session_id = str(data.get("session_id", ""))
+        # See norviq/sidecar/proxy.py _coerce_depth: this PEP had the same defect.
+        call_depth = _coerce_depth(data.get("call_depth"))
         try:
-            decision = await interceptor.intercept(tool_name, tool_params, session_id, framework="sidecar-http")
+            decision = await interceptor.intercept(tool_name, tool_params, session_id,
+                                                   framework="sidecar-http", call_depth=call_depth)
             identity = await resolver.resolve()
             event = ToolCallEvent(
                 tool_name=tool_name,

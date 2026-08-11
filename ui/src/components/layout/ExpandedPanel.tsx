@@ -3,6 +3,8 @@
 
 import {
   BadgeCheck,
+  ClipboardCheck,
+  Crosshair,
   BarChart3,
   Beaker,
   Info,
@@ -12,12 +14,14 @@ import {
   Network,
   Package,
   Plug,
+  Plug2,
   ShieldCheck,
   SlidersHorizontal,
   Swords,
   Target,
   User,
   Users,
+  Wrench,
   type LucideIcon
 } from "lucide-react";
 import { NavLink } from "react-router-dom";
@@ -39,7 +43,11 @@ const PANEL_CONFIG: Record<Section, { title: string; groups: Group[] }> = {
         items: [
           { to: "/policies/catalog", label: "Policy Catalog", icon: ShieldCheck },
           { to: "/policies/packs", label: "Policy Packs", icon: Package },
-          { to: "/policies/targets", label: "Target Settings", icon: Target }
+          { to: "/policies/targets", label: "Target Settings", icon: Target },
+          // Intents — the positive-security surface: state what a class is FOR and deny the rest.
+          // Sits under ENFORCEMENT rather than MONITORING because it authors policy, even though
+          // nothing it produces enforces until an operator applies the draft from Policy Catalog.
+          { to: "/intents", label: "Propose from traffic", icon: Crosshair }
         ]
       },
       {
@@ -47,7 +55,14 @@ const PANEL_CONFIG: Record<Section, { title: string; groups: Group[] }> = {
         label: "MONITORING",
         items: [
           { to: "/audit", label: "Audit Log", icon: BarChart3 },
-          { to: "/agents", label: "Agents", icon: Users }
+          { to: "/agents", label: "Agents", icon: Users },
+          // Tools — the registry: what exists in this namespace and how well Norviq knows each one.
+          // Above MCP Servers deliberately: this answers "what can I do with these tools", its sibling
+          // answers "are their definitions still trustworthy", and the first question comes first.
+          { to: "/tools", label: "Tools", icon: Wrench },
+          // MCP Servers — Gate A's console: which Model Context Protocol integrations are live and
+          // whether any of them changed a tool definition after it was approved.
+          { to: "/mcp", label: "MCP Servers", icon: Plug2 }
         ]
       },
       {
@@ -59,11 +74,16 @@ const PANEL_CONFIG: Record<Section, { title: string; groups: Group[] }> = {
           { to: "/redteam", label: "Red Team", icon: Swords }
         ]
       },
-      // Compliance is a top-level page (framework coverage / MITRE ATLAS).
+      // Compliance is a top-level page (framework coverage / MITRE ATLAS). Policy Compliance is its
+      // sibling and answers a different question — not "which frameworks do we cover" but "are the
+      // policies THIS customer wrote actually being met, and by which agent classes".
       {
         id: "compliance",
         label: "COMPLIANCE",
-        items: [{ to: "/compliance", label: "Compliance", icon: BadgeCheck }]
+        items: [
+          { to: "/compliance", label: "Compliance", icon: BadgeCheck },
+          { to: "/compliance/policies", label: "Policy Compliance", icon: ClipboardCheck }
+        ]
       },
       // Fleet is multi-cluster MANAGEMENT (opt-in) — it belongs in Security Operations, not Analytics. Only
       // shown when a fleet-api hub is configured.

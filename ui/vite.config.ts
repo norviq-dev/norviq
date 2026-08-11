@@ -21,9 +21,27 @@ export default defineConfig({
         manualChunks(id) {
           if (id.includes("zrender")) return "zrender";
           if (id.includes("echarts")) return "echarts-core";
+          // Monaco gets its OWN named chunk so the build output names what is actually large.
+          // Without this the bundler folded ~2.5 MB of editor into whichever app module happened to
+          // anchor the shared chunk — most recently `ApplyResultPanel`, a ~9 kB status panel — and the
+          // >500 kB warning then pointed at a file with nothing to optimize in it. The chunk is still
+          // lazy (only the four editor-bearing routes import it, via `__vite__mapDeps`), so this
+          // changes the NAME and not what any route downloads.
+          if (id.includes("monaco-editor")) return "monaco-editor";
           return undefined;
         }
       }
+    }
+  },
+  // `vite preview` serves the PRODUCTION build, so it is the only way to exercise chunking, lazy
+  // route loading and Monaco's worker wiring before an image is built. It needs the same API proxy
+  // the dev server has, or every page renders its error state and proves nothing.
+  preview: {
+    proxy: {
+      "/api": "http://127.0.0.1:8080",
+      "/healthz": "http://127.0.0.1:8080",
+      "/readyz": "http://127.0.0.1:8080",
+      "/ws": { target: "ws://127.0.0.1:8080", ws: true }
     }
   },
   server: {
@@ -40,6 +58,15 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "jsdom",
+    // Pin jsdom's origin OFF port 3000. jsdom defaults to http://localhost:3000, and msw is configured
+    // with onUnhandledRequest:"bypass", so any request a test does not explicitly mock is resolved
+    // against that origin and put on the real network. Port 3000 is exactly where this project's own
+    // docs tell you to put the console (`kubectl port-forward svc/norviq-ui 3000:80`), and that service
+    // serves static assets — it accepts the /api/v1 connection and never answers, so the request hangs
+    // until the test times out. The result was a suite whose outcome depended on whether the developer
+    // happened to have the console open: 7 tests failed with a 15s timeout and passed again after
+    // pinning the origin. Nothing listens on 59999, so unmocked requests now fail fast and locally.
+    environmentOptions: { jsdom: { url: "http://localhost:59999" } },
     setupFiles: "./src/test/setup.ts",
     // Vitest owns the unit tests under src/. The Playwright E2E suite (tests/e2e/**, @playwright/test)
     // must NOT be collected by vitest — its `test()` is a different runner and errors on import.

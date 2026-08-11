@@ -133,7 +133,7 @@ kubectl create namespace norviq
 
 # Installs from the published, cosign-signed chart. CRDs ship inside it, and every Norviq image is
 # pinned by immutable digest — so this deploys exactly the bytes that release published.
-helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.10 -n norviq \
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.0 -n norviq \
   --set 'policyQuotaNamespaces={default}' \
   --set config.dbSslMode=disable   # the bundled Postgres has no TLS; omit if you point at an external TLS DB
 ```
@@ -172,7 +172,7 @@ namespaces you listed in `policyQuotaNamespaces` — the label alone does nothin
 enabled:
 
 ```bash
-helm upgrade norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.10 -n norviq --reset-then-reuse-values --set webhook.injection.enabled=true
+helm upgrade norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.0 -n norviq --reset-then-reuse-values --set webhook.injection.enabled=true
 kubectl label namespace <your-agent-namespace> norviq-injection=enabled
 ```
 
@@ -181,7 +181,13 @@ kubectl label namespace <your-agent-namespace> norviq-injection=enabled
 release that introduced one fails with `nil pointer evaluating interface {}`. On older Helm, pass
 your own `-f values.yaml`.
 
-Every new pod in a labeled namespace then gets the enforcement sidecar injected.
+Then label each agent **pod** `norviq.io/agent-class=<class>` — that pod label is what gets the
+enforcement sidecar injected, not the namespace label alone. The namespace label opts the namespace
+in; the pod label says which pods are agents. A pod without it starts un-injected and ungoverned.
+
+That is deliberate (`webhook.injection.gateOnlyAgentPods`, default `true`): with `failurePolicy: Fail`,
+routing every pod in the namespace through the webhook would make Norviq's availability a precondition
+for starting that namespace's database and ingress too. Set it to `false` for namespace-wide injection.
 
 > Trying it locally? A single-node [kind](https://kind.sigs.k8s.io/) cluster is enough to evaluate
 > everything except multi-node HA. See **[docs/getting-started.md](docs/getting-started.md)**.
@@ -196,6 +202,7 @@ Full documentation is at **[docs.norviq.dev](https://docs.norviq.dev)**:
 - **[Policy cookbook](https://docs.norviq.dev/guides/policy-cookbook/)** — copy-paste `NrvqPolicy` recipes + validated Rego building blocks
 - **[Asset & attack graphs](https://docs.norviq.dev/guides/graphs/)** — real reach, kill chains, Simulate, Defend, tool classification
 - **[Compliance & coverage](https://docs.norviq.dev/guides/compliance/)** — MITRE ATLAS / OWASP LLM coverage, gaps, remediation, evidence pack
+- **[MCP firewall](https://docs.norviq.dev/guides/mcp/)** — governing MCP servers: the discovery and invocation gates, definition pinning and drift, and writing policy against `input.mcp`
 - **[Integrating agents](https://docs.norviq.dev/guides/integrating-agents/)** — the SDK: LangChain, LangGraph, CrewAI, AutoGen, Semantic Kernel
 - **[CLI reference](https://docs.norviq.dev/cli/)** — `norviq login`, policies, audit, agents, red-team, fleet
 - **[Configuration](https://docs.norviq.dev/configuration/)** — Helm `values.yaml` reference

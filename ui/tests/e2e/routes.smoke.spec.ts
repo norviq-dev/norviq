@@ -85,7 +85,11 @@ const ROUTES: RouteCase[] = [
   {
     name: "Target Settings / Governance",
     path: "/policies/targets",
-    title: "Effective Policy & Governance",
+    // "Namespace Governance" is what `TargetSettings.tsx` has rendered since the initial commit; the
+    // "Effective Policy & Governance" this asserted has never been the page's title. The test was
+    // wrong from the day it was written, not broken by a rename — `git log -S` finds no commit that
+    // ever introduced the old string into that page.
+    title: "Namespace Governance",
     data: async (page) => {
       await expect(page.getByText("Governance").first()).toBeVisible();
     }
@@ -137,7 +141,10 @@ const ROUTES: RouteCase[] = [
     path: "/settings/api-keys",
     title: "API Keys",
     data: async (page) => {
-      await expect(page.getByText("Issue a Key")).toBeVisible();
+      // `.first()` because the string appears more than once in the rendered panel (heading plus its
+      // enclosing region), which trips Playwright's strict mode. The assertion is unchanged — that
+      // the Issue-a-Key affordance is on screen — only the locator's ambiguity is resolved.
+      await expect(page.getByText("Issue a Key").first()).toBeVisible();
       await expect(page.getByText("Active Keys")).toBeVisible();
     }
   },

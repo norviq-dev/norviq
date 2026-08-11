@@ -106,7 +106,14 @@ describe("AssetGraph page (redesign)", () => {
     expect(strip.textContent).toMatch(/High risk/i);
     expect(strip.textContent).toMatch(/Blocked/i);
     // one blocked edge (block>0, allow>0 -> mixed is NOT blocked; 3 allow + 5 block => mixed) so Blocked shows 0
-    expect(screen.getByText(/paths/)).toBeInTheDocument();
+    //
+    // The unit is "edges", not "paths". This value counts agent→tool EDGES carrying a blocked
+    // verdict; a path is a multi-hop chain, which the Attack Graph counts separately — so the old
+    // label put two different quantities under one word on two screens an operator compares.
+    // Scoped to the strip: "edges" legitimately appears elsewhere on the page, and an unscoped
+    // getByText would be asserting against whichever node happened to match first.
+    expect(strip.textContent).toMatch(/edges/i);
+    expect(strip.textContent, "the Blocked tile counts edges, never paths").not.toMatch(/paths/i);
   });
 
   it("awaiting agents are hidden by default behind an 'Awaiting (N) — Show' chip (in document flow)", async () => {

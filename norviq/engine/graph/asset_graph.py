@@ -120,23 +120,44 @@ class AssetGraphBuilder:
         self._touch_node(data_id)
         self._enforce_node_limit()
 
-    def record_tool_call(self, spiffe_id: str, tool_name: str, decision: str, namespace: str = "", agent_class: str = "") -> None:
-        """Record an agent to tool call edge."""
-        self._ensure_tool_call_nodes(spiffe_id, tool_name, namespace, agent_class)
+    def record_tool_call(self, spiffe_id: str, tool_name: str, decision: str, namespace: str = "",
+                         agent_class: str = "", trust_score: float | None = None) -> None:
+        """Record an agent to tool call edge.
+
+        `trust_score` is the score the evaluator just computed for this call. It is optional only so
+        existing callers/tests keep working; when it is None the agent node keeps `add_agent`'s default
+        rather than being overwritten with a fabricated value.
+        """
+        self._ensure_tool_call_nodes(spiffe_id, tool_name, namespace, agent_class, trust_score)
         tool_id = f"tool:{tool_name}"
         self._upsert_call_edge(spiffe_id, tool_id, decision)
         self._increment_tool_counter(tool_id)
         self._record_mapped_data(tool_name)
         log.debug("nrvq.graph.tool_call_recorded", agent=spiffe_id, tool=tool_name, code="NRVQ-GRP-11000")
 
-    def _ensure_tool_call_nodes(self, spiffe_id: str, tool_name: str, namespace: str, agent_class: str) -> None:
+    def _ensure_tool_call_nodes(self, spiffe_id: str, tool_name: str, namespace: str, agent_class: str,
+                                trust_score: float | None = None) -> None:
         """Create missing agent or tool nodes before call-edge write."""
         if spiffe_id not in self._graph:
-            self.add_agent(spiffe_id, agent_class, namespace)
+            if trust_score is None:
+                self.add_agent(spiffe_id, agent_class, namespace)
+            else:
+                self.add_agent(spiffe_id, agent_class, namespace, trust_score=trust_score)
         else:
             # Same identity, another class (e.g. two agent-class labels on one service account) — record it
             # so the read model can render distinguishable sub-nodes instead of collapsing them.
             self._merge_agent_class(spiffe_id, agent_class)
+            # Trust MOVES between calls — that is the whole point of behavioural trust — so an existing
+            # node must track it, not keep whatever it was created with. Without this the score froze at
+            # first sight and every trust-derived read (severity, critical paths, low_trust_agents) was
+            # computed from a stale number.
+            if trust_score is not None:
+                props = self._graph.nodes[spiffe_id].setdefault("properties", {})
+                props["trust_score"] = float(trust_score)
+                # Category is DERIVED from the score (add_agent sets both at creation). Updating one
+                # without the other would leave the node self-contradictory — a 0.2 score still labelled
+                # the category it was created with — and the console reads the category.
+                props["trust_category"] = self._trust_category(float(trust_score))
         tool_id = f"tool:{tool_name}"
         if tool_id not in self._graph:
             self.add_tool(tool_name, namespace)

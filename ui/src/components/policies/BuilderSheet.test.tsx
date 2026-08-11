@@ -1,0 +1,2081 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Norviq Contributors
+//
+// BuilderSheet — render, add a rule, watch the live compiled-rego preview update, and the two safety
+// gates: Run dry-run is disabled while the graph has compile errors, and Save & enforce is disabled
+// until a VALID dry-run of the CURRENT graph state has completed (recompile invalidates it — see
+// builderCompile.ts / BuilderSheet.tsx's `dryRunStale` doctrine, same pattern as PolicyCatalog's raw
+// editor). Follows PolicyCatalog.dryrun.test.tsx's msw + monaco-stub convention.
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { http, HttpResponse } from "msw";
+import { setupServer } from "msw/node";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { BuilderSheet } from "./BuilderSheet";
+import type { BuilderGraph } from "../../lib/builderGraph";
+
+// A minimal Monaco stub: a read-only textarea that mirrors `value`, so the compiled rego preview is
+// inspectable without pulling in the real editor.
+vi.mock("@monaco-editor/react", () => ({
+  default: ({ value }: { value?: string }) => <textarea data-testid="monaco-editor" readOnly value={value} />
+}));
+
+const server = setupServer(http.get("/api/v1/agents", () => HttpResponse.json([])));
+beforeAll(() => server.listen({ onUnhandledRequest: "bypass" }));
+afterEach(() => server.resetHandlers());
+afterAll(() => server.close());
+
+function renderSheet() {
+  return render(<BuilderSheet namespace="default" onClose={() => {}} />);
+}
+
+/**
+ * Add a condition through the ConditionPicker.
+ *
+ * The two `<select>`s this replaced could be driven with a single `fireEvent.change`; a picker needs
+ * open → choose. Worth the two lines: a select cannot show a disabled option's REASON, which is the
+ * thing these tests care most about proving is visible.
+ *
+ * `id` is the option id — an argument path (`to`), a fact field (`data_classes`), or a constraint
+ * kind (`matches`).
+ */
+function openPicker() {
+  // IDEMPOTENT on purpose. These helpers get called inside `waitFor`, which retries — and the trigger
+  // is replaced by the popover on the first click, so a second unconditional click throws "unable to
+  // find builder-condition-picker-open" and the retry loop reports a missing element instead of the
+  // condition it was actually waiting for.
+  if (!screen.queryByTestId("builder-condition-picker")) {
+    fireEvent.click(screen.getByTestId("builder-condition-picker-open"));
+  }
+}
+
+function pickCondition(id: string) {
+  openPicker();
+  fireEvent.click(screen.getByTestId(`builder-condition-picker-option-${id}`));
+}
+
+/** Open the picker and read what it offers, without choosing anything. */
+function pickerOptionIds(): string[] {
+  openPicker();
+  return [...document.querySelectorAll('[data-testid^="builder-condition-picker-option-"]')].map((el) =>
+    (el.getAttribute("data-testid") ?? "").replace("builder-condition-picker-option-", "")
+  );
+}
+
+/** Scope + one rule with a reason (auto-fills rule_id) + one detector condition — a fully valid graph. */
+function buildValidRule() {
+  fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+  fireEvent.click(screen.getByTestId("builder-add-rule"));
+  fireEvent.change(screen.getByTestId("builder-rule-reason-0"), { target: { value: "SQL injection blocked" } });
+  fireEvent.click(screen.getByTestId("builder-add-condition-0-0")); // default condition = detector/sql_injection, already valid
+}
+
+describe("BuilderSheet", () => {
+  it("renders the scope field and an empty rule rail", () => {
+    renderSheet();
+    expect(screen.getByTestId("builder-sheet")).toBeInTheDocument();
+    expect(screen.getByTestId("builder-agent-class")).toBeInTheDocument();
+    expect(screen.getByText(/no rules yet/i)).toBeInTheDocument();
+    // Dry-run/Save start disabled — no scope, no rules.
+    expect(screen.getByTestId("builder-dryrun-btn")).toBeDisabled();
+    expect(screen.getByTestId("builder-save-btn")).toBeDisabled();
+  });
+
+  it("adding a rule renders a rule card, and filling it out updates the LIVE compiled rego preview", async () => {
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-add-rule"));
+    expect(screen.getByTestId("builder-rule-0")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByTestId("builder-rule-reason-0"), { target: { value: "SQL injection blocked" } });
+    fireEvent.click(screen.getByTestId("builder-add-condition-0-0"));
+
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain("package norviq.custom.builder_spike");
+      // rule_id auto-slugged from the reason text (untouched rule_id field).
+      expect(rego).toContain('blocks["cls_block_sql_injection"]');
+      expect(rego).toContain('"cls_block_sql_injection": "SQL injection blocked"');
+    });
+    // A fully-formed rule has no compile errors.
+    expect(screen.queryByTestId("builder-errors")).not.toBeInTheDocument();
+  });
+
+  it("disables Run dry-run while the graph has compile errors (an incomplete rule)", () => {
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-add-rule")); // empty rule_id/reason/conditions -> compile errors
+    expect(screen.getByTestId("builder-errors")).toBeInTheDocument();
+    expect(screen.getByTestId("builder-dryrun-btn")).toBeDisabled();
+    expect(screen.getByTestId("builder-save-btn")).toBeDisabled();
+  });
+
+  it("disables Save & enforce until a VALID dry-run of the current graph has completed", async () => {
+    server.use(
+      http.post("/api/v1/policies/dry-run", () =>
+        HttpResponse.json({
+          valid: true,
+          errors: [],
+          total_records_checked: 5,
+          would_block: 1,
+          would_allow: 4,
+          would_escalate: 0,
+          newly_blocked: 1,
+          newly_allowed: 0,
+          newly_blocked_samples: [{ tool_name: "execute_sql", was: "allow", now: "block", rule_id: "sql_injection_blocked" }],
+          recommendation: "Would NEWLY block 1 of 5 recent calls (20.0%) — review the flips before deploying."
+        })
+      )
+    );
+
+    renderSheet();
+    buildValidRule();
+
+    await waitFor(() => expect(screen.getByTestId("builder-dryrun-btn")).not.toBeDisabled());
+    // No dry-run has run yet against this graph -> Save stays gated.
+    expect(screen.getByTestId("builder-save-btn")).toBeDisabled();
+
+    fireEvent.click(screen.getByTestId("builder-dryrun-btn"));
+
+    await waitFor(() => expect(screen.getByTestId("builder-dryrun-result")).toBeInTheDocument());
+    expect(screen.getByText(/would newly block 1 of 5/i)).toBeInTheDocument();
+    // A VALID dry-run of the exact current graph -> Save unlocks.
+    await waitFor(() => expect(screen.getByTestId("builder-save-btn")).not.toBeDisabled());
+  });
+
+  // --- the gate a shipped inverted policy walked straight through -------------------------------
+  //
+  // Measured, not theorised. A policy authored in this sheet was saved as ENFORCING while doing the
+  // exact OPPOSITE of what its own rule id and reason string claimed — it allowed the attack and
+  // blocked the benign traffic, because a negation was dropped. Everything on screen was green:
+  // valid rego, a `valid` dry-run, Save enabled. The single true signal was "Replayed 0 recent real
+  // calls", and it was the one thing that carried no weight.
+
+  it("blocks Save when the dry-run replayed nothing, until the operator says so out loud", async () => {
+    server.use(
+      http.post("/api/v1/policies/dry-run", () =>
+        HttpResponse.json({ valid: true, errors: [], total_records_checked: 0, newly_blocked: 0, recommendation: "n/a" })
+      )
+    );
+    renderSheet();
+    buildValidRule();
+    await waitFor(() => expect(screen.getByTestId("builder-dryrun-btn")).not.toBeDisabled());
+    fireEvent.click(screen.getByTestId("builder-dryrun-btn"));
+
+    // valid, but it proved only that the rego compiles — it tested the policy against nothing.
+    await waitFor(() => expect(screen.getByTestId("builder-unmeasured-ack")).toBeInTheDocument());
+    expect(screen.getByTestId("builder-save-btn")).toBeDisabled();
+
+    fireEvent.click(screen.getByTestId("builder-unmeasured-ack-input"));
+    await waitFor(() => expect(screen.getByTestId("builder-save-btn")).not.toBeDisabled());
+  });
+
+  it("does not ask for the acknowledgement when the dry-run actually replayed traffic", async () => {
+    server.use(
+      http.post("/api/v1/policies/dry-run", () =>
+        HttpResponse.json({ valid: true, errors: [], total_records_checked: 12, newly_blocked: 0, recommendation: "n/a" })
+      )
+    );
+    renderSheet();
+    buildValidRule();
+    await waitFor(() => expect(screen.getByTestId("builder-dryrun-btn")).not.toBeDisabled());
+    fireEvent.click(screen.getByTestId("builder-dryrun-btn"));
+    await waitFor(() => expect(screen.getByTestId("builder-save-btn")).not.toBeDisabled());
+    expect(screen.queryByTestId("builder-unmeasured-ack")).toBeNull();
+  });
+
+  it("re-locks Save after the graph changes post-dry-run (staleness), even though the earlier dry-run was valid", async () => {
+    server.use(
+      http.post("/api/v1/policies/dry-run", () =>
+        HttpResponse.json({ valid: true, errors: [], total_records_checked: 5, newly_blocked: 0, recommendation: "n/a" })
+      )
+    );
+    renderSheet();
+    buildValidRule();
+    await waitFor(() => expect(screen.getByTestId("builder-dryrun-btn")).not.toBeDisabled());
+    fireEvent.click(screen.getByTestId("builder-dryrun-btn"));
+    await waitFor(() => expect(screen.getByTestId("builder-save-btn")).not.toBeDisabled());
+
+    // Edit the reason (and thus the compiled rego) after the dry-run — Save must re-lock.
+    fireEvent.change(screen.getByTestId("builder-rule-reason-0"), { target: { value: "SQL injection blocked v2" } });
+    expect(screen.getByTestId("builder-save-btn")).toBeDisabled();
+  });
+});
+
+// --- unsaved-changes guard (round B fix 3): overlay click, Cancel, and the X button all funnel
+// through the same `requestClose` gate — a dirty graph (some class typed or a rule added) requires an
+// explicit window.confirm before the sheet actually closes; a pristine sheet or one just saved does not. ---
+describe("BuilderSheet — unsaved-changes guard on close", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("guards the X button with window.confirm when dirty, and only closes once confirmed", () => {
+    const confirmSpy = vi.spyOn(window, "confirm");
+    const onClose = vi.fn();
+    render(<BuilderSheet namespace="default" onClose={onClose} />);
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+
+    confirmSpy.mockReturnValueOnce(false);
+    fireEvent.click(screen.getByTestId("builder-close"));
+    expect(confirmSpy).toHaveBeenLastCalledWith("Discard this unsaved policy?");
+    expect(onClose).not.toHaveBeenCalled();
+
+    confirmSpy.mockReturnValueOnce(true);
+    fireEvent.click(screen.getByTestId("builder-close"));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("guards the Cancel button with window.confirm when dirty (via a rule, not a class), and only closes once confirmed", () => {
+    const confirmSpy = vi.spyOn(window, "confirm");
+    const onClose = vi.fn();
+    render(<BuilderSheet namespace="default" onClose={onClose} />);
+    fireEvent.click(screen.getByTestId("builder-add-rule")); // dirty via a rule, not a class this time
+
+    confirmSpy.mockReturnValueOnce(false);
+    fireEvent.click(screen.getByText("Cancel"));
+    expect(onClose).not.toHaveBeenCalled();
+
+    confirmSpy.mockReturnValueOnce(true);
+    fireEvent.click(screen.getByText("Cancel"));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("guards the overlay click with window.confirm when dirty, and only closes once confirmed", () => {
+    const confirmSpy = vi.spyOn(window, "confirm");
+    const onClose = vi.fn();
+    const { container } = render(<BuilderSheet namespace="default" onClose={onClose} />);
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    const overlay = container.querySelector(".sheet-overlay") as HTMLElement;
+
+    confirmSpy.mockReturnValueOnce(false);
+    fireEvent.click(overlay);
+    expect(onClose).not.toHaveBeenCalled();
+
+    confirmSpy.mockReturnValueOnce(true);
+    fireEvent.click(overlay);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT call window.confirm when closing a pristine sheet (no class, no rules)", () => {
+    const confirmSpy = vi.spyOn(window, "confirm");
+    const onClose = vi.fn();
+    render(<BuilderSheet namespace="default" onClose={onClose} />);
+
+    fireEvent.click(screen.getByTestId("builder-close"));
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT prompt after a successful Save & enforce, even though the sheet still has a class + a rule", async () => {
+    server.use(
+      http.post("/api/v1/policies/dry-run", () =>
+        HttpResponse.json({ valid: true, errors: [], total_records_checked: 5, newly_blocked: 0, recommendation: "n/a" })
+      ),
+      http.post("/api/v1/policies", () => HttpResponse.json({ version: 1 })),
+      // verifyPolicyApplied's convergence poll — resolve on the very first tick so no timers linger.
+      http.get("/api/v1/policies", () =>
+        HttpResponse.json([{ namespace: "default", agent_class: "builder-spike", current_version: 1, enforcement_mode: "block" }])
+      )
+    );
+    const confirmSpy = vi.spyOn(window, "confirm");
+    const onClose = vi.fn();
+    render(<BuilderSheet namespace="default" onClose={onClose} />);
+    buildValidRule();
+
+    await waitFor(() => expect(screen.getByTestId("builder-dryrun-btn")).not.toBeDisabled());
+    fireEvent.click(screen.getByTestId("builder-dryrun-btn"));
+    await waitFor(() => expect(screen.getByTestId("builder-save-btn")).not.toBeDisabled());
+
+    fireEvent.click(screen.getByTestId("builder-save-btn"));
+    // The save round-trip completed once the button stops reading "Saving...".
+    await waitFor(() => expect(screen.getByTestId("builder-save-btn")).toHaveTextContent("Save & enforce"));
+
+    // Sheet still has a class + a rule (nothing was cleared) — pre-fix-3 this would still prompt.
+    expect(screen.getByTestId("builder-agent-class")).toHaveValue("builder-spike");
+    fireEvent.click(screen.getByTestId("builder-close"));
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+// --- editor expand/collapse (round B fix 4) ---
+describe("BuilderSheet — compiled-rego editor expand/collapse", () => {
+  it("toggles the editor between the compact and expanded height, and reflects state on the toggle + container", () => {
+    renderSheet();
+    const toggle = screen.getByTestId("builder-editor-expand-toggle");
+    const editorContainer = screen.getByTestId("builder-editor-container");
+
+    expect(toggle).toHaveAttribute("data-expanded", "false");
+    expect(editorContainer).toHaveAttribute("data-expanded", "false");
+    expect(editorContainer.style.height).toBe("260px");
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("data-expanded", "true");
+    expect(editorContainer).toHaveAttribute("data-expanded", "true");
+    expect(editorContainer.style.height).toBe("560px");
+
+    // The stats row below the editor is unaffected by the toggle (still present, unchanged testid).
+    expect(screen.getByTestId("builder-stats")).toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("data-expanded", "false");
+    expect(editorContainer.style.height).toBe("260px");
+  });
+});
+
+describe("BuilderSheet — a clause is filed under what it ADDRESSES", () => {
+  it("puts a param_paths clause under Argument, not under Whole call", async () => {
+    // `param_paths.<path>` clauses are STORED as facts because that is how the compiler emits them,
+    // and the facts pass used to render every one of them under a heading reading "A fact the ENGINE
+    // derived about the call, not one named argument" — which is the precise opposite of what a
+    // param_paths clause is. ARGUMENT vs WHOLE CALL is the distinction this panel exists to teach:
+    // an argument clause fails when the caller omits that argument; a whole-call fact holds wherever
+    // the value sits. Filing one under the other teaches it backwards.
+    // The same declared schema the sibling argument tests use — the picker can only offer a tool's
+    // arguments when the registry declares them, so without this there is no ARGUMENT clause to file
+    // anywhere and the test would pass by having nothing to group.
+    server.use(
+      http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
+      http.get("/api/v1/tools", () =>
+        HttpResponse.json([
+          registryEntry("send_email", {
+            source: "mcp_declared",
+            server_id: "smtp",
+            schema_available: true,
+            input_schema: {
+              type: "object",
+              required: ["to"],
+              properties: { to: { type: "string" }, retries: { type: "integer" } }
+            }
+          })
+        ])
+      )
+    );
+    renderSheet();
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
+
+    // One of each kind, added in an order that would put the whole-call fact FIRST if the pass simply
+    // followed authoring order — so a passing result cannot be an accident of insertion sequence.
+    await waitFor(() => expect(pickerOptionIds()).toContain("data_classes"));
+    pickCondition("data_classes");
+    await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
+    await waitFor(() => expect(pickerOptionIds()).toContain("to"));
+    pickCondition("to");
+    await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-1")).toBeInTheDocument());
+
+    // Assert DOM ORDER, not string positions: which heading a clause sits under is the guarantee, and
+    // it must not break when a label is reworded.
+    const editor = screen.getByTestId("builder-grant-editor-send_email");
+    const marks = [...editor.querySelectorAll('[data-testid^="builder-scope-section-"], [data-testid^="builder-fact-row-"]')].map(
+      (el) => el.getAttribute("data-testid") ?? ""
+    );
+
+    const argHeading = marks.indexOf("builder-scope-section-argument");
+    const wholeHeading = marks.indexOf("builder-scope-section-whole-call");
+    const argClause = marks.indexOf("builder-fact-row-send_email-1");   // param_paths.to
+    const wholeClause = marks.indexOf("builder-fact-row-send_email-0"); // data_classes
+
+    expect(argHeading).toBeGreaterThanOrEqual(0);
+    expect(wholeHeading).toBeGreaterThanOrEqual(0);
+    // ARGUMENT first, then its clause, then WHOLE CALL, then its clause — the argument clause must
+    // never fall under a heading reading "not one named argument".
+    expect(argHeading).toBeLessThan(argClause);
+    expect(argClause).toBeLessThan(wholeHeading);
+    expect(wholeHeading).toBeLessThan(wholeClause);
+  });
+
+  it("the ARGUMENT hint's omission promise is backed by an emitted guard, on the fact rows too", async () => {
+    // THE COPY IS A SECURITY CLAIM. The heading over these rows says "A call that omits it fails this
+    // line", and the panel header above it says omitting an argument cannot be used to skip a
+    // constraint. That was true of the CONSTRAINT rows and false of the `param_paths.<arg>` FACT rows
+    // printed under the same heading in the same panel: measured against real opa, a grant of
+    // `param_paths.columns notMatches "(?i)(card_number|ssn)"` ALLOWED a call that omitted `columns`.
+    //
+    // Two halves, and both have to hold or the sentence is a lie:
+    //   * the heading over a param_paths row still states the omission rule (asserted here);
+    //   * the compiler emits the derivability conjunct that MAKES it true (asserted here, on the rego
+    //     this very panel produced), and that conjunct actually denies — asserted against real opa in
+    //     builderIntentGrants.test.ts ("the panel's omission promise holds for every param_paths fact
+    //     row it prints"), because a decision is the only proof a policy enforces anything.
+    server.use(
+      http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
+      http.get("/api/v1/tools", () =>
+        HttpResponse.json([
+          registryEntry("send_email", {
+            source: "mcp_declared",
+            server_id: "smtp",
+            schema_available: true,
+            input_schema: { type: "object", required: ["to"], properties: { to: { type: "string" } } }
+          })
+        ])
+      )
+    );
+    renderSheet();
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
+
+    await waitFor(() => expect(pickerOptionIds()).toContain("to"));
+    pickCondition("to"); // -> addFact(param_paths.to), the picker's PRIMARY route for a declared arg
+    await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
+
+    // The heading this row sits under makes the promise...
+    const heading = screen.getByTestId("builder-scope-section-argument");
+    expect(heading.textContent).toMatch(/a call that omits it fails this line/i);
+
+    // ...and the rego this panel just compiled contains what makes it true: the path must have been
+    // DERIVED. Without this conjunct `scalarFieldExpr` defaults an absent path to "" and the clause is
+    // answered by a value the engine never saw.
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain('object.get(input.derived.param_paths, "to", null) != null');
+    });
+  });
+
+  it("removing a clause removes the one that was clicked, not the one at its display position", async () => {
+    // The pass is SORTED for display, so the ordinal a row appears at is not its index in the array.
+    // `removeFact(tool, i)` takes the real index — if the sort ever leaked into that argument, this
+    // would delete the wrong clause, silently, and the operator would be left enforcing something
+    // they thought they had removed.
+    // The same declared schema the sibling argument tests use — the picker can only offer a tool's
+    // arguments when the registry declares them, so without this there is no ARGUMENT clause to file
+    // anywhere and the test would pass by having nothing to group.
+    server.use(
+      http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
+      http.get("/api/v1/tools", () =>
+        HttpResponse.json([
+          registryEntry("send_email", {
+            source: "mcp_declared",
+            server_id: "smtp",
+            schema_available: true,
+            input_schema: {
+              type: "object",
+              required: ["to"],
+              properties: { to: { type: "string" }, retries: { type: "integer" } }
+            }
+          })
+        ])
+      )
+    );
+    renderSheet();
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
+
+    await waitFor(() => expect(pickerOptionIds()).toContain("data_classes"));
+    pickCondition("data_classes");                       // index 0 — whole call, displays SECOND
+    await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
+    await waitFor(() => expect(pickerOptionIds()).toContain("to"));
+    pickCondition("to");                                  // index 1 — argument, displays FIRST
+    await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-1")).toBeInTheDocument());
+
+    // Remove the ARGUMENT clause by its real index (1), and the whole-call one must survive.
+    fireEvent.click(screen.getByTestId("builder-fact-remove-send_email-1"));
+    await waitFor(() => {
+      // One clause left, and it must be the WHOLE-CALL one. If the display sort ever leaked into the
+      // index passed to removeFact, this removes data_classes instead and the operator is left
+      // enforcing a clause they believe they deleted.
+      const editor = screen.getByTestId("builder-grant-editor-send_email");
+      expect(editor.querySelectorAll('[data-testid^="builder-fact-row-"]')).toHaveLength(1);
+      expect(screen.getByTestId("builder-scope-section-whole-call")).toBeInTheDocument();
+      expect(screen.queryByTestId("builder-scope-section-argument")).not.toBeInTheDocument();
+    });
+  });
+});
+
+// --- Phase 2b: sourceVerb / paramRegex / NOT condition types -------------------------------------
+describe("BuilderSheet — Phase 2b condition types (sourceVerb / paramRegex / NOT)", () => {
+  it("configures a sourceVerb condition (source then verb dropdowns) and reflects it live in the compiled rego", async () => {
+    renderSheet();
+    buildValidRule(); // scope + rule 0 + reason + condition 0 (default: detector/sql_injection)
+
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-type"), { target: { value: "sourceVerb" } });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("builder-cond-0-0-0-source")).toBeInTheDocument();
+      expect(screen.getByTestId("builder-cond-0-0-0-verb")).toBeInTheDocument();
+    });
+
+    // Default (source,verb) picked by defaultConditionFor is the first entry of the capability mirror
+    // (elasticsearch/read) — it shows up in the live compiled preview immediately, no extra input needed.
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain("bld_srcverb_elasticsearch_read");
+    });
+    expect(screen.queryByTestId("builder-errors")).not.toBeInTheDocument();
+
+    // Switching source to postgresql and verb to delete updates the compiled predicate reference.
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-source"), { target: { value: "postgresql" } });
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-verb"), { target: { value: "delete" } });
+
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain("bld_srcverb_postgresql_delete");
+      expect(rego).not.toContain("bld_srcverb_elasticsearch_read");
+    });
+  });
+
+  it("filters the verb dropdown to what the chosen source supports (egress sources expose only 'send')", async () => {
+    renderSheet();
+    buildValidRule();
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-type"), { target: { value: "sourceVerb" } });
+    await waitFor(() => expect(screen.getByTestId("builder-cond-0-0-0-source")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-source"), { target: { value: "webhook" } });
+
+    const verbSelect = screen.getByTestId("builder-cond-0-0-0-verb") as HTMLSelectElement;
+    const options = Array.from(verbSelect.options).map((o) => o.value);
+    expect(options).toEqual(["send"]);
+
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain("bld_srcverb_webhook_send");
+    });
+  });
+
+  it("a paramRegex condition with an invalid pattern shows the inline hint and blocks dry-run/save via the existing compile-error gate", async () => {
+    renderSheet();
+    buildValidRule();
+
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-type"), { target: { value: "paramRegex" } });
+    await waitFor(() => expect(screen.getByTestId("builder-cond-0-0-0-field")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-field"), { target: { value: "query" } });
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-pattern"), { target: { value: "(unclosed" } });
+
+    await waitFor(() => expect(screen.getByTestId("builder-cond-0-0-0-pattern-invalid")).toBeInTheDocument());
+    expect(screen.getByTestId("builder-errors")).toBeInTheDocument();
+    expect(screen.getByTestId("builder-dryrun-btn")).toBeDisabled();
+    expect(screen.getByTestId("builder-save-btn")).toBeDisabled();
+
+    // Fixing the pattern clears both the inline hint and the compile-error gate.
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-pattern"), { target: { value: "^SELECT" } });
+    await waitFor(() => expect(screen.queryByTestId("builder-cond-0-0-0-pattern-invalid")).not.toBeInTheDocument());
+    expect(screen.queryByTestId("builder-errors")).not.toBeInTheDocument();
+
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      // `leaf`, not `val`: a paramRegex condition is a BLOCK trigger, and reading only a top-level
+      // string meant a nested or list-wrapped payload did not trigger it — so the rule read "block
+      // when query matches ^SELECT" and allowed `{"query": {"sql": "SELECT …"}}`. It now walks the
+      // named param (walk emits the root first, so the flat case is unchanged).
+      expect(rego).toContain('regex.match("^SELECT", leaf)');
+    });
+  });
+
+  it("the NOT toggle wraps a condition and the compiled preview gains a `not ` prefix (and unwraps back on a second click)", async () => {
+    renderSheet();
+    buildValidRule(); // condition 0 = detector/sql_injection
+
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain("bld_sql_injection");
+      expect(rego).not.toContain("not bld_sql_injection");
+    });
+    expect(screen.getByTestId("builder-cond-0-0-0-not-toggle")).toHaveAttribute("aria-pressed", "false");
+
+    fireEvent.click(screen.getByTestId("builder-cond-0-0-0-not-toggle"));
+
+    expect(screen.getByTestId("builder-cond-0-0-0-not-toggle")).toHaveAttribute("aria-pressed", "true");
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain("not bld_sql_injection");
+    });
+    // Toggling NOT does not itself introduce a compile error — the wrapped condition is still valid.
+    expect(screen.queryByTestId("builder-errors")).not.toBeInTheDocument();
+
+    // A second click unwraps it again.
+    fireEvent.click(screen.getByTestId("builder-cond-0-0-0-not-toggle"));
+    expect(screen.getByTestId("builder-cond-0-0-0-not-toggle")).toHaveAttribute("aria-pressed", "false");
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).not.toContain("not bld_sql_injection");
+      expect(rego).toContain("bld_sql_injection");
+    });
+  });
+});
+
+// --- per-instance rule-id generator (round B fix 1): a useRef inside the component, not module-level
+// mutable state, so a remount starts fresh and two independently mounted sheets never share a counter. ---
+describe("BuilderSheet — per-instance rule id generator (no cross-sheet collision)", () => {
+  function ruleInternalIds(container: HTMLElement): string[] {
+    return Array.from(container.querySelectorAll("[data-rule-internal-id]")).map(
+      (el) => el.getAttribute("data-rule-internal-id") as string
+    );
+  }
+
+  it("assigns unique, non-colliding ids to multiple rules within one sheet", () => {
+    const { container } = render(<BuilderSheet namespace="default" onClose={() => {}} />);
+    fireEvent.click(within(container).getByTestId("builder-add-rule"));
+    fireEvent.click(within(container).getByTestId("builder-add-rule"));
+    fireEvent.click(within(container).getByTestId("builder-add-rule"));
+    const ids = ruleInternalIds(container);
+    expect(ids).toHaveLength(3);
+    expect(new Set(ids).size).toBe(3);
+  });
+
+  it("a remounted sheet starts its rule-id sequence fresh, not continuing a prior mount's count", () => {
+    const first = render(<BuilderSheet namespace="default" onClose={() => {}} />);
+    fireEvent.click(within(first.container).getByTestId("builder-add-rule"));
+    fireEvent.click(within(first.container).getByTestId("builder-add-rule"));
+    fireEvent.click(within(first.container).getByTestId("builder-add-rule"));
+    const firstIds = ruleInternalIds(first.container);
+    expect(firstIds[firstIds.length - 1]).toMatch(/_3$/); // third rule added -> sequence at 3
+    first.unmount();
+
+    const second = render(<BuilderSheet namespace="default" onClose={() => {}} />);
+    fireEvent.click(within(second.container).getByTestId("builder-add-rule"));
+    const secondIds = ruleInternalIds(second.container);
+    // A module-level counter would carry over to _4 here; a fresh per-instance ref starts back at _1.
+    expect(secondIds[0]).toMatch(/_1$/);
+  });
+
+  it("two simultaneously mounted sheets never collide or share a counter", () => {
+    const sheetA = render(<BuilderSheet namespace="default" onClose={() => {}} />);
+    const sheetB = render(<BuilderSheet namespace="default" onClose={() => {}} />);
+
+    // Sheet A adds two rules first.
+    fireEvent.click(within(sheetA.container).getByTestId("builder-add-rule"));
+    fireEvent.click(within(sheetA.container).getByTestId("builder-add-rule"));
+    // Sheet B, mounted independently, adds one rule — it must NOT have been bumped to _3 by A's activity.
+    fireEvent.click(within(sheetB.container).getByTestId("builder-add-rule"));
+
+    const aIds = ruleInternalIds(sheetA.container);
+    const bIds = ruleInternalIds(sheetB.container);
+    expect(aIds).toHaveLength(2);
+    expect(bIds).toHaveLength(1);
+    expect(bIds[0]).toMatch(/_1$/); // sheet B's own first rule, unaffected by sheet A's counter
+    // No id collides across the two independently-keyed sheets.
+    expect(new Set([...aIds, ...bIds]).size).toBe(3);
+
+    sheetA.unmount();
+    sheetB.unmount();
+  });
+});
+
+// --- Phase 2c: Intent Allowlist mode --------------------------------------------------------------
+describe("BuilderSheet — Intent Allowlist mode (Phase 2c)", () => {
+  it("defaults to Tighten-only rules mode, and toggling to Intent allowlist hides the rules rail and shows the allowlist editor", async () => {
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+
+    // Starts in rules mode: the rules rail (Add rule button) is present, the allowlist editor is not.
+    expect(screen.getByTestId("builder-mode-rules")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("builder-mode-allowlist")).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByTestId("builder-add-rule")).toBeInTheDocument();
+    expect(screen.queryByTestId("builder-allowlist-tools")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+
+    expect(screen.getByTestId("builder-mode-allowlist")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("builder-mode-rules")).toHaveAttribute("aria-pressed", "false");
+    // Rules rail (and the Add rule button, and the Defaults section) is gone.
+    expect(screen.queryByTestId("builder-add-rule")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("builder-defaults-decision")).not.toBeInTheDocument();
+    // The allowlist editor is shown instead.
+    expect(screen.getByTestId("builder-allowlist-tools")).toBeInTheDocument();
+    expect(screen.getByTestId("builder-allowlist-refinement-readonly")).toBeInTheDocument();
+    expect(screen.getByTestId("builder-allowlist-refinement-egress")).toBeInTheDocument();
+    expect(screen.getByTestId("builder-allowlist-refinement-scope")).toBeInTheDocument();
+    expect(screen.getByTestId("builder-allowlist-refinement-rate")).toBeInTheDocument();
+
+    // An empty tool list warns (denies everything for the class).
+    expect(screen.getByTestId("builder-allowlist-empty-warning")).toBeInTheDocument();
+
+    // Compiled preview reflects the default-deny allowlist shape immediately.
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain("package norviq.intent.builder_spike");
+      expect(rego).toContain('default decision = "block"');
+      expect(rego).toContain('default rule_id = "intent_default_deny"');
+    });
+
+    // Toggling back to rules mode restores the rules rail and hides the allowlist editor again.
+    fireEvent.click(screen.getByTestId("builder-mode-rules"));
+    expect(screen.getByTestId("builder-add-rule")).toBeInTheDocument();
+    expect(screen.queryByTestId("builder-allowlist-tools")).not.toBeInTheDocument();
+  });
+
+  it("adding a tool updates the compiled preview to contain that tool (lower-cased) in allow_names, and the empty-allowlist warning clears", async () => {
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    expect(screen.getByTestId("builder-allowlist-empty-warning")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "Search_Docs" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+
+    expect(screen.getByTestId("builder-allowlist-tool-row-Search_Docs")).toBeInTheDocument();
+    // The warning clears once at least one tool is listed.
+    expect(screen.queryByTestId("builder-allowlist-empty-warning")).not.toBeInTheDocument();
+    // The input clears after adding, ready for the next tool.
+    expect(screen.getByTestId("builder-allowlist-tool-input")).toHaveValue("");
+
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain('allow_names := {"search_docs"}');
+    });
+
+    // Removing the tool via its chip's remove button brings the empty-allowlist warning back.
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-remove-Search_Docs"));
+    expect(screen.queryByTestId("builder-allowlist-tool-row-Search_Docs")).not.toBeInTheDocument();
+    expect(screen.getByTestId("builder-allowlist-empty-warning")).toBeInTheDocument();
+  });
+
+  it("pressing Enter in the tool input also adds the tool (not just the Add button)", async () => {
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "get_order" } });
+    fireEvent.keyDown(screen.getByTestId("builder-allowlist-tool-input"), { key: "Enter" });
+
+    expect(screen.getByTestId("builder-allowlist-tool-row-get_order")).toBeInTheDocument();
+  });
+
+  it("toggling a refinement checkbox adds its guard (and helper vocabulary) into the compiled preview", async () => {
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "search_docs" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).not.toContain("is_read");
+      expect(rego).not.toContain("read_verbs");
+    });
+
+    const readonlyCheckbox = screen.getByTestId("builder-allowlist-refinement-readonly") as HTMLInputElement;
+    expect(readonlyCheckbox.checked).toBe(false);
+    fireEvent.click(readonlyCheckbox);
+    expect(readonlyCheckbox.checked).toBe(true);
+
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain("read_verbs = {");
+      expect(rego).toContain("is_read { read_verbs[tool_verb] }");
+      expect(rego).toContain("    is_read");
+    });
+
+    // Unchecking removes the guard again.
+    fireEvent.click(readonlyCheckbox);
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).not.toContain("is_read");
+    });
+  });
+
+  it("switching modes preserves each mode's own state (rules survive a round trip through allowlist mode, and vice versa)", async () => {
+    renderSheet();
+    buildValidRule(); // scope + rule 0 (detector/sql_injection) in rules mode
+
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "search_docs" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+
+    fireEvent.click(screen.getByTestId("builder-mode-rules"));
+    // The rule added before switching to allowlist mode is still there, untouched.
+    expect(screen.getByTestId("builder-rule-0")).toBeInTheDocument();
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain('blocks["cls_block_sql_injection"]');
+    });
+
+    // Switching back to allowlist mode, the tool added earlier is still there too.
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    expect(screen.getByTestId("builder-allowlist-tool-row-search_docs")).toBeInTheDocument();
+  });
+});
+
+// --- Phase 2f: de-jargoned condition-type dropdown --------------------------------------------------
+// The React Flow canvas builder is gone (Phase 2f consolidation) — this form-based sheet is
+// now the ONLY visual builder, so its dropdown vocabulary can move from wire-ish jargon
+// ("detector"/"tool in"/"source verb") to operator language, grouped by category.
+describe("BuilderSheet — de-jargoned condition-type dropdown (Phase 2f)", () => {
+  it("renders operator-language labels (not the old wire-name jargon), grouped into Content/Tool/Trust/Engine-facts optgroups", () => {
+    renderSheet();
+    buildValidRule();
+
+    const typeSelect = screen.getByTestId("builder-cond-0-0-0-type") as HTMLSelectElement;
+    const optionTexts = Array.from(typeSelect.options).map((o) => o.text);
+    expect(optionTexts).toEqual([
+      "Content detector (injection / PII / secrets / destructive tool)",
+      "Keyword in tool params",
+      "Param matches regex",
+      "Tool name is one of",
+      "Source + verb (capability)",
+      "Agent trust below",
+      // Engine-derived facts. This entry is the whole reason "block when the MCP pin drifted" is
+      // expressible in the builder at all — before it, scalarFact was in CONDITION_TYPES but absent
+      // from CONDITION_TYPE_GROUPS, so the dropdown (which renders from the groups) never offered it.
+      // Pinning the exact option list here is what makes that divergence fail a test instead of
+      // shipping an unreachable control.
+      "Engine fact is / is not (MCP pin, scan severity, plane, verb, SQL)"
+    ]);
+    // None of the old bare jargon values are still on screen as visible text.
+    expect(screen.queryByText(/^detector$/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^tool in$/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^source verb$/)).not.toBeInTheDocument();
+
+    const groupLabels = Array.from(typeSelect.querySelectorAll("optgroup")).map((g) => g.getAttribute("label"));
+    expect(groupLabels).toEqual(["Content", "Tool", "Trust", "Engine facts (MCP, plane, verb, SQL)"]);
+  });
+
+  it("shows a one-line hint near the dropdown for whichever type is currently selected, and it updates on type change", () => {
+    renderSheet();
+    buildValidRule(); // condition 0 defaults to type=detector
+
+    expect(screen.getByTestId("builder-cond-0-0-0-hint")).toHaveTextContent(/built-in content scanner/i);
+
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-type"), { target: { value: "toolIn" } });
+    expect(screen.getByTestId("builder-cond-0-0-0-hint")).toHaveTextContent(/exactly matches one of the names/i);
+  });
+});
+
+// --- Phase 2f: namespace honesty ---------------------------------------------------------------------
+// PolicyCatalog no longer silently resolves the global "All namespaces" selector to "default" before
+// handing it to BuilderSheet — it passes the raw value through, and BuilderSheet itself must gate Save
+// (and Dry-Run, which also POSTs a namespace) behind an explicit, concrete choice.
+describe("BuilderSheet — namespace honesty (Phase 2f)", () => {
+  it("gates Dry-Run/Save on a concrete target namespace when the caller passes 'all', and always shows the create-target summary", () => {
+    render(<BuilderSheet namespace="all" onClose={() => {}} />);
+
+    // Nothing chosen yet — the summary sentence is ALWAYS rendered, even with nothing filled in, and the
+    // required-namespace prompt is visible because the global scope was "All namespaces". The plain-
+    // English sentence reads as "incomplete" until scope + namespace are both set; the muted small-text
+    // line beneath it still shows the (dash) loader key — the honesty guarantee, preserved verbatim.
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent(/Pick who this policy is for to continue/i);
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent(/creates\s*—\s*\/\s*—/);
+    expect(screen.getByTestId("builder-namespace-required-warning")).toBeInTheDocument();
+    expect(screen.getByTestId("builder-target-namespace")).toHaveValue("");
+
+    buildValidRule(); // a fully valid rule + agent class — everything BUT a namespace
+    expect(screen.getByTestId("builder-dryrun-btn")).toBeDisabled();
+    expect(screen.getByTestId("builder-save-btn")).toBeDisabled();
+
+    // Picking a concrete namespace clears the gate and the prompt, and the sentence reflects it.
+    fireEvent.change(screen.getByTestId("builder-target-namespace"), { target: { value: "default" } });
+    expect(screen.queryByTestId("builder-namespace-required-warning")).not.toBeInTheDocument();
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent(
+      "Applies to every `builder-spike` agent in namespace `default`."
+    );
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent("creates default / builder-spike");
+    expect(screen.getByTestId("builder-dryrun-btn")).not.toBeDisabled();
+  });
+
+  it("pre-fills (but keeps editable) the target namespace when the caller passes an already-concrete namespace, and does not gate on it", () => {
+    renderSheet(); // namespace="default"
+    expect(screen.getByTestId("builder-target-namespace")).toHaveValue("default");
+    expect(screen.queryByTestId("builder-namespace-required-warning")).not.toBeInTheDocument();
+    // Agent class still empty -> scope isn't complete yet, so the sentence reads as incomplete, but the
+    // muted key line already shows the concrete namespace (honesty: never hides what's already known).
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent(/Pick who this policy is for to continue/i);
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent(/creates\s*default\s*\/\s*—/);
+  });
+});
+
+// --- Phase 2f: tool-name autocomplete + unknown-tool warning ------------------------------------------
+/** One `GET /api/v1/tools` row. Defaults to the weak tier — `observed` proves the name exists and
+ *  claims nothing else, which is what most of these assertions are about. */
+function registryEntry(name: string, over: Record<string, unknown> = {}) {
+  return {
+    name,
+    name_skeleton: name,
+    source: "observed",
+    namespace: "default",
+    server_id: null,
+    pin_status: null,
+    scan_severity: null,
+    description: null,
+    description_withheld: false,
+    input_schema: null,
+    schema_available: false,
+    last_seen_at: null,
+    ...over
+  };
+}
+
+describe("BuilderSheet — tool-name autocomplete + unknown-tool warning (Phase 2f)", () => {
+  it("warns (non-blocking) when a toolIn tool has never been observed in the target namespace, and stays silent for an observed one", async () => {
+    server.use(
+      http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
+      http.get("/api/v1/tools", () => HttpResponse.json([registryEntry("delete_kb"), registryEntry("search_kb")])),
+      http.post("/api/v1/policies/dry-run", () =>
+        HttpResponse.json({ valid: true, errors: [], total_records_checked: 5, newly_blocked: 0, recommendation: "n/a" })
+      )
+    );
+
+    renderSheet(); // namespace="default" — already concrete, so the registry fetch fires on mount
+    buildValidRule();
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-type"), { target: { value: "toolIn" } });
+    await waitFor(() => expect(screen.getByTestId("builder-cond-0-0-0-tools")).toBeInTheDocument());
+
+    // A tool in the registry — no warning once the fetch has resolved.
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-tools"), { target: { value: "delete_kb" } });
+    await waitFor(() => expect(screen.queryByTestId("builder-unknown-tool-warning")).not.toBeInTheDocument());
+
+    // A typo'd/never-seen tool — warns, but the compile-error gate is untouched and Dry-Run stays enabled.
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-tools"), { target: { value: "delete_kb_typo" } });
+    await waitFor(() =>
+      expect(screen.getByTestId("builder-unknown-tool-warning")).toHaveTextContent(/"delete_kb_typo" is not in this namespace's tool registry/i)
+    );
+    expect(screen.queryByTestId("builder-errors")).not.toBeInTheDocument();
+    expect(screen.getByTestId("builder-dryrun-btn")).not.toBeDisabled();
+
+    // It never blocks Save either — dry-running and saving proceed exactly as normal with the warning up.
+    fireEvent.click(screen.getByTestId("builder-dryrun-btn"));
+    await waitFor(() => expect(screen.getByTestId("builder-save-btn")).not.toBeDisabled());
+    expect(screen.getByTestId("builder-unknown-tool-warning")).toBeInTheDocument();
+  });
+
+  it("warns for a CAPABILITY FRAGMENT, which the UI used to offer and then vouch for", async () => {
+    // The bug this endpoint exists to retire. `knownToolNames` was `observed ∪ ALL_CAPABILITY_FRAGMENTS`,
+    // and fragments are substrings for `contains()` matching inside sourceVerb — "delete", "post",
+    // "http" are not tool names and no call can ever carry one. Because the same set also fed the
+    // datalist, the builder SUGGESTED them and then suppressed its own warning for them: an operator
+    // picking "delete" from the dropdown got a rule that could never fire, with nothing said.
+    server.use(
+      http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
+      http.get("/api/v1/tools", () => HttpResponse.json([registryEntry("delete_kb")]))
+    );
+
+    renderSheet();
+    buildValidRule();
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-type"), { target: { value: "toolIn" } });
+    await waitFor(() => expect(screen.getByTestId("builder-cond-0-0-0-tools")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-tools"), { target: { value: "delete" } });
+    await waitFor(() =>
+      expect(screen.getByTestId("builder-unknown-tool-warning")).toHaveTextContent(/"delete" is not in this namespace's tool registry/i)
+    );
+  });
+
+  it("says nothing when the registry is empty — that is ignorance, not evidence of absence", async () => {
+    // helm ships `webhook.injection.mcp.enabled: false`, so an estate with no pins and no recent traffic
+    // is the COMMON case. Warning on every name there would be warning-on-everything, which is how a
+    // control gets ignored before the one time it matters.
+    server.use(
+      http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
+      http.get("/api/v1/tools", () => HttpResponse.json([]))
+    );
+
+    renderSheet();
+    buildValidRule();
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-type"), { target: { value: "toolIn" } });
+    await waitFor(() => expect(screen.getByTestId("builder-cond-0-0-0-tools")).toBeInTheDocument());
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-tools"), { target: { value: "anything_at_all" } });
+
+    await waitFor(() => expect(screen.getByTestId("builder-cond-0-0-0-tools")).toHaveValue("anything_at_all"));
+    expect(screen.queryByTestId("builder-unknown-tool-warning")).not.toBeInTheDocument();
+  });
+
+  it("a registry fetch FAILURE reads as unknown, not as an empty estate", async () => {
+    // The old code caught each request into `[]`, which made an outage indistinguishable from a
+    // namespace with no traffic and pointed the warning at every name the operator typed.
+    server.use(
+      http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
+      http.get("/api/v1/tools", () => HttpResponse.json({ detail: "boom" }, { status: 500 }))
+    );
+
+    renderSheet();
+    buildValidRule();
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-type"), { target: { value: "toolIn" } });
+    await waitFor(() => expect(screen.getByTestId("builder-cond-0-0-0-tools")).toBeInTheDocument());
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-tools"), { target: { value: "some_tool" } });
+
+    await waitFor(() => expect(screen.getByTestId("builder-cond-0-0-0-tools")).toHaveValue("some_tool"));
+    expect(screen.queryByTestId("builder-unknown-tool-warning")).not.toBeInTheDocument();
+  });
+
+  it("suppresses the unknown-tool warning entirely until a concrete target namespace has been chosen (nothing to check against yet)", () => {
+    render(<BuilderSheet namespace="all" onClose={() => {}} />);
+    buildValidRule();
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-type"), { target: { value: "toolIn" } });
+    fireEvent.change(screen.getByTestId("builder-cond-0-0-0-tools"), { target: { value: "totally_unseen_tool" } });
+
+    expect(screen.queryByTestId("builder-unknown-tool-warning")).not.toBeInTheDocument();
+  });
+});
+
+// --- Phase 3: tier picker (Agent class / Namespace / Workload) + reserved-scope guard --------------
+describe("BuilderSheet — policy tier picker (Phase 3)", () => {
+  it("defaults to the Agent class tier, and switching tiers swaps which identifier field(s) show", () => {
+    renderSheet();
+    // Tier picker is now a radiogroup of three cards (UX redesign) — aria-checked, not aria-pressed.
+    expect(screen.getByTestId("builder-tier-picker")).toHaveAttribute("role", "radiogroup");
+    expect(screen.getByTestId("builder-tier-class")).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByTestId("builder-tier-namespace")).toHaveAttribute("aria-checked", "false");
+    expect(screen.getByTestId("builder-tier-workload")).toHaveAttribute("aria-checked", "false");
+    expect(screen.getByTestId("builder-agent-class")).toBeInTheDocument();
+    expect(screen.queryByTestId("builder-scope-identifier")).not.toBeInTheDocument();
+
+    // Namespace tier: the Agent class field disappears — the (relabeled) Target namespace field IS the
+    // scope identifier now (single field, testid swaps to builder-scope-identifier).
+    fireEvent.click(screen.getByTestId("builder-tier-namespace"));
+    expect(screen.getByTestId("builder-tier-namespace")).toHaveAttribute("aria-checked", "true");
+    expect(screen.queryByTestId("builder-agent-class")).not.toBeInTheDocument();
+    expect(screen.getByTestId("builder-scope-identifier")).toBeInTheDocument();
+    expect(screen.queryByTestId("builder-target-namespace")).not.toBeInTheDocument();
+
+    // Workload tier: a NEW workload-name identifier field appears, AND the Target namespace field is
+    // still separately present (its own testid, unaffected) — a workload policy needs both.
+    fireEvent.click(screen.getByTestId("builder-tier-workload"));
+    expect(screen.getByTestId("builder-tier-workload")).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByTestId("builder-scope-identifier")).toBeInTheDocument();
+    expect(screen.getByTestId("builder-target-namespace")).toBeInTheDocument();
+    // "Deployments only" appears twice now (the workload card's own small print, always shown, plus the
+    // identifier field's helper text once that tier is active) — assert at least one, not a single match.
+    expect(screen.getAllByText(/deployments only/i).length).toBeGreaterThan(0);
+  });
+
+  it("namespace tier: the compiled rego guards on input.agent.namespace, not agent_class, and uses the ns_ package/rule-id token", async () => {
+    renderSheet(); // namespace prop = "default" -> targetNamespace pre-filled "default"
+    fireEvent.click(screen.getByTestId("builder-tier-namespace"));
+    // The identifier field IS the pre-filled target namespace already ("default").
+    expect(screen.getByTestId("builder-scope-identifier")).toHaveValue("default");
+
+    fireEvent.click(screen.getByTestId("builder-add-rule"));
+    fireEvent.change(screen.getByTestId("builder-rule-reason-0"), { target: { value: "Blocked a destructive tool" } });
+    fireEvent.click(screen.getByTestId("builder-add-condition-0-0"));
+
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain("package norviq.custom.ns_default");
+      expect(rego).toContain('input.agent.namespace == "default"');
+      expect(rego).not.toMatch(/agent_class ==/);
+    });
+    expect(screen.queryByTestId("builder-errors")).not.toBeInTheDocument();
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent(
+      "Applies to every agent in namespace `default`, whatever its class."
+    );
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent("creates default / namespace:default");
+  });
+
+  it("workload tier: the compiled rego guards on input.agent.namespace using the TARGET namespace field, and uses the wl_ package/rule-id token", async () => {
+    renderSheet(); // namespace prop = "default"
+    fireEvent.click(screen.getByTestId("builder-tier-workload"));
+    fireEvent.change(screen.getByTestId("builder-scope-identifier"), { target: { value: "checkout" } });
+    // Target namespace already pre-filled "default" from the sheet's namespace prop.
+    fireEvent.click(screen.getByTestId("builder-add-rule"));
+    fireEvent.change(screen.getByTestId("builder-rule-reason-0"), { target: { value: "Blocked a destructive tool" } });
+    fireEvent.click(screen.getByTestId("builder-add-condition-0-0"));
+
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain("package norviq.custom.wl_checkout");
+      expect(rego).toContain('input.agent.namespace == "default"');
+      expect(rego).not.toMatch(/agent_class ==/);
+    });
+    expect(screen.queryByTestId("builder-errors")).not.toBeInTheDocument();
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent(
+      "Applies to agents of Deployment `checkout` in namespace `default`."
+    );
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent("creates default / deployment:checkout");
+  });
+
+  it("switching tiers preserves each tier's own typed identifier (no cross-tier data loss)", () => {
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-tier-workload"));
+    fireEvent.change(screen.getByTestId("builder-scope-identifier"), { target: { value: "checkout" } });
+    fireEvent.click(screen.getByTestId("builder-tier-class"));
+    expect(screen.getByTestId("builder-agent-class")).toHaveValue("builder-spike");
+    fireEvent.click(screen.getByTestId("builder-tier-workload"));
+    expect(screen.getByTestId("builder-scope-identifier")).toHaveValue("checkout");
+  });
+
+  it("choosing a tier card reveals ONLY that tier's own identifier field, never more than one at a time", () => {
+    renderSheet();
+    // Default (class): only the agent-class field is shown.
+    expect(screen.getByTestId("builder-agent-class")).toBeInTheDocument();
+    expect(screen.queryByTestId("builder-scope-identifier")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("builder-tier-namespace"));
+    // Namespace: agent-class is gone, and the ONE identifier field shown is the (relabeled) namespace
+    // field — no second, separate identifier input appears alongside it.
+    expect(screen.queryByTestId("builder-agent-class")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("builder-scope-identifier")).toHaveLength(1);
+    expect(screen.queryByTestId("builder-target-namespace")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("builder-tier-workload"));
+    // Workload: agent-class stays hidden; exactly one workload-name identifier field, plus the always-
+    // needed target-namespace field (a second, distinct field — not a duplicate identifier).
+    expect(screen.queryByTestId("builder-agent-class")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("builder-scope-identifier")).toHaveLength(1);
+    expect(screen.getByTestId("builder-target-namespace")).toBeInTheDocument();
+  });
+});
+
+// --- UX redesign: numbered steps, plain-English sentence, progressive disclosure --------------------
+describe("BuilderSheet — numbered steps (UX redesign)", () => {
+  it("renders step ① active and steps ②/③ dimmed (locked) on a fresh sheet", () => {
+    renderSheet();
+    expect(screen.getByTestId("builder-step-1")).toHaveAttribute("data-step-state", "active");
+    expect(screen.getByTestId("builder-step-2")).toHaveAttribute("data-step-state", "locked");
+    expect(screen.getByTestId("builder-step-3")).toHaveAttribute("data-step-state", "locked");
+    expect(screen.getByTestId("builder-step-1-chip")).toHaveTextContent(/needs input/i);
+    // Locked steps stay fully present (an operator revisiting a saved policy must see everything) —
+    // never hard-disabled/unclickable.
+    expect(screen.getByTestId("builder-mode-rules")).not.toBeDisabled();
+  });
+
+  it("step ② flips from locked to active once step ① becomes valid (class tier)", () => {
+    renderSheet(); // namespace="default" already concrete
+    expect(screen.getByTestId("builder-step-2")).toHaveAttribute("data-step-state", "locked");
+
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "report-gen" } });
+
+    expect(screen.getByTestId("builder-step-1")).toHaveAttribute("data-step-state", "done");
+    expect(screen.getByTestId("builder-step-1-chip")).toHaveTextContent(/done/i);
+    expect(screen.getByTestId("builder-step-2")).toHaveAttribute("data-step-state", "active");
+  });
+
+  it("step ③ flips from locked to active once step ② has a valid rule", () => {
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "report-gen" } });
+    expect(screen.getByTestId("builder-step-3")).toHaveAttribute("data-step-state", "locked");
+
+    fireEvent.click(screen.getByTestId("builder-add-rule"));
+    fireEvent.change(screen.getByTestId("builder-rule-reason-0"), { target: { value: "Blocked a delete" } });
+    fireEvent.click(screen.getByTestId("builder-add-condition-0-0"));
+
+    expect(screen.getByTestId("builder-step-2")).toHaveAttribute("data-step-state", "done");
+    expect(screen.getByTestId("builder-step-3")).toHaveAttribute("data-step-state", "active");
+  });
+
+  it("renders the correct plain-English sentence for each of the three tiers, always with the loader key alongside it", () => {
+    renderSheet(); // namespace="default"
+
+    // class tier
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "report-gen" } });
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent(
+      "Applies to every `report-gen` agent in namespace `default`."
+    );
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent("creates default / report-gen");
+
+    // namespace tier
+    fireEvent.click(screen.getByTestId("builder-tier-namespace"));
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent(
+      "Applies to every agent in namespace `default`, whatever its class."
+    );
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent("creates default / namespace:default");
+
+    // workload tier
+    fireEvent.click(screen.getByTestId("builder-tier-workload"));
+    fireEvent.change(screen.getByTestId("builder-scope-identifier"), { target: { value: "checkout" } });
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent(
+      "Applies to agents of Deployment `checkout` in namespace `default`."
+    );
+    expect(screen.getByTestId("builder-create-target")).toHaveTextContent("creates default / deployment:checkout");
+  });
+});
+
+describe("BuilderSheet — reserved-scope guard (Phase 3, Item A / P1 fix)", () => {
+  it('typing "__baseline__" as the agent class shows the reserved-scope error and disables Dry-run/Save, with no compiled rego', async () => {
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "__baseline__" } });
+    fireEvent.click(screen.getByTestId("builder-add-rule"));
+    fireEvent.change(screen.getByTestId("builder-rule-reason-0"), { target: { value: "x" } });
+    fireEvent.click(screen.getByTestId("builder-add-condition-0-0"));
+
+    await waitFor(() => expect(screen.getByTestId("builder-scope-reserved-error")).toBeInTheDocument());
+    expect(screen.getByTestId("builder-scope-reserved-error")).toHaveTextContent(/reserved\/managed scope/i);
+    expect(screen.getByTestId("builder-dryrun-btn")).toBeDisabled();
+    expect(screen.getByTestId("builder-save-btn")).toBeDisabled();
+    expect((screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value).not.toContain("package norviq.");
+  });
+
+  it('typing "__cluster__" as the namespace-tier identifier shows the reserved-scope error and disables Save', async () => {
+    renderSheet();
+    fireEvent.click(screen.getByTestId("builder-tier-namespace"));
+    fireEvent.change(screen.getByTestId("builder-scope-identifier"), { target: { value: "__cluster__" } });
+    fireEvent.click(screen.getByTestId("builder-add-rule"));
+    fireEvent.change(screen.getByTestId("builder-rule-reason-0"), { target: { value: "x" } });
+    fireEvent.click(screen.getByTestId("builder-add-condition-0-0"));
+
+    await waitFor(() => expect(screen.getByTestId("builder-scope-reserved-error")).toBeInTheDocument());
+    expect(screen.getByTestId("builder-save-btn")).toBeDisabled();
+  });
+
+  it("a normal agent class shows no reserved-scope error", () => {
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "report-gen" } });
+    expect(screen.queryByTestId("builder-scope-reserved-error")).not.toBeInTheDocument();
+  });
+});
+
+// --- Phase 2d: per-tool parameter constraints ------------------------------------------------------
+// These assert the EDITOR wires through to the compiled policy. The policy's own DECISIONS are proven
+// against the real opa binary in src/lib/builderIntentGrants.test.ts — asserting decisions here would
+// only be asserting on rego text.
+describe("BuilderSheet — scoping an allowlisted tool by its arguments", () => {
+  const addTool = (name: string) => {
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: name } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+  };
+  const openAllowlistWith = (tool: string) => {
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    addTool(tool);
+  };
+
+  it("a newly allowed tool is unconstrained, and says so", () => {
+    openAllowlistWith("execute_sql");
+    fireEvent.click(screen.getByTestId("builder-scope-cell-execute_sql-cta"));
+    expect(screen.getByTestId("builder-grant-editor-execute_sql")).toBeInTheDocument();
+    // The wide-open state is stated rather than left to inference — allowing a tool and not noticing it
+    // takes any arguments is the exact failure this feature exists to prevent.
+    expect(screen.getByTestId("builder-grant-editor-execute_sql").textContent).toMatch(/allowed with any arguments/i);
+  });
+
+  it("adding a constraint narrows the compiled policy for that tool only", async () => {
+    openAllowlistWith("execute_sql");
+    addTool("search_kb");
+    fireEvent.click(screen.getByTestId("builder-scope-cell-execute_sql-cta"));
+    pickCondition("matches");
+    fireEvent.change(screen.getByTestId("builder-constraint-field-execute_sql-0"), { target: { value: "query" } });
+    fireEvent.change(screen.getByTestId("builder-constraint-value-execute_sql-0"), {
+      target: { value: "(?i)^\\s*select\\b" }
+    });
+
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain("constraints_ok");
+      expect(rego).toContain('_constrained := {"execute_sql"}');   // search_kb stays unconstrained
+      expect(rego).toContain("regex.match");
+    });
+  });
+
+  it("the scope cell shows how many conditions a tool carries", async () => {
+    openAllowlistWith("execute_sql");
+    // Before: an invitation to scope it.
+    expect(screen.getByTestId("builder-scope-cell-execute_sql-cta").textContent).toContain("Narrow it");
+    expect(screen.getByTestId("builder-scope-cell-execute_sql-headline")).toHaveTextContent("Any arguments · unrestricted");
+    fireEvent.click(screen.getByTestId("builder-scope-cell-execute_sql-cta"));
+    pickCondition("forbidden");
+    fireEvent.change(screen.getByTestId("builder-constraint-field-execute_sql-0"), { target: { value: "force" } });
+    await waitFor(() =>
+      expect(screen.getByTestId("builder-scope-cell-execute_sql-headline")).toHaveTextContent("Narrowed · 1 condition")
+    );
+  });
+
+  it("removing a tool drops its constraints, so no orphan grant breaks the compile", async () => {
+    openAllowlistWith("execute_sql");
+    fireEvent.click(screen.getByTestId("builder-scope-cell-execute_sql-cta"));
+    pickCondition("required");
+    fireEvent.change(screen.getByTestId("builder-constraint-field-execute_sql-0"), { target: { value: "query" } });
+    await waitFor(() =>
+      expect((screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value).toContain("constraints_ok")
+    );
+
+    // A grant for a tool that is no longer allowlisted is a hard compile error, so the tool's removal
+    // must take its constraints with it rather than leaving the policy uncompilable.
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-remove-execute_sql"));
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).not.toContain("constraints_ok");
+      expect(rego).not.toContain("execute_sql");
+    });
+  });
+
+  it("removing the last constraint returns the tool to unconstrained (not an empty grant)", async () => {
+    openAllowlistWith("execute_sql");
+    fireEvent.click(screen.getByTestId("builder-scope-cell-execute_sql-cta"));
+    pickCondition("required");
+    fireEvent.change(screen.getByTestId("builder-constraint-field-execute_sql-0"), { target: { value: "query" } });
+    await waitFor(() =>
+      expect((screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value).toContain("constraints_ok")
+    );
+
+    fireEvent.click(screen.getByTestId("builder-constraint-remove-execute_sql-0"));
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      // An empty grant is a compile ERROR; "no constraints" must be represented as absence.
+      expect(rego).not.toContain("constraints_ok");
+      expect(rego).toContain('allow_names := {"execute_sql"}');
+    });
+  });
+
+  it("switching a constraint's type keeps the parameter name", () => {
+    openAllowlistWith("http_get");
+    fireEvent.click(screen.getByTestId("builder-scope-cell-http_get-cta"));
+    pickCondition("matches");
+    fireEvent.change(screen.getByTestId("builder-constraint-field-http_get-0"), { target: { value: "url" } });
+    fireEvent.change(screen.getByTestId("builder-constraint-kind-http_get-0"), { target: { value: "hostIn" } });
+    // Retyping the parameter after every type change would be needless friction.
+    expect(screen.getByTestId("builder-constraint-field-http_get-0")).toHaveValue("url");
+  });
+});
+
+describe("BuilderSheet — the allowlist Add control", () => {
+  it("is disabled while the field is empty, rather than looking live and silently doing nothing", () => {
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+
+    // Reported as "the Add button is not working": it stayed enabled on a blank field and no-oped, so a
+    // click produced no chip, no message and no state change at all.
+    const add = screen.getByTestId("builder-allowlist-tool-add");
+    expect(add).toBeDisabled();
+
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "execute_sql" } });
+    expect(add).toBeEnabled();
+    fireEvent.click(add);
+    expect(screen.getByTestId("builder-allowlist-tool-row-execute_sql")).toBeInTheDocument();
+
+    // …and it goes back to disabled once the field clears after the add.
+    expect(screen.getByTestId("builder-allowlist-tool-add")).toBeDisabled();
+  });
+
+  it("stays disabled for whitespace only (which would add an empty tool)", () => {
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "   " } });
+    expect(screen.getByTestId("builder-allowlist-tool-add")).toBeDisabled();
+  });
+});
+
+describe("allowlist mode must be able to say more than a tool list", () => {
+  it("offers scoping facts, and an authored fact reaches the compiled policy", async () => {
+    // THE POINT OF THE MODE. A list of tool names plus per-argument rules is what a framework's tool
+    // binding already gives you — a capability list, not an intent. Until these rows existed the panel
+    // could only say "may call send_email", never "and it must not carry a credential": the facts were
+    // reachable ONLY via the /intents handoff, so they could not be authored at all, and a hand-built
+    // allowlist restated the agent framework instead of adding a control.
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
+
+    // The picker exists at all — this is what was missing.
+    expect(screen.getByTestId("builder-condition-picker-open")).toBeInTheDocument();
+
+    // It lists FIELDS derived from the registry, not five hand-picked presets. Every addressable
+    // field must be reachable — a hand-written subset is how six of them became unreachable, and how
+    // any future field would silently fail to appear.
+    expect(pickerOptionIds()).toEqual(expect.arrayContaining([
+      "data_classes", "sql_tables", "sql_statements", "param_values",
+      "destinations.emails", "destinations.urls", "destinations.hosts", "destinations.schemes",
+      "param_bytes", "call_depth", "trust_score"
+    ]));
+    fireEvent.click(screen.getByTestId("builder-condition-picker-close"));
+
+    pickCondition("data_classes");
+    await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
+    // The chip must now advertise the scope — counting only per-field constraints left a
+    // facts-only grant looking unscoped.
+    expect(screen.getByTestId("builder-scope-cell-send_email-headline")).toHaveTextContent(/Narrowed · 1 condition/);
+
+    // An empty value list is deliberately a compile ERROR (noneOf [] is a tautology), so the fact is
+    // not enforceable until the operator says WHICH classes.
+    fireEvent.change(screen.getByTestId("builder-fact-value-send_email-0"), { target: { value: "secret" } });
+
+    // ...and it must land in the EMITTED REGO, not merely in the UI.
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain("data_classes");
+      expect(rego).toContain("_grant_ok");
+    });
+  });
+
+  it("removing a tool discards its FACTS too, so re-adding it does not resurrect them", async () => {
+    // `removeAllowlistTool` dropped `allowlistGrants[t]` and left `allowlistGrantFacts[t]` standing, so
+    // a tool removed and re-added came back silently pre-scoped with narrowing the operator had thrown
+    // away. It was masked only because the graph memo iterates `allowlistTools` — a latent divergence
+    // between two stores holding one concept, which is the same shape as every other defect here.
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
+    pickCondition("data_classes");
+    await waitFor(() => expect(screen.getByTestId("builder-scope-cell-send_email-headline")).toHaveTextContent(/Narrowed · 1 condition/));
+
+    fireEvent.click(screen.getByTitle("Remove send_email"));
+    await waitFor(() => expect(screen.queryByTestId("builder-scope-cell-send_email-cta")).not.toBeInTheDocument());
+
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+
+    // Unscoped, as a freshly-added tool must be.
+    await waitFor(() =>
+      expect(screen.getByTestId("builder-scope-cell-send_email-headline")).toHaveTextContent(/Any arguments · unrestricted/)
+    );
+  });
+
+  it("offers a declared tool's OWN arguments, and a chosen one reaches the compiled policy", async () => {
+    // `param_paths.<path>` is the only primitive that can name one argument at any depth, and it had no
+    // editor anywhere in the product — reachable solely through the /intents handoff. The blocker was
+    // never the compiler (builderScopingFacts.test.ts has pinned this shape all along) but that a picker
+    // had nothing to offer: asking an operator to type a dotted path from memory, into a control whose
+    // default value does not compile, is worse than offering nothing. The registry's schema is what
+    // makes the control possible.
+    server.use(
+      http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
+      http.get("/api/v1/tools", () =>
+        HttpResponse.json([
+          registryEntry("send_email", {
+            source: "mcp_declared",
+            server_id: "smtp",
+            schema_available: true,
+            input_schema: {
+              type: "object",
+              required: ["to"],
+              properties: {
+                to: { type: "string" },
+                retries: { type: "integer" },
+                attachments: { type: "array", items: { type: "string" } },
+                filters: { type: "object", properties: { customer: { type: "string" } } }
+              }
+            }
+          })
+        ])
+      )
+    );
+
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
+
+    await waitFor(() => expect(pickerOptionIds()).toContain("to"));
+
+    // A nested string leaf is addressable — the case a flat per-field constraint cannot express.
+    const nested = screen.getByTestId("builder-condition-picker-option-filters.customer");
+    expect(nested).toBeInTheDocument();
+    expect(nested).not.toHaveAttribute("data-disabled");
+
+    // And the two that CANNOT be addressed are shown WITH their reason rather than dropped. A select
+    // could only grey them out; the reason it carried lived in a `title` on a disabled option, which
+    // no browser renders. This is the assertion that was impossible before.
+    const anInteger = screen.getByTestId("builder-condition-picker-option-retries");
+    expect(anInteger).toHaveAttribute("data-disabled", "true");
+    expect(anInteger).toHaveAttribute("aria-disabled", "true");
+    expect(anInteger.textContent).toMatch(/param_paths|only text|cannot be/i);
+
+    // An integer argument produces NO param_paths key at runtime (evaluator.py emits string leaves
+    // only), so `object.get(..., "")` could never match — offered, but disabled, with the reason.
+    expect(anInteger.textContent).toMatch(/only text/i);
+
+    // An array's runtime key carries a concrete index the schema cannot know.
+    const anArray = screen.getByTestId("builder-condition-picker-option-attachments");
+    expect(anArray).toHaveAttribute("data-disabled", "true");
+    expect(anArray.textContent).toMatch(/indexed at runtime/i);
+
+    // The engine-derived facts are still there — the tool's arguments are additive, not a replacement.
+    expect(screen.getByTestId("builder-condition-picker-option-data_classes")).toBeInTheDocument();
+
+    pickCondition("to");
+    await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
+    fireEvent.change(screen.getByTestId("builder-fact-value-send_email-0"), { target: { value: "ops@acme.com" } });
+
+    // ...and it must be real enforcement, not just a row in a panel.
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain('object.get(input.derived.param_paths, "to", "")');
+      expect(rego).toContain("ops@acme.com");
+    });
+  });
+
+  it("offers the declared enum as a picker instead of asking for a retyped literal", async () => {
+    // A typo'd literal is a silently dead restriction: fail-closed and noisy inside an allowlist grant,
+    // fail-open and silent in rules mode. Where the schema states the legal values, offering them is
+    // strictly better than a free-text box — while remaining a suggestion, never a restriction.
+    server.use(
+      http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
+      http.get("/api/v1/tools", () =>
+        HttpResponse.json([
+          registryEntry("deploy", {
+            source: "mcp_declared",
+            schema_available: true,
+            input_schema: {
+              type: "object",
+              properties: { region: { type: "string", enum: ["us-east", "eu-west"] } }
+            }
+          })
+        ])
+      )
+    );
+
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "deploy" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-deploy-cta"));
+
+    await waitFor(() => expect(pickerOptionIds()).toContain("region"));
+    fireEvent.click(screen.getByTestId("builder-condition-picker-close"));
+    pickCondition("region");
+    await waitFor(() => expect(screen.getByTestId("builder-fact-row-deploy-0")).toBeInTheDocument());
+
+    const value = screen.getByTestId("builder-fact-value-deploy-0") as HTMLSelectElement;
+    expect(value.tagName).toBe("SELECT");
+    expect([...value.options].map((o) => o.value)).toEqual(["", "us-east", "eu-west"]);
+
+    fireEvent.change(value, { target: { value: "eu-west" } });
+    await waitFor(() => {
+      const rego = (screen.getByTestId("monaco-editor") as HTMLTextAreaElement).value;
+      expect(rego).toContain('object.get(input.derived.param_paths, "region", "")');
+      expect(rego).toContain("eu-west");
+    });
+  });
+
+  it("suggests a declared argument's name and its enum to a per-field constraint, without restricting either", async () => {
+    // Constraints address `tool_params[<field>]` directly, so the schema can only ever SUGGEST here — a
+    // tool may accept more than it declares, and a stale schema must never make a real argument
+    // unauthorable. Hence datalists rather than selects.
+    server.use(
+      http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
+      http.get("/api/v1/tools", () =>
+        HttpResponse.json([
+          registryEntry("deploy", {
+            source: "mcp_declared",
+            schema_available: true,
+            input_schema: {
+              type: "object",
+              properties: {
+                region: { type: "string", enum: ["us-east", "eu-west"] },
+                nested: { type: "object", properties: { inner: { type: "string" } } }
+              }
+            }
+          })
+        ])
+      )
+    );
+
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "deploy" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-deploy-cta"));
+    pickCondition("oneOf");
+    await waitFor(() => expect(screen.getByTestId("builder-constraint-row-deploy-0")).toBeInTheDocument());
+
+    // Flat argument names are suggested; a NESTED path is not, because a constraint addresses one flat
+    // `tool_params[field]` and "nested.inner" is not a key the tool receives under that name.
+    const args = [...(document.getElementById("builder-args-deploy") as HTMLDataListElement).options].map((o) => o.value);
+    expect(args).toContain("region");
+    expect(args).not.toContain("nested.inner");
+
+    // Naming the argument surfaces its declared enum as suggestions on the value box.
+    fireEvent.change(screen.getByTestId("builder-constraint-field-deploy-0"), { target: { value: "region" } });
+    await waitFor(() => expect(document.getElementById("builder-enum-deploy-region")).toBeInTheDocument());
+    const enums = [...(document.getElementById("builder-enum-deploy-region") as HTMLDataListElement).options].map((o) => o.value);
+    expect(enums).toEqual(["us-east", "eu-west"]);
+
+    // And a value the schema never mentioned is still perfectly typeable — suggestion, not gate.
+    fireEvent.change(screen.getByTestId("builder-constraint-value-deploy-0"), { target: { value: "ap-south" } });
+    await waitFor(() => expect(screen.getByTestId("builder-constraint-value-deploy-0")).toHaveValue("ap-south"));
+  });
+
+  it("keeps a typed value when only the operator changes", async () => {
+    // The op select rebuilt the fact blank every time, so switching "must not include" to "must be
+    // within" — a change of meaning over the SAME values — silently cleared what had just been typed.
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "builder-spike" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
+    pickCondition("data_classes");
+    await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByTestId("builder-fact-value-send_email-0"), { target: { value: "secret, pci" } });
+    fireEvent.change(screen.getByTestId("builder-fact-op-send_email-0"), { target: { value: "subsetOf" } });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("builder-fact-value-send_email-0")).toHaveValue("secret, pci")
+    );
+  });
+
+  // NOT TESTED, deliberately: `setToolFacts` now deletes the key when the last fact goes, matching
+  // `setToolConstraints`. There is no test because the difference is not observable from here — the chip
+  // counts `.length` and the graph memo filters on it, so `{tool: []}` and an absent key render and
+  // compile identically. A test would pass with or without the fix, which is worse than no test. The
+  // change stands on preventing a future consumer from reading an empty array as "this tool is scoped".
+});
+
+describe("a negated scoping fact is visible, not merely enforced", () => {
+  /**
+   * The defect: `if (f.type === "not") return null` — a NOT-wrapped fact rendered NOTHING while
+   * still compiling and still enforcing. A grant could therefore say "Narrowed · 2 conditions",
+   * show one row, and carry a second live clause the operator could neither read nor remove.
+   *
+   * Such a fact cannot be AUTHORED here (the palette only produces plain facts) — it arrives from
+   * the Propose-from-traffic handoff. Read-only is a fair limitation. Invisible is not: a clause
+   * nobody can see is a clause nobody can audit.
+   */
+  const NEGATED: BuilderGraph = {
+    version: 1,
+    mode: "allowlist",
+    scope: { kind: "class", agentClass: "support-bot" },
+    rules: [],
+    defaults: { decision: "allow", reason: "No builder rule matched" },
+    allowlist: {
+      tools: ["send_email"],
+      // An ARRAY of grants, matching `BuilderGraph`. Keying it by tool compiled fine as a cast and
+      // blew up at `grants.filter` — a reminder that `as unknown as` in a fixture buys nothing.
+      grants: [
+        {
+          tool: "send_email",
+          constraints: [],
+          facts: [
+            { type: "not", inner: { type: "collectionFact", field: "data_classes", op: "noneOf", values: ["secret"] } }
+          ]
+        }
+      ]
+    }
+  } as unknown as BuilderGraph;
+
+  it("renders the NOT clause, counts it, and lets it be removed", async () => {
+    render(<BuilderSheet namespace="default" onClose={() => {}} seedGraph={NEGATED} />);
+
+    // It counts toward the headline — the count and the rows must describe the same policy.
+    await waitFor(() =>
+      expect(screen.getByTestId("builder-scope-cell-send_email-headline")).toHaveTextContent("Narrowed · 1 condition")
+    );
+
+    fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
+    const row = await screen.findByTestId("builder-fact-negated-send_email-0");
+    expect(row).toHaveTextContent("NOT");
+    // In the same words the generated rego's header comment uses.
+    expect(row).toHaveTextContent("data_classes excludes {secret}");
+    expect(row).toHaveTextContent(/Compiles and enforces/i);
+
+    // And it is removable, which it was not when it rendered nothing at all.
+    fireEvent.click(screen.getByTestId("builder-fact-remove-send_email-0"));
+    await waitFor(() =>
+      expect(screen.getByTestId("builder-scope-cell-send_email-headline")).toHaveTextContent("Any arguments · unrestricted")
+    );
+  });
+});
+
+// --- The blocked reason must name a field that is ON SCREEN ----------------------------------------
+describe("the Save-blocked reason names the identifier the SELECTED tier actually renders", () => {
+  /**
+   * The defect: one tier-blind branch, `!scopeReady ? "Set an agent class first."`. On the workload
+   * tier the sheet draws no agent-class control at all — the only identifier is "Workload name
+   * (Deployment)" — so the single sentence that names a field sent the operator hunting for a control
+   * that does not exist, while the generic scope sentence above it ("Pick who this policy is for to
+   * continue.") named nothing. A reason an operator cannot act on is not a reason.
+   */
+  it("workload tier: asks for the workload (Deployment) name, on a tier with no agent-class field", () => {
+    renderSheet(); // namespace="default" is already concrete, so the namespace branch is satisfied
+    fireEvent.click(screen.getByTestId("builder-tier-workload"));
+
+    // The premise, proved rather than assumed: no agent-class control exists on this tier, and the
+    // identifier that IS empty is the workload name.
+    expect(screen.queryByTestId("builder-agent-class")).not.toBeInTheDocument();
+    expect(screen.getByTestId("builder-scope-identifier")).toHaveValue("");
+    expect(screen.getByTestId("builder-save-btn")).toBeDisabled();
+
+    // VISIBLE text (InlineDisabledReason), because `.btn:disabled { pointer-events: none }` means a
+    // `title` on the greyed Save button can never be read.
+    const reason = screen.getByTestId("disabled-reason");
+    expect(reason).toHaveTextContent("Set a workload (Deployment) name first.");
+    expect(reason).not.toHaveTextContent(/agent class/i);
+    // The dry-run button carried the same wrong string in its (unreachable) title — same source now.
+    expect(screen.getByTestId("builder-dryrun-btn")).toHaveAttribute(
+      "title",
+      "Set a workload (Deployment) name first."
+    );
+  });
+
+  it("class tier still asks for the agent class — the string is tier-aware, not merely reworded", () => {
+    // A pin, not a discovery: tests/e2e/tools-registry.spec.ts asserts this exact sentence on the
+    // default (class) tier, and the fix must not drag every tier onto one new generic wording.
+    renderSheet();
+    expect(screen.getByTestId("builder-save-btn")).toBeDisabled();
+    expect(screen.getByTestId("disabled-reason")).toHaveTextContent("Set an agent class first.");
+  });
+});
+
+// --- A per-tool dry-run number is a SAMPLE, and must say so ----------------------------------------
+describe("the dry-run's per-tool traffic numbers state the size of the sample they came from", () => {
+  /**
+   * The defect: `sampled` was keyed on `dryRunResult.truncated`, which is the server's flag for the
+   * REPLAY hitting its 500-record cap — a different fact entirely. The flip list itself is capped at 8
+   * rows across ALL tools, unconditionally (`if len(flip_samples) < 8` in _replay_recent). So on an
+   * ordinary run the 8-row sample printed as a per-tool total, and every tool the sample never reached
+   * got ScopeCell's affirmative 0-case, "No replayed call would be denied by this grant." — an
+   * all-clear for a grant nobody measured, on the one screen whose job is to say whether enforcing
+   * this policy breaks real traffic.
+   */
+  const flips = (n: number, tool: string) =>
+    Array.from({ length: n }, () => ({ tool_name: tool, was: "allow", now: "block", rule_id: "intent_default_deny" }));
+
+  async function dryRunWithAllowlist(body: Record<string, unknown>) {
+    server.use(http.post("/api/v1/policies/dry-run", () => HttpResponse.json(body)));
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "support-agent" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    for (const tool of ["send_email", "http_post"]) {
+      fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: tool } });
+      fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    }
+    await waitFor(() => expect(screen.getByTestId("builder-dryrun-btn")).not.toBeDisabled());
+    fireEvent.click(screen.getByTestId("builder-dryrun-btn"));
+    await waitFor(() => expect(screen.getByTestId("builder-dryrun-result")).toBeInTheDocument());
+  }
+
+  it("a capped sample is a lower bound for the tool it names, and no verdict at all for the tool it does not", async () => {
+    // The exact shape _replay_recent emits for a busy namespace: 47 flips counted, 8 named.
+    await dryRunWithAllowlist({
+      valid: true,
+      errors: [],
+      total_records_checked: 120,
+      would_block: 47,
+      would_allow: 73,
+      would_escalate: 0,
+      newly_blocked: 47,
+      newly_allowed: 0,
+      newly_blocked_samples: flips(8, "send_email"),
+      truncated: false, // the REPLAY was not capped — only the sample was, which is the whole point
+      recommendation: "Would NEWLY block 47 of 120 recent calls (39.2%) — review the flips before deploying."
+    });
+
+    // The named tool: a lower bound, never "8" as though it were the total.
+    const named = screen.getByTestId("builder-scope-cell-send_email-impact");
+    expect(named).toHaveTextContent("at least 8 replayed calls would now be denied");
+
+    // The unnamed tool: the affirmative all-clear must not appear. Its grant is wide open and 39 of
+    // the 47 flips are attributed to nobody — "we did not measure this" is the honest answer.
+    const unnamed = screen.getByTestId("builder-scope-cell-http_post-impact");
+    expect(unnamed).not.toHaveTextContent(/No replayed call would be denied/i);
+    expect(unnamed).not.toHaveTextContent(/replayed call/i);
+
+    // ...and the silence is explained on the row, with the sample's size in it — a row that simply
+    // said nothing would be indistinguishable from a row with nothing to report.
+    expect(screen.getByTestId("builder-scope-sample-note-http_post")).toHaveTextContent(
+      "Not named in the dry-run's sample of 8 of 47 newly-blocked calls"
+    );
+    expect(screen.getByTestId("builder-scope-sample-note-send_email")).toHaveTextContent(
+      "Counted from the dry-run's sample of 8 of 47 newly-blocked calls"
+    );
+    // And the chip list itself is labelled as the sample it is.
+    expect(screen.getByTestId("builder-dryrun-sample-label")).toHaveTextContent(
+      "Sample — 8 of 47 newly-blocked calls named below."
+    );
+  });
+
+  it("a COMPLETE sample is stated as a total — the honesty runs both ways", async () => {
+    await dryRunWithAllowlist({
+      valid: true,
+      errors: [],
+      total_records_checked: 40,
+      newly_blocked: 2,
+      newly_blocked_samples: [...flips(1, "send_email"), ...flips(1, "http_post")],
+      truncated: false,
+      recommendation: "Would NEWLY block 2 of 40 recent calls (5.0%)."
+    });
+
+    // Every flip the run counted is named, so neither row hedges and neither carries a sample note.
+    expect(screen.getByTestId("builder-scope-cell-send_email-impact")).toHaveTextContent(
+      "1 replayed call would now be denied"
+    );
+    expect(screen.getByTestId("builder-scope-cell-send_email-impact")).not.toHaveTextContent(/at least/i);
+    expect(screen.getByTestId("builder-scope-cell-http_post-impact")).toHaveTextContent(
+      "1 replayed call would now be denied"
+    );
+    expect(screen.queryByTestId("builder-scope-sample-note-send_email")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("builder-scope-sample-note-http_post")).not.toBeInTheDocument();
+    expect(screen.getByTestId("builder-dryrun-sample-label")).toHaveTextContent("All 2 newly-blocked calls named below.");
+  });
+
+  it("a response that reports no total does not get to claim its sample is the whole story", async () => {
+    // `newly_blocked` is optional on the wire (client.ts). `?? 0` would make a MISSING total read as
+    // "the 8 rows you can see are all there were" — the same fallback-to-zero, one field along.
+    await dryRunWithAllowlist({
+      valid: true,
+      errors: [],
+      total_records_checked: 120,
+      newly_blocked_samples: flips(8, "send_email"),
+      truncated: false,
+      recommendation: "n/a"
+    });
+
+    expect(screen.getByTestId("builder-scope-cell-send_email-impact")).toHaveTextContent(
+      "at least 8 replayed calls would now be denied"
+    );
+    expect(screen.getByTestId("builder-scope-sample-note-http_post")).toHaveTextContent(
+      "Not named in the dry-run's sample of 8 newly-blocked calls, with no total reported"
+    );
+    // ...and the panel headline says the number is missing rather than printing a zero in the
+    // all-clear colour, which is the same fabricated measurement one line up.
+    const panel = screen.getByTestId("builder-dryrun-result");
+    expect(panel).toHaveTextContent("newly-blocked count not reported");
+    expect(panel).not.toHaveTextContent("0 newly blocked");
+  });
+
+  it("a replay that examined nothing is unmeasured, not clean", async () => {
+    // An empty `newly_blocked_samples` over zero replayed records used to render as "No replayed call
+    // would be denied by this grant." on every row — a measurement result produced by a measurement
+    // that never happened.
+    await dryRunWithAllowlist({
+      valid: true,
+      errors: [],
+      total_records_checked: 0,
+      newly_blocked: 0,
+      newly_blocked_samples: [],
+      truncated: false,
+      recommendation: "No recent traffic to replay."
+    });
+
+    expect(screen.getByTestId("builder-scope-cell-send_email-impact")).not.toHaveTextContent(/replayed call/i);
+    expect(screen.getByTestId("builder-scope-sample-note-send_email")).toHaveTextContent(
+      "The dry-run replayed no recent calls, so this grant's effect on real traffic is unmeasured — not zero."
+    );
+  });
+});
+
+// --- The condition picker must be searchable by the names the rest of the product prints ------------
+describe("ConditionPicker search speaks the same vocabulary as the chips and the compiled rego", () => {
+  const openPickerFor = async (tool: string) => {
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "support-agent" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: tool } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    fireEvent.click(screen.getByTestId(`builder-scope-cell-${tool}-cta`));
+    openPicker();
+    return screen.getByTestId("builder-condition-picker-search");
+  };
+
+  it("finds a whole-call fact by the RAW field name the scope chip and the rego header both print", async () => {
+    // The picker filtered on `label`/`meta`/`hint` and never on `id`, while `describeFact` — the same
+    // export the scope cell and the rego header comment use — prints the raw field. So the operator
+    // read `sql_tables` on a chip, typed it here, and was told "Nothing matches “sql_tables”… it was
+    // never declared", with the option sitting two rows below under its friendly label "SQL tables".
+    const search = await openPickerFor("execute_sql");
+
+    for (const raw of ["sql_tables", "data_classes", "destinations.emails", "param_bytes"]) {
+      fireEvent.change(search, { target: { value: raw } });
+      expect(screen.getByTestId(`builder-condition-picker-option-${raw}`)).toBeInTheDocument();
+      expect(screen.queryByTestId("builder-condition-picker-empty")).not.toBeInTheDocument();
+    }
+
+    // The friendly label still matches — this is an addition to the vocabulary, not a swap.
+    fireEvent.change(search, { target: { value: "SQL tables" } });
+    expect(screen.getByTestId("builder-condition-picker-option-sql_tables")).toBeInTheDocument();
+
+    // A name that really is nowhere still reaches the empty state.
+    fireEvent.change(search, { target: { value: "zzz_not_a_field" } });
+    expect(screen.getByTestId("builder-condition-picker-empty")).toBeInTheDocument();
+  });
+
+  it("keeps an empty group's explanation while the operator is typing", async () => {
+    // "This tool declares no arguments" is an ANSWER, and the group carrying it has no options to
+    // match — so the `(!g.options.length && !q)` arm meant to preserve it was constant-false (`if (!q)
+    // return groups` above guarantees a non-empty `q`), and the explanation vanished on the first
+    // keystroke, leaving a facts-only list with no account of where the arguments went.
+    server.use(
+      http.get("/api/v1/cluster-info", () => HttpResponse.json({ cluster_id: "c1", cluster_name: "kind", namespaces: ["default"] })),
+      http.get("/api/v1/tools", () => HttpResponse.json([registryEntry("send_email")])) // schema_available: false
+    );
+    const search = await openPickerFor("send_email");
+
+    const sub = /No declared schema for send_email/i;
+    expect(screen.getByText(sub)).toBeInTheDocument();
+
+    // "host" matches two whole-call facts, so the search is genuinely filtering, not idling.
+    fireEvent.change(search, { target: { value: "host" } });
+    expect(screen.getByTestId("builder-condition-picker-option-destinations.hosts")).toBeInTheDocument();
+    expect(screen.getByText(sub)).toBeInTheDocument();
+  });
+});
+
+// --- ADVERSARIAL VERIFICATION of the sample-honesty work ------------------------------------------
+// Four states the sample-honesty fix does not survive: an unreported total over an EMPTY flip list, a
+// capped REPLAY whose flip list is complete, an unreported replay size, and a dry run whose numbers
+// belong to a policy the operator has since edited.
+describe("what the dry run could not measure stays unmeasured on every path into the row", () => {
+  const flips = (n: number, tool: string) =>
+    Array.from({ length: n }, () => ({ tool_name: tool, was: "allow", now: "block", rule_id: "intent_default_deny" }));
+
+  async function dryRunWithAllowlist(body: Record<string, unknown>) {
+    server.use(http.post("/api/v1/policies/dry-run", () => HttpResponse.json(body)));
+    renderSheet();
+    fireEvent.change(screen.getByTestId("builder-agent-class"), { target: { value: "support-agent" } });
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    for (const tool of ["send_email", "http_post"]) {
+      fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: tool } });
+      fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    }
+    await waitFor(() => expect(screen.getByTestId("builder-dryrun-btn")).not.toBeDisabled());
+    fireEvent.click(screen.getByTestId("builder-dryrun-btn"));
+    await waitFor(() => expect(screen.getByTestId("builder-dryrun-result")).toBeInTheDocument());
+  }
+
+  it("an unreported total over an EMPTY flip list is not an all-clear, and does not contradict the headline", async () => {
+    // The hole the sample-completeness check left open: `flipSampleIncomplete` asked `flipSampleSize > 0`
+    // when no total was reported, so a response with an empty `newly_blocked_samples` and no
+    // `newly_blocked` scored as a COMPLETE sample — every row got ScopeCell's affirmative "No replayed
+    // call would be denied by this grant." on the same screen whose headline said the count was never
+    // reported. Two readings of one response, one of them an all-clear nobody measured.
+    await dryRunWithAllowlist({
+      valid: true,
+      errors: [],
+      total_records_checked: 120,
+      newly_blocked_samples: [],
+      truncated: false,
+      recommendation: "n/a"
+    });
+
+    const panel = screen.getByTestId("builder-dryrun-result");
+    expect(panel).toHaveTextContent("newly-blocked count not reported");
+    for (const tool of ["send_email", "http_post"]) {
+      expect(screen.getByTestId(`builder-scope-cell-${tool}-impact`)).not.toHaveTextContent(/replayed call/i);
+      expect(screen.getByTestId(`builder-scope-sample-note-${tool}`)).toHaveTextContent(
+        "The dry-run named no newly-blocked calls and reported no total, so this grant's effect on real traffic is unmeasured — not zero."
+      );
+    }
+  });
+
+  it("a capped REPLAY is named as the reason, not miscopied as a sample of 3 of 3", async () => {
+    // `flipSampleIncomplete` has TWO causes and the note stated only one. With the flip list complete
+    // (3 of 3) but the REPLAY stopped at its record cap, the row read "sample of 3 of 3 newly-blocked
+    // calls — this tool's real number can be higher": a sentence that refutes itself in nine words, and
+    // sends the operator looking for five missing flips instead of the records that were never
+    // evaluated at all.
+    await dryRunWithAllowlist({
+      valid: true,
+      errors: [],
+      total_records_checked: 500,
+      newly_blocked: 3,
+      newly_blocked_samples: flips(3, "send_email"),
+      truncated: true,
+      recommendation: "Would NEWLY block 3 of 500 recent calls (0.6%)."
+    });
+
+    // The named tool keeps its lower bound — the replay cap means calls beyond it were never seen.
+    expect(screen.getByTestId("builder-scope-cell-send_email-impact")).toHaveTextContent(
+      "at least 3 replayed calls would now be denied"
+    );
+    const named = screen.getByTestId("builder-scope-sample-note-send_email");
+    expect(named).not.toHaveTextContent("3 of 3");
+    expect(named).toHaveTextContent(/replay stopped at its record cap/i);
+    // The unnamed tool: still no all-clear, and still not blamed on a flip list that is in fact whole.
+    expect(screen.getByTestId("builder-scope-cell-http_post-impact")).not.toHaveTextContent(/replayed call/i);
+    const unnamed = screen.getByTestId("builder-scope-sample-note-http_post");
+    expect(unnamed).not.toHaveTextContent("3 of 3");
+    expect(unnamed).toHaveTextContent(/record cap/i);
+    // ...and the chip label above them does not call a complete list a sample of itself either.
+    expect(screen.getByTestId("builder-dryrun-sample-label")).not.toHaveTextContent("3 of 3");
+  });
+
+  it("a replay that never said how much it examined is unmeasured too — no 'Replayed 0'", async () => {
+    // `total_records_checked` is optional on the wire exactly like `newly_blocked`. `?? 0` printed
+    // "Replayed 0 recent real calls" — a measurement the run never claimed — one line above the
+    // headline that had just been fixed for the same fallback.
+    await dryRunWithAllowlist({
+      valid: true,
+      errors: [],
+      newly_blocked: 0,
+      newly_blocked_samples: [],
+      truncated: false,
+      recommendation: "n/a"
+    });
+
+    const panel = screen.getByTestId("builder-dryrun-result");
+    expect(panel).not.toHaveTextContent(/Replayed 0 recent real call/i);
+    expect(panel).toHaveTextContent(/did not report how many recent calls it replayed/i);
+    expect(screen.getByTestId("builder-scope-cell-send_email-impact")).not.toHaveTextContent(/replayed call/i);
+    expect(screen.getByTestId("builder-scope-sample-note-send_email")).toHaveTextContent(
+      "The dry-run did not report how many calls it replayed, so this grant's effect on real traffic is unmeasured — not zero."
+    );
+  });
+
+  it("numbers from a dry run the operator has since edited past do not describe the grant on screen", async () => {
+    // `dryRunStale` already re-locks Save and badges the results panel — but the per-tool traffic
+    // sentence, which sits far up the sheet beside the grant itself, went on printing the OLD rego's
+    // measurement as a fact about the grant now displayed. "at least 8 replayed calls would now be
+    // denied" under a grant that has since changed is a number about a policy that no longer exists.
+    await dryRunWithAllowlist({
+      valid: true,
+      errors: [],
+      total_records_checked: 120,
+      newly_blocked: 47,
+      newly_blocked_samples: flips(8, "send_email"),
+      truncated: false,
+      recommendation: "Would NEWLY block 47 of 120 recent calls (39.2%)."
+    });
+    // The fixture reaches the state: before the edit, the row is quoting this run.
+    expect(screen.getByTestId("builder-scope-cell-send_email-impact")).toHaveTextContent(
+      "at least 8 replayed calls would now be denied"
+    );
+
+    // Now change the policy — a third tool recompiles the rego, which is exactly what `dryRunStale` is.
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "http_get" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    await waitFor(() => expect(screen.getByTestId("builder-save-btn")).toBeDisabled());
+    expect(screen.getByTestId("builder-dryrun-result")).toHaveTextContent(/stale/i);
+
+    expect(screen.getByTestId("builder-scope-cell-send_email-impact")).not.toHaveTextContent(/replayed call/i);
+    for (const tool of ["send_email", "http_post", "http_get"]) {
+      expect(screen.getByTestId(`builder-scope-sample-note-${tool}`)).toHaveTextContent(
+        "This dry-run ran against an earlier version of the policy, so its numbers do not describe this grant — re-run it."
+      );
+    }
+  });
+});
+
+// --- ...and the picker must speak the OTHER half of that vocabulary too ---------------------------
+describe("the picker finds a declared argument by the param_paths name the chip and the rego print", () => {
+  it("searching the exact string the scope chip shows for an argument finds the argument", async () => {
+    // The id-search fix covered the whole-call facts, whose option id IS the printed field
+    // (`sql_tables`). A DECLARED ARGUMENT is the other half of the same vocabulary and does not match:
+    // picking `to` writes a fact on `param_paths.to` (BuilderSheet's addFact), which is what
+    // describeFact puts on the chip and what the compiled rego addresses — while the picker option is
+    // called `to` and matches neither. Typing back the name the product just printed still reached
+    // "Nothing matches … it was never declared", about an argument the schema declares.
+    server.use(
+      http.get("/api/v1/tools", () =>
+        HttpResponse.json([
+          registryEntry("send_email", {
+            source: "mcp_declared",
+            server_id: "smtp",
+            schema_available: true,
+            input_schema: { type: "object", required: ["to"], properties: { to: { type: "string" } } }
+          })
+        ])
+      )
+    );
+    renderSheet();
+    fireEvent.click(screen.getByTestId("builder-mode-allowlist"));
+    fireEvent.change(screen.getByTestId("builder-allowlist-tool-input"), { target: { value: "send_email" } });
+    fireEvent.click(screen.getByTestId("builder-allowlist-tool-add"));
+    fireEvent.click(screen.getByTestId("builder-scope-cell-send_email-cta"));
+    await waitFor(() => expect(pickerOptionIds()).toContain("to"));
+    pickCondition("to");
+    await waitFor(() => expect(screen.getByTestId("builder-fact-row-send_email-0")).toBeInTheDocument());
+
+    // The vocabulary the operator actually reads on the row, proved rather than assumed.
+    const chip = screen.getByTestId("builder-scope-cell-send_email-condition");
+    expect(chip).toHaveTextContent("param_paths.to");
+
+    // Type that exact string back into the picker.
+    openPicker();
+    fireEvent.change(screen.getByTestId("builder-condition-picker-search"), {
+      target: { value: chip.textContent!.split(" ")[0] }
+    });
+    expect(screen.getByTestId("builder-condition-picker-option-to")).toBeInTheDocument();
+    expect(screen.queryByTestId("builder-condition-picker-empty")).not.toBeInTheDocument();
+  });
+});

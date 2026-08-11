@@ -21,6 +21,13 @@ func TestIsAllowedSidecarImage(t *testing.T) {
 		// what a checkout injects
 		"ghcr.io/norviq-dev/norviq-engine:engine-latest",
 		"ghcr.io/norviq-dev/norviq-engine:engine-0.1.6",
+		// what a RELEASE CANDIDATE injects. Excluding the -dev package meant a candidate sidecar
+		// could never run on a cluster: the injector rejected it, silently substituted
+		// norviq-engine:engine-latest (NRVQ-WHK-4062), and "injection validated on AKS" covered
+		// main's sidecar rather than the one under test. Observed live before this was widened.
+		"ghcr.io/norviq-dev/norviq-engine-dev:engine-latest",
+		"ghcr.io/norviq-dev/norviq-engine-dev" + digest,
+		"ghcr.io/norviq-dev/norviq-engine-dev:engine-87e893c30be7c83e18e7bd6c34da84922547c3ee",
 	}
 	for _, img := range allowed {
 		if !isAllowedSidecarImage(img) {
@@ -35,6 +42,12 @@ func TestIsAllowedSidecarImage(t *testing.T) {
 		"ghcr.io/norviq-dev/norviq-engine@sha256:tooshort",          // malformed digest
 		"ghcr.io/norviq-dev/norviq-engine@md5:" + digest[8:],        // wrong algorithm
 		"ghcr.io/norviq-dev/norviq-engine:tag@sha256:" + digest[8:], // tag AND digest
+		// Widening for -dev must not have opened a prefix match. These are the lookalikes that a
+		// naive `strings.HasPrefix` or an unanchored regex would now let through.
+		"ghcr.io/norviq-dev/norviq-engine-dev-evil:engine-latest",
+		"ghcr.io/norviq-dev/norviq-engine-devil:engine-latest",
+		"evil.example.com/norviq-dev/norviq-engine-dev:engine-latest",
+		"ghcr.io/other-org/norviq-engine-dev:engine-latest",
 	}
 	for _, img := range denied {
 		if isAllowedSidecarImage(img) {

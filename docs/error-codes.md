@@ -266,7 +266,7 @@ Multi-cluster fleet. Spoke relay + hub fleet-api. Distinct prefix from `NRVQ-AUT
 | NRVQ-DB-9003 | Two events. `nrvq.db.schema_compat_applied` (INFO — additive schema-compat statements ran) and **`nrvq.db.partition_create_failed`** (ERROR — a monthly `audit_log` partition could not be created). See below. | `norviq/api/db/session.py` |
 | NRVQ-DB-9010..9028 | cache connect/hit/set/invalidate + token-revocation + per-ns posture mirror + 9028 hashed-policy-key legacy-entry skip | `norviq/engine/cache.py` |
 | NRVQ-DB-9030..9031 | cache pubsub listen/receive | `norviq/engine/cache.py` |
-| NRVQ-DB-9032..9033 | migration applied/failed | `norviq/api/main.py` |
+| NRVQ-DB-9032 | cache pubsub policy-mutation subscribe (`nrvq.cache.policy_mutations_listening`) | `norviq/engine/cache.py` |
 | NRVQ-DB-9034 / 9035 | `init_db` connect **exhausted** its backoff / a single connect attempt is being retried. The equivalent pair for the Redis cache connect is `NRVQ-REG-9034` / `NRVQ-REG-9035` — an inconsistent prefix, but that is what the code emits. | `norviq/api/main.py` |
 | NRVQ-DB-DEBUG-* | startup/connect/create-table diagnostics | `norviq/api/main.py`, `norviq/api/db/session.py` |
 
@@ -386,11 +386,11 @@ NRVQ-ENG-2056, NRVQ-ENG-2057, NRVQ-ENG-2058, NRVQ-ENG-2059, NRVQ-ENG-2060, NRVQ-
 NRVQ-ENG-DEBUG-INPUT, NRVQ-ENG-DEBUG-OPA, NRVQ-ENG-DEBUG-OPA-IN, NRVQ-ENG-DEBUG-QUERY
 
 NRVQ-DB-DEBUG-1, NRVQ-DB-DEBUG-2, NRVQ-DB-DEBUG-2-ERR, NRVQ-DB-DEBUG-2A, NRVQ-DB-DEBUG-2B, NRVQ-DB-DEBUG-2C,
-NRVQ-DB-DEBUG-2D, NRVQ-DB-DEBUG-3, NRVQ-DB-DEBUG-4, NRVQ-DB-DEBUG-5, NRVQ-DB-DEBUG-6, NRVQ-DB-9000,
+NRVQ-DB-DEBUG-2D, NRVQ-DB-DEBUG-5, NRVQ-DB-DEBUG-6, NRVQ-DB-9000,
 NRVQ-DB-9001, NRVQ-DB-9002, NRVQ-DB-9003, NRVQ-DB-9010, NRVQ-DB-9011, NRVQ-DB-9012, NRVQ-DB-9013,
 NRVQ-DB-9014, NRVQ-DB-9015, NRVQ-DB-9016, NRVQ-DB-9017, NRVQ-DB-9018, NRVQ-DB-9019, NRVQ-DB-9020,
 NRVQ-DB-9021, NRVQ-DB-9022, NRVQ-DB-9023, NRVQ-DB-9024, NRVQ-DB-9025, NRVQ-DB-9026, NRVQ-DB-9027,
-NRVQ-DB-9028, NRVQ-DB-9030, NRVQ-DB-9031, NRVQ-DB-9032, NRVQ-DB-9033, NRVQ-DB-9034, NRVQ-DB-9035,
+NRVQ-DB-9028, NRVQ-DB-9030, NRVQ-DB-9031, NRVQ-DB-9032, NRVQ-DB-9034, NRVQ-DB-9035,
 NRVQ-DB-DEBUG-CONNECT-ARGS, NRVQ-DB-DEBUG-METADATA
 
 NRVQ-FLT-15000, NRVQ-FLT-15001, NRVQ-FLT-15002, NRVQ-FLT-15003, NRVQ-FLT-15004, NRVQ-FLT-15005,

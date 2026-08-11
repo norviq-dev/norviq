@@ -51,3 +51,41 @@ def test_audit_record_carries_decision_provenance() -> None:
     assert rec["agent_class"] == "customer-support"
     assert rec["trust_score"] == 0.5
     assert rec["id"] == event.event_id
+
+
+def _event(agent_class: str, framework: str) -> ToolCallEvent:
+    return ToolCallEvent(
+        tool_name="search_kb",
+        tool_params={"query": "hello"},
+        agent_identity=AgentIdentity(
+            spiffe_id=f"spiffe://norviq/ns/default/sa/{agent_class}",
+            namespace="default",
+            agent_class=agent_class,
+        ),
+        framework=framework,
+        session_id="s1",
+    )
+
+
+_ALLOW = PolicyDecision(decision="allow", rule_id="default_allow", reason="ok", trust_score=0.9, latency_ms=2.0)
+
+
+def test_audit_record_carries_the_real_traffic_verdict() -> None:
+    """The live-tail payload must let the client apply the SAME real-traffic-only predicate the server
+    applies to fetched rows.
+
+    It carried neither `framework` nor any synthetic verdict, so the Audit Log's live filter tested
+    `r.framework === "redteam"` against `undefined`: with "Real traffic only" ON, red-team and probe rows
+    streamed into the tail regardless while the fetched rows below them were correctly excluded. The
+    verdict is computed server-side by the shared classifier so the class-prefix list is never forked
+    into TypeScript.
+    """
+    real = audit_record(_event("customer-support", "langchain"), _ALLOW)
+    assert real["framework"] == "langchain"  # also backs the Source column, blank on live rows before
+    assert real["non_real"] is False
+
+    # (1) red-team framework — the half the client THOUGHT it was testing
+    assert audit_record(_event("customer-support", "redteam"), _ALLOW)["non_real"] is True
+    # (2) synthetic/probe agent class — the half it never tested at all
+    assert audit_record(_event("probe-alpha", "langchain"), _ALLOW)["non_real"] is True
+    assert audit_record(_event("policy-tester", "langchain"), _ALLOW)["non_real"] is True

@@ -122,7 +122,7 @@ def test_deregister_rejects_foreign_target_cluster() -> None:
     Before the fix the guard was absent, so the delete proceeded to the registry (404 here). served
     cluster defaults to 'local' (fleet_cluster_id unset), so 'cluster-b' never matches."""
     app, client = _client(set())
-    _session_override(app, SimpleNamespace(spiffe_id=NS_AGENT))  # row exists => old code would 200, not 409
+    _session_override(app, SimpleNamespace(spiffe_id=NS_AGENT, namespace="team-a"))  # row exists => old code would 200, not 409
     resp = client.request(
         "DELETE",
         f"/api/v1/agents/{NS_AGENT}",
@@ -134,10 +134,14 @@ def test_deregister_rejects_foreign_target_cluster() -> None:
 def test_deregister_local_intent_still_works() -> None:
     """No target header (local intent) => the guard is a no-op and the delete proceeds."""
     app, client = _client(set())
-    _session_override(app, SimpleNamespace(spiffe_id=NS_AGENT))
+    _session_override(app, SimpleNamespace(spiffe_id=NS_AGENT, namespace="team-a"))
     resp = client.request("DELETE", f"/api/v1/agents/{NS_AGENT}", headers=_hdr(role="admin"))
     assert resp.status_code == 200
-    assert resp.json() == {"deleted": True, "spiffe_id": NS_AGENT}
+    body = resp.json()
+    assert body["deleted"] is True and body["spiffe_id"] == NS_AGENT
+    # No evaluator on app.state here, so there is no graph to prune — and the response must SAY so
+    # rather than implying the console is now clean.
+    assert body["graph_node_removed"] is False
 
 
 # --- Cold-cache parity: get_agent falls back to the persistent registry (mirrors list_agents) --------
@@ -180,3 +184,105 @@ def test_get_agent_absent_from_cache_and_registry_is_404(monkeypatch) -> None:
     _patch_registry(monkeypatch, None)
     resp = client.get(f"/api/v1/agents/{NS_AGENT}", headers=_hdr(role="admin"))
     assert resp.status_code == 404
+
+
+# --- deregister must also take the agent OFF the asset graph --------------------------------------
+#
+# get_asset_graph serves the union of a persisted asset_graph snapshot and the classes that are merely
+# deployed (registry/policy). Deleting the registry row alone therefore only removed agents that had
+# NEVER been observed; one that had actually run kept its snapshot node and stayed on the console,
+# while the response still said {"deleted": true}. That is the case that matters — an agent worth
+# decommissioning is usually one that ran. Observed live on kind: DELETE returned 200 and the agent
+# was still in GET /asset-graph afterwards.
+
+
+class _FakeGraph:
+    def __init__(self, nodes: set[str]) -> None:
+        self._nodes = set(nodes)
+        self.graph = SimpleNamespace(number_of_nodes=lambda: len(self._nodes), number_of_edges=lambda: 0)
+
+    def remove_node(self, node_id: str) -> bool:
+        if node_id not in self._nodes:
+            return False
+        self._nodes.discard(node_id)
+        return True
+
+
+class _FakeEvaluator:
+    def __init__(self, graph: _FakeGraph) -> None:
+        self._graph = graph
+        self.restored: list[str] = []
+
+    async def _restore_graph(self, namespace: str) -> None:
+        self.restored.append(namespace)
+
+    def get_graph(self, _namespace: str) -> _FakeGraph:
+        return self._graph
+
+
+class _FakeStore:
+    def __init__(self) -> None:
+        self.saved: list[str] = []
+
+    async def save(self, namespace: str, _graph) -> None:
+        self.saved.append(namespace)
+
+
+def test_deregister_removes_the_agents_node_from_the_asset_graph() -> None:
+    """FAIL-ON-BUG: an OBSERVED agent (node baked into the snapshot) must leave the graph too.
+
+    Before the fix this asserted nothing about the graph, the node survived the delete, and the
+    console kept rendering a decommissioned identity.
+    """
+    app, client = _client(set())
+    graph = _FakeGraph({NS_AGENT})
+    evaluator = _FakeEvaluator(graph)
+    store = _FakeStore()
+    app.state.evaluator = evaluator
+    app.state.graph_store = store
+    _session_override(app, SimpleNamespace(spiffe_id=NS_AGENT, namespace="team-a"))
+
+    resp = client.request("DELETE", f"/api/v1/agents/{NS_AGENT}", headers=_hdr(role="admin"))
+
+    assert resp.status_code == 200
+    assert resp.json()["graph_node_removed"] is True
+    assert graph.remove_node(NS_AGENT) is False, "the node must be gone from the live builder"
+    # The snapshot has to be rewritten, or the node returns on the next read of the persisted graph.
+    assert store.saved == ["team-a"], "the pruned graph was never saved back"
+    # And the namespace's persisted snapshot must be restored FIRST, or a pod that has not yet touched
+    # this namespace prunes an empty in-memory graph and saves that over a populated snapshot.
+    assert evaluator.restored == ["team-a"]
+
+
+def test_deregister_reports_false_when_the_agent_had_no_graph_node() -> None:
+    """A never-observed agent has no snapshot node. That is not a failure — but it must not be
+    reported as a graph removal either, or `graph_node_removed` stops meaning anything."""
+    app, client = _client(set())
+    app.state.evaluator = _FakeEvaluator(_FakeGraph(set()))
+    app.state.graph_store = _FakeStore()
+    _session_override(app, SimpleNamespace(spiffe_id=NS_AGENT, namespace="team-a"))
+
+    resp = client.request("DELETE", f"/api/v1/agents/{NS_AGENT}", headers=_hdr(role="admin"))
+
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] is True
+    assert resp.json()["graph_node_removed"] is False
+
+
+def test_deregister_still_succeeds_when_the_graph_prune_raises() -> None:
+    """The registry row is committed before the prune. If the prune explodes there is nothing to roll
+    back, so the delete must still report success — and must NOT claim the graph node went with it."""
+    class _Exploding(_FakeEvaluator):
+        async def _restore_graph(self, namespace: str) -> None:
+            raise RuntimeError("graph store unreachable")
+
+    app, client = _client(set())
+    app.state.evaluator = _Exploding(_FakeGraph({NS_AGENT}))
+    app.state.graph_store = _FakeStore()
+    _session_override(app, SimpleNamespace(spiffe_id=NS_AGENT, namespace="team-a"))
+
+    resp = client.request("DELETE", f"/api/v1/agents/{NS_AGENT}", headers=_hdr(role="admin"))
+
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] is True
+    assert resp.json()["graph_node_removed"] is False

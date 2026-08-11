@@ -1,0 +1,247 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+#
+# The policy for the MCP support-chatbot demo (examples/chatbot + the three norviq-demo-mcp servers).
+#
+# ── WHY THIS FILE EXISTS AT ALL ────────────────────────────────────────────────────────────────────
+# `crds/examples/policy-strict-chatbot.yaml` already targets this exact scope with `preset: strict`.
+# It is NOT enough, and the gap was measured rather than assumed — run the shipped preset through the
+# same `opa --v0-compatible` the engine forks (webhook/presets/strict.rego, package
+# norviq.presets.strict) with `derived.verb` from `norviq.engine.capability.source_registry`:
+#
+#   search_kb          read    allow  default_allow
+#   get_article        read    allow  default_allow
+#   get_customer       read    allow  default_allow
+#   get_order          read    allow  default_allow
+#   update_ticket      write   allow  default_allow
+#   execute_sql        delete  BLOCK  strict_default_block
+#   delete_record      delete  BLOCK  llm06_excessive_agency
+#   send_email         send    allow  default_allow      <-- the demo needs this BLOCKED
+#   export_customers   send    allow  default_allow      <-- the demo needs this BLOCKED
+#
+# strict's tool-name blocks are `execute_sql` plus the delete_/drop_/truncate_/destroy_/wipe_/purge_/
+# erase_ prefixes (strict.rego:726-736) and the `destructive_tools` set. `send_email` and
+# `export_customers` are only reached by its CONTENT rules — `data_leakage_detected` needs a
+# `password`/`secret`/`api_key`/`token`/`private_key` KEY in the arguments, `secret_egress_detected`
+# needs a credential-shaped VALUE. A support bot exfiltrating an ordinary customer record carries
+# neither, so the two egress sinks come back `allow`. webhook/controller.go:1041 says the same thing
+# in the engine's own words: the strict preset "allows anything but destructive tool names".
+#
+# ── WHY THIS REPLACES policy-strict-chatbot.yaml RATHER THAN LAYERING ON TOP OF IT ─────────────────
+# Two things make a second, additive CR impossible here, and both are load-bearing:
+#
+#   1. `resolve_policy_key` (norviq/api/routers/policies.py) keys a policy with `target.agentClass`
+#      FIRST, so this CR and `chatbot-strict` both resolve to the loader key
+#      `chatbot-prod:customer-support`. `loader.create()` is a full-replace upsert on
+#      (namespace, agent_class) — the two CRs would not layer, they would overwrite each other on
+#      every re-sync, and which one is enforcing would depend on which reconciled last.
+#   2. Base candidates are resolved by HIGHEST PRIORITY WINS, not most-restrictive-wins
+#      (`evaluator._resolve_precedence`). Tighten-only layering exists, but only for the
+#      `__pack__`/`__guardrail__`/`__remediation__` overlay keys — and the CRD cannot mint those
+#      (target.agentClass forbids `_`). So even at a different tier a higher-priority policy REPLACES
+#      the decision; it cannot add to it.
+#
+# APPLY EXACTLY ONE OF THE TWO. Deleting `chatbot-strict` is the intended operator action:
+#   kubectl -n chatbot-prod delete nrvqpolicy chatbot-strict
+#
+# ── WHAT IS GIVEN UP, STATED HONESTLY ──────────────────────────────────────────────────────────────
+# Replacing the preset drops its content detectors for THIS class: PII (SSN), PCI (PAN), base64-
+# decoded threats, cross-tenant params, and secret-key egress. That is deliberate, not an oversight.
+# Those detectors guard a SINK, and after the rules below this class has no sink: no destructive verb,
+# no egress verb, and nothing outside a five-tool register. A card number typed into `search_kb` has
+# nowhere to go, while blocking it costs a support bot the ability to search for the complaint the
+# customer is actually calling about. The one detector that still earns its place with no sink present
+# — prompt injection in the arguments — is carried below, so llm01 coverage is not silently lost.
+apiVersion: norviq.io/v1alpha1
+kind: NrvqPolicy
+metadata:
+  name: chatbot-mcp
+  namespace: chatbot-prod
+spec:
+  target:
+    agentClass: customer-support
+  enforcementMode: block
+  # 250 sits above the whole-namespace tier and the cluster `__baseline__` fallback (stored at
+  # priority 1 by webhook/controller.go `baselineFallbackPriority`) and below the 499 cap a namespace
+  # user may set, so this is the policy that decides for the class without needing admin scope.
+  priority: 250
+  # ADVISORY ONLY — the CRD says so and means it: nothing evaluates this list. It is here so a reader
+  # of `kubectl get nrvqpolicy -o yaml` sees the rule_ids the rego below can actually produce.
+  rules:
+    - chatbot_tool_not_registered
+    - chatbot_no_egress
+    - chatbot_destructive_verb
+    - chatbot_prompt_injection
+    - mcp_definition_not_approved
+    - mcp_definition_drift
+    - mcp_definition_flagged
+  rego: |
+    package norviq.chatbot.mcp
+
+    # DENY BY DEFAULT. Not a stylistic preference — it is the only shape that holds against a tool
+    # name nobody has seen before, and this agent's tool list is served at runtime by three MCP
+    # servers. A denylist is a promise to have thought of every dangerous name; a poisoned or drifted
+    # `tools/list` can invent one after the promise was made.
+    #
+    # `default decision = "block"` also makes the silent-allow class of bug structurally impossible
+    # here: `decision` is bound on EVERY input, so there is no path where a rule fails to match and
+    # the evaluator's absent-binding fallback quietly returns allow.
+    default decision = "block"
+    default rule_id = "chatbot_tool_not_registered"
+    default reason = "this tool is not registered for the customer-support class"
+
+    # ── THE REGISTER ───────────────────────────────────────────────────────────────────────────────
+    # WHY EACH OF THESE IS ALLOWED. The test is not "does it look harmless" — it is "can a hostile
+    # caller turn this into a sink". All five answer no, and each for a reason that survives the model
+    # being fully compromised by prompt injection:
+    #
+    #   search_kb(query)          Reads a fixed, in-process dictionary of public support articles.
+    #                             The argument is free text, but the tool has no destination argument
+    #                             and no write path — the worst a hostile query achieves is a miss.
+    #   get_article(article_id)   Same corpus, addressed by id. Public content; no customer data.
+    #   get_customer(customer_id) Reads ONE record the support agent is on the phone about. This is
+    #                             the tool the whole job needs, and refusing it would leave the demo
+    #                             proving nothing. It is safe here only BECAUSE of the egress rule
+    #                             below: reading a record is not a leak until something can carry it
+    #                             out of the pod, and after this policy nothing can.
+    #   get_order(order_id)       Same argument, order scope.
+    #   update_ticket(id,status)  The one WRITE. It is admitted because its blast radius is bounded by
+    #                             the tool itself, not by trust in the model: it can only move a
+    #                             ticket's status field. There is no row it can destroy and no
+    #                             recipient it can address.
+    #
+    # Every entry is a standing capability. Removing a tool from this set is the whole revocation
+    # mechanism — there is no second place to look.
+    allowed_tools = {
+        "search_kb",
+        "get_article",
+        "get_customer",
+        "get_order",
+        "update_ticket",
+    }
+
+    # ── DEFENCE IN DEPTH OVER THE REGISTER ─────────────────────────────────────────────────────────
+    # These two do not change the verdict for the four sinks the demo names — those are already
+    # refused for not being registered. They exist for the edit that has not happened yet: the day
+    # someone adds a tool to `allowed_tools` without reading what it does. A capability grant should
+    # not be one careless line away from an exfiltration path.
+    #
+    # `derived.verb` is the engine's own classification of the call, published on every evaluation.
+    # It is used here ONLY to BLOCK. It must never be used to ALLOW: the verb is derived from a tool
+    # NAME the agent side chooses, and an admin may promote it, so an allow keyed on it is a bypass
+    # waiting for a rename. Blocking on it is sound in exactly the way allowing on it is not — a
+    # rename can only move a call OFF the block, and the register above still has to admit it.
+    #
+    # `object.get(..., "")` so an engine that predates `derived` does not error the module; the
+    # register is the primary control and still holds if the classification is missing entirely.
+
+    # This class answers in the chat window. It has no legitimate reason to put a byte anywhere else,
+    # which is what makes a flat refusal of every egress verb affordable — and this is the rule that
+    # stops the confused-deputy chain: read a customer with an allowed tool, then mail it out.
+    blocks["chatbot_no_egress"] {
+        object.get(input.derived, "verb", "") == "send"
+    }
+
+    # Nothing this class does is destructive. `execute_sql` and `delete_record` both classify here,
+    # as does any renamed spelling of them.
+    blocks["chatbot_destructive_verb"] {
+        object.get(input.derived, "verb", "") == "delete"
+    }
+
+    # ── GATE-A CARRY-OVER ──────────────────────────────────────────────────────────────────────────
+    # `input.mcp` is the only fact in this file the MCP firewall alone can supply: the pin/scan state
+    # computed at DISCOVERY and cached on the catalog entry, so reading it costs a dict lookup. The
+    # proxy already refuses these at Gate A on its own; restating them as policy is what lets the
+    # verdict be attributed, audited and varied per class instead of being the proxy's private choice.
+    #
+    # TRUST BOUNDARY: `input.mcp` is PEP-REPORTED, exactly like `input.tool_name`. It says WHAT is
+    # being called, never WHO is calling — identity comes from the attested SVID and is never read
+    # from an MCP message.
+
+    # Pin mode `strict`: the definition has never been approved by an operator.
+    blocks["mcp_definition_not_approved"] {
+        input.mcp.pin_status == "quarantined"
+    }
+
+    # The served definition no longer matches the approved one. This is the rug pull: a tool that was
+    # reviewed as benign, re-served with new instructions after it was trusted.
+    blocks["mcp_definition_drift"] {
+        input.mcp.pin_status == "drift"
+    }
+
+    # The definition itself matched instruction-injection patterns at discovery. `unknown` is
+    # deliberately absent from this set: it is what a tool with no catalog entry carries, and treating
+    # "I never looked" as a block would refuse every call made before the first tools/list completes.
+    blocking_scan_severity = {"high", "critical"}
+
+    blocks["mcp_definition_flagged"] {
+        blocking_scan_severity[input.mcp.scan_severity]
+    }
+
+    # ── PROMPT INJECTION IN THE ARGUMENTS ──────────────────────────────────────────────────────────
+    # Carried over from the strict preset (llm01_prompt_injection) so replacing it does not silently
+    # drop that coverage for this class. It is the one content detector that still pays for itself
+    # with no sink present: an override phrase arriving inside a tool ARGUMENT means the model is
+    # already repeating text it was steered with — usually text that came back from a previous tool
+    # result — and that is worth a refusal and an audit row even when the call itself is harmless.
+    #
+    # Matched against `tool_params_normalized`, the confusable-folded copy the engine builds, so a
+    # homoglyph or zero-width spelling does not walk past it.
+    #
+    # Stated residual: top-level string arguments only. Every tool in the register above takes flat
+    # string arguments, so there is nothing nested to miss today; a tool that takes an object would
+    # need this widened to `walk`, and the register is what keeps such a tool out until then.
+    injection_phrases = [
+        "ignore previous instructions",
+        "ignore all previous instructions",
+        "ignore your instructions",
+        "disregard your instructions",
+        "disregard previous instructions",
+        "forget your instructions",
+        "bypass all safety",
+        "you are now",
+    ]
+
+    blocks["chatbot_prompt_injection"] {
+        some k
+        v := input.tool_params_normalized[k]
+        is_string(v)
+        contains(lower(v), injection_phrases[_])
+    }
+
+    # ── RESOLVER ───────────────────────────────────────────────────────────────────────────────────
+    # Partial-set triggers plus a deterministic resolver, matching the shipped presets. One input can
+    # match several triggers at once (a drifted tool called with an injection payload); resolving from
+    # a SET means exactly one decision binds instead of two complete rules conflicting and erroring
+    # the module out — which the evaluator would report as a fail-closed engine error, losing the real
+    # reason.
+    #
+    # `sort(...)[0]` picks the winning label deterministically. It is attribution only: every member
+    # of `blocks` carries the same verdict.
+    block_fired { blocks[_] }
+
+    # The ONLY allow in this file, and it is registration-based: on the list, and nothing fired.
+    decision = "allow" {
+        allowed_tools[input.tool_name]
+        not block_fired
+    }
+
+    rule_id = sort([id | blocks[id]])[0] { block_fired }
+
+    rule_id = "chatbot_registered_tool" {
+        allowed_tools[input.tool_name]
+        not block_fired
+    }
+
+    reasons = {
+        "chatbot_tool_not_registered": "tool is not registered for the customer-support class",
+        "chatbot_registered_tool": "registered read/update tool for the customer-support class",
+        "chatbot_no_egress": "this agent class may not send data outside the pod",
+        "chatbot_destructive_verb": "destructive operations are not permitted for this agent class",
+        "chatbot_prompt_injection": "prompt-injection payload in the tool arguments",
+        "mcp_definition_not_approved": "this MCP tool definition has not been approved",
+        "mcp_definition_drift": "this MCP tool definition changed after it was approved (rug pull)",
+        "mcp_definition_flagged": "this MCP tool definition matched an instruction-injection pattern",
+    }
+
+    reason = reasons[rule_id]

@@ -7,21 +7,22 @@
 //  The RedTeam scorecard metric cluster is UNBOXED (no --bg-surface/--border) + nudged right; values==latest.
 //  Compliance framework cards carry no "coverage steady" trend line.
 
-import { test, expect, waitForApp } from "./fixtures";
+import { test, expect, waitForApp, suiteSettled } from "./fixtures";
 import { type Page } from "@playwright/test";
 
-async function postSuite(page: Page, query: string): Promise<any> {
-  for (let i = 0; i < 20; i++) {
-    const r = await page.evaluate(async (q) => {
-      const t = localStorage.getItem("nrvq_token");
-      const res = await fetch(`/api/v1/redteam/suite?${q}`, { method: "POST", headers: t ? { Authorization: `Bearer ${t}` } : {} });
-      return res.json();
-    }, query);
-    if (!(r?.detail?.error || /already running/i.test(JSON.stringify(r?.detail ?? "")))) return r;
-    await page.waitForTimeout(1500);
-  }
-  throw new Error("suite stayed busy");
+// Read a GET endpoint from the page, carrying the real session token, and FAIL LOUDLY on a non-2xx.
+// Returning `res.json()` and dropping the status is how a 401 or a 429 arrives downstream as a body
+// with no fields and the assertion reports "undefined" — which mis-triaged whole runs in this repo.
+async function apiJson(page: Page, path: string): Promise<any> {
+  const { status, body } = await page.evaluate(async (p) => {
+    const t = localStorage.getItem("nrvq_token");
+    const res = await fetch(p, { headers: t ? { Authorization: `Bearer ${t}` } : {} });
+    return { status: res.status, body: await res.json().catch(() => null) };
+  }, path);
+  if (status >= 400) throw new Error(`GET ${path} -> HTTP ${status}: ${JSON.stringify(body)?.slice(0, 200)}`);
+  return body;
 }
+
 
 test.describe("Overview coverage caption sits below the gauge (no overlap)", () => {
   test("the score-gauge-caption is below the number and out of the arc; text preserved", async ({ page, recorder }) => {
@@ -51,7 +52,13 @@ test.describe("Overview coverage caption sits below the gauge (no overlap)", () 
 test.describe("Policy Packs flat side-by-side grid", () => {
   test("all packs render in ONE flat grid (~4 per row, side-by-side), actions intact, no page clip", async ({ page, recorder }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto("/policies/packs");
+    // `?ns=` matters. The default scope is "all", where every mutation is DELIBERATELY disabled
+    // ("Select a namespace to apply changes.") — a pack has to land somewhere, so applying one across
+    // an unspecified set is refused. This spec asserts the pack actions are intact, which is only a
+    // meaningful question once a concrete namespace is selected. `packs-governance-batch1.spec.ts`
+    // asserts the disabled-at-all behaviour and passes, so this is not a product bug to fix; it is
+    // this spec asking its question in the one scope where the answer is always "no".
+    await page.goto("/policies/packs?ns=default");
     await waitForApp(page);
     await expect(page.getByText("Sector Starter Packs")).toBeVisible({ timeout: 15000 });
 
@@ -95,7 +102,13 @@ test.describe("RedTeam scorecard metric cluster is unboxed + nudged right", () =
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/redteam");
     await waitForApp(page);
-    const run = await postSuite(page, "target_agent=customer-support&target_namespace=default");
+    // READ the newest run rather than starting another one. `ui-batch-a.spec.ts:53` already POSTs an
+    // identical suite (same target, same namespace) — these two are copy-paste twins asserting
+    // different CSS against the same cluster. Each suite POST costs ~12s, fans out over every agent
+    // class, and `redteam_detail_keep_runs = 1` means it PRUNES the previous run's detail rows, so the
+    // duplicate was actively destroying the fixture other red-team specs read. The assertions here are
+    // about the scorecard's layout and its agreement with the latest run; `results/latest` is that run.
+    const run = await apiJson(page, "/api/v1/redteam/results/latest?namespace=default");
     await page.goto("/redteam");
     await waitForApp(page);
     await expect(page.getByTestId("redteam-scorecard")).toBeVisible({ timeout: 30000 });

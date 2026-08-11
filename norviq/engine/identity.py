@@ -26,6 +26,10 @@ except ImportError:  # pragma: no cover
 
 log = structlog.get_logger()
 _CACHE_TTL = settings.spiffe_cache_ttl_s
+# Hard ceiling on how long an identity may be reused without re-consulting the Workload API. Shorter
+# than any plausible SVID lifetime, so this cache can never be the reason a rotation or revocation is
+# missed. See SPIFFEResolver._cache_ttl for why this is clamped rather than trusted.
+_MAX_CACHE_TTL = 300
 _TRUST_DOMAIN = "norviq"
 
 
@@ -68,14 +72,54 @@ class SPIFFEResolver:
             log.info("nrvq.identity.resolved", spiffe_id=identity.spiffe_id, code="NRVQ-IDT-10000")
             return identity
 
+    def _cache_ttl(self) -> int:
+        """How long a resolved identity may be reused, BOUNDED.
+
+        Two problems this replaces, both invisible until you look for them.
+
+        1. `_CACHE_TTL` was a module constant bound at import, so `NRVQ_SPIFFE_CACHE_TTL_S` had no
+           effect on a process that had already imported this module — the knob silently did nothing.
+        2. The value was unbounded. An operator raising it to an hour or a day does not get a faster
+           cache; they get SVID ROTATION TURNED OFF. The Workload API is never consulted again for the
+           whole window, so a workload whose SVID has rotated — or been REVOKED — keeps enforcing under
+           its previous identity, which is what every policy decision, trust score and the
+           `agent_frozen` kill-switch are keyed on.
+
+        The ceiling is deliberately shorter than any plausible SVID lifetime (SPIRE issues in minutes
+        to an hour and rotates at half-life), so the cache can never be the reason a rotation is
+        missed. Clamping rather than refusing: an over-long TTL is a misconfiguration, and failing a
+        workload's identity resolution over it would be a worse outcome than quietly enforcing a safe
+        bound and saying so.
+        """
+        configured = int(getattr(settings, "spiffe_cache_ttl_s", _CACHE_TTL) or _CACHE_TTL)
+        if configured > _MAX_CACHE_TTL:
+            log.warning(
+                "nrvq.identity.cache_ttl_clamped",
+                configured_s=configured,
+                enforced_s=_MAX_CACHE_TTL,
+                code="NRVQ-IDT-10007",
+            )
+            return _MAX_CACHE_TTL
+        return max(0, configured)
+
     def _get_cached(self) -> AgentIdentity | None:
-        """Return cached identity if still valid."""
+        """Return cached identity if still valid.
+
+        Drops EVERY expired entry before answering, and answers only when exactly one live identity
+        remains. The previous form returned the first entry inside its window while iterating a dict
+        keyed by spiffe_id — the key was never consulted, so with two identities present the answer
+        depended on insertion order. One attested identity per workload is the invariant; anything else
+        means the workload's identity changed under us, and the honest response is to re-resolve rather
+        than to pick one.
+        """
         now = time.monotonic()
-        for spiffe_id, (identity, ts) in tuple(self._cache.items()):
-            if now - ts < _CACHE_TTL:
-                return identity
-            del self._cache[spiffe_id]
-        return None
+        ttl = self._cache_ttl()
+        for spiffe_id, (_identity, ts) in tuple(self._cache.items()):
+            if now - ts >= ttl:
+                del self._cache[spiffe_id]
+        if len(self._cache) != 1:
+            return None
+        return next(iter(self._cache.values()))[0]
 
     async def _resolve_from_socket(self) -> AgentIdentity:
         """Resolve identity by mode: real Workload API SVID (fail-closed) or env-var mock."""
@@ -126,6 +170,13 @@ class SPIFFEResolver:
             service_account=service_account,
             agent_class=os.environ.get("NRVQ_AGENT_CLASS", "default"),
             pod_name=os.environ.get("HOSTNAME", "unknown-pod"),
+            # The Deployment this pod belongs to, injected as NRVQ_WORKLOAD by the admission webhook
+            # (workloadFromPod, webhook/injector.go) from the pod's OWNER reference — not from its name.
+            # Nothing set this before, on any production path, so `_collect_candidates`' workload tier
+            # (`<ns>:deployment:<workload>`) never matched a single call while the console, the CRD and
+            # the CLI all offered workload-scoped policies and reported them Active. Absent when the pod
+            # has no resolvable owner, in which case the tier correctly does not apply.
+            workload=os.environ.get("NRVQ_WORKLOAD", ""),
         )
 
     def _mock_resolve(self) -> AgentIdentity:
@@ -141,6 +192,7 @@ class SPIFFEResolver:
             service_account=service_account,
             agent_class=agent_class,
             pod_name=pod_name,
+            workload=os.environ.get("NRVQ_WORKLOAD", ""),
         )
 
     def _fallback_identity(self) -> AgentIdentity:

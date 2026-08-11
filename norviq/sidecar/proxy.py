@@ -48,6 +48,32 @@ def _is_missing_schema(exc: BaseException) -> bool:
     return False
 
 
+def _coerce_depth(raw: object) -> int:
+    """Clamp a caller-reported call depth to a sane non-negative int.
+
+    Never raises: a malformed depth must not fail the call open OR closed on a parse error — it just
+    degrades to 0, which is the value every PEP used to send unconditionally.
+    """
+    if raw is None:
+        return 0
+    try:
+        depth = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        # Not silent: a client sending a non-numeric depth is a client bug worth seeing, and the
+        # degrade-to-0 below is exactly the value that used to be sent unconditionally, so it can
+        # never fail a call open or closed. Logged rather than raised for that reason.
+        log.warning("nrvq.sidecar.call_depth_malformed", raw=repr(raw)[:64], code="NRVQ-SDC-3012")
+        return 0
+    if depth < 0:
+        log.warning("nrvq.sidecar.call_depth_negative", raw=depth, code="NRVQ-SDC-3012")
+        return 0
+    if depth > 1000:
+        # Clamped so a hostile value cannot be handed to rego as an unbounded integer.
+        log.warning("nrvq.sidecar.call_depth_clamped", raw=depth, code="NRVQ-SDC-3012")
+        return 1000
+    return depth
+
+
 class SidecarProxy:
     """Unix socket proxy for tool call interception."""
 
@@ -215,9 +241,21 @@ class SidecarProxy:
                 tool_name = str(data.get("tool_name", ""))
                 tool_params = self._tool_params(data)
                 session_id = str(data.get("session_id", ""))
+                # call_depth is CALLER-REPORTED, exactly like session_id and tool_params. It was not
+                # forwarded at all: every PEP called intercept() positionally and took the parameter's
+                # 0 default, so `chain_depth_limit` — shipped ENABLED in the default comprehensive
+                # policy and in the strict preset, exercised by the Policy Tester, and reported as
+                # PASSED by the red-team suite — could never fire on a real call, and ChainDepthSignal
+                # (10% of the trust weight) scored every request as depth 0.
+                #
+                # Trust level: a cooperative signal, not an attestation. An agent that lies about its
+                # depth under-reports, the same way it could lie about session_id. It bounds RUNAWAY
+                # RECURSION in a cooperating agent, which is what OWASP LLM08 asks for; it is not a
+                # defence against an agent that wants to hide its depth.
+                call_depth = _coerce_depth(data.get("call_depth"))
             with timer.phase("evaluate"):
                 decision = await self._interceptor.intercept(
-                    tool_name, tool_params, session_id, framework="sidecar"
+                    tool_name, tool_params, session_id, framework="sidecar", call_depth=call_depth
                 )
             with timer.phase("serialize"):
                 action = "forward" if decision.is_allowed() else "drop"

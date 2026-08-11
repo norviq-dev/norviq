@@ -29,8 +29,84 @@ log = structlog.get_logger()
 _BATCH = 500
 
 
+
+# RFC5424 severity per decision. A block is the row an on-call rule triggers on, so it must not arrive
+# at the same severity as an ordinary allow.
+_SYSLOG_SEVERITY = {"block": 4, "escalate": 4, "audit": 5, "allow": 6}
+_SYSLOG_FACILITY = 16  # local0
+
+
+# RFC5424 header fields are PRINTUSASCII (33..126) with no spaces, and each has a length cap. Anything
+# else must be replaced, not passed through.
+_SYSLOG_NILVALUE = "-"
+
+
+def _syslog_field(value: object, max_len: int) -> str:
+    """Sanitize one RFC5424 header field.
+
+    THIS IS A SECURITY BOUNDARY, and it was missing. `agent_class` was interpolated raw into PROCID —
+    and agent_class is caller-influenced (the pod label, and the body on unbound paths). A value
+    containing a space, a newline, or a crafted `<PRI>1 ...` prefix let a caller terminate the field,
+    or the whole frame, and inject fabricated events into the SIEM stream: forged blocks, or a forged
+    allow that buries a real one. That is worse than the gap this format was added to close, because
+    the header fields had just been given real semantics (PRI from the decision, MSGID = decision,
+    HOSTNAME = namespace) precisely so on-call rules could trigger on them.
+
+    Space is the field separator and newline is the frame separator, so both are fatal; everything
+    outside printable US-ASCII is dropped to `_` rather than guessed at. An empty or fully-scrubbed
+    value becomes the RFC's NILVALUE.
+    """
+    raw = str(value or "")
+    cleaned = "".join(ch if 33 <= ord(ch) <= 126 else "_" for ch in raw)[:max_len]
+    return cleaned or _SYSLOG_NILVALUE
+
+
+def _syslog_line(row: AuditLogEntry) -> str:
+    """One RFC5424 frame: <PRI>1 TIMESTAMP HOST APP PROCID MSGID SD MSG."""
+    doc = _to_dict(row)
+    severity = _SYSLOG_SEVERITY.get(str(doc.get("decision", "")).lower(), 6)
+    pri = _SYSLOG_FACILITY * 8 + severity
+    ts = getattr(row, "timestamp_utc", None)
+    # RFC5424 TIMESTAMP is RFC3339 and must not carry a space; isoformat() on a tz-aware datetime is
+    # already compliant, but a naive or odd value must not be allowed to break framing either.
+    stamp = _syslog_field(ts.isoformat(), 64) if ts is not None else _SYSLOG_NILVALUE
+    host = _syslog_field(doc.get("namespace"), 255)
+    procid = _syslog_field(doc.get("agent_class"), 128)
+    msgid = _syslog_field(doc.get("decision"), 32)
+    # The event itself stays JSON in MSG: a collector that parses RFC5424 gets real framing and
+    # severity, and the payload remains machine-readable rather than being flattened into prose.
+    # json.dumps escapes newlines, so MSG cannot terminate the frame.
+    return f"<{pri}>1 {stamp} {host} norviq {procid} {msgid} - " + json.dumps(doc, separators=(",", ":"))
+
+
+def _encode_batch(rows: list[AuditLogEntry]) -> tuple[str, str]:
+    """Encode a batch in the format the operator SELECTED.
+
+    `siem.format` was accepted by the chart, written into the ConfigMap, documented in two places as
+    `ndjson | syslog` — and read by nothing. The forwarder always posted NDJSON with
+    content-type application/x-ndjson, then logged `nrvq.siem.forwarded count=N` at INFO. An operator
+    pointing this at a syslog collector saw the setting land, saw the success line, and believed their
+    audit evidence was flowing; the collector silently dropped or mis-parsed every record. On the
+    audit-evidence egress path of a compliance product, a knob that reports success while ignoring the
+    operator's choice is the worst place for this defect to live.
+    """
+    if str(getattr(settings, "siem_format", "ndjson")).strip().lower() == "syslog":
+        return "".join(_syslog_line(row) + "\n" for row in rows), "text/plain; charset=utf-8"
+    return (
+        "".join(json.dumps(_to_dict(row), separators=(",", ":")) + "\n" for row in rows),
+        "application/x-ndjson",
+    )
+
 class AuditForwarder:
-    """Periodically POSTs new audit rows to a SIEM endpoint as NDJSON (cursor by timestamp)."""
+    # One row, one forwarder per deployment today; a named key leaves room for more without a migration.
+    _CURSOR_ID = "default"
+    # Bounds one poll so a huge backlog drains steadily instead of monopolising the loop forever.
+    _MAX_BATCHES_PER_POLL = 20
+
+    """Periodically POSTs new audit rows to a SIEM endpoint (cursor by timestamp).
+
+    Wire format follows `siem.format` — `ndjson` (default) or `syslog` (RFC5424). See `_encode_batch`.
+    """
 
     def __init__(self, session_factory=get_session, client: httpx.AsyncClient | None = None) -> None:
         """Store collaborators; session_factory yields an AsyncSession (overridable in tests)."""
@@ -40,6 +116,7 @@ class AuditForwarder:
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self._cursor_ts = None
+        self._cursor_loaded = False
 
     async def start(self) -> None:
         """Launch the background poll loop when enabled and configured (else a no-op)."""
@@ -67,18 +144,80 @@ class AuditForwarder:
                 pass
 
     async def forward_once(self) -> int:
-        """Fetch audit rows newer than the cursor, POST them, advance the cursor. Returns count."""
+        """Forward every audit row newer than the cursor, in batches, and persist the cursor.
+
+        Two defects lived here. The cursor was in-memory only, so each API restart re-forwarded the
+        audit log from row ONE — the whole history duplicated into the collector, while the INFO
+        success line said everything was fine. And this forwarded ONE batch per poll: 500 rows every
+        siem_poll_interval_s (30s by default) is a hard 16.7 rows/sec ceiling, so any namespace busier
+        than that fell permanently behind and the gap only ever grew. Now it drains until caught up,
+        bounded so one call cannot spin forever.
+        """
+        await self._load_cursor()
+        total = 0
+        for _ in range(self._MAX_BATCHES_PER_POLL):
+            sent = await self._forward_batch()
+            total += sent
+            if sent < _BATCH:
+                break
+        return total
+
+    async def _forward_batch(self) -> int:
+        """Forward at most one batch. Returns how many rows went."""
         rows = await self._fetch_new()
         if not rows:
             return 0
-        payload = "".join(json.dumps(_to_dict(row), separators=(",", ":")) + "\n" for row in rows)
+        payload, content_type = _encode_batch(rows)
         response = await self._client.post(
-            settings.siem_webhook_url, content=payload, headers={"content-type": "application/x-ndjson"}
+            settings.siem_webhook_url, content=payload, headers={"content-type": content_type}
         )
         response.raise_for_status()
         self._cursor_ts = rows[-1].timestamp_utc
+        await self._save_cursor()
         log.info("nrvq.siem.forwarded", count=len(rows), code="NRVQ-SIEM-14000")
         return len(rows)
+
+    async def _load_cursor(self) -> None:
+        """Read the persisted cursor once per process. Best-effort: a DB hiccup must not stop forwarding."""
+        if self._cursor_loaded:
+            return
+        self._cursor_loaded = True
+        try:
+            from norviq.api.db.models import SiemForwardCursor
+
+            provider = self._session_factory()
+            session = await provider.__anext__()
+            try:
+                row = await session.get(SiemForwardCursor, self._CURSOR_ID)
+                if row is not None and row.cursor_ts is not None:
+                    self._cursor_ts = row.cursor_ts
+                    log.info("nrvq.siem.cursor_restored", cursor=str(row.cursor_ts), code="NRVQ-SIEM-14003")
+            finally:
+                await provider.aclose()
+        except Exception as exc:
+            # Loud: starting from nothing means re-forwarding history, which is the defect this closes.
+            log.warning("nrvq.siem.cursor_load_failed", error=str(exc), code="NRVQ-SIEM-14004")
+
+    async def _save_cursor(self) -> None:
+        """Persist the cursor after a successful POST, so a restart resumes instead of replaying."""
+        try:
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+            from norviq.api.db.models import SiemForwardCursor
+
+            provider = self._session_factory()
+            session = await provider.__anext__()
+            try:
+                stmt = pg_insert(SiemForwardCursor).values(id=self._CURSOR_ID, cursor_ts=self._cursor_ts)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["id"], set_={"cursor_ts": self._cursor_ts},
+                )
+                await session.execute(stmt)
+                await session.commit()
+            finally:
+                await provider.aclose()
+        except Exception as exc:
+            log.warning("nrvq.siem.cursor_save_failed", error=str(exc), code="NRVQ-SIEM-14005")
 
     async def _fetch_new(self) -> list[AuditLogEntry]:
         """Read the next batch of audit rows after the cursor, ordered oldest-first."""

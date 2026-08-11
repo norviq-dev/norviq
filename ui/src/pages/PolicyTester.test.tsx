@@ -43,7 +43,14 @@ describe("PolicyTester signals honesty", () => {
     expect(screen.queryByText("1.00")).not.toBeInTheDocument();
   });
 
-  it("renders real signal bars when the engine DOES return them", async () => {
+  // NOTE ON THIS FIXTURE: /api/v1/evaluate does NOT return `trust_signals` today — evaluate.py's
+  // `EvaluateResponse` has exactly three fields (decision / rule_id / trust_score), so the body below
+  // is one this API cannot currently produce and the branch it covers is unreachable in production.
+  // The test is kept (and renamed) as a CONDITIONAL contract — "if a response ever carries signals,
+  // render the real values, never fabricated ones" — not as evidence that the endpoint carries them.
+  // The reachable branch, and the copy the operator actually reads, is covered above and in
+  // PolicyTester.provenance.test.tsx.
+  it("renders real signal bars IF a response ever carries them (branch is unreachable via /evaluate today)", async () => {
     server.use(
       http.post("/api/v1/evaluate", () =>
         HttpResponse.json({

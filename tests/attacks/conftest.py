@@ -65,29 +65,11 @@ def api() -> httpx.Client:
         client.close()
 
 
-@pytest.fixture(scope="session", autouse=True)
-def ensure_attack_agent_policy(api: httpx.Client) -> None:
-    """Ensure brand-new-agent has a runnable policy in local attack runs."""
-    if not API_TOKEN:
-        return
-    try:
-        src = api.get("/api/v1/policies/default/customer-support")
-        src.raise_for_status()
-        rego_source = src.json().get("rego_source", "")
-        if not rego_source:
-            return
-        payload = {
-            "namespace": "default",
-            "agent_class": "brand-new-agent",
-            "rego_source": rego_source,
-            "enforcement_mode": "block",
-            "saved_by": "attack-suite",
-            "priority": 700,
-        }
-        api.post("/api/v1/policies", json=payload).raise_for_status()
-    except Exception:
-        # Keep suite behavior unchanged if a target API doesn't expose policy admin.
-        return
+# `ensure_attack_agent_policy` lived here and created `default/brand-new-agent` at priority 700.
+# It has moved to `scripts/kind-e2e/seed.py::seed_version_history`, which is where console fixtures
+# belong. Two owners writing the same class at different priorities is a conflict waiting to be
+# debugged, and a browser spec that only passes when the ATTACKS suite has run first is not a test —
+# it is residue. The attacks suite does not need this class; the console does.
 
 
 def evaluate(

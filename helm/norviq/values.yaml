@@ -69,6 +69,21 @@ baselineClusterPolicy:
   name: baseline-cluster-guard
   clusterPriority: 900
   preset: strict
+  # audit (default) — every baseline control EVALUATES and records a non-compliance event, and the
+  # call proceeds. block — the baseline refuses the call outright.
+  #
+  # This shipped as `block`, which meant installing the chart silently put 22 block rules in front of
+  # every tool call in every tenant namespace, on day one, before the customer had written a single
+  # policy or seen a single decision. The failure mode is not theoretical: `deny_shell_execution`
+  # fires on roughly 1 in 8 ordinary alphanumeric identifiers (the base64 fan-out decodes an order id
+  # to random bytes and matches `|` in them), so a stock install drops a real fraction of a support
+  # bot's legitimate lookups and attributes it to shell injection.
+  #
+  # Defaulting to `audit` inverts the install experience: Norviq arrives observing, the customer sees
+  # in the compliance view exactly what WOULD be blocked and by which control, and promotes controls
+  # to enforcement when the blast radius is known. Set to `block` here to restore the old posture
+  # cluster-wide, or promote individual controls via the baseline controls API.
+  enforcementMode: audit
 
 images:
   # Registry prefix (trailing slash) prepended to every component repository. Defaults to the
@@ -127,8 +142,30 @@ imagePullSecrets: []
 tests:
   image: "curlimages/curl:8.10.1"
 
+# Extra annotations stamped onto every norviq pod template. Chiefly a rollout lever: a value that
+# changes with each build (an image ID, a git sha) forces the Deployment to actually roll, which a
+# rebuilt-but-same-tag image otherwise will not — see scripts/kind-e2e/00-up.sh.
+podAnnotations: {}
+
 gracefulShutdown:
-  preStopSleepSeconds: 3
+  # How long a terminating pod keeps serving before its process is asked to stop. This is NOT a
+  # politeness setting — it is the window in which the pod's removal from the Service endpoints
+  # propagates to every kube-proxy/dataplane. Until that lands, traffic is still being routed to a pod
+  # that is on its way out, and for a policy enforcement point that traffic does not merely fail: the
+  # engine fails CLOSED, so the agent's tool call is REFUSED. A rolling update quietly denies a slice
+  # of legitimate agent actions.
+  #
+  # MEASURED, not guessed (scripts/kind-e2e/chaos.py, scenario 1 — delete one replica under ~1,500
+  # concurrent evaluate calls):
+  #     preStopSleepSeconds: 3   ->  1 and 31 benign calls refused across two runs
+  #     preStopSleepSeconds: 15  ->  0, 0 and 2 refused across three runs
+  # Never once in the fail-OPEN direction, which is the property that actually matters; the cost of the
+  # short window was availability, not safety.
+  #
+  # 15s sits inside the 30s terminationGracePeriodSeconds with room for the app's own shutdown. The
+  # residual (~0.1%) is not eliminated by a longer sleep — that tail needs connection draining, not
+  # more waiting — so it is left visible rather than tuned into apparent perfection.
+  preStopSleepSeconds: 15
 
 # Hardened container securityContext for the primary app containers (defense-in-depth). The
 # chart sets it inline rather than relying on an external PSA/Kyverno restricted-profile mutation
@@ -217,22 +254,36 @@ api:
       # Lower this if you are deliberately capping a noisy tenant, but the cost of a low cap here is
       # paid as p95 latency on every enforcement decision.
       cpu: 2000m
-      memory: 256Mi
+      # MEMORY got the same treatment as cpu above, for the same reason: it was sized before the API
+      # ran more than one worker, and never re-measured.
+      #
+      # Measured at IDLE on AKS with a single uvicorn worker: 214Mi against a 256Mi limit — 84% full
+      # doing nothing. That left no room to serve a burst, and none at all to run the `--workers`
+      # the container now starts (each worker is a separate PROCESS with its own heap).
+      #
+      # 1Gi carries 4 workers with real headroom. As with cpu, only the LIMIT moves: `requests` stays
+      # at 128Mi so the chart still schedules on a small cluster, and a limit that is never reached
+      # costs nothing.
+      memory: 1Gi
+  # Uvicorn worker processes. Without this the API ran ONE event loop per pod, so a pod served one
+  # request at a time regardless of its CPU limit — and /api/v1/evaluate is in front of every agent
+  # tool call. Measured before: p50 66 -> 131 -> 291ms at concurrency 1/2/4 (linear: a queue, not
+  # work), and past ~4 concurrent it crossed the engine's 2s budget and FAILED CLOSED, refusing 92%
+  # of ordinary calls. Track this to the cpu limit; raising it needs memory to match.
+  workers: 4
   port: 8080
   # Leave this at the sentinel default and the chart AUTO-GENERATES a strong random secret on
   # first install (templates/secret.yaml), persisting it across `helm upgrade` (a live cluster lookup)
   # so upgrades never invalidate existing sessions/JWTs. Set an explicit value here to pin your own
   # secret instead (e.g. rotation, multi-cluster fleet trust) — it always wins over auto-generation.
   secretKey: "change-me-in-production"
-  env:
-    - name: NRVQ_DB_SSL_MODE
-      value: "require"
-    - name: NRVQ_DB_POOL_MAX_OVERFLOW
-      value: "10"
-    - name: NRVQ_DB_POOL_TIMEOUT
-      value: "10"
-    - name: NRVQ_DB_COMMAND_TIMEOUT
-      value: "10"
+  # An `api.env:` list used to sit here. No template ever read it — api-deployment.yaml's env surface is
+  # envFrom(norviq-config, norviq-secrets) plus an optional BYO-datastore var — so every entry was inert.
+  # Worse, it advertised NRVQ_DB_SSL_MODE: "require" while norviq-config renders "disable" for the
+  # bundled non-TLS StatefulSet, so it read as a security assurance the pods did not have. The real keys
+  # are config.dbPoolMaxOverflow / dbPoolTimeout / dbCommandTimeout, and TLS is chosen by the
+  # norviq.dbSslMode helper (see config.dbSslMode). Removed rather than wired: wiring it as written
+  # would set sslmode=require against the bundled Postgres and break a stock install on first boot.
 
 ui:
   replicas: 1
@@ -284,6 +335,53 @@ webhook:
     # nothing per-pod). "embedded" = the sidecar runs its own RedisCache+OPA(subprocess)+PolicyLoader
     # for air-gapped/edge (the chart then wires NRVQ_REDIS_URL/NRVQ_PG_URL through to the injector).
     sidecarMode: proxy
+    # Deliver the injected sidecar's credentials (NRVQ_API_TOKEN + the mTLS client cert/key) through a
+    # Secret + valueFrom.secretKeyRef instead of literal `value:` entries in the pod spec.
+    #
+    # WHY it matters: Kubernetes deliberately excludes Secrets from the built-in `view` ClusterRole
+    # (`view` grants `get pods`, not `get secrets`), so a credential in the pod spec is readable by
+    # anyone a read-only grant was considered safe for. It also lands in etcd, `kubectl describe`, and
+    # any GitOps diff.
+    #
+    # Needs namespaced Secret write for the webhook — a Role+RoleBinding is rendered in each namespace
+    # below (NOT a ClusterRole; see webhook-secret-rbac.yaml for the reasoning). If the webhook cannot
+    # write the Secret it FALLS BACK to literal pod env and logs NRVQ-WHK-4049 rather than refusing to
+    # schedule, because this webhook runs failurePolicy: Fail. Set `required: true` to refuse instead.
+    credentialSecret:
+      enabled: true
+      required: false
+      # Namespaces labelled norviq-injection=enabled. Defaults to policyQuotaNamespaces.
+      namespaces: []
+    # MCP action-firewall injection — the same zero-code-change deal the sidecar gives the SDK, for
+    # Model Context Protocol traffic. A pod opts in per container:
+    #
+    #   metadata:
+    #     annotations:
+    #       norviq.io/mcp-servers: "filesystem,github"     # containers whose command IS an MCP server
+    #       norviq.io/mcp-server-id.github: "github-prod"  # optional stable pin id (default: the name)
+    #
+    # The injector rewrites each named container's command to exec the proxy, and an init container
+    # copies that proxy in from proxyImage — so the MCP server's own image needs nothing installed.
+    #
+    # Two admission rules follow from "never leave a named server ungoverned": a name that matches no
+    # container, and a container with no explicit `command` (its argv is the image ENTRYPOINT, which
+    # admission cannot see), are both DENIED rather than skipped.
+    mcp:
+      enabled: false
+      # REQUIRED when enabled, with no fallback. Must hold the relocatable payload at proxySourcePath;
+      # build it with scripts/mcp-proxy-payload.Dockerfile and confirm it runs in the images your MCP
+      # servers actually use with scripts/mcp-proxy-payload-verify.sh. Defaulting this to the engine
+      # image was wrong — that image carries the norviq package, not the frozen payload, so the init
+      # container's `cp` found nothing and every governed pod failed at start.
+      proxyImage: ""
+      proxySourcePath: /opt/norviq/mcp-proxy
+      # Where Gate-A definition pins live. `control-plane` is the right posture in a cluster: pins are
+      # approvals, so they belong with policy — tenant-scoped, RBAC'd, audited, console-visible, and
+      # not lost when a pod restarts. `memory`/`file` exist for air-gapped single-process use.
+      pinStore: control-plane
+      # `tofu` trusts a server's definitions on first sight; `strict` quarantines them until an
+      # operator approves. strict is safer and needs an approval workflow to be practical.
+      pinMode: tofu
     # Resources for the INJECTED sidecar, chosen per sidecarMode. `proxy` is a thin forwarder;
     # `embedded` runs a whole engine in the pod (redis client, policy warm, audit emitter, pubsub
     # watcher, plus an OPA subprocess) and was OOMKilled at the proxy budget in every release before
@@ -327,16 +425,22 @@ webhook:
         limits:   { cpu: 2000m, memory: 384Mi }
     # DATA-PLANE posture: what a GOVERNED AGENT does when the central engine is unreachable. Distinct
     # from failurePolicy below, which is the ADMISSION posture (whether a pod may be created at all).
-    #   "block" (DEFAULT) = fail-CLOSED. The agent keeps talking, but every tool call is refused for as
-    #     long as the engine is down. Correct for an enforcement product: no ungoverned tool calls, ever.
-    #   "allow"           = fail-OPEN. Tool calls are forwarded UNGOVERNED during an outage, so the agent
-    #     keeps working. Each one is audited as rule_id=thin_proxy_fail_open — never as a policy allow.
+    #   "allow" (DEFAULT) = fail-OPEN. Tool calls are forwarded during an outage so the customer's
+    #     agents keep working. Each one is audited as rule_id=thin_proxy_fail_open — never as a policy
+    #     allow — so "we went unjudged" is countable and alertable rather than silent.
+    #   "block"           = fail-CLOSED. No ungoverned tool call, ever, at the cost of taking every
+    #     agent in the cluster down with us for as long as the engine is down.
     # This applies ONLY to a genuine outage (5xx / timeout / connection error). A 4xx is the engine
     # ANSWERING with a refusal — an expired token, a malformed request — and ALWAYS blocks regardless of
-    # this setting, so choosing "allow" cannot turn a revoked credential into a silent bypass.
-    # Before reaching for "allow": both data-plane paths already retry with backoff, which covers the
-    # common cases (rolling restarts, brief blips). "allow" is for tolerating a SUSTAINED outage.
-    fallbackMode: block
+    # this setting, so "allow" cannot turn a revoked credential into a silent bypass.
+    # Both data-plane paths retry with backoff first, so this only decides what happens after a
+    # SUSTAINED outage, not during a rolling restart or a brief blip.
+    #
+    # Defaulted to block until it was measured against the product's actual posture: Norviq sits in the
+    # request path of production agents, and a security control whose failure mode is a customer outage
+    # gets removed from that path, which protects nobody. Must track config.py's sdk_fallback_mode —
+    # this value is stamped into every injected sidecar and silently wins over the Python default.
+    fallbackMode: allow
     # Gate admission on the pod's agent-class label instead of the whole namespace (DEFAULT true).
     # Without this, `norviq-injection=enabled` on a namespace routes EVERY pod created there through the
     # injector — the namespace's database, ingress controller, batch jobs — so with failurePolicy: Fail a
@@ -349,13 +453,23 @@ webhook:
     # so this takes effect as pods are recreated.
     #
     # UPGRADE CARE: if you have agent pods relying on namespace-wide injection WITHOUT an agent-class
-    # label, they stop being injected on their next restart. That is silent by nature, so the console
-    # raises an "ungoverned agent pods" warning for exactly this case — or set this to false to keep the
-    # previous namespace-wide behaviour.
+    # label, they stop being injected on their next restart, and that is SILENT — the pod starts fine,
+    # it is simply ungoverned.
+    #
+    # This comment used to promise that "the console raises an 'ungoverned agent pods' warning for
+    # exactly this case". It does not: system_health.py reports only the fixed infra verdicts read back
+    # from audit_log, and nothing anywhere computes injected-vs-expected. Saying otherwise told an
+    # operator a compensating control existed, which is worse than the gap itself. Until it is built,
+    # verify by hand after an upgrade:
+    #   kubectl get pods -n <ns> -l norviq.io/agent-class -o name          # will be injected
+    #   kubectl get pods -n <ns> -L norviq.io/agent-class                  # blanks are NOT
+    # Or set this to false to keep the previous namespace-wide behaviour.
     gateOnlyAgentPods: true
     # Admission failure posture for the injector. "Fail" (DEFAULT) = fail-CLOSED: if the injector is
-    # unavailable, pod creation in an injection-enabled namespace is REJECTED so an agent pod can never
-    # start un-guarded (correct for a policy-enforcement product; the webhook is HA — 2 replicas + PDB,
+    # unavailable, creation of a pod the webhook ROUTES is REJECTED so a routed pod can never start
+    # un-guarded. Note what that does NOT cover: with gateOnlyAgentPods: true (above) only pods carrying
+    # norviq.io/agent-class are routed, so an unlabelled pod starts ungoverned no matter what this is set
+    # to (correct for a policy-enforcement product; the webhook is HA — 2 replicas + PDB,
     # and the control-plane/kube-system namespaces are excluded from the selector so this never self-
     # deadlocks). Set "Ignore" (fail-open) only for a dev/eval cluster where an un-injected pod is
     # acceptable.
@@ -365,9 +479,10 @@ webhook:
     # webhook.pdb.enabled=true, otherwise one drain can evict both replicas and reject pod creation in
     # every governed namespace until they reschedule.
     # Honor the per-pod injection opt-out (norviq-injection=disabled label / norviq.io/skip-injection
-    # annotation)? Default true (backward-compatible). Set false to make injection namespace-uniform — a
-    # pod author in an injection-enabled namespace cannot self-exempt their workload from
-    # enforcement (a real bypass otherwise). Pair with RBAC on pod label/annotation writes.
+    # annotation)? Default true (backward-compatible). Set false so a ROUTED pod cannot self-exempt (a
+    # real bypass otherwise). This is not namespace-uniform while gateOnlyAgentPods is true: omitting
+    # norviq.io/agent-class is an earlier exit this does not close. Pair with RBAC on the agent-class
+    # label as well as on pod opt-out label/annotation writes.
     allowPodOptOut: true
     # First-party bootstrap image for the TLS hooks. It carries openssl (self-sign the internal CA)
     # and curl (talk to the API server with the pod's service-account token). It deliberately does
@@ -563,8 +678,20 @@ opa:
       cpu: 50m
       memory: 64Mi
     limits:
-      cpu: 250m
-      memory: 128Mi
+      # 250m was too tight to COMPILE with, even though it was ample to evaluate with. Rego compilation
+      # is a CPU-bound burst that happens whenever a policy is created or edited, and OPA stops answering
+      # queries while it recompiles its module store. Throttled at 250m that burst ran past the engine's
+      # 2s evaluation budget, so the first tool call after every policy change was wrongly blocked
+      # (fail-closed `evaluator_timeout`). Measured on AKS: 250m → 0/5 correct on the first call after a
+      # policy save, 1500m → 5/5. Steady-state evaluation is unaffected either way (it uses ~7m), so this
+      # limit exists for the compile burst, not the query path.
+      cpu: 1500m
+      # ...and the same for memory, which never had the measurement cpu got. OPA sat at 117Mi against
+      # a 128Mi limit at idle — 91% full — and was OOMKilled (exit 137) during a run that pushed
+      # several policies concurrently. Rego COMPILATION is a burst in memory as well as CPU: the whole
+      # module store is rebuilt, so peak scales with how many policies exist, not with query rate.
+      # 512Mi is measured headroom for that burst, not a guess; steady-state evaluation stays ~117Mi.
+      memory: 512Mi
 
 ingress:
   # Console exposure. DEFAULT OFF, following the Grafana / Istio convention: the out-of-the-box access
@@ -599,7 +726,18 @@ config:
       limits: { memory: 64Mi }
   logLevel: INFO
   enforcementMode: block
-  noPolicyDecision: deny   # No-policy namespace -> deny in block mode ("allow" restores fail-open)
+  # What a namespace with NO policy loaded does. "allow" (default) | "deny".
+  #
+  # A namespace nobody has written a policy for is not governed, so there is no customer decision to
+  # enforce and the call proceeds. Set "deny" for namespaces you have deliberately locked down —
+  # deny-by-default is then an explicit choice rather than the silent consequence of having installed
+  # the chart and not configured anything yet.
+  #
+  # This said `deny`, which silently OVERRODE the code default in norviq/config.py: a fresh install
+  # into a namespace with no policy took that namespace's tool calls to zero. Two places holding one
+  # concept, and the chart is the one that wins — changing only the Python default did nothing on a
+  # real cluster.
+  noPolicyDecision: allow
   # OPA evaluation runtime: "server" (HTTP to the sidecar) or "subprocess" (per-call fork, rollback).
   opaMode: server
   # Refuse to start (fail-closed) on a weak/default/short JWT secret or the default admin

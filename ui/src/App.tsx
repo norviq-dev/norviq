@@ -19,6 +19,9 @@ const PolicyCatalog = lazy(() => import("./pages/PolicyCatalog").then((m) => ({ 
 const PolicyPacks = lazy(() => import("./pages/PolicyPacks").then((m) => ({ default: m.PolicyPacks })));
 const TargetSettings = lazy(() => import("./pages/TargetSettings").then((m) => ({ default: m.TargetSettings })));
 const AuditLog = lazy(() => import("./pages/AuditLog").then((m) => ({ default: m.AuditLog })));
+const Tools = lazy(() => import("./pages/Tools").then((m) => ({ default: m.Tools })));
+const McpServers = lazy(() => import("./pages/McpServers").then((m) => ({ default: m.McpServers })));
+const Intents = lazy(() => import("./pages/Intents").then((m) => ({ default: m.Intents })));
 const AgentMonitor = lazy(() => import("./pages/AgentMonitor").then((m) => ({ default: m.AgentMonitor })));
 const PolicyTester = lazy(() => import("./pages/PolicyTester").then((m) => ({ default: m.PolicyTester })));
 const RedTeam = lazy(() => import("./pages/RedTeam"));
@@ -26,6 +29,7 @@ const RedTeam = lazy(() => import("./pages/RedTeam"));
 const AssetGraph = lazy(() => import("./pages/AssetGraph"));
 const AttackGraph = lazy(() => import("./pages/AttackGraph").then((m) => ({ default: m.AttackGraph })));
 const Compliance = lazy(() => import("./pages/Compliance").then((m) => ({ default: m.Compliance })));
+const PolicyCompliance = lazy(() => import("./pages/PolicyCompliance").then((m) => ({ default: m.PolicyCompliance })));
 const AccountSettings = lazy(() =>
   import("./pages/AccountSettings").then((m) => ({ default: m.AccountSettings }))
 );
@@ -69,6 +73,12 @@ function App() {
             <Route path="/policies/packs" element={<ClusterScoped page="Policy Packs"><PolicyPacks /></ClusterScoped>} />
             <Route path="/policies/targets" element={<ClusterScoped page="Target Settings"><TargetSettings /></ClusterScoped>} />
             <Route path="/audit" element={<ClusterScoped page="Audit Log"><AuditLog /></ClusterScoped>} />
+            {/* Inventory, so it sits with MONITORING and immediately before its MCP sibling — Tools
+                answers "what exists and what can I do with it", /mcp answers "are these definitions
+                still trustworthy". Route order mirrors nav order. */}
+            <Route path="/tools" element={<ClusterScoped page="Tools"><Tools /></ClusterScoped>} />
+            <Route path="/mcp" element={<ClusterScoped page="MCP Servers"><McpServers /></ClusterScoped>} />
+            <Route path="/intents" element={<ClusterScoped page="Propose from traffic"><Intents /></ClusterScoped>} />
             {/* Agents is centralized — a remote cluster renders its REAL relayed agents at the hub (with
                 freshness); a stale/unreachable spoke falls back to the deep-link. Local renders the full page. */}
             <Route
@@ -89,6 +99,9 @@ function App() {
             <Route path="/threats/graph" element={<ClusterScoped page="Attack Graph"><AttackGraph /></ClusterScoped>} />
             {/* Compliance is now a top-level page; the old MITRE route redirects to it. */}
             <Route path="/compliance" element={<ClusterScoped page="Compliance"><Compliance /></ClusterScoped>} />
+            {/* Sibling of /compliance, not a tab on it: that page scores FRAMEWORK coverage (ATLAS,
+                OWASP), this one scores the customer's own policies against their own traffic. */}
+            <Route path="/compliance/policies" element={<ClusterScoped page="Policy Compliance"><PolicyCompliance /></ClusterScoped>} />
             <Route path="/threats/mitre" element={<Navigate to="/compliance" replace />} />
             <Route path="/settings" element={<Navigate to="/settings/general" replace />} />
             <Route path="/settings/account" element={<AccountSettings />} />

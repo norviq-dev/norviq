@@ -40,8 +40,33 @@ def _suffix() -> str:
 
 
 async def test_connect_configures_pool_size(cache: RedisCache) -> None:
-    """connect should configure max 20 pooled connections."""
-    assert cache._client().connection_pool.max_connections == 20
+    """The pool must take its size from settings, not a literal duplicated here."""
+    from norviq.config import settings
+
+    assert cache._client().connection_pool.max_connections == settings.redis_max_connections
+
+
+async def test_connect_uses_a_blocking_pool_that_queues_instead_of_refusing(cache: RedisCache) -> None:
+    """Pool exhaustion must WAIT, never raise — the evaluator fails CLOSED on any exception.
+
+    redis-py's default `ConnectionPool` raises `ConnectionError("Too many connections")` the instant it
+    is exhausted. On the enforcement path that is not a slow tool call, it is a REFUSED one: measured at
+    3/200 benign calls blocked with rule_id `evaluator_fallback` at concurrency 8. This pins the pool
+    CLASS rather than the symptom, because the symptom only appears under concurrency and would sail
+    through any hermetic suite.
+    """
+    from redis.asyncio import BlockingConnectionPool
+
+    from norviq.config import settings
+
+    pool = cache._client().connection_pool
+    assert isinstance(pool, BlockingConnectionPool), (
+        f"pool is {type(pool).__name__}; a non-blocking pool turns a momentary burst into a "
+        "fail-closed block on legitimate agent traffic"
+    )
+    # The wait has to stay inside the evaluator's own 2.0s OPA budget, or a stuck Redis surfaces as an
+    # anonymous `evaluator_fallback` instead of the named `evaluator_timeout`.
+    assert 0 < settings.redis_pool_wait_s < 2.0
 
 
 async def test_policy_get_set_and_warm(cache: RedisCache) -> None:

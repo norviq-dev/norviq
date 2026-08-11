@@ -19,7 +19,7 @@ import { fleetEnabled } from "../api/fleet";
 import { apiSend, apiUrl, createIntentDraft, fetchMe, fetchThreatPaths } from "../api/client";
 import { useApi } from "../hooks/useApi";
 import { getToken } from "../auth/session";
-import { AttackGraphCanvas, type AttackCanvasHandle, type ScopeCard } from "../components/attack-graph/AttackGraphCanvas";
+import { AttackGraphCanvas, buildScope, type AttackCanvasHandle, type ScopeCard } from "../components/attack-graph/AttackGraphCanvas";
 import { AttackGraphLegend } from "../components/attack-graph/AttackGraphLegend";
 import { AttackPathDetail, type SimResult } from "../components/attack-graph/AttackPathDetail";
 import { AttackPathList } from "../components/attack-graph/AttackPathList";
@@ -41,18 +41,61 @@ const RANGES = [
 const RANK_STATUS: Record<PathStatus, number> = { exploitable: 0, unsimulated: 1, blocked: 2 };
 const RANK_SEV: Record<Severity, number> = { critical: 0, high: 1, medium: 2, low: 3 };
 
+/**
+ * Say what a compute run actually did, from the route's own body.
+ *
+ * POST /attack-paths/compute answers one of two shapes: `{namespace, computed}` for a single
+ * namespace, `{computed_by_namespace, total}` for the aggregate. Both can legitimately be zero —
+ * no stored asset graph, no agents in it — and zero is exactly the outcome an operator must not
+ * read as "recomputed, all clear", because the screen underneath looks identical either way.
+ *
+ * A body we cannot parse is reported as UNREAD, never as a count. "We could not measure this" must
+ * not render like "we measured, and it is fine".
+ */
+function describeRecompute(body: unknown): string {
+  const b = (body ?? {}) as Record<string, unknown>;
+  if (typeof b.total === "number" && b.computed_by_namespace && typeof b.computed_by_namespace === "object") {
+    const ns = Object.keys(b.computed_by_namespace as Record<string, unknown>).length;
+    if (ns === 0) return "Recompute ran, but no namespace has a stored asset graph — there was nothing to compute from.";
+    return `Recomputed ${b.total} attack path${b.total === 1 ? "" : "s"} across ${ns} namespace${ns === 1 ? "" : "s"}.`;
+  }
+  if (typeof b.computed === "number") {
+    const where = typeof b.namespace === "string" && b.namespace ? ` in ${b.namespace}` : "";
+    return `Recomputed ${b.computed} attack path${b.computed === 1 ? "" : "s"}${where}.`;
+  }
+  return "Recompute returned 200, but the server did not report what it computed — treat the paths below as unverified.";
+}
+
 export function AttackGraph() {
   const { selectedNamespace, namespaces, selectedCluster, servedCluster, setCluster, setNamespace, clusters } = useApp();
   const [searchParams, setSearchParams] = useSearchParams();
 
   const [paths, setPaths] = useState<ThreatPath[]>([]);
+  // Authoritative per-class counts from the server, computed before the global cap. See the comment
+  // on `classGroups` for why this cannot be derived from `paths`.
+  const [classTotals, setClassTotals] = useState<Record<string, number>>({});
   const [apiNamespaces, setApiNamespaces] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [degraded, setDegraded] = useState(false);
   const [recomputing, setRecomputing] = useState(false);
+  // What the LAST compute run actually did, in the server's own words. `res.ok` only says the route
+  // ran; it cannot tell "recomputed 12 kill-chains" from "recomputed nothing", and this page's whole
+  // job after a Recompute is to say which of those happened. Null = no run since the last scope change.
+  const [recomputeNote, setRecomputeNote] = useState<string | null>(null);
 
   // filters (hydrated from URL on mount)
   const [range, setRange] = useState(searchParams.get("range") ?? "24h");
+  /**
+   * The window the paths ON SCREEN were actually counted over — set only inside a SUCCESSFUL fetch.
+   *
+   * `range` is what the operator has ASKED for; it changes the instant the dropdown moves and stays
+   * changed even when the fetch that would have re-measured it fails (the catch keeps the previous
+   * `paths` and raises the degraded banner). Captioning a range-scoped number with `range` therefore
+   * relabels last window's denial total with this window's name — the very defect the scope card's
+   * hardcoded "24h" was fixed for, just pointing the other way. Nothing on this page may caption a
+   * measurement with a window it was not measured over.
+   */
+  const [loadedRange, setLoadedRange] = useState<string | null>(null);
   const [agentClass, setAgentClass] = useState(searchParams.get("cls") ?? "all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>(
     searchParams.get("status") === "exploitable" || searchParams.get("status") === "blocked"
@@ -89,6 +132,9 @@ export function AttackGraph() {
   // Default-hide probe-rooted kill-chains; shares the one preference key with the Asset graph (localStorage).
   const [showSynthetic, setShowSynthetic] = useState<boolean>(() => localStorage.getItem("nrvq_show_synthetic") === "1");
   const [syntheticHidden, setSyntheticHidden] = useState(0);
+  // Pre-cap total. `paths` is truncated server-side at `_MAX_PATHS`, and until this was reported the
+  // console had no way to know it was looking at a partial list — see the truncation note in the head.
+  const [totalPaths, setTotalPaths] = useState(0);
 
   const canvasRef = useRef<AttackCanvasHandle>(null);
   // A failed recompute POST raises `degraded`, but the finally re-triggers the display-fetch
@@ -105,8 +151,13 @@ export function AttackGraph() {
       .then((res) => {
         if (!alive) return;
         setPaths(res.paths ?? []);
+        // These paths were counted over THIS range. Set together with `paths` so the two can never
+        // disagree, and never in the catch — a failed refetch leaves the old paths under the old label.
+        setLoadedRange(range);
         setApiNamespaces(res.namespaces ?? []);
         setSyntheticHidden(res.synthetic_hidden ?? 0);
+        setClassTotals(res.class_totals ?? {});
+        setTotalPaths(res.total_paths ?? (res.paths ?? []).length);
         // A successful GET does NOT clear a still-outstanding recompute failure — the paths it
         // returned are the STALE precompute the failed recompute couldn't refresh, so keep the banner up.
         setDegraded(recomputeFailedRef.current);
@@ -118,6 +169,20 @@ export function AttackGraph() {
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, [selectedNamespace, range, agentClass, recomputing, showSynthetic, lifecycleTick]);
+
+  // An open scope card is DERIVED from `paths` and the window they were measured over (its denial
+  // row is a range-scoped total). When either changes — Range switch, Recompute, a verb promotion —
+  // a card left alone would keep last window's numbers under this window's label. Recompute it in
+  // place, keyed on `loadedRange` (not `range`) so a fetch that never landed cannot relabel it.
+  useEffect(() => {
+    setScope((s) => (s ? buildScope(s.id, paths, loadedRange ?? undefined) : s));
+  }, [paths, loadedRange]);
+
+  // The note describes ONE compute run at ONE scope. Once the namespace moves it would caption this
+  // scope's screen with another scope's run — the same rule `loadedRange` enforces for the window.
+  // (It is deliberately NOT cleared in the fetch effect: that effect re-runs as part of the recompute
+  // cycle itself and would wipe the note before the operator ever saw it.)
+  useEffect(() => { setRecomputeNote(null); }, [selectedNamespace]);
 
   // Flip synthetic-agent visibility + persist (shared with the Asset graph); the fetch effect re-runs.
   const toggleSynthetic = () => setShowSynthetic((v) => {
@@ -174,9 +239,13 @@ export function AttackGraph() {
     // annotation, never merged into `blocked`.
     const whatIfCount = visible.filter((p) => isWhatIf(p)).length;
     const maxBlast = visible.reduce((m, p) => Math.max(m, p.blast), 0);
-    const toolCount: Record<string, number> = {};
-    visible.forEach((p) => p.steps.forEach((st) => { if (st.kind === "tool") toolCount[st.to] = (toolCount[st.to] || 0) + 1; }));
-    const chokepoints = Object.values(toolCount).filter((c) => c >= 2).length;
+    // CHOKEPOINTS — one definition, the server's. `p.tool` is the path's chokepoint as the backend
+    // computed it (threats.py `_derive_paths` → `path.tool`); it is what the inspector labels with an
+    // amber "chokepoint" chip and what the intent builder tags. This strip used to define a
+    // chokepoint locally as "a tool on 2+ paths", so with paths through distinct tools — including
+    // the ordinary single-path case — it read "CHOKEPOINTS 0 tools" while the panel beside it was
+    // naming one. Two definitions of one word, on two panels an operator reads together.
+    const chokepoints = new Set(visible.map((p) => p.tool).filter(Boolean)).size;
     return { crit, high, exploitable, blocked, whatIfCount, maxBlast, chokepoints };
   }, [visible, statusOf, isWhatIf]);
 
@@ -263,9 +332,19 @@ export function AttackGraph() {
     setWhatIf({});
     setSim({});
     setSimResult({});
+    setRecomputeNote(null);
     try {
       const token = getToken();
-      const res = await fetch(apiUrl(`/api/v1/attack-paths/compute?namespace=${encodeURIComponent(selectedNamespace)}`), {
+      // "all" is the console's AGGREGATE SENTINEL, not a namespace — policies.py rejects the same
+      // string at the write boundary (`_VIEW_SENTINEL_NAMESPACES`) precisely because no agent ever
+      // reports it. The compute route branches on `if namespace:`, so ANY truthy value takes its
+      // SINGLE-namespace path, which exact-matches `asset_graph.namespace = :ns` — a row that by
+      // construction never exists for "all". Sending it recomputed nothing, returned 200
+      // {"computed": 0}, and the operator got a spinner, no banner and the same stale kill-chains.
+      // The aggregate branch (`compute_all_namespaces`) is reachable ONLY when the parameter is ABSENT.
+      const scoped = selectedNamespace && selectedNamespace !== "all";
+      const qs = scoped ? `?namespace=${encodeURIComponent(selectedNamespace)}` : "";
+      const res = await fetch(apiUrl(`/api/v1/attack-paths/compute${qs}`), {
         method: "POST",
         headers: token ? { Authorization: `Bearer ${token}` } : {}
       });
@@ -274,7 +353,12 @@ export function AttackGraph() {
       // Latch the outcome so the follow-on refetch (below) can't clear the banner on a
       // successful READ of the stale paths — only a compute POST that returns ok clears the latch.
       if (!res.ok) { recomputeFailedRef.current = true; setDegraded(true); }
-      else recomputeFailedRef.current = false;
+      else {
+        recomputeFailedRef.current = false;
+        // 200 is not "the graph is fresh" — it is "the route ran". Read what it says it computed and
+        // put that on screen, so a run that produced nothing can never be mistaken for a full refresh.
+        setRecomputeNote(describeRecompute(await res.json().catch(() => null)));
+      }
     } catch {
       recomputeFailedRef.current = true;
       setDegraded(true);
@@ -314,12 +398,29 @@ export function AttackGraph() {
     const distinct = [...new Set(paths.map((p) => p.cls).filter(Boolean))];
     return [{ value: "all", label: "All classes" }, ...distinct.map((c) => ({ value: c, label: c }))];
   }, [paths]);
-  // Global intent: classes across all VISIBLE paths with their path counts (grouped-by-class), worst-first.
+  // Global intent: every class with a kill-chain, and its TRUE path count.
+  //
+  // The count comes from the server's `class_totals`, NOT from tallying `visible`. `paths` is capped
+  // at the API's `_MAX_PATHS`, so a tally over it answers "how many of this class survived the global
+  // cap" — which is not the class's exposure, and is smaller than it on any estate big enough to
+  // saturate the cap. This surface used to do exactly that, and the same dialog then showed
+  // "customer-support · 22 paths" beside a coverage denominator of 49: two numbers for one quantity,
+  // with the understated one shown first, on a console whose whole job is to size exposure honestly.
+  //
+  // The severity filter is deliberately NOT applied here. It filters the rendered list; the intent
+  // modal's coverage denominator is every path of the class, so filtering here would reintroduce the
+  // same disagreement in a subtler form.
   const classGroups = useMemo(() => {
+    const entries = Object.entries(classTotals);
+    if (entries.length) {
+      return entries.map(([cls, count]) => ({ cls, count })).sort((a, b) => b.count - a.count);
+    }
+    // Fallback for an API that predates `class_totals` (or a degraded read): tally what we hold, and
+    // accept the undercount rather than showing nothing.
     const m: Record<string, number> = {};
     visible.forEach((p) => { if (p.cls) m[p.cls] = (m[p.cls] || 0) + 1; });
     return Object.entries(m).map(([cls, count]) => ({ cls, count })).sort((a, b) => b.count - a.count);
-  }, [visible]);
+  }, [classTotals, visible]);
 
   const dropdowns = [
     {
@@ -382,6 +483,15 @@ export function AttackGraph() {
         </div>
       )}
 
+      {/* What the last Recompute actually did. Silence after a compute POST is indistinguishable from
+          a successful full refresh, and on this page the two have opposite meanings. */}
+      {recomputeNote && !degraded && (
+        <div role="status" data-testid="recompute-note" style={{ margin: "14px 0", display: "flex", alignItems: "center", gap: 9, padding: "9px 14px", background: "var(--bg-graph-panel, #141414)", border: "1px solid var(--graph-border, #2a2a2a)", borderRadius: 10, fontSize: 12, color: "var(--text-secondary, #9aa4b2)" }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7c8a9a" strokeWidth="1.8" style={{ flex: "none" }}><circle cx="12" cy="12" r="9" /><path d="M12 8h.01M11 12h1v4h1" /></svg>
+          <span>{recomputeNote}</span>
+        </div>
+      )}
+
       {/* Probe-rooted kill-chains hidden by default — surface the count + a reveal toggle. */}
       {(syntheticHidden > 0 || showSynthetic) && (
         <div role="status" style={{ margin: "14px 0", display: "flex", alignItems: "center", gap: 9, padding: "9px 14px", background: "var(--bg-graph-panel, #141414)", border: "1px solid var(--graph-border, #2a2a2a)", borderRadius: 10, fontSize: 12, color: "var(--text-secondary, #9aa4b2)" }}>
@@ -402,7 +512,23 @@ export function AttackGraph() {
         <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "18px 20px", borderBottom: "1px solid var(--graph-border-soft)" }}>
           <div>
             <div style={{ fontSize: 15, fontWeight: 700 }}>Threat Relationships</div>
-            <div style={{ fontSize: 12, color: "#a0a0a0", marginTop: 2 }}>{visible.length} attack paths · precomputed from the runtime asset graph</div>
+            <div style={{ fontSize: 12, color: "#a0a0a0", marginTop: 2 }} data-testid="attack-paths-caption">
+              {visible.length} attack paths · precomputed from the runtime asset graph
+            </div>
+            {/* SILENT TRUNCATION IS THE WORST KIND ON THIS SURFACE. The API ranks kill-chains
+                worst-first and returns the top `_MAX_PATHS`; below that ceiling the caption above is
+                a complete inventory, and above it the same sentence quietly becomes a sample. There
+                was a chip for `synthetic_hidden` and nothing at all for the cap, so an operator on a
+                saturated estate read "165 attack paths" as "we have 165 attack paths".
+                Worst-first ranking means what is dropped is the least severe, which is the right
+                thing to drop and still not something to drop in silence. */}
+            {totalPaths > paths.length && (
+              <div data-testid="attack-paths-truncated"
+                   style={{ fontSize: 12, color: "var(--warning)", marginTop: 4 }}>
+                Showing the {paths.length} most severe of {totalPaths}. Narrow the namespace or class
+                to see the rest.
+              </div>
+            )}
           </div>
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
             <div style={{ display: "flex", alignItems: "center", border: "1px solid var(--graph-border)", borderRadius: 9, overflow: "hidden" }}>
@@ -520,7 +646,14 @@ export function AttackGraph() {
           {empty ? (
             <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, minHeight: 520, textAlign: "center" }}>
               <div style={{ fontSize: 13, color: "#a0a0a0", lineHeight: 1.5 }}>
-                {paths.length === 0 && !loading ? "No attack paths stored for this namespace." : "No attack paths match the current filters."}
+                {/* Name the scope the emptiness is TRUE of. At the default aggregate scope "this
+                    namespace" reads as one namespace being clean while the operator is looking at
+                    the whole estate — the strongest possible claim, worded as the weakest. */}
+                {paths.length === 0 && !loading
+                  ? (selectedNamespace === "all"
+                      ? "No attack paths stored in any namespace."
+                      : `No attack paths stored for ${selectedNamespace}.`)
+                  : "No attack paths match the current filters."}
               </div>
               <div style={{ display: "flex", gap: 10 }}>
                 <button type="button" onClick={resetFilters} style={{ height: 30, padding: "0 14px", border: "1px solid var(--graph-border, #2a2a2a)", borderRadius: 8, background: "transparent", color: "#a0a0a0", fontFamily: "inherit", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Reset</button>
@@ -565,6 +698,11 @@ export function AttackGraph() {
                     path={selected}
                     allPaths={paths}
                     whatIfIndex={wf}
+                    // The scope card reports denial counts the server aggregated over the window
+                    // these paths were FETCHED with — it must not caption a 30-day total "24h", nor
+                    // a 24-hour total "30d" because the 30d refetch failed. `loadedRange`, not
+                    // `range`, is the one the numbers on screen were actually measured over.
+                    range={loadedRange ?? undefined}
                     onToggleWhatIf={toggleWhatIf}
                     onScope={setScope}
                   />

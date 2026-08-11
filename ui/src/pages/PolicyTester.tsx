@@ -48,6 +48,97 @@ function ruleLabel(ruleId: string): { text: string; title?: string } {
   return { text: ruleId || "default_allow" };
 }
 
+/**
+ * Rule ids the ENGINE emits — none of them is a rule anyone authored.
+ *
+ * This screen exists to answer one question: "does my policy do what I think it does?" A `block`
+ * whose rule_id is `trust_frozen` answers it with a NO that looks exactly like a YES — the trust
+ * override decided (evaluator.py `_apply_trust_overrides`), no rule matched at all, and the same
+ * call from a healthy-trust agent sails through. Ship on that reading and the control you believe
+ * you have does not exist. The same holds for the fail-closed defaults and the engine-health
+ * blocks, which the Attack Graph's simulate() already refuses to report as "blocked by policy".
+ *
+ * Keyed off `rule_id`, which is the one piece of decision provenance /evaluate actually returns.
+ * Every id here is emitted by norviq/engine/evaluator.py; anything else IS an authored rule and
+ * needs no gloss — inventing one for it would be a fabrication of its own.
+ */
+const ENGINE_RULE_PROVENANCE: Record<string, string> = {
+  trust_frozen:
+    "Decided by the TRUST OVERRIDE, not by an authored rule — this agent's trust is frozen, so every call it makes blocks. The same call from a healthy-trust agent would not hit this.",
+  escalate_low_trust:
+    "Decided by the TRUST OVERRIDE, not by an authored rule — low trust escalated a call the rules allowed. The same call from a healthy-trust agent would not hit this.",
+  no_policy_loaded:
+    "Blocked by the FAIL-CLOSED DEFAULT, not by an authored rule — no policy is loaded for this namespace. This is the absence of coverage, not coverage.",
+  policy_load_pending:
+    "Blocked because the policy subsystem is not ready yet — an engine-health block, not a policy decision. Retry once the engine has loaded.",
+  evaluator_error:
+    "The engine could not complete this evaluation and failed closed — not a policy decision. Retry the call.",
+  evaluator_timeout:
+    "The engine timed out and failed closed — not a policy decision. Retry the call.",
+  evaluator_fallback:
+    "The engine fell back to its fail-closed default — not a policy decision.",
+  evaluator_invalid_payload:
+    "The engine produced no usable decision for this payload and failed closed — not a policy decision.",
+  invalid_spiffe_identity:
+    "Blocked because the agent identity failed SPIFFE validation — an identity check, not a policy rule.",
+  rate_limit_exceeded:
+    "Throttled by the rate limit — a resource control, not a policy rule.",
+  unattributed_block:
+    "Blocked, but the engine could not attribute the block to a named rule. Treat the rule above as unknown, not as yours.",
+  default_allow:
+    "Allowed because NO rule matched — this is the engine's default, not a rule you authored that permits the call."
+};
+
+/**
+ * A softened would-block keeps its rule id — under a prefix.
+ *
+ * Monitor mode (`_apply_posture`) and a policy in audit mode (`_apply_policy_mode`) rewrite a
+ * block/escalate to `audit` and prefix the rule id with these exact strings (evaluator.py
+ * `MONITOR_WOULD_BLOCK_PREFIX` / `POLICY_AUDIT_WOULD_BLOCK_PREFIX`). `_POSTURE_EXEMPT_RULES` keeps
+ * trust_frozen / policy_load_pending / evaluator_error / evaluator_invalid_payload /
+ * rate_limit_exceeded hard, but everything else softens — including `no_policy_loaded` and
+ * `escalate_low_trust`. Without stripping the prefix the whole provenance map goes silent in exactly
+ * the posture where most policy verification happens: a Monitor namespace with no policy at all
+ * reported `audit` / `monitor_would_block:no_policy_loaded` and not one word saying so.
+ *
+ * The softening is also the more important half of the sentence on its own. An `audit` row is a
+ * WOULD-block: the call went through. Worded to match what the Attack Graph's simulate() already
+ * says of the same state ("evaluated, not enforced"), so two screens do not describe one posture two
+ * ways.
+ */
+const WOULD_BLOCK_PREFIXES = ["monitor_would_block:", "policy_audit_would_block:"] as const;
+const WOULD_BLOCK_NOTE =
+  "Nothing was stopped — this call was evaluated, not enforced, and softened to a log because the namespace or the matching policy is in Monitor mode. The rule id above is the real decision under that prefix.";
+
+/**
+ * An UNNAMED rule id is not the same claim on every decision.
+ *
+ * `ruleLabel` prints an empty `rule_id` as "default_allow", and OPA genuinely returns an empty one
+ * whenever a module sets `decision` without setting `rule_id`
+ * (evaluator.py `str(result.get("rule_id", ""))`, both the server and subprocess paths). The engine
+ * clamps only the BLOCK case — `_ensure_block_attribution` rewrites block+empty to
+ * `unattributed_block` — so `{"decision": "escalate", "rule_id": ""}` and the Monitor-mode
+ * `{"decision": "audit", "rule_id": ""}` reach /evaluate exactly as written. Keying the gloss on
+ * `rule_id` alone therefore printed "Allowed because NO rule matched" directly beneath an ESCALATE
+ * or AUDIT badge — a line asserting the opposite of the decision it captions, on the screen whose
+ * only job is to tell an operator what their policy did. An audit row is a WOULD-BLOCK.
+ */
+function ruleProvenance(ruleId: string, decision: Decision): string | null {
+  const softened = WOULD_BLOCK_PREFIXES.find((p) => ruleId.startsWith(p));
+  if (softened) {
+    // The id under the prefix is untouched, so its gloss is still the right one — append it when the
+    // engine owns that id, and say the softening either way (it is true of an AUTHORED rule too, and
+    // "my rule matched but nothing was enforced" is the answer this screen exists to give).
+    const inner = ENGINE_RULE_PROVENANCE[ruleId.slice(softened.length)];
+    return inner ? `${WOULD_BLOCK_NOTE} ${inner}` : WOULD_BLOCK_NOTE;
+  }
+  const key = ruleId || "default_allow";
+  if (key === "default_allow" && decision !== "allow") {
+    return "The engine returned this decision without naming a rule. The rule above is the console's placeholder for an empty rule id, not a rule that decided — nothing here identifies what produced this outcome, so do not read it as your policy working.";
+  }
+  return ENGINE_RULE_PROVENANCE[key] ?? null;
+}
+
 const TOOL_OPTIONS = [
   "search_kb",
   "get_customer",
@@ -222,6 +313,10 @@ export function PolicyTester() {
     setToolSelection(normalizeTool(scenario.tool));
     setCustomToolName(normalizeTool(scenario.tool) === "custom" ? scenario.tool : "");
     setToolParams(scenario.params);
+    // Clear any stale validation error. A quick scenario REPLACES the params wholesale with known-good
+    // JSON, so leaving "Tool params must be valid JSON." on screen accuses the user of a problem the click
+    // just fixed — and it sits directly above the Evaluate button, which reads as "this is still broken".
+    setFormError(null);
   }
 
   async function evaluate() {
@@ -435,6 +530,22 @@ export function PolicyTester() {
                 <span className="k">Rule</span>
                 <span className="mono" title={ruleLabel(result.ruleId).title}>{ruleLabel(result.ruleId).text}</span>
               </div>
+              {/* Say plainly when the decision did NOT come from a rule. Visible text, not a title:
+                  this is the difference between "my policy works" and "my policy was never consulted". */}
+              {ruleProvenance(result.ruleId, result.decision) && (
+                <div
+                  data-testid="rule-provenance"
+                  style={{
+                    fontSize: 12.5,
+                    lineHeight: 1.45,
+                    color: "var(--text-secondary)",
+                    borderLeft: "2px solid var(--escalate)",
+                    padding: "2px 0 2px 10px"
+                  }}
+                >
+                  {ruleProvenance(result.ruleId, result.decision)}
+                </div>
+              )}
               <div className="kv">
                 <span className="k">Trust</span>
                 <span className="mono">
@@ -472,8 +583,15 @@ export function PolicyTester() {
                   </div>
                 ) : (
                   <div className="muted" style={{ fontSize: 12.5 }} data-testid="signals-unavailable">
-                    This evaluation returned no per-call trust signals — the policy decided on rules alone
-                    (signals populate once trust telemetry is active for this agent).
+                    {/* The old copy said "the policy decided on rules alone (signals populate once trust
+                        telemetry is active for this agent)". Neither half was true: the engine computes
+                        the signals on every call and can decide on them ALONE (trust_frozen /
+                        escalate_low_trust), and no amount of live telemetry can make them appear here
+                        because /evaluate's response model does not carry the field at all. Waiting for
+                        bars that can never arrive is worse than being told they are not on offer. */}
+                    /evaluate does not return the per-call trust signal breakdown — its response carries
+                    the decision, the rule id and the resulting trust score only, so none can be shown for
+                    this run. What decided this call is named under Rule above.
                   </div>
                 )}
               </div>

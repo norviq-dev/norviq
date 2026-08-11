@@ -100,3 +100,48 @@ class TestMITREMapping:
         ]
         techniques = engine._extract_mitre_techniques(steps)
         assert techniques == []
+
+
+class TestStepVerdictMapsOnWhetherTheCallProceeds:
+    """`_evaluate_step` must bucket on whether the call RUNS, not on the literal decision string.
+
+    It used to test `== "block"` then `== "allow"`, dropping everything else into `no_policy`. That
+    put `audit` — the shape every baseline control emits, because they all ship on `monitor` — into
+    the least alarming of the three buckets, so a control that fired and recorded a dangerous call was
+    reported as "nothing evaluated this". It also silently disarmed the dangerous-tool risk check,
+    which keys on `would_allow and node_name in DANGEROUS_TOOLS`: an audited dangerous tool matched
+    neither arm and raised nothing. Same defect as BUG-011 and C2-021, on a third surface.
+
+    `escalate` groups with `block` (call held for a human, path not traversable unattended) — the same
+    convention `redteam_efficacy._ENFORCED_DECISIONS` already uses.
+    """
+
+    @staticmethod
+    async def _verdict(decision: str, rule_id: str = "some_rule"):
+        from norviq.engine.attack_graph import AttackGraphEngine
+        from norviq.sdk.core.decisions import PolicyDecision
+
+        class _Ev:
+            async def evaluate(self, event):
+                return PolicyDecision(decision=decision, rule_id=rule_id, reason="t")
+
+        eng = AttackGraphEngine.__new__(AttackGraphEngine)
+        eng.evaluator = _Ev()
+        return await eng._evaluate_step(
+            {"id": "agent::a", "properties": {"agent_class": "c", "trust_score": 0.5, "spiffe_id": "spiffe://norviq/ns/analytics/sa/a"}, "name": "a"},
+            {"id": "tool::delete_record", "type": "tool", "name": "delete_record", "properties": {}},
+            "analytics",
+        )
+
+    async def test_audit_is_would_allow_because_the_call_runs(self):
+        check, rule = await self._verdict("audit", "deny_shell_execution")
+        assert check == "would_allow", "a monitored detection still lets the call through"
+        assert rule == "deny_shell_execution", "the control that fired must stay attributable"
+
+    async def test_escalate_is_would_block_because_a_human_holds_it(self):
+        check, _ = await self._verdict("escalate")
+        assert check == "would_block"
+
+    async def test_block_and_allow_are_unchanged(self):
+        assert (await self._verdict("block"))[0] == "would_block"
+        assert (await self._verdict("allow", "default_allow")) == ("would_allow", "default_allow")

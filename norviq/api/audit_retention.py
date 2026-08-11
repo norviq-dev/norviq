@@ -181,7 +181,3 @@ class RetentionPruner:
             except (asyncio.CancelledError, Exception):  # noqa: BLE001 - shutdown best-effort
                 pass
             self._task = None
-
-
-# Back-compat alias for the audit-only pruner name.
-AuditRetentionPruner = RetentionPruner

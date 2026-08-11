@@ -8,6 +8,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -19,6 +21,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 )
 
 type Handler struct {
@@ -41,7 +45,24 @@ var systemExcludedNamespaces = map[string]bool{
 }
 
 func NewHandler(cfg Config) *Handler {
-	return &Handler{cfg: cfg, injector: NewInjector(cfg)}
+	inj := NewInjector(cfg)
+	// Secret-backed credentials need an API client. Built here rather than in main so it is present
+	// for every construction path, and best-effort: OUTSIDE a cluster (unit tests, local runs)
+	// InClusterConfig fails and the writer stays nil, which is exactly the previous literal-env
+	// behaviour. A webhook that refused to start without Secret write would be a worse default than
+	// the exposure it closes.
+	if cfg.SidecarSecretEnabled {
+		if rc, err := rest.InClusterConfig(); err != nil {
+			slog.Info("NRVQ-WHK-4050: no in-cluster config; sidecar credentials stay in pod env",
+				"error", err)
+		} else if dc, err := dynamic.NewForConfig(rc); err != nil {
+			slog.Error("NRVQ-WHK-4051: dynamic client init failed; sidecar credentials stay in pod env",
+				"error", err)
+		} else {
+			inj.SetSecretWriter(NewSecretWriter(dc))
+		}
+	}
+	return &Handler{cfg: cfg, injector: inj}
 }
 
 func (h *Handler) Healthz(w http.ResponseWriter, _ *http.Request) {
@@ -244,16 +265,55 @@ func (h *Handler) patchResponse(req *admissionv1.AdmissionRequest, pod *corev1.P
 		slog.Warn("NRVQ-WHK-4015: invalid agent class label, injecting with empty class", "value", agentClass, "pod", pod.Name, "namespace", req.Namespace)
 		agentClass = ""
 	}
-	patch, err := h.injector.CreatePatch(pod, agentClass, req.Namespace)
+	dryRun := req.DryRun != nil && *req.DryRun
+	patch, err := h.injector.CreatePatch(pod, agentClass, req.Namespace, PatchOptions{DryRun: dryRun})
 	if err != nil {
+		// A pod whose own MCP annotation cannot be honored gets the reason back: the fix is always in
+		// the pod spec (a misnamed container, or one with no explicit command), and a generic failure
+		// leaves the operator with nothing to act on. Other patch failures stay generic.
+		var mcpErr *mcpConfigError
+		if errors.As(err, &mcpErr) {
+			slog.Warn("NRVQ-WHK-4041: MCP injection denial", "pod", pod.Name, "namespace", req.Namespace, "error", err)
+			return &admissionv1.AdmissionResponse{
+				Allowed: false,
+				Result: &metav1.Status{Message: "NRVQ-WHK-4041: " + mcpErr.Error() +
+					" — the pod asked for MCP governance via " + mcpServersAnnotation +
+					" and it could not be applied, so admission fails closed rather than running an" +
+					" MCP server unpoliced."},
+			}
+		}
+		// SAY WHY. This returned the bare string "sidecar patch creation failed", so an operator whose
+		// namespace had suddenly stopped accepting ANY pod saw a message that named no cause and no
+		// fix — the real reason ("unauthorized sidecar image", with the image) was only in the
+		// webhook's own logs, which is the last place someone looks when kubectl apply is failing.
+		// Observed live: a cluster configured with a dev-package sidecar image the allowlist does not
+		// permit refused every pod in four namespaces, and the message said none of that.
 		slog.Error("NRVQ-WHK-4009: patch creation failed", "error", err)
 		return &admissionv1.AdmissionResponse{
 			Allowed: false,
-			Result:  &metav1.Status{Message: "sidecar patch creation failed"},
+			Result: &metav1.Status{Message: fmt.Sprintf(
+				"sidecar patch creation failed: %v. Admission fails CLOSED rather than running this"+
+					" workload unpoliced. Check the webhook's NRVQ_SIDECAR_IMAGE against the injector's"+
+					" image allowlist.", err)},
 		}
 	}
-	if req.DryRun != nil && *req.DryRun {
+	if dryRun {
 		slog.Info("NRVQ-WHK-4012: dry-run injection", "pod", pod.Name, "namespace", req.Namespace)
+	}
+	// The credential could not be moved out of the pod spec and this operator asked us not to ship one
+	// there. Only the handler can refuse, so the injector records the fault and the decision lives here.
+	if h.cfg.SidecarSecretRequired && h.injector.lastSecretError != nil {
+		slog.Error("NRVQ-WHK-4052: refusing admission — sidecar credential Secret unavailable and"+
+			" NRVQ_SIDECAR_SECRET_REQUIRED=true", "namespace", req.Namespace,
+			"error", h.injector.lastSecretError)
+		return &admissionv1.AdmissionResponse{
+			Allowed: false,
+			Result: &metav1.Status{Message: fmt.Sprintf(
+				"norviq: could not write the sidecar credential Secret (%v), and"+
+					" NRVQ_SIDECAR_SECRET_REQUIRED=true forbids falling back to a literal pod-env"+
+					" credential. Check the webhook's RBAC for secrets in namespace %q.",
+				h.injector.lastSecretError, req.Namespace)},
+		}
 	}
 	slog.Info("NRVQ-WHK-4003: sidecar injected", "pod", pod.Name, "latency_us", time.Since(start).Microseconds())
 	patchType := admissionv1.PatchTypeJSONPatch
@@ -323,6 +383,14 @@ func neuteredSidecarDecoy(cfg Config, pod *corev1.Pod) (string, bool) {
 		return "", false
 	}
 	for _, c := range allPodContainers(pod) {
+		// The injector's OWN MCP init container is a sidecar-image container that necessarily overrides
+		// command (it runs a `cp`), so it would read as a decoy on every re-admission of a pod it was
+		// injected into. Exempt it only on an exact match against the spec the injector generates —
+		// reproducing that means reproducing the real proxy copy, so the carve-out buys an attacker
+		// nothing.
+		if cfg.McpInject && isInjectorMcpInitContainer(cfg, c) {
+			continue
+		}
 		if (len(c.Command) > 0 || len(c.Args) > 0) && isSidecarContainer(c, configuredImage) {
 			return "container " + c.Name + " presents as the norviq sidecar but overrides command/args (neutered decoy)", true
 		}
@@ -366,7 +434,10 @@ func fullyInjected(cfg Config, pod *corev1.Pod) bool {
 			return false
 		}
 	}
-	return true
+	// A correct sidecar does not make an MCP server governed. A pod that ASKS for MCP governance but
+	// carries an unwrapped (or differently-wrapped) MCP container is not already-injected — skipping it
+	// would run that server unpoliced, which is the same hole the app-container check above closes.
+	return mcpFullyInjected(cfg, pod)
 }
 
 // enforcementArtifact reports any injector-owned plumbing on a pod that is NOT fully injected: a
@@ -388,6 +459,13 @@ func enforcementArtifact(cfg Config, pod *corev1.Pod) (string, bool) {
 		}
 		if hasSocketPathEnv(c) {
 			return "container " + c.Name + " pre-sets the injector-owned NRVQ_SOCKET_PATH env", true
+		}
+	}
+	// MCP plumbing is injector-owned on exactly the same terms. Gated on McpInject so that with the
+	// feature off the webhook's admission decisions are unchanged for every possible pod.
+	if cfg.McpInject {
+		if reason, ok := mcpArtifact(cfg, pod); ok {
+			return reason, true
 		}
 	}
 	return "", false

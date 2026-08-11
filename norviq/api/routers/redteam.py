@@ -22,6 +22,7 @@ from norviq.api.redteam_efficacy import attack_mapping, catalog_entry, compute_e
 from norviq.api.synthetic import is_synthetic_identity
 from norviq.config import settings
 from norviq.redteam.attacks import ATTACKS, AttackCategory, get_attack_by_id
+from norviq.redteam.vectors import vector_title
 from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
 
 log = structlog.get_logger()
@@ -33,10 +34,24 @@ REPORTS: dict[str, dict] = {}
 _FALLBACK_TARGET = "redteam-test"
 
 # Per-namespace in-flight guard. A suite run is long; two concurrent runs for the same namespace waste the
-# engine and race the retention prune. This maps namespace -> the in-flight run_id so a second concurrent POST
-# is rejected (409) with the id of the run already going. In-process is sufficient: the guard's job is to stop
-# a double-submit (UI double-click or a rapid scripted repeat) against a single API process.
+# engine and race the retention prune. Maps namespace -> the in-flight run_id so a second concurrent POST is
+# rejected (409) with the id of the run already going.
+#
+# THIS DICT ALONE IS NOT THE GUARD, and the comment that used to sit here said it was. It claimed
+# "in-process is sufficient ... against a single API process" — but the chart ships `api.replicas: 2`
+# (helm/norviq/values.yaml), so the two halves of a double-submit are load-balanced to DIFFERENT pods,
+# each consults its own dict, and both start a run. Measured against the deployed 2-replica service:
+# four of six paired POSTs returned `200 200`, i.e. the guard did not fire at all most of the time.
+#
+# The authoritative guard is now a Redis lock (Redis is already a hard dependency, and `SET NX EX` is
+# atomic across pods). The dict is kept as an in-process fast path and as the fallback when Redis is
+# unreachable — degrading to the old single-process behaviour is better than degrading to none.
 _INFLIGHT_SUITES: dict[str, str] = {}
+
+# Long enough to outlive a real suite (len(targets) x len(ATTACKS) evaluations plus the persist), short
+# enough that a pod dying mid-run does not wedge the namespace for long. The `finally` releases it on
+# every normal path; this bound only covers the crash.
+_SUITE_LOCK_TTL_S = 900
 
 # Process-wide cap on concurrently EXECUTING suites, on top of the per-namespace guard above. The
 # per-namespace guard alone lets an admin fan out one suite per namespace simultaneously — each suite is
@@ -100,15 +115,28 @@ async def run_suite(
     # Reject a concurrent run for the same namespace (double-click / scripted double-submit) — return the
     # in-flight run_id so the caller can watch it instead of starting a second identical run. Registered here,
     # before any await into the run, so the check-and-set is atomic under asyncio (no interleaving in between).
-    if target_namespace in _INFLIGHT_SUITES:
-        inflight = _INFLIGHT_SUITES[target_namespace]
+    run_id = str(uuid4())
+    cache = getattr(request.app.state, "cache", None)
+
+    # In-process first: free, and it catches a double-click that lands on this same pod.
+    inflight = _INFLIGHT_SUITES.get(target_namespace)
+    if inflight is None and cache is not None:
+        # ...then the cross-replica lock, which is the one that actually holds under the chart's
+        # default 2-replica topology. Failure to reach Redis must not block an admin-triggered scan,
+        # so an error here degrades to the in-process guard rather than refusing.
+        try:
+            inflight = await cache.acquire_lock(f"redteam:suite:{target_namespace}", run_id, _SUITE_LOCK_TTL_S)
+        except Exception as exc:  # noqa: BLE001 - a guard outage must not deny the operation it guards
+            log.warning("nrvq.redteam.suite_lock_unavailable", namespace=target_namespace,
+                        error=str(exc)[:200], code="NRVQ-RED-13009")
+            inflight = None
+    if inflight:
         log.info("nrvq.redteam.suite_concurrent_rejected", namespace=target_namespace, inflight_run_id=inflight,
                  code="NRVQ-RED-13008")
         raise HTTPException(
             status_code=409,
             detail={"error": "a red-team suite is already running for this namespace", "run_id": inflight},
         )
-    run_id = str(uuid4())
     _INFLIGHT_SUITES[target_namespace] = run_id
     try:
         # Bound how many suites (across ALL namespaces) actually execute at once — the
@@ -157,6 +185,12 @@ async def run_suite(
     finally:
         # always release the namespace, even if the run raised, so a failed run never wedges the guard.
         _INFLIGHT_SUITES.pop(target_namespace, None)
+        if cache is not None:
+            try:
+                await cache.release_lock(f"redteam:suite:{target_namespace}", run_id)
+            except Exception as exc:  # noqa: BLE001 - the TTL is the backstop; never mask the real result
+                log.warning("nrvq.redteam.suite_lock_release_failed", namespace=target_namespace,
+                            error=str(exc)[:200], code="NRVQ-RED-13010")
     log.info("nrvq.redteam.suite_run", namespace=target_namespace, targets=targets,
              total=len(results), passed=passed, proven_blocking_pct=efficacy["overall"]["proven_blocking_pct"],
              code="NRVQ-RED-13006")
@@ -430,6 +464,11 @@ def _build_event(attack: Any, target_agent: str, target_namespace: str) -> ToolC
         framework="redteam",
         session_id=f"redteam-{attack.id}",
         call_depth=int(depth) if isinstance(depth, (int, str)) and str(depth).isdigit() else 0,
+        # Gate-A context, published to rego as `input.mcp`. Empty for every non-MCP attack, which is
+        # the same document a plain SDK call presents, so nothing about the existing 29 changes.
+        # COPY it: `ATTACKS` is a module constant built once at import, and handing the same dict to
+        # every event in every run makes any future mutation an untraceable cross-run bug.
+        mcp=dict(getattr(attack, "mcp_context", None) or {}),
     )
 
 
@@ -442,6 +481,10 @@ def _mapping_fields(attack: Any) -> dict[str, Any]:
         "atlas_technique_name": m["atlas"]["technique_name"],
         "owasp_control": m["owasp"]["control_id"] if m["owasp"] else None,
         "owasp_control_name": m["owasp"]["control_name"] if m["owasp"] else None,
+        # None, not "", for an attack with no MCP vector — `compute_efficacy` skips falsy vectors, and
+        # None reads as "this attack exercises no MCP vector" rather than as an empty vector id.
+        "mcp_vector": getattr(attack, "mcp_vector", "") or None,
+        "mcp_vector_title": vector_title(attack.mcp_vector) if getattr(attack, "mcp_vector", "") else None,
     }
 
 
@@ -459,10 +502,25 @@ def _loaded_rego(request: Request, namespace: str) -> str:
     return blob
 
 
+# Categories whose enforcing rule is CONDITIONAL on an operator having loaded something — a sector
+# pack, or the opt-in MCP integration guardrail. Verified: no shipped baseline reads `input.mcp` at all
+# (strict/moderate/permissive/comprehensive, zero references), so an MCP attack in a namespace without
+# the guardrail can never be blocked and would score got_through forever, with no operator action that
+# fixes it. That is not a miss, it is a control that was never installed — and reporting it as a miss
+# would paint every default namespace red on the day this ships.
+_CONDITIONAL_CATEGORIES = frozenset(
+    {AttackCategory.SECTOR_POLICY, AttackCategory.MCP_IDENTITY}
+)
+
+
 def _attack_applicable(attack: Any, ns_rego: str) -> bool:
-    """A non-sector attack always applies. A SECTOR_POLICY attack applies only when its enforcing rule is
-    loaded for the namespace (the pack is enabled) — otherwise it's out of scope, not a real miss."""
-    if attack.category != AttackCategory.SECTOR_POLICY:
+    """An unconditional attack always applies. A conditional one (sector pack, MCP guardrail) applies only
+    when its enforcing rule is loaded for the namespace — otherwise it's out of scope, not a real miss.
+
+    POLICY_COMPOSITION is deliberately NOT conditional: its expected rules are baseline blocks that ship
+    everywhere, so the question it asks — did this class's own policy override the baseline? — is always
+    a fair one to ask."""
+    if attack.category not in _CONDITIONAL_CATEGORIES:
         return True
     return bool(attack.expected_rule and attack.expected_rule in ns_rego)
 

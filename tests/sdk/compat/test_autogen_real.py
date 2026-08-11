@@ -27,6 +27,10 @@ from autogen_core.tools import FunctionTool  # noqa: E402 - after importorskip, 
 from norviq.exceptions import NorviqBlockError  # noqa: E402 - after importorskip, by design
 from norviq.sdk.autogen.adapter import protect  # noqa: E402 - after importorskip, by design
 from norviq.sdk.core.decisions import PolicyDecision  # noqa: E402 - after importorskip, by design
+from norviq.sdk.langchain.adapter import (  # noqa: E402 - after importorskip, by design
+    declared_tool_schemas,
+    forget_declared_tool_schemas,
+)
 
 
 @dataclass
@@ -81,3 +85,32 @@ async def test_blocked_tool_call_raises_and_never_executes_through_real_function
     with pytest.raises(NorviqBlockError):
         await protected[0].run(args_model, CancellationToken())
     assert executed == []
+
+
+async def test_declared_schema_is_ingested_from_a_REAL_function_tool() -> None:
+    """The declared-argument ingestion must be pinned against the REAL autogen tool shape.
+
+    A fake that agrees with the adapter and disagrees with the framework is this repo's recurring
+    defect (see the note in tests/sdk/test_semantic_kernel_adapter.py). autogen-core builds
+    `.schema` as an OpenAI-style tool schema whose arguments live under
+    `parameters.properties` — not at the top level — so an ingestion that reads the wrong level
+    records a tool with NO arguments while the real tool has two.
+    """
+    forget_declared_tool_schemas()
+    try:
+
+        async def issue_refund(txn_id: str, amount: float) -> str:
+            """Issue a refund (compat test tool)."""
+            return "ok"
+
+        real_tool = FunctionTool(issue_refund, description="refund tool", name="issue_refund")
+        protect([real_tool], _FakeInterceptor(), session_id="compat-autogen")
+
+        record = declared_tool_schemas()[("autogen", "issue_refund")]
+        assert record.schema_available is True
+        assert record.param_keys == ("amount", "txn_id")
+        assert record.param_keys_truncated is False
+        # KEYS ONLY: the descriptions/titles autogen puts in the schema are not argument names.
+        assert "title" not in record.param_keys and "description" not in record.param_keys
+    finally:
+        forget_declared_tool_schemas()

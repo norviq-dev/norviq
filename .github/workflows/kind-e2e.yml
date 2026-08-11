@@ -1,0 +1,198 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+#
+# The gap `test.yml` names explicitly: `tests/integration` and `tests/attacks` are excluded from the
+# PR gate because they need a running cluster, and that comment ends with "they belong in a
+# kind-based e2e job, not a PR gate". This is that job.
+#
+# Excluded from the PR gate is correct. Excluded and never run ANYWHERE is not: these 162 tests are
+# the only ones that exercise the real evaluate path, real Postgres, real Redis, and the console
+# against a real API. Until this job existed they ran on one developer's laptop, sometimes.
+#
+# ⚠ WHY THIS JOB CANNOT JUST CALL PYTEST. `tests/attacks/conftest.py` xfails and
+# `tests/integration/conftest.py` skips when the backend is unreachable — both exit 0. A run against
+# a broken cluster prints "97 xfailed" and passes. `scripts/kind-e2e/l3.sh` asserts a nonzero PASSED
+# count per suite for exactly that reason; its thresholds come from measured live-vs-dead numbers,
+# and it has been verified to fail against a dead API rather than merely to pass against a live one.
+
+name: kind-e2e
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Nightly. This is a slow, cluster-shaped job — running it per-PR would add ~25 minutes to every
+    # push to prove things that change rarely. A nightly failure is still found within a day.
+    - cron: "0 3 * * *"
+  pull_request:
+    # ...except when a PR touches the things this job is the only cover for.
+    paths:
+      - "norviq/engine/**"
+      - "norviq/api/routers/**"
+      - "webhook/**"
+      - "helm/**"
+      - "tests/integration/**"
+      - "tests/attacks/**"
+      - "scripts/kind-e2e/**"
+      - ".github/workflows/kind-e2e.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kind-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kind-e2e:
+    name: L3 + L4 against a real cluster
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v5.0.1
+
+      - uses: actions/setup-python@e9d6f990972a57673cdb72ec29e19d42ba28880f # v6.0.0
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+
+      # Same pinned version + checksum as test.yml, so every layer evaluates rego against the dialect
+      # the sidecar actually runs. `l3.sh` refuses to start without it rather than letting the
+      # rego-backed tests skip into a green summary.
+      - name: install opa
+        run: |
+          curl -fsSL --retry 3 --retry-all-errors --max-time 120 \
+            -o /usr/local/bin/opa \
+            https://openpolicyagent.org/downloads/v1.18.0/opa_linux_amd64_static
+          echo "65d700b14b99b354982b61031b40bdc8e316ea93dadd61818f066d1d9a69dcce  /usr/local/bin/opa" | sha256sum -c -
+          chmod +x /usr/local/bin/opa
+          opa version
+
+      - uses: helm/kind-action@a1b0e391336a6ee6713a0583f8c6240d70863de3 # v1.12.0
+        with:
+          cluster_name: norviq-local
+          wait: 120s
+
+      - name: Python deps
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e ".[dev]"
+
+      # FIVE images, not four. `bootstrap` runs behind a Helm hook rather than as a Deployment, so a
+      # cluster without it fails during install on the `norviq-internal-tls` hook — a failure that
+      # reads as a chart problem rather than a missing image.
+      #
+      # No `--platform`: pinning it produces `exec format error` on a runner whose arch differs from
+      # the pin, and the failure surfaces as a CrashLoopBackOff with no useful message.
+      #
+      # The webhook is the ODD ONE OUT and the loop used to assume it was not: its Dockerfile lives at
+      # `webhook/Dockerfile` with `webhook/` as the build CONTEXT, not `Dockerfile.webhook` at the root
+      # like the other four. `docker build -f Dockerfile.webhook .` therefore failed with
+      # "failed to read dockerfile: open Dockerfile.webhook: no such file or directory" and took this
+      # whole job down before a single test ran. scripts/push_dev_image.sh already carries the correct
+      # per-component mapping; this mirrors it rather than inventing a second one.
+      - name: Build and load the five images
+        run: |
+          for img in api ui engine bootstrap; do
+            docker build -t "norviq/norviq-engine:${img}-latest" -f "Dockerfile.${img}" .
+          done
+          docker build -t "norviq/norviq-engine:webhook-latest" -f webhook/Dockerfile webhook
+          kind load docker-image --name norviq-local \
+            norviq/norviq-engine:api-latest \
+            norviq/norviq-engine:ui-latest \
+            norviq/norviq-engine:engine-latest \
+            norviq/norviq-engine:webhook-latest \
+            norviq/norviq-engine:bootstrap-latest
+
+      # Every namespace in `policyQuotaNamespaces` must EXIST before install, or the chart fails
+      # applying a quota to a namespace that is not there.
+      - name: Install the chart
+        run: |
+          kubectl apply -f helm/norviq/crds/
+          for ns in norviq agents analytics; do
+            kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f -
+          done
+          # policyQuotaNamespaces is REQUIRED here, and the chart is right to refuse without it:
+          # baselineClusterPolicy.enabled defaults true and renders ONE guard per namespace in this
+          # list, so an empty list would install a cluster with NO baseline at all while NOTES.txt
+          # claims one is present. values-light.yaml does not set it, so the install died on that
+          # guard ("baselineClusterPolicy.enabled=true but policyQuotaNamespaces is EMPTY").
+          #
+          # These are the tenant namespaces created immediately above — and they must exist BEFORE
+          # install, which is why the creation loop precedes this step rather than following it.
+          helm install norviq helm/norviq \
+            -n norviq \
+            -f helm/norviq/values-light.yaml \
+            --set policyQuotaNamespaces='{agents,analytics}' \
+            --set images.api.pullPolicy=IfNotPresent \
+            --set images.ui.pullPolicy=IfNotPresent \
+            --set images.engine.pullPolicy=IfNotPresent \
+            --set images.webhook.pullPolicy=IfNotPresent \
+            --wait --timeout 10m
+          kubectl -n norviq get pods
+
+      - name: Mint an admin token
+        run: |
+          api_pod="$(kubectl -n norviq get pods -o name | grep api | head -1)"
+          kubectl -n norviq exec "${api_pod#pod/}" -c api -- \
+            python -m norviq.api.token_mint --ttl 7200 | tail -1 > /tmp/nrvq-signin-token.txt
+          test -s /tmp/nrvq-signin-token.txt
+
+      - name: Seed the console's fixtures
+        run: |
+          kubectl -n norviq port-forward svc/norviq-ui 3400:80 &
+          for _ in $(seq 1 40); do curl -sf -o /dev/null http://localhost:3400/ && break; sleep 0.5; done
+          curl -sf -o /dev/null http://localhost:3400/
+          .venv/bin/python scripts/kind-e2e/seed.py
+
+      # L4 — the console against the real API. `scripts/e2e.sh` owns the Playwright invocation; adding
+      # a second runner here would let the two drift.
+      - name: L4 · Playwright
+        env:
+          PLAYWRIGHT_BASE_URL: http://localhost:3400
+          NRVQ_TOKEN_FILE: /tmp/nrvq-signin-token.txt
+        run: |
+          # `e2e.sh` runs `npm ci` and `playwright install` itself, but its install swallows errors
+          # (`|| true`) — fine on a developer machine that already has the system libs, fatal on a
+          # fresh runner where the browser then fails to launch with no explanation. `--with-deps`
+          # here, unsuppressed, so a missing dependency fails at the install rather than at the first
+          # test with a stack trace about a missing shared object.
+          (cd ui/tests/e2e && npx playwright install --with-deps chromium)
+          bash scripts/e2e.sh
+
+      # L3 LAST, deliberately. It creates policies in throwaway `integration-<uuid>` namespaces, and a
+      # namespace EXISTS as far as the console is concerned the moment a policy names one — so running
+      # it first grew the namespace selector by ten phantom entries and broke the browser suite's
+      # policy counts, catalog listings, pack rollups and namespace-scoped graph views. Fifty-nine
+      # specs failed in files unrelated to any change, pointing at the console rather than at the
+      # cause. `tests/integration/conftest.py` now sweeps those rows at session end; this ordering is
+      # the second line of defence, because a cleanup that fails must not silently poison L4.
+      - name: L3 · integration + attacks
+        run: scripts/kind-e2e/l3.sh
+
+      # Runs even when a step above failed. A red cluster run without the state behind it is a
+      # guessing game, and reproducing it costs another 25 minutes.
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get pods,jobs,svc -A -o wide || true
+          kubectl -n norviq describe pods || true
+          kubectl -n norviq logs -l app.kubernetes.io/component=api --tail=300 || true
+          kubectl -n norviq logs -l app.kubernetes.io/component=engine --tail=200 || true
+          kubectl get nrvqpolicies -A -o yaml || true
+
+      - name: Upload Playwright artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: playwright-artifacts
+          path: ui/tests/e2e/artifacts/
+          retention-days: 7
+          if-no-files-found: ignore

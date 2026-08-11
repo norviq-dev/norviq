@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from datetime import datetime, timezone
 import traceback
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -88,13 +90,6 @@ def _partition_months(count: int = PARTITION_LOOKAHEAD_MONTHS) -> list[tuple[str
     return windows
 
 
-def _partition_bounds() -> tuple[str, str, str]:
-    """Return current month partition and range."""
-    now = datetime.now(timezone.utc)
-    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    return _month_window(start)
-
-
 async def init_db() -> None:
     """Initialize async engine and session factory."""
     global _engine, _session_factory
@@ -113,15 +108,78 @@ async def init_db() -> None:
     log.info("nrvq.db.connected", pool_size=settings.pg_pool_size, code="NRVQ-DB-9000")
 
 
+# Schema init contends across EVERY api process, not every pod. The chart runs api.workers: 4 across
+# api.replicas: 2, so eight processes call create_tables() at once and seven of them queue on one
+# advisory lock — while the connection carries the ordinary NRVQ_DB_COMMAND_TIMEOUT (10s by default).
+# On the run that first creates a new table the holder takes long enough that the waiters blow that
+# budget, get asyncpg's TimeoutError, and uvicorn exits: "Application startup failed. Exiting." The pod
+# then CrashLoopBackOffs, and because every restart re-enters the same contention it does not reliably
+# self-heal — observed on AKS as two of three api pods stuck at 7 restarts.
+#
+# Waiting for a peer to finish creating the schema is the NORMAL path here, not a fault, so it must not
+# be fatal. Retry with backoff and let the lock do its job; by the second attempt the tables exist and
+# create_all no-ops in milliseconds.
+# Sized for "seven peers ahead of me, each doing an idempotent create_all", not for a healthy query.
+_SCHEMA_INIT_COMMAND_TIMEOUT_S = 180.0
+_SCHEMA_INIT_ATTEMPTS = 5
+_SCHEMA_INIT_BACKOFF_S = 3.0
+
+
 async def create_tables() -> None:
-    """Create schema and current-month audit partition."""
+    """Create schema and current-month audit partition, tolerating peer contention."""
+    last_exc: Exception | None = None
+    for attempt in range(1, _SCHEMA_INIT_ATTEMPTS + 1):
+        try:
+            await _create_tables_once()
+            return
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            # Someone else holds the schema lock. That is the design working, not a failure.
+            last_exc = exc
+            log.warning(
+                "nrvq.startup.create_tables.lock_contended",
+                attempt=attempt, of=_SCHEMA_INIT_ATTEMPTS,
+                detail="another api process is initialising the schema; retrying rather than exiting",
+                code="NRVQ-DB-9039",
+            )
+            if attempt < _SCHEMA_INIT_ATTEMPTS:
+                await asyncio.sleep(_SCHEMA_INIT_BACKOFF_S * attempt)
+    log.error(
+        "nrvq.startup.create_tables.lock_exhausted",
+        attempts=_SCHEMA_INIT_ATTEMPTS, error=str(last_exc), code="NRVQ-DB-9040",
+    )
+    raise last_exc if last_exc else RuntimeError("schema init failed")
+
+
+async def _schema_engine() -> AsyncEngine:
+    """A throwaway engine for schema init ONLY, with a budget sized for waiting on the lock.
+
+    The killer was a CLIENT-side timeout, so no server setting could fix it: `_build_connect_args`
+    puts asyncpg's `command_timeout` (NRVQ_DB_COMMAND_TIMEOUT, 10s) on every connection, and
+    `pg_advisory_xact_lock` BLOCKS — so a process queueing behind seven peers is killed by its own
+    client long before Postgres would ever have refused it. Retrying at the application layer helped
+    but could not fix the root: each retry re-entered the same 10s ceiling.
+
+    Schema init is a once-per-process startup step on its own connection, so a generous budget here
+    costs nothing at steady state and is disposed immediately after. NullPool because this engine
+    exists for one transaction.
+    """
+    from sqlalchemy.pool import NullPool
+
+    connect_args = dict(_build_connect_args())
+    connect_args["command_timeout"] = _SCHEMA_INIT_COMMAND_TIMEOUT_S
+    return create_async_engine(_async_pg_url(), poolclass=NullPool, connect_args=connect_args)
+
+
+async def _create_tables_once() -> None:
+    """One schema-init attempt. Raises TimeoutError when a peer holds the lock too long."""
     from norviq.api.db.models import Base
 
     if _engine is None:
         raise RuntimeError("Database not initialized. Call init_db() first.")
     log.info("nrvq.startup.create_tables.begin", code="NRVQ-DB-DEBUG-2A")
+    engine = await _schema_engine()
     try:
-        async with _engine.begin() as conn:
+        async with engine.begin() as conn:
             log.info("nrvq.startup.create_tables.connection_acquired", code="NRVQ-DB-DEBUG-2B")
             # Serialize schema init across replicas. `create_all` checks "does this table exist?" and
             # then creates it, which is not atomic: the chart runs 2 API replicas by default, both boot
@@ -230,6 +288,10 @@ async def create_tables() -> None:
             code="NRVQ-DB-DEBUG-2-ERR",
         )
         raise
+    finally:
+        # Disposed on every path: this engine exists for one transaction, and leaking a connection per
+        # retry across eight processes is how a fix for contention becomes a cause of it.
+        await engine.dispose()
 
 
 async def ensure_schema_compatibility() -> None:
@@ -271,17 +333,35 @@ async def ensure_schema_compatibility() -> None:
         "ALTER TABLE agent_registry ADD COLUMN IF NOT EXISTS frozen BOOLEAN NOT NULL DEFAULT false",
         "ALTER TABLE agent_registry ADD COLUMN IF NOT EXISTS trust_cap DOUBLE PRECISION",
     )
-    async with _engine.begin() as conn:
-        for statement in statements:
-            await conn.execute(text(statement))
-        # RETENTION backfill: drafts created before the expires_at column existed have NULL expiry and the
-        # GC's WHERE clause (expires_at IS NOT NULL) never touches them — stamp them with the normal TTL
-        # from their created_at so they age out like every other draft. Idempotent (only fills NULLs).
-        await conn.execute(
-            text("UPDATE intent_drafts SET expires_at = created_at + make_interval(days => :d) "
-                 "WHERE expires_at IS NULL"),
-            {"d": int(settings.draft_ttl_days)},
-        )
+    # Same treatment as create_tables, and for the same reason — the timeout simply moved one function
+    # along when create_tables was fixed. These are 16 idempotent ALTERs, and eight api processes
+    # (workers x replicas) run them at once on startup; each ALTER takes a table lock, so they queue,
+    # and on the main engine they queue against the ordinary 10s client command_timeout. Observed live:
+    # create_tables completed, then this raised TimeoutError and the pod exited "Application startup
+    # failed" all over again.
+    #
+    # Sharing the ADVISORY LOCK is the part that actually removes the contention rather than surviving
+    # it: the eight processes now serialise on one cheap lock instead of eight-way lock-thrashing over
+    # sixteen ALTERs, and whoever runs second finds every column present and no-ops.
+    engine = await _schema_engine()
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _SCHEMA_INIT_LOCK})
+            for statement in statements:
+                await conn.execute(text(statement))
+            # RETENTION backfill: drafts created before the expires_at column existed have NULL expiry
+            # and the GC's WHERE clause (expires_at IS NOT NULL) never touches them — stamp them with
+            # the normal TTL from their created_at so they age out like every other draft. Idempotent
+            # (only fills NULLs). Stays INSIDE the locked transaction: it reads a column the ALTERs
+            # above may have just added, so running it outside would race the very statements that
+            # create what it touches.
+            await conn.execute(
+                text("UPDATE intent_drafts SET expires_at = created_at + make_interval(days => :d) "
+                     "WHERE expires_at IS NULL"),
+                {"d": int(settings.draft_ttl_days)},
+            )
+    finally:
+        await engine.dispose()
     log.info("nrvq.db.schema_compat_applied", statements=len(statements), code="NRVQ-DB-9003")
 
 
@@ -332,9 +412,17 @@ async def upsert_agent_registry(
     agent_class: str,
     trust_score: float,
     trust_category: str,
-    violation_count: int = 0,
+    violation: bool = False,
 ) -> None:
-    """Write-through an agent's latest trust into the persistent registry (upsert by spiffe_id)."""
+    """Write-through an agent's latest trust into the persistent registry (upsert by spiffe_id).
+
+    `violation` ADDS one to the stored count when this call was blocked or escalated. The parameter
+    used to be `violation_count: int = 0`, no caller ever passed it, and the conflict clause SET the
+    column rather than adding to it — so the value was structurally pinned at 0 forever, while the
+    Agent Monitor renders a "Violations" column that turns amber above 3 and red above 8 and
+    `norviq agent get` prints "Violations: 0". An operator triaging which agent is misbehaving read a
+    number that could never move.
+    """
     from norviq.api.db.models import AgentRegistryEntry
 
     stmt = insert(AgentRegistryEntry).values(
@@ -343,7 +431,7 @@ async def upsert_agent_registry(
         agent_class=agent_class,
         trust_score=trust_score,
         trust_category=trust_category,
-        violation_count=violation_count,
+        violation_count=1 if violation else 0,
         last_seen=datetime.now(timezone.utc),
     )
     stmt = stmt.on_conflict_do_update(
@@ -353,7 +441,8 @@ async def upsert_agent_registry(
             "agent_class": agent_class,
             "trust_score": trust_score,
             "trust_category": trust_category,
-            "violation_count": violation_count,
+            # ADD, do not SET: a violation count that is overwritten on every call is a constant.
+            "violation_count": AgentRegistryEntry.violation_count + (1 if violation else 0),
             "last_seen": datetime.now(timezone.utc),
         },
     )

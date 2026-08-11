@@ -108,3 +108,91 @@ export async function waitForApp(page: Page): Promise<void> {
 export async function finalPath(page: Page): Promise<string> {
   return page.evaluate(() => window.location.pathname);
 }
+
+/**
+ * Start a RedTeam suite and return the SETTLED `results/latest` for its namespace.
+ *
+ * Three specs had their own copy of this, each returning the POST response. The POST answers as soon
+ * as the run is ACCEPTED, so a run still being scored carries no `efficacy` — and every caller then
+ * reads `run.efficacy.overall`, which throws a TypeError naming neither the suite nor the wait. It is
+ * intermittent by construction: whether it passes depends on how loaded the host was that minute.
+ *
+ * Two identical polls, not one. The run is written incrementally, so a single sighting of `efficacy`
+ * can be a partially-scored run whose totals move again under the assertion. Requiring the same
+ * fingerprint twice is what makes "finished" distinguishable from "in progress" — the same reason
+ * scripts/kind-e2e/seed.py waits for a stable count rather than sleeping once after a push.
+ */
+export async function suiteSettled(page: Page, query: string): Promise<any> {
+  const ns = new URLSearchParams(query).get("target_namespace") ?? "default";
+
+  const latestOf = async () =>
+    page.evaluate(async (n) => {
+      const t = localStorage.getItem("nrvq_token");
+      const res = await fetch(`/api/v1/redteam/results/latest?ns=${n}`, {
+        headers: t ? { Authorization: `Bearer ${t}` } : {},
+      });
+      return res.ok ? res.json() : null;
+    }, ns);
+
+  // The run_id already on record BEFORE we ask for anything. It is what lets the "someone else's run
+  // is in flight" path below stay honest: we accept that run's results only once they belong to a
+  // DIFFERENT run than the one that was already there, so a settled-but-stale result can never be
+  // mistaken for the fresh one this helper promises.
+  const priorRunId = (await latestOf())?.run_id ?? null;
+
+  const post = async () =>
+    page.evaluate(async (q) => {
+      const t = localStorage.getItem("nrvq_token");
+      const res = await fetch(`/api/v1/redteam/suite?${q}`, {
+        method: "POST",
+        headers: t ? { Authorization: `Bearer ${t}` } : {},
+      });
+      return res.json();
+    }, query);
+
+  // ONE attempt, then WAIT — never a retry loop against "already running".
+  //
+  // This used to POST up to 20 times at 1500ms and throw "redteam suite stayed busy across 20
+  // attempts" after 30s. The specs run with --workers=1, so nothing is racing us: the busy signal
+  // means an EARLIER spec's run (a UI-driven "Run suite" click) is still executing server-side, and a
+  // suite on a real cluster takes minutes — measured at 148s on AKS against ~seconds on kind. So the
+  // budget was never going to be enough, and every retry spent a round trip re-asking a question whose
+  // answer could not change until that run finished. It failed only on the slower cluster, which is
+  // exactly where the gate needs to mean something.
+  //
+  // Waiting for the in-flight run is not a workaround, it is the contract: this helper's job is to
+  // return a SETTLED scored run for the namespace, and a run already producing one for that same
+  // namespace satisfies that. The `priorRunId` guard keeps it from accepting a stale one.
+  const first = await post();
+  const busy = (first as { detail?: unknown })?.detail;
+  const waitingOnSomeoneElse = !!busy && /already running/i.test(JSON.stringify(busy));
+  if (!!busy && !waitingOnSomeoneElse) {
+    throw new Error(`POST /redteam/suite refused: ${JSON.stringify(busy)}`);
+  }
+  if (waitingOnSomeoneElse) {
+    // A whole foreign suite may have to drain first, which can outlast the default per-test budget.
+    test.setTimeout(300_000);
+  }
+
+  // Two identical polls, not one. The run is written incrementally, so a single sighting of `efficacy`
+  // can be a partially-scored run whose totals move again under the assertion.
+  let prev = "";
+  const deadline = Date.now() + (waitingOnSomeoneElse ? 240_000 : 90_000);
+  while (Date.now() < deadline) {
+    const latest = await latestOf();
+    const o = latest?.efficacy?.overall;
+    // While waiting on a foreign run, ignore the record that was already there — settling on it would
+    // assert against results this call did not produce.
+    const isFresh = !waitingOnSomeoneElse || (latest?.run_id && latest.run_id !== priorRunId);
+    if (o && isFresh) {
+      const fingerprint = `${latest.run_id}|${o.total}|${o.caught}|${o.got_through}|${latest.pass_rate}`;
+      if (fingerprint === prev) return latest;
+      prev = fingerprint;
+    }
+    await page.waitForTimeout(1500);
+  }
+  throw new Error(
+    `redteam results/latest for ns=${ns} never settled` +
+      (waitingOnSomeoneElse ? ` (waited out an in-flight run; prior run_id ${priorRunId})` : "")
+  );
+}

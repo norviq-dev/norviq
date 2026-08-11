@@ -6,6 +6,7 @@ import "../lib/monaco"; // Bundle Monaco locally (no cdn.jsdelivr fetch) — mus
 import Editor from "@monaco-editor/react";
 import { registerRego } from "../lib/monaco-rego";
 import { composerRego } from "../lib/composerRego";
+import { detachmentStatusOf } from "../lib/builderCompile";
 import {
   AlertCircle,
   ArrowUpCircle,
@@ -26,7 +27,7 @@ import {
   X
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import {
   apiGet,
   apiSend,
@@ -44,8 +45,11 @@ import { baseClassOfOverlay, isReservedScope, isRemediationOverlayClass, overlay
 import { ApplyResultPanel, type ApplyResult } from "../components/common/ApplyResultPanel";
 import { DecisionBadge, type Decision } from "../components/common/DecisionBadge";
 import { KitButton } from "../components/common/KitButton";
+import { Modal } from "../components/common/Modal";
 import { PageHead } from "../components/common/PageHead";
 import { Panel } from "../components/common/Panel";
+import { BuilderSheet } from "../components/policies/BuilderSheet";
+import type { BuilderGraph } from "../lib/builderGraph";
 import { PolicyHierarchy } from "../components/PolicyHierarchy";
 import { useApi, invalidateApiCache } from "../hooks/useApi";
 import { timeAgo } from "../lib/d3-helpers";
@@ -226,6 +230,19 @@ function withTargetType(list: Policy[]): Policy[] {
   }));
 }
 
+/**
+ * The identity of a policy in the editor's file list: NAMESPACE + class, never the class alone.
+ *
+ * Two namespaces routinely run the same agent class — dev/staging/prod each having `customer-support` is
+ * the normal case, not an edge one — and under the "All namespaces" scope (the default landing view) they
+ * all appear in one flat list. Keying on the bare class name made those rows indistinguishable: the row
+ * highlight matched BOTH, and the lookup returned whichever came first, so selecting the second row loaded
+ * the first row's policy and a subsequent Save/Apply wrote to that other namespace instead.
+ */
+function policyFileKey(p: { namespace?: string; target?: string | null; agent_class?: string | null }): string {
+  return `${p.namespace ?? ""}/${p.target ?? p.agent_class ?? "policy"}`;
+}
+
 function PriorityBars({ tier }: { tier: TargetType }) {
   const p = PRIORITY[tier];
   return (
@@ -349,20 +366,21 @@ function PolicyTarget({
             + raw editor support them) but the guided rego would never match them — offering them here
             (with a dead Name input) produced a policy that silently didn't enforce. Gate them to the raw
             editor instead of shipping a lie. */}
-        <RadioPill
-          active={mode === "workload"}
-          label="Workload"
-          disabled
-          title="Guided mode targets agent classes. Use 'New policy (raw rego)' to scope a policy to a workload."
-          onClick={() => {}}
-        />
-        <RadioPill
-          active={mode === "namespace"}
-          label="Namespace"
-          disabled
-          title="Guided mode targets agent classes. Use 'New policy (raw rego)' to scope a policy to a namespace."
-          onClick={() => {}}
-        />
+        <RadioPill active={mode === "workload"} label="Workload" disabled onClick={() => {}} />
+        <RadioPill active={mode === "namespace"} label="Namespace" disabled onClick={() => {}} />
+      </div>
+      {/* WHY THEY ARE GREY, AS TEXT. These two pills are hard-disabled — not state-dependent, never
+          enabled by anything — and the only explanation lived in a `title` on the disabled button.
+          `index.css` sets `.btn:disabled { pointer-events: none }`, so a disabled control never
+          receives the hover that would show it: the explanation was written, shipped, and
+          unreachable. An operator saw two greyed tiers and no way to learn that the limitation is
+          permanent in guided mode, or where to go instead — so they clicked, nothing happened, and
+          the page read as broken rather than as scoped.
+          Rendered once beneath the row rather than twice inside it: both pills have the same reason
+          and the same remedy, and two copies of one sentence is its own defect. */}
+      <div style={{ fontSize: 11.5, lineHeight: 1.5, color: "var(--text-muted)", margin: "-8px 0 16px" }}>
+        Guided mode targets agent classes. Use <strong>New policy (raw rego)</strong> to scope a policy to a
+        workload or a namespace.
       </div>
 
       {mode === "class" && (
@@ -551,9 +569,16 @@ export function PolicySheet({
   const isNew = policy.current_version == null;
   const currentMode = policy.mode ?? policy.enforcement_mode ?? "block";
   const enforcementChanged = !isNew && currentMode !== enforcement;
-  // Block keywords ARE enforced: on Apply they generate the block policy via composerRego (below). The
-  // former rate-limit / trust-threshold inputs were preview-only AND redundant with the namespace-scoped
-  // controls in Target Settings / Settings, so they were removed rather than shipped as dead inputs.
+  // Block keywords are enforced ONLY when creating a brand-new class policy: Apply passes
+  // composerRego(...) just for `isNew`, and passes `undefined` otherwise. For an EXISTING policy the
+  // keyword box was read, rendered, and then dropped on the floor — while the helper text said
+  // "Applied" and the result panel reported "enforcement block ... Effective immediately on the next
+  // tool call" over a rego that had not changed by a byte.
+  //
+  // Regenerating rego for an existing policy is NOT the fix: it would overwrite whatever the operator
+  // (or the builder, or a preset) authored with a generated keyword rule, which is a far worse
+  // outcome than an ignored box. So the control is only offered where it actually works, and existing
+  // policies are pointed at the surfaces that do edit their rego.
   const [keywords, setKeywords] = useState("secret,token,password");
   const keywordList = keywords.split(",").map((k) => k.trim()).filter(Boolean);
   const yamlPreview = `apiVersion: norviq.io/v1
@@ -606,14 +631,31 @@ spec:
         </div>
         {paramsOpen && (
           <div style={{ marginTop: 8 }}>
-            <div className="field-row">
-              <label className="field-label">Block keywords</label>
-              <input className="input mono" value={keywords} onChange={(e) => setKeywords(e.target.value)} />
-            </div>
-            <div className="panel-sub" style={{ marginTop: 6, color: "var(--text-muted)" }}>
-              Applied — these generate the block policy below. Rate limit and trust threshold are
-              namespace-wide and live in Target Settings.
-            </div>
+            {isNew ? (
+              <>
+                <div className="field-row">
+                  <label className="field-label">Block keywords</label>
+                  <input
+                    className="input mono"
+                    data-testid="policy-block-keywords"
+                    value={keywords}
+                    onChange={(e) => setKeywords(e.target.value)}
+                  />
+                </div>
+                <div className="panel-sub" style={{ marginTop: 6, color: "var(--text-muted)" }}>
+                  Applied — these generate the block policy below. Rate limit and trust threshold are
+                  namespace-wide and live in Settings → General (Tuning defaults); Target Settings holds
+                  the enforcement mode and change control.
+                </div>
+              </>
+            ) : (
+              <div className="panel-sub" data-testid="policy-block-keywords-unavailable" style={{ color: "var(--text-muted)" }}>
+                Keyword rules for an existing policy live in its Rego. Apply here changes the
+                enforcement mode and re-loads the saved policy — it does not rewrite the rule set, so a
+                keyword typed here would have no effect. Edit the policy in the Builder or the Rego
+                editor to change what it blocks.
+              </div>
+            )}
           </div>
         )}
 
@@ -1158,6 +1200,15 @@ export function PolicyCatalog() {
   // Catalog can't claim enforcement the namespace isn't doing. Only trust a definite monitor posture for
   // a concrete namespace (the "all" aggregate carries only the cluster default; per-ns overrides vary).
   const catalogMonitor = posture.mode === "audit" && namespace !== "all";
+  // A THIRD state, because "not audit" is not the same as "block". AppContext sets `posture.mode` to
+  // null when the /settings read failed — reachable through the default HTTP rate limiter or any 5xx,
+  // and DURABLE, since posture is not refetched until the namespace changes or postureVersion bumps.
+  // Folding null into the else-branch labelled a Monitor-mode namespace "Enforcing … Loaded into this
+  // cluster's policy engine" indefinitely. Also require the posture to describe the namespace on
+  // screen, the same guard Header.tsx applies: on a switch the previous scope's mode lingers until the
+  // new read settles. "all" is exempt — it legitimately shows the cluster default.
+  const postureForScope = posture.namespace === namespace && !posture.loading;
+  const catalogPostureUnknown = namespace !== "all" && (posture.mode == null || !postureForScope);
   const [searchParams, setSearchParams] = useSearchParams();
   const outlineTealButtonStyle = {
     background: "transparent",
@@ -1171,9 +1222,41 @@ export function PolicyCatalog() {
     searchParams.get("tab") === "catalog" ? "catalog" : "editor"
   );
   const [selected, setSelected] = useState<Policy | null>(null);
+  // Visual Policy Builder (round B) — a separate sheet from the guided composer above (multi-rule,
+  // multi-condition graph -> rego, compiled client-side; see components/policies/BuilderSheet.tsx).
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [builderOpen, setBuilderOpen] = useState(false);
+  // Handoff from /intents: that screen proposes a policy from RECORDED TRAFFIC and replays it — the
+  // two things the builder structurally cannot do — then hands the graph here to be edited, rather
+  // than growing a second editor of its own. Router STATE, not a query string: a policy body has no
+  // business in browser history, a Referer header, or an access log.
+  const handoffGraph = (location.state as { builderGraph?: BuilderGraph } | null)?.builderGraph ?? null;
+  useEffect(() => {
+    if (!handoffGraph) return;
+    setBuilderOpen(true);
+    // Consume it once, THROUGH THE ROUTER. `window.history.replaceState` does not work here:
+    // BrowserRouter keeps the location in React state and only updates it from its own history
+    // listener, and a direct replaceState fires neither that listener nor a popstate — so
+    // `useLocation().state` kept the graph, and any later re-render re-opened the sheet with a stale
+    // proposal on top of whatever the operator had since edited.
+    navigate(location.pathname + location.search, { replace: true, state: null });
+  }, [handoffGraph]);
   const [restoreV, setRestoreV] = useState<number | null>(null);
   const [viewV, setViewV] = useState<number | null>(null); // Version whose rego is expanded read-only
-  const [activeFile, setActiveFile] = useState<string | null>(null);
+  // Seeded from the URL so a deep link can OPEN a specific policy, not just the page.
+  //
+  // Policy Compliance links here with ?ns=<namespace>&agent_class=<class> from its remediation table.
+  // Before this the params were simply ignored: the operator clicked "Open policy" on a named
+  // non-compliant policy and landed on whatever the editor happened to select first, which on a
+  // multi-tenant list is somebody else's policy. Keyed the same way the file list is
+  // (`policyFileKey` = namespace/class), because two namespaces routinely run the same class name.
+  const [activeFile, setActiveFile] = useState<string | null>(() => {
+    const cls = searchParams.get("agent_class");
+    if (!cls) return null;
+    const ns = searchParams.get("ns") ?? searchParams.get("namespace");
+    return ns ? `${ns}/${cls}` : null;
+  });
   const [regoDraft, setRegoDraft] = useState("");
   const [editorStatus, setEditorStatus] = useState<"saved" | "unsaved" | `syntax:${number}`>("saved");
   const [dryRunResult, setDryRunResult] = useState<DryRunResult | null>(null);
@@ -1192,6 +1275,22 @@ export function PolicyCatalog() {
   const [newPolicy, setNewPolicy] = useState<{ namespace: string; agent_class: string; mode: NonNullable<Policy["mode"]> } | null>(null);
   // The policy pending a confirmed delete (drives the confirm modal). Null = no delete in flight.
   const [deleteTarget, setDeleteTarget] = useState<Policy | null>(null);
+  /**
+   * Open the delete confirm, and REFUSE TO RE-TARGET one that is already open.
+   *
+   * The confirm is rendered at the very end of the page while the trash buttons that open it sit in the
+   * policy list above, so a keyboard operator who tabs from an open confirm walks the rows underneath it
+   * — the overlay dims them but takes no focus. Enter on a second row's trash then fired
+   * `setDeleteTarget(otherPolicy)` while a confirm was already up: the dialog stayed mounted, the red
+   * "cannot be undone / removes the class from every layer" warning stayed word-for-word identical, and
+   * the ONLY thing that changed was one line of title text. "Delete policy" then destroyed a different
+   * enforcing policy from the one the operator opened.
+   *
+   * Moving to `Modal` (focus in, Escape out, role=dialog) removes the ordinary way to get there; this
+   * guard removes the rest — a destructive confirm's target must be fixed at the moment it is opened.
+   * Functional form so it reads the live value rather than a render-time closure.
+   */
+  const openDeleteConfirm = (p: Policy) => setDeleteTarget((cur) => cur ?? p);
   // An existing (already-saved) policy's mode is read-only from `editorPolicy`; this holds the in-progress
   // override that lets the operator change JUST the enforcement mode from the editor for the currently
   // loaded existing policy; null = no override yet (falls back to the loaded policy's persisted mode).
@@ -1344,7 +1443,12 @@ export function PolicyCatalog() {
 
   const editorPolicy = useMemo(() => {
     const list = policies.data ?? [];
-    if (activeFile) return list.find((p) => (p.target ?? p.agent_class) === activeFile);
+    // Resolve by NAMESPACE + class, not class alone. Two namespaces routinely run the same agent class
+    // (dev/staging/prod all have `customer-support`), and under the "All namespaces" scope both land in
+    // this list. Matching on the bare class name returned whichever happened to be FIRST, so clicking the
+    // second row loaded — and Save/Apply then targeted — a different tenant's policy than the one the
+    // operator selected. Same reason `policyFileKey` is used for the row key and the active-row highlight.
+    if (activeFile) return list.find((p) => policyFileKey(p) === activeFile);
     return list.find((p) => p.target_type === "class") ?? list[0];
   }, [policies.data, activeFile]);
 
@@ -1474,7 +1578,9 @@ export function PolicyCatalog() {
     try {
       await deletePolicy(ns, ac, overlay);
       await refreshPolicies();
-      if ((activeFile ?? editorPolicy?.agent_class) === ac) setActiveFile(null);  // deleted the loaded policy
+      // Compare the composite key: bare `ac` would also clear the selection when a SAME-NAMED class in a
+      // different namespace was deleted, blanking an editor the operator was still working in.
+      if ((activeFile ?? (editorPolicy ? policyFileKey(editorPolicy) : null)) === `${ns}/${ac}`) setActiveFile(null);
       setApplyResult({
         kind: "local",
         title: `Deleted ${ns}/${displayClass}${ver ? ` · v${ver}` : ""}`,
@@ -1595,7 +1701,8 @@ export function PolicyCatalog() {
   };
 
   const editorFiles = (policies.data ?? []).filter((p) => p.target_type === "class");
-  const activePolicyName = activeFile ?? editorFiles[0]?.target ?? editorFiles[0]?.agent_class ?? null;
+  const activePolicyKey = activeFile ?? (editorFiles[0] ? policyFileKey(editorFiles[0]) : null);
+  const activePolicyName = activePolicyKey ? activePolicyKey.split("/").slice(1).join("/") : null;
 
   // The STABLE identity of the loaded policy. The buffer-reset effect below keyed on
   // `editorPolicy?.id` (the policies API returns no id → always undefined) plus the raw rego string —
@@ -1607,6 +1714,16 @@ export function PolicyCatalog() {
     editorPolicy?.namespace && editorPolicy?.agent_class
       ? `${editorPolicy.namespace}/${editorPolicy.agent_class}`
       : null;
+
+  // Phase 2b detachment badge: classify the LOADED (saved) policy's rego against its own embedded
+  // builder-graph header, independent of the in-progress editor buffer (`regoDraft`) — the badge
+  // describes the server's current state, not an unsaved edit-in-flight. "not-builder" (no builder
+  // header at all — hand-authored/composer rego) renders nothing; see detachmentStatusOf's own doc
+  // comment in builderCompile.ts for the "attached"/"detached" distinction.
+  const detachStatus = useMemo(
+    () => (newPolicy ? "not-builder" : detachmentStatusOf(detail.data?.rego_source ?? "")),
+    [newPolicy, detail.data?.rego_source]
+  );
 
   useEffect(() => {
     // In new-policy mode the draft is the author's raw rego (seeded to NEW_POLICY_REGO on entry) — never
@@ -1777,29 +1894,34 @@ export function PolicyCatalog() {
         title="Policy Catalog"
         subtitle={`Showing: ${namespace}`}
         actions={
-          <KitButton
-            variant="ghost"
-            icon={Plus}
-            style={outlineTealButtonStyle}
-            // UX-CREATE: two create paths, now self-evidently distinct. This is the GUIDED composer
-            // (target + toggles → generated rego); the sidebar "raw rego" entry is for authors. A
-            // one-way bridge ("Edit as raw rego") lets the guided path graduate into the raw editor.
-            title="Guided: pick a target and toggles; Norviq generates the rego for you"
-            onMouseEnter={(e) => (e.currentTarget.style.background = "#2DDAB815")}
-            onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-            onClick={() =>
-              setSelected({
-                target_type: "class",
-                target: "",
-                agent_class: "",
-                // No `current_version` → the sheet treats this as a NEW policy (isNew) and the manual
-                // class is created (not a stamp of a non-existent saved policy).
-                mode: "block"
-              })
-            }
-          >
-            New Policy (guided)
-          </KitButton>
+          <div style={{ display: "flex", gap: 8 }}>
+            <KitButton
+              variant="ghost"
+              icon={Plus}
+              style={outlineTealButtonStyle}
+              // UX-CREATE (Phase 2f consolidation): the form-based Visual Builder is THE visual builder —
+              // the React Flow canvas (Phase 2d/2e) was cut, both compiled to identical rego over the
+              // same compiler so nothing was lost. Two create paths remain: this one (guided form, dry-run
+              // gated) and "Advanced (raw rego)" below for authors who want the raw editor directly.
+              title="Visual builder: compose multi-rule policies (detectors, keywords, tools, trust) with a live rego preview and dry-run gate"
+              onMouseEnter={(e) => (e.currentTarget.style.background = "#2DDAB815")}
+              onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+              onClick={() => setBuilderOpen(true)}
+            >
+              Visual Builder
+            </KitButton>
+            <KitButton
+              variant="ghost"
+              icon={Plus}
+              style={outlineTealButtonStyle}
+              title="Advanced: author the rego directly in the editor (no guided form)"
+              onMouseEnter={(e) => (e.currentTarget.style.background = "#2DDAB815")}
+              onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+              onClick={startNewPolicy}
+            >
+              Advanced (raw rego)
+            </KitButton>
+          </div>
         }
       />
 
@@ -1888,14 +2010,16 @@ export function PolicyCatalog() {
                     background: "transparent"
                   }}
                 >
-                  <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: catalogMonitor ? "var(--escalate)" : "var(--success, #30a46c)" }} />
-                  {catalogMonitor ? "Monitor · would-block" : "Enforcing"}
+                  <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: catalogMonitor ? "var(--escalate)" : catalogPostureUnknown ? "var(--text-muted)" : "var(--success, #30a46c)" }} />
+                  {catalogMonitor ? "Monitor · would-block" : catalogPostureUnknown ? "Loaded · posture unknown" : "Enforcing"}
                 </span>
               </div>
               <div className="muted" style={{ fontSize: 12.5 }}>
                 {catalogMonitor
                   ? `Loaded into the policy engine and EVALUATED, but ${namespace} is in Monitor mode — matches are logged as would-block, live traffic is not blocked. Distinct from the dry-run drafts above.`
-                  : "Loaded into this cluster's policy engine — grouped by workload, agent-class and namespace tier. Distinct from the dry-run drafts above."}
+                  : catalogPostureUnknown
+                    ? `These policies are loaded into the engine, but ${namespace}'s enforcement posture could not be read — this is NOT a statement that they are blocking. Reload, or check Target Settings.`
+                    : "Loaded into this cluster's policy engine — grouped by workload, agent-class and namespace tier. Distinct from the dry-run drafts above."}
               </div>
             </div>
             {TIERS.map((tier) => {
@@ -1997,7 +2121,7 @@ export function PolicyCatalog() {
                               data-testid={`catalog-delete-${p.agent_class ?? p.target ?? "policy"}-${p.namespace ?? "none"}`}
                               aria-label={`Delete policy ${p.agent_class ?? p.target ?? ""} in namespace ${p.namespace ?? "unknown"}`}
                               title={`Delete policy · ${p.namespace ?? "unknown namespace"}`}
-                              onClick={(e) => { e.stopPropagation(); setDeleteTarget(p); }}
+                              onClick={(e) => { e.stopPropagation(); openDeleteConfirm(p); }}
                               style={{ position: "absolute", top: 8, right: 8, color: "#ff6b81" }}
                             >
                               <Trash2 size={14} />
@@ -2079,19 +2203,31 @@ export function PolicyCatalog() {
                 )}
                 {editorFiles.map((p) => {
                   const name = p.target ?? p.agent_class ?? "policy";
-                  const isActive = !newPolicy && activePolicyName === name;
+                  const key = policyFileKey(p);
+                  const isActive = !newPolicy && activePolicyKey === key;
+                  // Show the namespace whenever another row carries the same class name. Two rows both
+                  // reading `customer-support.rego` are indistinguishable, and picking the wrong one edits
+                  // another tenant's policy.
+                  const ambiguous = editorFiles.filter((q) => (q.target ?? q.agent_class) === name).length > 1;
                   return (
                     <button
-                      key={p.id ?? name}
+                      key={key}
                       role="row"
                       className={`sb-link${isActive ? " active" : ""}`}
-                      onClick={() => { if (!confirmDiscardIfDirty(name)) return; setNewPolicy(null); resetDraftFlow(); setActiveFile(name); }}
-                      style={{ fontSize: 12.5 }}
+                      onClick={() => { if (!confirmDiscardIfDirty(name)) return; setNewPolicy(null); resetDraftFlow(); setActiveFile(key); }}
+                      style={{ fontSize: 12.5, flexDirection: "column", alignItems: "flex-start", gap: 1 }}
                     >
-                      <FileCode size={14} />
-                      <span className="mono" style={{ fontSize: 12 }}>
-                        {name}.rego
+                      <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <FileCode size={14} />
+                        <span className="mono" style={{ fontSize: 12 }}>
+                          {name}.rego
+                        </span>
                       </span>
+                      {ambiguous && (
+                        <span className="mono" style={{ fontSize: 10, color: "var(--text-muted)", paddingLeft: 20 }}>
+                          {p.namespace}
+                        </span>
+                      )}
                     </button>
                   );
                 })}
@@ -2191,6 +2327,52 @@ export function PolicyCatalog() {
                            show its real name, not a generic "policy.rego" that disagrees with the highlighted
                            sidebar row. activePolicyName resolves the same fallback the sidebar uses. */
                         (activePolicyName ?? "policy") + ".rego"}
+                    {/* Phase 2b: whether the loaded policy still matches the visual graph it was built
+                        from (see detachmentStatusOf's doc comment in builderCompile.ts). "not-builder"
+                        (never built visually) renders nothing — most policies in this catalog. */}
+                    {detachStatus === "detached" && (
+                      <span
+                        data-testid="builder-detachment-badge"
+                        data-status="detached"
+                        title="This policy has the Visual Policy Builder's header, but its rego body no longer matches the embedded graph hash — someone hand-edited it after it was generated, so reopening it in the builder would not reconstruct what's actually live."
+                        style={{
+                          marginLeft: 10,
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 4,
+                          fontSize: 10.5,
+                          fontWeight: 700,
+                          letterSpacing: ".03em",
+                          padding: "2px 8px",
+                          borderRadius: 999,
+                          background: "#ff3b5c1a",
+                          color: "#ff9eb0",
+                          border: "1px solid #ff3b5c55"
+                        }}
+                      >
+                        <TriangleAlert size={11} /> Hand-edited — detached from its visual graph
+                      </span>
+                    )}
+                    {detachStatus === "attached" && (
+                      <span
+                        data-testid="builder-detachment-badge"
+                        data-status="attached"
+                        title="This policy was generated by the Visual Policy Builder and its rego still matches the graph — reopening it in the builder reconstructs exactly this."
+                        style={{
+                          marginLeft: 10,
+                          fontSize: 10.5,
+                          fontWeight: 700,
+                          letterSpacing: ".03em",
+                          padding: "2px 8px",
+                          borderRadius: 999,
+                          background: "#2DDAB81a",
+                          color: "#2DDAB8",
+                          border: "1px solid #2DDAB855"
+                        }}
+                      >
+                        Built visually
+                      </span>
+                    )}
                     <span style={{ marginLeft: "auto", color: "var(--text-muted)" }}>Rego · OPA</span>
                   </div>
                   <Editor
@@ -2261,7 +2443,7 @@ export function PolicyCatalog() {
                       size="sm"
                       icon={Trash2}
                       data-testid="editor-delete-policy"
-                      onClick={() => setDeleteTarget(editorPolicy)}
+                      onClick={() => openDeleteConfirm(editorPolicy)}
                     >
                       Delete
                     </KitButton>
@@ -2491,7 +2673,7 @@ export function PolicyCatalog() {
                               variant="outline"
                               size="sm"
                               icon={RotateCcw}
-                              onClick={() => setRestoreV(v.version)}
+                              onClick={() => setRestoreV((cur) => cur ?? v.version)}
                             >
                               Restore
                             </KitButton>
@@ -2566,15 +2748,51 @@ export function PolicyCatalog() {
         />
       )}
 
+      {builderOpen && (
+        <BuilderSheet
+          // Phase 2f: pass the RAW selector value through (no silent "all" -> "default" resolution
+          // here) — BuilderSheet itself gates Save behind a concrete target namespace when this is
+          // "all"/empty, so the operator always sees and confirms exactly where the policy lands.
+          namespace={namespace}
+          seedGraph={handoffGraph}
+          onClose={() => setBuilderOpen(false)}
+          onSaved={() => {
+            refreshPolicies();
+          }}
+        />
+      )}
+
+      {/* Through the shared `Modal`, not the hand-rolled `.sheet-overlay` + `.confirm-modal` pair this
+          used to be. That pair had no role="dialog", no aria-modal, no Escape handler and moved focus
+          nowhere — focus stayed on the trash button BEHIND the dim overlay, so Tab walked the policy
+          list underneath and the whole retarget in `openDeleteConfirm`'s note was two keystrokes away.
+          `Modal` moves focus to the first control (Cancel, the safe one), restores it on close, and
+          closes on Escape; its own header says a modal an operator cannot dismiss from the keyboard
+          traps them mid-incident. `data-testid` stays on the card so every existing caller still
+          resolves it. */}
       {deleteTarget != null && (
-        <>
-          <div className="sheet-overlay" onClick={() => setDeleteTarget(null)} />
-          <div className="confirm-modal" data-testid="delete-policy-modal">
-            <div className="sheet-title">
+        <Modal
+          danger
+          data-testid="delete-policy-modal"
+          onClose={() => setDeleteTarget(null)}
+          title={
+            <>
               Delete {deleteTarget.namespace}/{overlayDisplayLabel(deleteTarget.agent_class ?? deleteTarget.target)} · v{deleteTarget.current_version ?? 1}?
-            </div>
-            {/* Everything in /policies is loaded & enforcing, so deleting always changes the enforced state. */}
-            <div
+            </>
+          }
+          actions={
+            <>
+              <KitButton variant="ghost" onClick={() => setDeleteTarget(null)}>
+                Cancel
+              </KitButton>
+              <KitButton variant="destructive" icon={Trash2} data-testid="delete-policy-confirm" onClick={confirmDeletePolicy}>
+                Delete policy
+              </KitButton>
+            </>
+          }
+        >
+          {/* Everything in /policies is loaded & enforcing, so deleting always changes the enforced state. */}
+          <div
               data-testid="delete-policy-warning"
               style={{
                 display: "flex", gap: 8, alignItems: "flex-start",
@@ -2599,49 +2817,45 @@ export function PolicyCatalog() {
                   durable across an api restart.
                 </span>
               )}
-            </div>
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
-              <KitButton variant="ghost" onClick={() => setDeleteTarget(null)}>
-                Cancel
-              </KitButton>
-              <KitButton variant="destructive" icon={Trash2} data-testid="delete-policy-confirm" onClick={confirmDeletePolicy}>
-                Delete policy
-              </KitButton>
-            </div>
           </div>
-        </>
+        </Modal>
       )}
 
+      {/* Same primitive, same three defects, same fix — this one rolls an enforcing policy back to an
+          older version, and its trigger (the per-version Restore button) is likewise reachable from
+          behind the old overlay. */}
       {restoreV != null && (
-        <>
-          <div className="sheet-overlay" onClick={() => setRestoreV(null)} />
-          <div className="confirm-modal">
-            <div className="sheet-title">Restore version v{restoreV}?</div>
-            <p
-              style={{
-                fontSize: 13,
-                color: "var(--text-secondary)",
-                lineHeight: 1.5,
-                margin: "10px 0 18px"
-              }}
-            >
-              This rolls the active policy back to v{restoreV}. The current version is preserved in
-              history.
-            </p>
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        <Modal
+          data-testid="restore-version-modal"
+          onClose={() => setRestoreV(null)}
+          title={<>Restore version v{restoreV}?</>}
+          actions={
+            <>
               <KitButton variant="ghost" onClick={() => setRestoreV(null)}>
                 Cancel
               </KitButton>
               <KitButton
                 variant="primary"
                 icon={RotateCcw}
+                data-testid="restore-version-confirm"
                 onClick={() => void confirmRestoreVersion()}
               >
                 Confirm Restore
               </KitButton>
-            </div>
-          </div>
-        </>
+            </>
+          }
+        >
+          <p
+            style={{
+              fontSize: 13,
+              color: "var(--text-secondary)",
+              lineHeight: 1.5,
+              margin: "0 0 4px"
+            }}
+          >
+            This rolls the active policy back to v{restoreV}. The current version is preserved in history.
+          </p>
+        </Modal>
       )}
     </div>
   );

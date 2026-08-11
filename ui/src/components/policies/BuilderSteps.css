@@ -1,0 +1,357 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Norviq Contributors */
+
+/* Visual Policy Builder — numbered-step left pane (UX redesign, layout only, no compiler/semantics
+   changes). Three progressively-revealed steps replace the old flat wall of two identical-looking tab
+   rows + two text fields, so an operator has a single, ordered path: who -> what -> check & enforce.
+   Reuses the app's existing tokens (--border, --bg-elevated, --text-muted, --accent #2DDAB8) — no new
+   palette, dark theme is the default here so contrast is checked against --bg-elevated / --bg-surface. */
+
+.vpb-step {
+  margin-bottom: 18px;
+}
+
+.vpb-step-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.vpb-step-badge {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+/* Active/valid steps get the accent ring on their badge so the eye tracks progress top-to-bottom. */
+.vpb-step[data-step-state="active"] .vpb-step-badge,
+.vpb-step[data-step-state="done"] .vpb-step-badge {
+  border-color: #2ddab8;
+  color: #2ddab8;
+  background: #2ddab81a;
+}
+
+.vpb-step-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  flex: 1 1 auto;
+}
+
+.vpb-step-chip {
+  flex: none;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  background: transparent;
+  white-space: nowrap;
+}
+
+.vpb-step-chip[data-done="true"] {
+  border-color: #2ddab8;
+  color: #2ddab8;
+  background: #2ddab81a;
+}
+
+/* Steps 2/3 stay fully in the DOM (an operator revisiting a saved policy must see everything) — only
+   dimmed + a short hint while the prior step isn't valid yet. Never disabled/unclickable. */
+.vpb-step[data-step-state="locked"] .vpb-step-body {
+  opacity: 0.45;
+}
+
+.vpb-step-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+  margin: -2px 0 10px;
+}
+
+/* --- tier picker: three selectable cards (radiogroup), replacing the old segmented-tab row --------- */
+
+.vpb-tier-cards {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.vpb-tier-card {
+  text-align: left;
+  padding: 10px 11px;
+  border-radius: var(--radius-md, 10px);
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  cursor: pointer;
+  transition: var(--transition, 150ms ease);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.vpb-tier-card:hover {
+  border-color: var(--border-active, #3a3a3a);
+}
+
+.vpb-tier-card:focus-visible {
+  outline: 2px solid #2ddab8;
+  outline-offset: 1px;
+}
+
+.vpb-tier-card[aria-checked="true"] {
+  border-color: #2ddab8;
+  background: #2ddab814;
+}
+
+.vpb-tier-card-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.vpb-tier-card[aria-checked="true"] .vpb-tier-card-title {
+  color: #2ddab8;
+}
+
+.vpb-tier-card-desc {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.vpb-tier-card-eg {
+  font-size: 10.5px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-muted);
+}
+
+.vpb-tier-card-note {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-style: italic;
+  margin-top: 2px;
+}
+
+/* --- mode chooser: two-option control, now with a one-line explanation under each ------------------- */
+
+.vpb-mode-options {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.vpb-mode-option {
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: var(--radius-md, 10px);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: var(--transition, 150ms ease);
+}
+
+.vpb-mode-option[aria-pressed="true"] {
+  border-color: #2ddab8;
+  background: #2ddab81e;
+  color: #2ddab8;
+}
+
+.vpb-mode-option-title {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.vpb-mode-option-desc {
+  font-size: 10.5px;
+  line-height: 1.35;
+  margin-top: 3px;
+  color: var(--text-secondary);
+}
+
+.vpb-mode-option[aria-pressed="true"] .vpb-mode-option-desc {
+  color: #2ddab8cc;
+}
+
+@media (max-width: 1000px) {
+  .vpb-tier-cards,
+  .vpb-mode-options {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Readability + density pass.
+   The first cut of this sheet ran at 10–12.5px across every element, in a pane
+   roughly 480px wide holding three-line tier descriptions, so the whole surface
+   read as one flat block of small grey text with no hierarchy — the operator had
+   nothing to anchor on. Nothing structural changes here: same DOM, same labels,
+   same behaviour, so the specs keep passing. Only type scale, spacing and the
+   selected-state affordance move.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/* Steps read as sections, not paragraphs. */
+.vpb-step { margin-bottom: 26px; }
+.vpb-step-header { gap: 12px; margin-bottom: 14px; }
+
+.vpb-step-badge {
+  width: 26px;
+  height: 26px;
+  font-size: 13px;
+}
+
+.vpb-step-title {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+/* The completed step is the one thing worth a colour cue at a glance. */
+.vpb-step[data-step-state="done"] .vpb-step-badge {
+  background: #2ddab8;
+  border-color: #2ddab8;
+  color: #08110f;
+}
+
+.vpb-step-chip { font-size: 11px; padding: 4px 10px; }
+.vpb-step-hint { font-size: 12.5px; line-height: 1.5; }
+
+/* A locked step should look inert, not broken — 0.45 was dim enough to look like a rendering fault. */
+.vpb-step[data-step-state="locked"] .vpb-step-body { opacity: 0.55; }
+
+/* --- tier cards: the primary choice on the sheet, so give them room --- */
+.vpb-tier-cards { gap: 10px; }
+
+.vpb-tier-card {
+  padding: 14px 14px 13px;
+  gap: 6px;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Accent bar on the chosen tier: the 1px border + faint tint alone was easy to miss on a dark surface. */
+.vpb-tier-card[aria-checked="true"]::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: #2ddab8;
+}
+
+.vpb-tier-card-title { font-size: 14px; letter-spacing: -0.01em; }
+.vpb-tier-card-desc { font-size: 12.5px; line-height: 1.5; }
+.vpb-tier-card-eg { font-size: 11.5px; }
+.vpb-tier-card-note { font-size: 11px; line-height: 1.45; margin-top: 4px; }
+
+/* --- mode chooser --- */
+.vpb-mode-options { gap: 10px; margin-bottom: 18px; }
+.vpb-mode-option { padding: 13px 14px; }
+.vpb-mode-option-title { font-size: 13.5px; font-weight: 650; }
+.vpb-mode-option-desc { font-size: 12.5px; line-height: 1.5; margin-top: 5px; }
+
+/* --- section labels: keep them as quiet signposts, not shouting --- */
+.vpb-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* --- condition rows read as one unit each, instead of loose controls on a flat background --- */
+.vpb-condition-row {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 10px);
+  padding: 10px 11px;
+  margin-bottom: 8px;
+}
+
+/* --- errors: a bordered block, so a long message stops looking like body copy --- */
+.vpb-errors {
+  border: 1px solid #ff6b6b40;
+  background: #ff6b6b12;
+  border-radius: var(--radius-md, 10px);
+  padding: 10px 12px;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+/* On a wide viewport the form is the work and the rego is reference — stop splitting them 50/50. */
+@media (min-width: 1180px) {
+  .vpb-form-pane { flex: 1.25 1 560px !important; }
+  .vpb-rego-pane { flex: 0.85 1 420px !important; }
+}
+
+/* Field labels inside a rule row. The decision select and the rule id had no labels at all — only
+   placeholders, and a placeholder disappears the moment the field has a value, which is exactly when a
+   new user most needs to know what they are looking at. */
+.vpb-field-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Full-screen shell.
+   The builder opened as a 1180px side layer over the catalog, which left the form
+   in roughly half a laptop screen and the page showing through around it — the
+   "cluttered" feel. Authoring a policy is a focused task, not a peek at a detail
+   panel, so it now takes the whole viewport.
+   ───────────────────────────────────────────────────────────────────────────── */
+.vpb-sheet-fullscreen {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  max-width: 100vw;
+  height: 100vh;
+  max-height: 100vh;
+  border-radius: 0;
+  border: none;
+  padding: 22px 26px 0;
+  z-index: 60;
+}
+
+/* The body is the only thing that grows; header stays put and each column scrolls on its own.
+   Previously both columns carried `maxHeight: calc(100vh - 180px)` — a hard-coded guess at the
+   chrome height that stopped matching as soon as the shell changed. */
+.vpb-sheet-fullscreen .vpb-body {
+  min-height: 0;
+  padding-bottom: 18px;
+}
+
+/* Comfortable reading measure: on a wide screen a single column of form fields stretched to 900px+
+   is worse than a bounded one, so cap the form and let the rego take the slack. */
+@media (min-width: 1180px) {
+  .vpb-sheet-fullscreen .vpb-form-pane { flex: 1.1 1 560px !important; max-width: 720px; }
+  .vpb-sheet-fullscreen .vpb-rego-pane { flex: 1 1 520px !important; }
+}
+
+/* Step 3 carries the actions, and it sits BELOW the rego editor in the right column. With the editor
+   expanded there was no way to reach it — the pane clipped instead of scrolling. The pane scrolls now,
+   and the action row sticks to the bottom of it so Run dry-run / Save & enforce are reachable at any
+   editor size and any scroll position. */
+.vpb-actions-sticky {
+  position: sticky;
+  bottom: 0;
+  background: var(--bg-surface, #0d0f0f);
+  padding: 10px 0 12px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  z-index: 2;
+}

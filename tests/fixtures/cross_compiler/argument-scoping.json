@@ -1,0 +1,180 @@
+{
+  "name": "argument-scoping",
+  "why": "The claim both compilers exist to make: a listed tool is admitted only for the ARGUMENTS stated.",
+  "intent": {
+    "name": "select-only",
+    "class": "report-gen",
+    "call": [
+      {
+        "id": "select-only",
+        "match": {
+          "tool_name": "execute_sql"
+        },
+        "require": {
+          "param_paths.query": {
+            "matches": "(?i)^\\s*select\\b"
+          }
+        }
+      }
+    ]
+  },
+  "graph": {
+    "schemaVersion": 1,
+    "scope": {
+      "kind": "class",
+      "agentClass": "report-gen"
+    },
+    "mode": "allowlist",
+    "rules": [],
+    "defaults": {
+      "decision": "block",
+      "reason": "not in the allowlist"
+    },
+    "allowlist": {
+      "tools": [
+        "execute_sql"
+      ],
+      "refinements": {
+        "readonly": false,
+        "egress": false,
+        "scope": false,
+        "rate": false
+      },
+      "grants": [
+        {
+          "tool": "execute_sql",
+          "constraints": [
+            {
+              "kind": "matches",
+              "field": "query",
+              "pattern": "(?i)^\\s*select\\b"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "cases": [
+    {
+      "note": "the tool, used the way the policy states",
+      "input": {
+        "tool_name": "execute_sql",
+        "tool_name_normalized": "execute_sql",
+        "tool_params": {
+          "query": "SELECT id FROM orders"
+        },
+        "agent": {
+          "spiffe_id": "spiffe://norviq/ns/analytics/sa/report-gen",
+          "namespace": "analytics",
+          "agent_class": "report-gen"
+        },
+        "call_depth": 0,
+        "trust_score": 0.9,
+        "derived": {
+          "verb": "read",
+          "tool_kind": "other",
+          "param_values": [
+            "SELECT id FROM orders"
+          ],
+          "param_values_lower": [
+            "select id from orders"
+          ],
+          "sql_normalized": "",
+          "sql_statements": [],
+          "param_paths": {
+            "query": "SELECT id FROM orders"
+          },
+          "sql_tables": [],
+          "data_classes": [],
+          "param_bytes": 0,
+          "destinations": {
+            "emails": [],
+            "urls": [],
+            "hosts": [],
+            "schemes": []
+          },
+          "param_paths_ambiguous": []
+        }
+      },
+      "expect": "allow"
+    },
+    {
+      "note": "SAME TOOL, forbidden argument \u2014 the whole point",
+      "input": {
+        "tool_name": "execute_sql",
+        "tool_name_normalized": "execute_sql",
+        "tool_params": {
+          "query": "DROP TABLE orders"
+        },
+        "agent": {
+          "spiffe_id": "spiffe://norviq/ns/analytics/sa/report-gen",
+          "namespace": "analytics",
+          "agent_class": "report-gen"
+        },
+        "call_depth": 0,
+        "trust_score": 0.9,
+        "derived": {
+          "verb": "read",
+          "tool_kind": "other",
+          "param_values": [
+            "DROP TABLE orders"
+          ],
+          "param_values_lower": [
+            "drop table orders"
+          ],
+          "sql_normalized": "",
+          "sql_statements": [],
+          "param_paths": {
+            "query": "DROP TABLE orders"
+          },
+          "sql_tables": [],
+          "data_classes": [],
+          "param_bytes": 0,
+          "destinations": {
+            "emails": [],
+            "urls": [],
+            "hosts": [],
+            "schemes": []
+          },
+          "param_paths_ambiguous": []
+        }
+      },
+      "expect": "block"
+    },
+    {
+      "note": "listed tool, argument absent entirely",
+      "input": {
+        "tool_name": "execute_sql",
+        "tool_name_normalized": "execute_sql",
+        "tool_params": {},
+        "agent": {
+          "spiffe_id": "spiffe://norviq/ns/analytics/sa/report-gen",
+          "namespace": "analytics",
+          "agent_class": "report-gen"
+        },
+        "call_depth": 0,
+        "trust_score": 0.9,
+        "derived": {
+          "verb": "read",
+          "tool_kind": "other",
+          "param_values": [],
+          "param_values_lower": [],
+          "sql_normalized": "",
+          "sql_statements": [],
+          "param_paths": {},
+          "sql_tables": [],
+          "data_classes": [],
+          "param_bytes": 0,
+          "destinations": {
+            "emails": [],
+            "urls": [],
+            "hosts": [],
+            "schemes": []
+          },
+          "param_paths_ambiguous": []
+        }
+      },
+      "expect": "block"
+    }
+  ]
+}

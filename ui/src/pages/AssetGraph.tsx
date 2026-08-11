@@ -293,7 +293,13 @@ export default function AssetGraph() {
           {statCell("High risk", highRisk, "nodes", highRisk ? "#FF3B5C" : "#a0a0a0",
             () => setRisks(riskFocused ? { low: true, medium: true, high: true, critical: true } : { low: false, medium: false, high: true, critical: true }),
             riskFocused ? "#FF3B5C" : "transparent")}
-          {statCell("Blocked", blockedEdges, "paths", blockedEdges ? "#FF3B5C" : "#a0a0a0",
+          {/* "edges", not "paths". This value is `visEdges.filter(e => e.verdict === "blocked").length`
+              — a count of agent→tool EDGES, each carrying one tool's decision history. A path is a
+              multi-hop chain and the Attack Graph counts those separately, so labelling an edge count
+              "paths" put two different quantities under one word on two screens the operator compares.
+              Only agent→tool `calls` edges can ever be blocked (tool→data `accesses` edges carry no
+              decision history at all), which is exactly why this is not a path count. */}
+          {statCell("Blocked", blockedEdges, "edges", blockedEdges ? "#FF3B5C" : "#a0a0a0",
             () => { setBlockedOnly((b) => !b); setSelectedId(null); setFocus(null); },
             blockedOnly ? "#FF3B5C" : "transparent")}
         </div>

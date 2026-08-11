@@ -95,7 +95,7 @@ export function APIKeys() {
             placeholder="default 90 (0 = never)"
             title="Expires in (days)"
             aria-label="Expires in (days)"
-            style={{ width: 170 }}
+            style={{ width: 210 }}
           />
           <KitButton variant="outline" size="sm" onClick={onCreate} disabled={busy || !name.trim() || scopeIsAll}>
             {busy ? "Creating…" : "Create key"}

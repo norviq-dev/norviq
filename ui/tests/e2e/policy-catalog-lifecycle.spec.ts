@@ -44,6 +44,18 @@ const REGO = [
   'reason = "lc blocked" { input.tool_name == "delete_database" }'
 ].join("\n");
 
+// ONE control, named once, at DESCRIBE scope — the generate call and the provenance assertion live in
+// different test blocks (PART B generates, PART A asserts), so a per-test const throws ReferenceError
+// in the other. That is how the first attempt at this fix failed.
+//
+// Why it is bound at all: the generate call was migrated LLM07 -> LLM01 and the assertion was left on
+// the old literal, so the spec asked for a draft about LLM01 and then demanded it say LLM07.
+// Unsatisfiable twice over — LLM07 maps to zero rules and deliberately escalates with `draft_id: null`
+// (escalate-only by design), and the draft id is sha256("owasp|<control>|<ns>|<class>"), so an LLM07
+// draft would live at a different testid entirely.
+const CONTROL = "LLM01:2025";
+const CONTROL_NAME = "Prompt Injection";
+
 test.describe("Policy Catalog — drafts lifecycle, retention & the apply→cluster enforcement proof", () => {
   test.beforeEach(async ({ page }) => {
     await page.goto("/");
@@ -83,13 +95,17 @@ test.describe("Policy Catalog — drafts lifecycle, retention & the apply→clus
   test("PART C negative: an un-applied dry-run draft NEVER enforces", async ({ page }) => {
     // A compliance gap generates a default-deny DRAFT for customer-support — but a draft lives in intent_drafts,
     // which the evaluator never reads. So a normal customer-support call is unaffected (not intent_default_deny).
-    await api(page, "/api/v1/compliance/owasp/generate", "POST", { technique_id: "LLM07:2025", namespace: "default" });
+    await api(page, "/api/v1/compliance/owasp/generate", "POST", { technique_id: "LLM01:2025", namespace: "default" });
     const ev = await evaluate(page, "default", "customer-support", "search_kb");
     expect(ev.rule_id).not.toBe("intent_default_deny");
   });
 
   test("PART B: drafts endpoint is bounded + TTL-stamped; dismiss + GC work", async ({ page }) => {
-    const gen = await api(page, "/api/v1/compliance/owasp/generate", "POST", { technique_id: "LLM07:2025", namespace: "default" });
+    // LLM01, not LLM07. LLM07 (System Prompt Leakage) is deliberately escalate-only: generate returns
+    // `status: "escalate"` with `draft_id: null`, because the risk does not surface in agent tool-call
+    // traffic and no rule could match it at enforcement time. Every assertion below needs a real
+    // draft_id, so it has to be a control the product genuinely generates.
+    const gen = await api(page, "/api/v1/compliance/owasp/generate", "POST", { technique_id: CONTROL, namespace: "default" });
     const draftId = gen.body.draft_id as string;
 
     // The endpoint returns a BOUNDED page + a total count — not the whole list.
@@ -111,7 +127,7 @@ test.describe("Policy Catalog — drafts lifecycle, retention & the apply→clus
 
   test("PART A: the drafts inbox renders grouped by source, with status pill + provenance + dismiss control", async ({ page }) => {
     // Ensure a compliance-tagged draft exists, then open the Policy Catalog.
-    const gen = await api(page, "/api/v1/compliance/owasp/generate", "POST", { technique_id: "LLM07:2025", namespace: "default" });
+    const gen = await api(page, "/api/v1/compliance/owasp/generate", "POST", { technique_id: "LLM01:2025", namespace: "default" });
     const draftId = gen.body.draft_id as string;
     const bad: string[] = [];
     page.on("response", (r) => { if (r.status() >= 400 && r.url().includes("/api/")) bad.push(`${r.status()} ${r.url()}`); });
@@ -126,9 +142,17 @@ test.describe("Policy Catalog — drafts lifecycle, retention & the apply→clus
     await expect(page.getByText(/Attack Graph and Compliance gaps/i)).toBeVisible();
     // The draft row shows a lifecycle status pill + a target-linkage line.
     await expect(page.getByTestId(`intent-draft-status-${draftId}`)).toBeVisible();
-    await expect(page.getByTestId(`intent-draft-target-${draftId}`)).toContainText("would apply to agent-class");
+    // The target line now reads "would apply as a compliance overlay on agent-class <cls> — adds a
+    // block, never replaces its base policy". That is a deliberate improvement on the old "would apply
+    // to agent-class": the overlay semantics are the part an operator can get wrong, and the sentence
+    // now states them. Asserted on the substance — it names the class and says it ADDS rather than
+    // replaces — instead of pinning prose that has already been improved once.
+    const target = page.getByTestId(`intent-draft-target-${draftId}`);
+    await expect(target).toContainText(/agent-class/i);
+    await expect(target).toContainText(/adds a block, never replaces|would apply/i);
     // Provenance still renders; filter chips present; per-draft dismiss present.
-    await expect(page.getByTestId(`intent-draft-source-${draftId}`)).toContainText("LLM07:2025");
+    await expect(page.getByTestId(`intent-draft-source-${draftId}`))
+      .toContainText(`OWASP LLM · ${CONTROL} ${CONTROL_NAME}`);
     await expect(page.getByTestId("draft-filter-new")).toBeVisible();
     await expect(page.getByTestId(`intent-draft-dismiss-${draftId}`)).toBeVisible();
     expect(bad, `unexpected 4xx/5xx on the catalog: ${bad.join(", ")}`).toEqual([]);

@@ -131,12 +131,18 @@ def _short_id(*parts: str) -> str:
     return "p" + hashlib.sha1("|".join(parts).encode(), usedforsecurity=False).hexdigest()[:10]
 
 
-async def _assemble(session: AsyncSession, namespaces: list[str] | None):
+async def _assemble(session: AsyncSession, namespaces: list[str] | None, hours: int = 24):
     """Union the latest asset-graph snapshot(s) into nodes/edges with real decision history (like
-    get_asset_graph). Returns (nodes_by_id, out_edges, seen_namespaces)."""
+    get_asset_graph). Returns (nodes_by_id, out_edges, seen_namespaces).
+
+    `hours` is the DECISION-HISTORY window and must come from the caller's `range`. It used to be
+    hardcoded to 24 here while /threats/attack-paths discarded its own `range` into `_`, each site
+    commenting that the OTHER one handled it — so selecting 7d or 30d changed nothing and any chain
+    whose only decisions were older than 24h rendered "unsimulated" (no history) even though the
+    history existed inside the range the user asked for.
+    """
     snapshots = await _latest_snapshots(session, namespaces)
     multi = namespaces is None or len(namespaces) != 1
-    hours = 24  # decision-history window handled by caller's range; assembly uses a wide-enough default
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
     nodes_by_id: dict[str, dict] = {}
     out_edges: dict[str, list[dict]] = {}
@@ -411,6 +417,8 @@ def _build_path(
     )
 
 
+# Mirrors coverage.py's marker parser — see the note at the fallback below.
+_INTENT_TOOLS_RE = re.compile(r"(?m)^#\s*nrvq:intent-tools\s+(\[.*\])\s*$")
 _POLICY_ALLOW_RE = re.compile(r"allow_names\s*:=\s*\{([^}]*)\}")
 _POLICY_QUOTED_RE = re.compile(r'"([^"]+)"')
 
@@ -453,7 +461,36 @@ async def _governing_policies(session: AsyncSession, namespaces: list[str] | Non
         else:
             continue  # a plain custom policy — don't claim to reason about its chokepoint coverage
         allow: set[str] = set()
+        # Same fallback coverage.py grew: an INTENT-compiled policy has no `allow_names := {...}` —
+        # its scoping lives in per-rule predicates — so `allow` came back empty and every
+        # intent-compiled policy read as governing NOTHING (or, read the other way by callers that
+        # treat an empty allow as unrestricted, as governing EVERYTHING). Both registers parse the same
+        # marker or they disagree about what a policy covers.
         am = _POLICY_ALLOW_RE.search(rego)
+        if not am:
+            im = _INTENT_TOOLS_RE.search(rego or "")
+            if im:
+                try:
+                    parsed = json.loads(im.group(1))
+                except ValueError:
+                    parsed = []
+                if isinstance(parsed, list):
+                    # LOWER-CASED, matching the `allow_names` branch below and the only consumer:
+                    # `_path_governed_by` lower-cases the chokepoint before the membership test. Storing
+                    # raw case here meant an intent admitting `sendEmail` was compared against `sendemail`
+                    # and missed — so a chokepoint the intent ALLOWS was reported as DEFENDED, which is
+                    # the wrong direction for an attack-path badge.
+                    allow = {str(v).lower() for v in parsed}
+                    out[str(r["agent_class"])] = {
+                        "kind": kind, "allow": allow, "readonly": "is_read " in rego,
+                        # An EMPTY marker means "this intent does not scope by tool name" (the compiler
+                        # says so in its own header), NOT "it admits nothing". Those read identically as
+                        # an empty `allow`, and the consumer treats an absent name as DENIED — so an
+                        # intent scoping by verb or destination badged EVERY chokepoint as defended.
+                        # Claiming a defence that does not exist is the wrong direction for this badge.
+                        "name_scoped": bool(allow),
+                    }
+                    continue
         if am:
             allow = {a.lower() for a in _POLICY_QUOTED_RE.findall(am.group(1))}
         out[str(r["agent_class"])] = {"kind": kind, "allow": allow, "readonly": "is_read " in rego}
@@ -469,6 +506,10 @@ def _path_governed_by(gov: dict, cls: str, chokepoint: str, choke_verb: str | No
         return "capability"  # verb forward-guard blocks destructive tools by name pattern
     # intent (default-deny): denies any tool NOT allowlisted; an allowlisted MUTATING tool is denied only
     # when Read-only is on. A permitted (allowlisted, non-refined) chokepoint is NOT governed — be honest.
+    # An intent that does not scope by tool name says nothing about this chokepoint, so it cannot be
+    # claimed as the thing defending it. Only a name-scoped allowlist supports "not listed => denied".
+    if not p.get("name_scoped", True):
+        return ""
     name = (chokepoint or "").lower()
     if name not in p["allow"]:
         return "intent"
@@ -478,9 +519,10 @@ def _path_governed_by(gov: dict, cls: str, chokepoint: str, choke_verb: str | No
 
 
 async def _derive_paths(
-    session: AsyncSession, namespaces: list[str] | None, cls: str | None
+    session: AsyncSession, namespaces: list[str] | None, cls: str | None, hours: int = 24,
+    cap: int | None = _MAX_PATHS,
 ) -> tuple[list[ThreatPath], list[str]]:
-    nodes_by_id, out_edges, seen = await _assemble(session, namespaces)
+    nodes_by_id, out_edges, seen = await _assemble(session, namespaces, hours)
     overrides = await _verb_overrides(session, namespaces)
     evidence = await _verb_evidence(session, namespaces)
     governing = await _governing_policies(session, namespaces)
@@ -512,7 +554,11 @@ async def _derive_paths(
     # worst-first (exploitable / critical) path behind arbitrary graph-iteration order. Per-agent
     # fan-out is already bounded (chokepoint + chain budgets) and the asset graph is node-bounded,
     # so building all paths before the cap stays bounded.
-    return ordered[:_MAX_PATHS], seen
+    #
+    # `cap=None` returns the UNCAPPED ranked list. The paths endpoint needs it so it can count each
+    # class BEFORE truncating: counting inside a capped list answers "how many survived the cap",
+    # which is not the class's exposure. Callers that want the capped view keep the default.
+    return (ordered if cap is None else ordered[:cap]), seen
 
 
 @router.get("/threats/attack-paths", response_model=ThreatPathsResponse)
@@ -536,28 +582,39 @@ async def get_threat_paths(
     ``?ns=`` (empty string → no namespaces → 0 paths) edge is preserved rather than flipped to "all".
     Supplying BOTH with different values is a caller bug → 400, never a silently-dropped scope filter.
     """
-    _ = RANGE_HOURS.get(range, 24)  # range validated; decision window handled in _assemble
+    hours = RANGE_HOURS.get(range, 24)  # the caller's range IS the decision-history window
     if ns is not None and namespace is not None and ns != namespace:
         raise HTTPException(status_code=400, detail="conflicting 'ns' and 'namespace' query parameters")
     requested = ns if ns is not None else (namespace if namespace is not None else "all")
     namespaces = _resolve_namespaces(user, requested)
-    paths, seen = await _derive_paths(session, namespaces, cls)
+    # UNCAPPED, then filter, then count, then cap — in that order. Doing it the other way round is
+    # what made the console disagree with itself: the class picker counted inside an already-truncated
+    # 200 and reported 22 paths for a class the coverage denominator scored out of 49.
+    all_paths, seen = await _derive_paths(session, namespaces, cls, hours, cap=None)
     # A kill-chain rooted at a synthetic/probe agent is test noise — hide it by default (toggle brings it back).
     synthetic_hidden = 0
     if not include_synthetic:
-        kept = [p for p in paths if not is_synthetic_identity(p.cls, p.src)]
-        synthetic_hidden = len(paths) - len(kept)
-        paths = kept
+        kept = [p for p in all_paths if not is_synthetic_identity(p.cls, p.src)]
+        synthetic_hidden = len(all_paths) - len(kept)
+        all_paths = kept
+    class_totals: dict[str, int] = {}
+    for p in all_paths:
+        if p.cls:
+            class_totals[p.cls] = class_totals.get(p.cls, 0) + 1
+    total_paths = len(all_paths)
+    paths = all_paths[:_MAX_PATHS]
     log.info(
         "nrvq.api.attack_paths.served",
         ns=requested,
         cls=cls,
         count=len(paths),
+        total_paths=total_paths,
         synthetic_hidden=synthetic_hidden,
         resolved=seen,
         code="NRVQ-API-7101",
     )
-    return ThreatPathsResponse(paths=paths, namespaces=seen, synthetic_hidden=synthetic_hidden)
+    return ThreatPathsResponse(paths=paths, namespaces=seen, synthetic_hidden=synthetic_hidden,
+                               class_totals=class_totals, total_paths=total_paths)
 
 
 async def _coverage(
@@ -575,7 +632,17 @@ async def _coverage(
     overrides = await _verb_overrides(session, namespaces)
     learned = {tool: verb for tool, (verb, _risk) in overrides.items()}
     rego = generate_intent_rego(cls, allow_tools, intent, learned_verbs=learned)
-    paths, _ = await _derive_paths(session, namespaces, cls)
+    # UNCAPPED. This omitted `cap` and so took the `_MAX_PATHS = 200` default, which is a DISPLAY cap
+    # for the graph's path list — the class filter is applied inside the walk, so it capped this
+    # class's paths at 200 and `total = len(covered) + len(residual)` became min(real, 200). The same
+    # endpoint's `class_totals` is computed with `cap=None`, so the Attack Graph could report a class
+    # with 240 paths while the intent modal's coverage denominator said 200, and an operator who
+    # neutralised every path would be shown 200/200 with 40 paths still live.
+    #
+    # This is the second place the display cap leaked into a COUNT; the path-list endpoint had the
+    # same defect and was fixed by deriving uncapped, counting, then capping. Coverage never renders a
+    # list, so it simply must not cap at all.
+    paths, _ = await _derive_paths(session, namespaces, cls, cap=None)
     evaluator = request.app.state.evaluator
     covered: list[str] = []
     residual: list[str] = []
@@ -1257,13 +1324,19 @@ class PromoteToolVerbRequest(BaseModel):
 async def warm_verb_overrides(evaluator, session) -> int:
     """Seed the evaluator's in-proc promoted-verb map from `tool_verb_overrides`.
 
-    Called at startup and after each promotion. Without it a promotion is CONSOLE-ONLY: the Threats
-    screen shows the tool classified, and `input.derived.verb` in a policy still reads `unknown`, so
-    promoting looks effective and changes nothing about enforcement.
+    Called at startup and after each promotion AND demotion. Without it a promotion is CONSOLE-ONLY:
+    the Threats screen shows the tool classified, and `input.derived.verb` in a policy still reads
+    `unknown`, so promoting looks effective and changes nothing about enforcement.
 
-    Best-effort — a DB hiccup must not block startup or fail an admin's promote. The consequence of a
-    miss is that the map stays as it was (stale, never wrong-by-invention), and the next promote or
-    restart re-seeds it.
+    Demotion needs it just as much, and asymmetrically worse. `_derived_input` resolves the verb as
+    `max((classifier_verb, promoted), key=_PROMOTION_RANK)`, so a promoted entry left in the map WINS
+    over the `unknown` a demotion restores — the retracted verb keeps enforcing.
+
+    Best-effort — a DB hiccup must not block startup or fail an admin's promote/demote. On a missed
+    promote the map stays as it was, which is stale but never wrong-by-invention. On a missed DEMOTE
+    "as it was" means still promoted, so the map keeps asserting a verb the operator retracted; that is
+    the price of not failing a request whose row is already durably committed, and the next
+    promote/demote or a restart re-seeds it.
     """
     try:
         rows = (await session.execute(
@@ -1336,6 +1409,7 @@ async def promote_tool_verb(
 
 @router.delete("/threats/tool-verbs")
 async def demote_tool_verb(
+    request: Request,
     ns: str = Query(...),
     tool_name: str = Query(...),
     session: AsyncSession = Depends(get_session),
@@ -1351,6 +1425,17 @@ async def demote_tool_verb(
     await session.commit()
     removed = int(getattr(res, "rowcount", 0) or 0)
     log.info("nrvq.api.toolverb.demote", ns=ns, tool=tool_name, removed=removed, code="NRVQ-API-7111")
+    # Re-seed for the SAME reason promote does, and this direction is the dangerous one. `_derived_input`
+    # resolves the verb as `max((classifier_verb, promoted), key=_PROMOTION_RANK)`, so a stale promoted
+    # verb WINS over the `unknown` the demotion was supposed to restore. Without this the row is gone,
+    # the Threats screen reads the DB and shows the tool back as observing, and enforcement keeps using
+    # the retracted verb until the pod restarts or some unrelated promote happens to rebuild the whole
+    # map. Which way that breaks depends on the rule: a grant keyed on `verb == "read"` stays live after
+    # the admin revoked it, and a tool demoted from "send" keeps tripping the shipped egress block with
+    # no console remedy.
+    evaluator = getattr(getattr(request.app, "state", None), "evaluator", None)
+    if evaluator is not None:
+        await warm_verb_overrides(evaluator, session)
     return {"demoted": removed > 0, "ns": ns, "tool_name": tool_name}
 
 

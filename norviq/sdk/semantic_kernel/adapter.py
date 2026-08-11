@@ -27,10 +27,58 @@ import structlog
 from norviq.exceptions import NorviqBlockError, NorviqEscalateError
 from norviq.sdk.core.interceptor import ToolInterceptor
 from norviq.sdk.core.wrapping import _output_dlp
+# Shared declared-schema ingestion. It lives in the LangChain adapter module only because this
+# change is scoped to the five adapter files (see the banner there); that module imports no
+# framework at import time, so this one still imports cleanly with or without SK installed.
+from norviq.sdk.langchain.adapter import declared_tool_schema, ingest_declared_schema
 
 log = structlog.get_logger()
 
 _FilterFunc = Callable[[Any, Callable[[Any], Awaitable[None]]], Awaitable[None]]
+
+# Where SK states a function's declared arguments: `KernelFunctionMetadata.parameters`, a list of
+# `KernelParameterMetadata` (each a `name` plus a per-parameter JSON Schema on `schema_data`), with
+# the function's own `.parameters` property as the equivalent second route.
+_SK_SCHEMA_ATTRS = ("metadata.parameters", "parameters")
+
+
+def _ingest_function_schema(context: Any, tool_name: str) -> None:
+    """Ingest SK's own declaration of this function's arguments, ONCE per function.
+
+    There is no wrap step to hang this on — SK's integration point is a filter — so it happens the
+    first time a function is seen. Every later invocation costs one dict lookup, and the whole thing
+    is contained: a context shape we cannot read must never keep a call from being evaluated.
+    """
+    try:
+        if not tool_name or getattr(context, "function", None) is None:
+            # No function object means no tool to key a record on. `_extract_tool_name` falls back
+            # to the literal "unknown", and registering THAT would put a row in the registry for a
+            # tool that does not exist.
+            return
+        if declared_tool_schema("semantic-kernel", tool_name) is not None:
+            # Already known: one O(1) lookup is all a later invocation costs.
+            #
+            # KNOWN LIMITATION, stated rather than hidden. Records are keyed by the BARE function
+            # name because that is Norviq's policy identity (see `_extract_tool_name`), so if two
+            # plugins each serve an `issue_refund` with DIFFERENT arguments, the first one invoked is
+            # the one whose argument names are recorded. Both are the same policy target, so the
+            # honest answer is the union of their declarations; producing it needs a per-function
+            # merge that is not built yet, and re-ingesting on every invocation to discover the
+            # collision would put schema work on the hot path.
+            return
+        ingest_declared_schema(
+            context.function,
+            tool_name=tool_name,
+            framework="semantic-kernel",
+            attrs=_SK_SCHEMA_ATTRS,
+        )
+    except Exception as exc:  # noqa: BLE001 - ingestion must never affect enforcement
+        log.warning(
+            "nrvq.semantic_kernel.schema_ingest_failed",
+            tool=tool_name,
+            error=str(exc),
+            code="NRVQ-SDK-1074",
+        )
 
 
 def _extract_tool_name(context: Any) -> str:
@@ -93,6 +141,7 @@ def policy_filter(interceptor: ToolInterceptor, session_id: str = "") -> _Filter
         """Evaluate policy before delegating to the next filter/function in the chain."""
         tool_name = _extract_tool_name(context)
         tool_params = _extract_tool_params(context)
+        _ingest_function_schema(context, tool_name)
         try:
             await interceptor.intercept_or_raise(
                 tool_name=tool_name,

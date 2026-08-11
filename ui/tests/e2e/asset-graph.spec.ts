@@ -110,18 +110,41 @@ test.describe("Asset Graph", () => {
     const nodesAfter = await page.getByTestId(CANVAS).locator("g.ag-node").count();
 
     const blocked = strip.getByRole("button").filter({ hasText: "Blocked" });
-    let blockedToggled = false;
-    if (await blocked.count()) {
-      await blocked.first().click();
-      blockedToggled = true;
-      await page.waitForTimeout(300);
-    }
+    test.skip((await blocked.count()) === 0, "Blocked tile not present (count 0). BEST-EFFORT.");
+    await blocked.first().click();
+    await page.waitForTimeout(300);
     const nodesFinal = await page.getByTestId(CANVAS).locator("g.ag-node").count();
 
-    // Assert a filter had an observable effect: the visible node count moved at some step, OR a filter
-    // was applied (we clicked a real filter tile). This is intentionally tolerant of live-data shape.
+    // THIS ASSERTION USED TO BE `expect(changed || blockedToggled).toBe(true)`, where `blockedToggled`
+    // was set to true simply because a Blocked tile existed and received a click. The tile is rendered
+    // unconditionally (AssetGraph.tsx renders the 6-cell strip with no `blockedEdges > 0` guard), so
+    // the disjunct was always true and the whole thing reduced to `expect(true).toBe(true)`. Both
+    // filters could have been unwired — identical node counts at every step, no active bar — and this
+    // stayed green while the coverage matrix reported the filtering as covered.
+    //
+    // The ACTIVE BAR is the honest signal, and it is the one the test name promises ("flip active
+    // state"). It is deterministic — a 2px underline whose colour is set from the filter's own state —
+    // unlike the node count, which legitimately may not move if every visible node already matches.
+    // So: the bar is asserted (it must flip), and the count is checked only as corroboration.
+    const barColor = (name: string) =>
+      strip
+        .getByRole("button")
+        .filter({ hasText: name })
+        .first()
+        .locator("div")
+        .last()
+        .evaluate((el) => getComputedStyle(el).backgroundColor);
+
+    // Both tiles are now active, so neither underline may still be transparent.
+    expect(await barColor("High risk"), "High risk tile did not flip active").not.toBe("rgba(0, 0, 0, 0)");
+    expect(await barColor("Blocked"), "Blocked tile did not flip active").not.toBe("rgba(0, 0, 0, 0)");
+
+    // Corroboration only — recorded, never used to excuse a missing flip.
     const changed = nodesAfter !== nodesBefore || nodesFinal !== nodesAfter;
-    expect(changed || blockedToggled).toBe(true);
+    if (!changed) {
+      // eslint-disable-next-line no-console
+      console.log("asset-graph: filters flipped active but the visible node count did not move");
+    }
   });
 
   test("BEST-EFFORT: namespace hull labels do not overlap node circles (bbox check)", async ({ page }) => {

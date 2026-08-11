@@ -280,3 +280,105 @@ describe("AgentMonitor mounts", () => {
     expect(screen.getByText("Reset Trust")).toBeInTheDocument();
   });
 });
+
+/**
+ * Probes, and the count that used to disagree with the Overview.
+ *
+ * This page read the SAME /api/v1/agents payload as the Overview donut but never filtered
+ * `synthetic`, so "Agents Tracked" counted probe/eval/red-team identities as real agents while the
+ * Overview — `Dashboard.tsx`: `.filter((a) => !a.synthetic)` — did not. Two "agents" numbers over one
+ * population with nothing on either screen saying which was which.
+ *
+ * Hidden by DEFAULT so the two reconcile, but never silently: a probe you cannot see is a probe you
+ * cannot investigate, and this page is where you would go to investigate one.
+ */
+describe("AgentMonitor — synthetic identities", () => {
+  const REAL = {
+    spiffe_id: "spiffe://norviq/ns/default/sa/deploy-bot",
+    namespace: "default", agent_class: "deploy-bot", last_seen: new Date().toISOString(),
+    score: 0.82, category: "high", violation_count: 0, signals: {}, dominant_signal: "", recommendation: ""
+  };
+  const PROBE = {
+    ...REAL,
+    spiffe_id: "spiffe://norviq/ns/default/sa/freeze-bot",
+    agent_class: "e2e-bot",
+    synthetic: true
+  };
+
+  function mount(rows: unknown[]) {
+    server.use(
+      http.get("/api/v1/agents", () => HttpResponse.json(rows)),
+      http.get(/\/api\/v1\/agents\/.*\/trust-history/, () => HttpResponse.json([])),
+      http.get(/\/api\/v1\/agents\/.*\/tool-usage/, () => HttpResponse.json([]))
+    );
+    return render(
+      <MemoryRouter>
+        <AppProvider>
+          <AgentMonitor />
+        </AppProvider>
+      </MemoryRouter>
+    );
+  }
+
+  it("hides synthetic identities by default, and counts only the real ones", async () => {
+    mount([REAL, PROBE]);
+    expect(await screen.findByText("deploy-bot")).toBeInTheDocument();
+    // The row renders the agent CLASS, which is what the synthetic classifier keys on.
+    expect(screen.queryByText("e2e-bot")).not.toBeInTheDocument();
+    // The tile must agree with the rows it is sitting above.
+    const tile = screen.getByText("Agents Tracked").parentElement!;
+    expect(tile).toHaveTextContent("1");
+    expect(tile).toHaveTextContent(/1 synthetic\/probe hidden/);
+  });
+
+  it("says how many it hid, and the toggle actually reveals them", async () => {
+    mount([REAL, PROBE]);
+    const toggle = await screen.findByTestId("agents-synthetic-toggle");
+    expect(toggle).toHaveTextContent(/1 synthetic\/probe hidden · Show/);
+    fireEvent.click(toggle);
+    // The hidden identity is reachable — not merely re-counted.
+    expect(await screen.findByText("e2e-bot")).toBeInTheDocument();
+    expect(toggle).toHaveTextContent(/Hide 1 synthetic\/probe/);
+  });
+
+  it("offers no toggle at all when there is nothing hidden", async () => {
+    // A control that is always present but usually a no-op teaches an operator to ignore it.
+    mount([REAL]);
+    expect(await screen.findByText("deploy-bot")).toBeInTheDocument();
+    expect(screen.queryByTestId("agents-synthetic-toggle")).not.toBeInTheDocument();
+  });
+});
+
+// A failed or FORBIDDEN /agents read is not an empty fleet. useApi keeps the last good data on error,
+// so a 403 (a viewer with no namespace scope, or a tenant asking for another namespace), a 5xx or a
+// network drop rendered "Agents Tracked 0 / Frozen 0 / Low Trust 0 / High Trust 0" — byte-identical
+// to a namespace that genuinely has no agents, and an operator would read it as "nothing to govern".
+describe("AgentMonitor — an unreadable fleet must not render as an empty one", () => {
+  it("shows — rather than 0 when /agents is forbidden", async () => {
+    server.use(http.get("/api/v1/agents", () => HttpResponse.json({ detail: "forbidden" }, { status: 403 })));
+    render(
+      <MemoryRouter>
+        <AppProvider>
+          <AgentMonitor />
+        </AppProvider>
+      </MemoryRouter>
+    );
+    await waitFor(() => expect(screen.getByText("Agent Monitor")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/could not read agents/i)).toBeInTheDocument());
+    // The zero that used to be here was the whole defect.
+    expect(screen.queryByText("Agents Tracked")?.parentElement?.textContent ?? "").not.toMatch(/\b0\b/);
+  });
+
+  it("still shows a real 0 for a namespace that genuinely has no agents", async () => {
+    server.use(http.get("/api/v1/agents", () => HttpResponse.json([])));
+    render(
+      <MemoryRouter>
+        <AppProvider>
+          <AgentMonitor />
+        </AppProvider>
+      </MemoryRouter>
+    );
+    await waitFor(() => expect(screen.getByText("Agent Monitor")).toBeInTheDocument());
+    expect(screen.queryByText(/could not read agents/i)).not.toBeInTheDocument();
+  });
+});

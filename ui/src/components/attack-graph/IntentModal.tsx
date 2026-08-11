@@ -19,6 +19,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { createIntentDraft, demoteToolVerb, fetchCoverageByCategory, fetchIntentCoverage, fetchIntentSuggest, fetchMe, promoteToolVerb } from "../../api/client";
 import { useApi } from "../../hooks/useApi";
+import type { BuilderGraph } from "../../lib/builderGraph";
+import { lookalikeOf } from "../../lib/predicateSentence";
+import { InlineDisabledReason } from "../common/InlineDisabledReason";
+import { LookalikeNote } from "../common/LookalikeNote";
 import { INTENT_CONTROLS, SEVERITY_COLORS } from "./constants";
 import type { IntentCoverage, IntentDraft, IntentSuggestTool, IntentToggles, ThreatPath } from "./types";
 
@@ -82,15 +86,30 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
   const [reloadKey, setReloadKey] = useState(0);
   // The concrete namespace behind the suggest scope — promotion must name ONE namespace even when the
   // modal was opened with ns="all" (the backend echoes the resolved scope in the response).
+  // "" = the scope did not resolve to exactly one namespace, so there is nothing honest to write into.
   const [suggestNs, setSuggestNs] = useState("");
 
   // Admin OVERRIDE surface: promote as the inferred verb OR any other (the admin's call always wins),
   // and demote a learned verb back to observing. verbMenu tracks which row's verb-picker is open.
   const [verbMenu, setVerbMenu] = useState<string | null>(null);
 
+  /**
+   * The ONE namespace a verb promotion/demotion may be written into, or "" when the scope names none.
+   *
+   * A learned verb is stored per (namespace, tool_name) and the evaluator reads it back with the
+   * REQUEST's namespace, so the namespace decides whether the override is ever consulted at all.
+   * `suggestNs` is filled only when the server resolved this scope to exactly one namespace — see the
+   * loader below. When it is "", every lifecycle action on this modal is disabled with a visible
+   * reason rather than silently writing somewhere plausible-looking.
+   */
+  const promoNs = ns && ns !== "all" ? ns : suggestNs;
+  // Rendered as TEXT, never as a `title`: `.btn:disabled { pointer-events: none }` means a tooltip on
+  // a disabled control can never be read.
+  const scopeReason =
+    "A verb is learned per namespace, and this scope did not resolve to a single one. Switch the console to one namespace to promote or demote here.";
+
   const promote = async (t: IntentSuggestTool, verb?: string) => {
     const chosen = verb ?? t.inferred_verb;
-    const promoNs = ns && ns !== "all" ? ns : suggestNs;
     if (!chosen || !promoNs || promoting) return;
     setPromoting(t.name);
     setVerbMenu(null);
@@ -107,7 +126,6 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
   };
 
   const demote = async (t: IntentSuggestTool) => {
-    const promoNs = ns && ns !== "all" ? ns : suggestNs;
     if (!promoNs || promoting) return;
     setPromoting(t.name);
     setError("");
@@ -185,7 +203,20 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
         // Preserve the operator's checks across a promotion-triggered reload (same class ⇒ same names);
         // a class switch produces different names, so defaults apply naturally.
         setChecked((prev) => Object.fromEntries(observed.map((t) => [t.name, prev[t.name] ?? defaultChecked(t)])));
-        setSuggestNs(s.ns?.[0] ?? "");
+        // `s.ns` is EVERY namespace the server resolved this scope to — threats.py returns
+        // `sorted(seen)`, the union of namespaces in the snapshots it read. Taking `[0]` picked the
+        // ALPHABETICALLY FIRST one and promoted into it: on an admin console at "All namespaces" a
+        // `warehouse_task` observed only in `studioai` had its learned verb written into `hr`, where
+        // no request ever carries it. `derived.verb` then stays `unknown` in studioai, so a policy
+        // shaped `block when derived.verb == "delete"` never fires — while this modal, whose reload
+        // reads overrides across ALL namespaces, flipped the row to a green "✓ learned" chip and
+        // asserted the classification existed. Exactly one resolved namespace IS a concrete scope
+        // (a namespace-scoped caller asking for "all" gets its own); anything else names none.
+        // NB: `IntentSuggest.ns` is declared `string` in types.ts but the API sends `list[str]`
+        // (schemas/threats.py `ns: list[str]`), so normalise both shapes rather than trusting either.
+        const resolvedNs = s.ns as unknown as string[] | string | undefined;
+        const nsList = Array.isArray(resolvedNs) ? resolvedNs.filter(Boolean) : resolvedNs ? [resolvedNs] : [];
+        setSuggestNs(nsList.length === 1 ? nsList[0] : "");
         setError("");
       })
       .catch((e: unknown) => {
@@ -231,6 +262,39 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
     }
   };
 
+  /**
+   * Hand the checked allowlist to the Visual Policy Builder, to be NARROWED there.
+   *
+   * This modal deliberately does not grow an argument-scoping editor of its own. That is the same
+   * call the repo already made for `/intents` ("editing belongs in the builder, so this hands the
+   * proposal over rather than growing a second editor here") and the reason is stronger here: the two
+   * screens would then hold two implementations of one concept, which is the defect shape this
+   * project has paid for repeatedly.
+   *
+   * What this screen uniquely knows — which tools are chokepoints, which reach an attack target,
+   * which paths stay residual — has already done its job by the time the boxes are ticked. What it
+   * cannot say is "…but only to @acme.com". So it hands over.
+   *
+   * `builderGraph` is the channel `/intents` and Tools already use and `PolicyCatalog` consumes.
+   * Router state rather than a query string: a policy body has no business in browser history.
+   */
+  const openInBuilder = () => {
+    const graph: BuilderGraph = {
+      schemaVersion: 1,
+      scope: { kind: "class", agentClass: activeCls },
+      mode: "allowlist",
+      rules: [],
+      defaults: { decision: "block", reason: "No builder rule matched" },
+      allowlist: {
+        tools: checkedTools,
+        // The four coarse refinements carry across unchanged — same four keys on both sides.
+        refinements: { readonly: intent.readonly, egress: intent.egress, scope: intent.scope, rate: intent.rate },
+        grants: []
+      }
+    };
+    navigate("/policies/catalog", { state: { builderGraph: graph, fromAttackGraph: activeCls } });
+  };
+
   // Coverage is always PER-CLASS — the denominator + residual are the SELECTED class's attack paths (what the
   // backend returns), matching the Policy Catalog's per-class numbers. An intent policy is one class's allowlist;
   // it can only neutralize THAT class's paths, so measuring it over every class's paths (all N) is misleading.
@@ -239,7 +303,23 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
   const covered = coverage?.covered_count ?? 0;
   const residualIds = coverage?.residual ?? [];
   const rego = coverage?.rego ?? "  # pick the intended tools to generate the allow-rule";
-  const grantedTo = global ? activeCls : ([...new Set(paths.filter((p) => p.tool === tool).map((p) => p.src))].join(", ") || cls);
+  // The grant target is the class the draft is actually created for — ONE class. `createIntentDraft`,
+  // `fetchIntentSuggest` and `fetchIntentCoverage` all take `activeCls`, so anything else here is a
+  // sentence describing something this modal does not do.
+  //
+  // The per-path branch used to render EVERY source class that reaches `tool`. On a busy namespace that
+  // is forty-odd names — including e2e debris like `q2-manual-*`, `bce2e-*` and `test` — under a heading
+  // that reads "Intended behaviour · customer-support", followed by "everything else is denied by
+  // default". The only available reading was that applying it would grant, or constrain, all forty.
+  // It grants exactly one.
+  const grantedTo = activeCls || cls;
+  // Those other classes ARE worth knowing about — they reach the same tool and each needs its own
+  // intent — so the fact is kept, stated as what it is rather than as the grant target. This is the
+  // same point the coverage comment above makes: an intent policy can only neutralize ITS class's paths.
+  const alsoReach = useMemo(
+    () => (tool ? [...new Set(paths.filter((p) => p.tool === tool && p.src !== (activeCls || cls)).map((p) => p.src))] : []),
+    [paths, tool, activeCls, cls]
+  );
   const hasSignal = checkedTools.length > 0 || enabledCount > 0;
   const coverColor = !hasSignal ? "#a0a0a0" : residualIds.length === 0 ? "#34d399" : "#FFB020";
   const byId = new Map(paths.map((p) => [p.id, p]));
@@ -298,7 +378,17 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
             </div>
           ) : (
             <div style={{ fontSize: 12, color: "#a0a0a0", marginTop: 5, lineHeight: 1.5 }}>
-              Granted to <b style={{ color: "#b8c2d6" }}>{grantedTo}</b>. Allow only what you intend — everything else is denied by default.
+              Granted to <b style={{ color: "#b8c2d6" }}>{grantedTo}</b> only. Allow only what you intend — everything else is denied by default.
+              {alsoReach.length > 0 && (
+                <>
+                  {" "}
+                  <span data-testid="intent-also-reach" style={{ color: "var(--escalate)" }}>
+                    {alsoReach.length} other {alsoReach.length === 1 ? "class" : "classes"} also reach{" "}
+                    <span style={{ fontFamily: "ui-monospace, monospace" }}>{tool}</span> — this policy does not
+                    constrain {alsoReach.length === 1 ? "it" : "them"}; each needs its own intent.
+                  </span>
+                </>
+              )}
             </div>
           )}
 
@@ -329,6 +419,13 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
                 // Self-referential "reached X via X" (a tool-terminal path) is noise — only flag a
                 // tool that goes on to reach a DIFFERENT target.
                 const flagged = isChoke && t.in_attack_path && t.target !== t.name;
+                // `t.name` is an OBSERVED tool name — attacker-controlled. `exеcute_sql` with a
+                // Cyrillic е (U+0435) renders pixel-identical to the real `execute_sql` in this
+                // font, and ticking THIS box is what puts those bytes into `allow_tools` — the
+                // default-deny allowlist of the generated policy, and the Visual Builder handoff.
+                // The repo already ships the detector and the consequence sentence; this is the
+                // surface that turns the name into a grant, so it renders them.
+                const lookalike = lookalikeOf(t.name);
                 const preHi = !global && !!tool && t.name === tool; // per-path entry pre-highlights the selected tool
                 const borderCol = on ? "#2ddab8" : flagged ? "#4a3a1a" : isEgress ? "#4a1f28" : "var(--graph-border-soft)";
                 const bg = on ? "rgba(45,218,184,0.1)" : preHi ? "rgba(45,218,184,0.05)" : "var(--bg-graph-card)";
@@ -345,6 +442,9 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
                         <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 12.5, fontWeight: 650, color: "#e8edf5", overflowWrap: "anywhere" }}>{t.name}</span>
+                        {lookalike && (
+                          <span style={chip("#3a1414", "#ff8fa3")} title={`This name carries ${lookalike.codepoints.join(", ")} — it is not the ASCII name it looks like.`}>⚠ lookalike name</span>
+                        )}
                         {/* What the tool DOES — the classification LIFECYCLE: a classified verb (registry or
                             admin-promoted), an OBSERVING tool whose params suggest a verb (promotable), or a
                             genuinely unknown tool (stays under observation — review, never read as safe). */}
@@ -360,15 +460,26 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
                                 <>
                                   <span style={chip("#12332a", "#6ee7b7")} title="Verb promoted by an admin from this tool's observed call evidence.">✓ learned</span>
                                   {isAdmin && (
-                                    <button
-                                      type="button"
-                                      disabled={promoting === t.name}
-                                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); void demote(t); }}
-                                      title={`Demote ${t.name} back to the observation phase — the learned verb is removed and evidence keeps accruing.`}
-                                      style={miniAction}
+                                    // Demotion DELETES the (namespace, tool_name) row, so it needs the
+                                    // same single concrete namespace a promotion does — pointed at the
+                                    // wrong one it removes nothing while the row reports it returned to
+                                    // observation.
+                                    <InlineDisabledReason
+                                      align="start"
+                                      tone="escalate"
+                                      data-testid={`intent-verb-scope-${t.name}`}
+                                      reason={promoNs ? undefined : scopeReason}
                                     >
-                                      {promoting === t.name ? "…" : "demote"}
-                                    </button>
+                                      <button
+                                        type="button"
+                                        disabled={promoting === t.name || !promoNs}
+                                        onClick={(e) => { e.preventDefault(); e.stopPropagation(); void demote(t); }}
+                                        title={promoNs ? `Demote ${t.name} in ${promoNs} back to the observation phase — the learned verb is removed and evidence keeps accruing.` : undefined}
+                                        style={{ ...miniAction, opacity: promoNs ? 1 : 0.55, cursor: promoNs ? "pointer" : "default" }}
+                                      >
+                                        {promoting === t.name ? "…" : "demote"}
+                                      </button>
+                                    </InlineDisabledReason>
                                   )}
                                 </>
                               )}
@@ -388,46 +499,64 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
                               // params reveal a verb — it must prompt REVIEW, never read as safe/allow.
                               <span style={chip("#2a2a2a", "#a0a0a0")} title="Norviq could not infer this tool's operation from its name yet — it stays under observation (calls are logged); once its params reveal the verb you can promote it. Review before allowing.">unclassified · observing</span>
                             )}
-                            {isAdmin && verbMenu !== t.name && (
-                              <>
-                                {t.inferred_verb && (
-                                  <button
-                                    type="button"
-                                    disabled={promoting === t.name}
-                                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); void promote(t); }}
-                                    title={`Promote ${t.name} to a defined "${t.inferred_verb}" verb — from then on it is classified everywhere (risk follows the verb).`}
-                                    style={{ flex: "none", height: 20, padding: "0 8px", border: "1px solid #2ddab8", borderRadius: 999, background: "rgba(45,218,184,0.08)", color: "#2ddab8", fontFamily: "inherit", fontSize: 10, fontWeight: 700, letterSpacing: "0.03em", cursor: promoting === t.name ? "wait" : "pointer" }}
-                                  >
-                                    {promoting === t.name ? "Promoting…" : `Promote as ${t.inferred_verb}`}
-                                  </button>
-                                )}
-                                <button
-                                  type="button"
-                                  disabled={promoting === t.name}
-                                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); setVerbMenu(t.name); }}
-                                  title="Admin override: promote as a DIFFERENT verb than inferred — you know the tool better than the evidence does."
-                                  style={miniAction}
-                                >
-                                  {t.inferred_verb ? "▾ other" : "▾ set verb"}
-                                </button>
-                              </>
-                            )}
-                            {isAdmin && verbMenu === t.name && (
-                              <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }} onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}>
-                                {(["read", "write", "send", "delete"] as const).map((v) => (
-                                  <button
-                                    key={v}
-                                    type="button"
-                                    disabled={promoting === t.name}
-                                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); void promote(t, v); }}
-                                    title={`Promote ${t.name} as "${v}" (admin override — risk follows the verb).`}
-                                    style={{ ...miniAction, borderColor: v === t.inferred_verb ? "#2ddab8" : "var(--graph-border)", color: v === t.inferred_verb ? "#2ddab8" : "#b8c2d6" }}
-                                  >
-                                    {v}
-                                  </button>
-                                ))}
-                                <button type="button" onClick={(e) => { e.preventDefault(); e.stopPropagation(); setVerbMenu(null); }} style={miniAction} title="Cancel">✕</button>
-                              </span>
+                            {isAdmin && (
+                              // Every write in this cluster is a (namespace, tool_name) row. Without ONE
+                              // concrete namespace there is nowhere honest to put it, and the reason has
+                              // to be visible TEXT — `.btn:disabled { pointer-events: none }` means a
+                              // title on a disabled control can never be read.
+                              <InlineDisabledReason
+                                align="start"
+                                tone="escalate"
+                                data-testid={`intent-verb-scope-${t.name}`}
+                                reason={promoNs ? undefined : scopeReason}
+                              >
+                                <span style={{ display: "inline-flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                                  {verbMenu !== t.name ? (
+                                    <>
+                                      {t.inferred_verb && (
+                                        <button
+                                          type="button"
+                                          disabled={promoting === t.name || !promoNs}
+                                          onClick={(e) => { e.preventDefault(); e.stopPropagation(); void promote(t); }}
+                                          // Scope, stated: the override is stored per (namespace, tool)
+                                          // and read back with the request's own namespace, so it
+                                          // classifies the tool in THAT namespace — not "everywhere",
+                                          // and not in whichever namespace happens to sort first.
+                                          title={promoNs ? `Promote ${t.name} to a defined "${t.inferred_verb}" verb in ${promoNs} — from then on it is classified there (risk follows the verb).` : undefined}
+                                          style={{ flex: "none", height: 20, padding: "0 8px", border: `1px solid ${promoNs ? "#2ddab8" : "var(--graph-border)"}`, borderRadius: 999, background: promoNs ? "rgba(45,218,184,0.08)" : "transparent", color: promoNs ? "#2ddab8" : "var(--text-muted)", fontFamily: "inherit", fontSize: 10, fontWeight: 700, letterSpacing: "0.03em", opacity: promoNs ? 1 : 0.55, cursor: !promoNs ? "default" : promoting === t.name ? "wait" : "pointer" }}
+                                        >
+                                          {promoting === t.name ? "Promoting…" : `Promote as ${t.inferred_verb}`}
+                                        </button>
+                                      )}
+                                      <button
+                                        type="button"
+                                        disabled={promoting === t.name || !promoNs}
+                                        onClick={(e) => { e.preventDefault(); e.stopPropagation(); setVerbMenu(t.name); }}
+                                        title={promoNs ? `Admin override: promote as a DIFFERENT verb than inferred, in ${promoNs} — you know the tool better than the evidence does.` : undefined}
+                                        style={{ ...miniAction, opacity: promoNs ? 1 : 0.55, cursor: promoNs ? "pointer" : "default" }}
+                                      >
+                                        {t.inferred_verb ? "▾ other" : "▾ set verb"}
+                                      </button>
+                                    </>
+                                  ) : (
+                                    <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }} onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}>
+                                      {(["read", "write", "send", "delete"] as const).map((v) => (
+                                        <button
+                                          key={v}
+                                          type="button"
+                                          disabled={promoting === t.name || !promoNs}
+                                          onClick={(e) => { e.preventDefault(); e.stopPropagation(); void promote(t, v); }}
+                                          title={promoNs ? `Promote ${t.name} as "${v}" in ${promoNs} (admin override — risk follows the verb).` : undefined}
+                                          style={{ ...miniAction, borderColor: v === t.inferred_verb && promoNs ? "#2ddab8" : "var(--graph-border)", color: v === t.inferred_verb && promoNs ? "#2ddab8" : "#b8c2d6", opacity: promoNs ? 1 : 0.55, cursor: promoNs ? "pointer" : "default" }}
+                                        >
+                                          {v}
+                                        </button>
+                                      ))}
+                                      <button type="button" onClick={(e) => { e.preventDefault(); e.stopPropagation(); setVerbMenu(null); }} style={miniAction} title="Cancel">✕</button>
+                                    </span>
+                                  )}
+                                </span>
+                              </InlineDisabledReason>
                             )}
                           </>
                         )}
@@ -439,10 +568,30 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
                           ⚠ reached <span style={{ fontFamily: "ui-monospace, monospace" }}>{t.target}</span> via {t.name} — intended?
                         </div>
                       )}
+                      {/* The same note the rule surfaces show, from the same detector: where the
+                          invisible character sits, and that the engine matches the allowlist
+                          evasion-normalised, so this grant widens to the plain-ASCII twin as well. */}
+                      {lookalike && <LookalikeNote lookalikes={[lookalike]} data-testid={`intent-tool-lookalike-${t.name}`} />}
                       <div style={{ marginTop: 3, display: "flex", gap: 12, fontSize: 11, color: "#7b8aa3", fontVariantNumeric: "tabular-nums" }}>
                         <span><span style={{ color: "#34d399" }}>{t.allow}</span> allow</span>
                         <span><span style={{ color: t.block > 0 ? "#ff8fa3" : "#a0a0a0" }}>{t.block}</span> block</span>
                       </div>
+                      {/* WHAT CHECKING THE BOX ACTUALLY GRANTS. This checklist allows a tool by NAME —
+                          which is precisely what the agent framework's own tool binding already does,
+                          the finding the Visual Builder's P1 fix exists to answer. The modal warned
+                          about destructive verbs and egress but never said that an intended tool is
+                          intended WITH ANY ARGUMENTS, so "send_email ✓" read as a decision when it was
+                          only half of one.
+                          Same words as the builder's ScopeCell headline, deliberately: one concept
+                          should not have two vocabularies across two screens. */}
+                      {on && (
+                        <div
+                          data-testid={`intent-tool-scope-${t.name}`}
+                          style={{ marginTop: 4, fontSize: 11, color: "#d0a24a" }}
+                        >
+                          Any arguments · unrestricted
+                        </div>
+                      )}
                     </div>
                   </label>
                 );
@@ -561,6 +710,32 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
             >
               {draft ? "Close" : "Cancel"}
             </button>
+          </div>
+
+          {/* The route out of a by-name allowlist. Disabled with a stated reason rather than hidden,
+              because "you can narrow these" is exactly the thing an operator must not have to
+              discover — the P1 finding, applied to the surface that produces the grants. */}
+          <div style={{ marginTop: 10 }}>
+            <button
+              type="button"
+              onClick={openInBuilder}
+              disabled={checkedTools.length === 0}
+              data-testid="intent-open-in-builder"
+              style={{
+                width: "100%", height: 34, display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                border: "1px solid var(--graph-border)", borderRadius: 10, background: "transparent",
+                color: checkedTools.length === 0 ? "#6b6b6b" : "#2ddab8",
+                fontFamily: "inherit", fontSize: 12.5, fontWeight: 650,
+                cursor: checkedTools.length === 0 ? "not-allowed" : "pointer"
+              }}
+            >
+              ✎ Narrow these arguments in the Visual Builder →
+            </button>
+            <div style={{ marginTop: 5, fontSize: 11, lineHeight: 1.5, color: "#7b8aa3", textAlign: "center" }}>
+              {checkedTools.length === 0
+                ? "Pick the intended tools first."
+                : "This list grants each tool with ANY arguments. The builder is where a grant becomes “only to @acme.com”."}
+            </div>
           </div>
         </div>
 

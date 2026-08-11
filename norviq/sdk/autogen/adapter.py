@@ -13,8 +13,43 @@ import structlog
 
 from norviq.sdk.core.interceptor import ToolInterceptor
 from norviq.sdk.core.wrapping import _output_dlp
+# Shared declared-schema ingestion. It lives in the LangChain adapter module only because this
+# change is scoped to the five adapter files (see the banner there); that module imports no
+# framework at import time, so an AutoGen-only install pays nothing for this.
+from norviq.sdk.langchain.adapter import ingest_declared_schema
 
 log = structlog.get_logger()
+
+# autogen-core publishes an OpenAI-style tool schema on `.schema`
+# (`{"name": ..., "parameters": {"type": "object", "properties": {...}}}`) — the exact document it
+# sends to the model.
+_AUTOGEN_SCHEMA_ATTRS = ("schema",)
+
+
+def _ingest_tool_schema(tool: Any, tool_name: str) -> None:
+    """Ingest the argument names AutoGen already declares for this tool.
+
+    Two independent statements of the same fact, tried in order: the published `.schema`, then the
+    pydantic args model behind `args_type()`. The second is a CALL on a third-party object, so it is
+    only made when the first yielded nothing — a tool whose schema is already readable is never
+    poked further — and any exception it raises is contained here.
+    """
+    if ingest_declared_schema(
+        tool, tool_name=tool_name, framework="autogen", attrs=_AUTOGEN_SCHEMA_ATTRS
+    ).schema_available:
+        return
+    args_type = getattr(tool, "args_type", None)
+    if not callable(args_type):
+        return
+    try:
+        args_model = args_type()
+    except Exception as exc:  # noqa: BLE001 - a failing args_type() leaves the schema unknown
+        log.debug("nrvq.autogen.args_type_failed", tool=tool_name, error=str(exc), code="NRVQ-SDK-1064")
+        return
+    if args_model is not None:
+        ingest_declared_schema(
+            tool, tool_name=tool_name, framework="autogen", schema=args_model, source="args_type"
+        )
 
 
 def _get_base_tool() -> type[Any]:
@@ -65,6 +100,7 @@ def protect(
             )
             protected.append(tool)
             continue
+        _ingest_tool_schema(tool, str(tool.name))
         original_run = tool.run
 
         async def async_wrapper(

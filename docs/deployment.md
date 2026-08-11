@@ -49,7 +49,7 @@ stacks, covered below.
 kubectl apply -f helm/norviq/crds/
 kubectl create namespace norviq
 kubectl create namespace my-agents          # tenant namespace; must exist before install
-helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.10 -n norviq \
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.0 -n norviq \
   --set-json 'policyQuotaNamespaces=["my-agents"]'
 kubectl -n norviq port-forward svc/norviq-ui 8080:80   # http://localhost:8080
 ```
@@ -78,6 +78,10 @@ namespace of agent pods:
 ```bash
 kubectl label namespace my-agents norviq-injection=enabled
 ```
+
+That opts the namespace in. Injection also needs the per-pod label `norviq.io/agent-class=<class>`:
+under the shipped default (`webhook.injection.gateOnlyAgentPods: true`) an unlabelled pod is never
+routed to the injector and starts ungoverned.
 
 Two overlays worth knowing for local work:
 

@@ -3,6 +3,7 @@
 """End-to-end test: seed asset graph → compute → verify attack paths."""
 
 import pytest
+from tests.integration.conftest import SLOW_ENDPOINT_TIMEOUT_S
 
 
 class TestAttackGraphCompute:
@@ -27,10 +28,17 @@ class TestAttackGraphCompute:
 
     @pytest.mark.asyncio
     async def test_compute_all_namespaces(self, api_client, auth_headers):
-        """Compute paths for all namespaces."""
+        """Compute paths for all namespaces.
+
+        Uses the SLOW budget, not the default one. A whole-cluster recompute is legitimately heavy —
+        measured at 9.86s against the 10.0s default on a cluster with 676 paths in `default` alone —
+        so this failed on the transport budget while the endpoint answered 200 with correct data. The
+        assertions below are unchanged; only the time allowed to answer is.
+        """
         resp = await api_client.post(
             "/api/v1/attack-paths/compute",
             headers=auth_headers,
+            timeout=SLOW_ENDPOINT_TIMEOUT_S,
         )
         assert resp.status_code == 200
         data = resp.json()

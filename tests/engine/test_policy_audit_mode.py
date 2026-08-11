@@ -18,7 +18,7 @@ Posture has no such hook, which is why it stays a per-call override.
 
 from __future__ import annotations
 
-from norviq.engine.evaluator import OPAEvaluator, _POSTURE_EXEMPT_RULES
+from norviq.engine.evaluator import OPAEvaluator, _posture_exempt_rules
 from norviq.sdk.core.decisions import PolicyDecision
 
 
@@ -64,8 +64,17 @@ def test_allows_are_never_touched() -> None:
 def test_exempt_rules_stay_hard_even_in_audit_mode() -> None:
     """An admin trust freeze is an incident-response kill switch — a policy's own mode must not be able
     to monitor it away, exactly as namespace posture cannot."""
-    assert _POSTURE_EXEMPT_RULES, "exempt set is empty — nothing would be protected"
-    for rule in _POSTURE_EXEMPT_RULES:
+    assert _posture_exempt_rules(), "exempt set is empty — nothing would be protected"
+    for rule in _posture_exempt_rules():
         d = _soften("block", rule, "audit")
         assert d.decision == "block", f"{rule} was softened away"
         assert d.rule_id == rule
+
+
+def test_operational_blocks_soften_under_a_policys_own_audit_mode() -> None:
+    """Parity with namespace posture: a policy trialled in audit mode must not still drop traffic
+    because the engine had a bad moment. These four used to be exempt here too."""
+    for rule in ("policy_load_pending", "evaluator_error", "evaluator_invalid_payload", "evaluator_timeout"):
+        d = _soften("block", rule, "audit")
+        assert d.decision == "audit", f"{rule} still interrupts traffic under an audit-mode policy"
+        assert d.rule_id == f"policy_audit_would_block:{rule}"

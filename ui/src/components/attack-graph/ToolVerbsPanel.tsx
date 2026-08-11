@@ -17,6 +17,7 @@ import {
   type ToolVerbCandidate,
   type ToolVerbOverride,
 } from "../../api/client";
+import { InlineDisabledReason } from "../common/InlineDisabledReason";
 import { SEVERITY_COLORS } from "./constants";
 
 interface Props {
@@ -30,10 +31,30 @@ interface Props {
 const VERBS = ["read", "write", "send", "delete"] as const;
 const VERB_RISK: Record<string, string> = { read: "low", write: "high", send: "high", delete: "critical" };
 
+/**
+ * The ONE namespace a promotion may be written into, or "" when the scope does not name one.
+ *
+ * A promoted verb is stored per (namespace, tool_name) and the evaluator reads it with the request's
+ * own namespace (`evaluator.py`), so the namespace is not decoration — it decides whether the
+ * override is ever consulted. The console's default scope is the literal string "all", which is a UI
+ * token for "every namespace", not a namespace. Posting it wrote a row under namespace='all' that no
+ * request will ever match: the console then showed a green "✓ learned" chip for a tool whose
+ * `derived.verb` still reads `unknown` at decision time, so a policy shaped
+ * `block when derived.verb == "delete"` never fires — fail-open, while the UI asserts coverage.
+ *
+ * `namespaces` is the scope the server actually resolved. Exactly one entry IS a concrete scope and
+ * is safe to promote into. Zero (an admin at "all") or several is not, and the UI has no honest way
+ * to pick — a ToolVerbCandidate carries no namespace of its own.
+ */
+function resolvePromoteScope(ns: string, resolved: string[] | undefined): string {
+  if (ns && ns !== "all") return ns;
+  return resolved?.length === 1 ? resolved[0] : "";
+}
+
 export function ToolVerbsPanel({ ns, isAdmin, onClose, onChanged }: Props) {
   const [overrides, setOverrides] = useState<ToolVerbOverride[]>([]);
   const [candidates, setCandidates] = useState<ToolVerbCandidate[]>([]);
-  const [scope, setScope] = useState<string>(ns);
+  const [scope, setScope] = useState<string>(() => resolvePromoteScope(ns, undefined));
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -44,7 +65,7 @@ export function ToolVerbsPanel({ ns, isAdmin, onClose, onChanged }: Props) {
       .then((r) => {
         setOverrides(r.overrides ?? []);
         setCandidates(r.candidates ?? []);
-        setScope(ns && ns !== "all" ? ns : (r.namespaces?.[0] ?? ns));
+        setScope(resolvePromoteScope(ns, r.namespaces));
         setError("");
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : "Could not load tool verbs"))
@@ -61,10 +82,17 @@ export function ToolVerbsPanel({ ns, isAdmin, onClose, onChanged }: Props) {
 
   const promote = async (tool: string, verb: string, targetNs?: string) => {
     if (busy) return;
+    const dest = targetNs ?? scope;
+    // Belt and braces alongside the disabled control: a promotion with no concrete namespace is
+    // never sent. "all" in particular is a UI token, not a namespace.
+    if (!dest || dest === "all") {
+      setError("Pick a single namespace before promoting — a promoted verb is stored per namespace.");
+      return;
+    }
     setBusy(tool);
     setError("");
     try {
-      await promoteToolVerb({ ns: targetNs ?? scope, tool_name: tool, verb });
+      await promoteToolVerb({ ns: dest, tool_name: tool, verb });
       load();
       onChanged();
     } catch (e: unknown) {
@@ -105,10 +133,15 @@ export function ToolVerbsPanel({ ns, isAdmin, onClose, onChanged }: Props) {
           <div style={{ fontSize: 18, fontWeight: 700, marginTop: 5 }}>
             Tool verbs · <span style={{ fontFamily: "ui-monospace, monospace", color: "#2ddab8" }}>{ns || "all"}</span>
           </div>
+          {/* "…classifies the tool everywhere" was not true of the code under it: the override is
+              stored per (namespace, tool_name) and the evaluator looks it up with the REQUEST's
+              namespace, so it classifies the tool in that namespace and nowhere else. The copy is
+              what an admin reasons about before clicking Promote, so it states the real scope. */}
           <div style={{ fontSize: 12, color: "#a0a0a0", marginTop: 5, lineHeight: 1.5 }}>
             <b style={{ color: "#ffcf82" }}>Observe</b> — an unclassified tool's calls are logged; params reveal its verb as evidence.{" "}
             <b style={{ color: "#ffcf82" }}>Infer</b> — the evidence suggests a verb.{" "}
-            <b style={{ color: "#6ee7b7" }}>Promote</b> — an admin confirms (or overrides) the verb; it then classifies the tool everywhere. Demote returns it to observation.
+            <b style={{ color: "#6ee7b7" }}>Promote</b> — an admin confirms (or overrides) the verb; it then classifies the tool
+            {scope ? <> in <span style={{ fontFamily: "ui-monospace, monospace", color: "#b8c2d6" }}>{scope}</span></> : " in one namespace"}. Demote returns it to observation.
           </div>
         </div>
 
@@ -158,24 +191,42 @@ export function ToolVerbsPanel({ ns, isAdmin, onClose, onChanged }: Props) {
                             ))}
                           </div>
                           {isAdmin && (
-                            <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                              <span style={{ fontSize: 10, color: "#6e6e6e", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>Promote as</span>
-                              {VERBS.map((v) => {
-                                const inferred = v === c.inferred_verb;
-                                return (
-                                  <button
-                                    key={v}
-                                    type="button"
-                                    disabled={busy === c.tool_name}
-                                    onClick={() => void promote(c.tool_name, v)}
-                                    title={inferred ? `Promote as "${v}" — matches the observed evidence.` : `Admin override: promote as "${v}" even though the evidence suggests ${c.inferred_verb ?? "nothing"}.`}
-                                    style={{ height: 22, padding: "0 10px", border: `1px solid ${inferred ? "#2ddab8" : "var(--graph-border)"}`, borderRadius: 999, background: inferred ? "rgba(45,218,184,0.1)" : "transparent", color: inferred ? "#2ddab8" : "#b8c2d6", fontFamily: "inherit", fontSize: 10.5, fontWeight: 700, cursor: busy === c.tool_name ? "wait" : "pointer" }}
-                                  >
-                                    {v}{inferred ? " ✓" : ""}
-                                  </button>
-                                );
-                              })}
-                            </div>
+                            // A promotion needs ONE namespace to be written into. At the console's
+                            // default "All namespaces" scope there is none, and the reason has to be
+                            // VISIBLE TEXT: index.css sets `.btn:disabled { pointer-events: none }`,
+                            // so a `title` on a disabled control can never be read.
+                            <InlineDisabledReason
+                              align="start"
+                              tone="escalate"
+                              data-testid={`toolverb-promote-${c.tool_name}`}
+                              reason={
+                                scope
+                                  ? undefined
+                                  : `Pick a single namespace to promote in — a verb is learned per namespace, and “All namespaces” is not one.`
+                              }
+                            >
+                              <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                                <span style={{ fontSize: 10, color: "#6e6e6e", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                                  {scope ? <>Promote in <span style={{ fontFamily: "ui-monospace, monospace", color: "#b8c2d6" }}>{scope}</span> as</> : "Promote as"}
+                                </span>
+                                {VERBS.map((v) => {
+                                  const inferred = v === c.inferred_verb;
+                                  const off = busy === c.tool_name || !scope;
+                                  return (
+                                    <button
+                                      key={v}
+                                      type="button"
+                                      disabled={off}
+                                      onClick={() => void promote(c.tool_name, v)}
+                                      title={inferred ? `Promote as "${v}" in ${scope || "…"} — matches the observed evidence.` : `Admin override: promote as "${v}" in ${scope || "…"} even though the evidence suggests ${c.inferred_verb ?? "nothing"}.`}
+                                      style={{ height: 22, padding: "0 10px", border: `1px solid ${inferred && scope ? "#2ddab8" : "var(--graph-border)"}`, borderRadius: 999, background: inferred && scope ? "rgba(45,218,184,0.1)" : "transparent", color: !scope ? "var(--text-muted)" : inferred ? "#2ddab8" : "#b8c2d6", fontFamily: "inherit", fontSize: 10.5, fontWeight: 700, opacity: off ? 0.55 : 1, cursor: off ? "default" : busy === c.tool_name ? "wait" : "pointer" }}
+                                    >
+                                      {v}{inferred ? " ✓" : ""}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </InlineDisabledReason>
                           )}
                         </div>
                       );

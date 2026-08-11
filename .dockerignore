@@ -5,14 +5,25 @@
 **/__pycache__
 .env
 .env.*
+# The directory that actually holds live credentials (.secrets/groq.env and friends). It is gitignored,
+# and no Dockerfile COPYs it today — every one of the five copies specific paths (norviq/, policies/,
+# ui/), never `.`. This entry is defence in depth: without it the build CONTEXT still carries real keys
+# to the daemon on every build, and the first `COPY . .` anyone adds bakes them into a published image.
+# `.env` was already excluded for exactly this reason; the directory that replaced it was not.
+.secrets/
 *.md
 tests/
 architecture/
 registry/
 ui/dist
 
-# Public-release build-context trimming (none are COPY'd by any Dockerfile)
+# Public-release build-context trimming
 webhook/
+# ...except the presets, which the API and engine images DO copy: norviq/api/baseline.py reads them to
+# recompile a namespace's baseline control set. The comment above used to say "none are COPY'd by any
+# Dockerfile" and that stopped being true — the build failed loudly here rather than silently shipping
+# an image whose baseline endpoint raises FileNotFoundError, which is the right way round.
+!webhook/presets/
 docs/
 portal/
 .reviews/

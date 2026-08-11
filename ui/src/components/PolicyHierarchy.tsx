@@ -2,8 +2,12 @@
 // Copyright 2026 Norviq Contributors
 //
 // The Policy precedence HIERARCHY — the resolution stack the evaluator ACTUALLY uses for a (namespace,
-// agent-class), rendered top-to-bottom in priority order. It renders GET /policies/effective VERBATIM (scope, order,
-// priority, overlay flag) — precedence is NEVER re-implemented in the UI; it always mirrors real enforcement.
+// agent-class), rendered top-to-bottom in priority order. Scope, priority and the overlay flag come from
+// GET /policies/effective verbatim — precedence is NEVER re-derived in the UI. The ROWS are ordered by the
+// server's own priority value (descending, stable on ties), because /policies/effective returns
+// `_collect_candidates` COLLECTION order, which is not the order in which layers beat each other —
+// rendering that raw contradicted this panel's own "highest-priority-wins, top to bottom" subtitle.
+// Ordering by a number the server supplied is not the same as re-implementing resolution.
 //
 // The "Mode" column reflects the effective per-namespace enforcement posture (Block / Monitor)
 // from GET /settings, so the hierarchy agrees with the Namespace Governance card. Still cluster-aware in STRUCTURE
@@ -76,7 +80,28 @@ export function PolicyHierarchy({ namespace, testId = "policy-hierarchy" }: { na
     [namespace, agentClass],
     { cacheKey: `effective:${namespace}:${agentClass}`, staleTimeMs: 15_000 }
   );
-  const layers = eff.data?.layers ?? [];
+  // Ordered so the row that WINS is first, which is what the panel's own subtitle promises
+  // ("highest-priority-wins, top to bottom"). The API returns the stack grouped by how the evaluator
+  // COLLECTS candidates, not by what beats what, so the table used to render e.g.
+  //
+  //     1  agent-class policy   default:probe-class          100
+  //     2  namespace baseline   default:__baseline__           1
+  //     3  namespace:default    default:namespace:default     50
+  //
+  // — a priority-100 row above a priority-1 row above a priority-50 row. Read against the stated rule
+  // that is simply wrong, and an operator reasoning about precedence has no way to reconcile it.
+  //
+  // Sorted on the server's OWN priority number — the UI does not re-derive precedence, it just orders by
+  // the value enforcement already reported. Ties keep the API's order, which preserves the tie-break the
+  // collection order encodes (a class policy still shows above a namespace policy at equal priority, which
+  // is how the evaluator actually resolves them).
+  const layers = useMemo(() => {
+    const raw = eff.data?.layers ?? [];
+    return raw
+      .map((l, i) => ({ l, i }))
+      .sort((a, b) => (b.l.priority ?? 0) - (a.l.priority ?? 0) || a.i - b.i)
+      .map((x) => x.l);
+  }, [eff.data?.layers]);
 
   // The effective per-ns enforcement posture (Block / Monitor). "audit" is displayed as "Monitor".
   const posture = useApi(
@@ -84,10 +109,22 @@ export function PolicyHierarchy({ namespace, testId = "policy-hierarchy" }: { na
     [namespace],
     { cacheKey: `hier-posture:${namespace}`, staleTimeMs: 15_000 }
   );
-  const modeLabel = posture.data?.enforcement_mode === "audit" ? "Monitor" : "Block";
-  const modeTitle = posture.data?.enforcement_mode === "audit"
-    ? "Monitor — evaluate & log would-block, but allow (observe mode)"
-    : "Block — matching policies are enforced";
+  // "Block" is a CLAIM about enforcement, so it may only be made from a posture that was actually
+  // read. Before, `posture.data?.enforcement_mode === "audit" ? ... : "Block"` sent every other state
+  // down the Block branch: a failed GET /settings, the first render before it resolves, and — worst —
+  // a namespace switch whose read fails, where useApi deliberately keeps the PREVIOUS namespace's
+  // settings in `data`, so the old namespace's mode was painted under the new namespace's stack.
+  // /settings is DB-backed while the layer rows come from the in-memory loader, so the posture can 5xx
+  // on its own and leave the table fully painted and confidently wrong: a namespace in Monitor (only
+  // logging would-blocks) reads "Block — matching policies are enforced".
+  // Same settingsKnown treatment as TargetSettings.tsx and AppContext.
+  const postureKnown = posture.data != null && !posture.error && !posture.stale;
+  const modeLabel = !postureKnown ? "Unknown" : posture.data?.enforcement_mode === "audit" ? "Monitor" : "Block";
+  const modeTitle = !postureKnown
+    ? "Enforcement posture could not be read for this namespace — this is not a claim that policies are enforced"
+    : posture.data?.enforcement_mode === "audit"
+      ? "Monitor — evaluate & log would-block, but allow (observe mode)"
+      : "Block — matching policies are enforced";
 
   const presentSlot = (key: string) => {
     const slot = TEMPLATE.find((s) => s.key === key);
@@ -149,7 +186,7 @@ export function PolicyHierarchy({ namespace, testId = "policy-hierarchy" }: { na
                   : <span style={{ color: "var(--text-secondary)" }}>base</span>}</td>
                 {/* The effective per-ns posture (Block / Monitor), from GET /settings. */}
                 <td style={cell}><span data-testid={`${testId}-mode`} data-mode={modeLabel.toLowerCase()} title={modeTitle}
-                  style={{ fontSize: 11, color: modeLabel === "Monitor" ? "var(--escalate)" : "var(--text-secondary)", border: "1px solid var(--border)", borderRadius: 6, padding: "1px 7px" }}>{modeLabel}</span></td>
+                  style={{ fontSize: 11, color: modeLabel === "Monitor" ? "var(--escalate)" : "var(--text-secondary)", border: "1px solid var(--border)", borderRadius: 6, padding: "1px 7px", opacity: postureKnown ? 1 : 0.65 }}>{modeLabel}</span></td>
                 <td style={cell}><span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--good, #2ecc71)" }}>
                   <span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--good, #2ecc71)" }} /> in force
                 </span></td>

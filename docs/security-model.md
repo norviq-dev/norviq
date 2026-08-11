@@ -10,16 +10,26 @@ where the honest limits of the current design are.
 
 Norviq is a policy enforcement point (PEP) for LLM agent tool calls: it enforces per-identity
 allow/block/escalate/audit decisions on the *inputs* of a tool call (`tool_name` + `tool_params`)
-before the tool body runs. The core security property is **fail-closed evaluation** — if OPA errors,
-times out, the caller's SPIFFE identity is malformed, or no policy is loaded for an enforcing
-namespace, the call is **blocked**, never silently allowed. See [Concepts → Decisions](concepts.md#decisions)
-for the full list of named fail-closed paths. Three worth stating explicitly here, because each is a
-place where a naive implementation fails *open*:
+before the tool body runs.
+
+The governing principle is that **a block is something a customer asked for**. Norviq sits in the
+request path of production agents, so traffic flows by default and the policies you author are the
+defense. A control that drops legitimate traffic nobody asked it to drop is not a strong security
+posture — it is an outage wearing a security-shaped `rule_id`, and it gets removed from the request
+path, which protects nobody.
+
+Within a namespace the customer *has* chosen to enforce, evaluation is **fail-closed**: if OPA errors,
+times out, or the caller's SPIFFE identity is malformed, the call is blocked rather than silently
+allowed. See [Concepts → Decisions](concepts.md#decisions) for the full list of named fail-closed
+paths. Three worth stating explicitly, because each is a place where a naive implementation fails
+*open* — and one of them is where the two principles above genuinely conflict:
 
 - **Unknown agent class / no policy loaded** → `block`, `rule_id=no_policy_loaded`
-  (`norviq/engine/evaluator.py::_no_policy_decision`), whenever `enforcement_mode=block` and
-  `no_policy_decision=deny` — both the shipped defaults. An unrecognised `(namespace, agent_class)` is
-  denied, not waved through on the theory that "no rule matched".
+  (`norviq/engine/evaluator.py::_no_policy_decision`), whenever `enforcement_mode=block` **and**
+  `no_policy_decision=deny`. `no_policy_decision` ships as **`allow`**: a namespace nobody has written
+  a policy for is not governed, so there is no customer decision to enforce and the call proceeds.
+  Set it to `deny` for namespaces you have decided to lock down — deny-by-default is then an explicit
+  choice rather than the silent consequence of not having configured anything yet.
 - **Policy subsystem not yet warm** → `block`, `rule_id=policy_load_pending`, kept as a *distinct* reason
   so a startup race is never silently mistaken for a genuine "this tenant has no policies" state.
 - **Any sidecar-side error** → `drop`. An undecodable body, a JSON body that is not an object, or an
@@ -198,7 +208,7 @@ implicit:
 | A manipulated / prompt-injected agent making tool calls it shouldn't | **Yes** — the core case | Policy on tool-call inputs + trust escalation |
 | A **compromised co-resident pod** dialing other pods' IPs | **Yes** | OPA binds loopback and is fronted by no Service; internal mTLS on the API path |
 | An agent workload trying to read the sidecar's mTLS key | **Yes** | tmpfs is mounted into the sidecar only, never the app container or the shared socket volume |
-| A pod author self-exempting from injection | **Yes, if you close it** | `webhook.injection.allowPodOptOut=false` (default `true`) + RBAC on pod labels |
+| A pod author self-exempting from injection | **Yes, if you close it** | `webhook.injection.allowPodOptOut=false` (default `true`) + RBAC on pod labels **and on `norviq.io/agent-class`** — see the note below, `allowPodOptOut` alone does not close it |
 | An authenticated user reaching another tenant's data | **Yes** | JWT namespace claim binding (`scoped_namespace` / `read_namespace`), per-tenant OPA packages |
 | A client asserting its own trust score | **Yes** | `trust_score` stripped from the request and recomputed server-side |
 | Agent code that bypasses the SDK entirely | **Partially** | `agentEgressPolicy` bounds it at the network layer; cooperative design cannot fully close it |
@@ -256,16 +266,23 @@ every scoped endpoint is single-tenant.
 These are stated intentionally, as operator responsibilities and threat-model notes — not gaps that
 were missed:
 
-- **Sidecar injection is opt-out-able by default.** The mutating webhook injects into every pod in a
-  namespace labeled `norviq-injection=enabled`, *unless* the pod itself carries
-  `norviq-injection=disabled` or the `norviq.io/skip-injection` annotation. This is documented,
-  intentional per-pod flexibility (e.g. exempting an infra pod from a labeled namespace) — but it also
-  means a workload that can set its own pod annotations/labels before admission can opt itself out of
-  enforcement. **Set `webhook.injection.allowPodOptOut=false`** (env `NRVQ_ALLOW_POD_OPT_OUT`, default
-  `true` for backward compatibility) to make the injector ignore the per-pod opt-out entirely, so no pod
-  author in a labeled namespace can self-exempt and the namespace-uniform guarantee holds
-  (`webhook/handler.go`). Otherwise treat namespace labeling as the enforcement boundary and restrict
-  who can set those labels/annotations via RBAC.
+- **Sidecar injection is opt-out-able by default, in two ways.** Under the shipped default
+  `webhook.injection.gateOnlyAgentPods: true`, the webhook's `objectSelector` routes a pod to the
+  injector only if it carries `norviq.io/agent-class`; the pod is then injected *unless* it also carries
+  `norviq-injection=disabled` or the `norviq.io/skip-injection` annotation. So there are two exits, and
+  `allowPodOptOut=false` closes only the second: a pod author who simply OMITS the agent-class label is
+  never routed to the webhook at all, and no admission control runs. Closing self-exemption therefore
+  needs RBAC on the agent-class label (or an external admission policy requiring it on agent workloads),
+  not just `allowPodOptOut=false`.
+
+  The second exit is documented, intentional per-pod flexibility (e.g. exempting an infra pod from a
+  labeled namespace) — but it means a workload that can set its own pod annotations/labels before
+  admission can opt itself out of enforcement. **Set `webhook.injection.allowPodOptOut=false`** (env
+  `NRVQ_ALLOW_POD_OPT_OUT`, default `true` for backward compatibility) to make the injector ignore the
+  per-pod opt-out entirely (`webhook/handler.go`). That closes the second exit only; it does **not**
+  restore a namespace-uniform guarantee, because a pod omitting `norviq.io/agent-class` never reaches
+  the injector. So the enforcement boundary is the **pod** label, not the namespace label: restrict who
+  can set `norviq.io/agent-class` and the opt-out label/annotation via RBAC.
 - **CRD-level policy business rules are enforced by the controller, not at admission.**
   `webhook/controller.go` validates `NrvqPolicy` semantics — cross-namespace targets, `clusterPriority`
   bounds (500-1000, restricted to the admin policy namespace), and Rego content — when it syncs a CRD to

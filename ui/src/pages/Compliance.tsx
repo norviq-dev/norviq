@@ -32,6 +32,7 @@ import { getToken } from "../auth/session";
 import { useApi } from "../hooks/useApi";
 import { useApp } from "../store/AppContext";
 import { FrameworkEmblem } from "../components/compliance/FrameworkEmblem";
+import { useToast } from "../components/common/Toast";
 
 // ---- canonical decision / status colors (NO blue anywhere) --------------------------------------
 const ACCENT = "var(--accent)"; // teal #2ddab8
@@ -162,10 +163,25 @@ function techStatus(t: MitreTechnique): keyof typeof ST {
   return t.status; // "enforced" | "gap" | "out_of_scope" — from the API, never inferred client-side
 }
 
-// Efficacy overlay. When a Red Team run exists it shows the REAL proven-blocking %; before any run it
-// keeps the honest "not efficacy-tested" caption with a call to action. Coverage (rules present) ≠ efficacy.
-function ComplianceEfficacyBanner({ efficacy, onView }: { efficacy?: RedteamLatest; onView: () => void }) {
-  const hasRun = !!efficacy?.has_run;
+// Efficacy overlay. Three states, because there are three: a run exists (the REAL proven-blocking %), no run
+// has been made yet (the honest "not efficacy-tested" + a call to action), and — the one this used to collapse
+// into the second — the read FAILED. /redteam/results/latest is admin-only (redteam.py `require_admin`), so
+// every non-admin console user, plus any 5xx or network fault, arrived with `error` set and `data` null and was
+// told as FACT that the posture is not efficacy-tested, and pointed at a "Run Red Team suite →" the API would
+// refuse them. "We could not ask" is not "we asked, and the answer is no". Coverage (rules present) ≠ efficacy.
+function ComplianceEfficacyBanner({
+  efficacy,
+  error,
+  onView,
+  onRetry
+}: { efficacy?: RedteamLatest; error?: string | null; onView: () => void; onRetry: () => void }) {
+  // NOT `&& !efficacy`: useApi keeps the PREVIOUS namespace's run in `data` when the new namespace's read
+  // fails (its catch only sets `error`), so that clause republished ns-A's "92% proven-blocking" as ns-B's
+  // the moment B's read faulted — a definite claim about a scope we could not read. An error means we cannot
+  // attest THIS scope's efficacy, whatever value we are still holding; `{has_run:false}` carries no namespace
+  // to compare against, so there is no narrower honest test.
+  const unknown = !!error;
+  const hasRun = !unknown && !!efficacy?.has_run;
   const pct = hasRun ? efficacy!.efficacy?.overall.proven_blocking_pct : undefined;
   const overall = efficacy?.efficacy?.overall;
   return (
@@ -173,13 +189,19 @@ function ComplianceEfficacyBanner({ efficacy, onView }: { efficacy?: RedteamLate
       data-testid="compliance-efficacy-banner"
       style={{
         display: "flex", alignItems: "center", gap: 12, padding: "11px 15px", marginBottom: 16,
-        background: hasRun ? "rgba(45,218,184,0.07)" : "rgba(255,255,255,0.03)",
-        border: `1px solid ${hasRun ? "#2ddab840" : "var(--border)"}`, borderRadius: 10
+        background: hasRun ? "rgba(45,218,184,0.07)" : unknown ? "rgba(255,176,32,0.08)" : "rgba(255,255,255,0.03)",
+        border: `1px solid ${hasRun ? "#2ddab840" : unknown ? "#4a3a1a" : "var(--border)"}`, borderRadius: 10
       }}
     >
       <span style={{ fontSize: 12.5, color: "var(--text-secondary)" }}>
         Coverage above shows <b>rules present</b>.{" "}
-        {hasRun ? (
+        {unknown ? (
+          <span data-testid="compliance-efficacy-unknown">
+            Efficacy is <b style={{ color: "var(--escalate)" }}>unknown</b> — the last Red Team run could not be
+            read, so this posture may or may not have been tested.
+            <span style={{ color: "var(--text-muted)" }}> {error}</span>
+          </span>
+        ) : hasRun ? (
           <span data-testid="compliance-proven-blocking">
             Efficacy: <b style={{ color: "#2ddab8" }}>{pct}% proven-blocking</b> on the last Red Team run
             {overall ? ` (${overall.caught}/${overall.total} block-expected attacks caught)` : ""}.
@@ -190,12 +212,14 @@ function ComplianceEfficacyBanner({ efficacy, onView }: { efficacy?: RedteamLate
           </span>
         )}
       </span>
+      {/* No "Run Red Team suite →" in the unknown state: the commonest cause is a 403 from the admin-only
+          endpoint, and that caller cannot run the suite either. Offer the action that IS theirs — retry. */}
       <button
-        onClick={onView}
+        onClick={unknown ? onRetry : onView}
         className="link-btn"
         style={{ marginLeft: "auto", background: "none", border: "none", color: "#2ddab8", cursor: "pointer", fontSize: 12.5, fontWeight: 600 }}
       >
-        {hasRun ? "View Red Team →" : "Run Red Team suite →"}
+        {unknown ? "Retry" : hasRun ? "View Red Team →" : "Run Red Team suite →"}
       </button>
     </div>
   );
@@ -204,6 +228,7 @@ function ComplianceEfficacyBanner({ efficacy, onView }: { efficacy?: RedteamLate
 // ================================================================================================
 export function Compliance() {
   const navigate = useNavigate();
+  const { push } = useToast();
   const { namespace, timeRange } = useApp();
 
   const [view, setView] = useState<"overview" | "detail">("overview");
@@ -219,7 +244,6 @@ export function Compliance() {
   const [scopeOpen, setScopeOpen] = useState(false);
   const [fwMenuOpen, setFwMenuOpen] = useState(false);
   const [drafted, setDrafted] = useState<Record<string, boolean>>({});
-  const [toast, setToast] = useState<{ msg: string; link?: string } | null>(null);
   // Multi-select: the set of GAP technique_ids checked for batch generation + the class-scope mode
   // for that batch ("affected" = each control's top affected class · "all" = every real affected class · a
   // specific class name).
@@ -271,8 +295,21 @@ export function Compliance() {
   const activeCoverage = covByFw[framework];
   const data = activeCoverage.data;
   // Degraded when the selected framework's coverage errored (detail) — or, on overview, when either did.
+  //
+  // The overview arm was `&&`, so BOTH frameworks had to fail before anything was said, while the
+  // comment above it said "either". One framework failing therefore kept rendering its previous
+  // value — the coverage %, the ENFORCED chip, the enforced/gap counts and the blocked-or-escalated
+  // total — with no indication, and the operator read a compliance claim about a scope that had not
+  // been read. `||` is what the sentence always described.
+  //
+  // `stale` is the second half: on a namespace switch whose read fails, useApi keeps the PREVIOUS
+  // namespace's coverage, so an un-degraded render here would attribute one namespace's ATLAS
+  // posture to another. Error and stale are both "this is not this scope's answer".
+  const covUnreadable = (c: { error: string | null; stale: boolean }): boolean => !!c.error || c.stale;
   const apiDegraded =
-    view === "detail" ? !!activeCoverage.error : !!atlasCoverage.error && !!owaspCoverage.error;
+    view === "detail"
+      ? covUnreadable(activeCoverage)
+      : covUnreadable(atlasCoverage) || covUnreadable(owaspCoverage);
 
   const techniques = useMemo<MitreTechnique[]>(() => data?.techniques ?? [], [data]);
   const selected = useMemo(
@@ -280,9 +317,30 @@ export function Compliance() {
     [techniques, selectedId]
   );
 
+  // THE ONE FEEDBACK SURFACE. This page used to run a private toast: one hard-coded accent-GREEN card, no
+  // `role`, no dismiss control, and an unconditional 3.5s fuse — so "Export failed", "Draft failed" and
+  // "Batch generate failed" arrived in the pixels of a success and erased themselves. An operator who
+  // glanced away walked off believing the auditor's evidence pack had been produced. Toast.tsx states the
+  // convention it was breaking: "no fetch result may be silently dropped … error/warning toasts are STICKY
+  // until dismissed so a failed or partial outcome can't expire unseen" — which it implements, along with
+  // the block-red border, `role="alert"` and a dismiss button. Route through it instead of re-implementing
+  // a second, weaker copy.
   function showToast(msg: string, link?: string) {
-    setToast({ msg, link });
-    window.setTimeout(() => setToast((cur) => (cur && cur.msg === msg ? null : cur)), 3500);
+    push({
+      kind: "success",
+      message: msg,
+      ...(link
+        ? { actionLabel: "Open →", onAction: () => navigate(link.startsWith("/") ? link : `/${link}`) }
+        : {})
+    });
+  }
+  /** A mutation that did NOT do what it says on the button. Sticky, red, announced, dismissible. */
+  function showFailure(msg: string) {
+    push({ kind: "error", message: msg });
+  }
+  /** A completed call whose OUTCOME was "nothing was created" — not a fault, but not a success either. */
+  function showNoOutcome(msg: string) {
+    push({ kind: "warning", message: msg });
   }
 
   // ---- open detail for a framework; jump to first gap. -------------------------------------------
@@ -318,7 +376,7 @@ export function Compliance() {
       showToast("Audit-evidence pack exported (JSON)");
       void covByFw[fw].refetch();
     } catch (e) {
-      showToast(e instanceof Error ? e.message : "Export failed");
+      showFailure(e instanceof Error ? e.message : "Export failed");
     }
   }
 
@@ -331,17 +389,17 @@ export function Compliance() {
     try {
       const res = await generateMitrePolicy(t.technique_id, namespace ?? "default", cls, framework);
       if (res.status === "no_affected_classes") {
-        showToast("No affected agent classes in range — nothing to remediate yet.");
+        showNoOutcome("No affected agent classes in range — nothing to remediate yet.");
         return;
       }
       if (res.status === "escalate") {
-        showToast(res.message ?? "This control can't be auto-generated — the risk doesn't show up in tool-call traffic, so it needs a manual (configuration/process) control.");
+        showNoOutcome(res.message ?? "This control can't be auto-generated — the risk doesn't show up in tool-call traffic, so it needs a manual (configuration/process) control.");
         return;
       }
       setDrafted((d) => ({ ...d, [t.technique_id]: true }));
       showToast(`Draft for ${res.control_name ?? t.name} · scoped to ${res.cls} · pending in Policies`, res.deeplink);
     } catch (e) {
-      showToast(e instanceof Error ? e.message : "Draft failed");
+      showFailure(e instanceof Error ? e.message : "Draft failed");
     }
   }
 
@@ -384,12 +442,11 @@ export function Compliance() {
       if (escalated) parts.push(`${escalated} need${escalated === 1 ? "s" : ""} a bespoke rule`);
       if (noClass) parts.push(`${noClass} with no affected class`);
       if (failed) parts.push(`${failed} failed`);
-      showToast(
-        res.drafts_created > 0 ? `${parts.join(" · ")} · drafts pending in Policies` : parts.join(" · "),
-        res.drafts_created > 0 ? firstLink : undefined
-      );
+      if (res.drafts_created > 0) showToast(`${parts.join(" · ")} · drafts pending in Policies`, firstLink);
+      // Nothing was created. The rollup used to go out in the same green card as a successful batch.
+      else showNoOutcome(parts.join(" · "));
     } catch (e) {
-      showToast(e instanceof Error ? e.message : "Batch generate failed");
+      showFailure(e instanceof Error ? e.message : "Batch generate failed");
     }
   }
 
@@ -424,7 +481,12 @@ export function Compliance() {
 
       {/* Proven-blocking efficacy overlay from the last Red Team run — coverage is "rules present",
           this is the honest "how much is PROVEN blocking". Coexists with the header range selector. */}
-      <ComplianceEfficacyBanner efficacy={efficacy.data ?? undefined} onView={() => navigate("/redteam")} />
+      <ComplianceEfficacyBanner
+        efficacy={efficacy.data ?? undefined}
+        error={efficacy.error}
+        onView={() => navigate("/redteam")}
+        onRetry={() => void efficacy.refetch()}
+      />
 
       {view === "overview" ? (
         <OverviewView
@@ -474,41 +536,6 @@ export function Compliance() {
         />
       )}
 
-      {/* TOAST */}
-      {toast && (
-        <div
-          style={{
-            position: "fixed",
-            bottom: 22,
-            right: 22,
-            zIndex: 90,
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            padding: "12px 16px",
-            background: "#171717",
-            border: "1px solid #2ddab866",
-            borderRadius: 11,
-            boxShadow: "0 16px 40px -14px rgba(0,0,0,0.7)",
-            maxWidth: 360
-          }}
-        >
-          <span style={{ fontSize: 12.5, fontWeight: 600, color: "#ededf0" }}>{toast.msg}</span>
-          {toast.link && (
-            <button
-              type="button"
-              onClick={() => {
-                const path = toast.link!.startsWith("/") ? toast.link! : `/${toast.link!}`;
-                setToast(null);
-                navigate(path);
-              }}
-              style={{ marginLeft: 4, background: "transparent", border: "none", color: ACCENT, fontFamily: "inherit", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}
-            >
-              Open →
-            </button>
-          )}
-        </div>
-      )}
     </div>
   );
 }
@@ -736,7 +763,9 @@ function FrameworkOverviewCard({
             <span><b style={{ color: GAP }}>{gap}</b> gap</span>
             <span><b style={{ color: OOS_TEXT }}>{oos}</b> out-of-scope</span>
             <span style={{ color: FAINT }}>·</span>
-            <span><b style={{ color: "#ededf0" }}>{fmt(data.blocked)}</b> blocked · {RANGE_LABEL[range]}</span>
+            <span
+              title="Counts blocked AND escalated decisions — for an attestation the question is whether the control acted. The Overview's Blocked KPI counts blocks only, so the two can differ."
+            ><b style={{ color: "#ededf0" }}>{fmt(data.blocked)}</b> blocked or escalated · {RANGE_LABEL[range]}</span>
           </div>
         </div>
 
@@ -1014,7 +1043,7 @@ function DetailView(props: {
           <div style={{ display: "flex", gap: 22 }}>
             <div style={{ fontSize: 11, color: MUTED }}>
               <b style={{ display: "block", fontSize: 19, fontWeight: 800, color: "#ededf0" }}>{fmt(data?.blocked)}</b>
-              blocked · {RANGE_LABEL[range]}
+              blocked or escalated · {RANGE_LABEL[range]}
             </div>
             <div style={{ fontSize: 11, color: MUTED }}>
               <b style={{ display: "block", fontSize: 19, fontWeight: 800, color: "#ededf0" }}>{fmt(data?.agent_classes)}</b>
@@ -1321,7 +1350,7 @@ function TechniqueDetail({
                     </span>
                     <span style={{ display: "flex", alignItems: "center", gap: 7, whiteSpace: "nowrap" }}>
                       <span style={{ fontSize: 11.5, fontWeight: 600, color: ruleBlocked > 0 ? ENFORCED : "#6e6e76" }}>
-                        {fmt(ruleBlocked)} blocked · {RANGE_LABEL[range]}
+                        {fmt(ruleBlocked)} blocked or escalated · {RANGE_LABEL[range]}
                       </span>
                       <span style={{ color: "#5f5f67" }}>↗</span>
                     </span>

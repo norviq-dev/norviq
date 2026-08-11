@@ -16,7 +16,7 @@ from norviq.api.auth import get_current_user, read_namespace, require_admin, req
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
 from norviq.api.routers.settings_router import assert_apply_allowed  # shared dry-run-only gate
-from norviq.api.synthetic import is_synthetic_identity  # exclude probe/test traffic from dry-run replay
+from norviq.api.synthetic import audit_row_is_non_real, is_synthetic_identity  # exclude probe/test traffic from dry-run replay
 from norviq.api.threat_intent import (  # accumulate remediation controls in the single overlay
     generate_remediation_overlay_rego, parse_remediation_controls, union_remediation_controls)
 from norviq.config import settings
@@ -32,7 +32,7 @@ router = APIRouter()
 # only blocks the pack scopes — delete forbids the entire managed set, since a delete is destructive and there is
 # no legitimate UI path to remove a managed scope (they are re-materialized from their own sources). The reserved
 # `__cluster__` namespace (the cluster-wide baseline) is likewise undeletable.
-_RESERVED_DELETE_CLASSES = ("__baseline__", "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__")
+_RESERVED_DELETE_CLASSES = ("__baseline__", "__controls__", "__egress__", "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__")
 _RESERVED_NAMESPACES = ("__cluster__",)
 # CONSOLE VIEW SENTINELS — not namespaces. The console's global picker sends `namespace="all"` to mean
 # "aggregate every namespace" (see evaluator._collect_candidates / policy_loader.namespaces_for_class, which
@@ -224,13 +224,28 @@ def _infer_target_type(ns: str, agent_class: str) -> str:
     return "class"
 
 
-async def _policy_match_counts(namespace: str | None) -> dict[tuple[str, str], int]:
+async def _policy_match_counts(namespace: str | None) -> dict[tuple[str, str], int] | None:
     """{(ns, class): governed-call count} from the audit log, in ONE grouped query, so a policy card can
     show real "matches" instead of a hardcoded 0. Acquires the session lazily + best-effort: if the DB is
-    unavailable (or not initialized, e.g. a unit test with no DB) it returns an empty map — matches then falls
-    back to 0 and the policy list still renders."""
-    stmt = select(AuditLogEntry.namespace, AuditLogEntry.agent_class, func.count(AuditLogEntry.id)).group_by(
-        AuditLogEntry.namespace, AuditLogEntry.agent_class
+    unavailable (or not initialized, e.g. a unit test with no DB) it returns ``None`` — the policy list
+    still renders, but every ``matches`` is reported as UNKNOWN rather than as a measured 0. An empty
+    dict and a failed read are different facts: the first says the audit log holds no matching traffic,
+    the second says we could not look, and rendering them identically puts an "inert policy" warning on
+    a perfectly healthy control every time the DB blips.
+
+    REAL traffic only. The Catalog renders `matches > 0` as a GREEN dot labelled "Loaded & enforcing"
+    with the title "enforcing on matching workloads" — a claim about a live workload. A Policy-Tester
+    session, an e2e probe or a red-team run is none of those: it is the console (or the efficacy
+    harness) POSTing `/evaluate` under a throwaway identity. Counting them was survivable while every
+    namespace-wide tier read a hardcoded 0, but now that those tiers sum their whole namespace it would
+    paint the namespace FLOOR green off nothing but Policy-Tester clicks — a false all-clear on the
+    broadest control in the product. `audit_row_is_non_real` is the same shared filter /tools, /mitre,
+    /audit stats and the dry-run replay use, so this count reconciles with the Overview's governed-call
+    KPI instead of being a second definition of "a call happened"."""
+    stmt = (
+        select(AuditLogEntry.namespace, AuditLogEntry.agent_class, func.count(AuditLogEntry.id))
+        .where(~audit_row_is_non_real(AuditLogEntry))
+        .group_by(AuditLogEntry.namespace, AuditLogEntry.agent_class)
     )
     if namespace:
         stmt = stmt.where(AuditLogEntry.namespace == namespace)
@@ -245,7 +260,50 @@ async def _policy_match_counts(namespace: str | None) -> dict[tuple[str, str], i
             await provider.aclose()
     except Exception as exc:  # noqa: BLE001 — matches is display-only; never fail the policy list on it
         log.warning("nrvq.api.policies.match_count_failed", error=str(exc), code="NRVQ-API-7012")
+        return None
     return counts
+
+
+# Loader keys whose scope is a whole NAMESPACE rather than one agent class. None of them is a legal
+# RFC-1123 ServiceAccount name, so `audit_log.agent_class` can never hold one — looking them up in a
+# (namespace, agent_class)-keyed map returns 0 forever, and 0 is what paints the amber "Loaded — no
+# matching workload" dot on the most broadly-scoped controls in the product.
+_NAMESPACE_WIDE_SCOPES = ("__baseline__", "__controls__", "__egress__", "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__")
+_OVERLAY_SUFFIX = "__remediation__"
+
+
+def _matches_for(
+    ns: str, agent_class: str, match_map: dict[tuple[str, str], int] | None
+) -> tuple[int | None, str]:
+    """Governed-call count for a policy's ACTUAL scope, plus the basis it was resolved on.
+
+    `matches` is read by the Catalog as a health signal — >0 paints "Loaded & enforcing", 0 paints
+    "Loaded, but nothing currently matches it". That inverts unless the count is resolved per TIER,
+    because only the class tier is keyed the same way the audit log is:
+
+      * cluster baseline   -> every recorded call, in every namespace
+      * namespace tier     -> every recorded call in that namespace (`__baseline__`, `namespace:<ns>`,
+                              the pack overlays and the tool-allowlist guardrail all govern the
+                              namespace's whole population, not one class)
+      * compliance overlay -> the BASE class it overlays (`<class>__remediation__` is additive on
+                              `<class>`, so it matches exactly what that class matches)
+      * workload tier      -> `deployment:<name>` has NO audit column to join on. That is UNKNOWN, and
+                              returning ``None`` says so; returning 0 would assert a measurement that
+                              was never taken.
+      * class tier         -> the (namespace, agent_class) key, unchanged.
+    """
+    if match_map is None:
+        return None, "unavailable"
+    if ns == "__cluster__":
+        return sum(match_map.values()), "cluster"
+    if agent_class in _NAMESPACE_WIDE_SCOPES or agent_class.startswith("namespace:"):
+        return sum(n for (row_ns, _cls), n in match_map.items() if row_ns == ns), "namespace"
+    if agent_class.endswith(_OVERLAY_SUFFIX) and len(agent_class) > len(_OVERLAY_SUFFIX):
+        base = agent_class[: -len(_OVERLAY_SUFFIX)]
+        return match_map.get((ns, base), 0), "base_class"
+    if ":" in agent_class:  # kind:name workload target — nothing in audit_log identifies a workload
+        return None, "not_measurable"
+    return match_map.get((ns, agent_class), 0), "agent_class"
 
 
 @router.get("/policies")
@@ -271,6 +329,7 @@ async def list_policies(
         applied_at = loader.get_applied_at(ns, agent_class) if hasattr(loader, "get_applied_at") else None
         last_ts = max([t for t in (saved_at, applied_at) if t is not None], default=None)
         last_applied = last_ts.isoformat() if last_ts else None
+        matches, matches_basis = _matches_for(ns, agent_class, match_map)
         rows.append(
             {
                 "namespace": ns,
@@ -285,7 +344,12 @@ async def list_policies(
                 "rego_length": len(str(entry["rego"])),
                 "priority": int(entry.get("priority", 100)),
                 "last_applied": last_applied,
-                "matches": match_map.get((ns, agent_class), 0),  # real governed-call count
+                # Resolved against the tier this policy actually governs, NOT blindly against the
+                # (namespace, agent_class) audit key — see `_matches_for`. `null` means UNKNOWN (the
+                # scope is not measurable from audit, or the count query failed) and must never be
+                # rendered as a measured 0; `matches_basis` names which of the two it is.
+                "matches": matches,
+                "matches_basis": matches_basis,
             }
         )
     log.info("nrvq.api.policies.listed", count=len(rows), code="NRVQ-API-7010")
@@ -407,7 +471,13 @@ async def create_policy(body: PolicyCreate, request: Request, user: dict = Depen
     # here either — it follows the `__guardrail__` precedent (directly writable via this endpoint), which is
     # how the Policy Catalog's "Review & Apply" of a compliance draft persists it (see mitre.py
     # `_generate_remediation_draft`). It is still reserved from raw DELETE (see `_reserved_scope_delete_error`).
-    if agent_class in ("__pack__", "__pack_override__", "__pack_weaken__"):
+    # `__egress__` joins them for the same reason and one more: it is collected as a HARD tighten-only
+    # overlay (evaluator._collect_candidates), so a hand-written module at that scope would enforce
+    # with the weight of an operator guardrail while the console's allowlist view — which reads the
+    # embedded `# nrvq-egress-allowlist/v1:` header — could not describe it at all.
+    # `__controls__` joins them: a direct create would bypass the baseline compiler entirely, so the
+    # console would show control effects that no longer describe the module actually enforcing.
+    if agent_class in ("__pack__", "__pack_override__", "__pack_weaken__", "__controls__", "__egress__"):
         log.warning("nrvq.api.policy.reserved_scope", namespace=body.namespace, agent_class=agent_class,
                     code="NRVQ-API-7016")
         raise HTTPException(
@@ -519,6 +589,20 @@ def assert_decision_resolver(cleaned_rego: str) -> None:
     changing absent-at-runtime to fail-closed would break legitimate NARROW block policies whose whole
     point is to allow every non-matching tool).
     """
+    # DENY-BY-DEFAULT is a resolver, and the strongest one there is. `default decision = "block"`
+    # (with the allowlist expressed as `decision = "allow" { ... }`) binds `decision` on EVERY input,
+    # so the silent-allow this function exists to prevent is structurally impossible — strictly safer
+    # than the complete-rule form below, whose condition can fail to match. This branch used to be
+    # absent, so the shape fell to the final `else` and was rejected with "must include block or
+    # escalate decision". Two SHIPPED templates are written this way —
+    # policies/templates/tool-allowlist-perimeter.rego and sql-allowlist-deny-by-default.rego — and
+    # both were refused with a 422 by this validator while passing `opa check` AND the Go controller's
+    # validateRego. Via the CRD path that is terminal: markDeterministicFailure never retries, so the
+    # CR sat in phase=Error forever while the DB kept serving the previous rego. The contradiction was
+    # already visible below, where this function's own error text instructs authors that "a policy that
+    # is meant to always block should say so explicitly with `default decision = \"block\"`".
+    if re.search(r'\bdefault\s+decision\s*=\s*"(?:block|escalate)"', cleaned_rego):
+        return
     if re.search(r'decision\s*=\s*"(block|escalate)"\s*\{', cleaned_rego):
         has_resolver = True
     elif re.search(r"\b(blocks|escalates|audits)\s*\[", cleaned_rego):
@@ -660,20 +744,92 @@ def _strip_string_literals(rego: str) -> str:
     return re.sub(r'"(?:\\.|[^"\\])*"', '""', rego)
 
 
+def resolve_apply_target_key(body: ApplyRequest, agent_class: str) -> str:
+    """Where an apply actually lands, from `target_type`.
+
+    `target_type` used to be accepted, echoed in the 200 response and written to the audit log
+    (`NRVQ-API-7015`) while the destination was hard-coded to the SOURCE `agent_class` — so
+    `--target-type workload` reported a successful apply and produced a class policy. A knob that is
+    logged but not read is worse than an absent one: the audit trail then records an intent the system
+    never carried out, and the operator holds written evidence of a control they do not have.
+
+    Kept a pure function, deliberately: the endpoint around it needs Postgres, so inlining this logic
+    made it reachable only by tests that skip without a live database — which is how the defect it
+    replaces survived. Mirrors `resolve_policy_key`, since both must produce keys
+    `evaluator._collect_candidates` actually resolves.
+    """
+    target_type = (body.target_type or "agent_class").strip().lower()
+    if target_type in {"agent_class", "class", ""}:
+        return agent_class
+    if target_type == "namespace":
+        return f"namespace:{body.target_namespace}"
+    if target_type == "workload":
+        target_name = (body.target_name or "").strip()
+        if not target_name:
+            raise HTTPException(
+                status_code=422,
+                detail="target_type=workload requires target_name (the workload's name). Without it no "
+                       "workload key can be formed and the apply would silently fall back to a class policy.",
+            )
+        target_kind = (body.target_kind or "deployment").strip().lower()
+        # The engine only ever resolves `deployment:<name>`; minting `statefulset:<name>` would store a
+        # row nothing reads — the same silent no-op this fix exists to remove, in a new costume.
+        if target_kind != "deployment":
+            raise HTTPException(
+                status_code=422,
+                detail=f"target_kind={target_kind!r} is not enforceable: the evaluator only resolves "
+                       "`deployment:<name>` workload keys. Use target_kind=deployment.",
+            )
+        return f"{target_kind}:{target_name}"
+    raise HTTPException(
+        status_code=422, detail="target_type must be one of: agent_class, namespace, workload"
+    )
+
+
 def resolve_policy_key(body: PolicyCreate) -> str:
-    """Resolve a stable loader key for namespace/workload policies."""
+    """Resolve a stable loader key for namespace/workload policies.
+
+    ORDER IS LOAD-BEARING, and getting it wrong silently disarmed every targeted NrvqPolicy.
+
+    `policy_name` used to be checked here, second. But `webhook/controller.go
+    buildPolicySyncPayload` sets `payload.PolicyName = u.GetName()` for EVERY CR, unconditionally —
+    it is a display name, not a statement of scope. So a workload- or namespace-targeted CR resolved
+    to its own `metadata.name` and was stored at `<ns>:<metadata.name>`, a key
+    `evaluator._collect_candidates` never looks up (it builds `<ns>:deployment:<workload>` and
+    `<ns>:namespace:<ns>`). Both shipped examples were inert:
+    `crds/examples/policy-custom-rego.yaml` landed at `<ns>:custom-sql-guard`, and
+    `policy-namespace-baseline.yaml` at `<ns>:prod-baseline`. The CR went Ready, the catalog listed
+    it, `kubectl get nrvqpolicy` looked healthy — and it never took part in a single decision. That
+    is the worst failure mode this product has: enforcement that reports itself as working.
+
+    So an explicit target now OUTRANKS policy_name, which drops to a fallback for the
+    genuinely name-keyed case (no target at all).
+
+    `agent_class` still wins over everything, and must: the console posts its already-resolved loader
+    key there verbatim (`ui/src/lib/builderCompile.ts loaderKeyFor`), and the controller sets it to
+    `__baseline__` for a cluster-priority namespace baseline (`namespaceBaselineKey`). Neither may be
+    second-guessed by a target block — note the controller also back-fills `target.namespace` with the
+    CR's own namespace, so a target is present far more often than it is meaningful.
+
+    Cross-namespace targets are rejected by the controller unless they carry `clusterPriority`
+    (`controller.go:1096-1099`), so for a plain namespace target `target.namespace` is always the CR's
+    namespace and `<ns>:namespace:<ns>` matches what the engine looks up.
+    """
     if body.agent_class:
         return body.agent_class
-    if body.policy_name:
-        return body.policy_name
     target = body.target or {}
     target_kind = str(target.get("kind", "")).strip().lower()
     target_name = str(target.get("name", "")).strip()
     if target_kind and target_name:
         return f"{target_kind}:{target_name}"
+    # A half-specified workload target (kind without name, or name without kind) is NOT a workload
+    # key — falling through to the namespace branch keeps it enforceable instead of minting
+    # `deployment:` or `:billing-api`, neither of which anything looks up.
     target_namespace = str(target.get("namespace", "")).strip()
     if target_namespace:
         return f"namespace:{target_namespace}"
+    if body.policy_name:
+        return body.policy_name
     raise HTTPException(status_code=422, detail="agent_class or policy_name/target is required")
 
 
@@ -821,24 +977,55 @@ async def rollback_policy(
     return {"rolled_back_to": body.target_version, "rego_length": len(rego)}
 
 
+def _sample_probe_input(evaluator, namespace: str, agent_class: str) -> dict:
+    """The synthetic probe call, expressed through the evaluator's own input builder."""
+    build = getattr(evaluator, "_build_input", None)
+    if not callable(build):
+        # Capability check, matching _opa_input_from_record: the dry-run suite drives this with fakes
+        # that implement only _evaluate_opa, and raising here would turn every validation into an error.
+        return {
+            "tool_name": "search_kb",
+            "tool_params": {"query": "dry-run probe"},
+            "agent": {
+                "spiffe_id": f"spiffe://norviq/ns/{namespace}/sa/{agent_class}",
+                "namespace": namespace,
+                "agent_class": agent_class,
+            },
+            "trust_score": 0.8,
+            "trust_category": "high",
+            "session_id": "dry-run",
+            "call_depth": 0,
+        }
+    from norviq.engine.trust import TrustResult
+    from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
+
+    event = ToolCallEvent(
+        tool_name="search_kb",
+        tool_params={"query": "dry-run probe"},
+        agent_identity=AgentIdentity(
+            spiffe_id=f"spiffe://norviq/ns/{namespace}/sa/{agent_class}",
+            namespace=namespace,
+            agent_class=agent_class,
+        ),
+        session_id="dry-run",
+    )
+    return build(event, TrustResult(
+        score=0.8, category=_engine_trust_category(0.8), signals={}, weights={},
+        dominant_signal="probe", recommendation="dry-run validation probe",
+    ))
+
+
 async def _validate_rego(evaluator, body: PolicyCreate) -> tuple[bool, list[str], dict | None]:
     """Compile + sample-evaluate the submitted rego via OPA; return (valid, errors, decision)."""
     errors: list[str] = []
     namespace = body.namespace or "default"
     agent_class = body.agent_class or "customer-support"
-    sample_input = {
-        "tool_name": "search_kb",
-        "tool_params": {"query": "dry-run probe"},
-        "agent": {
-            "spiffe_id": f"spiffe://norviq/ns/{namespace}/sa/{agent_class}",
-            "namespace": namespace,
-            "agent_class": agent_class,
-        },
-        "trust_score": 0.8,
-        "trust_category": "high",
-        "session_id": "dry-run",
-        "call_depth": 0,
-    }
+    # Built by the EVALUATOR, not by hand. The replay half of dry-run was converted to _build_input;
+    # this half was left hand-built and still omitted `derived`, `mcp` and `direction` — so a policy
+    # whose block arm keys on derived.verb, mcp.pin_status or direction produced no decision here, and
+    # `sample_decision` (the "here is what your policy does" readout, and the only thing that sets
+    # valid/errors) reported it as doing nothing. Same defect, same file, one function along.
+    sample_input = _sample_probe_input(evaluator, namespace, agent_class)
     decision: dict | None = None
     try:
         # Reuse the same OPA path real evaluation uses: this both compiles the rego and
@@ -859,25 +1046,97 @@ async def _validate_rego(evaluator, body: PolicyCreate) -> tuple[bool, list[str]
 _DRYRUN_REPLAY_CAP = 500  # bound the replay so a busy namespace can't make dry-run unbounded
 
 
-def _opa_input_from_record(rec: AuditLogEntry) -> dict:
+def _engine_trust_category(score: float) -> str:
+    """The tier the ENGINE would assign, so dry-run and enforcement cannot disagree.
+
+    Delegates to TrustCalculator so the boundaries (0.7/0.4, and any per-namespace override) live in
+    one place. Two ladders is exactly the defect this replaces.
+    """
+    from norviq.engine.trust import TrustCalculator
+
+    # _categorize needs no instance state (it reads only the score and optional threshold overrides),
+    # but TrustCalculator's __init__ wants a cache and two stores. Call it unbound so the ONE
+    # implementation of the boundaries is used without standing up collaborators a dry-run has no use
+    # for. If that ever stops being true this raises loudly rather than silently forking the ladder.
+    return TrustCalculator._categorize(None, float(score))  # type: ignore[arg-type]
+
+
+def _opa_input_from_record(rec: AuditLogEntry, evaluator=None) -> dict:
     """Reconstruct the evaluator's OPA input from a stored audit record so the CANDIDATE rego can be
-    replayed against the call it saw. tool_params come from the (optionally masked) payload — a
-    class/tool-name-keyed policy replays exactly; a param-content rule under-fires on masked params
-    (an honest limitation surfaced in the response)."""
+    replayed against the call it saw.
+
+    PARITY IS THE POINT, and this function used to break it. It hand-built the input dict and omitted
+    `derived`, `mcp` and `direction` — three facts the evaluator publishes and policies are explicitly
+    encouraged to use (`derived.verb` is how "block every sink" is written without enumerating tool
+    names). A candidate keyed on any of them saw them undefined here, so it fired on nothing and the
+    dry-run reported `would_block: 0` and "safe to deploy" for a policy that blocks those exact calls
+    in production. Read the other way round, a security engineer asking "would this have caught
+    yesterday's exfiltration?" was shown zero and concluded the rule did not work.
+
+    So the input is now built by the evaluator's OWN `_build_input`, from a ToolCallEvent
+    reconstructed out of the record — the same code path production uses, rather than a second
+    implementation that can drift from it. `_derived_input` is a pure function of the event, so the
+    derived block is reproduced exactly.
+
+    Honest limits, unchanged: tool_params come from the (optionally masked) payload, so a param-content
+    rule under-fires on masked params; and `mcp` is only as complete as what the record preserved.
+    Both are surfaced in the response rather than papered over.
+    """
     payload = rec.payload if isinstance(rec.payload, dict) else {}
     params = payload.get("masked_params") or payload.get("tool_params") or {}
+    params = params if isinstance(params, dict) else {}
+    trust = float(rec.trust_score or 0.0)
+
+    # Capability check, not a None check: the replay suite drives this with lightweight fake
+    # evaluators that implement only `_evaluate_opa`. Asking for `_build_input` on one of those raised,
+    # every record counted as an eval error, and total_records_checked went to 0 — a dry-run reporting
+    # "nothing to check" is the same class of lie this fix exists to remove, so it must degrade to the
+    # legacy shape rather than throw. tests/api/test_dryrun_input_parity.py asserts the REAL evaluator
+    # takes the branch below and produces the full document.
+    if callable(getattr(evaluator, "_build_input", None)):
+        from norviq.engine.trust import TrustResult
+        from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
+
+        event = ToolCallEvent(
+            tool_name=rec.tool_name,
+            tool_params=params,
+            agent_identity=AgentIdentity(
+                spiffe_id=rec.agent_id or "spiffe://norviq/ns/unknown/sa/unknown",
+                namespace=rec.namespace or "default",
+                agent_class=rec.agent_class or "",
+            ),
+            session_id=rec.session_id or "dry-run",
+            mcp=payload.get("mcp") or {},
+            # The record knows the depth the call was made at. Replaying every row at 0 measured any
+            # candidate touching input.call_depth — the OWASP-LLM08 chain-depth shape — against a
+            # constant and reported "safe to deploy".
+            call_depth=int(payload.get("call_depth") or 0),
+        )
+        # Use the ENGINE's own categorizer, not a second ladder. This recomputed 0.75/0.5 while
+        # enforcement uses 0.7/0.4 (TrustCalculator._categorize) AND honours a per-namespace
+        # trust_threshold override — so a candidate keyed on `trust_category` got the OPPOSITE verdict
+        # from the dry-run for every call whose trust sits in [0.4,0.5) or [0.7,0.75). "Would this rule
+        # have caught it?" answered wrong in both directions.
+        category = _engine_trust_category(trust)
+        return evaluator._build_input(event, TrustResult(
+            score=trust, category=category, signals={}, weights={},
+            dominant_signal="replay", recommendation="dry-run replay of a stored record",
+        ))
+
+    # Fallback for callers without an evaluator (unit tests). Keeps the historical shape; the
+    # evaluator path above is what the replay actually uses.
     return {
         "tool_name": rec.tool_name,
-        "tool_name_normalized": rec.tool_name,  # skeleton parity not reconstructable from the record; name is exact
-        "tool_params": params if isinstance(params, dict) else {},
-        "tool_params_normalized": params if isinstance(params, dict) else {},
+        "tool_name_normalized": rec.tool_name,
+        "tool_params": params,
+        "tool_params_normalized": params,
         "agent": {
             "spiffe_id": rec.agent_id,
             "namespace": rec.namespace,
             "agent_class": rec.agent_class,
         },
-        "trust_score": float(rec.trust_score or 0.0),
-        "trust_category": "high" if (rec.trust_score or 0) >= 0.75 else "medium" if (rec.trust_score or 0) >= 0.5 else "low",
+        "trust_score": trust,
+        "trust_category": _engine_trust_category(trust),
         "session_id": rec.session_id or "dry-run",
         "call_depth": 0,
     }
@@ -889,13 +1148,21 @@ async def _replay_recent(evaluator, session, body: PolicyCreate, since) -> dict:
     that tells an operator whether applying breaks legitimate traffic). Scoped to the target agent_class
     (a class-scoped policy can only flip its own class's calls); a class-less (namespace/workload) policy
     replays the whole namespace. Synthetic/red-team traffic is excluded — dry-run answers 'would this break
-    REAL traffic'. The module is pushed to OPA once (digest-cached) then queried per record."""
+    REAL traffic'. The module is pushed to OPA once (digest-cached) then queried per record.
+
+    ``total_records_checked`` is the number of records the candidate was ACTUALLY evaluated against.
+    Records excluded as synthetic, and records the evaluator raised on, are reported separately
+    (``synthetic_skipped`` / ``eval_errors``) and are NOT in that total — see the comment at the return."""
     ns = body.namespace or "default"
     q = (
         select(AuditLogEntry)
         .where(AuditLogEntry.timestamp_utc >= since, AuditLogEntry.namespace == ns)
-        # real traffic only: red-team is synthetic efficacy, not live traffic the policy must not break.
-        .where(func.coalesce(AuditLogEntry.framework, "") != "redteam")
+        # real traffic only: red-team is synthetic efficacy, and policy-tester/e2e/probe identities are
+        # test harnesses — neither is live traffic the policy must not break. `audit_row_is_non_real` is
+        # the SQL twin of `is_synthetic_identity`, so the exclusion happens BEFORE the cap: a class-less
+        # replay whose most recent 500 namespace rows are all Policy-Tester sessions would otherwise fill
+        # the cap with rows the loop then skips and report that it replayed the namespace.
+        .where(~audit_row_is_non_real(AuditLogEntry))
         .order_by(AuditLogEntry.timestamp_utc.desc())
         .limit(_DRYRUN_REPLAY_CAP + 1)
     )
@@ -907,17 +1174,26 @@ async def _replay_recent(evaluator, session, body: PolicyCreate, since) -> dict:
 
     dry_key = f"dryrun:{ns}:{body.agent_class or '__all__'}"
     would_block = would_allow = would_escalate = newly_blocked = newly_allowed = 0
+    # `replayed` counts records the candidate rego was ACTUALLY evaluated against — never the fetched
+    # row count. A skipped row was not measured, and reporting it as measured is what turns "we replayed
+    # nothing" into the all-clear "No currently-allowed traffic would be newly blocked — safe to deploy."
+    replayed = synthetic_skipped = eval_errors = 0
     flip_samples: list[dict] = []
     for rec in rows:
-        # The docstring promises synthetic traffic is excluded, but the query only drops framework=redteam.
-        # Policy-tester / e2e / probe records are synthetic-but-not-redteam and would pollute the "would this
-        # break REAL traffic" answer — filter them with the ONE shared classifier (mitre/redteam/retention use it).
+        # Belt-and-braces behind the SQL predicate above: the same shared classifier, applied to the
+        # object, so a stubbed/legacy session that did not run the predicate still cannot leak a
+        # policy-tester / e2e / probe record into the "would this break REAL traffic" answer.
         if is_synthetic_identity(rec.agent_class, getattr(rec, "agent_id", None)):
+            synthetic_skipped += 1
             continue
         try:
-            dec = await evaluator._evaluate_opa(dry_key, ns, rec.agent_class, _opa_input_from_record(rec), body.rego_source)
+            dec = await evaluator._evaluate_opa(dry_key, ns, rec.agent_class, _opa_input_from_record(rec, evaluator), body.rego_source)
         except Exception:
-            continue  # a single bad record never sinks the whole simulation
+            # A single bad record never sinks the whole simulation — but it is not a record that came
+            # back clean either, so it is COUNTED and reported rather than averaged into the denominator.
+            eval_errors += 1
+            continue
+        replayed += 1
         now = str(dec.get("decision", "allow"))
         was = str(rec.decision or "allow")
         if now == "block":
@@ -936,9 +1212,21 @@ async def _replay_recent(evaluator, session, body: PolicyCreate, since) -> dict:
                 flip_samples.append({"tool_name": rec.tool_name, "was": was, "now": now, "rule_id": str(dec.get("rule_id", ""))})
         elif was == "block" and now == "allow":
             newly_allowed += 1
-    checked = len(rows)
+    # `total_records_checked` is the DENOMINATOR every downstream number is read against — the console's
+    # "Replayed N recent real calls", its `replayUnmeasured` guard (replayCount === 0) and the route's
+    # own recommendation. It is therefore the count of records actually evaluated, NOT len(rows): a
+    # fetched-but-skipped row is a record we did not measure, and pricing it into the denominator both
+    # manufactures an all-clear out of an empty replay and understates the real block rate.
+    checked = replayed
     return {
         "total_records_checked": checked,
+        # What was fetched vs what was replayed, so the gap is inspectable instead of implied.
+        "records_fetched": len(rows),
+        "synthetic_skipped": synthetic_skipped,
+        # Records the evaluator could not decide. A non-zero value means the simulation is PARTIAL —
+        # surfaced rather than silently absorbed, because "OPA failed on every record" and "the candidate
+        # blocks nothing" must not produce the same answer.
+        "eval_errors": eval_errors,
         "would_block": would_block,
         "would_allow": would_allow,
         "would_escalate": would_escalate,
@@ -996,14 +1284,31 @@ async def dry_run_policy(
     replay = await _replay_recent(evaluator, session, body, since)
     checked = replay["total_records_checked"]
     newly = replay["newly_blocked"]
+    errored = replay.get("eval_errors", 0)
     if checked == 0:
-        recommendation = "No recent real traffic for this scope — cannot simulate impact; deploy with care."
+        # Nothing was measured. Distinguish "there was nothing to replay" from "the evaluator could not
+        # answer for anything we DID have" — the second is an engine fault, and telling the operator
+        # "no recent real traffic" there would send them looking for the wrong thing.
+        recommendation = (
+            f"The evaluator failed on all {errored} recent call{'' if errored == 1 else 's'} — impact was NOT simulated; "
+            "do not read this as clean."
+            if errored
+            else "No recent real traffic for this scope — cannot simulate impact; deploy with care."
+        )
     elif newly == 0:
         recommendation = "No currently-allowed traffic would be newly blocked — safe to deploy."
     else:
         pct = round(newly / checked * 100, 1)
         recommendation = f"Would NEWLY block {newly} of {checked} recent calls ({pct}%) — review the flips before deploying."
-    log.info("nrvq.api.policy.dry_run", valid=valid, checked=checked, would_block=replay["would_block"],
+    # A PARTIAL replay is never allowed to end on a bare all-clear: the records the evaluator could not
+    # decide are exactly the ones whose flips are unknown, so the caveat rides on whatever verdict we give.
+    if errored and checked:
+        recommendation += (
+            f" Simulation is PARTIAL — the evaluator failed on {errored} further "
+            f"record{'' if errored == 1 else 's'}, whose impact is unknown."
+        )
+    log.info("nrvq.api.policy.dry_run", valid=valid, checked=checked, fetched=replay.get("records_fetched"),
+             synthetic_skipped=replay.get("synthetic_skipped"), eval_errors=errored, would_block=replay["would_block"],
              newly_blocked=newly, ns=body.namespace, cls=body.agent_class, code="NRVQ-API-7014")
     return {
         "valid": True,
@@ -1050,11 +1355,19 @@ async def apply_policy(
     # path wrote the evaluator's unread dict and never persisted the target — a 200 that didn't enforce). This
     # routes apply through the same read-path/cache-invalidation create() uses; idempotent for the same-namespace
     # UI flow (re-affirm, no version bump), and it now genuinely enforces cross-target too.
+    # `target_type` used to be accepted, echoed in the response and written to the audit log while the
+    # destination key was hard-coded to the SOURCE agent_class — so `--target-type workload` reported a
+    # successful apply and produced a class policy. A knob that is logged but not read is worse than an
+    # absent one: the audit trail then records an intent the system never carried out.
+    #
+    # The destination key must be one the engine actually looks up, so this mirrors `resolve_policy_key`
+    # exactly (see `_collect_candidates`: `<ns>:namespace:<ns>` and `<ns>:deployment:<workload>`).
+    target_key = resolve_apply_target_key(body, agent_class)
     result = await loader.apply_to_target(
         namespace,
         agent_class,
         body.target_namespace,
-        agent_class,
+        target_key,
         saved_by=str(user.get("sub") or ""),
         enforcement_mode=body.enforcement_mode or "block",
     )
@@ -1068,13 +1381,14 @@ async def apply_policy(
     # Echoing body.enforcement_mode here is a 200 that can lie — apply_to_target's same-rego branch only
     # persists the caller's mode when it actually differs from what's stored (see NRVQ-REG-5019). Re-read the
     # TARGET entry so the response always reflects what's actually in the DB/read-path, not what was requested.
-    persisted_entry = loader.get_entry(body.target_namespace, agent_class)
+    persisted_entry = loader.get_entry(body.target_namespace, target_key)
     persisted_mode = str((persisted_entry or {}).get("enforcement_mode") or body.enforcement_mode or "block")
     log.info(
         "nrvq.api.policy.applied",
         namespace=namespace,
         agent_class=agent_class,
         target_type=body.target_type,
+        target_key=target_key,  # the loader key actually written, not just the requested shape
         target_namespace=body.target_namespace,
         mode=persisted_mode,
         actor=user.get("sub"),

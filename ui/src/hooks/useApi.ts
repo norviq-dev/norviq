@@ -74,6 +74,20 @@ export function useApi<T>(loader: () => Promise<T>, deps: unknown[] = [], option
   // to re-apply it.
   const seqRef = useRef(0);
   const appliedRef = useRef(0);
+  // Has THIS deps cycle produced data yet? On error the catch below deliberately keeps the previous
+  // value — a brief flicker to empty is worse than showing the last good numbers a moment longer —
+  // but that means after a NAMESPACE SWITCH whose read fails, `data` is the PREVIOUS namespace's,
+  // and every consumer renders it under the new namespace's header as measured fact.
+  //
+  // Six separately-reported defects were all this one hook contract: the audit log printed one
+  // namespace's blocked call under another's name, Compliance kept the old ATLAS coverage, the
+  // Overview republished the old coverage %, and an intent proposed in namespace A stayed
+  // Save-enabled after switching to B. Each page was "fixed" by testing `data == null`, which is
+  // never true here — so the fix looked right and changed nothing.
+  //
+  // `stale` is the fact those pages actually needed: we are holding data, and it is NOT this deps
+  // cycle's. A consumer can then say so instead of asserting it.
+  const [freshForDeps, setFreshForDeps] = useState(false);
   const { cacheKey, staleTimeMs = 0, refetchIntervalMs, isEmpty, emptyRetries = 0, emptyRetryMs = 1000 } = options;
 
   useEffect(() => {
@@ -81,6 +95,7 @@ export function useApi<T>(loader: () => Promise<T>, deps: unknown[] = [], option
     let emptyAttempts = 0; // reset per deps cycle (e.g. a range change gets a fresh retry budget)
     let emptyRetryTimer: ReturnType<typeof setTimeout> | null = null;
     appliedRef.current = 0; // fresh apply-watermark per deps cycle, so this cycle's first response always binds
+    setFreshForDeps(false); // whatever we are holding belongs to the PREVIOUS cycle until this one lands
 
     const load = (force = false): Promise<void> => {
       const mySeq = ++seqRef.current;
@@ -93,6 +108,7 @@ export function useApi<T>(loader: () => Promise<T>, deps: unknown[] = [], option
           if (canApply()) {
             setData(cached.value as T);
             appliedRef.current = mySeq;
+            setFreshForDeps(true);
             setLoading(false);
           }
           return Promise.resolve();
@@ -107,6 +123,7 @@ export function useApi<T>(loader: () => Promise<T>, deps: unknown[] = [], option
           setData(value);
           setError(null);
           appliedRef.current = mySeq;
+          setFreshForDeps(true);
           // Never cache an empty value — that is what poisons the staleTime window and sticks the cards at 0.
           if (cacheKey && !empty) CACHE.set(cacheKey, { timestamp: Date.now(), value });
           // Warm-up: an empty response schedules a bounded retry so the real value binds quickly once it exists.
@@ -144,5 +161,9 @@ export function useApi<T>(loader: () => Promise<T>, deps: unknown[] = [], option
   }, deps);
 
   const refetch = useCallback(() => refetchRef.current(), []);
-  return { data, error, loading, setData, refetch };
+  // `stale` = we are holding data and it is NOT this deps cycle's. Read it wherever the deps carry a
+  // SCOPE (a namespace, a cluster, a time range): rendering held data as if it described the new
+  // scope is how a console reports one namespace's security posture under another's name.
+  const stale = data !== null && !freshForDeps;
+  return { data, error, loading, stale, setData, refetch };
 }

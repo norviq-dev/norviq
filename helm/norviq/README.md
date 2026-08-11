@@ -33,7 +33,7 @@ The chart installs into the namespace from `helm -n/--namespace` (standard Helm)
 without an explicit tenant list — supply `policyQuotaNamespaces`:
 
 ```bash
-helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.10 \
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.0 \
   -n norviq --create-namespace \
   --set-json 'policyQuotaNamespaces=["default"]'
 ```
@@ -41,7 +41,7 @@ helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.10 \
 Production HA + autoscaling profile:
 
 ```bash
-helm pull oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.10 --untar   # for values-prod.yaml
+helm pull oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.0 --untar   # for values-prod.yaml
 helm install norviq ./norviq -n norviq --create-namespace \
   -f ./norviq/values-prod.yaml \
   --set postgresql.password=<strong> --set redis.password=<strong> \
@@ -63,7 +63,7 @@ helm test norviq -n norviq
 Upgrade / uninstall:
 
 ```bash
-helm upgrade norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.1.10 -n norviq --reset-then-reuse-values
+helm upgrade norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.0 -n norviq --reset-then-reuse-values
 helm uninstall norviq -n norviq
 ```
 
@@ -100,7 +100,7 @@ Every value is documented inline in [`values.yaml`](values.yaml); the environmen
 | `config.noPolicyDecision` | `deny` | Decision when no policy is loaded. `deny` = fail-closed. |
 | `config.requireStrongSecret` | `true` | Refuse to boot on a weak/default JWT secret or admin password. |
 | `webhook.injection.enabled` | `false` | Turn on sidecar injection (auto-bootstraps TLS, no cert-manager needed). |
-| `webhook.injection.failurePolicy` | `Fail` | `Fail` = an agent pod cannot start un-guarded. |
+| `webhook.injection.failurePolicy` | `Fail` | `Fail` = a pod the webhook **routes** cannot start un-guarded. Under `gateOnlyAgentPods: true` (default) only pods labelled `norviq.io/agent-class` are routed. |
 | `{api,engine,webhook}.autoscaling.enabled` | `false` | HPA on CPU and/or memory; the Deployment then drops its static `replicas`. |
 | `ingress.enabled` | `false` | See "Expose the console". |
 | `images.registry` | `ghcr.io/norviq-dev/` | Override to mirror into your own registry/ACR/GAR. |

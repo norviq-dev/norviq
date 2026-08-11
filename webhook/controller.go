@@ -113,8 +113,16 @@ var finalizerMaxAge = 15 * time.Minute
 // build a patch, and the pod is DENIED — enabling injection stopped tenant workloads from starting.
 // It stayed hidden because the checked-in chart carries `-latest` tags, which this pattern accepted,
 // so every render-based test and every local install passed.
+// The `-dev` package is the project's own pre-release image host, and excluding it meant a release
+// candidate's sidecar could never be exercised on a cluster: NRVQ_SIDECAR_IMAGE was rejected, the
+// injector fell back to `norviq-engine:engine-latest` (NRVQ-WHK-4062), and every "we validated
+// injection on AKS" claim actually covered main's sidecar, not the candidate's. Observed live —
+// three agent pods running a build three weeks older than the one under test.
+//
+// Widened by exactly one alternative. The anchors and the tag/digest suffix are unchanged, so this
+// still refuses a third-party registry, a lookalike org, and a bare repository with no tag.
 var allowedSidecarImagePattern = regexp.MustCompile(
-	`^(norviq/norviq-engine|docker\.io/norviq/norviq-engine|ghcr\.io/norviq-dev/norviq-engine)` +
+	`^(norviq/norviq-engine|docker\.io/norviq/norviq-engine|ghcr\.io/norviq-dev/norviq-engine|ghcr\.io/norviq-dev/norviq-engine-dev)` +
 		`(?::[a-zA-Z0-9._-]+|@sha256:[0-9a-f]{64})$`)
 
 type policySyncRequest struct {
@@ -664,10 +672,15 @@ func (c *Controller) processClass(u *unstructured.Unstructured) {
 			policyCount++
 		}
 	}
+	// agentCount and averageTrustScore are NOT written. They were int64(0)/float64(0) literals on every
+	// reconcile, sitting behind the DEFAULT printer columns "Agents" and "Avg-Trust" — next to a real
+	// policyCount, which made the zeros look measured. `kubectl get nrvqclass` therefore told an operator
+	// that a class with dozens of live agents had none, and that its fleet trust was 0.0 on a 0..1 scale
+	// where 0.7 is the threshold. Same defect as the Blocks-24h column, same resolution: the controller
+	// cannot compute either number (it has no agent registry access and never queries the API), so it
+	// writes neither and the columns are gone. Real values: the Agent Monitor, GET /api/v1/agents.
 	status := map[string]interface{}{
-		"agentCount":        int64(0),
-		"averageTrustScore": float64(0),
-		"policyCount":       policyCount,
+		"policyCount": policyCount,
 	}
 	if err := c.updateStatusWithRetry(context.Background(), classGVR, "", u.GetName(), status); err != nil {
 		slog.Warn("NRVQ-WHK-4038: class status update failed", "class", u.GetName(), "error", err)
@@ -713,11 +726,13 @@ func (c *Controller) processConfig(u *unstructured.Unstructured) {
 	for _, item := range policies {
 		namespaceSet[item.GetNamespace()] = struct{}{}
 	}
+	// totalAgents omitted for the same reason as NrvqClass.agentCount: a hard-coded 0 next to a correct
+	// totalPolicies reads as measured. activeNamespaces and totalPolicies ARE counted from the live
+	// policy list above, so they stay.
 	status := map[string]interface{}{
 		"appliedAt":        time.Now().UTC().Format(time.RFC3339),
 		"activeNamespaces": int64(len(namespaceSet)),
 		"totalPolicies":    int64(len(policies)),
-		"totalAgents":      int64(0),
 	}
 	if err := c.updateStatusWithRetry(context.Background(), configGVR, "", u.GetName(), status); err != nil {
 		slog.Warn("NRVQ-WHK-4039: config status update failed", "config", u.GetName(), "error", err)
@@ -796,26 +811,62 @@ func (c *Controller) updatePolicyStatus(ctx context.Context, u *unstructured.Uns
 	if c.client == nil {
 		return
 	}
+	// matchingWorkloads and blockCount24h are NOT written. They used to be hard-coded to int64(0) on
+	// every status write, and the CRD advertised blockCount24h as a printer column called "Blocks-24h"
+	// — so `kubectl get nrvqpolicy` showed a confident 0 for a policy that was blocking all day, and an
+	// operator reading it concludes their policy has caught nothing. A fabricated metric on a security
+	// product is worse than an absent one.
+	//
+	// They are not computed here on purpose: nothing in the controller knows the count, there is no
+	// per-policy block-count endpoint to ask (audit/top-blocked aggregates by TOOL), and a status write
+	// happens on every reconcile — a rolling 24h figure fetched over the network on that path would be
+	// both expensive and stale between reconciles. Leaving the fields unset makes kubectl print
+	// "<none>", which is honest. The real numbers live in the console's audit view and GET
+	// /api/v1/audit/stats. The schema fields are retained (removing them from a published CRD would be
+	// a breaking change) and their descriptions now say they are unpopulated.
 	status := map[string]interface{}{
-		"phase":             phase,
-		"message":           message,
-		"lastApplied":       time.Now().UTC().Format(time.RFC3339),
-		"matchingWorkloads": int64(0),
-		"blockCount24h":     int64(0),
+		"phase":       phase,
+		"message":     message,
+		"lastApplied": time.Now().UTC().Format(time.RFC3339),
 	}
 	if err := c.updateStatusWithRetry(ctx, policyGVR, u.GetNamespace(), u.GetName(), status); err != nil {
 		slog.Warn("NRVQ-WHK-4040: policy status update failed", "policy", u.GetName(), "namespace", u.GetNamespace(), "error", err)
 	}
 }
 
+// reservedDeleteClasses mirrors _RESERVED_DELETE_CLASSES in norviq/api/routers/policies.py. The API
+// refuses a plain DELETE of these "managed" scopes with a 422.
+var reservedDeleteClasses = map[string]bool{
+	"__baseline__": true, "__pack__": true, "__pack_override__": true,
+	"__pack_weaken__": true, "__guardrail__": true,
+}
+
+// deletePathFor builds the API delete path, opting into confirm_managed for scopes the API treats as
+// operator-managed.
+//
+// A cluster-priority namespace baseline is re-keyed to <targetNs>:__baseline__ on the way IN
+// (namespaceBaselineKey) and that is a reserved scope on the way OUT — so deleting the CR had the API
+// answer 422 "managed scope and cannot be deleted", the controller treat it as a failed delete, and
+// forceFinalizeAfterTimeout eventually drop the finalizer anyway. The CR vanished from kubectl and the
+// baseline kept enforcing, permanently, with nothing left to delete. That is the failure NRVQ-WHK-4043
+// above calls the worst one, reached through a different door.
+//
+// confirm_managed is the API's supported revert for exactly this, and the controller is a legitimate
+// caller: the CR IS the source of truth for a CR-backed baseline, so removing the CR must remove the
+// policy. Sent only for reserved scopes; every other delete is byte-identical to before.
+func deletePathFor(namespace, class string) string {
+	base := fmt.Sprintf("/api/v1/policies/%s/%s", namespace, class)
+	if reservedDeleteClasses[class] {
+		return base + "?confirm_managed=true"
+	}
+	return base
+}
+
 func (c *Controller) reconcileDeletingPolicy(ctx context.Context, u *unstructured.Unstructured) {
 	name := u.GetName()
 	namespace := u.GetNamespace()
-	delNs, delClass := namespace, name
-	if bns, bclass, ok := namespaceBaselineKey(u); ok {
-		delNs, delClass = bns, bclass
-	}
-	deletePath := fmt.Sprintf("/api/v1/policies/%s/%s", delNs, delClass)
+	delNs, delClass := policyStorageKey(u, c.adminPolicyNamespace)
+	deletePath := deletePathFor(delNs, delClass)
 	if err := c.syncDelete(ctx, deletePath); err != nil {
 		if c.forceFinalizeAfterTimeout(ctx, u, err) {
 			return
@@ -891,8 +942,20 @@ func (c *Controller) handlePolicyDelete(obj interface{}) {
 	}
 	name := u.GetName()
 	namespace := u.GetNamespace()
-	if annotations := u.GetAnnotations(); annotations != nil && (annotations[deleteSyncedAnnotation] == "true" || annotations[deleteSyncedAnnotation] == "timeout-forced") {
+	// Skip ONLY when the API delete actually succeeded. "timeout-forced" is the opposite claim: it is
+	// stamped by forceFinalizeAfterTimeout when the API delete kept FAILING and we removed the finalizer
+	// anyway so the CR would not wedge. Treating the two the same threw away the last chance to remove
+	// the policy — so `kubectl delete` returned cleanly, `kubectl get` showed the policy gone, and it
+	// stayed loaded in the engine deciding every matching call, permanently and invisibly. Worst when
+	// the policy was deleted precisely BECAUSE it was wrong.
+	//
+	// This handler is the final delete event for the object, so a best-effort retry here costs one call
+	// and is the only remaining opportunity.
+	if annotations := u.GetAnnotations(); annotations != nil && annotations[deleteSyncedAnnotation] == "true" {
 		return
+	} else if annotations != nil && annotations[deleteSyncedAnnotation] == "timeout-forced" {
+		slog.Warn("NRVQ-WHK-4043: retrying API delete for a force-finalized policy — it is still loaded "+
+			"in the engine until this succeeds", "policy", name, "namespace", namespace)
 	}
 
 	select {
@@ -901,11 +964,8 @@ func (c *Controller) handlePolicyDelete(obj interface{}) {
 		go func() {
 			defer c.wg.Done()
 			defer func() { <-c.syncSemaphore }()
-			delNs, delClass := namespace, name
-			if bns, bclass, ok := namespaceBaselineKey(u); ok {
-				delNs, delClass = bns, bclass
-			}
-			deletePath := fmt.Sprintf("/api/v1/policies/%s/%s", delNs, delClass)
+			delNs, delClass := policyStorageKey(u, c.adminPolicyNamespace)
+			deletePath := deletePathFor(delNs, delClass)
 			if err := c.syncDelete(context.Background(), deletePath); err != nil {
 				slog.Error("NRVQ-WHK-4031: API delete failed", "policy", name, "error", err)
 				return
@@ -953,6 +1013,17 @@ func (c *Controller) buildPolicySyncPayload(u *unstructured.Unstructured) (polic
 	// engine's no-policy baseline fallback (evaluator._collect_candidates) resolves it; otherwise it
 	// lands under the admin namespace + policy-name key and is unreachable, leaving unseeded agent
 	// classes to deny-by-default once NRVQ_NO_POLICY_DECISION=deny is in effect.
+	// A SCOPED cross-namespace target (admin-namespace CR naming another namespace plus an agentClass
+	// or a workload) must be stored under the TARGET namespace, because that is the namespace the
+	// evaluator resolves candidates in. validateTarget admits this shape and its own error text
+	// advertises it, but the payload kept the CR's namespace — so the policy landed at
+	// <adminNs>:<class> while every call looked for <targetNs>:<class>. Ready, listed, inert.
+	// clusterPriority baselines are handled by namespaceBaselineKey just below and keep their own path.
+	if targetNs := crossNamespaceTargetNamespace(u, c.adminPolicyNamespace); targetNs != "" {
+		payload.Namespace = targetNs
+		slog.Info("NRVQ-WHK-4044: scoped cross-namespace policy keyed to target namespace",
+			"policy", name, "namespace", targetNs)
+	}
 	baselineNs, baselineClass, isNamespaceBaseline := namespaceBaselineKey(u)
 	if isNamespaceBaseline {
 		payload.Namespace = baselineNs
@@ -1005,6 +1076,84 @@ const baselineFallbackPriority = 1
 // or workload kind+name. Such a policy is that namespace's catch-all and must be stored at
 // <targetNs>:__baseline__ to match the engine's baseline fallback (evaluator._collect_candidates).
 // ok is false for every other policy shape, leaving its keying unchanged.
+// policyStorageKey returns the (namespace, loader key) a CR is actually STORED under, mirroring
+// resolve_policy_key in norviq/api/routers/policies.py.
+//
+// This exists because the delete path used metadata.name while the create path let the API resolve a
+// key from spec.target — and once targeted policies were fixed to key on their target, deleting the CR
+// issued DELETE /policies/<ns>/<metadata.name>, a row that does not exist. kubectl reported the CR
+// gone and the policy KEPT ENFORCING, with no way to remove it short of the API directly. Consistently
+// wrong was survivable; half-fixed was worse. Both sides must derive the key the same way, so they
+// derive it here.
+//
+// Precedence must match the Python exactly: agentClass, then workload kind+name, then target namespace,
+// then metadata.name as the untargeted fallback.
+func policyStorageKey(u *unstructured.Unstructured, adminPolicyNamespace string) (ns, class string) {
+	namespace := u.GetNamespace()
+	if bns, bclass, ok := namespaceBaselineKey(u); ok {
+		return bns, bclass
+	}
+	// Must mirror buildPolicySyncPayload's cross-namespace re-key, or create and delete disagree again —
+	// the same mismatch that let a deleted CR leave its policy enforcing.
+	if targetNs := crossNamespaceTargetNamespace(u, adminPolicyNamespace); targetNs != "" {
+		namespace = targetNs
+	}
+	spec, _, _ := unstructured.NestedMap(u.Object, "spec")
+	target, _ := spec["target"].(map[string]interface{})
+	if target != nil {
+		if agentClass, _ := target["agentClass"].(string); agentClass != "" {
+			return namespace, agentClass
+		}
+		kind, _ := target["kind"].(string)
+		wlName, _ := target["name"].(string)
+		if kind != "" && wlName != "" {
+			return namespace, fmt.Sprintf("%s:%s", strings.ToLower(strings.TrimSpace(kind)), strings.TrimSpace(wlName))
+		}
+		// The controller back-fills target.namespace with the CR's namespace when absent, so this
+		// branch is reached by any target that names neither a class nor a workload.
+		if targetNs, _ := target["namespace"].(string); targetNs != "" {
+			return namespace, fmt.Sprintf("namespace:%s", strings.TrimSpace(targetNs))
+		}
+	}
+	return namespace, u.GetName()
+}
+
+// crossNamespaceTargetNamespace returns the namespace a SCOPED cross-namespace policy must be stored
+// under, or "" when the CR is not that shape. Scoped means: authored in the admin namespace, naming a
+// different target namespace, AND narrowed by an agentClass or a workload kind+name — the two shapes
+// validateTarget admits without clusterPriority. A whole-namespace cluster baseline is NOT this: it
+// goes through namespaceBaselineKey, which also re-keys the agent class to __baseline__.
+func crossNamespaceTargetNamespace(u *unstructured.Unstructured, adminPolicyNamespace string) string {
+	if adminPolicyNamespace == "" {
+		adminPolicyNamespace = "norviq"
+	}
+	if u.GetNamespace() != adminPolicyNamespace {
+		return ""
+	}
+	spec, _, _ := unstructured.NestedMap(u.Object, "spec")
+	if spec == nil {
+		return ""
+	}
+	if _, hasClusterPriority := spec["clusterPriority"]; hasClusterPriority {
+		return "" // baseline path owns this
+	}
+	target, _ := spec["target"].(map[string]interface{})
+	if target == nil {
+		return ""
+	}
+	targetNs, _ := target["namespace"].(string)
+	if targetNs == "" || targetNs == u.GetNamespace() {
+		return ""
+	}
+	agentClass, _ := target["agentClass"].(string)
+	kind, _ := target["kind"].(string)
+	wlName, _ := target["name"].(string)
+	if agentClass != "" || (kind != "" && wlName != "") {
+		return targetNs
+	}
+	return ""
+}
+
 func namespaceBaselineKey(u *unstructured.Unstructured) (ns, class string, ok bool) {
 	spec, _, _ := unstructured.NestedMap(u.Object, "spec")
 	if spec == nil {
@@ -1066,9 +1215,65 @@ func validateRego(rego string) error {
 	if strings.Count(cleaned, "\n") > 500 {
 		return fmt.Errorf("policy exceeds 500 line limit")
 	}
+	// MUST match validate_rego_source's cap of 25 (norviq/api/routers/policies.py). This was 5, and a
+	// controller stricter than the API is a policy an operator can never apply through the CRD path at
+	// all: the shipped `strict.rego` preset alone uses 23-26 regex ops. Divergence in EITHER direction
+	// is a defect — laxer here means the CR clears admission and then dies at the API with a 422 that
+	// markDeterministicFailure records once and never retries, so it cannot self-heal.
 	reCount := countRegexBuiltins(module)
-	if reCount > 5 {
-		return fmt.Errorf("too many regex operations (%d) - max 5 per policy", reCount)
+	if reCount > 25 {
+		return fmt.Errorf("too many regex operations (%d) - max 25 per policy", reCount)
+	}
+	// The API rejects network/env-escaping builtins and cross-package `data.` reads; the controller did
+	// not check either, so those policies passed admission and then failed terminally at the API.
+	if err := rejectForbiddenRego(cleaned); err != nil {
+		return err
+	}
+	return nil
+}
+
+// forbiddenRegoTokens mirrors _FORBIDDEN_REGO_TOKENS in norviq/api/routers/policies.py. Keep the two
+// lists in step: a token here that is missing there (or vice versa) recreates the split-brain this
+// function exists to close.
+var forbiddenRegoTokens = []*regexp.Regexp{
+	regexp.MustCompile(`\bhttp\.send\b`),
+	regexp.MustCompile(`\bopa\.runtime\b`),
+	regexp.MustCompile(`\bnet\.[a-z_]+\b`),
+	regexp.MustCompile(`\bio\.[a-z_]+\b`),
+	regexp.MustCompile(`\brego\.parse_module\b`),
+	regexp.MustCompile(`\btrace\s*\(`), // only the call form; a rule named `trace` is legal rego
+	regexp.MustCompile(`\bdata\s*\.\s*norviq\s*\.\s*managed\b`),
+}
+
+var (
+	regoStringLiteral = regexp.MustCompile(`"(?:\\.|[^"\\])*"`)
+	regoPackageDecl   = regexp.MustCompile(`(?m)^\s*package\s+([A-Za-z0-9_.]+)`)
+	regoDataRef       = regexp.MustCompile(`\bdata\.([A-Za-z0-9_.]*)`)
+)
+
+// rejectForbiddenRego is the Go half of _reject_forbidden_rego. `cleaned` is comment-stripped; string
+// literals are removed here so a policy's own `reason` text may mention these words freely — only real
+// rego references are rejected.
+func rejectForbiddenRego(cleaned string) error {
+	dequoted := regoStringLiteral.ReplaceAllString(cleaned, `""`)
+	for _, pattern := range forbiddenRegoTokens {
+		if pattern.MatchString(dequoted) {
+			return fmt.Errorf("policy references a forbidden builtin/cross-package data (network/env access is not permitted)")
+		}
+	}
+	// A `data.` read outside the module's OWN package is the cross-tenant escape: OPA's shared managed
+	// server namespaces every pushed module under data.norviq.managed.<key>, so one namespace can read
+	// another's compiled policy.
+	ownPkg := ""
+	if m := regoPackageDecl.FindStringSubmatch(dequoted); m != nil {
+		ownPkg = m[1]
+	}
+	for _, m := range regoDataRef.FindAllStringSubmatch(dequoted, -1) {
+		ref := m[1]
+		if ownPkg != "" && (ref == ownPkg || strings.HasPrefix(ref, ownPkg+".")) {
+			continue
+		}
+		return fmt.Errorf("policy references a forbidden builtin/cross-package data (network/env access is not permitted)")
 	}
 	return nil
 }
@@ -1080,11 +1285,25 @@ func validateTarget(namespace, adminPolicyNamespace string, target map[string]in
 	if len(target) == 0 {
 		return fmt.Errorf("target must specify agentClass, namespace, or workload kind+name")
 	}
+	// Checked FIRST, before any branch that can return nil. The evaluator resolves exactly one workload
+	// key shape, `deployment:<name>` (_collect_candidates), but the CRD used to offer StatefulSet,
+	// DaemonSet and ReplicaSet: all three synced clean, went phase=Active and decided nothing, forever,
+	// with every surface reporting them healthy. Refusing with a reason beats admitting a silent no-op.
+	if kind, _ := target["kind"].(string); strings.TrimSpace(kind) != "" {
+		if !strings.EqualFold(strings.TrimSpace(kind), "Deployment") {
+			return fmt.Errorf("workload target kind %q is not enforceable: the engine resolves only "+
+				"Deployment workload policies (loader key deployment:<name>)", kind)
+		}
+	}
 	targetNs, ok := target["namespace"].(string)
 	if namespace == adminPolicyNamespace && targetNs != "" && targetNs != namespace {
 		if hasClusterPriority {
 			return nil
 		}
+		// These two shapes are SUPPORTED — the error text below advertises them — and they are keyed
+		// to the target namespace by crossNamespaceTargetNamespace() in buildPolicySyncPayload. Before
+		// that, payload.Namespace was the CR's OWN namespace while the evaluator looked the policy up
+		// under the TARGET namespace, so the CR reported phase=Active and decided nothing, forever.
 		if ac, ok := target["agentClass"].(string); ok && ac != "" {
 			return nil
 		}

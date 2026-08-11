@@ -38,6 +38,13 @@ async function selectNamespace(page: Page, ns: string) {
   await expect(page.locator("button.cluster-sel")).toContainText(ns, { timeout: 8000 });
 }
 
+// SERIAL. These tests mutate namespace-level state that the others read: the dry-run test flips
+// `default` into `apply_mode: dry_run_only`, which DISABLES every pack toggle. Run fully parallel
+// (playwright.config.ts), that lands in the middle of the enable/disable test and its toggle simply
+// stops responding — reported as "expected Disable, received Enable", which names the symptom and
+// not the cause. Serial is the honest fix: the shared resource is the namespace, not the test.
+test.describe.configure({ mode: "serial" });
+
 test.describe("Packs/Governance — real login", () => {
   test.beforeEach(async ({ page }) => {
     await realLogin(page);
@@ -45,7 +52,11 @@ test.describe("Packs/Governance — real login", () => {
     for (const scope of [NS, "all"]) for (const id of ["ecommerce", "erp-crm", "media-entertainment"]) {
       await apiRaw(page, `/api/v1/policy-packs/${id}/disable`, "POST", { namespace: scope });
     }
-    await apiRaw(page, `/api/v1/settings`, "PUT", { namespace: NS, apply_mode: "enforce" });
+    // `namespace` goes in the QUERY STRING, not the body: the settings model rejects it as
+    // `extra_forbidden`, so the body form 422'd and — because `apiRaw` does not assert on status —
+    // the namespace silently stayed in its previous mode. The dry-run test then waited for a banner
+    // that could never appear, and reported a missing element rather than a rejected write.
+    await apiRaw(page, `/api/v1/settings?namespace=${NS}`, "PUT", { apply_mode: "enforce" });
   });
 
   test("All-namespaces disables every mutation + prompts, and sends NO ?namespace=all write", async ({ page }) => {
@@ -81,13 +92,24 @@ test.describe("Packs/Governance — real login", () => {
 
     const toggle = page.getByTestId("pack-toggle-ecommerce");
     await expect(toggle).toBeEnabled();
+
+    // Enabling or disabling a pack now goes through a confirmation (`pack-confirm-modal` /
+    // `pack-confirm-apply` in PolicyPacks.tsx). That is a deliberate safety step — the action loads
+    // or removes ENFORCING rules for a whole namespace — and this spec predates it, so it was
+    // clicking the toggle and asserting a flip that could not happen until the modal was answered.
+    const flip = async () => {
+      await toggle.click();
+      await expect(page.getByTestId("pack-confirm-modal")).toBeVisible();
+      await page.getByTestId("pack-confirm-apply").click();
+    };
+
     for (let i = 0; i < 3; i++) {
       // Enable → card flips to Enabled (poll, no reload)
       await expect(toggle).toHaveText(/Enable/);
-      await toggle.click();
+      await flip();
       await expect(toggle).toHaveText(/Disable/, { timeout: 15000 });
       // Disable → flips back
-      await toggle.click();
+      await flip();
       await expect(toggle).toHaveText(/Enable/, { timeout: 15000 });
     }
     // every enable wrote the concrete namespace, never "all"
@@ -95,7 +117,7 @@ test.describe("Packs/Governance — real login", () => {
     for (const b of enableBodies) { expect(b).toContain(`"${NS}"`); expect(b).not.toContain('"all"'); }
 
     // leave it enabled, then the Target-Settings "packs applied" chip must reflect it (cross-page cache-bust)
-    await toggle.click();
+    await flip();
     await expect(toggle).toHaveText(/Disable/, { timeout: 15000 });
     await page.goto("/policies/targets");
     await selectNamespace(page, NS);
@@ -106,7 +128,7 @@ test.describe("Packs/Governance — real login", () => {
 
   test("a dry-run-only namespace surfaces the reason and disables pack applies", async ({ page }) => {
     await realLogin(page);
-    await apiRaw(page, `/api/v1/settings`, "PUT", { namespace: NS, apply_mode: "dry_run_only" });
+    await apiRaw(page, `/api/v1/settings?namespace=${NS}`, "PUT", { apply_mode: "dry_run_only" });
     try {
       await page.goto("/policies/packs");
       await expect(page.getByRole("heading", { name: "Policy Packs" })).toBeVisible({ timeout: 15000 });
@@ -114,7 +136,7 @@ test.describe("Packs/Governance — real login", () => {
       await expect(page.getByTestId("pack-dryrun-banner")).toContainText(/dry-run-only/i, { timeout: 15000 });
       await expect(page.getByTestId("pack-toggle-ecommerce")).toBeDisabled();
     } finally {
-      await apiRaw(page, `/api/v1/settings`, "PUT", { namespace: NS, apply_mode: "enforce" });
+      await apiRaw(page, `/api/v1/settings?namespace=${NS}`, "PUT", { apply_mode: "enforce" });
     }
   });
 });

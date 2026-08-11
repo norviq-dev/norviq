@@ -10,6 +10,7 @@ viewer privilege-escalation, unauthenticated /ws/audit).
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 
 import httpx
@@ -22,9 +23,18 @@ from norviq.config import settings
 
 
 def _viewer_headers() -> dict[str, str]:
+    """A VALID token carrying the viewer role.
+
+    Signed with the key the API under test actually uses, which is not necessarily this process's
+    `settings.api_secret_key`: against a cluster the API reads `NRVQ_API_SECRET_KEY` from a Secret, so
+    a token signed locally is rejected at the SIGNATURE with 401 and never reaches the authorization
+    check these tests are about. A 401 would pass an `!= 200` assertion while proving nothing — the
+    point here is specifically that a well-formed, authenticated viewer is refused with 403.
+    """
+    secret = os.environ.get("NRVQ_JWT_SECRET") or settings.api_secret_key
     token = jwt.encode(
         {"sub": "viewer", "role": "viewer", "namespace": "default", "exp": int(time.time()) + 3600},
-        settings.api_secret_key,
+        secret,
         algorithm="HS256",
     )
     return {"Authorization": f"Bearer {token}"}

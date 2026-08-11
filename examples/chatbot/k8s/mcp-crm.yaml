@@ -1,0 +1,134 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Norviq Contributors
+#
+# The "crm" MCP server: get_customer / get_order / update_ticket. Two reads and one benign write.
+# update_ticket is the one that makes the demo honest -- a policy that only ever distinguishes
+# "read" from "write" would block it, and it should not be blocked. The interesting boundary is
+# between a scoped write and an unbounded sink, not between reading and writing.
+#
+# Deployment + Service + NetworkPolicy live in ONE file per server on purpose -- see mcp-kb.yaml for
+# why a single shared NetworkPolicy fails open during partial teardown.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-crm
+  namespace: chatbot-prod
+  labels:
+    app: mcp-crm
+    app.kubernetes.io/part-of: norviq-examples
+    app.kubernetes.io/component: mcp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-crm
+  template:
+    metadata:
+      labels:
+        app: mcp-crm
+        app.kubernetes.io/part-of: norviq-examples
+        app.kubernetes.io/component: mcp-server
+    spec:
+      # This pod never calls the Kubernetes API. Mounting a ServiceAccount token anyway would hand a
+      # cluster credential to the process the demo deliberately points untrusted model output at.
+      automountServiceAccountToken: false
+      containers:
+        - name: mcp
+          # Placeholder tag -- substitute at apply time, do NOT commit a real tag here (see k8s/README.md).
+          # One image serves all three servers; --server selects the tool surface.
+          image: ghcr.io/norviq-dev/norviq-demo-mcp:REPLACE_ME
+          imagePullPolicy: IfNotPresent
+          # `args` APPENDS to the image's ENTRYPOINT and REPLACES CMD -- see mcp-kb.yaml for the
+          # crashloop this causes if the image ships its server selection in CMD with no ENTRYPOINT.
+          args: ["--server", "crm"]
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              cpu: 250m
+              memory: 192Mi
+          securityContext:
+            runAsNonRoot: true
+            # Numeric uid, set here rather than inherited from the image -- see mcp-kb.yaml.
+            runAsUser: 65534
+            runAsGroup: 65534
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+            # The "write" in update_ticket is simulated and lands in a process-local dict, so there
+            # is still nothing on disk to preserve. If this server ever gains real persistence, a
+            # read-only root fs plus an emptyDir is the wrong shape for it -- it would need a volume
+            # that survives a restart, and the demo's counter semantics would need rethinking too.
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-crm
+  namespace: chatbot-prod
+  labels:
+    app: mcp-crm
+    app.kubernetes.io/part-of: norviq-examples
+spec:
+  # Name is load-bearing: the chatbot pod's firewall sidecar dials
+  # mcp-crm.chatbot-prod.svc.cluster.local from a literal --upstream flag. See mcp-kb.yaml.
+  selector:
+    app: mcp-crm
+  ports:
+    - port: 8080
+      targetPort: http
+      name: http
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcp-crm-ingress
+  namespace: chatbot-prod
+  labels:
+    app: mcp-crm
+    app.kubernetes.io/part-of: norviq-examples
+spec:
+  # Only the chatbot pod may reach this server -- anything else has routed around Gate B.
+  #
+  # NOT ENFORCED ON THE CURRENT AKS CLUSTER (networkPolicy=none, measured 2026-08-08). The full
+  # measurement and the remediation are in mcp-kb.yaml and k8s/README.md. Applied for reviewability,
+  # not currently a control.
+  podSelector:
+    matchLabels:
+      app: mcp-crm
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: demo-chatbot
+      ports:
+        - protocol: TCP
+          port: 8080

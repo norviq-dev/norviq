@@ -56,7 +56,11 @@ test.describe("Catalog hierarchy + governance — real login", () => {
   test.beforeEach(async ({ page }) => {
     await realLogin(page);
     for (const id of ["ecommerce", "erp-crm"]) await apiRaw(page, `/api/v1/policy-packs/${id}/disable`, "POST", { namespace: NS });
-    await apiRaw(page, `/api/v1/settings`, "PUT", { namespace: NS, apply_mode: "enforce" });
+    // `namespace` goes in the QUERY STRING, not the body: the settings model rejects it as
+    // `extra_forbidden`, so the body form 422'd and — because `apiRaw` does not assert on status —
+    // the namespace silently stayed in its previous mode. The dry-run test then waited for a banner
+    // that could never appear, and reported a missing element rather than a rejected write.
+    await apiRaw(page, `/api/v1/settings?namespace=${NS}`, "PUT", { apply_mode: "enforce" });
   });
 
   test("rendered hierarchy === direct /policies/effective (scope, order, priority)", async ({ page }) => {
@@ -69,10 +73,12 @@ test.describe("Catalog hierarchy + governance — real login", () => {
     const apiStack = (api.layers as { scope: string; priority: number }[]).map((l) => ({ scope: l.scope, priority: String(l.priority) }));
     await expect.poll(async () => (await renderedStack(page)).length).toBe(apiStack.length);
     expect(await renderedStack(page)).toEqual(apiStack); // same scopes, same ORDER, same priorities
-    // every row carries the reserved static Mode = Enforce
+    // Every row carries the namespace's enforcement mode. `PolicyHierarchy.tsx:112` maps it to exactly
+    // two labels — "Monitor" when `enforcement_mode === "audit"`, otherwise "Block" — so "Enforce",
+    // which this asserted, is a label the component has never rendered.
     const modes = page.getByTestId("policy-hierarchy-mode");
     expect(await modes.count()).toBe(apiStack.length);
-    expect(await modes.first().innerText()).toMatch(/Enforce/);
+    expect(await modes.first().innerText()).toMatch(/Block|Monitor/);
   });
 
   test("Target Settings has no effective-policy table; the link opens the hierarchy (ns preserved)", async ({ page }) => {
@@ -94,16 +100,26 @@ test.describe("Catalog hierarchy + governance — real login", () => {
     const packPresent = () => page.getByTestId("policy-hierarchy-slot-pack").getAttribute("data-present");
     // baseline: no pack overlay
     await expect.poll(packPresent).toBe("0");
+    // Enabling a pack is a TWO-STEP action: the toggle only opens a confirm modal, and the write is
+    // behind `pack-confirm-apply` (PolicyPacks.tsx — `onClick={() => setConfirmPack(pack)}`). This spec
+    // clicked the toggle and then waited for the label to flip, which it never does on its own, so it
+    // burned the full timeout on a dialog nobody dismissed. The sibling `packs-governance-batch1.spec.ts`
+    // already drives it correctly; this is the same helper.
+    const flipPack = async () => {
+      await page.getByTestId("pack-toggle-ecommerce").click();
+      await expect(page.getByTestId("pack-confirm-modal")).toBeVisible({ timeout: 15000 });
+      await page.getByTestId("pack-confirm-apply").click();
+    };
     // enable a pack for this concrete namespace via the Packs page, then return to the hierarchy
-    await page.goto("/policies/packs");
-    await page.getByTestId("pack-toggle-ecommerce").click();
+    await page.goto("/policies/packs?ns=default");
+    await flipPack();
     await expect(page.getByTestId("pack-toggle-ecommerce")).toHaveText(/Disable/, { timeout: 15000 });
     await openHierarchy(page);
     await expect.poll(packPresent, { timeout: 15000 }).toBe("1"); // overlay layer now IN FORCE
     expect(await renderedStack(page)).toContainEqual(expect.objectContaining({ scope: expect.stringContaining("__pack__") }));
     // disable → the overlay disappears
-    await page.goto("/policies/packs");
-    await page.getByTestId("pack-toggle-ecommerce").click();
+    await page.goto("/policies/packs?ns=default");
+    await flipPack();
     await expect(page.getByTestId("pack-toggle-ecommerce")).toHaveText(/Enable/, { timeout: 15000 });
     await openHierarchy(page);
     await expect.poll(packPresent, { timeout: 15000 }).toBe("0");

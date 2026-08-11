@@ -36,6 +36,17 @@ spec:
               type: object
             spec:
               type: object
+              description: >-
+                ADVISORY except for sidecar.image. The controller reads exactly ONE field of this spec —
+                spec.sidecar.image, which sets the injected sidecar image — and nothing else, in any language.
+                global.enforcementMode, global.logLevel, every trust.* and rateLimit.* field, sidecar.port,
+                sidecar.resources and telemetry.* are validated, stored, and read by no code path.
+                global.enforcementMode in particular does NOT put the cluster in shadow mode: the engine-wide
+                default is the helm value config.enforcementMode (NRVQ_ENFORCEMENT_MODE), per-namespace posture is
+                PUT /api/v1/settings?namespace=<ns>, and per-policy trialling is NrvqPolicy.spec.enforcementMode
+                (the only one the evaluator reads). Three kubectl columns that printed these inert fields —
+                Mode, Trust-Threshold and Rate-Limit — were removed, because a column an operator reads as the
+                live enforcement posture must not be sourced from a field nothing enforces.
               properties:
                 global:
                   type: object
@@ -144,18 +155,11 @@ spec:
                   type: integer
                 totalAgents:
                   type: integer
+                  description: >-
+                    RESERVED, not populated. The controller does not compute this. It was previously written as a hard-coded zero on every reconcile and surfaced in a kubectl column, so it reported a number that could not be true. Real values come from the console and the REST API.
       subresources:
         status: {}
       additionalPrinterColumns:
-        - name: Mode
-          type: string
-          jsonPath: .spec.global.enforcementMode
-        - name: Trust-Threshold
-          type: number
-          jsonPath: .spec.trust.threshold
-        - name: Rate-Limit
-          type: integer
-          jsonPath: .spec.rateLimit.defaultMaxPerMinute
         - name: Namespaces
           type: integer
           jsonPath: .status.activeNamespaces

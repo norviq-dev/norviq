@@ -23,6 +23,16 @@ spec:
       app: norviq-webhook
   template:
     metadata:
+      {{- /* Operator-supplied pod annotations. Their real job is to make the pod template CHANGE when
+             something outside it changes — chiefly a rebuilt image under an unchanged tag, where
+             Kubernetes correctly sees an identical spec and never rolls. api and engine got this
+             first; ui and webhook were left out, so a UI rebuild loaded into the node and the pod
+             serving the console kept running the previous bundle. The console is the one component
+             a human LOOKS at, which made it the worst possible omission. */}}
+      {{- with $.Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       labels:
         app: norviq-webhook
         {{- include "norviq.componentLabels" (dict "root" $ "component" "webhook") | nindent 8 }}
@@ -103,10 +113,17 @@ spec:
             # local engine for air-gapped/edge (needs the datastore wiring below).
             - name: NRVQ_SIDECAR_MODE
               value: {{ .Values.webhook.injection.sidecarMode | default "proxy" | quote }}
+            - name: NRVQ_SIDECAR_SECRET_ENABLED
+              value: {{ .Values.webhook.injection.credentialSecret.enabled | quote }}
+            - name: NRVQ_SIDECAR_SECRET_REQUIRED
+              value: {{ .Values.webhook.injection.credentialSecret.required | quote }}
             # Outage posture stamped into every injected sidecar (see values.yaml for the full contract).
             # Only applies when the engine is genuinely unreachable; a 4xx always blocks.
+            # Must track config.py's sdk_fallback_mode — this value is stamped into every injected
+            # sidecar and silently wins over the Python default, so a divergence makes that default
+            # decorative on every real install.
             - name: NRVQ_SDK_FALLBACK_MODE
-              value: {{ .Values.webhook.injection.fallbackMode | default "block" | quote }}
+              value: {{ .Values.webhook.injection.fallbackMode | default "allow" | quote }}
             {{- if eq (.Values.webhook.injection.sidecarMode | default "proxy") "embedded" }}
             # Embedded sidecars run their own RedisCache + OPA(subprocess) + PolicyLoader, so the injector
             # must propagate the datastore wiring. The thin-proxy default needs none of this.
@@ -158,6 +175,25 @@ spec:
               value: {{ .Values.config.spiffeMode | default "mock" | quote }}
             - name: NRVQ_SPIFFE_SOCKET
               value: {{ .Values.config.spiffeSocket | default "/spiffe-workload-api/spire-agent.sock" | quote }}
+            {{- end }}
+            {{- if .Values.webhook.injection.mcp.enabled }}
+            # MCP action-firewall injection. Containers named by a pod's norviq.io/mcp-servers
+            # annotation have their command rewritten to run under the MCP proxy, which an init
+            # container copies out of mcp.proxyImage. Off by default: with it off the injector emits a
+            # byte-identical patch, so enabling it is the only thing that changes admission.
+            - name: NRVQ_MCP_INJECT
+              value: "true"
+            # Required, with no fallback. The engine image carries the norviq package, not the frozen
+            # relocatable payload, so defaulting to it produced pods whose init container could never
+            # succeed — a failure that surfaces at pod start rather than at install. Caught here instead.
+            - name: NRVQ_MCP_PROXY_IMAGE
+              value: {{ required "webhook.injection.mcp.proxyImage is required when webhook.injection.mcp.enabled=true — build it with scripts/mcp-proxy-payload.Dockerfile and verify it with scripts/mcp-proxy-payload-verify.sh" .Values.webhook.injection.mcp.proxyImage | quote }}
+            - name: NRVQ_MCP_PROXY_SOURCE_PATH
+              value: {{ .Values.webhook.injection.mcp.proxySourcePath | default "/opt/norviq/mcp-proxy" | quote }}
+            - name: NRVQ_MCP_PIN_STORE
+              value: {{ .Values.webhook.injection.mcp.pinStore | default "control-plane" | quote }}
+            - name: NRVQ_MCP_PIN_MODE
+              value: {{ .Values.webhook.injection.mcp.pinMode | default "tofu" | quote }}
             {{- end }}
             {{- if .Values.webhook.oidc.enabled }}
             # Mint the controller's API bearer via OIDC client-credentials (Keycloak); HS256 fallback kept.

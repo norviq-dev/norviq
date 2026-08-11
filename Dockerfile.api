@@ -42,6 +42,12 @@ RUN printf "%s\n" "${NRVQ_GIT_SHA}" > /app/.build_git_sha
 
 COPY norviq/ norviq/
 COPY policies/ policies/
+# The baseline compiler (norviq/api/baseline.py) reads the shipped presets to rebuild a namespace's
+# control set, so the API image needs them too — they were previously only in the webhook image.
+# Copied from their authoring location rather than duplicated under policies/: this repo already
+# maintains one preset in two places (comprehensive.rego vs strict.rego) and the drift guard for that
+# pair only runs under `opa test`, never in-cluster.
+COPY webhook/presets/ webhook/presets/
 
 # Pin a NUMERIC uid and reference it numerically in USER so kubelet can verify the
 # securityContext runAsNonRoot=true (a name-based `USER norviq` fails with "non-numeric user").
@@ -49,4 +55,21 @@ RUN useradd -r -u 999 -s /usr/sbin/nologin norviq
 USER 999
 
 EXPOSE 8080
-CMD ["python", "-m", "uvicorn", "norviq.api.main:app", "--host", "0.0.0.0", "--port", "8080"]
+# --workers. Without it uvicorn runs ONE event loop per pod, so a pod serves one request at a time no
+# matter how much CPU it is given — and /api/v1/evaluate sits in front of every agent tool call.
+#
+# Measured in-cluster before this change (2 replicas, benign search_kb, 60 calls per level): p50 rose
+# 66ms -> 131ms -> 291ms at concurrency 1/2/4, linearly, which is a queue in front of a single server
+# rather than expensive work. Past ~4 concurrent it crossed the engine's 2s budget and FAILED CLOSED:
+# of 64 identical benign calls at 16-way, 21 returned evaluator_error, 19 trust_frozen, 19
+# evaluator_fallback and only 5 were allowed. Ordinary traffic refused because the enforcement point
+# ran out of capacity, not because anything was wrong with it.
+#
+# `sh -c` because a JSON-form CMD does not expand environment variables, and the count has to be
+# tunable per deployment — the right number tracks the container's CPU limit, which the chart owns.
+# `exec` so uvicorn stays PID 1 and keeps receiving SIGTERM for graceful drain.
+#
+# ⚠ Each worker is a separate PROCESS with its own memory. Raising this without raising the memory
+# limit trades timeouts for OOMKills: measured at 214Mi against a 256Mi limit with ONE worker, i.e.
+# 84% full at idle. The chart's api memory limit was raised in the same change.
+CMD ["sh", "-c", "exec python -m uvicorn norviq.api.main:app --host 0.0.0.0 --port 8080 --workers ${NRVQ_API_WORKERS:-4}"]

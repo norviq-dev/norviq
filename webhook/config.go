@@ -69,8 +69,39 @@ type Config struct {
 	// (signed by CACertFile/CAKeyFile, mounted from secret norviq-internal-ca) so the sidecar does
 	// mTLS to https://norviq-api:8443. Default off -> current plaintext behavior, byte-identical.
 	InternalTLS bool
-	CACertFile  string
-	CAKeyFile   string
+	// SidecarSecretEnabled delivers the sidecar's credentials via a Secret + secretKeyRef instead of
+	// literal pod env (C2-019). On by default: a credential in a pod spec is readable by anyone with
+	// the built-in `view` role, which deliberately excludes Secrets. Falls back to literal env
+	// automatically if the webhook cannot write the Secret, so enabling it cannot stop scheduling.
+	SidecarSecretEnabled bool
+	// SidecarSecretRequired turns that fallback into a refusal. Off by default — this webhook runs
+	// failurePolicy: Fail, so failing admission stops ALL pod creation in injection-labelled
+	// namespaces, and that is a worse outcome than the exposure for most operators. On for those who
+	// would rather not schedule than ship a token in a pod spec.
+	SidecarSecretRequired bool
+	CACertFile            string
+	CAKeyFile             string
+	// MCP action-firewall injection. When McpInject is true, every container named by the pod's
+	// norviq.io/mcp-servers annotation has its command rewritten to run UNDER the MCP proxy
+	// (norviq/mcp/__main__.py), so Model Context Protocol traffic is governed with no change to the
+	// agent's code or image. Default OFF: with it off not a single byte of the emitted patch changes,
+	// so existing clusters upgrade into identical output.
+	McpInject bool
+	// Image the proxy payload is copied FROM by the injected init container. Empty -> the sidecar
+	// image, which already carries the norviq package. NRVQ_MCP_PROXY_IMAGE.
+	McpProxyImage string
+	// Directory holding the relocatable proxy payload inside McpProxyImage, with the executable
+	// `norviq-mcp` at its root (scripts/mcp-proxy-payload.Dockerfile builds exactly that). The init
+	// container copies the whole tree into the shared volume and the rewritten command execs it from
+	// there. A directory rather than a single file because the payload is a PyInstaller onedir tree —
+	// it carries its own interpreter and stdlib, which is what lets it run in an image that has no
+	// Python. NRVQ_MCP_PROXY_SOURCE_PATH.
+	McpProxySourcePath string
+	// Pin backend + mode handed to injected proxies. "control-plane" is the right posture in a
+	// cluster: pins are approvals, approvals belong with policy, and an emptyDir pin file would be
+	// lost on every restart (see norviq/mcp/pins.py). NRVQ_MCP_PIN_STORE / NRVQ_MCP_PIN_MODE.
+	McpPinStore string
+	McpPinMode  string
 }
 
 type RuntimeConfig struct {
@@ -94,28 +125,62 @@ func LoadConfig() Config {
 		// Unify the opt-in/out label key with the MutatingWebhookConfiguration namespaceSelector
 		// (norviq-injection). The namespace opts in (MWC selector); a pod opts OUT with
 		// norviq-injection=disabled. Default flipped from the legacy "norviq" key.
-		EnableLabel:          envStr("NRVQ_ENABLE_LABEL", "norviq-injection"),
-		EnableValue:          envStr("NRVQ_ENABLE_VALUE", "enabled"),
-		AgentClassLabel:      envStr("NRVQ_AGENT_CLASS_LABEL", "norviq.io/agent-class"),
-		AdminPolicyNamespace: envStr("NRVQ_ADMIN_POLICY_NAMESPACE", "norviq"),
-		LogLevel:             slog.LevelInfo,
-		Runtime:              runtime,
-		AllowPodOptOut:       envBool("NRVQ_ALLOW_POD_OPT_OUT", true),
-		SpiffeInject:         envBool("NRVQ_SPIFFE_INJECT", false),
-		SpiffeMode:           envStr("NRVQ_SPIFFE_MODE", "mock"),
-		SpiffeSocket:         envStr("NRVQ_SPIFFE_SOCKET", "/spiffe-workload-api/spire-agent.sock"),
-		SidecarMode:          envStr("NRVQ_SIDECAR_MODE", "proxy"),
-		FallbackMode:         envStr("NRVQ_SDK_FALLBACK_MODE", "block"),
-		ApiURL:               envStr("NRVQ_API_URL", "http://norviq-api:8080"),
-		ApiSecret:            envStr("NRVQ_API_SECRET_KEY", envStr("NRVQ_API_TOKEN", "")),
-		SidecarTokenTTLHours: envInt("NRVQ_SIDECAR_TOKEN_TTL_HOURS", 720),
-		RedisURL:             envStr("NRVQ_REDIS_URL", ""),
-		PgURL:                envStr("NRVQ_PG_URL", ""),
-		DBSSLMode:            envStr("NRVQ_DB_SSL_MODE", "require"),
-		OpaMode:              envStr("NRVQ_SIDECAR_OPA_MODE", "subprocess"),
-		InternalTLS:          envBool("NRVQ_INTERNAL_TLS", false),
-		CACertFile:           envStr("NRVQ_CA_CERT_FILE", ""),
-		CAKeyFile:            envStr("NRVQ_CA_KEY_FILE", ""),
+		EnableLabel:           envStr("NRVQ_ENABLE_LABEL", "norviq-injection"),
+		EnableValue:           envStr("NRVQ_ENABLE_VALUE", "enabled"),
+		AgentClassLabel:       envStr("NRVQ_AGENT_CLASS_LABEL", "norviq.io/agent-class"),
+		AdminPolicyNamespace:  envStr("NRVQ_ADMIN_POLICY_NAMESPACE", "norviq"),
+		LogLevel:              slog.LevelInfo,
+		Runtime:               runtime,
+		AllowPodOptOut:        envBool("NRVQ_ALLOW_POD_OPT_OUT", true),
+		SpiffeInject:          envBool("NRVQ_SPIFFE_INJECT", false),
+		SpiffeMode:            envStr("NRVQ_SPIFFE_MODE", "mock"),
+		SpiffeSocket:          envStr("NRVQ_SPIFFE_SOCKET", "/spiffe-workload-api/spire-agent.sock"),
+		SidecarMode:           envStr("NRVQ_SIDECAR_MODE", "proxy"),
+		FallbackMode:          envStr("NRVQ_SDK_FALLBACK_MODE", "block"),
+		ApiURL:                envStr("NRVQ_API_URL", "http://norviq-api:8080"),
+		ApiSecret:             envStr("NRVQ_API_SECRET_KEY", envStr("NRVQ_API_TOKEN", "")),
+		SidecarTokenTTLHours:  envInt("NRVQ_SIDECAR_TOKEN_TTL_HOURS", 720),
+		RedisURL:              envStr("NRVQ_REDIS_URL", ""),
+		PgURL:                 envStr("NRVQ_PG_URL", ""),
+		DBSSLMode:             envStr("NRVQ_DB_SSL_MODE", "require"),
+		OpaMode:               envStr("NRVQ_SIDECAR_OPA_MODE", "subprocess"),
+		InternalTLS:           envBool("NRVQ_INTERNAL_TLS", false),
+		SidecarSecretEnabled:  envBool("NRVQ_SIDECAR_SECRET_ENABLED", true),
+		SidecarSecretRequired: envBool("NRVQ_SIDECAR_SECRET_REQUIRED", false),
+		CACertFile:            envStr("NRVQ_CA_CERT_FILE", ""),
+		CAKeyFile:             envStr("NRVQ_CA_KEY_FILE", ""),
+		McpInject:             envBool("NRVQ_MCP_INJECT", false),
+		McpProxyImage:         envStr("NRVQ_MCP_PROXY_IMAGE", ""),
+		McpProxySourcePath:    envStr("NRVQ_MCP_PROXY_SOURCE_PATH", "/opt/norviq/mcp-proxy"),
+		McpPinStore:           envStr("NRVQ_MCP_PIN_STORE", "control-plane"),
+		McpPinMode:            envStr("NRVQ_MCP_PIN_MODE", "tofu"),
+	}
+	// VALIDATE THE CONFIGURED IMAGE HERE, where the misconfiguration is made — not at pod admission,
+	// where it presents as a cluster outage.
+	//
+	// `CreatePatch` refuses an image outside the allowlist, and admission fails CLOSED on that refusal.
+	// That is the correct posture for a security control, but nothing checked the image at startup, so
+	// a bad NRVQ_SIDECAR_IMAGE stayed silent until the first pod — and then EVERY pod in EVERY
+	// injection-enabled namespace was denied, with the reason only in the webhook's logs.
+	//
+	// Observed live on a cluster deployed from the dev image package: the allowlist permits
+	// `ghcr.io/norviq-dev/norviq-engine` but not `...-engine-dev`, so four namespaces silently
+	// stopped accepting workloads. The deploy that caused it had reported success.
+	//
+	// Falling back to the built-in default rather than exiting: refusing to start leaves the same
+	// cluster-wide denial in place (failurePolicy is Fail), so it converts a loud misconfiguration
+	// into the identical outage. Injecting the known-good default keeps workloads admitted and
+	// governed, and the log says exactly what was ignored and why.
+	if !isAllowedSidecarImage(cfg.SidecarImage) {
+		fallback := "ghcr.io/norviq-dev/norviq-engine:engine-latest"
+		// 4062, not 4034: 4034 already labels TWO different events (a cross-namespace policy rejection
+		// in controller.go and an enforcement-integrity denial in handler.go). That collision is
+		// pre-existing and makes both unsearchable; adding a third would be worse than leaving it.
+		slog.Error("NRVQ-WHK-4062: configured sidecar image is not on the injector allowlist — "+
+			"ignoring it and using the built-in default, because honouring it would deny every pod "+
+			"in every injection-enabled namespace",
+			"configured", cfg.SidecarImage, "using", fallback)
+		cfg.SidecarImage = fallback
 	}
 	runtime.SetSidecarImage(cfg.SidecarImage)
 	return cfg

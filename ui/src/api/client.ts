@@ -71,14 +71,69 @@ function handleUnauthorized(): void {
   }
 }
 
+/**
+ * A failed API call, carrying the things a caller needs to react rather than merely report.
+ *
+ * TWO DEFECTS THIS REPLACES, both of which the old plain `Error` made unavoidable.
+ *
+ * 1. THE STATUS WAS THROWN AWAY. `apiSend` discarded `response.status` entirely, so no caller could
+ *    branch on one. That is not a theoretical loss: `POST /mcp/pins/approve` returns **409** when the
+ *    server changed its definition again between the operator reading the pin and clicking approve —
+ *    the rug pull happening live, and the single most important thing that surface can tell anyone.
+ *    Unreachable, it degraded into an indistinguishable red toast.
+ *
+ * 2. THE MESSAGE WAS RAW JSON. `apiSend` threw `await response.text()`, so a FastAPI error reached the
+ *    operator as `{"detail":"no recorded traffic for class 'support-bot'; run it in monitor mode
+ *    first"}` — braces, quotes and all. The useful sentence was in there, wrapped in a wire format.
+ *
+ * `message` is the parsed `detail` so every existing `(err as Error).message` caller improves without
+ * being touched; `status` and `body` are additive.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  /** The raw response body, kept for diagnostics when the parsed detail is not enough. */
+  readonly body: string;
+
+  constructor(status: number, message: string, body: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.body = body;
+  }
+}
+
+/** Pull the human sentence out of a FastAPI error body, falling back sanely for anything else. */
+function detailOf(body: string, status: number): string {
+  const trimmed = body.trim();
+  if (!trimmed) return `Request failed: ${status}`;
+  try {
+    const parsed = JSON.parse(trimmed) as { detail?: unknown };
+    const detail = parsed?.detail;
+    if (typeof detail === "string" && detail.trim()) return detail;
+    // 422 bodies carry a LIST of validation errors; each has a `msg`. Joining them beats printing the
+    // array, which is how the raw form leaked to operators in the first place.
+    if (Array.isArray(detail)) {
+      const msgs = detail
+        .map((d) => (d && typeof d === "object" && typeof (d as { msg?: unknown }).msg === "string" ? (d as { msg: string }).msg : ""))
+        .filter(Boolean);
+      if (msgs.length) return msgs.join("; ");
+    }
+  } catch {
+    // Not JSON — a plain-text body (nginx, a proxy) is already the sentence we want.
+  }
+  return trimmed;
+}
+
 export async function apiGet<T>(path: string): Promise<T> {
   const response = await fetch(apiUrl(path), { headers: authHeaders() });
   if (response.status === 401) {
     handleUnauthorized();
-    throw new Error("Unauthorized");
+    throw new ApiError(401, "Unauthorized", "");
   }
   if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
+    // The body used to be dropped on the floor here, so a read failure could only ever say its number.
+    const body = await response.text().catch(() => "");
+    throw new ApiError(response.status, detailOf(body, response.status), body);
   }
   return (await response.json()) as T;
 }
@@ -101,11 +156,11 @@ export async function apiSend<T>(path: string, method: "POST" | "PUT" | "DELETE"
   });
   if (response.status === 401) {
     handleUnauthorized();
-    throw new Error("Unauthorized");
+    throw new ApiError(401, "Unauthorized", "");
   }
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || `Request failed: ${response.status}`);
+    const body = await response.text();
+    throw new ApiError(response.status, detailOf(body, response.status), body);
   }
   return (await response.json()) as T;
 }
@@ -126,7 +181,13 @@ export type SystemIssue = {
   affected_calls: number;
   namespaces: string[];
   last_seen: string | null;
-  window_minutes: number;
+  /** Null on a FOREWARNING band. Every other issue here is derived from decisions recorded in a
+   *  window; `sidecar_credential_expiring` reports something that has not happened yet and therefore
+   *  wrote no rows, so it has no window to state. */
+  window_minutes: number | null;
+  /** Present only on `sidecar_credential_expiring`: the workloads whose injected credential expires
+   *  soon. Nothing renews these in place, so the remedy is to roll the Deployment. */
+  expiring?: { namespace: string; workload: string; expires_at: number; days_left: number }[];
 };
 
 export type SystemHealth = {
@@ -170,6 +231,93 @@ export async function saveSettings(
 }
 
 // --- Sector policy packs ---
+/** How a baseline control behaves. `monitor` evaluates and records without interrupting the call. */
+export type BaselineEffect = "off" | "monitor" | "deny";
+
+export type BaselineControl = {
+  id: string;
+  title: string;
+  description: string;
+  /** Known false-positive mode, shown before an operator promotes the control to `deny`. Often "". */
+  caveat: string;
+  effect: BaselineEffect;
+  default_effect: BaselineEffect;
+};
+
+export type BaselineControls = {
+  namespace: string;
+  preset: string;
+  default_effect: BaselineEffect;
+  effects: BaselineEffect[];
+  counts: Record<BaselineEffect, number>;
+  controls: BaselineControl[];
+};
+
+/** Every baseline control with its current effect in a namespace. */
+export async function fetchBaselineControls(namespace?: string): Promise<BaselineControls> {
+  const params = new URLSearchParams();
+  if (namespace && namespace !== "all") params.set("namespace", namespace);
+  const query = params.toString();
+  return apiGet<BaselineControls>(query ? `/api/v1/baseline/controls?${query}` : "/api/v1/baseline/controls");
+}
+
+export type BaselineUpdateResult = {
+  namespace: string;
+  preset: string;
+  effects: Record<string, BaselineEffect>;
+  enforcing: string[];
+  disabled: string[];
+};
+
+/** Set baseline control effects for a namespace and re-materialize the baseline (admin-only). */
+export async function saveBaselineControls(
+  namespace: string,
+  effects: Record<string, BaselineEffect>,
+): Promise<BaselineUpdateResult> {
+  return apiSend<BaselineUpdateResult>("/api/v1/baseline/controls", "PUT", { namespace, effects });
+}
+
+export type ComplianceControl = {
+  control_id: string;
+  /** Whether this row is one of the 14 shipped controls or a rule from a policy the customer wrote.
+   *
+   *  Stated by the server rather than re-derived here. Only a shipped control has a Promote action
+   *  behind it, so a consumer that guesses wrong offers a button that cannot work — and the endpoint
+   *  now deliberately returns both populations, because a customer trialling their own policy in
+   *  monitor mode had no other way to see what it caught. Optional for now: a pre-`origin` API still
+   *  answers this endpoint, and `baseline.has(control_id)` below remains a correct fallback. */
+  origin?: "baseline" | "custom";
+  /** WOULD-block population: what promoting this control would newly break. */
+  count: number;
+  /** Violations it ALREADY refused. The two answer opposite questions — see compliance_view.py. */
+  enforced?: number;
+  agent_classes: { name: string; count: number }[];
+  tools: { name: string; count: number }[];
+  namespaces: string[];
+  first_seen: string | null;
+  last_seen: string | null;
+  samples: { tool_name: string; agent_class: string; at: string | null }[];
+};
+
+export type PolicyCompliance = {
+  namespace: string;
+  range: string;
+  /** Real-traffic calls examined. Zero non-compliant out of ZERO is "idle", out of 40,000 is
+   *  "compliant" — without this the console cannot tell those apart. */
+  scanned: number;
+  excluded_synthetic: number;
+  controls: ComplianceControl[];
+};
+
+/** Non-compliant traffic grouped by the control that flagged it. */
+export async function fetchPolicyCompliance(namespace?: string, range?: string): Promise<PolicyCompliance> {
+  const params = new URLSearchParams();
+  if (namespace && namespace !== "all") params.set("namespace", namespace);
+  if (range) params.set("range", range);
+  const query = params.toString();
+  return apiGet<PolicyCompliance>(query ? `/api/v1/policy-compliance?${query}` : "/api/v1/policy-compliance");
+}
+
 export type PolicyPack = {
   id: string;
   sector: string;
@@ -285,7 +433,6 @@ export async function revokeApiKey(id: string): Promise<ApiKey> {
   return apiSend<ApiKey>(`/api/v1/keys/${encodeURIComponent(id)}`, "DELETE");
 }
 
-export type RedteamAttack = { id: string; name: string; category: string; description?: string; expected_decision?: string };
 export type RedteamResult = {
   attack_id: string;
   attack_name: string;
@@ -296,8 +443,11 @@ export type RedteamResult = {
   actual: string;
   rule_id: string;
   passed: boolean;
-  // false = a sector-pack attack whose pack isn't enabled for this namespace — out of scope, NOT a real
-  // miss; excluded from proven-blocking and rendered as "pack not enabled" rather than a red "got through".
+  // false = a CONDITIONAL attack whose enforcing rule isn't loaded for this namespace — a sector pack,
+  // or the opt-in MCP integration guardrail. Out of scope, NOT a real miss: excluded from
+  // proven-blocking and rendered as "not enabled here" rather than a red "got through". Anything
+  // reading this must go through `gotThrough()` in RedTeam.tsx; a bare `!passed` disagrees with both
+  // the badge and the scorecard.
   applicable?: boolean;
   latency_ms?: number;
   error?: string;
@@ -312,11 +462,6 @@ export type RedteamReport = {
   pass_rate: number;
   results: RedteamResult[];
 };
-
-/** The red-team attack catalog. */
-export async function fetchRedteamCatalog(): Promise<RedteamAttack[]> {
-  return apiGet<RedteamAttack[]>("/api/v1/redteam/catalog");
-}
 
 /** The real agent classes seeded in a namespace, for the target selector. */
 export async function fetchRedteamTargets(namespace?: string): Promise<{ namespace: string; targets: string[] }> {
@@ -337,11 +482,31 @@ export async function runRedteamSuite(targetAgent?: string, targetNamespace?: st
 export type RedteamEfficacyBucket = { total: number; caught: number; got_through: number; proven_blocking_pct: number };
 export type RedteamTechRow = RedteamEfficacyBucket & { technique_id: string; technique_name: string };
 export type RedteamOwaspRow = RedteamEfficacyBucket & { control_id: string; control_name: string };
+export type RedteamVectorRow = RedteamEfficacyBucket & { vector_id: string; vector_title: string };
+/**
+ * What the run measured of the catalogued MCP/tool surface, and what it did not. `proxy_only` vectors
+ * are decided at Gate A or in the pin registry — before any policy is consulted — so this suite has
+ * nothing to score for them. They are not failures and must never render as such.
+ */
+export type RedteamVectorCoverage = {
+  catalogued: number;
+  evaluate_reachable: number;
+  proxy_only: number;
+  out_of_scope: number;
+  exercised: number;
+  unexercised_reachable: string[];
+};
 export type RedteamEfficacy = {
   overall: RedteamEfficacyBucket;
   by_technique: RedteamTechRow[];
   by_owasp: RedteamOwaspRow[];
+  // OPTIONAL, and that is not laziness: retention keeps the efficacy blob of older runs verbatim, so a
+  // run written before this dimension shipped has neither key and the page must still render.
+  by_vector?: RedteamVectorRow[];
+  vector_coverage?: RedteamVectorCoverage;
   non_enforcement: number;
+  // Returned by the API since sector packs landed; the type had drifted and never listed it.
+  sector_not_enabled?: number;
   excluded_synthetic: number;
 };
 export type RedteamRunResult = RedteamResult & {
@@ -349,6 +514,8 @@ export type RedteamRunResult = RedteamResult & {
   atlas_technique_name?: string;
   owasp_control?: string | null;
   owasp_control_name?: string | null;
+  mcp_vector?: string | null;
+  mcp_vector_title?: string | null;
 };
 export type RedteamLatest = {
   has_run: boolean;
@@ -414,10 +581,10 @@ export async function fetchReadiness(): Promise<Readiness> {
 export async function fetchAuditStats(
   range: string = "24h",
   namespace?: string
-): Promise<{ total?: number; blocked?: number; allowed?: number; block_rate_pct?: number; engine_errors?: number; avg_latency_ms?: number }> {
+): Promise<{ total?: number; blocked?: number; allowed?: number; block_rate_pct?: number; would_blocked?: number; would_block_rate_pct?: number; engine_errors?: number; avg_latency_ms?: number }> {
   const params = new URLSearchParams({ range });
   if (namespace && namespace !== "all") params.set("namespace", namespace);
-  return apiGet<{ total?: number; blocked?: number; allowed?: number; block_rate_pct?: number; engine_errors?: number; avg_latency_ms?: number }>(
+  return apiGet<{ total?: number; blocked?: number; allowed?: number; block_rate_pct?: number; would_blocked?: number; would_block_rate_pct?: number; engine_errors?: number; avg_latency_ms?: number }>(
     `/api/v1/audit/stats?${params.toString()}`
   );
 }
@@ -478,6 +645,45 @@ export async function fetchTopBlocked(range: string = "24h", namespace?: string)
   return apiGet<Array<{ tool_name: string; count: number }>>(`/api/v1/audit/top-blocked?${params.toString()}`);
 }
 
+/**
+ * One entry in the tool registry.
+ *
+ * `source` is not decoration — it is the reason this type exists. The builder previously inferred a
+ * "known tools" set by unioning observed names with capability SUBSTRINGS ("post", "http", "delete")
+ * and treating the union as an existence oracle, which made it suggest names that cannot exist and then
+ * suppress its own unknown-tool warning for exactly those names. Callers must keep the tiers apart:
+ * `mcp_declared` means a definition was read and approved (and `input_schema` may be present);
+ * `observed` means only that the name appeared in real traffic.
+ */
+export interface ToolRegistryEntry {
+  name: string;
+  /** Server-computed. Never recompute this in the browser — ui/src/lib/skeleton.ts ports neither the
+   *  cross-script confusables table nor Cf/Cc stripping, so a locally derived value disagrees with the
+   *  evaluator's `input.tool_name_normalized`. */
+  name_skeleton: string;
+  source: "mcp_declared" | "observed";
+  namespace: string;
+  server_id: string | null;
+  pin_status: string | null;
+  scan_severity: string | null;
+  /** Null when withheld — see `description_withheld`. */
+  description: string | null;
+  /** True when Gate A stripped or stubbed this description before the model saw it. The stored
+   *  definition keeps the PRE-sanitize text, so the server refuses to send it and the console must not
+   *  go looking for it elsewhere. */
+  description_withheld: boolean;
+  input_schema: Record<string, unknown> | null;
+  /** False when the stored definition was truncated, unparseable, or carried no schema. */
+  schema_available: boolean;
+  last_seen_at: string | null;
+}
+
+export async function fetchTools(namespace?: string, range: string = "30d"): Promise<ToolRegistryEntry[]> {
+  const params = new URLSearchParams({ range });
+  if (namespace && namespace !== "all") params.set("namespace", namespace);
+  return apiGet<ToolRegistryEntry[]>(`/api/v1/tools?${params.toString()}`);
+}
+
 export async function fetchVolume(
   range: string = "24h",
   namespace?: string
@@ -531,8 +737,6 @@ export type MitreCoverage = {
   last_exported?: string | null;
   techniques: MitreTechnique[];
 };
-export type MitreTrendPoint = { timestamp: string; enforced: number; coverage_pct: number; blocked: number };
-export type MitreTrend = { namespace: string; range: string; framework: string; points: MitreTrendPoint[] };
 
 // Compliance frameworks — both live, same real coverage machinery (atlas | owasp).
 export type ComplianceFramework = "atlas" | "owasp";
@@ -544,13 +748,6 @@ export async function fetchMitreCoverage(namespace?: string, range = "24h", fram
   if (namespace && namespace !== "all") params.set("namespace", namespace);
   params.set("range", range);
   return apiGet<MitreCoverage>(`/api/v1/compliance/${framework}/coverage?${params.toString()}`);
-}
-
-export async function fetchMitreTrend(namespace?: string, range = "30d", framework: ComplianceFramework = "atlas"): Promise<MitreTrend> {
-  const params = new URLSearchParams();
-  if (namespace && namespace !== "all") params.set("namespace", namespace);
-  params.set("range", range);
-  return apiGet<MitreTrend>(`/api/v1/compliance/${framework}/trend?${params.toString()}`);
 }
 
 // Evidence-pack export: returns the in-cluster download URL (json|pdf). The caller triggers the download via
@@ -658,13 +855,32 @@ export type AgentClassPolicy = {
   effective: boolean; // has actually blocked / would-block traffic (proven, not just loaded)
 };
 export type CoverageByCategory = {
-  namespace: string;
+  /** The scope this payload was actually computed for, echoed by the server — NOT the scope you asked for.
+   *  `null` is the all-namespaces aggregate (`read_namespace` returns None for an admin's "all"), and a
+   *  SCOPED tenant's "all" comes back as its own claim namespace, never "all". It was typed `string`, which
+   *  is why nothing ever compared it: a consumer that wants to know "is this answer about the namespace I am
+   *  labelling it with?" must read this field and must handle the null. */
+  namespace: string | null;
   coverage_pct: number; // over IN-SCOPE categories only — not diluted by un-enabled sector packs
   basis?: string; // "rules_present" — score is presence, not a protection guarantee
   available?: number; // sector categories NOT enabled for this namespace ("available to add")
   categories: CategoryCoverageItem[];
-  namespace_mode?: string; // "block" | "audit" (Monitor) — how the namespace actually enforces
+  /** "block" | "audit" (Monitor) — coverage.py `_namespace_mode`: the namespace's OWN persisted
+   *  enforcement_mode row, or "block" when it has none. This is the ENGINE's rule for whether traffic is
+   *  softened to would-blocks (`_resolve_posture`: "`monitor` is True ONLY when the namespace explicitly
+   *  overrides enforcement_mode to 'audit' — a null/global mode does NO softening"). It is therefore NOT
+   *  interchangeable with /settings' `enforcement_mode`, which merges in the CLUSTER-WIDE default: on a
+   *  cluster deployed global-audit, /settings says "audit" for a namespace that the engine really blocks.
+   *  Any claim about would-blocks must key on THIS field, not on the settings posture. */
+  namespace_mode?: string;
   agent_class_policies?: AgentClassPolicy[];
+  /** TRUE when a DB read behind the agent-class section faulted (coverage.py `_agent_class_policies`):
+   *  either the policy query failed — so `agent_class_policies` is `[]` because we could not LOOK, not
+   *  because the namespace is empty — or the 30d efficacy query failed, so every policy's
+   *  observed/blocked/would_block came back forced to 0 and `effective` forced to false.
+   *  The numbers in that section are UNREADABLE, not zero. Any surface rendering it MUST show an explicit
+   *  degraded state — never grey/zero bars, an empty list, or a "not proven" verdict — as fact. */
+  agent_class_policies_degraded?: boolean;
 };
 
 /** Policy coverage per risk category: score = mapped rules PRESENT in the loaded rego (not efficacy).
@@ -704,6 +920,51 @@ export async function fetchAgents(namespace?: string): Promise<Array<{ category?
   return apiGet<Array<{ category?: string }>>(query ? `/api/v1/agents?${query}` : "/api/v1/agents");
 }
 
+/** One agent class as the compliance view counts it. `synthetic` is the shared classifier's verdict —
+ *  red-team and probe identities are real rows but they are not a customer workload, so they must not
+ *  land in a compliance denominator. */
+export type CompliancePrincipal = {
+  agent_class?: string;
+  spiffe_id?: string;
+  synthetic?: boolean;
+  violation_count?: number;
+  last_seen?: string | null;
+};
+
+/** Agent classes with enough shape to be a compliance DENOMINATOR (`fetchAgents` is typed for the
+ *  Dashboard's narrower need). Same endpoint, no extra request. */
+export async function fetchCompliancePrincipals(namespace?: string): Promise<CompliancePrincipal[]> {
+  const params = new URLSearchParams();
+  if (namespace && namespace !== "all") params.set("namespace", namespace);
+  const query = params.toString();
+  return apiGet<CompliancePrincipal[]>(query ? `/api/v1/agents?${query}` : "/api/v1/agents");
+}
+
+export type PolicyListRow = {
+  namespace?: string;
+  agent_class?: string;
+  current_version?: number;
+  enforcement_mode?: string;
+  priority?: number;
+  policy_name?: string | null;
+};
+
+/** Every policy in a namespace, reserved scopes included — the caller decides what to hide. */
+export async function fetchPolicyList(namespace: string): Promise<PolicyListRow[]> {
+  return apiGet<PolicyListRow[]>(`/api/v1/policies?namespace=${encodeURIComponent(namespace)}`);
+}
+
+/** A policy's rego, used to attribute a compliance row to the policy that DEFINES that rule.
+ *  /policy-compliance is keyed by rule_id, not by policy, so this is the join. */
+export async function fetchPolicySource(
+  namespace: string,
+  agentClass: string
+): Promise<{ namespace?: string; agent_class?: string; rego_source?: string; version?: number }> {
+  return apiGet(
+    `/api/v1/policies/${encodeURIComponent(namespace)}/${encodeURIComponent(agentClass)}`
+  );
+}
+
 export type SearchAuditRecord = { tool_name?: string; decision?: string; timestamp?: string };
 export type SearchAgent = {
   spiffe_id?: string;
@@ -712,7 +973,13 @@ export type SearchAgent = {
   trust_score?: number;
   category?: string;
 };
-export type SearchPolicy = { namespace?: string; agent_class?: string; mode?: string };
+/** A ⌘K policy hit. `mode` is DELIBERATELY absent from /api/v1/search: `_search_policies` reads the
+ *  loader's in-memory entry, which carries only {rego, priority} — the real enforcement_mode would need a
+ *  DB read, and the endpoint refuses to fabricate one because a hardcoded value would mislabel every
+ *  policy with a different posture. So the field is optional AND nullable, and a null/absent value means
+ *  "unknown" — it must be rendered as unknown, never defaulted to a concrete posture like "audit"
+ *  (that read as "Monitor / not enforcing" for policies that were actively blocking). */
+export type SearchPolicy = { namespace?: string; agent_class?: string; mode?: string | null };
 
 async function apiGetWithSignal<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(apiUrl(path), { signal, headers: authHeaders() });
@@ -720,23 +987,8 @@ async function apiGetWithSignal<T>(path: string, signal?: AbortSignal): Promise<
   return (await response.json()) as T;
 }
 
-export async function fetchAuditRecordsByTool(
-  toolName: string,
-  limit: number = 5,
-  signal?: AbortSignal
-): Promise<SearchAuditRecord[]> {
-  return apiGetWithSignal<SearchAuditRecord[]>(
-    `/api/v1/audit/records?tool_name=${encodeURIComponent(toolName)}&limit=${limit}`,
-    signal
-  );
-}
-
 export async function fetchAllAgents(signal?: AbortSignal): Promise<SearchAgent[]> {
   return apiGetWithSignal<SearchAgent[]>("/api/v1/agents", signal);
-}
-
-export async function fetchPolicies(signal?: AbortSignal): Promise<SearchPolicy[]> {
-  return apiGetWithSignal<SearchPolicy[]>("/api/v1/policies", signal);
 }
 
 export type SearchResults = { tools: SearchAuditRecord[]; agents: SearchAgent[]; policies: SearchPolicy[] };
@@ -760,6 +1012,11 @@ export type DryRunReplay = {
   truncated?: boolean;
   scope?: { namespace?: string; agent_class?: string | null };
   recommendation?: string;
+  // The server (norviq/api/routers/policies.py dry_run_policy) also returns whether the submitted
+  // rego_source itself is valid, plus any compile/validation errors — surfaced by the Visual Policy
+  // Builder's dry-run gate (see BuilderSheet.tsx's `canSave`).
+  valid?: boolean;
+  errors?: string[];
 };
 
 export async function dryRunPolicy(data: {

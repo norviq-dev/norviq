@@ -202,8 +202,18 @@ class PolicyEngineClient:
             )
             mode = "block"
         log.warning("nrvq.sdk.fallback", event_id=event.event_id, mode=mode, code="NRVQ-SDK-1013")
+        # Carry a rule_id. This used to be left at its "" default, which made a fail-OPEN fallback
+        # indistinguishable from a policy that genuinely allowed the call — the audit trail recorded an
+        # allow with no rule, and nothing could count how many calls went unjudged during an outage.
+        # Since `sdk_fallback_mode` now defaults to "allow", that anonymity would be the difference
+        # between a documented trade-off and a silent governance hole: the whole argument for the
+        # default is that an operator can see, count and alert on exactly these calls.
+        #
+        # Emitted in BOTH modes on purpose. The block case is equally worth attributing — an operator
+        # staring at blocked agents needs to know the cause was an engine outage, not their policy.
         return PolicyDecision(
             decision=mode,
+            rule_id="engine_unavailable_fallback",
             reason=f"Engine unavailable, fallback={mode}",
             event_id=event.event_id,
         )

@@ -30,6 +30,10 @@ from semantic_kernel.functions import KernelArguments, kernel_function  # noqa: 
 
 from norviq.exceptions import NorviqBlockError  # noqa: E402 - after importorskip, by design
 from norviq.sdk.core.decisions import PolicyDecision  # noqa: E402 - after importorskip, by design
+from norviq.sdk.langchain.adapter import (  # noqa: E402 - after importorskip, by design
+    declared_tool_schemas,
+    forget_declared_tool_schemas,
+)
 from norviq.sdk.semantic_kernel.adapter import policy_filter  # noqa: E402 - after importorskip, by design
 
 
@@ -62,6 +66,20 @@ class _EchoPlugin:
         """Execute the real kernel function body and record the call."""
         self._executed.append(query)
         return f"echo:{query}"
+
+
+class _RefundPlugin:
+    """Real Semantic Kernel plugin whose function DECLARES two arguments."""
+
+    def __init__(self, executed: list[str]) -> None:
+        """Store the shared executed-call log."""
+        self._executed = executed
+
+    @kernel_function(name="issue_refund", description="Issue a refund (compat test function).")
+    def issue_refund(self, txn_id: str, amount: float) -> str:
+        """Execute the real kernel function body and record the call."""
+        self._executed.append(txn_id)
+        return f"refunded:{txn_id}"
 
 
 def _cause_chain(exc: BaseException) -> list[BaseException]:
@@ -114,3 +132,32 @@ async def test_blocked_tool_call_raises_and_never_executes_through_real_kernel()
     assert raised is not None, "kernel.invoke() should have raised on a blocked decision"
     assert any(isinstance(e, NorviqBlockError) for e in _cause_chain(raised))
     assert executed == []
+
+
+async def test_declared_schema_is_ingested_from_a_REAL_kernel_function() -> None:
+    """The declared-argument ingestion must be pinned against the REAL SK metadata shape.
+
+    This module's non-compat twin fakes the context, and a fake that agrees with the adapter while
+    disagreeing with the framework is exactly the drift that once masked a dead DLP path here. Real
+    SK hangs the declared parameters on `function.metadata.parameters`, each a
+    `KernelParameterMetadata` carrying `name` (and a per-parameter JSON Schema on `schema_data`).
+    """
+    executed: list[str] = []
+    kernel = Kernel()
+    kernel.add_plugin(_RefundPlugin(executed), plugin_name="billing")
+    kernel.add_filter("function_invocation", policy_filter(_FakeInterceptor(), session_id="compat-sk"))
+
+    forget_declared_tool_schemas()
+    try:
+        await kernel.invoke(
+            function_name="issue_refund",
+            plugin_name="billing",
+            arguments=KernelArguments(txn_id="TXN-8891", amount=25.0),
+        )
+        record = declared_tool_schemas()[("semantic-kernel", "issue_refund")]
+        assert record.schema_available is True
+        # The operator moment: `amount` is nameable from SK's own declaration.
+        assert record.param_keys == ("amount", "txn_id")
+        assert record.param_keys_truncated is False
+    finally:
+        forget_declared_tool_schemas()

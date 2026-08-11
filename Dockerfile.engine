@@ -13,6 +13,9 @@ WORKDIR /app
 COPY --from=builder /deps /usr/local/lib/python3.12/site-packages
 COPY norviq/ norviq/
 COPY policies/ policies/
+# Kept in step with Dockerfile.api: the engine imports the same norviq.api package tree, so the
+# baseline compiler must be able to find the presets here too rather than raising FileNotFoundError.
+COPY webhook/presets/ webhook/presets/
 
 # OPA arch matches the build target (TARGETARCH = amd64|arm64; AKS=amd64, local kind on Apple Silicon=arm64).
 ARG TARGETARCH=amd64

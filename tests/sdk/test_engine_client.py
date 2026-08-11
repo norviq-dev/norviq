@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import httpx
 
+from norviq.config import settings
 from norviq.sdk.client.engine import PolicyEngineClient
 from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
 
@@ -61,7 +62,12 @@ async def test_evaluate_timeout_returns_fallback() -> None:
 
     client = make_client(httpx.MockTransport(handler))
     decision = await client.evaluate(make_event())
-    assert decision.decision in ("audit", "block")
+    # These three tests are about "a fallback was returned", not about which verdict it carries.
+    # Identify it by its marker rather than its value: the verdict follows settings.sdk_fallback_mode
+    # (now "allow" by default), so hardcoding one here would re-pin the shipped default in three
+    # places that have nothing to do with it — which is exactly why they broke when it changed.
+    assert decision.rule_id == "engine_unavailable_fallback"
+    assert decision.decision == settings.sdk_fallback_mode
     assert "Engine unavailable" in decision.reason
     await client.close()
 
@@ -74,7 +80,12 @@ async def test_evaluate_http_500_returns_fallback() -> None:
 
     client = make_client(httpx.MockTransport(handler))
     decision = await client.evaluate(make_event())
-    assert decision.decision in ("audit", "block")
+    # These three tests are about "a fallback was returned", not about which verdict it carries.
+    # Identify it by its marker rather than its value: the verdict follows settings.sdk_fallback_mode
+    # (now "allow" by default), so hardcoding one here would re-pin the shipped default in three
+    # places that have nothing to do with it — which is exactly why they broke when it changed.
+    assert decision.rule_id == "engine_unavailable_fallback"
+    assert decision.decision == settings.sdk_fallback_mode
     assert "Engine unavailable" in decision.reason
     await client.close()
 
@@ -87,7 +98,12 @@ async def test_evaluate_connection_error_returns_fallback() -> None:
 
     client = make_client(httpx.MockTransport(handler))
     decision = await client.evaluate(make_event())
-    assert decision.decision in ("audit", "block")
+    # These three tests are about "a fallback was returned", not about which verdict it carries.
+    # Identify it by its marker rather than its value: the verdict follows settings.sdk_fallback_mode
+    # (now "allow" by default), so hardcoding one here would re-pin the shipped default in three
+    # places that have nothing to do with it — which is exactly why they broke when it changed.
+    assert decision.rule_id == "engine_unavailable_fallback"
+    assert decision.decision == settings.sdk_fallback_mode
     assert "Engine unavailable" in decision.reason
     await client.close()
 

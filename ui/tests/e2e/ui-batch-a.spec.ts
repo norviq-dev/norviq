@@ -5,23 +5,10 @@
 //      hue is reserved for real block decisions. The RedTeam scorecard secondary metrics render as a
 //      grouped, evenly-spaced cluster (no overlap/clip) at desktop AND narrow widths, values from results/latest.
 
-import { test, expect, waitForApp } from "./fixtures";
-import { type Page } from "@playwright/test";
+import { test, expect, waitForApp, suiteSettled } from "./fixtures";
 
 const BLOCK_RED = "rgb(255, 59, 92)";
 
-async function postSuite(page: Page, query: string): Promise<any> {
-  for (let i = 0; i < 20; i++) {
-    const r = await page.evaluate(async (q) => {
-      const t = localStorage.getItem("nrvq_token");
-      const res = await fetch(`/api/v1/redteam/suite?${q}`, { method: "POST", headers: t ? { Authorization: `Bearer ${t}` } : {} });
-      return res.json();
-    }, query);
-    if (!(r?.detail?.error || /already running/i.test(JSON.stringify(r?.detail ?? "")))) return r;
-    await page.waitForTimeout(1500);
-  }
-  throw new Error("suite stayed busy");
-}
 
 test.describe("Overview Policy Coverage caption is neutral, not block-red", () => {
   test("the coverage caption color ∉ block-red; a real block decision badge stays red", async ({ page }) => {
@@ -50,7 +37,7 @@ test.describe("RedTeam scorecard metrics are a spaced grouped cluster (desktop +
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/redteam");
     await waitForApp(page);
-    const run = await postSuite(page, "target_agent=customer-support&target_namespace=default");
+    const run = await suiteSettled(page, "target_agent=customer-support&target_namespace=default");
     await page.goto("/redteam");
     await waitForApp(page);
     await expect(page.getByTestId("redteam-scorecard")).toBeVisible({ timeout: 30000 });

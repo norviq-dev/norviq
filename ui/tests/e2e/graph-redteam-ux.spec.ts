@@ -128,7 +128,14 @@ test("the ranked path list drops below the KPI/severity divider (top offset pres
   expect(listBox).not.toBeNull();
   // The list top sits at or below the KPI strip's bottom (no overlap with the divider).
   expect(listBox!.y).toBeGreaterThanOrEqual(stripBox!.y + stripBox!.height - 2);
-  // The top offset is present in the served bundle (computed padding-top ≥ the nudge).
-  const padTop = await list.evaluate((el) => parseFloat(getComputedStyle(el).paddingTop || "0"));
-  expect(padTop).toBeGreaterThanOrEqual(10);
+  // The GAP is what the test title claims, so measure the gap. This asserted `padding-top >= 10` on
+  // the ranked-list CARD, which is padding-free by design (`overflow: hidden` plus full-bleed row
+  // separators — padding there would inset the dividers). The offset lives on the grandparent flex
+  // row, so the locator was one level off and the assertion could only ever fail.
+  //
+  // Measuring the geometry instead of one element's computed padding is also strictly stronger than
+  // the check above it: line 130 tolerates a flush layout (`>= bottom - 2`), this requires real
+  // clearance. Threshold 8 against an actual 14px gap leaves room for a legitimate density change
+  // without going slack.
+  expect(listBox!.y - (stripBox!.y + stripBox!.height)).toBeGreaterThanOrEqual(8);
 });

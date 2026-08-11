@@ -3,6 +3,8 @@
 
 """Framework-agnostic tool-call interceptor."""
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from time import perf_counter
 from typing import Any, Protocol
 
@@ -17,6 +19,14 @@ from norviq.sdk.core.recorder import record_decision
 
 log = structlog.get_logger()
 
+# `framework` -> the `mode` label on the caller-observed interception-latency metric. A table rather
+# than a conditional so a new enforcement surface adds a row instead of editing the hot path, and so
+# every surface keeps its OWN latency series: folding MCP into "sdk" would have silently mixed a
+# proxy-mediated call into the in-process adapter's numbers and made the no-regression comparison on
+# the existing series unreadable. Anything unlisted still maps to "sdk", so the existing two labels
+# are byte-for-byte what they were.
+_MODE_BY_FRAMEWORK = {"sidecar": "sidecar", "mcp": "mcp"}
+
 
 class SupportsEvaluate(Protocol):
     """Structural type for anything ToolInterceptor can delegate evaluation to.
@@ -29,6 +39,38 @@ class SupportsEvaluate(Protocol):
     async def evaluate(self, event: ToolCallEvent) -> PolicyDecision:
         """Evaluate a tool call event and return a policy decision."""
         ...
+
+
+# In-process tool-call nesting depth. This is AUTHORITATIVE where it applies — the SDK adapters wrap
+# tool EXECUTION, so a tool invoked from inside another tool is measurably deeper, and nothing the agent
+# says can under-report it. It is the counterpart to the caller-reported depth the sidecar PEPs forward
+# (norviq/sidecar/proxy.py _coerce_depth), which is all a cross-process proxy can know.
+#
+# Before this, every adapter called intercept_or_raise with keyword args and none passed call_depth, so
+# the parameter's 0 default won on every path. `chain_depth_limit` — shipped ENABLED in the default
+# comprehensive policy and the strict preset, exercised by the Policy Tester, reported PASSED by the
+# red-team suite — could not fire on a single real call, and ChainDepthSignal (10% of the trust weight)
+# scored all production traffic at depth 0.
+_CALL_DEPTH: ContextVar[int] = ContextVar("nrvq_call_depth", default=0)
+
+
+def current_call_depth() -> int:
+    """The nesting depth of the tool call currently executing in this context."""
+    return _CALL_DEPTH.get()
+
+
+@contextmanager
+def depth_scope():
+    """Mark the execution of one tool call, so anything it invokes reports one level deeper.
+
+    Adapters that wrap tool execution should hold this for the duration of the tool body. Uses a
+    ContextVar token so concurrent agent tasks each carry their own depth rather than sharing a counter.
+    """
+    token = _CALL_DEPTH.set(_CALL_DEPTH.get() + 1)
+    try:
+        yield
+    finally:
+        _CALL_DEPTH.reset(token)
 
 
 class ToolInterceptor:
@@ -47,13 +89,25 @@ class ToolInterceptor:
         framework: str = "",
         call_depth: int = 0,
         identity: AgentIdentity | None = None,
+        mcp: dict[str, Any] | None = None,
     ) -> PolicyDecision:
-        """Evaluate a tool call and return policy decision."""
+        """Evaluate a tool call and return policy decision.
+
+        ``mcp`` carries protocol context for calls that arrived over MCP (server id, transport, pin
+        status, Gate-A scan severity). Keyword-only in practice and defaulted to None, so every
+        existing caller — the sidecar, all six framework adapters, the red-team runner — is
+        unchanged and still produces an event with an empty ``mcp``.
+        """
         # What the CALLER waits for one decision — the number a deployed agent actually feels, and the one
         # the published performance table cannot show: it reads the engine's own latency_ms, which excludes
         # everything outside the engine (identity resolve, the round trip to reach it, response handling).
         # In proxy mode that excluded part is the cross-pod hop, i.e. the term that dominates the tail.
         _t0 = perf_counter()
+        # A caller that states a depth wins (the sidecar forwards what its client reported, and the
+        # red-team runner sets it explicitly). Otherwise fall back to the ambient in-process depth,
+        # which is what makes nested SDK tool calls report honestly without every adapter threading it.
+        if not call_depth:
+            call_depth = current_call_depth()
         resolved = identity or await self._resolver.resolve()
         event = ToolCallEvent(
             tool_name=tool_name,
@@ -62,6 +116,7 @@ class ToolInterceptor:
             session_id=session_id,
             framework=framework,
             call_depth=call_depth,
+            mcp=mcp or {},
         )
         decision = await self._evaluator.evaluate(event)
         # Record every evaluated call on the active capture scope (if any). This is what lets a host
@@ -72,7 +127,7 @@ class ToolInterceptor:
         # `framework` already distinguishes the injected sidecar from an in-process SDK adapter, so it
         # doubles as the mode label rather than inventing a second signal that could disagree with it.
         record_interception_latency(
-            "sidecar" if framework == "sidecar" else "sdk", "total", (perf_counter() - _t0) * 1000.0
+            _MODE_BY_FRAMEWORK.get(framework, "sdk"), "total", (perf_counter() - _t0) * 1000.0
         )
         log.info("nrvq.intercept.result", tool=tool_name, decision=decision.decision, code="NRVQ-SDK-1020")
         return decision
@@ -85,9 +140,12 @@ class ToolInterceptor:
         framework: str = "",
         call_depth: int = 0,
         identity: AgentIdentity | None = None,
+        mcp: dict[str, Any] | None = None,
     ) -> PolicyDecision:
         """Evaluate call and raise on blocked or escalated outcomes."""
-        decision = await self.intercept(tool_name, tool_params, session_id, framework, call_depth, identity)
+        decision = await self.intercept(
+            tool_name, tool_params, session_id, framework, call_depth, identity, mcp
+        )
         if decision.is_blocked():
             log.warning("nrvq.intercept.blocked", tool=tool_name, rule=decision.rule_id, code="NRVQ-SDK-1021")
             raise NorviqBlockError(decision)

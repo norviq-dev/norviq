@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from norviq.api.auth import get_current_user, require_admin
 from norviq.api.db.session import get_session
+from norviq.api.graph_maintenance import remove_graph_node
 from norviq.api.synthetic import is_synthetic_identity
 from norviq.api.schemas.graphs import (
     AssetEdge,
@@ -335,7 +336,17 @@ def _attach_source_capability(nodes: list[AssetNode], edges: list[AssetEdge]) ->
             continue
         hist = e.properties.get("decision_history") or {}
         touched = int(hist.get("allow", 0)) + int(hist.get("block", 0)) + int(hist.get("escalate", 0))
-        guarded = int(hist.get("block", 0)) + int(hist.get("escalate", 0)) > 0
+        # would_block counts as GUARDED. In a Monitor-mode namespace the engine softens a policy's
+        # block/escalate to `audit` with a would-block rule marker, so `block` stays 0 for a rule that
+        # is catching traffic every day. Reading only block+escalate meant the source-capability panel
+        # could never report `defended` on such a namespace: it told the operator either "this grant is
+        # unused — revoke delete on PostgreSQL (least privilege)" for a verb their policy stopped 412
+        # times, or "undefended: observed in traffic, no policy has ever acted on it — author a rule.
+        # This is the live gap" for a rule that is already catching it. The count is fetched a few
+        # lines above and was simply not read here.
+        guarded = (
+            int(hist.get("block", 0)) + int(hist.get("escalate", 0)) + int(hist.get("would_block", 0))
+        ) > 0
         slot = tool_traffic.setdefault(e.target, {"touched": False, "guarded": False})
         slot["touched"] = slot["touched"] or touched > 0
         slot["guarded"] = slot["guarded"] or guarded
@@ -414,19 +425,13 @@ async def remove_asset_graph_node(
     policies, or decisions are touched)."""
     require_admin(user)
     evaluator = getattr(request.app.state, "evaluator", None)
-    store = getattr(request.app.state, "graph_store", None)
     if evaluator is None:
         raise HTTPException(status_code=503, detail="Graph engine is unavailable")
-    # Work on the evaluator's live builder so in-memory state and the snapshot can't diverge; restore
-    # the persisted snapshot first when this process hasn't touched the namespace yet.
-    restore = getattr(evaluator, "_restore_graph", None)
-    if restore is not None:
-        await restore(namespace)
-    graph = evaluator.get_graph(namespace)
-    if not graph.remove_node(node_id):
+    # Shared with DELETE /agents/{spiffe_id} (see norviq/api/graph_maintenance.py) so deregistering an
+    # agent and pruning a node cannot drift into two different notions of "removed from the graph".
+    if not await remove_graph_node(request, namespace, node_id):
         raise HTTPException(status_code=404, detail=f"node '{node_id}' not found in namespace '{namespace}'")
-    if store is not None:
-        await store.save(namespace, graph)
+    graph = evaluator.get_graph(namespace)
     log.info("nrvq.api.graph.node_removed", namespace=namespace, node_id=node_id,
              by=str(user.get("sub") or ""), code="NRVQ-API-7112")
     return {"removed": True, "namespace": namespace, "node_id": node_id,

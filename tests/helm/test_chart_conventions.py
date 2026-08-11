@@ -68,6 +68,39 @@ def test_schema_accepts_every_shipped_profile() -> None:
         assert res.returncode == 0, f"{profile}: {res.stderr[:400]}"
 
 
+# A shipped profile must produce an API that can actually BOOT. The schema test above cannot see this:
+# _run injects `--set api.secretKey=xxxx...` and a --set always beats a -f values file, so the profile's
+# own key is masked on every render. values-dev.yaml shipped `dev-secret-key` — 14 chars — against
+# config.requireStrongSecret=true (default), so norviq/api/main.py's startup gate raised and the API
+# CrashLooped for anyone who used the profile. Render each profile with NO secret override and assert
+# the rendered key clears that same gate.
+@pytest.mark.parametrize("profile", ["values-dev.yaml", "values-light.yaml", "values-prod.yaml"])
+def test_shipped_profile_secret_clears_the_api_startup_gate(profile: str) -> None:
+    res = subprocess.run(
+        ["helm", "template", "norviq", str(_CHART),
+         "--set-json", 'policyQuotaNamespaces=["default"]',
+         "--set", "postgresql.password=x", "--set", "redis.password=x",
+         "-f", str(_CHART / profile)],
+        capture_output=True, text=True,
+    )
+    assert res.returncode == 0, f"{profile}: {res.stderr[:400]}"
+
+    import base64
+    secret = None
+    for doc in yaml.safe_load_all(res.stdout):
+        if not doc or doc.get("kind") != "Secret":
+            continue
+        blob = dict(doc.get("stringData") or {})
+        blob.update({k: base64.b64decode(v).decode() for k, v in (doc.get("data") or {}).items()})
+        if "NRVQ_API_SECRET_KEY" in blob:
+            secret = blob["NRVQ_API_SECRET_KEY"]
+    assert secret is not None, f"{profile}: no NRVQ_API_SECRET_KEY rendered"
+
+    # Mirrors norviq/api/main.py's own condition; keep the two in step.
+    assert secret != "change-me-in-production", f"{profile}: ships the sentinel -> API refuses to start"
+    assert len(secret) >= 16, f"{profile}: secret is {len(secret)} chars, gate needs >=16 -> CrashLoop"
+
+
 # ---- namespace honors -n -------------------------------------------------------------------------
 
 def test_namespace_follows_release_namespace() -> None:

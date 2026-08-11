@@ -11,9 +11,12 @@ from typing import Any
 import pytest
 import structlog.testing
 
+from pydantic import BaseModel
+
 from norviq.exceptions import NorviqBlockError
 from norviq.sdk.autogen.adapter import protect
 from norviq.sdk.core.decisions import PolicyDecision
+from norviq.sdk.langchain.adapter import declared_tool_schemas, forget_declared_tool_schemas
 
 
 class _FakeBaseTool:
@@ -130,3 +133,104 @@ async def test_protect_opaque_args_become_str_payload(fake_base_tool: type[_Fake
     protected = protect([tool], interceptor)  # type: ignore[arg-type]
     await protected[0].run(42, cancellation_token=None)
     assert interceptor.calls == [("lookup", {"args": "42"}, "autogen")]
+
+
+# ── the DECLARED argument schema is ingested at wrap time ───────────────────────────────────────
+#
+# autogen-core's `BaseTool` publishes an OpenAI-style tool schema on `.schema`
+# (`{"name": ..., "parameters": {"type": "object", "properties": {...}}}`) and the pydantic args
+# model on `args_type()`. The adapter read `.name` and threw both away, so a rule authored for
+# `issue_refund` could only ever name the tool.
+
+
+@pytest.fixture(autouse=True)
+def _isolate_declared_schemas() -> Any:
+    """The declared-schema registry is process-global; no test may inherit another's entries."""
+    forget_declared_tool_schemas()
+    yield
+    forget_declared_tool_schemas()
+
+
+class _SchemaTool(_FakeBaseTool):
+    """Mirrors autogen-core's real `.schema` shape (verified against autogen-core 0.7)."""
+
+    def __init__(self) -> None:
+        super().__init__("issue_refund")
+        self.schema = {
+            "name": "issue_refund",
+            "description": "issues a refund",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "txn_id": {"description": "txn_id", "title": "Txn Id", "type": "string"},
+                    "amount": {"description": "amount", "title": "Amount", "type": "number"},
+                },
+                "required": ["txn_id", "amount"],
+                "additionalProperties": False,
+            },
+            "strict": False,
+        }
+
+
+class _ArgsTypeTool(_FakeBaseTool):
+    """A tool that exposes only the pydantic args model, via autogen's `args_type()`."""
+
+    class _Args(BaseModel):
+        matter_id: str
+        q: str
+
+    def __init__(self) -> None:
+        super().__init__("search_matter")
+
+    def args_type(self) -> type[BaseModel]:
+        return self._Args
+
+
+async def test_protect_ingests_the_openai_style_tool_schema(fake_base_tool: type[_FakeBaseTool]) -> None:
+    """The `amount` argument is knowable from the framework's own declaration, before any traffic."""
+    protect([_SchemaTool()], _FakeInterceptor(), session_id="sess-1")  # type: ignore[arg-type]
+    record = declared_tool_schemas()[("autogen", "issue_refund")]
+    assert record.schema_available is True
+    assert record.param_keys == ("amount", "txn_id")
+    assert record.param_keys_truncated is False
+
+
+async def test_protect_falls_back_to_the_declared_args_model(fake_base_tool: type[_FakeBaseTool]) -> None:
+    """`args_type()` is the other statement of the same fact — the legal operator's `matter_id`/`q`."""
+    protect([_ArgsTypeTool()], _FakeInterceptor(), session_id="sess-2")  # type: ignore[arg-type]
+    record = declared_tool_schemas()[("autogen", "search_matter")]
+    assert record.schema_available is True
+    assert record.param_keys == ("matter_id", "q")
+
+
+async def test_an_autogen_tool_with_no_schema_is_recorded_as_UNKNOWN_not_as_empty(
+    fake_base_tool: type[_FakeBaseTool],
+) -> None:
+    """`_FakeBaseTool` publishes neither — unknown, which must not read as "takes no arguments"."""
+    protect([_FakeBaseTool("lookup")], _FakeInterceptor(), session_id="sess-3")  # type: ignore[arg-type]
+    record = declared_tool_schemas()[("autogen", "lookup")]
+    assert record.schema_available is False
+    assert record.param_keys is None
+    assert record.unavailable_reason
+
+
+async def test_an_autogen_schema_that_explodes_does_not_break_wrapping_or_enforcement(
+    fake_base_tool: type[_FakeBaseTool],
+) -> None:
+    """Enforcement is the product; schema ingestion is never allowed to cost it."""
+
+    class _Hostile(_FakeBaseTool):
+        @property
+        def schema(self) -> Any:
+            raise RuntimeError("schema access exploded")
+
+        def args_type(self) -> Any:
+            raise RuntimeError("args_type exploded")
+
+    interceptor = _FakeInterceptor()
+    protected = protect([_Hostile("hostile_tool")], interceptor, session_id="sess-4")  # type: ignore[arg-type]
+    assert await protected[0].run({"key": "value"}, cancellation_token=None) == "ran:hostile_tool"
+    assert interceptor.calls == [("hostile_tool", {"key": "value"}, "autogen")]
+    record = declared_tool_schemas()[("autogen", "hostile_tool")]
+    assert record.schema_available is False
+    assert record.param_keys is None

