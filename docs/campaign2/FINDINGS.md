@@ -1033,3 +1033,43 @@ Notably clean: `update_profile{bio: "I manage the delete-old-logs cron"}` and
 `post_message{text: "we should drop table service at the restaurant"}` — destructive verbs in PROSE,
 which the name-keyed arm correctly ignores and the SQL arm correctly declines for lack of syntax
 context.
+
+## C2-025 — a preset upgrade does not reach a namespace that already has materialised controls
+
+**Severity: high (silent stale enforcement).** Found by accident, which is the point: I deployed the
+C2-024 fix to AKS, re-ran the probe, and `delete records` **still evaded** — on an image that
+provably contained the fix.
+
+`baseline_router._materialize` compiles the preset and writes the result to the namespace's
+`(namespace, '__controls__')` policy. The engine loads **that stored module**, never the preset file.
+So shipping a corrected `strict.rego` changes nothing for any namespace whose controls were already
+materialised — the customer upgrades, the release notes say the evasion is closed, and their cluster
+keeps enforcing the OLD compiled rego indefinitely.
+
+Proven live on `analytics`, same build, same call, seconds apart:
+
+| | before re-materialise | after `PUT /baseline/controls` |
+|---|---|---|
+| `delete records` (space) | `allow / default_allow` | **`audit / strict_default_block`** |
+| `delete_records` | audit / …strict_default_block | audit / …strict_default_block |
+| `dеlete_records` (Cyrillic) | audit / …strict_default_block | audit / …strict_default_block |
+| `get_customer` | allow / default_allow | allow / default_allow (no over-block) |
+
+The only thing that changed was recompiling. Nothing about the images, the pods or the effects map —
+the PUT sent `{"effects": {}}`, i.e. keep every control exactly where it is.
+
+**Why this is worse than it looks.** Every control-content fix this campaign produced — C2-012,
+C2-022, C2-023, C2-024 — lands in the preset. All of them are therefore invisible to existing
+namespaces until something re-materialises. An operator has no reason to suspect it: the console
+reads the effects map (which is current) rather than the compiled module (which is stale), so the UI
+says "14 controls, monitor" and means it, while the rego doing the work predates the upgrade.
+
+**Fix shape** (not attempted here): stamp the compiled module with the preset's content hash, and
+re-materialise on API start when the shipped preset no longer matches what is stored. The compiler is
+already deterministic, so a hash is enough to decide. Until then the operational workaround is a
+no-op `PUT /baseline/controls` per namespace after any upgrade that touches a preset.
+
+**Immediate consequence for the campaign record:** every live "verified" result for a preset-carried
+control is only valid for a namespace materialised AFTER that deploy. The C2-012 and C2-022
+verifications earlier today are sound — those namespaces were re-materialised during that session's
+control work — but this is exactly the trap that made C2-024 read as unfixed.
