@@ -6,7 +6,6 @@ how this campaign has been fooled before.
 """
 import json
 import subprocess
-import sys
 import urllib.request
 
 TOKEN = open("/tmp/nrvq-signin-token.txt").read().strip()
