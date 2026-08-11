@@ -3,7 +3,7 @@
 **Purpose:** a new session should be able to resume from this file alone. Keep it current — update
 the "Work queue" and "Session log" sections every time something lands. Do not let it go stale.
 
-Last updated: 2026-08-10 — Tiers 1, 2, 2b, 3 DONE **and VERIFIED LIVE on AKS**.
+Last updated: 2026-08-10 — Tiers 1/2/2b/3 DONE and VERIFIED LIVE. Round 2 run; C2-024 found and fixed (NOT yet live).
 Remaining: C2-013, C2-016, Tier 4 triage, the three deliverables, and resuming the attack campaign.
 
 ---
@@ -361,6 +361,18 @@ Append one line per landed change. Newest last.
   engine had been publishing all along.
 - 2026-08-10 — **BUILT, DEPLOYED AND VERIFIED LIVE.** api/engine/webhook at `50ebb70e`, helm rev 36
   `deployed`. All four fixes confirmed on the cluster (table above). Local kind stopped.
-  **NEXT: the attack campaign can now RESUME on a clean instrument — that was the whole point of the
-  Tier 2 pause. Then C2-013 (the headline design finding, still unfixed), C2-016, the Tier 4 triage,
-  and the three missing deliverables.**
+- 2026-08-10 `42229d3` — **ROUND 2 run against the deployed fixes, to break them.** 19 of 22
+  spellings of `delete_records` caught; `delete records` (SPACE) evaded -> **C2-024, fixed** by
+  widening `name_split_map`. Two others evade by design and are recorded not fixed: `d3lete_records`
+  (skeleton folds letters, not digits) and `remove_records` (`remove` not in the verb list).
+  Collateral clean 9/10 — the one flag is BUG-005, still open.
+  Reusable probes now live in `scripts/campaign2_round2.py` and `scripts/campaign2_verify_live.py`.
+
+  > **C2-024 IS NOT LIVE.** The presets ship inside the api/engine images, so it needs the next
+  > build+deploy. Everything else in the queue below is code-only until then.
+
+  **NEXT: C2-013 — the headline design finding, and now the clear priority.** Round 2's real lesson is
+  that C2-012/C2-022/C2-024 are ENUMERATION, not generalisation: each fixed the evasions in front of
+  it and the next round found one more separator. Keying on a semantic fact instead of the spelling of
+  a caller-supplied string is the only thing that ends that loop. Then C2-016, the Tier 4 triage, and
+  the three missing deliverables.
