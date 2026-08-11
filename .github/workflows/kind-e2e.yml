@@ -119,9 +119,18 @@ jobs:
           for ns in norviq agents analytics; do
             kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f -
           done
+          # policyQuotaNamespaces is REQUIRED here, and the chart is right to refuse without it:
+          # baselineClusterPolicy.enabled defaults true and renders ONE guard per namespace in this
+          # list, so an empty list would install a cluster with NO baseline at all while NOTES.txt
+          # claims one is present. values-light.yaml does not set it, so the install died on that
+          # guard ("baselineClusterPolicy.enabled=true but policyQuotaNamespaces is EMPTY").
+          #
+          # These are the tenant namespaces created immediately above — and they must exist BEFORE
+          # install, which is why the creation loop precedes this step rather than following it.
           helm install norviq helm/norviq \
             -n norviq \
             -f helm/norviq/values-light.yaml \
+            --set policyQuotaNamespaces='{agents,analytics}' \
             --set images.api.pullPolicy=IfNotPresent \
             --set images.ui.pullPolicy=IfNotPresent \
             --set images.engine.pullPolicy=IfNotPresent \
