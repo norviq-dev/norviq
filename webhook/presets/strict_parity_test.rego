@@ -315,3 +315,34 @@ test_absent_tool_name_normalized_falls_back_to_the_raw_name {
         "tool_name": "delete_records", "tool_params": {"t": "all"},
     })
 }
+
+# ---------------------------------------------------------------------------------------------
+# C2-024 — a SPACE in the tool name evaded the destructive-verb arm.
+#
+# Found by round 2 of the campaign, attacking the C2-022/C2-012 fixes rather than confirming them.
+# 19 of 22 spellings of `delete_records` were caught — hyphen, dot, camelCase, PascalCase, uppercase,
+# verb-last, bare verb, Cyrillic x1 and x3, U+217E, fullwidth, zero-width, soft hyphen, combining
+# acute — but `delete records` with a space was allowed, because the split map covered -, ., :, /
+# and camelCase and not whitespace. Same root-cause family as C2-012/C2-022, which is the point: the
+# earlier fixes improved coverage without fully generalising.
+
+test_a_space_separated_destructive_name_is_blocked {
+    strict.decision == "block" with input as _norm({
+        "tool_name": "delete records", "tool_params": {"t": "all"},
+    })
+}
+
+test_other_separators_are_covered_too {
+    every name in ["delete,records", "delete+records", "delete|records"] {
+        strict.decision == "block" with input as _norm({
+            "tool_name": name, "tool_params": {"t": "all"},
+        })
+    }
+}
+
+# Widening the split must not start flagging legitimate names. `deleted` is not `delete`.
+test_widening_the_split_does_not_over_block {
+    strict.decision == "allow" with input as _norm({
+        "tool_name": "report_deleted_items", "tool_params": {"range": "30d"},
+    })
+}

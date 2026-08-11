@@ -977,3 +977,59 @@ while the other three could not.
 This is also the second time this campaign that out-of-band cluster state has bitten: the same three
 Deployments were running images helm had no record of. Worth a rule: **deploy through helm or through
 kubectl, not both.**
+
+# Round 2 — attacking the fixes rather than confirming them
+
+Run on AKS at `50ebb70e`, immediately after the four fixes were deployed and verified. The purpose was
+to BREAK them. Rounds 1..n kept re-discovering one root cause (name-keyed matching); four fixes had
+just landed on it, so a round surfacing something genuinely different would be evidence they were the
+right fixes, and a round surfacing a fifth instance of the same cause would be evidence they were not.
+
+**It surfaced a fifth instance.** That is worth being plain about.
+
+## The score
+
+**19 of 22 spellings of `delete_records` were caught** — hyphen, dot, camelCase, PascalCase,
+uppercase, verb-last, bare verb, Cyrillic-е x1 and x3, Roman-numeral U+217E, fullwidth, zero-width
+space, soft hyphen, combining acute, plus `purge_`, `wipe_`, `erase-`, `truncate.`.
+
+Three got through:
+
+| spelling | verdict |
+|---|---|
+| `delete records` (SPACE) | **C2-024 — a real evasion, fixed below** |
+| `d3lete_records` (leetspeak) | known limitation — `skeleton()` folds confusable LETTERS, not digit substitutions. Not a regression; recorded, not fixed. |
+| `remove_records` | by design — `remove` is not in the destructive verb list. A coverage decision, not a defect. |
+
+## C2-024 — a space in the tool name evaded the destructive-verb arm
+
+`name_split_map` split on `-`, `.`, `:`, `/` and camelCase, but not whitespace, so `delete records`
+stayed ONE token and matched no verb.
+
+Tool names are server-DECLARED strings — an MCP server chooses them — so "nobody would name a tool
+with a space" is not a control, it is an assumption about an attacker. The same reasoning that made
+C2-012 (homoglyph) real makes this real.
+
+**Fixed** in both presets by adding space, tab, `,`, `+`, `|` and backslash to the split map.
+Widening the split can only ADD tokens and therefore only ADD matches, so it cannot open a new allow;
+the collateral risk is over-blocking, and `report_deleted_items` still tokenises to `deleted`, which
+is not `delete` — pinned by its own test. Three tests; verified two FAIL without the fix.
+
+**What this says about the earlier fixes.** C2-012 and C2-022 were correct but were *enumerating*
+rather than generalising: each fixed the specific evasions in front of it. The right long-term shape
+is the one C2-013 already argues for — key on a semantic fact, not on the spelling of a
+caller-supplied string. Until then this control will keep yielding one more separator.
+
+## Collateral — clean, with one known exception
+
+Ten benign calls; nine clean. The one flag was
+`get_order{delivery_date: "2026-08-10"}` -> `pii_detection`, which is **BUG-005**, the still-open
+date-shaped-value-is-an-SSN false positive (`^(\d{3}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2}|[A-Z]{2}\d{7})$`).
+Not a regression, and it independently confirms the fixture chosen for
+`test_the_shell_false_positive_is_recorded_not_dropped_under_the_default` when C2-023 retired its
+previous vehicle.
+
+Notably clean: `update_profile{bio: "I manage the delete-old-logs cron"}` and
+`post_message{text: "we should drop table service at the restaurant"}` — destructive verbs in PROSE,
+which the name-keyed arm correctly ignores and the SQL arm correctly declines for lack of syntax
+context.

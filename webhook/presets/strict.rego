@@ -288,7 +288,15 @@ egress_verb_tool { object.get(input.derived, "verb", "") == "send"; not retrieva
 #
 # One `strings.replace_n` (26 letters + the four separators) costs no regex op — the file is at 24 of
 # the API's 25 — and is linear in the name: a 40 000-character name evaluates in 0.07s.
-name_split_map = {"A": "_a", "B": "_b", "C": "_c", "D": "_d", "E": "_e", "F": "_f", "G": "_g", "H": "_h", "I": "_i", "J": "_j", "K": "_k", "L": "_l", "M": "_m", "N": "_n", "O": "_o", "P": "_p", "Q": "_q", "R": "_r", "S": "_s", "T": "_t", "U": "_u", "V": "_v", "W": "_w", "X": "_x", "Y": "_y", "Z": "_z", "-": "_", ".": "_", ":": "_", "/": "_"}
+name_split_map = {"A": "_a", "B": "_b", "C": "_c", "D": "_d", "E": "_e", "F": "_f", "G": "_g", "H": "_h", "I": "_i", "J": "_j", "K": "_k", "L": "_l", "M": "_m", "N": "_n", "O": "_o", "P": "_p", "Q": "_q", "R": "_r", "S": "_s", "T": "_t", "U": "_u", "V": "_v", "W": "_w", "X": "_x", "Y": "_y", "Z": "_z", "-": "_", ".": "_", ":": "_", "/": "_", " ": "_", "\t": "_", ",": "_", "+": "_", "|": "_", "\\": "_"}
+# Separators, NOT just punctuation-that-looks-like-a-separator. `delete records` with a SPACE
+# evaded the destructive-verb arm in round 2 of the campaign: the map split on -, ., :, / and
+# camelCase, so those variants were caught, but a space left `delete records` as ONE token which
+# matches no verb. Tool names are server-DECLARED strings — an MCP server chooses them — so
+# "nobody would name a tool with a space" is not a control, it is an assumption about an
+# attacker. Widening the split can only ADD tokens and therefore only ADD matches, so it cannot
+# open a new allow; the collateral risk is over-blocking, and a legitimate name like
+# `report_deleted_items` still tokenises to `deleted`, which is not `delete`.
 tool_name_tokens = [t | t := split(strings.replace_n(name_split_map, input.tool_name), "_")[_]; t != ""]
 
 # Destructive verbs, matched as whole TOKENS anywhere in the name by the `strict_default_block` arm
