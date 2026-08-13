@@ -530,3 +530,85 @@ Append one line per landed change. Newest last.
   it and the next round found one more separator. Keying on a semantic fact instead of the spelling of
   a caller-supplied string is the only thing that ends that loop. Then C2-016, the Tier 4 triage, and
   the three missing deliverables.
+
+---
+
+## 2026-08-13 — Independent v0.2.0 evaluation (`~/norviq-v020-eval/backlog.md`)
+
+Working the eval's fix-ready backlog. Ground rule from the brief and worth keeping: **the cards are
+reported issues, not conclusions.** Confirm the mechanism against current source, run the Repro, fix,
+run the Verify — and where a check disagrees with the card, trust the check and say so.
+
+Branched from `main` @ `22e9da6` (= tag `v0.2.0`), which is exactly what the eval targeted. One
+focused branch per finding; **nothing pushed** (standing rule: ask before pushing).
+
+### Done
+
+- **`fix/f-032-content-normalizer`** (`ae86def`) — the umbrella. New `norviq/engine/content_norm.py`:
+  one normalize+decode stage in front of every content detector. Repro'd first with
+  `scripts/f032_battery.py` — **68% evasion (15/22), 0 false positives** — then **4% (1/22), still 0
+  false positives**. The eval said 66%; same shape, and its per-family split reproduced.
+  - *Disagreement with the card, recorded:* the fullwidth SSN it lists as evading was **caught** in my
+    fixture, because Python's `\d` matches Unicode digits. My fixture used an ASCII hyphen, so it was a
+    weaker test than theirs, not a refutation of it.
+  - Three limits are deliberate and each is pinned by a test so removing one is a decision:
+    separators are canonicalised and **never deleted** on the general path (strip them from any nine
+    digits and every order number becomes an SSN); **bare nine digits stays uncaught**; PCI is
+    Luhn-gated. `desep()` exists for credential shapes only.
+  - `normalize()` does **not** case-fold — `AKIA[0-9A-Z]{16}` is case-sensitive and folding is how an
+    earlier attempt lost the key it was looking for.
+
+- **`fix/f-046-egress-and-confusable-verb`** (`1f71b20`) — three things.
+  1. *Egress from params, not the name.* Measured: same AWS key, same attacker URL, `fetch_data`
+     blocked (only because `fetch_` is in the prefix list) while `lookup_customer`,
+     `retrieve_records`, `view_report`, `describe_asset` all **allowed**. New `value_pattern_sink`
+     reads `derived.destinations`.
+     **Deliberately NOT folded into `egress_verb_tool`** — that would widen the KEY-NAME gate, and
+     `sensitive_keys` holds the bare key `token`, which is the over-block that once turned 39 of 53
+     vendor tools into sinks. Paired only with the VALUE-pattern gates. A pagination cursor beside a
+     URL still allows, and a test says so.
+     **The card's own fix (c) was rejected**: "always run the params egress recovery" would make
+     `fetch_data` report `send` and render its `read` *unsayable* — the failure `source_registry.py`
+     documents twice.
+  2. *Verb from the confusable skeleton.* `dеlete_records` (Cyrillic е) classified UNKNOWN.
+     **Order is load-bearing**: `skeleton()` casefolds, `_CAMEL_RE` needs uppercase, so folding before
+     splitting silently dropped the verb from `aws_s3_DeleteObject`, `chat.postMessage`,
+     `SES:SendRawEmail`, `getMail`, `sendEmail`. Caught by a 36-name vendor corpus, now a test.
+     Leetspeak (`de1ete_records`) left uncaught on purpose — folding digits rewrites `s3_get_object`
+     and `md5_hash`, which are names, not attacks. Pinned.
+  3. *The baseline could not grow.* `strict.rego` sat at **exactly 500 of the validator's 500-line
+     cap**, so a three-line security rule was unshippable — and the symptom is not a clean rejection:
+     the controller retries every 60s while the DB keeps enforcing the **old** policy. Raised to 650
+     and added `test_shipped_rego_keeps_line_headroom` mirroring the regex-op guard.
+
+- **`fix/f-012-preset-reads-engine-classes`** (`3fa4992`) — the presets read `derived.data_classes`
+  rather than re-deriving detection in Rego. base64 / hex / lowercase / spaced AKIA, spaced + dotted
+  SSN, spaced PAN and grouped Amex all went from **allow to block**. Costs **no regex ops**, which
+  mattered at 24 of 25. Rego detectors kept alongside as the floor for an older engine; `object.get`
+  defaults make that path degrade rather than error.
+
+**F-045 needs no separate change** — verified closed by F-032, including `access_token` /
+`client_secret` / `refresh_token` / `aws_secret_access_key` / `api-key` / `pwd` / `bearer_token`,
+Diners-14 and Discover-16, with `shipping` / `pinned` / `tokenizer` staying clean.
+F-045's item (4) — a high-entropy heuristic for `_SECRET_VALUE_RE` — was **not** done: the key-name
+path already catches every repro in the card, and a generic entropy test is exactly what destroys the
+0-FP property (UUIDs, SHA digests and JWT-shaped ids are all high entropy).
+
+### Found while verifying, not yet fixed
+
+- **BUG-005 is now attributable.** The benign ISO date `2026-08-11` still blocks as `pii_detection`
+  while the engine reports **no** data class for it. So the false positive is the **Rego** SSN regex,
+  not the engine's detector — the duplicate copy is both less sensitive *and* less precise than the
+  thing it duplicates. Deleting it is a **loosening**, so it needs its own change and its own
+  evidence; do not fold it into a recall fix.
+
+### Next, in order
+
+F-001 (v0.2.0 never published — Trivy failed on `oras.land/oras-go/v2` CVE-2026-50163), F-003
+(`agent_class` not attested for namespace-scoped keys), F-025 (`chain_depth_limit` live on 1 of 5
+adapters), then §4's secure-by-default items, then MEDIUM.
+**Skip** F-026 (needs-live). **Do not touch** F-011, F-029, F-015, F-017, F-019/21/22, F-035, F-036.
+
+### Gates as of this entry
+
+`2844 passed`, `ruff` clean, `opa test --v0-compatible` **45/45**, f032 battery **1/22 evaded, 0 FP**.
