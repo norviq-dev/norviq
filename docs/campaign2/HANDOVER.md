@@ -612,3 +612,64 @@ adapters), then §4's secure-by-default items, then MEDIUM.
 ### Gates as of this entry
 
 `2844 passed`, `ruff` clean, `opa test --v0-compatible` **45/45**, f032 battery **1/22 evaded, 0 FP**.
+
+### 2026-08-13, continued — F-025, F-003, F-001
+
+- **`fix/f-025-depth-scope-all-adapters`** (`aa8e43e`) — `depth_scope()` was held by LangChain only, so
+  `_CALL_DEPTH` never left 0 on CrewAI / AutoGen / LangGraph / Semantic Kernel and `chain_depth_limit`
+  could not fire at any depth — while the Compliance view counted it as enforced. Each adapter now
+  holds it around its own tool body (wrapped `_run`/`run`; the node invocation for LangGraph;
+  `next(context)` for SK).
+  Tests assert the depth seen **inside the tool body**, not the presence of the string `depth_scope`,
+  because a source scan cannot tell a scope held around the *interceptor* from one held around the
+  *tool*. **Verified by reverting the four adapters: those four fail, LangChain passes.**
+  A product-honesty test then caught the stale shipped caveat ("Only LangChain reports call depth
+  today") — it exists because that copy shipped self-contradictory once before, and it is written to
+  fail exactly when someone adds depth without updating the prose. The remaining honest caveat is not
+  about frameworks: the SDK measurement is **authoritative** (it wraps execution), while a sidecar or
+  MCP proxy can only forward a **caller-reported** depth.
+
+- **`fix/f-003-attest-agent-class`** (`45c1871`) — `scoped_identity` skips a claim whose credential
+  value is empty, so a namespace-scoped key let the request BODY choose `agent_class` — and that
+  selects the Rego program. The profitable move was not impersonating a real class but naming one with
+  **no** policy, which falls to `no_policy_decision='allow'`.
+  `auth_require_bound_agent_identity` now defaults **True** (the ratchet already existed and was only
+  ever waiting on migration cost), and issuing a `service` key without an `agent_class` is refused at
+  **creation** (422) rather than at evaluation, because the issuing admin is the only person who knows
+  which class it is for.
+  13 tests in `test_evaluate_scope.py` were written against the old default — one is literally
+  `test_the_existing_hot_path_is_unchanged_when_nothing_is_attestable`. Not deleted: `False` stays a
+  supported downgrade path, so an autouse fixture states that precondition explicitly and
+  `test_the_shipped_default_is_the_strict_one` guards the default (verified: reverting `config.py`
+  fails exactly that one test).
+
+- **F-001 — the card's fix is wrong for this repo, and the corrected one is staged but NOT committed.**
+  `oras.land/oras-go/v2` is **not** a Norviq dependency: it is absent from `webhook/go.mod` and
+  `go.sum`. It reaches the engine and api images inside the **pinned OPA static binary** — confirmed
+  directly with `go version -m $(which opa)`: `dep oras.land/oras-go/v2 v2.6.1`, the vulnerable
+  version exactly. So `go mod tidy` would change nothing; the fix is an **OPA bump**.
+  OPA **v1.19.0** ships `oras-go v2.6.2` (v1.18.2 still ships 2.6.1 — the patch line does not fix it).
+  Verified before editing anything: the full Python suite (**2857 passed**) and `opa test
+  --v0-compatible` (**45/45**) both run clean against a real 1.19.0 binary, and regenerating
+  `opa-capabilities.json` is **purely additive** — nothing removed, one new builtin
+  (`strings.split_n`). The `policies/templates/` "multiple default rules" error is **pre-existing** and
+  identical on 1.18.0 (those templates all declare `package norviq.custom` and are alternatives, not
+  meant to load together).
+  Staged: `Dockerfile.api`, `Dockerfile.engine` (URL + both SHA256 digests, recomputed from the real
+  downloads), `helm/norviq/values.yaml`, four workflows, `scripts/mcp-demo.Dockerfile`,
+  `scripts/kind-e2e/chaos.py`, `scripts/gen-opa-capabilities.py`, and both regenerated capability
+  files. **Still to do: `.trivyignore.yaml` names `opa 1.18.0-static` in three entries** — those
+  suppressions must be re-checked against 1.19.0 before this is committed, or a stale ignore could
+  silence a finding that no longer applies to the shipped binary.
+
+> **BLOCKER, environmental: the host disk is full** (`/` at 98%, ~330 MB free; the Data volume at
+> 100%). `docker system df` hangs and the full pytest run times out from thrashing — targeted runs
+> still pass in under a second, so this is the machine, not the changes. Freeing real space means
+> removing Docker images (which include the kind cluster and the locally loaded `norviq/norviq-engine`
+> images), so that is San's call, not something to do unilaterally.
+
+### Gates as of this entry
+
+`opa test --v0-compatible` **45/45** (on 1.18.0 and 1.19.0), targeted suites green.
+Last clean FULL run: **2857 passed** — taken *before* the OPA-bump file edits, which are therefore the
+one thing in this handover not yet covered by a full-suite pass.
