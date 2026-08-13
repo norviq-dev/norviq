@@ -14,7 +14,7 @@ a bug in the API check) still cannot call them. Keep the two lists in sync when 
 Regenerate after an OPA upgrade:
     python3 scripts/gen-opa-capabilities.py --opa-version-check
 
-Generated from: OPA v1.18.0 (`opa version` on the machine that ran this script).
+Generated from: OPA v1.19.0 (`opa version` on the machine that ran this script).
 """
 
 from __future__ import annotations

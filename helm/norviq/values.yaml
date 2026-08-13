@@ -666,12 +666,12 @@ otel:
 # queries it over HTTP; set config.opaMode=subprocess to roll back to the per-call `opa eval` fork.
 # Pinned (not `latest-static`) so the running OPA version stays matched to the one
 # scripts/gen-opa-capabilities.py generated helm/norviq/files/opa-capabilities.json from (verified real,
-# multi-arch amd64+arm64, via `docker manifest inspect openpolicyagent/opa:1.18.0-static`) — `latest-static`
+# multi-arch amd64+arm64, via `docker manifest inspect openpolicyagent/opa:1.19.0-static`) — `latest-static`
 # could silently drift to a version with a different builtin set than what the engine-layer capabilities
 # check (norviq/engine/opa_client.py::_check_capabilities) validates against.
 opa:
   enabled: true
-  image: "openpolicyagent/opa:1.18.0-static"
+  image: "openpolicyagent/opa:1.19.0-static"
   port: 8181
   resources:
     requests:

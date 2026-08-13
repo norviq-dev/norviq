@@ -17,7 +17,7 @@
 # at any directory holding a CA bundle under that name (or symlink the system bundle); it exists
 # because the environment this was developed in re-terminates TLS at an egress proxy, and a build
 # that silently disables certificate verification instead would be worse than an extra flag.
-FROM openpolicyagent/opa:1.18.0-static AS opabin
+FROM openpolicyagent/opa:1.19.0-static AS opabin
 
 FROM python:3.12-slim AS builder
 WORKDIR /build

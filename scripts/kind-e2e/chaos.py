@@ -236,7 +236,7 @@ def s2_kill_opa(ctx: Ctx) -> None:
     before = restart_counts(ctx, f"app.kubernetes.io/component={comp}").get(pod, 0)
 
     # HOW YOU KILL A DISTROLESS SIDECAR. `kubectl exec -c opa -- kill 1` cannot work: the image is
-    # `opa:1.18.0-static`, which has no shell and no coreutils, and containers in a pod do not share a
+    # `opa:1.19.0-static`, which has no shell and no coreutils, and containers in a pod do not share a
     # PID namespace by default, so nothing else in the pod can see OPA's process either.
     #
     # `kubectl debug --target=opa` attaches an ephemeral container INTO the target container's process

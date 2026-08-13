@@ -23,16 +23,16 @@ ARG TARGETARCH=amd64
 ARG NRVQ_GIT_SHA=unknown
 # Install the OPA binary so the `subprocess` rollback mode works in-cluster (server mode uses the
 # OPA sidecar and does not need this; kept for parity with Dockerfile.api). Pinned to the same version
-# as the Helm sidecar image (openpolicyagent/opa:1.18.0-static) and integrity-checked against the
+# as the Helm sidecar image (openpolicyagent/opa:1.19.0-static) and integrity-checked against the
 # published SHA256 digest so a compromised/mismatched download fails the build closed instead of
 # silently installing an unverified decision-engine binary.
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
     case "${TARGETARCH}" in \
-        amd64) OPA_SHA256="65d700b14b99b354982b61031b40bdc8e316ea93dadd61818f066d1d9a69dcce" ;; \
-        arm64) OPA_SHA256="93499a6eead5277ba1a52304111103ec4e7779d4f6b11716a4f07905b7ee4a96" ;; \
+        amd64) OPA_SHA256="1dd5c5591ff856f5e20a1d66bafae9511ddf3c5552ed3b5070c70b2b6580ee3f" ;; \
+        arm64) OPA_SHA256="06680087ed236c8c6aaa021660d83178db829a2ad30bdb3482481fada6791b2a" ;; \
         *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac && \
-    curl -fL -o /usr/local/bin/opa "https://openpolicyagent.org/downloads/v1.18.0/opa_linux_${TARGETARCH}_static" && \
+    curl -fL -o /usr/local/bin/opa "https://openpolicyagent.org/downloads/v1.19.0/opa_linux_${TARGETARCH}_static" && \
     echo "${OPA_SHA256}  /usr/local/bin/opa" | sha256sum -c - && \
     chmod +x /usr/local/bin/opa && \
     opa version && \
