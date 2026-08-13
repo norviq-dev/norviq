@@ -64,8 +64,16 @@ except NorviqBlockError as exc:
 
 Two things to know before your first run, because either one makes a correct setup look broken:
 
-- **Norviq is deny-by-default.** With no policy loaded for the scope you evaluate against, the
-  decision is `deny`. Load a policy for your namespace/agent-class first.
+- **A scope with no policy is ALLOWED, not denied.** With nothing loaded for the namespace/agent-class
+  you evaluate against, the decision is `allow` with `rule_id: default_allow` — so a typo in
+  `agent_class`, or an agent pointed at a namespace you never wrote a policy for, looks like a clean
+  pass rather than an error. If your first calls all come back allowed, check that the scope you are
+  sending matches the scope you wrote the policy for.
+
+  This is deliberate: Norviq sits in the request path of production agents, so an unconfigured scope
+  must not take the customer's traffic down. Set `config.noPolicyDecision: deny` (chart) or
+  `NRVQ_NO_POLICY_DECISION=deny` to lock a namespace down once you have written its policies —
+  deny-by-default is then an explicit choice you make per deployment, not a surprise on day one.
 - **`POST /api/v1/evaluate` requires a bearer token.** Without one the client fails closed.
 
 ## Links

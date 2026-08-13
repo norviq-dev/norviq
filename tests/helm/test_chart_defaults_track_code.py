@@ -141,3 +141,37 @@ def test_all_four_sources_of_the_fallback_mode_agree() -> None:
         "webhook/config.go": _go_env_default("NRVQ_SDK_FALLBACK_MODE"),
     }
     assert len(set(sources.values())) == 1, f"fallback mode disagrees across its homes: {sources}"
+
+
+# --- the FIFTH home: the published docs (F-008) --------------------------------------------------
+#
+# PYPI-README.md is the first thing a new user reads and it is published to PyPI, where it outlives
+# any given commit. It stated "Norviq is deny-by-default. With no policy loaded ... the decision is
+# `deny`" — the exact opposite of what ships, and had been since the deny->allow flip. A user
+# following it would write their first policy expecting a closed door and get an open one.
+#
+# Asserted against `settings` rather than spot-checked, because the failure mode is drift: whichever
+# way a future maintainer moves the default, the README has to move with it.
+
+_PYPI_README = _ROOT / "PYPI-README.md"
+
+
+def test_the_published_readme_describes_the_shipped_no_policy_posture() -> None:
+    text = _PYPI_README.read_text(encoding="utf-8")
+    if settings.no_policy_decision == "allow":
+        assert "no policy is ALLOWED, not denied" in text, (
+            "PYPI-README must tell the reader that an unpolicied scope allows — it is what makes a "
+            "typo'd agent_class look like a clean pass instead of an error"
+        )
+        assert "Norviq is deny-by-default." not in text, (
+            "PYPI-README still claims deny-by-default while the product ships allow"
+        )
+    else:
+        assert "deny" in text, "the README must describe a deny default if that is what ships"
+
+
+def test_the_readme_says_how_to_get_the_other_posture() -> None:
+    """Correcting the claim is only half of it — the reader needs the knob, or the honest default
+    reads as 'this product does not lock anything down'."""
+    text = _PYPI_README.read_text(encoding="utf-8")
+    assert "noPolicyDecision" in text and "NRVQ_NO_POLICY_DECISION" in text
