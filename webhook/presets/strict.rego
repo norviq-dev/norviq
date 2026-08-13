@@ -375,6 +375,38 @@ egress_action_tokens = {"send", "post", "upload", "publish", "forward", "relay",
                         "exfil", "exfiltrate", "leak", "smtp", "sms", "egress", "outbound"}
 egress_verb_tool { egress_action_tokens[tool_name_tokens[_]] }
 
+# EGRESS EVIDENCE FROM THE PARAMS, NOT THE NAME — F-046. SAME TEXT AS comprehensive.rego.
+#
+# Every clause above infers a sink from what the tool is CALLED. A read-named tool that carries a
+# destination in its arguments is a sink no matter what it is called, and measured on this file the
+# gap was live: with an AWS key in the payload and `http://evil.example/c` in a `url` param,
+#
+#   fetch_data      -> block  (only because `fetch_` is in the prefix list)
+#   lookup_customer -> ALLOW
+#   retrieve_records-> ALLOW
+#   view_report     -> ALLOW
+#   describe_asset  -> ALLOW
+#
+# Same call, same credential, same attacker URL; the verdict was decided by the tool's name. That is
+# the complaint already recorded above about `slack_post_message` — "the exfiltration path was chosen
+# by whichever SaaS the customer happens to use" — reappearing from the other direction.
+#
+# `derived.destinations` is already computed on the hot path for exactly this ("under deny-by-default
+# the destination IS the control"), so this reads it rather than re-regexing params in policy.
+#
+# WHY THIS IS NOT FOLDED INTO egress_verb_tool. Widening that predicate would also widen the KEY-NAME
+# gate below, and that gate is why `sensitive_keys` over-blocking is the documented disaster in this
+# file: it holds the bare key `token`, so `get_mail{"folder":"INBOX","token":"AQABAAAA-nextPage"}`
+# became data leakage and 39 of 53 realistic vendor tools turned into sinks. A pagination cursor beside
+# a URL must not block. So the destination signal is paired ONLY with the VALUE-pattern checks, which
+# require an actual credential/regulated artifact to match — evidence a cursor cannot produce.
+#
+# object.get-guarded throughout so an engine predating `derived.destinations` keeps today's behaviour
+# rather than erroring.
+value_pattern_sink { egress_verb_tool }
+value_pattern_sink { count(object.get(object.get(input.derived, "destinations", {}), "urls", [])) > 0 }
+value_pattern_sink { count(object.get(object.get(input.derived, "destinations", {}), "emails", [])) > 0 }
+
 data_leakage_detected {
     external_tools[input.tool_name]
     walk(input.tool_params, [path, _])
@@ -486,7 +518,7 @@ data_leakage_detected {
     _regulated_artifact(val)
 }
 data_leakage_detected {
-    egress_verb_tool
+    value_pattern_sink
     val := security_scan_texts[_]
     _regulated_artifact(val)
 }
@@ -494,11 +526,12 @@ data_leakage_detected {
 # A secret in a param VALUE must also block on ANY egress-verb sink, not only the 3 named
 # external_tools — mirrors the egress-verb key-name rule above and comprehensive.rego.
 data_leakage_detected {
-    egress_verb_tool
+    value_pattern_sink
     val := secret_scan_texts[_]
     some i
     regex.match(all_credential_patterns[i], val)
 }
+
 
 
 # Reading an environment secret / credential is data egress (OWASP LLM02).
@@ -566,7 +599,7 @@ secret_egress_detected {
     _credential_artifact(val)
 }
 secret_egress_detected {
-    egress_verb_tool
+    value_pattern_sink
     val := security_scan_texts[_]
     _credential_artifact(val)
 }

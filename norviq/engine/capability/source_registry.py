@@ -25,6 +25,7 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 
+from norviq.engine.confusables import skeleton
 from norviq.engine.graph.models import RiskLevel
 
 
@@ -356,8 +357,30 @@ _CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 def _tokenize_tool(name: str) -> list[str]:
     """Split a tool name into lowercased word tokens on non-alphanumerics AND camelCase boundaries, so
     'aws_s3_DeleteObject', 's3:DeleteObject', 'delete-record' all yield ['delete', …]. Whole-token matching
-    avoids substring false positives ('put' in 'input', 'get' in 'budget')."""
-    spaced = _CAMEL_RE.sub(" ", name or "")
+    avoids substring false positives ('put' in 'input', 'get' in 'budget').
+
+    TOKENISED FROM THE CONFUSABLE SKELETON (F-046). The evaluator already computes `skeleton(name)` for
+    Rego name-matching but classified the RAW name here, so the two disagreed on exactly the input an
+    attacker controls: with `deny { input.derived.verb == "delete" }` in force, `delete_records` and the
+    synonym `remove_records` both blocked while `dеlete_records` — one Cyrillic е — classified UNKNOWN
+    and was not caught by the verb rule at all. Folding here rather than at the call sites means every
+    consumer of the classification agrees, which is the property that was missing.
+
+    Only names containing confusables change: a pure-ASCII name is its own skeleton, so this cannot move
+    an existing classification. It is also strictly tightening — a homoglyph name that resolved to
+    nothing now resolves to what it is impersonating.
+
+    Deliberately NOT extended to leetspeak (`de1ete_records`). `skeleton()` is Unicode-TR39-aligned, and
+    folding digits to letters would mean `s3_get_object` and `md5_hash` no longer tokenise as themselves
+    — a change to ordinary vendor names in exchange for one evasion. See F-046's note in FINDINGS.
+    """
+    # ORDER IS LOAD-BEARING: camelCase split FIRST, skeleton SECOND. `skeleton()` casefolds, and
+    # `_CAMEL_RE` finds boundaries by looking for an uppercase letter — so folding first erases every
+    # boundary. Measured over a 36-name corpus when it was written the wrong way round:
+    # `aws_s3_DeleteObject` -> ['aws','s3','deleteobject'] and stopped classifying as `delete`, along
+    # with `chat.postMessage`, `SES:SendRawEmail`, `getMail` and `sendEmail`. That is the camelCase
+    # argument recorded in strict.rego reappearing here, in the direction that loses enforcement.
+    spaced = skeleton(_CAMEL_RE.sub(" ", name or ""))
     return [t.lower() for t in re.split(r"[^A-Za-z0-9]+", spaced) if t and not t.isdigit()]
 
 

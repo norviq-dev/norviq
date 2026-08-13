@@ -705,7 +705,15 @@ def validate_rego_source(rego: str, enforcement_mode: str = "block") -> None:
     if len(rego) > 65536:
         raise HTTPException(status_code=422, detail="rego_source exceeds max length")
     lines = [line for line in cleaned.splitlines() if line.strip()]
-    if len(lines) > 500:
+    # 500 -> 650. The cap is a SOFT ABUSE HEURISTIC for customer-submitted rego (the hard bounds are the
+    # 64 KB body limit above and OPA's linear-time RE2), but the SHIPPED baseline goes through this same
+    # validator, and `webhook/presets/strict.rego` had reached exactly 500 of 500. At the wall the
+    # enforced security baseline is frozen: F-046's fix is three lines of rego and could not be shipped,
+    # and neither could the next one. The failure mode is not a clean rejection either — per
+    # tests/api/test_shipped_presets_validate.py the controller retries the push every 60s while the
+    # database keeps enforcing the OLD policy, so the cluster silently runs stale rules.
+    # test_shipped_rego_keeps_line_headroom now fails locally before the wall is reached again.
+    if len(lines) > 650:
         raise HTTPException(status_code=422, detail="rego_source exceeds line limit")
     # Soft abuse heuristic (OPA uses linear-time RE2, so this is not a ReDoS guard). The shipped
     # comprehensive policy legitimately uses ~11 regex ops after the base64/PII/PCI detection rules,

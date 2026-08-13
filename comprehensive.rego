@@ -389,6 +389,29 @@ egress_action_tokens = {"send", "post", "upload", "publish", "forward", "relay",
                         "exfil", "exfiltrate", "leak", "smtp", "sms", "egress", "outbound"}
 egress_verb_tool { egress_action_tokens[tool_name_tokens[_]] }
 
+# EGRESS EVIDENCE FROM THE PARAMS, NOT THE NAME — F-046. SAME TEXT AS webhook/presets/strict.rego,
+# and the reason the pair has to move together.
+#
+# Every clause above infers a sink from what the tool is CALLED. A read-named tool carrying a
+# destination in its arguments is a sink whatever it is called, and the gap was measured live: with an
+# AWS key in the payload and `http://evil.example/c` in a `url` param, `fetch_data` blocked (only
+# because `fetch_` is in the prefix list) while `lookup_customer`, `retrieve_records`, `view_report`
+# and `describe_asset` all ALLOWED. Same call, same credential, same attacker URL — the verdict was
+# decided by the tool's name, which is the `slack_post_message` complaint from the other direction.
+#
+# `derived.destinations` is already computed on the hot path for exactly this purpose.
+#
+# NOT folded into egress_verb_tool: that would widen the KEY-NAME gate too, and `sensitive_keys` holds
+# the bare key `token`, so `get_mail{"folder":"INBOX","token":"AQABAAAA-nextPage"}` would become data
+# leakage again (39 of 53 realistic vendor tools turned into sinks last time). The destination signal
+# is therefore paired ONLY with the VALUE-pattern checks, which need a real credential/regulated
+# artifact to match — evidence a pagination cursor cannot produce.
+#
+# object.get-guarded so an engine predating `derived.destinations` keeps today's behaviour.
+value_pattern_sink { egress_verb_tool }
+value_pattern_sink { count(object.get(object.get(input.derived, "destinations", {}), "urls", [])) > 0 }
+value_pattern_sink { count(object.get(object.get(input.derived, "destinations", {}), "emails", [])) > 0 }
+
 data_leakage_detected {
     external_tools[input.tool_name]
     walk(input.tool_params, [path, _])
@@ -467,7 +490,7 @@ data_leakage_detected {
 # external_tools — mirrors the key-name egress rule above. Otherwise http_post/s3_put/send_sms
 # carrying "api_key=sk-…" / "password=…" / "bearer …" in a body param exfiltrated freely.
 data_leakage_detected {
-    egress_verb_tool
+    value_pattern_sink
     val := secret_scan_texts[_]
     some i
     regex.match(all_credential_patterns[i], val)
@@ -511,7 +534,7 @@ data_leakage_detected {
     _regulated_artifact(val)
 }
 data_leakage_detected {
-    egress_verb_tool
+    value_pattern_sink
     val := security_scan_texts[_]
     _regulated_artifact(val)
 }
@@ -582,7 +605,7 @@ secret_egress_detected {
     _credential_artifact(val)
 }
 secret_egress_detected {
-    egress_verb_tool
+    value_pattern_sink
     val := security_scan_texts[_]
     _credential_artifact(val)
 }

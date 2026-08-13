@@ -30,7 +30,7 @@ import re
 import pytest
 from fastapi import HTTPException
 
-from norviq.api.routers.policies import validate_rego_source
+from norviq.api.routers.policies import _strip_rego_comments, validate_rego_source
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -52,6 +52,17 @@ SHIPPED = [
 # Mirrors validate_rego_source. Kept as a literal rather than imported so that RAISING the cap cannot
 # silently make this test vacuous — if the cap moves, this constant must move with it, deliberately.
 REGEX_OP_CAP = 25
+
+# Same contract as REGEX_OP_CAP, for the same reason. This one is not hypothetical: strict.rego reached
+# exactly 500 of the previous 500-line cap, which froze the enforced baseline — a three-line security
+# rule could not be shipped — and the symptom would have been the controller retrying forever while the
+# cluster kept enforcing the old policy, not a visible error.
+REGO_LINE_CAP = 650
+
+
+def _code_lines(rego: str) -> int:
+    """Count the way validate_rego_source does: comments stripped, blanks dropped."""
+    return len([ln for ln in _strip_rego_comments(rego).splitlines() if ln.strip()])
 
 
 def _regex_ops(rego: str) -> int:
@@ -89,11 +100,32 @@ def test_shipped_rego_keeps_regex_headroom(path: pathlib.Path) -> None:
     )
 
 
+@pytest.mark.parametrize("path", SHIPPED, ids=lambda p: p.name)
+def test_shipped_rego_keeps_line_headroom(path: pathlib.Path) -> None:
+    """Fail BEFORE the cap. Reaching it freezes the baseline — see REGO_LINE_CAP."""
+    lines = _code_lines(path.read_text())
+    assert lines <= REGO_LINE_CAP, (
+        f"{path.name} has {lines} code lines, over the API's cap of {REGO_LINE_CAP} — it cannot be stored"
+    )
+    # 10% of the budget, so there is room for a rule rather than for one more line.
+    soft = int(REGO_LINE_CAP * 0.9)
+    assert lines <= soft, (
+        f"{path.name} has {lines} code lines of {REGO_LINE_CAP}, past the {soft}-line headroom mark. "
+        "The enforced baseline must keep room to grow: at the cap a new security rule cannot be shipped "
+        "at all, and the controller retries the push every 60s while the cluster enforces the old policy."
+    )
+
+
 def test_the_cap_constant_still_matches_the_validator() -> None:
-    """If validate_rego_source's cap changes, this test must be updated on purpose, not by accident."""
+    """If validate_rego_source's caps change, this test must be updated on purpose, not by accident."""
     src = (ROOT / "norviq" / "api" / "routers" / "policies.py").read_text()
     m = re.search(r"regex_ops\s*>\s*(\d+)", src)
     assert m, "could not find the regex-op cap in validate_rego_source — did it move?"
     assert int(m.group(1)) == REGEX_OP_CAP, (
         f"validate_rego_source caps at {m.group(1)} but this test assumes {REGEX_OP_CAP}"
+    )
+    m = re.search(r"len\(lines\)\s*>\s*(\d+)", src)
+    assert m, "could not find the line cap in validate_rego_source — did it move?"
+    assert int(m.group(1)) == REGO_LINE_CAP, (
+        f"validate_rego_source caps at {m.group(1)} lines but this test assumes {REGO_LINE_CAP}"
     )
