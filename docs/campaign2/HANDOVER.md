@@ -796,3 +796,65 @@ San asked for one branch. The six HIGH branches were stacked, so `fix/v020-eval-
 
 Every remaining suite failure was proven environmental by capturing the full run and diffing the
 failing set against `main` — **byte-identical**. That is the check I skipped earlier and got wrong.
+
+---
+
+## 2026-08-13 (cont.) — LOW findings; the v0.2.0 backlog is now closed
+
+All on `fix/v020-eval-backlog` (26 commits off `main`), which contains the HIGH work too.
+
+- **F-034** (`f4f5e00`) — the authored `reason` was computed, REQUIRED at author time (422 without
+  it), carried through `PolicyDecision`, written to the audit record — and `EvaluateResponse` was
+  three fields that did not include it. The operator wrote the sentence, the product insisted on it,
+  the caller never saw it.
+- **F-005** (`f4f5e00`) — `sql_query {query:"SELECT * FROM t -- bypass"}` was ALLOWED. Requires a
+  leading SQL keyword **and** a terminator; adding `--` to the destructive set would have failed twice
+  (the gate wants the value to LEAD with the pattern, and `--` in prose is punctuation).
+- **F-007** (`f4f5e00`) — `file://` blocked as `deny_shell_execution`, a shell attempt that never
+  happened. New `dangerous_scheme` **wins the sorted-rule_id tie-break** (checked, not assumed).
+  **Did NOT narrow the shell rule to exec-class tools** as the card suggests — that trades an
+  attribution bug for a detection gap on a renamed tool carrying a real payload.
+- **F-004** (`689686b`) — bare credential VALUES, as `secret_suspected`, a **separate advisory class**
+  that blocks nothing. Merging into `secret` was one line and would fire `llm02_data_leakage` on every
+  commit hash. Precision comes from excluding known-benign SHAPES — a digest and a secret have the
+  same entropy, so no threshold separates them. *This is why I declined the same heuristic under
+  F-045: there it widened a BLOCKING class.*
+- **F-009** (`689686b`) — `tenant_id` was compared against the k8s NAMESPACE. `agent.home_tenant` when
+  configured, namespace as fallback. Tested that a configured home tenant still **blocks** another
+  tenant — widening a comparison must not turn a containment control off.
+- **F-018 / F-020 / F-023** (`4442420`) — dry-run now separates `no_replayable_traffic` from
+  `params_captured` (masked capture is off by default, so content rules cannot fire) and returns an
+  `advisory` sentence so every consumer gets the caveat, not just the console; observed-tools panel
+  shows the namespace; the Overview gauge says "85% proven-blocking **of 20 evaluate-reachable
+  red-team attacks**" instead of a bare percentage that reads as total coverage.
+- **F-028 / F-016** (`959bbaf`) — MCP injection is stdio-only; an HTTP server is injected but
+  **ungoverned**, and now logs `NRVQ-WHK-4051`. **Warned, not refused** — a stdio server may
+  legitimately expose a health port, and failing admission would trade a visibility gap for an outage.
+  F-016 documents that content DLP is not the control for shapeless data; **the destination is**.
+
+### Disagreements recorded (checks trusted over the cards)
+
+- **F-027** — declined the flip to fail-closed. The three-way disagreement was the defect; failing
+  open is already loud (`NRVQ-SDK-1013` + `engine_unavailable_fallback`).
+- **F-026** — the card's premise inverts: LangGraph/SK guard the **execution path**, which is stronger
+  than per-tool wrapping. Unifying would have *introduced* the gap it worried about.
+- **F-013** — `do not reveal` was already caught.
+- **F-044** — fail-closed revocation would turn a Redis blip into a total auth outage; time-boxed it
+  instead (30s, cleared on success).
+- **F-043** — namespace posture not threaded (needs a query this route does not make); `proven` gives
+  the monitor-mode signal that motivated it.
+
+### Final gates
+
+`opa test --v0-compatible` **59/59** · `ruff` clean · UI **1155 passed**, `tsc` + `eslint` clean ·
+`go build` + `go test ./webhook` ok · f032 battery **1/22 evaded, 0 FP**.
+Python suite **2922 passed, 6 failed, 56 errors** — and the failing set is **byte-identical to `main`**
+(all `redis`/`asyncpg` connection errors from Docker still being down). Verified by diffing the
+failing set against a clean `main` checkout after every batch, which is how the one real regression in
+this session was caught rather than assumed away.
+
+### Still open (unchanged, deliberately)
+
+Cross-server MCP description shadowing (needs a shared cross-instance registry); an audit signal for a
+tool invoked without passing the guard (F-026, needs-live — detecting the ABSENCE of a call);
+namespace posture in the MITRE pack (F-043); HTTP MCP proxy wiring (F-028 — a feature, not a fix).
