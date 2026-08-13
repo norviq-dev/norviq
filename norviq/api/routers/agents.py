@@ -7,7 +7,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -299,11 +299,36 @@ async def _agent_from_registry(spiffe_id: str) -> dict | None:
     }
 
 
+def _mark_truncated(response: Response, truncated: bool, spiffe_id: str, view: str) -> None:
+    """Say so when a series was cut, instead of returning a shorter one that looks complete (F-042).
+
+    These endpoints cap at `_AGENT_AUDIT_LIMIT` rows, and the cap is reached by exactly the agents an
+    operator most wants to look at. Nothing in the response said so, so a busy agent's chart rendered
+    as a confident, complete picture drawn from a partial slice.
+
+    A header rather than a field in the body: both routes return a bare `list[dict]` that the console
+    already consumes, and changing the response shape to carry a flag would break every existing
+    caller to fix a reporting problem. A header is additive — the console can read it when it is ready
+    to render the warning, and a script can check it today.
+    """
+    response.headers["X-Nrvq-Truncated"] = "true" if truncated else "false"
+    if truncated:
+        response.headers["X-Nrvq-Truncated-Limit"] = str(_AGENT_AUDIT_LIMIT)
+        log.warning(
+            "nrvq.api.agent.series_truncated",
+            spiffe_id=spiffe_id,
+            view=view,
+            limit=_AGENT_AUDIT_LIMIT,
+            code="NRVQ-API-7084",
+        )
+
+
 # NOTE: these specific routes MUST be declared before the greedy /agents/{spiffe_id:path} GET below,
 # otherwise the path converter swallows the "/tool-usage" / "/trust-history" suffix.
 @router.get("/agents/{spiffe_id:path}/tool-usage")
 async def agent_tool_usage(
     spiffe_id: str,
+    response: Response,
     namespace: str | None = Query(None),
     range_: str = Query("7d", alias="range"),
     user: dict = Depends(get_current_user),
@@ -317,7 +342,16 @@ async def agent_tool_usage(
     )
     if namespace and namespace != "all":
         stmt = stmt.where(AuditLogEntry.namespace == namespace)
-    rows = (await session.execute(stmt.limit(_AGENT_AUDIT_LIMIT))).all()
+    # ORDERED before the limit (F-042). `limit` without `order_by` takes whatever rows the planner
+    # happens to emit first, so a busy agent's chart was drawn from an ARBITRARY 5000 of its
+    # calls — not the most recent, not a sample, just whatever came back. Two identical requests
+    # could disagree, and neither was wrong to the reader, because nothing said the series was cut.
+    # Newest-first is the honest choice for a time series: a truncated chart then shows a shorter
+    # recent window rather than a full window with holes in it.
+    rows = (await session.execute(
+        stmt.order_by(AuditLogEntry.timestamp_utc.desc()).limit(_AGENT_AUDIT_LIMIT)
+    )).all()
+    truncated = len(rows) >= _AGENT_AUDIT_LIMIT
 
     # Tag each tool with its risk tier (the SAME TOOL_RISK_MAP the asset graph uses) so the Tool
     # Usage bars can be coloured by RISK, not just call volume — an agent hammering a destructive tool no
@@ -336,6 +370,7 @@ async def agent_tool_usage(
         if decision == "block":
             entry["blocked"] += 1
     result = sorted(usage.values(), key=lambda item: item["count"], reverse=True)
+    _mark_truncated(response, truncated, spiffe_id, "tool-usage")
     log.debug("nrvq.api.agent.tool_usage", spiffe_id=spiffe_id, tools=len(result), code="NRVQ-API-7082")
     return result
 
@@ -343,6 +378,7 @@ async def agent_tool_usage(
 @router.get("/agents/{spiffe_id:path}/trust-history")
 async def agent_trust_history(
     spiffe_id: str,
+    response: Response,
     namespace: str | None = Query(None),
     range_: str = Query("7d", alias="range"),
     user: dict = Depends(get_current_user),
@@ -358,7 +394,16 @@ async def agent_trust_history(
     )
     if namespace and namespace != "all":
         stmt = stmt.where(AuditLogEntry.namespace == namespace)
-    rows = (await session.execute(stmt.limit(_AGENT_AUDIT_LIMIT))).all()
+    # ORDERED before the limit (F-042). `limit` without `order_by` takes whatever rows the planner
+    # happens to emit first, so a busy agent's chart was drawn from an ARBITRARY 5000 of its
+    # calls — not the most recent, not a sample, just whatever came back. Two identical requests
+    # could disagree, and neither was wrong to the reader, because nothing said the series was cut.
+    # Newest-first is the honest choice for a time series: a truncated chart then shows a shorter
+    # recent window rather than a full window with holes in it.
+    rows = (await session.execute(
+        stmt.order_by(AuditLogEntry.timestamp_utc.desc()).limit(_AGENT_AUDIT_LIMIT)
+    )).all()
+    truncated = len(rows) >= _AGENT_AUDIT_LIMIT
 
     buckets: dict[str, dict] = {}
     for ts, decision, trust in rows:
@@ -381,6 +426,7 @@ async def agent_trust_history(
         }
         for _, b in sorted(buckets.items())
     ]
+    _mark_truncated(response, truncated, spiffe_id, "trust-history")
     log.debug("nrvq.api.agent.trust_history", spiffe_id=spiffe_id, days=len(history), code="NRVQ-API-7083")
     return history
 

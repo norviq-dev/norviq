@@ -141,6 +141,17 @@ _CONTROL_COPY: dict[str, Control] = {
         "Supply chain",
         "Catches plugin/script loading from untrusted sources.",
     ),
+    "ssrf_metadata": Control(
+        "ssrf_metadata",
+        "Cloud metadata & loopback (SSRF)",
+        "Refuses tool calls that reach a cloud instance-metadata endpoint or the pod's own loopback.",
+        caveat="Matches on the destination, not the tool name, and resolves the alternate spellings "
+        "(169.254.169.254, metadata.google.internal, 2130706433, 0x7f000001, 127.1, localhost) to the "
+        "same address. Private RFC1918 ranges are deliberately NOT included: an agent in Kubernetes "
+        "reaches in-cluster services on 10.x/172.16-31.x constantly, so blocking those would refuse "
+        "ordinary traffic. Scope them yourself with derived.destinations.internal.private if you want "
+        "that rule.",
+    ),
     "pii_detection": Control(
         "pii_detection",
         "PII egress",

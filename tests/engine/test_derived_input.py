@@ -259,6 +259,15 @@ def test_destinations_are_empty_not_missing_when_the_call_has_none() -> None:
     d = _derived("q", {"query": "SELECT 1"})
     assert d["destinations"] == {
         "emails": [], "urls": [], "hosts": [], "schemes": [], "recipient_domains": [],
+        # `internal` groups the hosts that are not on the public internet, as
+        # {metadata|loopback|private: [...]}, for the SSRF floor (F-006). Stated here because this
+        # test demands it be.
+        #
+        # A dict rather than a list, and empty-not-absent for the same reason as its siblings: the
+        # preset reads `count(object.get(internal, "metadata", []))`, so an ABSENT key would make the
+        # SSRF rule silently vacuous — fail-open wearing a new name, which is exactly what this test
+        # was written to catch. `object.get` in the policy is the second belt.
+        "internal": {},
     }
 
 

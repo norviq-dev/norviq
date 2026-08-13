@@ -87,6 +87,15 @@ _OBSERVABILITY_METHODS = frozenset({"inc", "increment", "observe", "record_excep
 # Adding to this list is a deliberate, reviewable act — that is the point.
 # --------------------------------------------------------------------------------------------------
 _JUSTIFIED_SILENT_HANDLERS: dict[tuple[str, str], str] = {
+    ("engine/ssrf.py", "_as_ip"): (
+        "Speculative PARSING, not error handling. Each `except` is one address spelling failing to "
+        "apply so the next can be tried — dotted-quad, then bare integer/hex/octal, then the short "
+        "`inet_aton` form — and a hostname like `api.acme.com` fails all of them by design, which is "
+        "the overwhelmingly common case on every call. Logging would fire on essentially every "
+        "destination with attacker-controlled content, i.e. its own DoS vector. Nothing is lost "
+        "either: the caller treats an unparseable host as `not an IP`, which is the fail-SAFE answer "
+        "here — a name that is not an address cannot be a metadata or loopback target."
+    ),
     ("engine/content_norm.py", "_decode_candidates"): (
         "Speculative decoding: EVERY value on the hot path is offered to base64 and hex, so a decode "
         "that fails is the overwhelmingly common case — it means 'this substring was not encoded', "

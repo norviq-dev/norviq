@@ -188,10 +188,60 @@ class AssetGraphBuilder:
         props = self._graph.nodes[tool_id].setdefault("properties", {})
         props["call_count"] = int(props.get("call_count", 0)) + 1
 
+    # What a tool's VERB implies about the asset it touches, used when the static map says nothing.
+    # Deliberately coarse: the point is that the asset exists and is reachable, not to invent a
+    # precise URI the call never named.
+    _VERB_ASSET = {
+        "delete": ("compute/destructive", "critical", "write"),
+        "write": ("compute/mutating", "high", "write"),
+        "send": ("network/egress", "high", "write"),
+        "read": ("data/read", "medium", "read"),
+    }
+
     def _record_mapped_data(self, tool_name: str) -> None:
-        """Create tool to data edges for configured data mappings."""
-        for data_uri in TOOL_DATA_MAP.get(tool_name, []):
-            self.record_data_access(tool_name, data_uri)
+        """Create tool→data edges — from the static map, and from the tool's verb when it is silent.
+
+        THE STATIC MAP WAS THE WHOLE WORLD, AND IT HAS EIGHT ENTRIES (F-042). `exec_shell`,
+        `drop_table`, `spawn_pod`, `modify_config` and `upload_file` are all in `TOOL_RISK_MAP` — the
+        product already calls them critical — and none of them is in `TOOL_DATA_MAP`, so none produced
+        a data edge. Blast radius is computed by walking those edges, which is why
+        `GET /graph/blast-radius/{spiffe}` returned 200 with `total_reachable: 0` and
+        `attack_paths: []` for an agent with 300+ evaluations and 130 `shell_exec` calls. An
+        all-empty blast radius for a busy agent does not read as "we cannot see this" — it reads as
+        "nothing is reachable", which is the most dangerous thing a security console can say wrongly.
+        And it can never have been right, because a map of eight literal names cannot cover the tools
+        a customer actually deploys.
+
+        So the map becomes a SEED — precise URIs where we genuinely know them — and any other tool
+        falls back to the asset its verb implies. `classify_tool` is the product's one notion of what a
+        call does and is already used for enforcement, so this is the same fact reused rather than a
+        second taxonomy that can disagree with the first.
+
+        A verb-derived node is marked `derived: True` so the console can distinguish "this is the
+        orders table" from "this tool destroys something we could not name". Reporting a guess as a
+        precise asset would be its own kind of lie.
+        """
+        mapped = TOOL_DATA_MAP.get(tool_name, [])
+        if mapped:
+            for data_uri in mapped:
+                self.record_data_access(tool_name, data_uri)
+            return
+        # Imported HERE, not at module scope: `capability.source_registry` imports `graph.models`, so a
+        # top-level import closes a cycle (graph -> analyzer -> asset_graph -> capability -> graph).
+        # Local keeps the one notion of a verb without restructuring either package.
+        from norviq.engine.capability import classify_tool
+
+        try:
+            verb, _risk = classify_tool(tool_name)
+        except Exception:  # noqa: BLE001 - the graph is evidence, never enforcement; never break a call
+            log.warning("nrvq.graph.classify_failed", tool=tool_name, code="NRVQ-ENG-2066")
+            return
+        asset = self._VERB_ASSET.get(str(getattr(verb, "value", verb)))
+        if asset is None:
+            return  # genuinely unclassifiable: an edge to "unknown" would be noise, not evidence
+        data_uri, sensitivity, access_type = asset
+        self.add_data(data_uri, data_type="derived", sensitivity=sensitivity)
+        self.record_data_access(tool_name, data_uri, access_type=access_type)
 
     def record_delegation(self, from_agent: str, to_agent: str, depth: int = 1) -> None:
         """Record agent delegation edge."""
