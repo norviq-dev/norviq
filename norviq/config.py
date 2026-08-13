@@ -436,12 +436,27 @@ class NorviqSettings(BaseSettings):
     # is enforced and `spiffe_id` keys the trust score + the agent_frozen: kill-switch, so both are
     # authorization inputs, not labels: a credential that CARRIES the claim is always pinned to it.
     # This flag governs the credentials that DON'T carry one (pre-upgrade sidecar tokens, legacy API keys):
-    #   False (default) — unbound credentials may still assert an identity, so an in-flight upgrade doesn't
+    #   False           — unbound credentials may still assert an identity, so an in-flight upgrade doesn't
     #                     fail-closed every existing sidecar mid-rollout. Ratchet, not a permanent state.
-    #   True            — every non-admin caller MUST present a bound credential (403 otherwise). Flip this
-    #                     once all sidecar tokens have been re-minted (webhook stamps agent_class from the
-    #                     pod's norviq.io/agent-class label) and API keys re-issued with an agent_class.
-    auth_require_bound_agent_identity: bool = False
+    #   True (default)  — every non-admin caller MUST present a bound credential (403 otherwise).
+    #
+    # DEFAULT FLIPPED TO True (F-003). Left False, `scoped_identity` skips any claim whose credential
+    # value is empty, so a namespace-scoped key (`agent_class=''`) let the REQUEST BODY choose the
+    # agent_class — and agent_class selects the Rego program. A viewer/service key for one namespace
+    # could therefore evaluate as ANY class in it, including a class nobody has written a policy for,
+    # which falls to `no_policy_decision='allow'`. The dimension that SELECTS the policy has to be
+    # attested, exactly as `namespace` already is (that mismatch has returned 403 all along).
+    #
+    # This ratchet was built for precisely this and was only ever waiting on a migration concern:
+    # flipping it 403s credentials minted without an agent_class. There is no such installed base —
+    # v0.2.0 was tagged but never published (F-001; PyPI's latest is 0.1.10), so the compatibility
+    # cost of the secure default is being paid at the only moment it is free. Anyone upgrading from
+    # 0.1.x who has not yet re-minted sets this back to False, re-mints, and flips it again.
+    #
+    # Machine principals only, and only the fields the deployment can actually issue — see
+    # `_required_bound_fields`, which already drops `spiffe_id` on a workload-api install rather than
+    # demanding a claim that cannot exist. Human sessions are unaffected; admins bypass binding.
+    auth_require_bound_agent_identity: bool = True
     # --- OIDC (SSO). All default-off so legacy HS256 stays the only
     # path until an IdP is wired; flipping oidc_enabled adds RS256/ES256 validation ALONGSIDE HS256.
     oidc_enabled: bool = False

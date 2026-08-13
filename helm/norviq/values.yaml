@@ -853,9 +853,13 @@ auth:
   #   false (default) — they may still assert an identity, so an upgrade doesn't fail-closed every
   #                     in-flight sidecar mid-rollout.
   #   true            — every non-admin caller must present a bound credential (403 otherwise).
-  # RATCHET: flip to true once sidecars have been re-admitted (the webhook stamps agent_class from the
-  # pod's norviq.io/agent-class label) and workload API keys re-issued with an agent_class.
-  requireBoundAgentIdentity: false
+  # DEFAULTS TO true (F-003): agent_class selects the Rego program, so it must be attested like
+  # namespace already is. Left false, a namespace-scoped key with an empty agent_class let the request
+  # BODY pick the class — including one with no policy, which falls through to noPolicyDecision: allow.
+  # Set false only for an in-flight upgrade from 0.1.x whose sidecars/API keys predate agent_class
+  # binding; re-admit the sidecars (the webhook stamps agent_class from the pod's norviq.io/agent-class
+  # label), re-issue workload keys with an agent_class, then set it back to true.
+  requireBoundAgentIdentity: true
 
 oidc:
   enabled: false

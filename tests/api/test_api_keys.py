@@ -68,7 +68,10 @@ def test_create_returns_secret_once_and_stores_only_hash() -> None:
     client = _client(rows)
     resp = client.post(
         "/api/v1/keys",
-        json={"name": "ci", "namespace": "default", "role": "service"},
+        # agent_class is now required for a service key (F-003) — it selects the Rego program, so an
+        # unbound one would let the caller choose its own policy. This test's subject is the SECRET
+        # handling, so it just states the class rather than testing the refusal (below).
+        json={"name": "ci", "namespace": "default", "role": "service", "agent_class": "ci-runner"},
         headers={"Authorization": f"Bearer {_token('admin')}"},
     )
     assert resp.status_code == 200
@@ -246,3 +249,44 @@ def test_create_key_defaults_to_configured_ttl_and_zero_means_never() -> None:
     ).json()
     got7 = datetime.fromisoformat(body7["expires_at"])
     assert abs((got7 - (datetime.now(timezone.utc) + timedelta(days=7))).total_seconds()) < 300
+
+
+# --- F-003: a service key's agent_class is not optional ----------------------------------------
+
+def test_a_service_key_cannot_be_issued_without_an_agent_class() -> None:
+    """agent_class selects the Rego program this workload runs under.
+
+    Refused at CREATION rather than only at evaluation: the admin issuing the key is the only person
+    who knows which class it is for, and a 403 on the hot path days later gives them nothing to act on.
+    """
+    client = _client([])
+    resp = client.post(
+        "/api/v1/keys",
+        json={"name": "agent", "namespace": "chatbot-lab", "role": "service"},
+        headers={"Authorization": f"Bearer {_token('admin')}"},
+    )
+    assert resp.status_code == 422
+    assert "agent_class" in resp.json()["detail"]
+
+
+def test_a_whitespace_agent_class_does_not_satisfy_it() -> None:
+    client = _client([])
+    resp = client.post(
+        "/api/v1/keys",
+        json={"name": "agent", "namespace": "x", "role": "service", "agent_class": "   "},
+        headers={"Authorization": f"Bearer {_token('admin')}"},
+    )
+    assert resp.status_code == 422
+
+
+def test_operator_keys_are_unaffected() -> None:
+    """viewer/admin keys are operator/CI credentials with no agent identity to bind — the case the
+    empty default was always for. Requiring a class of them would be noise, not security."""
+    for role in ("viewer", "admin"):
+        rows: list = []
+        resp = _client(rows).post(
+            "/api/v1/keys",
+            json={"name": f"op-{role}", "namespace": "default", "role": role},
+            headers={"Authorization": f"Bearer {_token('admin')}"},
+        )
+        assert resp.status_code == 200, role

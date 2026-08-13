@@ -37,6 +37,39 @@ def _token(
     return jwt.encode(claims, settings.api_secret_key, algorithm="HS256")
 
 
+@pytest.fixture(autouse=True)
+def _ratchet_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This file's subject is the identity-BINDING logic, which is what runs with the ratchet off.
+
+    `auth_require_bound_agent_identity` now DEFAULTS to True (F-003: `agent_class` selects the Rego
+    program, so it has to be attested like `namespace` already is). These tests predate that and were
+    written against the old default, so several of them — including
+    `test_the_existing_hot_path_is_unchanged_when_nothing_is_attestable`, which asserts a claimless
+    service token gets 200 — assert exactly the behaviour the flag now refuses.
+
+    They are still worth having: the flag is documented as a downgrade path for an in-flight upgrade
+    from 0.1.x, so `False` is a configuration the product supports and the binding logic underneath it
+    must keep working. So the precondition is made EXPLICIT here rather than inherited from a default
+    that has moved. Nothing is weakened — the tests that exercise the ratchet set it back to True
+    themselves and still do, and `test_the_shipped_default_is_the_strict_one` below pins the default
+    itself so this fixture cannot quietly hide a regression in it.
+    """
+    monkeypatch.setattr(settings, "auth_require_bound_agent_identity", False)
+
+
+def test_the_shipped_default_is_the_strict_one() -> None:
+    """The autouse fixture above turns the ratchet off, so something has to guard the real default.
+
+    Deliberately reads the class default rather than the live `settings` object, which the fixture has
+    already patched.
+    """
+    from norviq.config import NorviqSettings
+
+    assert NorviqSettings.model_fields["auth_require_bound_agent_identity"].default is True, (
+        "agent_class selects the Rego program; an unbound machine credential must not choose its own"
+    )
+
+
 def _client() -> TestClient:
     app = create_app()
 
@@ -507,3 +540,43 @@ def test_mock_mode_still_requires_the_spiffe_claim(monkeypatch) -> None:
     with pytest.raises(HTTPException) as exc:
         auth_mod.scoped_identity(_svc(agent_class="chatbot"), {"namespace": "team-a"})
     assert exc.value.status_code == 403
+
+
+# --- F-003: agent_class must be attested, because it selects the Rego program -------------------
+#
+# `scoped_identity` only binds a claim whose credential value is NON-EMPTY, so a namespace-scoped key
+# (`agent_class=''`) let the request BODY choose the class. The class picks the policy, and a class
+# nobody has written a policy for falls through to `no_policy_decision='allow'` — so a key issued for
+# one namespace could evaluate as any class in it and shop for the most permissive outcome. The
+# namespace dimension has returned 403 on a mismatch all along; this is the same rule for the other
+# dimension that decides which program runs.
+
+def test_a_classless_service_credential_cannot_choose_its_own_class(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The repro from the finding, at the shipped default."""
+    monkeypatch.setattr(settings, "auth_require_bound_agent_identity", True)
+    monkeypatch.setattr(settings, "spiffe_mode", "workload-api")  # agent_class is the only required field
+    client = _client()
+    token = _token("service", "chatbot-lab")  # minted with NO agent_class claim
+    assert _eval_as(client, token, "chatbot-lab", "redteam") == 403
+    # ...and it cannot shop for a class that has no policy either, which was the profitable move.
+    assert _eval_as(client, token, "chatbot-lab", "anything-else") == 403
+
+
+def test_a_bound_service_credential_is_unaffected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fix must not touch the hot path it is protecting: a properly issued key still evaluates."""
+    monkeypatch.setattr(settings, "auth_require_bound_agent_identity", True)
+    monkeypatch.setattr(settings, "spiffe_mode", "workload-api")
+    client = _client()
+    token = _token("service", "chatbot-lab", agent_class="support-agent")
+    assert _eval_as(client, token, "chatbot-lab", "support-agent") == 200
+
+
+def test_a_human_session_is_unaffected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ratchet is for MACHINE principals. A viewer has no agent identity to bind, and holding
+    humans to it would break the console's Policy Tester and Attack Graph simulate for non-admins."""
+    monkeypatch.setattr(settings, "auth_require_bound_agent_identity", True)
+    monkeypatch.setattr(settings, "spiffe_mode", "workload-api")
+    client = _client()
+    assert _eval_as(client, _token("viewer", "team-a"), "team-a", "whatever") == 200

@@ -7,7 +7,7 @@ returned exactly once (on create); the store only ever holds its hash."""
 from datetime import datetime, timedelta, timezone
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -89,6 +89,23 @@ async def create_key(
 ) -> dict:
     """Issue a new API key. Returns the secret ONCE; only its hash is stored. Admin-only, audited."""
     require_admin(user)
+    # A `service` key is a WORKLOAD credential, and `agent_class` is what selects the Rego program for
+    # it — so minting one without a class creates a credential whose policy is chosen by the request
+    # body rather than by the issuer (F-003). Refused at creation, not just at evaluation, so the
+    # misconfiguration cannot exist: the admin issuing the key is the only person who knows which class
+    # it is for, and a 403 later gives them no way to find out.
+    #
+    # Only `service`. `viewer`/`admin` keys are operator/CI credentials with no agent identity to bind,
+    # which is the case the empty default was always for.
+    if body.role == "service" and not body.agent_class.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "a service key must be issued with an agent_class: it selects the policy this "
+                "workload is evaluated under, so an unbound one would let the caller choose its own "
+                "policy. Pass agent_class, or use role=viewer for an operator/CI key."
+            ),
+        )
     full, prefix, key_hash = generate_key()
     expires_at = _resolve_expiry(body.expires_in_days)
     row = ApiKey(
