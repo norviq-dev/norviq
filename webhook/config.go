@@ -136,7 +136,24 @@ func LoadConfig() Config {
 		SpiffeMode:            envStr("NRVQ_SPIFFE_MODE", "mock"),
 		SpiffeSocket:          envStr("NRVQ_SPIFFE_SOCKET", "/spiffe-workload-api/spire-agent.sock"),
 		SidecarMode:           envStr("NRVQ_SIDECAR_MODE", "proxy"),
-		FallbackMode:          envStr("NRVQ_SDK_FALLBACK_MODE", "block"),
+		// "block" -> "allow", to AGREE with config.py's sdk_fallback_mode and the chart (F-027).
+		//
+		// The three disagreed: this said block, config.py says allow, values.yaml sets allow
+		// explicitly and therefore won on every real install. So this default never applied and was
+		// a trap rather than a protection — the moment someone omitted the chart value (a slimmed
+		// values file, a raw manifest, a test harness building Config{} directly), injected sidecars
+		// would silently switch to fail-CLOSED and a Norviq outage would stop the customer's agents.
+		// A default nobody exercises is not a safe default; it is an untested branch.
+		//
+		// Aligned toward `allow` rather than the other way because the posture is deliberate and
+		// documented in values.yaml: Norviq sits in the request path of production agents, and a
+		// control whose failure mode is a customer outage gets removed from that path. It is the same
+		// rule the sidecar Secret writer follows ("a Norviq problem must not take the customer's
+		// workloads down"). Critically, failing open here is NOT silent — the SDK logs
+		// NRVQ-SDK-1013 and stamps rule_id=engine_unavailable_fallback on the decision, in BOTH
+		// modes, precisely so an operator can see, count and alert on the calls that went unjudged.
+		// Operators who prefer fail-closed set fallbackMode: block and get it everywhere.
+		FallbackMode:          envStr("NRVQ_SDK_FALLBACK_MODE", "allow"),
 		ApiURL:                envStr("NRVQ_API_URL", "http://norviq-api:8080"),
 		ApiSecret:             envStr("NRVQ_API_SECRET_KEY", envStr("NRVQ_API_TOKEN", "")),
 		SidecarTokenTTLHours:  envInt("NRVQ_SIDECAR_TOKEN_TTL_HOURS", 720),

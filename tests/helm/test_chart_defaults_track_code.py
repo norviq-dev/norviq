@@ -98,3 +98,46 @@ def test_the_defaults_are_documented_where_they_are_set(env_name: str, path: Pat
         f"{env_name} in {path.name} has no comment pointing at norviq/config.py — the next person to "
         "change the Python default will not know this silently overrides it"
     )
+
+
+# --- the FOURTH place, which is where F-027 was hiding -------------------------------------------
+#
+# The tests above compare values.yaml, the templates and config.py. The injector binary carries its
+# OWN default in webhook/config.go, and it said "block" while all three of those said "allow".
+#
+# That default never applied, because values.yaml sets fallbackMode explicitly and the chart always
+# wins — which is exactly what made it dangerous rather than harmless. It is the branch that runs when
+# the chart value is ABSENT: a slimmed values file, a hand-written manifest, a test harness building
+# Config{} directly. In that case injected sidecars would silently fail CLOSED and a Norviq outage
+# would stop the customer's agents, which is the one outcome this product's posture rules out.
+#
+# A default nobody exercises is not a safe default; it is an untested branch.
+
+_WEBHOOK_CONFIG_GO = _ROOT / "webhook" / "config.go"
+
+
+def _go_env_default(env_name: str) -> str:
+    """The literal in `envStr("NRVQ_X", "LITERAL")` in the injector's Go config."""
+    text = _WEBHOOK_CONFIG_GO.read_text(encoding="utf-8")
+    match = re.search(rf'envStr\("{re.escape(env_name)}",\s*"([^"]*)"\)', text)
+    assert match, f"{env_name} not found as an envStr default in webhook/config.go"
+    return match.group(1)
+
+
+def test_the_injector_binary_default_matches_the_code_default() -> None:
+    assert _go_env_default("NRVQ_SDK_FALLBACK_MODE") == settings.sdk_fallback_mode, (
+        "webhook/config.go and norviq/config.py disagree on the sidecar fallback mode. The chart "
+        "normally hides this, which is why it must be asserted: the Go default is what an install "
+        "that omits the chart value actually gets."
+    )
+
+
+def test_all_four_sources_of_the_fallback_mode_agree() -> None:
+    """One concept, four homes. Named individually so a failure says WHICH one drifted."""
+    sources = {
+        "norviq/config.py": settings.sdk_fallback_mode,
+        "values.yaml": _values_scalar("webhook.injection.fallbackMode"),
+        "webhook-deployment.yaml": _template_default(_WEBHOOK, "NRVQ_SDK_FALLBACK_MODE"),
+        "webhook/config.go": _go_env_default("NRVQ_SDK_FALLBACK_MODE"),
+    }
+    assert len(set(sources.values())) == 1, f"fallback mode disagrees across its homes: {sources}"
