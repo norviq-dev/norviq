@@ -332,3 +332,69 @@ def test_evaluate_route_returns_flat_response() -> None:
     response = client.post("/api/v1/evaluate", json=payload, headers=headers)
     assert response.status_code == 200
     assert response.json() == {"decision": "block", "rule_id": "deny_sql_injection", "trust_score": 0.41}
+
+
+# --- F-014: a scan that measures the wrong scope must refuse, not report ------------------------
+
+def test_an_unknown_query_param_is_refused_not_ignored() -> None:
+    """`namespace=` and `agent_class=` are the names an operator reaches for.
+
+    FastAPI drops undeclared query params, so the suite ran against `default` — which on most
+    installs has no baseline — and returned a pass_rate of 5.9% for a namespace that was actually at
+    82.4%. The operator has no way to distinguish that from a real result, and acts on the number.
+    """
+    client = _client()
+    headers = {"Authorization": f"Bearer {_token()}"}
+    resp = client.post("/api/v1/redteam/suite?namespace=chatbot-lab", headers=headers)
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert "namespace" in detail
+    # The error must name the parameters that DO work, since the failure is a plausible wrong name.
+    assert "target_namespace" in detail and "target_agent" in detail
+
+
+def test_a_misspelled_target_param_is_refused() -> None:
+    client = _client()
+    resp = client.post(
+        "/api/v1/redteam/suite?target_namesapce=chatbot-lab",
+        headers={"Authorization": f"Bearer {_token()}"},
+    )
+    assert resp.status_code == 422
+
+
+def test_the_correct_params_still_work() -> None:
+    """The guard must not reject the documented spelling — that would be a worse bug than the one
+    it fixes, since it would make the endpoint unusable rather than merely misleading."""
+    client = _client()
+    resp = client.post(
+        "/api/v1/redteam/suite?target_namespace=default&target_agent=support-agent",
+        headers={"Authorization": f"Bearer {_token()}"},
+    )
+    assert resp.status_code == 200
+
+
+def test_the_report_states_what_it_measured() -> None:
+    """A pass_rate without its scope is how 5.9% got read as 'the controls are broken' when it meant
+    'this scope is empty'. The two now travel together."""
+    client = _client()
+    body = client.post(
+        "/api/v1/redteam/suite?target_namespace=default",
+        headers={"Authorization": f"Bearer {_token()}"},
+    ).json()
+    scope = body["scope"]
+    assert scope["namespace"] == "default"
+    assert isinstance(scope["agent_classes"], list)
+    # The honest distinction: "we tested and it is bad" vs "there was nothing here to test".
+    assert "scope_empty" in scope and "policy_rules_loaded" in scope
+    assert scope["scope_empty"] is not scope["policy_rules_loaded"]
+
+
+def test_a_fallback_target_is_declared_as_such() -> None:
+    """With no real agent class seeded, the synthetic `redteam-test` identity is scored — which is a
+    fact about the measurement, not about the operator's deployment."""
+    client = _client(seeded=[])
+    body = client.post(
+        "/api/v1/redteam/suite?target_namespace=default",
+        headers={"Authorization": f"Bearer {_token()}"},
+    ).json()
+    assert body["scope"]["targets_are_fallback"] is True

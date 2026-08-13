@@ -80,6 +80,30 @@ async def _seeded_classes(session: AsyncSession, namespace: str) -> list[str]:
     )
 
 
+def _reject_unknown_query_params(request: Request, accepted: set[str]) -> None:
+    """422 on any query parameter this route does not declare.
+
+    FastAPI ignores undeclared query params, which is the right default for most routes and exactly
+    wrong for a measurement one: `?namespace=chatbot-lab` was dropped, the suite ran against the
+    `default` scope, and the report came back with a pass_rate for a namespace nobody asked about.
+    The operator has no way to tell that from a real result.
+
+    The error names the accepted parameters, because the whole failure mode is that the caller used a
+    plausible-but-wrong name and had no signal.
+    """
+    unknown = sorted(set(request.query_params.keys()) - accepted)
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"unknown query parameter(s): {', '.join(unknown)}. "
+                f"This endpoint accepts: {', '.join(sorted(accepted))}. "
+                "Refused rather than ignored — an ignored scope parameter means the report you get "
+                "back measures a different scope than the one you asked for."
+            ),
+        )
+
+
 @router.post("/redteam/run")
 async def run_attack(
     attack_id: str,
@@ -112,6 +136,12 @@ async def run_suite(
     in the namespace (or one explicit class), so the report reflects the deployed sector posture, not a synthetic
     identity. Each result row carries the agent_class/namespace it was evaluated against."""
     require_admin(user)  # red-team is admin-only
+    # MEASUREMENT INTEGRITY (F-014). `namespace=` and `agent_class=` are the names an operator reaches
+    # for, and FastAPI silently ignores query params it does not declare — so the suite ran against
+    # `default`, which on most installs has no baseline, and reported pass_rate 5.9% for a namespace
+    # that was actually at 82.4%. A scan that measures the wrong scope and says nothing is worse than
+    # one that refuses: the operator acts on the number.
+    _reject_unknown_query_params(request, {"target_agent", "target_namespace"})
     # Reject a concurrent run for the same namespace (double-click / scripted double-submit) — return the
     # in-flight run_id so the caller can watch it instead of starting a second identical run. Registered here,
     # before any await into the run, so the check-and-set is atomic under asyncio (no interleaving in between).
@@ -176,7 +206,30 @@ async def run_suite(
                 "pass_rate": round(passed / len(results) * 100, 1) if results else 0,
                 "results": results,
                 "efficacy": efficacy,
+                # WHAT WAS ACTUALLY MEASURED (F-014). A pass_rate is meaningless without it, and the
+                # reported failure was exactly this: 5.9% for a namespace with no policies loaded read
+                # as "our controls are broken" when it meant "this scope is empty". The number and the
+                # scope it describes now travel together, so a report cannot be quoted without it.
+                #
+                # `scope_empty` is the honest distinction between "we tested your posture and it is
+                # bad" and "there was nothing here to test". `targets_are_fallback` says the same
+                # thing about the agent side: no real class was seeded, so the synthetic
+                # `redteam-test` identity was scored instead of anything the operator deployed.
+                "scope": {
+                    "namespace": target_namespace,
+                    "agent_classes": targets,
+                    "targets_are_fallback": targets == [_FALLBACK_TARGET],
+                    "policy_rules_loaded": bool(ns_rego),
+                    "scope_empty": not ns_rego,
+                },
             }
+            if not ns_rego:
+                log.warning(
+                    "nrvq.redteam.suite_scope_empty",
+                    namespace=target_namespace,
+                    pass_rate=report["pass_rate"],
+                    code="NRVQ-RED-13011",
+                )
             REPORTS[run_id] = report
             # Persist the run durably + prune to the retention window (read-only evidence; never enforces).
             created_at = await _persist_run(session, report, str(user.get("sub") or ""))
