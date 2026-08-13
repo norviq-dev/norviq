@@ -64,8 +64,14 @@ def test_default_third_party_images_are_upstream() -> None:
 
 def test_global_registry_mirrors_third_party_not_norviq() -> None:
     imgs = _images(_render("--set", "global.imageRegistry=mirror.example.com"))
-    # third-party images get the mirror prefix
-    assert any(i == "mirror.example.com/openpolicyagent/opa:1.18.0-static" for i in imgs), imgs
+    # Third-party images get the mirror prefix. The subject here is the PREFIX, so the OPA tag is read
+    # from values.yaml rather than written out: this assertion used to pin `opa:1.18.0-static` as a
+    # literal and broke on the 1.19.0 bump (F-001), which is a version change failing a test about
+    # registry rewriting — noise that teaches nothing and invites someone to bump the literal without
+    # reading why it moved. `test_default_third_party_images_are_upstream` above already guards the
+    # image itself, and the chart's own comment guards the pin.
+    opa_image = yaml.safe_load((_CHART / "values.yaml").read_text())["opa"]["image"]
+    assert any(i == f"mirror.example.com/{opa_image}" for i in imgs), imgs
     assert any(i == "mirror.example.com/redis:7-alpine" for i in imgs), imgs
     # norviq images are NOT double-prefixed (they use images.registry, untouched)
     assert not any("mirror.example.com/ghcr.io" in i for i in imgs), imgs
