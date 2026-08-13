@@ -763,9 +763,29 @@ luhn_digit(d, parity) = sub {
 }
 
 # Cross-tenant
+# HOME TENANT, falling back to the namespace (F-009).
+#
+# These compared `tool_params.tenant_id` against the agent's KUBERNETES NAMESPACE, which silently
+# asserts that a tenant id and a namespace name are the same string. For a multi-tenant agent they
+# are not: one `support-agent` in namespace `chatbot-lab` serving tenants `acme` and `globex` had
+# EVERY tenant-scoped lookup flagged cross-tenant, at deny. The rule was not wrong to compare — it was
+# wrong about what to compare against.
+#
+# `agent.home_tenant` is the explicit answer when configured. The namespace stays the fallback so
+# single-tenant-per-namespace deployments — where the equivalence really does hold, and which is what
+# this rule was written for — keep working unchanged with no config.
+_home_tenant = t {
+    t := object.get(input.agent, "home_tenant", "")
+    t != ""
+}
+_home_tenant = t {
+    object.get(input.agent, "home_tenant", "") == ""
+    t := input.agent.namespace
+}
+
 cross_tenant_detected {
     input.tool_params.tenant_id
-    input.tool_params.tenant_id != input.agent.namespace
+    input.tool_params.tenant_id != _home_tenant
 }
 cross_tenant_detected {
     input.tool_params.namespace

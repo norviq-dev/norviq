@@ -32,6 +32,7 @@ from norviq.engine.capability import classify_tool
 from norviq.engine.confusables import skeleton
 from norviq.engine.inproc_cache import _MISS, TTLCache
 from norviq.engine import content_norm, ssrf
+from norviq.engine.entropy import looks_like_secret_value
 from norviq.engine.masking import (
     _PAN_ALT_RE,
     _PAN_RE,
@@ -1643,6 +1644,26 @@ class OPAEvaluator:
                 classes.add("secret")
             _scan(content_norm.views(key))
             _scan_credentials(content_norm.credential_views(key))
+
+        # BARE CREDENTIAL VALUES, as a SEPARATE and advisory class (F-004). The AWS access-key id
+        # (`AKIA…`) is caught by shape; the 40-character secret access-key VALUE has no shape at all
+        # and matched nothing — and it is the half that actually signs requests.
+        #
+        # Reported as `secret_suspected`, never folded into `secret`, and that separation is the whole
+        # design. A high-entropy 40-character string is a credential, a SHA-256 digest, a JWT segment,
+        # a git commit or a session id, and nothing in the bytes tells them apart — so this is the one
+        # detector here that cannot be precise. Merging it into `secret` would have been a one-line
+        # change and would make `llm02_data_leakage` fire on every commit hash in a payload, destroying
+        # the 0-false-positive property the rest of this function is built on.
+        #
+        # The shipped baseline deliberately does NOT block on it. It exists so an operator can see the
+        # egress in the audit log and decide, and so an author can write an audit rule against it on
+        # purpose. See norviq/engine/entropy.py for the exclusions that make it usable at all.
+        if "secret" not in classes:
+            for value in self._walk_values(params):
+                if isinstance(value, str) and looks_like_secret_value(value):
+                    classes.add("secret_suspected")
+                    break
         return sorted(classes)
 
     def _walk_keys(self, node: object, depth: int = 0):

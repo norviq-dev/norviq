@@ -577,3 +577,40 @@ test_ordinary_https_still_allows {
         "tool_name": "http_fetch", "tool_params": {"url": "https://api.acme.com/v1/orders"},
     })
 }
+
+# --- F-009: a tenant id is not a Kubernetes namespace -------------------------------------------
+#
+# `cross_tenant_detected` compared `tool_params.tenant_id` against the agent's NAMESPACE, which
+# asserts the two are the same string. For a multi-tenant agent they are not: one `support-agent` in
+# `chatbot-lab` serving tenants `acme` and `globex` had EVERY tenant-scoped lookup flagged
+# cross-tenant, at deny. The comparison was right; its right-hand side was wrong.
+_tenant(agent, params) := out {
+    out := object.union(_norm({"tool_name": "get_customer", "tool_params": params}), {"agent": agent})
+}
+
+test_a_configured_home_tenant_allows_its_own_tenant {
+    strict.decision == "allow" with input as _tenant(
+        {"namespace": "chatbot-lab", "agent_class": "support", "home_tenant": "acme"},
+        {"tenant_id": "acme"},
+    )
+}
+
+# The control has to keep working — this is a real containment rule, not just a source of false
+# positives, and widening the comparison must not turn it off.
+test_a_configured_home_tenant_still_blocks_another_tenant {
+    strict.decision == "block" with input as _tenant(
+        {"namespace": "chatbot-lab", "agent_class": "support", "home_tenant": "acme"},
+        {"tenant_id": "globex"},
+    )
+}
+
+# The fallback is what keeps single-tenant-per-namespace deployments working with no config at all —
+# the arrangement the rule was originally written for.
+test_without_a_home_tenant_the_namespace_is_still_used {
+    strict.decision == "allow" with input as _tenant(
+        {"namespace": "acme", "agent_class": "support"}, {"tenant_id": "acme"},
+    )
+    strict.decision == "block" with input as _tenant(
+        {"namespace": "acme", "agent_class": "support"}, {"tenant_id": "globex"},
+    )
+}
