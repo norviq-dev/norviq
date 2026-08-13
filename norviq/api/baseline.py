@@ -141,6 +141,15 @@ _CONTROL_COPY: dict[str, Control] = {
         "Supply chain",
         "Catches plugin/script loading from untrusted sources.",
     ),
+    "dangerous_scheme": Control(
+        "dangerous_scheme",
+        "Non-HTTP URL schemes",
+        "Refuses file://, gopher://, dict:// and similar schemes on fetch-style tools.",
+        caveat="These read LOCAL files or speak unrelated protocols, so they are a local-file-read "
+        "and SSRF primitive rather than a web fetch. Ordinary http/https is untouched. Some of these "
+        "URLs already blocked before this control existed — but as deny_shell_execution, which "
+        "attributed them to a shell-execution attempt that never happened.",
+    ),
     "ssrf_metadata": Control(
         "ssrf_metadata",
         "Cloud metadata & loopback (SSRF)",

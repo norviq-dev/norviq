@@ -527,3 +527,53 @@ test_a_missing_internal_key_still_evaluates {
         "tool_name": "http_fetch", "tool_params": {"url": "https://api.acme.com/v1"},
     })
 }
+
+# --- F-005 / F-007: renamed-tool SQL comments, and correct attribution for a non-HTTP scheme ----
+
+test_sql_comment_terminators_block_on_a_renamed_tool {
+    every q in ["SELECT * FROM t -- bypass", "SELECT * FROM t /* x */", "UNION SELECT pw FROM users #"] {
+        strict.decision == "block" with input as _norm({"tool_name": "sql_query", "tool_params": {"query": q}})
+    }
+}
+
+# The gate is "LEADS with a statement AND carries a terminator". Prose that merely contains a dash, a
+# hash or the word select must stay clean — `--` is ordinary punctuation and `#42` is a ticket number.
+test_prose_with_comment_characters_still_allows {
+    strict.decision == "allow" with input as _norm({
+        "tool_name": "send_email", "tool_params": {"body": "the meeting -- as discussed -- is at 3"},
+    })
+    strict.decision == "allow" with input as _norm({
+        "tool_name": "create_ticket", "tool_params": {"title": "issue #42 in the tracker"},
+    })
+    strict.decision == "allow" with input as _norm({
+        "tool_name": "search_kb", "tool_params": {"q": "how do I select from a dropdown"},
+    })
+}
+
+# F-007 is an ATTRIBUTION fix, so the assertion is on the rule_id, not on the block. `file://` already
+# blocked — as `deny_shell_execution`, a shell-execution attempt that never happened.
+test_a_non_http_scheme_is_attributed_to_the_scheme_rule {
+    strict.rule_id == "dangerous_scheme" with input as _norm({
+        "tool_name": "http_fetch", "tool_params": {"url": "file:///etc/passwd"},
+    })
+}
+
+test_other_dangerous_schemes_block_too {
+    every u in ["gopher://evil/x", "dict://evil:11211/", "php://filter/read=x"] {
+        strict.decision == "block" with input as _norm({"tool_name": "http_fetch", "tool_params": {"url": u}})
+    }
+}
+
+# The shell rule is deliberately NOT narrowed to exec-class tools: that would trade an attribution bug
+# for a detection gap on a renamed tool carrying a real shell payload.
+test_the_shell_rule_still_fires_on_non_exec_tools {
+    strict.decision == "block" with input as _norm({
+        "tool_name": "send_email", "tool_params": {"body": "cat /etc/passwd"},
+    })
+}
+
+test_ordinary_https_still_allows {
+    strict.decision == "allow" with input as _norm({
+        "tool_name": "http_fetch", "tool_params": {"url": "https://api.acme.com/v1/orders"},
+    })
+}

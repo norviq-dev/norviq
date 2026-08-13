@@ -331,7 +331,47 @@ def test_evaluate_route_returns_flat_response() -> None:
     }
     response = client.post("/api/v1/evaluate", json=payload, headers=headers)
     assert response.status_code == 200
-    assert response.json() == {"decision": "block", "rule_id": "deny_sql_injection", "trust_score": 0.41}
+    # `reason` joined the flat payload in F-034. Stated here rather than loosened to a subset check,
+    # because an exact-shape assertion is what makes this a contract test — the next field to appear
+    # should have to come here and be justified too.
+    assert response.json() == {
+        "decision": "block", "rule_id": "deny_sql_injection", "trust_score": 0.41, "reason": "",
+    }
+
+
+def test_evaluate_returns_the_authored_reason() -> None:
+    """F-034: the engine REQUIRES a `reason` rule at author time — a policy without one is refused
+    with a 422 — and then /evaluate dropped its value. The operator wrote the sentence, the product
+    insisted on it, and the caller never saw it.
+
+    It is the half a human reads: `deny_shell_execution` says which rule fired, "shell metacharacters
+    are not permitted in ticket bodies" says why the author cared.
+    """
+    class _WithReason:
+        async def evaluate(self, event):
+            _ = event
+            return PolicyDecision(
+                decision="block", rule_id="deny_sql_injection", trust_score=0.41,
+                reason="SQL metacharacters are not permitted in this field",
+            )
+
+    app = create_app()
+    app.state.evaluator = _WithReason()
+    client = TestClient(app)
+    payload = {
+        "tool_name": "execute_sql",
+        "tool_params": {"query": "SELECT * FROM x"},
+        "agent_identity": {
+            "spiffe_id": "spiffe://norviq/ns/default/sa/customer-support",
+            "namespace": "default", "agent_class": "customer-support",
+        },
+        "session_id": "redteam-test",
+    }
+    body = client.post(
+        "/api/v1/evaluate", json=payload, headers={"Authorization": f"Bearer {_token()}"}
+    ).json()
+    assert body["reason"] == "SQL metacharacters are not permitted in this field"
+    assert body["rule_id"] == "deny_sql_injection"  # rule_id still works; this is additive
 
 
 # --- F-014: a scan that measures the wrong scope must refuse, not report ------------------------

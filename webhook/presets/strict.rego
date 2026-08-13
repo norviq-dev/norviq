@@ -221,6 +221,50 @@ shell_injection_detected {
     contains(val, pattern)
 }
 
+# --- F-005: SQL comment-terminator injection on a RENAMED tool ---------------------------------
+#
+# `sql_injection_detected` has two arms: the full `sql_patterns` set (union/boolean/etc) gated on the
+# literal tool name `execute_sql`, and a context-gated `sql_destructive_patterns` set for any other
+# tool. The second arm is the renamed-tool backstop, and it had no comment terminator, so
+# `sql_query {query: "SELECT * FROM t -- bypass"}` was ALLOWED — measured on this file.
+#
+# A comment terminator is only injection when it follows an actual statement, so this requires BOTH:
+# the value LEADS with a SQL statement keyword, and it carries a terminator. Adding `--` to
+# `sql_destructive_patterns` instead would have been wrong twice over — the context gate wants the
+# value to LEAD with the matched pattern (a comment never leads a real statement), and `--` in prose
+# is ordinary punctuation.
+_sql_statement_lead(val) {
+    lead := ["select ", "insert ", "update ", "delete ", "drop ", "alter ", "create ", "truncate ", "union "]
+    startswith(trim_space(lower(val)), lead[_])
+}
+_sql_comment_terminator(val) { contains(val, "--") }
+_sql_comment_terminator(val) { contains(val, "/*") }
+_sql_comment_terminator(val) { contains(val, "#") }
+
+sql_injection_detected {
+    val := security_scan_texts[_]
+    _sql_statement_lead(val)
+    _sql_comment_terminator(val)
+}
+
+# --- F-007: a non-HTTP scheme on a fetch tool is LFI/SSRF, not shell injection ------------------
+#
+# `http_fetch {url: "file:///etc/passwd"}` blocked — correctly — but reported
+# `rule_id: deny_shell_execution`, because the shell content rule matches `/etc/passwd`-shaped text
+# whatever tool carries it. The block was right and the attribution was wrong, which corrupts the
+# product's own "confirm by rule_id" discipline: an operator reading the audit sees a shell-execution
+# attempt that never happened, and the rule they would tune is not the one that fired.
+#
+# This names it properly. The shell rule is deliberately NOT narrowed to exec-class tools, which the
+# card suggests: that would stop it firing on a renamed tool carrying a real shell payload, trading an
+# attribution bug for a detection gap. Both rules fire; `dangerous_scheme` is the accurate one, and
+# the resolver's sorted-rule_id tie-break is what decides which is reported.
+dangerous_scheme_detected {
+    val := lower(security_scan_texts[_])
+    scheme := ["file://", "gopher://", "dict://", "ftp://", "jar:", "netdoc://", "php://", "data:text/html"]
+    contains(val, scheme[_])
+}
+
 # Destructive / elevated tools
 destructive_tools = {"delete_record", "drop_table", "truncate"}
 elevated_tools = {"modify_config", "grant_access"}
@@ -864,6 +908,7 @@ blocks["llm06_excessive_agency"] { destructive_tools[input.tool_name] }
 blocks["llm02_data_leakage"] { data_leakage_detected }
 blocks["llm02_data_leakage"] { secret_egress_detected }
 blocks["llm05_supply_chain"] { supply_chain_tools[input.tool_name] }
+blocks["dangerous_scheme"] { dangerous_scheme_detected }
 blocks["ssrf_metadata"] { ssrf_internal_target }
 blocks["pii_detection"] { pii_detected }
 blocks["pci_card_numbers"] { pci_field_detected }
@@ -928,6 +973,7 @@ reasons = {
     "llm06_excessive_agency": "Excessive agency — destructive or elevated tool (OWASP LLM06)",
     "llm02_data_leakage": "Sensitive data sent to an external tool (OWASP LLM02)",
     "llm05_supply_chain": "Untrusted code / plugin load (OWASP LLM05)",
+    "dangerous_scheme": "Non-HTTP URL scheme (file/gopher/dict/…) — local-file or SSRF read",
     "ssrf_metadata": "Request to a cloud metadata or loopback address (SSRF / credential theft)",
     "pii_detection": "PII (SSN) detected in tool parameters",
     "pci_card_numbers": "Payment card data (PAN) detected — PCI DSS",

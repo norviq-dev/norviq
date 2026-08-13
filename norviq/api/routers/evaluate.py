@@ -279,6 +279,20 @@ class EvaluateResponse(BaseModel):
     decision: str
     rule_id: str
     trust_score: float
+    # THE AUTHORED EXPLANATION (F-034). The engine REQUIRES a `reason` rule at author time — a policy
+    # without one is refused with a 422 — computes it on every decision, carries it through
+    # PolicyDecision and writes it to the audit record, and then this response dropped it on the
+    # floor. So the operator wrote the sentence, the product insisted on it, and the caller never saw
+    # it: `reason` came back absent from /evaluate while `rule_id` came back fine.
+    #
+    # That breaks the product's own stated discipline of confirming a decision by rule_id AND reason,
+    # and it is the half a human actually reads — `deny_shell_execution` says which rule fired,
+    # "shell metacharacters are not permitted in ticket bodies" says why the author cared.
+    #
+    # Defaulted to "" rather than made required, so a client that predates this field is unaffected
+    # and an engine path that genuinely has no reason serialises as empty instead of failing
+    # validation on the hot path.
+    reason: str = ""
 
 
 @router.post("/evaluate")
@@ -411,7 +425,8 @@ async def evaluate_tool_call(
         hub.publish(audit_record(event, decision))
     record_path_phase("api", "route_fanout", (perf_counter() - _t) * 1000.0)
     response = EvaluateResponse(
-        decision=decision.decision, rule_id=decision.rule_id, trust_score=decision.trust_score
+        decision=decision.decision, rule_id=decision.rule_id, trust_score=decision.trust_score,
+        reason=decision.reason or "",
     )
     # Recorded LAST so it covers the whole handler. FastAPI still has to validate and serialise this
     # response afterwards, which is precisely why `total_asgi - route_total` is the number to read
