@@ -483,3 +483,47 @@ test_a_missing_derived_document_still_evaluates {
         {"tool_name": "lookup_customer", "tool_params": {"id": "C-91"}},
     )
 }
+
+# --- F-006: SSRF to cloud metadata / loopback is a baseline floor -------------------------------
+#
+# `http_fetch` to `169.254.169.254/latest/meta-data/` was ALLOWED by this file. One such call returns
+# the node's role credentials, so every policy above it is moot — a floor, not a business rule.
+#
+# The engine classifies the host with `ipaddress` and publishes `derived.destinations.internal`,
+# because the encodings ARE the attack: 2130706433, 0x7f000001, 127.1 and localhost are one
+# destination. Those spellings are pinned in tests/engine/test_ssrf.py; these assert the WIRING.
+_ssrf(tool, internal) := out {
+    out := object.union(_norm({"tool_name": tool, "tool_params": {"url": "http://x/"}}),
+        {"derived": {"verb": "read", "data_classes": [],
+                     "destinations": {"urls": [], "hosts": [], "emails": [], "schemes": [],
+                                      "internal": internal}}})
+}
+
+test_metadata_and_loopback_destinations_block {
+    strict.decision == "block" with input as _ssrf("http_fetch", {"metadata": ["169.254.169.254"]})
+    strict.decision == "block" with input as _ssrf("http_fetch", {"loopback": ["127.0.0.1"]})
+}
+
+test_both_policies_agree_on_the_ssrf_floor {
+    every internal in [{"metadata": ["169.254.169.254"]}, {"loopback": ["127.0.0.1"]}] {
+        strict.decision == canonical.decision with input as _ssrf("http_fetch", internal)
+    }
+}
+
+# THE PRECISION HALF. An agent in Kubernetes reaches in-cluster services on 10.x/172.16-31.x all day.
+# Blocking that would repeat the over-block that turned 39 of 53 vendor tools into sinks, so `private`
+# is published for a customer rule and is NOT part of the floor.
+test_rfc1918_is_not_blocked_by_the_baseline {
+    strict.decision == "allow" with input as _ssrf("http_fetch", {"private": ["10.0.0.5"]})
+}
+
+test_a_public_destination_is_not_blocked {
+    strict.decision == "allow" with input as _ssrf("http_fetch", {})
+}
+
+# An engine predating derived.destinations.internal must degrade to today's behaviour, not error.
+test_a_missing_internal_key_still_evaluates {
+    strict.decision == "allow" with input as _norm({
+        "tool_name": "http_fetch", "tool_params": {"url": "https://api.acme.com/v1"},
+    })
+}

@@ -31,7 +31,7 @@ from norviq.engine.cache import RedisCache
 from norviq.engine.capability import classify_tool
 from norviq.engine.confusables import skeleton
 from norviq.engine.inproc_cache import _MISS, TTLCache
-from norviq.engine import content_norm
+from norviq.engine import content_norm, ssrf
 from norviq.engine.masking import (
     _PAN_ALT_RE,
     _PAN_RE,
@@ -1563,11 +1563,19 @@ class OPAEvaluator:
             if len(emails) + len(urls) > self._MAX_DESTINATIONS:
                 break
         cap = self._MAX_DESTINATIONS
+        host_list = sorted(hosts)[:cap]
         return {
             "emails": sorted(emails)[:cap],
             "urls": sorted(urls)[:cap],
-            "hosts": sorted(hosts)[:cap],
+            "hosts": host_list,
             "schemes": sorted(schemes)[:cap],
+            # Which of those hosts are NOT on the public internet, grouped as metadata / loopback /
+            # private (F-006). Computed here rather than in policy because the alternate encodings are
+            # the whole attack — `2130706433`, `0x7f000001`, `127.1`, `::ffff:127.0.0.1` are all
+            # loopback — and `ipaddress` decides that correctly while a regex enumerating spellings
+            # will always miss one. See norviq/engine/ssrf.py for why `private` is published but
+            # deliberately not part of the baseline block.
+            "internal": ssrf.classify_hosts(host_list),
         }
 
     def _data_classes(self, params: object, values: list) -> list:

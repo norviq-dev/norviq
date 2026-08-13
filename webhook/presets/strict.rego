@@ -634,6 +634,27 @@ pii_detected { _derived_class("pii") }
 pci_value_detected { _derived_class("pci") }
 data_leakage_detected { value_pattern_sink; _derived_class("secret") }
 
+# --- F-006: SSRF to cloud metadata / loopback --------------------------------------------------
+#
+# The stock baseline allowed `http_fetch` to `169.254.169.254/latest/meta-data/`. That one call
+# returns the node's role credentials, and every policy written above that point is then moot — so
+# this is a baseline floor, not a per-agent business rule.
+#
+# Reads `derived.destinations.internal`, which the engine computes with `ipaddress` (see
+# norviq/engine/ssrf.py). The alternate encodings are the entire attack — `2130706433`,
+# `0x7f000001`, `017700000001`, `127.1`, `::ffff:127.0.0.1` and `localhost` are all the same
+# destination — and a Rego pattern enumerating those spellings would both miss one and cost a regex
+# op this file does not have (it sits at 24 of the API validator's 25).
+#
+# ONLY metadata and loopback. RFC1918 is classified and published as `private` but is NOT blocked: an
+# agent in Kubernetes talks to in-cluster services on 10.x/172.16-31.x constantly, and a baseline that
+# refused ordinary internal traffic would be switched off within a day — the same over-block lesson as
+# `sensitive_keys` holding the bare key `token`. A customer who wants that rule can write it against
+# `derived.destinations.internal.private`.
+ssrf_internal_target { count(object.get(_internal_dests, "metadata", [])) > 0 }
+ssrf_internal_target { count(object.get(_internal_dests, "loopback", [])) > 0 }
+_internal_dests = object.get(object.get(input.derived, "destinations", {}), "internal", {})
+
 # Supply chain
 supply_chain_tools = {"load_plugin", "download_script", "eval", "install_package"}
 
@@ -843,6 +864,7 @@ blocks["llm06_excessive_agency"] { destructive_tools[input.tool_name] }
 blocks["llm02_data_leakage"] { data_leakage_detected }
 blocks["llm02_data_leakage"] { secret_egress_detected }
 blocks["llm05_supply_chain"] { supply_chain_tools[input.tool_name] }
+blocks["ssrf_metadata"] { ssrf_internal_target }
 blocks["pii_detection"] { pii_detected }
 blocks["pci_card_numbers"] { pci_field_detected }
 blocks["pci_card_numbers"] { pci_value_detected }
@@ -906,6 +928,7 @@ reasons = {
     "llm06_excessive_agency": "Excessive agency — destructive or elevated tool (OWASP LLM06)",
     "llm02_data_leakage": "Sensitive data sent to an external tool (OWASP LLM02)",
     "llm05_supply_chain": "Untrusted code / plugin load (OWASP LLM05)",
+    "ssrf_metadata": "Request to a cloud metadata or loopback address (SSRF / credential theft)",
     "pii_detection": "PII (SSN) detected in tool parameters",
     "pci_card_numbers": "Payment card data (PAN) detected — PCI DSS",
     "cross_tenant_access": "Cross-tenant / cross-namespace access denied",
