@@ -17,6 +17,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -118,6 +119,29 @@ func mcpTargets(cfg Config, pod *corev1.Pod) ([]mcpTarget, error) {
 				"proxy cannot wrap an image ENTRYPOINT the webhook cannot see — set command (and args) "+
 				"explicitly on that container", name, mcpServersAnnotation)
 		}
+		// HTTP-TRANSPORT MCP SERVERS ARE NOT GOVERNED BY THIS ANNOTATION (F-028), and the operator
+		// gets no signal today. The wrapping model is stdio: the command is rewritten to run the
+		// server as a child of `python -m norviq.mcp`, which is the only faithful interception point
+		// for a process speaking MCP over its own stdin/stdout.
+		//
+		// A FastMCP / streamable-HTTP server speaks over a socket instead. The rewrite still happens
+		// and the pod still comes up, but the Service targets the raw server, the firewall is not in
+		// the MCP data path, and `/api/v1/mcp/servers` stays empty — while the operator sees an
+		// injected pod and reasonably concludes it is governed. Silently-not-governed is the worst of
+		// the three possible outcomes; a refusal or a warning are both better.
+		//
+		// Warned rather than refused: the heuristic is a heuristic. A declared containerPort is strong
+		// evidence of a socket-speaking server, but a stdio server can legitimately expose a health or
+		// metrics port, and failing admission on that would stop a pod this annotation does govern.
+		// So the pod starts and the ambiguity is stated, loudly, with the container named.
+		if httpTransportLikely(container) {
+			slog.Warn("NRVQ-WHK-4051: MCP container looks like an HTTP-transport server; the "+
+				mcpServersAnnotation+" annotation wraps STDIO servers only. The proxy is NOT in the "+
+				"MCP data path for this container, so Gate A/B do not see its traffic and it will not "+
+				"appear under /api/v1/mcp/servers. Front it with the norviq.mcp HTTP proxy instead, or "+
+				"remove the container from the annotation so the pod does not read as governed.",
+				"container", name, "namespace", pod.Namespace, "ports", len(container.Ports))
+		}
 		targets = append(targets, mcpTarget{
 			Kind:      kind,
 			Index:     idx,
@@ -127,6 +151,27 @@ func mcpTargets(cfg Config, pod *corev1.Pod) ([]mcpTarget, error) {
 		})
 	}
 	return targets, nil
+}
+
+// httpTransportLikely reports whether a container looks like it speaks MCP over a socket rather than
+// stdio. Best-effort by design — see the call site for why this warns instead of refusing.
+//
+// Two independent signals, either of which is enough: a declared containerPort (a stdio server has no
+// reason to listen), or an argv that names an HTTP transport or an ASGI server.
+func httpTransportLikely(c corev1.Container) bool {
+	if len(c.Ports) > 0 {
+		return true
+	}
+	argv := strings.ToLower(strings.Join(append(append([]string{}, c.Command...), c.Args...), " "))
+	for _, marker := range []string{
+		"--http", "--transport http", "--transport=http", "streamable-http", "--sse", "--port",
+		"uvicorn", "hypercorn", "gunicorn", "fastapi",
+	} {
+		if strings.Contains(argv, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // mcpServerID is the pin key for a container: the explicit per-container annotation when present,

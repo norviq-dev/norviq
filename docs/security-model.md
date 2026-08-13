@@ -266,6 +266,33 @@ every scoped endpoint is single-tenant.
 These are stated intentionally, as operator responsibilities and threat-model notes — not gaps that
 were missed:
 
+- **Content DLP is not the control for arbitrary sensitive data. Destination allowlisting is.** The
+  content detectors match KNOWN SHAPES — SSNs, card numbers, vendor credential prefixes — normalised
+  and decoded so a spelling cannot evade them. What they cannot do is recognise data that has no
+  shape: a canary string, an internal project codename, a proprietary customer identifier, the text of
+  an unreleased contract. Those look like ordinary prose, and a detector that fired on them would fire
+  on everything.
+
+  The intended control for that data is the DESTINATION, not the payload: `derived.destinations`
+  publishes every email, URL and host a call carries, so a policy can say "this agent may email
+  acme.com and nothing else" and be right about data it has never seen. Under deny-by-default the
+  destination is the whole control — it needs no detector for what is being sent, which is precisely
+  the gap a detector list can never close.
+
+  This is an operator responsibility: an allowlist nobody wrote allows everything. `derived` also
+  carries `data_classes` (including the advisory `secret_suspected`) and
+  `destinations.internal` for the SSRF classes, so a policy can combine "unknown destination" with
+  "carrying something sensitive" rather than choosing one.
+
+- **MCP firewall injection wraps stdio servers only.** The `norviq.io/mcp-servers` annotation rewrites
+  a container's command to run the server as a child of the MCP proxy, which is the only faithful
+  interception point for a process speaking MCP over its own stdin/stdout. An HTTP-transport server
+  (FastMCP, streamable-HTTP) speaks over a socket instead: the pod still comes up, but the Service
+  targets the raw server, the firewall is not in the MCP data path, and the server does not appear
+  under `/api/v1/mcp/servers`. The webhook now logs `NRVQ-WHK-4051` naming the container when it
+  detects this, rather than letting an injected-but-ungoverned pod read as governed. Front an HTTP MCP
+  server with the `norviq.mcp` HTTP proxy instead.
+
 - **Sidecar injection is opt-out-able by default, in two ways.** Under the shipped default
   `webhook.injection.gateOnlyAgentPods: true`, the webhook's `objectSelector` routes a pod to the
   injector only if it carries `norviq.io/agent-class`; the pod is then injected *unless* it also carries
