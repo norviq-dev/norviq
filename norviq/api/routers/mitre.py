@@ -105,6 +105,7 @@ async def _activity_by_rule(
     if namespace:
         stmt = stmt.where(AuditLogEntry.namespace == namespace)
     by_rule: dict[str, dict[str, int]] = {}
+    degraded = False
     excluded = 0
     try:
         for rid, decision, cls, framework, count in (await session.execute(stmt)).all():
@@ -119,9 +120,14 @@ async def _activity_by_rule(
             # blocked-counts differ, so it is named here rather than left to be discovered.
             if decision in ("block", "escalate"):
                 entry["blocked"] += n
-    except Exception as exc:  # noqa: BLE001 — activity is derived; a DB error just shows 0
+    except Exception as exc:  # noqa: BLE001 — activity is derived; a DB error must not 500 the view
+        # DEGRADED, and it has to be SAYABLE (F-043). Returning zeros here is right — the view still
+        # renders — but silently identical to "this control genuinely blocked nothing", which is the
+        # opposite conclusion. Unmarked, an evidence pack exported during a database outage attests
+        # `enforced` techniques with `blocked: 0` and reads as a clean bill of health.
         log.warning("nrvq.api.mitre.activity_unavailable", error=str(exc), code="NRVQ-API-7071")
-    return by_rule, excluded
+        degraded = True
+    return by_rule, excluded, degraded
 
 
 async def _blocked_by_rule_class(session: AsyncSession, namespace: str | None, range_token: str) -> dict[str, dict[str, int]]:
@@ -220,7 +226,7 @@ async def _compute_coverage(request: Request, session: AsyncSession, namespace: 
     """Build the full coverage payload for a framework from its mapping + the loaded rego + audit. NO mock."""
     mapping = _load_mapping(framework)
     rego_blob = _rego_blob(request, namespace)
-    by_rule, synthetic_excluded = await _activity_by_rule(session, namespace, range_token)
+    by_rule, synthetic_excluded, activity_degraded = await _activity_by_rule(session, namespace, range_token)
     by_rule_class = await _blocked_by_rule_class(session, namespace, range_token)
 
     techniques = []
@@ -307,6 +313,10 @@ async def _compute_coverage(request: Request, session: AsyncSession, namespace: 
         # rendered as one — `proven` below is the efficacy overlay, and the red-team suite is the proof.
         "basis": "rules_present",
         "proven": proven,
+        # True when the audit join could not run, so every observed/blocked count below is 0 for a
+        # reason that has nothing to do with the controls. Carried into the exported pack as well —
+        # a durable artifact that cannot say "I could not see" is worse than no artifact.
+        "degraded": activity_degraded,
         # back-compat headline fields (old page)
         "covered": enforced, "total": enforceable_total,
         "observed": total_observed, "blocked": total_blocked, "agent_classes": agent_classes,
@@ -526,6 +536,20 @@ async def mitre_export(
         "coverage_pct": cov["coverage_pct"], "enforced": cov["enforced"],
         "enforceable_total": cov["enforceable_total"], "gap": cov["gap"], "out_of_scope": cov["oos"],
         "blocked_over_range": cov["blocked"],
+        # THE HONESTY QUALIFIERS THE LIVE VIEW ALREADY CARRIES (F-043). `GET /mitre/coverage` returns
+        # {coverage_pct: 80, basis: "rules_present", proven: 7} — and the pack carried only the 80.
+        # The exported artifact therefore read STRONGER than the API it was generated from, which is
+        # backwards: the pack is the durable thing, the one that ends up in an audit file months
+        # later, long after the live view that qualified it has moved on.
+        #
+        # `basis` says this is rules-PRESENT, not efficacy. `proven` is how many of those enforced
+        # techniques actually have block/escalate evidence in the window — in a monitor-mode
+        # namespace that gap is 100% of `enforced`, i.e. the pack would otherwise attest 80% coverage
+        # for a namespace that blocked nothing at all. `degraded` says the audit join could not run,
+        # so the zeros mean "could not see", not "nothing happened".
+        "basis": cov["basis"],
+        "proven": cov["proven"],
+        "degraded": cov["degraded"],
         # COMP-EVIDENCE (product decision): carry the synthetic/simulated + red-team exclusion count into the
         # pack so the JSON export and the PDF can state "real traffic only" honestly.
         "synthetic_excluded": cov["synthetic_excluded"],
@@ -860,6 +884,19 @@ def _evidence_pdf(pack: dict) -> bytes:
         f"Coverage: {pack['coverage_pct']}%  (enforced {pack['enforced']} / {pack['enforceable_total']} enforceable)",
         f"Gaps: {pack['gap']}   Out-of-scope: {pack['out_of_scope']}   Blocked over range: {pack['blocked_over_range']}",
     ]
+    # THE QUALIFIERS, ON THE HUMAN-READABLE PAGE (F-043). The PDF is the artifact that actually gets
+    # read in an audit, and it carried the percentage with none of the caveats the API states. A
+    # coverage figure that does not say what it is a figure OF is the part an auditor will quote.
+    if pack.get("basis") == "rules_present":
+        lines.append(
+            f"Basis: rules present, not efficacy — {pack.get('proven', 0)} of {pack['enforced']} "
+            "enforced techniques have block/escalate evidence in this window."
+        )
+    if pack.get("degraded"):
+        lines.append(
+            "DEGRADED: the audit query did not complete, so every blocked/observed count above is 0 "
+            "because it could not be read — not because nothing happened."
+        )
     # COMP-EVIDENCE: real-traffic-only promise — synthetic/simulated + red-team events are excluded from the
     # counts above; state how many, matching the console line.
     if excluded > 0:
