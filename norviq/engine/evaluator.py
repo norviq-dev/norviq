@@ -31,7 +31,15 @@ from norviq.engine.cache import RedisCache
 from norviq.engine.capability import classify_tool
 from norviq.engine.confusables import skeleton
 from norviq.engine.inproc_cache import _MISS, TTLCache
-from norviq.engine.masking import _PAN_RE, _SENSITIVE_KEYS, _SSN_RE, mask_params
+from norviq.engine import content_norm
+from norviq.engine.masking import (
+    _PAN_ALT_RE,
+    _PAN_RE,
+    _SSN_RE,
+    is_sensitive_key,
+    luhn_ok,
+    mask_params,
+)
 from norviq.engine.graph.asset_graph import AssetGraphBuilder
 from norviq.engine.graph.store import GraphStore
 from norviq.engine.opa_client import OpaClient, managed_package, rewrite_package, sanitize_key
@@ -327,6 +335,18 @@ def _fold_path(path: str) -> str:
 # Credential SHAPES, complementing masking's key-name list. Value-shape detection is what the
 # key-name list cannot do: a bare AWS key pair sitting in a free-text `body` has a perfectly
 # innocuous key. §11.5 recorded exactly that call being allowed on a live cluster.
+# Case-INSENSITIVE twin of the credential shapes. `AKIA…` lowercased is not a valid AWS key id, but an
+# attacker lowercases precisely because the detector is case-sensitive and the receiving system is not
+# — that was 1 of the 6 secret evasions measured. Kept as a SEPARATE pattern rather than adding
+# re.IGNORECASE to the original so the case-sensitive intent of `[0-9A-Z]{16}` stays readable.
+_DIGIT_RUN_RE = re.compile(r"\d[\d -]{10,22}\d")
+
+
+def _digit_runs(text: str) -> list[str]:
+    """Digit runs with separators removed — the candidates a Luhn check can be run over."""
+    return ["".join(c for c in m.group(0) if c.isdigit()) for m in _DIGIT_RUN_RE.finditer(text)]
+
+
 _SECRET_VALUE_RE = re.compile(
     r"(?:"
     r"\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)[0-9A-Z]{16}\b"   # AWS access key id
@@ -338,6 +358,13 @@ _SECRET_VALUE_RE = re.compile(
     r"|\bBearer\s+[A-Za-z0-9._~+/-]{20,}={0,2}"                      # bearer credential
     r")"
 )
+
+# Case-INSENSITIVE twin of the shapes above. A lowercased `akia…` is not a valid AWS key id, but an
+# attacker lowercases precisely BECAUSE the detector is case-sensitive while the system that
+# ultimately consumes the string is not — that was one of the six secret evasions measured
+# (F-032). Kept separate rather than adding re.IGNORECASE to the original, so the deliberate
+# case-sensitivity of `[0-9A-Z]{16}` stays readable to the next reader.
+_SECRET_VALUE_CI_RE = re.compile(_SECRET_VALUE_RE.pattern, re.IGNORECASE)
 # FROM / JOIN / INTO / UPDATE / TRUNCATE <table>. Not a parser; see _sql_tables.
 _SQL_TABLE_RE = re.compile(
     r"\b(?:from|join|into|update|truncate\s+table|truncate)\s+([A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*)?)",
@@ -1549,21 +1576,65 @@ class OPAEvaluator:
         Key-name detection and value-shape detection are both used, because each misses what the
         other catches: `{"password": "hunter2"}` has an innocuous value, and a bare AWS key in a
         free-text `body` has an innocuous key.
+
+        Every check runs over `content_norm.views()` rather than the raw bytes, which is what closes
+        the spelling evasions (F-032): a measured 68% of attack variants walked past these detectors
+        purely by choosing a spelling — spaced or dotted SSN, lowercased or zero-width-split AWS key,
+        base64 or hex of either. One shared normalize+decode stage fixes them together, instead of
+        each regex growing its own alternation and drifting from the others.
+
+        `params` is now walked directly rather than trusting the caller's pre-filtered `values`,
+        because that list drops non-string leaves: an INTEGER `{"note": 4111111111111111}` was
+        invisible while the quoted form blocked (F-045). `values` is still scanned so existing
+        callers behave identically.
         """
         classes: set[str] = set()
-        for raw in values:
-            if _PAN_RE.search(raw):
-                classes.add("pci")
-            if _SSN_RE.search(raw):
-                classes.add("pii")
-            if _SECRET_VALUE_RE.search(raw):
-                classes.add("secret")
-        # Sensitive KEY names (password, api_key, token, …) — reused from the masking module so the
-        # request-side classifier and the response-side masker cannot drift apart.
-        for key in self._walk_keys(params):
-            if key.lower() in _SENSITIVE_KEYS:
-                classes.add("secret")
+
+        def _scan(text_views: list[str]) -> None:
+            for v in text_views:
+                if _PAN_RE.search(v) or _PAN_ALT_RE.search(v):
+                    # Luhn gates it. Without the check, any long digit run — an order id, a pair of
+                    # timestamps — reads as a card number, and this control has to stay precise
+                    # enough that an operator is willing to promote it to `deny`.
+                    if any(luhn_ok(d) for d in _digit_runs(v)):
+                        classes.add("pci")
+                if _SSN_RE.search(v):
+                    classes.add("pii")
+                if _SECRET_VALUE_RE.search(v) or _SECRET_VALUE_CI_RE.search(v):
+                    classes.add("secret")
+
+        def _scan_credentials(text_views: list[str]) -> None:
+            """Credential shapes get the extra de-separated view. See content_norm.desep for why the
+            PII/PCI patterns deliberately do NOT: stripping separators from nine digits turns every
+            order number into an SSN, while `AKIA`+16 uppercase alphanumerics survives it intact."""
+            for v in text_views:
+                if _SECRET_VALUE_RE.search(v) or _SECRET_VALUE_CI_RE.search(v):
+                    classes.add("secret")
+
+        scanned = 0
+        for leaf in self._walk_values(params):
+            _scan(content_norm.views(leaf))
+            _scan_credentials(content_norm.credential_views(leaf))
+            scanned += 1
+            if scanned >= self._MAX_PATHS:
                 break
+        for raw in values:  # caller-supplied list, kept so existing call sites are unchanged
+            _scan(content_norm.views(raw))
+            _scan_credentials(content_norm.credential_views(raw))
+
+        # Sensitive KEY names (password, api_key, token, …) — reused from the masking module so the
+        # request-side classifier and the response-side masker cannot drift apart. Matched as
+        # normalised substrings now, because the exact-set version missed `access_token`,
+        # `client_secret` and `AWS_SECRET_ACCESS_KEY` (F-045).
+        #
+        # The key TEXT is scanned too. A credential sitting in a key POSITION —
+        # `{"balances": {"AKIA…": 25.0}}` — was never inspected at all, because the walk was
+        # values-only (F-012).
+        for key in self._walk_keys(params):
+            if is_sensitive_key(key):
+                classes.add("secret")
+            _scan(content_norm.views(key))
+            _scan_credentials(content_norm.credential_views(key))
         return sorted(classes)
 
     def _walk_keys(self, node: object, depth: int = 0):

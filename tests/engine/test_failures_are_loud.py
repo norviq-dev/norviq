@@ -87,6 +87,14 @@ _OBSERVABILITY_METHODS = frozenset({"inc", "increment", "observe", "record_excep
 # Adding to this list is a deliberate, reviewable act — that is the point.
 # --------------------------------------------------------------------------------------------------
 _JUSTIFIED_SILENT_HANDLERS: dict[tuple[str, str], str] = {
+    ("engine/content_norm.py", "_decode_candidates"): (
+        "Speculative decoding: EVERY value on the hot path is offered to base64 and hex, so a decode "
+        "that fails is the overwhelmingly common case — it means 'this substring was not encoded', "
+        "not that anything went wrong. Logging it would fire on essentially every request with "
+        "fully attacker-controlled content, i.e. its own DoS vector, and would bury the real signal. "
+        "Nothing is lost either: the ORIGINAL value is always view[0] and is always scanned, so a "
+        "failed decode can only cost an extra view, never a detection on the text as sent."
+    ),
     ("api/api_keys.py", "_record_authfail"): (
         "Best-effort failed-auth counter. The throttle is defense-in-depth layered on top of the real "
         "API-key check; a Redis hiccup must not turn into an auth outage. The auth decision itself is "

@@ -12,9 +12,70 @@ import structlog
 log = structlog.get_logger()
 
 _PAN_RE = re.compile(r"\b\d{4}[ -]?\d{4}[ -]?\d{4}[ -]?\d{4}\b")
+
+# SSN, tolerant of HOW the groups are separated but not of whether they are.
+#
+# It was `\b\d{3}-\d{2}-\d{4}\b` — dashes only — while _PAN_RE already accepted spaces. That
+# asymmetry was the finding (F-012/F-032): `123 45 6789`, `123.45.6789`, the same with a non-breaking
+# space or a zero-width character all walked past a detector that caught the dashed form. Callers run
+# this over `content_norm.views()`, which canonicalises every separator spelling to `-`, so this
+# pattern only has to accept one.
+#
+# A bare `\d{9}` is deliberately NOT matched. Nine digits with no separator is as likely an order
+# number or account id as an SSN, and there is nothing in the digits to tell them apart — matching it
+# would trade one evasion for false positives on ordinary business traffic, which is the worse deal
+# for a control an operator has to trust. See content_norm's module docstring.
 _SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+
 _LONG_DIGITS_RE = re.compile(r"^\d{13,19}$")
+
+# Card numbers that are NOT 16 digits: Amex (15), Diners (14). _PAN_RE covers the 16-digit brands.
+# Grouped Amex (`3782 822463 10005`) was reported allowed while the 16-digit form blocked (F-045).
+# Luhn gates both, so widening the digit-count does not widen the false-positive surface much: a
+# random 15-digit run passes Luhn one time in ten.
+_PAN_ALT_RE = re.compile(r"\b\d{4}[ -]?\d{6}[ -]?\d{4,5}\b")
+
+# Key NAMES that mean "the value beside me is a credential". Matched as normalised SUBSTRINGS rather
+# than by exact equality, because the exact-set version missed the commonest real spellings:
+# `access_token`, `client_secret`, `apiKey`, `AWS_SECRET_ACCESS_KEY` (F-045).
 _SENSITIVE_KEYS = {"password", "secret", "api_key", "token", "private_key", "authorization", "ssn", "pin", "cvv"}
+_SENSITIVE_KEY_PARTS = (
+    "password", "passwd", "pwd", "secret", "apikey", "api_key", "privatekey", "private_key",
+    "authorization", "credential", "ssn", "cvv", "accesskey", "access_key", "accesstoken",
+    "access_token", "refreshtoken", "refresh_token", "clientsecret", "client_secret",
+    "bearertoken", "bearer_token", "sessiontoken", "session_token",
+)
+
+
+def is_sensitive_key(name: str) -> bool:
+    """True if a parameter NAME says its value is a credential.
+
+    Normalises separators and case first (`AWS_SECRET_ACCESS_KEY`, `aws-secret-access-key` and
+    `awsSecretAccessKey` are the same key), then looks for any known part as a substring. `pin` and
+    `token` stay EXACT matches — as substrings they would fire on `pinned`, `shipping`, `tokenizer`
+    and similar ordinary field names, which is precisely the false-positive class worth avoiding.
+    """
+    raw = (name or "").strip()
+    flat = re.sub(r"[^a-z0-9]", "", raw.casefold())
+    if flat in {"pin", "token", "ssn", "cvv"}:
+        return True
+    return any(part.replace("_", "") in flat for part in _SENSITIVE_KEY_PARTS)
+
+
+def luhn_ok(digits: str) -> bool:
+    """Luhn check-digit validation — what separates a card number from any long digit run."""
+    if not digits.isdigit() or not 12 <= len(digits) <= 19:
+        return False
+    total, alt = 0, False
+    for ch in reversed(digits):
+        d = ord(ch) - 48
+        if alt:
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+        alt = not alt
+    return total % 10 == 0
 
 
 def _mask_pan(value: str) -> str:
