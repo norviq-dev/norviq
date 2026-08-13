@@ -739,3 +739,60 @@ The rest of the account does hold, and was checked rather than assumed:
 
 **Lesson worth keeping:** triaging one file and generalising to the rest is how a real regression gets
 filed as environmental. Capture the whole run and group by file before making the claim.
+
+---
+
+## 2026-08-13 (cont.) — MEDIUM findings, all on `fix/v020-eval-backlog`
+
+San asked for one branch. The six HIGH branches were stacked, so `fix/v020-eval-backlog` branches off
+`fix/f-001-bump-opa-1.19.0` and therefore contains **everything**.
+
+- **F-027** (`48e0336`) — one concept, **four** homes, and they disagreed: values.yaml / config.py /
+  the Deployment template all said `allow`, `webhook/config.go` said `block`. **Declined the flip to
+  fail-closed**; aligned the Go default to `allow` instead. The chart always wins, so `block` was dead
+  on every real install — which is exactly what made it dangerous: it is the branch that runs when the
+  chart value is ABSENT (slimmed values, hand-written manifest, a harness building `Config{}`), and
+  there it would silently fail CLOSED and stop the customer's agents. Failing open here is **not
+  silent** — `NRVQ-SDK-1013` plus `rule_id=engine_unavailable_fallback` in both modes — which is what
+  separates a documented trade-off from a governance hole. `test_chart_defaults_track_code.py` now
+  compares all four and names which drifted.
+
+- **F-008** (`1b411f7`) — `PYPI-README.md` claimed deny-by-default; the product ships allow. Fixed the
+  **docs**, not the default. Kept the bullet's purpose: the truth is equally surprising, just in the
+  other direction (a typo'd `agent_class` reads as a clean pass), so it says that, says what to check,
+  and gives the knob. Every other deny-by-default mention describes a *policy template* and is
+  correct — only the README conflated the two.
+
+- **F-006** (`eb199d7`) — SSRF floor. Seven variants went allow → block (IMDS, ECS creds, GCP,
+  loopback, decimal, hex, `localhost`). New `norviq/engine/ssrf.py` classifies with `ipaddress`
+  because **the encodings are the attack** and the preset had no regex-op budget left.
+  **RFC1918 is classified and deliberately NOT blocked** — an agent in k8s talks to 10.x all day, and
+  refusing that is the 39-of-53 over-block again. `metadata.acme.com` and `localhost.acme.com` stay
+  clean (exact host or parent suffix, never substring).
+  *Got `127.1` wrong first* — an early draft returned before trying the short dotted form. Rule: match
+  what the HTTP **client** resolves, not what the address spec calls well-formed.
+
+- **F-014** (`2b1d4a8`) — `?namespace=` was silently dropped, so the suite scored `default` and
+  reported 5.9% for a scope that was 82.4%. Unknown query params are now 422 **naming the ones that
+  work**, and the report carries the scope it measured (`scope_empty`, `targets_are_fallback`,
+  `policy_rules_loaded`). **Deliberately did not 404 an unknown namespace** — a fresh install has no
+  seeded classes anywhere, and refusing there breaks the first thing an operator does.
+
+- **F-013** (`2a1abd4`) — concealment by intent, not a verb list. 6 of 9 probes evaded; 12 of 12 now
+  caught. Two new rules (`mcp_a_line_jumping`, `mcp_a_side_channel`) are **gated** so
+  "Logs each call for audit purposes." and "Include the request id in every response" stay clean —
+  a description scanner that fires on those gets switched off and then catches nothing.
+  *Disagreement with the card:* `do not reveal` was **already caught**; `reveal` was in the
+  alternation. The other five held up.
+  **NOT done:** cross-server description shadowing needs a shared cross-instance registry — an
+  architectural change, left open rather than half-done.
+
+- **F-033** (`e3b7cfa`) — a sustained violation rate now **caps** trust instead of subtracting from
+  it. The band was unreachable *by construction*: weight 0.25 means a constantly-blocked agent floors
+  at **0.75**, and no bucket-steepening reaches 0.4 because the weight is the ceiling. A test pins the
+  old 0.75 so nobody folds it back into a weight. Compliant agents are numerically unchanged (§4.4).
+
+### Triage discipline that paid off
+
+Every remaining suite failure was proven environmental by capturing the full run and diffing the
+failing set against `main` — **byte-identical**. That is the check I skipped earlier and got wrong.
