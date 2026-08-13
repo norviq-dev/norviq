@@ -227,7 +227,11 @@ async def coverage_by_category(
             if namespace is None or ns in (namespace, "__cluster__"):
                 rego_blob += str(entry.get("rego", ""))
 
-    activity, _synthetic_excluded = await _activity_by_rule(session, namespace, "30d")  # best-effort; {} if DB down
+    # Third element is the degraded flag (F-043). Read here too rather than discarded, because this
+    # route has its OWN `degraded` notion for the agent-class join and the two must not disagree:
+    # a coverage response that reports healthy while the activity join failed is the same
+    # "0 means could not see" confusion the flag exists to end.
+    activity, _synthetic_excluded, activity_degraded = await _activity_by_rule(session, namespace, "30d")
     categories = []
     # IN-SCOPE coverage: a category is IN SCOPE only when at least one of its rules is actually loaded for
     # this namespace (baseline horizontal rules, or a sector pack the operator ENABLED). Sector packs the
@@ -282,4 +286,10 @@ async def coverage_by_category(
         "available": available, "categories": categories,
         "namespace_mode": ns_mode, "agent_class_policies": agent_policies,
         "agent_class_policies_degraded": agent_policies_degraded,
+        # `activity_degraded`: the audit join behind every `observed`/`blocked` above did not complete,
+        # so those zeros mean "could not read", not "nothing happened" (F-043). Reported separately
+        # from `agent_class_policies_degraded` because they fail independently and a reader needs to
+        # know WHICH half of the page is unreliable — one flag covering both would make a healthy
+        # section look broken and a broken one look healthy depending on which failed.
+        "activity_degraded": activity_degraded,
     }

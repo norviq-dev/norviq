@@ -39,6 +39,7 @@ from norviq.api.passwords import (
     register_failure,
     verify_password_async,
 )
+from norviq.api.rate_limit import _client_ip
 from norviq.api.session_revocation import is_revoked, revoke, token_hash
 from norviq.api.token_mint import mint_session_token
 from norviq.config import settings
@@ -48,6 +49,11 @@ router = APIRouter()
 
 # Deliberately identical message for "no such user" and "wrong password" so a caller cannot tell which
 # half failed (no username enumeration via the error body — pairs with the dummy_verify timing guard).
+# How much harder a DISTRIBUTED attempt has to work to lock one account out. The per-(username, IP)
+# ceiling is the real throttle; this is the backstop for an attacker spread across many addresses, and
+# it is deliberately loose — a tight value would reintroduce the remote-lockout DoS it exists beside.
+_USERNAME_LOCK_MULTIPLIER = 10
+
 _INVALID_CREDS = "Invalid username or password"
 
 
@@ -97,8 +103,36 @@ async def login(
     cache = _cache(request)
     username = body.username.strip()
 
-    if await is_locked_out(cache, username, max_attempts=settings.auth_login_max_attempts):
-        log.warning("nrvq.auth.login_locked", user=username, code="NRVQ-AUTH-14012")
+    # LOCK PER (USERNAME, SOURCE IP), NOT PER USERNAME (F-044).
+    #
+    # Keyed on the username alone, the throttle was a remote lockout of any account whose name you can
+    # guess. Measured: five bad `admin` logins locked the REAL admin out for ~5 minutes — three
+    # correct-password logins returned 429 before one succeeded. An availability control that an
+    # unauthenticated attacker can aim at the operator is a denial-of-service primitive, and the
+    # operator it locks out is precisely the person who would respond to the attack.
+    #
+    # Adding the source IP means an attacker's attempts exhaust their OWN bucket; the legitimate
+    # operator, from a different address, is untouched. `_client_ip` is reused rather than reading
+    # X-Forwarded-For here, because that header is caller-writable: keying on it would let an attacker
+    # rotate the header for a fresh bucket per request and never reach the ceiling at all. It believes
+    # XFF only behind a trusted proxy and otherwise uses the unforgeable TCP peer.
+    #
+    # A per-username counter is KEPT alongside, at a much higher ceiling, so a distributed attempt
+    # spread across many addresses is still bounded — it just now costs an attacker
+    # `_USERNAME_LOCK_MULTIPLIER`x more requests to deny one operator, instead of five.
+    ip = _client_ip(request.scope)
+    per_ip_key = f"{username}|{ip}"
+    if await is_locked_out(cache, per_ip_key, max_attempts=settings.auth_login_max_attempts):
+        log.warning("nrvq.auth.login_locked", user=username, source_ip=ip, scope="ip", code="NRVQ-AUTH-14012")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed attempts. Try again later.",
+        )
+    if await is_locked_out(
+        cache, username, max_attempts=settings.auth_login_max_attempts * _USERNAME_LOCK_MULTIPLIER
+    ):
+        log.warning("nrvq.auth.login_locked", user=username, source_ip=ip, scope="username",
+                    code="NRVQ-AUTH-14012")
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many failed attempts. Try again later.",
@@ -110,10 +144,14 @@ async def login(
     if row is None or not await verify_password_async(body.password, row.password_hash):
         if row is None:
             await dummy_verify_async(body.password)  # constant-time parity for the unknown-user path
-        count = await register_failure(cache, username, window_s=settings.auth_login_window_s)
+        # Both counters advance: the per-IP one is what locks this attacker out, the per-username one
+        # is the distributed-attempt backstop.
+        count = await register_failure(cache, per_ip_key, window_s=settings.auth_login_window_s)
+        await register_failure(cache, username, window_s=settings.auth_login_window_s)
         log.warning("nrvq.auth.login_failed", user=username, attempts=count, code="NRVQ-AUTH-14012")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_CREDS)
 
+    await clear_failures(cache, per_ip_key)
     await clear_failures(cache, username)
     role = str(row.role or "viewer").lower()
     namespace = _namespace_for(role)
@@ -203,8 +241,10 @@ def _validate_new_password(new_password: str, *, current_password: str) -> None:
 @router.post("/auth/change-password")
 async def change_password(
     body: ChangePasswordRequest,
+    request: Request,
     user: dict = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
+    creds: HTTPAuthorizationCredentials = Depends(security),
 ) -> dict:
     """Change the authenticated local user's password: re-check current, validate new, set hash, clear must_change."""
     username = str(user.get("sub") or "")
@@ -220,6 +260,30 @@ async def change_password(
     row.must_change = False
     await session.commit()
     log.info("nrvq.auth.password_changed", user=username, code="NRVQ-AUTH-14011")
+    # REVOKE THE TOKEN THAT MADE THIS REQUEST (F-044). A password change is what a user does when they
+    # believe their credentials are compromised, and it left every already-issued session — including
+    # an attacker's — valid until its own `exp`. The new password locked no one out; it only stopped
+    # them getting a NEW token. That is the opposite of what the action means.
+    #
+    # Only the presented token can be revoked here: the denylist is keyed by the hash of the raw
+    # token, so sessions on other devices are not reachable without a per-user token epoch (a bigger
+    # change to the token contract, noted in the commit). Revoking this one closes the case that
+    # matters most — the browser the user just used, and any copy of that same token.
+    #
+    # Best-effort by design: a revocation-store failure must not undo a password change that is
+    # already committed. `revoke` writes the in-process mirror first and logs NRVQ-AUTH-14017 on a
+    # Redis failure, so an incomplete cross-replica revocation is greppable rather than invisible.
+    if creds is not None:
+        try:
+            old_exp = int((user.get("exp") or 0)) or int(time.time()) + int(settings.auth_session_ttl_s)
+            await revoke(_cache(request), creds.credentials, old_exp)
+        except Exception as exc:  # noqa: BLE001 — the password IS changed; never fail the response now
+            log.error(
+                "nrvq.auth.change_password_revoke_failed",
+                user=username,
+                error=str(exc),
+                code="NRVQ-AUTH-14020",
+            )
     # Mint a FRESH session token with must_change cleared and return it, so the caller can swap off the
     # login-time token immediately. The must_change gate (auth._validate_token, NRVQ-AUTH-14018) reads the
     # TOKEN CLAIM, not the DB row — so without a new token the client keeps a must_change=True JWT and is

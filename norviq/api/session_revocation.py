@@ -38,6 +38,14 @@ _mirror: dict[str, int] = {}
 _MIRROR_MAX_ENTRIES = 10_000
 _LOG_PREFIX_LEN = 12
 
+# How long the revocation store may be unreachable before `is_revoked` stops guessing and starts
+# refusing. Long enough to cover a Redis restart or failover — the blip this fail-open exists for, and
+# the one /readyz already drains the pod for — and far shorter than the lifetime of a session token,
+# so a sustained outage cannot leave revocation quietly disabled for hours. Module-level rather than
+# per-process state so the two callers share one clock.
+_REVOCATION_GRACE_S = 30.0
+_degraded_since: float | None = None
+
 
 def token_hash(raw_token: str) -> str:
     """SHA-256 hex of the raw presented credential — the denylist key."""
@@ -86,13 +94,39 @@ async def is_revoked(cache, raw_token: str) -> bool:
     if cache is None:
         return False
     try:
-        return bool(await cache.is_token_revoked(h))
-    except Exception as exc:  # noqa: BLE001 — deliberate fail-open: a Redis blip must not 401 every caller
+        revoked = bool(await cache.is_token_revoked(h))
+    except Exception as exc:  # noqa: BLE001 — degradation is BOUNDED below, not unconditional
+        # BOUNDED FAIL-OPEN (F-044). This used to fail open unconditionally, which meant a logged-out
+        # token kept working for as long as Redis was unreachable — indefinitely, and silently, since
+        # the only signal was a warning line. "Log out" that does not survive a dependency outage is
+        # not a security control, it is a UI gesture.
+        #
+        # Failing CLOSED outright is the card's suggestion and is worse: it turns a Redis blip into a
+        # 401 for every authenticated caller, which is a total outage of the product caused by the
+        # product. Both directions are real, so neither absolute is right.
+        #
+        # So the fail-open is time-boxed. A blip inside the grace window keeps everyone working, which
+        # is the case that actually happens (restarts, failovers, a brief partition) and the case
+        # /readyz already drains for. A SUSTAINED outage is a different thing — it is indistinguishable
+        # from someone holding the revocation store down precisely so a stolen token keeps working —
+        # and past the window this refuses rather than guesses.
+        global _degraded_since
+        now_ts = time.time()
+        if _degraded_since is None:
+            _degraded_since = now_ts
+        outage_s = now_ts - _degraded_since
+        fail_closed = outage_s > _REVOCATION_GRACE_S
         log.warning(
             "nrvq.auth.revocation_store_degraded",
             op="check",
             token_hash_prefix=h[:_LOG_PREFIX_LEN],
             error=str(exc),
+            outage_seconds=round(outage_s, 1),
+            failing_closed=fail_closed,
             code="NRVQ-AUTH-14017",
         )
-        return False
+        return fail_closed
+    # A successful read clears the outage clock, so the grace window measures THIS outage rather than
+    # accumulating across unrelated blips.
+    _degraded_since = None
+    return revoked
