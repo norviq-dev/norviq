@@ -1244,7 +1244,48 @@ async def _replay_recent(evaluator, session, body: PolicyCreate, since) -> dict:
         "block_rate_pct": round((would_block / checked * 100) if checked else 0, 2),
         "truncated": truncated,
         "replay_cap": _DRYRUN_REPLAY_CAP,
+        # "NOTHING MATCHED" AND "NOTHING WAS EXERCISED" ARE DIFFERENT ANSWERS (F-018).
+        #
+        # `newly_blocked: 0` reads as "this change is safe", and for a content- or canary-matching
+        # policy it usually meant the opposite: nothing was tested. Two distinct causes, so two
+        # distinct flags rather than one vague warning.
+        #
+        # `no_replayable_traffic` — there were no records to replay at all, so every count below is 0
+        # by construction. A brand-new namespace produces exactly this, and it is the most confident
+        # all-clear the endpoint can emit while measuring nothing.
+        "no_replayable_traffic": checked == 0,
+        # `params_captured` — audit_capture_masked_params is OFF by default, so replayed records carry
+        # EMPTY tool_params. A tool-name or scope rule still exercises correctly; a rule that matches
+        # on content (a canary string, a data class, an argument value) cannot fire against empty
+        # params and reports 0 for a reason that has nothing to do with the policy. The console can
+        # render "not exercised" distinctly from "0 newly blocked" instead of the operator inferring it.
+        "params_captured": bool(settings.audit_capture_masked_params),
+        "advisory": _dryrun_advisory(checked, eval_errors),
     }
+
+
+def _dryrun_advisory(checked: int, eval_errors: int) -> str:
+    """One sentence naming why a 0 might not mean what it looks like; empty when the run was sound.
+
+    Returned as text rather than left to the console so every consumer of this endpoint — the UI, a
+    CI check, someone reading the JSON — gets the same caveat. A number whose caveat lives only in one
+    renderer is a number that will be quoted without it.
+    """
+    if checked == 0:
+        return (
+            "No replayable traffic in the window — this candidate was not exercised at all. The zeros "
+            "below mean 'nothing to measure', not 'changes nothing'."
+        )
+    if not settings.audit_capture_masked_params:
+        return (
+            "Replayed records carry empty tool_params because audit_capture_masked_params is off "
+            "(the default). Tool-name and scope rules are exercised correctly; a rule matching on "
+            "CONTENT cannot fire here. Enable audit_capture_masked_params for a content-matching "
+            "dry-run."
+        )
+    if eval_errors:
+        return f"{eval_errors} record(s) could not be evaluated — this simulation is partial."
+    return ""
 
 
 @router.post("/policies/dry-run")

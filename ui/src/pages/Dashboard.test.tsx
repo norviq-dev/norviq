@@ -160,7 +160,13 @@ describe("Overview coverage caption reflects Red Team efficacy", () => {
     // The gauge caption carries the % (teal-emphasized in its own node) and is the NEUTRAL --text-muted
     // token, not block-red. " (last run)" follows the bold %.
     const gaugeCaption = await screen.findByTestId("score-gauge-caption");
-    expect(gaugeCaption).toHaveTextContent(/rules present · 85% proven-blocking \(last run\)/i);
+    // The DENOMINATOR is part of the claim (F-023). This used to assert a bare "85% proven-blocking
+    // (last run)", which on first glance reads as total coverage — it is efficacy over the
+    // evaluate-reachable red-team subset, while Compliance for the same posture honestly reports
+    // 80% ATLAS / 67% OWASP with named gaps. A bare percentage beside that is the one that gets quoted.
+    expect(gaugeCaption).toHaveTextContent(
+      /rules present · 85% proven-blocking of 20 evaluate-reachable red-team attacks \(last run\)/i
+    );
     expect(gaugeCaption.style.color).toBe("var(--text-muted)");
     // The proven-blocking % lives on the GAUGE caption; the coverage card is now color-first (the caption
     // that duplicated this number was removed for a cleaner card — the gauge is the single source).

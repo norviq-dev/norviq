@@ -340,6 +340,8 @@ export function Dashboard() {
   // published as "nothing here is enforced".
   const monitorConfirmed = selectedNamespace !== "all" && namespaceMode === "audit";
   const provenPct = efficacy.data?.has_run ? efficacy.data.efficacy?.overall.proven_blocking_pct : undefined;
+  // The subset SIZE, so the percentage above cannot be read as coverage of everything (F-023).
+  const provenTotal = efficacy.data?.has_run ? efficacy.data.efficacy?.overall.total : undefined;
   // /redteam/results/latest is ADMIN-ONLY (redteam.py require_admin), so a non-admin operator — and any 5xx or
   // network fault — lands here with `error` set and `data` null. That is "we could not ask", which must never
   // render as the FACT "not efficacy-tested": the posture may have been fully red-teamed an hour ago.
@@ -354,7 +356,17 @@ export function Dashboard() {
   const gaugeSub = efficacyUnknown ? (
     <>rules present · <span data-testid="dash-efficacy-unknown">efficacy unknown — the last Red Team run could not be read ({efficacy.error})</span></>
   ) : provenPct != null ? (
-    <>rules present · <b style={{ color: "var(--accent)" }}>{provenPct}% proven-blocking</b> (last run)</>
+    // THE DENOMINATOR IS PART OF THE CLAIM (F-023). This read "100% proven-blocking (last run)",
+    // which on first glance is total coverage — it is efficacy over the EVALUATE-REACHABLE red-team
+    // subset, and the Compliance page for the same posture honestly says 80% ATLAS / 67% OWASP with
+    // named gaps. A bare 100% next to that is the number an operator will quote.
+    //
+    // `caught`/`total` are already on the payload; showing them makes the subset visible without a
+    // click, and "N/N attacks" is what stops "100%" being read as "everything".
+    <>
+      rules present · <b style={{ color: "var(--accent)" }}>{provenPct}% proven-blocking</b>
+      {provenTotal != null ? ` of ${provenTotal} evaluate-reachable red-team attacks` : ""} (last run)
+    </>
   ) : (
     "rules present — not efficacy-tested"
   );

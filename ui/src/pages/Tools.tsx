@@ -191,6 +191,20 @@ export function Tools() {
    *  declared rows differing only by namespace are otherwise character-for-character identical. */
   const multiNamespace = useMemo(() => new Set(declared.map((t) => t.namespace)).size > 1, [declared]);
 
+  /** Same question for the OBSERVED panel (F-020). It had no namespace column at all, so on the
+   *  "All namespaces" scope a tool exercised in two namespaces — `transfer_funds` in `brand-new-ns`
+   *  and in `chatbot-lab` — rendered as two rows that are character-for-character identical. The
+   *  reader cannot tell a duplicate-looking row from a rendering bug, and the honest answer (these
+   *  are two different tools) is the one the page was withholding.
+   *
+   *  Computed over `observed` rather than reusing the declared flag: the two panels can span
+   *  different namespace sets, and a column that appears because the OTHER panel is multi-namespace
+   *  would be noise. */
+  const observedMultiNamespace = useMemo(
+    () => new Set(observed.map((t) => t.namespace)).size > 1,
+    [observed]
+  );
+
   const rowKey = (t: ToolRegistryEntry) => `${t.namespace}/${t.server_id ?? "-"}/${t.name}`;
   const current = rows.find((t) => rowKey(t) === selected) ?? null;
 
@@ -290,6 +304,7 @@ export function Tools() {
           rowKey={rowKey}
         />
         <ObservedPanel
+          showNamespace={observedMultiNamespace}
           rows={observed}
           selected={selected}
           onSelect={(t) => setSelected(rowKey(t) === selected ? null : rowKey(t))}
@@ -453,7 +468,7 @@ function DeclaredPanel({
   );
 }
 
-function ObservedPanel({ rows, selected, onSelect, rowKey }: TableProps) {
+function ObservedPanel({ rows, selected, onSelect, rowKey, showNamespace }: TableProps & { showNamespace: boolean }) {
   return (
     <Panel
       data-testid="tools-observed"
@@ -471,7 +486,12 @@ function ObservedPanel({ rows, selected, onSelect, rowKey }: TableProps) {
       ) : (
         <div style={{ overflowX: "auto" }}>
           <div style={{ minWidth: 670 }}>
-            <HeadRow cols={["Tool", "Scope", "What this costs you", ""]} template="minmax(150px,1.5fr) 116px minmax(190px,1.6fr) 130px" />
+            <HeadRow
+              cols={showNamespace
+                ? ["Tool", "Namespace", "Scope", "What this costs you", ""]
+                : ["Tool", "Scope", "What this costs you", ""]}
+              template={showNamespace ? "minmax(150px,1.5fr) 120px 116px minmax(190px,1.6fr) 130px" : "minmax(150px,1.5fr) 116px minmax(190px,1.6fr) 130px"}
+            />
             {rows.map((t) => (
               <button
                 key={rowKey(t)}
@@ -479,12 +499,13 @@ function ObservedPanel({ rows, selected, onSelect, rowKey }: TableProps) {
                 data-testid={`tool-row-observed-${t.name}`}
                 onClick={() => onSelect(t)}
                 aria-pressed={rowKey(t) === selected}
-                style={rowStyle(rowKey(t) === selected, "minmax(150px,1.5fr) 116px minmax(190px,1.6fr) 130px")}
+                style={rowStyle(rowKey(t) === selected, showNamespace ? "minmax(150px,1.5fr) 120px 116px minmax(190px,1.6fr) 130px" : "minmax(150px,1.5fr) 116px minmax(190px,1.6fr) 130px")}
               >
                 <span className="mono" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                   {t.name}
                   {t.name_skeleton.toLowerCase() !== t.name.toLowerCase() && <MiniPill hex="#ff3b5c">Homoglyph</MiniPill>}
                 </span>
+                {showNamespace && <span className="mono muted">{t.namespace}</span>}
                 <span><ScopeabilityBadge source="observed" schemaAvailable={false} /></span>
                 <span className="muted">{costsYou(t.name)}</span>
                 <span className="muted" style={{ fontSize: 12 }}>View in Audit Log →</span>
