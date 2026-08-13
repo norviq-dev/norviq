@@ -9,7 +9,7 @@ from typing import Any
 import structlog
 
 from norviq.exceptions import NorviqBlockError, NorviqEscalateError
-from norviq.sdk.core.interceptor import ToolInterceptor
+from norviq.sdk.core.interceptor import ToolInterceptor, depth_scope
 from norviq.sdk.core.wrapping import _output_dlp
 # Shared declared-schema ingestion. It lives in the LangChain adapter module only because this
 # change is scoped to the five adapter files (see the banner there); LangGraph tools ARE LangChain
@@ -136,7 +136,12 @@ class GuardedToolNode:
                 log.warning("nrvq.langgraph.denied", tool=name, code="NRVQ-SDK-1041")
                 raise
             log.debug("nrvq.langgraph.allowed", tool=name, code="NRVQ-SDK-1041")
-        result = await self._node.ainvoke(state)
+        # Held across the node's execution, which IS the tool body here: LangGraph runs the tools for
+        # the whole message inside one node invocation, so anything those tools invoke must report a
+        # deeper level. Without it `_CALL_DEPTH` stays 0 on this framework and `chain_depth_limit`
+        # cannot fire at any depth (F-025).
+        with depth_scope():
+            result = await self._node.ainvoke(state)
         _apply_output_dlp(result)
         log.info("nrvq.langgraph.executed", tool_count=len(calls), code="NRVQ-SDK-1042")
         return result

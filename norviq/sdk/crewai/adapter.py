@@ -7,7 +7,7 @@ from typing import Any
 
 import structlog
 
-from norviq.sdk.core.interceptor import ToolInterceptor
+from norviq.sdk.core.interceptor import ToolInterceptor, depth_scope
 from norviq.sdk.core.wrapping import _output_dlp, _run_sync, _tool_params, callable_signature
 # Shared declared-schema ingestion. It lives in the LangChain adapter module only because this
 # change is scoped to the five adapter files (see the banner there); that module imports no
@@ -83,7 +83,12 @@ def protect(
                 )
             )
             log.info("nrvq.crewai.allowed", tool=_name, code="NRVQ-SDK-1052")
-            return _output_dlp(_name, _orig(*args, **kwargs))
+            # depth_scope() must hold for the TOOL BODY, so a tool invoked from inside this one
+            # reports one level deeper. Without it `_CALL_DEPTH` never leaves 0 on this framework and
+            # `chain_depth_limit` — shipped enabled, and counted as enforced by the Compliance view —
+            # cannot fire at any depth (F-025).
+            with depth_scope():
+                return _output_dlp(_name, _orig(*args, **kwargs))
 
         tool._run = sync_wrapper  # type: ignore[method-assign]
         protected.append(tool)

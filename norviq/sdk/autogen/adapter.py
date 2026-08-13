@@ -11,7 +11,7 @@ from typing import Any
 
 import structlog
 
-from norviq.sdk.core.interceptor import ToolInterceptor
+from norviq.sdk.core.interceptor import ToolInterceptor, depth_scope
 from norviq.sdk.core.wrapping import _output_dlp
 # Shared declared-schema ingestion. It lives in the LangChain adapter module only because this
 # change is scoped to the five adapter files (see the banner there); that module imports no
@@ -113,7 +113,10 @@ def protect(
                 framework="autogen",
             )
             log.info("nrvq.autogen.allowed", tool=_name, code="NRVQ-SDK-1062")
-            result = await _orig(args, cancellation_token)
+            # See the note in the LangChain adapter: the scope must hold for the TOOL BODY, not just
+            # around the interception, or nothing this tool invokes reports a deeper level (F-025).
+            with depth_scope():
+                result = await _orig(args, cancellation_token)
             return _output_dlp(_name, result)
 
         tool.run = async_wrapper  # type: ignore[method-assign]

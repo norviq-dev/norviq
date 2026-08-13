@@ -25,7 +25,7 @@ from typing import Any
 import structlog
 
 from norviq.exceptions import NorviqBlockError, NorviqEscalateError
-from norviq.sdk.core.interceptor import ToolInterceptor
+from norviq.sdk.core.interceptor import ToolInterceptor, depth_scope
 from norviq.sdk.core.wrapping import _output_dlp
 # Shared declared-schema ingestion. It lives in the LangChain adapter module only because this
 # change is scoped to the five adapter files (see the banner there); that module imports no
@@ -153,7 +153,12 @@ def policy_filter(interceptor: ToolInterceptor, session_id: str = "") -> _Filter
             log.warning("nrvq.semantic_kernel.denied", tool=tool_name, code="NRVQ-SDK-1072")
             raise
         log.info("nrvq.semantic_kernel.allowed", tool=tool_name, code="NRVQ-SDK-1071")
-        await next(context)
+        # `next(context)` runs the rest of the filter chain and then the function itself, so it is
+        # this framework's tool body: a function invoked from inside it re-enters this filter and
+        # must report a deeper level. Without it `_CALL_DEPTH` stays 0 and `chain_depth_limit`
+        # cannot fire at any depth (F-025).
+        with depth_scope():
+            await next(context)
         _apply_output_dlp(context, tool_name)
 
     log.debug("nrvq.semantic_kernel.filter_created", code="NRVQ-SDK-1070")

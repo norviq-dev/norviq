@@ -163,9 +163,12 @@ _CONTROL_COPY: dict[str, Control] = {
         "chain_depth_limit",
         "Tool-chain depth",
         "Catches runaway tool-calling chains beyond the configured depth.",
-        caveat="Only LangChain reports call depth today — one adapter of five. Under CrewAI, AutoGen, "
-        "LangGraph and Semantic Kernel a nested call reports depth 0, so this control cannot fire "
-        "on that traffic even at deny.",
+        caveat="All five SDK adapters now report call depth, and the SDK's measurement is "
+        "authoritative — it wraps tool execution, so a nested call is measurably deeper and the agent "
+        "cannot under-report it. Traffic arriving through a sidecar or the MCP proxy is different: a "
+        "cross-process PEP can only forward the depth its CALLER claims, so a client that reports 0 "
+        "is believed. Trust this control for SDK-instrumented workloads; treat it as advisory for "
+        "proxied ones.",
     ),
     "base64_decoded_threat": Control(
         "base64_decoded_threat",

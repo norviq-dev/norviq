@@ -146,14 +146,19 @@ def test_the_chain_depth_caveat_matches_the_adapters_that_actually_report_depth(
     reporting = {f for f in frameworks if "depth_scope" in (sdk / f / "adapter.py").read_text()}
 
     assert len(frameworks) == 5, f"adapter count changed: {sorted(frameworks)} — revisit the caveat"
-    assert reporting == {"langchain"}, f"depth coverage changed: {sorted(reporting)} — update the caveat"
+    assert reporting == frameworks, (
+        f"an adapter stopped holding depth_scope: {sorted(frameworks - reporting)} — a nested call "
+        "there reports depth 0 and chain_depth_limit cannot fire on that traffic even at deny. "
+        "Restore the scope, or say so in the caveat."
+    )
 
     caveat = baseline_lib._CONTROL_COPY["chain_depth_limit"].caveat
-    assert "Only LangChain" in caveat
-    # every non-reporting framework must be named, so the operator can check their own fleet
-    for missing in frameworks - reporting:
-        label = {"semantic_kernel": "Semantic Kernel"}.get(missing, missing.capitalize())
-        assert label.lower() in caveat.lower(), f"{label} reports depth 0 but the caveat does not say so"
+    assert "All five SDK adapters" in caveat
+    # The remaining honest caveat is about the PROXY path, not the SDK one: a cross-process PEP can
+    # only forward a caller-reported depth, so it must not be described with the same confidence.
+    assert "authoritative" in caveat.lower()
+    assert "advisory" in caveat.lower()
+    assert "sidecar" in caveat.lower()
 
 
 def test_catalog_reflects_stored_deviations() -> None:
