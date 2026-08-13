@@ -17,6 +17,14 @@ integration point: Microsoft Agent Framework middleware can call the same generi
 Usage::
 
     kernel.add_filter("function_invocation", policy_filter(interceptor))
+
+GOVERNED SURFACE (F-026): the EXECUTION PATH, not individual tools — so, like the LangGraph adapter,
+this has no `protect()` and no `allow_unwrapped`, and for the same reason.
+
+`policy_filter` is registered on the kernel with `kernel.add_filter("function_invocation", ...)`, so
+every function invoked THROUGH the kernel is evaluated, including ones registered after the filter
+was added. There is no wrapping step to skip. A function called directly in Python, bypassing the
+kernel, is ungoverned — again a property of a cooperative PEP rather than of this adapter.
 """
 
 from collections.abc import Awaitable, Callable

@@ -5,6 +5,10 @@
 
 Targets autogen-core >= 0.4's `autogen_core.tools.BaseTool` API, which is what
 autogen-agentchat's `AssistantAgent` consumes.
+
+GOVERNED SURFACE (F-026): per-TOOL wrapping, exactly as LangChain. A tool not passed to `protect()`
+runs ungoverned; `allow_unwrapped=False` (the default) turns an unrecognised item into a startup
+error rather than a silent gap.
 """
 
 from typing import Any

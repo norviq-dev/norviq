@@ -5,6 +5,12 @@
 
 This module also hosts the DECLARED-SCHEMA INGESTION shared by all five framework adapters — see the
 banner below for what it does and why it lives here rather than in ``norviq.sdk.core``.
+
+GOVERNED SURFACE (F-026): per-TOOL wrapping. `protect(tools, ...)` replaces `_run`/`_arun` on each
+tool you hand it. A tool NOT passed to `protect()` runs with NO policy enforcement — Norviq's PEP is
+cooperative, so it governs the calls routed through the wrapper and cannot see the ones that are not.
+`allow_unwrapped=False` (the default) makes an unrecognised item a loud startup error rather than a
+silently ungoverned tool.
 """
 
 import inspect

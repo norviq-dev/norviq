@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""CrewAI adapter for Norviq tool interception."""
+"""CrewAI adapter for Norviq tool interception.
+GOVERNED SURFACE (F-026): per-TOOL wrapping, exactly as LangChain. A tool not passed to `protect()`
+runs ungoverned; `allow_unwrapped=False` (the default) turns an unrecognised item into a startup
+error rather than a silent gap.
+"""
 
 from typing import Any
 

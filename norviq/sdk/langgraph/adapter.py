@@ -1,7 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""LangGraph adapter for Norviq tool interception."""
+"""LangGraph adapter for Norviq tool interception.
+GOVERNED SURFACE (F-026): the EXECUTION PATH, not individual tools — and that is why this adapter has
+no `protect()` and no `allow_unwrapped`, which reads as a gap next to the other three but is the
+stronger arrangement.
+
+`GuardedToolNode` replaces the graph's ToolNode. Every tool call in a message passes through
+`__call__`, which evaluates each one before delegating to the node, so a tool cannot be added to the
+node and escape the guard — there is no per-tool wrapping step to forget. What IS ungoverned is a
+tool invoked outside the graph entirely, which is true of every adapter here and is a property of a
+cooperative PEP, not of this one.
+"""
 
 import json
 from typing import Any
