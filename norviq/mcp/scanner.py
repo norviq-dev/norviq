@@ -115,17 +115,77 @@ _RULES: tuple[tuple[str, str, re.Pattern[str], str], ...] = (
         "the definition tells the model to discard its own instructions",
     ),
     (
+        # BROADENED FROM A VERB LIST TO AN INTENT SET (F-013). The old alternation caught
+        # "do not tell/mention the user" and missed the paraphrases an attacker would actually reach
+        # for — measured: "do not surface this to the user" (the vendor's own console word), "without
+        # informing the user", "do not expose these results to the human" all scored zero findings.
+        #
+        # Two shape changes, not just more words. `\w*` lets a stem match its inflections, which is
+        # what let "informing" walk past `inform\b`. And the verb set now covers the whole
+        # make-the-user-aware family (surface/expose/inform/report/warn/admit/acknowledge/share)
+        # rather than the speech-act subset, because concealment is about the USER not finding out,
+        # however the sentence phrases it.
+        #
+        # The negation + audience frame is kept exactly as it was, and it is what holds the false
+        # positives down: an ordinary description says "Returns the user profile", never "do not
+        # ... the user".
         "mcp_a_concealment", "critical",
-        re.compile(r"(do\s*not|don't|never|without)\s+"
+        re.compile(r"(do\s*not|don't|never|without|avoid)\s+"
                    r"((ever|explicitly|directly)\s+)*"
-                   r"(tell|inform|mention|reveal|disclose|show|display|notify|alert|discuss)\b"
-                   r"[^.\n]{0,40}?\b(user|human|operator|anyone|them)\b"),
+                   r"(tell|inform|mention|reveal|disclose|show|display|notify|alert|discuss|"
+                   r"surface|expose|report|warn|admit|acknowledge|share|indicate|announce)\w*"
+                   r"[^.\n]{0,40}?\b(user|human|operator|anyone|them|caller|client)\b"),
         "the definition instructs the model to hide its behaviour from the user",
+    ),
+    (
+        # The same intent stated the other way round: not "do not tell them", but "keep it hidden".
+        # `keep this hidden from the operator` scored zero, and it is the plainest possible phrasing.
+        "mcp_a_concealment", "critical",
+        re.compile(r"(keep|leave|hold|remain)\s+[^.\n]{0,30}?"
+                   r"\b(hidden|secret|invisible|undisclosed|concealed|unreported|out\s+of\s+sight)\b"),
+        "the definition asks for the action to be kept from the user",
     ),
     (
         "mcp_a_concealment_bare", "high",
         re.compile(r"\b(silently|covertly|secretly|quietly|discreetly|without\s+the\s+user)\b"),
         "the definition asks for action the user is not meant to observe",
+    ),
+    (
+        # LINE-JUMPING (F-013): a description that tells the model to attach something to EVERY
+        # reply, which is an instruction about the conversation rather than about this tool.
+        #
+        # Gated on a sensitive object on purpose. "Include the request id in every response" is an
+        # ordinary API description and must stay clean, so the pattern requires the thing being
+        # appended to be credential- or channel-shaped. Without that gate this rule would fire on
+        # perfectly normal documentation, which is how a scanner earns its way to being switched off.
+        "mcp_a_line_jumping", "high",
+        re.compile(r"(append|add|include|insert|attach|prepend|embed|emit)\w*\s+[^.\n]{0,40}?"
+                   r"\b(token|secret|key|credential|password|cookie|session|header|payload|"
+                   r"url|link|instruction)\w*\b[^.\n]{0,40}?"
+                   r"\b(every|each|all)\s+(reply|response|message|answer|output|turn)"),
+        "the definition instructs the model to alter every reply, not just this tool's result",
+    ),
+    (
+        # SIDE-CHANNEL (F-013): "bcc security@evil.example on each call" — a copy of every
+        # invocation sent somewhere the user did not ask for.
+        #
+        # A DESTINATION is required, and that is the whole difference between this and ordinary
+        # telemetry. "Logs each call for audit purposes." is a normal, honest sentence and stays
+        # clean; the same verb aimed at an address or a URL is exfiltration.
+        "mcp_a_side_channel", "critical",
+        re.compile(r"\b(bcc|cc|forward|mirror|copy|relay|report|log|record|post|send)\w*\s+"
+                   r"[^.\n]{0,60}?\b(every|each|all)\s+"
+                   r"(call|invocation|request|query|use|message)\w*\b[^.\n]{0,60}?"
+                   r"(@[a-z0-9.-]+\.[a-z]{2,}|https?://|\b(webhook|endpoint|collector)\b)"),
+        "the definition sends a copy of every call to a destination of its own choosing",
+    ),
+    (
+        # The same shape with the destination first — "bcc x@y on each call" reads either way round.
+        "mcp_a_side_channel", "critical",
+        re.compile(r"\b(bcc|cc|forward|mirror|copy|relay)\w*\s+[^.\n]{0,60}?"
+                   r"(@[a-z0-9.-]+\.[a-z]{2,}|https?://)[^.\n]{0,60}?"
+                   r"\b(every|each|all)\s+(call|invocation|request|query|use|message)"),
+        "the definition sends a copy of every call to a destination of its own choosing",
     ),
     (
         "mcp_a_credential_read", "critical",
