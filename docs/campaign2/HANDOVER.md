@@ -673,3 +673,51 @@ adapters), then §4's secure-by-default items, then MEDIUM.
 `opa test --v0-compatible` **45/45** (on 1.18.0 and 1.19.0), targeted suites green.
 Last clean FULL run: **2857 passed** — taken *before* the OPA-bump file edits, which are therefore the
 one thing in this handover not yet covered by a full-suite pass.
+
+### F-001 — resolved, and it cleared more than expected (`f6d4342`, branch `fix/f-001-bump-opa-1.19.0`)
+
+The backlog's fix does not apply to this repo, and following it would have failed the release a second
+time. `oras.land/oras-go/v2` is **not** a Norviq dependency — absent from `webhook/go.mod` and
+`go.sum`. It reaches the images inside the **pinned OPA static binary**. Confirmed, not inferred:
+
+```
+$ go version -m $(which opa)
+  dep  oras.land/oras-go/v2  v2.6.1        <- exactly the vulnerable version
+```
+
+`go mod tidy` would have changed nothing. **OPA 1.18.2 is not the fix either** — the patch line still
+ships oras-go 2.6.1. **1.19.0** ships 2.6.2.
+
+Verified against a real 1.19.0 binary **before** editing anything, because OPA is the enforcement
+engine and this repo's Rego is v0: full Python suite **2857 passed**, `opa test --v0-compatible`
+**45/45**, and the regenerated `opa-capabilities.json` is **purely additive** (nothing removed, one
+new builtin `strings.split_n`). That regeneration is not optional — the pin is coupled to that file
+through `_check_capabilities`, and moving one without the other is how the sidecar starts refusing
+builtins the engine expects.
+
+Nine pin sites moved together so CI tests what ships: both Dockerfiles (URL **and** both SHA256
+digests, recomputed from the real downloads — the build verifies them and a stale digest fails
+closed), `helm/norviq/values.yaml`, four workflows, `scripts/mcp-demo.Dockerfile`, and a comment in
+`scripts/kind-e2e/chaos.py`.
+
+**The whole `.trivyignore.yaml` baseline went with it.** All three accepted HIGH findings were in this
+same third-party binary, each with an explicit exit condition; 1.19.0 met all three at once —
+go1.26.5 (was 1.26.4), grpc-go v1.82.1 (was v1.81.1), x/text v0.40.0 (was v0.38.0). The webhook half
+of the first was already covered (`golang:1.26-alpine` resolves ≥1.26.5; `webhook/go.mod` pins x/text
+v0.39.0). The list is now empty and the three rows are removed from
+`docs/engineering/security-baseline.md`, per that file's own rule.
+Removed rather than version-bumped **on purpose**: if a finding survives, the fail-closed gate goes
+red and names it, whereas a stale entry silently disarms the gate for a CVE the binary no longer has.
+
+**Not verified here: Trivy itself.** Docker is unresponsive on this machine, so CI's scanner run is
+the confirming check. Every dependency-version claim above comes from the released artifacts
+(`go version -m`, the published `go.mod`), not from the scanner.
+
+### Environment note for whoever picks this up
+
+The host disk filled mid-session (`/` hit 100%). I reclaimed ~2 GB from **regenerable package caches
+only** (`pip cache purge`; the 11 GB `~/.cache/uv` was lock-held and left alone) — no Docker images,
+no user data. Docker never recovered and is still hung, which means **Redis is down**, which means
+`tests/sidecar/` and other Redis-backed tests error on connection refused.
+**Triaged, not assumed:** those same tests fail identically on a **clean tree with every change
+stashed**, so they are environmental. Restarting Docker (and with it the kind cluster) is San's call.
