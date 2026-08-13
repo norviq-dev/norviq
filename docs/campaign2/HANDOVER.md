@@ -721,3 +721,21 @@ no user data. Docker never recovered and is still hung, which means **Redis is d
 `tests/sidecar/` and other Redis-backed tests error on connection refused.
 **Triaged, not assumed:** those same tests fail identically on a **clean tree with every change
 stashed**, so they are environmental. Restarting Docker (and with it the kind cluster) is San's call.
+
+### Correction — one post-bump failure was mine, not the environment (`c237232`)
+
+I reported the post-OPA-bump failures as environmental after checking `tests/sidecar` alone. That
+generalisation was wrong. Running the full suite with output captured showed 12 affected files, and
+one was a **real regression from the bump**:
+`test_global_registry_mirrors_third_party_not_norviq` pinned
+`mirror.example.com/openpolicyagent/opa:1.18.0-static` as a literal. Its subject is the mirror
+**prefix**, so the tag now comes from `values.yaml`; the image itself is still guarded by
+`test_default_third_party_images_are_upstream` immediately above. `tests/helm/` → **176 passed**.
+
+The rest of the account does hold, and was checked rather than assumed:
+- the errors are `asyncpg` / `redis` **connection** failures (Postgres and Redis are Docker-provided,
+  and Docker is hung);
+- `tests/engine/test_priority_enforcement.py` fails **identically on a clean checkout of `main`**.
+
+**Lesson worth keeping:** triaging one file and generalising to the rest is how a real regression gets
+filed as environmental. Capture the whole run and group by file before making the claim.
