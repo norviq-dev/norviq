@@ -286,9 +286,53 @@ class TrustCalculator:
         except Exception as exc:  # pragma: no cover
             log.error("nrvq.engine.trust.cache_failed", error=str(exc), code="NRVQ-ENG-2049")
 
+    # A sustained violation rate CAPS the overall score instead of merely subtracting from it (F-033).
+    #
+    # The actuation works — an agent at trust 0.35 escalates on a benign call and one at 0.45 allows,
+    # against the 0.4 threshold. What could not happen is a COMPUTED score arriving there. The reason
+    # is arithmetic, not tuning: `violation_rate` carries weight 0.25, so even an agent blocked on
+    # EVERY call loses at most 0.25, and its other six signals still look ordinary — a perfectly
+    # obedient-looking, constantly-refused agent floors out around 0.75, nearly double the escalation
+    # threshold. Measured live from the other end: 10 consecutive violations moved trust 0.615 -> 0.605.
+    #
+    # So the escalation band was unreachable by construction, and steepening the signal's own buckets
+    # could not fix it — the weight is the ceiling. A cap can, because it says the thing the weighted
+    # sum cannot: an agent being refused a fifth of the time is not a 0.75-trust agent that happens to
+    # have one bad signal, whatever the other six say about it.
+    #
+    # Thresholds are set so the FIRST band that caps sits just under the escalation threshold, and
+    # they preserve §4.4's caveat directly: a compliant agent has rate 0.0, gets no cap at all, and is
+    # numerically unchanged by this. Nothing here can lower the score of an agent that is not being
+    # blocked.
+    _VIOLATION_CAPS: tuple[tuple[float, float], ...] = (
+        (0.20, 0.30),   # blocked >1 call in 5 — inside the escalation band
+        (0.10, 0.45),   # blocked >1 in 10 — visibly degraded, not yet escalating
+        (0.05, 0.60),   # blocked >1 in 20 — capped below the default 0.7 threshold
+    )
+
+    def _violation_cap(self, signals: dict[str, float]) -> float:
+        """The highest score a given violation rate permits; 1.0 when there is nothing to cap.
+
+        Derived from the signal's own output rather than re-reading history, so there is exactly one
+        notion of "how often is this agent being blocked" and the cap cannot disagree with the signal
+        the console displays. The mapping is the inverse of ViolationRateSignal's buckets: it returns
+        0.0 above a 20% rate, 0.2 above 10%, 0.4 above 5%.
+        """
+        violation = signals.get("violation_rate", 1.0)
+        if violation >= 0.8:            # rate <= 2%, or no history at all
+            return 1.0
+        if violation <= 0.0:            # rate > 20%
+            return self._VIOLATION_CAPS[0][1]
+        if violation <= 0.2:            # rate > 10%
+            return self._VIOLATION_CAPS[1][1]
+        if violation <= 0.4:            # rate > 5%
+            return self._VIOLATION_CAPS[2][1]
+        return 1.0
+
     def _weighted_sum(self, signals: dict[str, float]) -> float:
-        """Return weighted trust score for all signals."""
-        return round(sum(self.WEIGHTS[name] * signals.get(name, 0.0) for name in self.WEIGHTS), 4)
+        """Return weighted trust score for all signals, capped by the violation rate."""
+        weighted = sum(self.WEIGHTS[name] * signals.get(name, 0.0) for name in self.WEIGHTS)
+        return round(min(weighted, self._violation_cap(signals)), 4)
 
     @staticmethod
     def _tiers(trust_threshold: float | None) -> tuple[float | None, float | None]:
