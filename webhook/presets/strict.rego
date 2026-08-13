@@ -604,6 +604,36 @@ secret_egress_detected {
     _credential_artifact(val)
 }
 
+# --- F-012: read the ENGINE's data classification instead of re-deriving it here ----------------
+#
+# These detectors are a SECOND, weaker copy of the content detection the engine already performed.
+# Measured on this file with `send_email`, the engine catching every one of them:
+#
+#   AKIAIOSFODNN7EXAMPLE                 -> block
+#   base64 of the same key               -> ALLOW
+#   hex of the same key                  -> ALLOW
+#   the same key lowercased              -> ALLOW
+#   "123 45 6789" (spaced SSN)           -> ALLOW
+#
+# The engine publishes `derived.data_classes` from one shared normalize+decode stage (F-032:
+# NFKC, invisible-strip, separator canonicalisation, base64/hex decode-and-rescan, Luhn-gated PAN,
+# non-string leaves coerced). Reading it here is strictly better than widening the Rego regexes: the
+# recall arrives for free, the 0-false-positive property comes with it, and there is one place to fix
+# a detector instead of two that drift. It also costs no regex ops, which matters — this file is at
+# 24 of the API validator's 25.
+#
+# The Rego detectors are deliberately KEPT alongside, not replaced. They are the floor if an engine
+# predating `derived.data_classes` evaluates this policy, and `object.get` with a default means that
+# case degrades to today's behaviour instead of erroring.
+#
+# Secret is the only one paired with a sink: possessing a credential is not egress, and blocking
+# every call that merely CONTAINS one would refuse ordinary authenticated tool calls. PII and PCI
+# already block unconditionally here, so they inherit that posture unchanged.
+_derived_class(c) { object.get(input.derived, "data_classes", [])[_] == c }
+pii_detected { _derived_class("pii") }
+pci_value_detected { _derived_class("pci") }
+data_leakage_detected { value_pattern_sink; _derived_class("secret") }
+
 # Supply chain
 supply_chain_tools = {"load_plugin", "download_script", "eval", "install_package"}
 

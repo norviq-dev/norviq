@@ -427,3 +427,59 @@ test_the_name_based_sink_still_blocks_with_no_destination_fact {
         _no_dest,
     )
 }
+
+# --- F-012: the preset reads the engine's data classification --------------------------------
+#
+# The Rego detectors are a second, weaker copy of the engine's content detection. Every case below
+# was ALLOWED by this file while the engine classified it correctly, because the Rego regexes match
+# the exact byte shape: base64, hex, lowercase, spaced and dotted spellings all walked past.
+#
+# `derived.data_classes` comes from the engine's one shared normalize+decode stage (F-032), so these
+# assert the WIRING, not the detectors — the detector itself is pinned in
+# tests/engine/test_content_norm.py, which also owns the 0-false-positive corpus.
+_classed(inp, classes) := out {
+    out := object.union(_norm(inp), {"derived": {
+        "verb": "send", "data_classes": classes,
+        "destinations": {"urls": [], "hosts": [], "emails": [], "schemes": []},
+    }})
+}
+
+test_a_secret_class_blocks_on_an_egress_sink {
+    strict.decision == "block" with input as _classed(
+        {"tool_name": "send_email", "tool_params": {"body": "QUtJQUlPU0ZPRE5ON0VYQU1QTEU="}}, ["secret"],
+    )
+}
+
+test_pii_and_pci_classes_block {
+    strict.decision == "block" with input as _classed(
+        {"tool_name": "send_email", "tool_params": {"body": "123 45 6789"}}, ["pii"],
+    )
+    strict.decision == "block" with input as _classed(
+        {"tool_name": "send_email", "tool_params": {"body": "3782 822463 10005"}}, ["pci"],
+    )
+}
+
+test_both_policies_agree_on_the_derived_classes {
+    every classes in [["secret"], ["pii"], ["pci"]] {
+        strict.decision == canonical.decision with input as _classed(
+            {"tool_name": "send_email", "tool_params": {"body": "x"}}, classes,
+        )
+    }
+}
+
+# A secret is paired with a sink because POSSESSING a credential is not egress — blocking every call
+# that merely carries one would refuse ordinary authenticated tool calls.
+test_a_secret_class_without_a_sink_does_not_block {
+    strict.decision == "allow" with input as object.union(
+        _classed({"tool_name": "lookup_customer", "tool_params": {"k": "x"}}, ["secret"]),
+        {"derived": {"verb": "read", "data_classes": ["secret"],
+                     "destinations": {"urls": [], "hosts": [], "emails": [], "schemes": []}}},
+    )
+}
+
+# An engine predating derived.data_classes must degrade to the old behaviour, not error.
+test_a_missing_derived_document_still_evaluates {
+    strict.decision == "allow" with input as _norm(
+        {"tool_name": "lookup_customer", "tool_params": {"id": "C-91"}},
+    )
+}
