@@ -858,3 +858,46 @@ this session was caught rather than assumed away.
 Cross-server MCP description shadowing (needs a shared cross-instance registry); an audit signal for a
 tool invoked without passing the guard (F-026, needs-live — detecting the ABSENCE of a call);
 namespace posture in the MITRE pack (F-043); HTTP MCP proxy wiring (F-028 — a feature, not a fix).
+
+---
+
+## 2026-08-13 — Docker restarted; first fully green run, and it found a real bug
+
+Docker Desktop was force-restarted (the backend was wedged from the disk-full event). `norviq-postgres`
+and `norviq-redis` had **exited 255** when the disk filled — that was the whole cause of the 56
+"environmental" errors — and both came back healthy on `docker start`.
+
+**The live run immediately failed a test that had been unreachable, and the failure was mine.**
+`tests/sidecar/test_proxy.py::test_http_fallback_allows_safe_tool`: a benign
+`search_kb {"query":"hello"}` came back `drop`. Traced through the logs to
+`trust_signals={'violation_rate': 0.0}` → score capped to **0.30** → escalate.
+
+The F-033 cap keyed on the RATE alone, and a rate over a handful of calls is noise. An earlier test in
+that module blocks once for the same identity, so the next call sat at a ~50% violation rate and was
+capped into the escalation band **on the strength of one block** — after which every benign call
+escalated. That is precisely the §4.4 caveat the original commit claimed to preserve, violated through
+a single unlucky event instead of sustained misbehaviour.
+
+Fixed in `95516c4`: the cap now needs **20 observations**, where a >20% rate means at least four
+blocks rather than one. Below the bound the violation signal still carries its 0.25 weight, so the
+score moves — it just cannot be forced into escalation by one event.
+
+> **The lesson worth keeping.** My own unit tests passed the whole time, because they were written
+> from the same assumption as the code — that the rate is the entire signal. The integration path
+> carried no such assumption and failed on the first try. A unit test written by the author of a
+> change inherits the author's blind spot; this one needed a test that did not know what the code
+> believed.
+
+### Final gates — all green, nothing skipped for environment
+
+| Gate | Result |
+|---|---|
+| Python suite | **2997 passed, 0 failed** |
+| `tests/integration` + `tests/attacks` (previously unrunnable) | **121 passed**, 62 skipped, 97 xfailed |
+| `opa test --v0-compatible` | **59/59** |
+| UI | **1155 passed** (101 files), `tsc` + `eslint` clean |
+| Go | `go build` + `go test ./webhook` ok |
+| F-032 battery | **1/22 evaded (4%), 0 false positives** |
+| `ruff` | clean |
+
+Branch `fix/v020-eval-backlog`, 28 commits off `main`. **Still unpushed.**
