@@ -121,7 +121,7 @@ class TrustCalculator:
             )
             profile, is_frozen = profile_and_frozen
         signals = await self._compute_signals(input_data, history, profile)
-        computed = 0.0 if is_frozen else self._weighted_sum(signals)
+        computed = 0.0 if is_frozen else self._weighted_sum(signals, sample_size=len(history))
         # tighten-only cap: an admin override can only LOWER effective trust, never raise it.
         capped = override is not None and override < computed and not is_frozen
         score = round(min(computed, override), 4) if capped else computed
@@ -310,7 +310,22 @@ class TrustCalculator:
         (0.05, 0.60),   # blocked >1 in 20 — capped below the default 0.7 threshold
     )
 
-    def _violation_cap(self, signals: dict[str, float]) -> float:
+    # A violation RATE over a handful of calls is noise, not a pattern. Below this many observations
+    # the cap does not apply at all.
+    #
+    # This is not a tuning knob, it is a correctness bound, and it was missing: the first version
+    # capped on the rate alone, so an agent whose 2nd call tripped a control sat at a 50% violation
+    # rate and was capped to 0.30 — inside the escalation band — on the strength of ONE block. Every
+    # subsequent benign call then escalated. Caught by tests/sidecar/test_proxy.py, where an earlier
+    # test in the module blocks once for the same identity and the next benign call started dropping.
+    #
+    # 20 is the point where a >20% rate means at least four blocks rather than one unlucky call, which
+    # is the difference between evidence and an accident. Below it the weighted sum still carries the
+    # violation signal at its 0.25 weight — the agent's score does move — it just cannot be forced
+    # into the escalation band by a single event.
+    _MIN_OBSERVATIONS_FOR_CAP = 20
+
+    def _violation_cap(self, signals: dict[str, float], sample_size: int) -> float:
         """The highest score a given violation rate permits; 1.0 when there is nothing to cap.
 
         Derived from the signal's own output rather than re-reading history, so there is exactly one
@@ -318,6 +333,8 @@ class TrustCalculator:
         the console displays. The mapping is the inverse of ViolationRateSignal's buckets: it returns
         0.0 above a 20% rate, 0.2 above 10%, 0.4 above 5%.
         """
+        if sample_size < self._MIN_OBSERVATIONS_FOR_CAP:
+            return 1.0
         violation = signals.get("violation_rate", 1.0)
         if violation >= 0.8:            # rate <= 2%, or no history at all
             return 1.0
@@ -329,10 +346,15 @@ class TrustCalculator:
             return self._VIOLATION_CAPS[2][1]
         return 1.0
 
-    def _weighted_sum(self, signals: dict[str, float]) -> float:
-        """Return weighted trust score for all signals, capped by the violation rate."""
+    def _weighted_sum(self, signals: dict[str, float], sample_size: int = 0) -> float:
+        """Return weighted trust score for all signals, capped by a SUSTAINED violation rate.
+
+        `sample_size` is the number of observations the rate was computed over. It defaults to 0 —
+        i.e. no cap — so any caller that does not supply it gets the pre-cap behaviour rather than a
+        surprise escalation.
+        """
         weighted = sum(self.WEIGHTS[name] * signals.get(name, 0.0) for name in self.WEIGHTS)
-        return round(min(weighted, self._violation_cap(signals)), 4)
+        return round(min(weighted, self._violation_cap(signals, sample_size)), 4)
 
     @staticmethod
     def _tiers(trust_threshold: float | None) -> tuple[float | None, float | None]:

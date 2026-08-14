@@ -165,7 +165,11 @@ class _FakeCalc(TrustCalculator):
     async def _compute_signals(self, input_data, history, profile):
         return {"violation_rate": 1.0}
 
-    def _weighted_sum(self, signals):
+    def _weighted_sum(self, signals, sample_size=0):
+        # `sample_size` mirrors the real signature (it carries len(history), for the violation cap's
+        # minimum-observations bound). Accepted and ignored: this double exists to pin a FIXED
+        # computed score so the override tests can assert the tighten-only rule, and honouring the
+        # cap here would make the score depend on the fixture's history length instead.
         return self._computed
 
     async def _persist(self, spiffe_id, result):
