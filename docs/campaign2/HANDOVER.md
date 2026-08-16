@@ -901,3 +901,60 @@ score moves — it just cannot be forced into escalation by one event.
 | `ruff` | clean |
 
 Branch `fix/v020-eval-backlog`, 28 commits off `main`. **Still unpushed.**
+
+---
+
+## 2026-08-16 — Docker wiped itself; full rebuild, and live testing found a bug 62 rego tests missed
+
+**Docker was empty** on return: 0 images, 0 containers, 0 volumes, both kind clusters gone, free disk
+up 22 GB. Not the restart I did earlier (pods were listed fine after that one). Most likely the very
+failure `scripts/kind-e2e/00-up.sh` warns about in its own preconditions — *"Docker starts reclaiming
+space and has already deleted the kind node container once in this project's history"* — after the
+disk hit 286 MB free. The repo was untouched.
+
+Rebuilt with the project's own path (`make kind-up && make seed`) rather than by hand. Cluster is up,
+seeded, verified running the branch build, console on **http://localhost:3400**, token at
+`/tmp/nrvq-signin-token.txt`. Test dependencies restored separately with
+`docker compose -f docker-compose.dev.yml up -d` — the standalone `norviq-postgres`/`norviq-redis` on
+5433/6379 are what the pytest suite uses, NOT the in-cluster pods.
+
+**OPA sidecar is now `openpolicyagent/opa:1.19.0-static` and reports 1.19.0 at runtime** — F-001 live.
+
+### The bug (`ece42de`) — F-012 and F-046 were each right alone and wrong together
+
+    get_mail{"folder":"INBOX","token":"AQABAAAA-nextPage","l":"https://acme.com/n"}
+      -> llm02_data_leakage
+
+`data_classes` reports `secret` for a sensitive KEY NAME as well as a credential-shaped VALUE,
+`sensitive_keys` holds the bare key `token`, and F-046's `value_pattern_sink` is satisfied by ANY
+destination — so the two together re-opened the **39-of-53 over-block**, through a door I built.
+`get_mail` was protected on the name path by `retrieval_lead_tool`; my destination path had no such
+demotion and walked around it.
+
+Fixed by pairing the key-name-derived class with `egress_verb_tool` (retrieval-lead-aware) while
+F-046 keeps `value_pattern_sink`, since those clauses need a real credential VALUE.
+
+**Why 62 rego tests missed it:** the F-046 fixtures set `data_classes: []` and the F-012 fixtures set
+no destinations. Each suite tested its change against a world where the other did not exist. There is
+now a test passing both facts as the engine publishes them, asserting all three outcomes together.
+
+**And a second trap:** rolling the pods did NOT pick up the preset fix. The engine reads the baseline
+**materialised into Postgres**, not the file on disk (C2-025) — a preset edit needs a re-install.
+`make kind-up` is idempotent and does it.
+
+### Live verification (through the running API)
+
+| Case | Result |
+|---|---|
+| `get_mail` cursor + link (the over-block) | `allow / default_allow` |
+| base64 AWS key → `send_email` | `audit / policy_audit_would_block:llm02_data_leakage` |
+| `lookup_customer` + AKIA + attacker URL | `audit / policy_audit_would_block:llm02_data_leakage` |
+| IMDS `169.254.169.254` | `audit / policy_audit_would_block:ssrf_metadata` |
+| decimal loopback `2130706433` | `audit / policy_audit_would_block:ssrf_metadata` |
+| `file:///etc/passwd` | `audit / policy_audit_would_block:dangerous_scheme` |
+| spaced SSN, SQL `--` terminator | correct rule each |
+| in-cluster RFC1918, order id | `allow / default_allow` |
+
+`audit / policy_audit_would_block:<rule>` is the CORRECT signal — controls ship on monitor.
+
+Gates: Python **2997 passed, 0 failed** · `opa test` **62/62** · ruff clean.
