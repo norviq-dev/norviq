@@ -682,7 +682,25 @@ secret_egress_detected {
 _derived_class(c) { object.get(input.derived, "data_classes", [])[_] == c }
 pii_detected { _derived_class("pii") }
 pci_value_detected { _derived_class("pci") }
-data_leakage_detected { value_pattern_sink; _derived_class("secret") }
+# PAIRED WITH egress_verb_tool, NOT value_pattern_sink — found live, on a real cluster.
+#
+# `derived.data_classes` reports `secret` for a sensitive KEY NAME as well as for a credential-shaped
+# VALUE, and `sensitive_keys` holds the bare key `token`. Pairing that with `value_pattern_sink` —
+# which is satisfied by any destination in the params — re-opened the exact over-block this file
+# documents at length: `get_mail{"folder":"INBOX","token":"AQABAAAA-nextPage","l":"https://acme.com/n"}`
+# came back `llm02_data_leakage`. A pagination cursor beside a link is not exfiltration.
+#
+# `get_mail` was already protected on the NAME path by `retrieval_lead_tool`, which withholds the
+# classification-derived sink from a tool that LEADS with a retrieval verb. The destination path had
+# no such demotion, so it walked straight around a guard that exists for this precise case.
+#
+# The F-046 clauses below keep `value_pattern_sink` deliberately: they require an actual credential or
+# regulated-artifact VALUE to match, which a cursor cannot produce. It is only the KEY-NAME-derived
+# class that must stay on the name-based, retrieval-lead-aware predicate.
+#
+# 59 rego tests did not catch this — the F-046 fixtures supplied `data_classes: []`, so the two
+# changes were never exercised together. One evaluate call against the running cluster did.
+data_leakage_detected { egress_verb_tool; _derived_class("secret") }
 
 # --- F-006: SSRF to cloud metadata / loopback --------------------------------------------------
 #

