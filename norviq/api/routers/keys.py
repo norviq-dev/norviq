@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from norviq.api.api_keys import generate_key, new_id
-from norviq.api.auth import get_current_user, require_admin
+from norviq.api.auth import _required_bound_fields, get_current_user, require_admin
 from norviq.api.db.models import ApiKey
 from norviq.api.db.session import get_session
 from norviq.config import settings
@@ -97,6 +97,27 @@ async def create_key(
     #
     # Only `service`. `viewer`/`admin` keys are operator/CI credentials with no agent identity to bind,
     # which is the case the empty default was always for.
+    # ...and every OTHER field this deployment's ratchet requires, for the same reason. Found live:
+    # a key minted with an agent_class but no spiffe_id was issued happily and then 403'd on EVERY
+    # call — including its own class — because `auth_require_bound_agent_identity` (now default-on)
+    # requires both in `mock` SPIFFE mode. The API handed out a credential that cannot work and said
+    # nothing, which is the same "two homes disagree" defect as the fallback-mode drift: creation and
+    # enforcement have to agree on what a usable service key IS.
+    #
+    # Driven off `_required_bound_fields()` rather than a second hardcoded list, so a deployment that
+    # legitimately cannot issue a SPIFFE id (workload-api mode drops it) is not asked for one.
+    if body.role == "service":
+        required = set(_required_bound_fields())
+        if "spiffe_id" in required and not body.spiffe_id.strip():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "a service key must be issued with a spiffe_id on this deployment: "
+                    f"auth_require_bound_agent_identity requires {sorted(required)} for machine "
+                    "principals, so a key without one is refused on every evaluate call — including "
+                    "for its own agent_class. Pass spiffe_id, or set spiffe_mode=workload-api."
+                ),
+            )
     if body.role == "service" and not body.agent_class.strip():
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

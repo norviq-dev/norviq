@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import jwt
+import pytest
 from fastapi.testclient import TestClient
 
 from norviq.api import api_keys as ak
@@ -71,7 +72,8 @@ def test_create_returns_secret_once_and_stores_only_hash() -> None:
         # agent_class is now required for a service key (F-003) — it selects the Rego program, so an
         # unbound one would let the caller choose its own policy. This test's subject is the SECRET
         # handling, so it just states the class rather than testing the refusal (below).
-        json={"name": "ci", "namespace": "default", "role": "service", "agent_class": "ci-runner"},
+        json={"name": "ci", "namespace": "default", "role": "service", "agent_class": "ci-runner",
+              "spiffe_id": "spiffe://norviq/ns/default/sa/ci-runner"},
         headers={"Authorization": f"Bearer {_token('admin')}"},
     )
     assert resp.status_code == 200
@@ -290,3 +292,39 @@ def test_operator_keys_are_unaffected() -> None:
             headers={"Authorization": f"Bearer {_token('admin')}"},
         )
         assert resp.status_code == 200, role
+
+
+def test_a_service_key_needs_a_spiffe_id_when_the_ratchet_requires_one() -> None:
+    """Creation and enforcement must agree on what a usable service key IS.
+
+    Found on a live cluster: a key minted with an agent_class but no spiffe_id was issued happily and
+    then 403'd on EVERY evaluate call — including for its own agent_class — because
+    `auth_require_bound_agent_identity` (default-on since F-003) requires both in `mock` SPIFFE mode.
+    The API handed out a credential that could not work and said nothing about why.
+    """
+    client = _client([])
+    resp = client.post(
+        "/api/v1/keys",
+        json={"name": "agent", "namespace": "chatbot-lab", "role": "service",
+              "agent_class": "chatbot-agent"},
+        headers={"Authorization": f"Bearer {_token('admin')}"},
+    )
+    assert resp.status_code == 422
+    assert "spiffe_id" in resp.json()["detail"]
+
+
+def test_the_requirement_follows_the_deployment_not_a_second_hardcoded_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A workload-api install cannot issue a SPIFFE id, and `_required_bound_fields` already drops it
+    there. Asking for one anyway would make service keys unmintable on exactly the deployment the
+    ratchet was designed for."""
+    monkeypatch.setattr(settings, "spiffe_mode", "workload-api")
+    client = _client([])
+    resp = client.post(
+        "/api/v1/keys",
+        json={"name": "agent", "namespace": "chatbot-lab", "role": "service",
+              "agent_class": "chatbot-agent"},
+        headers={"Authorization": f"Bearer {_token('admin')}"},
+    )
+    assert resp.status_code == 200
