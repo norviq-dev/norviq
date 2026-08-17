@@ -30,6 +30,7 @@ import { ScopeCell } from "./ScopeCell";
 import { AlertCircle, Check, FlaskConical, Maximize2, Minimize2, Plus, Trash2, X } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import {
+  apiGet,
   apiSend,
   dryRunPolicy,
   fetchAllAgents,
@@ -1436,6 +1437,29 @@ function isConcreteNamespace(ns: string): boolean {
  *  agent-class: Y" key summary (UX redesign) — states MEANING per tier rather than wire fields. Callers
  *  still render the loader key alongside this (in muted small text) so the honesty guarantee — the
  *  operator can always see the exact key that will be written — is preserved. */
+/**
+ * Apply the step-① MCP narrowing to every rule, as an AND on each existing condition row.
+ *
+ * ANDed into EVERY row rather than appended as a new row, because a builder rule's rows are ORed:
+ * a rule with two rows fires when either matches, so a narrowing added as its own row would WIDEN the
+ * rule to "…or any call through this MCP server" — the exact opposite of the affordance's promise. A
+ * rule with no rows at all gets one, so the narrowing is never silently dropped.
+ *
+ * Returns `rules` unchanged (same reference) when there is no narrowing, so the compiled output of a
+ * policy that does not use this is byte-identical to one authored before the feature existed.
+ */
+export function mcpNarrowedRules(rules: BuilderRule[], server: string): BuilderRule[] {
+  const s = server.trim();
+  if (!s) return rules;
+  const clause: BuilderCondition = { type: "scalarFact", field: "mcp.server", op: "equals", value: s };
+  return rules.map((rule) => ({
+    ...rule,
+    conditions: rule.conditions.length
+      ? rule.conditions.map((row) => [...row, clause])
+      : [[clause]]
+  }));
+}
+
 export function scopeSentence(params: {
   scopeReady: boolean;
   namespaceReady: boolean;
@@ -1443,13 +1467,19 @@ export function scopeSentence(params: {
   agentClass: string;
   workloadName: string;
   targetNamespace: string;
+  /** The step-① MCP narrowing, if any. Reads as a subordinate clause because it IS one: the tier
+   *  selects the policy, this only narrows when it applies. */
+  mcpServer?: string;
 }): string {
   const { scopeReady, namespaceReady, tier, agentClass, workloadName, targetNamespace } = params;
   if (!scopeReady || !namespaceReady) return "Pick who this policy is for to continue.";
   const ns = targetNamespace.trim();
-  if (tier === "class") return `Applies to every \`${agentClass.trim()}\` agent in namespace \`${ns}\`.`;
-  if (tier === "namespace") return `Applies to every agent in namespace \`${ns}\`, whatever its class.`;
-  return `Applies to agents of Deployment \`${workloadName.trim()}\` in namespace \`${ns}\`.`;
+  const narrowing = (params.mcpServer ?? "").trim()
+    ? `, and only when served by MCP server \`${(params.mcpServer ?? "").trim()}\``
+    : "";
+  if (tier === "class") return `Applies to every \`${agentClass.trim()}\` agent in namespace \`${ns}\`${narrowing}.`;
+  if (tier === "namespace") return `Applies to every agent in namespace \`${ns}\`, whatever its class${narrowing}.`;
+  return `Applies to agents of Deployment \`${workloadName.trim()}\` in namespace \`${ns}\`${narrowing}.`;
 }
 
 /** Every tool-name fragment the capability registry mirror knows about (across all sources/verbs),
@@ -1513,6 +1543,12 @@ export function BuilderSheet({
   // Save stays gated (see `namespaceReady`/`canSave` below) until the operator picks one explicitly.
   const [targetNamespace, setTargetNamespace] = useState(() => (isConcreteNamespace(namespace) ? namespace : ""));
   const [knownNamespaces, setKnownNamespaces] = useState<string[]>([]);
+  /** The step-① MCP narrowing. A CONDITION, never a tier — see `mcpNarrowedRules`. */
+  const [mcpServer, setMcpServer] = useState("");
+  /** Servers the registry knows about, for the picker. Suggestions only: the field stays free-text so
+   *  a policy can be written for a server before its first `tools/list` — the same reason the registry
+   *  itself accepts a decision about a server it has never seen. */
+  const [knownMcpServers, setKnownMcpServers] = useState<string[]>([]);
   const namespaceReady = isConcreteNamespace(targetNamespace);
 
   useEffect(() => {
@@ -1528,6 +1564,31 @@ export function BuilderSheet({
       live = false;
     };
   }, []);
+
+  // The MCP server registry, for the step-① narrowing picker. Re-fetched when the target namespace
+  // changes: the registry is per-namespace, and offering another tenant's server ids as suggestions
+  // would leak an inventory across the boundary the registry exists to keep.
+  useEffect(() => {
+    const ns = targetNamespace.trim();
+    if (!isConcreteNamespace(ns)) {
+      setKnownMcpServers([]);
+      return;
+    }
+    let live = true;
+    apiGet<{ server_id: string }[]>(`/api/v1/mcp/servers?namespace=${encodeURIComponent(ns)}`)
+      .then((rows) => {
+        if (!live) return;
+        const ids = (rows ?? []).map((r) => String(r.server_id ?? "")).filter(Boolean);
+        setKnownMcpServers([...new Set(ids)].sort());
+      })
+      .catch(() => {
+        // Suggestions only. An estate with no MCP, or an unreachable endpoint, still leaves the field
+        // usable — which matters because the field is what a policy for a not-yet-seen server needs.
+      });
+    return () => {
+      live = false;
+    };
+  }, [targetNamespace]);
 
   // Tool-name autocomplete + unknown-tool warning: `registry` is `null` until a concrete target
   // namespace is chosen AND the fetch resolves — while `null`, ConditionChip/allowlist suppress the
@@ -1888,7 +1949,17 @@ export function BuilderSheet({
       schemaVersion: 1,
       scope,
       mode,
-      rules,
+      // The MCP narrowing is folded in HERE, at the one boundary every consumer shares — the raw-rego
+      // preview, the dry-run and the save all read `compiled`, so a narrowing applied anywhere else
+      // would show in one and not the others.
+      //
+      // It is a CONDITION on every rule, never a fourth tier. `loaderKeyFor` maps the scope to the
+      // loader key that selects WHICH REGO PROGRAM RUNS, and all three tiers are attested —
+      // agent_class is rewritten from the credential by `scoped_identity`, namespace from the SVID,
+      // workload from the webhook's owner-reference derivation. `mcp.server` is PEP-REPORTED, and
+      // ToolCallEvent's own docstring draws the line: do not use it to decide WHO is calling, only
+      // WHAT they are calling. Make it a tier and a forgeable string chooses the policy program.
+      rules: mcpNarrowedRules(rules, mcpServer),
       defaults,
       ...(mode === "allowlist"
         ? {
@@ -1913,7 +1984,8 @@ export function BuilderSheet({
           }
         : {})
     }),
-    [scope, rules, defaults, mode, allowlistTools, allowlistRefinements, allowlistGrants, allowlistGrantFacts]
+    [scope, rules, mcpServer, defaults, mode, allowlistTools, allowlistRefinements, allowlistGrants,
+     allowlistGrantFacts]
   );
   // `targetNamespace` is passed as the compiler's 2nd argument for every tier (class/namespace tiers
   // ignore it; the workload tier needs it for its `input.agent.namespace` guard — see
@@ -2415,6 +2487,37 @@ export function BuilderSheet({
                       this policy in before you can dry-run or save.
                     </div>
                   )}
+                </div>
+
+                {/* THE MCP NARROWING — beneath the tier cards, deliberately subordinate to them.
+                    Same visual block so it reads as part of "who is this for"; clearly secondary so it
+                    reads as a narrowing rather than a fourth tier. It IS a condition: see
+                    `mcpNarrowedRules` for why an attested tier and a PEP-reported string cannot be the
+                    same kind of thing. */}
+                <div className="field-row" style={{ marginTop: 10 }} data-testid="builder-mcp-narrowing">
+                  <label className="field-label">…and only for MCP server (optional)</label>
+                  <input
+                    data-testid="builder-mcp-server"
+                    className="input mono"
+                    list="builder-known-mcp-servers"
+                    placeholder="any MCP server, and every non-MCP call"
+                    value={mcpServer}
+                    onChange={(e) => setMcpServer(e.target.value)}
+                    style={{ width: "100%" }}
+                  />
+                  <datalist id="builder-known-mcp-servers">
+                    {knownMcpServers.map((sv) => (
+                      <option key={sv} value={sv} />
+                    ))}
+                  </datalist>
+                  <div className="panel-sub" style={{ fontSize: 10.5, marginTop: 4 }}>
+                    {/* The asymmetry stated plainly, so the difference reads as deliberate rather than
+                        as an inconsistency somebody forgot to fix. */}
+                    The tiers above SELECT which policy runs, and are attested. An MCP server NARROWS a
+                    policy that already applies — it is reported by the enforcement point, so it says
+                    what is being called, never who is calling. Leave it empty and the policy applies to
+                    every call, MCP or not.
+                  </div>
                 </div>
 
                 {/* ASCII names only — see `asciiToolSuggestions` for why a datalist may not carry a
@@ -3335,7 +3438,7 @@ export function BuilderSheet({
                   style={{ marginBottom: 8 }}
                 >
                   <div style={{ fontSize: 12.5, color: namespaceReady ? "var(--text-primary)" : "var(--escalate)" }}>
-                    {scopeSentence({ scopeReady, namespaceReady, tier, agentClass, workloadName, targetNamespace })}
+                    {scopeSentence({ scopeReady, namespaceReady, tier, agentClass, workloadName, targetNamespace, mcpServer })}
                   </div>
                   <div className="mono" style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 3 }}>
                     creates {targetNamespace.trim() || "—"} / {scopeIdentifier(scope).trim() ? loaderKeyFor(scope) : "—"}

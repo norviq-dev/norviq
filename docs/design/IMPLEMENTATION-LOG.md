@@ -2156,3 +2156,50 @@ The chatbot's LangChain agent was repointed at the two `norviq.mcp` firewalls an
   through the real MCP SDK client returned zero tools.
 - Audit truth: `block | mcp_server_blocked | tools/list | rugpull`, with `transport: http`.
 - Denial coalescing verified on the discovery path: 5 listings of a blocked server → 1 audit row.
+
+## MCP baseline controls (P4) and the builder narrowing (P5)
+
+### P4a — five controls ported from the template into the shipped preset
+
+Live-verified through `/evaluate` on kind: drift → escalate `mcp_definition_drift`, never-scanned →
+escalate `mcp_definition_never_scanned`, quarantined → block `mcp_tool_not_approved`, scanner-critical
+→ block `mcp_definition_flagged`, healthy MCP call → allow, non-MCP call → allow.
+
+### P4b — the registry-backed pair, and the trap the precedent left
+
+`egress_allowlist.py` is a complete compiler with engine-side collection and **no router**: its only
+importer is its own test. The MCP registry module ships with `_materialize_mcp_registry` wired into
+every write path, and the test that asserts it comes before any of the rego assertions.
+
+**A live finding worth keeping.** The first probe after deploying showed a READ through a REGISTERED
+server blocking with `mcp_unregistered_server`. The generated module was correct — evaluated
+standalone it returned `allow`. The block came from the **stale hand-written `__guardrail__`** left in
+`chatbot-lab` by the earlier L2 campaign, whose `known_servers = {"rugpull"}` had never been updated.
+That is precisely the failure mode P4 exists to end: a hand-maintained list in a copy-me template,
+enforcing a stale answer with the weight of an operator guardrail.
+
+Isolating the shipped control from the legacy one took constructing a case where the two DISAGREE:
+`rugpull` is known-and-writable to the legacy guardrail and registered-read-only in the new registry.
+Read → allow (both agree). Write → **block, `mcp_unapproved_write_server`** — a verdict only the
+generated module can produce. The shipped control is live and its decision is the one that won.
+
+### Product decisions taken autonomously
+
+- **An empty registry is INERT**, the opposite of the egress module's discovery-first choice. An empty
+  egress allowlist flags destinations and interrupts nothing; an empty server registry would flag
+  every MCP call on a fresh install and the operator's first act would be to switch it off.
+- **Unregistered AUDITS, unapproved-write BLOCKS.** Registration is housekeeping that lags reality;
+  which servers may be written through is a decision already made.
+- **Server ids are not case-folded**, unlike egress domains — a domain is case-insensitive by
+  specification, a server id is an operator-chosen string the PEP reports verbatim.
+- **`unknown` verb is not a write.** The classifier saying "I cannot tell" is not evidence.
+- **P5 is a condition, not a fourth tier.** All three tiers are attested; `mcp.server` is
+  PEP-reported. A tier selects which rego program runs, so a forgeable string must never be one. The
+  narrowing is ANDed into EVERY condition row — a builder rule's rows are ORed, so appending a row
+  would have WIDENED the rule to "…or any call through this server", the opposite of the promise.
+
+### What is deliberately still open
+
+Part 6b (attack-graph non-agent origin) is unstarted, as the plan sequenced it: it needs the
+"which of the three attack-path surfaces is canonical" question settled first, and bundling it here
+would have made that decision by accident.
