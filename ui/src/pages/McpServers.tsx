@@ -71,6 +71,14 @@ export type McpServerRow = {
   decided_by?: string;
   note?: string;
   identity_drift_count?: number;
+  /** The roll-up that knows nothing about decisions — drift, quarantine, scan findings.
+   *
+   *  Rendered in the Status column so it stays independent of Registration. Without it a blocked
+   *  server read "BLOCKED | BLOCKED" across two columns, and the operator deciding whether to unblock
+   *  could not see whether its definitions were actually clean — the fact that decision turns on.
+   *  Optional: a pre-registry API sends only `health`, and falling back to it restores the old
+   *  behaviour rather than blanking the column. */
+  observed_health?: string;
   [key: string]: unknown;
 };
 
@@ -633,8 +641,8 @@ export function McpServers() {
     {
       key: "health",
       title: "Status",
-      render: (v) => {
-        const meta = HEALTH_META[String(v)] ?? HEALTH_META.ok;
+      render: (v, row) => {
+        const meta = HEALTH_META[String(row.observed_health ?? v)] ?? HEALTH_META.ok;
         const Icon = meta.icon;
         return (
           <span className="pill" style={{ ...TONE[meta.tone], display: "inline-flex", alignItems: "center", gap: 5 }}>

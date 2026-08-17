@@ -314,6 +314,22 @@ def test_registering_a_server_is_what_makes_it_read_as_ok():
     assert after[0]["writable"] is True
 
 
+def test_the_observation_and_the_decision_are_reported_SEPARATELY():
+    """A blocked server rendered "BLOCKED | BLOCKED" across the console's two columns, so an operator
+    deciding whether to unblock could not see whether its definitions were actually clean — which is
+    exactly the fact that decision turns on. `observed_health` knows nothing about decisions;
+    `health` folds the decision in and is what the list sorts on."""
+    client, _ = _client()
+    hdr = _hdr(role="service", namespace="agents")
+    client.post("/api/v1/mcp/pins/observe", json=_observe(server="clean"), headers=hdr)
+    client.post("/api/v1/mcp/servers/decision", headers=_hdr(),
+                json={"namespace": "agents", "server_id": "clean", "status": "blocked"})
+
+    row = client.get("/api/v1/mcp/servers?namespace=agents", headers=_hdr()).json()[0]
+    assert row["health"] == "blocked", "the sort key still has to put a refusal first"
+    assert row["observed_health"] == "ok", "its definitions are clean and the operator needs to know"
+
+
 def test_blocking_outranks_every_observation():
     """`blocked` is the operator's answer to a stronger question than any observation asks.
 

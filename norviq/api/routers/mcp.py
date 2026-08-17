@@ -319,16 +319,28 @@ async def list_servers(
 
     out = list(servers.values())
     for entry in out:
-        # One word an operator can triage on. The ordering itself is `servers.HEALTH_ORDER`, which
-        # documents why each rung outranks the next; the only thing decided here is which rung a row
-        # is on given what was observed and what was decided.
-        entry["health"] = (
-            "blocked" if entry["status"] == STATUS_BLOCKED
-            else "drift" if entry["drifted"]
+        # TWO roll-ups, because they answer different questions and a console showed the same word
+        # twice when they were one.
+        #
+        # `observed_health` is what the ESTATE says: drift, quarantine, scan findings. It knows
+        # nothing about decisions.
+        #
+        # `health` folds the DECISION in, and is what the list sorts on — `blocked` has to outrank
+        # every observation there or a server the operator already refused sinks below one that
+        # merely drifted.
+        #
+        # Measured live: `rugpull` rendered as "BLOCKED | BLOCKED" across the two columns, so an
+        # operator deciding whether to unblock could not see that its definitions were in fact clean —
+        # which is precisely the fact that decision turns on.
+        entry["observed_health"] = (
+            "drift" if entry["drifted"]
             else "quarantined" if entry["quarantined"]
             else "flagged" if entry["flagged"]
             else "unreviewed" if entry["status"] == STATUS_DISCOVERED
             else "ok"
+        )
+        entry["health"] = (
+            "blocked" if entry["status"] == STATUS_BLOCKED else entry["observed_health"]
         )
     # Worst first, by the real ordering. Sorting on `health == "ok"` was fine while an undecided server
     # read as "ok", and became wrong the moment it read as "unreviewed": every row on a fresh install

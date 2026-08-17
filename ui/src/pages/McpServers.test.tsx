@@ -812,3 +812,51 @@ describe("the server registry", () => {
     expect((await screen.findAllByText("Unreviewed")).length).toBe(4);
   });
 });
+
+describe("the Status column shows the observation, not the decision", () => {
+  const BLOCKED_BUT_CLEAN = [{
+    namespace: "agents", server_id: "rugpull", transport: "http", tools: 1,
+    drifted: 0, quarantined: 0, flagged: 0, worst_severity: "none",
+    health: "blocked", observed_health: "ok", status: "blocked", writable: false,
+    first_seen_at: "2026-07-31T10:00:00Z", last_seen_at: "2026-07-31T12:00:00Z"
+  }];
+
+  beforeEach(() => {
+    clearApiCache();
+    vi.restoreAllMocks();
+    vi.spyOn(client, "apiGet").mockImplementation(async (path: string) => {
+      if (path.startsWith("/api/v1/mcp/servers")) return BLOCKED_BUT_CLEAN as never;
+      return [] as never;
+    });
+    mockRole("admin");
+  });
+
+  it("a blocked server whose definitions are clean does not read BLOCKED twice", async () => {
+    // Measured live: the row rendered "BLOCKED | BLOCKED" across the two columns and told an operator
+    // nothing about whether anything was actually wrong underneath the block — which is the fact the
+    // decision to unblock turns on.
+    renderPage();
+    const row = await waitFor(() => {
+      const el = document.querySelector('tr[data-row-key="agents/rugpull"]');
+      if (!el) throw new Error("no row");
+      return el as HTMLElement;
+    });
+    expect(within(row).getByText("healthy")).toBeInTheDocument();
+    expect(within(row).getByText("Blocked")).toBeInTheDocument();
+  });
+
+  it("falls back to `health` when the API predates the split", async () => {
+    // Blanking the column would be a worse answer than the old, slightly redundant one.
+    clearApiCache();
+    vi.restoreAllMocks();
+    vi.spyOn(client, "apiGet").mockImplementation(async (path: string) => {
+      if (path.startsWith("/api/v1/mcp/servers")) {
+        return BLOCKED_BUT_CLEAN.map(({ observed_health: _drop, ...rest }) => rest) as never;
+      }
+      return [] as never;
+    });
+    mockRole("admin");
+    renderPage();
+    expect(await screen.findByText("blocked")).toBeInTheDocument();
+  });
+});
