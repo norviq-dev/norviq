@@ -134,7 +134,12 @@ class HttpProxy:
         #
         # Loaded on EVERY pin backend, unlike pins: choosing a local pin store is not a decision to
         # stop enforcing blocked servers.
-        self._servers = ControlPlaneServerStore(namespace=getattr(settings, "namespace", "") or "")
+        # Namespace is set in `run()` from the ATTESTED identity, not here. `settings.namespace` does
+        # not exist — `getattr(settings, "namespace", "")` returned "" on every deployment there has
+        # ever been, silently, because the fallback made the phantom read look deliberate. The stdio
+        # transport had it right all along (`identity.namespace` from the SPIFFE resolver); this one
+        # was reading a setting nobody defined.
+        self._servers = ControlPlaneServerStore(namespace="")
 
     async def _install_server_registry(self) -> None:
         """Load the server decisions before the listener binds, then keep re-reading.
@@ -144,6 +149,7 @@ class HttpProxy:
         same interval whether or not the first one worked. A failure here is loud (NRVQ-MCP-5070) and
         recovers on the next tick.
         """
+        self._servers.namespace = await self._attested_namespace()
         await self._servers.load()
         self._servers.start_refresh(settings.mcp_pin_refresh_s)
 
@@ -169,9 +175,25 @@ class HttpProxy:
             return
         self._schedule_pin_store_retry()
 
+    async def _attested_namespace(self) -> str:
+        """The namespace from the ATTESTED identity — the same source stdio uses.
+
+        Both control-plane stores on this transport read a `settings.namespace` that does not exist,
+        so both addressed the control plane with an empty namespace. The `getattr` default is what
+        hid it: a phantom setting with a fallback reads as a deliberate optional, and produces no
+        error at any layer.
+        """
+        try:
+            identity = await SPIFFEResolver().resolve()
+        except Exception as exc:  # noqa: BLE001 — an unresolvable identity must not stop the proxy
+            log.warning("nrvq.mcp.http.namespace_unresolved", error=str(exc), code="NRVQ-MCP-5073",
+                        hint="control-plane pins and server decisions will not be namespace-scoped")
+            return ""
+        return getattr(identity, "namespace", "") or ""
+
     async def _try_install_pin_store(self) -> bool:
         """One attempt. True when the durable store is live and installed."""
-        namespace = getattr(settings, "namespace", "") or ""
+        namespace = await self._attested_namespace()
         store = ControlPlanePinStore(
             namespace=namespace,
             server_id=self._server_id,

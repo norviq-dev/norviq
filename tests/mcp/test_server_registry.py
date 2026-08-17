@@ -421,3 +421,52 @@ class TestGateARefusesABlockedServer:
         result = await _list(fw, BENIGN_TOOLS)
 
         assert json.loads(result.forward)["result"]["tools"] == []
+
+
+# ── the two defects only a live deployment found ───────────────────────────────────────────────────
+
+class TestTheConfigurationTrapsThatOnlyShowedUpInACluster:
+    """Both of these passed every unit test and failed the moment a real sidecar started.
+
+    They are the same shape: a value that was WRONG rather than missing, with a fallback that made the
+    wrongness look deliberate. Neither produced an error at any layer — one produced a DNS failure
+    attributed to the control plane, the other produced nothing at all.
+    """
+
+    def test_api_url_follows_the_engine_url_when_only_that_one_is_set(self, monkeypatch) -> None:
+        """`policy_engine_url` and `api_url` are documented as the same target, and every deployment
+        in this repo sets only NRVQ_POLICY_ENGINE_URL. Anything reading `api_url` therefore fell back
+        to the short name `http://norviq-api:8080`, which resolves ONLY inside the API's own
+        namespace — so a sidecar anywhere else got "Name or service not known" from a proxy whose
+        /evaluate calls were working perfectly.
+        """
+        from norviq.config import NorviqSettings, apply_api_url_follows_engine
+
+        monkeypatch.setenv("NRVQ_POLICY_ENGINE_URL", "http://norviq-api.norviq.svc.cluster.local:8080")
+        monkeypatch.delenv("NRVQ_API_URL", raising=False)
+        # `_env_file=None` because THIS repo ships a .env that sets NRVQ_API_URL for local dev. That
+        # counts as an explicit statement and correctly suppresses the follow — which is why the first
+        # version of this test failed, and why the fix is to exclude the file rather than the rule.
+        s = apply_api_url_follows_engine(NorviqSettings(_env_file=None))
+        assert s.api_url == "http://norviq-api.norviq.svc.cluster.local:8080"
+
+    def test_an_explicit_api_url_is_never_overridden(self, monkeypatch) -> None:
+        """Two different endpoints is a legitimate configuration; following must not become forcing."""
+        from norviq.config import NorviqSettings, apply_api_url_follows_engine
+
+        monkeypatch.setenv("NRVQ_POLICY_ENGINE_URL", "http://engine:8080")
+        monkeypatch.setenv("NRVQ_API_URL", "http://api:9090")
+        s = apply_api_url_follows_engine(NorviqSettings(_env_file=None))
+        assert s.api_url == "http://api:9090"
+
+    def test_settings_has_no_namespace_field_which_is_why_the_getattr_was_a_bug(self) -> None:
+        """The HTTP transport read `getattr(settings, "namespace", "")` for BOTH control-plane stores.
+
+        There is no such setting, so both addressed the control plane with an empty namespace on every
+        deployment there has ever been. The `getattr` default is what hid it: a phantom read with a
+        fallback looks like a deliberate optional. This test fails the day somebody adds the field,
+        which is the right time to revisit the fix rather than leave two sources of one answer.
+        """
+        from norviq.config import settings as live
+
+        assert not hasattr(live, "namespace")

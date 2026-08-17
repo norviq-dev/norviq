@@ -520,3 +520,28 @@ class NorviqSettings(BaseSettings):
 settings = NorviqSettings()
 if settings.otel_disabled:
     settings.otel_enabled = False
+
+# `api_url` FOLLOWS `policy_engine_url` unless it was set explicitly.
+#
+# They are documented as the same target — the comment on `policy_engine_url` says so — but they are
+# two env vars, and every deployment in this repo and in the lab sets only `NRVQ_POLICY_ENGINE_URL`.
+# Anything reading `api_url` therefore fell back to `http://norviq-api:8080`, a SHORT name that
+# resolves only inside the API's own namespace. A sidecar in any other namespace got
+# "Name or service not known".
+#
+# It surfaced as a control-plane fetch failing in a proxy whose /evaluate calls were working
+# perfectly, which is the confusing part: one URL was configured and the other silently was not, and
+# the symptom named neither. Nothing here overrides an explicit NRVQ_API_URL — `model_fields_set` is
+# the environment's own record of what the operator actually stated.
+def apply_api_url_follows_engine(s: "NorviqSettings") -> "NorviqSettings":
+    """Point `api_url` at `policy_engine_url` unless the operator stated `api_url` themselves.
+
+    A function rather than four inline lines so the property is testable against the REAL rule instead
+    of a copy of it in a test — a copy would keep passing after this changed.
+    """
+    if "api_url" not in s.model_fields_set and "policy_engine_url" in s.model_fields_set:
+        s.api_url = s.policy_engine_url
+    return s
+
+
+apply_api_url_follows_engine(settings)

@@ -172,7 +172,9 @@ class ControlPlaneServerStore:
     """
 
     def __init__(self, namespace: str, api_url: str = "", token: str = "") -> None:
-        self._namespace = namespace
+        #: Writable because the HTTP transport learns it from an ASYNC identity resolution while the
+        #: firewall needs the registry object at construction. Set it before the first `load()`.
+        self.namespace = namespace
         self._api_url = (api_url or settings.api_url).rstrip("/")
         self._token = token if token else settings.api_token
         self._registry = ServerRegistry()
@@ -209,7 +211,7 @@ class ControlPlaneServerStore:
             async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=2.0)) as client:
                 resp = await client.get(
                     f"{self._api_url}/api/v1/mcp/servers",
-                    params={"namespace": self._namespace},
+                    params={"namespace": self.namespace},
                     headers=self._headers(),
                 )
                 resp.raise_for_status()
@@ -218,7 +220,7 @@ class ControlPlaneServerStore:
             self._degraded = True
             log.error(
                 "nrvq.mcp.servers.control_plane_unreachable",
-                namespace=self._namespace, error=str(exc), code="NRVQ-MCP-5070",
+                namespace=self.namespace, error=str(exc), code="NRVQ-MCP-5070",
                 detail=("no server decision is being enforced at discovery" if not self._loaded
                         else "serving the last known decisions; a change made since is not visible"),
                 hint="Gate B is unaffected — every tool call is still evaluated against policy",
@@ -230,12 +232,12 @@ class ControlPlaneServerStore:
         self._registry.decisions.clear()
         self._registry.decisions.update(fresh.decisions)
         if self._degraded:
-            log.info("nrvq.mcp.servers.control_plane_recovered", namespace=self._namespace,
+            log.info("nrvq.mcp.servers.control_plane_recovered", namespace=self.namespace,
                      code="NRVQ-MCP-5071")
         self._degraded = False
         self._loaded = True
         blocked = sum(1 for d in self._registry.decisions.values() if d.status == STATUS_BLOCKED)
-        log.info("nrvq.mcp.servers.loaded", namespace=self._namespace,
+        log.info("nrvq.mcp.servers.loaded", namespace=self.namespace,
                  count=len(self._registry.decisions), blocked=blocked, code="NRVQ-MCP-5071")
         return True
 
