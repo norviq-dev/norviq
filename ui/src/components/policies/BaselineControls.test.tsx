@@ -179,7 +179,7 @@ describe("baseline controls", () => {
 
   it("surfaces non-compliance from the customer's OWN policies, not just the shipped controls", async () => {
     // The gap this closes: /policy-compliance returns every rule that flagged traffic, but the panel
-    // only read it through `impact.get(c.id)` while iterating the 14 shipped controls, so a rule from
+    // only read it through `impact.get(c.id)` while iterating the shipped controls, so a rule from
     // a policy the customer wrote was fetched and silently discarded. That removed the entire point of
     // trialling a custom policy in audit mode — it records what it WOULD have blocked and the console
     // showed none of it. Found on a live cluster: a custom egress rule caught a real exfiltration,
@@ -246,3 +246,85 @@ describe("baseline controls", () => {
     expect(screen.getByTestId("baseline-save")).toBeDisabled();
   });
 });
+
+describe("grouping by plane", () => {
+  const mixed = {
+    namespace: "default",
+    preset: "strict",
+    default_effect: "monitor" as const,
+    effects: ["off", "monitor", "deny"] as const,
+    counts: { off: 0, monitor: 1, deny: 2 },
+    controls: [
+      {
+        id: "mcp_definition_flagged",
+        title: "Poisoned tool definition",
+        description: "Withholds a tool whose description scanned as an injection.",
+        caveat: "",
+        effect: "deny" as const,
+        default_effect: "deny" as const,
+        plane: "discovery" as const,
+      },
+      {
+        id: "deny_shell_execution",
+        title: "Shell / command execution",
+        description: "Catches shell metacharacters in tool parameters.",
+        caveat: "",
+        effect: "deny" as const,
+        default_effect: "deny" as const,
+        plane: "call" as const,
+      },
+      {
+        id: "mcp_a_dangerous_scheme",
+        title: "Executable URL scheme in a result",
+        description: "Fences a tool result carrying javascript: or data:text/html.",
+        caveat: "",
+        effect: "monitor" as const,
+        default_effect: "monitor" as const,
+        plane: "response" as const,
+      },
+    ],
+  };
+
+  it("renders one section per plane that has controls, in call order", async () => {
+    mockFetch(mixed);
+    renderPanel({ namespace: "default", isAdmin: true });
+
+    await screen.findByTestId("baseline-plane-discovery");
+    const planes = ["discovery", "call", "response"].map((k) =>
+      screen.getByTestId(`baseline-plane-${k}`),
+    );
+    // A call travels discovery -> call -> response, and the sections must read in that order or the
+    // grouping stops explaining the architecture it was chosen to mirror.
+    expect(planes[0].compareDocumentPosition(planes[1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(planes[1].compareDocumentPosition(planes[2]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("puts each control under its OWN plane", async () => {
+    mockFetch(mixed);
+    renderPanel({ namespace: "default", isAdmin: true });
+
+    const discovery = await screen.findByTestId("baseline-plane-discovery");
+    expect(discovery).toContainElement(screen.getByTestId("baseline-control-mcp_definition_flagged"));
+    expect(discovery).not.toContainElement(screen.getByTestId("baseline-control-deny_shell_execution"));
+  });
+
+  it("renders no empty section for a plane with no controls", async () => {
+    // Until the MCP controls land every control is `call`; an empty "Discovery" heading would tell an
+    // operator a layer exists that they cannot configure.
+    mockFetch({ ...mixed, controls: [mixed.controls[1]] });
+    renderPanel({ namespace: "default", isAdmin: true });
+
+    await screen.findByTestId("baseline-plane-call");
+    expect(screen.queryByTestId("baseline-plane-discovery")).toBeNull();
+    expect(screen.queryByTestId("baseline-plane-response")).toBeNull();
+  });
+
+  it("falls back to the call plane for a server that predates the field", async () => {
+    mockFetch({ ...mixed, controls: mixed.controls.map(({ plane: _p, ...rest }) => rest) });
+    renderPanel({ namespace: "default", isAdmin: true });
+
+    const call = await screen.findByTestId("baseline-plane-call");
+    expect(call).toContainElement(screen.getByTestId("baseline-control-mcp_definition_flagged"));
+  });
+});
+

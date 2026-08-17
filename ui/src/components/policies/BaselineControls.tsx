@@ -17,7 +17,9 @@ import {
   fetchBaselineControls,
   fetchPolicyCompliance,
   saveBaselineControls,
+  type BaselineControl,
   type BaselineEffect,
+  type ControlPlane,
 } from "../../api/client";
 import { Panel } from "../common/Panel";
 import { invalidateApiCache, useApi } from "../../hooks/useApi";
@@ -25,6 +27,19 @@ import { useMutationScope } from "../../hooks/useMutationScope";
 
 /** Wire value -> what an operator actually calls it. "deny" is shown as Enforce; "audit" is avoided
  *  entirely here because it already means a DECISION elsewhere in the console (and the Audit Log). */
+// The three planes, in the order a call travels through them. A control's plane comes from the
+// server (`BaselineControl.plane`) so the console and the engine cannot disagree about it; `planeOf`
+// only supplies the fallback for a server that predates the field.
+const PLANES: { key: ControlPlane; title: string; hint: string }[] = [
+  { key: "discovery", title: "Discovery", hint: "before the model is shown a tool" },
+  { key: "call", title: "Call", hint: "when the agent acts" },
+  { key: "response", title: "Response", hint: "what comes back" },
+];
+
+function planeOf(c: BaselineControl): ControlPlane {
+  return c.plane ?? "call";
+}
+
 const LABELS: Record<BaselineEffect, string> = {
   off: "Off",
   monitor: "Monitor",
@@ -94,7 +109,7 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
   // Non-compliance from the customer's OWN policies, which has nowhere else to go.
   //
   // /policy-compliance returns every rule that flagged traffic, but this component only ever read it
-  // through `impact.get(c.id)` while iterating the 14 shipped controls — so a rule from a policy the
+  // through `impact.get(c.id)` while iterating the shipped controls — so a rule from a policy the
   // customer wrote was fetched, stored in the map, and never looked up. That silently removed the
   // whole point of trialling a custom policy in monitor mode: it records what it WOULD have blocked,
   // and the console showed none of it. Same data, same request, just rendered.
@@ -174,8 +189,17 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
             )}
           </div>
 
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {rows.map((c) => {
+          {PLANES.filter((pl) => rows.some((c) => planeOf(c) === pl.key)).map((pl) => (
+            <div key={pl.key} data-testid={`baseline-plane-${pl.key}`} style={{ marginBottom: 18 }}>
+              {/* Grouped by WHERE the control acts, not by threat family. That axis mirrors the
+                  enforcement architecture — Gate A at discovery, Gate B at the call, the content
+                  guard on the way back — so the sections teach the model instead of hiding it, and
+                  a reader can tell why a discovery control cannot see call arguments. */}
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 6 }}>
+                <h4 style={{ margin: 0, fontSize: 13, color: "var(--text)" }}>{pl.title}</h4>
+                <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{pl.hint}</span>
+              </div>
+              {rows.filter((c) => planeOf(c) === pl.key).map((c) => {
               const current = effectFor(c.id, c.effect);
               const changed = current !== c.effect;
               return (
@@ -234,8 +258,9 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
                   </div>
                 </div>
               );
-            })}
-          </div>
+              })}
+            </div>
+          ))}
 
           <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 12 }}>
             <button

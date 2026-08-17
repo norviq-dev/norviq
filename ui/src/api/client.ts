@@ -241,12 +241,22 @@ export type BaselineControl = {
   /** Known false-positive mode, shown before an operator promotes the control to `deny`. Often "". */
   caveat: string;
   effect: BaselineEffect;
+  /** THIS control's shipped default, not one global value — the console renders the
+   *  differs-from-default marker off it, and a single global made that marker wrong for every
+   *  control that carries its own. */
   default_effect: BaselineEffect;
+  /** Where the control acts: before the model sees a tool (`discovery`), when the agent acts
+   *  (`call`), or on what comes back (`response`). The grouping axis, chosen to mirror the
+   *  enforcement architecture rather than invent a threat taxonomy. */
+  plane: ControlPlane;
 };
+
+export type ControlPlane = "discovery" | "call" | "response";
 
 export type BaselineControls = {
   namespace: string;
   preset: string;
+  /** The FALLBACK for a control that declares no default of its own — not what every control does. */
   default_effect: BaselineEffect;
   effects: BaselineEffect[];
   counts: Record<BaselineEffect, number>;
@@ -279,7 +289,7 @@ export async function saveBaselineControls(
 
 export type ComplianceControl = {
   control_id: string;
-  /** Whether this row is one of the 14 shipped controls or a rule from a policy the customer wrote.
+  /** Whether this row is one of the shipped controls or a rule from a policy the customer wrote.
    *
    *  Stated by the server rather than re-derived here. Only a shipped control has a Promote action
    *  behind it, so a consumer that guesses wrong offers a button that cannot work — and the endpoint
