@@ -448,6 +448,21 @@ def normalize_effects(preset: str, effects: dict[str, str] | None) -> dict[str, 
     return resolved
 
 
+def enforced_as(preset: str, control_id: str) -> str:
+    """`block` | `escalate` | `audit` — what setting this control to `deny` actually does.
+
+    Read from the PRESET's own heads rather than from a table here, for the reason the shipped-default
+    guard gives: the author's expressed severity is a signal, and a second copy of it drifts. A control
+    with heads in more than one set reports the strongest, which is what the resolver would pick.
+    """
+    sets = {h.set_name for h in controls_for(preset) if h.control_id == control_id}
+    if "blocks" in sets:
+        return "block"
+    if "escalates" in sets:
+        return "escalate"
+    return "audit"
+
+
 def describe(preset: str, effects: dict[str, str] | None = None) -> list[dict]:
     """The operator-facing control list for GET /baseline/controls."""
     resolved = normalize_effects(preset, effects)
@@ -469,6 +484,15 @@ def describe(preset: str, effects: dict[str, str] | None = None) -> list[dict]:
                 # the same default and the marker was wrong for any control that had its own.
                 "default_effect": shipped_default(cid),
                 "plane": plane_of(cid),
+                # WHAT `deny` ACTUALLY DOES for this control, which is not always "block".
+                #
+                # The compiler preserves a head's original severity: a control the preset registers as
+                # `escalates[...]` still escalates when the operator sets it to `deny`. The console
+                # rendered one sentence for every row — "call is blocked" — so the two MCP controls
+                # that hold a call for a human ADVERTISED a hard denial. An operator reading that
+                # would either expect an outage that never comes or decline to enforce a control that
+                # would not have broken anything.
+                "enforced_as": enforced_as(preset, cid),
             }
         )
     return out

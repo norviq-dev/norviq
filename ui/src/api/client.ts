@@ -249,6 +249,14 @@ export type BaselineControl = {
    *  (`call`), or on what comes back (`response`). The grouping axis, chosen to mirror the
    *  enforcement architecture rather than invent a threat taxonomy. */
   plane: ControlPlane;
+  /** What setting this control to `deny` ACTUALLY does — not always "block".
+   *
+   *  The compiler preserves a head's original severity, so a control the preset registers as
+   *  `escalates[...]` still escalates when enforced. The console rendered one sentence for every row
+   *  ("call is blocked"), so the two MCP controls that hold a call for a human advertised a hard
+   *  denial. Optional: an API that predates this sends nothing, and "block" remains the right
+   *  fallback because it is what all but three controls do. */
+  enforced_as?: "block" | "escalate" | "audit";
 };
 
 export type ControlPlane = "discovery" | "call" | "response";

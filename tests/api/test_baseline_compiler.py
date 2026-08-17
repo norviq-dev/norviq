@@ -206,3 +206,32 @@ def test_an_audit_authored_control_still_only_records_at_monitor() -> None:
     for head in baseline.parse_heads(region):
         if head.control_id in audit_authored:
             assert head.set_name == "audits"
+
+
+def test_enforced_as_reports_what_deny_ACTUALLY_does():
+    """The console said "call is blocked" under Enforce for every control, and two of them escalate.
+
+    The compiler preserves a head's original severity — a control registered as `escalates[...]` still
+    escalates when the operator sets it to `deny`. One sentence for every row made the MCP controls
+    that hold a call for a human advertise a hard denial: an operator would either expect an outage
+    that never comes, or decline to enforce a control that would not have broken anything.
+
+    Read from the PRESET's own heads rather than a table, for the same reason the shipped-default guard
+    is: the author's expressed severity is a signal, and a second copy of it drifts.
+    """
+    assert baseline.enforced_as("strict", "mcp_definition_drift") == "escalate"
+    assert baseline.enforced_as("strict", "mcp_definition_never_scanned") == "escalate"
+    assert baseline.enforced_as("strict", "deny_sql_injection") == "block"
+    assert baseline.enforced_as("strict", "scope_violation_dangerous_tool") == "audit"
+
+
+def test_a_control_with_heads_in_two_sets_reports_the_STRONGEST():
+    """`llm06_excessive_agency` registers in both `blocks` and `escalates`. Reporting the weaker one
+    would understate what enforcing costs, which is the direction that matters."""
+    assert baseline.enforced_as("strict", "llm06_excessive_agency") == "block"
+
+
+def test_the_wire_format_carries_it():
+    rows = {r["id"]: r for r in baseline.describe("strict")}
+    assert rows["mcp_definition_drift"]["enforced_as"] == "escalate"
+    assert all(r["enforced_as"] in ("block", "escalate", "audit") for r in rows.values())

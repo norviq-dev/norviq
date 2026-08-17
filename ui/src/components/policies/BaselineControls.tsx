@@ -46,6 +46,24 @@ const LABELS: Record<BaselineEffect, string> = {
   deny: "Enforce",
 };
 
+/** What ENFORCING does, which is not always "block".
+ *
+ *  A control the preset registers as `escalates[...]` still escalates when the operator sets it to
+ *  `deny` — the compiler preserves the head's severity. One sentence for every row made the two MCP
+ *  controls that hold a call for a human advertise a hard denial, so an operator would either expect
+ *  an outage that never comes or decline to enforce a control that would not have broken anything. */
+const ENFORCED_AS_COPY: Record<string, string> = {
+  block: "call is blocked",
+  escalate: "call is held for approval",
+  audit: "recorded, call proceeds",
+};
+
+/** What THIS control's current effect actually does. Only `deny` varies by control. */
+function consequenceOf(control: { enforced_as?: string }, effect: BaselineEffect): string {
+  if (effect !== "deny") return CONSEQUENCE[effect];
+  return ENFORCED_AS_COPY[control.enforced_as ?? "block"] ?? CONSEQUENCE.deny;
+}
+
 const CONSEQUENCE: Record<BaselineEffect, string> = {
   off: "not evaluated",
   monitor: "recorded, call proceeds",
@@ -247,14 +265,16 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
                           data-testid={`baseline-${c.id}-${eff}`}
                           className={`tab-kit${current === eff ? " active" : ""}`}
                           disabled={!isAdmin || saving || !canMutate}
-                          title={blockedReason ?? CONSEQUENCE[eff]}
+                          title={blockedReason ?? consequenceOf(c, eff)}
                           onClick={() => setPending((p) => ({ ...p, [c.id]: eff }))}
                         >
                           {LABELS[eff]}
                         </button>
                       ))}
                     </div>
-                    <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 3 }}>{CONSEQUENCE[current]}</div>
+                    <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 3 }}>
+                      {consequenceOf(c, current)}
+                    </div>
                   </div>
                 </div>
               );
