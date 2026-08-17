@@ -33,16 +33,20 @@ _QUERY_RULE = "data.norviq.presets.strict.rule_id"
 # containing '|' and the shell rule then matches.
 _SQL_ATTACK = {"tool_name": "run_report", "tool_params": {"q": "drop table users"}}
 _BENIGN = {"tool_name": "get_order", "tool_params": {"order_id": "ORD-002"}}
-# A legitimate lookup that a shipped control misfires on. The VEHICLE changed once, deliberately:
-# it used to be `order_id="fKtHF4vU"`, an 8-char identifier that `deny_shell_execution` misfired on
-# at roughly 1 in 8 — because the decoded arm of that rule matched bare shell metacharacters against
-# base64-decoded bytes. C2-023 fixed the detector, so that payload is correctly allowed now and no
-# longer demonstrates anything.
+# DECOUPLED FROM WHATEVER IS CURRENTLY MISFIRING. This fixture has now been retargeted twice, once
+# per detector fix: it was `order_id="fKtHF4vU"` until C2-023 fixed the base64 shell misfire, then
+# `delivery_date="2026-08-10"` until BUG-005 gated the date/passport patterns on field context. Each
+# time, a test about MONITOR SEMANTICS died because the bug it borrowed had been fixed.
 #
-# Retargeted to the date->SSN misfire (BUG-005), which is still open and is 100% deterministic rather
-# than 1-in-8: `pii_value_detected` matches `^(\d{3}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2}|[A-Z]{2}\d{7})$`,
-# so EVERY ISO-8601 date parameter is classified as a US SSN. A stronger fixture for the same claim.
-_FALSE_POSITIVE = {"tool_name": "get_order", "tool_params": {"delivery_date": "2026-08-10"}}
+# The claim under test never needed a false positive — it needs a DETECTION. `monitor` records rather
+# than drops, whatever the detection's merits, so a true positive proves it and cannot rot. The fixed
+# false positive is now a permanent regression guard instead (see `_FIXED_FALSE_POSITIVE` below).
+_DETECTED = {"tool_name": "get_order", "tool_params": {"customer_ssn": "123-45-6789"}}
+
+# BUG-005, now fixed: every ISO-8601 date parameter used to be classified as a US SSN, so a delivery
+# date was blocked and the audit trail blamed an SSN. Kept as a guard — a date is not a birth date
+# unless the call says so.
+_FIXED_FALSE_POSITIVE = {"tool_name": "get_order", "tool_params": {"delivery_date": "2026-08-10"}}
 
 
 def _compile_to_disk(effect: str, tmp: Path) -> Path:
@@ -96,24 +100,21 @@ def test_a_benign_call_is_allowed_under_every_effect(effect: str) -> None:
 
 
 @pytest.mark.skipif(_OPA is None, reason="opa binary required to evaluate the compiled baseline")
-def test_the_shell_false_positive_is_recorded_not_dropped_under_the_default() -> None:
+def test_a_detection_is_recorded_not_dropped_under_the_default() -> None:
     """The result this feature exists to produce.
 
-    `get_order(delivery_date="2026-08-10")` is a legitimate lookup that `pii_detection` misfires on,
-    for EVERY ISO-8601 date (BUG-005, still open). Under the OLD shipped posture — strict, block mode,
-    on every tenant namespace — that call was dropped and the audit trail blamed an SSN. Under the new
-    default it proceeds and is recorded as non-compliant instead.
+    Under the OLD shipped posture — strict, block mode, on every tenant namespace — a detection
+    dropped the call. Under the new default it proceeds and is recorded as non-compliant instead.
+    That is the difference between a product a customer can install and one they cannot.
 
-    This does not fix the detector; the false positive is tracked separately. It makes it non-fatal,
-    which is the difference between a product a customer can install and one they cannot.
-
-    The fixture moved from the shell misfire to the date misfire when C2-023 fixed the former — see
-    the `_FALSE_POSITIVE` comment. The claim under test is unchanged.
+    Deliberately uses a TRUE positive. Two earlier versions of this test borrowed whatever detector
+    was misfiring at the time, and both died when that detector was fixed — see the `_DETECTED`
+    comment. Monitor semantics do not depend on the detection being wrong.
     """
     with tempfile.TemporaryDirectory() as td:
         monitor = _compile_to_disk("monitor", Path(td))
-        assert _eval(monitor, _QUERY_DECISION, _FALSE_POSITIVE) == "audit"
-        assert _eval(monitor, _QUERY_RULE, _FALSE_POSITIVE) == "pii_detection"
+        assert _eval(monitor, _QUERY_DECISION, _DETECTED) == "audit"
+        assert _eval(monitor, _QUERY_RULE, _DETECTED) == "pii_detection"
 
         # And the escape hatch works: an operator who cannot tolerate the noise turns that one control
         # off while keeping the rest ENFORCING. Every other control is named explicitly here, because
@@ -121,12 +122,29 @@ def test_the_shell_false_positive_is_recorded_not_dropped_under_the_default() ->
         # the isolation claim below pass for the wrong reason.
         effects = {cid: "deny" for cid in baseline.control_ids("strict")}
         effects["pii_detection"] = "off"
-        off = Path(td) / "shell_off.rego"
+        off = Path(td) / "pii_off.rego"
         off.write_text(baseline.compile("strict", effects), encoding="utf-8")
 
-        assert _eval(off, _QUERY_DECISION, _FALSE_POSITIVE) == "allow"
+        assert _eval(off, _QUERY_DECISION, _DETECTED) == "allow"
         # Turning that ONE control off must not disarm the others.
         assert _eval(off, _QUERY_DECISION, _SQL_ATTACK) == "block"
+
+
+def test_the_date_false_positive_stays_fixed_even_when_every_control_enforces() -> None:
+    """BUG-005 regression guard, asserted at the STRICTEST setting.
+
+    A delivery date is not a birth date. This is the one that blocked `date_format("2026-01-01")`
+    live with "PII (SSN) detected", and it is the reason `pii_detection` could not ship enforcing.
+    Checked with every control at `deny`, because that is the configuration it has to survive.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        effects = {cid: "deny" for cid in baseline.control_ids("strict")}
+        path = Path(td) / "all_deny.rego"
+        path.write_text(baseline.compile("strict", effects), encoding="utf-8")
+
+        assert _eval(path, _QUERY_DECISION, _FIXED_FALSE_POSITIVE) == "allow"
+        # The genuine article must still be caught at the same setting, or the fix is just a hole.
+        assert _eval(path, _QUERY_DECISION, _DETECTED) == "block"
 
 
 @pytest.mark.skipif(_OPA is None, reason="opa binary required to evaluate the compiled baseline")
@@ -140,10 +158,12 @@ def test_a_partial_effect_map_leaves_the_rest_at_the_default() -> None:
     """
     with tempfile.TemporaryDirectory() as td:
         rego = Path(td) / "partial.rego"
-        # The named control must be the one _FALSE_POSITIVE actually trips, or "the one named" is
-        # allowed for the wrong reason and this test proves nothing.
+        # The named control must be one the fixture actually TRIPS, or "the one named" is allowed for
+        # the wrong reason and this test proves nothing. `_DETECTED` is a real SSN, so it trips
+        # `pii_detection` for certain; the old fixture stopped tripping it when BUG-005 was fixed,
+        # which is precisely the trap this comment was written to prevent.
         rego.write_text(baseline.compile("strict", {"pii_detection": "off"}), encoding="utf-8")
-        assert _eval(rego, _QUERY_DECISION, _FALSE_POSITIVE) == "allow"     # the one named
+        assert _eval(rego, _QUERY_DECISION, _DETECTED) == "allow"           # the one named
         assert _eval(rego, _QUERY_DECISION, _SQL_ATTACK) == "audit"        # the rest: default monitor
 
 
@@ -151,7 +171,7 @@ def test_a_partial_effect_map_leaves_the_rest_at_the_default() -> None:
 def test_all_deny_matches_the_unmodified_preset_decision_for_decision() -> None:
     """Parity against the real preset file, evaluated — not just the same heads on paper."""
     preset = Path(baseline._preset_dir() or ".") / "strict.rego"
-    cases = [_SQL_ATTACK, _BENIGN, _FALSE_POSITIVE,
+    cases = [_SQL_ATTACK, _BENIGN, _DETECTED, _FIXED_FALSE_POSITIVE,
              {"tool_name": "delete_user", "tool_params": {"id": "1"}},
              {"tool_name": "x", "tool_params": {"q": "4111111111111111"}}]
     with tempfile.TemporaryDirectory() as td:

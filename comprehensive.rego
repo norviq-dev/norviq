@@ -727,10 +727,45 @@ _internal_dests = object.get(object.get(input.derived, "destinations", {}), "int
 supply_chain_tools = {"load_plugin", "download_script", "eval", "install_package"}
 
 # PII — walk() recurses nested objects/arrays so {payload:{ssn:…}} is caught like a flat {ssn:…}.
-pii_detected {
+#
+# BUG-005: A BIRTH DATE AND A DELIVERY DATE ARE THE SAME STRING. This rule used to match
+# `^(\d{3}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2}|[A-Z]{2}\d{7})$` against every value, so EVERY ISO-8601 date
+# parameter was classified as a US SSN and every `GB1234567`-shaped order id as a passport — measured
+# at 100%, and reproduced live blocking `date_format("2026-01-01")` with "PII (SSN) detected".
+#
+# The patterns are NOT the mistake: a date of birth and a passport number are genuinely PII, and
+# tests/attacks/test_pii_pci.py asserts both are blocked. The mistake was reading them off the VALUE
+# alone, which cannot distinguish `date_of_birth` from `delivery_date`. They are now gated on the call
+# actually being ABOUT one of those fields.
+#
+# Context, not just the immediate key, because the field name is not always in key position: a generic
+# `update_record{field:"date_of_birth", value:"1990-01-15"}` carries the semantics in a SIBLING
+# parameter. Membership is EXACT (`pii_value_keys[lower(val)]`), never a substring, so prose that
+# happens to mention a passport does not arm the pattern.
+#
+# The SSN rule below stays UNGATED: an SSN is an SSN whatever the key is called, and `\b…\b` already
+# subsumes the anchored form that was dropped from the alternation above.
+pii_value_keys = {
+    "date_of_birth", "dob", "birth_date", "birthdate", "date_birth",
+    "passport", "passport_number", "passport_no", "national_id", "nin",
+}
+
+_pii_field_context {
+    walk(input.tool_params, [path, _])
+    count(path) > 0
+    pii_value_keys[lower(path[count(path) - 1])]
+}
+_pii_field_context {
     walk(input.tool_params, [_, val])
     is_string(val)
-    regex.match(`^(\d{3}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2}|[A-Z]{2}\d{7})$`, val)
+    pii_value_keys[lower(val)]
+}
+
+pii_detected {
+    _pii_field_context
+    walk(input.tool_params, [_, val])
+    is_string(val)
+    regex.match(`^(\d{4}-\d{2}-\d{2}|[A-Z]{2}\d{7})$`, val)
 }
 pii_detected {
     walk(input.tool_params, [_, val])

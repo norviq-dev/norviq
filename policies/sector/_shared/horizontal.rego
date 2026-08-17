@@ -64,10 +64,33 @@ shared_luhn_digit(d, parity) = sub {
 
 # >>> SHARED-RULE pii
 # PII — SSN shapes in params (mirrors comprehensive.rego). walk() recurses nested objects/arrays.
-blocks["pii_detection"] {
+#
+# BUG-005, mirrored: the date and passport shapes are gated on the call being ABOUT one of those
+# fields, because a birth date and a delivery date are the same string. See the long rationale in
+# comprehensive.rego; this file must stay decision-identical to it
+# (tests/policies/test_horizontal_parity.py), and it is composed into sector packs by SHARED-RULE
+# section name — so the helpers below have to live INSIDE these markers or they are dropped.
+pii_value_keys = {
+    "date_of_birth", "dob", "birth_date", "birthdate", "date_birth",
+    "passport", "passport_number", "passport_no", "national_id", "nin",
+}
+
+_pii_field_context {
+    walk(input.tool_params, [path, _])
+    count(path) > 0
+    pii_value_keys[lower(path[count(path) - 1])]
+}
+_pii_field_context {
     walk(input.tool_params, [_, val])
     is_string(val)
-    regex.match(`^(\d{3}-\d{2}-\d{4}|\d{4}-\d{2}-\d{2}|[A-Z]{2}\d{7})$`, val)
+    pii_value_keys[lower(val)]
+}
+
+blocks["pii_detection"] {
+    _pii_field_context
+    walk(input.tool_params, [_, val])
+    is_string(val)
+    regex.match(`^(\d{4}-\d{2}-\d{2}|[A-Z]{2}\d{7})$`, val)
 }
 blocks["pii_detection"] {
     walk(input.tool_params, [_, val])
