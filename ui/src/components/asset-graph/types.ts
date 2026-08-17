@@ -29,7 +29,9 @@ export interface SourceCapability {
 
 export interface AssetNode {
   id: string;
-  type: "agent" | "tool" | "data" | "namespace";
+  // `namespace` is a CLIENT-SIDE kind (the hull grouping), `mcp_server` a server-side one. Both are
+  // in the same union because the canvas has to draw them; the difference is where they come from.
+  type: "agent" | "tool" | "data" | "namespace" | "mcp_server";
   name: string;
   properties: {
     namespace?: string;
@@ -57,7 +59,10 @@ export interface AssetNode {
 export interface AssetEdge {
   source: string;
   target: string;
-  type: "calls" | "accesses" | "belongs_to" | "owns";
+  // `serves` is server -> tool: the MCP server PROVIDES the definition. Distinct from `calls`
+  // because the agent still calls the tool — the two edges answer different questions and the canvas
+  // draws them differently.
+  type: "calls" | "accesses" | "belongs_to" | "owns" | "serves";
   weight: number;
   properties: {
     last_call?: string;

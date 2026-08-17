@@ -15,6 +15,11 @@ class NodeType(str, Enum):
     AGENT = "agent"
     TOOL = "tool"
     DATA = "data"
+    # The MCP server a tool was SERVED BY. A distinct kind rather than a property on the tool node
+    # because the estate question — "which integrations is my agent estate talking to" — is asked of
+    # the server, and because one server serves many tools while one tool name may be served by
+    # several (`read_file` on `filesystem` and on `runbooks` are different definitions).
+    MCP_SERVER = "mcp_server"
 
 
 class EdgeType(str, Enum):
@@ -23,6 +28,9 @@ class EdgeType(str, Enum):
     CALLS = "calls"
     ACCESSES = "accesses"
     DELEGATES = "delegates"
+    # server -> tool. Directed that way because the server is what PROVIDES the definition; the agent
+    # still `calls` the tool, so an existing agent->tool path is unchanged by this edge existing.
+    SERVES = "serves"
 
 
 class RiskLevel(str, Enum):

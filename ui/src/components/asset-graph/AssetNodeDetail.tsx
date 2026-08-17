@@ -41,6 +41,10 @@ const STATUS_META: Record<string, { label: string; color: string; bg: string }> 
 };
 const VERB_LABEL: Record<string, string> = { read: "READ", write: "WRITE", delete: "DELETE", send: "SEND", unknown: "?" };
 
+/** Display names for node kinds whose WIRE name is not what a reader should see. `mcp_server`
+ *  uppercases to "MCP_SERVER", which reads as an identifier rather than a thing in the estate. */
+const KIND_LABEL: Partial<Record<ViewNode["kind"], string>> = { mcp_server: "MCP server" };
+
 export function AssetNodeDetail({ node, model, reach, cluster, side, onClose }: Props) {
   const kindColor = NODE_COLORS[node.kind];
   const byId = new Map(model.nodes.map((n) => [n.id, n]));
@@ -146,7 +150,7 @@ export function AssetNodeDetail({ node, model, reach, cluster, side, onClose }: 
         <span style={{ width: 12, height: 12, borderRadius: "50%", background: kindColor, marginTop: 5, flex: "none", boxShadow: `0 0 10px ${kindColor}` }} />
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", color: kindColor, textTransform: "uppercase" }}>
-            {node.kind}{node.ns ? ` · ${node.ns}` : ""}
+            {KIND_LABEL[node.kind] ?? node.kind}{node.ns ? ` · ${node.ns}` : ""}
           </div>
           <div style={{ fontSize: 15, fontWeight: 700, marginTop: 3, wordBreak: "break-word", lineHeight: 1.25 }}>{node.name}</div>
         </div>

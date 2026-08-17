@@ -12,10 +12,16 @@ import * as d3 from "d3";
 import { NODE_COLORS, RISK_COLORS } from "../../lib/d3-helpers";
 import { lookalikeOf } from "../../lib/predicateSentence";
 import type { FilterState, ViewEdge, ViewGroup, ViewModel, ViewNode } from "./model";
-import { computeSets } from "./model";
+import { STRUCTURAL_EDGE_TYPES, computeSets } from "./model";
 import { HULL_PAD, clampFitScale, clusterGaps, overviewColumns, ringRadius } from "./layout";
 
-const TYPE_R = { agent: 15, tool: 9, data: 8, namespace: 12 } as const;
+// The canvas's own radii, deliberately a shade different from `NODE_RADIUS` (which the legend and
+// filter dots use at their own scale). Every kind in the ViewNode union must have an entry: an
+// unlisted kind indexes to `undefined`, and a `undefined` radius draws a circle of NaN — a node that
+// is in the model, passes the filter, and is invisible. TypeScript now enforces the exhaustiveness,
+// which is how the MCP kind was caught here rather than on the screen.
+const TYPE_R: Record<ViewNode["kind"], number> =
+  { agent: 15, tool: 9, data: 8, namespace: 12, mcp_server: 11 };
 
 /**
  * Every node name on this canvas is OBSERVED traffic — a tool_name an agent registered, an agent
@@ -428,7 +434,7 @@ export const AssetGraphCanvas = forwardRef<CanvasHandle, Props>(function AssetGr
     w.link
       .style("display", (d) => (vis[d.source.id] && vis[d.target.id] ? null : "none"))
       .attr("stroke", (d) => {
-        if (d.type === "belongs_to") return "#3a4252";
+        if (STRUCTURAL_EDGE_TYPES.has(d.type)) return "#3a4252";
         const hl = sel && reach.has(d.source.id) && reach.has(d.target.id);
         if (circle) return d.verdict === "blocked" ? "#FF3B5C" : hl ? "#5f6d86" : "#33405c";
         return d.verdict === "blocked" ? "#FF3B5C" : hl ? "#a0a0a0" : "#6e6e6e";
@@ -439,13 +445,15 @@ export const AssetGraphCanvas = forwardRef<CanvasHandle, Props>(function AssetGr
         return d.verdict === "blocked" ? d.w + 1 : hl ? d.w + 1.3 : d.w;
       })
       .attr("stroke-opacity", (d) => {
-        if (d.type === "belongs_to") return 0.35;
+        if (STRUCTURAL_EDGE_TYPES.has(d.type)) return 0.35;
         const hl = sel && reach.has(d.source.id) && reach.has(d.target.id);
         if (circle) return sel ? (hl ? 0.9 : 0.05) : d.verdict === "blocked" ? 1 : 0.34;
         return sel ? (hl ? 0.95 : 0.08) : d.verdict === "blocked" ? 0.95 : 0.5;
       })
       .attr("marker-end", (d) => {
-        if (circle || d.type === "belongs_to") return null;
+        // No decision badge on a structural edge: there is no decision to report, and a badge
+        // reading "0" is how the would-block confusion started on this same canvas.
+        if (circle || STRUCTURAL_EDGE_TYPES.has(d.type)) return null;
         const dim = sel && !(reach.has(d.source.id) && reach.has(d.target.id));
         return dim ? "url(#arrowdim)" : d.verdict === "blocked" ? "url(#arrowblocked)" : "url(#arrowcall)";
       })

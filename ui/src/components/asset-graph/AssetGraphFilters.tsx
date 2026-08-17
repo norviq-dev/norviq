@@ -8,7 +8,7 @@
 
 import { NODE_COLORS, RISK_COLORS } from "../../lib/d3-helpers";
 
-export type TypeKey = "agent" | "tool" | "data";
+export type TypeKey = "agent" | "tool" | "data" | "mcp_server";
 export type RiskKey = "low" | "medium" | "high" | "critical";
 
 export interface DropdownOption {
@@ -39,7 +39,8 @@ interface Props {
 const TYPE_META: Array<{ key: TypeKey; label: string; dot: string }> = [
   { key: "agent", label: "Agent", dot: NODE_COLORS.agent },
   { key: "tool", label: "Tool", dot: NODE_COLORS.tool },
-  { key: "data", label: "Data", dot: NODE_COLORS.data }
+  { key: "data", label: "Data", dot: NODE_COLORS.data },
+  { key: "mcp_server", label: "MCP server", dot: NODE_COLORS.mcp_server }
 ];
 const RISK_META: Array<{ key: RiskKey; label: string; dot: string }> = [
   { key: "low", label: "Low", dot: RISK_COLORS.low },

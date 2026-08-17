@@ -19,7 +19,7 @@ function makeProps(overrides: Partial<Parameters<typeof AssetGraphFilters>[0]> =
       onToggleMenu: vi.fn(),
       search: "",
       onSearch: vi.fn(),
-      types: { agent: true, tool: true, data: true },
+      types: { agent: true, tool: true, data: true, mcp_server: true },
       onToggleType: vi.fn(),
       risks: { low: true, medium: true, high: true, critical: true },
       onToggleRisk: vi.fn(),

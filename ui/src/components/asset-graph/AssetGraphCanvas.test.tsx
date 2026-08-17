@@ -22,7 +22,7 @@ const EDGES: AssetEdge[] = [
   { source: "agentA", target: "tool:execute_sql", type: "calls", weight: 1, properties: { decision_history: { allow: 5, block: 7, escalate: 0 } } },
 ];
 const FILTERS: FilterState = {
-  search: "", types: { agent: true, tool: true, data: true },
+  search: "", types: { agent: true, tool: true, data: true, mcp_server: true },
   risks: { low: true, medium: true, high: true, critical: true },
   agentClass: "all", blockedOnly: false, focus: null, selectedId: null,
 };

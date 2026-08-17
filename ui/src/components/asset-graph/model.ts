@@ -30,10 +30,18 @@ import type { AssetEdge, AssetNode, CapabilityVerb, SourceCapability } from "./t
  */
 export type Verdict = "allow" | "mixed" | "blocked" | "would_block";
 
+/** Edges that describe STRUCTURE rather than traffic. No policy decision was ever made about them,
+ *  so they carry no verdict and are drawn as scaffolding rather than as permitted calls.
+ *
+ *  They are still traversed for blast radius: `serves` is exactly how you answer "what would a
+ *  compromised MCP server put in reach", and a data node's "who can reach me" should name the server
+ *  behind the tool. Only `belongs_to` is skipped there — it links an identity to itself. */
+export const STRUCTURAL_EDGE_TYPES: ReadonlySet<AssetEdge["type"]> = new Set(["belongs_to", "serves"]);
+
 export interface ViewNode {
   id: string;
   g: string; // group key = the owning agent's node id ("" = ungrouped)
-  kind: "agent" | "tool" | "data" | "namespace";
+  kind: "agent" | "tool" | "data" | "namespace" | "mcp_server";
   name: string;
   ns: string;
   agentClass: string;
@@ -210,7 +218,12 @@ export function buildModel(nodes: AssetNode[], edges: AssetEdge[]): ViewModel {
       s: e.source,
       t: e.target,
       type: e.type,
-      verdict: e.type === "belongs_to" ? "allow" : verdictOf(h),
+      // An edge that carries NO decision history is not an edge that was allowed. `belongs_to` is
+      // structural, and so is `serves` — the MCP server provides the definition, nothing was
+      // evaluated. `verdictOf(undefined)` returns "allow", which would paint both in the allow
+      // colour and put them in the same visual language as a call the engine actually permitted.
+      // The canvas draws these two types in the structural style for the same reason.
+      verdict: STRUCTURAL_EDGE_TYPES.has(e.type) ? "allow" : verdictOf(h),
       allow: h?.allow ?? 0,
       block: h?.block ?? 0,
       wouldBlock: h?.would_block ?? 0,
@@ -234,7 +247,7 @@ export function buildModel(nodes: AssetNode[], edges: AssetEdge[]): ViewModel {
 
 export interface FilterState {
   search: string;
-  types: Record<"agent" | "tool" | "data", boolean>;
+  types: Record<"agent" | "tool" | "data" | "mcp_server", boolean>;
   risks: Record<"low" | "medium" | "high" | "critical", boolean>;
   agentClass: string; // "all" or a class
   blockedOnly: boolean;
@@ -247,7 +260,12 @@ export function computeSets(model: ViewModel, s: FilterState): { vis: Record<str
   const vis: Record<string, boolean> = {};
   const groupMeta = new Map(model.groups.map((g) => [g.key, g]));
   for (const n of model.nodes) {
-    const kindOk = n.kind === "namespace" ? true : s.types[n.kind as "agent" | "tool" | "data"];
+    // A kind with no chip must default to VISIBLE, not to `undefined`. `s.types[k]` for an unknown
+    // `k` is undefined, which is falsy, so the node silently vanished — rendered by the server,
+    // carried through the model, and invisible with no filter to turn it back on. That is how the
+    // namespace kind had to be special-cased here, and it is the same trap for every kind after it.
+    const chip = s.types[n.kind as keyof typeof s.types];
+    const kindOk = n.kind === "namespace" ? true : chip !== false;
     const g = groupMeta.get(n.g);
     vis[n.id] =
       kindOk &&

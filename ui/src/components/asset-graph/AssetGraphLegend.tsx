@@ -24,6 +24,7 @@ export function AssetGraphLegend({ side = "left" }: { side?: "left" | "right" })
         <div style={item}><span style={{ width: 11, height: 11, borderRadius: "50%", background: NODE_COLORS.agent }} /><span style={label}>Agent</span></div>
         <div style={item}><span style={{ width: 11, height: 11, borderRadius: "50%", background: NODE_COLORS.tool }} /><span style={label}>Tool</span></div>
         <div style={item}><span style={{ width: 11, height: 11, borderRadius: "50%", background: NODE_COLORS.data }} /><span style={label}>Data</span></div>
+        <div style={item}><span style={{ width: 11, height: 11, borderRadius: "50%", background: NODE_COLORS.mcp_server }} /><span style={label}>MCP server</span></div>
       </div>
       <div style={{ height: 1, background: "var(--graph-border-soft)" }} />
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>

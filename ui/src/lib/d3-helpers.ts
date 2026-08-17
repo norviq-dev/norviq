@@ -6,14 +6,21 @@ export const NODE_COLORS = {
   agent: "#7C5CFC",
   tool: "#00E5A0",
   data: "#FFB020",
-  namespace: "#666666"
+  namespace: "#666666",
+  // Slate, from the palette's neutral rail. Deliberately not a fifth hue: an MCP server is where a
+  // tool CAME FROM, not a risk state, and giving it a colour of its own would put it in the same
+  // visual language as the risk ring it has nothing to do with.
+  mcp_server: "#8FA0BF"
 } as const;
 
 export const NODE_RADIUS = {
   agent: 14,
   tool: 10,
   data: 8,
-  namespace: 16
+  namespace: 16,
+  // Between agent and tool: a server is an origin that fans out to several tools, so it reads as a
+  // parent of them without competing with the agent that drives the graph.
+  mcp_server: 12
 } as const;
 
 // Asset Graph palette. Distinct 4-step risk gradient: slate → yellow → amber → red. High is

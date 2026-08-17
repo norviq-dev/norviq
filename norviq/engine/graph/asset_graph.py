@@ -107,6 +107,60 @@ class AssetGraphBuilder:
         self._touch_node(tool_id)
         self._enforce_node_limit()
 
+    def add_mcp_server(self, server_id: str, namespace: str = "", transport: str = "") -> str:
+        """Add or update an MCP server node, returning its node id.
+
+        The id is prefixed like `add_tool`'s, and for the same reason: node ids share one namespace in
+        the graph, so a server called `read_file` and a tool called `read_file` would otherwise be one
+        node with two meanings.
+
+        Deliberately carries NO trust or pin state. Those live in `mcp_servers` and `mcp_tool_pins`
+        where an operator changes them, and a copy here would be a second answer to "is this server
+        registered" that goes stale the moment somebody clicks Block. What the graph contributes is the
+        thing the tables cannot show: the shape — which agents reach which servers, through which
+        tools.
+        """
+        node_id = f"mcp:{server_id}"
+        node = GraphNode(
+            id=node_id,
+            type=NodeType.MCP_SERVER,
+            label=server_id,
+            namespace=namespace,
+            properties={"server_id": server_id, "transport": transport, "tool_count": 0},
+        )
+        self._graph.add_node(node_id, **node.__dict__)
+        self._touch_node(node_id)
+        self._enforce_node_limit()
+        return node_id
+
+    def record_mcp_serving(self, server_id: str, tool_name: str, namespace: str = "",
+                           transport: str = "") -> None:
+        """Record that `server_id` served `tool_name` — a `serves` edge, server -> tool.
+
+        Called from the decision path with `input.mcp.server`, so the graph learns the topology from
+        the same traffic everything else is derived from rather than from a second inventory that
+        could disagree with it.
+        """
+        if not server_id or not tool_name:
+            return
+        node_id = f"mcp:{server_id}"
+        if node_id not in self._graph:
+            self.add_mcp_server(server_id, namespace, transport)
+        tool_id = f"tool:{tool_name}"
+        if tool_id not in self._graph:
+            self.add_tool(tool_name, namespace)
+        if not self._graph.has_edge(node_id, tool_id):
+            edge = GraphEdge(source=node_id, target=tool_id, type=EdgeType.SERVES)
+            self._graph.add_edge(node_id, tool_id, **edge.__dict__)
+            props = self._graph.nodes[node_id].setdefault("properties", {})
+            props["tool_count"] = int(props.get("tool_count", 0)) + 1
+        self._touch_node(node_id)
+        self._touch_node(tool_id)
+
+    def get_mcp_servers(self) -> list[dict[str, object]]:
+        """Return all MCP server node dictionaries."""
+        return self._nodes_by_type(NodeType.MCP_SERVER)
+
     def add_data(self, data_uri: str, data_type: str = "database", sensitivity: str = "medium") -> None:
         """Add or update a data node."""
         data_id = f"data:{data_uri}"
@@ -282,16 +336,20 @@ class AssetGraphBuilder:
         return [self._graph.nodes[node_id] for node_id in self._graph if self._graph.nodes[node_id].get("type") == node_type]
 
     def get_node_count(self) -> dict[str, int]:
-        """Return node and edge counts by category."""
-        counts = {"agents": 0, "tools": 0, "data": 0, "edges": self._graph.number_of_edges()}
+        """Return node and edge counts by category.
+
+        Keyed off the enum rather than an if/elif chain: the chain silently dropped any kind nobody
+        had remembered to add a branch for, so a new node type would appear in the graph, be rendered,
+        be traversed, and count as nothing — a total that quietly disagreed with the picture.
+        """
+        counts = {"agents": 0, "tools": 0, "data": 0, "mcp_servers": 0,
+                  "edges": self._graph.number_of_edges()}
+        buckets = {NodeType.AGENT: "agents", NodeType.TOOL: "tools", NodeType.DATA: "data",
+                   NodeType.MCP_SERVER: "mcp_servers"}
         for node_id in self._graph:
-            node_type = self._graph.nodes[node_id].get("type")
-            if node_type == NodeType.AGENT:
-                counts["agents"] += 1
-            elif node_type == NodeType.TOOL:
-                counts["tools"] += 1
-            elif node_type == NodeType.DATA:
-                counts["data"] += 1
+            bucket = buckets.get(self._graph.nodes[node_id].get("type"))
+            if bucket is not None:
+                counts[bucket] += 1
         return counts
 
     def remove_node(self, node_id: str) -> bool:

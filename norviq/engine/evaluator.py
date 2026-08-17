@@ -1798,6 +1798,14 @@ class OPAEvaluator:
                 # the decision we just made — it is the same number _persist_behavior stores.
                 trust_score=decision.trust_score,
             )
+            # The MCP topology, learned from the same traffic. `event.mcp` is PEP-reported, which is
+            # why it is used here and never to decide WHO is calling (see ToolCallEvent's docstring) —
+            # drawing "this call arrived through that server" is exactly what a reported fact is good
+            # for, and it is the only place the console can show which integrations an agent reaches.
+            server = str((event.mcp or {}).get("server") or "")
+            if server:
+                graph.record_mcp_serving(server, event.tool_name, namespace,
+                                         str((event.mcp or {}).get("transport") or ""))
             if self._graph_store is not None:
                 await self._graph_store.save(namespace, graph)
         except Exception as exc:  # pragma: no cover

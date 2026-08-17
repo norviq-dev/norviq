@@ -60,7 +60,9 @@ export default function AssetGraph() {
   const [error, setError] = useState("");
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [types, setTypes] = useState<Record<TypeKey, boolean>>({ agent: true, tool: true, data: true });
+  const [types, setTypes] = useState<Record<TypeKey, boolean>>(
+    { agent: true, tool: true, data: true, mcp_server: true }
+  );
   const [risks, setRisks] = useState<Record<RiskKey, boolean>>({ low: true, medium: true, high: true, critical: true });
   const [agentClass, setAgentClass] = useState("all");
   const [blockedOnly, setBlockedOnly] = useState(false);

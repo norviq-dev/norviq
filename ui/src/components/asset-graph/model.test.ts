@@ -140,7 +140,7 @@ describe("buildModel", () => {
 describe("computeSets", () => {
   const model = buildModel(NODES, EDGES);
   const base: FilterState = {
-    search: "", types: { agent: true, tool: true, data: true },
+    search: "", types: { agent: true, tool: true, data: true, mcp_server: true },
     risks: { low: true, medium: true, high: true, critical: true },
     agentClass: "all", blockedOnly: false, focus: null, selectedId: null
   };
