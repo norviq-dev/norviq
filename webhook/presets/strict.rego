@@ -208,11 +208,44 @@ sql_syntax_context(val, _) { contains(val, ";") }
 # `base64_decoded_threat` rule below already uses correctly, which is why THAT rule never had this
 # problem. A real encoded payload still matches: base64("rm -rf /") decodes to "rm -rf /". Bare
 # metacharacters stay on the raw arm, where they mean something.
-shell_patterns = ["|", ";", "$(", "`", "rm -rf", "/etc/passwd", "/etc/shadow"]
+# SAME CHARACTER, DIFFERENT PARAMETER — the raw/decoded split above, taken one step further.
+#
+# That split says a "|" is evidence in text a human typed and noise among decoded bytes. Measured on
+# the benign corpus (norviq/redteam/benign.py), the same is true WITHIN raw text: a bare "|" or a
+# backtick in a support ticket or a runbook is not a shell pipe, and it fired on 2 of 28 legitimate
+# calls — a support note saying "the pipe | in their filename breaks it", and a runbook quoting
+# `kubectl get pods`. Prose about shells contains shell characters. At `deny` that blocks the ticket.
+#
+# So the bare metacharacters move to a NAME-GATED arm, and the multi-byte indicators stay universal:
+#
+#   `rm -rf`, `/etc/passwd`, `/etc/shadow`, `$(`  — unambiguous in any parameter, on any tool.
+#   `|`, `;`, backtick                            — only where a command could actually be run.
+#
+# Gated on whole TOKENS of the tool name, the primitive `strict_default_block` already uses, and
+# deliberately NOT on `derived.verb`: `classify_tool` takes the worst verb over all name tokens, so it
+# over-classifies, and the comment on that control spells out why over-classification is unsafe in a
+# rule that BLOCKS.
+#
+# Neither shipped shell attack loses coverage: SH-001 (`ls | cat /etc/passwd`) also carries
+# `/etc/passwd`, and SH-002 (`/tmp/file; rm -rf /`, on `read_file`) also carries `rm -rf`. The
+# residual is a bare `; whoami` on a tool whose name says nothing about execution — caught by the
+# argument-surface controls rather than here, and a strictly better trade than refusing every runbook.
+shell_patterns = ["rm -rf", "/etc/passwd", "/etc/shadow", "$("]
+shell_metachars = ["|", ";", "`"]
+exec_name_tokens = {"exec", "shell", "bash", "sh", "zsh", "command", "cmd", "spawn", "subprocess", "system", "eval", "terminal", "console"}
+
+_exec_shaped_tool { exec_name_tokens[lower(tool_name_tokens[_])] }
+_exec_shaped_tool { exec_name_tokens[lower(tool_name_normalized_tokens[_])] }
 
 shell_injection_detected {
     val := security_scan_texts_raw[_]
     pattern := shell_patterns[_]
+    contains(val, pattern)
+}
+shell_injection_detected {
+    _exec_shaped_tool
+    val := security_scan_texts_raw[_]
+    pattern := shell_metachars[_]
     contains(val, pattern)
 }
 shell_injection_detected {
