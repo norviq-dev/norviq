@@ -471,3 +471,58 @@ def test_concrete_namespace_is_still_accepted_after_the_sentinel_guard():
                                                  "rego_source": _VALID_REGO, "priority": 100})
     assert resp.status_code == 200
     assert ("nrvq-inject-e2e", "customer-support") in loader.created
+
+
+# ── an overlay cannot be trialled in audit mode ────────────────────────────────────────────────────
+
+def test_guardrail_in_audit_mode_is_refused():
+    """Accepting it would store a badge the engine will not honour.
+
+    `_apply_policy_mode` softens a policy's own audit mode for BASE/FLOOR candidates only; overlays
+    are excluded by construction (`_collect_candidates` tags them `"overlay": True` and gives them no
+    `enforcement_mode`), because an overlay may only TIGHTEN. So a guardrail saved as "audit" is
+    stored, rendered with an AUDIT chip, and hard-blocks the next call — exactly the UI lie
+    `_apply_policy_mode`'s docstring says it exists to prevent, one scope along.
+
+    Found live: an MCP integration guardrail pushed as `audit` to trial it blocked immediately.
+    """
+    client, loader = _client()
+    resp = client.post("/api/v1/policies", json={"namespace": "default", "agent_class": "__guardrail__",
+                                                 "rego_source": _VALID_REGO, "priority": 800,
+                                                 "enforcement_mode": "audit"})
+    assert resp.status_code == 422
+    assert ("default", "__guardrail__") not in loader.created
+    detail = resp.json()["detail"]
+    assert "audit mode" in detail
+    # It must say what to do instead, not just refuse.
+    assert "monitor" in detail or "base scope" in detail
+
+
+def test_a_remediation_overlay_in_audit_mode_is_refused():
+    """`<class>__remediation__` is per-class, so it cannot be a fixed member of the scope set."""
+    client, loader = _client()
+    resp = client.post("/api/v1/policies", json={"namespace": "default",
+                                                 "agent_class": "finance-agent__remediation__",
+                                                 "rego_source": _VALID_REGO, "priority": 800,
+                                                 "enforcement_mode": "audit"})
+    assert resp.status_code == 422
+
+
+def test_a_guardrail_in_block_mode_is_still_allowed():
+    """The refusal must be about the MODE, not about the scope — guardrails stay operator-loadable."""
+    client, loader = _client()
+    resp = client.post("/api/v1/policies", json={"namespace": "default", "agent_class": "__guardrail__",
+                                                 "rego_source": _VALID_REGO, "priority": 800,
+                                                 "enforcement_mode": "block"})
+    assert resp.status_code == 200
+    assert ("default", "__guardrail__") in loader.created
+
+
+def test_a_base_scope_in_audit_mode_is_untouched():
+    """A base/floor policy genuinely honours its own mode; refusing there would break trialling."""
+    client, loader = _client()
+    resp = client.post("/api/v1/policies", json={"namespace": "default", "agent_class": "finance-agent",
+                                                 "rego_source": _VALID_REGO, "priority": 100,
+                                                 "enforcement_mode": "audit"})
+    assert resp.status_code == 200
+    assert ("default", "finance-agent") in loader.created

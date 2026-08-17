@@ -485,6 +485,34 @@ async def create_policy(body: PolicyCreate, request: Request, user: dict = Depen
             detail=f"'{agent_class}' is a managed scope — enable a sector pack via POST /api/v1/policy-packs/{{id}}/enable "
                    "and customize it via PUT /api/v1/policy-packs/override, not the generic policy endpoint.",
         )
+    # An OVERLAY scope cannot be trialled in audit mode, so accepting one stores a badge the engine
+    # will not honour. `_apply_policy_mode` softens block/escalate only for BASE/FLOOR candidates —
+    # overlays are excluded by construction (`_collect_candidates` tags them `"overlay": True` and
+    # gives them no `enforcement_mode`), because an overlay may only TIGHTEN and honouring its mode
+    # would let it weaken the base policy it sits on. That reasoning is sound and is not what changes
+    # here; what changes is that the API stopped agreeing to something it cannot do.
+    #
+    # This is the same defect `_apply_policy_mode` was written to fix, one level along — its own
+    # docstring names it: "a policy saved with enforcement_mode='audit' showed an AUDIT chip and still
+    # hard-blocked, so the badge asserted something the engine did not do — the damaging kind of UI
+    # lie, because the operator believes they are trialling a rule safely." That fix reached base
+    # policies; an overlay written at `__guardrail__` still returned 200, stored "audit", rendered the
+    # chip, and hard-blocked the very next call.
+    #
+    # Found live: an MCP integration guardrail pushed as `audit` to trial it blocked immediately.
+    # Refusing at creation rather than silently rewriting to "block": the caller asked for a trial, and
+    # quietly enforcing instead is the outcome they were trying to avoid.
+    if _is_overlay_scope(agent_class) and body.enforcement_mode == "audit":
+        log.warning("nrvq.api.policy.overlay_audit_mode_refused", namespace=body.namespace,
+                    agent_class=agent_class, actor=user.get("sub"), code="NRVQ-API-7019")
+        raise HTTPException(
+            status_code=422,
+            detail=f"'{agent_class}' is a tighten-only OVERLAY and cannot run in audit mode: the engine "
+                   "applies a policy's own mode to base/floor policies only, so this would be stored and "
+                   "badged as 'audit' while blocking on the next call. Trial the rule at a base scope "
+                   "(namespace or agent class) first, or apply it here with enforcement_mode='block'. To "
+                   "silence a whole namespace instead, set its posture to monitor.",
+        )
     loader = request.app.state.loader
     # Per-namespace hard cap on the COUNT of distinct policy scopes — mirrors the existing
     # `draft_cap_per_namespace` retention pattern (norviq/api/retention.py), applied to the policy catalog
@@ -792,6 +820,22 @@ def resolve_apply_target_key(body: ApplyRequest, agent_class: str) -> str:
     raise HTTPException(
         status_code=422, detail="target_type must be one of: agent_class, namespace, workload"
     )
+
+
+#: Scopes the evaluator collects as tighten-only OVERLAYS rather than base/floor policies.
+#: Mirrors every `"overlay": True` append in `evaluator._collect_candidates` — kept as a literal
+#: rather than imported so that adding an overlay there fails a test here instead of silently
+#: gaining a mode it will never honour.
+_OVERLAY_SCOPES = frozenset({
+    "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__", "__egress__", "__controls__",
+})
+#: `<agent_class>__remediation__` is per-class, so it cannot be a fixed member of the set above.
+_REMEDIATION_SUFFIX = "__remediation__"
+
+
+def _is_overlay_scope(agent_class: str) -> bool:
+    """Is this loader key collected as an overlay (tighten-only, no `enforcement_mode`)?"""
+    return agent_class in _OVERLAY_SCOPES or agent_class.endswith(_REMEDIATION_SUFFIX)
 
 
 def resolve_policy_key(body: PolicyCreate) -> str:

@@ -129,3 +129,35 @@ def test_the_cap_constant_still_matches_the_validator() -> None:
     assert int(m.group(1)) == REGO_LINE_CAP, (
         f"validate_rego_source caps at {m.group(1)} lines but this test assumes {REGO_LINE_CAP}"
     )
+
+
+# ── overlay scopes cannot be trialled in audit mode ────────────────────────────────────────────────
+
+def test_every_overlay_the_evaluator_collects_is_known_to_the_api() -> None:
+    """The API's overlay list must not drift from the evaluator's.
+
+    `_apply_policy_mode` softens a policy's own audit mode for BASE/FLOOR candidates only — overlays
+    are excluded by construction. So an overlay accepted in audit mode is stored and badged "audit"
+    and then hard-blocks, which is precisely the UI lie `_apply_policy_mode` exists to prevent. If a
+    new overlay is added to `_collect_candidates` without being added here, it silently inherits that
+    bug; this test is the tripwire.
+    """
+    import re as _re
+
+    from norviq.api.routers.policies import _OVERLAY_SCOPES, _REMEDIATION_SUFFIX, _is_overlay_scope
+
+    src = (ROOT / "norviq" / "engine" / "evaluator.py").read_text()
+    # Every `f"{namespace}:__thing__"` key built next to an `"overlay": True` append.
+    collected = set(_re.findall(r'f"\{namespace\}:(__[a-z_]+__)"', src))
+    unknown = {s for s in collected if not _is_overlay_scope(s)}
+    assert not unknown, (
+        f"evaluator collects {sorted(unknown)} but the API does not treat them as overlays, so they "
+        f"can be stored in audit mode and will hard-block anyway. Add them to _OVERLAY_SCOPES."
+    )
+    assert "__guardrail__" in _OVERLAY_SCOPES
+    assert _is_overlay_scope(f"payments-agent{_REMEDIATION_SUFFIX}")
+    # A real agent class must NOT be caught by this.
+    assert not _is_overlay_scope("payments-agent")
+    assert not _is_overlay_scope("__baseline__"), (
+        "__baseline__ is a base/floor scope, not an overlay — it legitimately carries a mode"
+    )
