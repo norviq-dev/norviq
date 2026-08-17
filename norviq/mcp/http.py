@@ -42,7 +42,7 @@ from starlette.routing import Route
 from norviq.config import settings
 from norviq.engine.identity import SPIFFEResolver
 from norviq.mcp import protocol as P
-from norviq.mcp.firewall import McpFirewall
+from norviq.mcp.firewall import McpFirewall, MediationResult
 from norviq.mcp.pins import ControlPlanePinStore, PinRegistry, build_store, effective_store_kind
 from norviq.mcp.servers import ControlPlaneServerStore
 from norviq.sdk.client.engine import PolicyEngineClient
@@ -140,6 +140,9 @@ class HttpProxy:
         # transport had it right all along (`identity.namespace` from the SPIFFE resolver); this one
         # was reading a setting nobody defined.
         self._servers = ControlPlaneServerStore(namespace="")
+        # Set only for the control-plane backend, exactly as in stdio.py. None means "nowhere to
+        # report to", which is the truth for the `memory` and `file` kinds.
+        self._pin_store: ControlPlanePinStore | None = None
 
     async def _install_server_registry(self) -> None:
         """Load the server decisions before the listener binds, then keep re-reading.
@@ -214,6 +217,9 @@ class HttpProxy:
             )
             return False
         self._pins = PinRegistry(store=store, mode=settings.mcp_pin_mode)
+        # Held by name, like stdio's `_pin_store`, so the reporting path does not have to reach into
+        # PinRegistry's private `_store` to find out whether there is a control plane to talk to.
+        self._pin_store = store
         return True
 
     def _schedule_pin_store_retry(self) -> None:
@@ -273,6 +279,12 @@ class HttpProxy:
                 pins=self._pins,
                 servers=self._servers.registry,
                 tool_name_prefix=self._prefix,
+                # This driver never passed it, so every audit row and every pin this transport wrote
+                # claimed `transport: "stdio"` — the firewall's default. A console filtering MCP
+                # traffic by transport was reading a constant, and the one deployment shape where the
+                # distinction matters (any-request-any-instance under 2026-07-28) was the one
+                # mislabelled.
+                transport="http",
             )
             # Bounded anyway. The key is attested now, so a peer cannot mint entries — but a resolver
             # returning a varying id (a misconfiguration) should degrade to eviction, not to a memory
@@ -410,9 +422,34 @@ class HttpProxy:
             # A server-initiated request we refused. On this transport the reply travels back as a
             # separate POST rather than inline, so it is dispatched without blocking the stream.
             asyncio.create_task(self._post_back(result.reply))
+        self._report_catalog(fw, result)
         if result.forward is None:
             return b""
         return result.forward.rstrip(b"\n")
+
+    def _report_catalog(self, fw: McpFirewall, _result: MediationResult) -> None:
+        """Tell the control plane what this server served. Mirrors stdio.py's call site.
+
+        THIS TRANSPORT NEVER DID. `ControlPlanePinStore.put()` only enqueues; `flush()` is what sends,
+        and nothing here called it — so on streamable HTTP, the transport the 2026-07-28 spec mandates
+        and the one every real deployment uses, no MCP observation ever reached the control plane. The
+        console's MCP Servers page was empty on every such install, the pin table stayed at zero, and
+        cross-pod drift detection had nothing to compare against. Local Gate A worked throughout, which
+        is why it went unnoticed: the enforcement was real and the entire record of it was missing.
+
+        Found by driving a spec-compliant MCP client through the proxy and then reading the console —
+        the same method that found the SSE transport bug, and for the same reason: a unit test asserts
+        what the firewall decided, and nobody had asserted that anyone was ever told.
+
+        Background task, after the response is composed: the local decision was already made from the
+        state loaded at startup, so this write is durability and visibility, never the decision itself,
+        and the client must not wait on it.
+        """
+        if self._pin_store is None:
+            return                                     # a local pin store has nowhere to report to
+        catalog = fw.catalog_report_due()
+        if catalog is not None:
+            asyncio.create_task(self._pin_store.flush(catalog))
 
     async def _post_back(self, payload: bytes) -> None:
         with contextlib.suppress(Exception):

@@ -359,10 +359,14 @@ class StdioProxy:
             # background task, so the client never waits on it. The local decision was already made
             # from the state loaded at startup; this write is durability and visibility, not the
             # decision itself, so it must not sit on the discovery path either.
-            if result.note == "gate_a_rewrote_tools_list" or firewall.stats.get("_listed") is None:
-                if self._pin_store is not None and firewall.observed_catalog():
-                    firewall.stats["_listed"] = 1
-                    asyncio.create_task(self._pin_store.flush(firewall.observed_catalog()))
+            #
+            # The DUE rule now lives on the firewall and is shared with the HTTP driver. It used to
+            # be "a rewrite, or the first listing", which re-reported on every list of a persistently
+            # poisoned server — the report rate was the server's to choose.
+            if self._pin_store is not None:
+                catalog = firewall.catalog_report_due()
+                if catalog is not None:
+                    asyncio.create_task(self._pin_store.flush(catalog))
 
     async def _drain_server_stderr(self) -> None:
         """Relay the upstream server's stderr to ours.

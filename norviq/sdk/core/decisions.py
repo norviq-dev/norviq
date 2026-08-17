@@ -68,9 +68,24 @@ def apply_pep_denial(
        decision and — deliberately — its own `rule_id`: an authored control that fired is the better
        audit attribution, and it maps to a compliance requirement in a way "the proxy refused" does
        not. The PEP's report is preserved separately by the caller.
-    3. `escalate` is left alone rather than being promoted to `block`. Escalation is a human-in-the-
-       loop outcome, and quietly converting a hold-for-approval into a hard denial would change
-       enforcement behaviour under cover of an audit-fidelity change.
+    3. `escalate` IS promoted, and the reasoning changed once this was seen live. The original rule
+       left it alone, on the grounds that converting a hold-for-approval into a hard denial would
+       change enforcement behaviour under cover of an audit-fidelity change. That is right for a
+       decision the caller is about to ACT on — and a `pep_decision` is never one. It is only ever set
+       on a REPORT of a refusal that has already happened; the interceptor's return value on that path
+       is discarded, and there is no held call for anyone to release.
+
+       So leaving it alone did not preserve behaviour, it falsified the record. Measured live: a
+       blocked MCP server's discovery was refused, every tool withheld, and the audit row read
+       "escalate — this MCP tool definition was never inspected by Gate A". An operator reading the
+       console would believe a human was being asked to decide something that had already been
+       decided and could not be revisited.
+
+       Attribution follows the same principle as point 2, applied honestly: when the POLICY blocked,
+       the authored control is the better attribution and keeps it. When the policy only ESCALATED it
+       did not refuse anything, so the thing that actually refused is the PEP, and the PEP's rule id
+       is what the row carries — with the superseded escalation named in the reason so the policy's
+       finding is not lost.
 
     APPLIED LAST, after namespace posture and per-policy audit mode. That ordering is the point: the
     call was ALREADY refused at the PEP, so softening the record to "audit" would state that the call
@@ -79,10 +94,16 @@ def apply_pep_denial(
     """
     if pep_decision != "block":
         return decision
-    if decision.decision in ("block", "escalate"):
+    if decision.decision == "block":
         return decision
+    reason = pep_reason or "the enforcement point refused this call before policy evaluation"
+    if decision.decision == "escalate":
+        # The policy asked for a human about a call that was already refused. Record the refusal, and
+        # keep what the policy found — it is real, and losing it would trade one incomplete row for
+        # another.
+        reason = f"{reason} (policy would have escalated: {decision.rule_id or 'unattributed'})"
     return decision.model_copy(update={
         "decision": "block",
         "rule_id": pep_rule_id or PEP_UNATTRIBUTED_RULE,
-        "reason": pep_reason or "the enforcement point refused this call before policy evaluation",
+        "reason": reason,
     })

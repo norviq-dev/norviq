@@ -22,6 +22,7 @@ re-deriving a verdict per call.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from time import monotonic, perf_counter
@@ -390,6 +391,32 @@ class McpFirewall:
             }
             for e in self._catalog.values()
         ]
+
+    def catalog_report_due(self) -> list[dict] | None:
+        """The catalog to report to the control plane, or None when it already has this exact one.
+
+        Keyed on a FINGERPRINT of (tool_name, digest) rather than on "did Gate A rewrite the
+        listing". Rewriting is the wrong trigger and the difference is not academic: a persistently
+        poisoned server is stripped on EVERY list, so a rewrite-triggered report hands the report rate
+        to the server — the same cheap-in/expensive-out amplifier `_denial_report_due` is coalesced to
+        avoid, reached from the other side. The fingerprint reports exactly what the control plane
+        needs (first sight, then every change, which is the rug pull) and nothing a server can
+        manufacture by repeating itself.
+
+        Lives here rather than in either transport driver because both need it and they had drifted:
+        stdio reported on a rewrite-or-first-list rule, and HTTP did not report at all.
+        """
+        catalog = self.observed_catalog()
+        if not catalog:
+            return None
+        fingerprint = hashlib.sha256(
+            json.dumps([[t.get("tool_name", ""), t.get("digest", "")] for t in catalog],
+                       sort_keys=True).encode()
+        ).hexdigest()
+        if self.stats.get("_reported_fingerprint") == fingerprint:
+            return None
+        self.stats["_reported_fingerprint"] = fingerprint
+        return catalog
 
     def catalog_snapshot(self) -> list[dict]:
         return [

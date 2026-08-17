@@ -35,11 +35,44 @@ class TestApplyPepDenialIsTightenOnly:
         d = PolicyDecision(decision="block", rule_id="pii_detection", reason="PII (SSN) detected")
         assert apply_pep_denial(d, "block", "mcp_gate_a_flagged", "x").rule_id == "pii_detection"
 
-    def test_escalate_is_not_promoted_to_block(self):
-        """Escalation is a human-in-the-loop outcome. Quietly converting a hold-for-approval into a
-        hard denial would change enforcement under cover of an audit-fidelity change."""
+    def test_escalate_IS_promoted_to_block_because_the_call_was_already_refused(self):
+        """This test asserted the opposite until the rule was seen running.
+
+        The old reasoning — "escalation is a human-in-the-loop outcome, and converting a
+        hold-for-approval into a hard denial would change enforcement under cover of an audit-fidelity
+        change" — is right for a decision the caller is about to ACT on. A `pep_decision` is never one:
+        it is only ever set on a REPORT of a refusal that already happened, the interceptor's return
+        value on that path is discarded, and there is no held call for anyone to release.
+
+        So the carve-out did not preserve behaviour, it falsified the record. Measured on kind: a
+        blocked MCP server's discovery was refused, every tool withheld, and the audit row read
+        "escalate — this MCP tool definition was never inspected by Gate A". The console was telling
+        an operator that a human was being asked to decide something already decided.
+        """
         d = PolicyDecision(decision="escalate", rule_id="mcp_definition_drift", reason="drift")
-        assert apply_pep_denial(d, "block", "x", "y").decision == "escalate"
+        out = apply_pep_denial(d, "block", "mcp_server_blocked", "discovery refused")
+        assert out.decision == "block"
+
+    def test_the_promoted_row_is_attributed_to_the_thing_that_actually_refused(self):
+        """A policy that only escalated did not refuse anything, so the authored-control preference
+        of the block case does not apply — the PEP is what refused."""
+        d = PolicyDecision(decision="escalate", rule_id="mcp_definition_drift", reason="drift")
+        out = apply_pep_denial(d, "block", "mcp_server_blocked", "discovery refused")
+        assert out.rule_id == "mcp_server_blocked"
+
+    def test_the_superseded_escalation_is_not_lost(self):
+        """The policy's finding is real. Trading one incomplete row for another is not a fix."""
+        d = PolicyDecision(decision="escalate", rule_id="mcp_definition_drift", reason="drift")
+        out = apply_pep_denial(d, "block", "mcp_server_blocked", "discovery refused")
+        assert "mcp_definition_drift" in out.reason
+        assert "would have escalated" in out.reason
+
+    def test_a_policy_BLOCK_still_keeps_its_own_attribution(self):
+        """The promotion above changes only the escalate case. An authored control that genuinely
+        refused is still the better audit attribution."""
+        d = PolicyDecision(decision="block", rule_id="pii_detection", reason="PII (SSN) detected")
+        out = apply_pep_denial(d, "block", "mcp_server_blocked", "discovery refused")
+        assert (out.rule_id, out.reason) == ("pii_detection", "PII (SSN) detected")
 
     @pytest.mark.parametrize("value", ["allow", "audit", "ALLOW", "escalate", "unblock", "none"])
     def test_no_value_other_than_block_is_accepted_by_the_event(self, value):
