@@ -405,6 +405,64 @@ async def revoke_pin(
     return _row_dict(row)
 
 
+#: Priority for the generated registry module. Sits with `__controls__` in the base band: it is a
+#: namespace's own tuning, not a cluster-wide floor, so it must not outrank a policy a tenant wrote
+#: for themselves. Collected as a tighten-only overlay regardless, so priority is not what makes it
+#: hold — see `evaluator._append_controls_floor`.
+_MCP_SCOPE_PRIORITY = 2
+
+
+async def _materialize_mcp_registry(request: Request, session: AsyncSession, namespace: str) -> int:
+    """Recompile this namespace's `__mcp__` module from the registry. Returns the server count.
+
+    CALLED FROM EVERY WRITE PATH, and that is the whole point of it existing in this file rather than
+    only as a compiler. `norviq/api/egress_allowlist.py` is a complete, tested compiler with
+    engine-side collection and NO ROUTER: its only importer is its own test, so the control has never
+    been reachable by a customer. A generated module that nothing regenerates is indistinguishable
+    from a feature that was never built.
+
+    Never raises into the caller. The decision is already committed and is the durable record; the
+    module is derived from it, so a failure here means the control is stale until the next write, not
+    that an operator's decision was lost. It is logged at ERROR so "stale" is never silent.
+    """
+    from norviq.api import mcp_controls
+
+    try:
+        rows = (await session.scalars(
+            select(McpServer).where(McpServer.namespace == namespace)
+        )).all()
+        registered = [r.server_id for r in rows if r.status == STATUS_REGISTERED]
+        writable = [r.server_id for r in rows if r.status == STATUS_REGISTERED and r.writable]
+        rego = mcp_controls.compile(registered, writable)
+        loader = request.app.state.loader
+        await loader.create(
+            namespace, mcp_controls.SCOPE, rego,
+            saved_by="mcp-registry",
+            priority=_MCP_SCOPE_PRIORITY,
+            # Always "block". The module carries each control's own decision in its generated heads,
+            # exactly as the baseline compiler does — softening the whole module on top would make the
+            # per-control choice unreachable.
+            enforcement_mode="block",
+            policy_name="mcp-server-registry",
+        )
+        cache = getattr(loader, "_cache", None)
+        if cache is not None:
+            # The registry applies to every agent class in the namespace, so the whole namespace's
+            # eval cache goes: `loader.create` only invalidates the (ns, __mcp__) scope, and a cached
+            # decision from before the change would keep enforcing the old registry for up to
+            # redis_ttl_eval_s.
+            await cache.invalidate_eval_scope(namespace)
+        log.info("nrvq.mcp.registry.materialized", namespace=namespace,
+                 registered=len(registered), writable=len(writable), code="NRVQ-MCP-5074")
+        return len(registered)
+    except Exception as exc:  # noqa: BLE001 — see the docstring: derived state, never the record
+        log.error("nrvq.mcp.registry.materialize_failed", namespace=namespace, error=str(exc),
+                  code="NRVQ-MCP-5075",
+                  hint="the decision is saved; the registry-backed controls are stale until the "
+                       "next server decision in this namespace")
+        return -1
+
+
 class ServerDecisionBody(BaseModel):
     """An operator decision about one MCP server."""
 
@@ -419,6 +477,7 @@ class ServerDecisionBody(BaseModel):
 @router.post("/mcp/servers/decision")
 async def decide_server(
     body: ServerDecisionBody,
+    request: Request,
     session: AsyncSession = Depends(get_session),
     user: dict = Depends(get_current_user),
 ) -> dict:
@@ -455,17 +514,24 @@ async def decide_server(
     row.decided_at = datetime.now(timezone.utc)
     await session.commit()
 
+    registered = await _materialize_mcp_registry(request, session, body.namespace)
+
     log.warning("nrvq.mcp.server.decision", namespace=body.namespace, server=body.server_id,
                 previous=previous, status=row.status, writable=row.writable,
                 by=user.get("sub"), code="NRVQ-MCP-5069")
     return {"namespace": row.namespace, "server_id": row.server_id, "status": row.status,
-            "writable": row.writable, "previous_status": previous, "note": row.note}
+            "writable": row.writable, "previous_status": previous, "note": row.note,
+            # Reported so the console can say the registry-backed controls actually moved. -1 means
+            # the module could not be rebuilt and the decision is saved but not yet enforced —
+            # silence there would be the same class of defect as a block with no audit row.
+            "registered_servers": registered}
 
 
 @router.delete("/mcp/servers/{namespace}/{server_id}")
 async def forget_server(
     namespace: str,
     server_id: str,
+    request: Request,
     session: AsyncSession = Depends(get_session),
     user: dict = Depends(get_current_user),
 ) -> dict:
@@ -492,6 +558,10 @@ async def forget_server(
     if kept and not decision_kept:
         await session.delete(kept)
     await session.commit()
+    # Forget can DROP a registration (it keeps only a refusal), which changes the generated set. A
+    # forgotten-but-still-registered server would keep its write grant in the module until somebody
+    # happened to make an unrelated decision in the same namespace.
+    await _materialize_mcp_registry(request, session, namespace)
     log.warning("nrvq.mcp.server.forgotten", namespace=namespace, server=server_id,
                 removed=result.rowcount, decision_kept=decision_kept,
                 by=user.get("sub"), code="NRVQ-MCP-5045")

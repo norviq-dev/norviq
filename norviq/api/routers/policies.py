@@ -32,7 +32,7 @@ router = APIRouter()
 # only blocks the pack scopes — delete forbids the entire managed set, since a delete is destructive and there is
 # no legitimate UI path to remove a managed scope (they are re-materialized from their own sources). The reserved
 # `__cluster__` namespace (the cluster-wide baseline) is likewise undeletable.
-_RESERVED_DELETE_CLASSES = ("__baseline__", "__controls__", "__egress__", "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__")
+_RESERVED_DELETE_CLASSES = ("__baseline__", "__controls__", "__egress__", "__mcp__", "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__")
 _RESERVED_NAMESPACES = ("__cluster__",)
 # CONSOLE VIEW SENTINELS — not namespaces. The console's global picker sends `namespace="all"` to mean
 # "aggregate every namespace" (see evaluator._collect_candidates / policy_loader.namespaces_for_class, which
@@ -268,7 +268,7 @@ async def _policy_match_counts(namespace: str | None) -> dict[tuple[str, str], i
 # RFC-1123 ServiceAccount name, so `audit_log.agent_class` can never hold one — looking them up in a
 # (namespace, agent_class)-keyed map returns 0 forever, and 0 is what paints the amber "Loaded — no
 # matching workload" dot on the most broadly-scoped controls in the product.
-_NAMESPACE_WIDE_SCOPES = ("__baseline__", "__controls__", "__egress__", "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__")
+_NAMESPACE_WIDE_SCOPES = ("__baseline__", "__controls__", "__egress__", "__mcp__", "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__")
 _OVERLAY_SUFFIX = "__remediation__"
 
 
@@ -477,7 +477,11 @@ async def create_policy(body: PolicyCreate, request: Request, user: dict = Depen
     # embedded `# nrvq-egress-allowlist/v1:` header — could not describe it at all.
     # `__controls__` joins them: a direct create would bypass the baseline compiler entirely, so the
     # console would show control effects that no longer describe the module actually enforcing.
-    if agent_class in ("__pack__", "__pack_override__", "__pack_weaken__", "__controls__", "__egress__"):
+    # `__mcp__` joins them for exactly the `__egress__` reason: it is a GENERATED module carrying an
+    # embedded `# nrvq-mcp-registry/v1:` header that the console reads the registry back from, and a
+    # hand-written module at that scope would enforce with the weight of an operator guardrail while
+    # the MCP Servers page could not describe it at all.
+    if agent_class in ("__pack__", "__pack_override__", "__pack_weaken__", "__controls__", "__egress__", "__mcp__"):
         log.warning("nrvq.api.policy.reserved_scope", namespace=body.namespace, agent_class=agent_class,
                     code="NRVQ-API-7016")
         raise HTTPException(
@@ -828,6 +832,7 @@ def resolve_apply_target_key(body: ApplyRequest, agent_class: str) -> str:
 #: gaining a mode it will never honour.
 _OVERLAY_SCOPES = frozenset({
     "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__", "__egress__", "__controls__",
+    "__mcp__",
 })
 #: `<agent_class>__remediation__` is per-class, so it cannot be a fixed member of the set above.
 _REMEDIATION_SUFFIX = "__remediation__"

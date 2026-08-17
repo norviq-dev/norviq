@@ -2375,6 +2375,10 @@ class OPAEvaluator:
         # controls floor is one: a per-class policy at a higher priority must not be able to discard
         # the operator's destination rules, which is exactly what C2-008 was.
         await _append_controls_floor(namespace, "__egress__")
+        # The compiled MCP server registry. Same appender, same reasoning, third call site: a
+        # per-class policy must not be able to discard the operator's decision about which MCP
+        # integrations are expected here, or which of them may be written through.
+        await _append_controls_floor(namespace, "__mcp__")
         await _append_policy(namespace, "__baseline__")
         await _append_policy("__cluster__", "__baseline__")
         # The catalog advertises WORKLOAD and NAMESPACE tiers (resolve_policy_key mints
