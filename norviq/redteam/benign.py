@@ -43,6 +43,7 @@ class BenignCategory(str, Enum):
     ROUTINE_READ = "routine_read"    # ordinary retrieval an agent does constantly
     ROUTINE_WRITE = "routine_write"  # ordinary writes: notes, tickets, status updates
     STRUCTURED = "structured"        # nested payloads and envelopes, where a walk() can go wrong
+    MCP_HEALTHY = "mcp_healthy"      # ordinary MCP traffic through a proxy where nothing is wrong
 
 
 @dataclass(slots=True)
@@ -297,6 +298,52 @@ def _build_benign() -> list[BenignDefinition]:
                                        "labels": {"team": "ops"}}},
             "Depth plus short alphanumeric values — the decode-and-rescan surface.",
             ["base64_decoded_threat"]),
+
+        # ── MCP: the discovery plane, when everything is in order ─────────────────────────────────
+        #
+        # The five MCP controls read `input.mcp`, which only exists when a call arrived through the
+        # Norviq proxy. On an estate with no MCP they are inert — and "inert" is a claim, not a fact,
+        # so it is checked here rather than asserted in a comment. Each case is a call the proxy
+        # itself would report as entirely healthy: seen, pinned, scanned clean, on the call plane.
+        # A control that fires on one of these fires on ordinary MCP traffic.
+        BenignDefinition(
+            "BN-MCP-001", "Approved MCP tool, scanned clean", BenignCategory.MCP_HEALTHY,
+            "search_kb", {"q": "refund policy"},
+            "The common case by volume: a pinned definition the scanner cleared, served by a server "
+            "the operator registered. Every discovery-plane control must be silent here.",
+            ["mcp_definition_drift", "mcp_definition_never_scanned", "mcp_tool_not_approved",
+             "mcp_definition_flagged"],
+            mcp_context={"server": "knowledge-base", "surface": "tools/call", "direction": "call",
+                         "transport": "http", "pin_status": "pinned", "scan_severity": "none",
+                         "definition_seen": True}),
+        BenignDefinition(
+            "BN-MCP-002", "A LOW scanner grade is not a finding", BenignCategory.MCP_HEALTHY,
+            "get_order", {"order_id": "GB1234567"},
+            "The scanner grades a definition `low` for prose it found mildly unusual. Only high and "
+            "critical strip a tool — grading everything is how a scanner trains an operator to "
+            "ignore it, and a `low` that blocked would make the grade meaningless.",
+            ["mcp_definition_flagged"],
+            mcp_context={"server": "orders", "surface": "tools/call", "direction": "call",
+                         "transport": "stdio", "pin_status": "pinned", "scan_severity": "low",
+                         "definition_seen": True}),
+        BenignDefinition(
+            "BN-MCP-003", "An ordinary answer carrying no secret", BenignCategory.MCP_HEALTHY,
+            "confirm_shipping", {"answer": "yes, ship to the office address"},
+            "The 2026-07-28 input-required pattern used for what it is for: the server asked a "
+            "question and the agent answered with ordinary text. Refusing this would make the whole "
+            "answer plane unusable, which is not what the credential rule is protecting.",
+            ["mcp_answer_carries_secret"],
+            mcp_context={"server": "shipping", "surface": "answer", "direction": "answer",
+                         "transport": "http", "pin_status": "pinned", "scan_severity": "none",
+                         "definition_seen": True}),
+        BenignDefinition(
+            "BN-MCP-004", "A NON-MCP call reaches no MCP control", BenignCategory.MCP_HEALTHY,
+            "list_items", {"page": 2},
+            "The negative control, and the one that matters most: the overwhelming majority of "
+            "installs have no MCP at all. A discovery-plane control that fires with no `input.mcp` "
+            "would block an entire estate the moment these shipped enforcing.",
+            ["mcp_definition_drift", "mcp_definition_never_scanned", "mcp_tool_not_approved",
+             "mcp_definition_flagged", "mcp_answer_carries_secret"]),
     ]
 
 

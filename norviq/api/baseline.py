@@ -267,6 +267,66 @@ _CONTROL_COPY: dict[str, Control] = {
         default_effect="monitor",
         plane="call",
     ),
+    # ── the DISCOVERY plane: what the MCP proxy learned before the model saw the tool ─────────────
+    #
+    # These read `input.mcp`, which only exists when a call arrived through the Norviq MCP proxy. On
+    # an estate with no MCP they are inert — which is why they can ship enforcing without a
+    # measurable false-positive surface: there is no legitimate traffic for them to touch. The
+    # benign corpus exercises each one anyway, because "inert" is a claim that has to be checked.
+    "mcp_definition_drift": Control(
+        "mcp_definition_drift",
+        "MCP definition changed after approval",
+        "The rug pull: an MCP server is serving a tool definition that is not the one an operator "
+        "approved. Detected by content hash at discovery, before the model reads the new text.",
+        caveat="Escalates rather than blocks, deliberately. Adopting a changed definition is a "
+        "legitimate operator action — a server that ships a bug fix changes its description — and "
+        "the safe default is a human looking at the diff, not a silently broken agent.",
+        default_effect="deny",
+        plane="discovery",
+    ),
+    "mcp_definition_never_scanned": Control(
+        "mcp_definition_never_scanned",
+        "MCP definition never inspected",
+        "A tool call arrived for a definition Gate A never read — a stateless client, or a proxy "
+        "restarted since discovery.",
+        caveat="Escalates rather than blocks: a cold start is ordinary. What is not ordinary is "
+        "acting on a definition nobody has read. This exists because every OTHER Gate-A rule tests "
+        "for a specific bad state, so a tool in no state at all satisfied none of them and was "
+        "allowed — the checks were armed and the thing they protect was never inspected.",
+        default_effect="deny",
+        plane="discovery",
+    ),
+    "mcp_tool_not_approved": Control(
+        "mcp_tool_not_approved",
+        "MCP tool awaiting approval",
+        "In strict pin mode a newly-seen MCP tool is quarantined until an operator approves its "
+        "definition. This refuses the call while it waits.",
+        caveat="Only fires when the proxy runs in strict pin mode. Under the default (tofu) a "
+        "first-seen definition is pinned and allowed, and CHANGE is what gets enforced.",
+        default_effect="deny",
+        plane="discovery",
+    ),
+    "mcp_definition_flagged": Control(
+        "mcp_definition_flagged",
+        "MCP definition scanned as hostile",
+        "The definition itself carries instruction-injection shaped text — the tool-poisoning "
+        "vector, where the description is the payload and the model reads it before the user has "
+        "typed anything.",
+        caveat="The scanner is a heuristic and is evadable by construction; it is the discovery-"
+        "plane complement to the deterministic call-plane checks, not a replacement for them.",
+        default_effect="deny",
+        plane="discovery",
+    ),
+    "mcp_answer_carries_secret": Control(
+        "mcp_answer_carries_secret",
+        "Credential in an MCP answer",
+        "A server may answer a call by asking the CLIENT for more input (the 2026-07-28 "
+        "input-required pattern). This refuses to send a credential back as that answer.",
+        caveat="Depends on the response classifier recognising the value as a secret; a credential "
+        "in a shape the classifier does not know is not caught here.",
+        default_effect="deny",
+        plane="response",
+    ),
 }
 
 

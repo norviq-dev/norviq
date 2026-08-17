@@ -992,6 +992,48 @@ scope_violation_dangerous_tool {
     input.agent.agent_class == "customer-support"
 }
 
+# --- MCP Gate-A facts (input.mcp), ported from policies/templates/mcp_integration_guardrail.rego ---
+#
+# These read the DISCOVERY-plane state the proxy computed once per tool and cached: which server
+# served it, whether its definition was scanned, whether it matches the definition that was approved.
+# Nothing here is expressible with tool names alone, which is why the guardrail template existed at
+# all — and why it was the wrong shape to leave it there. A copy-me template is off by default and
+# needs a rego editor, so the MCP defences shipped as something a customer had to build.
+#
+# TRUST BOUNDARY, restated because it moved into the shipped baseline: `input.mcp` is PEP-REPORTED,
+# exactly like `input.tool_name`. It is a POLICY input and never a TRUST input. Nothing here decides
+# WHO is calling; identity comes from the attested SVID and is never read from an MCP message.
+#
+# Zero regex operations, deliberately — both presets sit at 24 of the 25-op cap.
+_is_mcp { input.mcp.server != "" }
+
+# Severities at which Gate A's scanner considers a definition hostile. Mirrors the proxy's own
+# `mcp_scan_strip_severity` default so the policy and the proxy do not disagree about the same word.
+_mcp_blocking_severity = {"high", "critical"}
+
+# A definition nobody read. `scan_severity` is "unknown" and `definition_seen` false when the proxy
+# has no catalog entry — a call that arrived without a mediated `tools/list` (a stateless client, or
+# a proxy restarted since discovery). EVERY other rule below tests for a SPECIFIC bad state, so a
+# tool in no state at all satisfies none of them and falls through to allow: the checks are armed and
+# the thing they protect was never inspected. Measured live before the fix: a raw stateless call
+# produced pin_status "unknown", definition_seen false, and no rule fired.
+_mcp_unscanned { _is_mcp; not input.mcp.definition_seen }
+
+# strict pin mode: a tool is quarantined until an operator approves its definition.
+_mcp_quarantined { _is_mcp; not _mcp_unscanned; input.mcp.pin_status == "quarantined" }
+
+# The rug pull: the definition being served is not the one that was approved.
+_mcp_drifted { _is_mcp; input.mcp.pin_status == "drift"; not _mcp_quarantined }
+
+# The scanner found instruction-injection shaped text in the definition itself.
+_mcp_flagged { _is_mcp; not _mcp_unscanned; _mcp_blocking_severity[input.mcp.scan_severity]; not _mcp_quarantined; not _mcp_drifted }
+
+# THE ANSWER PLANE (2026-07-28 MRTR). A server may answer a call with `resultType: "input_required"`
+# and ask the CLIENT for more input. The reply is data leaving the trust boundary in response to a
+# question the SERVER composed — the confused-deputy vector with a specification behind it. A
+# credential must never be the answer, whatever the server claims to need it for.
+_mcp_answer_carries_secret { input.direction == "answer"; input.derived.data_classes[_] == "secret" }
+
 # --- partial-set triggers (rule_id -> guard) ---
 #
 # >>> CONTROLS-BEGIN
@@ -1068,6 +1110,18 @@ audits["scope_violation_dangerous_tool"] { scope_violation_dangerous_tool }
 # the binding moved. A head outside these markers would be invisible to the compiler, so its control
 # could never be toggled and would silently keep enforcing at whatever severity it was written with.
 blocks["deny_sql_multi_statement"] { _sql_metachar_only_block }
+
+# --- the DISCOVERY plane: what the MCP proxy learned before the model saw the tool ---
+#
+# Two of these ESCALATE rather than block, and that is the considered part. Adopting a changed
+# definition is a legitimate operator action and a cold start is ordinary; what is not ordinary is
+# ACTING on a definition nobody has read. A human deciding once is proportionate — silently breaking
+# an agent is not, and it is how a security control gets switched off.
+escalates["mcp_definition_drift"] { _mcp_drifted }
+escalates["mcp_definition_never_scanned"] { _mcp_unscanned }
+blocks["mcp_tool_not_approved"] { _mcp_quarantined }
+blocks["mcp_definition_flagged"] { _mcp_flagged }
+blocks["mcp_answer_carries_secret"] { _mcp_answer_carries_secret }
 # >>> CONTROLS-END
 
 # reason text per rule_id. default_allow + the engine fallback are included for completeness.
@@ -1088,6 +1142,11 @@ reasons = {
     "base64_decoded_threat": "Base64-encoded payload decodes to a known-malicious pattern",
     "scope_violation_dangerous_tool": "Out-of-scope dangerous tool for this agent class",
     "strict_default_block": "Strict baseline blocked a high-risk tool",
+    "mcp_definition_drift": "This MCP tool definition changed after it was approved (possible rug pull)",
+    "mcp_definition_never_scanned": "This MCP tool definition was never inspected by Gate A",
+    "mcp_tool_not_approved": "This MCP tool definition has not been approved",
+    "mcp_definition_flagged": "This MCP tool definition matched an instruction-injection pattern",
+    "mcp_answer_carries_secret": "A credential may not be sent back to an MCP server",
     "default_allow": "Allowed",
 }
 
