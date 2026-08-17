@@ -2064,3 +2064,95 @@ measurable on this host**, which is a statement about the environment, not a pas
 The corrected baseline was **never in the cluster** until this pass: `rego_length` went 32063 → 38729
 at version 14. The earlier fix landed on `comprehensive.rego`, and `webhook/presets/strict.rego` is
 the copy that ships.
+
+---
+
+## MCP server registry (P3) + asset-graph node (6a) — live on kind, chatbot-lab
+
+### What the plan predicted, and what only the cluster found
+
+The plan said to verify "through the real MCP SDK client from the agent pod, not raw POSTs — the SSE
+bug last night only reproduced with a spec-compliant client". That instruction earned its place four
+more times. Everything below passed the full unit suite before it was deployed.
+
+1. **`settings.namespace` does not exist.** The HTTP transport read
+   `getattr(settings, "namespace", "")` for BOTH control-plane stores, so both addressed the control
+   plane with an empty namespace on every deployment there has ever been. The `getattr` default is
+   what hid it: a phantom read with a fallback looks like a deliberate optional and errors nowhere.
+   Fixed at the source — the namespace comes from the attested identity, which is what the stdio
+   transport was already doing.
+
+2. **`api_url` and `policy_engine_url` are two env vars for one target.** Every deployment sets only
+   `NRVQ_POLICY_ENGINE_URL`, so anything reading `api_url` fell back to the short name
+   `http://norviq-api:8080` — which resolves only inside the API's own namespace. A sidecar anywhere
+   else got "Name or service not known" from a proxy whose `/evaluate` calls were working perfectly,
+   so the symptom named neither variable. `api_url` now follows `policy_engine_url` unless stated.
+
+3. **The HTTP transport never reported anything to the control plane.** This is the big one.
+   `ControlPlanePinStore.put()` only enqueues; `flush()` sends, and nothing on the streamable-HTTP
+   path called it. On the transport the 2026-07-28 revision mandates and every real deployment uses,
+   no MCP observation ever reached the control plane: the console's MCP Servers page was empty on
+   every such install, the pin table stayed at zero, and cross-pod drift detection had nothing to
+   compare against. Local Gate A worked throughout — which is exactly why it survived. The
+   enforcement was real and the entire record of it was missing.
+
+   Not findable by unit test as the suite was written: every test asserted what the firewall DECIDED,
+   and none asserted that anybody was ever told. **The rule learned: for any control that produces a
+   record, one test must assert the record, not the decision.**
+
+4. **A refused discovery was recorded as `escalate`.** `apply_pep_denial` deliberately left escalate
+   alone, on the reasoning that promoting it would change enforcement under cover of an
+   audit-fidelity change. Correct for a decision the caller is about to act on — and a `pep_decision`
+   is never one. It is only ever set on a REPORT of a refusal that already happened, and the return
+   value on that path is discarded. So the carve-out did not preserve behaviour, it falsified the
+   record: tools withheld, console saying a human was being asked.
+
+5. **Every audit row and pin this transport wrote claimed `transport: "stdio"`** — the firewall's
+   default, never overridden by the HTTP driver. A console filtering by transport read a constant.
+
+### What the console itself showed
+
+`rugpull` rendered "BLOCKED | BLOCKED" across Status and Registration. Two columns, one word, and the
+operator deciding whether to unblock could not see that its definitions were clean — the fact that
+decision turns on. Split into `observed_health` (knows nothing about decisions) and `health` (folds
+the decision in, remains the sort key).
+
+### Product decisions taken autonomously
+
+- **A cold-start control-plane outage fails OPEN.** Before the first successful load nothing is
+  enforced, so a proxy that starts while the API is unreachable does not enforce a `blocked` decision
+  until it can read one. Failing closed was tried in another form and is documented in
+  `HttpProxy._install_pin_store`: three proxies refused every call at Gate A for eleven hours and the
+  failure was indistinguishable from a defence working. Logged loudly (NRVQ-MCP-5070); a load that
+  fails AFTER a success keeps the last good copy, so an API restart cannot un-block a server.
+- **An unrecognised status from a newer control plane degrades to `discovered`, not `blocked`.** A
+  rolling upgrade must not black out discovery for every server the moment the API is a version ahead
+  of the sidecars.
+- **Registering defaults to read-only.** Registering says the integration is expected here, not that
+  everything it offers may be invoked.
+- **Unblock returns a server to UNREVIEWED, never to registered.** Withdrawing a refusal must not
+  manufacture an approval nobody gave.
+- **The graph node carries no pin or registration state.** Those live in the tables where an operator
+  changes them; a copy would be a second answer that goes stale the moment somebody clicks Block.
+- **The report-due rule is a catalog FINGERPRINT, not "Gate A rewrote the listing".** A persistently
+  poisoned server is stripped on every list, so the rewrite rule handed the report rate to the server.
+
+### The six-becomes-seven UI break points
+
+The plan listed five places a new asset-graph node kind disappears. Working through them found two
+more, both silent: `AssetGraphCanvas` has its OWN radius table separate from `NODE_RADIUS` (an
+unlisted kind draws a circle of NaN), and `AssetEdge`'s type union had no `serves`. A third was in
+`computeSets`: `s.types[kind]` for a kind with no chip is `undefined`, which is falsy — so any future
+kind was hidden by default with no filter to turn it back on. That is why `namespace` had to be
+special-cased there; the fix generalises it instead of adding a second special case.
+
+### Live proof (chatbot-lab, kind)
+
+The chatbot's LangChain agent was repointed at the two `norviq.mcp` firewalls and run:
+
+- `malicious` — Gate A stripped 3 poisoned definitions (line_jumping, concealment + exfil_directive +
+  hidden_marker, concealment) before they reached the model. 5 tools observed, 3 flagged critical/high.
+- `rugpull` — blocked from the console; the decision reached a RUNNING proxy in ~24s and a re-list
+  through the real MCP SDK client returned zero tools.
+- Audit truth: `block | mcp_server_blocked | tools/list | rugpull`, with `transport: http`.
+- Denial coalescing verified on the discovery path: 5 listings of a blocked server → 1 audit row.
