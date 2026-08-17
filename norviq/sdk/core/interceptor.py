@@ -12,7 +12,7 @@ import structlog
 
 from norviq.engine.identity import SPIFFEResolver
 from norviq.exceptions import NorviqBlockError, NorviqEscalateError
-from norviq.sdk.core.decisions import PolicyDecision
+from norviq.sdk.core.decisions import PolicyDecision, apply_pep_denial
 from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
 from norviq.telemetry.metrics import record_interception_latency
 from norviq.sdk.core.recorder import record_decision
@@ -90,6 +90,9 @@ class ToolInterceptor:
         call_depth: int = 0,
         identity: AgentIdentity | None = None,
         mcp: dict[str, Any] | None = None,
+        pep_decision: str = "",
+        pep_rule_id: str = "",
+        pep_reason: str = "",
     ) -> PolicyDecision:
         """Evaluate a tool call and return policy decision.
 
@@ -97,6 +100,13 @@ class ToolInterceptor:
         status, Gate-A scan severity). Keyword-only in practice and defaulted to None, so every
         existing caller — the sidecar, all six framework adapters, the red-team runner — is
         unchanged and still produces an event with an empty ``mcp``.
+
+        ``pep_decision`` REPORTS a refusal this PEP already made on its own, before any policy ran —
+        the MCP firewall's Gate A, its schema conformance check, its tool-header guard. Without it
+        those denials reach no audit row at all and the console cannot show that anything happened.
+        It may only ever be ``"block"`` (validated on the event) and can never loosen a decision.
+        The returned decision still reflects the fold, so a caller that reads it sees the same
+        outcome the audit log recorded.
         """
         # What the CALLER waits for one decision — the number a deployed agent actually feels, and the one
         # the published performance table cannot show: it reads the engine's own latency_ms, which excludes
@@ -117,8 +127,17 @@ class ToolInterceptor:
             framework=framework,
             call_depth=call_depth,
             mcp=mcp or {},
+            pep_decision=pep_decision,
+            pep_rule_id=pep_rule_id,
+            pep_reason=pep_reason,
         )
         decision = await self._evaluator.evaluate(event)
+        # Fold the PEP's own refusal in here TOO, not only in the API router. Over HTTP the router has
+        # already applied it and this is a no-op (the operation is idempotent — a decision that is
+        # already "block" is returned unchanged). In EMBEDDED mode there is no router in the path at
+        # all, and without this the same PEP refusal would be recorded over HTTP and lost in-process:
+        # one property, two transports, and the property has to hold on both.
+        decision = apply_pep_denial(decision, pep_decision, pep_rule_id, pep_reason)
         # Record every evaluated call on the active capture scope (if any). This is what lets a host
         # report a block that a framework's own agent loop swallows before it can propagate — and gives
         # an honest tools_called for frameworks whose message objects don't expose the calls. No-op

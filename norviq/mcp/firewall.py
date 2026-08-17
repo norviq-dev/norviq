@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from time import perf_counter
+from time import monotonic, perf_counter
 from typing import Any
 
 import structlog
@@ -50,6 +50,7 @@ from norviq.mcp.scanner import (
     scan_untrusted_content,
 )
 from norviq.sdk.core.decisions import PolicyDecision
+from norviq.sdk.core.events import PEP_REASON_MAX, PEP_RULE_ID_MAX
 from norviq.sdk.core.interceptor import current_call_depth
 from norviq.sdk.core.interceptor import ToolInterceptor
 from norviq.telemetry.metrics import record_path_phase
@@ -96,6 +97,16 @@ _MAX_ITEM_TEXT = 16384
 # than saving anything. ~0.19 ms per 1000 characters puts 1 MiB at ~200 ms, still an order of
 # magnitude under the 2 s fail-closed evaluator budget.
 _CONTENT_GUARD_BUDGET = 1048576
+
+# How often ONE (tool, rule) refusal may be reported to the control plane. A refusal is the path an
+# ACTIVE attacker drives, so an unconditional report turns a cheap local call into an outbound round
+# trip — an amplifier against the control plane, which is the same shape the scan budget and the walk
+# bounds above exist to prevent. 60s keeps a real attack plainly visible (one attributable row per
+# minute per tool, carrying the suppressed count) while bounding the cost of a flood.
+_DENIAL_REPORT_WINDOW_S = 60.0
+# Both halves of the key are attacker-influenced — a client may call any tool name it likes — so the
+# ledger itself needs a bound, or it becomes the amplifier one level along.
+_DENIAL_REPORT_MAX_KEYS = 512
 
 
 def _fenced(text: str, *, scanned: bool) -> str:
@@ -352,6 +363,9 @@ class McpFirewall:
         self._skeletons: dict[str, str] = {}   # folded name -> canonical name, for shadowing detection
         self._client_pending = _PendingMap(settings.mcp_max_pending_requests)
         self._server_pending = _PendingMap(settings.mcp_max_pending_requests)
+        # (tool, rule) -> (monotonic of last report, refusals suppressed since). Rate-limits the
+        # PEP-denial REPORT only; Gate A's decision never consults it.
+        self._denial_reports: dict[tuple[str, str], tuple[float, int]] = {}
         self.stats: dict[str, int] = {}
 
     # ---------------------------------------------------------------- helpers
@@ -542,6 +556,91 @@ class McpFirewall:
         if entry is not None and entry.digest:
             ctx["tool_digest"] = entry.digest[:16]
         return ctx
+
+    def _denial_report_due(self, tool_name: str, rule_id: str) -> tuple[bool, int]:
+        """Should this refusal be reported now, and how many were suppressed since the last one?
+
+        A REFUSAL IS EXACTLY WHEN AN ATTACKER IS ACTIVE, which makes an unconditional report an
+        amplifier: a client looping calls to a withheld tool costs itself one cheap local request per
+        iteration and costs the proxy one outbound round trip to the control plane — the same
+        cheap-in/expensive-out shape the scanner's walk bounds and the content guard's budget exist to
+        stop. Gate A's own decision stays a dict lookup; only the REPORT is rate-limited.
+
+        Coalesced per (tool, rule) rather than globally, so a flood of one denial cannot hide a
+        different one that starts mid-flood. The suppressed count rides along on the next report, so a
+        quiet window and a hammered one are never indistinguishable — the bound is visible in the
+        record rather than silently applied.
+        """
+        now = monotonic()
+        key = (tool_name, rule_id)
+        last, suppressed = self._denial_reports.get(key, (0.0, 0))
+        if last and (now - last) < _DENIAL_REPORT_WINDOW_S:
+            self._denial_reports[key] = (last, suppressed + 1)
+            return False, 0
+        # Bounded: the key is (tool, rule) and BOTH halves are attacker-influenced (a client may call
+        # any name it likes), so an unbounded dict is the amplifier moved one level along. Cleared
+        # wholesale rather than evicted one-by-one — this is a rate-limit ledger, not a cache, and the
+        # worst case of dropping it is one extra report per key.
+        if len(self._denial_reports) >= _DENIAL_REPORT_MAX_KEYS:
+            self._denial_reports.clear()
+        self._denial_reports[key] = (now, 0)
+        return True, suppressed
+
+    async def _report_denial(self, tool_name: str, params: dict, rule_id: str, reason: str,
+                             surface: str = "tools/call") -> None:
+        """Tell the control plane about a refusal THIS proxy already made, before policy ran.
+
+        Gate A, schema conformance and the tool-header guard all return before `_evaluate`, so none of
+        them ever reached an audit row: measured live, three Gate-A denials produced ZERO. The attack
+        was stopped and the console could show nothing — no audit row, no attack-graph edge, no
+        compliance credit — which by this codebase's own detection discipline is indistinguishable
+        from nothing having happened.
+
+        NEVER CHANGES THE OUTCOME. The call is already refused; this is a report, not a question. So
+        every failure is swallowed: an engine that is down, slow, or returning an error must not turn
+        a refusal into a forwarded call, and must not raise into the proxy's reply path either. The
+        worst case is the pre-existing behaviour — a denial that is enforced but unrecorded.
+
+        Awaited rather than fire-and-forget: a refusal is rare (it is the failure case, not the hot
+        path), the engine client already carries its own timeout, and a detached task in a proxy that
+        may be about to answer and move on is how these reports get lost.
+        """
+        due, suppressed = self._denial_report_due(tool_name, rule_id)
+        if not due:
+            return
+        if suppressed:
+            reason = f"{reason} (+{suppressed} further refusal(s) of this tool suppressed)"
+        # MASK, then BOUND — in that order, and both before the value can reach the wire.
+        #
+        # MASK: the schema-violation reason interpolates undeclared argument NAMES verbatim, and a
+        # name is a key position an attacker can put data in (`{"balances": {"4111...": 1}}`). Without
+        # this, a PAN or SSN lands in `audit_log.reason` on a DEFAULT install — one that has value
+        # capture deliberately switched off. Same masker the rest of the codebase uses, so there is one
+        # notion of what is sensitive rather than a second.
+        #
+        # BOUND: `pep_reason` is capped at the API model, and `max_length` REJECTS rather than
+        # truncates. An unbounded reason therefore 422s the report, and `PolicyEngineClient._post`
+        # counts that 4xx on the SAME circuit breaker the real evaluations use — three of them open
+        # it, `sdk_fallback_mode` defaults to "allow", and every subsequent call is forwarded
+        # ungoverned. That is a fail-open an ATTACKER provokes by choosing long argument names, so the
+        # bound is applied here at construction rather than trusted to the callers.
+        reason = mask_text(reason)[:PEP_REASON_MAX]
+        rule_id = rule_id[:PEP_RULE_ID_MAX]
+        try:
+            await self._interceptor.intercept(
+                tool_name=self._engine_tool_name(tool_name),
+                tool_params=params,
+                session_id=self._session_id,
+                framework="mcp",
+                call_depth=current_call_depth(),
+                mcp=self._mcp_context(tool_name, surface),
+                pep_decision="block",
+                pep_rule_id=rule_id,
+                pep_reason=reason,
+            )
+        except Exception as exc:  # noqa: BLE001 — a report must never affect the refusal it reports
+            log.warning("nrvq.mcp.denial_report_failed", tool=tool_name, rule=rule_id,
+                        error=str(exc)[:200], code="NRVQ-MCP-5037")
 
     async def _evaluate(self, tool_name: str, params: dict, surface: str = "tools/call") -> tuple[PolicyDecision, float]:
         """One policy evaluation. This is the ONLY network call on the per-call path."""
@@ -747,6 +846,15 @@ class McpFirewall:
         if not settings.mcp_allow_tool_headers and self._sets_transport_headers(arguments):
             self._bump("tool_header_denied")
             log.warning("nrvq.mcp.tool_header_denied", tool=name, code="NRVQ-MCP-5063")
+            # Only when there are real arguments to report. This guard runs BEFORE the malformed
+            # check below, and `_sets_transport_headers` descends LISTS as well as dicts — so
+            # `arguments` genuinely can be a non-dict here. Coercing it to `{}` would write "called
+            # with no arguments" for a call that carried some: the same false row the malformed path
+            # refuses to write, and the reason that path is deliberately not reported at all.
+            if isinstance(arguments, dict):
+                await self._report_denial(
+                    name, arguments, "mcp_tool_header_injection",
+                    "the call's arguments set outbound HTTP headers, which is header-injection and SSRF surface")
             return MediationResult(
                 reply=P.encode(P.error_response(
                     msg.id, P.E_POLICY_DENIED,
@@ -761,6 +869,12 @@ class McpFirewall:
             # malformed; normalising to {} would silently evaluate a DIFFERENT call than the one sent.
             if arguments is not None:
                 self._bump("malformed_call")
+                # DELIBERATELY NOT REPORTED to the control plane, unlike the three refusals below.
+                # There are no arguments to report: the payload is malformed, so any event built here
+                # would have to invent a `tool_params` (`{}` reads as "called with no arguments"),
+                # and a false audit row is worse than a missing one. This is also the property
+                # `test_malformed_arguments_are_refused` pins — a malformed call must never be
+                # evaluated as if it were well-formed — and reporting it would erode exactly that.
                 return MediationResult(
                     reply=P.encode(P.error_response(
                         msg.id, P.E_INVALID_REQUEST, "tools/call params.arguments must be an object")),
@@ -777,6 +891,7 @@ class McpFirewall:
                 "nrvq.mcp.gate_a.call_denied", tool=name, pin_status=entry.pin_status,
                 severity=entry.scan_severity, code="NRVQ-MCP-5020",
             )
+            await self._report_denial(name, arguments, f"mcp_gate_a_{entry.pin_status}", reason)
             record_path_phase("mcp", "call_total", (perf_counter() - timer0) * 1000.0)
             return MediationResult(
                 reply=P.encode(P.tool_error_result(msg.id, reason, {
@@ -804,6 +919,9 @@ class McpFirewall:
                     "nrvq.mcp.gate_b.schema_violation", tool=name, violations=violations,
                     server=self._server_id, code="NRVQ-MCP-5066",
                 )
+                await self._report_denial(
+                    name, arguments, "mcp_schema_violation",
+                    f"the call does not match the tool's own declared inputSchema — {'; '.join(violations)}")
                 record_path_phase("mcp", "call_total", (perf_counter() - timer0) * 1000.0)
                 return MediationResult(
                     reply=P.encode(P.tool_error_result(

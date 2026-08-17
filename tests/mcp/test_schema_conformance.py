@@ -84,7 +84,8 @@ async def test_a_schema_with_no_properties_key_still_enforces_its_own_statements
     result = await _call(fw, {"q": "smuggled", "table": None})
     assert result.blocked, "an undeclared argument must not reach policy"
     assert "argument 'q' is not declared" in result.reply.decode()
-    assert evaluator.seen == []
+    assert [e for e in evaluator.seen if not e.pep_decision] == [], (
+        "the refusal must not cost an evaluate round trip to DECIDE; what may follow is a report of it")
 
     # `required` is enforced on the same schema, and the required name is NOT itself reported as
     # undeclared — a schema that demands `table` and refuses it would make the tool uncallable.
@@ -109,7 +110,8 @@ async def test_a_top_level_type_list_containing_object_is_accepted():
     result = await _call(fw, {"table": "users", "q": "smuggled"})
     assert result.blocked
     assert "argument 'q' is not declared" in result.reply.decode()
-    assert evaluator.seen == []
+    assert [e for e in evaluator.seen if not e.pep_decision] == [], (
+        "the refusal must not cost an evaluate round trip to DECIDE; what may follow is a report of it")
 
     fw2, ev2 = await _discovered(schema)
     assert not (await _call(fw2, {"table": "users"})).blocked
@@ -127,7 +129,8 @@ async def test_a_non_dict_properties_does_not_abandon_the_argument_set_checks():
     result = await _call(fw, {"q": "smuggled", "table": None})
     assert result.blocked
     assert "argument 'q' is not declared" in result.reply.decode()
-    assert evaluator.seen == []
+    assert [e for e in evaluator.seen if not e.pep_decision] == [], (
+        "the refusal must not cost an evaluate round trip to DECIDE; what may follow is a report of it")
     # ...and it is reported as not fully enforceable, since no per-argument type could be read.
     entry = fw._catalog["read_table"]
     assert entry.schema_enforced is False
@@ -180,7 +183,8 @@ async def test_pattern_properties_does_not_switch_off_the_undeclared_argument_re
     result = await _call(fw, {"a": "v", "x-trace": "t"})
     assert result.blocked, "the server declared a closed set; the pattern is not evaluated here"
     assert "argument 'x-trace' is not declared" in result.reply.decode()
-    assert evaluator.seen == []
+    assert [e for e in evaluator.seen if not e.pep_decision] == [], (
+        "the refusal must not cost an evaluate round trip to DECIDE; what may follow is a report of it")
     entry = fw._catalog["read_table"]
     assert entry.schema_closed is True, "the server DID declare a closed set"
     assert entry.schema_enforced is False

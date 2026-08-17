@@ -19,7 +19,7 @@ from norviq.config import settings
 from norviq.engine.capability import Verb, classify_tool
 from norviq.engine.evaluator import OPAEvaluator
 from norviq.engine.masking import mask_params, mask_text
-from norviq.sdk.core.decisions import PolicyDecision
+from norviq.sdk.core.decisions import PolicyDecision, apply_pep_denial
 from norviq.sdk.core.events import ToolCallEvent
 from norviq.telemetry.metrics import record_path_phase
 
@@ -271,6 +271,12 @@ class EvaluateRequest(BaseModel):
     # for every non-MCP caller, so this is additive: an existing sidecar/SDK body is unchanged and
     # every existing policy still sees exactly the input document it saw before.
     mcp: dict = Field(default_factory=dict)
+    # The PEP refused this call itself, before any policy ran — see ToolCallEvent.pep_decision for the
+    # full rationale. Constrained to ""/"block" at the model boundary so the "can only tighten"
+    # property holds for a RAW HTTP caller too, not just for one coming through the SDK.
+    pep_decision: str = Field(default="", pattern="^(|block)$")
+    pep_rule_id: str = Field(default="", max_length=255)
+    pep_reason: str = Field(default="", max_length=1024)
 
 
 class EvaluateResponse(BaseModel):
@@ -345,6 +351,20 @@ async def evaluate_tool_call(
     record_path_phase("api", "route_identity", (perf_counter() - _t_handler) * 1000.0)
     _t = perf_counter()
     decision: PolicyDecision = await request.app.state.evaluator.evaluate(event)
+    # Fold in a refusal the PEP made ITSELF, before any policy ran (MCP Gate A, schema conformance,
+    # the tool-header guard). Applied HERE rather than inside the evaluator, for two reasons that both
+    # matter:
+    #
+    #   * it is provably last. The evaluator has four return paths and applies namespace posture and
+    #     per-policy audit mode on several of them; a per-path override would be one refactor away
+    #     from being softened by monitor mode, which would record "would have blocked" for a call that
+    #     WAS blocked.
+    #   * it stays out of the eval cache. `evaluate()` caches the POLICY's decision, and that is the
+    #     right thing to cache — a PEP refusal is a fact about ONE call, and caching it would deny
+    #     every later caller that shares the cache key.
+    #
+    # Tighten-only by construction; see `apply_pep_denial`.
+    decision = apply_pep_denial(decision, payload.pep_decision, payload.pep_rule_id, payload.pep_reason)
     record_path_phase("api", "route_evaluate", (perf_counter() - _t) * 1000.0)
     _t = perf_counter()
     # Fire-and-forget audit emission (DB write + OTel span). emit() schedules its own

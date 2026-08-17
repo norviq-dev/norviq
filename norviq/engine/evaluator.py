@@ -48,7 +48,7 @@ from norviq.telemetry.metrics import record_eval_phases, record_tool_call
 from norviq.telemetry.spans import create_tool_call_span, enrich_span
 from norviq.engine.trust import AgentHistoryStore, AgentProfileStore, TrustCalculator, TrustInput, TrustResult
 from norviq.engine.trust.signals.param_entropy import ParamEntropySignal
-from norviq.sdk.core.decisions import PolicyDecision
+from norviq.sdk.core.decisions import PolicyDecision, apply_pep_denial
 from norviq.sdk.core.events import ToolCallEvent
 from norviq.sdk.core.trust import TrustScore
 
@@ -645,6 +645,22 @@ class OPAEvaluator:
                 decision = self._apply_trust_overrides(base_decision, trust_result, event.event_id)
                 decision = self._apply_posture(decision, posture, event.event_id)  # monitor mode
                 decision = self._ensure_block_attribution(decision, event.event_id)
+            # A refusal the PEP already made itself, folded in HERE — after posture and the trust
+            # overrides, and before the behavioural fan-out below.
+            #
+            # The position is the whole point, in both directions. AFTER posture, because the call was
+            # already refused upstream: softening the record to `audit` would say "this would have
+            # been blocked" about something that WAS. BEFORE `_persist_behavior`, because everything
+            # downstream of it — the attack graph, trust history, the behavioural profile, the agent
+            # registry's violation flag, the decision counters — reads this value, and with the fold
+            # applied only at the API boundary they all recorded a REFUSED call as an allow. The audit
+            # row was right and every derived surface was wrong.
+            #
+            # `base_decision` is what was written to the eval cache above, and it is deliberately NOT
+            # folded: a PEP refusal is a fact about ONE call, so caching it would deny every later
+            # caller that shares the key.
+            decision = apply_pep_denial(
+                decision, event.pep_decision, event.pep_rule_id, event.pep_reason)
             # The multi-candidate path builds per-candidate decisions with latency_ms=0.0; stamp the real
             # measured end-to-end latency on the winning decision so every audit record carries it (AU-12/SLA).
             decision = decision.model_copy(update={"latency_ms": round((time.monotonic() - start) * 1000, 2)})

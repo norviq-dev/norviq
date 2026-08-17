@@ -201,7 +201,11 @@ async def test_call_to_a_withheld_tool_is_denied_without_consulting_the_engine()
     result = await fw.on_client_message(_call("add", {"a": 1}))
     assert result.forward is None
     assert result.blocked
-    assert evaluator.seen == [], "Gate A already answered; no evaluate round trip should be spent"
+    # Gate A DECIDED without the engine: the stub is scripted to "allow", and the call is refused
+    # anyway. What reaches the engine afterwards is a REPORT of that refusal (pep_decision), not a
+    # question — see test_a_gate_a_refusal_is_reported_to_the_control_plane.
+    assert [e for e in evaluator.seen if not e.pep_decision] == [], (
+        "Gate A already answered; no evaluate round trip should be spent DECIDING")
 
 
 async def test_clean_catalog_is_forwarded_byte_identical():
@@ -279,7 +283,9 @@ async def test_strict_mode_quarantines_on_first_sight():
     result = await fw.on_server_message(_tools_list_response([CLEAN]))
     assert json.loads(result.forward)["result"]["tools"] == []
     call = await fw.on_client_message(_call("search_docs", {"query": "x"}))
-    assert call.blocked and evaluator.seen == []
+    assert call.blocked
+    assert [e for e in evaluator.seen if not e.pep_decision] == [], (
+        "quarantine is Gate A's own verdict; the engine is told about it, never asked")
 
 
 async def test_unknown_pin_mode_fails_to_the_stricter_posture():
@@ -479,7 +485,8 @@ async def test_an_undeclared_argument_is_refused():
     assert result.blocked
     assert "not declared" in result.reply.decode()
     # And it never reached policy: an allow over an argument nobody declared is a useless allow.
-    assert evaluator.seen == []
+    assert [e for e in evaluator.seen if not e.pep_decision] == [], (
+        "the refusal must not cost an evaluate round trip to DECIDE; what may follow is a report of it")
 
 
 async def test_a_wrong_typed_argument_is_refused():
