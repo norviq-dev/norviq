@@ -161,7 +161,14 @@ async def set_controls(
     for control_id, effect in sorted(resolved.items()):
         # Only persist deviations. A namespace running entirely at the default keeps zero rows, so a
         # future release that changes a default reaches it instead of being masked by a stored copy.
-        if effect == baseline_lib.DEFAULT_EFFECT:
+        #
+        # Compared against THIS control's shipped default, not the global one. Defaults are per control
+        # now, and the global comparison broke the stated property in both directions: a control sitting
+        # at its own `deny` default was written as a deviation (masking exactly the future change this
+        # comment protects), and an operator's deliberate choice to hold a `deny`-default control at
+        # `monitor` was read as "that's the default" and silently dropped — discarding a de-escalation
+        # somebody made on purpose.
+        if effect == baseline_lib.shipped_default(control_id):
             continue
         session.add(
             NamespaceBaselineControl(

@@ -81,6 +81,13 @@ class ControlHead:
     guard: str
 
 
+#: Where a control acts, which is the axis the console groups on. Chosen over a threat taxonomy
+#: because it mirrors the enforcement architecture an operator is actually reasoning about — Gate A at
+#: discovery, Gate B at the call, the content guard on the way back — so the grouping teaches the model
+#: rather than hiding it.
+Plane = Literal["discovery", "call", "response"]
+
+
 @dataclass(frozen=True, slots=True)
 class Control:
     """A control as an operator sees it: what it catches, and what it costs to enforce."""
@@ -91,6 +98,25 @@ class Control:
     # Named so the console can warn before promotion. Empty when the control has no known
     # false-positive mode worth calling out.
     caveat: str = ""
+    # WHAT THIS CONTROL DOES ON A FRESH INSTALL, per control rather than one global.
+    #
+    # `DEFAULT_EFFECT` shipped every control OBSERVING, for a stated reason: nothing is dropped before
+    # the customer knows the blast radius. That was right while the blast radius was unknown. It is now
+    # measured — `norviq/redteam/precision.py` runs a corpus of legitimate traffic through the compiled
+    # module with every control enforcing — so a control with no measured false positive can enforce on
+    # evidence instead of shipping inert.
+    #
+    # A value here is a claim that must be justifiable from TWO signals, and they are independent:
+    #   1. measured precision over `norviq/redteam/benign.py` (0 false positives on 29 measured cases);
+    #   2. the preset author's own expressed severity — which SET the control's heads register into.
+    #      `scope_violation_dangerous_tool` registers as `audits[...]`, i.e. observe-only by
+    #      construction, and shipping it at `deny` would contradict the source. That is guarded by a
+    #      test, not left to reviewer memory.
+    #
+    # Omitted -> `DEFAULT_EFFECT`, so a control added to a preset without a considered default keeps
+    # today's conservative behaviour rather than silently inheriting `deny`.
+    default_effect: Effect | None = None
+    plane: Plane = "call"
 
 
 # Operator-facing copy. Keyed by control id; a control with no entry still works and falls back to the
@@ -104,17 +130,23 @@ _CONTROL_COPY: dict[str, Control] = {
         "Prompt injection",
         "Catches instructions in tool parameters that try to override the agent's own instructions "
         "— 'ignore previous instructions', jailbreak phrasing, system-prompt exfiltration.",
+        default_effect="deny",
+        plane="call",
     ),
     "deny_sql_injection": Control(
         "deny_sql_injection",
         "SQL injection",
         "Catches destructive or injected SQL in any tool's parameters, not just execute_sql — a "
         "renamed tool carrying 'drop table users' is caught too.",
+        default_effect="deny",
+        plane="call",
     ),
     "deny_sql_multi_statement": Control(
         "deny_sql_multi_statement",
         "Multi-statement SQL",
         "Catches stacked statements and SQL metacharacters on execute_sql.",
+        default_effect="deny",
+        plane="call",
     ),
     "deny_shell_execution": Control(
         "deny_shell_execution",
@@ -124,22 +156,30 @@ _CONTROL_COPY: dict[str, Control] = {
         "values and matches single characters such as '|' in the decoded bytes, so ordinary "
         "alphanumeric identifiers — order ids, tracking codes, session tokens — decode to random "
         "bytes and trip it roughly 1 in 8 times at 16-24 characters. Observe before promoting.",
+        default_effect="deny",
+        plane="call",
     ),
     "llm06_excessive_agency": Control(
         "llm06_excessive_agency",
         "Destructive & elevated tools",
         "Blocks tools that delete or destroy, and escalates elevated ones.",
+        default_effect="deny",
+        plane="call",
     ),
     "llm02_data_leakage": Control(
         "llm02_data_leakage",
         "Secret egress",
         "Catches credentials and secrets sent to an external sink, on ANY tool name — including "
         "tool names it has never seen.",
+        default_effect="monitor",
+        plane="call",
     ),
     "llm05_supply_chain": Control(
         "llm05_supply_chain",
         "Supply chain",
         "Catches plugin/script loading from untrusted sources.",
+        default_effect="deny",
+        plane="call",
     ),
     "dangerous_scheme": Control(
         "dangerous_scheme",
@@ -149,6 +189,8 @@ _CONTROL_COPY: dict[str, Control] = {
         "and SSRF primitive rather than a web fetch. Ordinary http/https is untouched. Some of these "
         "URLs already blocked before this control existed — but as deny_shell_execution, which "
         "attributed them to a shell-execution attempt that never happened.",
+        default_effect="deny",
+        plane="call",
     ),
     "ssrf_metadata": Control(
         "ssrf_metadata",
@@ -160,6 +202,8 @@ _CONTROL_COPY: dict[str, Control] = {
         "reaches in-cluster services on 10.x/172.16-31.x constantly, so blocking those would refuse "
         "ordinary traffic. Scope them yourself with derived.destinations.internal.private if you want "
         "that rule.",
+        default_effect="deny",
+        plane="call",
     ),
     "pii_detection": Control(
         "pii_detection",
@@ -168,16 +212,22 @@ _CONTROL_COPY: dict[str, Control] = {
         caveat="Narrower than the name suggests: it matches US SSN-shaped values. Email addresses, "
         "phone numbers, dates of birth and passport numbers are NOT detected, so this control on "
         "its own is not sufficient for a customer-data policy.",
+        default_effect="deny",
+        plane="call",
     ),
     "pci_card_numbers": Control(
         "pci_card_numbers",
         "Card numbers (PCI)",
         "Catches payment card numbers in tool parameters, by field name and by value.",
+        default_effect="deny",
+        plane="call",
     ),
     "cross_tenant_access": Control(
         "cross_tenant_access",
         "Cross-tenant access",
         "Catches a call reaching for another tenant's data.",
+        default_effect="deny",
+        plane="call",
     ),
     "chain_depth_limit": Control(
         "chain_depth_limit",
@@ -189,11 +239,15 @@ _CONTROL_COPY: dict[str, Control] = {
         "cross-process PEP can only forward the depth its CALLER claims, so a client that reports 0 "
         "is believed. Trust this control for SDK-instrumented workloads; treat it as advisory for "
         "proxied ones.",
+        default_effect="deny",
+        plane="call",
     ),
     "base64_decoded_threat": Control(
         "base64_decoded_threat",
         "Encoded payloads",
         "Catches threats hidden behind base64, including nested encodings.",
+        default_effect="monitor",
+        plane="call",
     ),
     "strict_default_block": Control(
         "strict_default_block",
@@ -203,11 +257,15 @@ _CONTROL_COPY: dict[str, Control] = {
         caveat="Matches on the tool NAME alone, with no regard to arguments — a read-only reporting "
         "tool called delete_candidates_report is blocked. This is the control most likely to need "
         "an exception for a legitimate tool.",
+        default_effect="monitor",
+        plane="call",
     ),
     "scope_violation_dangerous_tool": Control(
         "scope_violation_dangerous_tool",
         "Out-of-scope tool use",
         "Records an agent class using a tool outside its expected scope.",
+        default_effect="monitor",
+        plane="call",
     ),
 }
 
@@ -284,9 +342,26 @@ def control_ids(preset: str) -> list[str]:
     return seen
 
 
+def shipped_default(control_id: str) -> Effect:
+    """The shipped default for ONE control — its own if it declares one, else the global.
+
+    Falling back rather than requiring an entry means a control added to a preset before anyone has
+    measured it keeps the conservative behaviour. The opposite default would silently enforce a
+    detector nobody has run a corpus against.
+    """
+    copy = _CONTROL_COPY.get(control_id)
+    return copy.default_effect if copy and copy.default_effect else DEFAULT_EFFECT
+
+
 def default_effects(preset: str) -> dict[str, Effect]:
-    """Every control at the shipped default."""
-    return {cid: DEFAULT_EFFECT for cid in control_ids(preset)}
+    """Every control at ITS shipped default — no longer one global for all of them."""
+    return {cid: shipped_default(cid) for cid in control_ids(preset)}
+
+
+def plane_of(control_id: str) -> Plane:
+    """Which plane a control acts on, for the console's grouping."""
+    copy = _CONTROL_COPY.get(control_id)
+    return copy.plane if copy else "call"
 
 
 def normalize_effects(preset: str, effects: dict[str, str] | None) -> dict[str, Effect]:
@@ -297,7 +372,13 @@ def normalize_effects(preset: str, effects: dict[str, str] | None) -> dict[str, 
     was enforcing.
     """
     known = control_ids(preset)
-    resolved: dict[str, Effect] = {cid: DEFAULT_EFFECT for cid in known}
+    # Seeded from each control's OWN shipped default, not the global one. This function is what
+    # actually decides the compiled module (`_materialize` -> `compile(preset, normalize_effects(...))`),
+    # so seeding it from the global made the per-control defaults inert: `describe()` reported
+    # `default_effect: "deny"` beside `effect: "monitor"`, i.e. every enforcing control read as
+    # deviating from its own default while nothing enforced. Two homes disagreeing about the same
+    # question, which is the defect shape this codebase keeps rediscovering.
+    resolved: dict[str, Effect] = {cid: shipped_default(cid) for cid in known}
     for cid, effect in (effects or {}).items():
         if cid not in resolved:
             raise ValueError(f"unknown control for preset {preset!r}: {cid}")
@@ -323,7 +404,11 @@ def describe(preset: str, effects: dict[str, str] | None = None) -> list[dict]:
                 "description": copy.description if copy else reasons.get(cid, ""),
                 "caveat": copy.caveat if copy else "",
                 "effect": resolved[cid],
-                "default_effect": DEFAULT_EFFECT,
+                # PER CONTROL, not the global. The console renders "Reset to default" and a
+                # differs-from-default marker off this, so a single global value made every row claim
+                # the same default and the marker was wrong for any control that had its own.
+                "default_effect": shipped_default(cid),
+                "plane": plane_of(cid),
             }
         )
     return out

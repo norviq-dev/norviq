@@ -152,9 +152,12 @@ def test_a_partial_effect_map_leaves_the_rest_at_the_default() -> None:
     """Naming one control must not silently re-enforce every other one.
 
     `compile()` takes a sparse map, so what happens to the controls the caller did NOT mention is a
-    real decision: they stay at the shipped default (`monitor`). The alternative — inheriting the
-    preset's original severity — would mean a customer flipping one control to `off` quietly
-    promoted the other thirteen to `deny`.
+    real decision: they stay at THEIR shipped default. The alternative — inheriting the preset's
+    original severity — would mean a customer flipping one control to `off` quietly promoted every
+    other one, including the four that deliberately ship observing.
+
+    Defaults are per control now, so "the rest" is no longer uniformly `audit`. The invariant under
+    test is unchanged: naming one control must not move any other one off its own default.
     """
     with tempfile.TemporaryDirectory() as td:
         rego = Path(td) / "partial.rego"
@@ -164,7 +167,12 @@ def test_a_partial_effect_map_leaves_the_rest_at_the_default() -> None:
         # which is precisely the trap this comment was written to prevent.
         rego.write_text(baseline.compile("strict", {"pii_detection": "off"}), encoding="utf-8")
         assert _eval(rego, _QUERY_DECISION, _DETECTED) == "allow"           # the one named
-        assert _eval(rego, _QUERY_DECISION, _SQL_ATTACK) == "audit"        # the rest: default monitor
+        # deny_sql_injection is untouched and ships ENFORCING, so the attack blocks — the unnamed
+        # controls sit at their own defaults, which is the property being asserted.
+        assert _eval(rego, _QUERY_DECISION, _SQL_ATTACK) == "block"
+        # ...and a control whose own default is observe-only is still observing, so "the rest went to
+        # deny" cannot be what happened.
+        assert baseline.shipped_default("scope_violation_dangerous_tool") == "monitor"
 
 
 @pytest.mark.skipif(_OPA is None, reason="opa binary required to evaluate the compiled baseline")

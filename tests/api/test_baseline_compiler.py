@@ -138,10 +138,32 @@ def test_unknown_preset_raises_rather_than_returning_empty() -> None:
         baseline.preset_source("no-such-preset")
 
 
-def test_the_shipped_default_is_monitor_for_every_control() -> None:
-    """Nothing is dropped on a fresh install — the premise of the whole feature."""
-    assert baseline.DEFAULT_EFFECT == "monitor"
-    assert set(baseline.default_effects(PRESET).values()) == {"monitor"}
+def test_the_shipped_default_is_now_per_control_and_actually_enforces() -> None:
+    """The premise CHANGED, deliberately, and this records what replaced it.
+
+    It used to be "nothing is dropped on a fresh install" — every control at `monitor` — because the
+    blast radius was unknown. It is now measured (`norviq/redteam/precision.py`), so a control with no
+    measured false positive enforces on evidence instead of shipping inert. A security product whose
+    controls all start switched off protects nothing until configured.
+
+    What still protects the customer is narrower and is asserted here plus in
+    tests/redteam/test_benign_precision.py::TestShippedDefaultsAreEarned:
+      * the GLOBAL fallback stays `monitor`, so a control nobody has measured ships observing;
+      * every control that ships `deny` is clean over the benign corpus;
+      * a control the preset registers as audit-only never ships `deny`.
+    """
+    assert baseline.DEFAULT_EFFECT == "monitor", "the fallback for an unmeasured control must stay safe"
+
+    effects = baseline.default_effects(PRESET)
+    assert set(effects.values()) == {"deny", "monitor"}, "defaults are per control, not one global"
+    assert effects["deny_shell_execution"] == "deny"
+    assert effects["scope_violation_dangerous_tool"] == "monitor"
+
+    # And it is not cosmetic: the default configuration must COMPILE blocking heads. Seeding
+    # `normalize_effects` from the global left every default enforcing on paper and observing in the
+    # module, which is the failure this assertion exists to catch.
+    src = baseline.compile(PRESET, effects)
+    assert "\nblocks[" in src, "the shipped default produces no blocking head — defaults are inert"
 
 
 def test_describe_surfaces_the_false_positive_caveats() -> None:
@@ -149,7 +171,9 @@ def test_describe_surfaces_the_false_positive_caveats() -> None:
     by_id = {c["id"]: c for c in baseline.describe(PRESET)}
     assert "1 in 8" in by_id["deny_shell_execution"]["caveat"]
     assert "SSN" in by_id["pii_detection"]["caveat"]
-    assert by_id["deny_shell_execution"]["effect"] == "monitor"
+    # Ships enforcing now — the base64 misfire this caveat describes was fixed by C2-023 and the
+    # prose-metacharacter one by the exec-name gating, and the corpus confirms both.
+    assert by_id["deny_shell_execution"]["effect"] == "deny"
 
 
 def test_an_audit_authored_control_can_actually_be_promoted_to_deny() -> None:

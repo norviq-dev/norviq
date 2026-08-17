@@ -111,9 +111,17 @@ def test_catalog_lists_every_control_at_the_default() -> None:
     body = client.get("/api/v1/baseline/controls?namespace=default", headers=_h()).json()
     ids = {c["id"] for c in body["controls"]}
     assert {"deny_shell_execution", "pii_detection", "strict_default_block"} <= ids
-    assert all(c["effect"] == "monitor" for c in body["controls"]), "fresh namespace must drop nothing"
+    # A fresh namespace now reflects each control's OWN shipped default, not one global value. It used
+    # to assert "fresh namespace must drop nothing"; that premise changed deliberately once precision
+    # was measured (see test_baseline_compiler::test_the_shipped_default_is_now_per_control...).
+    for control in body["controls"]:
+        assert control["effect"] == control["default_effect"], (
+            f"{control['id']} deviates from its own default on a FRESH namespace")
+    assert {c["effect"] for c in body["controls"]} == {"deny", "monitor"}, (
+        "a fresh namespace showing one effect for everything means defaults are not per control")
+    # The top-level value is the FALLBACK for a control that declares none — still safe.
     assert body["default_effect"] == "monitor"
-    assert body["counts"]["monitor"] == len(body["controls"])
+    assert body["counts"]["deny"] + body["counts"]["monitor"] == len(body["controls"])
 
 
 def test_catalog_surfaces_the_false_positive_caveat() -> None:
@@ -167,7 +175,8 @@ def test_catalog_reflects_stored_deviations() -> None:
     by_id = {c["id"]: c["effect"] for c in body["controls"]}
     assert by_id["deny_shell_execution"] == "off"
     assert by_id["pii_detection"] == "deny"
-    assert by_id["llm01_prompt_injection"] == "monitor"  # untouched, still default
+    # Untouched, so still at ITS default — which is `deny`, not the global fallback.
+    assert by_id["llm01_prompt_injection"] == baseline_lib.shipped_default("llm01_prompt_injection")
 
 
 # --- writes ----------------------------------------------------------------------------------------
@@ -180,7 +189,9 @@ def test_put_materializes_a_recompiled_baseline() -> None:
         headers=_h(),
     )
     assert resp.status_code == 200
-    assert resp.json()["enforcing"] == ["deny_sql_injection"]
+    # Every control at its shipped default already enforces, so `enforcing` is no longer just the one
+    # the caller named — assert membership rather than equality.
+    assert "deny_sql_injection" in resp.json()["enforcing"]
     assert len(loader.created) == 1
     written = loader.created[0]
     assert written["ns"] == "default"
@@ -191,8 +202,13 @@ def test_put_materializes_a_recompiled_baseline() -> None:
     assert written["agent_class"] == "__controls__"
     assert written["priority"] == 2, "must outrank the chart baseline (priority 1) but not a class policy"
     assert 'blocks["deny_sql_injection"]' in written["rego"]
-    # everything else stayed at monitor -> registered as audits, not blocks
-    assert 'audits["llm01_prompt_injection"]' in written["rego"]
+    # An UNNAMED control lands at its own shipped default, and the module must show that default
+    # honoured — llm01 ships enforcing, so it registers into blocks. The point of the assertion is
+    # unchanged: a control the caller did not mention must not be silently re-registered somewhere
+    # other than where its default says.
+    assert 'blocks["llm01_prompt_injection"]' in written["rego"]
+    # ...and one whose default is observe-only must still land in audits, or "per control" is a fiction.
+    assert 'audits["scope_violation_dangerous_tool"]' in written["rego"]
 
 
 def test_the_materialized_policy_stays_in_block_mode() -> None:
@@ -220,7 +236,11 @@ def test_only_deviations_are_persisted() -> None:
         headers=_h(),
     )
     stored = {r.control_id: r.effect for r in session.added}
-    assert stored == {"pii_detection": "deny"}, "a control left at the default must not be written"
+    # `pii_detection: deny` IS its shipped default now, so it is no longer a deviation and must not be
+    # written. `llm01_prompt_injection: monitor` IS one — the operator is holding a deny-default control
+    # back, which is exactly the deliberate de-escalation that must survive a release.
+    assert stored == {"llm01_prompt_injection": "monitor"}, (
+        "deviation must be computed against the control's OWN default, not the global fallback")
 
 
 def test_put_replaces_rather_than_merges() -> None:

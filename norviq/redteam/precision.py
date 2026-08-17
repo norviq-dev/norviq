@@ -93,7 +93,8 @@ def _eval(module: Path, query: str, case: BenignDefinition) -> str:
     payload = {
         "tool_name": case.tool_name,
         "tool_params": case.tool_params,
-        "agent": {"namespace": "default", "agent_class": "benign-probe"},
+        "agent": {"namespace": "default", "agent_class": case.agent_class},
+        "call_depth": case.call_depth,
         "derived": {},
     }
     if case.mcp_context:

@@ -141,3 +141,72 @@ def test_a_missing_opa_raises_rather_than_reading_as_zero() -> None:
             precision.measure("strict")
     finally:
         precision.shutil.which = original
+
+
+# ── the shipped defaults must be justifiable from the two independent signals ──────────────────────
+
+class TestShippedDefaultsAreEarned:
+    """A `deny` default is a claim. These are the two things that have to be true for it.
+
+    Both signals are needed and neither is sufficient. Precision says the control does not touch
+    legitimate traffic; the preset's own head set says the author meant it to block at all. A control
+    can pass one and fail the other.
+    """
+
+    def test_every_control_is_exercised_by_at_least_one_case(self) -> None:
+        """A control nothing reaches scores clean for want of an input, not on merit.
+
+        Three controls — llm05_supply_chain, chain_depth_limit, scope_violation_dangerous_tool — were
+        unexercised by the first version of this corpus and so read as clean. Two of them were not
+        reachable at all until the harness carried `call_depth` and `agent_class`.
+        """
+        exercised: set[str] = set()
+        for case in BENIGN:
+            exercised.update(case.at_risk_controls)
+            if case.expected_blocked_by:
+                exercised.add(case.expected_blocked_by)
+        missing = set(baseline.control_ids("strict")) - exercised
+        assert not missing, f"controls no benign case reaches: {sorted(missing)}"
+
+    def test_nothing_ships_deny_that_the_preset_registers_as_observe_only(self) -> None:
+        """The second signal, as a guard rather than reviewer memory.
+
+        `scope_violation_dangerous_tool` registers as `audits[...]` — the preset author made it
+        observe-only by construction. Shipping it at `deny` would contradict the source while looking
+        like a considered product decision.
+        """
+        native: dict[str, set[str]] = {}
+        for head in baseline.controls_for("strict"):
+            native.setdefault(head.control_id, set()).add(head.set_name)
+
+        for cid, sets in native.items():
+            if sets == {"audits"}:
+                assert baseline.shipped_default(cid) != "deny", (
+                    f"{cid} is registered audit-only in the preset but ships at deny")
+
+    def test_every_deny_default_is_clean_over_the_corpus(self) -> None:
+        """The first signal. Anything shipping enforcing must have touched nothing legitimate."""
+        report = measure("strict")
+        enforcing = [c for c in baseline.control_ids("strict")
+                     if baseline.shipped_default(c) == "deny"]
+        assert enforcing, "if nothing ships enforcing this test is vacuous"
+        dirty = [c for c in enforcing if c in report.by_control]
+        assert not dirty, f"shipping enforcing despite measured false positives: {dirty}"
+
+    def test_a_control_with_no_considered_default_stays_conservative(self) -> None:
+        """Falling back to the global means an unmeasured control ships inert, not enforcing."""
+        assert baseline.shipped_default("a_control_nobody_has_measured") == baseline.DEFAULT_EFFECT
+        assert baseline.DEFAULT_EFFECT == "monitor"
+
+    def test_default_effects_uses_the_per_control_value(self) -> None:
+        effects = baseline.default_effects("strict")
+        assert effects["deny_shell_execution"] == "deny"
+        assert effects["scope_violation_dangerous_tool"] == "monitor"
+        assert len(set(effects.values())) > 1, "a single value means the per-control wiring is not live"
+
+    def test_the_wire_format_carries_the_per_control_default_and_plane(self) -> None:
+        """The console renders differs-from-default off this; one global value made the marker lie."""
+        rows = {r["id"]: r for r in baseline.describe("strict")}
+        assert rows["deny_shell_execution"]["default_effect"] == "deny"
+        assert rows["scope_violation_dangerous_tool"]["default_effect"] == "monitor"
+        assert all(r["plane"] in ("discovery", "call", "response") for r in rows.values())
