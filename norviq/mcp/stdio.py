@@ -57,6 +57,7 @@ from norviq.engine.identity import SPIFFEResolver
 from norviq.mcp import protocol as P
 from norviq.mcp.firewall import McpFirewall
 from norviq.mcp.pins import ControlPlanePinStore, PinRegistry, build_store
+from norviq.mcp.servers import ControlPlaneServerStore
 from norviq.sdk.client.engine import PolicyEngineClient
 from norviq.sdk.core.interceptor import ToolInterceptor
 
@@ -130,6 +131,7 @@ class StdioProxy:
         self._client_out: "_Writer | None" = None
         self._out_lock = asyncio.Lock()
         self._pin_store = None      # set only for the control-plane backend
+        self._server_store = None   # the MCP server registry; always set once the firewall is built
 
     # ------------------------------------------------------------------ setup
     async def _build_firewall(self) -> McpFirewall:
@@ -161,11 +163,23 @@ class StdioProxy:
         else:
             store = build_store(settings.mcp_pin_store, settings.mcp_pin_path)
         pins = PinRegistry(store=store, mode=settings.mcp_pin_mode)
+
+        # The server-level registry, loaded on the same terms as pins: once here before any traffic,
+        # then re-read on the same interval so a BLOCK made in the console reaches a RUNNING proxy.
+        # It is loaded whatever the pin backend is — pins and decisions answer different questions,
+        # and an operator who chose a local pin store has not thereby declined to have their
+        # blocked-server decisions enforced.
+        servers = ControlPlaneServerStore(namespace=identity.namespace)
+        await servers.load()
+        servers.start_refresh(settings.mcp_pin_refresh_s)
+        self._server_store = servers
+
         return McpFirewall(
             interceptor=interceptor,
             server_id=self._server_id,
             session_id=self._session_id,
             pins=pins,
+            servers=servers.registry,
             tool_name_prefix=self._prefix,
             transport="stdio",
         )
@@ -280,6 +294,12 @@ class StdioProxy:
                 await self._pin_store.flush(
                     self._firewall.observed_catalog() if self._firewall else None
                 )
+        if self._server_store is not None:
+            # Cancel the refresh loop. Left running it holds the event loop open past shutdown and
+            # logs a control-plane error on the way down, which reads like a failure when it is only
+            # a poll that outlived the thing it was polling for.
+            with contextlib.suppress(Exception):
+                await self._server_store.aclose()
         if self._engine is not None:
             with contextlib.suppress(Exception):
                 await self._engine.close()

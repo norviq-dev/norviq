@@ -44,6 +44,7 @@ from norviq.engine.identity import SPIFFEResolver
 from norviq.mcp import protocol as P
 from norviq.mcp.firewall import McpFirewall
 from norviq.mcp.pins import ControlPlanePinStore, PinRegistry, build_store, effective_store_kind
+from norviq.mcp.servers import ControlPlaneServerStore
 from norviq.sdk.client.engine import PolicyEngineClient
 from norviq.sdk.core.interceptor import ToolInterceptor
 
@@ -126,6 +127,25 @@ class HttpProxy:
         self._lock = asyncio.Lock()
         # The control-plane recovery loop (BUG-026). None until a load actually fails.
         self._pin_retry_task: asyncio.Task | None = None
+        # The MCP server registry. Constructed HERE, not in `run()`, even though its `load()` is
+        # awaited later: `_firewall_for_caller` hands the firewall a reference to `.registry`, and a
+        # store that appeared only in `run()` would leave any firewall built before it with its own
+        # empty registry forever. Construction is sync and cheap; only the load needs a loop.
+        #
+        # Loaded on EVERY pin backend, unlike pins: choosing a local pin store is not a decision to
+        # stop enforcing blocked servers.
+        self._servers = ControlPlaneServerStore(namespace=getattr(settings, "namespace", "") or "")
+
+    async def _install_server_registry(self) -> None:
+        """Load the server decisions before the listener binds, then keep re-reading.
+
+        No retry loop of its own: unlike the pin store there is nothing to swap in on success — the
+        firewall already holds the registry object, and `start_refresh` re-attempts the load on the
+        same interval whether or not the first one worked. A failure here is loud (NRVQ-MCP-5070) and
+        recovers on the next tick.
+        """
+        await self._servers.load()
+        self._servers.start_refresh(settings.mcp_pin_refresh_s)
 
     async def _install_pin_store(self) -> None:
         """Swap in the durable, cross-pod store before the listener accepts anything.
@@ -229,6 +249,7 @@ class HttpProxy:
                 server_id=self._server_id,
                 session_id=f"mcp-http-{key}",
                 pins=self._pins,
+                servers=self._servers.registry,
                 tool_name_prefix=self._prefix,
             )
             # Bounded anyway. The key is attested now, so a peer cannot mint entries — but a resolver
@@ -384,6 +405,7 @@ class HttpProxy:
         # BEFORE the listener binds. A request arriving against the per-process fallback would take a
         # first_seen TOFU decision this pod would then never reconcile with the shared store.
         await self._install_pin_store()
+        await self._install_server_registry()
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(60.0, connect=5.0),
             limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
@@ -401,6 +423,8 @@ class HttpProxy:
         finally:
             if self._pin_retry_task is not None:
                 self._pin_retry_task.cancel()
+            with contextlib.suppress(Exception):
+                await self._servers.aclose()
             await self._client.aclose()
             with contextlib.suppress(Exception):
                 await self._engine.close()

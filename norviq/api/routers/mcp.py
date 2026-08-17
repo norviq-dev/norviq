@@ -32,7 +32,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from norviq.api.auth import get_current_user, read_namespace, require_admin, scoped_namespace
-from norviq.api.db.models import McpToolPin
+from norviq.api.db.models import McpServer, McpToolPin
 from norviq.api.db.session import get_session
 
 log = structlog.get_logger()
@@ -46,7 +46,36 @@ PIN_FIRST_SEEN = "first_seen"
 PIN_DRIFT = "drift"
 PIN_QUARANTINED = "quarantined"
 
+# Registry statuses, mirroring norviq/mcp/servers.py for the same reason.
+STATUS_DISCOVERED = "discovered"
+STATUS_REGISTERED = "registered"
+STATUS_BLOCKED = "blocked"
+
 _SEVERITY_ORDER = {"none": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+
+#: The server-level roll-up, worst first. An ORDERING, not a set — the console sorts on it.
+#:
+#: `blocked` outranks every observation because it answers a stronger question: telling an operator
+#: that a server they have already refused has "drift" sends them to re-approve a definition on a
+#: server they do not want reachable at all. `drift` beats a scan finding because drift means the
+#: thing that was approved is not the thing being served — a different class of problem from "this
+#: description looks suspicious". `unreviewed` sits above `ok`, not beside it: only a decision moves a
+#: server out of that state, and a fresh install is entirely made of it.
+#:
+#: Declared here rather than imported from `norviq.mcp.servers` for the same reason the pin verdicts
+#: above are: `norviq/mcp/__init__` imports the firewall, so one import for an ordering would pull the
+#: MCP data plane into the control-plane image. Health is a control-plane roll-up over pins AND
+#: decisions; the proxy has no use for it, so there is nothing shared to factor out.
+_HEALTH_ORDER: tuple[str, ...] = ("blocked", "drift", "quarantined", "flagged", "unreviewed", "ok")
+
+
+def _health_rank(health: str) -> int:
+    """Sort key for `_HEALTH_ORDER`. An unrecognised word sorts FIRST, not last — a health string
+    nothing here produces is a bug, and burying it at the bottom is how it stays one."""
+    try:
+        return _HEALTH_ORDER.index(health)
+    except ValueError:
+        return -1
 
 
 class ObservedTool(BaseModel):
@@ -265,18 +294,47 @@ async def list_servers(
             if iso and (cur is None or (field == "last_seen_at" and iso > cur) or (field == "first_seen_at" and iso < cur)):
                 entry[field] = iso
 
+    # The operator's DECISION, joined onto what was observed. A server with a decision but no pins yet
+    # still appears: registering a server before its first tools/list is a legitimate thing to do, and a
+    # listing that only shows servers it has seen cannot express it.
+    decisions = {}
+    dstmt = select(McpServer)
+    if ns:
+        dstmt = dstmt.where(McpServer.namespace == ns)
+    for row in (await session.scalars(dstmt)).all():
+        decisions[(row.namespace, row.server_id)] = row
+        servers.setdefault((row.namespace, row.server_id), {
+            "namespace": row.namespace, "server_id": row.server_id, "transport": row.transport,
+            "tools": 0, "drifted": 0, "quarantined": 0, "flagged": 0,
+            "worst_severity": "none", "last_seen_at": None, "first_seen_at": None,
+        })
+
+    for key, entry in servers.items():
+        row = decisions.get(key)
+        entry["status"] = row.status if row else STATUS_DISCOVERED
+        entry["writable"] = bool(row.writable) if row else False
+        entry["decided_by"] = (row.decided_by if row else "") or ""
+        entry["note"] = (row.note if row else "") or ""
+        entry["identity_drift_count"] = row.identity_drift_count if row else 0
+
     out = list(servers.values())
     for entry in out:
-        # One word an operator can triage on, worst-first. Drift beats a scan finding because drift
-        # means the thing that was approved is not the thing being served — a different class of
-        # problem from "this description looks suspicious".
+        # One word an operator can triage on. The ordering itself is `servers.HEALTH_ORDER`, which
+        # documents why each rung outranks the next; the only thing decided here is which rung a row
+        # is on given what was observed and what was decided.
         entry["health"] = (
-            "drift" if entry["drifted"]
+            "blocked" if entry["status"] == STATUS_BLOCKED
+            else "drift" if entry["drifted"]
             else "quarantined" if entry["quarantined"]
             else "flagged" if entry["flagged"]
+            else "unreviewed" if entry["status"] == STATUS_DISCOVERED
             else "ok"
         )
-    out.sort(key=lambda e: (e["health"] == "ok", e["server_id"]))
+    # Worst first, by the real ordering. Sorting on `health == "ok"` was fine while an undecided server
+    # read as "ok", and became wrong the moment it read as "unreviewed": every row on a fresh install
+    # is then non-ok, the boolean collapses, and the drifted server sorts wherever its id happens to
+    # fall. Ties break on server_id so the list is stable between reloads.
+    out.sort(key=lambda e: (_health_rank(e["health"]), e["server_id"]))
     return out
 
 
@@ -335,6 +393,63 @@ async def revoke_pin(
     return _row_dict(row)
 
 
+class ServerDecisionBody(BaseModel):
+    """An operator decision about one MCP server."""
+
+    namespace: str = Field(max_length=255)
+    server_id: str = Field(max_length=255)
+    status: str = Field(pattern="^(discovered|registered|blocked)$")
+    # Only meaningful with status=registered; a blocked server is not writable whatever this says.
+    writable: bool = False
+    note: str = Field(default="", max_length=1024)
+
+
+@router.post("/mcp/servers/decision")
+async def decide_server(
+    body: ServerDecisionBody,
+    session: AsyncSession = Depends(get_session),
+    user: dict = Depends(get_current_user),
+) -> dict:
+    """Register, block, or return a server to unreviewed. Admin-only, audited.
+
+    This is the write half of the registry, and it ships in the same change as the module that reads
+    it on purpose: `norviq/api/egress_allowlist.py` has a complete compiler and engine-side collection
+    and no router, so its only importer is its own test and the feature has never been reachable. A
+    control that reads a list nobody can populate is the same shape.
+    """
+    require_admin(user)
+    scoped_namespace(user, body.namespace)
+
+    row = (await session.scalars(
+        select(McpServer).where(McpServer.namespace == body.namespace,
+                                McpServer.server_id == body.server_id)
+    )).first()
+    if row is None:
+        # `status` is set explicitly rather than left to the column default, which SQLAlchemy applies
+        # at FLUSH: read before that, `row.status` is None, and the audit line and the response then
+        # said the previous status was nothing at all. "discovered" IS the state of a server with no
+        # decision row — that is the whole meaning of the default — so reporting it is not a guess.
+        row = McpServer(namespace=body.namespace, server_id=body.server_id,
+                        status=STATUS_DISCOVERED)
+        session.add(row)
+
+    previous = row.status
+    row.status = body.status
+    # A blocked server is never writable. Keeping the flag set would leave a latent grant that takes
+    # effect the moment somebody unblocks it, which is not what "block" is understood to mean.
+    row.writable = bool(body.writable) and body.status == STATUS_REGISTERED
+    row.note = body.note
+    row.decided_by = str(user.get("sub") or "")
+    row.decided_at = datetime.now(timezone.utc)
+    await session.commit()
+
+    log.warning("nrvq.mcp.server.decision", namespace=body.namespace, server=body.server_id,
+                previous=previous, status=row.status, writable=row.writable,
+                by=user.get("sub"), code="NRVQ-MCP-5069")
+    return {"namespace": row.namespace, "server_id": row.server_id, "status": row.status,
+            "writable": row.writable, "previous_status": previous, "note": row.note}
+
+
 @router.delete("/mcp/servers/{namespace}/{server_id}")
 async def forget_server(
     namespace: str,
@@ -352,7 +467,21 @@ async def forget_server(
     result = await session.execute(
         delete(McpToolPin).where(McpToolPin.namespace == namespace, McpToolPin.server_id == server_id)
     )
+    # THE DECISION IS NOT AN OBSERVATION AND DOES NOT GO WITH THEM. Forget clears what the server was
+    # SEEN to serve, so the next tools/list re-pins from scratch. A `blocked` decision is the opposite
+    # kind of fact — an operator's refusal — and dropping it here would make "forget" a way to launder
+    # a refusal into a clean first sight, which is precisely the re-TOFU laundering the DELETE handler
+    # in firewall.py already refuses to allow for Gate-A state. A registration is dropped, because
+    # re-registering after a decommission should be a deliberate act.
+    kept = (await session.scalars(
+        select(McpServer).where(McpServer.namespace == namespace, McpServer.server_id == server_id)
+    )).first()
+    decision_kept = bool(kept and kept.status == "blocked")
+    if kept and not decision_kept:
+        await session.delete(kept)
     await session.commit()
     log.warning("nrvq.mcp.server.forgotten", namespace=namespace, server=server_id,
-                removed=result.rowcount, by=user.get("sub"), code="NRVQ-MCP-5045")
-    return {"namespace": namespace, "server_id": server_id, "removed": result.rowcount}
+                removed=result.rowcount, decision_kept=decision_kept,
+                by=user.get("sub"), code="NRVQ-MCP-5045")
+    return {"namespace": namespace, "server_id": server_id, "removed": result.rowcount,
+            "decision_kept": decision_kept}

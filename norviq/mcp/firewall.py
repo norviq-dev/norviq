@@ -39,6 +39,7 @@ from norviq.mcp.pins import (
     canonical_definition,
     definition_digest,
 )
+from norviq.mcp.servers import ServerRegistry
 from norviq.mcp.scanner import (
     Finding,
     ScanReport,
@@ -349,12 +350,17 @@ class McpFirewall:
         pins: PinRegistry | None = None,
         tool_name_prefix: str = "",
         transport: str = "stdio",
+        servers: ServerRegistry | None = None,
     ) -> None:
         self._interceptor = interceptor
         self._server_id = server_id
         self._transport = transport
         self._session_id = session_id or f"mcp-{server_id}"
         self._pins = pins or PinRegistry(mode=settings.mcp_pin_mode)
+        # Operator decisions about the SERVER, loaded once at startup by the transport driver. An empty
+        # registry means every server reads as `discovered`, which is reachable — so a deployment that
+        # has not populated it behaves exactly as it did before this existed.
+        self._servers = servers or ServerRegistry()
         # Off by default. Prefixing makes `tool_name` no longer a 1:1 image of the MCP tool name,
         # which breaks any policy written against the bare name — so it is opt-in, for the
         # multi-server deployments where policy genuinely must tell two `read_file`s apart.
@@ -478,7 +484,9 @@ class McpFirewall:
             if requested == P.M_SERVER_DISCOVER:
                 return self._gate_a_discover(msg)
             if requested == P.M_TOOLS_LIST:
-                return self._gate_a_tools_list(msg)
+                # The only awaited branch in this dispatch. It reports a blocked-server refusal to the
+                # control plane, and that report is a network call — see `_gate_a_tools_list`.
+                return await self._gate_a_tools_list(msg)
             if requested == P.M_PROMPTS_GET:
                 return self._gate_a_prompts_get(msg)
             # The three discovery siblings of tools/list. Same channel, different method name — the
@@ -1067,7 +1075,7 @@ class McpFirewall:
         log.info("nrvq.mcp.catalog_changed", method=method, tools=len(self._catalog),
                  code="NRVQ-MCP-5030")
 
-    def _gate_a_tools_list(self, msg: P.JsonRpcMessage) -> MediationResult:
+    async def _gate_a_tools_list(self, msg: P.JsonRpcMessage) -> MediationResult:
         """Scan, pin, and rewrite a `tools/list` response before the model ever sees it.
 
         This is the whole Gate A budget for a session: it runs here, and on each re-list after a
@@ -1077,6 +1085,46 @@ class McpFirewall:
         tools = msg.result.get("tools")
         if not isinstance(tools, list):
             return MediationResult(forward=msg.framed)
+
+        # THE SERVER-LEVEL DECISION COMES FIRST, and it withholds WHOLESALE rather than per tool.
+        #
+        # A blocked server is refused here, at discovery, because for the poisoning vectors the
+        # DESCRIPTION is the payload: by the time a call arrives the prose has already been rendered
+        # into the model's context and has already had its chance to steer it. Filtering tool by tool
+        # would be the same mistake one level down — every description would still be read.
+        #
+        # This is also the only place the rogue-server shape is visible. A tool from an unregistered
+        # server can be entirely ordinary on its own terms (clean prose, benign schema, read verb), so
+        # Gate A's per-definition scan has nothing to say about it and the write-scoping rule exempts
+        # reads. The question "should we be talking to this server at all" is not answerable from any
+        # single tool, which is why it is asked before any of them are considered.
+        decision = self._servers.get(self._server_id)
+        if not decision.reachable:
+            self._bump("server_blocked")
+            log.warning("nrvq.mcp.gate_a.server_blocked", server=self._server_id,
+                        status=decision.status, tools_withheld=len(tools), code="NRVQ-MCP-5068")
+            # Reported like every other pre-policy refusal. Three choices in it:
+            #
+            # ONCE per listing, not once per withheld tool — the decision was taken about the SERVER,
+            # so N rows naming N tools would misdescribe one act as a spree.
+            #
+            # The audit row's tool is the METHOD, `tools/list`, not any tool name. There is no single
+            # tool this refusal is about, and the withheld names are the blocked server's own strings:
+            # echoing them would let a refused server keep writing into the console that refused it.
+            #
+            # The COUNT is included because it is the operator's evidence of scale — "12 definitions
+            # were withheld" is what makes this row actionable rather than a bare notice.
+            await self._report_denial(
+                "tools/list", {}, "mcp_server_blocked",
+                f"discovery refused: MCP server '{self._server_id}' is blocked by operator decision; "
+                f"{len(tools)} tool definition(s) were withheld before reaching the model",
+                surface="tools/list")
+            rewritten = json.loads(msg.raw)
+            rewritten["result"]["tools"] = []
+            _annotate(rewritten.get("result"), {
+                "server_blocked": True, "server_id": self._server_id, "status": decision.status,
+            })
+            return MediationResult(forward=P.encode(rewritten), note="server_blocked")
 
         kept: list[dict] = []
         changed = False

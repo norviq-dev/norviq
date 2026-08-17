@@ -447,6 +447,53 @@ class McpToolPin(Base):
     )
 
 
+class McpServer(Base):
+    """An MCP server as the OPERATOR has decided about it — not as it was observed.
+
+    `mcp_tool_pins` records what a server SERVED; this records what an operator SAID about it. They are
+    deliberately separate rows: `GET /mcp/servers` used to derive the server list by grouping pins in
+    memory, so a server existed only as a side effect of having observed a tool from it — there was
+    nowhere to put a decision, no way to name a server before it was seen, and `forget` (which deletes
+    pins) would have taken the decision with it.
+
+    `discovered` on first sight, NEVER `registered`. Observed and approved must be different states, for
+    the same reason Gate A reports `scan_severity: "unknown"` rather than `"none"` for a definition it
+    never scanned: "I have not looked at this" must not read like "I looked and it was fine".
+    Registration is always a human act.
+
+    Keyed `(namespace, server_id)` to match McpToolPin, so a server reachable from two namespaces is
+    registered twice. That is the tenant-safe reading: one namespace approving a server must not
+    silently authorise every other one.
+    """
+
+    __tablename__ = "mcp_servers"
+    namespace: Mapped[str] = mapped_column(String(255), primary_key=True)
+    server_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    # discovered | registered | blocked
+    status: Mapped[str] = mapped_column(String(16), default="discovered")
+    # Whether WRITE-verb tools on this server may be called. Separate from `status` because "may I
+    # reach it at all" and "may I write through it" are different questions — collapsing them is what
+    # left reads from an unregistered server ungoverned.
+    writable: Mapped[bool] = mapped_column(Boolean, default=False)
+    decided_by: Mapped[str] = mapped_column(String(255), default="")
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+    # THE SERVER'S IDENTITY SURFACE, hashed the way a tool definition is. `server_id` is only the
+    # `--server-id` the proxy was started with — operator-chosen, PEP-reported, not cryptographic — so
+    # without this "registered" means no more than "something claimed this name". The digest covers the
+    # initialize/discover response (serverInfo name+version, instructions banner) and the tool-name set,
+    # so a wholesale toolset swap under a stable name is visible as identity drift, which is a stronger
+    # signal than any single tool drifting.
+    identity_digest: Mapped[str] = mapped_column(String(64), default="")
+    last_identity_digest: Mapped[str] = mapped_column(String(64), default="")
+    identity_canonical: Mapped[str] = mapped_column(Text, default="")
+    identity_drift_count: Mapped[int] = mapped_column(Integer, default=0)
+    transport: Mapped[str] = mapped_column(String(16), default="stdio")
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    __table_args__ = (Index("idx_mcp_server_ns_status", "namespace", "status"),)
+
+
 class SiemForwardCursor(Base):
     """Where the SIEM forwarder got to, durably.
 
