@@ -37,6 +37,21 @@
 # v0 (--v0-compatible) dialect, matching every other shipped policy.
 package norviq.guardrail.mcp_integration
 
+# >>> EDIT: every MCP server this namespace may reach AT ALL, read or write.
+#     A server absent from this set is one nobody registered, and a tool served by it is the
+#     rogue-server vector: the definition can look perfectly ordinary — `lookup_record`, "Looks up an
+#     account record by id" — because the finding is not the tool, it is WHO is serving it. Gate A has
+#     nothing to say about it (the description is clean, so scan_severity is "none" and tofu pins it on
+#     first sight) and `writable_servers` below deliberately exempts reads, so before this set existed
+#     a read from an unregistered server passed every rule in this file.
+#     Ids are the `--server-id` the proxy was started with.
+#
+#     This is a SUPERSET of `writable_servers`: `reporting-kb` below is registered and read-only, which
+#     is the ordinary shape for a knowledge base. The two sets answer different questions — "may I
+#     reach it at all" and "may I write through it" — and collapsing them into one is what left reads
+#     from an unregistered server ungoverned.
+known_servers = {"postgres-prod", "mailer", "reporting-kb"}
+
 # >>> EDIT: integrations this namespace may WRITE through. Everything else is read-only.
 #     Server ids are the `--server-id` the proxy was started with, and they key the definition pins.
 writable_servers = {"postgres-prod", "mailer"}
@@ -61,12 +76,71 @@ verb = v {
 	v := input.derived.verb
 }
 
+# ── 0. The server itself is not registered ─────────────────────────────────────────────────────────
+# Highest precedence, because it is the strongest statement available: not "this call is wrong" but
+# "you should not be talking to this server at all". Everything below asks whether a TOOL is safe,
+# which already concedes the server is one you meant to reach.
+#
+# This is the rogue-server vector, and it is invisible to every other rule in this file: the tool's
+# description is clean, so the scanner says "none"; tofu pins it on first sight, so pin_status says
+# "pinned"; and it is a read, which `unapproved_write` exempts by design. Live, `lookup_record` on an
+# unregistered server returned its record through all four rules untouched.
+unknown_server {
+	is_mcp
+	not known_servers[input.mcp.server]
+}
+
+decision = "block" {
+	unknown_server
+}
+
+rule_id = "mcp_unregistered_server" {
+	unknown_server
+}
+
+reason = "this MCP server is not registered for this namespace" {
+	unknown_server
+}
+
+# ── 0b. Gate A never saw this definition ───────────────────────────────────────────────────────────
+# `scan_severity` is "unknown" and `definition_seen` is false when the proxy has no catalog entry for
+# the tool — a call that arrived without a mediated `tools/list` (a stateless client, or a proxy
+# restarted since discovery). Every Gate-A rule below tests for a SPECIFIC bad state, so a tool in no
+# state at all satisfies none of them and falls through to allow: the checks are armed and the thing
+# they protect was never inspected.
+#
+# Measured live: a raw stateless call sequence produced pin_status "unknown", definition_seen false,
+# scan_severity "unknown", and no rule fired.
+#
+# Escalate, not block. A cold start is ordinary and legitimate; what is not ordinary is acting on a
+# definition nobody has read. A human deciding once is the proportionate response, and it matches how
+# drift is handled two rules down.
+unscanned {
+	is_mcp
+	not unknown_server
+	not input.mcp.definition_seen
+}
+
+decision = "escalate" {
+	unscanned
+}
+
+rule_id = "mcp_definition_never_scanned" {
+	unscanned
+}
+
+reason = "this MCP tool definition was never inspected by Gate A" {
+	unscanned
+}
+
 # ── 1. Gate A: a definition that is not approved ───────────────────────────────────────────────────
 # In `strict` pin mode a tool is quarantined until an operator approves its definition. The proxy
 # already withholds it from the model; this makes the same fact available to policy, so an operator
 # can decide per class rather than accepting the proxy's built-in action.
 quarantined {
 	is_mcp
+	not unknown_server
+	not unscanned
 	input.mcp.pin_status == "quarantined"
 }
 
@@ -87,6 +161,7 @@ reason = "this MCP tool definition has not been approved" {
 # safe default is a human looking at the diff — not a silently broken agent.
 drifted {
 	is_mcp
+	not unknown_server
 	input.mcp.pin_status == "drift"
 	not quarantined
 }
@@ -106,6 +181,8 @@ reason = "this MCP tool definition changed after it was approved (possible rug p
 # ── 3. Gate A: a definition the scanner flagged ────────────────────────────────────────────────────
 flagged {
 	is_mcp
+	not unknown_server
+	not unscanned
 	blocking_scan_severity[input.mcp.scan_severity]
 	not quarantined
 	not drifted
@@ -128,6 +205,8 @@ reason = "this MCP tool definition matched an instruction-injection pattern" {
 # system. This is the rule a tool-name policy cannot express at all.
 unapproved_write {
 	is_mcp
+	not unknown_server
+	not unscanned
 	not writable_servers[input.mcp.server]
 	verb != "read"
 	verb != "unknown"
