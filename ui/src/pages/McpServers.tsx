@@ -15,8 +15,28 @@
 
 import { CSSProperties, useCallback, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { AlertTriangle, CheckCircle2, Info, RefreshCw, ShieldAlert, ShieldCheck, Trash2, XCircle } from "lucide-react";
-import { ApiError, apiGet, apiSend, fetchMe } from "../api/client";
+import {
+  AlertTriangle,
+  Ban,
+  CheckCircle2,
+  HelpCircle,
+  Info,
+  Lock,
+  RefreshCw,
+  ShieldAlert,
+  ShieldCheck,
+  Trash2,
+  XCircle
+} from "lucide-react";
+import {
+  ApiError,
+  apiGet,
+  apiSend,
+  decideMcpServer,
+  fetchMe,
+  forgetMcpServer,
+  type McpServerStatus,
+} from "../api/client";
 import { Column, DataTable } from "../components/common/DataTable";
 import { DefinitionDiff } from "../components/common/DefinitionDiff";
 import { DestructiveConfirm } from "../components/common/DestructiveConfirm";
@@ -43,6 +63,14 @@ export type McpServerRow = {
   health: string;
   first_seen_at: string | null;
   last_seen_at: string | null;
+  /** The operator's DECISION. Optional because a pre-registry API answers this endpoint without it,
+   *  and a console that rendered "blocked" from an `undefined` would be worse than one that says
+   *  nothing. Absent is read as `discovered`, which is what the server means by an absent row. */
+  status?: McpServerStatus;
+  writable?: boolean;
+  decided_by?: string;
+  note?: string;
+  identity_drift_count?: number;
   [key: string]: unknown;
 };
 
@@ -86,11 +114,33 @@ const TONE: Record<string, CSSProperties> = {
 };
 
 const HEALTH_META: Record<string, { label: string; tone: string; icon: typeof ShieldCheck }> = {
+  // Worst first, matching the order the API sorts on. `blocked` leads because it is the operator's
+  // own answer to a stronger question than any observation asks: telling them a server they have
+  // already refused has "drift" would send them to re-approve a definition on a server they do not
+  // want reachable at all.
+  blocked: { label: "blocked", tone: "bad", icon: Ban },
   drift: { label: "definition changed", tone: "bad", icon: ShieldAlert },
   quarantined: { label: "awaiting approval", tone: "warn", icon: AlertTriangle },
   flagged: { label: "scanner findings", tone: "warn", icon: AlertTriangle },
+  // Deliberately not green, and deliberately not "healthy". This server has done nothing wrong and
+  // nobody has vetted it; those are different facts, and only the second one is knowable here.
+  unreviewed: { label: "not reviewed", tone: "neutral", icon: HelpCircle },
   ok: { label: "healthy", tone: "ok", icon: ShieldCheck }
 };
+
+/** The registration column's vocabulary. Separate from health because a REGISTERED server can still
+ *  be drifting: "an operator vouched for this integration" and "it is behaving" are independent. */
+const REGISTRATION_META: Record<McpServerStatus, { label: string; tone: string }> = {
+  registered: { label: "Registered", tone: "ok" },
+  blocked: { label: "Blocked", tone: "bad" },
+  discovered: { label: "Unreviewed", tone: "neutral" }
+};
+
+/** An absent `status` means the same thing an absent row means server-side: nobody has decided. */
+export function registrationOf(row: Pick<McpServerRow, "status">): McpServerStatus {
+  const s = row.status;
+  return s === "registered" || s === "blocked" ? s : "discovered";
+}
 
 const STATUS_TONE: Record<string, string> = { drift: "bad", quarantined: "warn", pinned: "ok" };
 
@@ -299,6 +349,12 @@ export function McpServers() {
   const [busy, setBusy] = useState(false);
   const [conflict, setConflict] = useState<Conflict | null>(null);
   const [forgetting, setForgetting] = useState<McpServerRow | null>(null);
+  const [registering, setRegistering] = useState<McpServerRow | null>(null);
+  const [blocking, setBlocking] = useState<McpServerRow | null>(null);
+  // The write axis, asked in the register dialog. Defaults to read-only: registering a server is a
+  // statement that it is expected here, not that everything it offers may be invoked, and the
+  // narrower of two readings is the one to take by default when the operator has not said.
+  const [registerWritable, setRegisterWritable] = useState(false);
 
   const loadServers = useCallback(
     () => apiGet<McpServerRow[]>(`/api/v1/mcp/servers?namespace=${encodeURIComponent(ns)}`),
@@ -474,18 +530,75 @@ export function McpServers() {
     [allPins, refresh, toast]
   );
 
+  /**
+   * The registry's write path. Three buttons, one endpoint, because they are one decision with three
+   * values — modelling them as separate verbs would let a UI reach a state the server cannot express.
+   *
+   * `writable` rides along rather than being a fourth button: it is only meaningful for a REGISTERED
+   * server, and a control that is live in one state and inert in two others is a control an operator
+   * has to learn the rules of. Registering asks the question once, in the dialog, where the
+   * consequence can be stated beside it.
+   */
+  const decideServer = useCallback(
+    async (server: McpServerRow, status: McpServerStatus, writable: boolean, note = "") => {
+      setBusy(true);
+      try {
+        const res = await decideMcpServer({
+          namespace: server.namespace,
+          server_id: server.server_id,
+          status,
+          writable,
+          note
+        });
+        toast.push({
+          kind: "success",
+          message:
+            res.status === "registered"
+              ? `Registered ${server.server_id}`
+              : res.status === "blocked"
+                ? `Blocked ${server.server_id}`
+                : `${server.server_id} returned to unreviewed`,
+          detail:
+            res.status === "blocked"
+              ? "Its tools are withheld at discovery — the definitions never reach the model. Running proxies pick this up on their next registry refresh."
+              : res.status === "registered"
+                ? res.writable
+                  ? "Reads and writes are both permitted through this server."
+                  : "Registered read-only: write-verb tools on this server are refused."
+                : "No decision stands for this server. It is reachable, and controls that ask about registration will treat it as unreviewed."
+        });
+        setRegistering(null);
+        setBlocking(null);
+        refresh();
+      } catch (err) {
+        toast.push({
+          kind: "error",
+          message: `Could not update ${server.server_id}`,
+          detail: (err as Error).message
+        });
+      } finally {
+        setBusy(false);
+      }
+    },
+    [refresh, toast]
+  );
+
   const forgetServer = useCallback(
     async (server: McpServerRow) => {
       setBusy(true);
       try {
-        const res = await apiSend<{ removed: number }>(
-          `/api/v1/mcp/servers/${encodeURIComponent(server.namespace)}/${encodeURIComponent(server.server_id)}`,
-          "DELETE"
-        );
+        const res = await forgetMcpServer(server.namespace, server.server_id);
         toast.push({
           kind: "success",
           message: `Forgot ${server.server_id}`,
-          detail: `${res.removed} pin${res.removed === 1 ? "" : "s"} deleted. If the server reappears, its next definition is pinned afresh.`
+          // A `blocked` decision deliberately SURVIVES forget — otherwise forgetting would be a way
+          // to launder a refusal back into a clean first sight. The toast has to say so, or the
+          // operator reads "forgot" as "gone" and is surprised when the row is still there.
+          detail:
+            `${res.removed} pin${res.removed === 1 ? "" : "s"} deleted. ` +
+            (res.decision_kept
+              ? "Its BLOCKED decision was kept — forgetting observations must not undo a refusal."
+              : "If the server reappears, its next definition is pinned afresh.")
         });
         setForgetting(null);
         setSelectedServer(null);
@@ -526,6 +639,31 @@ export function McpServers() {
         return (
           <span className="pill" style={{ ...TONE[meta.tone], display: "inline-flex", alignItems: "center", gap: 5 }}>
             <Icon size={12} /> {meta.label}
+          </span>
+        );
+      }
+    },
+    {
+      key: "status",
+      title: "Registration",
+      render: (_v, row) => {
+        const reg = registrationOf(row);
+        const meta = REGISTRATION_META[reg];
+        return (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <Pill text={meta.label} tone={meta.tone} />
+            {/* Read-only is shown only where it can be true. Rendering it on an unreviewed server
+                would suggest a restriction nobody applied — `writable` means nothing until somebody
+                has registered the server. */}
+            {reg === "registered" && !row.writable && (
+              <span
+                className="pill"
+                style={{ ...TONE.neutral, display: "inline-flex", alignItems: "center", gap: 4 }}
+                title="Write-verb tools on this server are refused"
+              >
+                <Lock size={11} /> read-only
+              </span>
+            )}
           </span>
         );
       }
@@ -683,14 +821,74 @@ export function McpServers() {
           }
           action={
             selectedServerRow && (
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm revoke"
-                onClick={() => setForgetting(selectedServerRow)}
-                data-testid="mcp-forget-open"
-              >
-                <Trash2 size={14} /> Forget {selectedServerRow.server_id}…
-              </button>
+              // The permission fact as visible text, not a `title`: `.btn:disabled` sets
+              // `pointer-events: none`, so a tooltip on a disabled button can never be shown.
+              <InlineDisabledReason reason={notAdmin ? approveReason : undefined} tone="muted">
+              <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                {/* The registry actions lead, and Forget stays last and ghosted. Forget deletes
+                    observations; the other two are the decision this page now exists to record, and
+                    an operator reaching for the destructive one first is usually reaching for the
+                    wrong one — "forget the server that alarmed me" is one step from adopting the
+                    change that raised the alarm. */}
+                {registrationOf(selectedServerRow) !== "registered" && (
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    disabled={busy || notAdmin}
+                    onClick={() => {
+                      setRegisterWritable(Boolean(selectedServerRow.writable));
+                      setRegistering(selectedServerRow);
+                    }}
+                    data-testid="mcp-register-open"
+                  >
+                    <ShieldCheck size={14} /> Register…
+                  </button>
+                )}
+                {registrationOf(selectedServerRow) === "registered" && (
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    disabled={busy || notAdmin}
+                    onClick={() => {
+                      setRegisterWritable(Boolean(selectedServerRow.writable));
+                      setRegistering(selectedServerRow);
+                    }}
+                    data-testid="mcp-register-open"
+                  >
+                    <ShieldCheck size={14} /> Change registration…
+                  </button>
+                )}
+                {registrationOf(selectedServerRow) === "blocked" ? (
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-sm"
+                    disabled={busy || notAdmin}
+                    onClick={() => void decideServer(selectedServerRow, "discovered", false)}
+                    data-testid="mcp-unblock"
+                  >
+                    <HelpCircle size={14} /> Unblock (back to unreviewed)
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm revoke"
+                    disabled={busy || notAdmin}
+                    onClick={() => setBlocking(selectedServerRow)}
+                    data-testid="mcp-block-open"
+                  >
+                    <Ban size={14} /> Block…
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm revoke"
+                  onClick={() => setForgetting(selectedServerRow)}
+                  data-testid="mcp-forget-open"
+                >
+                  <Trash2 size={14} /> Forget {selectedServerRow.server_id}…
+                </button>
+              </div>
+              </InlineDisabledReason>
             )
           }
         >
@@ -1004,6 +1202,123 @@ export function McpServers() {
             Nothing was approved. Re-read the pin — or treat three definitions in one session as the answer.
           </p>
         </Modal>
+      )}
+
+      {registering && !conflict && (
+        <Modal
+          data-testid="mcp-register"
+          onClose={() => setRegistering(null)}
+          title={
+            <>
+              <ShieldCheck size={19} style={{ color: "var(--allow)" }} />
+              Register <span className="mono">{registering.server_id}</span>
+            </>
+          }
+          subtitle="Records that this integration is expected here. Registration is always a human act — a server is never promoted out of unreviewed on its own."
+          actions={
+            <>
+              <button type="button" className="btn btn-ghost" onClick={() => setRegistering(null)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={busy || notAdmin}
+                onClick={() => void decideServer(registering, "registered", registerWritable)}
+                data-testid="mcp-register-confirm"
+              >
+                Register {registerWritable ? "with writes" : "read-only"}
+              </button>
+            </>
+          }
+        >
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {/* The write axis. Two radio-style rows rather than a checkbox, because "unchecked" is
+                not a legible way to state a restriction an operator is choosing on purpose. */}
+            {[
+              {
+                writable: false,
+                label: "Read-only",
+                detail:
+                  "Write-verb tools on this server are refused. The right default for a knowledge base, a search index, or anything the agent should consult rather than change."
+              },
+              {
+                writable: true,
+                label: "Reads and writes",
+                detail:
+                  "Every tool this server serves may be invoked, subject to policy. Choose this only where the agent is meant to act through it."
+              }
+            ].map((opt) => (
+              <label
+                key={String(opt.writable)}
+                data-testid={`mcp-register-writable-${opt.writable ? "yes" : "no"}`}
+                style={{
+                  display: "flex",
+                  gap: 10,
+                  padding: "11px 13px",
+                  borderRadius: 10,
+                  cursor: "pointer",
+                  background: registerWritable === opt.writable ? "var(--bg-elevated)" : "transparent",
+                  border:
+                    registerWritable === opt.writable
+                      ? "1px solid var(--accent)"
+                      : "1px solid var(--border-subtle)"
+                }}
+              >
+                <input
+                  type="radio"
+                  name="mcp-register-writable"
+                  checked={registerWritable === opt.writable}
+                  onChange={() => setRegisterWritable(opt.writable)}
+                  style={{ marginTop: 3 }}
+                />
+                <span>
+                  <span style={{ display: "block", fontSize: 13, color: "var(--text-primary)", fontWeight: 600 }}>
+                    {opt.label}
+                  </span>
+                  <span style={{ display: "block", fontSize: 12.5, lineHeight: 1.55, color: "var(--text-muted)" }}>
+                    {opt.detail}
+                  </span>
+                </span>
+              </label>
+            ))}
+            <p style={{ margin: 0, fontSize: 12.5, lineHeight: 1.6, color: "var(--text-muted)" }}>
+              Registering does not approve any tool DEFINITION. Each one is still pinned by content
+              hash, and a definition that changes after approval is still withheld from the model.
+            </p>
+          </div>
+        </Modal>
+      )}
+
+      {blocking && !conflict && (
+        <DestructiveConfirm
+          title={
+            <>
+              Block <span className="mono">{blocking.server_id}</span>?
+            </>
+          }
+          confirmWord={blocking.server_id}
+          confirmLabel="Block server"
+          allowed={!notAdmin}
+          busy={busy}
+          onCancel={() => setBlocking(null)}
+          onConfirm={() => void decideServer(blocking, "blocked", false)}
+          data-testid="mcp-block"
+          consequence={
+            <>
+              Enforced at <strong style={{ color: "var(--text-primary)", fontWeight: 600 }}>discovery</strong>, not at
+              call time — its tools are withheld from <span className="mono">tools/list</span> so the descriptions never
+              reach the model.{" "}
+              <strong style={{ color: "var(--escalate)", fontWeight: 600 }}>
+                The agent loses these {blocking.tools} tool{blocking.tools === 1 ? "" : "s"} outright.
+              </strong>{" "}
+              A running proxy picks the block up on its next registry refresh rather than instantly.
+            </>
+          }
+        >
+          For a poisoned description the description IS the payload, so refusing calls afterwards is
+          too late. Blocking is reversible — the row stays, and Unblock returns it to unreviewed.
+        </DestructiveConfirm>
       )}
 
       {forgetting && (

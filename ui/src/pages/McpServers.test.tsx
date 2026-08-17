@@ -281,7 +281,11 @@ describe("McpServers", () => {
   });
 
   it("gates forgetting a server on typing its name, and states the tofu consequence", async () => {
-    const send = vi.spyOn(client, "apiSend").mockResolvedValue({ removed: 1 } as never);
+    // Spied on the NAMED helper, not on `apiSend`: the page calls `forgetMcpServer`, and an ESM
+    // module's internal call to `apiSend` does not go through the namespace object — the same reason
+    // `fetchMe` is spied directly above. The assertion is also better for it: it names the server
+    // being forgotten rather than a URL shape that could be right for the wrong row.
+    const forget = vi.spyOn(client, "forgetMcpServer").mockResolvedValue({ removed: 1 });
     renderPage();
     const user = userEvent.setup();
     await user.click((await screen.findAllByText("postgres"))[0]);
@@ -293,9 +297,7 @@ describe("McpServers", () => {
     await user.type(screen.getByTestId("mcp-forget-input"), "postgres");
     await user.click(screen.getByTestId("mcp-forget-submit"));
 
-    await waitFor(() => expect(send).toHaveBeenCalled());
-    expect(send.mock.calls[0][0]).toBe("/api/v1/mcp/servers/agents/postgres");
-    expect(send.mock.calls[0][1]).toBe("DELETE");
+    await waitFor(() => expect(forget).toHaveBeenCalledWith("agents", "postgres"));
   });
 
   it("filters tools to the clicked server", async () => {
@@ -617,5 +619,196 @@ describe("the collision note", () => {
     renderPage();
     const note = await screen.findByTestId("mcp-collision");
     expect(note.textContent ?? "").not.toMatch(/Lookalike/);
+  });
+});
+// ── the server registry ─────────────────────────────────────────────────────────────────────────
+//
+// The registry answers a question no per-tool pin can: "should we be talking to this server at all".
+// A tool from an unregistered server can be entirely ordinary on its own terms — clean prose, benign
+// schema, a read verb — so the console has to make the SERVER-level state legible and actionable, or
+// the decision has nowhere to be taken.
+
+describe("the server registry", () => {
+  /** The four fixture servers with registry state attached, since the base fixtures predate it. */
+  const REGISTRY_SERVERS = [
+    { ...SERVERS[0], status: "registered", writable: true },
+    { ...SERVERS[1], status: "blocked", health: "blocked", writable: false },
+    { ...SERVERS[2], status: "registered", writable: false },
+    { ...SERVERS[3], status: "discovered", health: "unreviewed", writable: false }
+  ];
+
+  function mockRegistryReads() {
+    vi.spyOn(client, "apiGet").mockImplementation(async (path: string) => {
+      if (path.startsWith("/api/v1/mcp/servers")) return REGISTRY_SERVERS as never;
+      if (path.startsWith("/api/v1/mcp/pins")) return PINS as never;
+      return [] as never;
+    });
+  }
+
+  beforeEach(() => {
+    clearApiCache();
+    vi.restoreAllMocks();
+    mockRegistryReads();
+    mockRole("admin");
+  });
+
+  it("says a server nobody has reviewed is NOT REVIEWED, never healthy", async () => {
+    // The distinction the whole registry turns on. `runbooks` has no scanner finding and no drift;
+    // calling that "healthy" would tell an operator their estate is fine when it is only unexamined,
+    // which is the same false all-clear as reporting `scan_severity: "none"` for a definition Gate A
+    // never scanned.
+    renderPage();
+    expect(await screen.findByText("not reviewed")).toBeInTheDocument();
+    expect(screen.getAllByText("Unreviewed").length).toBeGreaterThan(0);
+  });
+
+  it("distinguishes registration from health — a registered server can still be drifting", async () => {
+    // `postgres` is registered AND drifted. One column cannot carry both: "an operator vouched for
+    // this integration" and "it is behaving" are independent facts.
+    renderPage();
+    const row = await waitFor(() => {
+      const el = document.querySelector('tr[data-row-key="agents/postgres"]');
+      if (!el) throw new Error("no postgres row");
+      return el as HTMLElement;
+    });
+    expect(within(row).getByText("definition changed")).toBeInTheDocument();
+    expect(within(row).getByText("Registered")).toBeInTheDocument();
+  });
+
+  it("marks a registered server read-only, and says nothing of the kind for an unreviewed one", async () => {
+    // `writable` is meaningless until somebody has registered the server, so rendering it on an
+    // unreviewed row would suggest a restriction nobody applied.
+    renderPage();
+    const filesystem = await waitFor(() => {
+      const el = document.querySelector('tr[data-row-key="agents/filesystem"]');
+      if (!el) throw new Error("no filesystem row");
+      return el as HTMLElement;
+    });
+    expect(within(filesystem).getByText("read-only")).toBeInTheDocument();
+
+    const runbooks = document.querySelector('tr[data-row-key="agents/runbooks"]') as HTMLElement;
+    expect(within(runbooks).queryByText("read-only")).toBeNull();
+  });
+
+  it("registers a server read-only by default", async () => {
+    // Registering says the integration is expected here, not that everything it offers may be
+    // invoked. When the operator has not said, the narrower reading is the one to take.
+    const decide = vi.spyOn(client, "decideMcpServer").mockResolvedValue({
+      namespace: "agents", server_id: "runbooks", status: "registered",
+      writable: false, previous_status: "discovered", note: ""
+    });
+    renderPage();
+    const user = userEvent.setup();
+    await user.click((await screen.findAllByText("runbooks"))[0]);
+    await user.click(await screen.findByTestId("mcp-register-open"));
+    await user.click(screen.getByTestId("mcp-register-confirm"));
+
+    await waitFor(() =>
+      expect(decide).toHaveBeenCalledWith(
+        expect.objectContaining({ namespace: "agents", server_id: "runbooks", status: "registered", writable: false })
+      )
+    );
+  });
+
+  it("lets the operator choose writes deliberately", async () => {
+    const decide = vi.spyOn(client, "decideMcpServer").mockResolvedValue({
+      namespace: "agents", server_id: "runbooks", status: "registered",
+      writable: true, previous_status: "discovered", note: ""
+    });
+    renderPage();
+    const user = userEvent.setup();
+    await user.click((await screen.findAllByText("runbooks"))[0]);
+    await user.click(await screen.findByTestId("mcp-register-open"));
+    await user.click(screen.getByTestId("mcp-register-writable-yes"));
+    await user.click(screen.getByTestId("mcp-register-confirm"));
+
+    await waitFor(() =>
+      expect(decide).toHaveBeenCalledWith(expect.objectContaining({ writable: true }))
+    );
+  });
+
+  it("gates blocking on typing the server name and names what the agent loses", async () => {
+    // Blocking is enforced at DISCOVERY, so the agent loses the tools outright rather than seeing
+    // them refused. That is a bigger consequence than a revoke and is stated as one.
+    renderPage();
+    const user = userEvent.setup();
+    await user.click((await screen.findAllByText("runbooks"))[0]);
+    await user.click(await screen.findByTestId("mcp-block-open"));
+
+    expect(screen.getByTestId("mcp-block-consequence")).toHaveTextContent(/withheld from/i);
+    expect(screen.getByTestId("mcp-block-consequence")).toHaveTextContent(/loses these 1 tool/i);
+    expect(screen.getByTestId("mcp-block-submit")).toBeDisabled();
+
+    const decide = vi.spyOn(client, "decideMcpServer").mockResolvedValue({
+      namespace: "agents", server_id: "runbooks", status: "blocked",
+      writable: false, previous_status: "discovered", note: ""
+    });
+    await user.type(screen.getByTestId("mcp-block-input"), "runbooks");
+    await user.click(screen.getByTestId("mcp-block-submit"));
+
+    await waitFor(() =>
+      expect(decide).toHaveBeenCalledWith(
+        expect.objectContaining({ server_id: "runbooks", status: "blocked", writable: false })
+      )
+    );
+  });
+
+  it("offers UNBLOCK on a blocked server instead of a second Block button", async () => {
+    const decide = vi.spyOn(client, "decideMcpServer").mockResolvedValue({
+      namespace: "agents", server_id: "github", status: "discovered",
+      writable: false, previous_status: "blocked", note: ""
+    });
+    renderPage();
+    const user = userEvent.setup();
+    await user.click((await screen.findAllByText("github"))[0]);
+
+    expect(screen.queryByTestId("mcp-block-open")).toBeNull();
+    await user.click(await screen.findByTestId("mcp-unblock"));
+
+    // Back to UNREVIEWED, not to registered. Unblocking withdraws a refusal; it does not manufacture
+    // an approval nobody gave.
+    await waitFor(() =>
+      expect(decide).toHaveBeenCalledWith(expect.objectContaining({ server_id: "github", status: "discovered" }))
+    );
+  });
+
+  it("tells a viewer why the registry actions are unavailable", async () => {
+    clearApiCache();
+    vi.restoreAllMocks();
+    mockRegistryReads();
+    mockRole("viewer");
+    renderPage();
+    const user = userEvent.setup();
+    await user.click((await screen.findAllByText("runbooks"))[0]);
+
+    expect(await screen.findByTestId("mcp-register-open")).toBeDisabled();
+    expect(screen.getByTestId("mcp-block-open")).toBeDisabled();
+    // As visible text: `.btn:disabled` sets `pointer-events: none`, so a title can never be shown.
+    expect(screen.getByText(/Needs admin/i)).toBeInTheDocument();
+  });
+
+  it("reports that forget KEPT a blocked decision rather than claiming the server is gone", async () => {
+    // Forgetting deletes observations. If it silently dropped a refusal too, forget would be a way to
+    // launder a block back into a clean first sight.
+    vi.spyOn(client, "forgetMcpServer").mockResolvedValue({ removed: 4, decision_kept: true });
+    renderPage();
+    const user = userEvent.setup();
+    await user.click((await screen.findAllByText("github"))[0]);
+    await user.click(await screen.findByTestId("mcp-forget-open"));
+    await user.type(screen.getByTestId("mcp-forget-input"), "github");
+    await user.click(screen.getByTestId("mcp-forget-submit"));
+
+    expect(await screen.findByText(/BLOCKED decision was kept/i)).toBeInTheDocument();
+  });
+
+  it("reads a server with no registry field as unreviewed rather than rendering nothing", async () => {
+    // A pre-registry API answers this endpoint without `status`. Rendering "blocked" from an
+    // `undefined` would be worse than saying nothing, and saying nothing loses the column.
+    clearApiCache();
+    vi.restoreAllMocks();
+    mockReads();
+    mockRole("admin");
+    renderPage();
+    expect((await screen.findAllByText("Unreviewed")).length).toBe(4);
   });
 });

@@ -287,6 +287,65 @@ export async function saveBaselineControls(
   return apiSend<BaselineUpdateResult>("/api/v1/baseline/controls", "PUT", { namespace, effects });
 }
 
+/* ── MCP server registry ───────────────────────────────────────────────────────────────────────── */
+
+/** What an operator has DECIDED about a server, as opposed to what was observed about it.
+ *
+ *  `discovered` on first sight and NEVER `registered`: observed and approved have to be different
+ *  states, for the same reason Gate A reports `scan_severity: "unknown"` rather than `"none"` for a
+ *  definition it never scanned. Registration is always a human act. */
+export type McpServerStatus = "discovered" | "registered" | "blocked";
+
+/** The server-level roll-up the inventory sorts on, worst first.
+ *
+ *  `unreviewed` is NOT `ok`. A server that has merely never misbehaved has not been vetted, and a
+ *  console that calls it healthy tells an operator their estate is fine when it is only unexamined. */
+export type McpServerHealth = "blocked" | "drift" | "quarantined" | "flagged" | "unreviewed" | "ok";
+
+/** A decision, posted to `POST /mcp/servers/decision`. Admin-only, audited server-side.
+ *
+ *  `writable` is a separate axis from `status` on purpose: "may I reach it" and "may I write through
+ *  it" are different questions, and a read-only knowledge base is an ordinary shape that one
+ *  collapsed field cannot express. A blocked server is never writable whatever this says — the API
+ *  clears the flag rather than storing a latent grant that takes effect the moment somebody unblocks.
+ */
+export type McpServerDecision = {
+  namespace: string;
+  server_id: string;
+  status: McpServerStatus;
+  writable?: boolean;
+  note?: string;
+};
+
+export type McpServerDecisionResult = {
+  namespace: string;
+  server_id: string;
+  status: McpServerStatus;
+  writable: boolean;
+  /** What it was before. `discovered` for a server nobody had decided about — not null. */
+  previous_status: McpServerStatus;
+  note: string;
+};
+
+/** Register, block, or return a server to unreviewed. */
+export async function decideMcpServer(body: McpServerDecision): Promise<McpServerDecisionResult> {
+  return apiSend<McpServerDecisionResult>("/api/v1/mcp/servers/decision", "POST", body);
+}
+
+/** Delete a server's OBSERVATIONS. A `blocked` decision deliberately survives — see the API.
+ *
+ *  `decision_kept` says whether one did, so the console can report what actually happened rather
+ *  than claiming the server was forgotten wholesale. */
+export async function forgetMcpServer(
+  namespace: string,
+  serverId: string,
+): Promise<{ removed: number; decision_kept?: boolean }> {
+  return apiSend<{ removed: number; decision_kept?: boolean }>(
+    `/api/v1/mcp/servers/${encodeURIComponent(namespace)}/${encodeURIComponent(serverId)}`,
+    "DELETE",
+  );
+}
+
 export type ComplianceControl = {
   control_id: string;
   /** Whether this row is one of the shipped controls or a rule from a policy the customer wrote.
