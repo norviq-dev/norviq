@@ -394,7 +394,26 @@ class HttpProxy:
 
 
 def _wants_stream(request: Request) -> bool:
-    return _SSE in request.headers.get("accept", "")
+    """Does the client REQUIRE an SSE stream, or merely accept one?
+
+    The MCP spec has clients send ``Accept: application/json, text/event-stream``:
+    they accept EITHER and the server chooses. Reading the mere presence of the
+    SSE token as "send me a stream" made this true for every conforming client,
+    so the proxy took the streaming path even when the upstream answered with a
+    single ``application/json`` body. ``_stream_through`` then labelled that body
+    ``text/event-stream`` and emitted it unframed — compact JSON has no ``\\n\\n``,
+    so it fell out of the frame splitter whole. The client reads the header,
+    switches to SSE parsing, and waits forever for a ``data:`` frame that is
+    never coming.
+
+    Found live: the MCP Python SDK hung on every ``initialize`` through the proxy
+    while raw POSTs succeeded, which is what an agent behind the firewall would
+    experience as a total outage. Only SSE-only clients get the stream now;
+    everyone else takes the buffered path, and the upstream's own content-type
+    still routes to ``_stream_through`` when IT answers with a stream.
+    """
+    accept = request.headers.get("accept", "")
+    return _SSE in accept and "application/json" not in accept
 
 
 def _passthrough(headers) -> dict[str, str]:

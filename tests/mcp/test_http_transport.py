@@ -29,7 +29,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from norviq.mcp.http import HttpProxy
+from norviq.mcp.http import _SSE, HttpProxy
 from norviq.mcp.pins import MemoryPinStore, PinRegistry
 from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.events import AgentIdentity
@@ -196,6 +196,56 @@ def test_sse_framing_fields_survive_mediation():
     assert "event: message" in body
     assert "id: 42" in body
     assert body.rstrip().endswith("}") or "\n\n" in body
+
+
+def test_json_only_upstream_is_not_answered_as_sse():
+    """A spec-compliant client must not be told "SSE" and handed unframed JSON.
+
+    The MCP spec has clients send ``Accept: application/json, text/event-stream``
+    — they accept EITHER and the server picks. The proxy read the presence of the
+    SSE token as a DEMAND for a stream, which is true of every conforming client,
+    so it always took the streaming path. Against an upstream that answers JSON
+    (FastMCP's ``json_response=True``, which the lab's servers use) the body came
+    back labelled ``text/event-stream`` and unframed: compact JSON has no blank
+    line, so the frame splitter passed it through whole. The client switches to
+    SSE parsing on the header and blocks forever on a ``data:`` frame that never
+    arrives — the MCP Python SDK hung on every ``initialize`` through the proxy
+    while raw POSTs worked.
+
+    The stub above mirrors the client's Accept, so it answered SSE and the path
+    was self-consistent; this upstream answers JSON unconditionally, which is
+    what a real one does.
+    """
+    upstream = _Upstream()
+
+    async def json_only(request: Request) -> Response:
+        body = json.loads(await request.body() or b"{}")
+        upstream.received.append(body)
+        return JSONResponse({"jsonrpc": "2.0", "id": body.get("id"),
+                             "result": {"tools": [POISONED_TOOL, CLEAN_TOOL]}})
+
+    upstream_app = Starlette(routes=[Route("/mcp", json_only, methods=["POST"])])
+    client, _, _, proxy = _make("allow")
+    proxy._client = httpx.AsyncClient(  # noqa: SLF001 - swap in the JSON-only upstream
+        transport=httpx.ASGITransport(app=upstream_app), base_url="http://upstream")
+
+    r = client.post("/mcp", json=_rpc("tools/list"),
+                    headers={"accept": "application/json, text/event-stream"})
+
+    assert _SSE not in r.headers.get("content-type", ""), (
+        "a JSON upstream answered under an SSE content-type; a conforming client hangs here")
+    assert r.json()["result"]["tools"][0]["name"] == "search_docs"  # Gate A still enforced
+    assert "id_rsa" not in r.text
+
+
+def test_sse_only_client_still_gets_a_stream():
+    """The narrowing must not cost a client that genuinely asked for SSE."""
+    client, _, _, proxy = _make("allow")
+    with client.stream("POST", "/mcp", json=_rpc("tools/list"),
+                       headers={"accept": "text/event-stream"}) as r:
+        assert _SSE in r.headers.get("content-type", "")
+        body = b"".join(r.iter_bytes()).decode()
+    assert "event: message" in body and "id_rsa" not in body
 
 
 def test_content_length_is_not_copied_across_the_hop():
