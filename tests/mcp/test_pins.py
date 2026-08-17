@@ -17,6 +17,7 @@ from norviq.mcp.pins import (
     MemoryPinStore,
     PinRegistry,
     build_store,
+    effective_store_kind,
 )
 
 
@@ -52,7 +53,49 @@ class TestControlPlaneStoreIsNotSilentlyDowngraded:
         assert isinstance(build_store("file", str(tmp_path / "pins.json")), FilePinStore)
         # `file` WITHOUT a path is not a file store — an operator who set the kind and forgot the
         # path gets memory, which is the documented dependency-free default rather than a crash.
+        # Kept deliberately: a deployment that works today must not fail to start after an upgrade.
+        # It is no longer SILENT, though — see TestAMisconfiguredKindIsNotAcceptedInSilence.
         assert isinstance(build_store("file", ""), MemoryPinStore)
+
+
+class TestAMisconfiguredKindIsNotAcceptedInSilence:
+    """`NRVQ_MCP_PIN_STORE` names a KIND; the location lives in `NRVQ_MCP_PIN_PATH`.
+
+    Passing a PATH as the kind is an easy mistake — it was made while deploying this firewall for the
+    chatbot campaign — and it used to be accepted in silence: an unrecognised kind fell through to
+    `MemoryPinStore()` with no warning, drift detection off, and `pin_status` still reporting
+    `pinned` on every surface. That is strictly worse than the `memory` case, which at least reaches
+    the upgrade-to-control-plane path and logs NRVQ-MCP-5065.
+
+    The class above already argues the principle for `control-plane`: "a caller asking for it has
+    made a security choice, and quietly handing back a per-process store disarms drift detection
+    while every surface reports it armed." The same argument covers every other bad input; it had
+    only ever been applied to one.
+    """
+
+    def test_a_path_passed_as_the_kind_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="unknown MCP pin store kind"):
+            build_store("/var/lib/norviq/pins.json", "")
+
+    def test_the_refusal_says_which_variable_the_path_belongs_in(self) -> None:
+        """A refusal an operator cannot act on just moves the outage."""
+        with pytest.raises(ValueError) as exc:
+            build_store("filestore", "")
+        assert "NRVQ_MCP_PIN_PATH" in str(exc.value)
+        assert "drift" in str(exc.value)
+
+    def test_the_documented_kinds_still_construct(self) -> None:
+        """The refusal must be about UNRECOGNISED input, never a narrowing of what works."""
+        assert isinstance(build_store("", ""), MemoryPinStore)
+        assert isinstance(build_store("memory", ""), MemoryPinStore)
+
+    def test_effective_kind_reports_what_will_actually_be_built(self) -> None:
+        """So a caller can surface the REAL store rather than the requested one — recording `file`
+        while running memory is how a surface asserts durability the process does not have."""
+        assert effective_store_kind("file", "") == "memory"
+        assert effective_store_kind("file", "/tmp/p.json") == "file"
+        assert effective_store_kind("", "") == "memory"
+        assert effective_store_kind("memory", "") == "memory"
 
 
 class TestFileStoreSurvivesARestart:

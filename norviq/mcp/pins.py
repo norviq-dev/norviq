@@ -286,8 +286,26 @@ class PinRegistry:
         return self._store.all()
 
 
+#: Every LOCAL kind `build_store` knows how to construct. `""` means "unset", which is the documented
+#: way to take the default; anything outside this set is a misconfiguration, not a choice.
+LOCAL_PIN_STORE_KINDS = ("", "memory", "file")
+
+
+def effective_store_kind(kind: str, path: str) -> str:
+    """The kind that will ACTUALLY be constructed, which is not always the one configured.
+
+    Exists so a caller can REPORT the real store rather than the requested one. `http.py` records
+    `self._pin_store_kind` from the configured value and surfaces it; when the two disagree, every
+    surface asserts a durability the process does not have — which is the same "the log documents a
+    fix that never happened" defect this module was already written to fix, one input along.
+    """
+    if kind == "file" and not path:
+        return "memory"
+    return kind or "memory"
+
+
 def build_store(kind: str, path: str) -> PinStore:
-    """Construct a LOCAL backend. Unknown kind -> memory (the safe, dependency-free default).
+    """Construct a LOCAL backend. Raises on a kind it cannot honour.
 
     `control-plane` IS NOT CONSTRUCTIBLE HERE and must not be passed. `ControlPlanePinStore` needs a
     namespace, a server id and an awaited `load()`, none of which this signature carries — so falling
@@ -300,11 +318,32 @@ def build_store(kind: str, path: str) -> PinStore:
     Raising is right rather than silently downgrading: a caller asking for the durable, cross-pod
     store has made a security choice, and quietly giving them a per-process one disarms drift
     detection while every surface reports it as armed.
+
+    THAT ARGUMENT WAS ONLY EVER APPLIED TO ONE BAD INPUT. `NRVQ_MCP_PIN_STORE` is a KIND
+    (`memory`/`file`) and the location lives in `NRVQ_MCP_PIN_PATH` — so passing a PATH as the kind is
+    an easy mistake, and it was accepted in silence: an unrecognised kind fell through to
+    `MemoryPinStore()` with no warning at all, drift detection off, and `pin_status` still reporting
+    `pinned` on every surface. Found live doing exactly that while deploying the firewall for the
+    chatbot campaign. Worse than the `memory` case, which at least reaches `http.py`'s
+    upgrade-to-control-plane path and logs `NRVQ-MCP-5065`.
+
+    An unrecognised kind now raises, at construction — startup, never the hot path — because there is
+    no defensible interpretation of it. `""` (unset) still means the default, and `file` without a
+    path still degrades to memory rather than refusing to start: an operator whose deployment works
+    today must not be broken by an upgrade, so that case is made LOUD instead (see
+    `effective_store_kind`, and the caller's warning).
     """
     if kind == "control-plane":
         raise ValueError(
             "build_store cannot construct the control-plane store — it requires namespace/server_id "
             "and an awaited load(); construct ControlPlanePinStore directly"
+        )
+    if kind not in LOCAL_PIN_STORE_KINDS:
+        raise ValueError(
+            f"unknown MCP pin store kind {kind!r}. NRVQ_MCP_PIN_STORE selects a KIND — one of "
+            f"{', '.join(repr(k) for k in LOCAL_PIN_STORE_KINDS if k)} — and the file location goes in "
+            "NRVQ_MCP_PIN_PATH. Refused rather than defaulted: silently running an in-process store "
+            "leaves definition-drift detection off while every surface still reports tools as pinned."
         )
     if kind == "file" and path:
         return FilePinStore(path)

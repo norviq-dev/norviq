@@ -43,7 +43,7 @@ from norviq.config import settings
 from norviq.engine.identity import SPIFFEResolver
 from norviq.mcp import protocol as P
 from norviq.mcp.firewall import McpFirewall
-from norviq.mcp.pins import ControlPlanePinStore, PinRegistry, build_store
+from norviq.mcp.pins import ControlPlanePinStore, PinRegistry, build_store, effective_store_kind
 from norviq.sdk.client.engine import PolicyEngineClient
 from norviq.sdk.core.interceptor import ToolInterceptor
 
@@ -101,6 +101,20 @@ class HttpProxy:
                      "instance; set NRVQ_MCP_PIN_STORE explicitly to silence this",
             )
             pin_store = "control-plane"
+        # `file` with no location degrades to an in-process store. That degradation is deliberate — an
+        # operator whose deployment works today must not be broken by an upgrade — but it must not be
+        # SILENT, and the kind we report has to be the one we actually run. Recording the configured
+        # value here while `build_store` hands back memory is how a surface ends up asserting
+        # durability the process does not have.
+        elif pin_store != effective_store_kind(pin_store, settings.mcp_pin_path):
+            log.warning(
+                "nrvq.mcp.http.pin_store_degraded",
+                configured=pin_store, using=effective_store_kind(pin_store, settings.mcp_pin_path),
+                code="NRVQ-MCP-5067",
+                hint="NRVQ_MCP_PIN_STORE=file needs NRVQ_MCP_PIN_PATH; without it pins are held in "
+                     "process, so a restart re-TOFUs every definition and drift is not detected",
+            )
+            pin_store = effective_store_kind(pin_store, settings.mcp_pin_path)
         self._pin_store_kind = pin_store
         self._pins = PinRegistry(
             # A local store for the local kinds; the control-plane store replaces it in `run()`.
