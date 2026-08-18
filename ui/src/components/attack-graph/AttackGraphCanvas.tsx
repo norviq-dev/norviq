@@ -466,7 +466,17 @@ export const AttackGraphCanvas = forwardRef<AttackCanvasHandle, Props>(function 
     nEnter.append("text").attr("class", "role").attr("text-anchor", "middle").attr("font-family", "'Outfit', sans-serif").attr("font-size", 10).attr("fill", (d) => (d.role === "target" ? "#ff8fa3" : "#a0a0a0"))
       .attr("x", 0).attr("y", (d) => rOf(d) + 31)
       .style("text-rendering", "geometricPrecision")
-      .text((d) => (d.role === "target" ? (d.kind === "data" ? "crown jewel · sensitive" : "target · " + d.kind) : d.role === "source" ? "entry · agent" : "hop · " + d.kind));
+      // The SOURCE caption reads its kind like every other node, instead of asserting "agent".
+      // Seen on the live console: an MCP-server origin drew the right icon and the right colour and
+      // was captioned "entry · agent" underneath — the one label that names what the node IS, saying
+      // the opposite of the finding. Uses the same display-name map as the scope card so an
+      // underscore identifier never reaches an operator.
+      .text((d) =>
+        d.role === "target"
+          ? (d.kind === "data" ? "crown jewel · sensitive" : "target · " + (KIND_LABEL[d.kind] ?? d.kind))
+          : d.role === "source"
+            ? "entry · " + (KIND_LABEL[d.kind] ?? d.kind)
+            : "hop · " + (KIND_LABEL[d.kind] ?? d.kind));
     // Classification-lifecycle line under TOOL nodes: what the tool DOES (verb, risk-coloured; "· learned"
     // when admin-promoted) or its observation state — the observe → infer → promote loop, on the canvas.
     nEnter.filter((d) => !!d.opText).append("text").attr("class", "oplbl").attr("text-anchor", "middle")

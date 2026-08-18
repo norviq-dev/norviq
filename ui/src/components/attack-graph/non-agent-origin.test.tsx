@@ -111,3 +111,24 @@ describe("backwards compatibility with a payload that predates src_kind", () => 
     expect(buildScope("support-agent", [legacy])?.kindLabel).toBe("agent");
   });
 });
+
+describe("the canvas caption names what the node is", () => {
+  it("does not caption an MCP origin as an agent", async () => {
+    // Seen on the live console: the origin drew the right icon and the right colour and was captioned
+    // "entry · agent" underneath — the one label that names what the node IS, saying the opposite of
+    // the finding. The icon and the colour were fixed first, which is exactly why this survived: the
+    // node LOOKED right.
+    const { AttackGraphCanvas } = await import("./AttackGraphCanvas");
+    const { container } = render(
+      <MemoryRouter>
+        <AttackGraphCanvas
+          path={MCP_PATH} allPaths={[MCP_PATH]} whatIfIndex={-1}
+          onToggleWhatIf={vi.fn()} onScope={vi.fn()}
+        />
+      </MemoryRouter>
+    );
+    const text = container.textContent ?? "";
+    expect(text).not.toMatch(/entry · agent/);
+    expect(text).toMatch(/entry · mcp server/);
+  });
+});
