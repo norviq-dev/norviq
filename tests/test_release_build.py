@@ -53,6 +53,25 @@ def test_every_image_is_stamped_with_the_commit_it_was_built_from(line: str):
     assert "--build-arg NRVQ_GIT_SHA=" in line, f"unstamped image build: {line}"
 
 
+@pytest.mark.parametrize("line", BUILD_LINES, ids=lambda l: re.search(r"engine:([a-z]+)-", l).group(1))
+def test_every_dockerfile_actually_consumes_the_stamp(line: str):
+    """Passing the build-arg proves nothing if the Dockerfile does not receive it.
+
+    `Dockerfile.bootstrap` had no `ARG NRVQ_GIT_SHA`, no ENV and no label, so docker accepted the
+    build-arg and discarded it — the bootstrap image shipped unidentifiable while the test above
+    passed. That test asserts the CALLER passes the argument; this one asserts the thing that has to
+    be true. A build-arg with no ARG to receive it is silently dropped, which is precisely the failure
+    mode a stamp exists to make impossible.
+    """
+    dockerfile = ROOT / re.search(r"-f (\S+)", line).group(1)
+    body = dockerfile.read_text()
+    assert "ARG NRVQ_GIT_SHA" in body, f"{dockerfile.name} is passed the SHA but never declares ARG"
+    assert "NRVQ_BUILD_GIT_SHA=${NRVQ_GIT_SHA}" in body, f"{dockerfile.name} does not export the SHA at runtime"
+    assert "org.opencontainers.image.revision=${NRVQ_GIT_SHA}" in body, (
+        f"{dockerfile.name} carries no OCI revision label, so the built image cannot be identified"
+    )
+
+
 def test_the_sha_defaults_to_the_working_tree_not_to_a_literal():
     """`NRVQ_GIT_SHA ?=` so CI can override it, defaulting to the real HEAD rather than "unknown"."""
     assert re.search(r"^NRVQ_GIT_SHA \?= .*git rev-parse", MAKEFILE, re.MULTILINE)

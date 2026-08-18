@@ -30,6 +30,15 @@
 ARG ALPINE_VERSION=3.21
 FROM alpine:${ALPINE_VERSION}
 
+# The Makefile passes --build-arg NRVQ_GIT_SHA to all five images, and this one silently DROPPED it:
+# no ARG to receive it, no ENV, no label. So bootstrap was the one component an operator could not
+# identify — the exact "every component reported unknown" failure the stamp exists to prevent, and it
+# survived the release test because that test asserts the Makefile PASSES the arg, never that the
+# Dockerfile CONSUMES it. Same shape as the bug the stamp was added for.
+ARG NRVQ_GIT_SHA=unknown
+ENV NRVQ_BUILD_GIT_SHA=${NRVQ_GIT_SHA}
+LABEL org.opencontainers.image.revision=${NRVQ_GIT_SHA}
+
 # openssl: self-signs the internal CA. curl + ca-certificates: talks to the Kubernetes API directly.
 #
 # NO kubectl. It was here originally, and the fail-closed trivy gate in build.yml refused to publish
