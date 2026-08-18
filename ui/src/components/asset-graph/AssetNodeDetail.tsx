@@ -239,7 +239,12 @@ export function AssetNodeDetail({ node, model, reach, cluster, side, onClose }: 
                   <div key={f.verb} style={{ display: "flex", alignItems: "center", gap: 9, padding: "7px 10px", background: "var(--bg-graph-card)", border: "1px solid var(--graph-border-soft)", borderRadius: 8 }}>
                     <span style={{ width: 7, height: 7, borderRadius: 2, background: RISK_COLORS[f.risk], flex: "none" }} title={`${f.risk} risk`} />
                     <span style={{ fontSize: 11.5, fontWeight: 700, color: "#d3dae6", width: 52, flex: "none" }}>{VERB_LABEL[f.verb]}</span>
-                    <span style={{ minWidth: 0, flex: 1, fontSize: 11, color: "#9aa7bd", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {/* ~90-120px of a 316px inspector for a ~46-char label, so this clips at roughly
+                        "write / index…" — and what is cut is the parenthetical carrying the security
+                        claim plus the ATLAS technique id. An UNDEFENDED knowledge-poisoning finding
+                        then reads as a routine index write. The tail must stay reachable. */}
+                    <span title={`${f.label}${f.technique ? ` · ${f.technique}` : ""}`}
+                      style={{ minWidth: 0, flex: 1, fontSize: 11, color: "#9aa7bd", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                       {f.label}{f.technique ? ` · ${f.technique}` : ""}
                     </span>
                     <span style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: "0.03em", color: meta.color, background: meta.bg, padding: "2px 6px", borderRadius: 5, flex: "none" }}>{meta.label}</span>

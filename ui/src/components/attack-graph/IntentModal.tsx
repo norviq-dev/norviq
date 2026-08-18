@@ -746,8 +746,20 @@ export function IntentModal({ ns, cls, tool, paths, onClose, global, classOption
               <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.05em", color: "#a0a0a0", textTransform: "uppercase" }}>Attack-path coverage</div>
               <div style={{ fontSize: 20, fontWeight: 800, fontVariantNumeric: "tabular-nums", color: coverColor }}>{covered}/{total}</div>
             </div>
-            {hasSignal && residualIds.length === 0 && (
+            {/* `coverage` must be non-null. `residualIds = coverage?.residual ?? []`, so an empty
+                array meant "the server measured zero residual paths" and "no coverage answer has
+                arrived" equally — and the second is the state the panel is in the instant the first
+                tool is ticked (coverage is null, the POST is debounced 220ms) and the state it STAYS
+                in if that POST rejects, because the catch sets `error` and never touches `coverage`.
+                The affirmative green all-clear was therefore rendered directly beneath a "0/12"
+                headline. Unknown must not read as safe. */}
+            {hasSignal && coverage && residualIds.length === 0 && (
               <div style={{ marginTop: 8, fontSize: 12, fontWeight: 600, color: "#6ee7b7" }}>✓ All paths neutralized · 0 residual</div>
+            )}
+            {hasSignal && !coverage && (
+              <div data-testid="intent-coverage-unknown" style={{ marginTop: 8, fontSize: 12, fontWeight: 600, color: "var(--text-muted)" }}>
+                Coverage not measured yet — this is not a clean result.
+              </div>
             )}
             {hasSignal && residualIds.length > 0 && (
               <div style={{ marginTop: 10 }}>

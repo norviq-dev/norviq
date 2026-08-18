@@ -610,9 +610,14 @@ function ToolDetail({ tool }: { tool: ToolRegistryEntry }) {
       {declared && !tool.schema_available && (
         <Callout tone="#ffb020" title="Declared, but unscopeable">
           {/* "Approved definition" was the same false claim the panel subtitle made — this panel holds
-              never-approved pins too. The pin state is on the badge row above and in its own callout. */}
-          Declared definition, no argument schema — a long description evicted it from the 8&nbsp;KiB slice.
-          Allow or deny by name, or hand-write a path you know. The registry informs, never restricts.
+              never-approved pins too. The pin state is on the badge row above and in its own callout.
+              The CAUSAL half was left behind when that was fixed: `schema_available` is false when the
+              definition was truncated, when it was unparseable, OR when it declares no `inputSchema`
+              at all — which is every zero-argument tool, and the commonest case. Asserting the 8 KiB
+              eviction sent the reader looking for a truncation that did not happen. */}
+          Declared definition, but no argument schema in it — it may declare none, or the stored copy may be
+          truncated or unparseable; MCP Servers shows which. Allow or deny by name, or hand-write a path you
+          know. The registry informs, never restricts.
         </Callout>
       )}
 

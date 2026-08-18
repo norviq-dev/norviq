@@ -191,7 +191,12 @@ export function PolicyCompliance() {
       }
       const priority = policy.priority ?? 100;
       return {
-        key: agentClass,
+        // COMPOSITE, because the list spans namespaces under the "all" scope — which is the default
+        // landing scope. Two rows sharing an agent class produced one `key`, so DataTable's
+        // `selectedKey === key` lit BOTH on a single click, React warned on duplicate keys, and
+        // `rows.find(r => r.key === selected)` resolved the detail panel to whichever came first.
+        // The row already stamps its OWN namespace two lines down for exactly this reason.
+        key: `${policy.namespace ?? namespace}/${agentClass}`,
         name: policy.policy_name || agentClass,
         agentClass,
         // The ROW's namespace, never the selected one. Under "All namespaces" the list returns
@@ -390,7 +395,7 @@ export function PolicyCompliance() {
                 key: "name",
                 title: "Name",
                 render: (_v, r) => (
-                  <span data-testid={`pc-row-${(r as unknown as PolicyRow).key}`}>
+                  <span data-testid={`pc-row-${(r as unknown as PolicyRow).agentClass}`}>
                     {(r as unknown as PolicyRow).name}
                     {(r as unknown as PolicyRow).version !== null && (
                       <span style={{ color: "var(--text-muted)", marginLeft: 6, fontSize: 11 }}>
@@ -412,7 +417,7 @@ export function PolicyCompliance() {
                 render: (_v, r) => {
                   const row = r as unknown as PolicyRow;
                   return (
-                    <span data-testid={`pc-state-${row.key}`} style={{ color: STATE_COLOR[row.state], fontSize: 12 }}>
+                    <span data-testid={`pc-state-${row.agentClass}`} style={{ color: STATE_COLOR[row.state], fontSize: 12 }}>
                       {row.state}
                     </span>
                   );
@@ -424,7 +429,7 @@ export function PolicyCompliance() {
                 render: (_v, r) => {
                   const row = r as unknown as PolicyRow;
                   return (
-                    <span data-testid={`pc-pct-${row.key}`} data-pct={row.compliancePct ?? "unknown"}>
+                    <span data-testid={`pc-pct-${row.agentClass}`} data-pct={row.compliancePct ?? "unknown"}>
                       <ComplianceBar
                         pct={row.compliancePct}
                         compliant={row.totalPrincipals - row.nonCompliant.length}
@@ -478,7 +483,7 @@ export function PolicyCompliance() {
                 render: (_v, r) => {
                   const row = r as unknown as PolicyRow;
                   return (
-                    <div data-testid={`pc-remediate-${row.key}`}>
+                    <div data-testid={`pc-remediate-${row.agentClass}`}>
                       <div style={{ fontSize: 13 }}>{row.name}</div>
                       <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
                         {(row.ruleIds ?? []).length} rule{(row.ruleIds ?? []).length === 1 ? "" : "s"}
@@ -531,14 +536,14 @@ export function PolicyCompliance() {
                     <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
                       <Link
                         className="btn btn-outline btn-sm"
-                        data-testid={`pc-open-policy-${row.key}`}
+                        data-testid={`pc-open-policy-${row.agentClass}`}
                         to={`/policies/catalog?ns=${encodeURIComponent(row.namespace)}&agent_class=${encodeURIComponent(row.agentClass)}`}
                       >
                         Policy
                       </Link>
                       <Link
                         className="btn btn-outline btn-sm"
-                        data-testid={`pc-open-audit-${row.key}`}
+                        data-testid={`pc-open-audit-${row.agentClass}`}
                         to={`/audit?ns=${encodeURIComponent(row.namespace)}&range=${encodeURIComponent(range)}&agent=${encodeURIComponent(row.agentClass)}`}
                       >
                         Audit log

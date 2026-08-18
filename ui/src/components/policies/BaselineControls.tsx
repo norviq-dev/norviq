@@ -92,6 +92,14 @@ function consequenceOf(control: { enforced_as?: string }, effect: BaselineEffect
   return ENFORCED_AS_COPY[control.enforced_as ?? "block"] ?? CONSEQUENCE.deny;
 }
 
+/** What promoting THIS control would have done to the flagged calls — not "blocked" for all of them.
+ *  Same source of truth as `consequenceOf`: the server's `enforced_as`. */
+function impactVerb(control: { enforced_as?: string }): string {
+  if (control.enforced_as === "escalate") return "would have been held for approval";
+  if (control.enforced_as === "audit") return "would have been recorded, not stopped";
+  return "would have been blocked";
+}
+
 const CONSEQUENCE: Record<BaselineEffect, string> = {
   off: "not evaluated",
   monitor: "recorded, call proceeds",
@@ -217,8 +225,16 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
   return (
     <Panel title="Baseline controls">
       <div data-testid="baseline-intro" style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 10 }}>
+        {/* NOT "Enforce blocks it". This file already knows better: `ENFORCED_AS_COPY` maps
+            `escalate` to "call is held for approval" and `audit` to "recorded, call proceeds", and
+            `consequenceOf` uses it on every row. For `scope_violation_dangerous_tool` the intro said
+            Enforce blocks the call while that row's own consequence text, three inches below, read
+            "recorded, call proceeds" — two contradictory sentences on one screen, the louder one
+            wrong. The intro now defers to the row, which is the thing that actually knows. */}
         The shipped detectors, one row each. <b>Monitor</b> evaluates the call, records it as
-        non-compliant and lets it through. <b>Enforce</b> blocks it. Nothing is blocked until you say so.
+        non-compliant and lets it through. <b>Enforce</b> acts on it — each row says exactly how,
+        because a few hold the call for approval rather than blocking it. Nothing is enforced until you
+        say so.
       </div>
 
       {controls.loading && <div data-testid="baseline-loading" style={{ fontSize: 13, color: "var(--text-muted)" }}>Loading controls…</div>}
@@ -335,9 +351,13 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
                         an explanation — it is the number the decision turns on. Only rendered when
                         the control HAS flagged something: a "0 calls" line on every quiet control is
                         noise that trains people to stop reading the row. */}
+                    {/* Worded from `enforced_as`, which the row already has in hand (it passes it to
+                        `consequenceOf` just below). "412 would have been blocked" sat directly above
+                        this row's own "call is held for approval" / "recorded, call proceeds" — the
+                        same contradiction as the intro, one line apart. */}
                     {impact.has(c.id) && (
                       <div data-testid={`baseline-impact-${c.id}`} style={{ fontSize: 11, color: "var(--text-secondary)", marginTop: 2 }}>
-                        <b>{impact.get(c.id)!.count.toLocaleString()}</b> would have been blocked · 7d
+                        <b>{impact.get(c.id)!.count.toLocaleString()}</b> {impactVerb(c)} · 7d
                         {impact.get(c.id)!.classes > 0 && ` · ${impact.get(c.id)!.classes} class${impact.get(c.id)!.classes === 1 ? "" : "es"}`}
                         {impact.get(c.id)!.topTool && ` · ${impact.get(c.id)!.topTool}`}
                       </div>

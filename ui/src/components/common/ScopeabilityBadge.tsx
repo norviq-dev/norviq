@@ -50,7 +50,12 @@ export function ScopeabilityBadge({ schemaAvailable, source }: ScopeabilityBadge
       <span
         className="pill"
         data-testid="scopeability-no-schema"
-        title="Approved definition, but no argument schema — a long description evicted it from the 8 KiB slice"
+        // Three different states set `schema_available = false` — the definition was truncated, or it
+        // was unparseable, or it simply declares no `inputSchema` (every zero-argument tool). Naming
+        // the 8 KiB eviction as THE cause sent operators hunting a truncation that never happened on
+        // the commonest of the three. "Approved definition" was wrong for the same quarantined pins
+        // as the provenance badge. State the consequence, which is true of all three.
+        title="No argument schema in the stored definition, so arguments cannot be scoped — match by name, or hand-write a path"
         style={pillStyle("#ffb020")}
       >
         No schema

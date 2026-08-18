@@ -2489,3 +2489,55 @@ the bare `server_id`. `find(s => s.server_id === selected)` returns the FIRST ma
 namespaces publishing one server id, clicking one row highlighted the other, filtered the pin list to
 both, and aimed Register / Block at the wrong server. `pinKey` one level down already made this exact
 argument for tools; the server level had not followed it. Added `serverKey`.
+
+### The remaining 12 audit findings
+
+**Truncated identifiers get their value back** (Dashboard top-blocked, AssetNodeDetail capability
+findings). Both clipped the row's ONLY identifier with no `title`; on the capability row what was cut
+was the parenthetical carrying the security claim plus the ATLAS technique id, so an undefended
+knowledge-poisoning finding read as a routine index write. `RedTeam.tsx` already did exactly this for
+its truncated vector ids — these were the two places that had not.
+
+**Three claims the data cannot support.** ProvenanceBadge said an operator approved a definition, but
+the badge is keyed on `source` and `_declared_row` stamps SOURCE_DECLARED regardless of `approved` — so
+in strict pin mode it sat on a quarantined definition nobody had reviewed. ScopeabilityBadge and the
+Tools callout both named the 8 KiB eviction as THE cause of a missing schema, when the field is also
+false for an unparseable definition and for every zero-argument tool — the commonest case, where the
+reader was sent hunting a truncation that never happened. Same class as the caveat marker earlier: name
+the consequence, which is true of all the causes, not one case of a heterogeneous field.
+
+**"Enforce blocks it" was wrong for three controls.** The intro asserted one meaning for all 21 while
+the file's own `ENFORCED_AS_COPY` maps `escalate` to "held for approval" and `audit` to "recorded, call
+proceeds" — so on `scope_violation_dangerous_tool` the intro and that row's own consequence text
+contradicted each other on one screen, and the louder one was wrong. The impact line had it too: "412
+would have been blocked" directly above "call is held for approval". Both now read `enforced_as`, which
+the row already had in hand.
+
+**Two "unknown rendered as good news".** IntentModal showed a green "✓ All paths neutralized · 0
+residual" whenever `residualIds` was empty — but `residual` comes off a nullable `coverage`, so an empty
+array meant "no answer yet" as often as "measured zero". That is the state the panel is in the instant
+the first tool is ticked, and the state it STAYS in if the coverage POST rejects. And PolicyCatalog
+rendered a green measured zero for an uncompilable rego and for a namespace with no replayable traffic —
+both return HTTP 200 with every count at 0. The server already emits `valid` / `no_replayable_traffic`
+and its own comment says the console should render them distinctly; the client's local `DryRunResult`
+type had simply dropped the fields, so no branch could tell the cases apart.
+
+**Two identity/spacing bugs.** PolicyCompliance keyed rows on the bare agent class while the list spans
+namespaces under the default "all" scope, so one click lit two rows and the detail panel resolved to
+whichever came first — the row already stamped its own namespace two lines below for exactly this
+reason. AssetGraphFilters labelled the trigger with `options[0]` when the value matched nothing, so it
+read "All classes" while no option was checked and the stale value kept filtering.
+
+**Note on the testid sweep.** Making the PolicyCompliance key composite broke five testids derived from
+it, and I chased them one failing assertion at a time before doing the obvious thing and rewriting all
+`pc-*-${row.key}` in one pass. Testids belong on the stable human-meaningful field (`agentClass`), not
+on the identity key — they are different jobs and this is what conflating them costs.
+
+### Deployment note
+
+The kind console at :3400 was serving an image built BEFORE the last four commits. That is the whole
+explanation for both symptoms reported against it: the amber `!` caveat marker (since replaced by a
+neutral `i`, because "false-positive mode" was false for nine of the eleven caveats) and the Governance
+/ Baseline-controls cards still touching (fixed in 05127b5). Verified by grepping the pod's own assets:
+the deployed TargetSettings chunk contains no `page-enter stack`, and the bundle still contains the
+string "has a known false-positive mode". Source was correct; the image was stale.

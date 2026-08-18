@@ -76,7 +76,14 @@ export function AssetGraphFilters({
       {/* dropdown row */}
       <div style={{ display: "flex", alignItems: "flex-end", gap: 14, flexWrap: "wrap", padding: "14px 20px 12px", borderBottom: "1px solid var(--graph-border-soft)" }}>
         {dropdowns.map((d) => {
-          const cur = d.options.find((o) => o.value === d.value) ?? d.options[0];
+          // `?? d.options[0]` was a LIE when the value matched nothing: the listbox marks selection
+          // with a strict `o.value === d.value`, so the trigger read "All classes" while no option
+          // carried the check — and `computeSets` went on filtering by the stale value, hiding nodes
+          // for a class the UI said was not selected. This is reachable: the fetch effect resets
+          // `focus` and `selectedId` on a namespace change but never `agentClass`, so switching
+          // namespaces strands the filter on a class the new graph does not contain.
+          const match = d.options.find((o) => o.value === d.value);
+          const cur = match ?? { value: d.value, label: `${d.value} (not in this view)` };
           const open = openMenu === d.key;
           return (
             <div key={d.key} data-ag-menu style={{ position: "relative", display: "flex", flexDirection: "column", gap: 5 }}>

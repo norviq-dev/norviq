@@ -366,3 +366,46 @@ describe("grouping by plane", () => {
   });
 });
 
+
+
+describe("Enforce does not mean one thing", () => {
+  const withEnforcedAs = (enforced_as: string) => ({
+    ...CONTROLS,
+    controls: [{ ...CONTROLS.controls[0], enforced_as }],
+  });
+
+  it("does not promise a block in the intro", async () => {
+    // The intro said "Enforce blocks it" for all 21 controls while each row's own consequence text
+    // said otherwise for the escalate/audit ones — two contradictory sentences on one screen.
+    mockFetch();
+    renderPanel({ namespace: "chatbot-prod", isAdmin: true });
+    const intro = await screen.findByTestId("baseline-intro");
+    expect(intro.textContent).not.toMatch(/Enforce<\/b> blocks it|Enforce blocks it/);
+    expect(intro.textContent).toMatch(/each row says exactly how/i);
+  });
+
+  it("words the impact line from enforced_as, not as an unconditional block", async () => {
+    mockFetch(withEnforcedAs("escalate"));
+    mockCompliance([{
+      control_id: "deny_shell_execution", count: 412,
+      agent_classes: [], tools: [], namespaces: ["chatbot-prod"],
+      first_seen: null, last_seen: null, samples: [],
+    }]);
+    renderPanel({ namespace: "chatbot-prod", isAdmin: true });
+    const impact = await screen.findByTestId("baseline-impact-deny_shell_execution");
+    expect(impact.textContent).toMatch(/held for approval/i);
+    expect(impact.textContent).not.toMatch(/would have been blocked/i);
+  });
+
+  it("still says blocked for a control that really blocks", async () => {
+    mockFetch(withEnforcedAs("block"));
+    mockCompliance([{
+      control_id: "deny_shell_execution", count: 412,
+      agent_classes: [], tools: [], namespaces: ["chatbot-prod"],
+      first_seen: null, last_seen: null, samples: [],
+    }]);
+    renderPanel({ namespace: "chatbot-prod", isAdmin: true });
+    const impact = await screen.findByTestId("baseline-impact-deny_shell_execution");
+    expect(impact.textContent).toMatch(/would have been blocked/i);
+  });
+});

@@ -60,11 +60,29 @@ describe("ScopeabilityBadge", () => {
     expect(screen.getByTestId("scopeability-name-only")).toHaveTextContent("Name only");
   });
 
-  it("explains itself on hover for the two states an operator will question", () => {
+  it("explains itself on hover without asserting a cause it cannot know", () => {
+    // This asserted /8 KiB slice/ until the claim was checked against the field. `schema_available`
+    // is false in THREE states — the stored definition was truncated, it was unparseable, or it
+    // declares no `inputSchema` at all, which is every zero-argument tool and the commonest of the
+    // three. Naming the eviction as the cause sent operators hunting a truncation that never
+    // happened. The tooltip now states the CONSEQUENCE, which is true in all three.
     const { rerender } = render(<ScopeabilityBadge source="mcp_declared" schemaAvailable={false} />);
-    expect(screen.getByTestId("scopeability-no-schema")).toHaveAttribute("title", expect.stringMatching(/8 KiB slice/));
+    const noSchema = screen.getByTestId("scopeability-no-schema");
+    expect(noSchema.getAttribute("title")).toMatch(/cannot be scoped/i);
+    expect(noSchema.getAttribute("title")).not.toMatch(/8 ?KiB/i);
+    // And it must not claim approval — the badge is keyed on `source`, which never carries it.
+    expect(noSchema.getAttribute("title")).not.toMatch(/approved/i);
     rerender(<ScopeabilityBadge source="observed" schemaAvailable={false} />);
     expect(screen.getByTestId("scopeability-name-only")).toHaveAttribute("title", expect.stringMatching(/whole-call facts/i));
+  });
+
+  it("does not claim an operator approved a declared definition", () => {
+    // `_declared_row` stamps SOURCE_DECLARED for every pin regardless of `approved`, so in strict pin
+    // mode this badge sits on a first-sighted quarantined definition nobody has reviewed.
+    render(<ProvenanceBadge source="mcp_declared" />);
+    const title = screen.getByText("Declared").getAttribute("title") ?? "";
+    expect(title).toMatch(/published/i);
+    expect(title).not.toMatch(/approved it/i);
   });
 });
 

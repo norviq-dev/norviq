@@ -38,7 +38,11 @@ const TONE: Record<string, { label: string; hex: string; title: string }> = {
   mcp_declared: {
     label: "Declared",
     hex: "#2ddab8",
-    title: "An MCP server published this definition and an operator approved it"
+    // NOT "and an operator approved it". The badge is keyed on `source` alone, and `_declared_row`
+    // stamps SOURCE_DECLARED for every pin regardless of `approved` — so in strict pin mode a
+    // first-sighted, quarantined definition nobody has looked at carried a tooltip claiming a human
+    // had blessed it. Tools.tsx corrected this same sentence in its own subtitle and left the badge.
+    title: "An MCP server published this definition. Approval is per tool — see MCP Servers"
   },
   observed: {
     label: "Observed",

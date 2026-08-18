@@ -104,6 +104,17 @@ type DryRunResult = {
   newly_allowed?: number;
   newly_blocked_samples?: DryRunFlip[];
   block_rate_pct?: number;
+  // Emitted by POST /policies/dry-run and previously ABSENT from this type, which is why the console
+  // could not distinguish "we replayed traffic and nothing flipped" from "nothing was replayed" or
+  // "the rego does not compile". All three returned HTTP 200 with every count at 0, so all three
+  // rendered as a green `0` reading "0 currently-allowed calls would be newly blocked" — a measured
+  // all-clear the endpoint never gave. The server's own comment says the console should render these
+  // distinctly; the type is what stopped it.
+  valid?: boolean;
+  errors?: string[];
+  no_replayable_traffic?: boolean;
+  params_captured?: boolean;
+  advisory?: string | null;
   truncated?: boolean;
   scope?: { namespace?: string; agent_class?: string | null };
   recommendation?: string;
@@ -2532,6 +2543,25 @@ export function PolicyCatalog() {
                     {(() => {
                       const checked = dryRunResult.total_records_checked ?? 0;
                       const newly = dryRunResult.newly_blocked ?? 0;
+                      // A zero is only good news if something was actually measured. `valid === false`
+                      // means the rego never compiled; `no_replayable_traffic` means there was nothing
+                      // to replay. Both come back 200 with zeroes.
+                      const unmeasured =
+                        dryRunResult.valid === false ? "This rego did not compile — nothing was replayed."
+                        : dryRunResult.no_replayable_traffic ? "No recent traffic to replay, so nothing was exercised."
+                        : null;
+                      if (unmeasured) {
+                        return (
+                          <div data-testid="dryrun-unmeasured" style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 4 }}>
+                            <span style={{ fontSize: 20, fontWeight: 700, color: "var(--escalate)" }}>—</span>
+                            <span style={{ color: "var(--text-secondary)" }}>
+                              <strong style={{ color: "var(--escalate)" }}>Not measured.</strong> {unmeasured}{" "}
+                              This is not a zero-impact result.
+                              {dryRunResult.errors?.length ? ` ${dryRunResult.errors[0]}` : ""}
+                            </span>
+                          </div>
+                        );
+                      }
                       const flipColor = newly > 0 ? "var(--escalate)" : "var(--allow)";
                       return (
                         <>

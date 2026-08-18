@@ -205,6 +205,11 @@ function TopBlockedTools({
           <div key={d.tool} style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <span
               className="mono"
+              // The row's ONLY identifier, in a fixed 104px box that holds ~12 characters. The full
+              // name has to stay reachable or two tools that share a prefix become one bar in a chart
+              // whose entire job is ranking them. RedTeam.tsx does exactly this for its truncated
+              // vector ids; this panel was the one place that did not.
+              title={d.tool}
               style={{
                 fontSize: 13,
                 color: "var(--text-secondary)",

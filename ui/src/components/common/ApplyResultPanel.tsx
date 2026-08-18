@@ -172,6 +172,11 @@ export function ApplyResultPanel({ result, onClose }: { result: ApplyResult | nu
     <div
       style={{
         marginTop: 14,
+        // This card mounts as a mid-list child of a plain-block page root, so it owns BOTH its
+        // margins — the same "the parent will space it" assumption that left four page roots with
+        // cards touching. After any apply the next sibling is often the Intent-drafts `.panel`, which
+        // carries no margin of its own, so the two borders met.
+        marginBottom: 14,
         border: `1px solid ${accent}`,
         borderRadius: 12,
         background: "var(--bg-surface, #141414)",
