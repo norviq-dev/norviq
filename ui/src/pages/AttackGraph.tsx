@@ -377,7 +377,11 @@ export function AttackGraph() {
     try {
       const d = await createIntentDraft({
         ns: selected.ns,
-        cls: selected.cls,
+        // Guarded by `canDraftIntent` on the button, so this is unreachable for a non-agent origin —
+        // an agent-class intent draft for a path with no class would be a policy scoped to the empty
+        // string, which `_RESERVED_CLASSES` would reject server-side anyway. The `?? ""` keeps the
+        // type honest without inventing a second code path for a state the UI does not allow.
+        cls: selected.cls ?? "",
         allow_tools: [],
         intent: { readonly: true, scope: false, rate: false, egress: false },
         path_ids: [pid]
@@ -395,7 +399,11 @@ export function AttackGraph() {
     return [{ value: "all", label: "All namespaces" }, ...[...new Set(src)].map((n) => ({ value: n, label: n }))];
   }, [namespaces, apiNamespaces]);
   const classOptions = useMemo(() => {
-    const distinct = [...new Set(paths.map((p) => p.cls).filter(Boolean))];
+    // `filter(Boolean)` already dropped a null class; the cast is what TypeScript needs to know that.
+    // A non-agent origin has no class and deliberately gets no entry here — the picker chooses among
+    // AGENT CLASSES, and adding a pseudo-entry for "not an agent" would make the filter mean two
+    // different things depending on which row you picked.
+    const distinct = [...new Set(paths.map((p) => p.cls).filter((c): c is string => Boolean(c)))];
     return [{ value: "all", label: "All classes" }, ...distinct.map((c) => ({ value: c, label: c }))];
   }, [paths]);
   // Global intent: every class with a kill-chain, and its TRUE path count.

@@ -16,7 +16,7 @@ import * as d3 from "d3";
 import { DECISION_COLORS, NODE_COLORS } from "../../lib/d3-helpers";
 import { lookalikeOf } from "../../lib/predicateSentence";
 import { SEVERITY_COLORS } from "./constants";
-import type { ThreatPath, ThreatStep } from "./types";
+import type { NodeKind, OriginKind, ThreatPath, ThreatStep } from "./types";
 
 /** Classification-lifecycle caption for a tool hop: resolved verb (+ "learned" when admin-promoted),
  *  the observation state with its evidence counts, or the unclassified-observing fallback. */
@@ -68,7 +68,10 @@ export interface AttackCanvasHandle {
 
 interface ChainNode {
   id: string;
-  kind: "agent" | "tool" | "data";
+  // The union is NodeKind ∪ OriginKind: a chain node is either a step's target (agent/tool/data) or
+  // the chain's origin, which may be an MCP server. Kept explicit rather than widened to `string` so
+  // `drawIcon` losing an arm stays a compile error rather than a silent data-cylinder fallthrough.
+  kind: NodeKind | OriginKind;
   role: "source" | "step" | "target";
   x: number;
   y: number;
@@ -132,13 +135,20 @@ interface Props {
 
 const rOf = (d: ChainNode) => (d.role === "target" ? 24 : d.role === "source" ? 20 : 18);
 
+/** Display names for kinds whose WIRE word is not one. */
+const KIND_LABEL: Partial<Record<NodeKind | OriginKind, string>> = { mcp_server: "mcp server" };
+
 export function buildScope(nodeId: string, allPaths: ThreatPath[], range?: string): ScopeCard | null {
   const inPaths = allPaths.filter((p) => p.src === nodeId || p.steps.some((st) => st.to === nodeId));
   if (!inPaths.length) return null;
-  let kind: "agent" | "tool" | "data" = "agent";
+  // Defaults to "agent" only for a node that appears as some path's SOURCE and never as a step
+  // target. That used to be true by construction; with MCP origins it is not, so the source's own
+  // kind is consulted before falling back.
+  let kind: NodeKind | OriginKind = "agent";
   for (const p of inPaths) {
     const st = p.steps.find((x) => x.to === nodeId);
     if (st) { kind = st.kind; break; }
+    if (p.src === nodeId) { kind = p.src_kind ?? "agent"; break; }
   }
   const agents = [...new Set(inPaths.map((p) => p.src))].filter((a) => a !== nodeId);
   const targets = [...new Set(inPaths.map((p) => p.tgt))].filter((t) => t !== nodeId);
@@ -178,7 +188,10 @@ export function buildScope(nodeId: string, allPaths: ThreatPath[], range?: strin
   // scope card is the "what can this actually touch" answer, read right before an operator acts on it.
   const lk = lookalikeCaption(nodeId);
   if (lk) rows.push({ k: "Name", v: lk });
-  return { id: nodeId, kindLabel: kind, kindColor: NODE_COLORS[kind], rows };
+  // `kind` is the WIRE word and doubles as the label everywhere else, because agent/tool/data happen
+  // to read fine as prose. "mcp_server" does not — it reads as an identifier — so the one kind whose
+  // wire name is not a display name gets mapped. Same fix, same reason, as the asset inspector's.
+  return { id: nodeId, kindLabel: KIND_LABEL[kind] ?? kind, kindColor: NODE_COLORS[kind], rows };
 }
 
 export const AttackGraphCanvas = forwardRef<AttackCanvasHandle, Props>(function AttackGraphCanvas(
@@ -231,6 +244,15 @@ export const AttackGraphCanvas = forwardRef<AttackCanvasHandle, Props>(function 
       s.append("rect").attr("x", -8).attr("y", -6).attr("width", 16).attr("height", 12).attr("rx", 2.5);
       s.append("path").attr("d", "M-4 -2 L-1 1 L-4 4");
       s.append("line").attr("x1", 1).attr("y1", 4).attr("x2", 5).attr("y2", 4);
+    } else if (kind === "mcp_server") {
+      // A stacked-rack glyph: a server, plainly, and visibly not the agent's robot or the data
+      // cylinder. Without its own arm it would fall through to the else below and an MCP server would
+      // be drawn as a database — which is what the else-branch does for EVERY unrecognised kind, and
+      // is why this needs an arm rather than a colour.
+      s.append("rect").attr("x", -7.5).attr("y", -7).attr("width", 15).attr("height", 5.5).attr("rx", 1.5);
+      s.append("rect").attr("x", -7.5).attr("y", 1.5).attr("width", 15).attr("height", 5.5).attr("rx", 1.5);
+      s.append("circle").attr("cx", -4.5).attr("cy", -4.25).attr("r", 1).attr("fill", color).attr("stroke", "none");
+      s.append("circle").attr("cx", -4.5).attr("cy", 4.25).attr("r", 1).attr("fill", color).attr("stroke", "none");
     } else {
       s.append("ellipse").attr("cx", 0).attr("cy", -5).attr("rx", 7).attr("ry", 2.6);
       s.append("path").attr("d", "M-7 -5 V5 C-7 6.4 -3.8 7.6 0 7.6 C3.8 7.6 7 6.4 7 5 V-5");
@@ -309,7 +331,12 @@ export const AttackGraphCanvas = forwardRef<AttackCanvasHandle, Props>(function 
     // HORIZONTAL kill-chain: agent (left) → tool(s) → crown jewel (right). fitView's viewBox scales the
     // whole chain to the canvas so it is always fully on-screen (no overflow), regardless of hop count.
     const nodes: ChainNode[] = [
-      { id: p.src, kind: "agent", role: "source", x: 0, y: 0, lookalikeText: lookalikeCaption(p.src) }
+      // The origin's kind comes from the path, not from a constant. Hardcoding "agent" was correct
+      // while an agent was the only thing that could start a chain; with an MCP-server origin it drew
+      // a robot icon over a server and, worse, `drawIcon`'s else-branch would have drawn a DATABASE
+      // for any kind it did not recognise — so the one node whose kind carries the finding was the
+      // one most likely to be mislabelled.
+      { id: p.src, kind: (p.src_kind ?? "agent"), role: "source", x: 0, y: 0, lookalikeText: lookalikeCaption(p.src) }
     ];
     p.steps.forEach((st, i) => {
       const oc = opCaption(st);

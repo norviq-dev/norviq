@@ -67,9 +67,12 @@ def captured(monkeypatch) -> list:
     # `cap` is part of the real signature: the route asks for the UNCAPPED list so it can count each
     # class before truncating. A double that silently swallowed it with **kwargs would keep passing if
     # the route stopped passing it, which is the regression that matters — so it is named explicitly.
+    # The third element is `non_agent_hidden` — paths excluded by an agent-class filter because their
+    # origin is not an agent. Named explicitly for the same reason `cap` is: a double that returned a
+    # 2-tuple would fail loudly here rather than letting the route quietly drop the count.
     async def _fake_derive(_session, namespaces, _cls, _hours=24, cap=None):
         seen.append(namespaces)
-        return [], []
+        return [], [], 0
 
     monkeypatch.setattr(threats_router, "_derive_paths", _fake_derive)
     return seen
@@ -82,7 +85,7 @@ def captured_hours(monkeypatch) -> list:
 
     async def _fake_derive(_session, _namespaces, _cls, hours=24, cap=None):
         seen.append(hours)
-        return [], []
+        return [], [], 0
 
     monkeypatch.setattr(threats_router, "_derive_paths", _fake_derive)
     return seen

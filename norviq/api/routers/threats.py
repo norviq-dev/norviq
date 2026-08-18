@@ -34,11 +34,11 @@ from typing import cast
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from norviq.api.auth import get_current_user, require_admin, require_target_cluster
-from norviq.api.db.models import IntentDraft
+from norviq.api.db.models import IntentDraft, McpServer
 from norviq.api.db.session import get_session
 from norviq.api.retention import draft_expiry, enforce_draft_cap, gc_expired_drafts
 from norviq.api.synthetic import is_synthetic_identity
@@ -176,6 +176,32 @@ def _is_source_agent(node: dict) -> bool:
     )
 
 
+#: Node types that can START a kill-chain, and what the path reports as its origin kind.
+#:
+#: An MCP server is an origin because the question "if this server were compromised, what does it
+#: reach" is the one the registry work makes askable, and it is not answerable from any agent's row:
+#: a poisoned definition steers whichever agent happens to be connected, so the blast radius belongs
+#: to the SERVER. The `serves` edge (server -> tool) added with the graph node is what makes the walk
+#: possible, and it points the same way the traversal already goes.
+_ORIGIN_KINDS = ("agent", "mcp_server")
+
+
+def _origin_kind(node: dict) -> str:
+    """The path-origin kind for a node, or "" if it cannot start a path.
+
+    Deliberately NOT a widening of `_is_source_agent`. That predicate has four conjuncts and three of
+    them encode real properties of AGENTS — an identity super-node has no outgoing edges, an awaiting
+    agent has made no calls, and a class-less agent cannot be governed by an agent-class policy.
+    Loosening them to admit a different kind of node would have quietly changed what counts as an
+    agent origin too. An MCP server answers to none of those, so it gets its own arm.
+    """
+    if _is_source_agent(node):
+        return "agent"
+    if node["type"] == "mcp_server":
+        return "mcp_server"
+    return ""
+
+
 def _node_sensitive(node: dict) -> bool:
     if node["type"] == "data":
         return True
@@ -259,18 +285,88 @@ def _walk_paths(source: str, out_edges: dict[str, list[dict]], nodes_by_id: dict
     return out
 
 
+#: Origin risk for a non-agent origin, in the same 0..1 units as `1.0 - trust`.
+#:
+#: These are the registry states an operator sets on the MCP Servers page, so the number the Attack
+#: Graph shows moves when they make a decision — which is the point. An unreviewed server is the
+#: highest because "nobody has looked at this" is the state the whole registry exists to distinguish
+#: from "looked at and fine"; the same reasoning that makes Gate A report `scan_severity: "unknown"`
+#: rather than `"none"`.
+#:
+#: `blocked` is NOT the maximum. A blocked server's tools are withheld at discovery, so the path is
+#: real topology that enforcement already covers — ranking it above the servers nobody has reviewed
+#: would push the reviewed-and-refused ones to the top of a list whose job is to surface what is NOT
+#: handled.
+_MCP_ORIGIN_RISK = {
+    "discovered": 1.0,   # nobody has reviewed it
+    "registered": 0.5,   # an operator vouched for it; it can still be compromised
+    "blocked": 0.3,      # refused at discovery — the topology exists, the reach does not
+}
+#: An origin kind with no registry behind it at all. Worst case on purpose: a new origin kind that
+#: nobody has taught this function about must not arrive scoring as safe.
+_UNKNOWN_ORIGIN_RISK = 1.0
+
+
+def _origin_risk(src_kind: str, src_node: dict, registry: dict[tuple[str, str], dict] | None) -> float:
+    """The severity term for an origin that has no behavioural trust score.
+
+    Reads the LIVE registry rather than anything cached on the graph node. That is deliberate and
+    matches the decision taken when the node was added: `add_mcp_server` carries no registration
+    state, because a copy on a node refreshed by traffic goes stale the moment somebody clicks Block,
+    and two answers to "is this server registered" is worse than one lookup.
+    """
+    if src_kind != "mcp_server":
+        return _UNKNOWN_ORIGIN_RISK
+    server_id = str(src_node["props"].get("server_id") or "")
+    namespace = str(src_node["props"].get("namespace") or "")
+    row = (registry or {}).get((namespace, server_id))
+    # No row means no decision has been recorded, which IS `discovered` — the same equivalence the
+    # registry API reports as `previous_status` for a server nobody has decided about.
+    status = str((row or {}).get("status") or "discovered")
+    return _MCP_ORIGIN_RISK.get(status, _UNKNOWN_ORIGIN_RISK)
+
+
+async def _mcp_registry(session: AsyncSession, namespaces: list[str]) -> dict[tuple[str, str], dict]:
+    """The MCP server decisions for these namespaces, keyed (namespace, server_id).
+
+    One query per request, like `_governing_policies` beside it — not per path, and never per hop.
+    Failure returns an empty map rather than raising: an attack-path list that 500s because the
+    registry table was unreachable would be a worse outcome than one whose MCP origins fall back to
+    `discovered`, which is also the honest default.
+    """
+    if not namespaces:
+        return {}
+    try:
+        rows = (await session.scalars(
+            select(McpServer).where(McpServer.namespace.in_(namespaces))
+        )).all()
+    except Exception as exc:  # noqa: BLE001 — see the docstring
+        log.warning("nrvq.api.threats.mcp_registry_unavailable", error=str(exc),
+                    code="NRVQ-API-7113")
+        return {}
+    return {(r.namespace, r.server_id): {"status": r.status, "writable": bool(r.writable)}
+            for r in rows}
+
+
 def _build_path(
     node_ids: list[str],
     nodes_by_id: dict[str, dict],
     out_edges: dict[str, list[dict]],
     verb_overrides: dict[str, tuple[str, str]] | None = None,
     verb_evidence: dict[str, dict] | None = None,
+    mcp_registry: dict[tuple[str, str], dict] | None = None,
 ) -> ThreatPath:
     src_node = nodes_by_id[node_ids[0]]
     tgt_node = nodes_by_id[node_ids[-1]]
     ns = str(src_node["props"].get("namespace") or "")
-    cls = str(src_node["props"].get("agent_class") or "")
-    trust = float(src_node["props"].get("trust_score") or 0.8)
+    src_kind = _origin_kind(src_node) or "agent"
+    # Agent-shaped facts ONLY when the origin is an agent. `cls or ""` and `trust or 0.8` used to run
+    # unconditionally, so a non-agent origin got an empty class that read as "unknown agent" and a
+    # fabricated 0.8 trust that rendered green and capped its severity below "critical".
+    cls: str | None = str(src_node["props"].get("agent_class") or "") if src_kind == "agent" else None
+    trust: float | None = (
+        float(src_node["props"].get("trust_score") or 0.8) if src_kind == "agent" else None
+    )
 
     steps: list[ThreatStep] = []
     chokepoint = ""
@@ -380,7 +476,19 @@ def _build_path(
     blast = len([r for r in reach])
 
     tgt_sens = 1.0 if _node_sensitive(tgt_node) else 0.4
-    risk = min(1.0, (1.0 - trust) * 0.5 + tgt_sens * 0.35 + (0.15 if chokepoint else 0.0))
+    # THE ORIGIN TERM. For an agent it is behavioural trust, which is measured. For anything else there
+    # is no trust score, and the question is what to put in its place.
+    #
+    # NOT 0.8, which is what the old `or 0.8` produced: the best-but-one value, contributing 0.10 to a
+    # formula whose other terms cap at 0.50, so an unreviewed MCP server reaching a crown jewel could
+    # never exceed "high". A number nobody measured must not be the reason a path looks survivable.
+    #
+    # NOT a constant worst case either — that would rank a knowledge base an operator registered
+    # read-only alongside one they have never looked at, and the operator has already told us the
+    # difference. `_origin_risk` reads the registry they populated, so the decisions taken on the MCP
+    # Servers page are what move this number.
+    origin_risk = (1.0 - trust) if trust is not None else _origin_risk(src_kind, src_node, mcp_registry)
+    risk = min(1.0, origin_risk * 0.5 + tgt_sens * 0.35 + (0.15 if chokepoint else 0.0))
     sev = _severity_from(risk)
 
     if blocked:
@@ -394,6 +502,23 @@ def _build_path(
         )
     elif any_allow_all and len(steps) > 0:
         status, verdict = "exploitable", f"Every hop has allowed traffic — '{chokepoint}' is reachable end-to-end."
+    elif src_kind != "agent":
+        # SAME status value, different sentence. The value is load-bearing in two places that must not
+        # be disturbed: `_STATUS_ORDER[p.status]` is a DIRECT index in the dedupe (a new string raises
+        # KeyError), and the same map drives the pre-cap ranking, so inventing a rank would decide by
+        # accident whether these displace agent findings in the 200-path view.
+        #
+        # The SENTENCE had to change. Decision history is keyed (agent_id, tool_name) from the audit
+        # log, and no audit row will ever carry `agent_id = "mcp:<server>"` — so this path is
+        # permanently "unsimulated" and "simulate to confirm" asks the operator to do something that
+        # cannot work. What is true is that the reach is structural: the server serves the tool
+        # whether or not anyone has called it.
+        status = "unsimulated"
+        verdict = (
+            f"Reachable by construction: this MCP server serves '{chokepoint}', which reaches "
+            f"{tgt_node['name']}. No traffic is attributable to a server (audit rows name the calling "
+            "agent), so this is topology, not observed exploitation."
+        )
     else:
         status, verdict = "unsimulated", "No end-to-end traffic yet — simulate to confirm reachability."
 
@@ -403,10 +528,11 @@ def _build_path(
         src=src_node["name"],
         tgt=tgt_node["name"],
         ns=ns,
+        src_kind=src_kind,
         cls=cls,
         mitre=mitre_for_tool(chokepoint),
         hops=len(node_ids) - 1,
-        trust=round(trust, 2),
+        trust=round(trust, 2) if trust is not None else None,
         blast=blast,
         status=status,
         tool=chokepoint,
@@ -521,24 +647,40 @@ def _path_governed_by(gov: dict, cls: str, chokepoint: str, choke_verb: str | No
 async def _derive_paths(
     session: AsyncSession, namespaces: list[str] | None, cls: str | None, hours: int = 24,
     cap: int | None = _MAX_PATHS,
-) -> tuple[list[ThreatPath], list[str]]:
+) -> tuple[list[ThreatPath], list[str], int]:
     nodes_by_id, out_edges, seen = await _assemble(session, namespaces, hours)
     overrides = await _verb_overrides(session, namespaces)
     evidence = await _verb_evidence(session, namespaces)
     governing = await _governing_policies(session, namespaces)
+    registry = await _mcp_registry(session, seen)
     paths: list[ThreatPath] = []
+    non_agent_hidden = 0
     for nid, node in nodes_by_id.items():
-        if not _is_source_agent(node):
+        if not _origin_kind(node):
             continue
         for chain in _walk_paths(nid, out_edges, nodes_by_id):
-            p = _build_path(chain, nodes_by_id, out_edges, verb_overrides=overrides, verb_evidence=evidence)
+            p = _build_path(chain, nodes_by_id, out_edges, verb_overrides=overrides,
+                            verb_evidence=evidence, mcp_registry=registry)
             if cls and cls.lower() != "all" and p.cls != cls:
+                # A non-agent origin has no class, so an agent-class filter legitimately excludes it —
+                # but silently, which is the part that had to change. Counted here and reported on the
+                # response so the console can say "N non-agent origins hidden", exactly as it already
+                # does for probe traffic. An exclusion nobody can see is indistinguishable from an
+                # estate that has none.
+                if p.cls is None:
+                    non_agent_hidden += 1
                 continue
             # Mark whether an APPLIED policy governs this chokepoint (audit-derived status can lag a fresh
             # apply). Chokepoint verb: promoted override → name classifier.
             ov = overrides.get(p.tool)
             choke_verb = ov[0] if ov else (lambda v: v.value if v != Verb.UNKNOWN else None)(classify_tool(p.tool)[0])
-            p.governed_by = _path_governed_by(governing, p.cls, p.tool, choke_verb)
+            # "n/a", not "". `_path_governed_by` looks the class up in a per-class map and misses for a
+            # class-less path, returning "" — which the console renders as "no defense applied". An
+            # agent-class intent policy is not a thing that COULD govern a non-agent origin, so "we did
+            # not find one" would be a false negative wearing the clothes of a finding.
+            p.governed_by = (
+                _path_governed_by(governing, p.cls, p.tool, choke_verb) if p.cls is not None else "n/a"
+            )
             paths.append(p)
     # Dedup by id (an agent can reach the same target via distinct-length chains — keep worst).
     by_id: dict[str, ThreatPath] = {}
@@ -558,7 +700,7 @@ async def _derive_paths(
     # `cap=None` returns the UNCAPPED ranked list. The paths endpoint needs it so it can count each
     # class BEFORE truncating: counting inside a capped list answers "how many survived the cap",
     # which is not the class's exposure. Callers that want the capped view keep the default.
-    return (ordered if cap is None else ordered[:cap]), seen
+    return (ordered if cap is None else ordered[:cap]), seen, non_agent_hidden
 
 
 @router.get("/threats/attack-paths", response_model=ThreatPathsResponse)
@@ -590,17 +732,28 @@ async def get_threat_paths(
     # UNCAPPED, then filter, then count, then cap — in that order. Doing it the other way round is
     # what made the console disagree with itself: the class picker counted inside an already-truncated
     # 200 and reported 22 paths for a class the coverage denominator scored out of 49.
-    all_paths, seen = await _derive_paths(session, namespaces, cls, hours, cap=None)
+    all_paths, seen, non_agent_hidden = await _derive_paths(session, namespaces, cls, hours, cap=None)
     # A kill-chain rooted at a synthetic/probe agent is test noise — hide it by default (toggle brings it back).
     synthetic_hidden = 0
     if not include_synthetic:
-        kept = [p for p in all_paths if not is_synthetic_identity(p.cls, p.src)]
+        # `cls or ""` because the classifier takes an optional class and a non-agent origin now sends
+        # None. It falls through to the SVID parse, which cannot match `mcp:<server>`, so a non-agent
+        # origin is never mistaken for a probe — asserted in the tests rather than assumed.
+        kept = [p for p in all_paths if not is_synthetic_identity(p.cls or "", p.src)]
         synthetic_hidden = len(all_paths) - len(kept)
         all_paths = kept
     class_totals: dict[str, int] = {}
+    non_agent_paths = 0
     for p in all_paths:
         if p.cls:
             class_totals[p.cls] = class_totals.get(p.cls, 0) + 1
+        elif p.cls is None:
+            # Counted SEPARATELY rather than under a synthetic "mcp_server" key: `class_totals` is
+            # keyed by agent class, and a key that is not one would collide with a real class of that
+            # name and break the map's contract. This keeps the invariant restatable —
+            # sum(class_totals) + non_agent_paths == total_paths — which `if p.cls:` alone silently
+            # broke, since `total_paths` counts what the loop skipped.
+            non_agent_paths += 1
     total_paths = len(all_paths)
     paths = all_paths[:_MAX_PATHS]
     log.info(
@@ -610,10 +763,13 @@ async def get_threat_paths(
         count=len(paths),
         total_paths=total_paths,
         synthetic_hidden=synthetic_hidden,
+        non_agent_paths=non_agent_paths,
+        non_agent_hidden=non_agent_hidden,
         resolved=seen,
         code="NRVQ-API-7101",
     )
     return ThreatPathsResponse(paths=paths, namespaces=seen, synthetic_hidden=synthetic_hidden,
+                               non_agent_hidden=non_agent_hidden, non_agent_paths=non_agent_paths,
                                class_totals=class_totals, total_paths=total_paths)
 
 
@@ -642,7 +798,7 @@ async def _coverage(
     # This is the second place the display cap leaked into a COUNT; the path-list endpoint had the
     # same defect and was fixed by deriving uncapped, counting, then capping. Coverage never renders a
     # list, so it simply must not cap at all.
-    paths, _ = await _derive_paths(session, namespaces, cls, cap=None)
+    paths, _, _ = await _derive_paths(session, namespaces, cls, cap=None)
     evaluator = request.app.state.evaluator
     covered: list[str] = []
     residual: list[str] = []
@@ -1452,7 +1608,7 @@ async def intent_suggest(
     enforces. The operator seeds the intent allowlist from this, then drafts (default-deny) around it."""
     namespaces = _resolve_namespaces(user, ns)
     nodes_by_id, out_edges, seen = await _assemble(session, namespaces)
-    paths, _ = await _derive_paths(session, namespaces, cls)
+    paths, _, _ = await _derive_paths(session, namespaces, cls)
 
     # This class's chokepoint tools + the target each reaches on an attack path, and the tools on any step.
     chokepoints: set[str] = set()

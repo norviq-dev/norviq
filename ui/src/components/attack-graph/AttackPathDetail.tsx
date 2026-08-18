@@ -8,7 +8,7 @@
 // "Draft blocking policy" button. Sits in the right column; a `side` prop lets the page flip it (matching
 // AssetNodeDetail) though the design keeps it right by default.
 
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { SEVERITY_COLORS, STEP_DECISION_COLORS } from "./constants";
 import type { PathStatus, ThreatPath } from "./types";
 
@@ -50,6 +50,35 @@ const chip: React.CSSProperties = {
   background: "var(--bg-graph-card)", border: "1px solid var(--graph-border-soft)", borderRadius: 999, padding: "4px 10px"
 };
 
+/**
+ * What to say where the "Define {class}'s intended behaviour" button would be, when the path does not
+ * start at an agent.
+ *
+ * The alternative was a disabled button, and it would have been the wrong shape: an intent policy for
+ * a non-agent origin is not a thing that exists and is temporarily unavailable, it is a category
+ * error. What DOES defend this path is named instead, so the panel still ends in an action — the two
+ * MCP controls that read the registry, plus the per-tool pin approval, all of which are reachable from
+ * the MCP Servers page.
+ */
+function NonAgentOriginNote() {
+  return (
+    <div
+      data-testid="attack-path-non-agent-note"
+      style={{
+        marginTop: 10, padding: "10px 12px", borderRadius: 9,
+        background: "var(--bg-graph-card)", border: "1px solid var(--graph-border-soft)",
+        fontSize: 11.5, lineHeight: 1.55, color: "#b8c2d6"
+      }}
+    >
+      This path starts at an MCP server, not an agent, so an agent-class intent does not apply to it.
+      Govern it from{" "}
+      <Link to="/mcp" style={{ color: "var(--accent)" }}>MCP Servers</Link>: registering the server
+      read-only refuses writes through it, and blocking it withholds its tools at discovery.
+    </div>
+  );
+}
+
+
 export function AttackPathDetail({
   path, status, whatIfIndex, simResult, simulating, drafted, draftLink, draftError,
   onToggleWhatIf, onDefineIntent, onSimulate, onDraft
@@ -57,7 +86,20 @@ export function AttackPathDetail({
   const navigate = useNavigate();
   const sev = SEVERITY_COLORS[path.sev];
   const naturalBlock = path.steps.some((st) => st.dec === "block");
-  const trustColor = path.trust >= 0.8 ? "#34d399" : path.trust >= 0.6 ? "#fbbf24" : "#ff8fa3";
+  // AGENT-ONLY AFFORDANCES. Both the intent draft and Simulate are scoped by agent class: the draft
+  // creates a policy for `cls`, and Simulate mints `spiffe://…/sa/{cls}` to run each hop through
+  // /evaluate. A path that does not start at an agent has no class, so neither is a thing that could
+  // be done — offering them would either 422 server-side or, worse, quietly create a policy scoped to
+  // the empty string. Hidden with a stated reason rather than left to fail.
+  const isAgentOrigin = (path.src_kind ?? "agent") === "agent" && Boolean(path.cls);
+  // NEUTRAL when there is no trust score, never green. `path.trust` is null for a non-agent origin,
+  // and `null >= 0.8` is false in JS — so a naive comparison would have painted the "no score" case
+  // in the WORST colour, which is a different lie from the fabricated-0.8 green it replaced but a lie
+  // all the same. Absent is its own state and gets its own colour.
+  const trustColor =
+    path.trust === null || path.trust === undefined
+      ? "var(--text-muted)"
+      : path.trust >= 0.8 ? "#34d399" : path.trust >= 0.6 ? "#fbbf24" : "#ff8fa3";
   // An active what-if gets its OWN amber verdict — it must never borrow the green "blocked"
   // styling of a real block. It is a hypothetical, and the copy says so ("WOULD flip to blocked").
   const verdictStyle =
@@ -115,8 +157,22 @@ export function AttackPathDetail({
             <div style={{ fontSize: 15, fontWeight: 700, marginTop: 6, fontVariantNumeric: "tabular-nums" }}>{path.hops}</div>
           </div>
           <div style={card}>
-            <div style={{ fontSize: 10.5, color: "#8a8a8a", textTransform: "uppercase", letterSpacing: "0.04em" }}>Min trust</div>
-            <div style={{ fontSize: 15, fontWeight: 700, marginTop: 6, color: trustColor, fontVariantNumeric: "tabular-nums" }}>{path.trust.toFixed(2)}</div>
+            <div style={{ fontSize: 10.5, color: "#8a8a8a", textTransform: "uppercase", letterSpacing: "0.04em" }}>
+              {path.trust === null || path.trust === undefined ? "Origin" : "Min trust"}
+            </div>
+            <div
+              data-testid="attack-path-trust"
+              title={
+                path.trust === null || path.trust === undefined
+                  ? "Behavioural trust is measured per agent. This path does not start at one, so there is no score to show — severity uses the MCP server's registry state instead."
+                  : undefined
+              }
+              style={{ fontSize: 15, fontWeight: 700, marginTop: 6, color: trustColor, fontVariantNumeric: "tabular-nums" }}
+            >
+              {/* "not an agent" rather than a number. A dash would read as "we lost it"; the sentence
+                  says which kind of thing this is, which is the fact that explains the absence. */}
+              {path.trust === null || path.trust === undefined ? "not an agent" : path.trust.toFixed(2)}
+            </div>
           </div>
         </div>
 
@@ -141,13 +197,17 @@ export function AttackPathDetail({
               RECOMMENDED FIX
             </div>
             <div style={{ fontSize: 11.5, color: "#b8c2d6", marginTop: 6, lineHeight: 1.5 }}>{path.fix}</div>
-            <button
-              type="button" onClick={onDefineIntent}
-              style={defineBtn}
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flex: "none", marginTop: 1 }}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /><path d="m9 12 2 2 4-4" /></svg>
-              <span>Define {path.cls}&apos;s intended behaviour</span>
-            </button>
+            {isAgentOrigin ? (
+              <button
+                type="button" onClick={onDefineIntent}
+                style={defineBtn}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flex: "none", marginTop: 1 }}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /><path d="m9 12 2 2 4-4" /></svg>
+                <span>Define {path.cls}&apos;s intended behaviour</span>
+              </button>
+            ) : (
+              <NonAgentOriginNote />
+            )}
           </div>
         )}
 
@@ -160,13 +220,17 @@ export function AttackPathDetail({
                 ? `Blocked today by a specific rule. Define ${path.cls}'s intended behaviour to make the block durable (default-deny for the class).`
                 : `Define ${path.cls}'s intended behaviour — allow only intended calls, deny everything else.`}
             </div>
-            <button
-              type="button" onClick={onDefineIntent}
-              style={defineBtn}
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flex: "none", marginTop: 1 }}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /><path d="m9 12 2 2 4-4" /></svg>
-              <span>Define {path.cls}&apos;s intended behaviour</span>
-            </button>
+            {isAgentOrigin ? (
+              <button
+                type="button" onClick={onDefineIntent}
+                style={defineBtn}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flex: "none", marginTop: 1 }}><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /><path d="m9 12 2 2 4-4" /></svg>
+                <span>Define {path.cls}&apos;s intended behaviour</span>
+              </button>
+            ) : (
+              <NonAgentOriginNote />
+            )}
           </div>
         )}
 

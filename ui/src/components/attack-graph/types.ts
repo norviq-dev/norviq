@@ -10,6 +10,9 @@ export type PathStatus = "exploitable" | "blocked" | "unsimulated";
 // logs instead of enforcing. Distinct from "block" (enforced) and from "allow" (nothing would stop it).
 export type StepDecision = "allow" | "mixed" | "block" | "would_block";
 export type NodeKind = "agent" | "tool" | "data";
+/** What a path STARTS at. Separate from `NodeKind` because `ThreatStep.kind` is the kind of a step's
+ *  TARGET — the canvas assigns it to `st.to` — so widening that union could not describe an origin. */
+export type OriginKind = "agent" | "mcp_server";
 
 /** One asset in a path's blast radius; s=1 marks a sensitive (data / high-sensitivity) asset. */
 export interface ReachAsset {
@@ -45,10 +48,18 @@ export interface ThreatPath {
   src: string;
   tgt: string;
   ns: string;
-  cls: string;
+  /** Defaulted server-side to "agent", so every path that existed before MCP origins is unchanged. */
+  src_kind?: OriginKind;
+  /** NULL when the origin is not an agent — not "" and not 0.8.
+   *
+   *  `cls: ""` reads as "an agent whose class we could not determine", a different and more alarming
+   *  claim than "this did not start at an agent". `trust` mattered more: the server used to fabricate
+   *  0.8 for an origin with no score, which renders GREEN and fed the severity formula, so an
+   *  unreviewed MCP server reaching a crown jewel could never be "critical". */
+  cls: string | null;
   mitre: string;
   hops: number;
-  trust: number;
+  trust: number | null;
   blast: number;
   status: PathStatus;
   tool: string; // chokepoint tool
@@ -58,7 +69,10 @@ export interface ThreatPath {
   fix: string;
   // An applied intent/capability policy denies this chokepoint. status is audit-derived so it can still
   // read "exploitable" right after a defense is applied — this says "a defense is in place; Simulate to confirm".
-  governed_by?: "" | "intent" | "capability";
+  /** "n/a" means an agent-class policy is not a thing that COULD govern this path — a non-agent
+   *  origin. Distinct from "", which the shield chip renders as "no defense applied": for an origin
+   *  with no class that would be a false negative wearing the clothes of a finding. */
+  governed_by?: "" | "intent" | "capability" | "n/a";
 }
 
 export interface ThreatPathsResponse {
@@ -70,6 +84,14 @@ export interface ThreatPathsResponse {
   // counting a class inside it yields "how many of this class survived the cap" — a number smaller
   // than the class's real exposure on any estate large enough to saturate it.
   class_totals?: Record<string, number>;
+  /** Paths whose origin is not an agent, hidden because an agent-class filter is active. Drives the
+   *  same "N hidden" affordance as `synthetic_hidden` — an exclusion nobody can see is
+   *  indistinguishable from an estate that has none. */
+  non_agent_hidden?: number;
+  /** Paths whose origin is not an agent, in the full result. `class_totals` is keyed by agent class
+   *  and deliberately excludes them, so the invariant is
+   *  `sum(class_totals) + non_agent_paths === total_paths`. */
+  non_agent_paths?: number;
   // Total before truncation. `paths.length < total_paths` is how the client knows it holds a capped view.
   total_paths?: number;
 }

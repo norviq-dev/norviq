@@ -59,7 +59,7 @@ async def test_class_totals_count_every_path_not_only_the_ones_that_survived_the
         # uncapped list. If it stops passing cap=None this fake truncates and the test fails, which is
         # precisely the regression being guarded.
         ordered = list(fixture)
-        return (ordered if cap is None else ordered[:cap]), ["default"]
+        return (ordered if cap is None else ordered[:cap]), ["default"], 0
 
     monkeypatch.setattr(threats_router, "_derive_paths", fake_derive)
     monkeypatch.setattr(threats_router, "is_synthetic_identity", lambda cls, src: False)
@@ -103,7 +103,7 @@ async def test_class_totals_exclude_synthetic_paths_when_they_are_hidden(monkeyp
 
     async def fake_derive(session, namespaces, cls, hours=24, cap=_MAX):
         ordered = list(fixture)
-        return (ordered if cap is None else ordered[:cap]), ["default"]
+        return (ordered if cap is None else ordered[:cap]), ["default"], 0
 
     monkeypatch.setattr(threats_router, "_derive_paths", fake_derive)
     monkeypatch.setattr(threats_router, "is_synthetic_identity", lambda cls, src: cls == "evtrace-probe")

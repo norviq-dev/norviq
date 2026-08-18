@@ -55,10 +55,27 @@ class ThreatPath(BaseModel):
     src: str
     tgt: str
     ns: str
-    cls: str
+    # WHAT KIND OF THING THE PATH STARTS AT. "agent" for every path that existed before MCP origins.
+    #
+    # It has to be its own field: `ThreatStep.kind` is the kind of a step's TARGET (the canvas assigns
+    # it to `st.to`), so widening that union cannot describe an origin. Defaulted, so every stored
+    # fixture and every hand-written literal stays valid.
+    src_kind: str = "agent"  # agent | mcp_server
+    # NULL when the origin is not an agent, rather than "" and 0.8.
+    #
+    # This is the `ThreatStep.op` precedent applied one level up: a field that does not APPLY is absent,
+    # and the UI renders the absence. The empty string was worse than useless here — `cls=""` reads as
+    # "an agent whose class we could not determine", which is a different and more alarming claim than
+    # "this did not start at an agent", and every cls-keyed feature then silently dropped the path.
+    #
+    # `trust` mattered more. `float(props.get("trust_score") or 0.8)` fabricated 0.8 for any origin
+    # without a score, which renders GREEN and feeds the severity formula's `(1.0 - trust) * 0.5` term —
+    # so an unreviewed MCP server reaching a sensitive target capped at 0.60 ("high") and could never be
+    # "critical". A number nobody measured must not be the reason a path looks safe.
+    cls: str | None = None
     mitre: str
     hops: int
-    trust: float
+    trust: float | None = None
     blast: int
     status: str  # exploitable | blocked | unsimulated
     tool: str  # chokepoint tool
@@ -69,7 +86,13 @@ class ThreatPath(BaseModel):
     # An intent/capability policy is APPLIED for this class whose allowlist would deny the chokepoint tool.
     # The `status` above is derived from historical audit, so it can still read "exploitable" right after a
     # defense is applied (no new traffic yet) — this flag says "you have a defense here; Simulate to confirm".
-    governed_by: str = ""  # "" | "intent" | "capability"
+    # "" | "intent" | "capability" | "n/a".
+    #
+    # "n/a" is not decoration. `_path_governed_by` looks the class up in a per-class policy map, and a
+    # path with no class misses — returning "", which the console's shield chip renders as "no defense
+    # applied". For a non-agent origin that is a false negative dressed as a finding: an agent-class
+    # intent policy is not a thing that could govern it, so "we did not find one" is the wrong sentence.
+    governed_by: str = ""
 
 
 class ThreatPathsResponse(BaseModel):
@@ -77,6 +100,23 @@ class ThreatPathsResponse(BaseModel):
     namespaces: list[str] = []
     # Number of paths hidden because their source agent is synthetic/probe (drives the "N hidden — Show" chip).
     synthetic_hidden: int = 0
+    # Paths whose origin is NOT an agent, hidden because an agent-class filter is active.
+    #
+    # Modelled on `synthetic_hidden` directly above, and for the identical reason: the class filter
+    # legitimately excludes a path with no class, and an exclusion the operator cannot see is
+    # indistinguishable from an estate that has none. Without this the MCP origins simply vanish the
+    # moment somebody picks a class, with nothing on screen to say so.
+    non_agent_hidden: int = 0
+    # Paths whose origin is not an agent, in the FULL result (independent of any filter).
+    #
+    # `class_totals` is keyed by agent class and deliberately does not carry these — adding an
+    # "mcp_server" key would collide with a real agent class of that name, and the map's contract is
+    # "class -> count". So the invariant is restated rather than broken:
+    #     sum(class_totals.values()) + non_agent_paths == total_paths
+    # Before this field, `if p.cls:` skipped these while `total_paths` counted them, so the invariant
+    # silently failed on any estate with an MCP origin — and the test that asserts it uses a fixture
+    # where every path has a class, so it would have stayed green.
+    non_agent_paths: int = 0
     # TRUE per-class path counts, computed BEFORE the global `_MAX_PATHS` truncation.
     #
     # `paths` is capped, so counting a class inside it answers "how many of this class survived the
