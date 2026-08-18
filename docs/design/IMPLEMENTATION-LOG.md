@@ -2611,3 +2611,39 @@ where that row comes from.
 **Suite note:** running the full python suite while five images (incl. a Go compile) were building gave
 21 failures in `test_api.py` and a 193s runtime. Clean re-run: 3197 passed in 101s. Environmental
 contention — re-run rather than assumed.
+
+### The expiry band could not name what it warned about
+
+Reported from the deployed console: a permanent red band, "Injected sidecar credentials expire soon …
+? (norviq)", on an install where NO pod in the `norviq` namespace had an injected sidecar. The row
+behind it was `{"namespace": "norviq", "workload": "", "days_left": 0}`.
+
+**`role=service` is not "injected sidecar".** `auth.py` says so in as many words — the webhook
+controller and the fleet relay hold that role with an empty claim — and `workload` is an OPTIONAL claim
+that only the injector mints. `observe()` captured on `role == "service"` alone, so every
+operator-minted service key was recorded under an empty workload and then described, titled and
+remediated as an injected sidecar. The remediation it printed, "roll the affected Deployments", cannot
+rotate a service key at all; it names no Deployment because there is none.
+
+Three changes:
+- The KIND is decided by the `workload` claim — the thing that actually distinguishes the two — not by
+  the role they happen to share.
+- The SUBJECT is always recorded: the workload for a sidecar, `sub` otherwise. "? (norviq)" was the
+  whole complaint, and both minting paths set `sub`.
+- One band PER KIND, because the remediations have nothing in common. A credential that can name
+  neither a workload nor a subject is now not warned about at all: a band an operator cannot act on
+  trains them to ignore the band that means an outage.
+
+New key prefix, so v1 records stop being READ immediately rather than lingering for their TTL —
+otherwise the stale band survives the fix meant to remove it.
+
+**A probe that proved nothing, caught by control-testing.** Exercising `observe()` in the deployed pod
+returned `ROWS=[]`, which looked like the fix working. It was not: `RedisCache` requires `connect()`
+first, and `observe` swallows every exception by design, so the writes had failed silently. A control
+probe on the raw client surfaced `RuntimeError: connect() must be called before use`. **A function that
+cannot fail cannot be used as evidence that nothing needed doing.** With `connect()` called, the real
+behaviour appeared: service key and sidecar separated, each named, each with its own remediation, the
+unnameable and human credentials correctly ignored.
+
+Verified end to end on kind: both bands render correctly through `GET /api/v1/system-health` with their
+own remediations, and with the probe rows removed the console shows no expiry band and no "? (norviq)".
