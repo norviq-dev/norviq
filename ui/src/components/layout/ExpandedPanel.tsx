@@ -24,6 +24,7 @@ import {
   Wrench,
   type LucideIcon
 } from "lucide-react";
+import { useMemo } from "react";
 import { NavLink } from "react-router-dom";
 import { fetchVersion, logout } from "../../api/client";
 import { fleetEnabled } from "../../api/fleet";
@@ -140,6 +141,21 @@ const PANEL_CONFIG: Record<Section, { title: string; groups: Group[] }> = {
   }
 };
 
+/** Paths that another nav item sits underneath, and which therefore must match EXACTLY.
+ *
+ *  NavLink matches by prefix unless told otherwise, which is the behaviour you want almost everywhere
+ *  here: a detail route like `/tools/<id>` should keep Tools lit. It is wrong in exactly one shape —
+ *  when one nav item's path is an ancestor of another's. Standing on `/compliance/policies` lit BOTH
+ *  Compliance and Policy Compliance, because `/compliance` is a prefix of it.
+ *
+ *  Derived from the config rather than hand-listed, so adding a nested item later cannot reintroduce
+ *  this: the moment `/x/y` joins a section that already has `/x`, `/x` starts matching exactly.
+ */
+function exactMatchPaths(groups: Group[]): Set<string> {
+  const paths = groups.flatMap((g) => g.items.map((i) => i.to));
+  return new Set(paths.filter((p) => paths.some((other) => other !== p && other.startsWith(p + "/"))));
+}
+
 export default function ExpandedPanel({
   overlay = false,
   onNavigate
@@ -149,6 +165,7 @@ export default function ExpandedPanel({
 }) {
   const { activeSection } = useApp();
   const config = PANEL_CONFIG[activeSection];
+  const exact = useMemo(() => exactMatchPaths(config.groups), [config]);
   const version = useApi(() => fetchVersion(), [], { cacheKey: "version", staleTimeMs: 600_000 });
 
   return (
@@ -162,7 +179,7 @@ export default function ExpandedPanel({
               <NavLink
                 key={item.to}
                 to={item.to}
-                end={item.to === "/"}
+                end={item.to === "/" || exact.has(item.to)}
                 className={({ isActive }) => `sb-link${isActive ? " active" : ""}`}
                 onClick={onNavigate}
               >

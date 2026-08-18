@@ -2412,3 +2412,29 @@ Also: the first measurement script only compared panels adjacent in the flat `qu
 NodeList, which skipped the Policy Packs shape (a page-level panel following one that contains a rail
 of nested panels) and reported it clean. Pairing on `previousElementSibling` instead found it. A
 measurement that cannot see a case reports it as passing.
+
+### Follow-up: two sidebar items highlighted at once
+
+On Policy Compliance, both Compliance and Policy Compliance were lit. `NavLink` matches by PREFIX
+unless `end` is set, and `end` was `item.to === "/"` — exact for the root and nothing else — so
+`/compliance` also matched `/compliance/policies`.
+
+Not fixed with blanket `end`. Prefix matching is the behaviour you want almost everywhere in this nav:
+a detail route like `/tools/<id>` should keep Tools lit, and `end` on everything would leave the
+sidebar with NOTHING highlighted there. The rule is narrower: a nav item must match exactly when
+another nav item sits underneath it. Derived from the config (`exactMatchPaths`) rather than
+hand-listed, so adding a nested item later cannot reintroduce it.
+
+Swept all 23 routes in the live DOM before and after: exactly one route was broken, and now every
+route lights exactly one item — never zero, never two.
+
+**Test design.** Four tests, each mutation-checked: two fail with the fix reverted, one fails under the
+blanket-`end` over-fix, one anchors the parent's own route. A test that cannot fail under either the
+bug or its plausible over-correction is not guarding the decision.
+
+**A flake I introduced and then fixed.** The sweep test mounts the panel once per nav link, and
+`ExpandedPanel` calls `fetchVersion()` on mount with nothing mocking the network in that file. Sixteen
+late-rejecting promises resolving after their test had unmounted surfaced as a failure in an unrelated
+test — one failure in the full suite, green on re-run. "Passed on retry" is not a diagnosis: the call
+is now stubbed, and the suite is green four consecutive times. The latent version of this (one
+unmocked call) predates the change; the sweep only made it visible.
