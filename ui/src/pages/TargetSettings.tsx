@@ -110,8 +110,18 @@ export function TargetSettings() {
       <PageHead title="Namespace Governance" subtitle={scopeLabel} />
 
       <Panel title="Governance" sub="How this namespace is governed right now (server-enforced).">
-        <div style={{ display: "flex", gap: 24, flexWrap: "wrap", alignItems: "flex-start" }}>
-          <div>
+        {/* GRID, not a wrapping flex. Each of these three knobs carries a variable amount of state
+            text underneath it — a Monitor note here, a frozen note there, a pack list that grows with
+            the namespace — so as flex items they sized to their own content and the columns landed at
+            three different widths that moved every time the posture changed. An explicit track keeps
+            the three reading as peers, and `alignItems: start` stops a tall column stretching the
+            short ones. `auto-fit` collapses them to one column on a narrow viewport rather than
+            letting the 300px note blocks overhang. */}
+        <div style={{
+          display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(clamp(240px, 30%, 320px), 1fr))",
+          gap: 20, alignItems: "start",
+        }}>
+          <div style={{ minWidth: 0 }}>
             {/* TGT-POSTURE-01: the block-vs-observe axis is now an editable toggle (Block ⇄ Monitor). */}
             <div style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 4 }}>Enforcement mode</div>
             <div className="tabs-kit" style={{ display: "flex" }}>
@@ -168,7 +178,7 @@ export function TargetSettings() {
             )}
             {!isAdmin && <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>{permissionNote}</div>}
           </div>
-          <div>
+          <div style={{ minWidth: 0 }}>
             {/* Change control (apply governance) — a policy-EDIT lock, not a traffic mode. Wire values enforce|dry_run_only. */}
             <div style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 4 }}>Change control — policy edits</div>
             <div className="tabs-kit" style={{ display: "flex" }}>
@@ -203,8 +213,8 @@ export function TargetSettings() {
             )}
             {!isAdmin && <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>{permissionNote}</div>}
           </div>
-          <div>
-            <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>Sector packs applied</div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 12, color: "var(--text-secondary)", marginBottom: 4 }}>Sector packs applied</div>
             {/* Explicit APPLIED/NONE state tied to the concrete namespace, updates after enable/disable. */}
             {!concrete ? (
               <div data-testid="packs-applied-state" style={{ marginTop: 4, fontSize: 13, color: "var(--text-muted)" }}>Select a namespace to see applied packs</div>

@@ -86,14 +86,41 @@ describe("baseline controls", () => {
     expect(await screen.findByTestId("baseline-control-pii_detection")).toBeInTheDocument();
   });
 
-  it("shows the false-positive caveat inline, not behind a tooltip", async () => {
-    // The moment someone clicks Enforce is exactly the moment they will not go and read the docs.
+  it("marks the controls that carry a limitation, and only those", async () => {
+    // This test asserted the OPPOSITE until the page was read in situ: the caveat was a paragraph on
+    // every affected row, and twenty-one rows of prose is what made the panel unreadable. The prose
+    // moved to the docs; the MARKER did not, because a control having a limitation is what an
+    // operator needs at the moment they click Enforce.
+    //
+    // The label is deliberately not "false positive" — see the component. Eleven controls carry a
+    // caveat and only two of them are about false positives.
     mockFetch();
     renderPanel({ namespace: "chatbot-prod", isAdmin: true });
     const caveat = await screen.findByTestId("baseline-caveat-deny_shell_execution");
-    expect(caveat.textContent).toContain("1 in 8");
-    // A control with no known false-positive mode must not render an empty warning box.
+    // The text is still REACHABLE — the marker carries it — so the fact was moved, not deleted.
+    expect(caveat.getAttribute("title")).toContain("1 in 8");
+    expect(caveat.getAttribute("aria-label")).toMatch(/limitation/i);
+    expect(caveat.getAttribute("aria-label")).not.toMatch(/false.positive/i);
+    // A control with no known false-positive mode must not be marked.
     expect(screen.queryByTestId("baseline-caveat-pii_detection")).toBeNull();
+  });
+
+  it("puts no description prose on a control row", async () => {
+    // The change the operator asked for, stated as a property rather than as an absence of markup:
+    // a row carries its heading and its measured impact, and nothing that belongs in the docs.
+    mockFetch();
+    renderPanel({ namespace: "chatbot-prod", isAdmin: true });
+    const row = await screen.findByTestId("baseline-control-deny_shell_execution");
+    expect(row.textContent).toContain("Shell / command execution");   // the heading stays
+    expect(row.textContent).not.toContain("Catches shell metacharacters");  // the description does not
+  });
+
+  it("gives every section one docs link instead of a paragraph per control", async () => {
+    mockFetch();
+    renderPanel({ namespace: "chatbot-prod", isAdmin: true });
+    const tool = await screen.findByTestId("baseline-surface-tool");
+    const links = [...tool.querySelectorAll("a")].filter((a) => /docs/i.test(a.textContent ?? ""));
+    expect(links).toHaveLength(1);
   });
 
   it("reports an unreadable control set as unknown, never as 'nothing enforcing'", async () => {
@@ -167,13 +194,24 @@ describe("baseline controls", () => {
       agent_classes: [{ name: "cmp-support", count: 1400 }, { name: "cmp-finance", count: 32 }],
       tools: [{ name: "get_order", count: 1200 }], namespaces: ["chatbot-prod"],
       first_seen: null, last_seen: null, samples: [],
+    }, {
+      // The quiet-but-reported case. It still carries agent_classes, so rendering it produced the
+      // sentence "0 would have been blocked · 2 classes" — which is not merely noisy, it is false.
+      control_id: "pii_detection", count: 0,
+      agent_classes: [{ name: "cmp-support", count: 0 }, { name: "cmp-finance", count: 0 }],
+      tools: [], namespaces: ["chatbot-prod"],
+      first_seen: null, last_seen: null, samples: [],
     }]);
     renderPanel({ namespace: "chatbot-prod", isAdmin: true });
     const impact = await screen.findByTestId("baseline-impact-deny_shell_execution");
     expect(impact.textContent).toContain("1,432");
-    expect(impact.textContent).toContain("2 agent classes");
+    expect(impact.textContent).toContain("2 classes");
     expect(impact.textContent).toContain("get_order");
     // A quiet control gets no line at all — "0 calls" on every row trains people to stop reading it.
+    // pii_detection is PRESENT AT ZERO in the payload — the shape the live endpoint actually returns,
+    // and the one the old `impact.has(id)` guard rendered as "0 would have been blocked · 2 classes".
+    // An ABSENT control would satisfy this assertion for the wrong reason, which is what the first
+    // version of this test did, so it could not fail when the guard was removed.
     expect(screen.queryByTestId("baseline-impact-pii_detection")).toBeNull();
   });
 

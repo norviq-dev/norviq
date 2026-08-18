@@ -12,6 +12,7 @@ and keep the number from silently meaning nothing.
 from __future__ import annotations
 
 import shutil
+from collections import Counter
 
 import pytest
 
@@ -210,3 +211,36 @@ class TestShippedDefaultsAreEarned:
         assert rows["deny_shell_execution"]["default_effect"] == "deny"
         assert rows["scope_violation_dangerous_tool"]["default_effect"] == "monitor"
         assert all(r["plane"] in ("discovery", "call", "response") for r in rows.values())
+
+
+class TestControlSurface:
+    """`surface` is the axis the console groups on at the top level: WHAT a control governs.
+
+    It is deliberately server-side and NOT derived from an `mcp_` id prefix in the console. The prefix
+    is a naming convention nothing enforces, so a future MCP control named without it would land
+    silently in the tool group — the one place an operator would never look for it.
+    """
+
+    def test_every_control_declares_a_surface(self) -> None:
+        rows = baseline.describe("strict")
+        assert rows, "no controls described"
+        assert all(r["surface"] in ("tool", "mcp") for r in rows)
+
+    def test_the_mcp_controls_are_the_ones_that_read_input_mcp(self) -> None:
+        """The grouping must follow what a control actually reads, not what it is called."""
+        rows = {r["id"]: r for r in baseline.describe("strict")}
+        mcp = {cid for cid, r in rows.items() if r["surface"] == "mcp"}
+        assert mcp == {cid for cid in rows if cid.startswith("mcp_")}, (
+            "surface and the mcp_ naming convention disagree — one of them is wrong"
+        )
+        assert len(mcp) >= 5, "the MCP group lost controls"
+
+    def test_both_groups_are_non_empty(self) -> None:
+        """A surface with no controls renders as a heading over nothing."""
+        rows = baseline.describe("strict")
+        by_surface = Counter(r["surface"] for r in rows)
+        assert by_surface["tool"] > 0 and by_surface["mcp"] > 0
+
+    def test_an_unknown_control_id_defaults_to_the_tool_surface(self) -> None:
+        """Matches the client's `?? "tool"` fallback, so an old payload groups rather than vanishes."""
+        assert baseline.surface_of("a_control_nobody_has_measured") == "tool"

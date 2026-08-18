@@ -87,6 +87,18 @@ class ControlHead:
 #: rather than hiding it.
 Plane = Literal["discovery", "call", "response"]
 
+#: WHAT the control governs, which is the axis the console groups on at the top level.
+#:
+#: `plane` (above) says WHERE a control acts and stays the SUBGROUP: it is a real property and the
+#: reason a discovery control cannot see call arguments. But it is the wrong first cut for a reader —
+#: an operator arrives asking "what do my MCP integrations enforce", not "what happens at discovery",
+#: and grouping by plane split the MCP controls across two sections with the tool controls wedged
+#: between them.
+#:
+#: Server-side rather than derived from an `mcp_` id prefix in the console, for the reason the plane
+#: field is: an id→group map in the UI drifts the moment a control is renamed, and nothing fails.
+Surface = Literal["tool", "mcp"]
+
 
 @dataclass(frozen=True, slots=True)
 class Control:
@@ -117,6 +129,7 @@ class Control:
     # today's conservative behaviour rather than silently inheriting `deny`.
     default_effect: Effect | None = None
     plane: Plane = "call"
+    surface: Surface = "tool"
 
 
 # Operator-facing copy. Keyed by control id; a control with no entry still works and falls back to the
@@ -283,6 +296,7 @@ _CONTROL_COPY: dict[str, Control] = {
         "the safe default is a human looking at the diff, not a silently broken agent.",
         default_effect="deny",
         plane="discovery",
+        surface="mcp",
     ),
     "mcp_definition_never_scanned": Control(
         "mcp_definition_never_scanned",
@@ -295,6 +309,7 @@ _CONTROL_COPY: dict[str, Control] = {
         "allowed — the checks were armed and the thing they protect was never inspected.",
         default_effect="deny",
         plane="discovery",
+        surface="mcp",
     ),
     "mcp_tool_not_approved": Control(
         "mcp_tool_not_approved",
@@ -305,6 +320,7 @@ _CONTROL_COPY: dict[str, Control] = {
         "first-seen definition is pinned and allowed, and CHANGE is what gets enforced.",
         default_effect="deny",
         plane="discovery",
+        surface="mcp",
     ),
     "mcp_definition_flagged": Control(
         "mcp_definition_flagged",
@@ -316,6 +332,7 @@ _CONTROL_COPY: dict[str, Control] = {
         "plane complement to the deterministic call-plane checks, not a replacement for them.",
         default_effect="deny",
         plane="discovery",
+        surface="mcp",
     ),
     "mcp_answer_carries_secret": Control(
         "mcp_answer_carries_secret",
@@ -326,6 +343,7 @@ _CONTROL_COPY: dict[str, Control] = {
         "in a shape the classifier does not know is not caught here.",
         default_effect="deny",
         plane="response",
+        surface="mcp",
     ),
 }
 
@@ -418,6 +436,16 @@ def default_effects(preset: str) -> dict[str, Effect]:
     return {cid: shipped_default(cid) for cid in control_ids(preset)}
 
 
+def surface_of(control_id: str) -> Surface:
+    """What a control governs — `tool` unless it is declared otherwise.
+
+    Defaults to `tool` so a control added to a preset without a copy entry lands in the section an
+    operator expects rather than in a section of its own or in none at all.
+    """
+    copy = _CONTROL_COPY.get(control_id)
+    return copy.surface if copy else "tool"
+
+
 def plane_of(control_id: str) -> Plane:
     """Which plane a control acts on, for the console's grouping."""
     copy = _CONTROL_COPY.get(control_id)
@@ -484,6 +512,7 @@ def describe(preset: str, effects: dict[str, str] | None = None) -> list[dict]:
                 # the same default and the marker was wrong for any control that had its own.
                 "default_effect": shipped_default(cid),
                 "plane": plane_of(cid),
+                "surface": surface_of(cid),
                 # WHAT `deny` ACTUALLY DOES for this control, which is not always "block".
                 #
                 # The compiler preserves a head's original severity: a control the preset registers as

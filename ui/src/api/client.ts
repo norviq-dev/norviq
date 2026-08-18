@@ -249,6 +249,12 @@ export type BaselineControl = {
    *  (`call`), or on what comes back (`response`). The grouping axis, chosen to mirror the
    *  enforcement architecture rather than invent a threat taxonomy. */
   plane: ControlPlane;
+  /** WHAT the control governs — the console's top-level grouping. `plane` stays the subgroup.
+   *
+   *  Server-side rather than derived from an `mcp_` id prefix here: a map in the console drifts the
+   *  moment a control is renamed, and nothing fails. Optional so an API that predates it still
+   *  renders — everything falls into the tool group, which is where 16 of the 21 belong. */
+  surface?: ControlSurface;
   /** What setting this control to `deny` ACTUALLY does — not always "block".
    *
    *  The compiler preserves a head's original severity, so a control the preset registers as
@@ -260,6 +266,7 @@ export type BaselineControl = {
 };
 
 export type ControlPlane = "discovery" | "call" | "response";
+export type ControlSurface = "tool" | "mcp";
 
 export type BaselineControls = {
   namespace: string;

@@ -2345,3 +2345,48 @@ Live re-verified after the clean redeploy: precision (ISO date, GB order id → 
 SSRF → block), all five MCP controls firing unshadowed in a clean namespace (drift → escalate,
 never-scanned → escalate, quarantined/flagged → block, healthy and non-MCP → allow), and the
 builder-authored policy still blocking the credential read.
+
+## Target Settings — headings-only baseline controls, grouped by surface
+
+Operator report: "lot of text in UI", controls not grouped by what they govern, and "cards are
+intersecting". All three were real and the third was measurable.
+
+**The intersection.** The control row was `display: flex` with `justifyContent: space-between`, a text
+column with `minWidth: 0` but no `flex`, and a `flexShrink: 0` control column. The text therefore ran
+UNDER the toggles — measured at 226px of overlap at 1440px wide, in all three sections. Fixed by making
+the row `grid` with `minmax(0, 1fr) auto`: the text gets a track it cannot exceed and the controls size
+to content, so the two cannot intersect at any width. The Governance panel above got the same treatment
+for a milder version of the same thing — three flex knobs each sized to their own state text, landing at
+three different widths that moved whenever the posture changed.
+
+**Grouping.** Added a server-side `surface` (`tool` | `mcp`) to `Control`/`describe()`. It is the top
+level because it is the question an operator arrives with; `plane` survives as the subgroup and is drawn
+only when a surface actually spans more than one, so the sixteen tool controls (all `call`) gain no
+heading that says nothing, while the five MCP controls split into DISCOVERY (4) and RESPONSE (1).
+Deliberately NOT derived from the `mcp_` id prefix in the console: the prefix is a convention nothing
+enforces, so a future MCP control named without it would land silently in the tool group.
+
+**Rules learned, all four from running the page rather than reading it:**
+
+1. *A guard that says `has()` when it means "has any".* `/policy-compliance` returns a row for every
+   control it evaluated, quiet ones at `count: 0`. The render guard was `impact.has(c.id)`, so eleven of
+   sixteen rows carried "0 would have been blocked · 7d · 2 classes" — noise, and false (zero blocks,
+   two classes). The unit mock omitted quiet controls entirely, so in the test `has()` and "flagged
+   something" coincided and no assertion could separate them. Fixed at map-build time (`count > 0`).
+2. *An inversion check is the only proof a test detects anything.* The first version of that test
+   asserted on a control ABSENT from the fixture, so it passed with the fix reverted. Caught only by
+   deleting the fix and demanding a failure. Now uses a control present-at-zero, and fails without it.
+3. *Don't label a heterogeneous field with one of its cases.* The caveat marker shipped as an
+   escalate-coloured "!" reading "has a known false-positive mode". Reading the eleven live caveats
+   showed only two are about false positives; the rest are false-NEGATIVE gaps (`pii_detection` matches
+   US SSN shapes and nothing else), matching semantics (`ssrf_metadata` keys on destination, not tool
+   name), or a precondition that makes the control inert (`mcp_tool_not_approved` only fires in strict
+   pin mode). A red alarm over "narrower than its name" is an alarm about the wrong thing. Now a neutral
+   marker claiming only what holds for all eleven.
+4. *Truncation is not a shorter name.* `nowrap` + ellipsis looked tidier until tablet width, where the
+   titles became "Prompt injecti…" and "Destructive & …" — the second is a different claim, not an
+   abbreviation. Titles wrap now; the controls column is `auto` so the text column is the one that gives.
+
+Verified live on kind `chatbot-lab`: both groups render with correct subgroups, 21 rows, zero row
+overlap, no zero-count impact lines, and a full save round-trip through the MCP group (deny → monitor
+persisted server-side, dirty marker cleared, counts 17/4 → 16/5, then restored).
