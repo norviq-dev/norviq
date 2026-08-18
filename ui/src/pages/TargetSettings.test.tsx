@@ -242,3 +242,34 @@ describe("Namespace Governance states the CONSEQUENCE of the mode to every reade
     expect(screen.getAllByText(/Admin only/i)).toHaveLength(2);
   });
 });
+
+describe("panel spacing", () => {
+  it("stacks its panels in a gapped container instead of letting them touch", async () => {
+    // Reported from the live console: the Governance card and the Baseline controls card sat flush,
+    // their 1px borders touching, which reads as one card overlapping the other.
+    //
+    // `.panel` carries no margin of its own — by design, so a page can choose its own rhythm — and the
+    // page root was a plain block. Measuring every route showed this was not one page's slip: four of
+    // them (this one, Policy Packs, Account Settings, API Keys) had a 0px gap, while the five that
+    // looked right all used the same `.stack` flex container. The fix is to use the idiom that already
+    // exists, not to give `.panel` a margin: `.stack` spaces with `gap`, and in flexbox a margin ADDS
+    // to gap, so a blanket `.panel + .panel { margin-top }` would have double-spaced every page that
+    // was already correct.
+    //
+    // jsdom has no layout, so this asserts the STRUCTURE that produces the spacing rather than the
+    // pixel gap — the pixels are checked in the browser.
+    const { container } = renderPage();
+    await waitFor(() => expect(screen.getByText("Baseline controls")).toBeInTheDocument());
+
+    const touching = [...container.querySelectorAll(".panel")].filter(
+      (p) => p.previousElementSibling?.classList.contains("panel"),
+    );
+    expect(touching.length).toBeGreaterThan(0);   // else this test proves nothing about this page
+    for (const panel of touching) {
+      const parent = panel.parentElement!;
+      const spaced =
+        parent.classList.contains("stack") || /gap/.test(parent.getAttribute("style") ?? "");
+      expect(spaced, `adjacent panels share an unspaced parent: ${parent.className}`).toBe(true);
+    }
+  });
+});

@@ -21,7 +21,7 @@ export function AccountSettings() {
   ];
 
   return (
-    <div className="page-enter">
+    <div className="page-enter stack">
       <PageHead title="Account Settings" subtitle={`Showing: ${namespace}`} />
       <Panel title="User Profile" sub="The identity the server resolved for your session">
         {me.loading ? (

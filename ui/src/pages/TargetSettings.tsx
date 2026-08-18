@@ -106,7 +106,7 @@ export function TargetSettings() {
   const concrete = namespace !== "all";
 
   return (
-    <div className="page-enter">
+    <div className="page-enter stack">
       <PageHead title="Namespace Governance" subtitle={scopeLabel} />
 
       <Panel title="Governance" sub="How this namespace is governed right now (server-enforced).">

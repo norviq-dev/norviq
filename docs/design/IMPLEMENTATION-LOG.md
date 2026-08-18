@@ -2390,3 +2390,25 @@ enforces, so a future MCP control named without it would land silently in the to
 Verified live on kind `chatbot-lab`: both groups render with correct subgroups, 21 rows, zero row
 overlap, no zero-count impact lines, and a full save round-trip through the MCP group (deny → monitor
 persisted server-side, dirty marker cleared, counts 17/4 → 16/5, then restored).
+
+### Follow-up: panels touching (Governance / Baseline controls)
+
+Reported as "overlapping". `.panel` carries no margin of its own — deliberately, so a page picks its
+own rhythm — and the page root was a plain block, so consecutive cards sat flush and their 1px borders
+touched.
+
+Measuring adjacent sibling `.panel` gaps across all 23 routes in the live DOM showed it was systemic,
+not one page's slip: **four** routes were at 0px (`/policies/targets`, `/policies/packs`,
+`/settings/account`, `/settings/api-keys`) while every route that looked right used the same existing
+`.stack` container (`display: flex; flex-direction: column; gap: 16px`), used by only 4 of 19 pages.
+Fixed by adding `stack` to the four page roots. Re-measured all 23: no gap below 16px.
+
+**The tempting wrong fix:** `.panel + .panel { margin-top: 16px }`. In flexbox a margin ADDS to `gap`,
+so it would have silently double-spaced the five pages that were already correct — which is why the
+diagnosis had to establish WHERE each working gap came from (all from a parent `gap`, none from a
+panel's own margin) before choosing.
+
+Also: the first measurement script only compared panels adjacent in the flat `querySelectorAll`
+NodeList, which skipped the Policy Packs shape (a page-level panel following one that contains a rail
+of nested panels) and reported it clean. Pairing on `previousElementSibling` instead found it. A
+measurement that cannot see a case reports it as passing.

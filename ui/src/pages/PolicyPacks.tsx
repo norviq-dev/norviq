@@ -358,7 +358,7 @@ export function PolicyPacks() {
   };
 
   return (
-    <div className="page-enter">
+    <div className="page-enter stack">
       {/* The subtitle must not read "Showing: all" over per-namespace state it cannot show. */}
       <PageHead
         title="Policy Packs"

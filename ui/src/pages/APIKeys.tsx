@@ -67,7 +67,7 @@ export function APIKeys() {
   const rows = keys.data ?? [];
 
   return (
-    <div className="page-enter">
+    <div className="page-enter stack">
       <PageHead title="API Keys" subtitle={`Showing: ${namespace}`} />
 
       <Panel title="Issue a Key" sub="Create a scoped API key. The secret is shown only once.">
