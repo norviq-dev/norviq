@@ -2569,3 +2569,45 @@ edge of the panel.
 and pass on the replacement. Also: React derives `onMouseEnter` from a delegated `mouseover`, so a
 synthetic non-bubbling `mouseenter` dispatched at the element does nothing. My first live check
 reported "tooltip did not open" for every marker and the tooltip was fine — the probe was wrong.
+
+### Deployed 1631aa8 to kind and verified
+
+All five images built from scratch via `make docker-build` and loaded into `chatbot-lab`.
+
+**Every component stamped and confirmed running `1631aa8`** — api/engine/ui read from the pod's own
+`NRVQ_BUILD_GIT_SHA`, webhook via containerd (`crictl inspecti`) because it is distroless and cannot be
+exec'd.
+
+**Two verification methods of mine were wrong before the answer was.** Worth recording, because both
+would have produced a confident false report:
+- Reading the stamp with `kubectl exec … printenv || echo "<unset>"` reported the webhook as unstamped.
+  That was the `||` fallback firing on an EXEC FAILURE (no shell in a distroless image), not an unset
+  variable. A fallback that cannot distinguish "no value" from "could not look" will always report the
+  first.
+- Comparing the pod's `imageID` to the local `docker image inspect .Id` said the webhook DIFFERED. Control-
+  testing the method against the API pod — already proven correct by its env stamp — showed the same
+  "mismatch": kind-loaded images get an `import-<date>@sha256:…` digest in containerd, a different digest
+  space entirely. The method was invalid, not the deployment.
+
+**Functional checks on the deployed stack**, not just liveness: the API returns `surface` (16 tool /
+5 mcp) and `enforced_as` on all 21 controls; the console renders both surface groups with plane
+subgroups, 21 rows, zero row overlap, a 16px card gap, no zero-count impact lines, exactly one active
+nav item on `/compliance` AND `/compliance/policies`, no zero-width tool names, and the caveat tooltip
+opening with only its text, no `title`/`aria-label`, and nothing clipped by the panel. The from-scratch
+build also left exactly ONE `TargetSettings` chunk — the orphans accumulated by incremental `COPY`
+layers are gone.
+
+**The webhook was verified by behaviour, not just by label**: rolling `chatbot-lab/agent` re-admitted it
+through the newly deployed webhook, which injected `norviq-sidecar` from `engine-latest` — 2/2 Running.
+
+**A pre-existing product finding, surfaced by the console during this check** (NOT caused by the
+deploy): the header warns "Injected sidecar credentials expire soon … ? (norviq)". The API row behind it
+is `{"namespace": "norviq", "workload": "", "days_left": 0}` and NO pod in the `norviq` namespace carries
+an injected sidecar. So it is a red, permanent alarm about a workload it cannot name, whose stated
+remediation ("roll the affected Deployments") names no Deployment. Same class as the findings fixed this
+session — an alarm asserting more than its data supports. Filed, not fixed; it needs its own look at
+where that row comes from.
+
+**Suite note:** running the full python suite while five images (incl. a Go compile) were building gave
+21 failures in `test_api.py` and a 193s runtime. Clean re-run: 3197 passed in 101s. Environmental
+contention — re-run rather than assumed.
