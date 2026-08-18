@@ -153,3 +153,76 @@ def test_the_band_is_a_warning_not_a_critical():
 
 def test_no_band_when_there_is_nothing_to_say():
     assert sidecar_expiry.issue_for([]) is None
+
+
+class TestTheTwoKindsAreNotTheSameThing:
+    """Observed live: a red band reading "? (norviq)" on an install where NO pod in that namespace had
+    an injected sidecar. `role=service` is not "injected sidecar" — auth.py says the webhook controller
+    and the fleet relay hold that role with an empty claim, and `workload` is the OPTIONAL claim only
+    the injector mints. So every service key was captured, named nothing, and was told to roll a
+    Deployment that did not exist.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_credential_with_a_workload_claim_is_a_sidecar(self):
+        r = _FakeRedis()
+        await sidecar_expiry.observe(_FakeCache(r), _claims(2, sub="spiffe://x"))
+        rows = await sidecar_expiry.expiring_soon(_FakeCache(r))
+        assert [x["kind"] for x in rows] == [sidecar_expiry.KIND_SIDECAR]
+        assert rows[0]["subject"] == "finance-agent"
+
+    @pytest.mark.asyncio
+    async def test_a_service_principal_with_no_workload_is_not_a_sidecar(self):
+        """The exact live row: role=service, namespace norviq, no workload claim."""
+        r = _FakeRedis()
+        claims = {"role": "service", "namespace": "norviq", "sub": "mcp-firewall-chatbot-v3",
+                  "exp": int(time.time() + 2 * 86400)}
+        await sidecar_expiry.observe(_FakeCache(r), claims)
+        rows = await sidecar_expiry.expiring_soon(_FakeCache(r))
+        assert [x["kind"] for x in rows] == [sidecar_expiry.KIND_SERVICE_KEY]
+        # It NAMES itself. "? (norviq)" was the whole complaint.
+        assert rows[0]["subject"] == "mcp-firewall-chatbot-v3"
+
+    @pytest.mark.asyncio
+    async def test_a_service_key_is_never_told_to_roll_a_deployment(self):
+        r = _FakeRedis()
+        claims = {"role": "service", "namespace": "norviq", "sub": "mcp-firewall-chatbot-v3",
+                  "exp": int(time.time() + 2 * 86400)}
+        await sidecar_expiry.observe(_FakeCache(r), claims)
+        bands = sidecar_expiry.issues_for(await sidecar_expiry.expiring_soon(_FakeCache(r)))
+        assert [b["id"] for b in bands] == ["service_key_expiring"]
+        assert "Mint a replacement key" in bands[0]["remediation"]
+        assert "Roll the affected Deployments" not in bands[0]["remediation"]
+        # and the band must name the credential, never a bare "?"
+        assert "mcp-firewall-chatbot-v3" in bands[0]["detail"]
+        assert "? (" not in bands[0]["detail"]
+
+    @pytest.mark.asyncio
+    async def test_each_kind_gets_its_own_band(self):
+        r = _FakeRedis()
+        c = _FakeCache(r)
+        await sidecar_expiry.observe(c, _claims(3))                       # sidecar
+        await sidecar_expiry.observe(c, {"role": "service", "namespace": "norviq",
+                                         "sub": "relay", "exp": int(time.time() + 86400)})
+        bands = sidecar_expiry.issues_for(await sidecar_expiry.expiring_soon(c))
+        assert sorted(b["id"] for b in bands) == ["service_key_expiring", "sidecar_credential_expiring"]
+        # soonest first, so the operator reads the one that bites first
+        assert bands[0]["id"] == "service_key_expiring"
+
+    @pytest.mark.asyncio
+    async def test_a_credential_that_can_name_nothing_is_not_warned_about(self):
+        """A band an operator cannot act on trains them to ignore the band that matters."""
+        r = _FakeRedis()
+        await sidecar_expiry.observe(_FakeCache(r), {"role": "service", "namespace": "norviq",
+                                                     "exp": int(time.time() + 86400)})
+        assert r.store == {}
+        assert await sidecar_expiry.expiring_soon(_FakeCache(r)) == []
+
+    @pytest.mark.asyncio
+    async def test_legacy_v1_records_are_not_read(self):
+        """v1 keyed on (namespace, workload) and produced the unnameable rows. They carry the
+        credential's own remaining lifetime as their TTL, so they age out — but they must stop being
+        REPORTED immediately, or the stale band survives the fix that was meant to remove it."""
+        r = _FakeRedis()
+        r.store["sidecar_exp:norviq:-"] = str(int(time.time() + 86400))
+        assert await sidecar_expiry.expiring_soon(_FakeCache(r)) == []

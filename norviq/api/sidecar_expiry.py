@@ -1,7 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Norviq Contributors
 
-"""Forewarning for the 30-day sidecar credential cliff (C2-020).
+"""Forewarning for expiring service credentials — the 30-day sidecar cliff (C2-020), and service keys.
+
+TWO KINDS, and conflating them is what this module got wrong first time round. It captured every
+`role=service` principal and described all of them as injected sidecars, but `role=service` also covers
+the webhook controller, the fleet relay and every operator-minted service key (`auth.py`: "principals
+(role=service: the webhook controller, fleet relay) stay trusted with an empty claim"). The `workload`
+claim is what the injector actually mints and is OPTIONAL for everything else, so those principals were
+recorded under an empty workload and rendered as "? (norviq)" — a red, permanent band naming no
+workload, telling the operator to roll a Deployment that did not exist. Observed live on a kind install
+where NO pod in that namespace had an injected sidecar at all.
+
+So the kind is decided by the `workload` claim, the subject is always recorded (workload, else `sub`),
+and each kind gets its own band because their remediations have nothing in common.
 
 Both credentials the webhook injects are 30-day and are baked into an immutable pod spec: the service
 JWT (`iat` -> `exp` measured at exactly 720h on a live pod) and the mTLS client cert
@@ -41,11 +53,25 @@ log = structlog.get_logger()
 # spare, short enough that the warning is not permanently lit for a fleet on healthy 30-day rotation.
 WARN_WITHIN_S = 7 * 24 * 3600
 
-_KEY_PREFIX = "sidecar_exp"
+# v2. The v1 prefix keyed on (namespace, WORKLOAD) and captured every `role=service` principal, but
+# `workload` is an optional claim that only the injector mints — so the webhook controller, the fleet
+# relay and every operator-minted service key landed under an empty workload and rendered as "? (ns)":
+# a red banner naming nothing, telling the operator to roll a Deployment that does not exist. The v1
+# keys are deliberately NOT read any more; each carries the credential's own remaining lifetime as its
+# TTL, so they age out on their own and a stale unnameable row disappears from the banner immediately.
+_KEY_PREFIX = "cred_exp"
+_LEGACY_KEY_PREFIX = "sidecar_exp"
+
+#: An injected sidecar credential, identified by the `workload` claim the injector mints
+#: (`webhook/injector.go`). Rotates by pod replacement.
+KIND_SIDECAR = "sidecar"
+#: Any other `role=service` principal — the webhook controller, the fleet relay, an operator-minted
+#: service key. Rotates by minting a replacement and updating whatever consumes it.
+KIND_SERVICE_KEY = "service_key"
 
 
-def _key(namespace: str, workload: str) -> str:
-    return f"{_KEY_PREFIX}:{namespace or '-'}:{workload or '-'}"
+def _key(kind: str, namespace: str, subject: str) -> str:
+    return f"{_KEY_PREFIX}:{kind}:{namespace or '-'}:{subject or '-'}"
 
 
 async def observe(cache, claims: dict) -> None:
@@ -79,7 +105,20 @@ async def observe(cache, claims: dict) -> None:
         remaining = exp - int(time.time())
         if remaining <= 0 or remaining > WARN_WITHIN_S:
             return
-        key = _key(str(claims.get("namespace") or ""), str(claims.get("workload") or ""))
+        # WHICH KIND of service credential this is decides the entire warning: its title, what it says
+        # will break, and what the operator should do. `workload` is the injector's own claim, so its
+        # presence — not `role=service` — is what makes something an injected sidecar.
+        workload = str(claims.get("workload") or "")
+        if workload:
+            kind, subject = KIND_SIDECAR, workload
+        else:
+            kind, subject = KIND_SERVICE_KEY, str(claims.get("sub") or "")
+        if not subject:
+            # Nothing to name means nothing to act on, and a warning an operator cannot resolve trains
+            # them to ignore the band. Both minting paths set `sub`, so this is a degenerate token.
+            log.debug("nrvq.api.sidecar_expiry.unnameable_credential", code="NRVQ-API-7122")
+            return
+        key = _key(kind, str(claims.get("namespace") or ""), subject)
         await cache._client().set(key, str(exp), ex=max(1, remaining), nx=True)
     except Exception as exc:  # noqa: BLE001 — a reporting write must never fail authentication
         log.debug("nrvq.api.sidecar_expiry.observe_failed", error=str(exc), code="NRVQ-API-7120")
@@ -102,9 +141,11 @@ async def expiring_soon(cache, namespace: str | None = None) -> list[dict]:
         async for raw in client.scan_iter(match=f"{_KEY_PREFIX}:*", count=200):
             key = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
             parts = key.split(":")
-            if len(parts) < 3:
+            if len(parts) < 4:
                 continue
-            ns, workload = parts[1], ":".join(parts[2:])
+            kind, ns, subject = parts[1], parts[2], ":".join(parts[3:])
+            if kind not in (KIND_SIDECAR, KIND_SERVICE_KEY):
+                continue
             if namespace and ns != namespace:
                 continue
             value = await client.get(key)
@@ -112,8 +153,12 @@ async def expiring_soon(cache, namespace: str | None = None) -> list[dict]:
                 continue
             exp = int(value.decode() if isinstance(value, (bytes, bytearray)) else value)
             out.append({
+                "kind": kind,
                 "namespace": "" if ns == "-" else ns,
-                "workload": "" if workload == "-" else workload,
+                "subject": "" if subject == "-" else subject,
+                # Kept so an older console still renders a name rather than an empty cell; for a
+                # service key this is the key's own subject, which IS what an operator acts on.
+                "workload": "" if subject == "-" else subject,
                 "expires_at": exp,
                 "days_left": max(0, round((exp - now) / 86400, 1)),
             })
@@ -125,30 +170,77 @@ async def expiring_soon(cache, namespace: str | None = None) -> list[dict]:
 
 
 def issue_for(rows: list[dict]) -> dict | None:
-    """Render the warning band for /system-health, or None when there is nothing to say."""
+    """The warning band for /system-health, or None when there is nothing to say.
+
+    Returns the SOONEST-expiring kind. `issues_for` returns one band per kind and is what the route
+    uses; this is kept because a single band was the shipped shape and returning two from a function
+    named `issue_for` would be a silent contract change for any other caller.
+    """
+    bands = issues_for(rows)
+    return bands[0] if bands else None
+
+
+def issues_for(rows: list[dict]) -> list[dict]:
+    """One band per kind of expiring credential, soonest first.
+
+    Split because the two kinds share nothing an operator acts on. An injected sidecar's credential is
+    baked into an immutable pod spec and rotates by pod replacement; a service key is a row an operator
+    minted and rotates by minting another and updating whatever presents it. One band saying "roll the
+    affected Deployments" over a mixed list is wrong for half of it — and was wrong for ALL of it here,
+    because the only row this install ever produced was a service principal with no workload at all.
+    """
     if not rows:
-        return None
+        return []
+    out: list[dict] = []
+    for kind in (KIND_SIDECAR, KIND_SERVICE_KEY):
+        group = [r for r in rows if r.get("kind", KIND_SIDECAR) == kind]
+        if group:
+            out.append(_band(kind, group))
+    out.sort(key=lambda b: b["expiring"][0]["expires_at"])
+    return out
+
+
+def _band(kind: str, rows: list[dict]) -> dict:
     soonest = rows[0]
-    names = ", ".join(f"{r['workload'] or '?'} ({r['namespace'] or '?'})" for r in rows[:5])
+    names = ", ".join(
+        f"{r.get('subject') or r.get('workload') or '?'} ({r['namespace'] or '?'})" for r in rows[:5]
+    )
     if len(rows) > 5:
         names += f", and {len(rows) - 5} more"
+    days = WARN_WITHIN_S // 86400
+    if kind == KIND_SIDECAR:
+        ident, title = "sidecar_credential_expiring", "Injected sidecar credentials expire soon"
+        detail = (
+            f"{len(rows)} injected workload(s) hold a credential expiring within {days} days — soonest "
+            f"in {soonest['days_left']} day(s): {names}. Nothing renews these in place: the token and "
+            "client certificate are 30-day and are fixed in the pod spec at admission. When one expires "
+            "the engine refuses that sidecar's calls and they fail CLOSED, so the workload's tool calls "
+            "stop."
+        )
+        remediation = (
+            "Roll the affected Deployments before the date above — replacement is how these rotate, "
+            "and a new pod is admitted with freshly minted credentials."
+        )
+    else:
+        ident, title = "service_key_expiring", "Service keys expire soon"
+        detail = (
+            f"{len(rows)} service credential(s) expire within {days} days — soonest in "
+            f"{soonest['days_left']} day(s): {names}. These are not injected sidecars: they are keys an "
+            "operator minted (an MCP proxy, the fleet relay, a CI caller). When one expires the API "
+            "answers 401 and the caller fails CLOSED, so whatever presents it stops working."
+        )
+        remediation = (
+            "Mint a replacement key with the same role and namespace, update whatever presents it, then "
+            "revoke the old one. Rolling a Deployment does NOT rotate these."
+        )
     return {
-        "id": "sidecar_credential_expiring",
+        "id": ident,
         # WARNING, not critical: nothing is broken yet, and that is the entire point of this entry.
         # Raising it as critical would train operators to ignore the band that DOES mean an outage.
         "severity": "warning",
-        "title": "Injected sidecar credentials expire soon",
-        "detail": (
-            f"{len(rows)} injected workload(s) hold a credential expiring within "
-            f"{WARN_WITHIN_S // 86400} days — soonest in {soonest['days_left']} day(s): {names}. "
-            "Nothing renews these in place: the token and client certificate are 30-day and are fixed "
-            "in the pod spec at admission. When one expires the engine refuses that sidecar's calls "
-            "and they fail CLOSED, so the workload's tool calls stop."
-        ),
-        "remediation": (
-            "Roll the affected Deployments before the date above — replacement is how these rotate, "
-            "and a new pod is admitted with freshly minted credentials."
-        ),
+        "title": title,
+        "detail": detail,
+        "remediation": remediation,
         "affected_calls": len(rows),
         "namespaces": sorted({r["namespace"] for r in rows if r["namespace"]}),
         "last_seen": None,

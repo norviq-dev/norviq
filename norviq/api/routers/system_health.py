@@ -291,9 +291,10 @@ async def system_health(
     cache = getattr(cache, "cache", None) if cache is not None else None
     expiry_scope = claim_ns if (role != "admin" and claim_ns) else None
     expiring = await sidecar_expiry.expiring_soon(cache, expiry_scope)
-    expiry_issue = sidecar_expiry.issue_for(expiring)
-    if expiry_issue is not None:
-        issues.append(expiry_issue)
+    # One band PER KIND: an injected sidecar rotates by pod replacement, a service key by minting a
+    # replacement. A single band told every operator to roll a Deployment, which was wrong for every
+    # service key — and a service key with no `workload` claim was the only row this ever produced.
+    issues.extend(sidecar_expiry.issues_for(expiring))
 
     if issues:
         log.warning(
