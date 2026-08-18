@@ -11,7 +11,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { McpServers, pinKey } from "./McpServers";
+import { McpServers, pinKey, serverKey } from "./McpServers";
 import { ToastProvider } from "../components/common/Toast";
 import { AppProvider } from "../store/AppContext";
 import { clearApiCache } from "../hooks/useApi";
@@ -858,5 +858,25 @@ describe("the Status column shows the observation, not the decision", () => {
     mockRole("admin");
     renderPage();
     expect(await screen.findByText("blocked")).toBeInTheDocument();
+  });
+});
+
+
+describe("server selection identity is (namespace, server_id)", () => {
+  // The table already keyed its ROWS on the composite; selection stored the bare `server_id`. With
+  // two namespaces publishing the same server id, `serverRows.find(s => s.server_id === selected)`
+  // returns the FIRST match — so clicking the second namespace's row highlighted the first one,
+  // filtered the pin list to both, and aimed Register / Block at the wrong server. `pinKey` one level
+  // down already made exactly this argument for tools; the server level had not followed it.
+  it("distinguishes the same server id in two namespaces", () => {
+    const a = { namespace: "chatbot-prod", server_id: "reporting-kb" };
+    const b = { namespace: "chatbot-lab", server_id: "reporting-kb" };
+    expect(serverKey(a)).not.toBe(serverKey(b));
+    expect(serverKey(a)).toBe("chatbot-prod/reporting-kb");
+  });
+
+  it("agrees with the key the pin level already uses", () => {
+    const pin = { namespace: "chatbot-prod", server_id: "reporting-kb", tool_name: "read_file" };
+    expect(pinKey(pin).startsWith(serverKey(pin) + "/")).toBe(true);
   });
 });

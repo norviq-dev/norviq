@@ -422,8 +422,18 @@ function DeclaredPanel({
                 aria-pressed={rowKey(t) === selected}
                 style={rowStyle(rowKey(t) === selected, template)}
               >
-                <span className="mono" style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{t.name}</span>
+                {/* WRAPS, and the name holds a floor. The pills beside the name are all `flex: none`
+                    while the name span was `flex: 0 1 auto` with `overflow: hidden` — and `overflow:
+                    hidden` sets a flex item's automatic minimum size to 0. So in the `minmax(160px,
+                    1.5fr)` track, a 109px name beside a 134px "Description withheld" pill resolved by
+                    shrinking the ONLY shrinkable item to nothing: the tool name rendered at width 0
+                    and the pills overflowed the track into the Scope column, landing on top of the
+                    Scopeable badge. Measured live: three rows with an invisible name and a 36px pill
+                    collision — and they were the flagged rows, the ones an operator most needs to
+                    identify. `flexWrap` moves the pills to a second line instead of squeezing the
+                    name, and the `minWidth` floor means the name ellipsises rather than vanishing. */}
+                <span className="mono" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, minWidth: 0 }}>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: "1 1 auto", minWidth: "6ch" }}>{t.name}</span>
                   {t.name_skeleton.toLowerCase() !== t.name.toLowerCase() && (
                     <AlertTriangle
                       size={13}

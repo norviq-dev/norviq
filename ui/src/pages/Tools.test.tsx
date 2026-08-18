@@ -476,6 +476,30 @@ describe("'Withheld' means the same thing on Tools as it does on MCP Servers", (
     }
   });
 
+  it("keeps the tool NAME visible on a row carrying pills", async () => {
+    // Found on the live console: on the three flagged rows the tool name rendered at width ZERO and
+    // the pills overflowed the 160px grid track into the Scope column, landing on top of the
+    // Scopeable badge. The pills are all `flex: none`, the name span was `flex: 0 1 auto`, and
+    // `overflow: hidden` sets a flex item's automatic minimum size to 0 — so the only shrinkable
+    // item absorbed the whole shortfall and disappeared. The rows it hit were the flagged ones: an
+    // operator saw CRITICAL, "Description withheld", and no way to tell WHICH tool.
+    //
+    // jsdom has no layout, so this pins the properties that make the collapse impossible rather than
+    // the rendered width — the pixels are measured in the browser.
+    renderTools([sanitizedOnly]);
+    const row = await screen.findByTestId("tool-row-vendor-mcp-quarterly_report");
+    const cell = row.firstElementChild as HTMLElement;
+    const name = cell.firstElementChild as HTMLElement;
+
+    expect(name.textContent).toBe("quarterly_report");
+    // A floor, so the worst case is an ellipsis rather than nothing at all.
+    expect(name.style.minWidth).not.toBe("");
+    expect(name.style.minWidth).not.toBe("0px");
+    expect(name.style.flex).toMatch(/^1 1/);
+    // And the pills move to another line instead of squeezing the name out of existence.
+    expect(cell.style.flexWrap).toBe("wrap");
+  });
+
   it("does not shout Withheld over a tool MCP Servers calls approved", async () => {
     renderTools([sanitizedOnly]);
     const row = await screen.findByTestId("tool-row-vendor-mcp-quarterly_report");

@@ -2438,3 +2438,54 @@ late-rejecting promises resolving after their test had unmounted surfaced as a f
 test — one failure in the full suite, green on re-run. "Passed on retry" is not a diagnosis: the call
 is now stubbed, and the suite is green four consecutive times. The latent version of this (one
 unmocked call) predates the change; the sweep only made it visible.
+
+### Console-wide UI sweep
+
+Two methods, because neither alone was sufficient.
+
+**Empirical (live DOM, 24 routes, desktop + tablet).** Checked for the classes already proven real:
+adjacent cards with no gap, sibling boxes physically intersecting, text actually clipped, horizontal
+page scroll, and multi/zero nav highlight.
+
+- The overlap detector's first version compared UNION bounding boxes, which over-reports badly for
+  wrapped inline text: a wrapped `<span>`'s union box spans every line it occupies, so it "overlaps"
+  anything beside it on the first line. It reported a clean link/caption pair on Target Settings as a
+  134px collision. Rewritten to compare per-line boxes via `getClientRects()`, every reported overlap
+  outside SVG/Monaco disappeared.
+- It also MISSED a real one, in the opposite direction: on Tools, three tool names rendered at width
+  ZERO — and a zero-width box cannot intersect anything, so an overlap detector is blind to it. The
+  clipped-text check is what caught it. **A detector's failure mode is a property of the detector, and
+  a clean result from one is not evidence about what it cannot represent.**
+
+**FIXED — Tools, tool name collapses to nothing (the worst one).** The name cell is
+`inline-flex` with pills at `flex: none` and a name span at `flex: 0 1 auto` with `overflow: hidden` —
+and `overflow: hidden` sets a flex item's automatic minimum size to 0. In the `minmax(160px, 1.5fr)`
+track, a 109px name beside a 134px "Description withheld" pill resolved by shrinking the only
+shrinkable item to zero: the name vanished and the pills overflowed into the Scope column, landing on
+top of the Scopeable badge (36px collision). It hit exactly the FLAGGED rows — CRITICAL scan,
+description withheld — so the operator saw the alarm and no way to tell which tool raised it. Fixed
+with `flexWrap` plus a `minWidth` floor on the name.
+
+**Source-level (27-agent workflow, 7 lenses = the bug classes confirmed real this session, each
+finding adversarially refuted by an independent agent).** 20 candidates, 15 survived, 5 refuted — and
+the refuted five were the entire "reason only in a disabled control's title" lens, killed as
+deliberate, documented and test-pinned. The adversarial stage earned its cost.
+
+Two of the survivors were MY OWN INCOMPLETE FIXES, in the file I had just edited:
+
+- `BaselineControls.tsx:172` — `customRows` had the same missing `count > 0` filter as the impact map
+  one function above, which I had fixed while leaving this one behind. A customer rule that flagged
+  nothing was listed under a heading saying these rules flagged real traffic.
+- `BaselineControls.tsx:405` — the custom-rule row was still on the old flex-underrun shape that I had
+  converted to a grid 100 lines above. Worse than the original: `c.id` is a customer-authored
+  snake_case rule id with no break opportunities, and `.content` is `overflow-x: hidden`, so the
+  impact sentence was silently CLIPPED outside its card rather than visibly spilling.
+
+**Rule: when you fix a shape, grep for the shape — not the symptom.** Both misses were in the same
+file, within 250 lines of the fix, and neither the live sweep nor the type checker could see them.
+
+**FIXED — MCP Servers, selection identity.** Rows keyed on `(namespace, server_id)`; selection stored
+the bare `server_id`. `find(s => s.server_id === selected)` returns the FIRST match, so with two
+namespaces publishing one server id, clicking one row highlighted the other, filtered the pin list to
+both, and aimed Register / Block at the wrong server. `pinKey` one level down already made this exact
+argument for tools; the server level had not followed it. Added `serverKey`.

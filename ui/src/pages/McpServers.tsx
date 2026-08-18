@@ -112,6 +112,15 @@ export function pinKey(p: Pick<McpPinRow, "namespace" | "server_id" | "tool_name
   return `${p.namespace}/${p.server_id}/${p.tool_name}`;
 }
 
+/** The same argument one level up: a server is `(namespace, server_id)`, never `server_id` alone.
+ *  The table already keyed its rows this way; SELECTION did not, and stored the bare id — so with two
+ *  namespaces publishing the same server_id, clicking the row in one highlighted the row in the other
+ *  (`find` returns the first match), filtered the pin list to both, and pointed the Register / Block
+ *  actions at whichever row happened to come first. */
+export function serverKey(s: Pick<McpPinRow, "namespace" | "server_id">): string {
+  return `${s.namespace}/${s.server_id}`;
+}
+
 // Reuses the DecisionBadge colour language so severity reads the same way it does everywhere else in
 // the console: red = enforced against, amber = needs a human, green = fine.
 const TONE: Record<string, CSSProperties> = {
@@ -352,6 +361,7 @@ export function McpServers() {
   const { selectedNamespace } = useApp();
   const toast = useToast();
   const ns = selectedNamespace || "all";
+  // Holds `serverKey(row)` — "<namespace>/<server_id>" — NOT a bare server_id. See serverKey.
   const [selectedServer, setSelectedServer] = useState<string | null>(null);
   const [selectedPin, setSelectedPin] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -387,7 +397,7 @@ export function McpServers() {
   const serverRows = useMemo(() => servers.data ?? [], [servers.data]);
   const allPins = useMemo(() => pins.data ?? [], [pins.data]);
   const pinRows = useMemo(
-    () => allPins.filter((p) => !selectedServer || p.server_id === selectedServer),
+    () => allPins.filter((p) => !selectedServer || serverKey(p) === selectedServer),
     [allPins, selectedServer]
   );
 
@@ -760,7 +770,7 @@ export function McpServers() {
 
   const loading = servers.loading || pins.loading;
   const error = servers.error || pins.error;
-  const selectedServerRow = serverRows.find((s) => s.server_id === selectedServer) ?? null;
+  const selectedServerRow = serverRows.find((s) => serverKey(s) === selectedServer) ?? null;
   const approveReason = notAdmin ? "Needs admin — you are a viewer." : undefined;
 
   return (
@@ -824,7 +834,7 @@ export function McpServers() {
           title="Servers"
           sub={
             selectedServer
-              ? `Filtered to ${selectedServer} — click the row again to clear`
+              ? `Filtered to ${selectedServerRow?.server_id ?? selectedServer} — click the row again to clear`
               : "Click a server to filter the tool definitions below"
           }
           action={
@@ -904,8 +914,8 @@ export function McpServers() {
             columns={serverColumns}
             rows={serverRows}
             rowKey={(r) => `${r.namespace}/${r.server_id}`}
-            selectedKey={selectedServerRow ? `${selectedServerRow.namespace}/${selectedServerRow.server_id}` : null}
-            onRowClick={(row) => setSelectedServer((cur) => (cur === row.server_id ? null : row.server_id))}
+            selectedKey={selectedServerRow ? serverKey(selectedServerRow) : null}
+            onRowClick={(row) => setSelectedServer((cur) => (cur === serverKey(row) ? null : serverKey(row)))}
             placeholder="Filter servers…"
           />
           <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>

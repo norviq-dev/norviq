@@ -169,7 +169,11 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
   const customRows = useMemo(() => {
     const baseline = new Set(rows.map((c) => c.id));
     return (compliance.data?.controls ?? [])
-      .filter((c) => !baseline.has(c.control_id))
+      // `count > 0` for the same reason as the impact map above, which was fixed first and left this
+      // one behind: /policy-compliance reports every control it evaluated, quiet ones at zero, so
+      // without it a customer's own rule that flagged NOTHING is listed under a heading that says
+      // these rules flagged real traffic.
+      .filter((c) => !baseline.has(c.control_id) && c.count > 0)
       .map((c) => ({
         id: c.control_id,
         count: c.count,
@@ -398,12 +402,20 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
                     key={c.id}
                     data-testid={`custom-rule-${c.id}`}
                     style={{
-                      display: "flex", gap: 12, alignItems: "baseline", justifyContent: "space-between",
+                      // GRID, for the same reason as the control row above — this row was left on the
+                      // old flex when that one was converted. `c.id` is a CUSTOMER-authored rule id
+                      // (snake_case, no break opportunities, arbitrarily long) with no flex and no
+                      // minWidth, beside a variable-length sentence pinned by `flexShrink: 0`. With
+                      // negative free space `space-between` degrades to `flex-start` and the sentence
+                      // is laid out past the card's edge — and since `.content` is `overflow-x:
+                      // hidden`, it is silently CLIPPED rather than visibly spilling.
+                      display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto",
+                      columnGap: 12, alignItems: "baseline",
                       padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 8,
                     }}
                   >
-                    <code style={{ fontSize: 12 }}>{c.id}</code>
-                    <div style={{ fontSize: 11, color: "var(--text-secondary)", flexShrink: 0 }}>
+                    <code style={{ fontSize: 12, minWidth: 0, overflowWrap: "anywhere" }}>{c.id}</code>
+                    <div style={{ fontSize: 11, color: "var(--text-secondary)", justifySelf: "end", textAlign: "right" }}>
                       <b>{c.count.toLocaleString()}</b> call{c.count === 1 ? "" : "s"} would have been blocked
                       {c.classes > 0 && ` — ${c.classes} agent class${c.classes === 1 ? "" : "es"}`}
                       {c.topTool && `, mostly ${c.topTool}`}
