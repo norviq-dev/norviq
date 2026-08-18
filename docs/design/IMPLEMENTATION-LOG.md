@@ -2282,3 +2282,66 @@ reported a genuinely frozen agent (trust 0.0) as 0.80.
 below", and an equality that held for any two values because the bucket saturated. The rule: when a
 test asserts an ORDERING, assert it strictly, and assert on the term rather than on a bucket that can
 saturate.
+
+## Red/blue campaign through the chatbot, and the cut
+
+### The campaign
+
+24 attack prompts fired as real chat turns through the chatbot's own agent path
+(`build_toolset` → `ToolContext` → `norviq-sdk` interceptor → `adapter.run`), covering tool
+poisoning, rug pull, line jumping, tool shadowing, command injection, SQLi, SSRF, dangerous scheme,
+cross-tool contamination, indirect injection, confused deputy, token theft, OAuth DCR, excessive
+agency, supply chain, PII exfil, PCI, chain depth, base64, cross-tenant, three MCP vectors and a
+homoglyph tool name. **48 real tool calls, 5 blocked at baseline.**
+
+Correlated live across every surface: 48 `framework=langchain` audit rows (exactly the tool calls),
+4 `mcp_server` nodes and 8 `serves` edges in the asset graph, 43 attack paths of which 8 have a
+non-agent origin — and `sum(class_totals) + non_agent_paths == total_paths` held on real data.
+
+### The blue team, in the Visual Policy Builder
+
+The red team found a hole the baseline does not cover: **an agent reading its own credentials**.
+`shell_exec printenv NRVQ_API_TOKEN` carries no shell metacharacter, so `deny_shell_execution` does
+not fire; only the lab tool's own refusal stopped it.
+
+Defended by authoring a policy in the builder UI — agent-class tier, `chatbot-lab`, one keyword
+condition, dry-run gated, saved as `chatbot-agent` v1. Re-fired through the chat path:
+`token_theft` went **0 → 1 blocked** (`deny_credential_read`), and a benign search still made 4 calls
+with 0 blocks.
+
+### Three things the campaign found that no gate would have
+
+1. **The chatbot's model had been decommissioned.** Every "run" returned in ~260 ms with zero tool
+   calls and no error surfaced — a red team that measures nothing looks exactly like a red team that
+   found nothing. Switched to an available model; the agent then made real calls immediately.
+
+2. **A stale component made the console describe a ruleset the cluster was not enforcing.** A plain
+   ISO date blocked as "PII (SSN) detected" — the P1a false positive, fixed in the preset and green
+   in every test. The cause was a partial image roll: I had rebuilt api/engine/ui repeatedly and
+   never the webhook, and **the webhook carries the presets and re-renders every namespace's baseline
+   when it rolls**. Rolling it re-rendered `__baseline__` to v3 with the gated arm and the false
+   positive vanished. The mechanism works; the deployment was mixed.
+
+3. **Nothing could have told an operator that.** `GET /api/v1/version` reported
+   `build_git_sha: "unknown"`, and `make docker-build` both pointed at a non-existent
+   `Dockerfile.webhook` (so the documented build had never built the webhook at all) and passed no
+   `NRVQ_GIT_SHA`. Every image was unlabelled, so a mixed-version install was undetectable from any
+   surface. Fixed, and locked by `tests/test_release_build.py` — which asserts every Dockerfile the
+   Makefile names exists and every image is stamped.
+
+**The rule:** the webhook is not an optional component to skip in a partial roll. It owns the
+presets, so an install running an older webhook enforces an older ruleset while the console describes
+the newer one — and until this change, silently.
+
+### Cut state
+
+All five images rebuilt from one commit through the fixed Makefile and verified:
+`{"version":"0.2.0","build_git_sha":"56c7849"}`.
+
+Gates: python 3188, ui 1207, tsc/eslint/build clean, `opa test --v0-compatible` 62/62,
+benign corpus 0 false positives over 33 measured cases, version manifest consistent at 0.2.0.
+
+Live re-verified after the clean redeploy: precision (ISO date, GB order id → allow), recall (SSN,
+SSRF → block), all five MCP controls firing unshadowed in a clean namespace (drift → escalate,
+never-scanned → escalate, quarantined/flagged → block, healthy and non-MCP → allow), and the
+builder-authored policy still blocking the credential read.
