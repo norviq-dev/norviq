@@ -2203,3 +2203,82 @@ generated module can produce. The shipped control is live and its decision is th
 Part 6b (attack-graph non-agent origin) is unstarted, as the plan sequenced it: it needs the
 "which of the three attack-path surfaces is canonical" question settled first, and bundling it here
 would have made that decision by accident.
+
+## Part 6b — Attack Graph non-agent origin
+
+### The prerequisite: which surface is canonical
+
+The plan deferred 6b behind this question. Ten agents read the code; three independent lenses
+(consumer-truth, evidence-and-persistence, maintenance-and-honesty) judged it. **All three chose
+`GET /threats/attack-paths`** (`norviq/api/routers/threats.py`), and the decisive facts hold up by
+hand:
+
+- It is what the console renders (`ui/src/api/client.ts:1184`, plus every e2e spec).
+- The persisted surface's GET has exactly one consumer in the repo: an msw stub.
+- The networkx surface scores every non-agent origin at **0.0 risk** — `_trust_score` defaults to 1.0
+  and risk is `1.0 - min(trust)` — so shipping the MCP answer there would have shipped "no risk" on a
+  compromised server.
+
+Corrections to the plan's framing that the map produced, all verified:
+
+- There are **four** route-level attack-path endpoints, not three. The console's own **Recompute**
+  button POSTs to the persisted surface and then renders the derived one — so the "Recomputed N attack
+  paths" banner reports a number about a list the operator is not looking at.
+- `_is_source_agent` is not a type check; it is four conjuncts, and one of them (`is_identity`)
+  already yields **zero paths** for any multi-class SPIFFE identity.
+- A tool→data hop can never carry decision history, so every agent→tool→data path is permanently
+  "unsimulated" today.
+
+### Product decisions taken autonomously
+
+- **Canonical = the derived surface.** Not deleting the other two: that is a public API break whose
+  blast radius cannot be scoped from inside the repo, and `docs/guides/graphs.md` advertises them as
+  API-only. Flagged for an owner's call, not taken.
+- **`_origin_kind` is a new arm, not a widening of `_is_source_agent`.** Three of that predicate's
+  four conjuncts encode real properties of agents; loosening them would have silently changed what
+  counts as an agent origin.
+- **`cls`/`trust` are NULL, not `""`/`0.8`.** The fabricated trust was the serious one: it renders
+  green and feeds `(1.0 - trust) * 0.5`, capping an unreviewed server reaching a crown jewel at "high".
+- **Severity's origin term comes from the registry**, so decisions taken on the MCP Servers page move
+  the Attack Graph. `blocked` is deliberately not the maximum — its tools are withheld at discovery,
+  so it is topology enforcement already covers.
+- **The status VALUE is reused; only the sentence changes.** `_STATUS_ORDER[p.status]` is a direct
+  index (KeyError on a new string) and drives the pre-cap ranking, so a new rank would have decided by
+  accident whether these displace agent findings.
+- **Non-agent origins are capped separately, and the reservation is dynamic.** See below.
+
+### What live output changed, twice
+
+1. Deployed, and all eight MCP paths rendered **critical** — including two servers an operator had
+   REGISTERED. The registry term was correct and invisible: every MCP path ends at a data node through
+   a chokepoint, so the agent weights saturate. Non-agent origins now have their own weighting, on the
+   reasoning that for an agent the origin is a given while for a server "should this be here at all"
+   IS the finding. Live: unreviewed → critical, registered → high, blocked → medium.
+2. The canvas drew the right icon in the right colour and captioned it **"entry · agent"**. The one
+   label that names what the node IS said the opposite of the finding, and it survived the first pass
+   precisely because the node looked correct.
+
+### What an adversarial pass found (34 agents: 5 attack lenses, 1 refuter per finding)
+
+29 candidates, 18 survived refutation. The refutations were real — two findings died on reproduction.
+
+**The security one.** `input.mcp.server` is PEP-reported and unvalidated, so an agent that can reach
+`/evaluate` chooses the names that become path origins. Reproduced twice: **300 fabricated servers
+pushed all five real agent kill-chains out of the 200-path view.** The ranking held; the thing being
+ranked was whatever the attacker minted most of. Non-agent origins now take at most 40 slots.
+
+The first cut of that fix subtracted the sub-cap unconditionally, shrinking the agent view from 200 to
+160 on **every** estate — paying for a defence against a population most installs do not have. Caught
+by the existing class-totals test. The reservation is now dynamic.
+
+Also fixed: Simulate was ungated while the comment beside it claimed otherwise (it POSTed `sa/null`
+and surfaced a raw pydantic error as a PREVIEW banner); `non_agent_hidden` counted chains rather than
+paths; `recommended_fix` prescribed scoping a class that does not exist; `is_synthetic_identity` was
+handed an MCP label, so a server named `test-kb` would have vanished as fabricated traffic; an empty
+"class" chip; MCP servers listed under "Granted to"; and `float(... or 0.8)` on the AGENT arm, which
+reported a genuinely frozen agent (trust 0.0) as 0.80.
+
+**Two of my own tests could not detect their own inversion** — a `>=` where the claim was "ranks
+below", and an equality that held for any two values because the bucket saturated. The rule: when a
+test asserts an ORDERING, assert it strictly, and assert on the term rather than on a bucket that can
+saturate.
