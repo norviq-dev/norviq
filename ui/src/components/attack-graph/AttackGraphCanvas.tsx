@@ -150,7 +150,18 @@ export function buildScope(nodeId: string, allPaths: ThreatPath[], range?: strin
     if (st) { kind = st.kind; break; }
     if (p.src === nodeId) { kind = p.src_kind ?? "agent"; break; }
   }
-  const agents = [...new Set(inPaths.map((p) => p.src))].filter((a) => a !== nodeId);
+  // AGENT origins only. `inPaths` now includes MCP-origin paths, and this list is rendered under
+  // "Granted to" / "Reached by" — labels that assert the thing listed is an agent with a grant. An
+  // MCP server appearing there reads as an identity somebody provisioned, which is exactly the
+  // confusion the separate origin kind exists to prevent.
+  const agents = [...new Set(
+    inPaths.filter((p) => (p.src_kind ?? "agent") === "agent").map((p) => p.src)
+  )].filter((a) => a !== nodeId);
+  // Servers that serve this node, named as what they are. Kept separate rather than merged so the
+  // card can say "served by" instead of stretching "granted to" over both.
+  const servers = [...new Set(
+    inPaths.filter((p) => (p.src_kind ?? "agent") === "mcp_server").map((p) => p.src)
+  )].filter((a) => a !== nodeId);
   const targets = [...new Set(inPaths.map((p) => p.tgt))].filter((t) => t !== nodeId);
   const sens = new Set(inPaths.flatMap((p) => (p.reach || []).filter((r) => r.s).map((r) => r.n))).size;
   const denies = inPaths.reduce(
@@ -161,6 +172,7 @@ export function buildScope(nodeId: string, allPaths: ThreatPath[], range?: strin
   const rows: Array<{ k: string; v: string }> = [];
   if (kind === "data") {
     rows.push({ k: "Reached by", v: agents.join(", ") || "—" });
+    if (servers.length) rows.push({ k: "Via MCP server", v: servers.join(", ") });
     rows.push({ k: "Exposes", v: [...new Set(inPaths.flatMap((p) => (p.reach || []).map((r) => r.n)))].slice(0, 5).join(", ") || "—" });
   } else if (kind === "tool") {
     // Classification lifecycle: what this tool DOES (or its observation state) — from the hop that
@@ -171,6 +183,7 @@ export function buildScope(nodeId: string, allPaths: ThreatPath[], range?: strin
       if (oc) rows.push({ k: "Operation", v: oc.text + (toolStep.op && toolStep.op_risk ? ` · ${toolStep.op_risk} risk` : "") });
     }
     rows.push({ k: "Granted to", v: agents.join(", ") || "—" });
+    if (servers.length) rows.push({ k: "Served by", v: servers.join(", ") });
     rows.push({ k: "Reaches", v: targets.join(", ") || "—" });
   } else {
     rows.push({

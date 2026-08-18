@@ -97,6 +97,18 @@ _MAX_CHAINS_PER_CHOKEPOINT = 3
 # arbitrary graph-iteration order.
 _MAX_CHOKEPOINTS_PER_AGENT = 16
 _MAX_PATHS = 200
+# How many of those slots a NON-AGENT origin may take.
+#
+# `input.mcp.server` is PEP-reported and unvalidated, so an agent that can call /evaluate chooses the
+# server names that become graph nodes — and every one of them is a path origin now. Measured: 300
+# fabricated servers pushed all five real agent kill-chains out of the 200-path view. The cap ranks
+# before truncating, so this was not "the worst findings survive"; it was "the worst findings are
+# whatever the attacker minted most of".
+#
+# A sub-cap rather than a smaller total: MCP origins are real findings and must still be shown, they
+# simply cannot be allowed to occupy the budget reserved for the agent estate. `non_agent_paths` on
+# the response reports the true count, so a truncated view still states its own size.
+_MAX_NON_AGENT_PATHS = 40
 _MAX_DEPTH = 4
 _RESERVED_CLASSES = {"__baseline__", "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__"}
 _SENSITIVE = {"critical", "high"}
@@ -364,8 +376,12 @@ def _build_path(
     # unconditionally, so a non-agent origin got an empty class that read as "unknown agent" and a
     # fabricated 0.8 trust that rendered green and capped its severity below "critical".
     cls: str | None = str(src_node["props"].get("agent_class") or "") if src_kind == "agent" else None
+    # ABSENT, not falsy. `or 0.8` reported a genuinely frozen agent (trust 0.0) as 0.80 — the same
+    # class of defect as the fabricated trust this change removed for non-agent origins, and on the
+    # one input where being wrong matters most.
+    _raw_trust = src_node["props"].get("trust_score")
     trust: float | None = (
-        float(src_node["props"].get("trust_score") or 0.8) if src_kind == "agent" else None
+        float(_raw_trust if _raw_trust is not None else 0.8) if src_kind == "agent" else None
     )
 
     steps: list[ThreatStep] = []
@@ -555,7 +571,16 @@ def _build_path(
         reach=reach[:8],
         steps=steps,
         verdict=verdict,
-        fix=recommended_fix(chokepoint),
+        # The prescription has to match the origin. `recommended_fix` is agent-class-only in all four
+        # of its arms ("scope <class> to…"), so on an MCP-origin path the card told the operator to do
+        # something to a class that does not exist — directly contradicting the note underneath it,
+        # which says an agent-class intent does not apply.
+        fix=(
+            recommended_fix(chokepoint)
+            if src_kind == "agent"
+            else f"Register '{src_node['name']}' read-only, or block it, on the MCP Servers page — "
+                 f"blocking withholds its tools at discovery so '{chokepoint}' never reaches the model."
+        ),
     )
 
 
@@ -670,7 +695,7 @@ async def _derive_paths(
     governing = await _governing_policies(session, namespaces)
     registry = await _mcp_registry(session, seen)
     paths: list[ThreatPath] = []
-    non_agent_hidden = 0
+    non_agent_hidden_ids: set[str] = set()
     for nid, node in nodes_by_id.items():
         if not _origin_kind(node):
             continue
@@ -684,7 +709,13 @@ async def _derive_paths(
                 # does for probe traffic. An exclusion nobody can see is indistinguishable from an
                 # estate that has none.
                 if p.cls is None:
-                    non_agent_hidden += 1
+                    # By ID, not per chain. The dedupe below collapses chains that share
+                    # (ns, src, tgt, hops) into one path, and `synthetic_hidden` / `non_agent_paths`
+                    # are both computed AFTER it — so counting raw chains here put this number on a
+                    # different denominator from the ones it is meant to reconcile with. Measured: one
+                    # server serving two tools that both reach the same data reported 2 hidden where
+                    # the unfiltered view holds 1.
+                    non_agent_hidden_ids.add(p.id)
                 continue
             # Mark whether an APPLIED policy governs this chokepoint (audit-derived status can lag a fresh
             # apply). Chokepoint verb: promoted override → name classifier.
@@ -716,7 +747,7 @@ async def _derive_paths(
     # `cap=None` returns the UNCAPPED ranked list. The paths endpoint needs it so it can count each
     # class BEFORE truncating: counting inside a capped list answers "how many survived the cap",
     # which is not the class's exposure. Callers that want the capped view keep the default.
-    return (ordered if cap is None else ordered[:cap]), seen, non_agent_hidden
+    return (ordered if cap is None else ordered[:cap]), seen, len(non_agent_hidden_ids)
 
 
 @router.get("/threats/attack-paths", response_model=ThreatPathsResponse)
@@ -755,7 +786,14 @@ async def get_threat_paths(
         # `cls or ""` because the classifier takes an optional class and a non-agent origin now sends
         # None. It falls through to the SVID parse, which cannot match `mcp:<server>`, so a non-agent
         # origin is never mistaken for a probe — asserted in the tests rather than assumed.
-        kept = [p for p in all_paths if not is_synthetic_identity(p.cls or "", p.src)]
+        # Only AGENT origins are classified. `is_synthetic_identity` takes an agent class and a SPIFFE
+        # id; an MCP server label is neither, and feeding it one means a server an operator happens to
+        # name `test-kb` or `probe-mcp` would be silently hidden as fabricated traffic — a real
+        # integration disappearing because of its name.
+        kept = [
+            p for p in all_paths
+            if p.cls is None or not is_synthetic_identity(p.cls, p.src)
+        ]
         synthetic_hidden = len(all_paths) - len(kept)
         all_paths = kept
     class_totals: dict[str, int] = {}
@@ -771,7 +809,20 @@ async def get_threat_paths(
             # broke, since `total_paths` counts what the loop skipped.
             non_agent_paths += 1
     total_paths = len(all_paths)
-    paths = all_paths[:_MAX_PATHS]
+    # Truncate the two origin kinds against separate budgets, preserving the ranked order within each.
+    # See `_MAX_NON_AGENT_PATHS`: origin names are attacker-influenced, and a single shared cap let a
+    # flood of fabricated MCP servers evict every real agent finding from the view.
+    # The reservation is DYNAMIC: non-agent origins take at most `_MAX_NON_AGENT_PATHS` of the budget,
+    # and whatever they do not use goes to agents. Subtracting the sub-cap unconditionally shrank the
+    # agent view from 200 to 160 on every estate — including the overwhelming majority that have no
+    # MCP servers at all — which is paying for a defence against a population that does not exist.
+    # Caught by the existing class-totals test, which asserts the full 200 on an agent-only fixture.
+    non_agent_slice = [p for p in all_paths if p.cls is None][:_MAX_NON_AGENT_PATHS]
+    agent_slice = [p for p in all_paths if p.cls is not None][:_MAX_PATHS - len(non_agent_slice)]
+    kept_ids = {id(p) for p in agent_slice} | {id(p) for p in non_agent_slice}
+    # Re-emitted in the ORIGINAL ranked order rather than agents-then-servers: the page's contract is
+    # worst-first, and concatenating the slices would sort by origin kind instead.
+    paths = [p for p in all_paths if id(p) in kept_ids]
     log.info(
         "nrvq.api.attack_paths.served",
         ns=requested,

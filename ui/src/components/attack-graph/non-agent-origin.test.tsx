@@ -132,3 +132,59 @@ describe("the canvas caption names what the node is", () => {
     expect(text).toMatch(/entry · mcp server/);
   });
 });
+
+describe("what the adversarial pass found", () => {
+  it("does not offer Simulate on an MCP origin", () => {
+    // It mints `spiffe://…/sa/{cls}` from the path's class. With a null class it POSTed `sa/null` with
+    // `agent_class: null`, which /evaluate rejects at the model — so the operator got a PREVIEW banner
+    // containing a raw pydantic validation error. A button that can only ever fail is worse than an
+    // absent one, and the note above already says what to do instead.
+    renderDetail(MCP_PATH);
+    expect(screen.queryByText(/simulate \(preview\)/i)).toBeNull();
+  });
+
+  it("still offers Simulate on an agent path", () => {
+    renderDetail(AGENT_PATH);
+    expect(screen.getByText(/simulate \(preview\)/i)).toBeInTheDocument();
+  });
+
+  it("renders no empty 'class' chip", () => {
+    // The chip row emitted a pill whose label was "class" and whose value was nothing — a field that
+    // looks like it failed to load rather than one that does not apply.
+    renderDetail(MCP_PATH);
+    const chips = [...document.querySelectorAll("span")].map((s) => s.textContent ?? "");
+    expect(chips.some((c) => c === "class")).toBe(false);
+    expect(screen.getByText("ns")).toBeInTheDocument();  // the row still renders
+  });
+
+  it("keeps the class chip for an agent path", () => {
+    renderDetail(AGENT_PATH);
+    expect(screen.getByText("class")).toBeInTheDocument();
+  });
+
+  it("does not list an MCP server under 'Granted to'", () => {
+    // "Granted to" asserts the thing listed is an agent with a grant. A server there reads as an
+    // identity somebody provisioned — the confusion the separate origin kind exists to prevent.
+    const card = buildScope("read_file", [MCP_PATH, AGENT_PATH]);
+    const granted = card?.rows.find((r) => r.k === "Granted to")?.v ?? "";
+    expect(granted).toContain("support-agent");
+    expect(granted).not.toContain("reporting-kb");
+    expect(card?.rows.find((r) => r.k === "Served by")?.v).toBe("reporting-kb");
+  });
+
+  it("draws the origin with the rack glyph, not the data cylinder", async () => {
+    // The three glyphs are distinct shape lists: the cylinder uses <ellipse>, the agent a <circle>
+    // cluster, the rack two <rect>s. Asserting on geometry is what makes an else-branch fallthrough
+    // fail rather than merely look wrong.
+    const { AttackGraphCanvas } = await import("./AttackGraphCanvas");
+    const { container } = render(
+      <MemoryRouter>
+        <AttackGraphCanvas path={MCP_PATH} allPaths={[MCP_PATH]} whatIfIndex={-1}
+          onToggleWhatIf={vi.fn()} onScope={vi.fn()} />
+      </MemoryRouter>
+    );
+    // The data TARGET legitimately draws a cylinder; the ORIGIN must not.
+    const ellipses = container.querySelectorAll("ellipse").length;
+    expect(ellipses).toBe(1);
+  });
+});

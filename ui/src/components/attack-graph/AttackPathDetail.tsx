@@ -186,7 +186,11 @@ export function AttackPathDetail({
 
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
           <span style={chip}><span style={{ color: "#8a8a8a" }}>ns</span>{path.ns}</span>
-          <span style={chip}><span style={{ color: "#8a8a8a" }}>class</span>{path.cls}</span>
+          {/* Gated like the chokepoint chip beside it. `cls` is null for a non-agent origin, so this
+              rendered a chip whose label was "class" and whose value was nothing — a field that looks
+              like it failed to load rather than one that does not apply. The origin kind is already
+              said properly in the ORIGIN card below. */}
+          {path.cls && <span style={chip}><span style={{ color: "#8a8a8a" }}>class</span>{path.cls}</span>}
           {path.tool && <span style={chip}><span style={{ color: "#8a8a8a" }}>chokepoint</span>{path.tool}</span>}
         </div>
 
@@ -234,7 +238,15 @@ export function AttackPathDetail({
           </div>
         )}
 
-        {/* Simulate: run each step as a REAL /evaluate call — labeled PREVIEW (nothing enforces). */}
+        {/* Simulate: run each step as a REAL /evaluate call — labeled PREVIEW (nothing enforces).
+            AGENT ORIGINS ONLY, and the comment above `isAgentOrigin` used to claim this was already
+            true when it was not. Simulate mints `spiffe://…/sa/{cls}` from the path's class; with a
+            null class it POSTed `sa/null` with `agent_class: null`, which /evaluate rejects at the
+            model — so the operator got a PREVIEW banner containing a raw pydantic validation error.
+            A button that can only ever fail is worse than an absent one, and NonAgentOriginNote above
+            already says what to do instead. */}
+        {isAgentOrigin && (
+        <>
         <button
           type="button" onClick={onSimulate} disabled={simulating}
           style={{ width: "100%", height: 32, marginBottom: 14, display: "flex", alignItems: "center", justifyContent: "center", gap: 7, border: "1px solid var(--graph-border)", borderRadius: 8, background: "var(--bg-graph-card)", color: "#2ddab8", fontFamily: "inherit", fontSize: 12, fontWeight: 700, cursor: simulating ? "default" : "pointer" }}
@@ -259,6 +271,8 @@ export function AttackPathDetail({
             </div>
           );
         })()}
+        </>
+        )}
 
         <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.04em", color: "#8a8a8a", textTransform: "uppercase", marginBottom: 10 }}>Step-by-step</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>

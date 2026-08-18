@@ -157,12 +157,19 @@ class TestSeverityComesFromTheRegistryNotAFabricatedTrust:
         Ranking it above the servers nobody has reviewed would put the handled ones at the top of a
         list whose job is to surface what is not."""
         blocked = self._sev({("agents", "reporting-kb"): {"status": "blocked", "writable": False}})
-        assert T._SEVERITY_ORDER[blocked] >= T._SEVERITY_ORDER[self._sev({})]
+        # STRICTLY below. `>=` passed even when `blocked` was mutated to tie `discovered`, so the test
+        # named a property it could not detect the inversion of.
+        assert T._SEVERITY_ORDER[blocked] > T._SEVERITY_ORDER[self._sev({})]
 
     def test_a_server_with_no_registry_row_is_treated_as_unreviewed(self):
-        """No row IS `discovered` — the same equivalence the registry API reports as previous_status."""
-        assert self._sev({}) == self._sev(
-            {("agents", "reporting-kb"): {"status": "discovered", "writable": False}})
+        """No row IS `discovered` — the same equivalence the registry API reports as previous_status.
+
+        Asserted on the RISK TERM, not the severity bucket: every status used to land in "critical"
+        here, so the equality held for any two values and the test proved nothing.
+        """
+        node = _node("m", "mcp_server", "kb", server_id="reporting-kb")
+        assert T._origin_risk("mcp_server", node, {}) == T._origin_risk(
+            "mcp_server", node, {("agents", "reporting-kb"): {"status": "discovered"}})
 
     def test_an_UNKNOWN_origin_kind_scores_worst_case(self):
         """A future origin kind nobody has taught the risk table about must not arrive scoring safe."""
@@ -238,3 +245,173 @@ class TestTheEndpointAccounting:
         resp = await self._serve(monkeypatch, [self._path("c", None, "mcp_server")])
         assert "mcp_server" not in resp.class_totals
         assert resp.class_totals == {}
+
+
+# ── what the adversarial pass found, each with the test that would have caught it ─────────────────
+
+@pytest.mark.asyncio
+class TestTheDefectsAnAdversarialPassFound:
+    """Every one of these was demonstrated against the first cut of this change.
+
+    They are grouped rather than scattered because they share a root: an origin whose NAME an
+    attacker chooses, threaded into surfaces built when the only origin was an attested agent.
+    """
+
+    async def _derive(self, nodes, edges, cls=None, registry=None):
+        """Drive the REAL `_derive_paths`, stubbing only its I/O.
+
+        The file's docstring claims this, and until now the endpoint tests below monkeypatched
+        `_derive_paths` away — so the ~40 lines that actually changed had no test calling them.
+        """
+        async def _assemble(_s, _ns, _hours):
+            return nodes, edges, ["agents"]
+
+        async def _empty(*_a, **_k):
+            return {}
+
+        import norviq.api.routers.threats as T2
+        orig = (T2._assemble, T2._verb_overrides, T2._verb_evidence, T2._governing_policies, T2._mcp_registry)
+        T2._assemble, T2._verb_overrides, T2._verb_evidence = _assemble, _empty, _empty
+        T2._governing_policies = _empty
+        T2._mcp_registry = lambda *_a, **_k: _wrap(registry or {})
+        try:
+            return await T2._derive_paths(None, ["agents"], cls, 24, cap=None)
+        finally:
+            (T2._assemble, T2._verb_overrides, T2._verb_evidence,
+             T2._governing_policies, T2._mcp_registry) = orig
+
+    async def test_non_agent_hidden_counts_PATHS_not_raw_chains(self):
+        """One server serving two tools that both reach the same data is ONE path after dedupe, and
+        the count that reports it hidden must say one. Counting chains put this number on a different
+        denominator from `non_agent_paths`, which the schema comment ties it to."""
+        nodes, edges = _graph()
+        nodes["tool:query_db"] = _node("tool:query_db", "tool", "query_db", risk_level="medium")
+        edges["mcp:reporting-kb"].append({"target": "tool:query_db", "type": "serves", "hist": {}})
+        edges["tool:query_db"] = [{"target": "data:pg/customers", "type": "accesses", "hist": {}}]
+
+        _all, _seen, hidden_unfiltered = await self._derive(nodes, edges)
+        _filtered, _s2, hidden = await self._derive(nodes, edges, cls="support-agent")
+        assert hidden_unfiltered == 0
+        assert hidden == 1, "two chains collapsing to one path must be reported as one hidden path"
+
+    async def test_a_flood_of_fabricated_origins_cannot_evict_agent_findings(self):
+        """`input.mcp.server` is PEP-reported and unvalidated, so an agent that can reach /evaluate
+        chooses the names that become path origins. Measured on the first cut: 300 fabricated servers
+        pushed all five real agent kill-chains out of the 200-path view — the ranking held, but the
+        thing being ranked was whatever the attacker minted most of."""
+        nodes, edges = _graph()
+        for i in range(400):
+            nid = f"mcp:flood-{i:03d}"
+            nodes[nid] = _node(nid, "mcp_server", f"flood-{i:03d}", server_id=f"flood-{i:03d}")
+            edges[nid] = [{"target": "tool:read_file", "type": "serves", "hist": {}}]
+
+        paths, _seen, _hidden = await self._derive(nodes, edges)
+        agent_paths = [p for p in paths if p.src_kind == "agent"]
+        assert agent_paths, "the agent kill-chain must still be derived"
+
+        # The endpoint's kind-aware truncation is what protects it.
+        kept_agents = [p for p in paths if p.cls is not None][:T._MAX_PATHS - T._MAX_NON_AGENT_PATHS]
+        kept_servers = [p for p in paths if p.cls is None][:T._MAX_NON_AGENT_PATHS]
+        assert len(kept_agents) == len(agent_paths), "every agent finding survives the cap"
+        assert len(kept_servers) == T._MAX_NON_AGENT_PATHS, "server origins are bounded, not dropped"
+
+    async def test_a_server_NAMED_like_a_probe_is_not_hidden_as_synthetic(self):
+        """`is_synthetic_identity` takes an agent class and a SPIFFE id. Handing it an MCP label means
+        a server an operator happens to call `test-kb` vanishes from the console as fabricated
+        traffic — a real integration disappearing because of its name."""
+        from norviq.api.synthetic import is_synthetic_identity
+
+        assert is_synthetic_identity("e2e-probe", "spiffe://x") is True   # the classifier works
+        nodes, edges = _graph()
+        nodes["mcp:e2e-probe"] = _node("mcp:e2e-probe", "mcp_server", "e2e-probe", server_id="e2e-probe")
+        edges["mcp:e2e-probe"] = [{"target": "tool:read_file", "type": "serves", "hist": {}}]
+
+        paths, _s, _h = await self._derive(nodes, edges)
+        kept = [p for p in paths if p.cls is None or not is_synthetic_identity(p.cls, p.src)]
+        assert any(p.src == "e2e-probe" for p in kept), "a server is not a probe identity"
+
+
+class TestThePrescriptionMatchesTheOrigin:
+    def test_the_fix_text_does_not_tell_the_operator_to_scope_a_CLASS(self):
+        """`recommended_fix` is agent-class-only in all four arms, so the card prescribed an action on
+        a class that does not exist — directly contradicting the note beneath it."""
+        nodes, edges = _graph()
+        p = T._build_path(CHAIN, nodes, edges)
+        assert "MCP Servers" in p.fix
+        assert "scope" not in p.fix.lower() or "class" not in p.fix.lower()
+
+    def test_an_agent_path_keeps_the_class_scoped_recommendation(self):
+        nodes, edges = _graph()
+        p = T._build_path(["spiffe://norviq/ns/agents/sa/support", "tool:read_file", "data:pg/customers"],
+                          nodes, edges)
+        assert "MCP Servers" not in p.fix
+
+
+class TestTheAgentTrustReadIsAbsentNotFalsy:
+    def test_a_FROZEN_agent_reports_0_not_0_point_8(self):
+        """`or 0.8` treated a measured 0.0 as missing, so the most distrusted agent in the estate
+        reported the same trust as one nobody had scored — on the one input where being wrong about
+        trust matters most."""
+        nodes, edges = _graph()
+        nodes["spiffe://norviq/ns/agents/sa/support"]["props"]["trust_score"] = 0.0
+        p = T._build_path(["spiffe://norviq/ns/agents/sa/support", "tool:read_file", "data:pg/customers"],
+                          nodes, edges)
+        assert p.trust == 0.0
+
+    def test_an_agent_with_NO_score_still_gets_the_documented_default(self):
+        nodes, edges = _graph()
+        del nodes["spiffe://norviq/ns/agents/sa/support"]["props"]["trust_score"]
+        p = T._build_path(["spiffe://norviq/ns/agents/sa/support", "tool:read_file", "data:pg/customers"],
+                          nodes, edges)
+        assert p.trust == 0.8
+
+
+class _wrap:
+    """Awaitable that yields a fixed value — `_mcp_registry` is awaited, not called."""
+
+    def __init__(self, value): self.value = value
+    def __await__(self):
+        async def _v(): return self.value
+        return _v().__await__()
+
+
+@pytest.mark.asyncio
+class TestTheCapReservationIsDynamic:
+    """Bounding the new origin kind must not cost the estates that do not have one."""
+
+    async def _serve(self, monkeypatch, paths):
+        async def fake_derive(_s, _ns, _cls, _hours=24, cap=None):
+            return list(paths), ["agents"], 0
+
+        monkeypatch.setattr(T, "_derive_paths", fake_derive)
+        monkeypatch.setattr(T, "_resolve_namespaces", lambda user, requested: ["agents"])
+        monkeypatch.setattr(T, "is_synthetic_identity", lambda cls, src: False)
+        return await T.get_threat_paths(ns="agents", namespace=None, cls=None, range="24h",
+                                        include_synthetic=False, session=None,
+                                        user={"role": "admin", "namespace": "*"})
+
+    def _p(self, i, cls):
+        from norviq.api.schemas.threats import ThreatPath
+        return ThreatPath(id=f"p{i}", sev="high", src="s", tgt="t", ns="agents",
+                          src_kind="agent" if cls else "mcp_server", cls=cls, mitre="", hops=2,
+                          blast=1, status="unsimulated", tool="read_file")
+
+    async def test_an_estate_with_NO_mcp_origins_keeps_the_full_budget(self, monkeypatch):
+        resp = await self._serve(monkeypatch, [self._p(i, "support-agent") for i in range(400)])
+        assert len(resp.paths) == T._MAX_PATHS
+
+    async def test_a_flood_of_mcp_origins_takes_only_its_sub_cap(self, monkeypatch):
+        agents = [self._p(i, "support-agent") for i in range(400)]
+        servers = [self._p(1000 + i, None) for i in range(400)]
+        resp = await self._serve(monkeypatch, agents + servers)
+        kept_agents = [p for p in resp.paths if p.cls is not None]
+        kept_servers = [p for p in resp.paths if p.cls is None]
+        assert len(kept_servers) == T._MAX_NON_AGENT_PATHS
+        assert len(kept_agents) == T._MAX_PATHS - T._MAX_NON_AGENT_PATHS
+        assert len(resp.paths) == T._MAX_PATHS
+        assert resp.total_paths == 800, "the response still states its true size"
+
+    async def test_a_few_mcp_origins_do_not_cost_the_agents_a_full_reservation(self, monkeypatch):
+        agents = [self._p(i, "support-agent") for i in range(400)]
+        resp = await self._serve(monkeypatch, agents + [self._p(9000, None)])
+        assert len([p for p in resp.paths if p.cls is not None]) == T._MAX_PATHS - 1
