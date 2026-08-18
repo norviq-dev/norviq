@@ -2541,3 +2541,31 @@ neutral `i`, because "false-positive mode" was false for nine of the eleven cave
 / Baseline-controls cards still touching (fixed in 05127b5). Verified by grepping the pod's own assets:
 the deployed TargetSettings chunk contains no `page-enter stack`, and the bundle still contains the
 string "has a known false-positive mode". Source was correct; the image was stale.
+
+### The caveat marker's hover: info, and nothing else
+
+The `i` shipped as a native `title` plus an `aria-label`. Two defects, one of them mine and invisible:
+
+1. **`aria-label` displaced the information.** It wins the accessible-name computation over `title`,
+   so assistive tech announced the generic "this control has a limitation — read it before relying on
+   it" and NEVER read the caveat. The one thing the marker exists to deliver was the one thing it did
+   not deliver. Adding a helpful-sounding label is what broke it.
+2. **The caveats are 142-462 characters.** A native tooltip renders that after a ~1s delay, unstyled,
+   wrapped however the platform likes.
+
+Replaced with a real tooltip whose only child is the caveat text: `role="tooltip"`, referenced by
+`aria-describedby` so the caveat is the DESCRIPTION rather than a label that replaces it, and the
+trigger carries neither `title` nor `aria-label` — either would displace it again. Focusable, opens on
+focus, dismissable with Escape, because hover is not an affordance for a keyboard user.
+
+**Positioning.** Anchored at the icon, the bubble's right edge lands wherever the control's TITLE
+pushes it — measured 11px past the panel on the first control tried, and `.content` is `overflow-x:
+hidden`, so that edge is clipped rather than scrollable. A fixed max-width cannot fix it because the
+overflow depends on the title length, so the bubble measures itself against the panel on open and
+slides left only as far as needed. Verified across the caveat-carrying controls: nothing past either
+edge of the panel.
+
+**Test note.** Four tests, all inversion-checked against the old native-title marker — they fail on it
+and pass on the replacement. Also: React derives `onMouseEnter` from a delegated `mouseover`, so a
+synthetic non-bubbling `mouseenter` dispatched at the element does nothing. My first live check
+reported "tooltip did not open" for every marker and the tooltip was fine — the probe was wrong.

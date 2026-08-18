@@ -18,7 +18,7 @@
 // that matters — so an escalate-coloured marker stays on the row, carrying the text, pointing at the
 // docs for the rest.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   fetchBaselineControls,
   fetchPolicyCompliance,
@@ -66,6 +66,83 @@ function planeOf(c: BaselineControl): ControlPlane {
  *  rather than an empty MCP section or an unsectioned list. */
 function surfaceOf(c: BaselineControl): ControlSurface {
   return c.surface ?? "tool";
+}
+
+/** The caveat, on hover or focus, and NOTHING else.
+ *
+ *  This replaced a native `title`, which had two problems. The visible one: these caveats run 142-462
+ *  characters, and an OS tooltip renders that after a ~1s delay, unstyled, wrapped however the
+ *  platform likes. The invisible one was worse — the trigger carried BOTH `title` and `aria-label`,
+ *  and `aria-label` wins the accessible-name computation, so a screen reader announced the generic
+ *  "this control has a limitation" and never read the caveat at all. The one thing the marker exists
+ *  to deliver was the one thing assistive tech could not reach.
+ *
+ *  So: the bubble's only content is `text`, and `aria-describedby` points at it, which makes the
+ *  caveat the DESCRIPTION rather than a label that displaces it. Focusable and Escape-dismissable,
+ *  because hover alone is not an affordance for keyboard users.
+ */
+function CaveatTip({ id, text }: { id: string; text: string }) {
+  const [open, setOpen] = useState(false);
+  const [shift, setShift] = useState(0);
+  const tipRef = useRef<HTMLSpanElement | null>(null);
+  const tipId = `caveat-tip-${id}`;
+
+  // Anchored at the icon, the bubble's right edge lands wherever the control's TITLE happens to push
+  // it — measured 11px past the panel on the first control tried, and `.content` is `overflow-x:
+  // hidden`, so that edge is clipped rather than scrollable. A fixed max-width cannot fix it because
+  // the overflow depends on the title length, so measure and slide it back. `Math.min(0, …)` means
+  // this only ever moves the bubble LEFT, and never past the panel's own left edge.
+  useLayoutEffect(() => {
+    if (!open || !tipRef.current) return;
+    setShift(0);
+    const tip = tipRef.current.getBoundingClientRect();
+    const host = tipRef.current.closest(".panel")?.getBoundingClientRect();
+    if (!host) return;
+    const overflow = tip.right - (host.right - 14);
+    if (overflow > 0) setShift(-Math.min(overflow, Math.max(0, tip.left - (host.left + 14))));
+  }, [open, text]);
+  return (
+    <span style={{ position: "relative", display: "inline-flex", flex: "none" }}>
+      <button
+        type="button"
+        data-testid={`baseline-caveat-${id}`}
+        aria-describedby={open ? tipId : undefined}
+        aria-expanded={open}
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+        onKeyDown={(e) => e.key === "Escape" && setOpen(false)}
+        style={{
+          font: "inherit", fontSize: 10, lineHeight: "14px", cursor: "help",
+          color: "var(--text-muted)", background: "transparent",
+          border: "1px solid var(--border)", borderRadius: 4, padding: "0 4px",
+        }}
+      >
+        i
+      </button>
+      {open && (
+        <span
+          id={tipId}
+          role="tooltip"
+          ref={tipRef}
+          data-testid={`baseline-caveat-tip-${id}`}
+          style={{
+            position: "absolute", top: "calc(100% + 6px)", left: 0, zIndex: 30,
+            transform: shift ? `translateX(${shift}px)` : undefined,
+            width: "max-content", maxWidth: "min(360px, 60vw)",
+            padding: "8px 10px", borderRadius: 8,
+            border: "1px solid var(--border)", background: "var(--bg-surface)",
+            boxShadow: "var(--shadow-card)",
+            fontSize: 11.5, lineHeight: 1.5, fontWeight: 400,
+            color: "var(--text-secondary)", whiteSpace: "normal", textAlign: "left",
+          }}
+        >
+          {text}
+        </span>
+      )}
+    </span>
+  );
 }
 
 const LABELS: Record<BaselineEffect, string> = {
@@ -329,17 +406,7 @@ export function BaselineControls({ namespace, isAdmin }: { namespace: string; is
                           A red "!" over "this control is narrower than its name" is an alarm about
                           the wrong thing, so the marker claims only what is true of all eleven: there
                           is a limitation here, and it is worth reading before you rely on it. */}
-                      {c.caveat && (
-                        <span
-                          data-testid={`baseline-caveat-${c.id}`}
-                          title={c.caveat}
-                          aria-label="this control has a limitation — read it before relying on it"
-                          style={{ fontSize: 10, color: "var(--text-muted)", border: "1px solid var(--border)",
-                                   borderRadius: 4, padding: "0 4px", flex: "none", cursor: "help" }}
-                        >
-                          i
-                        </span>
-                      )}
+                      {c.caveat && <CaveatTip id={c.id} text={c.caveat} />}
                       {changed && (
                         <span data-testid={`baseline-dirty-${c.id}`} style={{ fontSize: 11, color: "var(--accent)", flex: "none" }}>
                           unsaved

@@ -97,10 +97,7 @@ describe("baseline controls", () => {
     mockFetch();
     renderPanel({ namespace: "chatbot-prod", isAdmin: true });
     const caveat = await screen.findByTestId("baseline-caveat-deny_shell_execution");
-    // The text is still REACHABLE — the marker carries it — so the fact was moved, not deleted.
-    expect(caveat.getAttribute("title")).toContain("1 in 8");
-    expect(caveat.getAttribute("aria-label")).toMatch(/limitation/i);
-    expect(caveat.getAttribute("aria-label")).not.toMatch(/false.positive/i);
+    expect(caveat).toBeInTheDocument();
     // A control with no known false-positive mode must not be marked.
     expect(screen.queryByTestId("baseline-caveat-pii_detection")).toBeNull();
   });
@@ -407,5 +404,59 @@ describe("Enforce does not mean one thing", () => {
     renderPanel({ namespace: "chatbot-prod", isAdmin: true });
     const impact = await screen.findByTestId("baseline-impact-deny_shell_execution");
     expect(impact.textContent).toMatch(/would have been blocked/i);
+  });
+});
+
+
+describe("the caveat marker delivers the caveat, and nothing else", () => {
+  // It began as a native `title`, which failed in two ways. Visibly: these caveats run 142-462
+  // characters and an OS tooltip renders that after a delay, unstyled. Invisibly, and worse: the
+  // trigger carried BOTH `title` and `aria-label`, and `aria-label` WINS the accessible-name
+  // computation — so a screen reader announced the generic "this control has a limitation" and never
+  // read the caveat. The one thing the marker exists to deliver was the one thing it did not deliver.
+  const CAVEAT = "trips on roughly 1 in 8 ordinary alphanumeric identifiers";
+
+  it("shows the caveat text on hover, as the tooltip's only content", async () => {
+    mockFetch();
+    renderPanel({ namespace: "chatbot-prod", isAdmin: true });
+    const trigger = await screen.findByTestId("baseline-caveat-deny_shell_execution");
+    expect(screen.queryByTestId("baseline-caveat-tip-deny_shell_execution")).toBeNull();
+
+    await userEvent.hover(trigger);
+    const tip = await screen.findByTestId("baseline-caveat-tip-deny_shell_execution");
+    expect(tip.textContent).toBe(CAVEAT);          // exactly the caveat
+    expect(tip.childElementCount).toBe(0);          // and no other content
+  });
+
+  it("puts nothing on the trigger that could displace the caveat", async () => {
+    mockFetch();
+    renderPanel({ namespace: "chatbot-prod", isAdmin: true });
+    const trigger = await screen.findByTestId("baseline-caveat-deny_shell_execution");
+    // Either of these would become the accessible name and hide the description from assistive tech.
+    expect(trigger).not.toHaveAttribute("title");
+    expect(trigger).not.toHaveAttribute("aria-label");
+  });
+
+  it("exposes the caveat as the trigger's DESCRIPTION while open", async () => {
+    mockFetch();
+    renderPanel({ namespace: "chatbot-prod", isAdmin: true });
+    const trigger = await screen.findByTestId("baseline-caveat-deny_shell_execution");
+    await userEvent.hover(trigger);
+    const tip = await screen.findByTestId("baseline-caveat-tip-deny_shell_execution");
+    expect(trigger.getAttribute("aria-describedby")).toBe(tip.id);
+    expect(tip).toHaveAttribute("role", "tooltip");
+  });
+
+  it("opens on keyboard focus and closes on Escape", async () => {
+    // Hover is not an affordance for a keyboard user, and a tooltip they cannot dismiss is a trap.
+    mockFetch();
+    renderPanel({ namespace: "chatbot-prod", isAdmin: true });
+    const trigger = await screen.findByTestId("baseline-caveat-deny_shell_execution");
+    trigger.focus();
+    expect(await screen.findByTestId("baseline-caveat-tip-deny_shell_execution")).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(screen.queryByTestId("baseline-caveat-tip-deny_shell_execution")).toBeNull()
+    );
   });
 });
