@@ -300,7 +300,7 @@ def _walk_paths(source: str, out_edges: dict[str, list[dict]], nodes_by_id: dict
 _MCP_ORIGIN_RISK = {
     "discovered": 1.0,   # nobody has reviewed it
     "registered": 0.5,   # an operator vouched for it; it can still be compromised
-    "blocked": 0.3,      # refused at discovery — the topology exists, the reach does not
+    "blocked": 0.1,      # refused at discovery — the topology exists, the reach does not
 }
 #: An origin kind with no registry behind it at all. Worst case on purpose: a new origin kind that
 #: nobody has taught this function about must not arrive scoring as safe.
@@ -487,8 +487,24 @@ def _build_path(
     # read-only alongside one they have never looked at, and the operator has already told us the
     # difference. `_origin_risk` reads the registry they populated, so the decisions taken on the MCP
     # Servers page are what move this number.
-    origin_risk = (1.0 - trust) if trust is not None else _origin_risk(src_kind, src_node, mcp_registry)
-    risk = min(1.0, origin_risk * 0.5 + tgt_sens * 0.35 + (0.15 if chokepoint else 0.0))
+    if trust is not None:
+        risk = min(1.0, (1.0 - trust) * 0.5 + tgt_sens * 0.35 + (0.15 if chokepoint else 0.0))
+    else:
+        # A DIFFERENT WEIGHTING for a non-agent origin, and the live output is what forced it.
+        #
+        # Reusing the agent weights looked right and was measured wrong: every MCP-origin path ends at
+        # a data node (sensitive, 0.35) through a chokepoint (0.15), so `origin * 0.5 + 0.5` is >= 0.75
+        # for any origin risk above 0.5 — and all eight paths on the kind cluster rendered "critical",
+        # including the two servers an operator had REGISTERED. The registry term was real, computed,
+        # and invisible: a control that reads an operator's decisions and changes nothing they can see.
+        #
+        # The weights differ because the QUESTION differs. For an agent the origin is a given — it is
+        # supposed to be there — and the target's sensitivity is what makes the path severe. For an MCP
+        # server "should this be here at all" IS the finding, so the origin term dominates and the
+        # constant terms make room for it. Agent paths are untouched, so nothing that existed before
+        # this change moves.
+        origin_risk = _origin_risk(src_kind, src_node, mcp_registry)
+        risk = min(1.0, origin_risk * 0.6 + tgt_sens * 0.25 + (0.1 if chokepoint else 0.0))
     sev = _severity_from(risk)
 
     if blocked:

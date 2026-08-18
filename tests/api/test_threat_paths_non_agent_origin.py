@@ -112,17 +112,8 @@ class TestTheDerivedPath:
 class TestSeverityComesFromTheRegistryNotAFabricatedTrust:
     """The operator's decisions on the MCP Servers page are what move this number."""
 
-    def _sev(self, registry, sensitive: bool = True):
+    def _sev(self, registry):
         nodes, edges = _graph()
-        if not sensitive:
-            # A LESS SENSITIVE target, on purpose. With a sensitive target the formula saturates —
-            # `origin_risk * 0.5 + 0.35 + 0.15` is >= 1.0 for anything above origin_risk 0.5 — so both
-            # an unreviewed and a registered server land in "critical" and the registry distinction is
-            # invisible at severity granularity. That is a property of the shared severity buckets, not
-            # of this change, and rebalancing them would move every agent path's severity too. The
-            # distinction is asserted where the formula is not pinned.
-            nodes["data:pg/customers"]["props"]["sensitivity"] = "low"
-            nodes["data:pg/customers"]["type"] = "tool"
         return T._build_path(CHAIN, nodes, edges, mcp_registry=registry).sev
 
     def test_an_unreviewed_server_reaching_a_crown_jewel_is_CRITICAL(self):
@@ -131,14 +122,28 @@ class TestSeverityComesFromTheRegistryNotAFabricatedTrust:
         customer data, presented as one rung down from the worst thing on the page."""
         assert self._sev({}) == "critical"
 
-    def test_a_REGISTERED_server_ranks_below_an_unreviewed_one(self):
-        """An operator who vouched for a server has told us something. Ranking it identically to one
-        nobody has looked at would make the registry decision cosmetic."""
-        registered = self._sev({("agents", "reporting-kb"): {"status": "registered", "writable": False}},
-                               sensitive=False)
-        unreviewed = self._sev({}, sensitive=False)
-        assert registered != unreviewed
-        assert T._SEVERITY_ORDER[registered] > T._SEVERITY_ORDER[unreviewed]
+    def test_the_THREE_registry_states_land_in_THREE_severity_buckets(self):
+        """The shape that actually occurs, which is why the weights for a non-agent origin differ.
+
+        Every MCP-origin path ends at a data node through a chokepoint, so under the agent weights
+        (`origin * 0.5 + 0.35 + 0.15`) everything above origin-risk 0.5 is >= 0.75 and renders
+        "critical". Measured on the kind cluster: all eight MCP paths were critical, including two
+        servers an operator had REGISTERED — the registry term was computed and invisible, a control
+        that reads an operator's decisions and changes nothing they can see.
+        """
+        assert self._sev({}) == "critical"                                                   # unreviewed
+        assert self._sev({("agents", "reporting-kb"): {"status": "registered"}}) == "high"
+        assert self._sev({("agents", "reporting-kb"): {"status": "blocked"}}) == "medium"
+
+    def test_an_AGENT_path_severity_is_untouched_by_the_new_weights(self):
+        """The non-agent weighting is a separate branch on purpose. If it had replaced the shared
+        formula, every agent path's severity would have moved — a silent re-grading of the whole page
+        under cover of an MCP feature."""
+        nodes, edges = _graph()
+        agent_chain = ["spiffe://norviq/ns/agents/sa/support", "tool:read_file", "data:pg/customers"]
+        p = T._build_path(agent_chain, nodes, edges)
+        # trust 0.9 -> (1-0.9)*0.5 + 1.0*0.35 + 0.15 = 0.55 -> "high", exactly as before this change.
+        assert p.sev == "high"
 
     def test_the_registry_term_separates_them_even_where_severity_saturates(self):
         """The bucket can hide the difference; the term underneath must not. This is what a future
