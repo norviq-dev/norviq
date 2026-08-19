@@ -604,8 +604,8 @@ async def _governing_policies(session: AsyncSession, namespaces: list[str] | Non
         rows = (
             (
                 await session.execute(
-                    text(
-                        f"SELECT DISTINCT ON (namespace, agent_class) agent_class, rego_source FROM policies "  # nosec B608 (constant WHERE fragments; namespaces bound as :nss) # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+                    text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+                        f"SELECT DISTINCT ON (namespace, agent_class) agent_class, rego_source FROM policies "  # nosec B608 (constant WHERE fragments; namespaces bound as :nss)
                         f"WHERE {where} ORDER BY namespace, agent_class, version DESC"
                     ),
                     params,
