@@ -224,3 +224,50 @@ func TestMutateFreshPodInjects(t *testing.T) {
 		t.Fatal("a fresh pod must be injected (patch expected)")
 	}
 }
+
+// --- the product's OWN example must admit -------------------------------------------------------
+//
+// Found on a fresh AKS install: enabling injection per the docs and deploying examples/chatbot refused
+// every pod with NRVQ-WHK-4034. The example runs three `norviq.mcp` proxy containers FROM THE ENGINE
+// IMAGE with their own args; once image tags are aligned — which the chart's upgrade notes explicitly
+// instruct — they equal NRVQ_SIDECAR_IMAGE exactly and read as neutered decoys. The example admitted
+// before only because it pinned a STALE engine tag, i.e. by accident.
+//
+// They carry no socket mount, no NRVQ_SOCKET_PATH, and are not named norviq-sidecar, so they cannot
+// occupy the enforcement path: `fullyInjected` needs the pod-level norviq-socket volume, which is
+// absent, so the pod is injected rather than skipped and the workload stays governed.
+func TestMutateChatbotMcpProxySidecarsAreAdmitted(t *testing.T) {
+	cfg := LoadConfig()
+	mcp := func(name string) corev1.Container {
+		return corev1.Container{
+			Name:  name,
+			Image: cfg.SidecarImage, // the aligned engine image — the whole point of the regression
+			Args:  []string{"-m", "norviq.mcp", "--server-id", name},
+		}
+	}
+	pod := enabledPod("demo-chatbot", corev1.PodSpec{Containers: []corev1.Container{
+		{Name: "chatbot", Image: "ghcr.io/norviq-dev/norviq-engine-dev:demo-chatbot"},
+		mcp("mcp-fw-kb"), mcp("mcp-fw-crm"), mcp("mcp-fw-ops"),
+	}})
+	resp := sendReview(t, NewHandler(cfg), makeReviewFromPod(pod, gvkPod(), "default"))
+	if !resp.Response.Allowed {
+		t.Fatalf("the shipped chatbot example must admit; denied with: %v", resp.Response.Result)
+	}
+	if resp.Response.Patch == nil {
+		t.Fatal("the pod must still be INJECTED — admitting it unpoliced would be the real bug")
+	}
+}
+
+// The relaxation must not let a container TAKE the injector's own container name: the injector would
+// then patch in a second container with the same name, which the API server rejects outright.
+func TestMutateSidecarNamedDecoyWithoutSocketIsStillDenied(t *testing.T) {
+	cfg := LoadConfig()
+	pod := enabledPod("attacker", corev1.PodSpec{Containers: []corev1.Container{
+		{Name: "app", Image: "nginx"},
+		{Name: "norviq-sidecar", Image: cfg.SidecarImage, Args: []string{"--do-nothing"}},
+	}})
+	resp := sendReview(t, NewHandler(cfg), makeReviewFromPod(pod, gvkPod(), "default"))
+	if resp.Response.Allowed {
+		t.Fatal("a container taking the injector's own name must still be DENIED")
+	}
+}

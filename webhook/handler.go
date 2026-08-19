@@ -368,11 +368,44 @@ func allPodContainers(pod *corev1.Pod) []corev1.Container {
 
 // isSidecarContainer reports whether c is (or masquerades as) the enforcement sidecar by image identity:
 // the configured image, or the enforcement socket mounted from a same-NAME image (a drifted tag/registry).
+// UNCHANGED, and deliberately so: `fullyInjected` depends on it, and loosening the SKIP path would let a
+// pod be treated as injected when it is not.
 func isSidecarContainer(c corev1.Container, configuredImage string) bool {
 	if configuredImage != "" && c.Image == configuredImage {
 		return true
 	}
 	return hasSocketMount(c) && sameSidecarImageName(c.Image, configuredImage)
+}
+
+// injectedSidecarName is the container name the injector generates (`newSidecarTemplate`). A container
+// that CLAIMS that name is claiming to be the sidecar regardless of what it mounts — and if it were
+// admitted, the injector's own patch would add a second container with the same name, which the API
+// server rejects outright.
+const injectedSidecarName = "norviq-sidecar"
+
+// occupiesEnforcementPath is the DENY-path test. A container is treated as claiming the enforcement
+// sidecar's place when it presents as the sidecar AND either touches the enforcement socket or takes
+// the injector's own container name.
+//
+// Image identity ALONE is not enough, and that was a false positive against the product's own shipped
+// example: the chatbot runs three `norviq.mcp` proxy containers (`mcp-fw-kb/crm/ops`) FROM THE ENGINE
+// IMAGE with their own args. Once an operator aligns image tags — which the chart's upgrade notes
+// explicitly instruct — those equal NRVQ_SIDECAR_IMAGE exactly and every pod in the namespace was
+// refused as a neutered decoy. The example admitted before only because it pinned a stale engine tag,
+// i.e. by accident.
+//
+// This does not weaken the decoy defence. A socket-less, differently-named container cannot suppress
+// injection: `fullyInjected` returns false unless the POD declares the norviq-socket volume, so the pod
+// is never skipped — it is injected and the workload stays governed. Everything the deny paths caught
+// before is still caught: the socket volume without full injection, a container mounting the socket or
+// presetting NRVQ_SOCKET_PATH, and anything taking the sidecar's name. What is no longer denied is the
+// one case that was never an attack — another norviq component, sharing the image, nowhere near the
+// enforcement path and not pretending to be it.
+func occupiesEnforcementPath(c corev1.Container, configuredImage string) bool {
+	if !hasSocketMount(c) && !hasSocketPathEnv(c) && c.Name != injectedSidecarName {
+		return false
+	}
+	return isSidecarContainer(c, configuredImage)
 }
 
 // neuteredSidecarDecoy: a sidecar-identity container that overrides command/args (the injector never
@@ -391,7 +424,7 @@ func neuteredSidecarDecoy(cfg Config, pod *corev1.Pod) (string, bool) {
 		if cfg.McpInject && isInjectorMcpInitContainer(cfg, c) {
 			continue
 		}
-		if (len(c.Command) > 0 || len(c.Args) > 0) && isSidecarContainer(c, configuredImage) {
+		if (len(c.Command) > 0 || len(c.Args) > 0) && occupiesEnforcementPath(c, configuredImage) {
 			return "container " + c.Name + " presents as the norviq sidecar but overrides command/args (neutered decoy)", true
 		}
 	}
@@ -451,7 +484,7 @@ func enforcementArtifact(cfg Config, pod *corev1.Pod) (string, bool) {
 		return "pod declares the injector-owned norviq-socket volume but is not fully injected", true
 	}
 	for _, c := range allPodContainers(pod) {
-		if isSidecarContainer(c, configuredImage) {
+		if occupiesEnforcementPath(c, configuredImage) {
 			return "container " + c.Name + " presents as the norviq sidecar but the pod is not fully injected", true
 		}
 		if mountsSocketPath(c) {
