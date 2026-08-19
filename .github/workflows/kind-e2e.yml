@@ -174,32 +174,34 @@ jobs:
           # minutes, ate the whole job budget and was killed at the cap having never started a
           # single spec — the only trace was the orphaned install process in the cleanup log. A
           # bound turns that into a fast, named failure.
-          # Install the browser AND its system deps in one go, bounded, with the Azure mirror rewritten
-          # out of apt's sources first.
+          # EVERY apt-touching command is bounded, and none of them can fail the job.
           #
-          # Two corrections are baked in here, both mine. First: apt was the whole problem, and only apt —
-          # azure.archive answers `Ign:` for every index, apt falls back to archive.ubuntu.com, fetches the
-          # InRelease files and then hangs on the package lists. Rewriting the mirror out fixed it; the step
-          # went from stalling for 12 minutes to finishing in about one.
+          # Both halves of that are corrections. The previous version bounded `playwright install` but left
+          # the `apt-get update` in FRONT of it unbounded — so apt hung there for 113 minutes and the job
+          # was killed at its cap having run no specs. I added that update while fixing a hang, and put it
+          # outside the guard that existed to catch exactly this.
           #
-          # Second: I briefly replaced --with-deps with a `chromium.launch()` probe, on the theory that
-          # testing the property beats trusting the mechanism. The theory is right; the probe was not. It
-          # ran `require('@playwright/test')` from ui/tests/e2e BEFORE anything had installed node_modules
-          # there — e2e.sh runs `npm ci` itself, later — so it died on MODULE_NOT_FOUND every time and never
-          # launched a browser at all. It passed locally only because a dev checkout has node_modules. A
-          # check that cannot reach the thing it checks reports the failure it was written to detect, which
-          # is worse than no check: I read its failure as evidence about chromium and said so.
+          # And the mirror rewrite is not a fix, only a mitigation: one run finished apt in about a minute
+          # after it, the next still queried azure.archive and hung. The Ubuntu mirrors on this runner are
+          # intermittently bad, which nothing in this repo controls.
           #
-          # `npx playwright install` works without node_modules because npx fetches the CLI on demand.
-          # `require('@playwright/test')` does not. That difference is the entire bug.
-          sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
+          # So setup must never be able to hang the suite. Bound each step, degrade to a browser-only
+          # install if the deps cannot be fetched, and let the SPECS report whether the browser actually
+          # works — a real signal, unlike a setup step that times out into silence.
+          timeout 3m sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
             /etc/apt/sources.list /etc/apt/sources.list.d/*.list \
-            /etc/apt/sources.list.d/*.sources 2>/dev/null || true
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || true
-          timeout 12m bash -c 'cd ui/tests/e2e && npx playwright install --with-deps chromium' || {
-            echo "::error::playwright install did not finish in 12m (apt lock or mirror stall)" >&2
-            exit 1
-          }
+            /etc/apt/sources.list.d/*.sources 2>/dev/null || echo 'mirror rewrite skipped'
+          timeout 6m sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 update \
+            || echo 'apt-get update did not finish in 6m — continuing'
+          if timeout 10m bash -c 'cd ui/tests/e2e && npx playwright install --with-deps chromium'; then
+            echo 'browser + system deps installed'
+          else
+            echo '::warning::--with-deps did not finish in 10m (apt/mirror); falling back to browser-only'
+            timeout 6m bash -c 'cd ui/tests/e2e && npx playwright install chromium' || {
+              echo '::error::could not download the chromium binary either — this is not apt' >&2
+              exit 1
+            }
+          fi
           bash scripts/e2e.sh
 
       # L3 LAST, deliberately. It creates policies in throwaway `integration-<uuid>` namespaces, and a
