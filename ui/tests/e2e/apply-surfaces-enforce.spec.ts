@@ -155,8 +155,36 @@ test.describe("Apply-per-surface enforcement — each surface flips /evaluate on
     } finally { await rmPolicy(page, NS, C); }
   });
 
-  test("BASELINE + no-policy: an unknown ns/class fails CLOSED (block), never fail-open allow", async ({ page }) => {
+  test("BASELINE + no-policy: an unknown ns/class allows, but NEVER anonymously", async ({ page }) => {
+    // This asserted `block` and was correct when the engine shipped default-deny. It is not any
+    // more: shipping block put 22 baseline rules in front of every tool call in every tenant
+    // namespace on day one, and `deny_shell_execution` alone fires on roughly 1 in 8 ordinary
+    // alphanumeric identifiers — so a stock install dropped real traffic before the customer had
+    // written a policy. The default is now allow, decided deliberately (helm values
+    // `baselineClusterPolicy.enforcementMode`, and `no_policy_decision` on the engine).
+    //
+    // What still matters is that the allow is ATTRIBUTABLE. An unjudged call must be countable and
+    // alertable, so it carries the named `default_allow` rule rather than an empty rule_id — the
+    // same reason `engine_unavailable_fallback` was given a name. An anonymous allow is the actual
+    // regression to guard against here, because it is indistinguishable from a policy that ran and
+    // permitted the call.
     const d = await ev(page, "fbe-nopol", "fbe-none", "anything_at_all", { p: 1 });
-    expect(d.decision).toBe("block");   // fail-closed; NEVER allow when nothing is loaded
+    expect(d.decision).toBe("allow");
+    expect(d.rule_id).toBe("default_allow");   // named, never "" — an anonymous allow is the bug
+  });
+
+  test("the fail-CLOSED paths are still closed: a refused credential blocks, whatever the fallback", async ({ page }) => {
+    // The complement of the test above, and the one that actually protects the posture. A 4xx from
+    // the engine is not an outage, so it must block even with fail-open configured — otherwise an
+    // expired sidecar credential becomes a total governance bypass. 0.2.1 shipped exactly that hole
+    // via the SDK circuit breaker (three 401s tripped it, and the breaker is checked before the 4xx
+    // rule), so this direction is worth asserting against the live engine too.
+    const res = await page.request.post("/api/v1/evaluate", {
+      headers: { Authorization: "Bearer not-a-real-token" },
+      data: { tool_name: "anything_at_all", tool_params: { p: 1 }, framework: "langchain",
+              agent_identity: { spiffe_id: "spiffe://cluster.local/ns/fbe-nopol/sa/x",
+                                namespace: "fbe-nopol", agent_class: "fbe-none" } },
+    });
+    expect(res.status(), "a bogus credential must be refused, never served a decision").toBe(401);
   });
 });

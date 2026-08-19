@@ -105,7 +105,16 @@ fi
 # above came from this run or a previous one.
 [ -z "${NRVQ_E2E_PASSWORD:-}" ] && clear_login_lockout
 
-if [ -z "${NRVQ_E2E_PASSWORD:-}" ] && [ -x "$(dirname "$0")/kind-e2e/login-gate.sh" ]; then
+# Invoked through `bash` rather than gated on the executable bit. It WAS `[ -x ... ]`, and the file
+# was committed 100644 — so the guard was simply false, the gate was skipped with NO message at all,
+# and the 11 form-login specs then spent 20 seconds each failing against the placeholder password.
+# That is the whole reason this job was red every day since 2026-08-13: one mode bit, and a check
+# that said nothing when it was wrong. A genuinely missing file is still a skip, but it says so now.
+_gate="$(dirname "$0")/kind-e2e/login-gate.sh"
+if [ -z "${NRVQ_E2E_PASSWORD:-}" ] && [ ! -f "$_gate" ]; then
+  echo "login gate: $_gate NOT FOUND — the 11 form-login specs will fail on the placeholder" >&2
+fi
+if [ -z "${NRVQ_E2E_PASSWORD:-}" ] && [ -f "$_gate" ]; then
   # stderr is NOT suppressed. The first version sent it to /dev/null, so when the gate failed — it
   # was reaching for whatever kubectl context happened to be current, which after a cluster delete was
   # a dangling one — the run printed "login gate FAILED" and nothing about WHY, and 27 tests failed
@@ -113,7 +122,7 @@ if [ -z "${NRVQ_E2E_PASSWORD:-}" ] && [ -x "$(dirname "$0")/kind-e2e/login-gate.
   # error becomes an unexplained one.
   if gate_out="$(PLAYWRIGHT_BASE_URL="$BASE_URL" NRVQ_KUBE_CONTEXT="${NRVQ_KUBE_CONTEXT:-}" \
                  NRVQ_NAMESPACE="${NRVQ_NAMESPACE:-norviq}" \
-                 "$(dirname "$0")/kind-e2e/login-gate.sh")"; then
+                 bash "$_gate")"; then
     eval "$gate_out"
     export NRVQ_E2E_PASSWORD
     echo "login gate: admin ready (must_change=false) for the 11 form-login specs"
