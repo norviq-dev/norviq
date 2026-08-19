@@ -174,11 +174,14 @@ jobs:
           # minutes, ate the whole job budget and was killed at the cap having never started a
           # single spec — the only trace was the orphaned install process in the cleanup log. A
           # bound turns that into a fast, named failure.
-          # Browser binary first, WITHOUT --with-deps. That flag shells out to apt, and apt on this
-          # runner keeps stalling: two runs died here, one silently for 39 minutes and one on the bound
-          # below, both after azure.archive.ubuntu.com ignored every index and the fallback mirror hung
-          # mid-fetch. ubuntu-latest already ships chromium's system libs, so that round trip is mostly
-          # risk for no gain.
+          # Browser binary first and separately, because it is the part that WORKS: the Microsoft CDN
+          # download succeeds on this runner even while apt is unusable, so a browser-only install never
+          # has to wait on a package mirror.
+          #
+          # (An earlier version of this comment claimed ubuntu-latest already ships chromium's system
+          # libraries, making --with-deps pure risk. The launch check below disproved that on its first
+          # run — chromium did NOT start without them. Recorded because the check is the only reason a
+          # wrong assumption did not turn into a silent skip.)
           (cd ui/tests/e2e && npx playwright install chromium)
           # Then TEST the property --with-deps exists to guarantee — that chromium actually launches —
           # rather than assume apt succeeding is the same thing. Pay for apt only when this proves it is
@@ -187,6 +190,14 @@ jobs:
             echo "chromium launches; skipping apt"
           else
             echo "chromium could not launch — installing system deps"
+            # Drop the Azure mirror first. Every failed run showed one pattern: azure.archive answers `Ign:`
+            # for every index, apt falls back to archive.ubuntu.com, fetches the InRelease files and then
+            # hangs on the package lists until it is killed. The browser download in this same job succeeds,
+            # so this is apt/mirror-specific and not egress.
+            sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
+              /etc/apt/sources.list /etc/apt/sources.list.d/*.list \
+              /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || true
             timeout 12m bash -c 'cd ui/tests/e2e && npx playwright install-deps chromium' || {
               echo "::error::playwright install-deps did not finish in 12m (apt lock or mirror stall)" >&2
               exit 1
