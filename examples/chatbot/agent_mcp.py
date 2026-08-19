@@ -65,7 +65,18 @@ async def get_agent():
     example does not have.
     """
     global _agent, _tools, _problems
-    if _agent is None:
+    # Do NOT cache an agent that discovered NOTHING. The three firewall sidecars start in this pod
+    # alongside the agent container, so the first request can arrive before they have bound their
+    # loopback ports — and caching that outcome made the race PERMANENT: `_agent is None` never
+    # became true again, discovery never retried, and the pod served a tool-less agent until someone
+    # restarted it. Observed on AKS: every /chat returned `tool_servers: []` while the very same
+    # `load_mcp_tools(servers_from_env())` returned the full tool set when run by hand in that pod.
+    #
+    # Retrying while the tool list is empty costs one discovery round trip per request during the few
+    # seconds of a cold start, and nothing at all once it succeeds. An agent that permanently believes
+    # it has no tools is the worse failure: the model then calls a tool the runtime says it does not
+    # have, and the provider rejects the request outright.
+    if _agent is None or not _tools:
         _tools, _problems = await load_mcp_tools(servers_from_env())
         _agent = create_react_agent(model=llm, tools=_tools, prompt=SYSTEM_PROMPT)
     return _agent

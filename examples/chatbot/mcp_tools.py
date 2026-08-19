@@ -32,7 +32,14 @@ from typing import Any
 
 from langchain_core.tools import StructuredTool
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+# The MCP SDK renamed this symbol (`streamablehttp_client` -> `streamable_http_client`) inside the 1.x
+# range this file's requirements allow, so a fresh build of this example crash-looped on ImportError
+# while an older lockfile kept working. Accept both spellings rather than pinning to one and breaking
+# on the other edge of the supported range.
+try:  # SDKs from the rename onward
+    from mcp.client.streamable_http import streamable_http_client as streamablehttp_client
+except ImportError:  # older SDKs, still inside the supported floor
+    from mcp.client.streamable_http import streamablehttp_client
 from mcp.shared.exceptions import McpError
 
 # The contract's sidecar ports. Overridable so the same module runs against a local `--listen` proxy
