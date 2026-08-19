@@ -97,7 +97,7 @@ Every value is documented inline in [`values.yaml`](values.yaml); the environmen
 |---|---|---|
 | `policyQuotaNamespaces` | `[]` | **Required.** Tenant namespaces to protect. Empty + `baselineClusterPolicy.enabled` fails the install by design. |
 | `config.enforcementMode` | `block` | `block` (enforce) or `audit` (visibility only). |
-| `config.noPolicyDecision` | `deny` | Decision when no policy is loaded. `deny` = fail-closed. |
+| `config.noPolicyDecision` | `allow` | Decision when no policy is loaded. Ships `allow`, matching `values.yaml`; the call carries the named `default_allow` rule. `deny` = fail-closed, and applies only in `block` enforcement mode. |
 | `config.requireStrongSecret` | `true` | Refuse to boot on a weak/default JWT secret or admin password. |
 | `webhook.injection.enabled` | `false` | Turn on sidecar injection (auto-bootstraps TLS, no cert-manager needed). |
 | `webhook.injection.failurePolicy` | `Fail` | `Fail` = a pod the webhook **routes** cannot start un-guarded. Under `gateOnlyAgentPods: true` (default) only pods labelled `norviq.io/agent-class` are routed. |

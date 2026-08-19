@@ -273,3 +273,69 @@ async def test_workload_tier_absent_when_caller_has_no_workload(evaluator: OPAEv
     evt = _event()  # no workload on the identity
     keys = {c["key"] for c in await evaluator._collect_candidates(evt)}
     assert "default:deployment:checkout" not in keys
+
+
+@pytest.mark.asyncio
+async def test_pep_refusal_is_folded_on_the_CACHE_HIT_path_too(
+    evaluator: OPAEvaluator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A PEP refusal must reach the behavioural fan-out on BOTH return paths, not just the fresh one.
+
+    `apply_pep_denial` sits before `_persist_behavior` on the fresh-evaluation path, and the comment
+    there states exactly why: "everything downstream of it — the attack graph, trust history, the
+    behavioural profile, the agent registry's violation flag, the decision counters — reads this
+    value, and with the fold applied only at the API boundary they all recorded a REFUSED call as an
+    allow. The audit row was right and every derived surface was wrong."
+
+    `evaluate()` has a SECOND return path. On a cache hit it calls `_handle_cache_hit` — which
+    applies rate-limit, trust overrides, posture and block attribution, but NOT the fold — and then
+    calls `_persist_behavior` with that unfolded decision. And the cached `base_decision` is
+    deliberately never folded (correctly: a PEP refusal is a fact about ONE call, so caching it
+    would deny every later caller sharing the key). So the cache hit reinstated the exact bug the
+    comment describes, on the other path.
+
+    Reachable in a real deployment: two MCP-proxied pods sharing (namespace, agent_class) and the
+    Redis eval cache, both in front of an operator-BLOCKED server. Each `tools/list` refusal reports
+    the identical tool_name and empty params, so they share a cache key. Pod A evaluates and
+    persists a block; pod B hits the cache inside the TTL and persists the same refusal as an ALLOW,
+    so the attacker's trust score is never penalised and the attack graph records no violation.
+
+    The HTTP response stays correct either way (the API boundary and the SDK re-apply the fold), so
+    this is detection and trust integrity rather than a forwarded call — which is precisely why
+    nothing user-visible would have caught it.
+    """
+    persisted: list = []
+
+    async def _capture(event: ToolCallEvent, decision, trust: TrustResult) -> None:
+        persisted.append(decision)
+
+    monkeypatch.setattr(evaluator, "_persist_behavior", _capture)
+
+    async def _fake_opa(key: str, namespace: str, agent_class: str, opa_input: dict, rego_source: str = "") -> dict:
+        # No shipped rule gates tools/list, so policy says allow — the refusal came from the PEP.
+        return {"decision": "allow", "rule_id": "default_allow", "reason": "No policy matched"}
+
+    monkeypatch.setattr(evaluator, "_evaluate_opa", _fake_opa)
+
+    def _refusal() -> ToolCallEvent:
+        ev = _event(tool_name="tools/list", params={})
+        return ev.model_copy(update={
+            "pep_decision": "block",
+            "pep_rule_id": "mcp_server_blocked",
+            "pep_reason": "server is blocked by an operator decision",
+        })
+
+    first = await evaluator.evaluate(_refusal())    # cache MISS -> fresh path
+    second = await evaluator.evaluate(_refusal())   # cache HIT  -> _handle_cache_hit path
+
+    assert first.decision == "block", "fresh path must fold the PEP refusal"
+    assert second.decision == "block", "returned decision must not soften on a cache hit"
+
+    assert len(persisted) == 2, f"expected both paths to persist, got {len(persisted)}"
+    assert [d.decision for d in persisted] == ["block", "block"], (
+        "a PEP refusal reached the behavioural fan-out as an ALLOW on the cache-hit path: "
+        f"{[(d.decision, d.rule_id) for d in persisted]}"
+    )
+    assert persisted[1].rule_id == "mcp_server_blocked", (
+        f"the refusal must keep its own rule id, got {persisted[1].rule_id!r}"
+    )

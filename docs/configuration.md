@@ -317,7 +317,7 @@ a non-chart deployment makes the app spawn its own managed `opa run --server`, b
 | `config.internalTls.proxyImage` | `nginx:1.27-alpine` | Image for that TLS terminator sidecar. |
 | `config.logLevel` | `INFO` | |
 | `config.enforcementMode` | `block` | Global default enforcement mode (individual `NrvqPolicy` objects can override per-target). |
-| `config.noPolicyDecision` | `deny` | What happens to a call in a namespace with **no matching policy**, in `block` mode. `deny` is fail-closed; setting `allow` restores fail-open behavior. |
+| `config.noPolicyDecision` | `allow` | What happens to a call in a namespace with **no matching policy**. Ships `allow` — a namespace nobody has written a policy for does not block, and the call is recorded against the named `default_allow` rule so it stays countable. Set `deny` for fail-closed, which takes effect only in `block` enforcement mode. This row previously said the default was `deny`, which overstated the shipped posture. |
 | `config.opaMode` | `server` | `server` — evaluate via HTTP against the per-pod OPA sidecar (`opa.*` above). `subprocess` — per-call `opa eval` fork (rollback path). |
 | `config.requireStrongSecret` | `true` | See Production checklist. |
 | `config.trustThreshold` | `0.7` | Agent trust score below this affects evaluation/escalation behavior. Renders `NRVQ_TRUST_THRESHOLD`, which binds to `settings.trust_threshold`. |

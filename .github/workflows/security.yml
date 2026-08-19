@@ -51,10 +51,32 @@ jobs:
         run: |
           curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
             | tar -xz -C /usr/local/bin gitleaks
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
+          # BASE/HEAD must come from the event that actually fired. `pull_request.base.sha` is EMPTY on a
+          # push, so "${BASE}..${HEAD:-HEAD}" collapsed to "..HEAD" — which git resolves as HEAD..HEAD, a
+          # range of ZERO commits. gitleaks scanned nothing and exited 0. The push trigger was added so this
+          # gate would cover direct pushes to main; it ran, and examined not one line. A secret scanner that
+          # reports clean having read nothing is worse than an absent one — the green check is identical.
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          HEAD="${{ github.event.pull_request.head.sha || github.sha }}"
+          # A new branch or force-push reports the all-zero sha, and a rewritten base may not exist locally.
+          # Neither is a reason to scan LESS — fall back to the full history.
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            echo "gitleaks: no usable base (BASE='${BASE}') — scanning full history"
+            LOG_OPTS="--all"
+          else
+            N=$(git rev-list --count "${BASE}..${HEAD}")
+            # The guard the old line needed: an empty range is now loud, never a silent pass.
+            if [ "$N" -eq 0 ]; then
+              echo "gitleaks: ${BASE}..${HEAD} is EMPTY — scanning full history rather than nothing"
+              LOG_OPTS="--all"
+            else
+              echo "gitleaks: scanning ${N} commit(s) in ${BASE}..${HEAD}"
+              LOG_OPTS="${BASE}..${HEAD}"
+            fi
+          fi
           gitleaks detect --no-banner --redact --config .gitleaks.toml \
-            --log-opts="${BASE}..${HEAD:-HEAD}" --exit-code 1
+            --log-opts="${LOG_OPTS}" --exit-code 1
 
   # ── Python SAST: bandit on CHANGED files + semgrep diff-aware (--baseline-commit) — fail-closed. ──
   python-sast:
@@ -70,14 +92,31 @@ jobs:
         run: pip install bandit semgrep
       - name: bandit (changed .py, high severity, fail-closed)
         run: |
-          BASE="${{ github.event.pull_request.base.sha }}"
-          FILES=$(git diff --name-only "${BASE}"...HEAD -- 'norviq/**/*.py' | tr '\n' ' ')
-          if [ -n "$FILES" ]; then bandit -ll -q $FILES; else echo "no changed python"; fi
+          # Same empty-BASE trap: on a push this expanded to `git diff ...HEAD`, which returns nothing, so
+          # the step printed "no changed python" for a push that changed Python.
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            echo "bandit: no usable base — scanning ALL of norviq/"
+            FILES=$(git ls-files 'norviq/**/*.py' | tr '\n' ' ')
+          else
+            FILES=$(git diff --name-only "${BASE}"...HEAD -- 'norviq/**/*.py' | tr '\n' ' ')
+          fi
+          if [ -n "$FILES" ]; then bandit -ll -q $FILES; else echo "bandit: base reachable, genuinely no changed python"; fi
       - name: semgrep (diff-aware vs base, fail-closed)
         run: |
           semgrep ci --config=auto --config=p/python --config=p/owasp-top-ten --error || true
-          semgrep scan --config=auto --error --severity=ERROR \
-            --baseline-commit "${{ github.event.pull_request.base.sha }}" norviq/ ui/src
+          # An empty --baseline-commit made this a whole-repo scan by accident rather than by decision.
+          # Resolve the same way, and drop the flag when there is no usable base so the full scan is stated.
+          BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            echo "semgrep: no usable base — full scan of norviq/ ui/src"
+            semgrep scan --config=auto --error --severity=ERROR norviq/ ui/src
+          else
+            semgrep scan --config=auto --error --severity=ERROR \
+              --baseline-commit "${BASE}" norviq/ ui/src
+          fi
 
   # ── TS/JS SAST: eslint-plugin-security over the whole ui/src, FAIL-CLOSED (any finding fails the
   #    build). Rules in ui/eslint.config.js. Complements the semgrep step above (which also scans

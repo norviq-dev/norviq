@@ -544,6 +544,23 @@ class OPAEvaluator:
             if cached is not None:
                 cache_hit = True
                 decision = await self._handle_cache_hit(event, cached, start, trust_result, posture)
+                # Fold the PEP refusal HERE too. This is the second return path out of evaluate(), and
+                # it used to skip the fold entirely: `_handle_cache_hit` applies rate-limit, trust
+                # overrides, posture and block attribution, but not this. The cached `base_decision` is
+                # deliberately never folded (a PEP refusal is a fact about ONE call, so caching it would
+                # deny every later caller sharing the key) — which is exactly why the fold has to be
+                # re-applied per call, on BOTH paths.
+                #
+                # Without it a cache hit reinstated the bug the fresh path documents below: the attack
+                # graph, trust history, behavioural profile, agent-registry violation flag and decision
+                # counters all recorded a REFUSED call as an allow, so the caller was never penalised.
+                # Two MCP-proxied pods sharing a namespace, agent class and the Redis eval cache in
+                # front of a blocked server hit this on the second pod's tools/list.
+                #
+                # Placed after `_handle_cache_hit` so the ordering matches the fresh path exactly:
+                # after posture and the trust overrides, before `_persist_behavior`.
+                decision = apply_pep_denial(
+                    decision, event.pep_decision, event.pep_rule_id, event.pep_reason)
                 # Stamp the real measured end-to-end latency so the audit record reflects it (not 0.0).
                 decision = decision.model_copy(update={"latency_ms": round((time.monotonic() - start) * 1000, 2)})
                 with timer.phase(PHASE_PERSIST):
