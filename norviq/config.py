@@ -166,7 +166,18 @@ class NorviqSettings(BaseSettings):
     # override-validation error. Keep the query timeout tight; give push real headroom.
     opa_push_timeout_ms: int = 5000
     debug_opa_logging: bool = Field(default=False, validation_alias=AliasChoices("DEBUG_OPA_LOGGING", "DEBUG_OPA"))
-    evaluator_rate_limit_per_window: int = 60
+    # NRVQ_RATE_LIMIT is accepted because the CHART SENDS IT. configmap.yaml renders
+    # `config.rateLimit` as NRVQ_RATE_LIMIT, nothing consumed that name, and `extra="ignore"` above
+    # dropped it in silence — so an operator tightening the throttle to 5/60s kept getting 60/60s and
+    # had no way to tell. Both defaults being 60 hid it perfectly: the documented value matched the
+    # effective one, so the knob looked connected right up until someone relied on it.
+    #
+    # A validation_alias bypasses env_prefix, so the canonical NRVQ_EVALUATOR_RATE_LIMIT_PER_WINDOW
+    # has to be listed explicitly alongside it or setting it by its real name would stop working.
+    evaluator_rate_limit_per_window: int = Field(
+        default=60,
+        validation_alias=AliasChoices("NRVQ_EVALUATOR_RATE_LIMIT_PER_WINDOW", "NRVQ_RATE_LIMIT"),
+    )
     evaluator_rate_limit_window_s: int = 60
     # Exempt read-like tools from the per-identity rate limiter so a benign read spike isn't denied
     # (a legitimate availability hit under load). Write/destructive tools are still rate-limited (fail-safe).

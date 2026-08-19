@@ -80,3 +80,33 @@ def test_require_strong_secret_defaults_true(monkeypatch) -> None:
             monkeypatch.delenv(key, raising=False)
     loaded = NorviqSettings(_env_file=None)
     assert loaded.require_strong_secret is True
+
+
+def test_the_chart_s_rate_limit_var_actually_reaches_the_limiter(monkeypatch) -> None:
+    """`config.rateLimit` must change the throttle. It silently did not.
+
+    helm/norviq/templates/configmap.yaml renders `config.rateLimit` as NRVQ_RATE_LIMIT. No Settings
+    field consumed that name, and SettingsConfigDict(extra="ignore") drops an unmatched env var
+    without a word — so an operator tightening the per-identity limiter to 5/60s kept getting the
+    code default of 60/60s, with nothing anywhere to tell them.
+
+    Both defaults are 60, which is what made it invisible: the documented value matched the effective
+    one, so the knob looked wired right up until somebody depended on it. That is the same shape as
+    every other defect this release chased — a control that reads as working while doing nothing.
+
+    Asserting a NON-default value is the point. A test that set it to 60 would pass against the bug.
+    """
+    from norviq.config import NorviqSettings
+
+    monkeypatch.delenv("NRVQ_EVALUATOR_RATE_LIMIT_PER_WINDOW", raising=False)
+    monkeypatch.setenv("NRVQ_RATE_LIMIT", "5")
+    assert NorviqSettings().evaluator_rate_limit_per_window == 5
+
+    # The canonical name must keep working — a validation_alias REPLACES the env_prefix lookup, so
+    # listing only the chart's variable would have broken anyone setting it the documented way.
+    monkeypatch.delenv("NRVQ_RATE_LIMIT", raising=False)
+    monkeypatch.setenv("NRVQ_EVALUATOR_RATE_LIMIT_PER_WINDOW", "7")
+    assert NorviqSettings().evaluator_rate_limit_per_window == 7
+
+    monkeypatch.delenv("NRVQ_EVALUATOR_RATE_LIMIT_PER_WINDOW", raising=False)
+    assert NorviqSettings().evaluator_rate_limit_per_window == 60
