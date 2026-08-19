@@ -174,39 +174,32 @@ jobs:
           # minutes, ate the whole job budget and was killed at the cap having never started a
           # single spec — the only trace was the orphaned install process in the cleanup log. A
           # bound turns that into a fast, named failure.
-          # Browser binary first and separately, because it is the part that WORKS: the Microsoft CDN
-          # download succeeds on this runner even while apt is unusable, so a browser-only install never
-          # has to wait on a package mirror.
+          # Install the browser AND its system deps in one go, bounded, with the Azure mirror rewritten
+          # out of apt's sources first.
           #
-          # (An earlier version of this comment claimed ubuntu-latest already ships chromium's system
-          # libraries, making --with-deps pure risk. The launch check below disproved that on its first
-          # run — chromium did NOT start without them. Recorded because the check is the only reason a
-          # wrong assumption did not turn into a silent skip.)
-          (cd ui/tests/e2e && npx playwright install chromium)
-          # Then TEST the property --with-deps exists to guarantee — that chromium actually launches —
-          # rather than assume apt succeeding is the same thing. Pay for apt only when this proves it is
-          # needed, and bound it when we do.
-          if (cd ui/tests/e2e && node -e "require('@playwright/test').chromium.launch().then(b=>b.close()).then(()=>process.exit(0)).catch(e=>{console.error(String(e).split('\n')[0]);process.exit(1)})"); then
-            echo "chromium launches; skipping apt"
-          else
-            echo "chromium could not launch — installing system deps"
-            # Drop the Azure mirror first. Every failed run showed one pattern: azure.archive answers `Ign:`
-            # for every index, apt falls back to archive.ubuntu.com, fetches the InRelease files and then
-            # hangs on the package lists until it is killed. The browser download in this same job succeeds,
-            # so this is apt/mirror-specific and not egress.
-            sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
-              /etc/apt/sources.list /etc/apt/sources.list.d/*.list \
-              /etc/apt/sources.list.d/*.sources 2>/dev/null || true
-            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || true
-            timeout 12m bash -c 'cd ui/tests/e2e && npx playwright install-deps chromium' || {
-              echo "::error::playwright install-deps did not finish in 12m (apt lock or mirror stall)" >&2
-              exit 1
-            }
-            (cd ui/tests/e2e && node -e "require('@playwright/test').chromium.launch().then(b=>b.close()).then(()=>process.exit(0)).catch(e=>{console.error(String(e).split('\n')[0]);process.exit(1)})") || {
-              echo "::error::chromium still cannot launch after installing system deps" >&2
-              exit 1
-            }
-          fi
+          # Two corrections are baked in here, both mine. First: apt was the whole problem, and only apt —
+          # azure.archive answers `Ign:` for every index, apt falls back to archive.ubuntu.com, fetches the
+          # InRelease files and then hangs on the package lists. Rewriting the mirror out fixed it; the step
+          # went from stalling for 12 minutes to finishing in about one.
+          #
+          # Second: I briefly replaced --with-deps with a `chromium.launch()` probe, on the theory that
+          # testing the property beats trusting the mechanism. The theory is right; the probe was not. It
+          # ran `require('@playwright/test')` from ui/tests/e2e BEFORE anything had installed node_modules
+          # there — e2e.sh runs `npm ci` itself, later — so it died on MODULE_NOT_FOUND every time and never
+          # launched a browser at all. It passed locally only because a dev checkout has node_modules. A
+          # check that cannot reach the thing it checks reports the failure it was written to detect, which
+          # is worse than no check: I read its failure as evidence about chromium and said so.
+          #
+          # `npx playwright install` works without node_modules because npx fetches the CLI on demand.
+          # `require('@playwright/test')` does not. That difference is the entire bug.
+          sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.list \
+            /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || true
+          timeout 12m bash -c 'cd ui/tests/e2e && npx playwright install --with-deps chromium' || {
+            echo "::error::playwright install did not finish in 12m (apt lock or mirror stall)" >&2
+            exit 1
+          }
           bash scripts/e2e.sh
 
       # L3 LAST, deliberately. It creates policies in throwaway `integration-<uuid>` namespaces, and a
