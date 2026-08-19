@@ -1,20 +1,46 @@
 # FOSSA license-compliance + vulnerability scan config (fossa-cli v3).
 # https://github.com/fossas/fossa-cli/blob/master/docs/references/files/fossa-yml.md
 #
-# FOSSA auto-detects the dependency graphs in this monorepo:
-#   - Python  : pyproject.toml + uv.lock
-#   - Node    : ui/package.json (+ package-lock.json)
-#   - Go      : webhook/go.mod (+ go.sum)
+# WHAT THIS SCANS, AND WHY IT IS NOT "THE REPO".
 #
-# Test-only and example manifests are NOT part of the distributed product, so they are excluded
-# from the compliance graph to keep the scan focused on what actually ships. Remove an exclusion
-# if you want those dependency licenses reviewed too.
+# A licence review answers one question: what does the distributed product carry? The previous config
+# said it scoped the scan to "what actually ships" and excluded two directories to do it. That could
+# not work. FOSSA built the Python graph from pyproject.toml + uv.lock, and uv.lock is the UNIVERSAL
+# resolution — every optional extra, every platform marker, resolved together. A path exclusion
+# cannot express "optional extra", so the whole framework-adapter surface (semantic-kernel, crewai,
+# autogen, langchain, litellm, chromadb and their closures) was graded as though it shipped.
+#
+# Measured against the lock:
+#     runtime closure                     58 packages
+#     universal resolution (all extras)   an order of magnitude more
+#     of the 13 packages FOSSA flagged, 11 are absent from the runtime closure entirely.
+#     The two that do ship are networkx (BSD-3-Clause) and grpcio (Apache-2.0).
+#
+# The tell was numpy being reported a DIRECT dependency. It appears in no manifest in this repo; it
+# arrives as scipy's dependency, and scipy arrives via semantic-kernel, which is an optional extra
+# that `pip install norviq` never installs. The scan was measuring a set the product does not have.
+#
+# So: analyse an explicit runtime requirements file instead of the lock. CI regenerates it from
+# uv.lock immediately before the scan (see .github/workflows/fossa.yml) so it cannot drift, and
+# asserts that no known extras-only package appears in it — a scope narrowed by accident is
+# indistinguishable from one narrowed on purpose, and only one of those is honest.
 version: 3
 
 project:
   name: Norviq
 
+# Explicit targets. Anything not listed is not analysed, which is the point — the previous config
+# relied on exclusion, and exclusion cannot describe a dependency set that lives inside one lockfile.
+targets:
+  only:
+    - type: pip          # requirements-runtime.txt — the shipped Python closure, generated in CI
+      path: .
+    - type: npm          # the console's production dependencies
+      path: ui
+    - type: gomod        # the admission webhook
+      path: webhook
+
 paths:
   exclude:
-    - ui/tests/e2e            # Playwright e2e tooling — dev/test only, not shipped
-    - examples                # example integrations — not shipped
+    - ui/tests/e2e       # Playwright e2e tooling — dev/test only, never in an image
+    - examples           # example integrations — not shipped

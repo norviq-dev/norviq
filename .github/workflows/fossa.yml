@@ -28,6 +28,34 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      # Regenerate the SHIPPED Python closure immediately before the scan. .fossa.yml analyses this
+      # file rather than uv.lock, because the lock is the universal resolution of every optional
+      # extra — grading it charged the product for a dependency set it does not have (11 of the 13
+      # flagged packages were absent from the runtime closure entirely).
+      #
+      # Generated here and never committed, so it cannot drift from the lock it derives from.
+      - name: Generate the shipped Python closure for FOSSA
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          uv export --frozen --no-dev --no-emit-project --no-hashes > requirements-runtime.txt
+          echo "runtime closure: $(grep -cE '^[a-zA-Z0-9]' requirements-runtime.txt) packages"
+
+          # ASSERT the narrowing is the intended one. A scope narrowed by accident looks exactly like
+          # a scope narrowed on purpose, and a licence scan that quietly stopped looking is worse than
+          # one that reports noise. These MUST be present — their absence means the export collapsed
+          # and the scan would be grading almost nothing while still reporting green.
+          for must in fastapi pydantic sqlalchemy redis networkx grpcio; do
+            grep -qiE "^${must}([=<>[;]|$)" requirements-runtime.txt \
+              || { echo "::error::runtime closure is missing ${must} — refusing to scan a set this small"; exit 1; }
+          done
+          # And these must NOT be: they reach the graph only through optional framework extras.
+          for never in scipy numpy pypdfium2 semantic-kernel chromadb pywin32; do
+            ! grep -qiE "^${never}([=<>[;]|$)" requirements-runtime.txt \
+              || { echo "::error::${never} is in the runtime closure — .fossa.yml's scope claim is wrong"; exit 1; }
+          done
+          echo "scope verified: includes what ships, excludes what does not"
+
       # Installs the fossa CLI and runs `fossa analyze` (upload only; we run `fossa test` ourselves below
       # so we can capture its JSON regardless of exit code). SHA-pinned (v1.7.0 tag dereferenced via
       # `gh api repos/fossas/fossa-action/git/ref/tags/v1.7.0` -> annotated tag object -> commit).

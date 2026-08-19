@@ -228,8 +228,25 @@ sleep 1
 # visible in the log rather than indistinguishable from product breakage.
 (
   while true; do
-    "${KUBECTL[@]}" -n "$NS" port-forward "svc/norviq-ui" "${UI_PORT}:80" >>/tmp/nrvq-kind-ui.log 2>&1
-    echo "port-forward exited, restarting $(date -u +%H:%M:%S)" >>/tmp/nrvq-kind-ui.log
+    "${KUBECTL[@]}" -n "$NS" port-forward "svc/norviq-ui" "${UI_PORT}:80" >>/tmp/nrvq-kind-ui.log 2>&1 &
+    _pf=$!
+    # HEALTH-CHECKED, because waiting for kubectl to exit is not enough. A restarted Deployment
+    # leaves the port-forward PROCESS alive while the tunnel to the old pod is gone, so every
+    # request returns ECONNRESET and a supervisor watching only for process death never fires.
+    # Measured: with an exit-only supervisor, 30 ECONNRESETs landed on ONE shard and zero on the
+    # other three — the shard carrying the specs that apply policies and therefore roll the
+    # Deployment (policy-editor-create-delete, policy-catalog-lifecycle, packs-governance-batch1,
+    # posture-apply-ux, intent-allowlist-effect). Not random flakiness; a specific, reproducible
+    # consequence of the thing under test.
+    while kill -0 "$_pf" 2>/dev/null; do
+      sleep 5
+      curl -sf -o /dev/null --max-time 4 "http://localhost:${UI_PORT}/" && continue
+      echo "console unreachable at $(date -u +%H:%M:%S) — cycling the forward" >>/tmp/nrvq-kind-ui.log
+      kill "$_pf" 2>/dev/null || true
+      break
+    done
+    wait "$_pf" 2>/dev/null || true
+    echo "port-forward down, re-establishing $(date -u +%H:%M:%S)" >>/tmp/nrvq-kind-ui.log
     sleep 1
   done
 ) &

@@ -94,3 +94,4 @@ ui/vite.config.js
 webhook/deploy/
 webhook/webhook
 ﻿__pycache__/
+requirements-runtime.txt
