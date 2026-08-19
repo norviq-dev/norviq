@@ -195,7 +195,56 @@ require
 {{- end -}}
 {{- end -}}
 
+{{/*
+The host the READINESS GATE waits on, which is not always the host the URL uses.
+
+Three cases, and the third is the one that was missing:
+  explicit .host            -> wait on it
+  bundled StatefulSet       -> wait on the in-chart Service
+  external, no .host        -> "" — unknowable at template time, so do not wait at all
+
+`norviq.pgHost` deliberately still falls back to the bundled name because NRVQ_PG_URL needs *a*
+value; the gate must not inherit that fallback, because a name that will never resolve turns a
+successful install into a permanent Init:0/2.
+*/}}
+{{- define "norviq.pgWaitHost" -}}
+{{- if .Values.postgresql.host -}}
+{{- .Values.postgresql.host -}}
+{{- else if .Values.postgresql.enabled -}}
+{{- printf "%s.%s.svc.cluster.local" (ternary .Values.postgresql.ha.serviceName "norviq-postgresql" .Values.postgresql.ha.enabled) .Release.Namespace -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "norviq.redisWaitHost" -}}
+{{- if .Values.redis.host -}}
+{{- .Values.redis.host -}}
+{{- else if .Values.redis.enabled -}}
+{{- printf "%s.%s.svc.cluster.local" (ternary .Values.redis.ha.serviceName "norviq-redis" .Values.redis.ha.enabled) .Release.Namespace -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+An EMPTY .host renders NO init container.
+
+The gate can only wait on an address it can name. With an external datastore configured the
+documented way — `enabled: false` + `existingSecret`, no `host` — the address lives inside the
+Secret's URL and the chart cannot see it at template time.
+
+That case rendered `until nc -z norviq-postgresql.<ns>.svc.cluster.local 5432`: the BUNDLED name, for
+a Service `enabled: false` never creates. `helm install` reported success and every api and engine
+pod then sat in Init:0/2 indefinitely, holding a perfectly good external URL it was never allowed to
+try. The comment above about resolving the hosts in one place fixed the HA and explicit-host cases
+and did not reach this one, because `norviq.pgHost` keys only off `.Values.postgresql.host`.
+values.yaml made it worse by telling operators that with `existingSecret` the other keys "are then
+unused" — `host` was still being used, here.
+
+Skipping is safe. This gate is a convenience that avoids a few CrashLoopBackOffs while the bundled
+StatefulSets come up; it is not a correctness mechanism. The app retries its own connections, and a
+managed datastore is up before the release is installed. Waiting on a name that cannot resolve is
+strictly worse than not waiting.
+*/}}
 {{- define "norviq.waitFor" -}}
+{{- if .host -}}
 - name: {{ .name }}
   image: busybox:1.36
   command: ['sh','-c','until nc -z {{ .host }} {{ .port }}; do echo waiting for {{ .host }}; sleep 2; done']
@@ -219,6 +268,7 @@ require
     limits:
       cpu: 50m
       memory: 32Mi
+{{- end -}}
 {{- end -}}
 
 {{/*

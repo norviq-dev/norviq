@@ -595,7 +595,11 @@ postgresql:
   # PRODUCTION credential path: name of a Secret YOU manage holding the full Postgres URL. When set, the
   # chart never renders or generates a DB credential — the pods read the URL straight from your Secret,
   # so it never passes through values or `--set` (which lands in `helm history` and your shell history).
-  # The URL carries user/password/host/port/database, so those keys below are then unused. Create it with:
+  # The URL carries user/password/host/port/database. Set `host` as well if you want the readiness
+  # gate to wait on the datastore before api/engine start — the chart cannot read an address out of
+  # your Secret at template time, so with `existingSecret` alone the gate is skipped and the app
+  # simply retries its own connection. (It previously waited on the BUNDLED service name here, which
+  # `enabled: false` never creates, and pods sat in Init:0/2 forever.) Every other key below is unused. Create it with:
   #   kubectl create secret generic my-pg --from-literal=url='postgresql://user:PW@host:5432/norviq'
   existingSecret: ""
   existingSecretKey: "url"
