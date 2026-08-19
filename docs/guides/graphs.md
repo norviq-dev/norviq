@@ -651,7 +651,7 @@ config:
 ```
 
 ```bash
-helm upgrade norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.1 -n norviq -f values.yaml
+helm upgrade norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.2 -n norviq -f values.yaml
 ```
 
 Eviction is silent and LRU by touch order, so a namespace that exceeds the cap loses its coldest nodes —
