@@ -69,8 +69,8 @@ jobs:
         run: |
           curl -fsSL --retry 3 --retry-all-errors --max-time 120 \
             -o /usr/local/bin/opa \
-            https://openpolicyagent.org/downloads/v1.19.0/opa_linux_amd64_static
-          echo "65d700b14b99b354982b61031b40bdc8e316ea93dadd61818f066d1d9a69dcce  /usr/local/bin/opa" | sha256sum -c -
+            https://openpolicyagent.org/downloads/v1.19.1/opa_linux_amd64_static
+          echo "c9f985ce0d345f5484006ade2c695ed9e3f308e4441139e46695c5c182ac0839  /usr/local/bin/opa" | sha256sum -c -
           chmod +x /usr/local/bin/opa
           opa version
 
