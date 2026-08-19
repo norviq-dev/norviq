@@ -44,14 +44,33 @@ concurrency:
 
 jobs:
   kind-e2e:
-    name: L3 + L4 against a real cluster
+    name: L3 + L4 against a real cluster (shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
+    # SHARDED. Serially the browser suite took 114 minutes and was killed at the cap having produced
+    # no tally at all — five runs in a row reported nothing about the product in either direction.
+    #
+    # The split is across JOBS, not workers. playwright.config.ts keeps --workers=1 deliberately:
+    # every worker shares one storageState token against a backend with a single admin identity, so a
+    # spec that logs out or rotates the password breaks whatever runs beside it (measured: 3 workers
+    # gave 21 failed / 12 flaky). Each shard is its own job with its own kind cluster and its own
+    # admin, so the contention that made workers unsafe simply is not there.
+    #
+    # The cost is honest: every leg rebuilds a cluster, so setup is paid 4x (~7 min each). It buys
+    # wall-clock ~36 min instead of >120, and — the part that matters — a result.
+    #
+    # fail-fast: false because a failing shard must not hide the other three. The point of this job is
+    # the complete picture, and "3 of 4 green" is not green: Playwright shards by file, so every spec
+    # lands in exactly one shard and a missing leg is missing COVERAGE, not a flake to retry.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     # 120, not 60. The cap was sized when ~28 specs died on a 20-second login timeout and L4
     # finished in 26 minutes; with the login gate actually running, those specs execute their real
     # flows and L4 reached 124 of 196 in 53 minutes before being cut. Two workers is deliberate —
     # playwright.config.ts warns that more of them contend on the single kind backend — so the
     # suite needs time rather than concurrency.
-    timeout-minutes: 120
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v5.0.1
 
@@ -164,6 +183,7 @@ jobs:
           PLAYWRIGHT_BASE_URL: http://localhost:3400
           NRVQ_TOKEN_FILE: /tmp/nrvq-signin-token.txt
           NRVQ_E2E_CONTAINER: "1"
+          NRVQ_E2E_SHARD: "${{ matrix.shard }}/4"
         run: |
           # No browser install here at all. scripts/e2e.sh runs the suite inside
           # mcr.microsoft.com/playwright:<lockfile version>-noble, which ships the browsers and their
@@ -183,6 +203,11 @@ jobs:
       # cause. `tests/integration/conftest.py` now sweeps those rows at session end; this ordering is
       # the second line of defence, because a cleanup that fails must not silently poison L4.
       - name: L3 · integration + attacks
+        # ONE shard runs L3. It creates policies in throwaway `integration-<uuid>` namespaces, and a
+        # namespace EXISTS as far as the console is concerned the moment a policy names one — running
+        # it on all four legs multiplies that debris across four clusters for no extra signal, since
+        # L3 does not shard.
+        if: matrix.shard == 1
         run: scripts/kind-e2e/l3.sh
 
       # Runs even when a step above failed. A red cluster run without the state behind it is a

@@ -233,6 +233,25 @@ fi
 # same reason this script owns the invocation at all.
 PW_ARGS="--workers=${NRVQ_E2E_WORKERS:-1} --reporter=line"
 
+# SHARDING. Set NRVQ_E2E_SHARD="i/n" to run only slice i of n, which is how CI splits a suite that
+# takes ~114 minutes serially into legs that finish in ~30.
+#
+# It has to be serial WITHIN a shard. The comment above explains why --workers stays at 1: every
+# worker shares one storageState token against a backend with ONE admin identity, so a spec that
+# logs out or rotates the password breaks whatever is running beside it. Sharding sidesteps that
+# because each shard is a SEPARATE JOB with its own kind cluster and its own admin — parallelism
+# across clusters, not across workers inside one.
+#
+# Playwright shards by file after sorting, so the split is deterministic and every spec lands in
+# exactly one shard. A missing shard therefore means missing coverage, not a rerun: CI must fail if
+# any leg fails, and must not treat "3 of 4 green" as green.
+if [ -n "${NRVQ_E2E_SHARD:-}" ]; then
+  case "$NRVQ_E2E_SHARD" in
+    */*) PW_ARGS="$PW_ARGS --shard=$NRVQ_E2E_SHARD"; echo "  shard: $NRVQ_E2E_SHARD" ;;
+    *) echo "FATAL: NRVQ_E2E_SHARD must look like i/n, got '${NRVQ_E2E_SHARD}'" >&2; exit 2 ;;
+  esac
+fi
+
 if [ -n "${NRVQ_E2E_CONTAINER:-}" ]; then
   # Run the browser in Microsoft's Playwright image so apt is never on the path.
   #
