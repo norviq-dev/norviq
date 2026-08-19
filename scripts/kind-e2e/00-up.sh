@@ -215,42 +215,43 @@ esac
 stage "Console access"
 pkill -f "port-forward.*norviq-ui" 2>/dev/null || true
 sleep 1
-# SUPERVISED, not a bare `&`. One kubectl port-forward does not survive a long run: it drops on a pod
-# restart, on an idle timeout, and under sustained load. Unsupervised, the browser suite then fails
-# every remaining spec with net::ERR_CONNECTION_RESET — which reads exactly like a broken product
-# when the console is fine and only the tunnel to it is gone.
+# NODEPORT FIRST, port-forward only as a fallback.
 #
-# Sharding made this unmissable. The two shards that finished in ~2 minutes passed 46 of 47; the two
-# that ran 26 and 45 minutes returned 20 and 39 failures. Duration correlating with failure is the
-# signature of an environmental fault, not a real one.
+# The forward was this job's largest single source of failure: one run logged 95 ERR_CONNECTION_RESET
+# against 6 real assertion failures. It dies WITHOUT the kubectl process exiting — a rolled
+# Deployment, an idle timeout, sustained load — so a supervisor watching for process death never
+# fires, and a supervisor polling with curl only narrows the window. Whichever shard ran longest lost
+# the tunnel and failed everything after it, which is why duration correlated with failure and why
+# the same shard passed 40/6 one run and 12/37 the next on identical specs.
 #
-# The loop restarts the forward whenever kubectl exits and logs each restart, so a flapping tunnel is
-# visible in the log rather than indistinguishable from product breakage.
-(
-  while true; do
-    "${KUBECTL[@]}" -n "$NS" port-forward "svc/norviq-ui" "${UI_PORT}:80" >>/tmp/nrvq-kind-ui.log 2>&1 &
-    _pf=$!
-    # HEALTH-CHECKED, because waiting for kubectl to exit is not enough. A restarted Deployment
-    # leaves the port-forward PROCESS alive while the tunnel to the old pod is gone, so every
-    # request returns ECONNRESET and a supervisor watching only for process death never fires.
-    # Measured: with an exit-only supervisor, 30 ECONNRESETs landed on ONE shard and zero on the
-    # other three — the shard carrying the specs that apply policies and therefore roll the
-    # Deployment (policy-editor-create-delete, policy-catalog-lifecycle, packs-governance-batch1,
-    # posture-apply-ux, intent-allowlist-effect). Not random flakiness; a specific, reproducible
-    # consequence of the thing under test.
-    while kill -0 "$_pf" 2>/dev/null; do
-      sleep 5
-      curl -sf -o /dev/null --max-time 4 "http://localhost:${UI_PORT}/" && continue
-      echo "console unreachable at $(date -u +%H:%M:%S) — cycling the forward" >>/tmp/nrvq-kind-ui.log
-      kill "$_pf" 2>/dev/null || true
-      break
+# When the cluster publishes a NodePort on the host (CI does; see .github/kind/e2e-cluster.yaml)
+# there is no tunnel to lose: kube-proxy routes to whichever pod is Ready, across restarts included.
+# A developer running this locally against a plain kind cluster still gets the forward.
+if "${KUBECTL[@]}" -n "$NS" patch svc norviq-ui \
+     -p "{\"spec\":{\"type\":\"NodePort\",\"ports\":[{\"port\":80,\"targetPort\":\"http\",\"nodePort\":30080}]}}" \
+     >/dev/null 2>&1 && curl -sf -o /dev/null --max-time 5 "http://localhost:${UI_PORT}/"; then
+  echo "  console via NodePort 30080 -> localhost:${UI_PORT} (no port-forward)"
+else
+  echo "  NodePort unavailable — falling back to a supervised port-forward"
+  pkill -f "port-forward.*norviq-ui" 2>/dev/null || true
+  (
+    while true; do
+      "${KUBECTL[@]}" -n "$NS" port-forward "svc/norviq-ui" "${UI_PORT}:80" >>/tmp/nrvq-kind-ui.log 2>&1 &
+      _pf=$!
+      while kill -0 "$_pf" 2>/dev/null; do
+        sleep 5
+        curl -sf -o /dev/null --max-time 4 "http://localhost:${UI_PORT}/" && continue
+        echo "console unreachable at $(date -u +%H:%M:%S) — cycling the forward" >>/tmp/nrvq-kind-ui.log
+        kill "$_pf" 2>/dev/null || true
+        break
+      done
+      wait "$_pf" 2>/dev/null || true
+      echo "port-forward down, re-establishing $(date -u +%H:%M:%S)" >>/tmp/nrvq-kind-ui.log
+      sleep 1
     done
-    wait "$_pf" 2>/dev/null || true
-    echo "port-forward down, re-establishing $(date -u +%H:%M:%S)" >>/tmp/nrvq-kind-ui.log
-    sleep 1
-  done
-) &
-echo $! > /tmp/nrvq-kind-ui-supervisor.pid
+  ) &
+  echo $! > /tmp/nrvq-kind-ui-supervisor.pid
+fi
 # Poll, never sleep-once: a forward that is not up yet is indistinguishable from a broken one.
 for _ in $(seq 1 40); do curl -sf -o /dev/null "http://localhost:${UI_PORT}/" && break; sleep 0.5; done
 curl -sf -o /dev/null "http://localhost:${UI_PORT}/" || fail "console never came up on ${UI_PORT} — see /tmp/nrvq-kind-ui.log"

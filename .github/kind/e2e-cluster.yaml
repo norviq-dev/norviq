@@ -1,0 +1,21 @@
+# kind cluster for the browser e2e job.
+#
+# The extraPortMapping is the whole point. The suite used to reach the console through
+# `kubectl port-forward`, and that tunnel is the single largest source of failure this job has ever
+# had: 95 ERR_CONNECTION_RESET against 6 real assertion failures in one run. The forward dies without
+# the kubectl process exiting — a rolled Deployment, an idle timeout, load — so it cannot be
+# supervised by watching for process death, and the shards that ran longest simply lost it and failed
+# everything afterwards.
+#
+# A NodePort published on the host removes the tunnel from the path entirely. There is nothing left
+# to drop: kube-proxy routes to whichever pod is Ready, including across a restart. The same pattern
+# is already used by scripts/identity-local/kind-config.yaml for the same reason.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30080   # norviq-ui, patched to NodePort after install
+        hostPort: 3400         # what PLAYWRIGHT_BASE_URL already points at
+        protocol: TCP
+        listenAddress: "127.0.0.1"

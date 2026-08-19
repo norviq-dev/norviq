@@ -102,6 +102,9 @@ jobs:
         with:
           cluster_name: norviq-local
           wait: 120s
+          # Publishes NodePort 30080 on the host at 127.0.0.1:3400, so the console is reachable
+          # without a port-forward. See the file for why the forward had to go.
+          config: .github/kind/e2e-cluster.yaml
 
       - name: Python deps
         run: |
