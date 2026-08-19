@@ -299,7 +299,7 @@ both Postgres and Redis, which is exactly the embedded shape.
 | Key | Default | What it does |
 |---|---|---|
 | `opa.enabled` | `true` | Deploys OPA as a long-lived sidecar in every api/engine pod instead of forking `opa eval` per call. Each replica gets its own OPA — no shared single point of failure. The sidecar is started with `--addr=127.0.0.1:<opa.port>`: OPA's admin API is unauthenticated **read-write**, so it must never be reachable from another pod. It therefore carries **no kubelet probes** (a kubelet probe dials the pod IP, which can't reach a loopback bind, and the `-static` image is distroless so an exec probe isn't an option either) — OPA health reaches readiness through the app's own `/readyz`. |
-| `opa.image` | `openpolicyagent/opa:1.18.0-static` | Pinned (not `latest-static`) so the running OPA version matches the one `scripts/gen-opa-capabilities.py` generated `helm/norviq/files/opa-capabilities.json` from; a drifted OPA could have a different builtin set than what `norviq/engine/opa_client.py::_check_capabilities` validates against. |
+| `opa.image` | `openpolicyagent/opa:1.19.1-static` | Pinned (not `latest-static`) so the running OPA version matches the one `scripts/gen-opa-capabilities.py` generated `helm/norviq/files/opa-capabilities.json` from; a drifted OPA could have a different builtin set than what `norviq/engine/opa_client.py::_check_capabilities` validates against. |
 | `opa.port` | `8181` | |
 | `opa.resources` | `50m/64Mi` req, `250m/128Mi` limit | Per-sidecar CPU/memory. |
 

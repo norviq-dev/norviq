@@ -215,3 +215,55 @@ def test_run_sync_uses_one_stable_background_loop() -> None:
 
     third = asyncio.run(call_from_async_context())
     assert third == first
+
+
+async def test_repeated_4xx_never_opens_the_circuit_into_fail_open() -> None:
+    """A 4xx must block EVERY time, no matter how many of them arrive in a row.
+
+    Regression, found live on a fresh 0.2.1 install with a stale sidecar token. `_handle_http_error`
+    is explicit that a 4xx can never fail open — "a revoked credential silently turns into a total
+    governance bypass". But `_post` recorded a failure for every HTTPStatusError, 4xx included, so
+    the Nth consecutive 401 tripped the breaker and `evaluate()` then returned at its own top via
+    `_fallback_decision()` — never reaching the 4xx rule at all.
+
+    With the shipped defaults (threshold 3, fallback "allow") that turned an expired credential into
+    an ALLOW for every subsequent call, and the breaker only resets on a SUCCESS, so a permanently
+    bad credential never recovers: it settles into a mostly-ungoverned state. It also chains onto the
+    30-day sidecar credential cliff this product warns about — the expiry produces exactly the 401
+    storm that switches enforcement off.
+
+    A 4xx is the engine ANSWERING. Only a silent engine (5xx / timeout / connect) may open a breaker
+    whose whole purpose is to stop hammering something that is not responding.
+    """
+    assert settings.sdk_fallback_mode == "allow", "this regression only bites in fail-open mode"
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"detail": "expired token"})
+
+    client = make_client(httpx.MockTransport(handler))
+    try:
+        decisions = [await client.evaluate(make_event()) for _ in range(settings.sdk_circuit_fail_threshold + 3)]
+    finally:
+        await client.close()
+
+    assert [d.decision for d in decisions] == ["block"] * len(decisions), (
+        f"a 4xx failed open: {[(d.decision, d.rule_id) for d in decisions]}"
+    )
+    assert all(d.rule_id == "engine_rejected_request" for d in decisions), (
+        f"blocked for the wrong reason: {[d.rule_id for d in decisions]}"
+    )
+
+
+async def test_5xx_still_opens_the_circuit() -> None:
+    """The breaker must keep working for the case it exists for — an engine that is not answering."""
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"detail": "unavailable"})
+
+    client = make_client(httpx.MockTransport(handler))
+    try:
+        for _ in range(settings.sdk_circuit_fail_threshold):
+            await client.evaluate(make_event())
+        assert client._is_circuit_open(), "5xx must still trip the breaker"
+    finally:
+        await client.close()

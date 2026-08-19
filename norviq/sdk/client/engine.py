@@ -95,8 +95,18 @@ class PolicyEngineClient:
                 response.raise_for_status()
                 self._record_success()
                 return response.json()
-            except httpx.HTTPStatusError:
-                self._record_failure()
+            except httpx.HTTPStatusError as exc:
+                # Only a SILENT engine may trip the breaker. A 4xx is the engine answering, and
+                # `_handle_http_error` is what turns it into a block — but the breaker is checked at
+                # the TOP of `evaluate()`, so letting a 4xx count here meant the Nth consecutive 401
+                # opened the circuit and every later call short-circuited to `_fallback_decision()`,
+                # never reaching the 4xx rule. With the shipped defaults that flipped an expired
+                # credential from fail-CLOSED to fail-OPEN, which is the exact bypass that rule exists
+                # to prevent. Worse, the breaker only resets on a SUCCESS, so a permanently bad
+                # credential never recovered — it settled into a mostly-ungoverned state, and the
+                # 30-day sidecar credential cliff produces precisely that 401 storm.
+                if exc.response.status_code >= 500:
+                    self._record_failure()
                 raise
             except httpx.TimeoutException as exc:
                 self._record_failure()

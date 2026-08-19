@@ -85,7 +85,7 @@ A few things worth knowing about this install:
   this pulls the public `norviq-engine` images (api/engine/ui/webhook tags) straight from GHCR —
   no registry login or `imagePullSecrets` needed for a stock install.
 - **Bundled dependencies** — the chart also deploys single-replica PostgreSQL (`postgres:16-alpine`)
-  and Redis (`redis:7-alpine`) StatefulSets, plus an OPA (`openpolicyagent/opa:1.18.0-static`)
+  and Redis (`redis:7-alpine`) StatefulSets, plus an OPA (`openpolicyagent/opa:1.19.1-static`)
   sidecar in every API/engine pod. Nothing external is required to get the core stack running.
 - **`config.dbSslMode`** — the API's DB connection mode. Left empty (the default) it is **derived from
   the datastore you chose**: `disable` for the bundled Postgres StatefulSet, which has no TLS listener,

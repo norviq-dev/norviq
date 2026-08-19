@@ -55,6 +55,11 @@ go1.26.5 (was 1.26.4), grpc-go v1.82.1 (was v1.81.1), x/text v0.40.0 (was v0.38.
 removed rather than annotated, per the rule directly above. Their full rationale remains in git
 history and in `.trivyignore.yaml`'s header comment.
 
+On 2026-08-16 the pin moved again, to **OPA 1.19.1**, for 8 HIGH Go-stdlib advisories in the 1.19.0
+static binary. The chart's `opa.image` and every CI checksum moved together — the chart pin is the one
+that matters, because it is the binary that actually serves decisions; leaving it behind would have
+shipped the fix everywhere except where policy is evaluated.
+
 | Date | Tool | ID / finding | Where | Why baselined (not fixed now) | Exit condition |
 |------|------|--------------|-------|-------------------------------|----------------|
 | 2026-07 | FOSSA | `CVE-2026-45829`, `CVE-2026-26030`, `CVE-2026-25592` | `ACCEPTED_CVES` in `.github/workflows/fossa.yml` **and** marked *Ignored* in the FOSSA project UI (reason: vulnerable code not in execute path; version-scoped) so the FOSSA GitHub App's "Security Analysis" check also passes | All three live only in **optional** SDK framework-adapter extras (`norviq[frameworks]` / `[crewai]` / `[semantic-kernel]`), never in a shipped container image, and none can be closed by a version bump today. Per-CVE reachability rationale is the table in [`SECURITY.md`](../../SECURITY.md#accepted-dependency-exceptions) — that table, this allow-list, and the FOSSA-UI ignore must stay in lockstep. | Reviewed each release; drop the moment upstream ships a fixed release reachable without a pre-release dependency (and un-ignore in the FOSSA UI). |
