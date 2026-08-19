@@ -80,7 +80,7 @@ def evaluate(
     agent_class: str = "customer-support",
     trust_score: float = 0.8,
     session_id: str = "attack-test",
-    chain_depth: int = 0,
+    call_depth: int = 0,
 ) -> EvalResult:
     """Send a tool call to Norviq and return the decision."""
     payload = {
@@ -93,7 +93,13 @@ def evaluate(
         },
         "session_id": session_id,
         "trust_score": trust_score,
-        "chain_depth": chain_depth,
+        # `call_depth`, NOT `chain_depth`. EvaluateRequest declares call_depth and sets no
+        # model_config, so pydantic silently DROPS an unknown key — this helper posted chain_depth
+        # for every caller, the engine saw depth 0 every time, and the one test named for chain
+        # depth asserted a trust score nothing had moved. Measured against a live 0.2.2 engine:
+        # call_depth=0 -> trust 0.855, call_depth=4 -> 0.775, call_depth=12 -> chain_depth_limit
+        # fires; chain_depth=12 -> trust 0.955 and nothing fires at all.
+        "call_depth": call_depth,
     }
     try:
         resp = api.post("/api/v1/evaluate", json=payload)

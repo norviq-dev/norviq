@@ -37,9 +37,23 @@ class TestTrustBehavior:
             "get_customer",
             {"customer_id": "123"},
             trust_score=0.8,
-            chain_depth=4,
+            call_depth=4,
         )
-        assert result.trust_score <= 0.8
+        # Compared against a depth-0 baseline, not an absolute number. The old assertion was
+        # `trust_score <= 0.8` against an input of 0.8, so it held whether or not anything moved —
+        # and nothing did, because the harness posted a key the API drops. A test that cannot fail
+        # reports safety it never checked.
+        baseline = evaluate(
+            api,
+            "get_customer",
+            {"customer_id": "123"},
+            trust_score=0.8,
+            call_depth=0,
+        )
+        assert result.trust_score < baseline.trust_score, (
+            f"chain depth must reduce trust: depth-4 {result.trust_score} "
+            f"vs depth-0 {baseline.trust_score}"
+        )
 
     def test_new_agent_neutral_trust(self, api):
         """A brand-new agent on safe query should stay usable."""

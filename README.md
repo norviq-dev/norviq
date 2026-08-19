@@ -148,8 +148,12 @@ Working on Norviq itself, or a modified chart? Install from a clone instead — 
 [getting-started](https://docs.norviq.dev/getting-started/) for that path.
 
 `policyQuotaNamespaces` is the list of tenant namespaces that will run agents — it is **required**, not
-optional. The chart installs a fail-closed `strict` namespace baseline for each entry, so an empty list
-fails the install by design rather than shipping a cluster with no baseline. Add every agent namespace
+optional. The chart installs a `strict`-preset namespace baseline for each entry, so an empty list
+fails the install by design rather than shipping a cluster with no baseline. That baseline ships in
+**audit** mode (`baselineClusterPolicy.enforcementMode`): every control evaluates and records a
+non-compliance event, and the call proceeds. It is deliberately not fail-closed — installing 22 block
+rules in front of every tool call on day one dropped real traffic — so set `enforcementMode: block`
+when you are ready to enforce. Add every agent namespace
 you plan to use, and **create them before installing** — the baseline policy and quota are namespaced
 objects, so the install cannot place them in a namespace that does not exist yet. If one is missing the
 chart stops before applying anything and names it.
