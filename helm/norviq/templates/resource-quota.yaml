@@ -4,6 +4,35 @@
   so a fresh install never fails on a namespace that hasn't been created yet — add tenant namespaces
   here (via `helm upgrade`) once they exist.
 */ -}}
+{{- /*
+  PRECONDITION, checked here because this is the object that fails first without it. A ResourceQuota is
+  namespaced, so every entry in `policyQuotaNamespaces` must already exist — and when one did not, the
+  install died partway through with
+
+      server-side apply failed for object <ns>/norviq-crd-quota /v1, Kind=ResourceQuota:
+      namespaces "<ns>" not found
+
+  which names the object rather than the thing the operator got wrong, and leaves a release in `failed`
+  that must be uninstalled before retrying. The README tells a new user that `policyQuotaNamespaces` is
+  required without saying the namespaces must exist first, so this was the very first command in the
+  quickstart, on a clean cluster.
+
+  `lookup` returns EMPTY during `helm template` and `--dry-run=client`, where there is no cluster to ask.
+  Failing on that would break templating for everyone, so probe with a namespace every real cluster has:
+  if the probe comes back empty we are rendering offline and cannot know, and silence is the honest
+  answer. If it comes back, `lookup` works and an empty result for a listed namespace is real.
+*/ -}}
+{{- if lookup "v1" "Namespace" "" "kube-system" }}
+  {{- $missing := list }}
+  {{- range $ns := .Values.policyQuotaNamespaces }}
+    {{- if not (lookup "v1" "Namespace" "" $ns) }}
+      {{- $missing = append $missing $ns }}
+    {{- end }}
+  {{- end }}
+  {{- if $missing }}
+    {{- fail (printf "policyQuotaNamespaces lists %d namespace(s) that do not exist: %s. Each one gets a ResourceQuota and a baseline policy, both namespaced, so they must be created BEFORE installing:\n\n    kubectl create namespace %s\n\nThen re-run the install. (Listing a namespace you have not created yet is the most common first-install failure.)" (len $missing) (join ", " $missing) (join " " $missing)) }}
+  {{- end }}
+{{- end }}
 {{- range $ns := .Values.policyQuotaNamespaces }}
 apiVersion: v1
 kind: ResourceQuota

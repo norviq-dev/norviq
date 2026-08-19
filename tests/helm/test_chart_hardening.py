@@ -335,3 +335,36 @@ def test_uninstall_hook_can_be_disabled() -> None:
     res = _template("-n", "norviq", "--set", "crdFinalizerCleanup.enabled=false")
     assert res.returncode == 0, res.stderr
     assert "crd-cleanup" not in res.stdout
+
+
+# --- policyQuotaNamespaces precondition ---------------------------------------------------------
+#
+# A brand-new user's FIRST command failed on a clean cluster: the README says
+# `policyQuotaNamespaces` is required but not that those namespaces must already exist, and the
+# install died partway through with a server-side-apply error naming the ResourceQuota rather than
+# the mistake — leaving a release in `failed` that has to be uninstalled before retrying.
+
+def test_offline_templating_still_works_when_a_listed_namespace_cannot_be_checked() -> None:
+    """`lookup` returns empty with no cluster, and that means "cannot know", not "missing".
+
+    Failing there would break `helm template` and client-side `--dry-run` for everyone, including CI
+    that renders the chart without a cluster. The guard probes for a namespace every real cluster has
+    and stays silent when the probe itself comes back empty.
+    """
+    r = _template("--set", "policyQuotaNamespaces={definitely-not-a-real-namespace}")
+    assert r.returncode == 0, f"offline templating must not fail on an unverifiable namespace: {r.stderr}"
+    assert "kind: ResourceQuota" in r.stdout
+
+
+def test_the_precondition_names_the_namespace_and_the_command() -> None:
+    """When it CAN check and the namespace is absent, the message has to be actionable.
+
+    Pinned on content, not on exit code: "Error: INSTALLATION FAILED" was already what the old
+    server-side-apply failure printed. What was missing was which namespace and what to do.
+    """
+    quota = (_CHART / "templates" / "resource-quota.yaml").read_text()
+    assert 'lookup "v1" "Namespace" "" "kube-system"' in quota, "no probe — the guard would fire while templating"
+    assert "do not exist" in quota
+    assert "kubectl create namespace" in quota, "the message must carry the fix, not just the diagnosis"
+    # and it must be evaluated BEFORE any object is emitted, or the install still fails halfway
+    assert quota.index("fail (printf") < quota.index("kind: ResourceQuota")

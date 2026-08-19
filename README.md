@@ -131,6 +131,11 @@ real model decides the tool calls and Norviq blocks the dangerous ones before th
 ```bash
 kubectl create namespace norviq
 
+# Create the tenant namespaces FIRST. Each one listed in policyQuotaNamespaces gets a ResourceQuota
+# and a baseline policy, and both are namespaced — so the install fails on a namespace that does not
+# exist yet. (The chart now says so by name if you forget, rather than failing partway through.)
+kubectl create namespace default 2>/dev/null || true
+
 # Installs from the published, cosign-signed chart. CRDs ship inside it, and every Norviq image is
 # pinned by immutable digest — so this deploys exactly the bytes that release published.
 helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.0 -n norviq \
@@ -145,7 +150,9 @@ Working on Norviq itself, or a modified chart? Install from a clone instead — 
 `policyQuotaNamespaces` is the list of tenant namespaces that will run agents — it is **required**, not
 optional. The chart installs a fail-closed `strict` namespace baseline for each entry, so an empty list
 fails the install by design rather than shipping a cluster with no baseline. Add every agent namespace
-you plan to use.
+you plan to use, and **create them before installing** — the baseline policy and quota are namespaced
+objects, so the install cannot place them in a namespace that does not exist yet. If one is missing the
+chart stops before applying anything and names it.
 
 The chart deploys the API, engine, console UI, mutating webhook, and bundled PostgreSQL + Redis + OPA.
 Port-forward the console:
