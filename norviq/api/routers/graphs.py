@@ -107,11 +107,17 @@ async def _deployed_classes(session: AsyncSession, namespaces: list[str] | None)
         "SELECT DISTINCT namespace, agent_class FROM policies",
         "SELECT DISTINCT namespace, agent_class FROM agent_registry",
     ):
+        # `sql` is one of the two LITERALS in the tuple above — it is never built from input — and the
+        # only variable, `namespaces`, is bound as :nss rather than interpolated. The rule fires on
+        # `text()` receiving a non-literal, which is the right default; here the non-literal is a
+        # constant chosen by the loop.
         if namespaces is None:
-            rows = (await session.execute(text(sql))).mappings().all()
+            rows = (await session.execute(text(sql))).mappings().all()  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
         else:
             rows = (
-                await session.execute(text(f"{sql} WHERE namespace = ANY(:nss)"), {"nss": namespaces})
+                await session.execute(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+                    text(f"{sql} WHERE namespace = ANY(:nss)"), {"nss": namespaces}  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+                )
             ).mappings().all()
         for r in rows:
             ns, klass = str(r.get("namespace") or ""), str(r.get("agent_class") or "")

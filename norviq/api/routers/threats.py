@@ -1249,8 +1249,8 @@ async def list_intent_drafts(
     rows = (
         (
             await session.execute(
-                text(
-                    "SELECT id, namespace, agent_class, affected_class, allow_tools, toggles, covered_count, total, "  # nosec B608 (constant WHERE; namespaces/offset/limit bound :nslist/:off/:lim) # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+                text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+                    "SELECT id, namespace, agent_class, affected_class, allow_tools, toggles, covered_count, total, "  # nosec B608 (constant WHERE; namespaces/offset/limit bound :nslist/:off/:lim)
                     "created_by, created_at, source_framework, source_control_id, source_control_name, expires_at "
                     f"FROM intent_drafts{where} ORDER BY created_at DESC OFFSET :off LIMIT :lim"
                 ),

@@ -16,6 +16,11 @@ name: Security (SAST)
 
 on:
   pull_request:
+  # Direct pushes to main skipped this ENTIRE suite — gitleaks, bandit, semgrep, pip-audit and the
+  # trivy config/fs scan — so a fast-forward merge landed unscanned and main still showed green. The
+  # gate has to run where the code actually lands, not only on the path that happens to be a PR.
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:

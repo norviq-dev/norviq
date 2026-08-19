@@ -2,6 +2,14 @@
 # The PR job is diff-aware (--baseline-commit) so pre-existing findings don't fail a PR anyway;
 # this just keeps noise down. Triage promotions/removals: docs/engineering/security-baseline.md
 tests/
+# The UI colocates its tests with the source it tests, so `tests/` above does not reach them and the
+# rule that "tests are out of SAST scope" was being applied to Python only. `useWebSocket.test.ts`
+# names `ws://x/ws/audit` as a FIXTURE — no connection is opened — and it failed the fail-closed gate
+# on `detect-insecure-websocket`. Excluding UI test files applies the existing policy consistently
+# rather than carving out a new exception; production UI code stays in scope.
+ui/src/**/*.test.ts
+ui/src/**/*.test.tsx
+ui/tests/
 norviq/redteam/
 ui/node_modules/
 ui/dist/
