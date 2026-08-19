@@ -221,6 +221,20 @@ jobs:
           kubectl -n norviq logs -l app.kubernetes.io/component=engine --tail=200 || true
           kubectl get nrvqpolicies -A -o yaml || true
 
+          # THE PORT-FORWARD LOG. Two rounds of fixes were aimed at this tunnel and neither could be
+          # judged, because the supervisor writes to a file on the runner that nothing ever printed —
+          # so "0 supervisor messages" meant "I cannot see" and was read as "it did not fire". Print
+          # it, and print whether the process and the tunnel are actually alive right now.
+          echo "----- /tmp/nrvq-kind-ui.log -----"
+          tail -80 /tmp/nrvq-kind-ui.log 2>/dev/null || echo "(no port-forward log — the supervisor never started)"
+          echo "----- supervisor / kubectl processes -----"
+          ps -ef | grep -E "port-forward|nrvq-kind-ui" | grep -v grep || echo "(no port-forward process alive)"
+          echo "----- can the console be reached from here, now? -----"
+          curl -sS -o /dev/null -w "console HTTP %{http_code} in %{time_total}s\n" --max-time 10 \
+            "http://localhost:${NRVQ_UI_PORT:-3400}/" || echo "console unreachable at dump time"
+          echo "----- api pod restarts (a roll would explain a dropped tunnel) -----"
+          kubectl -n norviq get pods -o custom-columns=NAME:.metadata.name,RESTARTS:.status.containerStatuses[*].restartCount,AGE:.metadata.creationTimestamp || true
+
       - name: Upload Playwright artifacts on failure
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
