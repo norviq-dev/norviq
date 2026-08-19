@@ -163,45 +163,16 @@ jobs:
         env:
           PLAYWRIGHT_BASE_URL: http://localhost:3400
           NRVQ_TOKEN_FILE: /tmp/nrvq-signin-token.txt
+          NRVQ_E2E_CONTAINER: "1"
         run: |
-          # `e2e.sh` runs `npm ci` and `playwright install` itself, but its install swallows errors
-          # (`|| true`) — fine on a developer machine that already has the system libs, fatal on a
-          # fresh runner where the browser then fails to launch with no explanation. `--with-deps`
-          # here, unsuppressed, so a missing dependency fails at the install rather than at the first
-          # test with a stack trace about a missing shared object.
-          # `--with-deps` shells out to apt, which can stall on a lock or a slow mirror. Unbounded,
-          # that stall is indistinguishable from a slow suite: run 32217519135 sat here for 39
-          # minutes, ate the whole job budget and was killed at the cap having never started a
-          # single spec — the only trace was the orphaned install process in the cleanup log. A
-          # bound turns that into a fast, named failure.
-          # EVERY apt-touching command is bounded, and none of them can fail the job.
+          # No browser install here at all. scripts/e2e.sh runs the suite inside
+          # mcr.microsoft.com/playwright:<lockfile version>-noble, which ships the browsers and their
+          # system libraries, so apt is never on the path.
           #
-          # Both halves of that are corrections. The previous version bounded `playwright install` but left
-          # the `apt-get update` in FRONT of it unbounded — so apt hung there for 113 minutes and the job
-          # was killed at its cap having run no specs. I added that update while fixing a hang, and put it
-          # outside the guard that existed to catch exactly this.
-          #
-          # And the mirror rewrite is not a fix, only a mitigation: one run finished apt in about a minute
-          # after it, the next still queried azure.archive and hung. The Ubuntu mirrors on this runner are
-          # intermittently bad, which nothing in this repo controls.
-          #
-          # So setup must never be able to hang the suite. Bound each step, degrade to a browser-only
-          # install if the deps cannot be fetched, and let the SPECS report whether the browser actually
-          # works — a real signal, unlike a setup step that times out into silence.
-          timeout 3m sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
-            /etc/apt/sources.list /etc/apt/sources.list.d/*.list \
-            /etc/apt/sources.list.d/*.sources 2>/dev/null || echo 'mirror rewrite skipped'
-          timeout 6m sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 update \
-            || echo 'apt-get update did not finish in 6m — continuing'
-          if timeout 10m bash -c 'cd ui/tests/e2e && npx playwright install --with-deps chromium'; then
-            echo 'browser + system deps installed'
-          else
-            echo '::warning::--with-deps did not finish in 10m (apt/mirror); falling back to browser-only'
-            timeout 6m bash -c 'cd ui/tests/e2e && npx playwright install chromium' || {
-              echo '::error::could not download the chromium binary either — this is not apt' >&2
-              exit 1
-            }
-          fi
+          # It was on the path for five consecutive runs and none of them reported anything about the
+          # product: azure.archive answers `Ign:` for every index, the fallback mirror fetches InRelease
+          # and then hangs on the package lists. Bounding it, retrying it and rewriting the mirror all
+          # reduced the damage without removing the dependency. This removes the dependency.
           bash scripts/e2e.sh
 
       # L3 LAST, deliberately. It creates policies in throwaway `integration-<uuid>` namespaces, and a

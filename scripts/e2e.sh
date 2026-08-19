@@ -214,7 +214,11 @@ fi
 
 echo "▶ R10 — Playwright E2E against $BASE_URL"
 ( cd "$E2E_DIR" && [ -d node_modules/@playwright ] || npm ci --silent )
-( cd "$E2E_DIR" && npx playwright install chromium >/dev/null 2>&1 || true )
+# Skipped in container mode: the image already carries browsers matching its own tag, and pulling a
+# second copy into the mounted node_modules is the version mismatch this is meant to avoid.
+if [ -z "${NRVQ_E2E_CONTAINER:-}" ]; then
+  ( cd "$E2E_DIR" && npx playwright install chromium >/dev/null 2>&1 || true )
+fi
 # WORKER COUNT. The config defaults to 3, and 3 workers share ONE storageState token against a
 # backend with ONE admin identity — so a spec that logs out or rotates the password breaks whatever is
 # running beside it. Measured over full runs: 3 workers gave 21 failed / 12 flaky, 1 worker gave
@@ -225,6 +229,43 @@ echo "▶ R10 — Playwright E2E against $BASE_URL"
 # otherwise hit an unforwarded 127.0.0.1:18080 and fail with ECONNREFUSED, which reads as a broken
 # backend) and it resets + seeds first. A direct `npx playwright test` skips both and produces failures
 # that belong to the invocation, not to the product — that mistake cost a whole 21-minute run.
-PLAYWRIGHT_BASE_URL="$BASE_URL" NRVQ_TOKEN_FILE="$TOKEN_FILE" \
-  bash -c "cd '$E2E_DIR' && npx playwright test --workers=${NRVQ_E2E_WORKERS:-1} --reporter=line"
+# ONE argument list, shared by both runners, so the container and host paths cannot drift — the
+# same reason this script owns the invocation at all.
+PW_ARGS="--workers=${NRVQ_E2E_WORKERS:-1} --reporter=line"
+
+if [ -n "${NRVQ_E2E_CONTAINER:-}" ]; then
+  # Run the browser in Microsoft's Playwright image so apt is never on the path.
+  #
+  # WHY: on GitHub runners `playwright install --with-deps` shells out to apt, and apt there is
+  # intermittently broken — azure.archive answers `Ign:` for every index, the fallback mirror
+  # fetches InRelease and then hangs on the package lists. That cost five consecutive kind-e2e
+  # runs, none of which reported anything about the product in either direction. This image ships
+  # the browsers and their system libraries already, so none of that can happen.
+  #
+  # The tag comes from the LOCKFILE, not a literal. Browsers that do not match the installed
+  # @playwright/test are exactly the breakage this is meant to remove, and a hardcoded version
+  # silently becomes wrong on the next dependency bump.
+  PW_VER="$(node -p "require('./$E2E_DIR/package-lock.json').packages['node_modules/@playwright/test'].version" 2>/dev/null || true)"
+  [ -n "$PW_VER" ] || { echo "FATAL: cannot resolve @playwright/test from the lockfile — refusing to guess an image tag" >&2; exit 1; }
+  PW_IMAGE="mcr.microsoft.com/playwright:v${PW_VER}-noble"
+  echo "  runner: $PW_IMAGE (no apt)"
+  # --network host: the console and API are reached over kubectl port-forwards on localhost.
+  # /tmp is mounted because NRVQ_TOKEN_FILE lives there and four specs read it.
+  # -u keeps anything written into the mounted workspace owned by the runner rather than root.
+  docker run --rm --network host \
+    -v "$PWD":"$PWD" -w "$PWD/$E2E_DIR" \
+    -v /tmp:/tmp \
+    -u "$(id -u):$(id -g)" \
+    -e HOME=/tmp \
+    -e CI="${CI:-}" \
+    -e PLAYWRIGHT_BASE_URL="$BASE_URL" \
+    -e NRVQ_TOKEN_FILE="$TOKEN_FILE" \
+    -e NRVQ_API_URL="$NRVQ_API_URL" \
+    -e NRVQ_E2E_PASSWORD="${NRVQ_E2E_PASSWORD:-}" \
+    "$PW_IMAGE" \
+    npx playwright test $PW_ARGS
+else
+  PLAYWRIGHT_BASE_URL="$BASE_URL" NRVQ_TOKEN_FILE="$TOKEN_FILE" \
+    bash -c "cd '$E2E_DIR' && npx playwright test $PW_ARGS"
+fi
 echo "✓ R10 — Playwright E2E green (coverage matrix: $E2E_DIR/COVERAGE-MATRIX.md)"
