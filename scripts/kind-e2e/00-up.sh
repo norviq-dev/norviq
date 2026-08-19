@@ -215,7 +215,25 @@ esac
 stage "Console access"
 pkill -f "port-forward.*norviq-ui" 2>/dev/null || true
 sleep 1
-"${KUBECTL[@]}" -n "$NS" port-forward "svc/norviq-ui" "${UI_PORT}:80" >/tmp/nrvq-kind-ui.log 2>&1 &
+# SUPERVISED, not a bare `&`. One kubectl port-forward does not survive a long run: it drops on a pod
+# restart, on an idle timeout, and under sustained load. Unsupervised, the browser suite then fails
+# every remaining spec with net::ERR_CONNECTION_RESET — which reads exactly like a broken product
+# when the console is fine and only the tunnel to it is gone.
+#
+# Sharding made this unmissable. The two shards that finished in ~2 minutes passed 46 of 47; the two
+# that ran 26 and 45 minutes returned 20 and 39 failures. Duration correlating with failure is the
+# signature of an environmental fault, not a real one.
+#
+# The loop restarts the forward whenever kubectl exits and logs each restart, so a flapping tunnel is
+# visible in the log rather than indistinguishable from product breakage.
+(
+  while true; do
+    "${KUBECTL[@]}" -n "$NS" port-forward "svc/norviq-ui" "${UI_PORT}:80" >>/tmp/nrvq-kind-ui.log 2>&1
+    echo "port-forward exited, restarting $(date -u +%H:%M:%S)" >>/tmp/nrvq-kind-ui.log
+    sleep 1
+  done
+) &
+echo $! > /tmp/nrvq-kind-ui-supervisor.pid
 # Poll, never sleep-once: a forward that is not up yet is indistinguishable from a broken one.
 for _ in $(seq 1 40); do curl -sf -o /dev/null "http://localhost:${UI_PORT}/" && break; sleep 0.5; done
 curl -sf -o /dev/null "http://localhost:${UI_PORT}/" || fail "console never came up on ${UI_PORT} — see /tmp/nrvq-kind-ui.log"
