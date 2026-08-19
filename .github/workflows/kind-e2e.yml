@@ -46,7 +46,12 @@ jobs:
   kind-e2e:
     name: L3 + L4 against a real cluster
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 120, not 60. The cap was sized when ~28 specs died on a 20-second login timeout and L4
+    # finished in 26 minutes; with the login gate actually running, those specs execute their real
+    # flows and L4 reached 124 of 196 in 53 minutes before being cut. Two workers is deliberate —
+    # playwright.config.ts warns that more of them contend on the single kind backend — so the
+    # suite needs time rather than concurrency.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v5.0.1
 
