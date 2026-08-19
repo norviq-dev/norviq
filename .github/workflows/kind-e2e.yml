@@ -169,7 +169,7 @@ jobs:
           # minutes, ate the whole job budget and was killed at the cap having never started a
           # single spec — the only trace was the orphaned install process in the cleanup log. A
           # bound turns that into a fast, named failure.
-          timeout 12m env -C ui/tests/e2e npx playwright install --with-deps chromium || {
+          timeout 12m bash -c 'cd ui/tests/e2e && npx playwright install --with-deps chromium' || {
             echo "::error::playwright install did not finish in 12m (apt lock or mirror stall)" >&2
             exit 1
           }
