@@ -2647,3 +2647,112 @@ unnameable and human credentials correctly ignored.
 
 Verified end to end on kind: both bands render correctly through `GET /api/v1/system-health` with their
 own remediations, and with the probe rows removed the console shows no expiry band and no "? (norviq)".
+# AKS fresh-install validation — findings (47d9de1)
+
+## F1 — the documented install FAILS on a clean cluster (first-run blocker)
+README's quickstart says `policyQuotaNamespaces` is "required, not optional … add every agent
+namespace you plan to use", but never says those namespaces must ALREADY EXIST. Following it
+verbatim on a bare cluster:
+
+    Error: INSTALLATION FAILED: server-side apply failed for object chatbot-prod/norviq-crd-quota
+    /v1, Kind=ResourceQuota: namespaces "chatbot-prod" not found
+
+A brand-new user hits a hard install failure on the very first command. The error is at least
+specific enough to diagnose, but the install is left partially applied and the docs are wrong.
+Fix: document `kubectl create namespace` first, AND fail fast in a chart helper with an actionable
+message rather than a server-side-apply error partway through the install.
+Impact detail: the failed attempt leaves a helm release in `failed` state plus a created `norviq`
+namespace, so the user must `helm uninstall` before retrying — the docs do not mention that either.
+
+## F2 — a FRESH install reports `degraded` immediately, and can never clear (first-run blocker)
+`GET /api/v1/system-health` on a brand-new install:
+
+    status: degraded
+    service_key_expiring | warning | "1 service credential(s) expire within 7 days —
+                                      soonest in 0 day(s): norviq-webhook (norviq)"
+
+Root cause: `webhook/controller.go:1653-1657` mints a **1-hour** service JWT for the controller's own
+API calls and re-mints it automatically at 60s-to-expiry (`bearerToken`). It is short-lived and
+SELF-RENEWING by design. The expiry warning fires on any service credential inside a 7-day window, so
+a 1-hour token is ALWAYS inside it — the band appears on install and never clears.
+
+This is also the true root of the originally-reported "? (norviq)" band: under the v1 key that same
+webhook token was recorded as `sidecar_exp:norviq:-`. The kind fix named it correctly but did not stop
+it firing, because naming was only half the defect.
+
+Fix: warn only about credentials whose TOTAL lifetime exceeds the warning window. A credential born
+inside the window cannot meaningfully be "expiring soon" — it is short-lived on purpose and something
+renews it. A 30-day sidecar credential still warns at day 23; a 1-hour auto-renewing token never does.
+Missing `iat` falls back to warning, because failing toward telling the operator is the safe direction.
+
+## F3 — the anti-decoy guard refuses the product's OWN shipped example (release blocker)
+Following the documented flow — enable injection, label the namespace, deploy `examples/chatbot` —
+every pod is refused:
+
+    NRVQ-WHK-4034: container mcp-fw-kb presents as the norviq sidecar but overrides command/args
+    (neutered decoy) ... refused fail-closed.
+
+Mechanism (`webhook/handler.go`):
+  * `isSidecarContainer` returns true on EXACT IMAGE EQUALITY alone (`c.Image == configuredImage`),
+    with a second branch `hasSocketMount(c) && sameSidecarImageName(...)`.
+  * `neuteredSidecarDecoy` then flags any such container that sets command/args.
+  * The example's three MCP-firewall sidecars (`mcp-fw-kb/crm/ops`) run the ENGINE image with custom
+    args (they are the `norviq.mcp` proxy, not the enforcement sidecar) — and, verified, they carry
+    NO socket mount and NO `NRVQ_SOCKET_PATH`. They provably do not masquerade as the sidecar.
+
+Why it was not seen before: the example pins a STALE engine tag
+(`engine-76cc4778…`) which is != `NRVQ_SIDECAR_IMAGE`, so the equality branch missed. The moment an
+operator aligns image versions — which the chart's own upgrade notes explicitly instruct ("Move all
+four image tags together") — the shipped example stops admitting. The example passes by accident.
+
+The guard's own second branch already encodes the right discriminator: the SOCKET. A container with
+the same image but no socket plumbing cannot occupy the enforcement path. The exact-image branch is
+what over-matches.
+
+NOT patched here: this is a fail-closed security control and the fix (requiring socket involvement on
+the equality branch too) needs adversarial review against the decoy attack it exists to stop —
+specifically, whether a socket-less same-image container can suppress injection. Flagged for a
+considered fix, not a late-session patch.
+
+### F3 fix (pending adversarial review)
+The DENY paths now use a narrower predicate; `isSidecarContainer` and `fullyInjected` (the SKIP path)
+are UNCHANGED — a first attempt that touched `isSidecarContainer` broke `TestMutateAlreadyInjected`
+(its fixture's sidecar has the pod-level socket volume but no container mount), which would have
+re-injected an already-injected pod. That was a real regression in the patch, not a stale test.
+
+    const injectedSidecarName = "norviq-sidecar"
+    func occupiesEnforcementPath(c, configuredImage) bool {
+        if !hasSocketMount(c) && !hasSocketPathEnv(c) && c.Name != injectedSidecarName { return false }
+        return isSidecarContainer(c, configuredImage)
+    }
+
+Why it is safe: a socket-less, differently-named container cannot suppress injection, because
+`fullyInjected` requires the POD-level norviq-socket volume — so the pod is injected, not skipped, and
+stays governed. The name check is load-bearing for a second reason: a container taking the injector's
+own name would collide with the patch the injector adds, which the API server rejects.
+
+All webhook Go tests pass, including the three original decoy tests. Two new tests: the shipped chatbot
+topology must admit AND still be injected; a sidecar-named decoy without a socket is still denied. The
+first reproduces the exact production error string when the guard is reverted.
+
+## F4/F5 — the shipped example, and what the end-to-end run proved
+F4: `mcp` SDK renamed `streamablehttp_client`; requirements.txt still pinned an uncapped `mcp>=1.9.0`
+while the repo had moved to `>=1.28.1,<2`. Fresh build -> ImportError -> CrashLoopBackOff.
+F5: `get_agent()` cached the agent on first request, so a cold-start race (the three firewall sidecars
+bind after the agent container is ready) left `_tools` empty PERMANENTLY — `_agent is None` never went
+true again. Every /chat returned `tool_servers: []` while the same loader returned the full set by hand.
+
+### End-to-end result on the fresh AKS install
+* BENIGN: the agent called `search_kb` through the MCP firewall and answered from the knowledge base.
+* ENFORCEMENT: a tool call carrying a shell-injection argument was BLOCKED at the proxy —
+  "rule: deny_shell_execution ... The tool was NOT executed."
+* AUDIT: postgres ground truth `allow|1, block|1`; the console Audit Log shows "2 of 2 records" with
+  `deny_shell_execution` and `search_kb` both visible. A block WITH an audit row — the discipline held.
+* REGISTRY: all three MCP servers discovered as `discovered` (never `registered` — observed is not
+  approved), and 9 tools learned with correct `mcp_declared` source and server attribution.
+* HEALTH: `status: ok`, no issues — the F2 fix holding on a real install.
+
+**Two attacks were refused by the MODEL, not by Norviq** (`tools_called: []`, `denied_by: ''`). That is
+not a validation of enforcement, and reporting it as one would have been the easy mistake — the tool
+call has to REACH the gate before the gate can be said to have done anything. Driving the enforcement
+point directly is what produced the evidence above.
