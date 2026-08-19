@@ -28,7 +28,8 @@ RUN apt-get update && apt-get upgrade -y && \
         arm64) OPA_SHA256="19dcb5186fd394c32023918c53eaacda55f835abb05e13e0f9a766dd1429494f" ;; \
         *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac && \
-    curl -fL -o /usr/local/bin/opa "https://openpolicyagent.org/downloads/v1.19.1/opa_linux_${TARGETARCH}_static" && \
+    curl -fL --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 15 --max-time 180 \
+        -o /usr/local/bin/opa "https://openpolicyagent.org/downloads/v1.19.1/opa_linux_${TARGETARCH}_static" && \
     echo "${OPA_SHA256}  /usr/local/bin/opa" | sha256sum -c - && \
     chmod +x /usr/local/bin/opa && \
     opa version && \
