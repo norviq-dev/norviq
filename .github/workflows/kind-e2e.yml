@@ -174,10 +174,28 @@ jobs:
           # minutes, ate the whole job budget and was killed at the cap having never started a
           # single spec — the only trace was the orphaned install process in the cleanup log. A
           # bound turns that into a fast, named failure.
-          timeout 12m bash -c 'cd ui/tests/e2e && npx playwright install --with-deps chromium' || {
-            echo "::error::playwright install did not finish in 12m (apt lock or mirror stall)" >&2
-            exit 1
-          }
+          # Browser binary first, WITHOUT --with-deps. That flag shells out to apt, and apt on this
+          # runner keeps stalling: two runs died here, one silently for 39 minutes and one on the bound
+          # below, both after azure.archive.ubuntu.com ignored every index and the fallback mirror hung
+          # mid-fetch. ubuntu-latest already ships chromium's system libs, so that round trip is mostly
+          # risk for no gain.
+          (cd ui/tests/e2e && npx playwright install chromium)
+          # Then TEST the property --with-deps exists to guarantee — that chromium actually launches —
+          # rather than assume apt succeeding is the same thing. Pay for apt only when this proves it is
+          # needed, and bound it when we do.
+          if (cd ui/tests/e2e && node -e "require('@playwright/test').chromium.launch().then(b=>b.close()).then(()=>process.exit(0)).catch(e=>{console.error(String(e).split('\n')[0]);process.exit(1)})"); then
+            echo "chromium launches; skipping apt"
+          else
+            echo "chromium could not launch — installing system deps"
+            timeout 12m bash -c 'cd ui/tests/e2e && npx playwright install-deps chromium' || {
+              echo "::error::playwright install-deps did not finish in 12m (apt lock or mirror stall)" >&2
+              exit 1
+            }
+            (cd ui/tests/e2e && node -e "require('@playwright/test').chromium.launch().then(b=>b.close()).then(()=>process.exit(0)).catch(e=>{console.error(String(e).split('\n')[0]);process.exit(1)})") || {
+              echo "::error::chromium still cannot launch after installing system deps" >&2
+              exit 1
+            }
+          fi
           bash scripts/e2e.sh
 
       # L3 LAST, deliberately. It creates policies in throwaway `integration-<uuid>` namespaces, and a
