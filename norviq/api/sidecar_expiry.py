@@ -105,6 +105,20 @@ async def observe(cache, claims: dict) -> None:
         remaining = exp - int(time.time())
         if remaining <= 0 or remaining > WARN_WITHIN_S:
             return
+        # SHORT-LIVED CREDENTIALS ARE NOT "EXPIRING SOON" — they are short-lived on purpose, and
+        # something re-mints them. The webhook controller signs itself a ONE-HOUR service JWT and
+        # re-mints it at 60s-to-expiry (`webhook/controller.go`, `bearerToken`), so it is ALWAYS inside
+        # a 7-day window: on a fresh install this warning appeared immediately, marked the whole system
+        # `degraded`, and could never clear. Measured on a clean AKS install.
+        #
+        # A credential whose ENTIRE lifetime is shorter than the warning window was born inside it, so
+        # "expires within 7 days" carries no information about it. Lifetime, not remaining time, is what
+        # separates the two: a 30-day sidecar credential still warns at day 23; a 1-hour token never
+        # does. No `iat` means the lifetime is unknowable, and there the safe direction is to warn —
+        # missing a real expiry is worse than one extra band.
+        issued = int(claims.get("iat") or 0)
+        if issued > 0 and (exp - issued) <= WARN_WITHIN_S:
+            return
         # WHICH KIND of service credential this is decides the entire warning: its title, what it says
         # will break, and what the operator should do. `workload` is the injector's own claim, so its
         # presence — not `role=service` — is what makes something an injected sidecar.

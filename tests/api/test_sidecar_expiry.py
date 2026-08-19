@@ -226,3 +226,61 @@ class TestTheTwoKindsAreNotTheSameThing:
         r = _FakeRedis()
         r.store["sidecar_exp:norviq:-"] = str(int(time.time() + 86400))
         assert await sidecar_expiry.expiring_soon(_FakeCache(r)) == []
+
+
+class TestShortLivedCredentialsAreNotExpiringSoon:
+    """Measured on a clean AKS install: `status: degraded` the moment it came up, with
+    "service keys expire soon — norviq-webhook, 0 days", and it could never clear.
+
+    The webhook controller signs ITSELF a one-hour service JWT and re-mints it at 60s-to-expiry
+    (`webhook/controller.go`, `bearerToken`). A one-hour credential is always inside a seven-day
+    window, so the band was permanent on every fresh install. Lifetime — not remaining time — is what
+    separates "short-lived on purpose, something renews it" from "baked in and about to die".
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_webhooks_own_hourly_token_is_not_warned_about(self):
+        r = _FakeRedis()
+        now = int(time.time())
+        await sidecar_expiry.observe(_FakeCache(r), {
+            "role": "service", "namespace": "norviq", "sub": "norviq-webhook",
+            "iat": now, "exp": now + 3600,          # the real shape, from controller.go
+        })
+        assert r.store == {}
+        assert await sidecar_expiry.expiring_soon(_FakeCache(r)) == []
+
+    @pytest.mark.asyncio
+    async def test_a_thirty_day_credential_still_warns_near_the_end(self):
+        """The case the module exists for must keep working."""
+        r = _FakeRedis()
+        now = int(time.time())
+        await sidecar_expiry.observe(_FakeCache(r), {
+            "role": "service", "namespace": "chatbot-prod", "workload": "agent",
+            "iat": now - 24 * 86400, "exp": now + 6 * 86400,   # 30-day cred, 6 days left
+        })
+        rows = await sidecar_expiry.expiring_soon(_FakeCache(r))
+        assert [x["subject"] for x in rows] == ["agent"]
+        assert rows[0]["kind"] == sidecar_expiry.KIND_SIDECAR
+
+    @pytest.mark.asyncio
+    async def test_a_credential_with_no_iat_still_warns(self):
+        """Unknown lifetime must not silently suppress a real expiry."""
+        r = _FakeRedis()
+        await sidecar_expiry.observe(_FakeCache(r), {
+            "role": "service", "namespace": "norviq", "sub": "legacy-key",
+            "exp": int(time.time() + 2 * 86400),
+        })
+        assert [x["subject"] for x in await sidecar_expiry.expiring_soon(_FakeCache(r))] == ["legacy-key"]
+
+    @pytest.mark.asyncio
+    async def test_a_fresh_install_reports_no_expiry_band_at_all(self):
+        """The end-user property: install Norviq, open the console, see a healthy system."""
+        r = _FakeRedis()
+        c = _FakeCache(r)
+        now = int(time.time())
+        # everything a brand-new install actually presents
+        await sidecar_expiry.observe(c, {"role": "service", "namespace": "norviq",
+                                         "sub": "norviq-webhook", "iat": now, "exp": now + 3600})
+        await sidecar_expiry.observe(c, {"role": "admin", "namespace": "norviq",
+                                         "sub": "cli-admin", "iat": now, "exp": now + 28800})
+        assert sidecar_expiry.issues_for(await sidecar_expiry.expiring_soon(c)) == []
