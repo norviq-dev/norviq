@@ -46,7 +46,7 @@ jobs:
   kind-e2e:
     name: L3 + L4 against a real cluster
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v5.0.1
 
@@ -164,7 +164,15 @@ jobs:
           # fresh runner where the browser then fails to launch with no explanation. `--with-deps`
           # here, unsuppressed, so a missing dependency fails at the install rather than at the first
           # test with a stack trace about a missing shared object.
-          (cd ui/tests/e2e && npx playwright install --with-deps chromium)
+          # `--with-deps` shells out to apt, which can stall on a lock or a slow mirror. Unbounded,
+          # that stall is indistinguishable from a slow suite: run 32217519135 sat here for 39
+          # minutes, ate the whole job budget and was killed at the cap having never started a
+          # single spec — the only trace was the orphaned install process in the cleanup log. A
+          # bound turns that into a fast, named failure.
+          timeout 12m env -C ui/tests/e2e npx playwright install --with-deps chromium || {
+            echo "::error::playwright install did not finish in 12m (apt lock or mirror stall)" >&2
+            exit 1
+          }
           bash scripts/e2e.sh
 
       # L3 LAST, deliberately. It creates policies in throwaway `integration-<uuid>` namespaces, and a
