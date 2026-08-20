@@ -26,12 +26,25 @@ name: Tests
 
 on:
   pull_request:
+  # AND on main, because main is where releases are cut from and nothing else tests it.
+  #
+  # This was a PR-only gate. release.yml fires on a `v*.*.*` tag and runs no suite of its own, so a
+  # tag cut from main was gated by nothing — and with work landing on main directly rather than
+  # through PRs, this job's last CI result was 8 days and ~20 commits stale while reading as the
+  # merge gate. A gate that does not cover the path people actually use is the same shape as a scan
+  # of zero commits: green, and about nothing.
+  push:
+    branches: [main]
   workflow_dispatch: {}
 
-# A newer push to the same PR supersedes the old run; tests are pure so cancelling is safe.
 concurrency:
+  # A newer push to the same PR supersedes the old run; tests are pure so cancelling is safe.
+  #
+  # NOT on main. A cancelled run is indistinguishable from a green one at a glance, and on main the
+  # question being asked is "is this commit releasable" — which every commit has to answer for
+  # itself. Two pushes in quick succession must not leave the first one's verdict as "cancelled".
   group: tests-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   ui-tests:
