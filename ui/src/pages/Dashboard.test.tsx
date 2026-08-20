@@ -542,6 +542,19 @@ describe("Overview Monitor-mode signals are scoped and true of the code beneath 
 // fixed for exactly this reason (audit.py:222); these two panels were not.
 // ---------------------------------------------------------------------------------------------------
 describe("Overview block feeds are Monitor-aware", () => {
+  // A TOKEN, like the sibling describe above. AppContext's posture effect opens with
+  // `if (!getToken()) return;`, so without one `posture.mode` stays null, `monitorScope` is false, and
+  // the Monitor-empty variants these tests assert on never render at all.
+  //
+  // They passed locally anyway because AppContext's DEV bootstrap reads VITE_DEV_TOKEN from the
+  // GITIGNORED ui/.env.local and writes it to localStorage — so a developer's machine authenticated
+  // these tests and CI did not. That is what made "does NOT assert the Monitor mechanism…" burn a full
+  // 30s on the runner while finishing in 180ms here, and why raising the budget 15s -> 30s never helped:
+  // the element was not late, it was never going to render. setup.ts now stubs VITE_DEV_TOKEN empty so
+  // the two environments cannot diverge again; this block says out loud that it needs auth.
+  beforeEach(() => sessionStorage.setItem("nrvq_token", "test-token"));
+  afterEach(() => sessionStorage.removeItem("nrvq_token"));
+
   function monitorNamespace(wouldBlocked = 812) {
     return [
       http.get("*/api/v1/settings", ({ request }) => {

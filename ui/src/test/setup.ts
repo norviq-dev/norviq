@@ -32,6 +32,29 @@ import { cleanup, configure } from "@testing-library/react";
 // DOM dump and get a bare "Test timed out" that says nothing about what was missing.
 configure({ asyncUtilTimeout: 15000 });
 
+// NO AMBIENT DEV TOKEN. AppContext's bootstrap effect (src/store/AppContext.tsx) does this in DEV:
+//
+//     if (getToken()) return;
+//     if (import.meta.env.DEV) {
+//       const devToken = import.meta.env.VITE_DEV_TOKEN;
+//       if (devToken) { localStorage.setItem("nrvq_token", devToken); window.location.reload(); }
+//     }
+//
+// Vitest runs with DEV true and loads `ui/.env.local`, which is GITIGNORED. So on a developer's
+// machine that file silently authenticated every test, and on CI — where it does not exist — nothing
+// did. That is not a small difference: AppContext's posture effect opens with `if (!getToken())
+// return;`, so with no token `posture.mode` stays null forever, and every render path gated on the
+// namespace's enforcement posture simply never appears.
+//
+// It cost two investigations and two timeout raises (1s -> 15s -> 30s) aimed at a slow runner that
+// was not the problem. Dashboard.test.tsx's "does NOT assert the Monitor mechanism…" burned its full
+// 30s budget on CI while passing in 180ms locally, and the difference was one untracked file.
+//
+// Stubbing it empty makes the two environments identical: no test is authenticated by accident, and a
+// test that needs a token seeds one itself and says so. Verified both ways — with `.env.local` present
+// and moved aside, the suite now behaves the same.
+vi.stubEnv("VITE_DEV_TOKEN", "");
+
 // SLIM-MONACO: the lib/monaco side-effect (loader.config + a Vite ?worker import + monaco core) is a
 // production-only concern — no-op it in unit tests so pages that import it don't pull Monaco/workers into
 // jsdom. The editor component itself is separately mocked where a test renders it.
