@@ -1888,7 +1888,29 @@ class OPAEvaluator:
             log.error("nrvq.engine.agent_registry.write_failed", error=str(exc), code="NRVQ-ENG-2051")
 
     async def _safe_record_history(self, event: ToolCallEvent, decision: PolicyDecision) -> None:
-        """Persist enforced decision for rolling trust-history features."""
+        """Persist enforced decision for rolling trust-history features.
+
+        SYNTHETIC TRAFFIC IS EXCLUDED, for the same reason `_safe_register_agent` excludes it — and
+        that function is the one directly above this one. The red-team simulator builds its events with
+        the REAL agent's SVID, so one admin "Run suite" click writes the whole attack corpus onto every
+        governed agent in the namespace.
+
+        The earlier fix stopped that reaching the console's violation counter and stopped there. This
+        writer, queued on the very next line of `_persist_behavior`, kept recording them — so the
+        fabricated blocks were removed from the number an operator can SEE and left in the one that
+        silently changes enforcement. TrustCalculator caps a score at 0.30 once an agent has >= 20
+        observations at a >20% block rate, and `_apply_trust_overrides` turns any `low` category into
+        `escalate`. The shipped corpus is 34 vectors of which 32 are expected to block, so running the
+        product's own red-team feature put every real agent in that namespace into "every benign call
+        held for approval" for the length of the trust window — attributed to attacks that never
+        happened, and invisible on the page built to show exactly that.
+
+        Excluded from the whole history record rather than just its `decision`, because every trust
+        signal reads this store: tool_novelty would learn the simulator's tool surface, scope_drift its
+        targets, session_velocity its request rate. Simulated traffic is not behaviour.
+        """
+        if _is_synthetic_framework(getattr(event, "framework", "")):
+            return
         try:
             await self._history.record(
                 event.agent_identity.spiffe_id,
@@ -1905,8 +1927,15 @@ class OPAEvaluator:
             log.error("nrvq.engine.trust.history_failed", error=str(exc), code="NRVQ-ENG-2043")
 
     async def _safe_update_profile(self, event: ToolCallEvent, decision: PolicyDecision) -> None:
-        """Update profile only for trusted outcomes using raw entropy baseline."""
+        """Update profile only for trusted outcomes using raw entropy baseline.
+
+        Synthetic traffic excluded on the same grounds as the history writer above: a simulated call
+        that happens to be allowed would otherwise teach the behavioural baseline the simulator's tool
+        surface and parameter shapes as if a real agent had done them.
+        """
         if decision.decision not in {"allow", "audit"}:
+            return
+        if _is_synthetic_framework(getattr(event, "framework", "")):
             return
         try:
             entropy = ParamEntropySignal.entropy_of_params(event.tool_params)

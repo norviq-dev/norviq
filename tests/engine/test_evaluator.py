@@ -319,3 +319,45 @@ def test_cache_hit_decision_refreshes_trust_fields_without_enforcement_change() 
     assert updated.trust_dominant_signal == "violation_rate"
     assert updated.trust_recommendation == "escalate"
     assert updated.decided_at > decision.decided_at
+
+
+async def test_a_red_team_run_does_not_degrade_a_real_agent_s_trust(evaluator: OPAEvaluator) -> None:
+    """The product simulating attacks against itself must not change what it does to real traffic.
+
+    The red-team simulator builds its events with the REAL agent's SVID, so one admin "Run suite"
+    click drives the whole corpus — 32 of 34 shipped vectors are expected to block — through the
+    evaluator under a governed agent's identity.
+
+    `_safe_register_agent` already excluded that from the console's violation counter, and its comment
+    describes this exact scenario. `_safe_record_history`, queued on the very next line of
+    `_persist_behavior`, did not. So the fabricated blocks were taken out of the number an operator can
+    SEE and left in the one that silently changes enforcement: TrustCalculator caps a score at 0.30
+    once an agent has >= 20 observations at a >20% block rate, and `_apply_trust_overrides` turns a
+    `low` category into `escalate`. Every benign call from that agent was then held for approval, for
+    attacks that never happened, with the page built to show violations reporting none.
+
+    Asserted on the DECISION rather than on the stored history, because the decision is the thing a
+    customer experiences and it stays true if the storage is refactored.
+    """
+    suffix = _suffix()
+
+    def synthetic(tool: str, params: dict) -> ToolCallEvent:
+        # ToolCallEvent is frozen, so the marker goes on at construction — the same way redteam.py's
+        # `_build_event` does it.
+        return _event(suffix, tool, params).model_copy(update={"framework": "redteam"})
+
+    # A benign call BEFORE any simulation — the control arm. If this is not `allow`, the assertion
+    # below proves nothing, because the agent was never in a state the red-team run could damage.
+    before = await evaluator.evaluate(_event(suffix, "search_kb", {"q": "refund policy"}))
+    assert before.decision == "allow", f"control arm: a fresh agent must allow, got {before.decision}"
+
+    # 30 simulated attacks under that same agent's identity, all blocking — comfortably past the
+    # 20-observation / 20%-block-rate threshold that pins the score to 0.30.
+    for i in range(30):
+        await evaluator.evaluate(synthetic("execute_sql", {"query": f"DROP TABLE t{i}"}))
+
+    after = await evaluator.evaluate(_event(suffix, "search_kb", {"q": "refund policy again"}))
+    assert after.decision == "allow", (
+        f"a red-team run degraded a real agent's trust: benign call now {after.decision}"
+        f" / {after.rule_id}. Simulated traffic is not behaviour."
+    )
