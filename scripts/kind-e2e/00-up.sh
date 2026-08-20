@@ -122,7 +122,7 @@ helm --kube-context "kind-${CLUSTER}" upgrade --install norviq "${REPO_ROOT}/hel
   --set images.bootstrap.pullPolicy=IfNotPresent \
   --set "policyQuotaNamespaces={${QUOTA_NS}}" \
   --set webhook.injection.enabled=true \
-  --set-string config.extraEnv.NRVQ_HTTP_RATE_LIMIT_DEFAULT_PER_WINDOW=5000 \
+  -f "${REPO_ROOT}/scripts/kind-e2e/values-e2e.yaml" \
   --set-string "podAnnotations.nrvq-local-image-id=${API_IMAGE_ID}" \
   --wait --timeout 10m
 

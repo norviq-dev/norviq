@@ -157,6 +157,7 @@ jobs:
           helm install norviq helm/norviq \
             -n norviq \
             -f helm/norviq/values-light.yaml \
+            -f scripts/kind-e2e/values-e2e.yaml \
             --set policyQuotaNamespaces='{agents,analytics}' \
             --set images.api.pullPolicy=IfNotPresent \
             --set images.ui.pullPolicy=IfNotPresent \

@@ -1,0 +1,37 @@
+# Settings that make a cluster a TEST RIG rather than a deployment.
+#
+# WHY THIS FILE EXISTS. There are two install paths for the browser suite — scripts/kind-e2e/00-up.sh
+# for a laptop and the `Install the chart` step in .github/workflows/kind-e2e.yml for CI — and they
+# drifted twice in one day, both times silently and both times costing a full run:
+#
+#   * The NodePort. e2e-cluster.yaml maps host 3400 -> node:30080 and says "patched to NodePort after
+#     install"; only 00-up.sh patched it. CI got the mapping and no Service, so every request was
+#     accepted and reset — 27 ERR_CONNECTION_RESET in one shard.
+#   * This rate-limit ceiling. Set in 00-up.sh:125 and nowhere else, so CI kept running into the
+#     production default.
+#
+# A fix that lands in one path reads as applied and applies to half the runs. Anything both paths
+# need belongs here, in one file, passed with `-f` by both. tests/test_e2e_harness_parity.py fails if
+# either path stops using it.
+#
+# NOT a customer-facing values file, which is why it lives under scripts/ and not in helm/norviq/ —
+# `helm package` sweeps up every values-*.yaml in the chart directory, and a test rig's ceilings have
+# no business shipping to an operator.
+
+config:
+  extraEnv:
+    # The suite drives ~190 specs through ONE admin identity and the limiter keys on the JWT `sub`,
+    # so all of them share a single bucket: 300-480 requests per 60s window against a 300 default.
+    # The 429s then land on whichever spec happens to be running, which is why the failing SET moved
+    # between runs while the count stayed flat — it reads like flakiness and is arithmetic.
+    #
+    # Sharding made it worse, not better. Four jobs do not share a bucket (each has its own cluster,
+    # API and Redis), but each shard now packs ~49 specs into ~2.3 minutes instead of spreading 190
+    # over 25, so the requests-per-window went UP.
+    #
+    # No real operator generates this load: 300/60s is 20-60 console page-loads a minute sustained.
+    # The ceiling is right for production and wrong for a test rig, so it is raised HERE and the
+    # product default stays 300. The limiter keeps its own unit coverage in tests/api/test_rate_limit.py
+    # (which drives it at a ceiling of 1 or 2), so raising it for the browser suite removes no
+    # coverage of the control itself.
+    NRVQ_HTTP_RATE_LIMIT_DEFAULT_PER_WINDOW: "5000"
