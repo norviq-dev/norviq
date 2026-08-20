@@ -464,10 +464,19 @@ export function PolicyCompliance() {
       >
         {nonCompliantRows.length === 0 ? (
           <div data-testid="pc-remediation-empty" style={{ fontSize: 13, color: "var(--text-muted)" }}>
-            {rows.length === 0
-              ? "No policies to remediate."
-              : loading || evidenceUnreadable || rows.some((r) => r.state === "Unknown")
-                ? "Compliance is not fully known yet — this is not an all-clear."
+            {/* ORDER MATTERS, and it was wrong. `rows.length === 0` used to be tested FIRST, and rows
+                are empty for the whole of the load — so the `loading` arm below could never be reached
+                in the one state it exists for, and the panel announced "No policies to remediate" over
+                data that had not arrived. That is the same all-clear-over-nothing the two tests above
+                this one were written to prevent, reached by a different route: not a missing guard, a
+                guard made unreachable by a cheaper check placed in front of it.
+
+                So the "we do not know yet" arms come first. Only once the fetches have settled and the
+                evidence is readable does an empty list mean there is genuinely nothing to remediate. */}
+            {loading || evidenceUnreadable || rows.some((r) => r.state === "Unknown")
+              ? "Compliance is not fully known yet — this is not an all-clear."
+              : rows.length === 0
+                ? "No policies to remediate."
                 : totalPrincipals === 0
                   ? "No agent classes have run yet, so nothing has been evaluated."
                   : "Nothing to remediate — every policy is compliant across all agent classes."}

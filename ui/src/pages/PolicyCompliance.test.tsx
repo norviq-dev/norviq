@@ -255,6 +255,35 @@ describe("remediation", () => {
     expect(empty.textContent).not.toContain("every policy is compliant");
   });
 
+  it("says nothing at all rather than 'nothing to remediate' while the data is still arriving", async () => {
+    // THE ORDER OF THE BRANCHES IS THE BUG. The empty panel read:
+    //
+    //     rows.length === 0 ? "No policies to remediate."
+    //       : loading || evidenceUnreadable || rows.some(Unknown) ? "not fully known yet" : ...
+    //
+    // `rows` is empty for the whole of the load, so the first arm always won and the `loading` guard
+    // below it could never be reached — in exactly the state it exists for. The panel therefore told
+    // an operator "No policies to remediate" over data that had not arrived, which is the same
+    // all-clear-over-nothing the sibling tests in this block exist to prevent.
+    //
+    // It surfaced as a CI-only failure of the test below, because a fast machine settles the fetches
+    // before the assertion reads the node and a slower one does not. Asserted here on a fetch that is
+    // deliberately still pending, so it is a statement about the branch order rather than about how
+    // fast the machine is.
+    mockAll({});
+    let releasePolicies: (v: unknown) => void = () => {};
+    vi.spyOn(client, "fetchPolicyList").mockReturnValue(
+      new Promise((resolve) => { releasePolicies = resolve; }) as never
+    );
+
+    renderPage();
+    const empty = await screen.findByTestId("pc-remediation-empty");
+    expect(empty.textContent).not.toContain("No policies to remediate");
+    expect(empty.textContent).toContain("not fully known");
+
+    releasePolicies([]);
+  });
+
   it("does not claim 'all compliant' when nothing has been evaluated", async () => {
     mockAll({ principals: [], scanned: 0 });
     renderPage();
