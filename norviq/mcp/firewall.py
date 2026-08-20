@@ -510,6 +510,21 @@ class McpFirewall:
             # a discovery surface exactly like tools/list — and Gate A never saw it.
             if requested == P.M_SERVER_DISCOVER:
                 return self._gate_a_discover(msg)
+            # The 2025-06-18 handshake, and the reason this branch exists: it was MISSING. Every
+            # docstring in this package claimed Gate A covered `initialize` — module header line 13,
+            # __init__.py's overview — while the dispatch had no case for it, so the response fell
+            # through to the terminal `forward=msg.framed` below and reached the model unscanned.
+            #
+            # `initialize` carries `serverInfo` and `instructions`, and `instructions` is free text the
+            # host puts in FRONT of the model (servers.py says so where it hashes it: "a change there
+            # is a content change in the same sense a tool description is"). So the one surface that
+            # lands with system-prompt adjacency, on the first message of the session, before
+            # tools/list or any registry check, was the one surface never inspected.
+            #
+            # It is not legacy-dead either: protocol.py is explicit that "SPEC_2026 is not a migration
+            # target that retires SPEC_2025" — both revisions are live and the client negotiates.
+            if requested == P.M_INITIALIZE:
+                return self._gate_a_initialize(msg)
             if requested == P.M_TOOLS_LIST:
                 # The only awaited branch in this dispatch. It reports a blocked-server refusal to the
                 # control plane, and that report is a network call — see `_gate_a_tools_list`.
@@ -1621,24 +1636,38 @@ class McpFirewall:
         return blocks if isinstance(blocks, list) and blocks else None
 
     def _gate_a_discover(self, msg: P.JsonRpcMessage) -> MediationResult:
-        """Scan a `server/discover` result before the client acts on it.
+        """Scan a `server/discover` result before the client acts on it."""
+        return self._gate_a_handshake(msg, P.M_SERVER_DISCOVER, "result.server_discover")
 
-        Flagged rather than blocked: refusing discovery would make the server unusable, and the
-        threat here is the model READING advertised text as instructions — which fencing addresses
-        and refusal does not.
+    def _gate_a_initialize(self, msg: P.JsonRpcMessage) -> MediationResult:
+        """Scan an `initialize` result — the 2025-06-18 handshake — before the client acts on it."""
+        return self._gate_a_handshake(msg, P.M_INITIALIZE, "result.initialize")
+
+    def _gate_a_handshake(self, msg: P.JsonRpcMessage, surface: str, label: str) -> MediationResult:
+        """Scan a handshake result before the client acts on it.
+
+        ONE body for both revisions on purpose. `server/discover` and `initialize` are the same
+        surface — a server advertising its identity and free-text instructions — and they were
+        allowed to diverge: `server/discover` was written with a scan and a test, `initialize` was
+        documented as covered and had neither. Two implementations of one surface is how that
+        happens, so there is one here and each revision is a two-line entry point.
+
+        Flagged rather than blocked: refusing a handshake makes the server unusable, and the threat is
+        the model READING advertised text as instructions — which fencing addresses and refusal does
+        not.
         """
         report: ScanReport = scan_untrusted_content(
-            json.dumps(msg.result, sort_keys=True)[:16384], "result.server_discover")
+            json.dumps(msg.result, sort_keys=True)[:16384], label)
         if report.clean:
             self._bump("discover_clean")
             return MediationResult(forward=msg.framed)
         findings = [f.as_dict() for f in report.findings]
         self._bump("discover_flagged")
-        log.warning("nrvq.mcp.discover.flagged",
+        log.warning("nrvq.mcp.discover.flagged", surface=surface,
                     findings=[f["rule"] for f in findings], code="NRVQ-MCP-5064")
         rewritten = json.loads(msg.raw)
         _annotate(rewritten.get("result"), {
-            "gate": "A", "surface": P.M_SERVER_DISCOVER, "scan": findings,
+            "gate": "A", "surface": surface, "scan": findings,
         })
         return MediationResult(forward=P.encode(rewritten), note="discover_flagged")
 
