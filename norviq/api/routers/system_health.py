@@ -43,7 +43,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from norviq.api.auth import get_current_user
+from norviq.api.auth import get_current_user, read_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
 from norviq.api import sidecar_expiry
@@ -245,8 +245,24 @@ async def system_health(
     shown another tenant's incident. An admin without a namespace claim sees the whole deployment.
     """
     since = datetime.now(timezone.utc) - timedelta(minutes=_WINDOW_MINUTES)
-    role = str(user.get("role", "")).lower()
-    claim_ns = str(user.get("namespace", "") or "")
+    # Resolve the tenant scope through the SHARED helper, exactly as every other cross-namespace
+    # read does. This route used to compute it by hand as `if role != "admin" and claim_ns:` — a
+    # non-admin whose namespace claim is EMPTY satisfies neither side, so no filter was ever applied
+    # and the least-privilege principal received the whole deployment: every namespace with an
+    # infrastructure verdict, the per-rule affected-call counts, and every namespace's expiring
+    # sidecar workloads and service-key subjects.
+    #
+    # That principal is not exotic, it is the product's designed floor. `auth_login._namespace_for`
+    # returns "" for every non-admin local role, an authenticated-but-unmapped OIDC user gets
+    # {role: viewer, namespace: ""}, and `token_mint` does the same for a minted viewer. Every other
+    # scoped read answers it 403 "No namespace scope"; this one answered 200 with the admin payload,
+    # and the console polls it for the header banner, so nothing unusual had to be done to reach it.
+    #
+    # read_namespace returns None ONLY for a principal entitled to the whole deployment (admin, a "*"
+    # claim, or a service token with no claim) and raises 403 for a no-claim human — so `if ns:` below
+    # is now a correct guard rather than a hole. cluster_info.py:52 already guards this exact case and
+    # names the leak in its comment; the two routes now agree.
+    ns = read_namespace(user, None)
 
     stmt = (
         select(
@@ -259,8 +275,8 @@ async def system_health(
         .where(AuditLogEntry.rule_id.in_(_INFRA_RULE_VARIANTS.keys()))
         .group_by(AuditLogEntry.rule_id)
     )
-    if role != "admin" and claim_ns:
-        stmt = stmt.where(AuditLogEntry.namespace == claim_ns)
+    if ns:
+        stmt = stmt.where(AuditLogEntry.namespace == ns)
 
     rows = (await session.execute(stmt)).all()
     # One underlying rule can now arrive as up to three grouped rows (bare + the two would-block
@@ -289,8 +305,7 @@ async def system_health(
     # which is precisely why the product could only ever diagnose this cliff in retrospect.
     cache = getattr(getattr(request, "app", None), "state", None)
     cache = getattr(cache, "cache", None) if cache is not None else None
-    expiry_scope = claim_ns if (role != "admin" and claim_ns) else None
-    expiring = await sidecar_expiry.expiring_soon(cache, expiry_scope)
+    expiring = await sidecar_expiry.expiring_soon(cache, ns)
     # One band PER KIND: an injected sidecar rotates by pod replacement, a service key by minting a
     # replacement. A single band told every operator to roll a Deployment, which was wrong for every
     # service key — and a service key with no `workload` claim was the only row this ever produced.
@@ -313,7 +328,7 @@ async def system_health(
     # all — every record this route reads arrives through the central /evaluate, so a data plane that
     # has been severed from the API writes nothing and looks identical to a healthy quiet one. Count
     # what the window actually holds, in the caller's scope, and say which of the two we are in.
-    recorded = await _decisions_in_window(session, since, None if role == "admin" or not claim_ns else claim_ns)
+    recorded = await _decisions_in_window(session, since, ns)
     if recorded is None:
         # The liveness read itself failed. "We could not look" is never "we looked and it is clean".
         log.warning("nrvq.api.system_health.liveness_unavailable", code="NRVQ-API-7091")

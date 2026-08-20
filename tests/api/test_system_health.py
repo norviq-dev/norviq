@@ -25,6 +25,10 @@ from norviq.api.main import create_app
 
 _ADMIN = {"role": "admin", "namespace": "", "sub": "admin"}
 _TENANT = {"role": "viewer", "namespace": "chatbot-prod", "sub": "tenant"}
+# The least-privilege floor: authenticated, non-admin, NO namespace claim. Produced by local login
+# for every non-admin role (auth_login._namespace_for returns ""), by an unmapped OIDC user, and by
+# a minted viewer token.
+_NO_CLAIM = {"role": "viewer", "namespace": "", "sub": "unmapped"}
 _NOW = datetime(2026, 7, 26, 10, 0, tzinfo=timezone.utc)
 
 
@@ -160,6 +164,30 @@ def test_admin_without_a_namespace_claim_sees_the_whole_deployment() -> None:
     assert client.get("/api/v1/system-health").status_code == 200
     # No equality filter on namespace was added for the unscoped admin.
     assert "audit_log.namespace =" not in session.statements[0]
+
+
+def test_a_viewer_with_no_namespace_claim_gets_no_data() -> None:
+    """The gap between the two tests above.
+
+    Scoping was hand-rolled as `if role != "admin" and claim_ns:`. A non-admin with an EMPTY claim
+    satisfies neither side, so no filter was applied and this principal — the product's documented
+    least-privilege floor — received the unscoped deployment view: every namespace carrying an
+    infrastructure verdict, the per-rule affected-call counts, and every namespace's expiring sidecar
+    workloads and service-key subjects. The console polls this route for its header banner, so nothing
+    unusual had to be done to reach it.
+
+    The suite covered admin (unscoped, correct) and a scoped tenant (filtered, correct). Neither
+    exercises the branch where the hand-rolled condition differs from `read_namespace`, which is the
+    only branch that was wrong. cluster_info.py guards the same principal with a 403 and a comment
+    naming this leak; the two routes must agree.
+    """
+    client, session = _client([_row("thin_proxy_fail_closed")], user=_NO_CLAIM)
+    resp = client.get("/api/v1/system-health")
+    assert resp.status_code == 403, (
+        f"a no-scope viewer got {resp.status_code} with body {resp.text[:300]}"
+    )
+    assert resp.json()["detail"] == "No namespace scope"
+    assert not session.statements, "the query ran before the scope was resolved"
 
 
 def test_only_infrastructure_rule_ids_qualify_as_incidents() -> None:
