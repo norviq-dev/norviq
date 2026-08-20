@@ -207,7 +207,18 @@ test.describe("Overview — Monitor mode reports what WOULD have been blocked", 
   test("would_blocked counts softened decisions while blocked stays 0", async ({ request }) => {
     test.skip(token() === "", "needs an admin token file");
     const auth = { Authorization: `Bearer ${token()}`, "Content-Type": "application/json" };
-    const target = process.env.NRVQ_E2E_MONITOR_NS ?? "chatbot-prod";
+    // `chatbot-prod` is a namespace out of the DOCS, not out of this cluster. kind-e2e installs with
+    // policyQuotaNamespaces={agents,analytics} and seed.py seeds `analytics` + `default`, so no policy
+    // has ever existed for `chatbot-prod`. NRVQ_NO_POLICY_DECISION is "allow", so all four calls below
+    // returned allow/default_allow; `_apply_posture` softens only block and escalate, so there was
+    // nothing to soften and would_blocked was correctly 0. The tile was not lying — the fixture was
+    // empty, and "no policy here" and "the counter is broken" produced the identical silent 0.
+    //
+    // `analytics` is a namespace this cluster actually governs: the chart renders
+    // baseline-cluster-guard-analytics with preset `strict` at enforcementMode `audit`, so a block
+    // there is already recorded as `policy_audit_would_block:` — which is exactly the mechanism under
+    // test, and one WOULD_BLOCK_RULE_PREFIXES counts.
+    const target = process.env.NRVQ_E2E_MONITOR_NS ?? "analytics";
 
     const settingsUrl = `${API}/api/v1/settings?namespace=${target}`;
     const before = await (await withTransportRetry(() => request.get(settingsUrl, { headers: auth }))).json();
@@ -221,8 +232,21 @@ test.describe("Overview — Monitor mode reports what WOULD have been blocked", 
     try {
       await new Promise((r) => setTimeout(r, 6000)); // namespace posture is cached in-proc
 
+      // The counter BEFORE this test's own traffic — see the delta assertions below.
+      const baseline = await (
+        await withTransportRetry(() =>
+          request.get(`${API}/api/v1/audit/stats?range=1h&namespace=${target}`, { headers: auth })
+        )
+      ).json();
+
+      // ASSERT ON THIS TEST'S OWN TRAFFIC, not just on an aggregate. Reading /audit/stats blind is what
+      // made this spec unable to tell "the namespace has no policy", "the class was filtered as
+      // synthetic", "the posture never converged" and "the counter is broken" apart — every one of them
+      // is the same silent 0. The evaluate response carries the decision and rule_id for the very call
+      // just made, so the softening is verified where it happens.
+      const softened: string[] = [];
       for (let i = 0; i < 4; i++) {
-        await withTransportRetry(() => request.post(`${API}/api/v1/evaluate`, {
+        const ev = await withTransportRetry(() => request.post(`${API}/api/v1/evaluate`, {
           headers: auth,
           data: {
             tool_name: "execute_sql",
@@ -238,7 +262,17 @@ test.describe("Overview — Monitor mode reports what WOULD have been blocked", 
             }
           }
         }));
+        const body = await ev.json();
+        softened.push(String(body.rule_id ?? ""));
       }
+
+      // A softened would-block carries the prefix; a live block or a plain allow does not. This fails
+      // loudly and specifically when the fixture is wrong: `default_allow` means the namespace has no
+      // policy, a bare `deny_*` means the posture never softened.
+      expect(
+        softened.every((r) => r.startsWith("policy_audit_would_block:") || r.startsWith("monitor_would_block:")),
+        `expected every call to be SOFTENED in ${target}; got rule_ids ${JSON.stringify(softened)}`
+      ).toBe(true);
 
       const stats = await (
         await withTransportRetry(() =>
@@ -249,8 +283,14 @@ test.describe("Overview — Monitor mode reports what WOULD have been blocked", 
       // The bug: the tile relabels itself "Would-block" in Monitor mode but read `blocked`, which is 0
       // BY CONSTRUCTION here — so the one mode whose whole purpose is showing what would have been
       // stopped reported that nothing would have been.
-      expect(stats.would_blocked, "monitor mode must report would-blocks").toBeGreaterThan(0);
-      expect(stats.blocked, "monitor mode emits no live block — this must not be inflated").toBe(0);
+      //
+      // Deltas rather than absolutes. `analytics` is a shared namespace in this cluster and other specs
+      // drive traffic through it, so pinning `blocked` to exactly 0 would make this test fail for
+      // somebody else's reasons — and, worse, pass for them too.
+      expect(stats.would_blocked - baseline.would_blocked,
+        "monitor mode must report the would-blocks this test just generated").toBeGreaterThanOrEqual(4);
+      expect(stats.blocked - baseline.blocked,
+        "monitor mode emits no live block — this must not be inflated").toBe(0);
       expect(stats.would_block_rate_pct).toBeGreaterThan(0);
     } finally {
       // Always hand the namespace back exactly as found — a monitored tenant left behind is a silently

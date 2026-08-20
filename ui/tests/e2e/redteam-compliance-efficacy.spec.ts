@@ -42,9 +42,25 @@ test.describe("Red Team efficacy wired into Compliance + Overview", () => {
     await expect(page.getByTestId("time-range")).toBeVisible();
     await expect(page.getByTestId("range-chip-24h")).toBeVisible();
 
-    // OVERVIEW: the coverage caption upgrades to the same proven-blocking number (not the "not efficacy-tested" placeholder)
+    // OVERVIEW: the coverage caption upgrades to the same proven-blocking number (not the
+    // "not efficacy-tested" placeholder).
+    //
+    // The caption gained its DENOMINATOR in F-023 and this assertion was never updated. Dashboard.tsx
+    // now renders "rules present · N% proven-blocking of T evaluate-reachable red-team attacks (last
+    // run)", so a regex demanding "N% proven-blocking (last run)" contiguously could never match —
+    // the words it needs adjacent have the subject of the whole change sitting between them.
+    //
+    // Asserting the denominator too, because that is the point of F-023: a bare "100%" reads as total
+    // coverage when it is efficacy over the evaluate-reachable subset, and the Compliance page for the
+    // same posture honestly says 80% ATLAS with named gaps. Both numbers come from the same live
+    // payload, so a fabricated percentage OR a mismatched subset size now fails. Scoped to the gauge
+    // caption's own testid rather than a page-wide text match, which would also match every ancestor.
     await page.goto("/");
     await waitForApp(page);
-    await expect(page.getByText(new RegExp(`${latest.efficacy.overall.proven_blocking_pct}% proven-blocking \\(last run\\)`, "i"))).toBeVisible({ timeout: 10000 });
+    const overall = latest.efficacy.overall;
+    await expect(page.getByTestId("score-gauge-caption")).toContainText(
+      `${overall.proven_blocking_pct}% proven-blocking of ${overall.total} evaluate-reachable red-team attacks (last run)`,
+      { timeout: 10000 }
+    );
   });
 });

@@ -10,14 +10,18 @@ import { type Page } from "@playwright/test";
 async function seedDraft(page: Page) {
   // Ensure at least one intent draft exists for a throwaway class (dry-run only; deduped by class).
   const cls = `wave3e2e-${Date.now()}`;
-  await page.evaluate(async (cls) => {
+  const res = await page.evaluate(async (cls) => {
     const token = localStorage.getItem("nrvq_token");
-    await fetch("/api/v1/threats/intent-draft", {
+    const r = await fetch("/api/v1/threats/intent-draft", {
       method: "POST",
       headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       body: JSON.stringify({ ns: "all", cls, allow_tools: ["search_kb"], intent: { readonly: true, scope: false, rate: false, egress: false } }),
     });
+    return { status: r.status, body: await r.text() };
   }, cls);
+  // A seed that quietly 4xx'd looked byte-for-byte identical to "the row is not there" — the same
+  // "element(s) not found" either way. Fail on the seed itself so the next failure names its own cause.
+  expect(res.status, `intent-draft seed failed: ${res.body.slice(0, 300)}`).toBeLessThan(300);
   return cls;
 }
 
@@ -30,6 +34,20 @@ test.describe("punch-list — EFFECT proofs on the live console", () => {
 
   test("an intent draft row opens its review (generated rego) on click", async ({ page }) => {
     await seedDraft(page);
+    // REVEAL THE TEST DRAFTS FIRST. The seeded class is `wave3e2e-<ts>`, which PolicyCatalog's
+    // TEST_DRAFT_RE (:179, mirroring norviq/api/synthetic.py) classifies as a test draft and hides
+    // behind its "N test drafts hidden — Show" toggle. That toggle reads `nrvq_show_test_drafts`,
+    // which is a DIFFERENT key from the `nrvq_show_synthetic` the beforeEach sets for the graphs —
+    // so the draft this test seeds was never on screen and the row button never rendered.
+    //
+    // Set BEFORE navigating: `showTestDrafts` is a useState INITIALIZER (:1334), read once at mount,
+    // so writing it after the page is up would not take effect until something remounted the panel.
+    //
+    // The throwaway class keeps its `wave3e2e-` prefix deliberately — that prefix is what keeps this
+    // draft out of the asset/attack graphs, the compliance affected-class join and the real-traffic
+    // KPIs, and what gives it the 24h test TTL instead of 14 days. Renaming it to dodge the filter
+    // would leak a fake class into surfaces an operator reads.
+    await page.evaluate(() => localStorage.setItem("nrvq_show_test_drafts", "1"));
     await page.goto("/policies/catalog");
     await waitForApp(page);
     // The drafts panel is on the editor/landing view; the row header is now a real button.
