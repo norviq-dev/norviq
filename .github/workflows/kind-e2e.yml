@@ -172,18 +172,47 @@ jobs:
             python -m norviq.api.token_mint --ttl 7200 | tail -1 > /tmp/nrvq-signin-token.txt
           test -s /tmp/nrvq-signin-token.txt
 
-      - name: Seed the console's fixtures
+      # THE PATCH IS WHAT MAKES THE NodePort REAL. The cluster config publishes host 127.0.0.1:3400 ->
+      # node:30080, but nothing puts a Service on 30080 until this runs. Adding the mapping without
+      # this step is worse than not adding it: every request is accepted by docker, forwarded to a
+      # port with no listener, and reset. That is exactly what run 32314397336 did — 27
+      # ERR_CONNECTION_RESET on localhost:3400 in the shard that ran longest, while the step below
+      # still carried `kubectl port-forward ... &` and the NodePort work sat unused in
+      # scripts/kind-e2e/00-up.sh, which this job does not run.
+      #
+      # There is deliberately NO port-forward here and no fallback to one. The forward is the single
+      # largest source of failure this job has ever had (it dies without the kubectl process exiting,
+      # so it cannot be supervised by watching for process death), and a fallback would let the same
+      # bug hide again by quietly restoring the path the NodePort exists to delete. If the NodePort
+      # does not serve, the job fails and says so.
+      - name: Publish the console on the NodePort the cluster maps
         run: |
-          kubectl -n norviq port-forward svc/norviq-ui 3400:80 &
-          for _ in $(seq 1 40); do curl -sf -o /dev/null http://localhost:3400/ && break; sleep 0.5; done
-          curl -sf -o /dev/null http://localhost:3400/
-          .venv/bin/python scripts/kind-e2e/seed.py
+          set -euo pipefail
+          kubectl -n norviq patch svc norviq-ui -p \
+            '{"spec":{"type":"NodePort","ports":[{"port":80,"targetPort":"http","nodePort":30080}]}}'
+
+          # Nothing else listens on 3400, so a 200 here can only have come through kube-proxy.
+          for _ in $(seq 1 60); do
+            curl -sf -o /dev/null http://127.0.0.1:3400/ && break
+            sleep 1
+          done
+          if ! curl -sf -o /dev/null http://127.0.0.1:3400/; then
+            echo "::error::console not reachable on the published NodePort 30080"
+            kubectl -n norviq get svc norviq-ui -o wide
+            kubectl -n norviq get endpoints norviq-ui -o wide
+            kubectl -n norviq get pods -l app.kubernetes.io/component=ui -o wide
+            exit 1
+          fi
+          echo "console reachable at 127.0.0.1:3400 via NodePort 30080 (no tunnel in the path)"
+
+      - name: Seed the console's fixtures
+        run: .venv/bin/python scripts/kind-e2e/seed.py
 
       # L4 — the console against the real API. `scripts/e2e.sh` owns the Playwright invocation; adding
       # a second runner here would let the two drift.
       - name: L4 · Playwright
         env:
-          PLAYWRIGHT_BASE_URL: http://localhost:3400
+          PLAYWRIGHT_BASE_URL: http://127.0.0.1:3400
           NRVQ_TOKEN_FILE: /tmp/nrvq-signin-token.txt
           NRVQ_E2E_CONTAINER: "1"
           NRVQ_E2E_SHARD: "${{ matrix.shard }}/4"
@@ -224,18 +253,22 @@ jobs:
           kubectl -n norviq logs -l app.kubernetes.io/component=engine --tail=200 || true
           kubectl get nrvqpolicies -A -o yaml || true
 
-          # THE PORT-FORWARD LOG. Two rounds of fixes were aimed at this tunnel and neither could be
-          # judged, because the supervisor writes to a file on the runner that nothing ever printed —
-          # so "0 supervisor messages" meant "I cannot see" and was read as "it did not fire". Print
-          # it, and print whether the process and the tunnel are actually alive right now.
-          echo "----- /tmp/nrvq-kind-ui.log -----"
-          tail -80 /tmp/nrvq-kind-ui.log 2>/dev/null || echo "(no port-forward log — the supervisor never started)"
-          echo "----- supervisor / kubectl processes -----"
-          ps -ef | grep -E "port-forward|nrvq-kind-ui" | grep -v grep || echo "(no port-forward process alive)"
+          # THE CONSOLE PATH. There is no tunnel to inspect any more — the console is a NodePort. So
+          # dump the three things that path is made of, because a dead one of them is what
+          # ERR_CONNECTION_RESET on 3400 actually means: the Service must be type NodePort on 30080,
+          # it must have endpoints, and the mapping must answer.
+          #
+          # The step this replaces tailed /tmp/nrvq-kind-ui.log and grepped for a supervisor process.
+          # Both were already vestigial when they ran, and "no port-forward log" printed on every
+          # failure while reading as a finding. A diagnostic that cannot come back false is not one.
+          echo "----- norviq-ui service (must be NodePort 30080) -----"
+          kubectl -n norviq get svc norviq-ui -o wide || true
+          echo "----- norviq-ui endpoints (empty here = RST on 3400) -----"
+          kubectl -n norviq get endpoints norviq-ui -o wide || true
           echo "----- can the console be reached from here, now? -----"
           curl -sS -o /dev/null -w "console HTTP %{http_code} in %{time_total}s\n" --max-time 10 \
-            "http://localhost:${NRVQ_UI_PORT:-3400}/" || echo "console unreachable at dump time"
-          echo "----- api pod restarts (a roll would explain a dropped tunnel) -----"
+            "http://127.0.0.1:${NRVQ_UI_PORT:-3400}/" || echo "console unreachable at dump time"
+          echo "----- pod restarts -----"
           kubectl -n norviq get pods -o custom-columns=NAME:.metadata.name,RESTARTS:.status.containerStatuses[*].restartCount,AGE:.metadata.creationTimestamp || true
 
       - name: Upload Playwright artifacts on failure
