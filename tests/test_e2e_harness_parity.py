@@ -21,6 +21,7 @@ anything that notices when one path silently stops doing it.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -101,3 +102,33 @@ def test_ci_has_no_port_forward_for_the_console():
         "the console must be reached over the NodePort, with no tunnel in the path:\n  "
         + "\n  ".join(offenders)
     )
+
+
+def test_every_script_a_workflow_runs_bare_is_executable():
+    """A missing mode bit is a whole CI run, and this is the third time it has cost one.
+
+    `.github/workflows/kind-e2e.yml` has `run: scripts/kind-e2e/l3.sh`. Invoked as a command rather
+    than through `bash`, a 100644 file gives "Permission denied" and exit 126 — AFTER the cluster is
+    built, the images are loaded and 47 browser specs have passed, so the job reports failure with a
+    fully green Playwright tally above it and nothing that looks like a cause.
+
+    The bit is invisible in review: the diff shows the script, not its mode, and it survives on a
+    developer's machine where everything is run as `bash script.sh`. So assert it from the workflow
+    text itself — anything invoked bare must be executable, whatever it is called and whenever it is
+    added.
+    """
+    import re as _re
+
+    offenders: list[str] = []
+    for wf in sorted((REPO / ".github/workflows").glob("*.yml")):
+        for line in wf.read_text().splitlines():
+            # `run: scripts/foo.sh` — a bare invocation, not `bash scripts/foo.sh` and not a comment.
+            m = _re.match(r"\s*run:\s+((?:scripts|\./scripts)/\S+\.sh)\s*$", line)
+            if not m:
+                continue
+            script = REPO / m.group(1).lstrip("./")
+            if not script.exists():
+                offenders.append(f"{wf.name} runs {m.group(1)}, which does not exist")
+            elif not os.access(script, os.X_OK):
+                offenders.append(f"{wf.name} runs {m.group(1)} bare, but it is not executable")
+    assert not offenders, "\n  ".join(["mode-bit problems:"] + offenders)

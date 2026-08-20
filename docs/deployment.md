@@ -49,7 +49,7 @@ stacks, covered below.
 kubectl apply -f helm/norviq/crds/
 kubectl create namespace norviq
 kubectl create namespace my-agents          # tenant namespace; must exist before install
-helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.3 -n norviq \
+helm install norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.4 -n norviq \
   --set-json 'policyQuotaNamespaces=["my-agents"]'
 kubectl -n norviq port-forward svc/norviq-ui 8080:80   # http://localhost:8080
 ```
