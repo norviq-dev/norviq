@@ -138,6 +138,41 @@ jobs:
             norviq/norviq-engine:webhook-latest \
             norviq/norviq-engine:bootstrap-latest
 
+      # PRELOAD THE THIRD-PARTY IMAGES TOO. Only the five images this job builds were loaded into the
+      # node, so busybox, opa, postgres, redis, nginx and curl were pulled from Docker Hub by the
+      # KUBELET at pod-start — after the cluster is up, the chart is installed and the job has spent
+      # several minutes. A Hub hiccup or an anonymous-pull rate limit therefore killed the whole run
+      # with `ErrImagePull`, reported as a cluster failure with no test output at all. It did exactly
+      # that on shard 1 of run 32373505877 (openpolicyagent/opa:1.19.1-static), and a `python:3.12-slim`
+      # 502 took a shard of an earlier run the same way.
+      #
+      # Pulling on the RUNNER instead moves that dependency to a step that can retry and whose failure
+      # names itself, and `kind load` then means the kubelet never needs the network.
+      #
+      # The list is DERIVED from the rendered chart, not hardcoded. A hardcoded list silently stops
+      # covering an image the moment the chart adds or bumps one — which is the same shape as every
+      # other stale-copy defect this job has had. `helm template` is the only thing that knows.
+      - name: Preload the chart's third-party images
+        run: |
+          set -euo pipefail
+          mapfile -t IMAGES < <(
+            helm template norviq helm/norviq -n norviq \
+              -f helm/norviq/values-light.yaml -f scripts/kind-e2e/values-e2e.yaml \
+              --set policyQuotaNamespaces='{agents,analytics}' \
+            | grep -oE 'image: *"?[^"]+"?' | sed 's/image: *//' | tr -d '"' \
+            | grep -v '^ghcr\.io/norviq-dev/' | sort -u
+          )
+          test "${#IMAGES[@]}" -gt 0   # a silent empty list would preload nothing and read as success
+          echo "preloading ${#IMAGES[@]} third-party images: ${IMAGES[*]}"
+          for img in "${IMAGES[@]}"; do
+            for attempt in 1 2 3; do
+              docker pull "$img" && break
+              echo "::warning::pull failed for $img (attempt $attempt), retrying"
+              sleep $((attempt * 5))
+            done
+            kind load docker-image --name norviq-local "$img"
+          done
+
       # Every namespace in `policyQuotaNamespaces` must EXIST before install, or the chart fails
       # applying a quota to a namespace that is not there.
       - name: Install the chart

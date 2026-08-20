@@ -69,6 +69,17 @@ test.describe("Policy Catalog — drafts lifecycle, retention & the apply→clus
       const before = await evaluate(page, DST, CLS, TOOL);
       expect(before.rule_id).not.toBe("lce2e_block_delete");
 
+      // GIVE BOTH SCOPES A BASELINE FIRST. The rego below is `package norviq.intent.*`, and POST
+      // /policies now refuses a generated intent policy in a namespace that has neither a cluster
+      // guard nor a controls floor (NRVQ-API-7132): an intent allowlist matches on tool NAME and
+      // inspects no arguments, so with nothing under it an allowlisted tool carrying an injection is
+      // allowed while the policy still reads as default-deny. These are throwaway namespaces created
+      // by this spec, so they start bare.
+      for (const ns of [SRC, DST]) {
+        expect((await api(page, "/api/v1/baseline/controls", "PUT",
+          { namespace: ns, preset: "strict", effects: { llm01_prompt_injection: "deny" } })).status).toBe(200);
+      }
+
       // Save (create) the blocking policy at the SOURCE — the portal's Save path.
       expect((await api(page, "/api/v1/policies", "POST",
         { namespace: SRC, agent_class: CLS, rego_source: REGO, enforcement_mode: "block" })).status).toBe(200);

@@ -518,6 +518,15 @@ test.describe("Policy apply feedback — enforcing heading distinct + real block
       await page.goto("/policies/catalog");
       await waitForApp(page);
 
+      // The rego is `package norviq.intent.cf2`, and POST /policies refuses a generated intent policy
+      // in a namespace with no baseline under it (NRVQ-API-7132) — an allowlist inspects tool names,
+      // not arguments, so on its own it reads as default-deny while letting an injection through an
+      // allowlisted tool. Materialize the floor first, the way an operator would.
+      const floor = await api.put(`/api/v1/baseline/controls`, {
+        data: { namespace: NS, preset: "strict", effects: { llm01_prompt_injection: "deny" } }
+      });
+      expect(floor.ok(), `could not materialize the ${NS} baseline: ${floor.status()}`).toBeTruthy();
+
       // Apply a default-deny policy for the throwaway class at baseline priority 1 (== the intent-effect spec).
       const create = await api.post(`/api/v1/policies`, {
         data: {
