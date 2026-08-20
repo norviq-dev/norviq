@@ -148,6 +148,53 @@ def _await_inproc_convergence() -> None:
         time.sleep(INPROC_TTL_S + 0.5)
 
 
+@pytest.fixture(autouse=True)
+def _clean_trust_history(redis_client):
+    """Every test starts from a clean trust history on the shared identity.
+
+    WHY THIS EXISTS. `evaluate()` above posts EVERY test in this suite as one SVID —
+    `spiffe://norviq/ns/default/sa/customer-support`, from the `namespace`/`agent_class` defaults — and
+    trust history is keyed by SVID. The suite fires ~150 attacks that correctly block on that identity
+    and then asserts unconditional `allow` on the same one. So the attack tests decided the outcome of
+    the false-positive tests, as a function of pytest collection order: 22 of the 26 failures in
+    kind-e2e run 32345942397 were benign payloads that return allow/default_allow/0.855 on a clean
+    identity and `escalate` on the identity the suite had just spent 150 attacks poisoning.
+
+    That made the whole suite unfalsifiable in both directions. A real false positive would have been
+    indistinguishable from this, and a real regression could hide behind it — the failures move between
+    files when collection order changes, which is exactly what "flaky" looks like and is not.
+
+    Clearing BEFORE each test rather than after, and deliberately not between calls WITHIN a test:
+    accumulating history across several calls in one test is a thing some of these tests legitimately
+    do (test_cross_tenant's blocks, the trust-behaviour cases), and per-call clearing would break the
+    behaviour they are actually asserting.
+
+    The three keys are the ones `low_trust_agent` already treats as this identity's trust state, so
+    there is one definition of "clean" rather than two that can drift. This fixture is autouse, so it
+    is instantiated before `low_trust_agent` when a test asks for both — the clear happens first and
+    the deliberate low-trust seeding still lands.
+
+    FAILS rather than skips when Redis is unreachable. A silent skip here restores the exact
+    order-dependent suite this removes, and it would restore it invisibly — the tests would go green or
+    red for reasons nothing in the output explains. This suite already refuses to report a pass it did
+    not earn (`l3.sh` asserts a nonzero PASSED count for the same reason).
+    """
+    if redis_client is None:
+        pytest.fail(
+            f"Redis unreachable at {REDIS_URL}, so this suite cannot isolate trust history between "
+            f"tests. Every test posts as {DEFAULT_SPIFFE} and the suite's own ~150 blocking attacks "
+            f"would decide the benign assertions by collection order. Refusing to run rather than "
+            f"report an order-dependent result."
+        )
+    redis_client.delete(
+        f"agent_history:{DEFAULT_SPIFFE}",
+        f"agent_profile:{DEFAULT_SPIFFE}",
+        "agent_class:customer-support",
+    )
+    _await_inproc_convergence()
+    yield
+
+
 @pytest.fixture
 def low_trust_agent(redis_client):
     """Seed history + profile so the default agent recomputes to low trust (<0.4).
