@@ -31,7 +31,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from norviq.api.auth import get_current_user, read_namespace, require_admin, scoped_namespace
+from norviq.api.auth import (
+    get_current_user,
+    read_namespace,
+    require_admin,
+    require_admin_or_service,
+    scoped_namespace,
+)
 from norviq.api.db.models import McpServer, McpToolPin
 from norviq.api.db.session import get_session
 
@@ -160,7 +166,16 @@ async def observe(
     `notifications/tools/list_changed`) — never per tool call. The namespace is bound to the CALLER's
     credential rather than taken from the body, exactly as `/evaluate` does, so a service token
     scoped to one tenant cannot write another tenant's pins.
+
+    ADMIN OR SERVICE. This is a WRITE to the pin store, which is Gate A's memory of what each server
+    has served, and it had only the namespace binding — no role gate at all. A read-only viewer
+    scoped to a namespace could therefore create pins there, and in TOFU mode a first-sighted pin is
+    written `approved=True`: the viewer would be blessing a tool definition through the side door
+    while `/mcp/pins/approve` and `/mcp/pins/revoke` two hundred lines below both call
+    `require_admin` for the same decision. The proxy that legitimately calls this presents a service
+    token, so gating on admin-or-service costs the real caller nothing.
     """
+    require_admin_or_service(user)
     namespace = scoped_namespace(user, body.namespace or None) or body.namespace
     if not namespace:
         raise HTTPException(status_code=400, detail="namespace is required")

@@ -426,3 +426,27 @@ def client_and_post(body):
     client, _ = _client()
     return client.post("/api/v1/mcp/pins/observe", json=body,
                        headers=_hdr(role="service", namespace="agents"))
+
+
+def test_a_viewer_cannot_write_the_pin_store():
+    """`/mcp/pins/observe` is a WRITE to Gate A's memory of what each server has served.
+
+    It had the namespace binding and no role gate at all, so a read-only viewer scoped to a namespace
+    could create pins there — and in TOFU mode a first-sighted pin is written `approved=True`, so the
+    viewer would be blessing a tool definition through the side door while `/mcp/pins/approve` and
+    `/mcp/pins/revoke` both call `require_admin` for that same decision. Two doors to one outcome,
+    one of them locked.
+
+    The service arm is the control: it proves the endpoint still works and that the 403 below is
+    about the ROLE rather than a request the handler rejects for some other reason.
+    """
+    client, _session = _client()
+    viewer = client.post("/api/v1/mcp/pins/observe", json=_observe(),
+                         headers=_hdr(role="viewer", namespace="agents"))
+    assert viewer.status_code == 403, (
+        f"a read-only viewer wrote to the pin store: {viewer.status_code} {viewer.text[:200]}"
+    )
+
+    service = client.post("/api/v1/mcp/pins/observe", json=_observe(),
+                          headers=_hdr(role="service", namespace="agents"))
+    assert service.status_code == 200, f"the proxy's own call broke: {service.text[:200]}"

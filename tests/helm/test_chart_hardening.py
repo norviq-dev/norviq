@@ -22,6 +22,7 @@ Skipped (not failed) when the `helm` binary isn't on PATH, so the suite still ru
 from __future__ import annotations
 
 import pathlib
+import re
 import shutil
 import subprocess
 
@@ -409,6 +410,56 @@ def test_every_pod_reading_chart_config_by_name_rolls_when_it_changes() -> None:
             assert "checksum/config" in annotations, (
                 f"{name} reads {sorted(configmaps)} by name but carries no checksum/config."
             )
+
+
+def _is_setting_value(text: str) -> bool:
+    """A number or a boolean is a knob, not a credential.
+
+    Keyed on the VALUE rather than more name gymnastics: `NRVQ_AUTH_MIN_PASSWORD_LENGTH` says
+    "password" and holds `12`, and no list of name exceptions stays correct as settings are added.
+    A credential is never a bare integer.
+    """
+    t = text.strip().strip('"')
+    return t == "" or t.lower() in {"true", "false"} or t.replace(".", "", 1).isdigit()
+
+
+def test_no_credential_is_rendered_into_a_configmap() -> None:
+    """A ConfigMap is not a place for a password, and the chart put one there.
+
+    `NRVQ_FLEET_PG_URL` — a Postgres DSN with the password inline — was rendered into the
+    norviq-fleet-config ConfigMap while the fleet hub's OTHER two secrets (the bundle signing key and
+    the OIDC client secret) were correctly in norviq-secrets. A ConfigMap is not encrypted at rest by
+    default, is readable by anything holding `get configmaps` in the namespace, and is printed in full
+    by `kubectl describe` and every routine cluster dump — so the credential travelled into support
+    bundles and terminal scrollback that a Secret would have kept out of.
+
+    Asserted by SHAPE rather than by key name, so the next credential to be added is covered whatever
+    it is called: any value that looks like a DSN with inline credentials, and any key whose name says
+    it is a password or a private key.
+    """
+    res = _template(
+        "--set", "fleet.enabled=true", "--set", "fleet.hub.enabled=true",
+        "--set", "fleet.hub.postgresql.password=Str0ngFleetPw!2026",
+        "--set", "fleet.hub.pgUrl=postgresql://hub:SUPERSECRET@pg:5432/fleet",
+        "--set", "fleet.hub.signingKey=SIGNKEY", "--set", "fleet.oidc.clientSecret=OIDCSECRET",
+    )
+    assert res.returncode == 0, res.stderr
+
+    dsn_with_password = re.compile(r"[a-z][a-z0-9+.-]*://[^/\s:]+:[^/\s@]+@", re.I)
+    secretish = re.compile(r"(password|passwd|secret|private_?key|signing_?key)", re.I)
+
+    offenders: list[str] = []
+    for doc in yaml.safe_load_all(res.stdout):
+        if not doc or doc.get("kind") != "ConfigMap":
+            continue
+        name = doc["metadata"]["name"]
+        for key, value in (doc.get("data") or {}).items():
+            text = str(value)
+            if dsn_with_password.search(text):
+                offenders.append(f"{name}.{key} is a DSN with an inline credential")
+            elif secretish.search(key) and not _is_setting_value(text):
+                offenders.append(f"{name}.{key} is named like a credential and holds a non-numeric value")
+    assert not offenders, "credentials rendered into a ConfigMap:\n  " + "\n  ".join(offenders)
 
 
 def test_bundled_default_is_unchanged_by_the_byo_plumbing() -> None:

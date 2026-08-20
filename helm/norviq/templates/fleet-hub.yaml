@@ -23,7 +23,8 @@ metadata:
   labels:
     {{- include "norviq.labels" . | nindent 4 }}
 data:
-  NRVQ_FLEET_PG_URL: {{ .Values.fleet.hub.pgUrl | quote }}
+  # NRVQ_FLEET_PG_URL is NOT here — it is a Postgres URL and carries the password. It lives in
+  # the norviq-secrets Secret, which this pod already loads by secretRef alongside this map.
   NRVQ_FLEET_STALE_AFTER_S: {{ .Values.fleet.staleAfterSeconds | default 180 | quote }}
   NRVQ_FLEET_BUNDLE_TTL_S: {{ .Values.fleet.hub.bundleTtlSeconds | default 900 | quote }}
   NRVQ_DB_SSL_MODE: {{ include "norviq.dbSslMode" . | quote }}
@@ -91,7 +92,7 @@ spec:
             - secretRef:
                 name: norviq-secrets        # NRVQ_API_SECRET_KEY for token validation
             - configMapRef:
-                name: norviq-fleet-config   # NRVQ_FLEET_PG_URL + OIDC validation settings
+                name: norviq-fleet-config   # OIDC validation settings (no credentials)
           {{- if .Values.fleet.hub.signingKeySecretName }}
           # Read the bundle signing PRIVATE key from a pre-created in-cluster Secret (never in values/
           # git/CI). An explicit env overrides the empty envFrom default. Empty -> hub cannot sign (fail-closed).
