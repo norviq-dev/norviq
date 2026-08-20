@@ -4,6 +4,12 @@ import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 
 export default defineConfig({
+  // See the NO AMBIENT DEV TOKEN note in `test` below. This has to be a `define` and not `test.env`
+  // or a `vi.stubEnv`: Vite INLINES `import.meta.env.VITE_*` at transform time from the loaded .env
+  // files, so by the time either of those runs there is no lookup left to intercept. Both were tried
+  // and both were inert while reading as a fix. `define` replaces at that same transform stage.
+  // Gated on VITEST so production builds keep the real value.
+  define: process.env.VITEST ? { "import.meta.env.VITE_DEV_TOKEN": '""' } : {},
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
@@ -67,6 +73,23 @@ export default defineConfig({
     // happened to have the console open: 7 tests failed with a 15s timeout and passed again after
     // pinning the origin. Nothing listens on 59999, so unmocked requests now fail fast and locally.
     environmentOptions: { jsdom: { url: "http://localhost:59999" } },
+    // NO AMBIENT DEV TOKEN — the same class of bug as the jsdom origin above, and it cost more.
+    //
+    // AppContext's DEV bootstrap (src/store/AppContext.tsx:148-156) does
+    // `localStorage.setItem("nrvq_token", import.meta.env.VITE_DEV_TOKEN)` when no token is present.
+    // Vitest runs with DEV true and Vite loads `ui/.env.local`, which is GITIGNORED — so a developer's
+    // machine silently authenticated the whole suite and CI, where that file does not exist, did not.
+    // AppContext's posture effect opens with `if (!getToken()) return;`, so with no token `posture.mode`
+    // stays null forever and every render gated on the namespace's enforcement posture never appears.
+    // One test burned its full 30s budget on CI while finishing in 180ms here, and two investigations
+    // read that as a slow runner and raised the budget twice (1s -> 15s -> 30s) at something that was
+    // never timing.
+    //
+    // It belongs HERE and not in a `vi.stubEnv` in setup.ts. That was tried first and is INERT: Vite
+    // inlines `VITE_*` references at transform time, so by the time a stub runs there is no lookup left
+    // to intercept — `import.meta.env.VITE_DEV_TOKEN` still read the real token straight out of
+    // .env.local while the setup file claimed to have neutralised it. `test.env` is applied when the
+    // environment is built, which is early enough to win.
     setupFiles: "./src/test/setup.ts",
     // Vitest owns the unit tests under src/. The Playwright E2E suite (tests/e2e/**, @playwright/test)
     // must NOT be collected by vitest — its `test()` is a different runner and errors on import.
