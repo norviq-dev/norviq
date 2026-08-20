@@ -74,6 +74,13 @@ spec:
         app: norviq-internal-tls
     spec:
       serviceAccountName: norviq-internal-tls
+      {{- /* Hook Jobs pull the SAME images.bootstrap image from the SAME images.registry as every
+             Deployment, so they need the same pull auth. Without it a private-registry install
+             ImagePullBackOffs here while every other pod starts: the pre-install cert and TLS
+             hooks then block `helm install --wait` on a deadline, and the pre-delete finalizer
+             cleanup silently fails to release norviq.io/policy-protection, stranding NrvqPolicy
+             CRs in Terminating on uninstall. */}}
+      {{- include "norviq.imagePullSecrets" . | nindent 6 }}
       restartPolicy: Never
       securityContext:
         # The bootstrap image ships openssl (and curl, which replaces kubectl here), so this hook

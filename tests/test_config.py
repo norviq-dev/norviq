@@ -110,3 +110,49 @@ def test_the_chart_s_rate_limit_var_actually_reaches_the_limiter(monkeypatch) ->
 
     monkeypatch.delenv("NRVQ_EVALUATOR_RATE_LIMIT_PER_WINDOW", raising=False)
     assert NorviqSettings().evaluator_rate_limit_per_window == 60
+
+
+def test_every_env_var_the_chart_renders_is_actually_consumed() -> None:
+    """The chart must not render a variable that nothing reads.
+
+    This class of bug has now happened twice — NRVQ_RATE_LIMIT and NRVQ_VIOLATION_PENALTY — and both
+    times the shape was identical: configmap.yaml renders a name, no Settings field binds it,
+    SettingsConfigDict(extra="ignore") drops it in silence, and because the chart default matched the
+    code default the knob looked wired right up until an operator depended on it. One of them governs
+    a rate limiter and the other how fast a misbehaving identity loses trust; both read as configured
+    while doing nothing.
+
+    Fixing instances leaves the class open, so this asserts the invariant over EVERY rendered
+    variable. A new one added to configmap.yaml without a matching field fails here rather than in
+    somebody's cluster.
+    """
+    import re
+    from pathlib import Path
+    from pydantic import AliasChoices
+    from norviq.config import NorviqSettings
+
+    cm = Path(__file__).resolve().parents[1] / "helm/norviq/templates/configmap.yaml"
+    rendered = set(re.findall(r"^\s{2}(NRVQ_[A-Z0-9_]+):", cm.read_text(), re.M))
+
+    consumed: set[str] = set()
+    for name, field in NorviqSettings.model_fields.items():
+        consumed.add(f"NRVQ_{name.upper()}")           # the env_prefix binding
+        alias = getattr(field, "validation_alias", None)
+        if isinstance(alias, AliasChoices):
+            consumed.update(str(c).upper() for c in alias.choices)
+        elif isinstance(alias, str):
+            consumed.add(alias.upper())
+
+    # Consumed OUTSIDE pydantic, deliberately. Each needs its reader named, so that "it is fine, it
+    # is read elsewhere" is a checkable claim rather than an assumption — the assumption is exactly
+    # what let the two real orphans sit here unnoticed.
+    NON_PYDANTIC = {
+        "NRVQ_API_WORKERS": "Dockerfile.api CMD — uvicorn --workers ${NRVQ_API_WORKERS:-4}",
+    }
+
+    orphans = sorted(rendered - consumed - set(NON_PYDANTIC))
+    assert not orphans, (
+        "configmap.yaml renders variables nothing consumes: "
+        + ", ".join(orphans)
+        + ". Either bind them with a validation_alias, or record the reader in NON_PYDANTIC."
+    )

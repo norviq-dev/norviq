@@ -147,7 +147,16 @@ class NorviqSettings(BaseSettings):
     # Hard per-cache entry cap (bounds per-pod memory under identity/namespace churn). NRVQ_EVALUATOR_INPROC_CACHE_MAX.
     evaluator_inproc_cache_max: int = 8192
     trust_threshold: float = 0.7
-    trust_violation_penalty: float = 0.05
+    # NRVQ_VIOLATION_PENALTY is accepted because the CHART SENDS IT (configmap.yaml renders
+    # `config.violationPenalty` under that name). Nothing consumed it and `extra="ignore"` dropped it,
+    # so an operator raising the penalty to make repeated violations cost more trust got the shipped
+    # 0.05 regardless — and both defaults being 0.05 made it invisible until someone depended on it.
+    # Identical in shape to the NRVQ_RATE_LIMIT defect above; found by auditing all 68 rendered
+    # variables against the model rather than waiting for the next report.
+    trust_violation_penalty: float = Field(
+        default=0.05,
+        validation_alias=AliasChoices("NRVQ_TRUST_VIOLATION_PENALTY", "NRVQ_VIOLATION_PENALTY"),
+    )
     evaluator_max_concurrency: int = 10
     # OPA evaluation runtime. "server" = long-lived OPA queried over HTTP (default, low latency + HA);
     # "subprocess" = legacy per-call `opa eval` fork (rollback gate, no redeploy needed to revert).
