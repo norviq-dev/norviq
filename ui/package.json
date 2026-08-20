@@ -11,7 +11,8 @@
     "test": "vitest",
     "test:ui": "vitest --ui",
     "test:run": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "prebuild": "node scripts/patch-vendored-dompurify.mjs"
   },
   "dependencies": {
     "@fontsource/jetbrains-mono": "^5.2.8",
