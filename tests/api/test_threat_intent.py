@@ -356,3 +356,61 @@ class TestPathGovernedBy:
     def test_no_policy_for_class(self):
         from norviq.api.routers.threats import _path_governed_by
         assert _path_governed_by({}, "report-gen", "warehouse_task", "delete") == ""
+
+
+# --- Rego injection ------------------------------------------------------------------------------
+#
+# Every value reaching generated Rego is escaped at the point of emission (`_rego_string` and its two
+# siblings in threat_intent.py). Before that, a tool name or an agent class was pasted straight into a
+# string literal as f'"{v}"', so a value carrying a quote could close the literal and open a rule.
+#
+# This is the one policy in the product whose whole purpose is DEFAULT-DENY. Turning it into
+# allow-everything is not a degradation of the control, it is its inversion — and the generated draft
+# still reads as default-deny in the console, because the injected rule sits below the header saying
+# so and the module compiles cleanly, so the policy validator accepts it on apply.
+#
+# The payloads below are the ones that actually WORKED against the unescaped generator, verified by
+# evaluating the generated module with the real opa binary. An earlier attempt with `allow { true }`
+# did nothing: the rule the policy gates on is `allow_intent`, not `allow`, so a payload that reads
+# like an exploit is not one. Targeting the wrong rule is how this would have been written off.
+
+_INJECTION_PAYLOADS = [
+    pytest.param('a"} allow_intent { true } unused := {"', id="defines-allow_intent"),
+    pytest.param('a"} in_allowlist { true } unused := {"', id="defines-in_allowlist"),
+    pytest.param('a"} in_allowlist { input.tool_name } unused := {"', id="in_allowlist-via-input"),
+]
+
+
+@pytest.mark.parametrize("payload", _INJECTION_PAYLOADS)
+def test_a_crafted_tool_name_cannot_turn_default_deny_into_allow(payload: str):
+    rego = generate_intent_rego(CLS, ["get_report", payload], Intent())
+    assert _decide(rego, _inp("exfiltrate_all")) == "block", (
+        "a tool name escaped its string literal and added a rule — the default-deny allowlist policy "
+        "now allows a tool nobody put on the allowlist"
+    )
+
+
+@pytest.mark.parametrize("payload", _INJECTION_PAYLOADS)
+def test_a_crafted_agent_class_cannot_turn_default_deny_into_allow(payload: str):
+    """Same hole, different field. The class is interpolated at four sites including two comments."""
+    cls = CLS + payload
+    rego = generate_intent_rego(cls, ["get_report"], Intent())
+    pkg = f"norviq.intent.{sanitize_class(cls)}"
+    with tempfile.TemporaryDirectory() as d:
+        rp, ip = Path(d) / "p.rego", Path(d) / "i.json"
+        rp.write_text(rego)
+        ip.write_text(json.dumps(opa_input_for_step("exfiltrate_all", "payments", cls, {})))
+        out = subprocess.run(
+            [_OPA, "eval", "--v0-compatible", "-d", str(rp), "-i", str(ip), f"data.{pkg}.decision"],
+            capture_output=True, text=True, check=True,
+        )
+    assert json.loads(out.stdout)["result"][0]["expressions"][0]["value"] == "block"
+
+
+def test_the_injection_tests_can_tell_allow_from_block():
+    """The control arm. Every assertion above is `== "block"`, which a generator that emitted a
+    syntactically broken module (or nothing at all) would also satisfy for the wrong reason. So pin
+    that the same harness reports `allow` when the policy really does allow."""
+    rego = generate_intent_rego(CLS, ["get_report"], Intent())
+    assert _decide(rego, _inp("get_report")) == "allow"
+    assert _decide(rego, _inp("exfiltrate_all")) == "block"

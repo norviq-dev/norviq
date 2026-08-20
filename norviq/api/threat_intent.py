@@ -164,13 +164,60 @@ def sanitize_class(agent_class: str) -> str:
     return token
 
 
+def _rego_string(value: str) -> str:
+    """A complete, escaped Rego string LITERAL for `value` — quotes included.
+
+    EVERY value interpolated into generated Rego goes through this or one of its two siblings. It used
+    to be `f\'"{v}"\'`, which let a tool name close the literal and open a rule: a name of
+
+        x"}\n\nallow { true }\n\nunused := {"
+
+    turned `generate_intent_rego`\'s DEFAULT-DENY allowlist policy into one carrying an unconditional
+    `allow { true }`. That inverts the single control the policy exists to provide — a positive-security
+    allowlist becomes allow-everything — and the draft still reads as a default-deny policy in the
+    console, because the injected rule sits below the header that says so.
+
+    Rego string literals are JSON strings, so `json.dumps` is exactly the right encoder rather than an
+    approximation of one: it handles the quote, the backslash, every control character and the newline
+    that made the break-out possible.
+
+    `ensure_ascii=True` deliberately. It escapes non-ASCII to \\uXXXX, which costs nothing semantically
+    (Rego reads the two spellings as the same string) and makes homoglyphs and zero-width characters
+    VISIBLE in a generated policy a human is asked to review before applying. This product exists in
+    part to catch those; its own generated artefacts should not hide them.
+    """
+    return json.dumps(str(value))
+
+
+def _rego_inner(value: str) -> str:
+    """`value` escaped for embedding INSIDE a larger Rego string literal (no surrounding quotes).
+
+    For the human-readable reason strings, where the class name sits inside a sentence. Same escaping,
+    minus the quotes json.dumps adds.
+    """
+    return json.dumps(str(value))[1:-1]
+
+
+_COMMENT_UNSAFE = re.compile(r"[\r\n\x00-\x1f\x7f]")
+
+
+def _rego_comment(value: str) -> str:
+    """`value` reduced to something that cannot escape a `#` comment line.
+
+    A comment is not a safe place either: generated headers interpolate the class name and the source
+    display name, and a single newline ends the comment and starts executable policy. Control
+    characters are replaced rather than dropped so the mangling is visible instead of silent.
+    """
+    return _COMMENT_UNSAFE.sub("\uFFFD", str(value))
+
+
 def _rego_str_set(name: str, values: tuple[str, ...]) -> str:
-    items = ", ".join(f'"{v}"' for v in values)
+    items = ", ".join(_rego_string(v) for v in values)
     return f"{name} := {{{items}}}"
 
 
 def _rego_quoted_set(name: str, values: list[str]) -> str:
-    items = ", ".join(f'"{v}"' for v in values)
+    items = ", ".join(_rego_string(v) for v in values)
     return f"{name} := {{{items}}}"
 
 
@@ -195,7 +242,11 @@ def generate_capability_rego(
     src_tok = _control_token(source_type)
     cls_tok = sanitize_class(agent_class)
     verb_tok = "_".join(verbs)
-    safe_reason = (reason or "").replace('"', "'")
+    # Every value that reaches generated Rego is escaped at the point of emission — see _rego_string.
+    cls_lit = _rego_string(agent_class)
+    cls_cmt = _rego_comment(agent_class)
+    rid_lit = _rego_string(rule_id)
+    reason_lit = _rego_string(reason or "")
     names = sorted({t.strip() for t in tool_names if t and t.strip()})
     tool_set = _rego_quoted_set("cap_tools", names)
 
@@ -207,15 +258,15 @@ def generate_capability_rego(
         alt = "|".join(re.escape(f) for f in frags)
         pat = f"(^|[^a-z0-9])({alt})([^a-z0-9]|$)"
         pattern_block = f"""
-cap_verb_pattern := "{pat}"
+cap_verb_pattern := {_rego_string(pat)}
 # Forward guard: block any tool whose name (or its confusable-normalized form) matches a target verb.
-blocks["{rule_id}"] {{ is_capability_class; regex.match(cap_verb_pattern, lower(input.tool_name)) }}
-blocks["{rule_id}"] {{ is_capability_class; regex.match(cap_verb_pattern, lower(input.tool_name_normalized)) }}"""
+blocks[{rid_lit}] {{ is_capability_class; regex.match(cap_verb_pattern, lower(input.tool_name)) }}
+blocks[{rid_lit}] {{ is_capability_class; regex.match(cap_verb_pattern, lower(input.tool_name_normalized)) }}"""
 
     return f"""package norviq.remediation.capability.{src_tok}_{verb_tok}_{cls_tok}
 
-# CAPABILITY POLICY — GENERATED, DRY-RUN DRAFT. Makes {source_display} {"/".join(verbs)}-safe for agent
-# class "{agent_class}": blocks any tool that performs those verbs (by verb-name pattern — a FORWARD GUARD
+# CAPABILITY POLICY — GENERATED, DRY-RUN DRAFT. Makes {_rego_comment(source_display)} {"/".join(verbs)}-safe for agent
+# class "{cls_cmt}": blocks any tool that performs those verbs (by verb-name pattern — a FORWARD GUARD
 # for tools not yet seen — plus the concrete tools observed reaching it). The OPA input has no data-source
 # field, so the source is resolved to verbs/tools at generation time. TIGHTEN-ONLY at baseline priority —
 # only ADDS denials. NEVER auto-enforces — the operator reviews + applies via the gated Policies flow.
@@ -224,18 +275,18 @@ default decision = "allow"
 default rule_id  = "capability_noop"
 default reason   = "Allowed"
 
-is_capability_class {{ input.agent.agent_class == "{agent_class}" }}
+is_capability_class {{ input.agent.agent_class == {cls_lit} }}
 
 {tool_set}
 
-blocks["{rule_id}"] {{ is_capability_class; cap_tools[input.tool_name] }}
+blocks[{rid_lit}] {{ is_capability_class; cap_tools[input.tool_name] }}
 # Evasion parity: also match the confusable-skeleton of the tool name (homoglyph/zero-width).
-blocks["{rule_id}"] {{ is_capability_class; cap_tools[input.tool_name_normalized] }}{pattern_block}
+blocks[{rid_lit}] {{ is_capability_class; cap_tools[input.tool_name_normalized] }}{pattern_block}
 
 block_fired {{ blocks[_] }}
 decision = "block" {{ block_fired }}
 rule_id = sort([id | blocks[id]])[0] {{ block_fired }}
-reason = "{safe_reason}" {{ block_fired }}
+reason = {reason_lit} {{ block_fired }}
 """
 
 
@@ -304,7 +355,7 @@ def generate_intent_rego(
         return (_rego_quoted_set(rego_name, entries) if entries else "", entries)
 
     # allow_intent body: class guard, allowlist membership, then one line per enabled refinement toggle.
-    guards = [f'    input.agent.agent_class == "{agent_class}"', "    in_allowlist"]
+    guards = [f"    input.agent.agent_class == {_rego_string(agent_class)}", "    in_allowlist"]
     if intent.readonly:
         guards.append("    is_read           # read-only refinement: read verb (learned verb overrides the name)")
     if intent.egress:
@@ -433,16 +484,16 @@ rate_within { input.call_depth <= 8 }""")
 
     header = f"""package norviq.intent.{token}
 
-# Positive-security INTENT policy for agent class "{agent_class}" — GENERATED, DRY-RUN DRAFT.
+# Positive-security INTENT policy for agent class "{_rego_comment(agent_class)}" — GENERATED, DRY-RUN DRAFT.
 # DEFAULT-DENY: a call is BLOCKED unless it is this class AND the tool is in the intended allowlist AND
 # every enabled refinement toggle holds. The allowlist is matched evasion-normalized (lower + skeleton).
 # TIGHTEN-ONLY at baseline priority (most-restrictive tie-break) — only ADDS denials, never weakens a block.
-# Allowlist ({len(names)} tools): {", ".join(names) or "(empty — denies everything for the class)"}
+# Allowlist ({len(names)} tools): {", ".join(_rego_comment(n) for n in names) or "(empty — denies everything for the class)"}
 # Refinements: {", ".join(enabled) or "(none)"}{learned_note}
 
 default decision = "block"
 default rule_id = "intent_default_deny"
-default reason = "Blocked: tool is not in the intended allowlist for {agent_class}"
+default reason = "Blocked: tool is not in the intended allowlist for {_rego_inner(agent_class)}"
 
 {_rego_quoted_set("allow_names", names)}
 {_rego_quoted_set("allow_skeletons", skels)}
@@ -459,11 +510,11 @@ in_allowlist {{ allow_skeletons[input.tool_name_normalized] }}{helpers}
 
 # a class call that is NOT in the intended allowlist, OR that IS allowlisted but fails an enabled
 # refinement toggle, is denied
-denied {{ input.agent.agent_class == "{agent_class}"; not allow_intent }}
+denied {{ input.agent.agent_class == {_rego_string(agent_class)}; not allow_intent }}
 
 decision = "allow" {{ allow_intent }}
 rule_id = "intent_allow_{token}" {{ allow_intent }}
-reason = "Allowed: tool in the intended allowlist for {agent_class}" {{ allow_intent }}
+reason = "Allowed: tool in the intended allowlist for {_rego_inner(agent_class)}" {{ allow_intent }}
 
 # HONEST REASON for the self-contradictory case: the tool IS in the allowlist but an enabled refinement
 # toggle (readonly / no-egress / scope / rate) still fails it — e.g. an egress tool allowlisted while "No
@@ -472,14 +523,14 @@ reason = "Allowed: tool in the intended allowlist for {agent_class}" {{ allow_in
 # decision stays "block" either way — only rule_id/reason change to reflect which guard actually failed.
 decision = "block" {{ denied; in_allowlist }}
 rule_id = "intent_refinement_mismatch" {{ denied; in_allowlist }}
-reason = sprintf("Blocked: %s is allowlisted for {agent_class} but fails an enabled refinement (e.g. no-external-egress)", [input.tool_name]) {{ denied; in_allowlist }}
+reason = sprintf("Blocked: %s is allowlisted for {_rego_inner(agent_class)} but fails an enabled refinement (e.g. no-external-egress)", [input.tool_name]) {{ denied; in_allowlist }}
 
 # Explicit reachable block rule for the genuinely-not-allowlisted case — semantically identical to the
 # default-deny, but present as a rule so the policy validator accepts the draft on apply (it requires
 # `decision = "block" {{ ... }}`).
 decision = "block" {{ denied; not in_allowlist }}
 rule_id = "intent_default_deny" {{ denied; not in_allowlist }}
-reason = "Blocked: tool is not in the intended allowlist for {agent_class}" {{ denied; not in_allowlist }}
+reason = "Blocked: tool is not in the intended allowlist for {_rego_inner(agent_class)}" {{ denied; not in_allowlist }}
 """
     return header + "\n" + tail
 
@@ -696,8 +747,8 @@ def generate_remediation_rego(
 
     header = f"""package norviq.remediation.{fw_tok}.{ctrl_tok}
 
-# CONTROL-SPECIFIC remediation for {framework} · {control_id} {safe_name} — GENERATED, DRY-RUN DRAFT.
-# Closes the runtime gap by asserting this control's mapped block rule(s) for agent class "{agent_class}".
+# CONTROL-SPECIFIC remediation for {_rego_comment(framework)} · {_rego_comment(control_id)} {_rego_comment(safe_name)} — GENERATED, DRY-RUN DRAFT.
+# Closes the runtime gap by asserting this control's mapped block rule(s) for agent class "{_rego_comment(agent_class)}".
 # TIGHTEN-ONLY at baseline priority (most-restrictive tie-break) — only ADDS denials, never weakens a
 # baseline block. NEVER auto-enforces — the operator reviews + applies via the gated Policies flow.
 # Mapped rules: {", ".join(usable)}
@@ -707,7 +758,7 @@ default decision = "allow"
 default rule_id  = "remediation_noop"
 default reason   = "Allowed"
 
-is_remediation_class {{ input.agent.agent_class == "{agent_class}" }}
+is_remediation_class {{ input.agent.agent_class == {_rego_string(agent_class)} }}
 """
 
     helpers_block = "\n".join(helper_lines)
@@ -720,7 +771,7 @@ is_remediation_class {{ input.agent.agent_class == "{agent_class}" }}
 block_fired {{ blocks[_] }}
 decision = "block" {{ block_fired }}
 rule_id = sort([id | blocks[id]])[0] {{ block_fired }}
-reason = "{framework} {control_id} {safe_name} — remediation block" {{ block_fired }}
+reason = "{_rego_inner(framework)} {_rego_inner(control_id)} {_rego_inner(safe_name)} — remediation block" {{ block_fired }}
 """
     return header + tail
 
@@ -764,7 +815,7 @@ def generate_remediation_overlay_rego(agent_class: str, controls: list[dict]) ->
 
     header = f"""package norviq.remediation.overlay.{class_tok}
 
-# COMPLIANCE remediation OVERLAY for agent class "{safe_class}" — GENERATED, DRY-RUN until applied.
+# COMPLIANCE remediation OVERLAY for agent class "{_rego_comment(safe_class)}" — GENERATED, DRY-RUN until applied.
 # Accumulates the UNION of every applied compliance control (one block per control × mapped rule); applying
 # another control UNIONS into this same overlay instead of replacing it. TIGHTEN-ONLY at
 # baseline priority (most-restrictive tie-break) — only ADDS denials, never weakens a baseline block.
@@ -775,7 +826,7 @@ default decision = "allow"
 default rule_id  = "remediation_noop"
 default reason   = "Allowed"
 
-is_remediation_class {{ input.agent.agent_class == "{safe_class}" }}
+is_remediation_class {{ input.agent.agent_class == {_rego_string(safe_class)} }}
 """
     helpers_block = "\n".join(helper_lines)
     blocks_block = "\n".join(block_lines)
