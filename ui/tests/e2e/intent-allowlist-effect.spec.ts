@@ -77,6 +77,36 @@ test.describe("Intent allowlist — EFFECT PROOF (generated policy flips real de
       ignoreHTTPSErrors: true,
       extraHTTPHeaders: token ? { Authorization: `Bearer ${token}` } : {}
     });
+
+    // ESTABLISH THE BASELINE THIS TEST ASSERTS AGAINST, rather than assuming it.
+    //
+    // Step 4c expects an allowlisted tool carrying a prompt injection to be blocked "by the UNWEAKENED
+    // baseline" — but `default` is not in kind-e2e's policyQuotaNamespaces={agents,analytics}, so no
+    // cluster guard is rendered for it, and `_append_controls_floor` attaches `<ns>:__controls__` only
+    // when one exists. With neither, `_collect_candidates` returned exactly ONE module — the throwaway
+    // intent policy — whose allow matches on TOOL NAME with no content inspection at all. So the
+    // injection came back `allow`, and the test read as a governance bypass when the namespace simply
+    // had nothing to bypass.
+    //
+    // `agents`/`analytics` are not the answer either: their cluster guards run at enforcementMode
+    // `audit`, which softens the block to `policy_audit_would_block:llm01_prompt_injection` — the
+    // assertion needs a HARD block.
+    //
+    // So materialize the namespace's own controls floor through the shipped admin API, which is what a
+    // real operator has. Verified with the real compiler and opa that this floor gives exactly the three
+    // outcomes below: benign search_kb -> allow/default_allow, the same tool carrying the injection ->
+    // block/llm01_prompt_injection, get_order -> allow (so the intent policy's default-deny is what
+    // blocks it, which is what 4b is actually testing).
+    //
+    // Left in place afterwards on purpose. There is no un-materialize endpoint, and a namespace WITH a
+    // baseline floor is the safer state to leave a shared test cluster in — more enforcement, not less.
+    const floor = await api.put(`/api/v1/baseline/controls`, {
+      data: { namespace: NS, preset: "strict", effects: { llm01_prompt_injection: "deny" } }
+    });
+    if (!floor.ok()) {
+      // Do not limp on into three assertions that can only fail confusingly.
+      throw new Error(`could not materialize the ${NS} controls floor: ${floor.status()} ${await floor.text()}`);
+    }
   });
 
   test.afterAll(async () => {
