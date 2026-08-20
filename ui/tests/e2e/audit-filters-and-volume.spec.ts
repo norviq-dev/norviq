@@ -250,7 +250,12 @@ test.describe("Overview — Monitor mode reports what WOULD have been blocked", 
           headers: auth,
           data: {
             tool_name: "execute_sql",
-            tool_params: { query: "DROP TABLE payments" },
+            // DISTINCT per call. Four byte-identical evaluates coalesce: `event.mcp`-keyed evaluation
+            // caching returns the first decision for the rest, so one audit row is written and the
+            // delta below was 1 where the loop count says 4. Varying the table keeps every call a
+            // genuine block of the same shape while giving each its own cache key — which is what makes
+            // this a test of the COUNTER rather than of the cache.
+            tool_params: { query: `DROP TABLE payments_${i}` },
             framework: "langchain",
             session_id: "e2e-monitor",
             agent_identity: {
