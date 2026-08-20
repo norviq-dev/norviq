@@ -13,7 +13,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from norviq.api.auth import get_current_user, read_namespace, require_admin, require_admin_or_service, require_target_cluster, scoped_namespace
-from norviq.api.db.models import AuditLogEntry
+from norviq.api.db.models import AuditLogEntry, Policy
 from norviq.api.db.session import get_session
 from norviq.api.routers.settings_router import assert_apply_allowed  # shared dry-run-only gate
 from norviq.api.synthetic import audit_row_is_non_real, is_synthetic_identity  # exclude probe/test traffic from dry-run replay
@@ -427,6 +427,60 @@ async def get_policy(
             "version": vers[-1].version if vers else 1}  # real version number, not the count
 
 
+
+# A generated intent policy is DEFAULT-DENY over an allowlist of tool NAMES. It inspects no content —
+# that is the baseline's job, and the two are designed to stack: `generate_intent_rego` documents
+# itself as tighten-only, meaning a baseline `block` always wins the most-restrictive tie-break.
+#
+# That promise is conditional on a baseline existing, and nothing said so. In a namespace with neither
+# a cluster guard nor a tuned controls floor, `_collect_candidates` returns exactly one module — the
+# intent policy — and its allow is the whole decision. An allowlisted tool then carries a prompt
+# injection straight through, because nothing in that module looks at the arguments.
+#
+# The operator has no way to see this. The console calls it positive security and default-deny, the
+# draft applies cleanly, the un-allowlisted tools really are blocked, and the one thing that is not
+# happening is the one they would assume from the words. It is the shape this codebase keeps
+# producing: a control that reads as enforcing while enforcing less than it appears to.
+#
+# So refuse the apply and say what to do instead, rather than accept it and hope the docs are read.
+# Refusing is safe in the direction that matters — it withholds a policy the operator would have
+# over-trusted, and it withholds it at the moment they are looking at the screen.
+_INTENT_PACKAGE_MARKER = "package norviq.intent."
+_BASELINE_SCOPES = ("__baseline__", "__controls__")
+
+
+async def _assert_intent_has_a_baseline_under_it(session: AsyncSession, body: PolicyCreate) -> None:
+    """Refuse a generated intent policy in a namespace that has nothing inspecting content."""
+    if _INTENT_PACKAGE_MARKER not in (body.rego_source or ""):
+        return
+    existing = (
+        await session.execute(
+            select(Policy.agent_class).where(
+                Policy.namespace == body.namespace,
+                Policy.agent_class.in_(_BASELINE_SCOPES),
+            )
+        )
+    ).scalars().all()
+    if existing:
+        return
+    log.warning(
+        "nrvq.api.policy.intent_without_baseline", namespace=body.namespace,
+        agent_class=body.agent_class, code="NRVQ-API-7132",
+    )
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"namespace '{body.namespace}' has no baseline, so this intent policy would be the only "
+            "thing evaluating its traffic. An intent allowlist matches on TOOL NAME and inspects no "
+            "arguments — with nothing underneath it, an allowlisted tool carrying a prompt injection, "
+            "SQL injection or a PII payload is allowed, while the policy still reads as default-deny. "
+            "Enable the baseline controls for this namespace first (Policies -> Baseline controls, or "
+            "PUT /api/v1/baseline/controls), then apply this intent policy on top — it is designed to "
+            "tighten a baseline, not to replace one."
+        ),
+    )
+
+
 @router.post("/policies")
 async def create_policy(body: PolicyCreate, request: Request, user: dict = Depends(get_current_user), session: AsyncSession = Depends(get_session), _target: None = Depends(require_target_cluster)) -> dict:
     """Create or update a policy (admin, or the webhook controller's service identity)."""
@@ -459,6 +513,7 @@ async def create_policy(body: PolicyCreate, request: Request, user: dict = Depen
             detail=f"'{body.namespace}' is the managed cluster-baseline scope and cannot be written via this "
                    "endpoint — the cluster baseline is materialized by the loader/seed.",
         )
+    await _assert_intent_has_a_baseline_under_it(session, body)
     validate_policy_create(body)
     agent_class = resolve_policy_key(body)
     # `__pack__` is a managed scope OWNED by the packs router (materialized from NamespacePack rows). A direct
