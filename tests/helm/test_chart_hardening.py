@@ -355,6 +355,62 @@ def test_an_explicit_external_host_still_gets_a_wait_naming_that_host() -> None:
         assert "norviq-redis" not in cmds, f"{dep} still dials the BUNDLED redis name"
 
 
+def test_every_pod_reading_chart_config_by_name_rolls_when_it_changes() -> None:
+    """A name-referenced Secret/ConfigMap is resolved ONCE, at pod start.
+
+    Kubernetes does not roll a Deployment when the content of a Secret or ConfigMap it references by
+    name changes — not for `envFrom`, and not for a `secretKeyRef` either. The chart's answer is a
+    checksum annotation on the pod template, which api and engine carry.
+
+    webhook-deployment.yaml did not. It reads NRVQ_API_SECRET_KEY from `norviq-secrets` and signs the
+    injected sidecar's identity token and its own policy-sync token with it, so `helm upgrade` with a
+    rotated `api.secretKey` rolled api and engine and left the webhook signing with the OLD key. The
+    rotated API rejected both tokens, and injection went on producing pods whose identity the control
+    plane refused — silently, until somebody restarted the webhook. A credential rotation is the
+    moment an operator is least able to tell a broken deployment from a working one.
+
+    Derived from the RENDERED manifest rather than a hand-kept list of deployments, so a new component
+    that reads the chart's config is covered the day it is added rather than the day someone
+    remembers. `ui` references nothing and is therefore correctly absent from both checks.
+    """
+    res = _template()
+    assert res.returncode == 0, res.stderr
+
+    for doc in yaml.safe_load_all(res.stdout):
+        if not doc or doc.get("kind") != "Deployment":
+            continue
+        name = doc["metadata"]["name"]
+        template = doc["spec"]["template"]
+        annotations = template["metadata"].get("annotations") or {}
+
+        secrets: set[str] = set()
+        configmaps: set[str] = set()
+        for container in template["spec"]["containers"]:
+            for entry in container.get("envFrom") or []:
+                if ref := entry.get("secretRef"):
+                    secrets.add(ref["name"])
+                if ref := entry.get("configMapRef"):
+                    configmaps.add(ref["name"])
+            for env in container.get("env") or []:
+                source = env.get("valueFrom") or {}
+                if ref := source.get("secretKeyRef"):
+                    secrets.add(ref["name"])
+                if ref := source.get("configMapKeyRef"):
+                    configmaps.add(ref["name"])
+
+        # Only the chart's OWN objects. An operator's existingSecret is theirs to roll; the chart
+        # cannot checksum a file it does not render.
+        if any(s.startswith("norviq-") for s in secrets):
+            assert "checksum/secret" in annotations, (
+                f"{name} reads {sorted(secrets)} by name but carries no checksum/secret, so rotating "
+                f"that secret updates the Secret and never restarts this pod — it keeps the old value."
+            )
+        if any(c.startswith("norviq-") for c in configmaps):
+            assert "checksum/config" in annotations, (
+                f"{name} reads {sorted(configmaps)} by name but carries no checksum/config."
+            )
+
+
 def test_bundled_default_is_unchanged_by_the_byo_plumbing() -> None:
     """The default path must not grow a pod-level URL override — it still comes from envFrom."""
     res = _template()

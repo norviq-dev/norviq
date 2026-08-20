@@ -23,6 +23,23 @@ spec:
       app: norviq-webhook
   template:
     metadata:
+      annotations:
+        # Roll this pod when the Secret it consumes BY NAME changes. Kubernetes does not do this on
+        # its own for a name-referenced secretKeyRef any more than it does for envFrom: the value is
+        # resolved once at pod start, so the running container keeps whatever it was given.
+        #
+        # Without it, rotating `api.secretKey` rolled api and engine (which carry these annotations)
+        # and left the webhook running on the OLD key. The webhook signs the sidecar identity token
+        # and its own policy-sync token with NRVQ_API_SECRET_KEY, so the rotated API then rejected
+        # both — sidecar injection kept producing pods whose identity the control plane refused,
+        # silently, until somebody happened to restart the webhook. A credential rotation is exactly
+        # when an operator is least able to tell a broken deployment from a working one.
+        #
+        # Only checksum/secret, deliberately. The webhook consumes no ConfigMap by name in either
+        # sidecar mode (verified against the rendered manifest in both), so a checksum/config here
+        # would roll a validating webhook on every unrelated config edit for no benefit. api and
+        # engine carry both because they read the ConfigMap via envFrom.
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
       {{- /* Operator-supplied pod annotations. Their real job is to make the pod template CHANGE when
              something outside it changes — chiefly a rebuilt image under an unchanged tag, where
              Kubernetes correctly sees an identical spec and never rolls. api and engine got this
@@ -30,7 +47,6 @@ spec:
              serving the console kept running the previous bundle. The console is the one component
              a human LOOKS at, which made it the worst possible omission. */}}
       {{- with $.Values.podAnnotations }}
-      annotations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:
