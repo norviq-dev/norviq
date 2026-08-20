@@ -287,6 +287,74 @@ def test_existing_secret_keeps_the_credential_out_of_the_chart() -> None:
     assert eref[("norviq-webhook", "NRVQ_REDIS_URL")] == ("my-redis", "url")
 
 
+def _wait_init_containers(manifest: str) -> dict[str, list[tuple[str, str]]]:
+    """{deployment: [(init container name, its full command)]} for the datastore waits only."""
+    out: dict[str, list[tuple[str, str]]] = {}
+    for doc in yaml.safe_load_all(manifest):
+        if not doc or doc.get("kind") != "Deployment":
+            continue
+        spec = doc["spec"]["template"]["spec"]
+        waits = [
+            (c["name"], " ".join(c.get("command", []) + c.get("args", [])))
+            for c in (spec.get("initContainers") or [])
+            if "postgres" in c["name"] or "redis" in c["name"]
+        ]
+        out[doc["metadata"]["name"]] = waits
+    return out
+
+
+def test_external_datastores_with_no_host_render_no_wait_at_all() -> None:
+    """The install that succeeded and then never started (6fa14d7).
+
+    The documented production shape — managed Postgres/Redis via `enabled: false` + `existingSecret`
+    — rendered api and engine with an init container running `nc -z norviq-postgresql.<ns>...`, the
+    BUNDLED service name, for a Service that `enabled: false` never creates. `helm install` returned
+    success and every api and engine pod then sat in Init:0/2 forever, holding a perfectly correct
+    external URL from the operator's Secret that it was never allowed to try.
+
+    Nothing asserted the symptom. The sibling tests here cover the credential (no datastore secret in
+    the chart) and the refusal (external with no host and no existingSecret fails) — both passed
+    throughout, because neither looks at initContainers. This one looks at initContainers.
+    """
+    res = _template(
+        "--set", "postgresql.enabled=false", "--set", "redis.enabled=false",
+        "--set", "postgresql.existingSecret=my-pg", "--set", "postgresql.existingSecretKey=dsn",
+        "--set", "redis.existingSecret=my-redis",
+    )
+    assert res.returncode == 0, res.stderr
+    waits = _wait_init_containers(res.stdout)
+    for dep in ("norviq-api", "norviq-engine"):
+        assert waits.get(dep) == [], (
+            f"{dep} waits on a datastore whose address the chart does not know: {waits.get(dep)}. "
+            f"There is no Service to dial, so this pod never leaves Init."
+        )
+
+
+def test_an_explicit_external_host_still_gets_a_wait_naming_that_host() -> None:
+    """The control for the test above — otherwise deleting the helper entirely would pass it.
+
+    A wait loop is the right behaviour when the chart HAS an address; the bug was waiting on an
+    address it had invented. So assert the wait exists and names the operator's host, and in
+    particular that the bundled service name appears nowhere in it.
+    """
+    res = _template(
+        "--set", "postgresql.enabled=false", "--set", "redis.enabled=false",
+        "--set", "postgresql.host=pg.example.internal", "--set", "postgresql.password=s3cret",
+        "--set", "redis.host=redis.example.internal",
+    )
+    assert res.returncode == 0, res.stderr
+    waits = _wait_init_containers(res.stdout)
+    for dep in ("norviq-api", "norviq-engine"):
+        cmds = " ".join(cmd for _, cmd in waits.get(dep, []))
+        assert cmds, f"{dep} lost its datastore wait entirely"
+        assert "pg.example.internal" in cmds, f"{dep} does not wait on the operator's postgres host"
+        assert "redis.example.internal" in cmds, f"{dep} does not wait on the operator's redis host"
+        assert "norviq-postgresql" not in cmds, (
+            f"{dep} still dials the BUNDLED postgres name, which `enabled: false` never creates"
+        )
+        assert "norviq-redis" not in cmds, f"{dep} still dials the BUNDLED redis name"
+
+
 def test_bundled_default_is_unchanged_by_the_byo_plumbing() -> None:
     """The default path must not grow a pod-level URL override — it still comes from envFrom."""
     res = _template()
