@@ -36,7 +36,17 @@ func TestWorkloadFromPod(t *testing.T) {
 		{"hyphenated deployment name survives", podWithOwner("ReplicaSet", "billing-api-6c9fd4b7f", nil), "billing-api"},
 		{"direct StatefulSet owner", podWithOwner("StatefulSet", "postgres", nil), "postgres"},
 		{"direct DaemonSet owner", podWithOwner("DaemonSet", "node-agent", nil), "node-agent"},
-		{"explicit label wins over the owner", podWithOwner("ReplicaSet", "checkout-7d9f8b5c4",
+		// REWRITTEN, deliberately. This case used to assert "explicit label wins over the owner" and
+		// expect "checkout-canary" — it pinned the behaviour as intended, and the behaviour was a
+		// forgeable identity. A pod controls its own labels, and the workload tier selects which policy
+		// program runs, so a pod under a strict policy could relabel itself onto a permissive one. The
+		// attested value from the object graph must win; the label is now a fallback for pods that have
+		// no attested value at all (the two cases below).
+		{"a pod cannot relabel itself off its attested workload", podWithOwner("ReplicaSet", "checkout-7d9f8b5c4",
+			map[string]string{workloadLabel: "checkout-canary"}), "checkout"},
+		{"the label still names a bare pod's workload", podWithOwner("", "",
+			map[string]string{workloadLabel: "batch-runner"}), "batch-runner"},
+		{"the label still covers an owner kind we do not recognise", podWithOwner("Rollout", "argo-thing",
 			map[string]string{workloadLabel: "checkout-canary"}), "checkout-canary"},
 		{"bare pod resolves to nothing rather than guessing", podWithOwner("", "", nil), ""},
 		{"unknown owner kind is not guessed at", podWithOwner("Rollout", "argo-thing", nil), ""},

@@ -308,14 +308,24 @@ func envState(containers []corev1.Container) []containerPatchState {
 // (sdk/core/events.py) rules out. A bare pod has no owner and gets no workload: the tier then does not
 // apply, which is the correct outcome, not a default.
 //
-// An explicit `norviq.io/workload` label always wins, for the cases the ownership chain cannot express
-// (a bare pod, a CRD-managed workload, an Argo Rollout).
+// An explicit `norviq.io/workload` label is a FALLBACK, not an override — it is consulted only when the
+// ownership chain yields nothing, which is exactly the set of cases it was added for (a bare pod, a
+// CRD-managed workload, an owner kind this code does not recognise such as a direct Rollout owner).
+//
+// It used to win outright, and that made the workload tier forgeable. A pod author controls their own
+// labels, so any pod could label itself with another workload's name and have the webhook mint that
+// name into its bound `workload` JWT claim — and the workload tier SELECTS WHICH POLICY PROGRAM RUNS.
+// A pod under a strict policy could relabel itself onto a permissive one, which is the inverse of what
+// an identity tier is for. The other two tiers are attested (namespace from the SVID, agent_class
+// rewritten from the credential), and `keys.py` already refuses this same shape for service keys.
+//
+// Ordering it after the owner lookup keeps every case the label exists for and removes the only case
+// that was a forgery: a pod whose identity the object graph ALREADY establishes can no longer rename
+// itself. Argo Rollouts are unaffected either way — they create ReplicaSets, so their pods resolve
+// through the branch below.
 func workloadFromPod(pod *corev1.Pod) string {
 	if pod == nil {
 		return ""
-	}
-	if explicit := strings.TrimSpace(pod.Labels[workloadLabel]); explicit != "" {
-		return explicit
 	}
 	for _, ref := range pod.OwnerReferences {
 		switch ref.Kind {
@@ -326,6 +336,11 @@ func workloadFromPod(pod *corev1.Pod) string {
 		case "Deployment", "StatefulSet", "DaemonSet", "Job":
 			return ref.Name
 		}
+	}
+	// Nothing attested. The label may now speak, because there is no attested value for it to
+	// contradict — an unowned pod has no object-graph identity to forge in the first place.
+	if explicit := strings.TrimSpace(pod.Labels[workloadLabel]); explicit != "" {
+		return explicit
 	}
 	return ""
 }
