@@ -279,11 +279,21 @@ test.describe("Overview — Monitor mode reports what WOULD have been blocked", 
         `expected every call to be SOFTENED in ${target}; got rule_ids ${JSON.stringify(softened)}`
       ).toBe(true);
 
-      const stats = await (
-        await withTransportRetry(() =>
-          request.get(`${API}/api/v1/audit/stats?range=1h&namespace=${target}`, { headers: auth })
-        )
-      ).json();
+      // POLL, never read once. `_persist_behavior` is queued as BACKGROUND work — the evaluate response
+      // returns before its audit row is written — so a single read after four calls sees however many
+      // happened to have landed. Measured across runs: 0 with the wrong namespace, then 1, then 2. The
+      // decisions were never in doubt (the per-call assertion above passed every time); only their rows
+      // were still in flight. Reading once turned an async write into an arithmetic-looking failure.
+      let stats = baseline;
+      for (let i = 0; i < 40; i++) {
+        stats = await (
+          await withTransportRetry(() =>
+            request.get(`${API}/api/v1/audit/stats?range=1h&namespace=${target}`, { headers: auth })
+          )
+        ).json();
+        if ((stats.would_blocked ?? 0) - (baseline.would_blocked ?? 0) >= 4) break;
+        await new Promise((r) => setTimeout(r, 500));
+      }
 
       // The bug: the tile relabels itself "Would-block" in Monitor mode but read `blocked`, which is 0
       // BY CONSTRUCTION here — so the one mode whose whole purpose is showing what would have been
