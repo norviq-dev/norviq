@@ -408,3 +408,37 @@ def test_a_failing_report_never_breaks_the_response():
     r = client.post("/mcp", json=_rpc("tools/list", mid=7))
     assert r.status_code == 200
     assert json.loads(r.content)["result"]["tools"]
+
+
+def test_an_approved_call_reaches_the_server_exactly_once():
+    """One Gate-B decision must mean one execution, whatever shape the server answers in.
+
+    Real MCP clients send `Accept: application/json, text/event-stream` — they ACCEPT a stream rather
+    than require one — and the server picks per request. The proxy used to issue a buffered POST for
+    that case and then, on seeing `text/event-stream` come back, fall through to the streaming path
+    with the SAME approved body, POSTing it a second time. The first response was discarded unread, so
+    the client saw only the second execution while the tool had run twice.
+
+    The untrusted party controls that choice: any MCP server could double every state-changing call it
+    was permitted — send the email twice, take the payment twice — against one audit row, with nothing
+    surfacing to the client or the operator.
+
+    Asserting on what the SERVER received is the point. Response-shape assertions pass happily while a
+    tool runs twice; only the upstream's own record shows it.
+    """
+    client, upstream, _ev, _proxy = _make("allow")
+
+    client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    before = len([m for m in upstream.received if m.get("method") == "tools/call"])
+
+    client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+              "params": {"name": CLEAN_TOOL["name"], "arguments": {}}},
+        headers={"accept": "application/json, text/event-stream"},
+    )
+
+    calls = [m for m in upstream.received if m.get("method") == "tools/call"]
+    assert len(calls) - before == 1, (
+        f"one approved call reached the server {len(calls) - before} times: {calls}"
+    )

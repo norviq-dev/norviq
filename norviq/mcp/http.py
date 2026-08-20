@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import httpx
 import structlog
@@ -327,19 +327,24 @@ class HttpProxy:
             return JSONResponse(P.error_response(msg.id, P.E_INTERNAL, "message refused by firewall"),
                                 status_code=400)
 
-        upstream = await self._client.request(
-            "POST", self._upstream, content=mediation.forward,
-            headers={**self._forward_headers(request.headers), "content-type": "application/json"},
-        ) if not _wants_stream(request) else None
-
-        if upstream is not None and _SSE not in upstream.headers.get("content-type", ""):
-            out = await self._mediate_server_bytes(fw, upstream.content)
-            return Response(out, status_code=upstream.status_code,
-                            headers=_passthrough(upstream.headers), media_type="application/json")
-
-        # Either the client asked for a stream, or the server answered with one. Stream through,
-        # mediating each SSE event as it arrives so nothing is buffered.
-        return await self._stream_through(fw, "POST", request, mediation.forward)
+        # EXACTLY ONE upstream request, always.
+        #
+        # This used to issue a buffered POST, and then — if the server happened to answer
+        # `text/event-stream` rather than `application/json` — fall through to `_stream_through` with
+        # the SAME `mediation.forward`, POSTing the approved tool call a second time. The first
+        # response was discarded unread, so the client saw only the second execution while the tool
+        # had run twice for one Gate-B decision and one audit row.
+        #
+        # The server chooses that content-type per request and is the untrusted party here, so any
+        # MCP server could double every state-changing call it was permitted — send the email twice,
+        # take the payment twice — with nothing surfacing to the client or the operator. "One
+        # evaluate, one execution" is the invariant this whole file is built on.
+        #
+        # Opening the response as a stream lets the content-type be read BEFORE the body is consumed,
+        # so one request serves both shapes.
+        if _wants_stream(request):
+            return await self._stream_through(fw, "POST", request, mediation.forward)
+        return await self._post_once(fw, request, mediation.forward)
 
     async def _handle_get(self, request: Request) -> Response:
         """Standalone SSE stream: server -> client, including server-initiated requests."""
@@ -371,18 +376,57 @@ class HttpProxy:
             async with self._client.stream(
                 method, self._upstream, headers=headers, content=body, timeout=None
             ) as resp:
-                buffer = b""
-                async for chunk in resp.aiter_bytes():
-                    buffer += chunk
-                    # SSE frames are separated by a blank line. Split on the boundary and emit whole
-                    # frames only — a half-received frame must not be parsed, and must not be held
-                    # back longer than it takes to complete.
-                    while b"\n\n" in buffer:
-                        frame, buffer = buffer.split(b"\n\n", 1)
-                        yield await self._mediate_frame(fw, frame) + b"\n\n"
-                if buffer.strip():
-                    yield await self._mediate_frame(fw, buffer)
+                async for out in self._pump_frames(fw, resp):
+                    yield out
             del req
+
+        return StreamingResponse(events(), media_type=_SSE, headers={"cache-control": "no-cache"})
+
+    async def _pump_frames(self, fw: McpFirewall, resp: Any) -> AsyncIterator[bytes]:
+        """Mediate an SSE body frame by frame. One implementation, two callers.
+
+        `_stream_through` and `_post_once` both consume SSE, and duplicating this loop is how the two
+        would eventually disagree about framing — the same way `initialize` and `server/discover`
+        drifted until one of them had no scan at all.
+        """
+        buffer = b""
+        async for chunk in resp.aiter_bytes():
+            buffer += chunk
+            # SSE frames are separated by a blank line. Split on the boundary and emit whole frames
+            # only — a half-received frame must not be parsed, and must not be held back longer than
+            # it takes to complete.
+            while b"\n\n" in buffer:
+                frame, buffer = buffer.split(b"\n\n", 1)
+                yield await self._mediate_frame(fw, frame) + b"\n\n"
+        if buffer.strip():
+            yield await self._mediate_frame(fw, buffer)
+
+    async def _post_once(self, fw: McpFirewall, request: Request, body: bytes) -> Response:
+        """POST upstream exactly once and serve whichever shape comes back.
+
+        The context manager is entered by hand because the decision — buffer or stream — depends on a
+        header that is only available after the response starts, and the streaming branch must keep
+        the connection open past the return. Both branches close it: the buffered one in `finally`,
+        the streaming one when the generator is exhausted or discarded.
+        """
+        headers = {**self._forward_headers(request.headers), "content-type": "application/json"}
+        cm = self._client.stream("POST", self._upstream, headers=headers, content=body, timeout=None)
+        resp = await cm.__aenter__()
+
+        if _SSE not in resp.headers.get("content-type", ""):
+            try:
+                out = await self._mediate_server_bytes(fw, await resp.aread())
+                return Response(out, status_code=resp.status_code,
+                                headers=_passthrough(resp.headers), media_type="application/json")
+            finally:
+                await cm.__aexit__(None, None, None)
+
+        async def events() -> AsyncIterator[bytes]:
+            try:
+                async for out in self._pump_frames(fw, resp):
+                    yield out
+            finally:
+                await cm.__aexit__(None, None, None)
 
         return StreamingResponse(events(), media_type=_SSE, headers={"cache-control": "no-cache"})
 
