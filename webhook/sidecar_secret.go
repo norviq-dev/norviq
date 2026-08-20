@@ -133,9 +133,22 @@ func (w *dynamicSecretWriter) Upsert(ctx context.Context, namespace, name string
 // triple. Deterministic because admission is not the only writer over time — the same Deployment
 // admitting a replacement pod must land on the SAME object, or every rollout would leak a new Secret.
 //
-// A hash suffix is appended whenever the readable part had to be altered or would overflow, so two
-// distinct workloads whose names sanitise to the same string cannot collide onto one Secret and hand
-// each other's claims out.
+// The hash suffix is ALWAYS appended, and covers workload AND agent_class. It used to be conditional
+// — added only when the readable part had to be sanitised or truncated — which meant a clean, short
+// workload name skipped it and the agent_class dropped out of the identity entirely. Two pods sharing
+// a workload but carrying different agent_classes then landed on the SAME Secret
+// (`norviq-sidecar-checkout` for both), and admission rewrites rather than merges, so each pod's
+// admission overwrote the other's credential. The surviving pod's sidecar reads claims minted for a
+// different agent_class on its next restart — which is either a refusal or, worse, the wrong policy
+// tier — and nothing reports it, because from the webhook's side both writes succeeded.
+//
+// The comment above already claimed this name was "for the (namespace, workload, agent_class) triple".
+// It was, in exactly the cases that needed a hash for an unrelated reason.
+//
+// UPGRADE NOTE: names change for workloads that previously skipped the suffix, so an upgrade leaves the
+// old Secrets behind. They are inert — nothing reads them once pods are admitted against the new name —
+// but they are not garbage-collected, and an operator tidying up should delete `norviq-sidecar-*`
+// objects with no matching pod.
 func sidecarSecretName(workload, agentClass string) string {
 	raw := workload
 	if raw == "" {
@@ -150,9 +163,8 @@ func sidecarSecretName(workload, agentClass string) string {
 	const prefix = "norviq-sidecar-"
 	const maxLen = 63 // Secret names are DNS-1123 labels in practice; stay inside the strictest bound.
 	const hashLen = 8
-	needsHash := sanitized != strings.ToLower(raw) || sanitized == ""
 	budget := maxLen - len(prefix)
-	if needsHash || len(sanitized) > budget {
+	{
 		sum := sha256.Sum256([]byte(workload + "\x00" + agentClass))
 		suffix := hex.EncodeToString(sum[:])[:hashLen]
 		keep := budget - hashLen - 1
@@ -168,7 +180,6 @@ func sidecarSecretName(workload, agentClass string) string {
 		}
 		return prefix + sanitized + "-" + suffix
 	}
-	return prefix + sanitized
 }
 
 var nonDNS1123 = regexp.MustCompile(`[^a-z0-9-]+`)

@@ -213,3 +213,37 @@ func dns1123OK(s string) bool {
 	}
 	return true
 }
+
+// One workload, two agent classes, one Secret. The suffix that separates them used to be conditional.
+func TestSidecarSecretNameSeparatesAgentClasses(t *testing.T) {
+	// `checkout` is already lower-case DNS-1123 and well inside the length budget, so it needed no
+	// sanitising and no truncation — and the hash suffix was only appended when one of those applied.
+	// The agent_class therefore dropped out of the name entirely for exactly the well-behaved names
+	// real deployments use.
+	//
+	// Admission REWRITES the Secret rather than merging, so a collision is not a shared credential —
+	// it is each pod's admission overwriting the other's. The surviving pod's sidecar picks up claims
+	// minted for a different agent_class on its next restart: a refusal, or the wrong policy tier, and
+	// no signal either way because both writes succeeded from the webhook's side.
+	support := sidecarSecretName("checkout", "support-agent")
+	payments := sidecarSecretName("checkout", "payments-agent")
+	if support == payments {
+		t.Fatalf("two agent classes on one workload share a Secret (%q) — each pod's admission "+
+			"overwrites the other's credential", support)
+	}
+
+	// Determinism is the other half and must survive: the same Deployment admitting a replacement pod
+	// has to land on the SAME object, or every rollout leaks a new Secret.
+	if again := sidecarSecretName("checkout", "support-agent"); again != support {
+		t.Fatalf("not deterministic: %q then %q", support, again)
+	}
+
+	// And the readable part is still readable — the point of the prefix is that an operator can tell
+	// what a Secret belongs to without decoding it.
+	if !strings.HasPrefix(support, "norviq-sidecar-checkout-") {
+		t.Fatalf("lost the readable workload segment: %q", support)
+	}
+	if len(support) > 63 {
+		t.Fatalf("name exceeds the DNS-1123 label bound: %d chars", len(support))
+	}
+}
