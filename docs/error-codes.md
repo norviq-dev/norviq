@@ -95,7 +95,7 @@ Total unique codes: **407** (including `*-DEBUG-*` traces).
 | NRVQ-API-7460 | `nrvq.api.target_cluster_mismatch` (a cluster-scoped mutation carried `X-Nrvq-Target-Cluster` != this deployment's served cluster → 409; the SERVER backstop behind the UI guard) | `norviq/api/auth.py` (`require_target_cluster`) |
 | NRVQ-API-7100 | `nrvq.api.policies.effective` (effective-resolution view) | `norviq/api/routers/policies.py` |
 | NRVQ-API-7062 | `nrvq.api.policy.managed_scope_reverted` (admin confirm-deleted an operator-authored `__baseline__`/`__guardrail__`) | `norviq/api/routers/policies.py` |
-| NRVQ-API-7063 | `nrvq.api.settings.warmed` / `settings.mirror_failed` (per-ns posture mirror warm/write) | `norviq/api/routers/settings_router.py` |
+| NRVQ-API-7063 | `nrvq.api.settings.warmed` (per-ns posture mirror warmed at startup; fires on every API process start, including with `count=0`) | `norviq/api/routers/settings_router.py` |
 | NRVQ-API-7115 | `nrvq.api.search.served` (scoped ⌘K search across tools/agents/policies) | `norviq/api/routers/search.py` |
 | NRVQ-API-7121 | `nrvq.api.agent.deregistered` (admin removed a decommissioned agent identity from the registry) | `norviq/api/routers/agents.py` |
 | NRVQ-API-7122 | `nrvq.api.apikey.expired` (an expired API key was presented — rejected like a revoked one) | `norviq/api/api_keys.py` |
@@ -111,7 +111,7 @@ Total unique codes: **407** (including `*-DEBUG-*` traces).
 | NRVQ-API-7033 | `nrvq.api.agent.registry_read_failed` / `agent.trust_persist_failed` / `agents.last_seen_failed` (degraded registry writes; read paths still serve) | `norviq/api/routers/agents.py` |
 | NRVQ-API-7034 / 7035 | `nrvq.api.agent.overrides_warmed` / `overrides_warm_failed` (durable trust-override cache warm at boot and on write) | `norviq/api/routers/agents.py`, `norviq/api/main.py` |
 | NRVQ-API-7040 / 7041 | `nrvq.api.ws_audit.open` / `close` (live audit WebSocket) | `norviq/api/main.py` |
-| NRVQ-API-7050 | also `nrvq.api.body_too_large` (request body over `max_request_body_bytes`, 256 KiB — rejected before parsing) | `norviq/api/body_limit.py` |
+| NRVQ-API-7136 | `nrvq.api.body_too_large` — request body over `max_request_body_bytes` (256 KiB), rejected with **413** before parsing. Alertable: the sidecar turns any 4xx from `/evaluate` into a hard block, so a burst of these is a misconfigured client or an abuse probe, and this log is the only record the cap fired (the reject path returns before the metric) | `norviq/api/body_limit.py` |
 | NRVQ-API-7060 / 7060-ERR | `nrvq.attack_graph.computed` / `computed_all` / `compute_failed` (on-demand attack-path recompute) | `norviq/api/routers/attack_graph_compute.py` |
 | NRVQ-API-7064 | `nrvq.startup.policy_sync_dropped` (a policy-sync message was dropped at boot) | `norviq/api/main.py` |
 | NRVQ-API-7070-ERR | `nrvq.api.mitre.mapping_missing` | `norviq/api/routers/mitre.py` |
@@ -127,6 +127,8 @@ Total unique codes: **407** (including `*-DEBUG-*` traces).
 | NRVQ-API-7133 | **`nrvq.api.rate_limit.fail_open`** — Redis was unreachable so the HTTP rate limiter let the request through (availability over strictness; log-throttled to once per 30s). Alert on this: while it fires, the HTTP throttle is not enforcing | `norviq/api/rate_limit.py` |
 | NRVQ-API-7134 | **`nrvq.api.rate_limit.exceeded`** — the HTTP-layer throttle returned **429** for this route class | `norviq/api/rate_limit.py` |
 | NRVQ-API-7135 | `nrvq.api.policy.priority_band_denied` — a write tried to claim a priority band it isn't allowed to | `norviq/api/routers/policies.py` |
+| NRVQ-API-7137 | `nrvq.api.settings.mirror_failed` — an admin saved per-namespace posture, the row committed and the console shows it applied, but the Redis mirror the evaluator hot path reads did not update. **Alert on this**: enforcement is running on the previous or global posture while the UI claims otherwise | `norviq/api/routers/settings_router.py` |
+| NRVQ-API-7138 | `nrvq.startup.ns_settings_warm_failed` — the boot warm of per-namespace posture failed, so *every* persisted per-ns posture is absent from Redis and the evaluator falls back to global config. Wider blast radius than 7137, same meaning: saved posture is not the posture being enforced | `norviq/api/main.py` |
 
 ## WHK
 
@@ -242,7 +244,7 @@ Multi-cluster fleet. Spoke relay + hub fleet-api. Distinct prefix from `NRVQ-AUT
 | NRVQ-FLT-15013 | `nrvq.fleet.insecure_default_secret` | `norviq/fleet/main.py` |
 | NRVQ-FLT-15014 | `nrvq.fleet.stopped` | `norviq/fleet/main.py` |
 | NRVQ-FLT-15015 | `nrvq.fleet.bundle_signed` (hub built+signed a bundle) | `norviq/fleet/routers/fleet_policy.py` |
-| NRVQ-FLT-15016 | `nrvq.fleet.puller_started` / `pull_failed` / `puller_no_trust_root` | `norviq/fleet_puller.py` |
+| NRVQ-FLT-15016 | `nrvq.fleet.puller_started` (the bundle puller came up) | `norviq/fleet_puller.py` |
 | NRVQ-FLT-15017 | `nrvq.fleet.bundle_not_newer` (replay/rollback rejected) | `norviq/fleet_puller.py` |
 | NRVQ-FLT-15018 | `nrvq.fleet.bundle_verify_failed` (tamper/wrong-key/unsigned/wrong-cluster) | `norviq/fleet_puller.py` |
 | NRVQ-FLT-15019 | `nrvq.fleet.bundle_expired` / `not_yet_valid` | `norviq/fleet_puller.py` |
@@ -265,6 +267,8 @@ Multi-cluster fleet. Spoke relay + hub fleet-api. Distinct prefix from `NRVQ-AUT
 | NRVQ-FLT-15024 | `nrvq.fleet.spiffe_id_changed` (SVID binding change) | `norviq/fleet/routers/ingest.py` |
 | NRVQ-FLT-15025 | `nrvq.fleet.drilldown_served` / `drilldown_failed` | `norviq/fleet/routers/fleet_policy.py` |
 | NRVQ-FLT-15026 | `nrvq.fleet.drilldown_residency_blocked` | `norviq/fleet/routers/fleet_policy.py` |
+| NRVQ-FLT-15043 | `nrvq.fleet.pull_failed` — a bundle pull failed; the fleet member keeps serving its last good bundle, so policy is stale rather than absent | `norviq/fleet_puller.py` |
+| NRVQ-FLT-15044 | `nrvq.fleet.puller_no_trust_root` — the puller has no trust root, so bundle signatures cannot be verified. **Alert on this**: it is the precondition for accepting an unsigned bundle | `norviq/fleet_puller.py` |
 
 ## DB
 
@@ -315,6 +319,7 @@ table stays unpartitioned for that range and retention pruning gets slower over 
 | NRVQ-ENG-2030 | `nrvq.engine.policy_hot_reloaded` | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2031 | `nrvq.engine.policy_unloaded` (evaluator unload on delete) | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2040..2050 | trust calculator/profile/history/cache codes | `norviq/engine/trust/*`, `norviq/engine/evaluator.py` |
+| NRVQ-ENG-2067 | `nrvq.engine.trust.freeze_check_failed` — the trust-freeze check itself errored, so a frozen agent may be scored as if it were not frozen. Split off the 2040..2050 range because that range also carries routine INFO | `norviq/engine/trust/calculator.py` |
 | NRVQ-ENG-DEBUG-* | OPA I/O and evaluator debug traces | `norviq/engine/evaluator.py` |
 
 ## UI
@@ -337,7 +342,8 @@ pod is up but its tool calls are all failing, or when a pod is stuck `NotReady`.
 | NRVQ-SDC-3020..3023 | `nrvq.sidecar.pubsub_failed` / `policy_reloaded` / `reload_failed` / `pubsub_watcher_started` | `norviq/sidecar/proxy.py` |
 | NRVQ-SDC-3030 | `nrvq.sidecar.remote_evaluator.ready` (thin proxy wired to the central API) | `norviq/sidecar/remote_evaluator.py` |
 | NRVQ-SDC-3031 | `nrvq.sidecar.remote_evaluator.fail_closed` — the call to the central `/evaluate` failed, so the tool call was **blocked**. A burst of these is a control-plane reachability/auth problem (missing or rejected `NRVQ_API_TOKEN`), not a policy decision. | `norviq/sidecar/remote_evaluator.py` |
-| NRVQ-SDC-3032 | Two events, both about proxy mode: `nrvq.sidecar.mode.proxy` (startup, with the resolved `api_url`) and `nrvq.sidecar.remote_evaluator.mtls_enabled` (the injected client cert/CA were accepted and internal mTLS is active) | `norviq/sidecar/proxy.py`, `norviq/sidecar/remote_evaluator.py` |
+| NRVQ-SDC-3032 | Two events, both about proxy mode: `nrvq.sidecar.mode.proxy` (startup, with the resolved `api_url`) and `nrvq.sidecar.remote_evaluator.mtls_enabled` (the injected client cert/CA were accepted and internal mTLS is active). Both are startup INFO. **`remote_evaluator.fail_open` was also on this code and is now `NRVQ-SDC-3036`** — a filter written for these two was silencing it | `norviq/sidecar/proxy.py`, `norviq/sidecar/remote_evaluator.py` |
+| NRVQ-SDC-3036 | **`nrvq.sidecar.remote_evaluator.fail_open`** — the control plane was unreachable (5xx/timeout/connect error) and `sdk_fallback_mode` is `allow`, so this tool call ran **unjudged** with `rule_id="thin_proxy_fail_open"`. This is the signal that agents are currently ungoverned. Deliberately not on 3032 with the startup INFO lines, because a filter written for those hides it | `norviq/sidecar/remote_evaluator.py` |
 | **NRVQ-SDC-3033** | `nrvq.sidecar.mode.embedded` — this workload evaluates **locally** with its own `RedisCache` + OPA + `PolicyLoader` instead of proxying to the central API. Expected on the `norviq-engine` Deployment, which pins `NRVQ_SIDECAR_MODE=embedded`, and on air-gapped/edge injected sidecars. Seeing it on a pod you expected to be a thin proxy means `NRVQ_SIDECAR_MODE` was overridden. | `norviq/sidecar/proxy.py` |
 
 ## REG / GRP / AUD / RED / TEL / CLI / SDK / IDT
@@ -375,7 +381,7 @@ NRVQ-API-7086, NRVQ-API-7087, NRVQ-API-7090, NRVQ-API-7091, NRVQ-API-7092, NRVQ-
 NRVQ-API-7095, NRVQ-API-7096, NRVQ-API-7097, NRVQ-API-7098, NRVQ-API-7099, NRVQ-API-7100, NRVQ-API-7101,
 NRVQ-API-7102, NRVQ-API-7103, NRVQ-API-7104, NRVQ-API-7105, NRVQ-API-7110, NRVQ-API-7111, NRVQ-API-7112,
 NRVQ-API-7113, NRVQ-API-7114, NRVQ-API-7115, NRVQ-API-7120, NRVQ-API-7121, NRVQ-API-7122, NRVQ-API-7123,
-NRVQ-API-7124, NRVQ-API-7132, NRVQ-API-7133, NRVQ-API-7134, NRVQ-API-7135, NRVQ-API-7460
+NRVQ-API-7124, NRVQ-API-7132, NRVQ-API-7136, NRVQ-API-7137, NRVQ-API-7138, NRVQ-API-7133, NRVQ-API-7134, NRVQ-API-7135, NRVQ-API-7460
 
 NRVQ-WHK-4000, NRVQ-WHK-4001, NRVQ-WHK-4002, NRVQ-WHK-4003, NRVQ-WHK-4004, NRVQ-WHK-4005, NRVQ-WHK-4006,
 NRVQ-WHK-4007, NRVQ-WHK-4008, NRVQ-WHK-4009, NRVQ-WHK-4010, NRVQ-WHK-4011, NRVQ-WHK-4012, NRVQ-WHK-4013,
@@ -423,7 +429,7 @@ NRVQ-REG-9034, NRVQ-REG-9035
 
 NRVQ-SDC-3000, NRVQ-SDC-3001, NRVQ-SDC-3002, NRVQ-SDC-3003, NRVQ-SDC-3004, NRVQ-SDC-3005, NRVQ-SDC-3006,
 NRVQ-SDC-3010, NRVQ-SDC-3011, NRVQ-SDC-3012, NRVQ-SDC-3013, NRVQ-SDC-3020, NRVQ-SDC-3021, NRVQ-SDC-3022,
-NRVQ-SDC-3023, NRVQ-SDC-3030, NRVQ-SDC-3031, NRVQ-SDC-3032, NRVQ-SDC-3033
+NRVQ-SDC-3023, NRVQ-SDC-3030, NRVQ-SDC-3031, NRVQ-SDC-3032, NRVQ-SDC-3036, NRVQ-SDC-3033
 
 NRVQ-AUTH-14000, NRVQ-AUTH-14001, NRVQ-AUTH-14002, NRVQ-AUTH-14003, NRVQ-AUTH-14004, NRVQ-AUTH-14005,
 NRVQ-AUTH-14006, NRVQ-AUTH-14007, NRVQ-AUTH-14010, NRVQ-AUTH-14011, NRVQ-AUTH-14012, NRVQ-AUTH-14013,

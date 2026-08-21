@@ -218,7 +218,7 @@ class RemoteEvaluator:
             log.warning(
                 "nrvq.sidecar.remote_evaluator.fail_open",
                 error=str(last_exc),
-                code="NRVQ-SDC-3032",
+                code="NRVQ-SDC-3036",
             )
             return PolicyDecision(
                 decision="allow",

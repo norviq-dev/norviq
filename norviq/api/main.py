@@ -203,7 +203,7 @@ async def lifespan(app: FastAPI):
     try:
         await settings_router.warm_ns_settings(app.state.cache)
     except Exception as exc:  # noqa: BLE001 — advisory warm; never block startup
-        log.error("nrvq.startup.ns_settings_warm_failed", error=str(exc), code="NRVQ-API-7063")
+        log.error("nrvq.startup.ns_settings_warm_failed", error=str(exc), code="NRVQ-API-7138")
     # SECURITY (trust fail-open fix): re-seed durable admin freeze/cap from the DB into Redis so a Redis
     # restart/flush cannot leave a killed/capped agent running unpoliced.
     try:

@@ -170,7 +170,7 @@ async def put_settings(
         try:
             await cache.set_ns_settings(namespace, _posture_mirror(row))
         except Exception as exc:  # noqa: BLE001 — the DB write is the source of truth; the mirror is advisory
-            log.error("nrvq.api.settings.mirror_failed", namespace=namespace, error=str(exc), code="NRVQ-API-7063")
+            log.error("nrvq.api.settings.mirror_failed", namespace=namespace, error=str(exc), code="NRVQ-API-7137")
     log.info(
         "nrvq.api.settings.saved",
         namespace=namespace,

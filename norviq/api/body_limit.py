@@ -62,7 +62,7 @@ class BodySizeLimitMiddleware:
                 try:
                     if int(value) > max_bytes:
                         log.warning("nrvq.api.body_too_large", declared=value.decode(errors="replace"),
-                                    limit=max_bytes, code="NRVQ-API-7050")
+                                    limit=max_bytes, code="NRVQ-API-7136")
                         await _reject_413(send)
                         return
                 except ValueError:
@@ -88,7 +88,7 @@ class BodySizeLimitMiddleware:
             if mtype == "http.request":
                 body.extend(message.get("body", b""))
                 if len(body) > max_bytes:
-                    log.warning("nrvq.api.body_too_large", read=len(body), limit=max_bytes, code="NRVQ-API-7050")
+                    log.warning("nrvq.api.body_too_large", read=len(body), limit=max_bytes, code="NRVQ-API-7136")
                     await _reject_413(send)
                     return
                 if not message.get("more_body", False):

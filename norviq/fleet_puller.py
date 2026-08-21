@@ -52,7 +52,7 @@ class FleetPolicyPuller:
             return
         if not settings.fleet_bundle_pubkey:
             # FAIL-CLOSED: no trust root -> never apply any bundle (do not "trust the hub").
-            log.warning("nrvq.fleet.puller_no_trust_root", code="NRVQ-FLT-15016")
+            log.warning("nrvq.fleet.puller_no_trust_root", code="NRVQ-FLT-15044")
             return
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=10.0)
@@ -67,7 +67,7 @@ class FleetPolicyPuller:
             try:
                 await self.pull_once()
             except Exception as exc:  # pragma: no cover - network/DB transient; fire-and-forget
-                log.error("nrvq.fleet.pull_failed", error=str(exc), code="NRVQ-FLT-15016")
+                log.error("nrvq.fleet.pull_failed", error=str(exc), code="NRVQ-FLT-15043")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=settings.fleet_pull_interval_s)
             except asyncio.TimeoutError:

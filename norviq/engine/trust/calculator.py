@@ -265,7 +265,7 @@ class TrustCalculator:
         try:
             return bool(await self._cache._client().get(f"agent_frozen:{spiffe_id}"))
         except Exception as exc:  # pragma: no cover
-            log.error("nrvq.engine.trust.freeze_check_failed", error=str(exc), code="NRVQ-ENG-2050")
+            log.error("nrvq.engine.trust.freeze_check_failed", error=str(exc), code="NRVQ-ENG-2067")
             return True
 
     async def _safe_override_only(self, spiffe_id: str) -> float | None:
