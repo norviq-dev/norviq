@@ -50,7 +50,7 @@ Total unique codes: **407** (including `*-DEBUG-*` traces).
 | NRVQ-API-7013 | `nrvq.api.policy.rolled_back` | `norviq/api/routers/policies.py` |
 | NRVQ-API-7014 | `nrvq.api.policy.dry_run` | `norviq/api/routers/policies.py` |
 | NRVQ-API-7015 | `nrvq.api.policy.applied` | `norviq/api/routers/policies.py` |
-| NRVQ-API-7020 | `nrvq.api.audit.listed`; also `nrvq.api.deployments.listed` and `nrvq.api.policy.priority_band_denied` (a write tried to claim a priority band it isn't allowed to) | `norviq/api/routers/audit.py`, `norviq/api/routers/deployments.py`, `norviq/api/routers/policies.py` |
+| NRVQ-API-7020 | `nrvq.api.audit.listed`; also `nrvq.api.deployments.listed` | `norviq/api/routers/audit.py`, `norviq/api/routers/deployments.py` |
 | NRVQ-API-7021 | `nrvq.api.audit.stats` | `norviq/api/routers/audit.py` |
 | NRVQ-API-7022 | `nrvq.api.audit.top_blocked` | `norviq/api/routers/audit.py` |
 | NRVQ-API-7023 | `nrvq.api.audit.volume` | `norviq/api/routers/audit.py` |
@@ -67,8 +67,8 @@ Total unique codes: **407** (including `*-DEBUG-*` traces).
 | NRVQ-API-7102 | `nrvq.api.intent.coverage` / `coverage_eval_failed` (positive-security intent dry-run coverage) | `norviq/api/routers/threats.py` |
 | NRVQ-API-7103 | `nrvq.api.intent.draft_created` (DRY-RUN draft; enforcement="draft", never enforces on its own) | `norviq/api/routers/threats.py` |
 | NRVQ-API-7104 | `nrvq.api.intent.draft_listed` | `norviq/api/routers/threats.py` |
-| NRVQ-API-7080 | `nrvq.api.cluster_info.served` (live cluster+namespaces); also **`nrvq.api.rate_limit.fail_open`** — Redis was unreachable so the HTTP rate limiter let the request through (availability over strictness; log-throttled to once per 30s) — and `nrvq.api.mitre.generate_no_classes` | `norviq/api/routers/cluster_info.py`, `norviq/api/rate_limit.py`, `norviq/api/routers/mitre.py` |
-| NRVQ-API-7081 | `nrvq.api.coverage.served` (coverage-by-category); also **`nrvq.api.rate_limit.exceeded`** — the HTTP-layer throttle returned **429** for this route class — and `nrvq.api.mitre.generate_batch` | `norviq/api/routers/coverage.py`, `norviq/api/rate_limit.py`, `norviq/api/routers/mitre.py` |
+| NRVQ-API-7080 | `nrvq.api.cluster_info.served` (live cluster+namespaces); also `nrvq.api.mitre.generate_no_classes` | `norviq/api/routers/cluster_info.py`, `norviq/api/routers/mitre.py` |
+| NRVQ-API-7081 | `nrvq.api.coverage.served` (coverage-by-category); also `nrvq.api.mitre.generate_batch` | `norviq/api/routers/coverage.py`, `norviq/api/routers/mitre.py` |
 | NRVQ-API-7081-ERR | `nrvq.api.coverage.mapping_missing` | `norviq/api/routers/coverage.py` |
 | NRVQ-API-7082 | `nrvq.api.agent.tool_usage` (audit-derived) | `norviq/api/routers/agents.py` |
 | NRVQ-API-7083 | `nrvq.api.agent.trust_history` (audit-derived) | `norviq/api/routers/agents.py` |
@@ -117,6 +117,10 @@ Total unique codes: **407** (including `*-DEBUG-*` traces).
 | NRVQ-API-7113 | `nrvq.api.retention.cap_failed` | `norviq/api/retention.py` |
 | NRVQ-API-7114 | `nrvq.api.intent.draft_dismissed` | `norviq/api/routers/threats.py` |
 | NRVQ-API-7120 | `nrvq.api.policy.scope_cap_exceeded` (namespace hit `policy_scope_cap_per_namespace`, 200 distinct `(ns, class)` scopes) | `norviq/api/routers/policies.py` |
+| NRVQ-API-7132 | `nrvq.api.policy.intent_without_baseline` — an intent policy was refused (409) because no baseline or controls policy exists under it, so the intent would be the only thing standing between the agent and the tool | `norviq/api/routers/policies.py` |
+| NRVQ-API-7133 | **`nrvq.api.rate_limit.fail_open`** — Redis was unreachable so the HTTP rate limiter let the request through (availability over strictness; log-throttled to once per 30s). Alert on this: while it fires, the HTTP throttle is not enforcing | `norviq/api/rate_limit.py` |
+| NRVQ-API-7134 | **`nrvq.api.rate_limit.exceeded`** — the HTTP-layer throttle returned **429** for this route class | `norviq/api/rate_limit.py` |
+| NRVQ-API-7135 | `nrvq.api.policy.priority_band_denied` — a write tried to claim a priority band it isn't allowed to | `norviq/api/routers/policies.py` |
 
 ## WHK
 
@@ -365,7 +369,7 @@ NRVQ-API-7086, NRVQ-API-7087, NRVQ-API-7090, NRVQ-API-7091, NRVQ-API-7092, NRVQ-
 NRVQ-API-7095, NRVQ-API-7096, NRVQ-API-7097, NRVQ-API-7098, NRVQ-API-7099, NRVQ-API-7100, NRVQ-API-7101,
 NRVQ-API-7102, NRVQ-API-7103, NRVQ-API-7104, NRVQ-API-7105, NRVQ-API-7110, NRVQ-API-7111, NRVQ-API-7112,
 NRVQ-API-7113, NRVQ-API-7114, NRVQ-API-7115, NRVQ-API-7120, NRVQ-API-7121, NRVQ-API-7122, NRVQ-API-7123,
-NRVQ-API-7124, NRVQ-API-7460
+NRVQ-API-7124, NRVQ-API-7132, NRVQ-API-7133, NRVQ-API-7134, NRVQ-API-7135, NRVQ-API-7460
 
 NRVQ-WHK-4000, NRVQ-WHK-4001, NRVQ-WHK-4002, NRVQ-WHK-4003, NRVQ-WHK-4004, NRVQ-WHK-4005, NRVQ-WHK-4006,
 NRVQ-WHK-4007, NRVQ-WHK-4008, NRVQ-WHK-4009, NRVQ-WHK-4010, NRVQ-WHK-4011, NRVQ-WHK-4012, NRVQ-WHK-4013,

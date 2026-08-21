@@ -148,7 +148,7 @@ def _enforce_priority_band(user: dict, priority: int) -> None:
     silently clamped, so the caller learns the write was refused (parity with the reserved-scope guards)."""
     if not _may_set_cluster_priority(user) and not (0 <= priority < _CLUSTER_PRIORITY_FLOOR):
         log.warning("nrvq.api.policy.priority_band_denied", priority=priority, actor=user.get("sub"),
-                    actor_role=user.get("role"), code="NRVQ-API-7020")
+                    actor_role=user.get("role"), code="NRVQ-API-7135")
         raise HTTPException(
             status_code=422,
             detail=f"priority {priority} is outside the namespace band (0-{_CLUSTER_PRIORITY_FLOOR - 1}); the "

@@ -265,7 +265,7 @@ class RateLimitMiddleware:
             if now - self._last_fail_open_log > 30:
                 log.warning(
                     "nrvq.api.rate_limit.fail_open", error=str(exc), route_class=route_class,
-                    code="NRVQ-API-7080",
+                    code="NRVQ-API-7133",
                 )
                 self._last_fail_open_log = now
             await self.app(scope, receive, send)
@@ -274,7 +274,7 @@ class RateLimitMiddleware:
         if count > limit:
             log.warning(
                 "nrvq.api.rate_limit.exceeded", route_class=route_class, identity=identity,
-                count=count, limit=limit, code="NRVQ-API-7081",
+                count=count, limit=limit, code="NRVQ-API-7134",
             )
             body = _too_many_requests_body(route_class)
             await send({
