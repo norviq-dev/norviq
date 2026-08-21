@@ -6,9 +6,15 @@ the message text — messages get reworded, codes don't.
 Codes come from log/error literals in `norviq/**/*.py` (control plane, engine, sidecar, SDK, CLI),
 `webhook/*.go` (the Go admission webhook + CRD controller), and `ui/src/**` (one console-side guard).
 
-A code is a **stable identifier for a situation, not a 1:1 alias for one message**. A handful are
-reused across two related events (noted inline below) — `NRVQ-DB-9002`, `NRVQ-DB-9003`,
+A code is a **stable identifier for a situation, not a 1:1 alias for one message**. 96 of them are
+reused across two or more related events (noted inline below) — `NRVQ-DB-9002`, `NRVQ-DB-9003`,
 `NRVQ-API-7099` and `NRVQ-SDC-3032` are the ones most likely to surprise you.
+
+What a code will **never** do is cover both a security signal and ordinary traffic: if a code fires
+on something you would alert on, it does not also fire on a routine read. That is enforced by
+`tests/test_log_code_uniqueness.py`, which also freezes the 96 so the count can only fall. It used
+to be untrue — `NRVQ-API-7080` once covered `rate_limit.fail_open` alongside `cluster_info.served`,
+so alerting on the throttle failing open also fired on every dashboard view.
 
 `*-DEBUG-*` codes are development traces, not operator signals; they are listed in the index but not
 individually described.
