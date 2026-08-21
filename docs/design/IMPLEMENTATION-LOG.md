@@ -2123,7 +2123,7 @@ the decision in, remains the sort key).
   enforced, so a proxy that starts while the API is unreachable does not enforce a `blocked` decision
   until it can read one. Failing closed was tried in another form and is documented in
   `HttpProxy._install_pin_store`: three proxies refused every call at Gate A for eleven hours and the
-  failure was indistinguishable from a defence working. Logged loudly (NRVQ-MCP-5070); a load that
+  failure was indistinguishable from a defence working. Logged loudly (NRVQ-MCP-5077); a load that
   fails AFTER a success keeps the last good copy, so an API restart cannot un-block a server.
 - **An unrecognised status from a newer control plane degrades to `discovered`, not `blocked`.** A
   rolling upgrade must not black out discovery for every server the moment the API is a version ahead

@@ -228,7 +228,7 @@ class ControlPlaneServerStore:
             self._registry.degraded = True   # the firewall reads the registry, not this store
             log.error(
                 "nrvq.mcp.servers.control_plane_unreachable",
-                namespace=self.namespace, error=str(exc), code="NRVQ-MCP-5070",
+                namespace=self.namespace, error=str(exc), code="NRVQ-MCP-5077",
                 detail=("no server decision is being enforced at discovery" if not self._loaded
                         else "serving the last known decisions; a change made since is not visible"),
                 hint="Gate B is unaffected — every tool call is still evaluated against policy",
