@@ -5,9 +5,9 @@
 
 A preset used to be all-or-nothing. Installing the chart put 22 block rules in front of every tool
 call in every tenant namespace on day one, before the customer had written a policy or seen a single
-decision — and one of those rules (`deny_shell_execution`, via the base64 fan-out) fires on roughly
-1 in 8 ordinary alphanumeric identifiers. There was no way to keep the detector and stop it dropping
-traffic, short of turning the whole preset off.
+decision — and one of those rules (`deny_shell_execution`, via the base64 fan-out) fired on roughly
+1 in 8 ordinary alphanumeric identifiers until 0.2.1 narrowed it. There was no way to keep the
+detector and stop it dropping traffic, short of turning the whole preset off.
 
 This module makes each control independently settable:
 
@@ -165,10 +165,11 @@ _CONTROL_COPY: dict[str, Control] = {
         "deny_shell_execution",
         "Shell / command execution",
         "Catches shell metacharacters and command-execution patterns in tool parameters.",
-        caveat="Highest false-positive rate of any control. It also scans base64-DECODED parameter "
-        "values and matches single characters such as '|' in the decoded bytes, so ordinary "
-        "alphanumeric identifiers — order ids, tracking codes, session tokens — decode to random "
-        "bytes and trip it roughly 1 in 8 times at 16-24 characters. Observe before promoting.",
+        caveat="Guards the widest surface, so it is the one to observe first. Through 0.2.0 it "
+        "matched single characters such as '|' in base64-DECODED parameter values, so ordinary "
+        "identifiers — order ids, tracking codes, session tokens — decoded to random bytes and "
+        "tripped it roughly 1 in 8 times. Fixed in 0.2.1: the decoded arm matches multi-byte "
+        "indicators only, and bare metacharacters need an execution-shaped tool name.",
         default_effect="deny",
         plane="call",
     ),

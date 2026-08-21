@@ -169,10 +169,18 @@ def test_the_shipped_default_is_now_per_control_and_actually_enforces() -> None:
 def test_describe_surfaces_the_false_positive_caveats() -> None:
     """An operator promoting a control to deny needs to know what it will cost, at that moment."""
     by_id = {c["id"]: c for c in baseline.describe(PRESET)}
-    assert "1 in 8" in by_id["deny_shell_execution"]["caveat"]
+    shell = by_id["deny_shell_execution"]["caveat"]
+    assert "1 in 8" in shell
+    # ...and it must say that rate is HISTORY. The base64 misfire was fixed by C2-023 and the
+    # prose-metacharacter one by exec-name gating, but the caveat kept describing both in the present
+    # tense while the control shipped `deny` — so the console warned operators off enforcing a control
+    # whose stated cost no longer existed. Asserting the substring alone cannot tell the tenses apart,
+    # which is why it passed either way.
+    assert "Fixed in 0.2.1" in shell, (
+        "the caveat states a false-positive rate that was fixed in 0.2.1; it must say so, or it "
+        "reads as a live defect in the console's own UI"
+    )
     assert "SSN" in by_id["pii_detection"]["caveat"]
-    # Ships enforcing now — the base64 misfire this caveat describes was fixed by C2-023 and the
-    # prose-metacharacter one by the exec-name gating, and the corpus confirms both.
     assert by_id["deny_shell_execution"]["effect"] == "deny"
 
 

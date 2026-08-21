@@ -130,6 +130,9 @@ def test_catalog_surfaces_the_false_positive_caveat() -> None:
     body = client.get("/api/v1/baseline/controls", headers=_h()).json()
     shell = next(c for c in body["controls"] if c["id"] == "deny_shell_execution")
     assert "1 in 8" in shell["caveat"]
+    assert "Fixed in 0.2.1" in shell["caveat"], (
+        "the served caveat must present the 1-in-8 rate as history, not as current behaviour"
+    )
 
 
 def test_the_chain_depth_caveat_matches_the_adapters_that_actually_report_depth() -> None:

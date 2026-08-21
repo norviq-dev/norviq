@@ -74,10 +74,11 @@ baselineClusterPolicy:
   #
   # This shipped as `block`, which meant installing the chart silently put 22 block rules in front of
   # every tool call in every tenant namespace, on day one, before the customer had written a single
-  # policy or seen a single decision. The failure mode is not theoretical: `deny_shell_execution`
-  # fires on roughly 1 in 8 ordinary alphanumeric identifiers (the base64 fan-out decodes an order id
-  # to random bytes and matches `|` in them), so a stock install drops a real fraction of a support
-  # bot's legitimate lookups and attributes it to shell injection.
+  # policy or seen a single decision. The failure mode was not theoretical: until 0.2.1,
+  # `deny_shell_execution` fired on roughly 1 in 8 ordinary alphanumeric identifiers (the base64
+  # fan-out decoded an order id to random bytes and matched `|` in them), so a stock install dropped a
+  # real fraction of a support bot's legitimate lookups and attributed it to shell injection. That
+  # specific bug is fixed; the argument for arriving in `audit` never depended on it.
   #
   # Defaulting to `audit` inverts the install experience: Norviq arrives observing, the customer sees
   # in the compliance view exactly what WOULD be blocked and by which control, and promotes controls
