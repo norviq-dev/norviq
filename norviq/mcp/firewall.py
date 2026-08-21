@@ -1141,6 +1141,29 @@ class McpFirewall:
         # reads. The question "should we be talking to this server at all" is not answerable from any
         # single tool, which is why it is asked before any of them are considered.
         decision = self._servers.get(self._server_id)
+        # SAY SO AT THE MOMENT THE TOOLS ARE SERVED, not only when the refresh failed.
+        #
+        # When the control plane is unreachable the registry is empty or stale, so `get` returns the
+        # `discovered` default and this listing proceeds as if the server had simply never been
+        # reviewed. That is indistinguishable, from here, from a server the operator genuinely has not
+        # got to yet — and the difference matters: one is "no decision has been made", the other is "a
+        # decision may exist and we could not read it", which on a BLOCKED server means its
+        # descriptions reach the model anyway.
+        #
+        # The store already logged its own failure, minutes earlier and in another component's
+        # vocabulary. This is the line that names the consequence, at the point it happens, per
+        # discovery. Observed live on AKS: a sidecar whose credential the API rejected served three
+        # servers' tools this way while Gate B correctly failed closed.
+        if getattr(self._servers, "degraded", False) and self._server_id not in self._servers.decisions:
+            self._bump("server_decision_unavailable")
+            log.warning(
+                "nrvq.mcp.gate_a.server_decision_unavailable", server=self._server_id,
+                tools_served=len(tools), code="NRVQ-MCP-5076",
+                detail="serving this server's tools without a server-level decision — the control "
+                       "plane could not be read, so a BLOCK on it would not be seen here",
+                hint="Gate B still evaluates every call; check the sidecar's credential and the "
+                     "control plane's reachability",
+            )
         if not decision.reachable:
             self._bump("server_blocked")
             log.warning("nrvq.mcp.gate_a.server_blocked", server=self._server_id,

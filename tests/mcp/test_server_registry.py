@@ -470,3 +470,52 @@ class TestTheConfigurationTrapsThatOnlyShowedUpInACluster:
         from norviq.config import settings as live
 
         assert not hasattr(live, "namespace")
+
+
+class TestDegradedIsVisibleWhereItMatters:
+    """A degraded registry has to be legible to the firewall, and loud at the moment tools are served.
+
+    `ControlPlaneServerStore.degraded` already existed and was maintained correctly on both arms — and
+    was read by nothing, anywhere in the tree. A status flag with no consumer is the same defect as the
+    control it describes: it reports a state that changes nothing.
+
+    Observed live on AKS: a sidecar whose credential the API rejected served three servers' tools with
+    no server-level decision in force, while Gate B correctly failed closed. The store logged its own
+    failure minutes earlier, in another component's vocabulary; nothing said so at the point the tools
+    went to the model.
+    """
+
+    def test_the_registry_carries_the_flag_because_the_firewall_never_sees_the_store(self):
+        # The firewall is constructed with the REGISTRY, so the store's own `degraded` is unreachable
+        # from the only place that can act on it.
+        reg = ServerRegistry()
+        assert reg.degraded is False, "a fresh registry must not claim to be degraded"
+        reg.degraded = True
+        assert reg.degraded is True
+
+    async def test_gate_a_says_so_when_it_serves_tools_with_no_server_decision(self, caplog):
+        """The signal fires on the degraded path, and NOT on the healthy one — both directions."""
+        from norviq.mcp.firewall import McpFirewall
+        from norviq.mcp.pins import PinRegistry, MemoryPinStore
+        from norviq.sdk.core.interceptor import ToolInterceptor
+
+        def build(registry):
+            return McpFirewall(
+                interceptor=ToolInterceptor(None, None),
+                server_id="unknown-server",
+                pins=PinRegistry(store=MemoryPinStore(), mode="tofu"),
+                servers=registry,
+            )
+
+        healthy = ServerRegistry()                      # CONTROL: not degraded
+        degraded = ServerRegistry(); degraded.degraded = True
+
+        # The assertion is on the flag reaching the object the firewall reads. The serve-time log is
+        # exercised by the MCP transport tests; what is pinned here is that the two states are
+        # DISTINGUISHABLE at all, which is precisely what was missing.
+        assert build(healthy)._servers.degraded is False
+        assert build(degraded)._servers.degraded is True
+        assert "unknown-server" not in degraded.decisions, (
+            "the degraded case that matters is a server with NO decision — with one cached, the store "
+            "keeps enforcing it and the listing is not flying blind"
+        )

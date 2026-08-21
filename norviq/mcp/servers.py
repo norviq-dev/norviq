@@ -106,6 +106,13 @@ class ServerRegistry:
     """
 
     decisions: dict[str, ServerDecision] = field(default_factory=dict)
+    # True while the control plane could not be reached, so `decisions` is empty or stale.
+    #
+    # It lives on the REGISTRY, not only on the store, because the firewall holds this object and never
+    # sees the store. `ControlPlaneServerStore.degraded` already existed, was maintained correctly, and
+    # was read by nothing anywhere in the tree — a status flag with no consumer is the same defect as
+    # the control it describes: it reports a state that changes nothing.
+    degraded: bool = False
 
     def get(self, server_id: str) -> ServerDecision:
         """The decision for a server, or an unreviewed one. Never returns None.
@@ -218,6 +225,7 @@ class ControlPlaneServerStore:
                 rows = resp.json()
         except Exception as exc:  # noqa: BLE001 — availability choice, see the class docstring
             self._degraded = True
+            self._registry.degraded = True   # the firewall reads the registry, not this store
             log.error(
                 "nrvq.mcp.servers.control_plane_unreachable",
                 namespace=self.namespace, error=str(exc), code="NRVQ-MCP-5070",
@@ -235,6 +243,7 @@ class ControlPlaneServerStore:
             log.info("nrvq.mcp.servers.control_plane_recovered", namespace=self.namespace,
                      code="NRVQ-MCP-5071")
         self._degraded = False
+        self._registry.degraded = False
         self._loaded = True
         blocked = sum(1 for d in self._registry.decisions.values() if d.status == STATUS_BLOCKED)
         log.info("nrvq.mcp.servers.loaded", namespace=self.namespace,
