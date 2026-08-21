@@ -77,7 +77,7 @@ docker build -f scripts/mcp-proxy-payload.Dockerfile -t <registry>/norviq-mcp-pa
 # it with the mount read-only, the way an injected container does.
 scripts/mcp-proxy-payload-verify.sh node:22-bookworm python:3.12-slim
 
-helm upgrade norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.4 -n norviq \
+helm upgrade norviq oci://ghcr.io/norviq-dev/charts/norviq --version 0.2.5 -n norviq \
   --set webhook.injection.enabled=true \
   --set webhook.injection.mcp.enabled=true \
   --set webhook.injection.mcp.proxyImage=<registry>/norviq-mcp-payload:0.2.0
