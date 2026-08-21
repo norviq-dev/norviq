@@ -166,10 +166,47 @@ function MonitorBlockFeedEmpty({
   );
 }
 
+// THE THIRD OUTCOME, which this page did not have. `monitorScope` false meant two OPPOSITE things and
+// printed the confident one: "the posture was read and this namespace enforces" — where an empty feed is a
+// real measurement — and "the posture could not be read at all", where it is not. Measured on this page: with
+// /coverage-by-category AND /settings both faulting, both feeds rendered "No blocked tool calls in the
+// selected range", byte-identical to a namespace whose posture was read as `enforce`. If that namespace is in
+// Monitor, the zero is the whole point of Monitor — every policy match rewritten to an audit row, so no policy
+// block can ever appear here — and the console published it as a clean bill of health. That is exactly the
+// defect the `confirmed` split above exists to prevent, one step further out.
+//
+// Reachable without an outage: `scoped_namespace` (api/auth.py) 403s /settings for any non-admin human with no
+// namespace claim, and for one scoped to a different namespace. The page-level "Showing partial data" notice
+// does NOT cover this — it keys on `coverage.error`, which is set whether or not the posture was read, so it
+// is on in both the trustworthy and the untrustworthy case and cannot tell them apart.
+//
+// The row count itself is still stated: that part IS a measurement of what /audit/records returned. Only its
+// MEANING is withheld, which is the part we do not have.
+function UnreadPostureBlockFeedEmpty({ testid, onCheckPosture }: { testid: string; onCheckPosture: () => void }) {
+  return (
+    <div
+      data-testid={testid}
+      style={{ color: "var(--text-muted)", fontSize: 12.5, padding: "16px 2px", lineHeight: 1.6 }}
+    >
+      <span style={{ color: "var(--escalate)", fontWeight: 600 }}>No blocked tool calls recorded in the selected range.</span>{" "}
+      This namespace&apos;s enforcement posture could not be read — neither the engine&apos;s own coverage field nor
+      the settings posture answered — so whether that is a measurement or a consequence of Monitor mode, where
+      every policy match is rewritten to an audit row and <b>no policy block can appear here</b>, is{" "}
+      <b>unknown</b>.
+      <div>
+        <button type="button" className="btn btn-ghost btn-sm" style={{ marginTop: 8 }} onClick={onCheckPosture}>
+          Check this namespace&apos;s posture →
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function TopBlockedTools({
   data,
   monitorScope,
   monitorConfirmed,
+  postureUnknown,
   wouldBlocked,
   onShowWouldBlocks,
   onCheckPosture
@@ -177,6 +214,7 @@ function TopBlockedTools({
   data: Array<{ tool: string; count: number }>;
   monitorScope: boolean;
   monitorConfirmed: boolean;
+  postureUnknown: boolean;
   wouldBlocked?: number;
   onShowWouldBlocks: () => void;
   onCheckPosture: () => void;
@@ -196,6 +234,8 @@ function TopBlockedTools({
             onShowWouldBlocks={onShowWouldBlocks}
             onCheckPosture={onCheckPosture}
           />
+        ) : postureUnknown ? (
+          <UnreadPostureBlockFeedEmpty testid="top-blocked-posture-unknown" onCheckPosture={onCheckPosture} />
         ) : (
           <div style={{ color: "var(--text-muted)", fontSize: 13, padding: "16px 0", textAlign: "center" }}>
             No blocked tool calls in the selected range
@@ -441,6 +481,18 @@ export function Dashboard() {
   // THIS SCOPE, and is not still loading, is unavailable. Note this is the complement of the two branches
   // above it, which is what guarantees the ring can never be drawn from an absent or off-scope payload.
   const coverageUnavailable = !useHub && !coverageUsable && !postureLoading;
+  // The same distinction for the BLOCK FEEDS, which had only two states where there are three. See
+  // `UnreadPostureBlockFeedEmpty`. `monitorScope` false is not one fact: it is "read, and this namespace
+  // enforces" (an empty feed is a measurement) OR "not read at all" (it is not). This is the second, and it
+  // requires that BOTH sources came up empty — the engine's own `namespace_mode` and the /settings posture —
+  // and that neither is still in flight, so a first paint or a namespace switch never flashes it.
+  const postureUnknown =
+    !useHub &&
+    selectedNamespace !== "all" &&
+    namespaceMode === undefined &&
+    posture.mode === null &&
+    !posture.loading &&
+    !postureLoading;
   // The backend flags the agent-class section degraded when its policy OR its 30d-efficacy DB read faulted.
   // Degraded means the section's numbers are unreadable: the list may be empty because we could not look, and
   // any policy in it carries forced-zero efficacy with effective=false. Never draw that as a verdict.
@@ -692,6 +744,7 @@ export function Dashboard() {
               data={topBlockedData}
               monitorScope={monitorScope}
               monitorConfirmed={monitorConfirmed}
+              postureUnknown={postureUnknown}
               wouldBlocked={stats.data?.would_blocked}
               onShowWouldBlocks={showWouldBlocks}
               onCheckPosture={checkPosture}
@@ -885,6 +938,8 @@ export function Dashboard() {
                   onShowWouldBlocks={showWouldBlocks}
                   onCheckPosture={checkPosture}
                 />
+              ) : postureUnknown ? (
+                <UnreadPostureBlockFeedEmpty testid="recent-blocked-posture-unknown" onCheckPosture={checkPosture} />
               ) : (
                 <div
                   style={{

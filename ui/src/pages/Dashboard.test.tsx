@@ -746,4 +746,83 @@ describe("Overview block feeds are Monitor-aware", () => {
     fireEvent.click(within(screen.getByTestId("recent-blocked")).getByRole("button", { name: /See All/ }));
     await waitFor(() => expect(screen.getByTestId("test-location")).toHaveTextContent("/audit?decision=block"));
   });
+
+  // The test above covers "the posture was readable and said audit, the engine's field was not". This is one
+  // step further out and was the page's blind spot: NEITHER source answered. `monitorScope` false meant both
+  // "read, and this namespace enforces" and "not read at all", and printed the first — so a Monitor namespace
+  // whose posture could not be read published "No blocked tool calls in the selected range", the one sentence
+  // that cannot be true there, since `_apply_posture` rewrites every policy match to an audit row. Reachable
+  // without an outage: `scoped_namespace` 403s /settings for a non-admin with no namespace claim.
+  // Everything EXCEPT /settings, so each test below registers exactly one settings handler and the two
+  // cases differ by that alone. (`server.use` prepends, so a second handler for the same route would be
+  // shadowed by the first rather than overriding it.)
+  function quietFeedsNoCoverage() {
+    return [
+      http.get("*/api/v1/coverage-by-category", () => new HttpResponse("boom", { status: 500 })),
+      http.get("*/api/v1/audit/stats", () =>
+        HttpResponse.json({ total: 2000, blocked: 0, allowed: 2000, block_rate_pct: 0, would_blocked: 0 })
+      ),
+      http.get("*/api/v1/audit/records", () => HttpResponse.json([])),
+      http.get("*/api/v1/audit/top-blocked", () => HttpResponse.json([])),
+      http.get("*/api/v1/audit/volume", () => HttpResponse.json([])),
+      http.get("*/api/v1/agents", () => HttpResponse.json([])),
+      http.get("*/api/v1/redteam/results/latest", () => HttpResponse.json({ has_run: false }))
+    ];
+  }
+
+  it("does NOT state the empty feeds as a measurement when the posture could not be read at all", async () => {
+    server.use(
+      http.get("*/api/v1/settings", () => new HttpResponse("boom", { status: 500 })),
+      ...quietFeedsNoCoverage()
+    );
+    render(
+      <MemoryRouter initialEntries={["/?ns=payments"]}>
+        <AppProvider>
+          <LocationProbe />
+          <Dashboard />
+        </AppProvider>
+      </MemoryRouter>
+    );
+    expect(await screen.findByText(/Showing: payments/)).toBeInTheDocument();
+
+    // FAIL-ON-BUG: the confident sentence, over a namespace whose posture is unknown.
+    const recent = await screen.findByTestId("recent-blocked-posture-unknown");
+    const top = await screen.findByTestId("top-blocked-posture-unknown");
+    expect(screen.queryAllByText(/No blocked tool calls in the selected range/i)).toHaveLength(0);
+    // …and none of the Monitor claims either: we cannot assert the mechanism from a posture we never read.
+    expect(screen.queryByTestId("recent-blocked-monitor-empty")).toBeNull();
+    expect(screen.queryByTestId("recent-blocked-monitor-empty-unconfirmed")).toBeNull();
+    expect(screen.queryByTestId("top-blocked-monitor-empty")).toBeNull();
+    expect(screen.queryByTestId("top-blocked-monitor-empty-unconfirmed")).toBeNull();
+    for (const el of [recent, top]) {
+      expect(el).toHaveTextContent(/posture could not be read/i);
+      expect(el).toHaveTextContent(/unknown/i);
+      expect(el).not.toHaveTextContent(/not blocked live/i);
+    }
+  });
+
+  // CONTROL: a hedge that is always on says nothing — the same lesson `apiError` already records about
+  // efficacy.error. When the posture IS readable and says `enforce`, the zero is a real measurement about
+  // real enforcement and must keep saying so plainly.
+  it("CONTROL: a READABLE enforcing posture keeps the plain empty state", async () => {
+    server.use(
+      http.get("*/api/v1/settings", () => HttpResponse.json({ enforcement_mode: "enforce", apply_mode: "enforce" })),
+      ...quietFeedsNoCoverage()
+    );
+    render(
+      <MemoryRouter initialEntries={["/?ns=payments"]}>
+        <AppProvider>
+          <LocationProbe />
+          <Dashboard />
+        </AppProvider>
+      </MemoryRouter>
+    );
+    expect(await screen.findByText(/Showing: payments/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId("coverage-categories-unavailable")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.queryAllByText(/No blocked tool calls in the selected range/i).length).toBeGreaterThan(0)
+    );
+    expect(screen.queryByTestId("recent-blocked-posture-unknown")).toBeNull();
+    expect(screen.queryByTestId("top-blocked-posture-unknown")).toBeNull();
+  });
 });
