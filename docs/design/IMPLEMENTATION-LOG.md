@@ -2756,3 +2756,99 @@ true again. Every /chat returned `tool_servers: []` while the same loader return
 not a validation of enforcement, and reporting it as one would have been the easy mistake — the tool
 call has to REACH the gate before the gate can be said to have done anything. Driving the enforcement
 point directly is what produced the evidence above.
+
+---
+
+# 0.2.5 — log codes that named two things at once (ac5e928, tag v0.2.5)
+
+## What was wrong
+
+`docs/error-codes.md` states the design intent plainly: a code is "a stable identifier for a
+situation, not a 1:1 alias for one message", and "a handful are reused across two related events".
+Both halves understated it. 96 of 409 codes covered more than one event, and in five of those the
+two events were not related at all — one was something an operator would page on, the other fired on
+ordinary healthy traffic. Sharing a code between them makes the alert unusable: it has to be silenced
+to be tolerable, and a silenced alert is indistinguishable from one that was never wired up.
+
+The worst was `NRVQ-SDC-3032`. It carried two startup INFO lines (`sidecar.mode.proxy`,
+`remote_evaluator.mtls_enabled`) and also `remote_evaluator.fail_open` — the record that a tool call
+ran UNJUDGED because the control plane was unreachable and `sdk_fallback_mode` is `allow`. The
+reference row described it as "Two events, both about proxy mode" and never mentioned the third. So
+an operator who read the documentation correctly, and filtered 3032 as startup noise, was filtering
+away the only signal that says agents are currently ungoverned. The docs did not merely fail to help;
+they argued for the filter that hid it.
+
+This is the house defect shape pointed at the alerting layer rather than the enforcement path. The
+control (a loud log at the fail-open) existed, was correct, and was unreachable in practice.
+
+## Split, each with its own reference row
+
+| code | event | had been sharing with |
+|---|---|---|
+| `NRVQ-SDC-3036` | `remote_evaluator.fail_open` | two startup INFO lines |
+| `NRVQ-API-7137` | `settings.mirror_failed` | `settings.warmed`, every process start |
+| `NRVQ-API-7138` | `startup.ns_settings_warm_failed` | as above |
+| `NRVQ-API-7136` | `body_too_large` (413) | `asset_graph.served`, every page view |
+| `NRVQ-ENG-2067` | `trust.freeze_check_failed` | the `2040..2050` range row |
+| `NRVQ-FLT-15043/15044` | `pull_failed`, `puller_no_trust_root` | `puller_started` |
+
+Earlier in the cycle, on the same reasoning: `NRVQ-API-7133` (`rate_limit.fail_open`), `7134`
+(`rate_limit.exceeded`), `7135` (`policy.priority_band_denied`). `NRVQ-API-7132` had shipped with no
+reference row at all and got one.
+
+In every case the code stayed with the meaning the reference named FIRST, so an existing runbook
+grepping `7080` still matches what it always matched — it just stops also matching the fail-open.
+
+## The method was wrong before the answer was
+
+The first pass keyword-matched both halves against hand-written "security" and "routine" word lists
+and reported zero problems while all five were live. `body_too_large` contains no security word;
+`mode.proxy` contains no routine word. Neither pairing matched, so the check reported safety it had
+never verified — the same defect class it was written to find.
+
+`tests/test_log_code_uniqueness.py` now derives severity from the **log level at each call site**: a
+code emitted at both `warning`/`error`/`critical` and `debug`/`info` is mixing an alert with routine
+traffic. Nobody maintains it, it covers the next module the day it is added, and it subsumes the
+keyword rule — all three codes that rule caught were `info`+`warning` pairs. Its one blind spot (two
+events at the SAME level) is stated in the module docstring rather than left implied.
+
+Two frozen lists ratchet downward: 40 codes that still mix levels, 52 same-level duplicates. Adding
+one fails; fixing one ALSO fails until the entry is deleted, so neither list can go stale and hide
+the next real case.
+
+The extractor caught a bug in its own test. Adding the level capture shifted `code` from group 3 to
+group 4, so the scan keyed on the gap text and found 362 codes instead of 416 — and the positive
+control ("this scan must find >390") failed and named the cause. Groups are named now. A regex whose
+captures are read positionally will be edited eventually; name them.
+
+## Release validation
+
+Published artifacts, checked against the registries rather than the workflow's green:
+
+* **Chart** — cosign verified (claims, transparency log, trusted CA), and control-tested: a wrong
+  signer identity exits 1, so the check discriminates. Pins all five images by digest.
+* **Images** — all five GA tags (`api/ui/engine/webhook/bootstrap-0.2.5`) resolve to exactly the
+  digests the chart pins. The api image is independently signed.
+* **Wheel** — `pip install norviq` resolves 0.2.5, checked with `python -I` from an EMPTY directory
+  so the working tree could not shadow it (that shadowing faked a publishing bug at 0.2.3). The
+  installed wheel carries the new codes and `fail_open` reads `NRVQ-SDC-3036`.
+* **Fresh install** — clean kind cluster, `getting-started.md` followed exactly: deployed first try,
+  8/8 pods, 0 restarts, `/healthz` 200, baseline policy rendered for the tenant namespace.
+* **Upgrade 0.2.4 -> 0.2.5** — on the real AKS install from the 0.2.4 validation. Revision 2, all
+  pods ready with 0 restarts, and postgres/redis kept their pre-upgrade age: the StatefulSets were
+  not recreated and the PVCs carried through.
+
+## Two of my own measurements were wrong, and both looked like product findings
+
+* I reported that the documented fresh install "fails verbatim on a clean cluster". It does not. My
+  excerpt window started at line 36 and skipped `kubectl create namespace norviq` at line 32. A
+  follow-up survey then flagged five more install commands; four are prose fragments or a
+  `--dry-run`, and README creates the namespace one line outside my lookback window. **There is no
+  docs defect.** (Note that F1 above WAS this bug, found and fixed during the 0.2.4 AKS validation —
+  which is exactly why it no longer reproduces.)
+* `pip install norviq` failed with "No matching distribution found", which reads precisely like a
+  publishing failure. The venv was on macOS system Python 3.9.6 and the package requires `>=3.11`.
+  Worth keeping as a support answer: a user below 3.11 gets that message, not a version error.
+
+Both were caught by reading the source instead of trusting the tool's output. Neither reached a
+commit, but both would have.
