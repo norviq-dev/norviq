@@ -76,10 +76,38 @@ sharp edge that the Secret holds only the FIRST password and is stale after the 
 
 ---
 
+### 1.2 E.1 and the 0.2.6 cut are one unit, not two items
+
+**Decision:** ship the busybox fix (§2.1) and cut 0.2.6 together, or do neither. Not launch-gating.
+
+The dependency runs one way and is easy to miss: **fixing `_helpers.tpl` does nothing on its own.**
+Anyone installing gets the published chart, which hardcodes bare `busybox:1.36`. A fix that sits on
+`main` while 0.2.5 remains the published chart is indistinguishable, from a user's position, from no
+fix at all — while reading in the repo as done. That is this codebase's recurring defect shape applied
+to the release process rather than to a control.
+
+So the pair is:
+
+1. §2.1 — wrap `busybox:1.36` in `norviq.thirdPartyImage` so `global.imageRegistry` relocates it
+2. correct `docs/deployment.md:370`, which currently lists busybox among the images that key covers
+3. cut **0.2.6**, which also carries the already-landed `deny_shell_execution` caveat fix (§1.1) and
+   the `docs/error-codes.md` direction corrections
+
+**Why it is not launch-gating.** busybox only breaks installs with no path to Docker Hub. An
+evaluator on EKS/AKS/GKE — the target user — pulls it fine and never sees this. It is an
+enterprise/air-gapped evaluation blocker, which matters on a slower clock than a launch.
+
+**Why not cut 0.2.6 sooner.** As of this writing 0.2.6 would carry one corrected caveat string and
+some doc rows. That is thin justification for spending a version and re-running the irreversible PyPI
+path. §2.1 gives the release a reason to exist, and the docs corrections ride along.
+
+---
+
 ## 2. Product defects — verified
 
 ### 2.1 `busybox:1.36` is not relocatable, and air-gap installs will fail on it
 **Status:** verified. **Severity:** first-run blocker on air-gapped clusters.
+**Sequencing:** paired with the 0.2.6 cut — see §1.2. Fixing this without releasing changes nothing for users.
 
 `helm/norviq/templates/_helpers.tpl:249` hardcodes `image: busybox:1.36` with no
 `norviq.thirdPartyImage` wrapper, unlike every other third-party reference. Rendering with
