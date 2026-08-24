@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -422,6 +423,7 @@ def admin_reset_password(namespace: str, kube_context: str | None, username: str
 
 def main() -> None:
     """Run CLI entry point."""
+    structlog.configure(logger_factory=structlog.PrintLoggerFactory(file=sys.stderr))
     cli()
 
 if __name__ == "__main__":
