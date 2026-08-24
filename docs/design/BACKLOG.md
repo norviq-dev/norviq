@@ -30,6 +30,52 @@ says the false positive was fixed in 0.2.1 while the shipped console still calls
 
 ---
 
+## 1a. Quickstart gate — RUN, and it passes
+
+**Status:** verified 2026-08-24 end to end on a clean cluster. **The documented path takes 88
+seconds**, 8/8 pods Running, `helm install` exit 0 on the first attempt.
+
+| stage | elapsed | in the product's path? |
+|---|---|---|
+| `helm install` from the published chart, pulling 5 digest-pinned + 4 third-party images | **88s** | **yes — this is the quickstart** |
+| `kind create cluster` | 53s | no — test-rig scaffolding, see below |
+
+Usability was checked, not assumed: the documented password retrieval
+(`kubectl get secret norviq-secrets ... | base64 -d`) returns a 20-character value, the documented
+port-forward serves the console at HTTP 200 (`<title>Norviq Security Console</title>`), and the API
+answers `/healthz` 200. The README's command was run **verbatim**, including
+`--set config.dbSslMode=disable` and `policyQuotaNamespaces={default}` — not the variant known to work.
+
+**Measured on one machine:** macOS arm64, fast network. A fresh kind node has its own empty
+containerd, so the image pulls were real. A slower link moves the 88s and nothing else.
+
+### The README's prerequisite is deliberate, not a gap
+
+An earlier draft of this entry recommended adding `kind create cluster` to the README Quick start,
+on the reasoning that "a Kubernetes cluster (1.30+)" leaves a newcomer stranded. **That
+recommendation was wrong and has been removed.** Norviq targets corporate Kubernetes: an evaluator
+arrives with EKS, AKS, GKE or an on-prem cluster already running. Putting `kind` in the Quick start
+would position a runtime security product as a laptop toy and invite people to evaluate it on a
+single-node cluster where the HA, quota and multi-namespace behaviour it exists to provide cannot be
+exercised.
+
+The 53s above is therefore scaffolding for THIS measurement, not a step any target user performs. It
+is recorded so nobody re-derives a 141s figure and reports it as the install time.
+
+### One finding stands
+
+**There is no documented "10-minute quickstart" to gate.** The phrase appears exactly once in the
+repo — a code comment at `scripts/kind-e2e/00-up.sh:43`, an internal note about where a precondition
+check belongs. It is not a user-facing promise anywhere in README, docs/, or the docs site. The
+measurement now supports making a claim if one is wanted (88s onto an existing cluster); what should
+stop is treating an internal comment as a public commitment.
+
+**Not a gap, checked because one was expected:** login is documented in three independent places —
+`README.md:169-177`, `docs/getting-started.md:107`, and the chart's post-install NOTES — including the
+sharp edge that the Secret holds only the FIRST password and is stale after the forced change.
+
+---
+
 ## 2. Product defects — verified
 
 ### 2.1 `busybox:1.36` is not relocatable, and air-gap installs will fail on it
