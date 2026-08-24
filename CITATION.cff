@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: "If you use Norviq in your research, please cite it as below."
+title: "Norviq: Runtime security platform for LLM agent tool calls on Kubernetes"
+abstract: >-
+  Norviq evaluates and enforces policy on every tool call an LLM agent makes, at
+  runtime, on Kubernetes. It mediates both the agent's own tool calls and the
+  Model Context Protocol surface, gating MCP servers at discovery so poisoned
+  tool descriptions never reach the model's context, and again at call time.
+  Policy is authored as Rego over an attested identity — namespace, workload and
+  agent class derived from SPIFFE and the admission webhook's owner chain rather
+  than asserted by the caller — and is distributed as signed bundles. The control
+  plane ships a baseline of independently settable detectors mapped to OWASP LLM
+  and MITRE ATLAS.
+type: software
+authors:
+  - family-names: Puppala
+    given-names: Santosh Kumar
+repository-code: "https://github.com/norviq-dev/norviq"
+url: "https://norviq.dev"
+license: Apache-2.0
+version: 0.2.5
+date-released: "2026-08-20"
+keywords:
+  - llm-security
+  - ai-agents
+  - agent-security
+  - model-context-protocol
+  - kubernetes
+  - policy-as-code
+  - open-policy-agent
+  - runtime-security
+  - owasp-llm
+  - mitre-atlas
