@@ -142,6 +142,14 @@ python -m norviq.mcp --server-id filesystem -- \
 Point your MCP host (Claude Desktop, Cursor, any stdio client) at that command instead of the
 server's own, and every `tools/list` and `tools/call` goes through the gates on the way past.
 
+> **Known defect.** Gate A withholds any tool whose description trips a high-severity finding, and one
+> concealment rule matches the word *silently* bare. The official filesystem server's
+> `create_directory` says "this operation will succeed silently", so on the command above the model is
+> served **13 tools instead of 14** — announced only by a `nrvq.mcp.gate_a.stripped` line on stderr.
+> Nothing is wrong with that tool. Tracked in
+> [#115](https://github.com/norviq-dev/norviq/issues/115); until it lands, watch stderr for
+> `gate_a.stripped`.
+
 To front a remote server instead of spawning one:
 
 ```bash
