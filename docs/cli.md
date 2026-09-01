@@ -613,7 +613,7 @@ $ norviq admin reset-password -n norviq -u admin --console-url https://norviq.ex
 Reset 'admin'. Sign in with this ONE-TIME password (you will be forced to set a new one):
 
      username: admin
-     password: rH7kPqXm3vTnBzWyLd42
+     password: <the-generated-password>
 
   Console: https://norviq.example.com/login
 ```
