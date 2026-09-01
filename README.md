@@ -124,7 +124,39 @@ real model decides the tool calls and Norviq blocks the dangerous ones before th
   deletes; HPA/PDB/anti-affinity for multi-node clusters.
 - **Multi-cluster (fleet)** — signed policy-bundle distribution across a hub and spoke clusters.
 
-## Quick start
+## Try it without a cluster
+
+The MCP action-firewall runs as a plain stdio proxy, so you can put it in front of an MCP server on a
+laptop and see what it does before deciding whether the Kubernetes install is worth it.
+
+**Prerequisites:** Python 3.11+.
+
+```bash
+pip install norviq
+
+# Wrap any MCP server. Norviq spawns it as a child process and sits on the stdio pair.
+python -m norviq.mcp --server-id filesystem -- \
+  npx -y @modelcontextprotocol/server-filesystem /work
+```
+
+Point your MCP host (Claude Desktop, Cursor, any stdio client) at that command instead of the
+server's own, and every `tools/list` and `tools/call` goes through the gates on the way past.
+
+To front a remote server instead of spawning one:
+
+```bash
+python -m norviq.mcp --http --listen 127.0.0.1:9000 --upstream https://mcp.example.com/mcp
+```
+
+**What local mode does and does not do.** Gate A still scans tool definitions for injection patterns
+and content-hash pins six fields per tool (`name`, `title`, `description`, `inputSchema`,
+`outputSchema`, `annotations`), so a definition that changes between runs is visible. What it cannot
+do without a control plane is ask whether a server should be spoken to at all — every local discovery
+logs `gate_a.server_decision_unavailable` — and Gate B has no policy to evaluate, so calls are
+allowed. **Local mode is a scanner and a change detector, not an enforcement point.** The Kubernetes
+install below is what gives Gate B something to decide with.
+
+## Quick start (Kubernetes)
 
 **Prerequisites:** a Kubernetes cluster (1.30+), `kubectl`, and Helm 3.
 
