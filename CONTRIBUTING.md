@@ -12,6 +12,9 @@ By participating you agree to abide by our [Code of Conduct](CODE_OF_CONDUCT.md)
 - **Improve docs** — the `docs/` tree and this README are always improvable.
 - **Fix or build features** — please open (or comment on) an issue first for anything non-trivial, so
   we can agree on the approach before you invest time.
+- **Start somewhere small** — issues labelled
+  [`good first issue`](https://github.com/norviq-dev/norviq/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+  each carry a file path, a reproduction you can run, and a definition of done.
 
 ## The stack
 
@@ -166,7 +169,21 @@ silence a real finding.
 1. Fork and branch from `main`.
 2. Keep PRs focused; describe the change and how you tested it.
 3. Run the checks above locally, and confirm CI is green.
-4. A maintainer will review. For enforcement/auth/policy changes, expect a careful security review.
+4. The maintainer reviews and merges once CI is green. There is one maintainer and no required-review
+   gate on `main` today (see [GOVERNANCE.md](GOVERNANCE.md)); for enforcement, auth or policy changes a
+   second reviewer is asked for and cannot yet be guaranteed. Expect questions that ask you to
+   reproduce a claim rather than restate it.
+
+## Developer Certificate of Origin
+
+Contributions are accepted under the [Developer Certificate of Origin](https://developercertificate.org/)
+(DCO): by signing off a commit you certify that you wrote it, or otherwise have the right to submit
+it under the project licence. Sign off with `git commit -s`, which appends
+
+    Signed-off-by: Your Name <you@example.com>
+
+using the name and email you commit as. Every commit in a pull request needs it. This applies from
+the date this section landed; earlier history is not rewritten.
 
 ## License
 

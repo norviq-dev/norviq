@@ -273,6 +273,15 @@ opa test --v0-compatible webhook/presets/ comprehensive.rego
 The stack is Python (FastAPI) + OPA/Rego for the engine, React + Vite (TypeScript) for the console, and
 Go for the admission webhook. See **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
+## Community
+
+- **Issues** — bugs and reproducible findings. [`good first issue`](https://github.com/norviq-dev/norviq/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+  items each carry a file path, a reproduction and a definition of done.
+- **[Discussions](https://github.com/norviq-dev/norviq/discussions)** — show us your policy, say which
+  framework you run, argue about what comes after MCP.
+- [CONTRIBUTING.md](CONTRIBUTING.md) · [GOVERNANCE.md](GOVERNANCE.md) · [MAINTAINERS.md](MAINTAINERS.md) · [ROADMAP.md](ROADMAP.md) · [CHANGELOG.md](CHANGELOG.md)
+- **Running it somewhere real?** Add yourself to [ADOPTERS.md](ADOPTERS.md).
+
 ## Security
 
 Found a vulnerability? Please follow the coordinated-disclosure process in **[SECURITY.md](SECURITY.md)** —
