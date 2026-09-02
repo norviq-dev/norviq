@@ -122,6 +122,38 @@ _SILENCE_IS_ORDINARY = re.compile(
 # phrase elsewhere in the same description cannot suppress a real hit.
 _VETO_WINDOW = 24
 
+# The veto's verb list is also the vocabulary a poisoned description uses to suppress a control:
+# "silently skip the policy check", "quietly ignore the operator's revocation". The verb cannot
+# separate those from "silently skips entries that do not parse" — the OBJECT can. When the words
+# after the adverb name a control rather than data, the occurrence is concealment however ordinary
+# the verb, and the veto does not apply. Looking FORWARD only, and further than the veto window: the
+# object follows the verb, and a wider window here is strictly safe — it can only make the rule
+# fire, never suppress it, so a decoy cannot exploit it.
+_CONTROL_OBJECT = re.compile(
+    r"\b(polic(?:y|ies)|checks?|audits?|prompts?|instructions?|rules?|guards?|sandbox(?:es)?|"
+    r"warnings?|refusals?|revocations?|permissions?|approvals?|consent|controls?|verifications?|"
+    r"validations?|reviews?|alerts?|restrictions?|safeguards?|escalations?|authori[sz]ation|"
+    r"authentication)\b"
+)
+_OBJECT_WINDOW = 64
+
+
+def _excused(folded: str, m: "re.Match[str]", veto: "re.Pattern[str]") -> bool:
+    """True only when THIS occurrence is ordinary prose about the tool's own outcome.
+
+    Two conditions, both required. The veto phrase must CONTAIN this adverb, not merely sit inside
+    the window around it — otherwise "skip silently." twenty characters earlier excuses a following
+    "silently exfiltrate", which is the decoy the window was meant to defeat, moved closer. And the
+    words after the adverb must not name a control: "silently skip" is ordinary when the thing
+    skipped is data and concealment when it is the policy check.
+    """
+    lo = max(0, m.start() - _VETO_WINDOW)
+    window = folded[lo:m.end() + _VETO_WINDOW]
+    here = m.start() - lo
+    if not any(v.start() <= here < v.end() for v in veto.finditer(window)):
+        return False
+    return _CONTROL_OBJECT.search(folded[m.start():m.end() + _OBJECT_WINDOW]) is None
+
 _RULES: tuple[tuple[str, str, re.Pattern[str], str], ...] = (
     (
         "mcp_a_instruction_override", "critical",
@@ -397,10 +429,8 @@ def _scan_text(text: str, field_path: str) -> list[Finding]:
         # "silently exfiltrate" — a one-line bypass for any server that wanted it. Still one
         # finding per rule; the loop stops at the first occurrence the veto does not excuse.
         for m in pattern.finditer(folded):
-            if veto is not None:
-                window = folded[max(0, m.start() - _VETO_WINDOW):m.end() + _VETO_WINDOW]
-                if veto.search(window):
-                    continue
+            if veto is not None and _excused(folded, m, veto):
+                continue
             findings.append(Finding(rule, severity, field_path, _excerpt(text, m.span()), detail))
             break
     return findings
