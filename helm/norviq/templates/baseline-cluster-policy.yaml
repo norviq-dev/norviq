@@ -12,7 +12,7 @@
   non-compliance, and calls proceed. Rendering zero baselines is still wrong under that default — the
   customer loses the visibility the audit posture exists to give them.
 */ -}}
-{{- fail "\n\nbaselineClusterPolicy.enabled=true but policyQuotaNamespaces is EMPTY.\nNo baseline guard would be rendered, leaving every agent class without the fail-closed cluster baseline.\nEither:\n  - set policyQuotaNamespaces to your tenant namespaces (the baseline renders one per namespace), for example:\n      --set policyQuotaNamespaces='{default,chatbot-prod}'\n    or\n  - set baselineClusterPolicy.enabled=false to explicitly run WITHOUT a cluster baseline (not recommended).\n" }}
+{{- fail "\n\nbaselineClusterPolicy.enabled=true but policyQuotaNamespaces is EMPTY.\nNo baseline guard would be rendered, leaving every agent class with NO cluster baseline at all — no controls evaluating, not even in audit mode.\nEither:\n  - set policyQuotaNamespaces to your tenant namespaces (the baseline renders one per namespace), for example:\n      --set policyQuotaNamespaces='{default,chatbot-prod}'\n    or\n  - set baselineClusterPolicy.enabled=false to explicitly run WITHOUT a cluster baseline (not recommended).\n" }}
 {{- end }}
 {{- range $ns := .Values.policyQuotaNamespaces }}
 apiVersion: norviq.io/v1alpha1
