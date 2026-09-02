@@ -56,11 +56,13 @@ kubectl get secret norviq-secrets -n norviq \
   node drains/upgrades. Postgres/Redis ship as single-replica StatefulSets — point at managed HA
   datastores, or use the `values-prod.yaml` operator-backed HA, for production.
 
-## 3b. Baseline policy coverage (fail-closed)
+## 3b. Baseline policy coverage
 `baselineClusterPolicy.enabled` is `true` by default and renders **one baseline policy per namespace
 listed in `policyQuotaNamespaces`** — which ships **empty**. The chart therefore **fails the render**
 until you list your tenant namespaces (or explicitly set `baselineClusterPolicy.enabled=false`),
-rather than installing with zero baselines and a silently fail-open posture.
+rather than installing with zero baselines — no controls evaluating, not even in audit mode. The
+baselines it does render ship in **audit** mode; set `baselineClusterPolicy.enforcementMode: block`
+to enforce.
 
 ```bash
 helm upgrade --install norviq ./helm/norviq \

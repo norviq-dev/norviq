@@ -855,9 +855,9 @@ auth:
   # keys the trust score + the agent_frozen: kill-switch, so a credential that CARRIES either claim is
   # ALWAYS pinned to it (never spoofable) regardless of this flag. This governs credentials that carry
   # NO binding — pre-upgrade sidecar tokens and API keys issued without an agentClass:
-  #   false (default) — they may still assert an identity, so an upgrade doesn't fail-closed every
+  #   false           — they may still assert an identity, so an upgrade doesn't fail-closed every
   #                     in-flight sidecar mid-rollout.
-  #   true            — every non-admin caller must present a bound credential (403 otherwise).
+  #   true (default)  — every non-admin caller must present a bound credential (403 otherwise).
   # DEFAULTS TO true (F-003): agent_class selects the Rego program, so it must be attested like
   # namespace already is. Left false, a namespace-scoped key with an empty agent_class let the request
   # BODY pick the class — including one with no policy, which falls through to noPolicyDecision: allow.

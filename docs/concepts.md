@@ -345,12 +345,12 @@ editing individual policies, put the namespace into monitor mode
 `block`/`escalate` to a logged `audit` (`rule_id` prefixed `monitor_would_block:`) for that namespace.
 Monitor mode only ever *softens*; it never turns an `allow` into a block.
 
-A fixed set of `rule_id`s stays hard regardless of posture — `trust_frozen` (the admin kill switch),
-`policy_load_pending` and `evaluator_error` / `evaluator_invalid_payload` (engine health), and
-`rate_limit_exceeded` (`_POSTURE_EXEMPT_RULES`, `norviq/engine/evaluator.py:329`) — because those are
-safety/health signals, not policy calls to be monitored away. The same exemption list applies to the
-per-policy audit mode above, so neither layer can monitor away a trust freeze or an engine-health
-block. See also the `POST /api/v1/policies/dry-run` replay for testing a policy against real recent
+One `rule_id` stays hard regardless of posture — `trust_frozen` (the admin kill switch) — plus
+`rate_limit_exceeded` while `monitor_exempt_rate_limit` is true, its default (`_posture_exempt_rules()`,
+`norviq/engine/evaluator.py`). Engine-health blocks (`policy_load_pending`, `evaluator_error`,
+`evaluator_invalid_payload`) soften to audit with everything else: a kill switch is not a policy call
+to be monitored away, and a health signal is reported rather than enforced. The same exemption list applies to the
+per-policy audit mode above, so neither layer can monitor away a trust freeze. See also the `POST /api/v1/policies/dry-run` replay for testing a policy against real recent
 traffic before applying it.
 
 ## Decisions

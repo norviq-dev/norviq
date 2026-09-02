@@ -38,9 +38,11 @@ paths. Three worth stating explicitly, because each is a place where a naive imp
   bypass reachable by sending malformed input, so the error path is the enforcement path.
 
 `enforcement_mode=audit` deliberately inverts the no-policy default to allow — that is shadow mode, and
-it is a visibility posture, not an enforcement one. A small set of `rule_id`s stays hard even in audit
-mode (`trust_frozen`, `policy_load_pending`, `evaluator_error`, `evaluator_invalid_payload`,
-`rate_limit_exceeded`), so an admin trust freeze cannot be lifted by flipping a namespace to audit.
+it is a visibility posture, not an enforcement one. One `rule_id` stays hard even in audit
+mode — `trust_frozen` — plus `rate_limit_exceeded` while `monitor_exempt_rate_limit` is true, its default
+(`_posture_exempt_rules()` in `norviq/engine/evaluator.py`). Engine-health blocks (`policy_load_pending`,
+`evaluator_error`) soften to audit like any other rule. So an admin trust freeze cannot be lifted by
+flipping a namespace to audit.
 
 **Norviq's PEP is cooperative, not interposing.** This is the single most important scope statement in
 this document. The sidecar does not sit in the network path of the tool invocation and does not execute
@@ -150,11 +152,12 @@ not traverse the sidecar.
   `norviq.io/agent-class` label, and API keys take `agent_class`/`spiffe_id` at creation.
 
   A credential carrying **no** binding (a sidecar token minted before this shipped, or an operator/CI
-  key issued without one) is still accepted by default, so an upgrade does not fail-closed every
-  in-flight sidecar mid-rollout. That is a deliberate ratchet, not the end state — set
-  `auth.requireBoundAgentIdentity=true` once sidecars have been re-admitted and workload keys re-issued,
-  and every non-admin caller must then present a bound credential (`NRVQ-AUTH-14020`). Admin keeps the
-  cross-identity latitude it already has across namespaces (console what-if, red-team simulation).
+  key issued without one) is **rejected by default** — `auth.requireBoundAgentIdentity` ships `true`, and
+  every non-admin caller must present a bound credential (403, `NRVQ-AUTH-14020`). Upgrading from 0.1.x
+  with sidecars or keys that predate binding: set it `false` for the rollout, re-admit the sidecars (the
+  webhook stamps `agent_class` from the pod's `norviq.io/agent-class` label), re-issue workload keys with
+  an `agent_class`, then set it back. Admin keeps the cross-identity latitude it already has across
+  namespaces (console what-if, red-team simulation).
 - **OPA** — evaluates Rego against the input document `_build_input` constructs (see
   [`opa-input-schema.md`](engineering/opa-input-schema.md)). Each deployment runs OPA per-replica (the
   in-pod sidecar model, `NRVQ_OPA_URL` pointing at `localhost:8181`, or a per-process managed server in

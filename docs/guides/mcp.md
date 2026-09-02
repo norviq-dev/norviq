@@ -215,7 +215,7 @@ the *raw* text, because the skeleton can never witness them (`scanner.py:257-266
 | `mcp_a_concealment` | critical | "do not tell the user", any wording of the same shape |
 | `mcp_a_exfil_directive` | critical | "send/include … to \<url\>" or "… as the \<x\> argument" |
 | `mcp_a_credential_read` | critical | names a credential location (`.ssh/`, `.env`, `api_key`, `/var/run/secrets`, …) |
-| `mcp_a_concealment_bare` | high | `silently`, `covertly`, `without the user` |
+| `mcp_a_concealment_bare` | high | `covertly`, `secretly`, `discreetly`, `without the user` — always. `silently`, `quietly` — unless directly adjacent to an outcome verb ("succeed silently", "silently ignored") AND not aimed at a control ("silently skip the policy check" still fires) |
 | `mcp_a_hidden_marker` | high | `<IMPORTANT>`, `[[SYSTEM]]`, `## instructions` |
 | `mcp_a_tool_precondition` | high | asserts a precondition on *other* tools |
 | `mcp_a_role_impersonation` | high | a line beginning `system:` / `assistant:` |

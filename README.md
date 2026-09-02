@@ -111,7 +111,7 @@ real model decides the tool calls and Norviq blocks the dangerous ones before th
 
 ## Features
 
-- **Policy enforcement** — OPA/Rego evaluated per tool call, sub-second, fail-closed.
+- **Policy enforcement** — OPA/Rego evaluated per tool call, sub-second; an engine fault fails closed.
 - **Kubernetes-native** — `NrvqPolicy` / `NrvqClass` / `NrvqConfig` CRDs, a mutating webhook that
   injects the enforcement sidecar, and a Helm chart.
 - **Workload identity** — SPIFFE/SPIRE SVIDs (with a mock mode for non-SPIRE clusters).
