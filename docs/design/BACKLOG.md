@@ -76,6 +76,22 @@ sharp edge that the Secret holds only the FIRST password and is stale after the 
 
 ---
 
+### 1.1a Also landed on `cncf-readiness`, also unreleased (2026-09-02)
+
+All verified with a control before commit; none reaches a user until 0.2.6 ships.
+
+* **stdio MCP proxy degraded its pin store in silence** on the path the quickstart recommends
+  (`file` with no path → memory, no log). Warning moved into `build_store` (`NRVQ-MCP-5078`) so no
+  caller can forget it; tested through the real entrypoint. `9c97470`.
+* **Two security booleans fell back to OFF** — `auth.requireBoundAgentIdentity` and
+  `config.requireStrongSecret` used `| default false` while the code defaults True, so an overlay that
+  nulled the key rendered `"false"`. Latent (stock pins true). The other four `| default false`
+  booleans default False in code and are harmless. `3c2c2ec`.
+* **`NOTES.txt` and the refusal message called the audit-mode baseline "fail-closed"**, in the text
+  printed on every install. `c9ea106`.
+* **#117's veto excused "silently skip the policy check"** — see §7.1; the fix is on the branch, the
+  open PR still carries the bypass.
+
 ### 1.2 E.1 and the 0.2.6 cut are one unit, not two items
 
 **Decision:** ship the busybox fix (§2.1) and cut 0.2.6 together, or do neither. Not launch-gating.
@@ -150,10 +166,20 @@ optional `host` for the gate? Then make the docs match whichever it is.
 
 ---
 
-## 3. Docs drift — verified, not yet fixed
+## 3. Docs drift — verified; most fixed on `cncf-readiness`, three held on purpose
 
-Two claims on `docs.norviq.dev` that the 0.2.5 audit confirmed stale and that were left alone
-because both depend on decisions above, not on wording:
+**Fixed (`8522e16`, `c9ea106`)**, each side read before either was changed: six pages claiming five
+rule_ids stay hard in audit mode (the code keeps one plus one behind `monitor_exempt_rate_limit`;
+the cited symbol `_POSTURE_EXEMPT_RULES` raises ImportError); "fail-closed" on the audit baseline in
+getting-started, production-config, prod-deploy-runbook, NOTES.txt and the chart's refusal message;
+graphs.md's "fail-closed default" row, unreachable stock (`no_policy_loaded` needs
+`noPolicyDecision: deny`; the chart ships allow); security-model.md and `values.yaml:858` calling
+`requireBoundAgentIdentity` false-by-default when it has shipped true since 0.2.1; README:114's
+unqualified "fail-closed". `tests/test_docs_prose_parity.py` now reads the prose so this cannot
+recur silently — anchored on the function name, because "stays hard" also occurs in unrelated text
+about pack overlays.
+
+**Held**, because each depends on a decision in §2 rather than on wording:
 
 | page | claim | why it is wrong |
 |---|---|---|
@@ -177,7 +203,9 @@ were refuted on inspection.
 * **40 codes** emitted at both an alertable level (`warning`/`error`/`critical`) and a routine one
   (`debug`/`info`). All 40 were reviewed; none hides a security signal behind routine traffic. Mostly
   a debug trace beside a warning in the same module.
-* **52 codes** covering more than one event at the same severity. Untidy in a log reader, harmless in
+* **51 codes** covering more than one event at the same severity (52 until `9c97470` gave the pin-store
+  warning its own code and `NRVQ-MCP-5067` stopped carrying two events — the ratchet's delete-the-entry
+  rule fired, as designed). Untidy in a log reader, harmless in
   an alert.
 
 Both ratchet: adding one fails, and *fixing* one also fails until the entry is deleted, so neither
@@ -198,7 +226,8 @@ warning.
 it was never committed, but it is a live token until rotated.
 
 ### 5.2 Cloudflare rewrites the tool-poisoning demo on `norviq.dev`
-**Status:** verified, cosmetic.
+**Status:** RESOLVED 2026-08-24 — `norviq-UI#2` removed the literal address rather than escaping it;
+the live page now carries no `email-decode.min.js` (measured: 0). Kept for the record.
 
 The live page differs from `norviq-public-ui/test/index.html` by 233 bytes: Cloudflare's email
 obfuscator finds `audit@attacker.example` inside the MCP tool-poisoning *payload* illustration,
@@ -230,3 +259,114 @@ Also noted during the MCP registry design and deliberately not fixed inside it:
 `_reload_policy` (`policy_loader.py:795`) reads only Redis and returns silently on a miss, with no DB
 fallback, so a replica that misses the pubsub message keeps serving a stale in-memory module. It also
 drops `enforcement_mode` when rebuilding the entry.
+
+---
+
+## 7. Opened during the CNCF readiness pass (2026-09-02)
+
+Every item below was reproduced against the tree or the live API by this session; the audit that
+proposed most of them had executed nothing. Where the audit was wrong, §8 says so.
+
+### 7.1 PR #117 narrowed the concealment scanner into a bypass
+**Status:** fixed on `cncf-readiness` (`6c4d3b3`); **the open PR still has it.** Decision: push the fix
+onto the PR branch, or the maintainer takes it.
+
+The veto that makes "succeed silently" ordinary matched on the verb alone, and its verb list — skip,
+drop, ignore, overwrite, discard, continue, retry — is what a poisoned description uses to suppress a
+control. Seven phrasings went STRIP/high → PASS-THROUGH on both the definition and the tool-result
+path; the PR's own positive controls sample only exfiltrate/send/copy, which the veto cannot match,
+so they stayed green. A second defect in the same function: the veto checked the window, not whether
+the ordinary phrase contained *this* adverb, so a decoy "skip silently." twenty characters earlier
+excused a following "silently exfiltrate". Fixed by requiring the veto phrase to span the adverb and
+by refusing the excuse when the words after the adverb name a control. Sixteen regression cases;
+reverting fails exactly fifteen. **#116** documents the false positive "until #117 lands" and should
+be reworded once the corrected fix does.
+
+### 7.2 CI is red on `main`, and nothing is a required check
+**Status:** measured; open.
+
+FOSSA fails on the webhook's Go deps at `k8s.io/{apimachinery,client-go}` v0.33.0
+(CVE-2018-1002105, CVE-2019-11250, CVE-2020-8565) — the gate working, the dependency old. Framework
+Compat's autogen leg fails at collection on `protobuf` gencode 6.33.5 vs runtime 5.29.6. Neither
+blocks a merge: `main` has no branch protection and no rulesets, so no workflow is a required check
+— while `test.yml:2` calls itself a merge gate. The lint/audit gates added in `dafdcca` report and do
+not block for the same reason. GOVERNANCE.md says when that changes.
+
+### 7.3 The default Redis image is RSALv2/SSPLv1, on a floating tag, with no digest
+**Status:** verified; open — needs a licence election, not a patch.
+
+`redis:7-alpine` resolves today to 7.4.11 (OCI annotation and the image's own `REDIS_VERSION`),
+which is past the 7.4 relicense. Unlike every first-party image the redis entry has no `digest` key,
+and `release.yml`'s "every image is digest-pinned" gate asserts `@sha256:` only on `ghcr.io/norviq-dev/`
+lines — false for six of eight images. Options: pin `7.2-alpine` (BSD-3-Clause, verified against
+upstream `COPYING` at tag 7.2.16), or `valkey/valkey:8-alpine` (BSD, LF fork, drop-in for the
+`redis://` client), then run kind-e2e against the Sentinel/HA paths. Either way the floating major
+tag goes, and the release gate should assert digests on *all* `image:` lines.
+
+### 7.4 Four commits are authored as `Claude <noreply@anthropic.com>`
+**Status:** decision owed. `.mailmap` (`1855de8`) collapses the seven human spellings and deliberately
+leaves these four alone — folding them into a human identity by mailmap would hide the question, not
+answer it. An AI cannot certify origin under the DCO; a foundation doing IP diligence will ask.
+Options: re-attribute to the maintainer with the AI noted in the body; leave and disclose; or a
+one-off DCO remediation commit covering prior work. Not a formatting question. Also: 387 commits
+(73%) carry a `Co-Authored-By: Claude` trailer; those stopped 2026-08-10 and are disclosure, not
+authorship.
+
+### 7.5 Repository security toggles are off, and SECURITY.md points at one of them
+**Status:** verified live; decision owed.
+
+Private Vulnerability Reporting: `enabled: false` (control: `github/docs` → true). Secret scanning,
+push protection, Dependabot security updates: all off. `SECURITY.md:12-13` calls PVR "the preferred
+channel" and `:8` forbids a public issue — a researcher following the doc finds no button and is
+pushed toward the one route the doc bans. Either flip the toggles or edit the sentence; leaving both
+as they are is the defect.
+
+### 7.6 `.gitleaks.toml` allowlists every `.md`, so docs are never scanned
+**Status:** verified (from the #118 review); open. Line 12's `.*\.md$` means the `secrets` job does not
+read `docs/cli.md` — or any markdown. #118's premise that "a scanner flagged" the example password is
+true only of Mr-Neutr0n's scanner, not this repo's. Two credential-shaped strings have now lived in
+docs; measuring what un-allowlisting costs across all 62 tracked `.md` files is the next step.
+
+### 7.7 `docs/cli.md` line citations are systemically stale
+**Status:** verified (hand-checked sample from the #118 review); open. `:14` cites `pyproject.toml:67-68`
+(actual 82-83); `:608` cites `config.py:393` (actual 454, and 393 is a comment about body size).
+Prefer function names and YAML key paths over raw line numbers; nothing in CI keeps a line number
+fresh.
+
+### 7.8 Two of the maintainer's worktrees were deleted by this session
+**Status:** recorded. `../tmp/prega-92ceec1` (`release/pre-ga-consolidated`) and
+`../tmp/wt-pre-ga-remediation` (`fix/catalog-hierarchy-batch2`) were removed by an over-broad
+cleanup filter. Both branches are intact at `92ceec1`, last commit 2026-07-08. Any uncommitted work
+in those directories is gone; `git worktree add ../tmp/<name> <branch>` restores the directory.
+
+### 7.9 Steps not yet done from the CNCF audit
+* **OpenSSF Best Practices badge** — never registered (`bestpractices.dev` → "Zero Projects";
+  control: `kubernetes` → 431). Owner-only web form; criterion answers to be drafted from the repo as
+  it stands *after* the items above, so justifications point at real artifacts.
+* **Security self-assessment** (CNCF TAG Security abbreviated template) — the highest-value artifact
+  and the one where an unverified claim is actively dangerous. To be written from the code at the
+  moment of writing; §3's drift list is its raw material.
+* **Framework Compat and FOSSA reds** (§7.2) — bump the k8s Go deps; pin protobuf in the autogen leg.
+
+---
+
+## 8. Audit claims that did not reproduce
+
+Recorded so the next reader of the CNCF audit knows which numbers to distrust.
+
+* "PR #109 has been open and unanswered" — answered twice by the maintainer on 2026-09-01, approved,
+  held on the release cut. The audit predates the reply.
+* "The only open PR" — four were open.
+* "Three shipped dependencies carry non-allowlisted licences" — one (`certifi`, MPL-2.0) in the
+  58-distribution `norviq[spiffe]` closure; the other copyleft-flagged packages are dev-only.
+* "Posture may vary by preset / namespace list / prod overlay" — one behaviour, `audit`, on every
+  path constructible.
+* "Nine dependencies carry NOTICE files" — five shipped; four are in the venv but not the images.
+* "`git shortlog -sne` shows 7 identities" — the count is right; the command as written reads stdin
+  when non-interactive and prints nothing. Use `-sne HEAD`.
+* "0 reviews across 96 PRs" — 100 PRs; 96 is the closed count. The zero holds across all 100.
+* "`README.md:244` is where Community goes" — stale citation; the section went before `## Security`
+  at what was line 276.
+* "`ruff` shows 5 errors on main" — exact for main; this branch had added three more before the gate
+  existed, which is the gate's own argument.
+
