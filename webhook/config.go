@@ -125,17 +125,17 @@ func LoadConfig() Config {
 		// Unify the opt-in/out label key with the MutatingWebhookConfiguration namespaceSelector
 		// (norviq-injection). The namespace opts in (MWC selector); a pod opts OUT with
 		// norviq-injection=disabled. Default flipped from the legacy "norviq" key.
-		EnableLabel:           envStr("NRVQ_ENABLE_LABEL", "norviq-injection"),
-		EnableValue:           envStr("NRVQ_ENABLE_VALUE", "enabled"),
-		AgentClassLabel:       envStr("NRVQ_AGENT_CLASS_LABEL", "norviq.io/agent-class"),
-		AdminPolicyNamespace:  envStr("NRVQ_ADMIN_POLICY_NAMESPACE", "norviq"),
-		LogLevel:              slog.LevelInfo,
-		Runtime:               runtime,
-		AllowPodOptOut:        envBool("NRVQ_ALLOW_POD_OPT_OUT", true),
-		SpiffeInject:          envBool("NRVQ_SPIFFE_INJECT", false),
-		SpiffeMode:            envStr("NRVQ_SPIFFE_MODE", "mock"),
-		SpiffeSocket:          envStr("NRVQ_SPIFFE_SOCKET", "/spiffe-workload-api/spire-agent.sock"),
-		SidecarMode:           envStr("NRVQ_SIDECAR_MODE", "proxy"),
+		EnableLabel:          envStr("NRVQ_ENABLE_LABEL", "norviq-injection"),
+		EnableValue:          envStr("NRVQ_ENABLE_VALUE", "enabled"),
+		AgentClassLabel:      envStr("NRVQ_AGENT_CLASS_LABEL", "norviq.io/agent-class"),
+		AdminPolicyNamespace: envStr("NRVQ_ADMIN_POLICY_NAMESPACE", "norviq"),
+		LogLevel:             slog.LevelInfo,
+		Runtime:              runtime,
+		AllowPodOptOut:       envBool("NRVQ_ALLOW_POD_OPT_OUT", true),
+		SpiffeInject:         envBool("NRVQ_SPIFFE_INJECT", false),
+		SpiffeMode:           envStr("NRVQ_SPIFFE_MODE", "mock"),
+		SpiffeSocket:         envStr("NRVQ_SPIFFE_SOCKET", "/spiffe-workload-api/spire-agent.sock"),
+		SidecarMode:          envStr("NRVQ_SIDECAR_MODE", "proxy"),
 		// "block" -> "allow", to AGREE with config.py's sdk_fallback_mode and the chart (F-027).
 		//
 		// The three disagreed: this said block, config.py says allow, values.yaml sets allow

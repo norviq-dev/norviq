@@ -21,7 +21,7 @@ def _env_value(env_name: str, *extra: str) -> str:
         capture_output=True, text=True,
     )
     assert res.returncode == 0, res.stderr
-    line = next(l for l in res.stdout.splitlines() if l.strip().startswith(env_name + ":"))
+    line = next(line for line in res.stdout.splitlines() if line.strip().startswith(env_name + ":"))
     return line.split(":", 1)[1].strip()
 
 

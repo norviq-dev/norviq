@@ -25,7 +25,7 @@ import pytest
 from norviq.mcp import protocol as P
 from norviq.mcp.firewall import McpFirewall
 from norviq.mcp.pins import MemoryPinStore, PinRegistry
-from norviq.sdk.core.decisions import PolicyDecision, apply_pep_denial
+from norviq.sdk.core.decisions import PolicyDecision
 from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
 from norviq.sdk.core.interceptor import ToolInterceptor
 

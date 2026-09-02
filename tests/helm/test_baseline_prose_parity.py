@@ -31,7 +31,7 @@ def test_the_chart_does_not_call_its_audit_mode_baseline_fail_closed():
     )
     for name in ("NOTES.txt", "baseline-cluster-policy.yaml"):
         text = (_TEMPLATES / name).read_text()
-        hits = [l.strip() for l in text.splitlines() if "fail-closed" in l]
+        hits = [line.strip() for line in text.splitlines() if "fail-closed" in line]
         assert not hits, (
             f"{name} calls the baseline 'fail-closed' while values.yaml ships enforcementMode: audit, "
             f"under which every control evaluates and records and the call PROCEEDS. Say what audit "

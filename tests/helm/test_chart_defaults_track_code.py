@@ -194,7 +194,7 @@ def test_a_boolean_that_defaults_true_in_code_cannot_fall_back_to_false_in_the_c
         f"{field} no longer defaults True in norviq/config.py; this test's premise changed, re-read it"
     )
     text = (_ROOT / "helm/norviq/templates/configmap.yaml").read_text()
-    line = next(l for l in text.splitlines() if l.strip().startswith(env_name + ":"))
+    line = next(line for line in text.splitlines() if line.strip().startswith(env_name + ":"))
     assert "| default false" not in line, (
         f"{env_name} uses `| default false`, which turns a nulled key into \"false\" while the code "
         f"default is True. Use the ternary form so nil falls back to the CODE default."

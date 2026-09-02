@@ -508,7 +508,8 @@ class TestDegradedIsVisibleWhereItMatters:
             )
 
         healthy = ServerRegistry()                      # CONTROL: not degraded
-        degraded = ServerRegistry(); degraded.degraded = True
+        degraded = ServerRegistry()
+        degraded.degraded = True
 
         # The assertion is on the flag reaching the object the firewall reads. The serve-time log is
         # exercised by the MCP transport tests; what is pinned here is that the two states are
