@@ -692,6 +692,8 @@ All read from the **proxy process's** environment, prefix `NRVQ_`:
 | `NRVQ_MCP_ALLOW_TOOL_HEADERS` | `false` | permit tool parameters to set outbound HTTP headers |
 | `NRVQ_MCP_MAX_PENDING_REQUESTS` | `4096` | per-direction cap on in-flight request-id bookkeeping |
 
+> **`file` with no path is not an error — it is a silent downgrade, now made loud.** `NRVQ_MCP_PIN_STORE=file` without `NRVQ_MCP_PIN_PATH` degrades to the in-process store: a restart re-TOFUs every definition and drift is not detected. `build_store` logs this as `nrvq.mcp.pins.store_degraded` (**`NRVQ-MCP-5078`**) on every transport. Until 0.2.6 only the HTTP proxy said so; the stdio proxy this guide's quickstart recommends degraded with no line at all.
+
 Helm keys that set them on injected proxies: `webhook.injection.mcp.pinStore` and
 `webhook.injection.mcp.pinMode` (`values.yaml:349-352`; wired at
 `webhook/mcp_injector.go:206-215`). The injector's admission check *requires* a wrapped container's

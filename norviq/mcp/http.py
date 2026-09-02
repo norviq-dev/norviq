@@ -108,13 +108,8 @@ class HttpProxy:
         # value here while `build_store` hands back memory is how a surface ends up asserting
         # durability the process does not have.
         elif pin_store != effective_store_kind(pin_store, settings.mcp_pin_path):
-            log.warning(
-                "nrvq.mcp.http.pin_store_degraded",
-                configured=pin_store, using=effective_store_kind(pin_store, settings.mcp_pin_path),
-                code="NRVQ-MCP-5067",
-                hint="NRVQ_MCP_PIN_STORE=file needs NRVQ_MCP_PIN_PATH; without it pins are held in "
-                     "process, so a restart re-TOFUs every definition and drift is not detected",
-            )
+            # build_store logs the degradation (NRVQ-MCP-5078) for every caller; this branch only
+            # keeps the kind this surface REPORTS equal to the kind it actually runs.
             pin_store = effective_store_kind(pin_store, settings.mcp_pin_path)
         self._pin_store_kind = pin_store
         self._pins = PinRegistry(
