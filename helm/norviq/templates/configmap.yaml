@@ -41,7 +41,7 @@ data:
   # The `default` here must track norviq/config.py's default — it silently wins over it, so a
   # divergence means the Python setting is decorative on every real install.
   NRVQ_NO_POLICY_DECISION: {{ .Values.config.noPolicyDecision | default "allow" | quote }}
-  NRVQ_REQUIRE_STRONG_SECRET: {{ .Values.config.requireStrongSecret | default false | quote }}
+  NRVQ_REQUIRE_STRONG_SECRET: {{ ternary "false" "true" (eq (toString .Values.config.requireStrongSecret) "false") | quote }}
   NRVQ_OPA_MODE: {{ .Values.config.opaMode | default "server" | quote }}
   NRVQ_OPA_URL: {{ printf "http://localhost:%v" .Values.opa.port | quote }}
   NRVQ_SIEM_ENABLED: {{ .Values.siem.enabled | default false | quote }}
@@ -119,7 +119,7 @@ data:
   # Ratchet for /evaluate identity binding: when true, a non-admin caller whose credential carries NO
   # agent_class/spiffe_id binding is refused (403). A credential that DOES carry one is always pinned
   # to it regardless. See auth.scoped_identity.
-  NRVQ_AUTH_REQUIRE_BOUND_AGENT_IDENTITY: {{ .Values.auth.requireBoundAgentIdentity | default false | quote }}
+  NRVQ_AUTH_REQUIRE_BOUND_AGENT_IDENTITY: {{ ternary "false" "true" (eq (toString .Values.auth.requireBoundAgentIdentity) "false") | quote }}
   # --- OIDC + workload-identity mode. Default-off; legacy HS256 stays on. ---
   NRVQ_OIDC_ENABLED: {{ .Values.oidc.enabled | default false | quote }}
   NRVQ_OIDC_ISSUER: {{ .Values.oidc.issuer | default "" | quote }}
