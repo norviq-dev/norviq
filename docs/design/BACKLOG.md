@@ -310,7 +310,16 @@ reverting fails exactly fifteen. **#116** documents the false positive "until #1
 be reworded once the corrected fix does.
 
 ### 7.2 CI is red on `main`, and nothing is a required check
-**Status:** measured; open.
+**Status:** FOSSA half resolved on `cncf-readiness` (`9aede34`, `111ccc0`); Framework Compat and
+the required-check question still open.
+
+The k8s modules are bumped v0.33.0 → v0.37.0 (build/vet/test/image all green). That does **not**
+clear FOSSA — read from the advisory database, all three CVEs have fixed versions eight to twenty
+minors below v0.33.0 (client-go 0.17.0 / 0.19.6; CVE-2018-1002105 is against `kubernetes/kubernetes`
+< 1.12.3, never a library). The matches are spurious and have no upper bound, so they are excepted in
+`scripts/check_fossa_issues.py` with the rationale beside them, in SECURITY.md's table, and pinned by
+a test. The lesson worth keeping: a bump that "fixes" a scanner finding without reading the advisory
+is the recurring defect in a new costume.
 
 FOSSA fails on the webhook's Go deps at `k8s.io/{apimachinery,client-go}` v0.33.0
 (CVE-2018-1002105, CVE-2019-11250, CVE-2020-8565) — the gate working, the dependency old. Framework
@@ -320,7 +329,14 @@ blocks a merge: `main` has no branch protection and no rulesets, so no workflow 
 not block for the same reason. GOVERNANCE.md says when that changes.
 
 ### 7.3 The default Redis image is RSALv2/SSPLv1, on a floating tag, with no digest
-**Status:** verified; open — needs a licence election, not a patch.
+**Status:** licence half RESOLVED on `cncf-readiness` (`50cfb18`); the digest half open.
+
+Ships `valkey/valkey:8.1-alpine` — BSD-3-Clause, LF fork, minor-pinned. Validated before pinning:
+the image symlinks `redis-server`/`redis-cli`, sentinel mode starts, and the full suite (3297) ran
+green against a live Valkey — the first fully green run this cycle. compose, test.yml's service and
+the chart now agree. Still open: no `digest` key on the redis entry, and release.yml's "every image
+is digest-pinned" gate asserts `@sha256:` only on first-party lines. Widening it needs a rehearsal
+run, which needs a push.
 
 `redis:7-alpine` resolves today to 7.4.11 (OCI annotation and the image's own `REDIS_VERSION`),
 which is past the 7.4 relicense. Unlike every first-party image the redis entry has no `digest` key,
