@@ -7,7 +7,7 @@
 # fails on a namespace that hasn't been created yet. Example: [prod-agents, analytics].
 # Global settings shared across the chart.
 global:
-  # Air-gapped / private-mirror host prepended to the THIRD-PARTY images (opa, redis, postgres, the
+  # Air-gapped / private-mirror host prepended to the THIRD-PARTY images (opa, valkey, postgres, the
   # internal-tls nginx proxy, the cert-bootstrap job, the helm-test curl). Empty = pull from their
   # public upstreams. Norviq's own images use images.registry (below) instead. Example:
   #   --set global.imageRegistry=myregistry.example.com
@@ -127,8 +127,12 @@ images:
     digest: ""
     pullPolicy: Always
   redis:
-    repository: redis
-    tag: "7-alpine"
+    # valkey/valkey, not redis/redis: Redis relicensed to RSALv2/SSPLv1 at 7.4, and `7-alpine` had floated
+    # onto 7.4.11. Valkey is the BSD-3-Clause fork under the Linux Foundation; its image symlinks
+    # `redis-server` and `redis-cli` to the valkey binaries and runs sentinel mode, so nothing else changes.
+    # Minor-pinned on purpose — a floating major is how the licence changed under a stock install.
+    repository: valkey/valkey
+    tag: "8.1-alpine"
   postgresql:
     repository: postgres
     tag: "16-alpine"
