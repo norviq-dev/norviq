@@ -19,6 +19,12 @@ import sys
 # matches wherever FOSSA puts it (cve field, title, or the advisory URL).
 ACCEPTED = frozenset({
     "CVE-2024-6825", "CVE-2026-45829", "CVE-2026-26030", "CVE-2026-25592", "GHSA-qwww-vcr4-c8h2",
+    # The webhook's k8s.io modules. FOSSA matches these three against any v0.x version; the advisory
+    # database says otherwise. CVE-2018-1002105 is against kubernetes/kubernetes < 1.12.3 (an
+    # API-server aggregation bug, never a library one). CVE-2019-11250 is fixed in client-go 0.17.0,
+    # CVE-2020-8565 in 0.19.6 / 0.20.0-alpha.2. The pinned version is v0.37.0 — twenty minors past
+    # the latest fix. A bump cannot satisfy a match that has no upper bound; this exception can.
+    "CVE-2018-1002105", "CVE-2019-11250", "CVE-2020-8565",
 })
 _SEC = ("vulnerability", "malware")
 
