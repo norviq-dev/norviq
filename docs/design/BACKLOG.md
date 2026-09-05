@@ -92,6 +92,33 @@ All verified with a control before commit; none reaches a user until 0.2.6 ships
 * **#117's veto excused "silently skip the policy check"** — see §7.1; the fix is on the branch, the
   open PR still carries the bypass.
 
+### 1.1b PR #109 (Mr-Neutr0n) — approved, held on the cut; three things to do before merging
+**Status:** open, head `e8b3886`, approved by the maintainer's comments on 2026-09-01 and held so
+the docs change in it does not describe a fix no released version has. **The only third-party human
+contribution the repo has.** Reviewed by this session on the merits: the fix is correct, the
+subprocess test is the right shape (`CliRunner` never executes `main()`), and reverting the one-line
+fix makes the test fail — it can fail, for the right reason.
+
+Before it merges, in order of consequence:
+
+1. **CI has never run on this commit.** It is a cross-repository PR, and all three workflows on
+   `e8b3886` sit at `action_required` with zero check runs — the only green is FOSSA's legacy commit
+   status, which is what `gh pr checks` reports as "all passed". Approve the fork workflow runs
+   first, or the first execution of the suite on this code is the merge itself.
+2. **The test does not guard the half its name promises.** `test_json_payload_reaches_stdout_and_logs_go_to_stderr`
+   never asserts anything is *on* stdout: moving the JSON to stderr leaves it green while `-o json |
+   jq` reads nothing (probed). Issue #104's own checklist asked for `json.loads(proc.stdout)`. The
+   maintainer's comment offered the success-case variant as optional; it is the load-bearing half.
+3. **Two copy-paste examples still pipe through the `grep -v` workaround** the PR deletes the
+   explanation for (`docs/cli.md:337` and `:483` on main). Harmless post-fix, but the file now
+   contradicts the sentence the PR adds. A gap in #104's checklist, not the contributor's.
+4. Minor: `subprocess.run` inherits the environment, so `HTTP_PROXY`/`ALL_PROXY` routes the
+   deliberately-unreachable `127.0.0.1:1` through a proxy and the test fails on `returncode != 0`
+   (measured). `tests/mcp/test_stdio_transport.py:62-68` already passes an explicit env.
+
+Items 2–4 are for the contributor or a follow-up commit; item 1 is the maintainer's click. None of
+this is on `cncf-readiness` — it is the contributor's PR and stays theirs.
+
 ### 1.2 E.1 and the 0.2.6 cut are one unit, not two items
 
 **Decision:** ship the busybox fix (§2.1) and cut 0.2.6 together, or do neither. Not launch-gating.
