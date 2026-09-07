@@ -73,10 +73,23 @@ stage "Building and loading five images"
 # Dockerfile lives INSIDE that directory and takes it as the build context. Four of the five follow the
 # repo-root `Dockerfile.<name>` convention and the fifth silently does not — this loop assumed the
 # convention held and died on `open Dockerfile.webhook: no such file or directory`.
+#
+# The API gets a provenance stamp the other four do not need. scripts/mcp-chatbot-scenario.sh refuses
+# to run against a stale CONTROL PLANE — its policies are Python modules inside this image — and that
+# check reads /app/.build_tree_digest. Dockerfile.api only writes it when the arg is passed, so
+# omitting it here left the scenario asserting a file that was never created: a guard that could not
+# pass rather than one that could not fail, but equally useless.
+GIT_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+TREE_DIGEST="$("${REPO_ROOT}/scripts/tree-digest.sh")"
+echo "  tree ${TREE_DIGEST:0:12}"
 for img in api ui engine webhook bootstrap; do
   echo "  build ${img}"
   if [ "$img" = "webhook" ]; then
     docker build -q -t "norviq/norviq-engine:webhook-latest" "${REPO_ROOT}/webhook" >/dev/null
+  elif [ "$img" = "api" ]; then
+    docker build -q -t "norviq/norviq-engine:api-latest" -f "${REPO_ROOT}/Dockerfile.api" \
+      --build-arg NRVQ_GIT_SHA="$GIT_SHA" --build-arg NRVQ_TREE_DIGEST="$TREE_DIGEST" \
+      "$REPO_ROOT" >/dev/null
   else
     docker build -q -t "norviq/norviq-engine:${img}-latest" -f "${REPO_ROOT}/Dockerfile.${img}" "$REPO_ROOT" >/dev/null
   fi

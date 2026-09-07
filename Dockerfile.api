@@ -16,6 +16,11 @@ COPY --from=builder /deps /usr/local/lib/python3.12/site-packages
 ARG TARGETARCH=amd64
 ARG NRVQ_GIT_SHA=unknown
 ENV NRVQ_BUILD_GIT_SHA=${NRVQ_GIT_SHA}
+# The tree digest, not just the sha: HEAD does not move when you edit a file, so a git sha alone
+# cannot tell a freshly-built API from a stale one during uncommitted work. scripts/tree-digest.sh
+# digests exactly what the COPY below puts in the image (norviq/ + pyproject.toml).
+ARG NRVQ_TREE_DIGEST=unknown
+ENV NRVQ_BUILD_TREE_DIGEST=${NRVQ_TREE_DIGEST}
 LABEL org.opencontainers.image.revision=${NRVQ_GIT_SHA}
 # Install OPA binary, pinned to the same version as the Helm sidecar image
 # (openpolicyagent/opa:1.19.1-static) and integrity-checked against the published SHA256 digest so a
@@ -39,8 +44,9 @@ RUN apt-get update && apt-get upgrade -y && \
 
 RUN /usr/local/bin/opa version
 
-# Build provenance stamp: changing NRVQ_GIT_SHA invalidates downstream COPY cache.
-RUN printf "%s\n" "${NRVQ_GIT_SHA}" > /app/.build_git_sha
+# Build provenance stamp: changing either value invalidates the downstream COPY cache.
+RUN printf "%s\n" "${NRVQ_GIT_SHA}" > /app/.build_git_sha && \
+    printf "%s\n" "${NRVQ_TREE_DIGEST}" > /app/.build_tree_digest
 
 COPY norviq/ norviq/
 COPY policies/ policies/
