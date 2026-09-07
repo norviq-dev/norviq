@@ -393,6 +393,72 @@ in those directories is gone; `git worktree add ../tmp/<name> <branch>` restores
 
 ---
 
+### 7.10 A misclassified tool NAME cascades into an agent-wide outage
+
+Found by running `scripts/mcp-chatbot-scenario.sh` on a live kind cluster (2026-09-07), not by
+reading. `classify_tool("run_query")` resolves to **delete** — the `run` token is in the lexicon as
+delete/critical — and the evaluator consults an admin's promotion ONLY when the name classifier
+returns `unknown`; when the name resolves, "the classifier wins outright, whichever direction the
+promotion points" (`norviq/engine/evaluator.py`, pinned by
+`tests/engine/test_promoted_verb_enforcement.py::test_a_promotion_cannot_demote_a_classified_tool_in_any_direction`).
+
+That rule is right on its own terms — it stops a promotion being used to move a tool into an egress
+refinement. The consequence is not:
+
+1. A policy gating on `input.derived.verb == "delete"` blocks `run_query` permanently, and the
+   documented remediation (promote the tool) cannot reach it.
+2. The scenario retries the blocked call 12 times. Each refusal is a violation.
+3. Trust falls 0.8 -> 0.515 -> 0.505 -> **0.30**, the floor. Measured across the audit rows of one run.
+4. At the floor, `escalate_low_trust` catches the agent's BENIGN traffic — `post_message` to
+   `#support` and `search_issues` on a different MCP server both escalate, on servers and tools that
+   no policy rule touches.
+
+So one bad name in the classifier lexicon degrades into an agent-wide, cross-server outage, and the
+one admin control that looks like the fix is inert against it. Neither half is visible from either
+side alone: the classifier looks correct, the trust control looks correct, the promotion returns 200.
+
+Fix candidates, none applied yet — this needs a product decision:
+* correct the lexicon so `run_query` does not tokenise to `delete` (narrowest, but the next
+  `run_*` read tool hits it again);
+* let a promotion outrank a name-classifier result when it is strictly DE-escalating and carries
+  evidence, keeping the existing refusal for escalating promotions;
+* have repeated refusals of the SAME tool+rule count once toward trust, so a policy loop cannot
+  drive an agent to the floor.
+
+The third is worth doing regardless: as it stands, any agent that retries a blocked call is
+self-driving toward an outage, which is a denial-of-service an attacker can trigger deliberately.
+
+### 7.11 Two harness checks reported green for something they never observed
+
+Same run, both now fixed on `cncf-readiness`.
+
+* **`scripts/mcp-chatbot-scenario.sh:56` could never pass.** It asserted `/app/.build_tree_digest` in
+  the **API** pod, but only `scripts/mcp-demo.Dockerfile` writes that file and nothing builds the API
+  from it — `Dockerfile.api` writes `.build_git_sha`, and `00-up.sh` never passed the arg, so the
+  value was `unknown`. Copy-pasted from the data-plane check at :133, which is correct because the
+  chatbot pod does run that image. Fixed by stamping the digest in `Dockerfile.api` and passing both
+  build args from `00-up.sh`; control-tested in both directions (perturb the tree -> guard goes red
+  with the real digests; rebuild -> passes).
+* **The promotion claim passed on an HTTP 200.** `_promote_verb` returned "the POST succeeded" and
+  the claim asserted that, so `an admin can correct a misclassified tool through the existing
+  promotion lifecycle` reported PASS while the correction reached nothing (7.10). Its docstring
+  asserted "the override outranks the name classifier" — prose contradicting the module it described.
+  Now read off enforcement: `promoted, but the name classifier still wins`.
+* **The PII-masking check reported `masked` on a refused call.** `"4111111111111111" not in txt` is
+  trivially true when `txt` is a block message, so the check was strongest exactly when the model had
+  received no customer data at all. Now reports `not evaluated — the query never returned a result`.
+
+### 7.12 The chatbot scenario is not idempotent, and does not say so
+
+Re-running it against the same cluster scores lower on identical code: **13/16, then 10/16, then
+12/16**. The middle run began with the agent already at trust 0.30 from the previous run's attacks, so
+`escalate_low_trust` caught the two benign controls. Nothing in the script resets trust or warns that
+the first run poisons the second, and the score is printed as if it were a property of the code.
+
+The 12/16 is the honest clean-baseline number with the 7.11 checks corrected: reset with
+`delete from agent_registry where namespace='agents'`, `FLUSHALL`, restart the API. Either the script
+should do that itself or it should refuse to run twice without it.
+
 ## 8. Audit claims that did not reproduce
 
 Recorded so the next reader of the CNCF audit knows which numbers to distrust.

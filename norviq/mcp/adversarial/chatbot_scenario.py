@@ -170,11 +170,17 @@ def _promote_verb(api: str, admin_token: str, namespace: str, tool: str, verb: s
     every Postgres MCP server classifies as DESTRUCTIVE. A policy that gates on
     `input.derived.verb == "delete"` then blocks the one tool the class is supposed to use.
 
-    The product already has the answer, and it is not "weaken the policy": an admin PROMOTES the tool
-    to its true verb with evidence, the override outranks the name classifier, and the very next call
-    is classified correctly everywhere — allowlist chips, kill-chain hops, and `input.derived.verb`.
-    Exercising it here is the point: the MCP surface and the classification lifecycle are the same
-    product, and a scenario that quietly rewrote the policy instead would be hiding the seam.
+    This function POSTs the promotion. It deliberately does NOT decide the claim — see the assertion
+    at the call site, which reads enforcement instead.
+
+    An earlier version of this docstring said the override "outranks the name classifier, and the very
+    next call is classified correctly everywhere". The code says the opposite, and says so explicitly:
+    `_derived_input` consults the promotion ONLY when `classify_tool` returns `unknown`, and when the
+    name resolves "the classifier wins outright, whichever direction the promotion points" — pinned by
+    tests/engine/test_promoted_verb_enforcement.py::
+    test_a_promotion_cannot_demote_a_classified_tool_in_any_direction. `classify_tool("run_query")`
+    resolves to `delete`, so promotion cannot correct THIS tool, and the claim that it can was prose
+    contradicting the module it described.
     """
     body = json.dumps({"ns": namespace, "tool_name": tool, "verb": verb,
                        "evidence": {"source": "mcp-chatbot-scenario",
@@ -226,22 +232,17 @@ async def run(api: str, admin_token: str) -> list[Check]:
             err and not _executed(log, "postgres", "run_query"), rule))
 
         # 1c — a pre-existing classifier result the MCP surface makes very visible. See _promote_verb.
+        # The POST is only half the claim. A remediation that returns 200 and never reaches the
+        # enforcement path is precisely the "reads as fixing it, fixes nothing" shape this product
+        # keeps finding in itself, so the claim is asserted BELOW, against what the evaluator did.
         promoted = _promote_verb(api, admin_token, "agents", "run_query", "read")
-        checks.append(Check(
-            "an admin can correct a misclassified tool through the existing promotion lifecycle",
-            "-", "postgres", "run_query", "run_query promoted to verb=read",
-            "promoted" if promoted else "promotion failed", False, promoted))
 
         # 2 — the same server, a different class: allowed, and PII masked on the way back.
         #
-        # Polled rather than called once, because a promotion is NOT effective on the next call in a
-        # multi-replica deployment. `warm_verb_overrides` runs at API startup and again only on the
-        # replica that served the promote POST (api/main.py, routers/threats.py) — there is no pub/sub
-        # and no periodic refresh, so the other replicas keep the stale classification. Measured here:
-        # convergence lands within ~10s on a 2-replica install, which is consistent with the shared
-        # Redis decision cache republishing the re-seeded replica's answer rather than with the other
-        # replica being refreshed. Reporting the convergence time is the honest form of this claim;
-        # asserting "instant" would be asserting something the code does not do.
+        # Polled rather than called once because a promotion is not guaranteed to be effective on the
+        # next call: `warm_verb_overrides` re-seeds the evaluator's in-proc map on the worker that
+        # served the POST (api/main.py, routers/threats.py), and with no pub/sub the other uvicorn
+        # workers and replicas keep the stale map until they are re-seeded or restarted.
         waited = 0.0
         for attempt in range(12):
             err, txt, rule, _ = await _call("postgres", "support-agent", "run_query",
@@ -250,14 +251,52 @@ async def run(api: str, admin_token: str) -> list[Check]:
                 break
             await asyncio.sleep(2.0)
             waited += 2.0
+
+        # The promotion claim, read off ENFORCEMENT rather than off the POST's status code.
+        #
+        # MEASURED 2026-09-07, single replica and NRVQ_API_WORKERS=1, so neither replica skew nor
+        # worker skew is in play: the promotion does not reach `input.derived.verb` for this tool, and
+        # that is by design. `classify_tool("run_query")` resolves to `delete` (the `run` token is in
+        # the lexicon as delete/critical), and the evaluator consults a promotion ONLY when the name
+        # classifier returns `unknown` — when the name resolves the classifier wins outright, pinned by
+        # tests/engine/test_promoted_verb_enforcement.py::
+        # test_a_promotion_cannot_demote_a_classified_tool_in_any_direction.
+        #
+        # So promotion is the wrong remediation for a MISCLASSIFIED NAME, and asserting `promoted`
+        # here reported a green for an admin action that changed nothing about enforcement. The
+        # remediation this tool actually needs is a policy that does not gate on the name classifier
+        # (`support_no_write_sql` already catches the writes precisely) or a lexicon fix.
+        reached_enforcement = promoted and rule != "support_no_destructive_verb"
+        if not promoted:
+            promo_observed = "promotion POST failed"
+        elif reached_enforcement:
+            promo_observed = "promotion reached enforcement"
+        else:
+            promo_observed = "promoted, but the name classifier still wins"
+        checks.append(Check(
+            "an admin can correct a misclassified tool through the existing promotion lifecycle",
+            "-", "postgres", "run_query", "the promoted verb reaches input.derived.verb",
+            promo_observed, False, reached_enforcement))
+
         add(f"tier-2 support CAN query the customer replica (converged after {waited:.0f}s)",
             "support-agent", "postgres",
             "run_query", "allowed", err, txt, rule, _executed(log, "postgres", "run_query"), False)
-        pan_masked = "4111111111111111" not in txt.replace(" ", "")
-        checks.append(Check(
-            "customer PII in the result is masked before the model sees it", "support-agent",
-            "postgres", "run_query", "PAN + SSN masked",
-            "masked" if pan_masked else "LEAKED", True, pan_masked and "***-**-6789" in txt))
+
+        # Masking can only be judged on a result that came back. When the call was REFUSED there is no
+        # result, and "the PAN is absent" is then a statement about a block message — which is how this
+        # reported `masked` on a run where the model received no customer data at all. A masking check
+        # that passes its own absence test hardest when nothing was returned is not a masking check.
+        if err:
+            checks.append(Check(
+                "customer PII in the result is masked before the model sees it", "support-agent",
+                "postgres", "run_query", "PAN + SSN masked",
+                "not evaluated — the query never returned a result", False, False))
+        else:
+            pan_masked = "4111111111111111" not in txt.replace(" ", "")
+            checks.append(Check(
+                "customer PII in the result is masked before the model sees it", "support-agent",
+                "postgres", "run_query", "PAN + SSN masked",
+                "masked" if pan_masked else "LEAKED", True, pan_masked and "***-**-6789" in txt))
 
         # 3 — a capability nobody approved, on a server the class is otherwise allowed to use.
         err, txt, rule, _ = await _call("postgres", "support-agent", "execute_sql",
