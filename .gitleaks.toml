@@ -9,7 +9,6 @@ description = "Norviq allowlist — test fixtures, attack payloads, and example 
 paths = [
   '''tests/.*''',
   '''norviq/redteam/.*''',
-  '''.*\.md$''',                 # docs/specs use example tokens
   '''specs/prompts/.*''',
   '''scripts/live-pentest/.*''',        # local-kind E2E / release-exit overlays: dummy secretKeys for throwaway clusters
   # Rego test fixtures: fake api_key/PII/token payloads that EXERCISE the detectors. Widened from
@@ -33,6 +32,13 @@ paths = [
 ]
 # Common non-secret placeholders used in dev/kind (e.g. norviq-redis-password).
 regexes = [
+  # Log-code identifiers (NRVQ-API-7460 and 393 others live in docs/error-codes.md). generic-api-key
+  # matched one of them when the blanket `.*\.md$` path allowlist came out. That allowlist had meant
+  # no markdown was ever scanned — two credential-shaped strings lived in docs/cli.md under it, and
+  # #118's premise that "a scanner flagged" one was true only of the contributor's scanner, never this
+  # repo's. Measured before removing it: across all 67 tracked .md files the cost was exactly two
+  # hits, this identifier and the example one-time password #118 makes obviously fake.
+  '''NRVQ-[A-Z]+-[0-9]+''',
   '''norviq-[a-z-]+-password''',
   '''change-?me''',
   '''example\.com''',
