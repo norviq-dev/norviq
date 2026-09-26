@@ -226,7 +226,7 @@ MCP traffic is ordinary traffic to the rest of the product, and that is the poin
 | the full attack scoreboard | same command — 22 checks, including two the scanner is *expected* to lose |
 | a rug pull from scratch | delete the server's pins in the console, re-run, then re-run with `NRVQ_RUGPULL_SLACK=1` |
 | strict approval mode | set `NRVQ_MCP_PIN_MODE=strict` on the agent pod — every new tool is quarantined until approved |
-| fail-closed behaviour | scale `norviq-api` to 0 and make a call; the proxy blocks rather than forwarding |
+| outage behaviour | scale `norviq-api` to 0 and make a call; with the default `NRVQ_SDK_FALLBACK_MODE=allow` the call is forwarded ungoverned and logged as `engine_unavailable_fallback`. Set `NRVQ_SDK_FALLBACK_MODE=block` on the agent pod and the same call is refused |
 | latency | `kubectl -n agents exec chatbot -- python /tmp/final_latency.py` |
 
 ---
