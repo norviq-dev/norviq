@@ -5,9 +5,19 @@
 
 In proxy mode the injected sidecar does NOT run its own OPA/Redis/Postgres. It resolves identity
 locally, then POSTs the tool call to the central norviq-api ``/api/v1/evaluate`` with a
-namespace-scoped service JWT and maps the response to a ``PolicyDecision``. Every failure path
-(network error, non-2xx, timeout, bad body) fails **closed** — returns a block decision so the
-sidecar drops the tool call rather than forwarding it.
+namespace-scoped service JWT and maps the response to a ``PolicyDecision``.
+
+What happens when no decision comes back depends on whether the engine answered:
+
+- A 4xx is the engine answering with a refusal (expired or wrong credential, malformed request). It
+  is not retried and always blocks (``thin_proxy_fail_closed``), whatever the fallback posture.
+- A 5xx, timeout or connect error is retried; an unparseable body or any other unexpected error is
+  not. Once the attempts are spent, the outcome follows ``settings.sdk_fallback_mode``
+  (``NRVQ_SDK_FALLBACK_MODE``). With the shipped default, ``allow``, the call is forwarded
+  ungoverned under ``thin_proxy_fail_open`` and logged as ``NRVQ-SDC-3036``; with ``block`` it is
+  dropped under ``thin_proxy_fail_closed``.
+
+So an engine outage fails OPEN by default. Only a refusal is unconditionally fail-closed.
 """
 
 from __future__ import annotations
@@ -30,14 +40,16 @@ from norviq.sdk.core.events import ToolCallEvent
 
 log = structlog.get_logger()
 
-# Reason surfaced when the central API is unreachable/unhealthy — distinct from a policy block.
+# Reason when the central API is unreachable/unhealthy and the fallback posture is ``block`` —
+# distinct from a policy block.
 _FAIL_CLOSED_REASON = "Thin-proxy sidecar could not reach the central policy engine (fail-closed)"
 # The engine ANSWERED and refused us: a credential/request problem, not an outage. Kept separate so
 # operators are not sent to debug healthy engine pods, and so it is auditable as distinct from an outage.
 _ENGINE_REFUSED_REASON = (
     "Central policy engine rejected the sidecar's request (credential or request error, not an outage)"
 )
-# Only reachable when the operator has explicitly chosen availability over enforcement.
+# Reason when the central API is unreachable/unhealthy and the fallback posture is ``allow``, which
+# is the shipped default (config.sdk_fallback_mode), not an opt-in.
 _FAIL_OPEN_REASON = (
     "Thin-proxy sidecar could not reach the central policy engine; forwarding UNGOVERNED because "
     "the configured fallback posture is allow"
@@ -143,7 +155,8 @@ class RemoteEvaluator:
             record_interception_latency("sidecar_proxy", "upstream", (perf_counter() - _t0) * 1000.0)
 
     async def _evaluate_upstream(self, event: ToolCallEvent) -> PolicyDecision:
-        """POST the event to the central engine; fail CLOSED (block) on any error."""
+        """POST the event to the central engine. A 4xx refusal blocks; any other failure follows
+        ``settings.sdk_fallback_mode`` (default ``allow``)."""
         if self._client is None:
             await self.connect()
         # Split payload / post / parse: the gap between what this client waits and what the API reports
