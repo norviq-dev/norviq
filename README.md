@@ -111,7 +111,10 @@ real model decides the tool calls and Norviq blocks the dangerous ones before th
 
 ## Features
 
-- **Policy enforcement** — OPA/Rego evaluated per tool call, sub-second, fail-closed.
+- **Policy enforcement** — OPA/Rego evaluated per tool call, sub-second. Under an enforcing policy, an
+  evaluation error or a 4xx from the policy engine blocks the call; an unreachable engine and a namespace
+  with no policy proceed by default (`webhook.injection.fallbackMode` and `noPolicyDecision` ship `allow`),
+  and they can be set to `block` and `deny` respectively. See [Security model](docs/security-model.md).
 - **Kubernetes-native** — `NrvqPolicy` / `NrvqClass` / `NrvqConfig` CRDs, a mutating webhook that
   injects the enforcement sidecar, and a Helm chart.
 - **Workload identity** — SPIFFE/SPIRE SVIDs (with a mock mode for non-SPIRE clusters).
