@@ -58,12 +58,12 @@ export CHATBOT_IMAGE=$REGISTRY/norviq-demo-chatbot:$TAG
 
 ---
 
-## 1. Load a policy first — the namespace is deny-by-default
+## 1. Load a policy first
 
-Do this **before** the workload, not after. `no_policy_decision` defaults to `deny`, so a
-`chatbot-prod` with no policy loaded blocks *every* tool call in `block` mode. The symptom is a
-chatbot that refuses `search_kb` — indistinguishable from an over-strict policy, and it sends you
-debugging the wrong thing.
+Do this **before** the workload, not after. On a chart install, a `chatbot-prod` with no policy of
+your own lets *every* tool call through and the demo blocks nothing: the namespace baseline ships in
+`audit` (`baselineClusterPolicy.enforcementMode`), and the no-policy decision ships `allow`
+(`config.noPolicyDecision`).
 
 ```bash
 kubectl apply -f crds/examples/class-customer-support.yaml

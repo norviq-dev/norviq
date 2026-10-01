@@ -133,10 +133,9 @@ Two caveats, both real:
   (`webhook/controller.go:929`) — setting *that* to `audit` does not put the namespace into monitor
   mode. Under the namespace posture, `_apply_posture` softens a would-block **or would-escalate** to
   an `audit` decision and rewrites the rule id to `monitor_would_block:<rule>`
-  (`norviq/engine/evaluator.py:761-779`). Five rule ids stay hard regardless — `trust_frozen`,
-  `policy_load_pending`, `evaluator_error`, `evaluator_invalid_payload`, `rate_limit_exceeded`
-  (`_POSTURE_EXEMPT_RULES`, `evaluator.py:329-331`) — but none of them is a mapped `rule_id` in
-  either framework mapping, so no technique is rescued by the exemption. The audit rows therefore
+  (`norviq/engine/evaluator.py:761-779`). Two rule ids stay hard regardless — `trust_frozen` and,
+  by default, `rate_limit_exceeded` (`_posture_exempt_rules`, `evaluator.py:395-402`) — but neither is
+  a mapped `rule_id` in either framework mapping, so no technique is rescued by the exemption. The audit rows therefore
   match neither the `block`/`escalate` decision filter nor the mapped `rule_id`, so `blocked` is 0
   and `proven` is **false for every technique**, while `status` still reads `enforced`. That is
   correct behaviour, not a defect — but it means block evidence is structurally impossible in a

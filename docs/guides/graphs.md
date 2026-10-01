@@ -493,12 +493,12 @@ What it does (`ui/src/pages/AttackGraph.tsx:279-326`):
 |---|---|---|
 | Enforced block | any hop returns `block` whose `rule_id` is **not** `no_policy_loaded` | "Blocked by an authored policy" |
 | Monitor would-block | any hop returns `audit` | "Would be blocked — this namespace is in Monitor mode (evaluated, not enforced)" |
-| Fail-closed only | a hop returns `block` with `rule_id = "no_policy_loaded"` | "Blocked only by the fail-closed default — no policy is loaded for this namespace. Author a policy to control it intentionally." |
+| No-policy deny only | a hop returns `block` with `rule_id = "no_policy_loaded"` (only with `no_policy_decision=deny`; it ships `allow`) | "Blocked only by the fail-closed default — no policy is loaded for this namespace. Author a policy to control it intentionally." |
 | Gap | everything allowed | "Simulation found a policy gap — no policy covers this path" |
 
-Only the first two count as *covered*. The fail-closed default is deliberately not reported as a block
-by policy — it is the absence of a policy, and treating it as coverage is how a namespace ends up
-looking governed when nobody authored anything.
+Only the first two count as *covered*. The no-policy deny (opt-in via `no_policy_decision=deny`) is
+deliberately not reported as a block by policy — it is the absence of a policy, and treating it as
+coverage is how a namespace ends up looking governed when nobody authored anything.
 
 Three limits to hold on to:
 
@@ -706,7 +706,7 @@ blocked. A hop also carries its resolved operation and, for an unclassified tool
 | `EXPLOITABLE` **with** a teal shield note | a policy is applied but status is derived from pre-apply traffic | **Simulate** to confirm the defense holds now. Do not author a second policy. |
 | `NOT SIMULATED` chain | topology exists, no end-to-end allowed traffic | **Simulate**. If it comes back "policy gap", author before that traffic arrives. |
 | `BLOCKED` with the Monitor verdict | a policy covers the chokepoint but the namespace only logs | Switch the namespace to Block mode. This is a coverage decision, not a policy gap. |
-| Simulate → "Blocked only by the fail-closed default" | no policy is loaded for the namespace | Author an explicit policy. Fail-closed is a safety net, not a control you can evidence. |
+| Simulate → "Blocked only by the fail-closed default" | no policy is loaded and `no_policy_decision` is set to `deny` | Author an explicit policy. The no-policy deny is a safety net, not a control you can evidence. |
 | Simulate → "policy gap" | no rule addresses the chain | Draft from the what-if, or define the class's intended behaviour. |
 | Capability finding `UNDEFENDED` | a verb is observed on a source and nothing has ever acted on it | **Defend** → review the draft in Policies → apply. |
 | Capability finding `DORMANT_GRANT` | reachable, never exercised | Remove or scope the grant now, while nothing depends on it. |

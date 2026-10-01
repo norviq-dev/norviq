@@ -35,12 +35,13 @@ protected agent behind the same chat page. See [`chatbot/README.md`](chatbot/REA
   `docker compose -f docker-compose.dev.yml up -d`, then
   `python -m uvicorn norviq.api.main:app --port 8080` — see [CONTRIBUTING.md](../CONTRIBUTING.md).
   In a cluster, see [docs/getting-started.md](../docs/getting-started.md).
-- **A policy loaded for the scope you evaluate against.** Norviq is deny-by-default:
-  `no_policy_decision` (`norviq/config.py`) defaults to `"deny"`, so an unconfigured namespace in
-  `block` mode denies every call. `python scripts/seed-local-policies.py` seeds `comprehensive.rego`
-  for `(default, customer-support)`.
+- **A policy loaded for the scope you evaluate against.** `no_policy_decision` (`norviq/config.py`)
+  defaults to `"allow"`, so in an unconfigured namespace every call proceeds and the example blocks
+  nothing; set it to `"deny"` to refuse instead (`block` mode only).
+  `python scripts/seed-local-policies.py` seeds `comprehensive.rego` for `(default, customer-support)`.
 - **A bearer token.** `POST /api/v1/evaluate` requires one — `POST /api/v1/auth/login` returns an
-  `access_token`. Without it the SDK client fails closed (`sdk_fallback_mode`, default `"block"`).
+  `access_token`. Without it the SDK client fails closed: the API answers 401, and a 4xx always blocks,
+  whatever `sdk_fallback_mode` (default `"allow"`) says.
 - **The SDK, from this checkout**: `pip install -e ".[langchain,langgraph]"` from the repo root.
   Framework extras are declared in `pyproject.toml`.
 

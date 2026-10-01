@@ -54,7 +54,8 @@ on `allow`/`audit`.
 `PolicyEngineClient` posts to the central API's `POST /api/v1/evaluate` — the same
 endpoint + bearer-token contract the injected sidecar uses. The token is a namespace-scoped
 service token (or any API token authorized for the namespace being evaluated); requests
-without one are rejected, and the client then returns its fail-closed fallback decision.
+without one are rejected, and the client blocks the call (`engine_rejected_request`) — a 4xx
+never takes the `sdk_fallback_mode` path.
 
 `ToolInterceptor` doesn't hard-depend on `PolicyEngineClient` — its `evaluator` parameter
 accepts anything satisfying `SupportsEvaluate` (`async def evaluate(self, event: ToolCallEvent)

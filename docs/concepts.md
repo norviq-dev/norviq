@@ -325,7 +325,7 @@ every rule its own `BuilderDecision` of `block` / `escalate` / `audit`
 same resolver. That is a per-rule choice, not a policy-level mode.
 
 The policy-level mode is applied by the engine at evaluation time.
-`_apply_policy_mode` (`norviq/engine/evaluator.py:721`) softens the winning policy's `block`/`escalate`
+`_apply_policy_mode` (`norviq/engine/evaluator.py:908`) softens the winning policy's `block`/`escalate`
 to `audit` when *that policy* is saved with `enforcementMode: audit`, re-attributing it as
 `policy_audit_would_block:<original_rule_id>`. So a hand-written module that says `decision = "block"`
 still returns `audit` if the policy holding it is in audit mode — your Rego decides *what fires*, the
@@ -345,13 +345,14 @@ editing individual policies, put the namespace into monitor mode
 `block`/`escalate` to a logged `audit` (`rule_id` prefixed `monitor_would_block:`) for that namespace.
 Monitor mode only ever *softens*; it never turns an `allow` into a block.
 
-A fixed set of `rule_id`s stays hard regardless of posture — `trust_frozen` (the admin kill switch),
-`policy_load_pending` and `evaluator_error` / `evaluator_invalid_payload` (engine health), and
-`rate_limit_exceeded` (`_POSTURE_EXEMPT_RULES`, `norviq/engine/evaluator.py:329`) — because those are
-safety/health signals, not policy calls to be monitored away. The same exemption list applies to the
-per-policy audit mode above, so neither layer can monitor away a trust freeze or an engine-health
-block. See also the `POST /api/v1/policies/dry-run` replay for testing a policy against real recent
-traffic before applying it.
+Two `rule_id`s stay hard regardless of posture (`_posture_exempt_rules`,
+`norviq/engine/evaluator.py:395-402`): `trust_frozen` (the admin kill switch) and `rate_limit_exceeded`
+(a resource control; setting `monitor_exempt_rate_limit` to `false` softens it too). Engine-health
+blocks such as `policy_load_pending`, `evaluator_error` and `evaluator_timeout` soften in monitor mode
+like any other block (e.g. `monitor_would_block:evaluator_error`). The same exemptions apply to the
+per-policy audit mode above, so neither layer can monitor away a trust freeze. See also the
+`POST /api/v1/policies/dry-run` replay for testing a policy against real recent traffic before
+applying it.
 
 ## Decisions
 
@@ -360,9 +361,13 @@ Every evaluated tool call resolves to a `PolicyDecision` with three required fie
 and **`reason`** (a human-readable explanation). This triple is what gets returned to the caller,
 logged to the audit trail, and shown in the console.
 
-Norviq is **fail-closed**: if OPA evaluation fails, times out, the agent's SPIFFE identity is
-malformed, or no policy at all is loaded for a namespace that's in `block` mode, the call is denied —
-never silently allowed. Each fail-closed path carries its own named `rule_id` (e.g.
+Where a namespace is in `block` mode, evaluation is **fail-closed**: if OPA evaluation times out or the
+agent's SPIFFE identity is malformed, the call is denied — never silently allowed. An OPA error on the
+policy that decides the call denies it when that policy is in `block` mode; a policy in `audit`, which
+is how the chart's namespace baseline ships, softens the error to
+`policy_audit_would_block:evaluator_error`. A namespace with no policy loaded is denied only when
+`no_policy_decision` is `deny` (it ships `allow`), or while a replica is still warming
+(`policy_load_pending`). Each fail-closed path carries its own named `rule_id` (e.g.
 `evaluator_error`, `evaluator_timeout`, `invalid_spiffe_identity`, `no_policy_loaded`) so an
 engine-health problem is never mistaken for a real policy block in the audit log.
 
