@@ -74,9 +74,10 @@ do **not** want when evaluating a release.
 A few things worth knowing about this install:
 
 - **`policyQuotaNamespaces` is required.** It lists your *tenant* namespaces — the ones that will run
-  agent workloads, not the `norviq` control-plane namespace. The chart renders one fail-closed
-  `strict` namespace baseline (`baseline-cluster-guard-<ns>`, `clusterPriority: 900`) per entry, plus
-  the optional per-namespace `NrvqPolicy` quota. Leaving it empty **fails the install by design**
+  agent workloads, not the `norviq` control-plane namespace. The chart renders one `strict` namespace
+  baseline (`baseline-cluster-guard-<ns>`, `clusterPriority: 900`) per entry, in `audit` mode until
+  you set `baselineClusterPolicy.enforcementMode: block`, plus the optional per-namespace `NrvqPolicy`
+  quota. Leaving it empty **fails the install by design**
   (`helm/norviq/templates/baseline-cluster-policy.yaml`) rather than silently shipping a cluster with
   no baseline. To install deliberately without a baseline, set `baselineClusterPolicy.enabled=false`
   instead.
@@ -215,7 +216,7 @@ What these do:
 top of this install.** A namespace-targeted `NrvqPolicy` is stored at the scope
 `<namespace>:__baseline__`, which is the *same* scope the chart's `baseline-cluster-guard-chatbot-prod`
 already occupies, and the newest version of a scope wins. Applying the permissive example would
-replace the strict, fail-closed baseline the chart installed in step 2 and silently weaken the
+replace the strict baseline the chart installed in step 2 and silently weaken the
 namespace floor. Use it only on a namespace you installed *without* a chart baseline.
 
 The webhook's CRD controller watches these objects and syncs them to the API

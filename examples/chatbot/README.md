@@ -42,8 +42,8 @@ pip install -r examples/chatbot/requirements.txt
 
 **2. Seed a policy, then start the API**
 
-Norviq is deny-by-default: `no_policy_decision` defaults to `"deny"`, so a namespace with **no**
-policy loaded blocks everything in `block` mode. Seed one first or the demo will refuse every call.
+`no_policy_decision` defaults to `"allow"`, so a namespace with **no** policy loaded lets every call
+through (`"deny"` blocks it instead, in `block` mode). Seed one first or the demo blocks nothing.
 
 ```bash
 python scripts/seed-local-policies.py    # loads comprehensive.rego for (default, customer-support)

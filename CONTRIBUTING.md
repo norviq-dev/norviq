@@ -150,7 +150,11 @@ silence a real finding.
 
 - **Match the surrounding code** — naming, comment density, and idiom. Don't reformat unrelated code.
 - **Fail closed.** This is a security product: on any error in the enforcement/auth path, deny — never
-  fail open. New security-relevant code needs a test proving the block/deny path.
+  fail open. The exceptions are configured and carry their own `rule_id`: an engine that is unavailable
+  or sends an unreadable reply (5xx, timeout, connection error, open circuit, malformed body) follows
+  `sdk_fallback_mode`, which ships `allow`; a namespace
+  in monitor mode records engine-side failures as would-blocks; and a policy in `audit` mode does the
+  same for its own OPA errors. New security-relevant code needs a test proving the block/deny path.
 - **Tests are required** for behavior changes. No new test failures against the baseline suite.
 - **Policies must validate** — any Rego must define `decision` / `rule_id` / `reason` and a
   `default decision`, and must not use network/environment builtins (see

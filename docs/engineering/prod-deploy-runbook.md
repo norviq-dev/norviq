@@ -76,7 +76,7 @@ The chart fails the **render** (not the rollout) rather than install something q
 
 | Missing | Guard | Why it fails closed |
 |---|---|---|
-| `policyQuotaNamespaces` | `templates/baseline-cluster-policy.yaml` | `baselineClusterPolicy.enabled` is `true` by default and renders **one baseline per listed namespace**. With the list empty it would render ZERO baselines — every agent class silently loses the fail-closed cluster baseline. Set your tenant namespaces, or set `baselineClusterPolicy.enabled=false` to opt out explicitly. |
+| `policyQuotaNamespaces` | `templates/baseline-cluster-policy.yaml` | `baselineClusterPolicy.enabled` is `true` by default and renders **one baseline per listed namespace**. With the list empty it would render ZERO baselines — every agent class silently loses the cluster baseline. Set your tenant namespaces, or set `baselineClusterPolicy.enabled=false` to opt out explicitly. |
 | `postgresql.password` | `templates/secret.yaml` | With `config.requireStrongSecret=true` (the default), an empty password would put a blank credential into `NRVQ_PG_URL`. |
 | `redis.password` | `templates/secret.yaml` | Same, for `NRVQ_REDIS_URL`. |
 

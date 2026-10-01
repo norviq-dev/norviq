@@ -56,11 +56,12 @@ kubectl get secret norviq-secrets -n norviq \
   node drains/upgrades. Postgres/Redis ship as single-replica StatefulSets — point at managed HA
   datastores, or use the `values-prod.yaml` operator-backed HA, for production.
 
-## 3b. Baseline policy coverage (fail-closed)
+## 3b. Baseline policy coverage
 `baselineClusterPolicy.enabled` is `true` by default and renders **one baseline policy per namespace
 listed in `policyQuotaNamespaces`** — which ships **empty**. The chart therefore **fails the render**
 until you list your tenant namespaces (or explicitly set `baselineClusterPolicy.enabled=false`),
-rather than installing with zero baselines and a silently fail-open posture.
+rather than silently installing with zero baselines. Each baseline ships in `audit`
+(`baselineClusterPolicy.enforcementMode`); set `block` to enforce it.
 
 ```bash
 helm upgrade --install norviq ./helm/norviq \
@@ -128,10 +129,9 @@ Verify: `kubectl get clusterrolebinding | grep norviq-`.
 
 ## 7. Enforcement posture
 - `config.enforcementMode: block` (default; not `audit`) for real enforcement.
-- `config.noPolicyDecision: deny` (default) — a namespace with **no** matching policy denies in block
-  mode. Setting it to `allow` restores fail-**open** for uncovered namespaces; that is a deliberate
-  choice, not a default. Combined with the per-namespace baselines from §3b this is what keeps an
-  unconfigured tenant from being an enforcement hole.
+- `config.noPolicyDecision: allow` (default) — a namespace with **no** matching policy allows the call
+  under the named `default_allow` rule. Set `deny` to refuse uncovered namespaces in block mode; with
+  the defaults (and the §3b baselines in `audit`) an unconfigured tenant is observed, not enforced.
 - Confirm seeded policies cover every tenant `(namespace, agent_class)` you run.
 - `config.opaMode: server` (default) runs OPA as the long-lived sidecar; `subprocess` forks per call
   and exists only as a rollback path.
