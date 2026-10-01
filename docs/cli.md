@@ -138,18 +138,9 @@ nor rollable — `loader.rollback` searches the same in-memory list
 `redteam` has its own `--output` with a third value, `markdown`; it does not read the group's `-o`.
 See [`norviq redteam`](#norviq-redteam--attack-simulation) below.
 
-**Known defect — `-o json` is not directly pipeable.** The CLI emits structlog lines
-(`nrvq.cli.started` on every invocation, `nrvq.cli.command_ok` on success) to **stdout**, interleaved
-with the payload, because nothing configures structlog for the CLI process and its default
-`PrintLogger` writes to stdout. `norviq -o json policy list | jq .` therefore fails on the leading log
-line. Until that is fixed, strip the log lines:
-
-```bash
-norviq -o json policy list | grep -v '^[0-9-]\{10\} [0-9:]\{8\} \[' | jq '.[].namespace'
-```
-
-The codes in those lines (`NRVQ-CLI-8000`..`8004`) are catalogued in
-[error-codes.md](error-codes.md).
+The CLI's structlog lines (`nrvq.cli.started` on every invocation, `nrvq.cli.command_ok` on success)
+are written to **stderr**, so `-o json` output on stdout pipes straight into `jq`. The codes in those
+lines (`NRVQ-CLI-8000`..`8004`) are catalogued in [error-codes.md](error-codes.md).
 
 ## 4. Exit codes
 
@@ -632,7 +623,6 @@ planned features; they are what the code does today, at version 0.2.0.
 
 | Gap | Where |
 |---|---|
-| `-o json` output is interleaved with structlog lines on stdout — not directly pipeable to `jq` | no structlog config for the CLI process |
 | `norviq status` errors out (exit 1) instead of reporting a degraded dependency | `main.py:67-71` vs `health.py:59-62` |
 | `redteam run` exits 0 regardless of pass rate; the rate to gate on is `.summary.pass_rate`, not `.pass_rate` | `runner.py:42-46`, `reporter.py:46-60` |
 | `policy apply --target-type` is accepted, echoed, and ignored | `policies.py:1163-1170` |
