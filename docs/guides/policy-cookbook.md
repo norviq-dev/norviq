@@ -846,10 +846,10 @@ conditions worth knowing precisely (`_apply_policy_mode`, `norviq/engine/evaluat
 - Softened decisions keep their identity: `decision` becomes `audit` and `rule_id` is prefixed
   `policy_audit_would_block:` (`evaluator.py:63`, `756-759`). The call **proceeds** — `audit` counts as
   allowed at the PEP (`PolicyDecision.is_allowed`, `norviq/sdk/core/decisions.py:35-37`).
-- Two rule ids stay hard whatever the mode says: `trust_frozen`, and `rate_limit_exceeded` while
-  `monitor_exempt_rate_limit` is true — its default (`_posture_exempt_rules()`, `evaluator.py`). An admin
-  trust freeze is an incident-response kill switch and a rate limit is not a policy decision to monitor
-  away; engine-health blocks (`policy_load_pending`, `evaluator_error`) soften to audit like any rule.
+- Two rule ids stay hard whatever the mode says: `trust_frozen` and, while `monitor_exempt_rate_limit`
+  is on (the default), `rate_limit_exceeded` (`_posture_exempt_rules`, `evaluator.py:395-402`). An admin
+  trust freeze is an incident-response kill switch and the rate limiter a resource control; engine-health
+  blocks soften like any other.
 
 ```yaml
 apiVersion: norviq.io/v1alpha1

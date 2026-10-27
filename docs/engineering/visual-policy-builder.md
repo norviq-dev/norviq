@@ -191,9 +191,9 @@ defaults to `default`.
 Off-cluster: 477 vitest specs, `tsc`, eslint and `vite build` clean; every compiled fixture passes
 `opa check --v0-compatible`.
 
-On a real cluster (kind, Helm-installed, 6/6 pods ready) the shipped posture with no policy is
-fail-closed — every call returns `block · no_policy_loaded`. An allowlist policy authored by the
-builder flipped that:
+On a real cluster (kind, Helm-installed, 6/6 pods ready), under v0.1.9's
+`noPolicyDecision: deny` (the chart ships `allow` from v0.2.0), every call with no policy returned
+`block · no_policy_loaded`. An allowlist policy authored by the builder flipped that:
 
 | Call | Before | After |
 |---|---|---|

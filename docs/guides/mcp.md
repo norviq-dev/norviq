@@ -570,8 +570,10 @@ config (`webhook/mcp_injector.go:400-402`) — not by the API itself.
   shipped rule; see the fragment in §5.
 - **A control plane unreachable at startup degrades to per-process TOFU.** `load()` never raises; it
   sets `_degraded`, leaves the in-memory pins empty, and logs `NRVQ-MCP-5046`. For that window every
-  tool reads `first_seen` and cross-pod drift detection is unavailable. Gate B is unaffected — every
-  call is still evaluated and a fail-closed engine still blocks (`pins.py:403-424`).
+  tool reads `first_seen` and cross-pod drift detection is unavailable. Gate B still asks `/evaluate`;
+  if the API is unavailable too (5xx, timeout, connection error, or an open circuit, which skips the
+  request), the call follows `sdk_fallback_mode`, which ships `allow`
+  (`norviq/sdk/client/engine.py:181-195`, `:197-229`).
 - **The HTTP driver never reports observations.** `ControlPlanePinStore.flush()` is the only writer to
   `/mcp/pins/observe`, and only `stdio.py` calls it (`stdio.py:278-282, 343-345`); `http.py` has no
   such call. A server fronted with `--http` therefore loads approved pins but never appears in the

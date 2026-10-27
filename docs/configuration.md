@@ -114,7 +114,7 @@ quota list — three other things key off it, which is why it is effectively man
 | Key | Default | What it does |
 |---|---|---|
 | `policyQuotaNamespaces` | `[]` | For each listed namespace: renders a `ResourceQuota` capping `count/nrvqpolicies.norviq.io` at 100, **and** one baseline `NrvqPolicy`, **and** (when `agentEgressPolicy.namespaces` is empty) the egress lockdown target set. Each namespace must already exist — a `ResourceQuota` is namespaced. |
-| `baselineClusterPolicy.enabled` | `true` | Renders the fail-closed cluster baseline guard, one `NrvqPolicy` per namespace above. With `policyQuotaNamespaces` empty this **fails the render** rather than shipping zero baselines. |
+| `baselineClusterPolicy.enabled` | `true` | Renders the cluster baseline guard, one `NrvqPolicy` per namespace above, in `audit` mode (`baselineClusterPolicy.enforcementMode`; set `block` to enforce). With `policyQuotaNamespaces` empty this **fails the render** rather than shipping zero baselines. |
 | `baselineClusterPolicy.name` | `baseline-cluster-guard` | Name prefix; the rendered object is `<name>-<namespace>`. |
 | `baselineClusterPolicy.clusterPriority` | `900` | Priority of the baseline relative to tenant-authored policy. |
 | `baselineClusterPolicy.preset` | `strict` | Preset rego bundled with the webhook (`strict` / `moderate` / `permissive` — see `webhook/presets/`). |
