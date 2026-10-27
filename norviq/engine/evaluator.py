@@ -2056,12 +2056,17 @@ class OPAEvaluator:
         return "data.norviq.strict"
 
     def _no_policy_decision(self, key: str, namespace: str) -> dict:
-        """Decide when NO policy is loaded for `key`. Deny-by-default for a PEP (enforcement_mode=block),
-        with three distinct, loudly-logged cases so a startup/load anomaly is never mistaken for genuine no-policy.
+        """Decide when NO policy is loaded for `key`, with three distinct, loudly-logged cases so a
+        startup/load anomaly is never mistaken for genuine no-policy.
 
         - load FAILURE never reaches here: load_from_db raises -> evaluate() fail-closes (NRVQ-ENG-2000).
         - not-yet-warmed (loader bound but warm load incomplete) -> deny `policy_load_pending` (distinct alarm).
-        - genuine no-policy for an enforcing namespace -> deny `no_policy_loaded` (block mode) or allow (audit mode).
+        - genuine no-policy -> deny `no_policy_loaded` ONLY when enforcement_mode=block AND
+          no_policy_decision=deny; otherwise allow under `default_allow`. no_policy_decision ships "allow"
+          (config.py, values.yaml config.noPolicyDecision), so on a stock install this branch allows.
+
+        This docstring used to open "Deny-by-default for a PEP (enforcement_mode=block)", which the code
+        below has not done since no_policy_decision began shipping "allow" in 0.2.0.
         """
         loader = getattr(self, "_loader", None)
         warmed = getattr(loader, "_warmed", True) if loader is not None else True
