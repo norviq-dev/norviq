@@ -92,9 +92,15 @@ jobs:
           echo "c9f985ce0d345f5484006ade2c695ed9e3f308e4441139e46695c5c182ac0839  /usr/local/bin/opa" | sha256sum -c -
           chmod +x /usr/local/bin/opa
           opa version
-      - name: install norviq (dev extras)
-        run: pip install -e ".[dev]"
-      - name: install ${{ matrix.framework }} (latest, unpinned — the whole point)
-        run: pip install "${{ matrix.package }}"
+      # ONE pip call, not two. As two steps this leg installed `.[dev]` first, which resolved
+      # googleapis-common-protos to its latest (1.75.3, metadata `protobuf>=6.33.5`), then installed
+      # autogen-core, whose `protobuf~=5.29.3` downgraded the runtime — and pip, upgrading one package,
+      # warns about the now-broken neighbour and proceeds. The result was gencode 6.33.5 under runtime
+      # 5.29.6 and `import norviq.telemetry` failing at collection: every test in the leg errored before
+      # one ran. Resolved jointly, pip cannot satisfy both constraints on the same googleapis version and
+      # backtracks it to 1.75.0 (measured), with autogen-core still at its latest. "Pin protobuf" was the
+      # first diagnosis and is impossible — the framework is what caps it. The framework stays unpinned.
+      - name: install norviq (dev extras) + ${{ matrix.framework }} (latest, unpinned — the whole point)
+        run: pip install -e ".[dev]" "${{ matrix.package }}"
       - name: compat + unit tests (${{ matrix.framework }})
         run: python -m pytest "${{ matrix.compat_file }}" "${{ matrix.unit_file }}" -q

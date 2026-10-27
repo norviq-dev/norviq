@@ -215,7 +215,7 @@ the *raw* text, because the skeleton can never witness them (`scanner.py:257-266
 | `mcp_a_concealment` | critical | "do not tell the user", any wording of the same shape |
 | `mcp_a_exfil_directive` | critical | "send/include … to \<url\>" or "… as the \<x\> argument" |
 | `mcp_a_credential_read` | critical | names a credential location (`.ssh/`, `.env`, `api_key`, `/var/run/secrets`, …) |
-| `mcp_a_concealment_bare` | high | `silently`, `covertly`, `without the user` |
+| `mcp_a_concealment_bare` | high | `covertly`, `secretly`, `discreetly`, `without the user` — always. `silently`, `quietly` — unless directly adjacent to an outcome verb ("succeed silently", "silently ignored") AND not aimed at a control ("silently skip the policy check" still fires) |
 | `mcp_a_hidden_marker` | high | `<IMPORTANT>`, `[[SYSTEM]]`, `## instructions` |
 | `mcp_a_tool_precondition` | high | asserts a precondition on *other* tools |
 | `mcp_a_role_impersonation` | high | a line beginning `system:` / `assistant:` |
@@ -693,6 +693,8 @@ All read from the **proxy process's** environment, prefix `NRVQ_`:
 | `NRVQ_MCP_GOVERN_SAMPLING` | `true` | evaluate server-initiated `sampling/createMessage` |
 | `NRVQ_MCP_ALLOW_TOOL_HEADERS` | `false` | permit tool parameters to set outbound HTTP headers |
 | `NRVQ_MCP_MAX_PENDING_REQUESTS` | `4096` | per-direction cap on in-flight request-id bookkeeping |
+
+> **`file` with no path is not an error — it is a silent downgrade, now made loud.** `NRVQ_MCP_PIN_STORE=file` without `NRVQ_MCP_PIN_PATH` degrades to the in-process store: a restart re-TOFUs every definition and drift is not detected. `build_store` logs this as `nrvq.mcp.pins.store_degraded` (**`NRVQ-MCP-5078`**) on every transport. Until 0.2.6 only the HTTP proxy said so; the stdio proxy this guide's quickstart recommends degraded with no line at all.
 
 Helm keys that set them on injected proxies: `webhook.injection.mcp.pinStore` and
 `webhook.injection.mcp.pinMode` (`values.yaml:349-352`; wired at

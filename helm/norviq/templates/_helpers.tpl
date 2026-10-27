@@ -246,7 +246,11 @@ strictly worse than not waiting.
 {{- define "norviq.waitFor" -}}
 {{- if .host -}}
 - name: {{ .name }}
-  image: busybox:1.36
+  {{- /* Wrapped like every other third-party image. This was the one bare reference in the chart, so
+         `global.imageRegistry` relocated opa, postgres, valkey, nginx and curl and left busybox pointing
+         at Docker Hub — on an air-gapped cluster api and engine sat in Init:0/2 on an ImagePullBackOff
+         for an image the operator never chose and could not move. */}}
+  image: {{ include "norviq.thirdPartyImage" (dict "root" .root "image" "busybox:1.36") | quote }}
   command: ['sh','-c','until nc -z {{ .host }} {{ .port }}; do echo waiting for {{ .host }}; sleep 2; done']
   securityContext:
     runAsNonRoot: true

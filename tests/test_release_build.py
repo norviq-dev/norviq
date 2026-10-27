@@ -27,7 +27,7 @@ def test_there_is_a_build_line_for_every_shipped_image():
     assert images == {"api", "ui", "engine", "webhook", "bootstrap"}
 
 
-@pytest.mark.parametrize("line", BUILD_LINES, ids=lambda l: re.search(r"engine:([a-z]+)-", l).group(1))
+@pytest.mark.parametrize("line", BUILD_LINES, ids=lambda line: re.search(r"engine:([a-z]+)-", line).group(1))
 def test_every_dockerfile_the_makefile_names_actually_exists(line: str):
     """`make docker-build` pointed at `Dockerfile.webhook`, which does not exist — the real one is
     `webhook/Dockerfile` with the `webhook` directory as its context. So the documented build had
@@ -41,7 +41,7 @@ def test_every_dockerfile_the_makefile_names_actually_exists(line: str):
     assert (ROOT / dockerfile).is_file(), f"Makefile builds with a missing {dockerfile}"
 
 
-@pytest.mark.parametrize("line", BUILD_LINES, ids=lambda l: re.search(r"engine:([a-z]+)-", l).group(1))
+@pytest.mark.parametrize("line", BUILD_LINES, ids=lambda line: re.search(r"engine:([a-z]+)-", line).group(1))
 def test_every_image_is_stamped_with_the_commit_it_was_built_from(line: str):
     """Without the build-arg, `ENV NRVQ_BUILD_GIT_SHA` keeps its `unknown` default and
     `GET /api/v1/version` reports "unknown" for every image built the documented way — so an operator
@@ -53,7 +53,7 @@ def test_every_image_is_stamped_with_the_commit_it_was_built_from(line: str):
     assert "--build-arg NRVQ_GIT_SHA=" in line, f"unstamped image build: {line}"
 
 
-@pytest.mark.parametrize("line", BUILD_LINES, ids=lambda l: re.search(r"engine:([a-z]+)-", l).group(1))
+@pytest.mark.parametrize("line", BUILD_LINES, ids=lambda line: re.search(r"engine:([a-z]+)-", line).group(1))
 def test_every_dockerfile_actually_consumes_the_stamp(line: str):
     """Passing the build-arg proves nothing if the Dockerfile does not receive it.
 

@@ -248,7 +248,7 @@ Full documentation is at **[docs.norviq.dev](https://docs.norviq.dev)**:
 - **[Policy cookbook](https://docs.norviq.dev/guides/policy-cookbook/)** — copy-paste `NrvqPolicy` recipes + validated Rego building blocks
 - **[Asset & attack graphs](https://docs.norviq.dev/guides/graphs/)** — real reach, kill chains, Simulate, Defend, tool classification
 - **[Compliance & coverage](https://docs.norviq.dev/guides/compliance/)** — MITRE ATLAS / OWASP LLM coverage, gaps, remediation, evidence pack
-- **[MCP firewall](https://docs.norviq.dev/guides/mcp/)** — governing MCP servers: the discovery and invocation gates, definition pinning and drift, and writing policy against `input.mcp`
+- **[MCP firewall](https://docs.norviq.dev/guides/mcp-servers/)** — governing MCP servers: the discovery and invocation gates, definition pinning and drift, and writing policy against `input.mcp`
 - **[Integrating agents](https://docs.norviq.dev/guides/integrating-agents/)** — the SDK: LangChain, LangGraph, CrewAI, AutoGen, Semantic Kernel
 - **[CLI reference](https://docs.norviq.dev/cli/)** — `norviq login`, policies, audit, agents, red-team, fleet
 - **[Configuration](https://docs.norviq.dev/configuration/)** — Helm `values.yaml` reference
@@ -275,6 +275,15 @@ opa test --v0-compatible webhook/presets/ comprehensive.rego
 
 The stack is Python (FastAPI) + OPA/Rego for the engine, React + Vite (TypeScript) for the console, and
 Go for the admission webhook. See **[CONTRIBUTING.md](CONTRIBUTING.md)**.
+
+## Community
+
+- **Issues** — bugs and reproducible findings. [`good first issue`](https://github.com/norviq-dev/norviq/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+  items each carry a file path, a reproduction and a definition of done.
+- **[Discussions](https://github.com/norviq-dev/norviq/discussions)** — show us your policy, say which
+  framework you run, argue about what comes after MCP.
+- [CONTRIBUTING.md](CONTRIBUTING.md) · [GOVERNANCE.md](GOVERNANCE.md) · [MAINTAINERS.md](MAINTAINERS.md) · [ROADMAP.md](ROADMAP.md) · [CHANGELOG.md](CHANGELOG.md)
+- **Running it somewhere real?** Add yourself to [ADOPTERS.md](ADOPTERS.md).
 
 ## Security
 

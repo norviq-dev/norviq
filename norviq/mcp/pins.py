@@ -333,6 +333,19 @@ def build_store(kind: str, path: str) -> PinStore:
     today must not be broken by an upgrade, so that case is made LOUD instead (see
     `effective_store_kind`, and the caller's warning).
     """
+    # The one degradation this function performs on purpose — `file` with no path becomes memory —
+    # is announced HERE rather than by the caller. Two transports construct a store; one of them
+    # wrote the warning and one did not, and the one that did not is the path the published
+    # quickstart recommends. A warning that a caller has to remember is a warning that gets
+    # forgotten by the third caller; this one cannot be.
+    effective = effective_store_kind(kind, path)
+    if kind and effective != kind:
+        log.warning(
+            "nrvq.mcp.pins.store_degraded",
+            configured=kind, using=effective, code="NRVQ-MCP-5078",
+            hint="NRVQ_MCP_PIN_STORE=file needs NRVQ_MCP_PIN_PATH; without it pins are held in "
+                 "process, so a restart re-TOFUs every definition and drift is not detected",
+        )
     if kind == "control-plane":
         raise ValueError(
             "build_store cannot construct the control-plane store — it requires namespace/server_id "

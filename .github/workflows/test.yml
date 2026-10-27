@@ -110,6 +110,59 @@ jobs:
         # that goes red for reasons unrelated to the change under test is worse than a slow one.
         run: npm run test -- --run --no-file-parallelism
 
+  # Nothing below ran in any workflow. `make lint` is documented as THE lint command (README) and was
+  # red on main — pre-commit only sees staged files, which is exactly how the violations got in. The
+  # webhook's 186 Go tests likewise ran nowhere: the Dockerfile COPYs *_test.go and then `go build`,
+  # which ignores them. And tsc ran only inside the post-merge image build, never on a pull request.
+  # Each of these was control-tested with a deliberate violation before landing.
+  lint:
+    name: lint (ruff, gofmt/vet/test, tsc)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: ruff
+        # PINNED to uv.lock's ruff, and tests/test_ci_tool_pins.py fails if the two drift. Unpinned, this
+        # step installed the newest ruff on every run: 0.15.21 (the locked version, and what every
+        # developer runs) reports 0 findings, 0.16.0 reports 930 and 0.17.3 reports 1,098. The job's first
+        # real run on CI failed here, so gofmt, go vet, go test and tsc below never executed — a lint gate
+        # whose verdict depended on the day it ran, not on the code.
+        run: pip install --quiet "ruff==0.15.21" && ruff check norviq/ tests/
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: webhook/go.mod
+          cache-dependency-path: webhook/go.sum
+      - name: gofmt
+        working-directory: webhook
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then echo "not gofmt-formatted:"; echo "$unformatted"; exit 1; fi
+      - name: go vet
+        working-directory: webhook
+        run: go vet ./...
+      - name: go test
+        working-directory: webhook
+        # -count=1 disables the test cache; a cached PASS is not evidence about this commit. The
+        # `ok` grep asserts at least one package actually ran and passed — an empty match set would
+        # otherwise print nothing and exit 0, which is how a suite that never ran reads as green.
+        run: go test -count=1 ./... 2>&1 | tee go-test.log && grep -qE '^ok\s' go-test.log
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: npm ci
+        working-directory: ui
+        run: npm ci --no-audit --no-fund
+      - name: tsc
+        working-directory: ui
+        run: npx tsc --noEmit
+
   python-tests:
     name: pytest (engine, api, sdk, helm, rego)
     runs-on: ubuntu-latest
@@ -140,7 +193,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       redis:
-        image: redis:7-alpine
+        image: valkey/valkey:8.1-alpine
         ports:
           - 6379:6379
         options: >-

@@ -31,7 +31,10 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 
 const VENDORED = 'node_modules/monaco-editor/esm/vs/base/browser/dompurify/dompurify.js'
 const REPLACEMENT = 'node_modules/dompurify/dist/purify.es.mjs'
-const MIN_SAFE = [3, 4, 13] // GHSA-55q2-fjhq-7xh7 first patched in 3.4.13
+// 3.4.16: GHSA-p98j-92pf-mc4p and GHSA-6688-9rhm-gjv2 (CVE-2026-109344/-109345), both IN_PLACE XSS —
+// the same addHook/removeAllHooks/sanitize surface monaco's domSanitize.js drives. Was 3.4.13 for
+// GHSA-55q2-fjhq-7xh7; raised so a downgrade below either fix fails the build, not just the audit.
+const MIN_SAFE = [3, 4, 16]
 
 const die = (msg) => {
   console.error(`\n  patch-vendored-dompurify: ${msg}\n`)
@@ -63,7 +66,7 @@ if (!vm) die(`could not read a version banner from ${REPLACEMENT}`)
 const pkgVersion = vm[1]
 if (!gte(parse(pkgVersion), MIN_SAFE)) {
   die(`the dompurify dependency is ${pkgVersion}, which is not >= ${MIN_SAFE.join('.')} ` +
-      `(GHSA-55q2-fjhq-7xh7). Bump it before building.`)
+      `(GHSA-55q2-fjhq-7xh7, GHSA-p98j-92pf-mc4p, GHSA-6688-9rhm-gjv2). Bump it before building.`)
 }
 
 const vendored = readFileSync(VENDORED, 'utf8')
@@ -73,8 +76,10 @@ const already = vendored.includes(`DOMPurify ${pkgVersion}`)
 // domSanitize.js calls. Check rather than assume — a shape mismatch would break the editor at runtime
 // rather than at build time, which is far worse than a failed build.
 const replacement = replacementRaw
-if (!/export\s*\{\s*purify as default\s*\}/.test(replacement)) {
-  die(`${REPLACEMENT} no longer ends in \`export { purify as default }\`; the drop-in assumption ` +
+// Any `export { <name> as default }`. 3.4.17 renamed the binding `purify` -> `purify_default`; monaco
+// does a default import, so the binding's name is not part of the contract — the default export is.
+if (!/export\s*\{\s*[A-Za-z_$][\w$]*\s+as\s+default\s*\}/.test(replacement)) {
+  die(`${REPLACEMENT} no longer has an \`export { <name> as default }\`; the drop-in assumption ` +
       `this script relies on has changed.`)
 }
 for (const fn of ['addHook', 'removeAllHooks', 'sanitize']) {
@@ -94,4 +99,4 @@ writeFileSync(VENDORED, replacement.replace(/\n\/\/# sourceMappingURL=.*\s*$/, '
 const after = readFileSync(VENDORED, 'utf8')
 if (!after.includes(`DOMPurify ${pkgVersion}`)) die('write completed but the version banner did not change')
 
-console.log(`  patch-vendored-dompurify: monaco vendored DOMPurify ${before} -> ${pkgVersion} (GHSA-55q2-fjhq-7xh7)`)
+console.log(`  patch-vendored-dompurify: monaco vendored DOMPurify ${before} -> ${pkgVersion} (GHSA-55q2-fjhq-7xh7, GHSA-p98j-92pf-mc4p, GHSA-6688-9rhm-gjv2)`)

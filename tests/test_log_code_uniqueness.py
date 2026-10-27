@@ -134,7 +134,6 @@ KNOWN_DUPLICATES: dict[str, tuple[str, ...]] = {
     "NRVQ-MCP-5046": ('nrvq.mcp.http.pin_store_degraded', 'nrvq.mcp.pins.control_plane_unreachable'),
     "NRVQ-MCP-5047": ('nrvq.mcp.http.pin_store_recovered', 'nrvq.mcp.pins.loaded_from_control_plane'),
     "NRVQ-MCP-5063": ('nrvq.mcp.content_guard.budget_exhausted', 'nrvq.mcp.tool_header_denied'),
-    "NRVQ-MCP-5067": ('nrvq.mcp.gate_a.item_list_flagged', 'nrvq.mcp.http.pin_store_degraded'),
     "NRVQ-MCP-5068": ('nrvq.mcp.gate_a.elicitation_flagged', 'nrvq.mcp.gate_a.server_blocked'),
     "NRVQ-MCP-5069": ('nrvq.mcp.notification_flagged', 'nrvq.mcp.server.decision'),
     "NRVQ-MCP-5071": ('nrvq.mcp.servers.control_plane_recovered', 'nrvq.mcp.servers.loaded'),

@@ -57,8 +57,12 @@ def _images(rendered: str) -> list[str]:
 
 def test_default_third_party_images_are_upstream() -> None:
     imgs = _images(_render())
+    # The redis-protocol store is read from values.yaml, not written as a literal: it moved from
+    # `redis` to `valkey/valkey` when Redis relicensed at 7.4, and a literal here would have failed a
+    # test about upstream-ness on a licence change — the same noise the mirror test below describes.
+    store = yaml.safe_load((_CHART / "values.yaml").read_text())["images"]["redis"]
     assert any(i.startswith("openpolicyagent/opa") for i in imgs)
-    assert any(i.startswith("redis:") for i in imgs)
+    assert any(i == f"{store['repository']}:{store['tag']}" for i in imgs), imgs
     assert any(i.startswith("postgres:") for i in imgs)
 
 
@@ -72,7 +76,16 @@ def test_global_registry_mirrors_third_party_not_norviq() -> None:
     # image itself, and the chart's own comment guards the pin.
     opa_image = yaml.safe_load((_CHART / "values.yaml").read_text())["opa"]["image"]
     assert any(i == f"mirror.example.com/{opa_image}" for i in imgs), imgs
-    assert any(i == "mirror.example.com/redis:7-alpine" for i in imgs), imgs
+    store = yaml.safe_load((_CHART / "values.yaml").read_text())["images"]["redis"]
+    assert any(i == f"mirror.example.com/{store['repository']}:{store['tag']}" for i in imgs), imgs
+    # The wait-for init containers too. busybox was the ONE bare reference in the chart — five init
+    # containers pointed at Docker Hub while every other third-party image took the mirror — so on an
+    # air-gapped cluster api and engine sat in Init:0/2 on an ImagePullBackOff for an image the
+    # operator never chose. Asserted on every occurrence, not `any`: one wrapped and four bare would
+    # still strand the pod.
+    busybox = [i for i in imgs if "busybox" in i]
+    assert busybox, imgs
+    assert all(i == "mirror.example.com/busybox:1.36" for i in busybox), busybox
     # norviq images are NOT double-prefixed (they use images.registry, untouched)
     assert not any("mirror.example.com/ghcr.io" in i for i in imgs), imgs
 
