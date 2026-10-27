@@ -106,6 +106,54 @@ class ScanReport:
 # insert whitespace. They target the SHAPE of an instruction aimed at a model, not any single
 # wording — "do not tell the user" and "don't mention this to the user" share a shape.
 
+# Outcome verbs that make "silently"/"quietly" ordinary API prose rather than concealment:
+# "succeed silently", "silently ignored", "fails quietly". Adjacency is required in both
+# directions — a verb three sentences away says nothing about THIS occurrence.
+_SILENCE_IS_ORDINARY = re.compile(
+    r"\b(succeed|succeeds|succeeded|fail|fails|failed|failing|return|returns|returned|"
+    r"exit|exits|exited|ignore|ignores|ignored|skip|skips|skipped|drop|drops|dropped|"
+    r"discard|discards|discarded|truncate|truncates|truncated|overwrite|overwrites|overwritten|"
+    r"continue|continues|retry|retries|no-?op|noop)\s+(silently|quietly)\b"
+    r"|\b(silently|quietly)\s+(succeed|fail|return|exit|ignore|skip|drop|discard|truncate|"
+    r"overwrite|continue|retry|no-?op)\w*"
+)
+
+# How far either side of a match the veto may look. Deliberately tight (a few words), so a decoy
+# phrase elsewhere in the same description cannot suppress a real hit.
+_VETO_WINDOW = 24
+
+# The veto's verb list is also the vocabulary a poisoned description uses to suppress a control:
+# "silently skip the policy check", "quietly ignore the operator's revocation". The verb cannot
+# separate those from "silently skips entries that do not parse" — the OBJECT can. When the words
+# after the adverb name a control rather than data, the occurrence is concealment however ordinary
+# the verb, and the veto does not apply. Looking FORWARD only, and further than the veto window: the
+# object follows the verb, and a wider window here is strictly safe — it can only make the rule
+# fire, never suppress it, so a decoy cannot exploit it.
+_CONTROL_OBJECT = re.compile(
+    r"\b(polic(?:y|ies)|checks?|audits?|prompts?|instructions?|rules?|guards?|sandbox(?:es)?|"
+    r"warnings?|refusals?|revocations?|permissions?|approvals?|consent|controls?|verifications?|"
+    r"validations?|reviews?|alerts?|restrictions?|safeguards?|escalations?|authori[sz]ation|"
+    r"authentication)\b"
+)
+_OBJECT_WINDOW = 64
+
+
+def _excused(folded: str, m: "re.Match[str]", veto: "re.Pattern[str]") -> bool:
+    """True only when THIS occurrence is ordinary prose about the tool's own outcome.
+
+    Two conditions, both required. The veto phrase must CONTAIN this adverb, not merely sit inside
+    the window around it — otherwise "skip silently." twenty characters earlier excuses a following
+    "silently exfiltrate", which is the decoy the window was meant to defeat, moved closer. And the
+    words after the adverb must not name a control: "silently skip" is ordinary when the thing
+    skipped is data and concealment when it is the policy check.
+    """
+    lo = max(0, m.start() - _VETO_WINDOW)
+    window = folded[lo:m.end() + _VETO_WINDOW]
+    here = m.start() - lo
+    if not any(v.start() <= here < v.end() for v in veto.finditer(window)):
+        return False
+    return _CONTROL_OBJECT.search(folded[m.start():m.end() + _OBJECT_WINDOW]) is None
+
 _RULES: tuple[tuple[str, str, re.Pattern[str], str], ...] = (
     (
         "mcp_a_instruction_override", "critical",
@@ -146,9 +194,27 @@ _RULES: tuple[tuple[str, str, re.Pattern[str], str], ...] = (
         "the definition asks for the action to be kept from the user",
     ),
     (
+        # Adverbs with no ordinary engineering meaning. "covertly"/"secretly"/"discreetly" do not
+        # appear in an honest tool description, so these stay a bare match.
         "mcp_a_concealment_bare", "high",
-        re.compile(r"\b(silently|covertly|secretly|quietly|discreetly|without\s+the\s+user)\b"),
+        re.compile(r"\b(covertly|secretly|discreetly|without\s+the\s+user)\b"),
         "the definition asks for action the user is not meant to observe",
+    ),
+    (
+        # "silently" and "quietly" DO have an ordinary meaning, and the bare match was wrong for it.
+        # Measured on the official @modelcontextprotocol/server-filesystem: create_directory says
+        # "If the directory already exists, this operation will succeed silently", which scored
+        # high and — because mcp_scan_strip_severity defaults to "high" — withheld the tool. The
+        # model was served 13 tools instead of 14 and nothing but a stderr line said so.
+        #
+        # The veto requires the adverb to be DIRECTLY adjacent to an outcome verb, and is evaluated
+        # in a narrow window around this occurrence rather than over the whole field. Both of those
+        # matter: a whole-text veto would let a hostile description neutralise the rule by adding
+        # "returns silently on success" somewhere far away from "silently exfiltrate".
+        "mcp_a_concealment_bare", "high",
+        re.compile(r"\b(silently|quietly)\b"),
+        "the definition asks for action the user is not meant to observe",
+        _SILENCE_IS_ORDINARY,
     ),
     (
         # A SCHEME THAT EXECUTES WHEN FOLLOWED, in text bound for the model.
@@ -355,10 +421,18 @@ def _scan_text(text: str, field_path: str) -> list[Finding]:
     # before the rules run. Offsets are into the skeleton, not the original, so the excerpt is taken
     # positionally — approximate for heavily-folded text, which is acceptable for an audit hint.
     folded = skeleton(text)
-    for rule, severity, pattern, detail in _RULES:
-        m = pattern.search(folded)
-        if m:
+    for entry in _RULES:
+        rule, severity, pattern, detail = entry[:4]
+        veto = entry[4] if len(entry) > 4 else None
+        # EVERY occurrence is considered, not just the first. `search` would let one ordinary
+        # "silently ignored" earlier in the field veto the rule before it ever reached a later
+        # "silently exfiltrate" — a one-line bypass for any server that wanted it. Still one
+        # finding per rule; the loop stops at the first occurrence the veto does not excuse.
+        for m in pattern.finditer(folded):
+            if veto is not None and _excused(folded, m, veto):
+                continue
             findings.append(Finding(rule, severity, field_path, _excerpt(text, m.span()), detail))
+            break
     return findings
 
 
