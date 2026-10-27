@@ -149,7 +149,7 @@ path. §2.1 gives the release a reason to exist, and the docs corrections ride a
 ## 2. Product defects — verified
 
 ### 2.1 `busybox:1.36` is not relocatable, and air-gap installs will fail on it
-**Status:** verified. **Severity:** first-run blocker on air-gapped clusters.
+**Status:** FIXED on `cncf-readiness` (`0e51ea7`, control-tested: helper reverted → the relocation test lists five bare `busybox:1.36`). Still reaches nobody until a cut — see §1.2. **Severity:** first-run blocker on air-gapped clusters.
 **Sequencing:** paired with the 0.2.6 cut — see §1.2. Fixing this without releasing changes nothing for users.
 
 `helm/norviq/templates/_helpers.tpl:249` hardcodes `image: busybox:1.36` with no
@@ -310,8 +310,15 @@ reverting fails exactly fifteen. **#116** documents the false positive "until #1
 be reworded once the corrected fix does.
 
 ### 7.2 CI is red on `main`, and nothing is a required check
-**Status:** FOSSA half resolved on `cncf-readiness` (`9aede34`, `111ccc0`); Framework Compat and
-the required-check question still open.
+**Status:** FOSSA half resolved (`9aede34`, `111ccc0`); Framework Compat RESOLVED (`69f0010`); the
+required-check question has a prepared, unrun settings script (§7.5).
+
+**The Framework Compat diagnosis below ("pin protobuf") was wrong.** The autogen leg installed in two
+pip calls: `.[dev]` resolved googleapis-common-protos to 1.75.3 (metadata `protobuf>=6.33.5`), then
+autogen-core's `protobuf~=5.29.3` downgraded the runtime and pip carried on with a warning. One joint
+resolve backtracks googleapis to 1.75.0 and the leg's 13 tests pass, with the framework still unpinned.
+Pinning protobuf was impossible — the framework is what caps it. End users were never affected:
+`pip install norviq[autogen]` and `uv sync --extra autogen` both resolve jointly (measured).
 
 The k8s modules are bumped v0.33.0 → v0.37.0 (build/vet/test/image all green). That does **not**
 clear FOSSA — read from the advisory database, all three CVEs have fixed versions eight to twenty
@@ -365,13 +372,19 @@ pushed toward the one route the doc bans. Either flip the toggles or edit the se
 as they are is the defect.
 
 ### 7.6 `.gitleaks.toml` allowlists every `.md`, so docs are never scanned
-**Status:** verified (from the #118 review); open. Line 12's `.*\.md$` means the `secrets` job does not
+**Status:** FIXED on `cncf-readiness` (`d81e1ea`). Measured cost of removing the line across all 67
+tracked `.md`: two findings — `NRVQ-API-7460` (a log-code id, now allowed by shape) and the example
+one-time password #118 makes fake (same one-line change made here). Controls: 67 files → 0; a planted
+`ghp_` token in a `.md` → found; `gitleaks git` over the PR range → 0. The first attempt scanned 0 bytes
+twice and reported clean both times. Original entry: Line 12's `.*\.md$` means the `secrets` job does not
 read `docs/cli.md` — or any markdown. #118's premise that "a scanner flagged" the example password is
 true only of Mr-Neutr0n's scanner, not this repo's. Two credential-shaped strings have now lived in
 docs; measuring what un-allowlisting costs across all 62 tracked `.md` files is the next step.
 
 ### 7.7 `docs/cli.md` line citations are systemically stale
-**Status:** verified (hand-checked sample from the #118 review); open. `:14` cites `pyproject.toml:67-68`
+**Status:** measured 2026-09-16, open. 122 `file:line` citations; 19 point at nothing a sentence could
+mean (a blank line, a lone `)`, or a bare basename the page never resolves); 44 more sit 11–349 lines
+below the symbol they presumably mean. The fix is symbol anchors, not renumbering. Original entry: `:14` cites `pyproject.toml:67-68`
 (actual 82-83); `:608` cites `config.py:393` (actual 454, and 393 is a comment about body size).
 Prefer function names and YAML key paths over raw line numbers; nothing in CI keeps a line number
 fresh.
@@ -450,6 +463,20 @@ Same run, both now fixed on `cncf-readiness`.
 
 ### 7.12 The chatbot scenario is not idempotent, and does not say so
 
+**Update 2026-09-16 — a reset through the product does not reset.** A step calling
+`DELETE /agents/{spiffe_id}` before each run was tried (stashed, not committed: `git stash list`,
+"scenario trust reset via DELETE /agents"). Run 1 after it scored 12/16, run 2 still 10/16 on
+`escalate_low_trust`. In-pod, authenticated (`DBSIZE` 3 as the control): after the delete,
+`agent_profile:<id>` and `agent_history:<id>` survive — the handler drops the registry row, the
+freeze key and the trust override, not the behavioural history the score is recomputed from. So a
+re-registered identity inherits its violations. That the history drives the score is inferred from
+`AgentHistoryStore`/`AgentProfileStore` and the result, not control-tested.
+
+Not obviously a bug: clearing history on delete would make deregister-and-return a way to launder an
+agent's record, the same laundering the MCP plan refuses for `forget_server`. Decision owed — either
+the docstring stops implying a fresh start, or an explicit admin "reset history" exists and is audited.
+
+
 Re-running it against the same cluster scores lower on identical code: **13/16, then 10/16, then
 12/16**. The middle run began with the agent already at trust 0.30 from the previous run's attacks, so
 `escalate_low_trust` caught the two benign controls. Nothing in the script resets trust or warns that
@@ -458,6 +485,33 @@ the first run poisons the second, and the score is printed as if it were a prope
 The 12/16 is the honest clean-baseline number with the 7.11 checks corrected: reset with
 `delete from agent_registry where namespace='agents'`, `FLUSHALL`, restart the API. Either the script
 should do that itself or it should refuse to run twice without it.
+
+### 7.13 DCO: the charter requires it on acceptance; 0 of 540 commits carry it
+
+**Status:** verified 2026-10-27; decision owed. The CNCF charter (§11, `cncf/foundation/charter.md`) says
+inbound code contributions "shall be … accompanied by a Developer Certificate of Origin sign-off".
+`CONTRIBUTING.md` on this branch says "every commit in a pull request needs it", while nothing enforces
+it (no DCO app; the only workflow hit for "dco" is the substring in "hardcoded") and **0 of 540 commits
+on `main` have a `Signed-off-by`**. The sentence is a stated rule that neither CI nor history follows.
+Options: start signing off now and add a check once `cncf-readiness` lands (commits before the section
+are exempt, as it says), or word it as a request until then. Adding San's sign-off to commits on his
+behalf is his certification to make, not the tooling's — not done.
+
+### 7.14 PR #109's CI never ran; the approvals expired
+
+**Status:** verified 2026-10-27. All three runs on `e8b3886` show `completed / failure` with **zero jobs**
+(control: a `main` run has 4). They sat at `action_required` from 2026-08-24 and GitHub expired them on
+2026-09-23. The red X is not a test result. Re-running needs the maintainer's account; the contributor's
+last activity was 2026-09-01.
+
+### 7.15 Sandbox eligibility: 2026-11-28, enforced by an automated pre-review
+
+**Status:** verified 2026-10-27 from `cncf/sandbox`. Since 2026-08-19 a Copilot pre-review
+(`scripts/sandbox-application-review-prompt.md`, `.github/workflows/sandbox-application-review.yml`)
+labels an application `Postponed` on a "clear violation", including repo `created_at` under 6 months and a
+MAINTAINERS link that 404s. `norviq-dev/norviq` was created 2026-05-28. On `main` today
+`MAINTAINERS.md`, `ROADMAP.md`, `GOVERNANCE.md`, `ADOPTERS.md`, `NOTICE` and `CHANGELOG.md` do not exist —
+they are on this branch only. The form also rejects "will add after acceptance".
 
 ## 8. Audit claims that did not reproduce
 
