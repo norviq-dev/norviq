@@ -127,7 +127,12 @@ jobs:
         with:
           python-version: "3.12"
       - name: ruff
-        run: pip install --quiet ruff && ruff check norviq/ tests/
+        # PINNED to uv.lock's ruff, and tests/test_ci_tool_pins.py fails if the two drift. Unpinned, this
+        # step installed the newest ruff on every run: 0.15.21 (the locked version, and what every
+        # developer runs) reports 0 findings, 0.16.0 reports 930 and 0.17.3 reports 1,098. The job's first
+        # real run on CI failed here, so gofmt, go vet, go test and tsc below never executed — a lint gate
+        # whose verdict depended on the day it ran, not on the code.
+        run: pip install --quiet "ruff==0.15.21" && ruff check norviq/ tests/
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: webhook/go.mod
