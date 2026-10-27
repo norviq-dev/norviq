@@ -149,7 +149,7 @@ path. §2.1 gives the release a reason to exist, and the docs corrections ride a
 ## 2. Product defects — verified
 
 ### 2.1 `busybox:1.36` is not relocatable, and air-gap installs will fail on it
-**Status:** FIXED on `cncf-readiness` (`0e51ea7`, control-tested: helper reverted → the relocation test lists five bare `busybox:1.36`). Still reaches nobody until a cut — see §1.2. **Severity:** first-run blocker on air-gapped clusters.
+**Status:** FIXED on `cncf-readiness` (`557e311`, control-tested: helper reverted → the relocation test lists five bare `busybox:1.36`). Still reaches nobody until a cut — see §1.2. **Severity:** first-run blocker on air-gapped clusters.
 **Sequencing:** paired with the 0.2.6 cut — see §1.2. Fixing this without releasing changes nothing for users.
 
 `helm/norviq/templates/_helpers.tpl:249` hardcodes `image: busybox:1.36` with no
@@ -310,7 +310,7 @@ reverting fails exactly fifteen. **#116** documents the false positive "until #1
 be reworded once the corrected fix does.
 
 ### 7.2 CI is red on `main`, and nothing is a required check
-**Status:** FOSSA half resolved (`9aede34`, `111ccc0`); Framework Compat RESOLVED (`69f0010`); the
+**Status:** FOSSA half resolved (`e4bf1b9`, `bd78e61`); Framework Compat RESOLVED (`024101b`); the
 required-check question has a prepared, unrun settings script (§7.5).
 
 **The Framework Compat diagnosis below ("pin protobuf") was wrong.** The autogen leg installed in two
@@ -336,7 +336,7 @@ blocks a merge: `main` has no branch protection and no rulesets, so no workflow 
 not block for the same reason. GOVERNANCE.md says when that changes.
 
 ### 7.3 The default Redis image is RSALv2/SSPLv1, on a floating tag, with no digest
-**Status:** licence half RESOLVED on `cncf-readiness` (`50cfb18`); the digest half open.
+**Status:** licence half RESOLVED on `cncf-readiness` (`a822c7f`); the digest half open.
 
 Ships `valkey/valkey:8.1-alpine` — BSD-3-Clause, LF fork, minor-pinned. Validated before pinning:
 the image symlinks `redis-server`/`redis-cli`, sentinel mode starts, and the full suite (3297) ran
@@ -354,7 +354,7 @@ upstream `COPYING` at tag 7.2.16), or `valkey/valkey:8-alpine` (BSD, LF fork, dr
 tag goes, and the release gate should assert digests on *all* `image:` lines.
 
 ### 7.4 Four commits are authored as `Claude <noreply@anthropic.com>`
-**Status:** decision owed. `.mailmap` (`1855de8`) collapses the seven human spellings and deliberately
+**Status:** decision owed. `.mailmap` (`8ff9a05`) collapses the seven human spellings and deliberately
 leaves these four alone — folding them into a human identity by mailmap would hide the question, not
 answer it. An AI cannot certify origin under the DCO; a foundation doing IP diligence will ask.
 Options: re-attribute to the maintainer with the AI noted in the body; leave and disclose; or a
@@ -372,7 +372,7 @@ pushed toward the one route the doc bans. Either flip the toggles or edit the se
 as they are is the defect.
 
 ### 7.6 `.gitleaks.toml` allowlists every `.md`, so docs are never scanned
-**Status:** FIXED on `cncf-readiness` (`d81e1ea`). Measured cost of removing the line across all 67
+**Status:** FIXED on `cncf-readiness` (`57bcd74`). Measured cost of removing the line across all 67
 tracked `.md`: two findings — `NRVQ-API-7460` (a log-code id, now allowed by shape) and the example
 one-time password #118 makes fake (same one-line change made here). Controls: 67 files → 0; a planted
 `ghp_` token in a `.md` → found; `gitleaks git` over the PR range → 0. The first attempt scanned 0 bytes
