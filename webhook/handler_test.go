@@ -210,7 +210,9 @@ func TestMutateAlreadyInjectedAfterImageDrift(t *testing.T) {
 			Containers: []corev1.Container{
 				fullyInjectedContainer("app", "nginx"),
 				// drifted image (old tag) but same name "norviq-engine" + socket mount + trusted routing → recognized.
-				trustedSidecar("norviq-sidecar", "norviq/norviq-engine:some-old-sha", h.cfg,
+				// The project's own registry: this fixture used Docker Hub's `norviq/` namespace, which the
+				// project does not own and which is no longer trusted (see the test below).
+				trustedSidecar("norviq-sidecar", "ghcr.io/norviq-dev/norviq-engine:engine-some-old-sha", h.cfg,
 					corev1.VolumeMount{Name: "norviq-socket", MountPath: socketMountPath}),
 			},
 		},
@@ -218,6 +220,35 @@ func TestMutateAlreadyInjectedAfterImageDrift(t *testing.T) {
 	resp := sendReview(t, h, makeReviewFromPod(pod, metav1.GroupVersionKind{Kind: "Pod"}, "default"))
 	if !resp.Response.Allowed || resp.Response.Patch != nil {
 		t.Fatal("expected no patch for a fully-injected pod whose sidecar image drifted (same name + socket mount)")
+	}
+}
+
+// A self-wired "sidecar" from Docker Hub's `norviq` namespace must not make a pod count as already
+// injected. That namespace is unowned (anyone can register it and push norviq/norviq-engine), and it
+// used to be on the allowlist the skip path consults — so a tenant could ship their own image under
+// that name, wire it like the real sidecar, and have the webhook skip injecting the real one. The
+// tool calls would then be judged by the tenant's image.
+func TestMutateDockerHubNorviqSidecarIsNotTrustedAsInjected(t *testing.T) {
+	prev := allowLocalSidecarImages
+	t.Cleanup(func() { allowLocalSidecarImages = prev })
+	allowLocalSidecarImages = false
+	h := NewHandler(LoadConfig())
+	for _, img := range []string{"norviq/norviq-engine:engine-latest", "docker.io/norviq/norviq-engine:engine-x"} {
+		pod := corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "test", Labels: map[string]string{"norviq": "enabled"}},
+			Spec: corev1.PodSpec{
+				Volumes: []corev1.Volume{{Name: "norviq-socket"}},
+				Containers: []corev1.Container{
+					fullyInjectedContainer("app", "nginx"),
+					trustedSidecar("norviq-sidecar", img, h.cfg,
+						corev1.VolumeMount{Name: "norviq-socket", MountPath: socketMountPath}),
+				},
+			},
+		}
+		resp := sendReview(t, h, makeReviewFromPod(pod, metav1.GroupVersionKind{Kind: "Pod"}, "default"))
+		if resp.Response.Allowed && resp.Response.Patch == nil {
+			t.Fatalf("%s was trusted as the real sidecar and injection was skipped", img)
+		}
 	}
 }
 

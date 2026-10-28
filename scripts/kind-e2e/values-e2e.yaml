@@ -18,6 +18,11 @@
 # `helm package` sweeps up every values-*.yaml in the chart directory, and a test rig's ceilings have
 # no business shipping to an operator.
 
+webhook:
+  # The rig builds `norviq/norviq-engine:*` and kind-loads it. Without this the webhook refuses that
+  # name, falls back to the published GHCR sidecar (NRVQ-WHK-4062), and injection tests the wrong image.
+  allowLocalSidecarImages: true
+
 config:
   extraEnv:
     # The suite drives ~190 specs through ONE admin identity and the limiter keys on the JWT `sub`,

@@ -188,6 +188,7 @@ func LoadConfig() Config {
 	// cluster-wide denial in place (failurePolicy is Fail), so it converts a loud misconfiguration
 	// into the identical outage. Injecting the known-good default keeps workloads admitted and
 	// governed, and the log says exactly what was ignored and why.
+	allowLocalSidecarImages = envBool("NRVQ_ALLOW_LOCAL_SIDECAR_IMAGES", false)
 	if !isAllowedSidecarImage(cfg.SidecarImage) {
 		fallback := "ghcr.io/norviq-dev/norviq-engine:engine-latest"
 		// 4062, not 4034: 4034 already labels TWO different events (a cross-namespace policy rejection

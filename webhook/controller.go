@@ -122,8 +122,21 @@ var finalizerMaxAge = 15 * time.Minute
 // Widened by exactly one alternative. The anchors and the tag/digest suffix are unchanged, so this
 // still refuses a third-party registry, a lookalike org, and a bare repository with no tag.
 var allowedSidecarImagePattern = regexp.MustCompile(
-	`^(norviq/norviq-engine|docker\.io/norviq/norviq-engine|ghcr\.io/norviq-dev/norviq-engine|ghcr\.io/norviq-dev/norviq-engine-dev)` +
+	`^(ghcr\.io/norviq-dev/norviq-engine|ghcr\.io/norviq-dev/norviq-engine-dev)` +
 		`(?::[a-zA-Z0-9._-]+|@sha256:[0-9a-f]{64})$`)
+
+// The names a LOCAL build uses (scripts/kind-e2e builds `norviq/norviq-engine:*` and `kind load`s it).
+// They used to sit in the pattern above unconditionally, and both resolve to Docker Hub's `norviq`
+// namespace — which the project does not own: /v2/users/norviq and /v2/orgs/norviq both 404, the same
+// answer a random name gets. The comment above said the pattern "still refuses a third-party registry";
+// for these two alternatives it accepted exactly that. Allowed now only when the operator says the
+// cluster runs local builds (webhook.allowLocalSidecarImages, off by default; the kind rig turns it on).
+var localSidecarImagePattern = regexp.MustCompile(
+	`^(norviq/norviq-engine|docker\.io/norviq/norviq-engine)` +
+		`(?::[a-zA-Z0-9._-]+|@sha256:[0-9a-f]{64})$`)
+
+// Set from NRVQ_ALLOW_LOCAL_SIDECAR_IMAGES by LoadConfig, before it validates the configured image.
+var allowLocalSidecarImages bool
 
 type policySyncRequest struct {
 	Namespace       string                 `json:"namespace"`
@@ -1597,7 +1610,10 @@ func shouldProcessUpdate(oldObj, newObj interface{}) bool {
 }
 
 func isAllowedSidecarImage(image string) bool {
-	return allowedSidecarImagePattern.MatchString(image)
+	if allowedSidecarImagePattern.MatchString(image) {
+		return true
+	}
+	return allowLocalSidecarImages && localSidecarImagePattern.MatchString(image)
 }
 
 // isMutableTag reports whether the image reference uses a mutable tag (":latest" or "...-latest")

@@ -47,3 +47,15 @@ def test_no_other_workload_sets_it() -> None:
             assert "NRVQ_SIDECAR_REMOTE_CALLERS" not in _env(c), f"{d['metadata']['name']}/{c['name']}"
     cm = next(d for d in _docs() if d["kind"] == "ConfigMap" and d["metadata"]["name"] == "norviq-config")
     assert "NRVQ_SIDECAR_REMOTE_CALLERS" not in cm["data"], "in the shared ConfigMap it would reach every envFrom"
+
+
+def _webhook_env(*extra: str) -> dict:
+    wh = next(d for d in _docs(*extra) if d["kind"] == "Deployment" and d["metadata"]["name"] == "norviq-webhook")
+    return _env(wh["spec"]["template"]["spec"]["containers"][0])
+
+
+def test_local_sidecar_images_are_refused_on_a_real_install() -> None:
+    """`norviq/norviq-engine` is Docker Hub's unowned `norviq` namespace; only the kind rig may trust it."""
+    assert _webhook_env().get("NRVQ_ALLOW_LOCAL_SIDECAR_IMAGES") == "false"
+    rig = str(Path(__file__).resolve().parents[2] / "scripts" / "kind-e2e" / "values-e2e.yaml")
+    assert _webhook_env("-f", rig).get("NRVQ_ALLOW_LOCAL_SIDECAR_IMAGES") == "true"

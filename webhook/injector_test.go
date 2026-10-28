@@ -143,11 +143,13 @@ func TestInjector_VolumeSizeLimit(t *testing.T) {
 
 func TestInjector_ValidateImage(t *testing.T) {
 	inj := NewInjector(LoadConfig())
-	if !inj.validateImage("norviq/norviq-engine:engine-latest") {
-		t.Fatal("expected official image to be allowed")
+	// Docker Hub's `norviq` namespace is not the project's; these were asserted as allowed until the
+	// local-images flag existed. Default-off now (see TestLocalImageNamesNeedTheFlag).
+	if inj.validateImage("norviq/norviq-engine:engine-latest") {
+		t.Fatal("norviq/ on Docker Hub must not be allowed without the local-images flag")
 	}
-	if !inj.validateImage("docker.io/norviq/norviq-engine:engine-latest") {
-		t.Fatal("expected docker.io official image to be allowed")
+	if inj.validateImage("docker.io/norviq/norviq-engine:engine-latest") {
+		t.Fatal("docker.io/norviq must not be allowed without the local-images flag")
 	}
 	// Regression: the public release ships GHCR images; the chart injects
 	// ghcr.io/norviq-dev/norviq-engine, which the allowlist must accept (it was Docker-Hub-only,

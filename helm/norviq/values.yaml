@@ -328,6 +328,11 @@ openshift:
 
 webhook:
   enabled: true
+  # Accept locally built sidecar images (`norviq/norviq-engine:*`, which is how scripts/kind-e2e tags
+  # them) in addition to the project's GHCR images. Off for every real install: those names resolve to
+  # Docker Hub's `norviq` namespace, which the project does not control. scripts/kind-e2e/values-e2e.yaml
+  # turns it on for the local and CI kind rigs.
+  allowLocalSidecarImages: false
   # Turnkey sidecar injection: render the MutatingWebhookConfiguration from the chart and
   # auto-bootstrap TLS via a pre/post-install hook Job (self-signs a cert, writes the
   # norviq-webhook-tls secret, patches the webhook caBundle). No cert-manager required.

@@ -102,6 +102,8 @@ spec:
               value: {{ $prof.limits.memory | quote }}
             - name: NRVQ_SIDECAR_IMAGE
               value: "{{ include "norviq.image" (dict "root" $ "component" .Values.images.engine) }}"
+            - name: NRVQ_ALLOW_LOCAL_SIDECAR_IMAGES
+              value: {{ ternary "true" "false" (eq (toString .Values.webhook.allowLocalSidecarImages) "true") | quote }}
             - name: NRVQ_CONTROLLER_ENABLED
               value: "true"
             # FQDN (namespace-qualified) so the value is resolvable BOTH from the controller (in this
