@@ -17,9 +17,11 @@
 </div>
 
 Norviq is a policy enforcement point (PEP) that sits between an AI agent's reasoning loop and the
-tools it can call. Every tool call is intercepted, evaluated against OPA/Rego policies scoped to the
-workload's Kubernetes/SPIFFE identity, and then **allowed, blocked, escalated, or audited** — before
-the tool runs. It turns "the model decided to call `execute_sql` / `send_email` / `shell`" from an
+tools it can call. Before a tool runs, the call is sent to Norviq — by the SDK inside the agent's
+process, or by the agent to an injected sidecar — evaluated against OPA/Rego policies scoped to the
+workload's Kubernetes/SPIFFE identity, and answered **allow, block, escalate, or audit**. The agent then
+runs the tool or declines to: Norviq authorizes the call, it does not sit in the tool's network path
+(see [Security model](docs/security-model.md)). It turns "the model decided to call `execute_sql` / `send_email` / `shell`" from an
 implicit trust into an enforced, per-identity, auditable decision.
 
 ---
@@ -33,7 +35,8 @@ that surface, so a tool call only happens if an explicit policy for that agent's
 
 ## How it works
 
-Every tool call takes a round trip through the engine before it executes:
+A tool call that goes through the SDK or the sidecar takes a round trip through the engine before it
+executes:
 
 ```mermaid
 sequenceDiagram
@@ -52,11 +55,23 @@ sequenceDiagram
     Engine->>Engine: audit log · trust score · asset/attack graph
 ```
 
-- **Interception** — an injected sidecar (or the SDK) forwards each tool call to the engine's `/evaluate`.
-- **Identity** — decisions are scoped to the calling workload's SPIFFE identity (SPIRE SVID), not a
-  shared secret, so policy is per-agent-class and per-namespace.
-- **Policy** — Rego policies are layered in tiers (agent-class → namespace baseline → cluster baseline)
-  with tighten-only overlays; the most-restrictive matching rule wins.
+- **Interception** — the SDK, or the agent through an injected sidecar, sends each tool call to the
+  engine's `/evaluate` and runs the tool only if the answer allows it. This is cooperative: agent code
+  that calls a tool without asking reaches it unjudged, which the opt-in `agentEgressPolicy` bounds at
+  the network layer.
+- **Identity** — decisions are scoped to the calling workload's namespace and agent class, so policy is
+  per-agent-class and per-namespace. By default (`config.spiffeMode: mock`) the injected sidecar
+  presents a per-workload HS256 token that the admission webhook mints at injection, signed with the API
+  secret (`api.secretKey`); the API overwrites the namespace, agent class and SPIFFE ID in each request
+  with that token's claims, so a sidecar cannot claim a sibling's identity. SPIRE-issued SVIDs
+  (`config.spiffeMode: workload-api` with `config.spiffeCsi.enabled` and `webhook.spiffe.inject`) are
+  opt-in. See [Concepts → Agent identity](docs/concepts.md#agent-identity).
+- **Policy** — Rego policies are layered in tiers (agent-class → namespace baseline → cluster baseline).
+  Across the tiers the highest-priority enforcing policy wins, with the most restrictive decision
+  breaking ties, so a class policy at a higher priority can loosen a baseline; a policy saved in `audit`
+  mode can only tighten. Tighten-only overlays (sector packs, guardrails, remediation) then apply on top
+  and can make the result stricter, never looser. See
+  [Concepts → Policy tiers & precedence](docs/concepts.md#policy-tiers--precedence).
 - **Modes** — `block` (deny + reason), `escalate`, `audit` (log only / monitor mode), so you can roll
   out enforcement observably before turning it on.
 
@@ -119,7 +134,8 @@ real model decides the tool calls and Norviq blocks the dangerous ones before th
   and they can be set to `block` and `deny` respectively. See [Security model](docs/security-model.md).
 - **Kubernetes-native** — `NrvqPolicy` / `NrvqClass` / `NrvqConfig` CRDs, a mutating webhook that
   injects the enforcement sidecar, and a Helm chart.
-- **Workload identity** — SPIFFE/SPIRE SVIDs (with a mock mode for non-SPIRE clusters).
+- **Workload identity** — a webhook-minted, per-workload token by default (`mock` mode); SPIFFE/SPIRE
+  SVIDs as an opt-in for clusters running SPIRE.
 - **Console UI** — policy catalog + editor, attack graph, asset graph, agent trust, audit stream.
 - **Red-team suite** — built-in adversarial tests (prompt injection, encoding/nesting evasion, SQLi,
   PII/PCI exfil) that prove a policy actually blocks.

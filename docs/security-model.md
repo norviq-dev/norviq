@@ -118,8 +118,11 @@ not traverse the sidecar.
 
 - **The sidecar (PEP)** — injected into the agent's pod by the mutating webhook, it answers
   forward/drop on the agent's tool calls over a local Unix domain socket; the agent executes the tool
-  (see the cooperative-PEP note above). It presents the workload's SPIFFE SVID as identity, not a
-  bearer secret the agent code controls. In `proxy` mode (the default for *injected* sidecars —
+  (see the cooperative-PEP note above). Its credential is the per-workload service token the webhook
+  mints at injection (HS256, signed with the API secret), and the API takes the namespace, agent class
+  and — in the default `mock` mode — SPIFFE ID from that token's claims; the sidecar resolves a
+  SPIRE-issued SVID only in the opt-in `workload-api` mode. Either way it is not a bearer secret the
+  agent code controls. In `proxy` mode (the default for *injected* sidecars —
   `webhook.injection.sidecarMode`, `webhook/config.go`) the sidecar holds no policy state itself: it's a
   thin forwarder, so compromising one sidecar exposes only that pod's own traffic, not the policy set.
   Note that the standalone `norviq-engine` Deployment is a different thing and is pinned to
@@ -347,14 +350,20 @@ were missed:
 ## Supply chain
 
 - **OPA binary** is pinned and checksummed in the build, not pulled loose at runtime.
-- **Container images** are gated by Trivy (`build.yml` post-build scan on `main`); the SAST gate
-  (`.github/workflows/security.yml` + `.pre-commit-config.yaml`) runs gitleaks, bandit, and semgrep
-  diff-aware against every PR — new HIGH/CRITICAL findings fail the build, never backlogged.
+- **Container images** are scanned by Trivy after they are pushed (`build.yml`, on `main` and on a
+  release tag). A new fixable HIGH/CRITICAL finding fails the job before the image is signed, so it
+  stops the cosign signature and SBOM attestation, and on a release the chart and PyPI jobs that depend
+  on it — but the image tag is already in the registry. The SAST checks
+  (`.github/workflows/security.yml` + `.pre-commit-config.yaml`) run gitleaks, bandit, and semgrep
+  diff-aware against every PR — new findings fail the check, never backlogged.
   **eslint-security** (eslint-plugin-security) additionally scans the whole `ui/src` fail-closed — any
-  finding fails the build — adding JS/TS-specific security rules (eval, unsafe-regex, child_process,
+  finding fails the check — adding JS/TS-specific security rules (eval, unsafe-regex, child_process,
   bidi-characters, …) on top of semgrep's `ui/src` pass (see
   [`security-baseline.md`](engineering/security-baseline.md) for the full triage rule and the
   whole-repo-scan ratchet plan).
+- **No check is required to merge.** `main` has no branch protection or ruleset today, so a failing
+  check reports on the PR or commit and stops nothing by itself. Making the fail-closed checks required
+  is pending, not applied.
 - **FOSSA** dependency scanning covers open-source license/security posture (badge on the repo
   README).
 - **Third-party GitHub Actions are SHA-pinned**, not tag-pinned, so a compromised upstream tag can't
@@ -362,8 +371,10 @@ were missed:
   supply-chain risk (the trivy-action project itself had a compromise). `actions/checkout`,
   `actions/setup-python`, `actions/setup-node`, `docker/*-action`, `aquasecurity/trivy-action`,
   `azure/setup-helm`, `sigstore/cosign-installer`, and `pypa/gh-action-pypi-publish` are all pinned to a
-  commit SHA. Three remain tag-pinned and are tracked follow-up: `actions/upload-artifact@v4`,
-  `bridgecrewio/checkov-action@v12`, and `fossas/fossa-action@v1.7.0`.
+  commit SHA, and so are `actions/upload-artifact`, `bridgecrewio/checkov-action`, and
+  `fossas/fossa-action`, which were the last three on a tag. The one `uses:` without a SHA is
+  `release.yml` calling the in-repo reusable workflow `./.github/workflows/build.yml`, which has no
+  upstream tag to move.
 
 ## Reporting a vulnerability
 

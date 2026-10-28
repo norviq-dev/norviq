@@ -175,12 +175,13 @@ gracefulShutdown:
 # Hardened container securityContext for the primary app containers (defense-in-depth). The
 # chart sets it inline rather than relying on an external PSA/Kyverno restricted-profile mutation
 # ("injected by cluster policy"), which need not exist on the target cluster.
-# This restricted profile matches the opa/tls-proxy sidecars: non-root, no privilege escalation, all caps
-# dropped, seccomp RuntimeDefault, read-only root FS. Consumers whose container writes its root FS must
-# provide a writable emptyDir mount (the api/engine/webhook images already run as a non-root USER, and the
-# webhook writes nothing to its rootfs). The UI (nginx) is NOT covered by this default — it runs as root
-# and binds :80, so it needs a component-specific uid/port/emptyDir treatment. Set enabled:false to defer
-# entirely to a cluster-level PodSecurity/Kyverno policy.
+# The api, engine, ui and webhook containers all take non-root, no privilege escalation, all caps
+# dropped and seccomp RuntimeDefault from here, which is also what the opa/tls-proxy sidecars set.
+# The readOnlyRootFilesystem value below reaches ONLY the webhook, which writes nothing to its rootfs: the api,
+# engine and ui templates deliberately leave it out (the api writes tmp at runtime; the UI entrypoint
+# writes config.js + fleet-proxy.conf at startup), and the opa/tls-proxy sidecars do not set
+# it either. The UI is covered like the rest — it runs nginx-unprivileged as uid 101 on :8080. Set
+# enabled:false to defer entirely to a cluster-level PodSecurity/Kyverno policy.
 securityContext:
   enabled: true
   runAsNonRoot: true
@@ -436,8 +437,10 @@ webhook:
     # DATA-PLANE posture: what a GOVERNED AGENT does when the central engine is unreachable. Distinct
     # from failurePolicy below, which is the ADMISSION posture (whether a pod may be created at all).
     #   "allow" (DEFAULT) = fail-OPEN. Tool calls are forwarded during an outage so the customer's
-    #     agents keep working. Each one is audited as rule_id=thin_proxy_fail_open — never as a policy
-    #     allow — so "we went unjudged" is countable and alertable rather than silent.
+    #     agents keep working. Each one carries rule_id=thin_proxy_fail_open — never a policy allow —
+    #     and the sidecar logs it as NRVQ-SDC-3036, so "we went unjudged" is countable and alertable
+    #     from the sidecar logs rather than silent. It is NOT written to audit_log: the API that
+    #     writes the audit log is the thing that is unreachable.
     #   "block"           = fail-CLOSED. No ungoverned tool call, ever, at the cost of taking every
     #     agent in the cluster down with us for as long as the engine is down.
     # This applies ONLY to a genuine outage (5xx / timeout / connection error). A 4xx is the engine

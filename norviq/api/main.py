@@ -270,7 +270,9 @@ def create_app() -> FastAPI:
     """Create the Norviq FastAPI app."""
     app = FastAPI(
         title="Norviq API",
-        version="0.1.0",
+        # The installed package version, read the same way GET /api/v1/version reads it. This was the
+        # literal "0.1.0" through 0.2.5, so /openapi.json and /docs reported a version that never shipped.
+        version=version._version(),
         description="Runtime security for LLM agent tool calls",
         lifespan=lifespan,
     )
