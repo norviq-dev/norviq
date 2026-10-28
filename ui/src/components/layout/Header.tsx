@@ -1052,7 +1052,7 @@ export function Header({
             <button
               className="dd-item"
               style={{ padding: 12, borderRadius: 0 }}
-              onClick={() => window.open("https://norviq.dev/docs", "_blank", "noreferrer")}
+              onClick={() => window.open("https://docs.norviq.dev/", "_blank", "noreferrer")}
             >
               Documentation ↗
             </button>

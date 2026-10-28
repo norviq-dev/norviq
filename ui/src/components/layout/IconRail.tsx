@@ -24,17 +24,17 @@ const BOTTOM_ICONS = [
   {
     Icon: HelpCircle,
     title: "Support",
-    onClick: () => window.open("https://norviq.dev/docs", "_blank", "noreferrer")
+    onClick: () => window.open("https://docs.norviq.dev/operations/troubleshooting/", "_blank", "noreferrer")
   },
   {
     Icon: MessageCircle,
     title: "Feedback",
-    onClick: () => window.open("https://norviq.dev/docs", "_blank", "noreferrer")
+    onClick: () => window.open("https://github.com/norviq-dev/norviq/discussions", "_blank", "noreferrer")
   },
   {
     Icon: BookOpen,
     title: "Documentation",
-    onClick: () => window.open("https://norviq.dev/docs", "_blank", "noreferrer")
+    onClick: () => window.open("https://docs.norviq.dev/", "_blank", "noreferrer")
   }
 ];
 

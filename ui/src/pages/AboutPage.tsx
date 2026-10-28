@@ -34,12 +34,12 @@ export function AboutPage() {
         <div className="kv">
           <span className="k">Documentation</span>
           <a
-            href="https://norviq.dev/docs"
+            href="https://docs.norviq.dev/"
             target="_blank"
             rel="noreferrer"
             style={{ color: "var(--accent)", textDecoration: "none" }}
           >
-            norviq.dev/docs ↗
+            docs.norviq.dev ↗
           </a>
         </div>
       </Panel>
