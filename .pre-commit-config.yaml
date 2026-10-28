@@ -23,7 +23,7 @@ repos:
   - repo: https://github.com/PyCQA/bandit
     rev: 1.7.9
     hooks:
-      - id: bandit # fast python SAST, high severity only
+      - id: bandit # fast python SAST, medium and high severity (-ll)
         args: ["-ll", "-q"]
         exclude: ^(tests/|norviq/redteam/)
 

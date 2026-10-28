@@ -20,7 +20,7 @@ live, so nothing is silently ignored.
 | Tool | PR scope | Starts blocking? | Ratchet to full-blocking |
 |------|----------|------------------|--------------------------|
 | gitleaks | PR commit **range** only (not history) | **Yes** — new secrets fail | already blocking; allowlist in `.gitleaks.toml` |
-| bandit | **changed** `norviq/**/*.py`, `-ll` | **Yes** — new high fails | config `[tool.bandit]` in `pyproject.toml` |
+| bandit | **changed** `norviq/**/*.py`, `-ll` | **Yes** — new medium or high fails | config `[tool.bandit]` in `pyproject.toml` |
 | semgrep | diff-aware `--baseline-commit <base>` | **Yes** — new findings fail | ignores in `.semgrepignore` |
 | eslint-security | whole `ui/src` (eslint-plugin-security rules) | **Yes** — any finding fails, fail-closed (starts green today) | already blocking; rules in `ui/eslint.config.js` (`detect-object-injection` off as too noisy; confirmed false positives suppressed inline with a rationale) |
 | pip-audit / npm audit | whole repo | **No — report-only** | remove `continue-on-error` on `deps-audit` |

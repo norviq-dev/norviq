@@ -6,9 +6,9 @@ name: Security (SAST)
 # This workflow does code / deps / secrets / IaC (filesystem + config) analysis only.
 #
 # Start-green, then ratchet (see docs/engineering/security-baseline.md):
-#   - Diff-aware jobs (secrets, python-sast) fail-closed on NEW high/critical only — pre-existing
-#     findings never fail a PR because only the PR range / changed files are scanned. python-sast's
-#     semgrep step also scans ui/src.
+#   - Diff-aware jobs (secrets, python-sast) fail-closed on NEW findings only (bandit runs -ll, so
+#     medium and high) — pre-existing findings never fail a PR because only the PR range / changed
+#     files are scanned. python-sast's semgrep step also scans ui/src.
 #   - ts-sast (eslint-security) scans the WHOLE ui/src fail-closed (any finding fails the build); it
 #     starts green today. Rules live in ui/eslint.config.js (eslint-plugin-security).
 #   - Whole-repo jobs (deps-audit, iac) start REPORT-ONLY (soft-fail) until the baseline is triaged
@@ -90,7 +90,7 @@ jobs:
           python-version: "3.11"
       - name: install
         run: pip install bandit semgrep
-      - name: bandit (changed .py, high severity, fail-closed)
+      - name: bandit (changed .py, medium and high severity, fail-closed)
         run: |
           # Same empty-BASE trap: on a push this expanded to `git diff ...HEAD`, which returns nothing, so
           # the step printed "no changed python" for a push that changed Python.
