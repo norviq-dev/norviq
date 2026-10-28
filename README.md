@@ -17,9 +17,11 @@
 </div>
 
 Norviq is a policy enforcement point (PEP) that sits between an AI agent's reasoning loop and the
-tools it can call. Every tool call is intercepted, evaluated against OPA/Rego policies scoped to the
-workload's Kubernetes/SPIFFE identity, and then **allowed, blocked, escalated, or audited** — before
-the tool runs. It turns "the model decided to call `execute_sql` / `send_email` / `shell`" from an
+tools it can call. Before a tool runs, the call is sent to Norviq — by the SDK inside the agent's
+process, or by the agent to an injected sidecar — evaluated against OPA/Rego policies scoped to the
+workload's Kubernetes/SPIFFE identity, and answered **allow, block, escalate, or audit**. The agent then
+runs the tool or declines to: Norviq authorizes the call, it does not sit in the tool's network path
+(see [Security model](docs/security-model.md)). It turns "the model decided to call `execute_sql` / `send_email` / `shell`" from an
 implicit trust into an enforced, per-identity, auditable decision.
 
 ---
@@ -33,7 +35,8 @@ that surface, so a tool call only happens if an explicit policy for that agent's
 
 ## How it works
 
-Every tool call takes a round trip through the engine before it executes:
+A tool call that goes through the SDK or the sidecar takes a round trip through the engine before it
+executes:
 
 ```mermaid
 sequenceDiagram
@@ -52,7 +55,10 @@ sequenceDiagram
     Engine->>Engine: audit log · trust score · asset/attack graph
 ```
 
-- **Interception** — an injected sidecar (or the SDK) forwards each tool call to the engine's `/evaluate`.
+- **Interception** — the SDK, or the agent through an injected sidecar, sends each tool call to the
+  engine's `/evaluate` and runs the tool only if the answer allows it. This is cooperative: agent code
+  that calls a tool without asking reaches it unjudged, which the opt-in `agentEgressPolicy` bounds at
+  the network layer.
 - **Identity** — decisions are scoped to the calling workload's SPIFFE identity (SPIRE SVID), not a
   shared secret, so policy is per-agent-class and per-namespace.
 - **Policy** — Rego policies are layered in tiers (agent-class → namespace baseline → cluster baseline)
