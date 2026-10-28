@@ -133,9 +133,12 @@ def test_logout_denylist_ttl_matches_remaining_token_lifetime() -> None:
     client = _client(cache)
     token = _mint(ttl=600)
     assert client.post("/api/v1/auth/logout", headers={"Authorization": f"Bearer {token}"}).status_code == 200
-    assert len(cache.revoked) == 1
-    ttl = next(iter(cache.revoked.values()))
-    assert 595 <= ttl <= 600  # TTL = exp - now: the entry dies exactly when the token would
+    # Two entries, by design: the canonical key over the decoded token, and the 0.2.5 raw-string key so
+    # a rollback still sees the revocation. This asserted exactly one entry when there was one key.
+    from norviq.api.session_revocation import _legacy_token_hash, token_hash
+    assert set(cache.revoked) == {token_hash(token), _legacy_token_hash(token)}
+    for ttl in cache.revoked.values():
+        assert 595 <= ttl <= 600  # TTL = exp - now: each entry dies exactly when the token would
 
 
 def test_logout_requires_a_valid_jwt() -> None:

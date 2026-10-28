@@ -4,8 +4,15 @@
 """Server-side session revocation (logout) for stateless JWTs.
 
 Sessions are stateless HS256/OIDC JWTs with no ``jti``, so logout is implemented as a denylist keyed
-by the SHA-256 of the RAW presented token (unique per token via the signature; covers login-, CLI- and
-webhook-minted tokens without changing the token contract). Entries carry TTL = the token's remaining
+by a SHA-256 over the token's DECODED segments (unique per token via the signature; covers login-, CLI-
+and webhook-minted tokens without changing the token contract).
+
+Keyed on the decoded bytes, not the presented string, because one token has several valid spellings.
+A base64url segment whose length is not a multiple of four carries spare low bits in its last
+character, and PyJWT before 2.14.0 accepted every value of them. Keyed on the raw string, a logged-out
+token re-spelled in its last character missed the denylist and still verified: logout was undone by
+editing one character. The 2.14.0 floor in pyproject closes it at decode time; this closes it here too,
+so revocation does not depend on which library version rejects what. Entries carry TTL = the token's remaining
 lifetime, so the denylist can never outgrow the set of still-live tokens.
 
 Two layers, checked on every JWT validation (``auth.get_current_user`` / ``auth.decode_token``):
@@ -25,6 +32,8 @@ whether a specific stolen token is revoked).
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import time
 
@@ -47,9 +56,34 @@ _REVOCATION_GRACE_S = 30.0
 _degraded_since: float | None = None
 
 
-def token_hash(raw_token: str) -> str:
-    """SHA-256 hex of the raw presented credential — the denylist key."""
+def _legacy_token_hash(raw_token: str) -> str:
+    """The 0.2.5-and-earlier key: SHA-256 of the raw string. Still written and checked so a token revoked
+    before an upgrade (or after a rollback) stays revoked; it can go once every such token has expired."""
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def token_hash(raw_token: str) -> str:
+    """The denylist key: SHA-256 over a JWT's decoded segments, each length-prefixed so segment
+    boundaries cannot be shifted. Every spelling of one token maps to one key. A credential that is not
+    a three-segment base64url JWT (an API key, say) keeps the raw-string hash."""
+    parts = raw_token.split(".")
+    if len(parts) == 3:
+        try:
+            h = hashlib.sha256()
+            for seg in parts:
+                raw = base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4))
+                h.update(len(raw).to_bytes(8, "big"))
+                h.update(raw)
+            return h.hexdigest()
+        except (binascii.Error, ValueError):
+            pass
+    return _legacy_token_hash(raw_token)
+
+
+def _keys(raw_token: str) -> list[str]:
+    """Canonical key first, then the legacy one when it differs."""
+    canonical, legacy = token_hash(raw_token), _legacy_token_hash(raw_token)
+    return [canonical] if canonical == legacy else [canonical, legacy]
 
 
 def _prune_mirror(now: int) -> None:
@@ -67,13 +101,16 @@ async def revoke(cache, raw_token: str, exp: int) -> None:
     """Revoke a token until its own ``exp``: mirror always, Redis best-effort (ERROR on failure)."""
     now = int(time.time())
     ttl = max(1, int(exp) - now)
-    h = token_hash(raw_token)
-    _mirror[h] = now + ttl
+    keys = _keys(raw_token)
+    h = keys[0]
+    for k in keys:
+        _mirror[k] = now + ttl
     _prune_mirror(now)
     if cache is None:
         return
     try:
-        await cache.revoke_token(h, ttl)
+        for k in keys:
+            await cache.revoke_token(k, ttl)
     except Exception as exc:  # noqa: BLE001 — revocation must never 500 a logout; mirror already holds it
         log.error(
             "nrvq.auth.revocation_store_degraded",
@@ -88,13 +125,18 @@ async def is_revoked(cache, raw_token: str) -> bool:
     """True if the token was logged out. Mirror first (free), then Redis (fail-OPEN with a warning)."""
     now = int(time.time())
     _prune_mirror(now)
-    h = token_hash(raw_token)
-    if _mirror.get(h, 0) > now:
+    keys = _keys(raw_token)
+    h = keys[0]
+    if any(_mirror.get(k, 0) > now for k in keys):
         return True
     if cache is None:
         return False
     try:
-        revoked = bool(await cache.is_token_revoked(h))
+        revoked = False
+        for k in keys:
+            if await cache.is_token_revoked(k):
+                revoked = True
+                break
     except Exception as exc:  # noqa: BLE001 — degradation is BOUNDED below, not unconditional
         # BOUNDED FAIL-OPEN (F-044). This used to fail open unconditionally, which meant a logged-out
         # token kept working for as long as Redis was unreachable — indefinitely, and silently, since
