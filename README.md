@@ -66,8 +66,12 @@ sequenceDiagram
   with that token's claims, so a sidecar cannot claim a sibling's identity. SPIRE-issued SVIDs
   (`config.spiffeMode: workload-api` with `config.spiffeCsi.enabled` and `webhook.spiffe.inject`) are
   opt-in. See [Concepts → Agent identity](docs/concepts.md#agent-identity).
-- **Policy** — Rego policies are layered in tiers (agent-class → namespace baseline → cluster baseline)
-  with tighten-only overlays; the most-restrictive matching rule wins.
+- **Policy** — Rego policies are layered in tiers (agent-class → namespace baseline → cluster baseline).
+  Across the tiers the highest-priority enforcing policy wins, with the most restrictive decision
+  breaking ties, so a class policy at a higher priority can loosen a baseline; a policy saved in `audit`
+  mode can only tighten. Tighten-only overlays (sector packs, guardrails, remediation) then apply on top
+  and can make the result stricter, never looser. See
+  [Concepts → Policy tiers & precedence](docs/concepts.md#policy-tiers--precedence).
 - **Modes** — `block` (deny + reason), `escalate`, `audit` (log only / monitor mode), so you can roll
   out enforcement observably before turning it on.
 
