@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from norviq.engine.trust.models import TrustInput
-from norviq.engine.trust.signals.base import BaseSignal
+from norviq.engine.trust.signals.base import BaseSignal, collapse_repeated_refusals
 
 
 class TimeDecaySignal(BaseSignal):
@@ -18,7 +18,7 @@ class TimeDecaySignal(BaseSignal):
     async def compute(self, input_data: TrustInput, history: list[dict[str, Any]], profile: dict[str, Any]) -> float:
         """Return trust score from violation recency."""
         _ = profile, input_data
-        blocked = [entry for entry in history if entry.get("decision") == "block"]
+        blocked = [entry for entry in collapse_repeated_refusals(history) if entry.get("decision") == "block"]
         if not blocked:
             return 1.0
         latest = max(self._to_dt(entry.get("timestamp")) for entry in blocked)

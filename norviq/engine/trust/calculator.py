@@ -17,6 +17,7 @@ from norviq.engine.inproc_cache import _MISS, TTLCache
 from norviq.engine.trust.history import AgentHistoryStore
 from norviq.engine.trust.models import TrustInput, TrustResult
 from norviq.engine.trust.profile import AgentProfileStore
+from norviq.engine.trust.signals.base import collapse_repeated_refusals
 from norviq.engine.trust.signals import (
     ChainDepthSignal,
     ParamEntropySignal,
@@ -121,7 +122,10 @@ class TrustCalculator:
             )
             profile, is_frozen = profile_and_frozen
         signals = await self._compute_signals(input_data, history, profile)
-        computed = 0.0 if is_frozen else self._weighted_sum(signals, sample_size=len(history))
+        # The cap's observation count is taken over the same collapsed history the violation rate was
+        # computed on, so retries of one refused call cannot satisfy the 20-observation bound by themselves.
+        observed = len(collapse_repeated_refusals(history))
+        computed = 0.0 if is_frozen else self._weighted_sum(signals, sample_size=observed)
         # tighten-only cap: an admin override can only LOWER effective trust, never raise it.
         capped = override is not None and override < computed and not is_frozen
         score = round(min(computed, override), 4) if capped else computed
