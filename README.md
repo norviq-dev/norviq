@@ -59,8 +59,13 @@ sequenceDiagram
   engine's `/evaluate` and runs the tool only if the answer allows it. This is cooperative: agent code
   that calls a tool without asking reaches it unjudged, which the opt-in `agentEgressPolicy` bounds at
   the network layer.
-- **Identity** — decisions are scoped to the calling workload's SPIFFE identity (SPIRE SVID), not a
-  shared secret, so policy is per-agent-class and per-namespace.
+- **Identity** — decisions are scoped to the calling workload's namespace and agent class, so policy is
+  per-agent-class and per-namespace. By default (`config.spiffeMode: mock`) the injected sidecar
+  presents a per-workload HS256 token that the admission webhook mints at injection, signed with the API
+  secret (`api.secretKey`); the API overwrites the namespace, agent class and SPIFFE ID in each request
+  with that token's claims, so a sidecar cannot claim a sibling's identity. SPIRE-issued SVIDs
+  (`config.spiffeMode: workload-api` with `config.spiffeCsi.enabled` and `webhook.spiffe.inject`) are
+  opt-in. See [Concepts → Agent identity](docs/concepts.md#agent-identity).
 - **Policy** — Rego policies are layered in tiers (agent-class → namespace baseline → cluster baseline)
   with tighten-only overlays; the most-restrictive matching rule wins.
 - **Modes** — `block` (deny + reason), `escalate`, `audit` (log only / monitor mode), so you can roll
@@ -123,7 +128,8 @@ real model decides the tool calls and Norviq blocks the dangerous ones before th
   and they can be set to `block` and `deny` respectively. See [Security model](docs/security-model.md).
 - **Kubernetes-native** — `NrvqPolicy` / `NrvqClass` / `NrvqConfig` CRDs, a mutating webhook that
   injects the enforcement sidecar, and a Helm chart.
-- **Workload identity** — SPIFFE/SPIRE SVIDs (with a mock mode for non-SPIRE clusters).
+- **Workload identity** — a webhook-minted, per-workload token by default (`mock` mode); SPIFFE/SPIRE
+  SVIDs as an opt-in for clusters running SPIRE.
 - **Console UI** — policy catalog + editor, attack graph, asset graph, agent trust, audit stream.
 - **Red-team suite** — built-in adversarial tests (prompt injection, encoding/nesting evasion, SQLi,
   PII/PCI exfil) that prove a policy actually blocks.

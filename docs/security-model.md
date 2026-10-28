@@ -118,8 +118,11 @@ not traverse the sidecar.
 
 - **The sidecar (PEP)** — injected into the agent's pod by the mutating webhook, it answers
   forward/drop on the agent's tool calls over a local Unix domain socket; the agent executes the tool
-  (see the cooperative-PEP note above). It presents the workload's SPIFFE SVID as identity, not a
-  bearer secret the agent code controls. In `proxy` mode (the default for *injected* sidecars —
+  (see the cooperative-PEP note above). Its credential is the per-workload service token the webhook
+  mints at injection (HS256, signed with the API secret), and the API takes the namespace, agent class
+  and — in the default `mock` mode — SPIFFE ID from that token's claims; the sidecar resolves a
+  SPIRE-issued SVID only in the opt-in `workload-api` mode. Either way it is not a bearer secret the
+  agent code controls. In `proxy` mode (the default for *injected* sidecars —
   `webhook.injection.sidecarMode`, `webhook/config.go`) the sidecar holds no policy state itself: it's a
   thin forwarder, so compromising one sidecar exposes only that pod's own traffic, not the policy set.
   Note that the standalone `norviq-engine` Deployment is a different thing and is pinned to
