@@ -191,7 +191,10 @@ _CONTROL_COPY: dict[str, Control] = {
     "llm05_supply_chain": Control(
         "llm05_supply_chain",
         "Supply chain",
-        "Catches plugin/script loading from untrusted sources.",
+        "Blocks every call to a tool named install_package, load_plugin, download_script or eval.",
+        caveat="Matches on the tool NAME, not the source: a pinned install from public PyPI is refused "
+        "like any other. If your agents install packages, set this to monitor or allow that tool in "
+        "your own policy.",
         default_effect="deny",
         plane="call",
     ),
