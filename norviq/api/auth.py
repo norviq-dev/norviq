@@ -561,6 +561,25 @@ def scoped_identity(user: dict, agent_identity: dict | None) -> dict:
     return identity
 
 
+def bind_caller_identity(user: dict, agent_identity: dict | None) -> dict:
+    """The identity a tool call is evaluated under, bound to the CALLER's credential.
+
+    The exact sequence /evaluate used to run inline — ``scoped_namespace``, then ``scoped_identity``, then
+    the SVID-attested namespace winning over both — lifted here so the standalone engine
+    (``norviq/sidecar/http_fallback.py``) binds a remote caller the same way rather than with a second
+    implementation that can drift from it. Raises the same HTTPException (403) on a spoof.
+    """
+    requested_ns = (agent_identity or {}).get("namespace")
+    effective_ns = scoped_namespace(user, requested_ns)
+    identity = scoped_identity(user, agent_identity)
+    attested_ns = attested_namespace(user, requested_ns)
+    if attested_ns:
+        effective_ns = attested_ns
+    if effective_ns:
+        identity["namespace"] = effective_ns
+    return identity
+
+
 def read_namespace(user: dict, requested: str | None) -> str | None:
     """Namespace filter for cross-namespace READ endpoints (Audit / Agents / MITRE / Coverage / …).
 

@@ -81,6 +81,11 @@ spec:
             # for Postgres AND Redis, none of which a thin proxy uses.
             - name: NRVQ_SIDECAR_MODE
               value: "embedded"
+            # This Deployment is the one place the HTTP fallback is reachable off-pod (Service norviq-engine).
+            # Off-pod callers must present a service JWT and are evaluated as the identity bound in it.
+            # Without this the setting defaults to "deny"; with neither, it once answered anyone, as itself.
+            - name: NRVQ_SIDECAR_REMOTE_CALLERS
+              value: "token"
             {{- include "norviq.datastoreUrlEnv" . | nindent 12 }}
           envFrom:
             - secretRef:

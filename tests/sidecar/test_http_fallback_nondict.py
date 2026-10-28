@@ -40,7 +40,10 @@ def client() -> TestClient:
     """Real create_http_fallback app with an allow-everything evaluator + stub resolver."""
     app = create_http_fallback(ToolInterceptor(_AllowEval(), _FakeResolver()), None, _FakeResolver())
     # raise_server_exceptions=False so an unhandled 500 surfaces as a response, not a test crash.
-    return TestClient(app, raise_server_exceptions=False)
+    # The pod-local app is a LOOPBACK caller. TestClient's default peer is the string "testclient",
+    # which is not loopback, and /v1/evaluate now refuses off-pod callers before parsing anything —
+    # so without this the test would exercise the remote-caller gate, not the decode guard it is for.
+    return TestClient(app, raise_server_exceptions=False, client=("127.0.0.1", 50000))
 
 
 @pytest.mark.parametrize(

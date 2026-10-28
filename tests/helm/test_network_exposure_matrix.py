@@ -108,14 +108,15 @@ EXPOSED_SURFACES: dict[str, str] = {
     "norviq-engine/engine:8282": (
         "Sidecar HTTP fallback (POST /v1/evaluate) run as a standalone evaluator Deployment. ADVISORY "
         "ONLY: it returns forward/drop for a submitted tool call and can neither read nor mutate policy, "
-        "and it fails CLOSED (drop) on any malformed input. NOTE (accepted residual risk, tracked): it "
-        "performs no caller authentication, so a pod that dials it can obtain decisions and append "
-        "audit/trust events under the ENGINE's own identity. Justified only because the blast radius is "
-        "advisory; re-justify (or require the service JWT / drop the Service) before widening it."
+        "and it fails CLOSED (drop) on any malformed input. Off-pod callers must present a service JWT "
+        "(NRVQ_SIDECAR_REMOTE_CALLERS=token on this Deployment only), verified and revocation-checked like "
+        "/api/v1/evaluate, and are evaluated as the identity bound in it. This entry used to record the "
+        "opposite as an accepted residual risk: no caller authentication, so any pod could append "
+        "audit/trust events under the ENGINE's own identity."
     ),
     "Service/norviq-engine:8282": (
-        "Fronts norviq-engine/engine:8282. Cluster-reachable by name — see the residual-risk note above; "
-        "nothing in the chart consumes this Service, so removing it is the cheaper fix if that risk grows."
+        "Fronts norviq-engine/engine:8282. Cluster-reachable by name, for callers that evaluate without the "
+        "API (README); every off-pod request is authenticated as described above."
     ),
     # -- console -----------------------------------------------------------------------------------
     "norviq-ui/ui:8080": (

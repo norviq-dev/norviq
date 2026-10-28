@@ -388,6 +388,15 @@ class NorviqSettings(BaseSettings):
     log_format: str = "json"
     socket_path: str = "/tmp/norviq-proxy.sock"  # nosec B108 - Settings default; the sidecar's socket lives on a pod-private emptyDir, path overridable via NRVQ_SOCKET_PATH
     http_fallback_port: int = 8282
+    # Who may call the sidecar's HTTP fallback (POST /v1/evaluate) from OFF the pod. "deny" (default):
+    # loopback only — the pod-local app, which is the only caller an injected sidecar has (the primary
+    # transport is the unix socket anyway). "token": a remote caller must present a service JWT, verified
+    # and revocation-checked like /api/v1/evaluate, and is evaluated under the identity bound in it. The
+    # chart sets "token" on the standalone engine Deployment only, which holds the signing key; an
+    # injected sidecar does not, and must never try to verify with whatever key it falls back to.
+    # Before this the fallback had no caller check at all, and the engine Deployment served it on a
+    # ClusterIP Service, so any pod could submit evaluations under the ENGINE's identity.
+    sidecar_remote_callers: str = "deny"
     api_port: int = 8080
     # Reject over-large request bodies (defense against the base64 fan-out DoS amplifier and
     # generic memory abuse). 256 KiB is far above any legitimate tool-call payload. NRVQ_MAX_REQUEST_BODY_BYTES.

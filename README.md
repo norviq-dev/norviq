@@ -91,6 +91,8 @@ bound to `127.0.0.1`) — neither proxies to the other. In the default injection
 so Postgres, Redis, and policy loading stay centralized and nothing is evaluated per-pod. The Engine
 Deployment runs that same evaluator as a standalone cluster workload (`NRVQ_SIDECAR_MODE=embedded`,
 exposed as `norviq-engine:8282`) for callers that want to evaluate without going through the API.
+Those callers authenticate with the same service token `/api/v1/evaluate` takes, and are evaluated as
+the identity bound in it.
 
 ## Works with your agent framework
 
