@@ -61,9 +61,10 @@ export CHATBOT_IMAGE=$REGISTRY/norviq-demo-chatbot:$TAG
 ## 1. Load a policy first
 
 Do this **before** the workload, not after. On a chart install, a `chatbot-prod` with no policy of
-your own lets *every* tool call through and the demo blocks nothing: the namespace baseline ships in
-`audit` (`baselineClusterPolicy.enforcementMode`), and the no-policy decision ships `allow`
-(`config.noPolicyDecision`).
+your own gets only the namespace baseline, and only if it is listed in `policyQuotaNamespaces`: from
+0.2.6 that baseline enforces its `deny` controls (`baselineClusterPolicy.enforcementMode: block`).
+If it is not listed, nothing covers it and the no-policy decision ships `allow`
+(`config.noPolicyDecision`), so every tool call goes through.
 
 ```bash
 kubectl apply -f crds/examples/class-customer-support.yaml

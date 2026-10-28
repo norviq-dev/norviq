@@ -10,6 +10,33 @@ Three versions published incompletely — `v0.1.0` shipped no chart, `v0.1.1` sh
 `v0.2.0` shipped no chart — and their headings say so: they are listed because they happened, not
 because they should be installed.
 
+## [Unreleased] — 0.2.6 — the namespace baseline enforces by default
+
+**Upgrade impact — read before `helm upgrade`.**
+
+- **The namespace baseline now blocks.** `baselineClusterPolicy.enforcementMode` defaults to `block`
+  (it was `audit`). Its 17 `deny` controls refuse the call; its four `monitor` controls still only record.
+  Set `baselineClusterPolicy.enforcementMode=audit` to keep the 0.2.5 posture. Measured before the
+  change: 0 false positives over a 51-case benign corpus, with every control at deny.
+- **Agents that install packages are refused.** `llm05_supply_chain` blocks `install_package`,
+  `load_plugin`, `download_script` and `eval` by tool name, including installs from public PyPI. Set
+  that control to `monitor`, or allow the tool in your own policy.
+- **Callers of `norviq-engine:8282` from other pods must send a service token**, the same Bearer token
+  `/api/v1/evaluate` takes. Nothing in the chart calls it.
+- **Local sidecar image names are refused unless you opt in.** `norviq/norviq-engine:*` is accepted
+  only with `webhook.allowLocalSidecarImages=true`. Published images are unaffected.
+- **Default Redis is Valkey 8.1** (`valkey/valkey:8.1-alpine`, BSD-3-Clause, minor-pinned). It replaces
+  `redis:7-alpine`, which had moved to 7.4 and its RSALv2/SSPLv1 licence.
+
+**Security.** Fixes in the engine's caller authentication, logout token revocation and the webhook's
+sidecar image trust; details in the advisories published with this release. Dependency floors for
+pyjwt, aiohttp, urllib3, anyio, multidict, certifi and opentelemetry; DOMPurify 3.4.17 in the console.
+Image builds now move `-latest` and version tags only after the scan and signature pass.
+
+**Fixed.** `global.imageRegistry` relocates the busybox init image. An agent that retries one refused
+call no longer loses trust on every attempt. Two security booleans no longer fall back to off when an
+overlay nulls them. The stdio MCP proxy warns when its pin store degrades.
+
 ## [0.2.5] — 2026-08-20 — log codes that named two things at once
 
 - **Eleven log codes renumbered** so an alertable event no longer shares a code with routine traffic.

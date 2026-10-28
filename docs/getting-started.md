@@ -75,8 +75,8 @@ A few things worth knowing about this install:
 
 - **`policyQuotaNamespaces` is required.** It lists your *tenant* namespaces — the ones that will run
   agent workloads, not the `norviq` control-plane namespace. The chart renders one `strict` namespace
-  baseline (`baseline-cluster-guard-<ns>`, `clusterPriority: 900`) per entry, in `audit` mode until
-  you set `baselineClusterPolicy.enforcementMode: block`, plus the optional per-namespace `NrvqPolicy`
+  baseline (`baseline-cluster-guard-<ns>`, `clusterPriority: 900`) per entry, enforcing from 0.2.6
+  (`baselineClusterPolicy.enforcementMode: block`; set `audit` to observe only), plus the optional per-namespace `NrvqPolicy`
   quota. Leaving it empty **fails the install by design**
   (`helm/norviq/templates/baseline-cluster-policy.yaml`) rather than silently shipping a cluster with
   no baseline. To install deliberately without a baseline, set `baselineClusterPolicy.enabled=false`

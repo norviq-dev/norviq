@@ -363,9 +363,9 @@ logged to the audit trail, and shown in the console.
 
 Where a namespace is in `block` mode, evaluation is **fail-closed**: if OPA evaluation times out or the
 agent's SPIFFE identity is malformed, the call is denied — never silently allowed. An OPA error on the
-policy that decides the call denies it when that policy is in `block` mode; a policy in `audit`, which
-is how the chart's namespace baseline ships, softens the error to
-`policy_audit_would_block:evaluator_error`. A namespace with no policy loaded is denied only when
+policy that decides the call denies it when that policy is in `block` mode, which is how the chart's
+namespace baseline ships from 0.2.6; a policy in `audit` (the baseline's default through 0.2.5) softens
+the error to `policy_audit_would_block:evaluator_error`. A namespace with no policy loaded is denied only when
 `no_policy_decision` is `deny` (it ships `allow`), or while a replica is still warming
 (`policy_load_pending`). Each fail-closed path carries its own named `rule_id` (e.g.
 `evaluator_error`, `evaluator_timeout`, `invalid_spiffe_identity`, `no_policy_loaded`) so an

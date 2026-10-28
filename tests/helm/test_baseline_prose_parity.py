@@ -15,25 +15,37 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import re
+
 import yaml
 
 _ROOT = Path(__file__).resolve().parents[2]
 _TEMPLATES = _ROOT / "helm/norviq/templates"
 
 
-def test_the_chart_does_not_call_its_audit_mode_baseline_fail_closed():
+def test_the_chart_describes_the_baseline_posture_it_ships():
+    """Rewritten for 0.2.6, when the baseline began shipping `block`.
+
+    This asserted `audit` and carried a tripwire for the day that changed: re-read NOTES.txt and the
+    template and decide whether "fail-closed" had become TRUE, rather than deleting the assertion. Re-read
+    and decided: it has not. Seventeen controls refuse the call, but four ship at `monitor` and only
+    record, and an API outage still follows fallbackMode, which ships `allow`. So the text must say the
+    baseline ENFORCES, name `audit` as the way back, and still not call it fail-closed.
+    """
     values = yaml.safe_load((_ROOT / "helm/norviq/values.yaml").read_text())
     mode = values["baselineClusterPolicy"]["enforcementMode"]
-    assert mode == "audit", (
-        f"baselineClusterPolicy.enforcementMode now ships as {mode!r}. If that is deliberate, this "
-        f"test's premise has changed: re-read NOTES.txt and baseline-cluster-policy.yaml and decide "
-        f"whether 'fail-closed' is now TRUE there, rather than deleting this assertion."
+    assert mode == "block", (
+        f"baselineClusterPolicy.enforcementMode now ships as {mode!r}. If that is deliberate, re-read "
+        f"NOTES.txt and baseline-cluster-policy.yaml and make them describe it, then update this test."
     )
+    notes = (_TEMPLATES / "NOTES.txt").read_text()
+    assert re.search(r"ENFORCES|enforces", notes), "NOTES.txt no longer says the baseline enforces"
+    assert "enforcementMode=audit" in notes, "NOTES.txt no longer tells an operator how to keep the audit posture"
     for name in ("NOTES.txt", "baseline-cluster-policy.yaml"):
         text = (_TEMPLATES / name).read_text()
+        stale = [line.strip() for line in text.splitlines()
+                 if re.search(r"ships in audit|records non-compliance and does not block|defaults to `audit`", line)]
+        assert not stale, f"{name} still describes the 0.2.5 audit default:\n  " + "\n  ".join(stale)
         hits = [line.strip() for line in text.splitlines() if "fail-closed" in line]
-        assert not hits, (
-            f"{name} calls the baseline 'fail-closed' while values.yaml ships enforcementMode: audit, "
-            f"under which every control evaluates and records and the call PROCEEDS. Say what audit "
-            f"mode actually does:\n  " + "\n  ".join(hits)
-        )
+        assert not hits, f"{name} calls the baseline 'fail-closed'; four controls monitor and outages fail open:\n  " + "\n  ".join(hits)
+

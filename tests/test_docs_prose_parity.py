@@ -81,16 +81,29 @@ def _says_softens(window: str, rule: str) -> bool:
     return i != -1 and re.search(r"soften|not exempt|removed from the exemption", window[max(0, i - 200):i + 300]) is not None
 
 
-def test_docs_do_not_call_the_audit_baseline_fail_closed():
+_BASELINE_PAGES = ("README.md", "docs/getting-started.md", "docs/configuration.md", "docs/concepts.md",
+                   "docs/engineering/production-config.md", "docs/engineering/prod-deploy-runbook.md",
+                   "examples/chatbot/k8s/README.md")
+_STALE_AUDIT_DEFAULT = re.compile(
+    r"baseline ships in `?audit|ships in \*\*audit\*\*|in `audit` mode until|baselines? in `audit`\)"
+    r"|Each baseline ships in `audit`|which is how the chart's namespace baseline ships, softens")
+
+
+def test_docs_describe_the_baseline_posture_that_ships():
+    """Rewritten for 0.2.6. This asserted the baseline shipped `audit` and carried a tripwire: when that
+    changed, re-read these pages and decide whether "fail-closed" had become true. It has not — four
+    controls ship at monitor and an outage still fails open — so the pages must stop describing the
+    0.2.5 default, and must still not call the baseline fail-closed."""
     values = yaml.safe_load((_ROOT / "helm/norviq/values.yaml").read_text())
     mode = values["baselineClusterPolicy"]["enforcementMode"]
-    assert mode == "audit", f"baseline now ships {mode!r}; re-read the three pages below and decide whether 'fail-closed' is now true"
-    for site in ("docs/getting-started.md", "docs/engineering/production-config.md",
-                 "docs/engineering/prod-deploy-runbook.md"):
+    assert mode == "block", f"baseline now ships {mode!r}; re-read {_BASELINE_PAGES} and update them and this test"
+    for site in _BASELINE_PAGES:
         lines = (_ROOT / site).read_text().splitlines()
+        stale = [f"{n+1}: {line.strip()}" for n, line in enumerate(lines)
+                 if _STALE_AUDIT_DEFAULT.search(" ".join(lines[max(0, n - 1):n + 1]))]
+        assert not stale, f"{site} still describes the 0.2.5 audit default:\n  " + "\n  ".join(stale)
         hits = [f"{n+1}: {line.strip()}" for n, line in enumerate(lines)
-                if "fail-closed" in line and "baseline" in (line + (lines[n - 1] if n else "")).lower()]
-        assert not hits, (
-            f"{site} calls the namespace baseline 'fail-closed' while values.yaml ships enforcementMode: "
-            f"audit (evaluate, record, proceed):\n  " + "\n  ".join(hits)
-        )
+                if "fail-closed" in line and "baseline" in (line + (lines[n - 1] if n else "")).lower()
+                and "not fail-closed" not in line]
+        assert not hits, f"{site} calls the namespace baseline 'fail-closed':\n  " + "\n  ".join(hits)
+

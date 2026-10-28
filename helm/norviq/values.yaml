@@ -80,11 +80,20 @@ baselineClusterPolicy:
   # real fraction of a support bot's legitimate lookups and attributed it to shell injection. That
   # specific bug is fixed; the argument for arriving in `audit` never depended on it.
   #
-  # Defaulting to `audit` inverts the install experience: Norviq arrives observing, the customer sees
-  # in the compliance view exactly what WOULD be blocked and by which control, and promotes controls
-  # to enforcement when the blast radius is known. Set to `block` here to restore the old posture
-  # cluster-wide, or promote individual controls via the baseline controls API.
-  enforcementMode: audit
+  # Through 0.2.5 this defaulted to `audit` on that argument: arrive observing, and promote controls to
+  # enforcement once their blast radius is known.
+  #
+  # From 0.2.6 it defaults to `block`. Each control's own default_effect still decides what enforcing
+  # means: 17 of the 21 controls ship at `deny`, and four (llm02_data_leakage, base64_decoded_threat,
+  # scope_violation_dangerous_tool, strict_default_block) ship at `monitor`, so they record and never
+  # block whatever this says. Evidence taken before the flip: norviq.redteam.precision over the 51-case
+  # benign corpus, built with the engine's own input builder, gives 0 false positives with every
+  # control at deny. Four corpus calls are refused by design, and one matters on upgrade:
+  # llm05_supply_chain refuses install_package by NAME, even from public PyPI.
+  #
+  # To keep the 0.2.5 posture, set this to `audit`. To loosen one control rather than the whole
+  # baseline, set its effect through the baseline controls API.
+  enforcementMode: block
 
 images:
   # Registry prefix (trailing slash) prepended to every component repository. Defaults to the

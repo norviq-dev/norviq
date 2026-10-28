@@ -31,7 +31,8 @@ implicit trust into an enforced, per-identity, auditable decision.
 LLM agents are given real tools — databases, shells, email, cloud APIs, internal services. The model
 chooses which to call at runtime, and a single prompt injection or reasoning error can turn a benign
 agent into an exfiltration or destruction path. Norviq puts a deterministic, policy-driven gate on
-that surface, so a tool call only happens if an explicit policy for that agent's identity allows it.
+that surface: the agent asks before each tool call, the policy for its identity decides, and in a
+namespace the baseline covers, a call one of its controls refuses does not run.
 
 ## How it works
 
@@ -202,11 +203,12 @@ Working on Norviq itself, or a modified chart? Install from a clone instead — 
 
 `policyQuotaNamespaces` is the list of tenant namespaces that will run agents — it is **required**, not
 optional. The chart installs a `strict`-preset namespace baseline for each entry, so an empty list
-fails the install by design rather than shipping a cluster with no baseline. That baseline ships in
-**audit** mode (`baselineClusterPolicy.enforcementMode`): every control evaluates and records a
-non-compliance event, and the call proceeds. It is deliberately not fail-closed — installing 22 block
-rules in front of every tool call on day one dropped real traffic — so set `enforcementMode: block`
-when you are ready to enforce. Add every agent namespace
+fails the install by design rather than shipping a cluster with no baseline. From 0.2.6 that baseline
+**enforces** (`baselineClusterPolicy.enforcementMode: block`): its 17 `deny` controls refuse the call,
+and its four `monitor` controls record without blocking. Through 0.2.5 it shipped in `audit`; set
+`enforcementMode: audit` to keep that posture. It is not fail-closed as a whole: a namespace outside
+this list has no baseline, and an API outage still follows `webhook.injection.fallbackMode`, which ships
+`allow`. Add every agent namespace
 you plan to use, and **create them before installing** — the baseline policy and quota are namespaced
 objects, so the install cannot place them in a namespace that does not exist yet. If one is missing the
 chart stops before applying anything and names it.
