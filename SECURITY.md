@@ -103,13 +103,15 @@ exist in this application, not because the dependency is absent. That is a weake
 exploitable" than the other three, so it is scheduled for a real fix (see the note under the table)
 rather than treated as permanently accepted.
 
-**`cryptography>=48.0.1`** is the other such floor, and unlike `werkzeug` it *is* in the shipped image —
+**`cryptography>=50.0.0`** is the other such floor, and unlike `werkzeug` it *is* in the shipped image —
 so it is declared in `[project] dependencies`, not in `[tool.uv] constraint-dependencies`. The images
 install with **pip**, which reads neither `uv.lock` nor uv's constraints; a floor kept only in the uv
 config would have left the published images on a vulnerable version while every local check looked green.
 It closes **GHSA-537c-gmf6-5ccf** (HIGH, CVSS 7.5): `cryptography` wheels statically link OpenSSL, and
 every wheel below 48.0.1 bundles the OpenSSL affected by the
-[2026-06-09 advisory](https://openssl-library.org/news/secadv/20260609.txt). `cryptography` reaches us
+[2026-06-09 advisory](https://openssl-library.org/news/secadv/20260609.txt). The floor was then raised
+from 48.0.1 to 50.0.0 for CVE-2026-69247, which affects 49.0.0 and has no 49.x fix; `pyopenssl>=26.4.0`
+is declared alongside it because 26.3.0 caps `cryptography<50`. `cryptography` reaches us
 transitively through `pyjwt`, `spiffe`, `azure-identity` and `pyopenssl`, so it is on the JWT-verification
 and SPIFFE paths rather than in an optional extra.
 
