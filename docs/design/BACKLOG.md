@@ -408,6 +408,10 @@ in those directories is gone; `git worktree add ../tmp/<name> <branch>` restores
 
 ### 7.10 A misclassified tool NAME cascades into an agent-wide outage
 
+**Status 2026-10-28:** the cascade half FIXED on `prep/0.2.6` (`1a199c4`): repeated refusals of the
+same tool with the same parameters count once toward trust, so a retry loop no longer reaches the
+violation cap. The classifier half (`run_query` -> delete) is still open.
+
 Found by running `scripts/mcp-chatbot-scenario.sh` on a live kind cluster (2026-09-07), not by
 reading. `classify_tool("run_query")` resolves to **delete** — the `run` token is in the lexicon as
 delete/critical — and the evaluator consults an admin's promotion ONLY when the name classifier
@@ -463,6 +467,9 @@ Same run, both now fixed on `cncf-readiness`.
 
 ### 7.12 The chatbot scenario is not idempotent, and does not say so
 
+**Status 2026-10-28:** FIXED on `prep/0.2.6` (`b1bbd00`): each run uses its own service-account name,
+so it starts with no history. Whether DELETE /agents should also clear history is still open.
+
 **Update 2026-09-16 — a reset through the product does not reset.** A step calling
 `DELETE /agents/{spiffe_id}` before each run was tried (stashed, not committed: `git stash list`,
 "scenario trust reset via DELETE /agents"). Run 1 after it scored 12/16, run 2 still 10/16 on
@@ -512,6 +519,21 @@ labels an application `Postponed` on a "clear violation", including repo `create
 MAINTAINERS link that 404s. `norviq-dev/norviq` was created 2026-05-28. On `main` today
 `MAINTAINERS.md`, `ROADMAP.md`, `GOVERNANCE.md`, `ADOPTERS.md`, `NOTICE` and `CHANGELOG.md` do not exist —
 they are on this branch only. The form also rejects "will add after acceptance".
+
+### 7.16 0.2.6 preparation (2026-10-28), local branch `prep/0.2.6`, unpushed
+
+* **Security fixes** in the engine's caller authentication, logout revocation, the webhook's sidecar
+  image trust and the image-build order. Details are kept out of this file until the advisories publish.
+* **The namespace baseline enforces by default** (`b4c127a`), and the baselines are now tighten-only
+  floors (`b9d414b`). Without the floor, the enforcing baseline would have switched off for every agent
+  class with a policy of its own, because the chart stores it at priority 1.
+* **The false-positive measurement now uses the engine's own input builder** (`ca57189`). Its hand-built
+  input omitted `derived` and the normalised params. Over 51 benign cases, no decision changed: 0 false
+  positives at all-deny, 4 refused by design.
+* **`test_priority_enforcement.py` could not fail.** Every call in it blocked as `trust_frozen`, and the
+  tests asserted only `block`. They now run as a healthy agent and assert the deciding rule.
+* **`llm05_supply_chain`'s console copy said "from untrusted sources".** The rule matches tool names.
+  The copy is corrected; the control stays at deny.
 
 ## 8. Audit claims that did not reproduce
 
