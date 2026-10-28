@@ -350,14 +350,20 @@ were missed:
 ## Supply chain
 
 - **OPA binary** is pinned and checksummed in the build, not pulled loose at runtime.
-- **Container images** are gated by Trivy (`build.yml` post-build scan on `main`); the SAST gate
-  (`.github/workflows/security.yml` + `.pre-commit-config.yaml`) runs gitleaks, bandit, and semgrep
-  diff-aware against every PR — new HIGH/CRITICAL findings fail the build, never backlogged.
+- **Container images** are scanned by Trivy after they are pushed (`build.yml`, on `main` and on a
+  release tag). A new fixable HIGH/CRITICAL finding fails the job before the image is signed, so it
+  stops the cosign signature and SBOM attestation, and on a release the chart and PyPI jobs that depend
+  on it — but the image tag is already in the registry. The SAST checks
+  (`.github/workflows/security.yml` + `.pre-commit-config.yaml`) run gitleaks, bandit, and semgrep
+  diff-aware against every PR — new findings fail the check, never backlogged.
   **eslint-security** (eslint-plugin-security) additionally scans the whole `ui/src` fail-closed — any
-  finding fails the build — adding JS/TS-specific security rules (eval, unsafe-regex, child_process,
+  finding fails the check — adding JS/TS-specific security rules (eval, unsafe-regex, child_process,
   bidi-characters, …) on top of semgrep's `ui/src` pass (see
   [`security-baseline.md`](engineering/security-baseline.md) for the full triage rule and the
   whole-repo-scan ratchet plan).
+- **No check is required to merge.** `main` has no branch protection or ruleset today, so a failing
+  check reports on the PR or commit and stops nothing by itself. Making the fail-closed checks required
+  is pending, not applied.
 - **FOSSA** dependency scanning covers open-source license/security posture (badge on the repo
   README).
 - **Third-party GitHub Actions are SHA-pinned**, not tag-pinned, so a compromised upstream tag can't

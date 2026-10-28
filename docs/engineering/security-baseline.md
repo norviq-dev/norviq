@@ -11,27 +11,31 @@ The gate is designed to **start GREEN on this mature codebase and then ratchet**
 on day one gets bypassed. This doc records how "green" is achieved and where the baselined findings
 live, so nothing is silently ignored.
 
+**None of these checks is required to merge.** `main` has no branch protection or ruleset today, so a
+failing check reports on the PR or commit and stops nothing by itself; making the fail-closed checks
+required is pending, not applied. "Fails" below means the job fails, not that a merge is refused.
+
 ## Triage rule
-- **HIGH / CRITICAL → BLOCK** (fail-closed). Never backlogged.
+- **HIGH / CRITICAL → FAIL the check** (fail-closed). Never backlogged.
 - **MEDIUM / LOW →** fix in-scope if doable, else record here with a rationale +
   a ticket.
 
-## How the gate starts green (and how it ratchets to blocking)
-| Tool | PR scope | Starts blocking? | Ratchet to full-blocking |
+## How the gate starts green (and how it ratchets to fail-closed)
+| Tool | PR scope | Fails the check from day one? | Ratchet to fail-closed |
 |------|----------|------------------|--------------------------|
-| gitleaks | PR commit **range** only (not history) | **Yes** — new secrets fail | already blocking; allowlist in `.gitleaks.toml` |
+| gitleaks | PR commit **range** only (not history) | **Yes** — new secrets fail | already fail-closed; allowlist in `.gitleaks.toml` |
 | bandit | **changed** `norviq/**/*.py`, `-ll` | **Yes** — new medium or high fails | config `[tool.bandit]` in `pyproject.toml` |
 | semgrep | diff-aware `--baseline-commit <base>` | **Yes** — new findings fail | ignores in `.semgrepignore` |
-| eslint-security | whole `ui/src` (eslint-plugin-security rules) | **Yes** — any finding fails, fail-closed (starts green today) | already blocking; rules in `ui/eslint.config.js` (`detect-object-injection` off as too noisy; confirmed false positives suppressed inline with a rationale) |
+| eslint-security | whole `ui/src` (eslint-plugin-security rules) | **Yes** — any finding fails, fail-closed (starts green today) | already fail-closed; rules in `ui/eslint.config.js` (`detect-object-injection` off as too noisy; confirmed false positives suppressed inline with a rationale) |
 | pip-audit / npm audit | whole repo | **No — report-only** | remove `continue-on-error` on `deps-audit` |
 | checkov / kube-linter / trivy-config | whole `helm/` (chart + CRDs) | **No — report-only** | `.checkov.yaml soft-fail:false`; set `iac` job `exit-code:1`; drop `continue-on-error` |
-| trivy **image** (engine/api/ui/webhook) | post-build on `main` (`build.yml`) | **Yes — blocking** (`exit-code:"1"`, fail-closed) | already blocking; new fixable HIGH/CRITICAL findings fail the build; accepted findings are triaged into `.trivyignore.yaml` with a rationale (baselined findings log below). The YAML form (not the flat file) is what lets an entry carry `paths`, so a CVE accepted in a vendored third-party binary stays **blocking** in the binaries we build ourselves |
-| FOSSA dependency gate | whole dependency graph (`fossa.yml`) | **Yes** — any dependency `vulnerability` or `malware` issue fails | already blocking; exceptions are an explicit `ACCEPTED_CVES` allow-list in the job |
+| trivy **image** (engine/api/ui/webhook) | post-build on `main` (`build.yml`) | **Yes** — fails the job (`exit-code:"1"`) after the image is pushed: it stops the cosign signature, the SBOM attestation and, on a release, the chart and PyPI jobs, not the push itself | already fail-closed; new fixable HIGH/CRITICAL findings fail the job; accepted findings are triaged into `.trivyignore.yaml` with a rationale (baselined findings log below). The YAML form (not the flat file) is what lets an entry carry `paths`, so a CVE accepted in a vendored third-party binary stays **fail-closed** in the binaries we build ourselves |
+| FOSSA dependency gate | whole dependency graph (`fossa.yml`) | **Yes** — any dependency `vulnerability` or `malware` issue fails | already fail-closed; exceptions are an explicit `ACCEPTED_CVES` allow-list in the job |
 
 Diff-aware jobs are green by construction — only NEW code is judged. The whole-repo jobs are the
-ones that need a one-time baseline pass before they can block.
+ones that need a one-time baseline pass before they can fail the check.
 
-The FOSSA gate is the exception to "start report-only": it blocks today. It deliberately gates on
+The FOSSA gate is the exception to "start report-only": it fails the check today. It deliberately gates on
 **vulnerability + malware only**, not license issues — the free tier cannot tune the license policy,
 and its CC-BY-SA/APSL flags are documented false positives on bundled data inside permissive-code
 deps. OS/image CVEs are trivy's job (`build.yml`); FOSSA covers the dependency graph.
