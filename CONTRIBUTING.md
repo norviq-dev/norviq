@@ -80,8 +80,7 @@ cd ui && npx tsc --noEmit && npm run test:run     # test:run = `vitest run`
 
 # Go webhook
 cd webhook && go test ./... && gofmt -l . && go vet ./...
-# `gofmt -l` currently lists two pre-existing files with struct-alignment drift
-# (config.go, handler_injection_integrity_test.go) — not caused by your change.
+# `gofmt -l` prints nothing on a clean tree; any file it lists is drift your change introduced.
 
 # Rego — the shipped baseline policy must parse
 opa check --v0-compatible comprehensive.rego
