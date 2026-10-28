@@ -365,8 +365,10 @@ were missed:
   supply-chain risk (the trivy-action project itself had a compromise). `actions/checkout`,
   `actions/setup-python`, `actions/setup-node`, `docker/*-action`, `aquasecurity/trivy-action`,
   `azure/setup-helm`, `sigstore/cosign-installer`, and `pypa/gh-action-pypi-publish` are all pinned to a
-  commit SHA. Three remain tag-pinned and are tracked follow-up: `actions/upload-artifact@v4`,
-  `bridgecrewio/checkov-action@v12`, and `fossas/fossa-action@v1.7.0`.
+  commit SHA, and so are `actions/upload-artifact`, `bridgecrewio/checkov-action`, and
+  `fossas/fossa-action`, which were the last three on a tag. The one `uses:` without a SHA is
+  `release.yml` calling the in-repo reusable workflow `./.github/workflows/build.yml`, which has no
+  upstream tag to move.
 
 ## Reporting a vulnerability
 
