@@ -431,8 +431,10 @@ webhook:
     # DATA-PLANE posture: what a GOVERNED AGENT does when the central engine is unreachable. Distinct
     # from failurePolicy below, which is the ADMISSION posture (whether a pod may be created at all).
     #   "allow" (DEFAULT) = fail-OPEN. Tool calls are forwarded during an outage so the customer's
-    #     agents keep working. Each one is audited as rule_id=thin_proxy_fail_open — never as a policy
-    #     allow — so "we went unjudged" is countable and alertable rather than silent.
+    #     agents keep working. Each one carries rule_id=thin_proxy_fail_open — never a policy allow —
+    #     and the sidecar logs it as NRVQ-SDC-3036, so "we went unjudged" is countable and alertable
+    #     from the sidecar logs rather than silent. It is NOT written to audit_log: the API that
+    #     writes the audit log is the thing that is unreachable.
     #   "block"           = fail-CLOSED. No ungoverned tool call, ever, at the cost of taking every
     #     agent in the cluster down with us for as long as the engine is down.
     # This applies ONLY to a genuine outage (5xx / timeout / connection error). A 4xx is the engine
