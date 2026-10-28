@@ -87,6 +87,12 @@ _OBSERVABILITY_METHODS = frozenset({"inc", "increment", "observe", "record_excep
 # Adding to this list is a deliberate, reviewable act — that is the point.
 # --------------------------------------------------------------------------------------------------
 _JUSTIFIED_SILENT_HANDLERS: dict[tuple[str, str], str] = {
+    ("sidecar/http_fallback.py", "_is_loopback"): (
+        "Speculative PARSING of the peer address, and the failure answer is the fail-CLOSED one: a peer "
+        "that does not parse as an IP is treated as NOT loopback, so it must authenticate (or is refused) "
+        "rather than being evaluated as the pod. In-cluster peers are IP literals; a non-IP peer is a "
+        "test transport or a proxy, and logging each one would add noise without adding a decision."
+    ),
     ("engine/ssrf.py", "_as_ip"): (
         "Speculative PARSING, not error handling. Each `except` is one address spelling failing to "
         "apply so the next can be tried — dotted-quad, then bare integer/hex/octal, then the short "

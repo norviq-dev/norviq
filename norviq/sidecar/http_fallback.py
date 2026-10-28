@@ -55,7 +55,9 @@ async def _remote_identity(request: Request, body: dict, cache) -> AgentIdentity
         return AgentIdentity.model_validate(bound)
     except HTTPException as exc:
         return JSONResponse(status_code=exc.status_code, content={"action": "drop", "error": "identity_not_permitted"})
-    except Exception:  # noqa: BLE001 — an identity the credential cannot back is a refusal, not a 500
+    except Exception as exc:  # noqa: BLE001 — an identity the credential cannot back is a refusal, not a 500
+        log.warning("nrvq.sidecar.http.remote_identity_invalid", peer=request.client.host if request.client else "",
+                    error=type(exc).__name__, code="NRVQ-SDC-3044")
         return JSONResponse(status_code=422, content={"action": "drop", "error": "invalid_agent_identity"})
 
 
