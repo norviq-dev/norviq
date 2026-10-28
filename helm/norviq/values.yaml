@@ -175,12 +175,13 @@ gracefulShutdown:
 # Hardened container securityContext for the primary app containers (defense-in-depth). The
 # chart sets it inline rather than relying on an external PSA/Kyverno restricted-profile mutation
 # ("injected by cluster policy"), which need not exist on the target cluster.
-# This restricted profile matches the opa/tls-proxy sidecars: non-root, no privilege escalation, all caps
-# dropped, seccomp RuntimeDefault, read-only root FS. Consumers whose container writes its root FS must
-# provide a writable emptyDir mount (the api/engine/webhook images already run as a non-root USER, and the
-# webhook writes nothing to its rootfs). The UI (nginx) is NOT covered by this default — it runs as root
-# and binds :80, so it needs a component-specific uid/port/emptyDir treatment. Set enabled:false to defer
-# entirely to a cluster-level PodSecurity/Kyverno policy.
+# The api, engine, ui and webhook containers all take non-root, no privilege escalation, all caps
+# dropped and seccomp RuntimeDefault from here, which is also what the opa/tls-proxy sidecars set.
+# The readOnlyRootFilesystem value below reaches ONLY the webhook, which writes nothing to its rootfs: the api,
+# engine and ui templates deliberately leave it out (the api writes tmp at runtime; the UI entrypoint
+# writes config.js + fleet-proxy.conf at startup), and the opa/tls-proxy sidecars do not set
+# it either. The UI is covered like the rest — it runs nginx-unprivileged as uid 101 on :8080. Set
+# enabled:false to defer entirely to a cluster-level PodSecurity/Kyverno policy.
 securityContext:
   enabled: true
   runAsNonRoot: true
