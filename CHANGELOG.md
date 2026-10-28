@@ -18,6 +18,10 @@ because they should be installed.
   (it was `audit`). Its 17 `deny` controls refuse the call; its four `monitor` controls still only record.
   Set `baselineClusterPolicy.enforcementMode=audit` to keep the 0.2.5 posture. Measured before the
   change: 0 false positives over a 51-case benign corpus, with every control at deny.
+- **A class policy no longer loosens the baseline.** The namespace and cluster baselines are floors: a
+  baseline control's block applies even where a class policy allows. Through 0.2.5 any class policy
+  outranked the baseline (stored at priority 1), so an enforcing baseline would have switched off for
+  every class that had a policy. To exempt a class from one control, set that control's effect.
 - **Agents that install packages are refused.** `llm05_supply_chain` blocks `install_package`,
   `load_plugin`, `download_script` and `eval` by tool name, including installs from public PyPI. Set
   that control to `monitor`, or allow the tool in your own policy.

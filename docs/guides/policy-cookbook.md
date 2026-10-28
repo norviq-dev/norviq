@@ -475,13 +475,15 @@ class-tier policy matches.
    cross-namespace target, not the evaluation priority**: the controller then stores the policy at
    priority `1` (`baselineFallbackPriority`, `webhook/controller.go:998-1001`).
 
-That priority is the point. A namespace baseline is a **fallback, not a floor**. Base-tier candidates
-are resolved highest-priority-wins (`_resolve_precedence`, `norviq/engine/evaluator.py:2149-2158`), so
-a class policy at the default `100` outranks the baseline at `1` outright — including when the class
-policy allows and the baseline would have blocked. If you need something that can only ever tighten
-regardless of priority, you need an overlay, and no overlay is reachable from a CR — the CRD's
-`agentClass` pattern (`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`) forbids underscores. Which endpoint you use
-depends on which overlay:
+Through 0.2.5 that priority made a namespace baseline a **fallback**: base tiers resolve
+highest-priority-wins (`_resolve_precedence`), so a class policy at the default `100` outranked the
+baseline at `1` outright, including when the class policy allowed and the baseline would have blocked.
+From 0.2.6 the baselines are collected as **floors** (`_collect_candidates`): a baseline block applies
+whatever the class policy says, and a baseline allow never undoes a class policy's block. To exempt a
+class from one baseline control, set that control's effect through the baseline controls API. For
+anything else that must only tighten, you still need an overlay, and no overlay is reachable from a CR
+— the CRD's `agentClass` pattern (`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`) forbids underscores. Which endpoint
+you use depends on which overlay:
 
 | Overlay | How to author it |
 |---|---|

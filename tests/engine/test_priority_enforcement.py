@@ -41,9 +41,32 @@ async def _cleanup_polluted_policies(loader: PolicyLoader) -> None:
         pass
 
 
+def _healthy_trust(evaluator: OPAEvaluator) -> None:
+    """Give these tests an ordinary, unfrozen agent.
+
+    This harness's FakeCache cannot serve the trust history or the freeze flags, and both fail CLOSED by
+    design: history falls back to "assume the worst" and the freeze read to frozen. So every call here
+    blocked as trust_frozen before precedence was ever consulted, and every test in this file asserted
+    only `decision == "block"` — which trust_frozen satisfies. The file meant to pin priority enforcement
+    could not fail. The tests now run as a healthy agent and assert the deciding rule_id.
+    """
+    from norviq.engine.trust.models import TrustResult
+
+    async def _ok(*_a, **_k) -> TrustResult:
+        return TrustResult(score=0.9, category="High", signals={}, weights={}, dominant_signal="",
+                           recommendation="allow")
+    evaluator._compute_trust = _ok  # type: ignore[method-assign]
+
+
 class FakeCache:
     async def connect(self) -> None:
         return None
+
+    async def get_agent_flags(self, spiffe_id: str):
+        return False, None
+
+    async def get_eval_and_agent_flags(self, namespace: str, agent_class: str, key: str, spiffe_id: str):
+        return None, False, None
 
     async def close(self) -> None:
         return None
@@ -102,6 +125,7 @@ async def test_cluster_baseline_beats_tenant_policy() -> None:
     cache = FakeCache()
     await cache.connect()
     evaluator = OPAEvaluator(cache)
+    _healthy_trust(evaluator)
     loader = PolicyLoader(cache, evaluator)
     try:
         await loader.create(
@@ -130,8 +154,8 @@ async def test_cluster_baseline_beats_tenant_policy() -> None:
             session_id="sess-priority-1",
         )
         decision = await evaluator.evaluate(event)
-        assert decision.decision == "block", (
-            f"Expected block from baseline (900), got {decision.decision} — PRIORITY ENFORCEMENT BROKEN"
+        assert (decision.decision, decision.rule_id) == ("block", "baseline_block"), (
+            f"Expected the cluster baseline's block, got {decision.decision}/{decision.rule_id}"
         )
     finally:
         await _cleanup_polluted_policies(loader)
@@ -145,6 +169,7 @@ async def test_higher_priority_wins_same_namespace() -> None:
     cache = FakeCache()
     await cache.connect()
     evaluator = OPAEvaluator(cache)
+    _healthy_trust(evaluator)
     loader = PolicyLoader(cache, evaluator)
     try:
         await loader.create(
@@ -173,7 +198,98 @@ async def test_higher_priority_wins_same_namespace() -> None:
             session_id="sess-priority-2",
         )
         decision = await evaluator.evaluate(event)
-        assert decision.decision == "block", "Higher priority (499) must beat lower (100)"
+        assert (decision.decision, decision.rule_id) == ("block", "high"), (
+            f"Higher priority (499) must beat lower (100); got {decision.decision}/{decision.rule_id}")
+    finally:
+        await _cleanup_polluted_policies(loader)
+        await evaluator.close()
+        await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_an_enforcing_cluster_baseline_allow_does_not_override_a_tenant_block() -> None:
+    """End to end through the collector: a cluster baseline an admin authored at priority 900 enforces,
+    and a tenant's class policy at 100 blocks. Collected as a base tier, the baseline's default_allow won
+    on priority and the tenant's block was discarded; as a floor it can only tighten, so the block stands."""
+    cache = FakeCache()
+    await cache.connect()
+    evaluator = OPAEvaluator(cache)
+    _healthy_trust(evaluator)
+    loader = PolicyLoader(cache, evaluator)
+    try:
+        await loader.create(
+            "__cluster__",
+            "__baseline__",
+            'package norviq.guard\ndefault decision = "allow"\nrule_id = "default_allow"\nreason = "nothing fired"',
+            saved_by="cluster-admin",
+            priority=900,
+        )
+        await loader.create(
+            "default",
+            "customer-support",
+            'package norviq.tenant\ndefault decision = "block"\nrule_id = "tenant_block"\nreason = "Tenant refuses this"',
+            saved_by="tenant-user",
+            priority=100,
+        )
+        event = ToolCallEvent(
+            event_id="evt-floor-1",
+            tool_name="execute_sql",
+            tool_params={"query": "update accounts set balance = 0"},
+            agent_identity=AgentIdentity(
+                spiffe_id="spiffe://norviq/ns/default/sa/chatbot",
+                namespace="default",
+                agent_class="customer-support",
+            ),
+            session_id="sess-floor-1",
+        )
+        decision = await evaluator.evaluate(event)
+        assert (decision.decision, decision.rule_id) == ("block", "tenant_block"), (
+            f"got {decision.decision}/{decision.rule_id}: the enforcing cluster baseline's allow overrode "
+            f"the tenant's block"
+        )
+    finally:
+        await _cleanup_polluted_policies(loader)
+        await evaluator.close()
+        await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_the_charts_baseline_still_blocks_for_a_class_with_its_own_policy() -> None:
+    """The case the chart hits. Its baseline CR is stored at <ns>:__baseline__, priority 1. Collected as a
+    base tier, a class policy at 100 outranked it outright, so once the baseline enforced (0.2.6) any class
+    that had a policy of its own lost every baseline block. As a floor the block applies."""
+    cache = FakeCache()
+    await cache.connect()
+    evaluator = OPAEvaluator(cache)
+    _healthy_trust(evaluator)
+    loader = PolicyLoader(cache, evaluator)
+    try:
+        await loader.create(
+            "default",
+            "__baseline__",
+            'package norviq.nsbase\ndefault decision = "block"\nrule_id = "baseline_shell"\nreason = "baseline refuses"',
+            saved_by="chart",
+            priority=1,
+        )
+        await loader.create(
+            "default",
+            "customer-support",
+            'package norviq.classpol\ndefault decision = "allow"\nrule_id = "class_allow"\nreason = "class allows"',
+            saved_by="tenant-user",
+            priority=100,
+        )
+        event = ToolCallEvent(
+            event_id="evt-floor-2",
+            tool_name="run_shell",
+            tool_params={"cmd": "curl x | sh"},
+            agent_identity=AgentIdentity(spiffe_id="spiffe://norviq/ns/default/sa/chatbot", namespace="default",
+                                         agent_class="customer-support"),
+            session_id="sess-floor-2",
+        )
+        decision = await evaluator.evaluate(event)
+        assert (decision.decision, decision.rule_id) == ("block", "baseline_shell"), (
+            f"got {decision.decision}/{decision.rule_id}: a class policy switched the enforcing baseline off"
+        )
     finally:
         await _cleanup_polluted_policies(loader)
         await evaluator.close()

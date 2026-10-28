@@ -2430,8 +2430,21 @@ class OPAEvaluator:
         # per-class policy must not be able to discard the operator's decision about which MCP
         # integrations are expected here, or which of them may be written through.
         await _append_controls_floor(namespace, "__mcp__")
-        await _append_policy(namespace, "__baseline__")
-        await _append_policy("__cluster__", "__baseline__")
+        # The namespace and cluster baselines are FLOORS too, for the reason the controls tier is one.
+        # As base tiers they resolved by priority outright. The chart's baseline CR is stored at
+        # `<ns>:__baseline__` with priority 1 (webhook baselineFallbackPriority), so any class policy
+        # outranked it. That was harmless only while the baseline shipped in `audit`, which partitions
+        # it out as an observer. Once it ENFORCES (the 0.2.6 default), measured on this resolver: an
+        # enforcing baseline block (deny_shell_execution) against a class policy at 100 that allows
+        # came back allow / support_default_allow. Writing any policy for a class switched the whole
+        # enforcing baseline off for it. The opposite direction is just as wrong for a baseline an
+        # admin authors at a HIGH priority (`__cluster__:__baseline__` at 900): its default_allow then
+        # beat a tenant's block. As a floor the baseline only tightens: its blocks apply whatever the
+        # priority, and its allow never undoes a tenant's block. An `audit` baseline still only records,
+        # because floors are ranked by their effective decision. To exempt a class from one control,
+        # set that control's effect (baseline controls API) — a class policy no longer loosens it.
+        await _append_controls_floor(namespace, "__baseline__")
+        await _append_controls_floor("__cluster__", "__baseline__")
         # The catalog advertises WORKLOAD and NAMESPACE tiers (resolve_policy_key mints
         # `deployment:<name>` / `namespace:<ns>` keys); collect them here so they are enforced, not just
         # advertised (in-memory-only, additive: zero hot-path cost when absent, and priority resolution
@@ -2509,21 +2522,21 @@ class OPAEvaluator:
         candidates: list[dict] = []
         seen: set[str] = set()
 
-        async def _append_policy(target_namespace: str, target_agent_class: str) -> None:
-            # Base/floor lookup only — never tags "overlay": True (mirrors _collect_candidates).
+        async def _append_policy(target_namespace: str, target_agent_class: str, floor: bool = False) -> None:
+            # Base lookup, or a FLOOR when `floor` is set (the chart baselines; mirrors _collect_candidates).
             key = f"{target_namespace}:{target_agent_class}"
             if key in seen:
                 return
             if key in self._loader._policies:
                 entry = self._loader._policies[key]
                 candidates.append({"key": key, "rego": entry["rego"], "priority": entry["priority"],
-                                   "enforcement_mode": entry.get("enforcement_mode", "block")})
+                                   "enforcement_mode": entry.get("enforcement_mode", "block"), "overlay": floor})
                 seen.add(key)
                 return
             loaded = await self._loader.load_from_db(target_namespace, target_agent_class)
             if loaded:
                 candidates.append({"key": key, "rego": loaded["rego"], "priority": loaded["priority"],
-                                   "enforcement_mode": loaded.get("enforcement_mode", "block")})
+                                   "enforcement_mode": loaded.get("enforcement_mode", "block"), "overlay": floor})
                 seen.add(key)
 
         def _append_overlay(key: str) -> None:
@@ -2555,14 +2568,14 @@ class OPAEvaluator:
             # their tuning took effect.
             _append_controls_overlay(ns)
             _append_controls_overlay(ns, "__egress__")
-            await _append_policy(ns, "__baseline__")
+            await _append_policy(ns, "__baseline__", floor=True)
             for overlay in ("__pack__", "__guardrail__", "__pack_override__", "__pack_weaken__"):
                 _append_overlay(f"{ns}:{overlay}")
             # Mirror the per-class remediation overlay lookup from _collect_candidates for
             # the union resolver (console's namespace="all" picker) — same additive/in-memory-only, tighten-only.
             if agent_class:
                 _append_overlay(f"{ns}:{agent_class}__remediation__")
-        await _append_policy("__cluster__", "__baseline__")
+        await _append_policy("__cluster__", "__baseline__", floor=True)
         return candidates
 
     def _resolve_with_packs(self, results: list[dict]) -> dict:
@@ -2621,7 +2634,7 @@ class OPAEvaluator:
         (_resolve_with_packs) does NOT use this method — it uses the "overlay" flag tagged at construction, which
         can never misclassify a real class's own base policy. Prefer the flag over this heuristic wherever the
         candidate dict is available."""
-        return (key.endswith(":__pack__") or key.endswith(":__guardrail__")
+        return (key.endswith(":__baseline__") or key.endswith(":__pack__") or key.endswith(":__guardrail__")
                 or key.endswith(":__pack_override__") or key.endswith(":__pack_weaken__")
                 or key.endswith("__remediation__"))
 
@@ -2632,7 +2645,6 @@ class OPAEvaluator:
         __pack_weaken__ overlay exists ONLY to dial back a sector pack's own restriction, not to neutralize an
         operator guardrail or a compliance-remediation control. Each partition is resolved independently, then
         combined by plain most-restrictive-wins, so a hard block/escalate always survives a pack weaken's allow."""
-        rank = {"block": 0, "escalate": 1, "audit": 2, "allow": 3}
         pack_family = [
             r for r in results
             if str(r["key"]).endswith((":__pack__", ":__pack_override__", ":__pack_weaken__"))
@@ -2645,8 +2657,8 @@ class OPAEvaluator:
             return hard_winner
         if hard_winner is None:
             return pack_winner
-        pack_rank = rank.get(pack_winner["decision"].decision, 3)
-        hard_rank = rank.get(hard_winner["decision"].decision, 3)
+        pack_rank = self._effective_rank(pack_winner)
+        hard_rank = self._effective_rank(hard_winner)
         # a tie keeps the hard overlay's winner (guardrail/remediation reason takes attribution priority).
         return pack_winner if pack_rank < hard_rank else hard_winner
 
@@ -2667,9 +2679,13 @@ class OPAEvaluator:
     @staticmethod
     def _resolve_hard_overlay(results: list[dict]) -> dict:
         """Plain most-restrictive-wins for HARD tighten-only overlays (:__guardrail__, *__remediation__) — NO
-        weaken exception. Ties broken by highest priority."""
-        rank = {"block": 0, "escalate": 1, "audit": 2, "allow": 3}
-        results.sort(key=lambda item: (rank.get(item["decision"].decision, 3), -int(item["priority"])))
+        weaken exception. Ties broken by highest priority.
+
+        Ranked by EFFECTIVE decision. A block from an audit-mode floor is about to be softened to an audit,
+        so ranking it as a block let it tie an enforcing guardrail's block and win on priority — and the
+        softened result discarded the enforcement. Reachable once the chart baseline became a floor and an
+        operator kept it in `audit`."""
+        results.sort(key=lambda item: (OPAEvaluator._effective_rank(item), -int(item["priority"])))
         return results[0]
 
     def _resolve_precedence(self, results: list[dict]) -> dict:
