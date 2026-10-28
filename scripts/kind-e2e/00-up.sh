@@ -46,9 +46,25 @@ command -v opa >/dev/null || fail "opa not on PATH — rego-backed tests would s
 # A multi-image build on a nearly-full disk does not fail cleanly: Docker starts reclaiming space and
 # has already deleted the kind node container once in this project's history, which presents as a
 # cluster that vanished mid-run.
-avail_gb=$(df -g / | awk 'NR==2 {print $4}')
-[ "${avail_gb:-99}" -lt 10 ] && fail "only ${avail_gb}GB free — build five images with <10GB and docker starts deleting things, including the kind node"
-echo "  disk ${avail_gb}GB free · opa $(opa version | head -1)"
+#
+# Measured where the images actually go. This read `df /` on the HOST, and on Docker Desktop that is the
+# wrong disk: the images and the kind node live inside the VM's disk image, which on this machine is
+# fully allocated (Docker.raw: 100G apparent, 100G on disk), so builds reuse space INSIDE it and never
+# grow the host file. The host read 5GB and refused while the VM had 65GB free. It can also be wrong the
+# other way, on a sparse image the host has to grow — so both are checked, and the message says which.
+vm_avail_gb=$(docker run --rm alpine:3.20 df -k / 2>/dev/null | awk 'NR==2 {print int($4/1048576)}')
+[ -n "$vm_avail_gb" ] || fail "could not read free space inside Docker — is the daemon up?"
+[ "$vm_avail_gb" -lt 10 ] && fail "only ${vm_avail_gb}GB free inside Docker — build five images with <10GB and docker starts deleting things, including the kind node"
+host_avail_gb=$(df -g / | awk 'NR==2 {print $4}')
+raw="$HOME/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw"
+if [ -f "$raw" ]; then
+  apparent=$(ls -l "$raw" | awk '{print int($5/1073741824)}'); allocated=$(du -k "$raw" | awk '{print int($1/1048576)}')
+  # A sparse image still has to grow on the host: require the host to hold the growth it may need.
+  if [ "$allocated" -lt "$apparent" ] && [ "${host_avail_gb:-0}" -lt 10 ]; then
+    fail "only ${host_avail_gb}GB free on the host, and Docker's disk image can still grow by $((apparent - allocated))GB"
+  fi
+fi
+echo "  disk: ${vm_avail_gb}GB free in Docker, ${host_avail_gb}GB on the host · opa $(opa version | head -1)"
 
 # --- 2. cluster -----------------------------------------------------------------------------------
 stage "Cluster ${CLUSTER}"

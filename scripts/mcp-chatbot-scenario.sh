@@ -73,6 +73,16 @@ for agent_class, rego in POLICIES.items():
     print(' ', agent_class, '->', json.loads(urllib.request.urlopen(req).read()))
 "
 
+# ---------------------------------------------------------------- a fresh identity per run
+# The scenario attacks on purpose, and trust is keyed on the SPIFFE id. With one fixed id
+# (sa/default) every run inherited the previous run's violations: measured 13/16, then 10/16, then
+# 12/16 on identical code, the middle run starting at the 0.30 floor. Resetting through
+# DELETE /agents does not help — it keeps the behavioural history the score is recomputed from — and
+# should not: deregister-and-return must not launder an agent's record. A per-run service-account name
+# gives each run an identity with no history, which is the precondition the claims assume.
+RUN_SA="${RUN_SA:-chatbot-scenario-$(date +%s)}"
+echo "  run identity: spiffe://norviq/ns/${NS_AGENT}/sa/${RUN_SA}"
+
 # ---------------------------------------------------------------- credentials
 # One service token PER AGENT CLASS. This is the mechanism that makes two bots sharing four servers
 # get different power: the class is bound to the CREDENTIAL, not asserted in the request body, so a
@@ -85,7 +95,7 @@ from norviq.config import settings
 now = int(time.time())
 print(jwt.encode({'sub': 'chatbot-${CLS}', 'role': 'service', 'namespace': '${NS_AGENT}',
                   'agent_class': '${CLS}',
-                  'spiffe_id': 'spiffe://norviq/ns/${NS_AGENT}/sa/default',
+                  'spiffe_id': 'spiffe://norviq/ns/${NS_AGENT}/sa/${RUN_SA}',
                   'iat': now, 'exp': now + 86400}, settings.api_secret_key, algorithm='HS256'))")"
   kubectl -n "$NS_AGENT" create secret generic "norviq-token-${CLS}" \
     --from-literal=NRVQ_API_TOKEN="$TOK" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
@@ -117,7 +127,7 @@ spec:
     - {name: NRVQ_POLICY_ENGINE_URL, value: "http://norviq-api.${NS_CTRL}.svc.cluster.local:8080"}
     - {name: NRVQ_API_URL,           value: "http://norviq-api.${NS_CTRL}.svc.cluster.local:8080"}
     - {name: NRVQ_NAMESPACE,         value: "${NS_AGENT}"}
-    - {name: NRVQ_SERVICE_ACCOUNT,   value: "default"}
+    - {name: NRVQ_SERVICE_ACCOUNT,   value: "${RUN_SA}"}
     # Pins live in the CONTROL PLANE: tenant-scoped, audited, console-visible, and — the point for a
     # supply-chain check — they survive this pod being restarted.
     - {name: NRVQ_MCP_PIN_STORE,     value: "control-plane"}
