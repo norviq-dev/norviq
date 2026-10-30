@@ -47,7 +47,14 @@ from norviq.engine.masking import (
 from norviq.engine.graph.asset_graph import AssetGraphBuilder
 from norviq.engine.graph.store import GraphStore
 from norviq.engine.empty_literals import upgrade_legacy
-from norviq.engine.opa_client import OpaClient, OpaModuleRejected, managed_package, rewrite_package, sanitize_key
+from norviq.engine.opa_client import (
+    OPA_COMPILE_ERROR,
+    OpaClient,
+    OpaModuleRejected,
+    managed_package,
+    rewrite_package,
+    sanitize_key,
+)
 from norviq.telemetry.metrics import record_eval_phases, record_tool_call
 from norviq.telemetry.spans import create_tool_call_span, enrich_span
 from norviq.engine.trust import AgentHistoryStore, AgentProfileStore, TrustCalculator, TrustInput, TrustResult
@@ -73,10 +80,6 @@ _SUPERSEDE_MEMO_MAX = 1024
 # rather than on every evaluation. Dry-run keys are caller-chosen, so the memo cannot be unbounded; when
 # full it is cleared, which costs at most one repeated line per module.
 _MAX_REPORTED_MODULES = 4096
-# OPA's compile-stage error codes (rego_parse_error, rego_type_error, rego_unsafe_var_error, ...), as
-# opposed to evaluation-time ones (eval_conflict_error, ...). Lets the fork path tell "this module does
-# not compile" from "this input broke evaluation", which the server path learns from the push.
-_OPA_COMPILE_ERROR = re.compile(r"\brego_[a-z_]+_error\b")
 
 # rule_id PREFIXES stamped when a would-block is SOFTENED to a logged `audit` decision — namespace
 # monitor mode and per-policy audit mode respectively. Exported (not inlined into the f-strings below)
@@ -2172,9 +2175,9 @@ class OPAEvaluator:
         if shapes and self._remember(self._upgrade_reported, (key, hashlib.sha256(rego.encode("utf-8")).hexdigest())):
             log.info(
                 "nrvq.opa.legacy_literals_upgraded", key=key, shapes=list(shapes), code="NRVQ-ENG-2070",
-                detail="stored by an older release; compiled with typed empty literals, stored row unchanged. "
-                       "Regenerating the policy from its source (builder, intent, MCP registry) stores the "
-                       "current form.",
+                detail="holds a bare empty literal of a shape an older release's generator wrote; compiled "
+                       "as the typed form (same value), stored row unchanged. Regenerating the policy from its "
+                       "source (builder, intent, MCP registry) stores the current form.",
             )
         return upgraded
 
@@ -2329,7 +2332,9 @@ class OPAEvaluator:
             # `--format=json` reports a compile error on STDOUT with an empty stderr, so the message this
             # raised used to read just "opa eval failed: " and OPA's reason was lost.
             detail = (stderr or stdout).decode("utf-8", errors="replace").strip()
-            if _OPA_COMPILE_ERROR.search(detail):
+            # Compile-stage codes only (opa_client.OPA_COMPILE_ERROR): "this module does not compile",
+            # not "this input broke evaluation" — the distinction the server path gets from the push.
+            if OPA_COMPILE_ERROR.search(detail):
                 exc = OpaModuleRejected(f"opa eval failed: {detail[:2000]}")
                 self._report_rejected(key, stored_rego, sanitize_key(key), exc)
                 raise exc

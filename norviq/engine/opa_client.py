@@ -47,9 +47,18 @@ _CAPABILITIES_PATH = Path(__file__).parent / "opa-capabilities.json"
 
 class OpaModuleRejected(RuntimeError):
     """OPA — or the `opa check` gate in front of it — refused to COMPILE a module, as opposed to being
-    unreachable. The message carries OPA's own error text. A RuntimeError, so every fail-closed handler
-    treats it exactly as before; the type exists so a caller holding the policy key can name the policy
-    (evaluator: NRVQ-ENG-2071) instead of leaving only an `evaluator_error` decision behind."""
+    unreachable or refusing the request for some other reason. The message carries OPA's own error text.
+    A RuntimeError, so every fail-closed handler treats it exactly as before; the type exists so a caller
+    holding the policy key can name the policy (evaluator: NRVQ-ENG-2071) instead of leaving only an
+    `evaluator_error` decision behind."""
+
+
+# OPA's compile-stage error codes (rego_parse_error, rego_type_error, rego_unsafe_var_error,
+# rego_compile_error, ...), as opposed to evaluation-time ones (eval_conflict_error, ...) and to request
+# errors that are not about the module at all. Only a response carrying one of these is a module OPA
+# refused to compile: a 413 for an oversized body is a 4xx too, and calling it "does not compile" would
+# send the operator to the wrong place.
+OPA_COMPILE_ERROR = re.compile(r"\brego_[a-z_]+_error\b")
 
 
 async def _check_capabilities(rego_source: str, module_id: str) -> None:
@@ -74,7 +83,8 @@ async def _check_capabilities(rego_source: str, module_id: str) -> None:
                       code="NRVQ-ENG-2055")
             # Not "(forbidden builtin)", which this said whatever OPA reported: `opa check` fails for any
             # compile error, and a type error blamed on a forbidden builtin sends the reader the wrong way.
-            raise OpaModuleRejected(f"rego_source failed `opa check` against the shipped capabilities: {detail}")
+            exc_type = OpaModuleRejected if OPA_COMPILE_ERROR.search(detail) else RuntimeError
+            raise exc_type(f"rego_source failed `opa check` against the shipped capabilities: {detail}")
 
 
 def sanitize_key(key: str) -> str:
@@ -206,9 +216,11 @@ class OpaClient:
         if resp.status_code >= 300:
             log.error("nrvq.opa.push_failed", module_id=module_id, status=resp.status_code,
                       body=resp.text[:300], code="NRVQ-ENG-2054")
-            # A 4xx is OPA refusing the module (400 = it does not compile); its body is the compiler's
-            # error, which the exception used to drop, so the evaluator's log said only "400".
-            exc_type = OpaModuleRejected if 400 <= resp.status_code < 500 else RuntimeError
+            # OPA's body is the reason, which the exception used to drop, so the evaluator's log said only
+            # "400". It is a compile rejection only when the body carries a compile error code (OPA answers
+            # 400 with `rego_type_error` etc. for a module that does not compile); any other status or
+            # body — a 413, a 400 about the request — stays a plain RuntimeError with its own message.
+            exc_type = OpaModuleRejected if OPA_COMPILE_ERROR.search(resp.text) else RuntimeError
             raise exc_type(f"OPA policy push failed for {module_id}: {resp.status_code}: {resp.text[:300]}")
         log.info("nrvq.opa.policy_pushed", module_id=module_id, code="NRVQ-ENG-2053")
 

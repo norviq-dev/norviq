@@ -474,3 +474,201 @@ def test_a_rewritten_module_is_what_the_generator_writes_today(name: str) -> Non
 )
 def test_operator_written_rego_is_left_alone(rego: str) -> None:
     assert upgrade_legacy(rego) == (rego, ())
+
+
+# --- A raw string is data, never a declaration ------------------------------------------------------
+#
+# The review's three repros, verbatim. Each carries a generator's header or package line and a backtick
+# raw string holding an exact legacy line, and decides on the string's content. Rewriting inside the
+# string evaluated every one LOOSER than its own text: ('allow', 'loosened') where OPA, on either
+# binary, says block. The rewrite must leave them byte-identical, so they decide what their text says.
+
+_RAW_INPUT = {
+    "tool_name": "export_all",
+    "tool_name_normalized": "export_all",
+    "agent": {"agent_class": "support", "namespace": "ns"},
+}
+
+RAW_STRING_REPROS: dict[str, tuple[str, tuple[str, str]]] = {
+    "intent package, allow_names line in a raw string": (
+        """package norviq.intent.support
+
+default decision = "block"
+default rule_id = "intent_default_deny"
+default reason = "deny"
+
+sentinel := `
+allow_names := {}
+`
+decision = "allow" { sentinel != "\\nallow_names := {}\\n" }
+rule_id = "loosened" { sentinel != "\\nallow_names := {}\\n" }
+""",
+        ("block", "intent_default_deny"),
+    ),
+    "egress header, allowed_suffix line in a raw string": (
+        """# nrvq-egress-allowlist/v1: e30=
+package norviq.egress
+
+default decision = "block"
+default rule_id = "egress_deny"
+default reason = "deny"
+
+doc := `
+allowed_suffix = []
+`
+decision = "allow" { count(doc) != 21 }
+rule_id = "loosened" { count(doc) != 21 }
+""",
+        ("block", "egress_deny"),
+    ),
+    "builder header, stub line in a raw string": (
+        """package norviq.custom.support
+
+# nrvq-builder-graph/v1: e30=
+# nrvq-builder-hash: 00000000
+
+default decision = "block"
+default rule_id = "b_deny"
+default reason = "deny"
+
+t := `
+escalates[id] { id := [][_] }
+`
+decision = "allow" { not contains(t, "[][_]") }
+rule_id = "loosened" { not contains(t, "[][_]") }
+""",
+        ("block", "b_deny"),
+    ),
+}
+
+
+def _raw_text_decision(rego: str) -> tuple[str, str]:
+    """What OPA itself says about the module's own text — the reference the evaluator must match."""
+    package = re.search(r"(?m)^package\s+(\S+)", rego).group(1)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "p.rego"
+        path.write_text(rego, encoding="utf-8")
+        out = subprocess.run(
+            [
+                "opa",
+                "eval",
+                "--v0-compatible",
+                "-d",
+                str(path),
+                "-I",
+                "-f",
+                "json",
+                f"[data.{package}.decision, data.{package}.rule_id]",
+            ],
+            input=json.dumps(_RAW_INPUT),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    return tuple(json.loads(out.stdout)["result"][0]["expressions"][0]["value"])
+
+
+@pytest.mark.parametrize("name", sorted(RAW_STRING_REPROS))
+def test_a_legacy_line_inside_a_raw_string_is_not_rewritten(name: str) -> None:
+    rego, _expected = RAW_STRING_REPROS[name]
+    assert upgrade_legacy(rego) == (rego, ())
+
+
+@needs_opa
+@pytest.mark.parametrize("opa_mode", ["server", "subprocess"])
+@pytest.mark.parametrize("name", sorted(RAW_STRING_REPROS))
+async def test_a_raw_string_policy_decides_what_its_own_text_says(name: str, opa_mode: str, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "opa_mode", opa_mode)
+    rego, expected = RAW_STRING_REPROS[name]
+    assert _raw_text_decision(rego) == expected
+    evaluator = OPAEvaluator(FakeCache())  # type: ignore[arg-type]
+    try:
+        result = await evaluator._evaluate_opa(f"ns:raw-{uuid.uuid4().hex[:8]}", "ns", "support", _RAW_INPUT, rego)
+    finally:
+        await evaluator.close()
+    assert (result["decision"], result["rule_id"]) == expected, (
+        f"{name}: the evaluator decided differently from the policy's own text — the rewrite changed data"
+    )
+
+
+def test_code_lines_follows_rego_strings_and_comments() -> None:
+    from norviq.engine.empty_literals import _code_lines
+
+    rego = "\n".join(
+        [
+            'a := "a ` in a quoted string opens nothing"',  # 0 code
+            "b := 1  # nor does a ` after a comment",  # 1 code
+            'c := "an escaped \\" quote, then ` still quoted"',  # 2 code
+            "d := `opens here",  # 3 not code (opens a raw string)
+            'allow_names := {}  # " and # are data in here',  # 4 not code (inside)
+            "closes here`",  # 5 not code (closes it)
+            "allowed_suffix = []",  # 6 code
+            "e := `one line`",  # 7 not code (a raw string on the line)
+        ]
+    )
+    assert _code_lines(rego) == [True, True, True, False, False, False, True, False]
+
+
+def test_only_code_lines_count_for_the_header_and_the_shape() -> None:
+    # A header quoted in a raw string does not make a hand-written module generated.
+    quoted_header = "package norviq.custom.x\ns := `\n# nrvq-egress-allowlist/v1: e30=\n`\nallowed_suffix = []\n"
+    assert upgrade_legacy(quoted_header) == (quoted_header, ())
+    # A real legacy line beside a raw string holding one: the declaration is rewritten, the data is not.
+    mixed = "package norviq.intent.x\nallow_names := {}\ns := `\nallow_names := {}\n`\n"
+    upgraded, shapes = upgrade_legacy(mixed)
+    assert shapes == ("intent_allowlist_empty",)
+    assert upgraded.splitlines() == [
+        "package norviq.intent.x",
+        'allow_names := {k: k | k := ""; false}',
+        "s := `",
+        "allow_names := {}",
+        "`",
+    ]
+
+
+# --- Only a compile error is a "rejected module" ----------------------------------------------------
+
+# What OPA 1.21.4's `PUT /v1/policies/<id>` answers for a module that does not compile (abridged).
+_OPA_COMPILE_400 = (
+    '{"code": "invalid_parameter", "message": "error(s) occurred while compiling module(s)", '
+    '"errors": [{"code": "rego_type_error", "message": "undefined ref: data.t.X[input.k]"}]}'
+)
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "rejected"),
+    [
+        (400, _OPA_COMPILE_400, True),
+        (413, "request entity too large", False),
+        (400, '{"code": "invalid_parameter", "message": "invalid policy id"}', False),
+        (500, '{"code": "internal_error", "message": "storage"}', False),
+    ],
+)
+async def test_only_a_compile_error_is_reported_as_a_module_opa_refused(status, body, rejected, monkeypatch) -> None:
+    """NRVQ-ENG-2071 says "OPA refused to compile this policy". A 413 or a 400 about the request is a 4xx
+    too, and naming it a compile failure would send the operator to the wrong place."""
+    from types import SimpleNamespace
+
+    from norviq.engine import opa_client
+    from norviq.engine.opa_client import OpaModuleRejected
+
+    class _Put:
+        async def put(self, *_a, **_k):
+            return SimpleNamespace(status_code=status, text=body)
+
+    async def _client():
+        return _Put()
+
+    async def _no_check(*_a, **_k) -> None:
+        return None
+
+    monkeypatch.setattr(settings, "opa_mode", "server")
+    monkeypatch.setattr(opa_client, "_check_capabilities", _no_check)  # isolate the PUT's own answer
+    evaluator = OPAEvaluator(FakeCache())  # type: ignore[arg-type]
+    monkeypatch.setattr(evaluator.opa, "_ensure", _client)
+    with capture_logs() as logs, pytest.raises(RuntimeError) as raised:
+        await evaluator._ensure_module_pushed("ns:cls", 'package t\ndefault decision = "allow"\n')
+    assert isinstance(raised.value, OpaModuleRejected) is rejected
+    assert body[:40] in str(raised.value), "OPA's own reason must survive into the message"
+    named = [e["key"] for e in logs if e["event"] == "nrvq.opa.module_rejected"]
+    assert named == (["ns:cls"] if rejected else [])

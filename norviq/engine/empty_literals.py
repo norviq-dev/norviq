@@ -66,10 +66,20 @@ def brackets(rendered: list[str]) -> str:
 # copy (which the policies API serves, and whose builder body hash the console checks for hand edits)
 # and the version history are untouched, so a rollback to 0.2.5 reads byte-identical rows.
 #
-# Each line is a whole-line match of what the generator emitted, and nothing looser: a hand-written
-# `names := {}`, or a generated line an operator has edited, is not touched and compiles or fails on
-# its own merits. Taken from each released tag's own generator output (v0.1.0 .. v0.2.5), not from the
-# current source.
+# Each line is a whole-line match of what the generator emitted, taken from each released tag's own
+# generator output (v0.1.0 .. v0.2.5), not from the current source, and nothing looser: a line with a
+# trailing comment, different spacing, or a different name is not touched. What gates a shape is the
+# generator's own header comment for six of them, but only the PACKAGE for two: `allow_names` /
+# `allow_skeletons := {}` in any `package norviq.intent.*` module and `cap_tools := {}` in any
+# `package norviq.remediation.capability.*` module are rewritten even when an operator wrote them.
+# That is harmless because every replacement is the same value — but only for a line that is CODE.
+#
+# A line inside a backtick raw string is data. Rewriting one changes the string, and a policy can
+# compare that string: a module carrying a generator's header, a raw string whose middle line is
+# `allow_names := {}`, and `decision = "allow" { s != "\nallow_names := {}\n" }` evaluated LOOSER than
+# its own text (the review's repro: original ('block', 'intent_default_deny'), rewritten ('allow', ...)).
+# So the rewrite and the header check consider only lines wholly outside raw strings (`_code_lines`). "Rewrite only when OPA rejects the raw text" would not be enough on its own: the same
+# module can also carry one real legacy line outside the string, which makes the raw text fail.
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,18 +153,69 @@ LEGACY_SHAPES: tuple[_LegacyShape, ...] = (
 )
 
 
+_CODE, _QUOTED, _RAW = 0, 1, 2
+
+
+def _code_lines(rego: str) -> list[bool]:
+    """For each `\n`-separated line, whether it is wholly Rego code — neither starting inside a backtick
+    raw string nor opening one. A comment line counts as code (its text is not data).
+
+    A lexical scan, the three states Rego has for this purpose: code, a double-quoted string (single
+    line, `\\` escapes), and a raw string (any number of lines, no escapes). A backtick inside a
+    double-quoted string or after a `#` comment opens nothing, and a `#` or `"` inside a raw string is
+    data. A double-quoted string still open at a line's end is a parse error OPA reports itself; the scan
+    resets to code there rather than guessing.
+    """
+    lines = rego.split("\n")
+    code = [True] * len(lines)
+    state = _CODE
+    for i, line in enumerate(lines):
+        if state == _RAW:
+            code[i] = False
+        j = 0
+        while j < len(line):
+            ch = line[j]
+            if state == _CODE:
+                if ch == "#":
+                    break
+                if ch == '"':
+                    state = _QUOTED
+                elif ch == "`":
+                    state = _RAW
+                    code[i] = False
+            elif state == _QUOTED:
+                if ch == "\\":
+                    j += 1
+                elif ch == '"':
+                    state = _CODE
+            elif ch == "`":
+                state = _CODE
+            j += 1
+        if state == _QUOTED:
+            state = _CODE
+    return code
+
+
 def upgrade_legacy(rego: str) -> tuple[str, tuple[str, ...]]:
     """Rewrite the bare empty literals an older release's generators stored; return the new source and
     the names of the shapes rewritten (empty when nothing matched, and then `rego` is returned as is).
 
-    Idempotent — no replacement matches any pattern — and line-preserving, so an OPA error on the
-    result still points at the stored row's line numbers.
+    Only CODE lines are considered, for the generator's header as well as for the shape (see
+    `_code_lines`): a header quoted inside a raw string does not make a module generated, and a legacy
+    line inside one is a string's content, not a declaration. Idempotent — no replacement matches any
+    pattern — and line-preserving, so an OPA error on the result still points at the stored row's lines.
     """
+    lines = rego.split("\n")
+    code = _code_lines(rego)
     applied: list[str] = []
     for shape in LEGACY_SHAPES:
-        if not shape.marker.search(rego):
+        if not any(is_code and shape.marker.search(line) for line, is_code in zip(lines, code)):
             continue
-        rego, count = shape.line.subn(shape.replacement, rego)
+        count = 0
+        for i, line in enumerate(lines):
+            if code[i]:
+                lines[i], n = shape.line.subn(shape.replacement, line)
+                count += n
         if count:
             applied.append(shape.name)
-    return rego, tuple(applied)
+    return ("\n".join(lines), tuple(applied)) if applied else (rego, ())
