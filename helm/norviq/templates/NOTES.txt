@@ -95,6 +95,20 @@ Production reminder:
   manage — the production path, since a --set password lands in `helm history`. For an EXTERNAL managed
   datastore set postgresql.enabled=false + postgresql.host=<host> (same for redis).
   Set values.policyQuotaNamespaces to include every tenant namespace (for example: default, chatbot-prod, analytics); quotas and baseline policies render from this list.
-  A baseline high-priority policy is installed for EACH namespace in policyQuotaNamespaces (values.baselineClusterPolicy.*). From 0.2.6 it ENFORCES (baselineClusterPolicy.enforcementMode=block): its deny controls refuse the call and its monitor controls record. It shipped in audit through 0.2.5; set baselineClusterPolicy.enforcementMode=audit to keep that posture. NOTE: with baselineClusterPolicy.enabled=true, an EMPTY policyQuotaNamespaces now FAILS the install (it would otherwise render no baseline at all) — list your tenant namespaces, or set enabled=false to opt out explicitly.
+{{- if .Values.baselineClusterPolicy.enabled }}
+{{- $baselineMode := toString (.Values.baselineClusterPolicy.enforcementMode | default "block") }}
+  NAMESPACE BASELINE: a {{ .Values.baselineClusterPolicy.preset }} baseline is installed for EACH namespace in policyQuotaNamespaces (values.baselineClusterPolicy.*). It is a floor: a class policy cannot loosen it.
+{{- if eq $baselineMode "audit" }}
+  It is in AUDIT (baselineClusterPolicy.enforcementMode=audit): it records what it would refuse and the call proceeds, except in a namespace whose Baseline controls are saved (those replace it and enforce what they show). Drop the flag to enforce, the default from 0.2.6.
+{{- else }}
+  It ENFORCES (baselineClusterPolicy.enforcementMode={{ $baselineMode }}{{ if eq $baselineMode "block" }}, the default from 0.2.6{{ else }}; a policy in {{ $baselineMode }} mode is enforced like block, only audit softens it{{ end }}){{ if eq .Values.baselineClusterPolicy.preset "strict" }}: 20 of its 21 controls refuse the call or hold it for approval, and scope_violation_dangerous_tool records it{{ end }}. To turn it off:
+    every namespace: --set baselineClusterPolicy.enforcementMode=audit
+    one namespace:   console Target Settings -> Monitor, or PUT /api/v1/settings?namespace=<ns> with {"enforcement_mode": "audit"}
+    one control:     console Baseline controls -> Monitor or Off, or PUT /api/v1/baseline/controls
+{{- end }}
+  NOTE: with baselineClusterPolicy.enabled=true, an EMPTY policyQuotaNamespaces FAILS the install (it would otherwise render no baseline at all) — list your tenant namespaces, or set enabled=false to opt out explicitly.
+{{- else }}
+  NAMESPACE BASELINE: none (baselineClusterPolicy.enabled=false). No namespace has a baseline; only the policies you write apply.
+{{- end }}
   Bind ClusterRoles to your tenant/admin groups (this chart ships roles but not subject-specific bindings).
   Policies with permissive preset and/or enforcementMode=audit provide visibility only and do not enforce blocks.

@@ -11,9 +11,9 @@ The shape deliberately mirrors `routers/packs.py`: read a per-namespace table, r
 from it, write it to a reserved scope through the normal loader path, invalidate the namespace's eval
 cache. It gets its OWN reserved scope, `__controls__` — sharing the chart's `__baseline__` key meant a
 helm upgrade silently reverted the customer. The engine collects it as a floor and, once saved, lets
-it REPLACE the chart's `<ns>:__baseline__` (evaluator._apply_controls_supersede), so Off and Monitor
-relax a control the chart enforces. Two floors alone combine strictest-wins, and the switch could only
-ever tighten.
+it REPLACE the chart's `<ns>:__baseline__` (evaluator._apply_controls_supersede) when baseline.covers
+proves it is exactly this release's compile of the chart's own text, so Off and Monitor relax a control
+the chart enforces. Two floors alone combine strictest-wins, and the switch could only ever tighten.
 
 Every control defaults to what the chart's preset does with it (baseline.shipped_default), so saving
 changes only what the operator changed. This route is how a customer relaxes a control to `monitor` or

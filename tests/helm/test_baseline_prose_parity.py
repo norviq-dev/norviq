@@ -13,10 +13,13 @@ passes; nothing reads the prose. This reads the prose.
 
 from __future__ import annotations
 
+import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
-import re
-
+import pytest
 import yaml
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -48,4 +51,55 @@ def test_the_chart_describes_the_baseline_posture_it_ships():
         assert not stale, f"{name} still describes the 0.2.5 audit default:\n  " + "\n  ".join(stale)
         hits = [line.strip() for line in text.splitlines() if "fail-closed" in line]
         assert not hits, f"{name} calls the baseline 'fail-closed'; a control only records and outages fail open:\n  " + "\n  ".join(hits)
+
+
+def _rendered_notes(*extra: str) -> str:
+    """NOTES.txt as `helm install` would print it. `helm template` skips NOTES.txt, so a copy of the chart
+    carries it as the data of a ConfigMap template, rendered with the same values."""
+    if shutil.which("helm") is None:
+        pytest.skip("helm not on PATH")
+    with tempfile.TemporaryDirectory() as td:
+        copy = Path(td) / "norviq"
+        shutil.copytree(_ROOT / "helm/norviq", copy)
+        body = "\n".join("    " + line for line in (copy / "templates/NOTES.txt").read_text().splitlines())
+        (copy / "templates/zz-notes-render.yaml").write_text(
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: notes-render\ndata:\n  notes: |\n" + body + "\n")
+        res = subprocess.run(
+            ["helm", "template", "norviq", str(copy), "--show-only", "templates/zz-notes-render.yaml",
+             "--set-json", 'policyQuotaNamespaces=["agents"]', *extra], capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr[-600:]
+    return yaml.safe_load(res.stdout)["data"]["notes"]
+
+
+def test_notes_says_what_the_install_actually_renders():
+    """NOTES.txt is printed after every install. It must agree with the mode the baseline CRs were just
+    rendered in — enforcing by default, auditing under the flag — and on an enforcing install it must name
+    all three ways off, because that is the moment an operator learns the baseline blocks.
+
+    It printed `enforcementMode=block` for any value but audit; the CRD also admits `escalate`, which the
+    engine enforces like block (only `audit` softens a policy), so the rendered value is what it prints."""
+    default = _rendered_notes()
+    assert "ENFORCES (baselineClusterPolicy.enforcementMode=block" in default and "It is in AUDIT" not in default
+    assert "20 of its 21 controls" in default, "NOTES no longer states what the strict baseline does"
+    for way_off in ("--set baselineClusterPolicy.enforcementMode=audit", "PUT /api/v1/settings?namespace=<ns>",
+                    '"enforcement_mode": "audit"', "PUT /api/v1/baseline/controls", "Monitor or Off"):
+        assert way_off in default, f"an enforcing install's NOTES no longer names {way_off!r}"
+    audited = _rendered_notes("--set", "baselineClusterPolicy.enforcementMode=audit")
+    assert "It is in AUDIT" in audited and "ENFORCES" not in audited
+    assert "Baseline controls are saved" in audited, "AUDIT NOTES must say saved controls still enforce"
+    escalated = _rendered_notes("--set", "baselineClusterPolicy.enforcementMode=escalate")
+    assert "ENFORCES (baselineClusterPolicy.enforcementMode=escalate" in escalated
+    assert "enforcementMode=block" not in escalated.split("To turn it off")[0]
+    off = _rendered_notes("--set", "baselineClusterPolicy.enabled=false")
+    assert "ENFORCES" not in off and "It is in AUDIT" not in off and "NAMESPACE BASELINE: none" in off
+
+
+def test_values_comment_names_the_default_it_sits_above():
+    """The comment over `enforcementMode: block` opened "audit (default)" after the default became block."""
+    text = (_ROOT / "helm/norviq/values.yaml").read_text()
+    block = text[text.index("baselineClusterPolicy:"):text.index("\nimages:")]
+    assert "audit (default)" not in block, "values.yaml still calls audit the baseline default"
+    assert "block (default" in block
+    for way_off in ("Target Settings -> Monitor", "/api/v1/baseline/controls"):
+        assert way_off in block, f"values.yaml no longer names {way_off!r} as a way off the baseline"
 

@@ -101,12 +101,14 @@ baselineClusterPolicy:
   name: baseline-cluster-guard
   clusterPriority: 900
   preset: strict
-  # audit (default) — every baseline control EVALUATES and records a non-compliance event, and the
-  # call proceeds. block — the baseline refuses the call outright.
+  # block (default from 0.2.6) — the baseline enforces: each control acts at the severity the preset
+  # authors it with (below). audit — every baseline control EVALUATES and records a non-compliance
+  # event, and the call proceeds.
   #
-  # This shipped as `block`, which meant installing the chart silently put 22 block rules in front of
-  # every tool call in every tenant namespace, on day one, before the customer had written a single
-  # policy or seen a single decision. The failure mode was not theoretical: until 0.2.1,
+  # Before 0.2.0 this shipped as `block` with every control blocking, which meant installing the chart
+  # silently put 22 block rules in front of every tool call in every tenant namespace, on day one,
+  # before the customer had written a single policy or seen a single decision. The failure mode was
+  # not theoretical: until 0.2.1,
   # `deny_shell_execution` fired on roughly 1 in 8 ordinary alphanumeric identifiers (the base64
   # fan-out decoded an order id to random bytes and matched `|` in them), so a stock install dropped a
   # real fraction of a support bot's legitimate lookups and attributed it to shell injection. That
@@ -116,17 +118,26 @@ baselineClusterPolicy:
   # enforcement once their blast radius is known.
   #
   # From 0.2.6 it defaults to `block`, and the preset decides what that means per control: 20 of the 21
-  # are authored to enforce (two MCP controls hold the call for approval rather than refuse it), and
-  # scope_violation_dangerous_tool is authored as a record, so it records whatever this says. The
+  # are authored to enforce (17 refuse; llm06_excessive_agency refuses destructive tools and holds
+  # elevated ones for approval; mcp_definition_drift and mcp_definition_never_scanned hold the call for
+  # approval), and scope_violation_dangerous_tool is authored as a record, so it records whatever this
+  # says. The
   # console's Baseline controls default to the same. Evidence taken before the flip:
   # norviq.redteam.precision over the 51-case benign corpus, built with the engine's own input builder,
   # gives 0 false positives with every control at deny. Four corpus calls are refused by design, and
   # one matters on upgrade:
   # llm05_supply_chain refuses install_package by NAME, even from public PyPI.
   #
-  # To keep the 0.2.5 posture, set this to `audit`. To loosen one control rather than the whole
-  # baseline, set its effect in the console's Baseline controls: once saved, a namespace's control
-  # effects replace this baseline in that namespace.
+  # Three ways to turn it off, widest first; each records the call instead of refusing it, except a
+  # control switched Off, which is not evaluated at all:
+  #   every baseline namespace  set this to `audit` (the 0.2.5 posture)
+  #   one namespace             console Target Settings -> Monitor, or
+  #                             PUT /api/v1/settings?namespace=<ns> {"enforcement_mode": "audit"}
+  #   one control               console Baseline controls -> Monitor or Off, or PUT /api/v1/baseline/controls
+  # Once saved, a namespace's Baseline controls replace this baseline in that namespace (when they are
+  # this release's compile of the same preset, baseline.covers) and run in block, so `audit` here no
+  # longer reaches that namespace. config.enforcementMode below is NOT a way off: it never softens a
+  # block a policy returns.
   enforcementMode: block
 
 images:
@@ -785,6 +796,9 @@ config:
       requests: { cpu: 10m, memory: 24Mi }
       limits: { memory: 64Mi }
   logLevel: INFO
+  # Engine-wide default (NRVQ_ENFORCEMENT_MODE). It decides whether noPolicyDecision=deny can block,
+  # and is the decision used when a module returns none; it never softens a block a policy or the
+  # baseline returns. To stop the baseline refusing calls, see baselineClusterPolicy.enforcementMode.
   enforcementMode: block
   # What a namespace with NO policy loaded does. "allow" (default) | "deny".
   #

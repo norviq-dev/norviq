@@ -20,23 +20,39 @@ because they should be installed.
   `mcp_definition_never_scanned` hold it for approval; `scope_violation_dangerous_tool` only records.
   The console's Baseline controls now default to the same: they showed `strict_default_block`,
   `llm02_data_leakage` and `base64_decoded_threat` at Monitor while the baseline blocked them. Measured
-  before the change: 0 false positives over a 51-case benign corpus, with every control at deny.
+  before the change: 0 false positives over a 51-case benign corpus, with every control at deny. Three
+  ways to turn it off, each recording the call instead of refusing it (a control switched Off is not
+  evaluated at all):
+  - every namespace: `--set baselineClusterPolicy.enforcementMode=audit`, the 0.2.5 posture (but see
+    the next item for namespaces whose Baseline controls were saved);
+  - one namespace: console Target Settings → **Monitor**, or `PUT /api/v1/settings?namespace=<ns>` with
+    `{"enforcement_mode": "audit"}` (softens every block in that namespace, your own policies' too);
+  - one control: console Baseline controls → **Monitor** or **Off**, or `PUT /api/v1/baseline/controls`.
+
+  `config.enforcementMode` is not one of them; it never softened a policy's block.
 - **`baselineClusterPolicy.enforcementMode=audit` keeps the 0.2.5 posture only where nobody saved the
   console's Baseline controls.** Saved controls enforce whatever the chart's mode, in 0.2.5 too, and from
-  0.2.6 they replace the chart's baseline in that namespace. But 0.2.5 stored only the controls that differed from its own defaults,
-  which had `strict_default_block`, `llm02_data_leakage` and `base64_decoded_threat` at Monitor. In a
-  namespace whose panel was saved under 0.2.5 with those three left alone, the 0.2.6 API recompiles the
-  saved controls at startup with 0.2.6's defaults, and the three start refusing calls (`execute_sql`
-  becomes `block` / `strict_default_block`), whatever `enforcementMode` says. A control saved at an
+  0.2.6 they replace the chart's baseline in that namespace. But 0.2.5 stored only the controls that
+  differed from its own defaults, which had `strict_default_block`, `llm02_data_leakage` and
+  `base64_decoded_threat` at Monitor. In a namespace whose panel was saved under 0.2.5 with those three
+  left alone, the 0.2.6 API recompiles the saved controls at startup with 0.2.6's defaults, and the
+  three start refusing calls (`execute_sql` becomes `block` / `strict_default_block`), whatever
+  `enforcementMode` says. A control saved at an
   explicit value keeps it. To keep the three recording, set them to **Monitor** in the panel and save;
   Monitor now differs from their default, so it is stored. `GET /api/v1/baseline/controls?namespace=<ns>`
   shows what each control is set to. A namespace nobody saved the panel for is unaffected beyond the
-  default flip: `webhook/presets/strict.rego`, the chart's baseline, has not changed since 0.2.5.
+  default flip: `webhook/presets/strict.rego`, the chart's baseline, has not changed since 0.2.5, so if
+  you already ran 0.2.5 with `enforcementMode=block` it refuses what it refused then, and now also for
+  classes that have their own policy (next item). Saving the panel
+  for the first time under an `audit` install has the same effect as above: that namespace starts
+  acting at the effects the panel shows, the 20 at Enforce included, so set the ones you only want
+  recorded to Monitor in the same save.
 - **A class policy no longer loosens the baseline.** The namespace and cluster baselines are floors: a
   baseline control's block applies even where a class policy allows. Through 0.2.5 any class policy
   outranked the baseline (stored at priority 1), so an enforcing baseline would have switched off for
   every class that had a policy. To relax one control, set its effect in the console's Baseline
-  controls: once saved, a namespace's control effects replace the chart's baseline there, for every
+  controls; that applies to the whole namespace, because a class policy can no longer exempt itself.
+  Once saved, a namespace's control effects replace the chart's baseline there, for every
   agent class, and each control does what the console shows; a control you did not change keeps doing
   what the baseline did. Controls saved by an earlier release are recompiled from their stored settings
   when the API starts, so they take effect without re-saving, and a control left at its old default

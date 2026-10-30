@@ -72,12 +72,13 @@ sequenceDiagram
   policy saved in `audit` mode can only tighten). The namespace and cluster baselines, your tuned
   controls and the tighten-only overlays (sector packs, guardrails, remediation) are floors on top: they
   can make the result stricter, never looser, whatever their priority. From 0.2.6 a class policy no longer
-  loosens a baseline control. Setting the control's effect in the console's Baseline controls does: once
-  saved, a namespace's control effects replace the chart's baseline there, for every agent class (the
+  loosens a baseline control. Setting the control's effect in the console's Baseline controls does, for
+  the whole namespace: once saved, a namespace's control effects replace the chart's baseline there, for
+  every agent class, when they are this release's compile of the chart's own `strict` preset (the
   cluster baseline still applies). See
   [Concepts → Policy tiers & precedence](docs/concepts.md#policy-tiers--precedence).
-- **Modes** — `block` (deny + reason), `escalate`, `audit` (log only / monitor mode), so you can roll
-  out enforcement observably before turning it on.
+- **Modes** — `block` (deny + reason), `escalate`, `audit` (log only / monitor mode), so you can trial
+  a policy observably, or step the enforcing baseline back to observing (below).
 
 ### Deployed components
 
@@ -207,15 +208,28 @@ Working on Norviq itself, or a modified chart? Install from a clone instead — 
 `policyQuotaNamespaces` is the list of tenant namespaces that will run agents — it is **required**, not
 optional. The chart installs a `strict`-preset namespace baseline for each entry, so an empty list
 fails the install by design rather than shipping a cluster with no baseline. From 0.2.6 that baseline
-**enforces** (`baselineClusterPolicy.enforcementMode: block`): 20 of its 21 controls refuse the call
-(two MCP controls hold it for approval), and `scope_violation_dangerous_tool` records without blocking.
-Through 0.2.5 it shipped in `audit`; set
-`enforcementMode: audit` to keep that posture. It is not fail-closed as a whole: a namespace outside
+**enforces** (`baselineClusterPolicy.enforcementMode: block`): 20 of its 21 controls act on the call —
+17 refuse it, `llm06_excessive_agency` refuses destructive tools and holds elevated ones for approval,
+and two MCP controls hold it for approval — and `scope_violation_dangerous_tool` records without
+blocking. Through 0.2.5 it shipped in `audit`. It is not fail-closed as a whole: a namespace outside
 this list has no baseline, and an API outage still follows `webhook.injection.fallbackMode`, which ships
-`allow`. Add every agent namespace
-you plan to use, and **create them before installing** — the baseline policy and quota are namespaced
-objects, so the install cannot place them in a namespace that does not exist yet. If one is missing the
-chart stops before applying anything and names it.
+`allow`.
+
+To turn it off, pick the scope. Each records the call instead of refusing it, except a control
+switched Off, which is not evaluated at all:
+
+- **Every namespace, at install:** `--set baselineClusterPolicy.enforcementMode=audit` (the 0.2.5
+  posture, in every namespace whose Baseline controls nobody has saved).
+- **One namespace:** console → Target Settings → **Monitor**, or `PUT /api/v1/settings?namespace=<ns>`
+  with `{"enforcement_mode": "audit"}`. This softens every block in that namespace, not only the baseline's.
+- **One control:** console → Baseline controls → **Monitor** or **Off** (`PUT /api/v1/baseline/controls`).
+
+[Concepts → Turning the shipped baseline off](docs/concepts.md#turning-the-shipped-baseline-off) has the
+details, including what saving the controls panel does under an `audit` install.
+
+Add every agent namespace you plan to use, and **create them before installing** — the baseline policy
+and quota are namespaced objects, so the install cannot place them in a namespace that does not exist
+yet. If one is missing the chart stops before applying anything and names it.
 
 The chart deploys the API, engine, console UI, mutating webhook, and bundled PostgreSQL + Redis + OPA.
 Port-forward the console:

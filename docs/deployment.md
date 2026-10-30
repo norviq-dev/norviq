@@ -86,8 +86,9 @@ routed to the injector and starts ungoverned.
 Two overlays worth knowing for local work:
 
 - **`values-dev.yaml`** — fixed dev secrets (`api.secretKey`, DB/Redis passwords), `logLevel: DEBUG`,
-  and `config.enforcementMode: audit`, so a fresh dev install logs decisions instead of enforcing them
-  until you're ready.
+  and `config.enforcementMode: audit`. That setting does **not** stop the namespace baseline enforcing,
+  which it does by default from 0.2.6; for a dev install that only records, also pass
+  `--set baselineClusterPolicy.enforcementMode=audit`.
 - **`values-light.yaml`** — the smallest viable single-node footprint (one replica of everything,
   PDBs/HPAs/HA/SPIFFE off). Enforcement is byte-identical to the default chart; only replica counts,
   PDBs, and resource requests/limits change:

@@ -484,8 +484,9 @@ baseline control, set its effect with `PUT /api/v1/baseline/controls` (the conso
 Once saved, the namespace's control effects replace the chart's `<ns>:__baseline__` for every agent
 class there, each control doing what the console shows (a control nobody changed does what the preset
 does) — provided the chart's baseline is the `strict` preset the console compiles and the saved module
-is exactly this release's compile of it (`_apply_controls_supersede`; the API re-compiles saved
-controls at startup). With another preset or its own rego, both stay floors and the stricter wins;
+is exactly this release's compile of it (`covers()` in `norviq/api/baseline.py`, checked by
+`_apply_controls_supersede`; the API re-compiles saved controls at startup). The effect applies to every
+class in the namespace, because a class policy can no longer exempt itself. With another preset or its own rego, both stay floors and the stricter wins;
 `__cluster__:__baseline__` is never replaced. For
 anything else that must only tighten, you still need an overlay, and no overlay is reachable from a CR
 — the CRD's `agentClass` pattern (`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`) forbids underscores. Which endpoint
@@ -503,10 +504,10 @@ any pack is toggled and skips the override route's OPA validation and admin gate
 [Writing Policies §4](writing-policies.md).
 
 **One namespace has exactly one `__baseline__` scope, and on most installs the chart already occupies
-it.** With `baselineClusterPolicy.enabled: true` (the default, `helm/norviq/values.yaml:67-71`) the
+it.** With `baselineClusterPolicy.enabled: true` (the default, `baselineClusterPolicy` in `helm/norviq/values.yaml`) the
 chart renders one `baseline-cluster-guard-<ns>` CR per entry in `policyQuotaNamespaces`, each landing at
 `<ns>:__baseline__` with the `strict` preset. Check before you assume: `policyQuotaNamespaces` is `[]`
-by default (`values.yaml:17`), and the chart refuses to install with the baseline enabled and that list
+by default (`values.yaml`), and the chart refuses to install with the baseline enabled and that list
 empty rather than silently rendering zero baselines (`{{- fail }}`,
 `helm/norviq/templates/baseline-cluster-policy.yaml:1-10`) — so the scope is occupied for exactly the
 namespaces on that list, and not at all if the operator chose `baselineClusterPolicy.enabled: false`.

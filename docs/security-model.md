@@ -13,10 +13,29 @@ allow/block/escalate/audit decisions on the *inputs* of a tool call (`tool_name`
 before the tool body runs.
 
 The governing principle is that **a block is something a customer asked for**. Norviq sits in the
-request path of production agents, so traffic flows by default and the policies you author are the
-defense. A control that drops legitimate traffic nobody asked it to drop is not a strong security
-posture — it is an outage wearing a security-shaped `rule_id`, and it gets removed from the request
-path, which protects nobody.
+request path of production agents, so outside the shipped namespace baseline (below) traffic flows by
+default and the policies you author are the defense. A control that drops legitimate traffic nobody
+asked it to drop is not a strong security posture — it is an outage wearing a security-shaped
+`rule_id`, and it gets removed from the request path, which protects nobody.
+
+**The shipped namespace baseline enforces, from 0.2.6.** It is the one place the product blocks on
+your behalf before you have written a policy: every namespace you list in `policyQuotaNamespaces` gets
+the `strict` baseline (`baselineClusterPolicy.enforcementMode: block`), whose 21 controls act at the
+severity the preset authors them with — 20 act on a matching call (17 refuse it, `llm06_excessive_agency`
+refuses destructive tools and escalates elevated ones, two MCP controls escalate) and
+`scope_violation_dangerous_tool` only records. It was switched on with evidence —
+`norviq.redteam.precision` over the 51-case benign corpus gives 0 false positives with every control at
+`deny` (`helm/norviq/values.yaml`) — and every scope has a way back:
+`--set baselineClusterPolicy.enforcementMode=audit` for every namespace, Monitor
+(`PUT /api/v1/settings?namespace=<ns>` with `{"enforcement_mode": "audit"}`) for one, and the console's
+Baseline controls panel (Off / Monitor / Enforce, `PUT /api/v1/baseline/controls`) for one control.
+Each records what it would have refused, except Off, which stops the control evaluating. Saved controls
+replace the chart's baseline in their namespace only when `covers()` proves they are this release's
+compile of the chart's own preset, so a rule the operator did not switch off cannot be dropped by
+saving the panel. See [Concepts → Turning the shipped baseline off](concepts.md#turning-the-shipped-baseline-off).
+The baseline is not fail-closed: a namespace outside the list has none, the no-policy decision below
+ships `allow`, and when the engine is unreachable the sidecar follows `webhook.injection.fallbackMode`,
+which also ships `allow`.
 
 Within a namespace the customer *has* chosen to enforce, evaluation is **fail-closed**: if OPA errors,
 times out, or the caller's SPIFFE identity is malformed, the call is blocked rather than silently

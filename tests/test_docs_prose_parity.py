@@ -21,8 +21,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
+from norviq.api import baseline
 from norviq.engine.evaluator import _posture_exempt_rules
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -103,7 +105,86 @@ def test_docs_describe_the_baseline_posture_that_ships():
                  if _STALE_AUDIT_DEFAULT.search(" ".join(lines[max(0, n - 1):n + 1]))]
         assert not stale, f"{site} still describes the 0.2.5 audit default:\n  " + "\n  ".join(stale)
         hits = [f"{n+1}: {line.strip()}" for n, line in enumerate(lines)
-                if "fail-closed" in line and "baseline" in (line + (lines[n - 1] if n else "")).lower()
+                if "fail-closed" in line and "baseline" in (line + _wrapped_from(lines, n)).lower()
                 and "not fail-closed" not in line]
         assert not hits, f"{site} calls the namespace baseline 'fail-closed':\n  " + "\n  ".join(hits)
+
+
+def _wrapped_from(lines: list[str], n: int) -> str:
+    """The line a wrapped sentence continues from — none for a markdown table row, which is one unit.
+
+    This read the previous line unconditionally, and a table row is not a continuation of the row above
+    it: configuration.md's `config.noPolicyDecision` row ("Set `deny` for fail-closed", about the no-policy
+    decision) was flagged as a claim about the baseline once the `config.enforcementMode` row above it
+    named `baselineClusterPolicy.enforcementMode`. A row that itself calls the baseline fail-closed is
+    still caught, by the row's own text."""
+    if not n or lines[n].lstrip().startswith("|"):
+        return ""
+    return lines[n - 1]
+
+
+# Every page that describes the shipped baseline posture, and the three ways off it. A page that says the
+# baseline enforces and does not say how to stop it is the gap this guards: the operator reads "enforces",
+# finds no switch, and turns the whole baseline off with enabled=false.
+_OFF_SWITCH_PAGES = ("README.md", "docs/getting-started.md", "docs/configuration.md", "docs/concepts.md",
+                     "docs/security-model.md", "docs/engineering/production-config.md", "helm/norviq/README.md")
+_OFF_SWITCHES = {
+    "install": re.compile(r"baselineClusterPolicy\.enforcementMode=audit"),
+    "namespace": re.compile(r"/api/v1/settings\?namespace=<ns>`?\s+with\s+`?\{\s*\"enforcement_mode\":\s*\"audit\"\s*\}"),
+    "control": re.compile(r"/api/v1/baseline/controls"),
+}
+
+
+def _unreleased_changelog() -> str:
+    text = (_ROOT / "CHANGELOG.md").read_text()
+    start = text.index("## [Unreleased]")
+    return text[start:text.index("\n## [", start + 1)]
+
+
+@pytest.mark.parametrize("site", [*_OFF_SWITCH_PAGES, "CHANGELOG.md"])
+def test_every_posture_page_names_all_three_ways_off(site: str) -> None:
+    text = _unreleased_changelog() if site == "CHANGELOG.md" else (_ROOT / site).read_text()
+    missing = [scope for scope, pattern in _OFF_SWITCHES.items() if not pattern.search(text)]
+    assert not missing, f"{site} describes the enforcing baseline but not the {missing} way(s) to turn it off"
+
+
+# `config.enforcementMode` never softened a policy's block (`_resolve_posture` reads only the per-namespace
+# mirror; the global mode reaches `_no_policy_decision` and the decision fallback). Two pages offered it as
+# a visibility switch, and values-dev.yaml's description said its `audit` made a dev install log instead
+# of enforce, which stopped being true the day the baseline began enforcing.
+_GLOBAL_MODE_AS_A_SWITCH = re.compile(
+    r"`config\.enforcementMode` \| `block` \| `block` \(enforce\) or `audit` \(visibility only\)"
+    r"|enforcementMode: audit`?,? so a fresh dev install logs decisions instead of"
+    r"|Global default enforcement mode \(individual `NrvqPolicy` objects can override")
+
+
+@pytest.mark.parametrize("site", [*_OFF_SWITCH_PAGES, "docs/deployment.md"])
+def test_no_page_offers_the_global_mode_as_a_way_off(site: str) -> None:
+    lines = (_ROOT / site).read_text().splitlines()
+    stale = [f"{n+1}: {line.strip()}" for n, line in enumerate(lines)
+             if _GLOBAL_MODE_AS_A_SWITCH.search(" ".join(lines[max(0, n - 1):n + 1]))]
+    assert not stale, f"{site} offers config.enforcementMode as a way to stop blocking:\n  " + "\n  ".join(stale)
+
+
+# How many baseline controls act, stated in prose, against the preset that decides it. The pages said
+# "17 deny controls ... four monitor controls" after the defaults were read from the preset, which
+# authors 20 to act (block or escalate) and one to record; an operator counting on four records got
+# three refusals. Every "N of [its|the] 21" on a posture page must be the preset's own count.
+_COUNT_SITES = (*_OFF_SWITCH_PAGES, "CHANGELOG.md", "docs/guides/policy-cookbook.md", "helm/norviq/values.yaml",
+                "helm/norviq/templates/NOTES.txt", "helm/norviq/templates/baseline-cluster-policy.yaml",
+                "ui/src/components/policies/BaselineControls.tsx")
+_N_OF_TOTAL = re.compile(r"\b(\d+) of (?:its |the )?(\d+)\b(?=\s+(?:(?://|#)\s*)?(?:controls|are|at|act))")
+_STALE_COUNTS = re.compile(r"four `?monitor`? controls|17 `?deny`? controls|seventeen rows|17 of (?:its |the )?21")
+
+
+@pytest.mark.parametrize("site", _COUNT_SITES)
+def test_every_count_of_the_baseline_controls_is_the_presets(site: str) -> None:
+    defaults = baseline.default_effects("strict")
+    acting, total = sum(1 for eff in defaults.values() if eff == "deny"), len(defaults)
+    text = _unreleased_changelog() if site == "CHANGELOG.md" else (_ROOT / site).read_text()
+    stale = _STALE_COUNTS.findall(text)
+    assert not stale, f"{site} still states the 17/4 split: {stale}"
+    wrong = [m.group(0) for m in _N_OF_TOTAL.finditer(text)
+             if int(m.group(2)) == total and int(m.group(1)) != acting]
+    assert not wrong, f"{site} says {wrong}; the strict preset has {acting} of {total} controls acting by default"
 

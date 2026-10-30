@@ -97,6 +97,37 @@ func TestPolicyStorageKeyFollowsTheClusterBaselineRekey(t *testing.T) {
 	}
 }
 
+// `--set baselineClusterPolicy.enforcementMode=audit` is the documented install-time way off the
+// enforcing baseline. The chart puts it in each baseline CR's spec.enforcementMode; this is the hop that
+// carries it to the API, where the stored mode decides whether a block is applied or only recorded. The
+// CR is the one helm/norviq/templates/baseline-cluster-policy.yaml renders.
+func TestBuildPolicySyncPayload_ChartBaselineKeepsItsMode(t *testing.T) {
+	for _, mode := range []string{"block", "audit"} {
+		controller := newTestController()
+		controller.presetBasePath = "presets"
+		u := policyCR("norviq", "baseline-cluster-guard-analytics", map[string]interface{}{
+			"target":          map[string]interface{}{"namespace": "analytics"},
+			"enforcementMode": mode,
+			"preset":          "strict",
+			"clusterPriority": int64(900),
+		})
+		payload, err := controller.buildPolicySyncPayload(u)
+		if err != nil {
+			t.Fatalf("%s: %v", mode, err)
+		}
+		if payload.EnforcementMode != mode {
+			t.Fatalf("chart baseline at %q synced as %q", mode, payload.EnforcementMode)
+		}
+		if payload.Namespace != "analytics" || payload.AgentClass != "__baseline__" || payload.Priority != baselineFallbackPriority {
+			t.Fatalf("%s: synced to %s:%s at priority %d, want analytics:__baseline__ at %d",
+				mode, payload.Namespace, payload.AgentClass, payload.Priority, baselineFallbackPriority)
+		}
+		if payload.RegoSource == "" {
+			t.Fatalf("%s: the strict preset was not loaded", mode)
+		}
+	}
+}
+
 // The regression guard proper: whatever key a CR is stored under, the delete path must ask for that
 // exact key. Asserted on source so it holds for every shape, not just the ones enumerated above.
 func TestDeletePathsUseTheSharedResolver(t *testing.T) {

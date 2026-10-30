@@ -11,8 +11,11 @@ Three ready-made overlays ship alongside the defaults:
   on for both datastores, which requires you to supply `postgresql.password`/`redis.password`
   explicitly — an HA cluster manages its own credential material (see [deployment.md](deployment.md)).
 - `helm/norviq/values-dev.yaml` — fixed dev secrets (`api.secretKey`, DB/Redis passwords),
-  `logLevel: DEBUG`, and `enforcementMode: audit` so a fresh dev install logs decisions instead of
-  enforcing them.
+  `logLevel: DEBUG`, and `config.enforcementMode: audit`. That last one does **not** stop the namespace
+  baseline enforcing (see `config.enforcementMode` below); add
+  `--set baselineClusterPolicy.enforcementMode=audit` for a dev install that only records. It does make
+  the console's Target Settings show every namespace without its own setting as Monitor, which is the
+  global value, not what the engine applies there.
 - `helm/norviq/values-light.yaml` — smallest viable single-node footprint (one replica of everything,
   PDBs/HPAs/HA/SPIFFE off). Enforcement behaviour is unchanged; only replicas and resources shrink.
 
@@ -114,9 +117,10 @@ quota list — three other things key off it, which is why it is effectively man
 | Key | Default | What it does |
 |---|---|---|
 | `policyQuotaNamespaces` | `[]` | For each listed namespace: renders a `ResourceQuota` capping `count/nrvqpolicies.norviq.io` at 100, **and** one baseline `NrvqPolicy`, **and** (when `agentEgressPolicy.namespaces` is empty) the egress lockdown target set. Each namespace must already exist — a `ResourceQuota` is namespaced. |
-| `baselineClusterPolicy.enabled` | `true` | Renders the cluster baseline guard, one `NrvqPolicy` per namespace above, enforcing (`baselineClusterPolicy.enforcementMode: block` from 0.2.6; it was `audit` through 0.2.5, and `audit` restores that). With `policyQuotaNamespaces` empty this **fails the render** rather than shipping zero baselines. |
+| `baselineClusterPolicy.enabled` | `true` | Renders the cluster baseline guard, one `NrvqPolicy` per namespace above. With `policyQuotaNamespaces` empty this **fails the render** rather than shipping zero baselines. |
+| `baselineClusterPolicy.enforcementMode` | `block` | From 0.2.6 the baseline **enforces**: the `strict` preset as written, so 20 of its 21 controls act on a matching call (17 refuse it, `llm06_excessive_agency` refuses destructive tools and holds elevated ones, two MCP controls hold it for approval) and `scope_violation_dangerous_tool` records it and lets it through. `audit` records what it would refuse and lets every call proceed, the 0.2.5 posture, in every namespace whose Baseline controls nobody has saved (saved controls replace the chart's baseline and run in `block`). This is the install-wide way off; per namespace it is Monitor (`PUT /api/v1/settings?namespace=<ns>` with `{"enforcement_mode": "audit"}`), per control the console's Baseline controls panel (`PUT /api/v1/baseline/controls`). See [Concepts → Turning the shipped baseline off](concepts.md#turning-the-shipped-baseline-off). |
 | `baselineClusterPolicy.name` | `baseline-cluster-guard` | Name prefix; the rendered object is `<name>-<namespace>`. |
-| `baselineClusterPolicy.clusterPriority` | `900` | Priority of the baseline relative to tenant-authored policy. |
+| `baselineClusterPolicy.clusterPriority` | `900` | Authorizes the baseline's cross-namespace target (the CRD admits `500`-`1000`). It is not an evaluation priority: the controller stores the baseline at priority `1`, and as a floor the baseline tightens whatever the priorities say. |
 | `baselineClusterPolicy.preset` | `strict` | Preset rego bundled with the webhook (`strict` / `moderate` / `permissive` — see `webhook/presets/`). |
 
 ## Agent egress lockdown (`agentEgressPolicy.*`)
@@ -318,7 +322,7 @@ a non-chart deployment makes the app spawn its own managed `opa run --server`, b
 | `config.internalTls.enabled` | `true` | Zero-touch internal TLS/mTLS for control-plane traffic. A Helm hook mints an internal CA and the API serving cert, the API pod runs an nginx TLS terminator sidecar on `:8443` (the app itself stays plain HTTP on loopback, so probes are unaffected), and the injector gives each sidecar a CA-signed client cert for mTLS. No operator certs or CSRs. Set `false` only for a plaintext dev cluster. |
 | `config.internalTls.proxyImage` | `nginx:1.27-alpine` | Image for that TLS terminator sidecar. |
 | `config.logLevel` | `INFO` | |
-| `config.enforcementMode` | `block` | Global default enforcement mode (individual `NrvqPolicy` objects can override per-target). |
+| `config.enforcementMode` | `block` | Engine-wide default (`NRVQ_ENFORCEMENT_MODE`). It decides whether `config.noPolicyDecision: deny` can block, and is the decision used when a module returns none. It does **not** soften a block that a policy or the namespace baseline returns, so it is not a way to turn the baseline off — that is `baselineClusterPolicy.enforcementMode`, namespace Monitor, or the controls panel. |
 | `config.noPolicyDecision` | `allow` | What happens to a call in a namespace with **no matching policy**. Ships `allow` — a namespace nobody has written a policy for does not block, and the call is recorded against the named `default_allow` rule so it stays countable. Set `deny` for fail-closed, which takes effect only in `block` enforcement mode. This row previously said the default was `deny`, which overstated the shipped posture. |
 | `config.opaMode` | `server` | `server` — evaluate via HTTP against the per-pod OPA sidecar (`opa.*` above). `subprocess` — per-call `opa eval` fork (rollback path). |
 | `config.requireStrongSecret` | `true` | See Production checklist. |

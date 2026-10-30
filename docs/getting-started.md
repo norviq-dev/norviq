@@ -75,12 +75,26 @@ A few things worth knowing about this install:
 
 - **`policyQuotaNamespaces` is required.** It lists your *tenant* namespaces — the ones that will run
   agent workloads, not the `norviq` control-plane namespace. The chart renders one `strict` namespace
-  baseline (`baseline-cluster-guard-<ns>`, `clusterPriority: 900`) per entry, enforcing from 0.2.6
-  (`baselineClusterPolicy.enforcementMode: block`; set `audit` to observe only), plus the optional per-namespace `NrvqPolicy`
-  quota. Leaving it empty **fails the install by design**
+  baseline (`baseline-cluster-guard-<ns>`, `clusterPriority: 900`) per entry, plus the optional
+  per-namespace `NrvqPolicy` quota. Leaving it empty **fails the install by design**
   (`helm/norviq/templates/baseline-cluster-policy.yaml`) rather than silently shipping a cluster with
   no baseline. To install deliberately without a baseline, set `baselineClusterPolicy.enabled=false`
   instead.
+
+- **The baseline enforces from 0.2.6** (`baselineClusterPolicy.enforcementMode: block`): 20 of its 21
+  controls act on a matching call (17 refuse it, `llm06_excessive_agency` refuses destructive tools and
+  holds elevated ones for approval, two MCP controls hold it for approval), and
+  `scope_violation_dangerous_tool` records it and lets it through. Three ways to turn it off, each
+  recording the call instead of refusing it (a control switched Off is not evaluated at all):
+  - every namespace: add `--set baselineClusterPolicy.enforcementMode=audit` to the install (the 0.2.5
+    posture);
+  - one namespace: console → Target Settings → **Monitor**, or `PUT /api/v1/settings?namespace=<ns>`
+    with `{"enforcement_mode": "audit"}` — this softens every block in that namespace;
+  - one control: console → Baseline controls → **Monitor** or **Off** (`PUT /api/v1/baseline/controls`).
+    Once saved, the panel's effects replace the chart's baseline in that namespace, whichever install
+    mode you chose.
+
+  See [Concepts → Turning the shipped baseline off](concepts.md#turning-the-shipped-baseline-off).
 
 - **Images** — `helm/norviq/values.yaml` defaults `images.registry` to `ghcr.io/norviq-dev/`, so
   this pulls the public `norviq-engine` images (api/engine/ui/webhook tags) straight from GHCR —
@@ -211,13 +225,13 @@ What these do:
   `delete_*`/`drop_*`/`truncate_*`/`destroy_*`) plus prompt-injection, SQL/shell-injection,
   PII/PCI, and data-exfiltration patterns in the params — see `webhook/presets/strict.rego`.
 
-`crds/examples/` also ships `policy-namespace-baseline.yaml` — a whole-namespace fallback for
-`chatbot-prod` (`preset: permissive`, `enforcementMode: audit`, `priority: 50`). **Don't apply it on
-top of this install.** A namespace-targeted `NrvqPolicy` is stored at the scope
-`<namespace>:__baseline__`, which is the *same* scope the chart's `baseline-cluster-guard-chatbot-prod`
-already occupies, and the newest version of a scope wins. Applying the permissive example would
-replace the strict baseline the chart installed in step 2 and silently weaken the
-namespace floor. Use it only on a namespace you installed *without* a chart baseline.
+`crds/examples/` also ships `policy-namespace-baseline.yaml` — a namespace-wide policy for
+`chatbot-prod` (`preset: permissive`, `enforcementMode: audit`, `priority: 50`). Despite its name it
+does not take the chart baseline's slot: it sets no `clusterPriority`, so it is stored as the namespace
+tier (`chatbot-prod:namespace:chatbot-prod`, `resolve_policy_key`), a base tier beside the class
+policy, and the chart's `baseline-cluster-guard-chatbot-prod` keeps applying as a floor. Only a
+`clusterPriority` `NrvqPolicy` targeting the namespace alone replaces the chart's baseline
+([Concepts → Policy tiers & precedence](concepts.md#policy-tiers--precedence)).
 
 The webhook's CRD controller watches these objects and syncs them to the API
 (`POST /api/v1/policies`) automatically — nothing else to run. Confirm they synced:
