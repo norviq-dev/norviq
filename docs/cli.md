@@ -529,9 +529,9 @@ deliberate pair: 01 shows the write allowlist working, 02 shows its limit — th
 is self-asserted, so an attacker claiming to *be* the allowlisted server is admitted by the rule that
 just refused them. One of that pair is expected to fail, by design, and the reasoning is in the
 comment above `MCP-01` in `norviq/redteam/attacks.py::_build_attacks`. Note that the `mcp_identity`
-bucket in `by_category` is not that pair — it holds three attacks, `MCP-01`…`MCP-03`
-(`norviq/redteam/attacks.py::AttackCategory.MCP_IDENTITY`), so it cannot read the 50% the pair alone
-would; read the per-attack `results` entries rather than the category percentage when you are judging
+bucket in `by_category` is not that pair: the same function files three attacks under
+`AttackCategory.MCP_IDENTITY`, `MCP-01`…`MCP-03`, so the bucket cannot read the 50% the pair alone
+would. Read the per-attack `results` entries rather than the category percentage when you are judging
 this control.
 
 ### `norviq fleet` — enrollment
