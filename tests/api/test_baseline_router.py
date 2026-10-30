@@ -375,6 +375,17 @@ def test_the_controls_scope_is_reserved_from_the_generic_policy_api() -> None:
     assert "__controls__" in policies._NAMESPACE_WIDE_SCOPES
 
 
+def test_the_api_rerenders_saved_controls_at_startup() -> None:
+    """Guards the WIRING of rematerialize_controls (its behaviour is tested end to end in
+    tests/engine/test_saved_controls_supersede_the_chart_baseline.py). Without the call, a module an
+    earlier release compiled is never rewritten: only a PUT writes `__controls__`."""
+    import inspect
+
+    from norviq.api import main
+
+    assert "rematerialize_controls(app.state.loader)" in inspect.getsource(main.lifespan)
+
+
 def test_the_effective_stack_reports_the_chart_baseline_the_saved_controls_replace() -> None:
     """/policies/effective is how the console explains which layer decides. Once saved controls
     supersede the chart's baseline, listing the baseline as a layer would claim it enforces, and

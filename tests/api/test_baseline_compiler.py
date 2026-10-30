@@ -309,11 +309,65 @@ def test_a_different_module_outside_the_region_is_not_covered() -> None:
         assert not baseline.covers(compiled, newer)
 
 
-def test_a_module_compiled_before_the_off_marker_covers_only_when_nothing_is_off() -> None:
+def test_a_module_compiled_before_the_off_marker_never_covers() -> None:
+    """f373aa1 let one with nothing switched off supersede, and strict.rego is byte-identical to
+    v0.2.5's, so every v0.2.5 module with no Off control replaced the chart's baseline un-re-saved,
+    carrying v0.2.5's Monitor defaults. It now has to be exactly this compiler's output; the API
+    re-renders saved controls at startup (baseline_router.rematerialize_controls)."""
     monitored = baseline.compile(PRESET, {"deny_shell_execution": "monitor"})
     switched_off = baseline.compile(PRESET, {"deny_shell_execution": "off"})
-    assert baseline.covers(_without_off_marker(monitored), _CHART)
+    assert not baseline.covers(_without_off_marker(monitored), _CHART)
     assert not baseline.covers(_without_off_marker(switched_off), _CHART)
+
+
+def test_a_module_the_v025_compiler_wrote_never_covers() -> None:
+    """The real v0.2.5 compiler, loaded from the tag, and the stand-in the engine tests use for it.
+
+    Skipped where the tag is not fetched (a shallow CI clone): the stand-in assertion is the one that
+    matters there, and it is checked against the real output here wherever the tag is present."""
+    import importlib.util
+    import subprocess
+    import sys
+    import tempfile
+    from pathlib import Path
+
+    try:
+        src = subprocess.run(["git", "show", "v0.2.5:norviq/api/baseline.py"], capture_output=True, text=True,
+                             check=True, cwd=Path(__file__).resolve().parents[2]).stdout
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("v0.2.5 is not reachable in this checkout")
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "baseline_v025.py"
+        path.write_text(src, encoding="utf-8")
+        spec = importlib.util.spec_from_file_location("baseline_v025", path)
+        v025 = importlib.util.module_from_spec(spec)
+        sys.modules["baseline_v025"] = v025
+        try:
+            spec.loader.exec_module(v025)  # type: ignore[union-attr]
+            for effects in ({"llm05_supply_chain": "monitor"}, {"deny_shell_execution": "off"}):
+                old = v025.compile(PRESET, effects)
+                assert not baseline.covers(old, _CHART), effects
+                full = v025.normalize_effects(PRESET, effects)
+                assert old == _without_off_marker(baseline.compile(PRESET, full)), "the stand-in drifted"
+        finally:
+            sys.modules.pop("baseline_v025", None)
+
+
+def test_an_untouched_control_does_what_the_charts_baseline_does() -> None:
+    """The chart's baseline IS the preset file, so the module compiled at the shipped defaults must
+    register exactly the preset's own heads — same set, same control, same guard.
+
+    The defaults were a table that disagreed with the preset (three block-authored controls at
+    monitor), and once saved controls replace the chart's baseline any save relaxed those three.
+    Defaults are now read from the preset's authoring; this pins the property, not the mechanism."""
+    _, region, _ = baseline._split_region(baseline.compile(PRESET, {}))
+    compiled = {(h.set_name, h.control_id, h.guard) for h in baseline.parse_heads(region)}
+    authored = {(h.set_name, h.control_id, h.guard) for h in baseline.controls_for(PRESET)}
+    assert compiled == authored
+    defaults = baseline.default_effects(PRESET)
+    assert defaults["strict_default_block"] == defaults["llm02_data_leakage"] == "deny"
+    assert defaults["base64_decoded_threat"] == "deny"
+    assert [cid for cid, eff in defaults.items() if eff == "monitor"] == ["scope_violation_dangerous_tool"]
 
 
 def test_unreadable_input_is_not_covered_rather_than_an_error() -> None:

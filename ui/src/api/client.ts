@@ -454,7 +454,10 @@ export async function revertPackOverride(namespace: string): Promise<{ namespace
 
 // The effective policy stack governing a (namespace, agent_class) — derived from the real evaluator.
 export type EffectiveLayer = { scope: string; label: string; priority: number; overlay: boolean };
-export async function fetchEffectivePolicy(namespace: string, agentClass: string): Promise<{ namespace: string; agent_class: string; layers: EffectiveLayer[]; note?: string }> {
+/** A layer that exists but decides nothing because another replaced it — the chart's namespace baseline
+ *  once the namespace's saved baseline controls supersede it. `superseded_by` names a scope in `layers`. */
+export type SupersededLayer = { scope: string; label: string; priority: number; superseded_by: string };
+export async function fetchEffectivePolicy(namespace: string, agentClass: string): Promise<{ namespace: string; agent_class: string; layers: EffectiveLayer[]; superseded?: SupersededLayer[]; note?: string }> {
   return apiGet(`/api/v1/policies/effective?namespace=${encodeURIComponent(namespace)}&agent_class=${encodeURIComponent(agentClass)}`);
 }
 

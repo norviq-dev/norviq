@@ -237,20 +237,27 @@ policy that could apply and resolves them together:
    therefore *coexist* as separate candidates, while a second cluster-priority `NrvqPolicy` on the same
    target namespace replaces the chart's guard rather than layering under it.
 5. **Cluster baseline** — `(__cluster__, __baseline__)`, a floor for the whole cluster.
+6. **Saved baseline controls** — `(namespace, __controls__)`, written by the console's Baseline
+   controls (`PUT /api/v1/baseline/controls`): the `strict` preset compiled with an effect (Off,
+   Monitor, Enforce) on every control.
 
-These are resolved by **highest priority wins**, with the most restrictive decision
-(`block < escalate < audit < allow`) breaking ties. Priority, not specificity, decides: a baseline with
-a higher priority than the class policy wins even though the class policy is more specific.
+Tiers 1–3 are resolved by **highest priority wins**, with the most restrictive decision
+(`block < escalate < audit < allow`) breaking ties. Priority, not specificity, decides between them.
 
-One caveat about the baseline that actually ships, because the numbers do not read the way they look.
-The chart sets `baselineClusterPolicy.clusterPriority: 900` (`helm/norviq/values.yaml:70`), but the CRD
-controller deliberately *discards* that as the evaluation priority and stores the baseline at
-`baselineFallbackPriority = 1` (`webhook/controller.go:975-982`, `:1001`). `clusterPriority` there authorizes
-the cross-namespace target; it is not the weight. So the shipped baseline behaves as a **fallback that
-only decides when nothing more specific matched**, not as a floor that can outrank a namespace or class
-policy — the reasoning being that the `strict` preset allows anything it does not recognise as
-destructive, so a high-priority baseline would have *weakened* stricter policies sitting under it. A
-baseline you author yourself with an ordinary `priority` is a genuine floor.
+From 0.2.6 the baselines and the saved controls (4–6) are **floors**: they can make the result stricter,
+never looser, whatever their priority. A baseline's block applies even where a class policy allows,
+and a baseline's allow never undoes a class policy's block. (Through 0.2.5 they resolved by priority
+too, and the controller stores the chart's baseline at `baselineFallbackPriority = 1`, so any class
+policy outranked it.) A floor saved in `audit` mode only records.
+
+So a class policy cannot relax a baseline control; the namespace's saved controls can. Once saved they
+**replace** the chart's namespace baseline for every agent class in that namespace, and each control
+does what the console shows. A control nobody changed does what the chart's preset does, because the
+console's defaults are read from how the preset authors each control. They replace it only when the
+saved module is exactly what this release compiles from the chart's own `strict` preset, and only in
+`block` mode; with another preset, the chart's own rego, or a module from an earlier release, both stay
+floors and the stricter wins. The API re-compiles saved controls from their stored settings at
+startup. The cluster baseline is never replaced.
 
 On top of that base layer, Norviq supports **tighten-only overlays** that can only make a decision
 *more* restrictive than the base result, never less — regardless of their own priority:
@@ -274,7 +281,10 @@ flowchart TB
         wl["Workload policy<br/>(deployment:&lt;name&gt;)"]
         cls["Agent-class policy"]
         nst["Namespace tier<br/>(namespace:&lt;ns&gt;) — API/console"]
-        nsb["Namespace baseline<br/>(__baseline__) — CRD/chart<br/>shipped one stored at priority 1"]
+    end
+    subgraph fl["Floors — can only tighten, whatever their priority"]
+        nsb["Namespace baseline<br/>(__baseline__) — CRD/chart"]
+        ctl["Saved baseline controls<br/>(__controls__) — console<br/>replace the namespace baseline once saved"]
         clb["Cluster baseline<br/>(__cluster__)"]
     end
     subgraph ov["Tighten-only overlays — can only ADD a block, never weaken the base"]
@@ -283,13 +293,15 @@ flowchart TB
         rem["Compliance remediation<br/>(&lt;class&gt;__remediation__)"]
     end
     base --> M{"Combine:<br/>most-restrictive wins"}
+    fl --> M
     ov --> M
     M --> D["Final decision<br/>for this tool call"]
 ```
 
 **Example:** namespace `chatbot-prod` has a class policy (`customer-support`, `strict` preset,
 priority 200) and a namespace baseline (`chatbot-prod`, `permissive` preset, `audit` mode, priority
-50). The class policy wins on priority. If a finance sector pack is also enabled for that namespace
+50). The class policy decides; the baseline is a floor in `audit` mode, so the most it adds is a record
+of what it would have blocked. If a finance sector pack is also enabled for that namespace
 and it blocks `execute_sql` while the class policy would allow it, the pack's `block` wins because
 overlays only ever tighten.
 

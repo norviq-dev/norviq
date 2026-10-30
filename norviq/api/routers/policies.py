@@ -34,6 +34,11 @@ router = APIRouter()
 # `__cluster__` namespace (the cluster-wide baseline) is likewise undeletable.
 _RESERVED_DELETE_CLASSES = ("__baseline__", "__controls__", "__egress__", "__mcp__", "__pack__", "__pack_override__", "__pack_weaken__", "__guardrail__")
 _RESERVED_NAMESPACES = ("__cluster__",)
+# Managed scopes CREATE refuses: each is written only by its own router (see create_policy for why each
+# one). Named here, not inline, so the fleet's reserved set can be held to it by a test — the fleet hub
+# reserved only `__baseline__` and `__pack__`, and a bundle could write `__controls__`, which replaces a
+# cluster's chart baseline.
+_MANAGED_SCOPES = ("__pack__", "__pack_override__", "__pack_weaken__", "__controls__", "__egress__", "__mcp__")
 # CONSOLE VIEW SENTINELS — not namespaces. The console's global picker sends `namespace="all"` to mean
 # "aggregate every namespace" (see evaluator._collect_candidates / policy_loader.namespaces_for_class, which
 # both resolve it for READS and explicitly exclude it from the real-namespace set). No agent ever carries it,
@@ -553,7 +558,7 @@ async def create_policy(body: PolicyCreate, request: Request, user: dict = Depen
     # embedded `# nrvq-mcp-registry/v1:` header that the console reads the registry back from, and a
     # hand-written module at that scope would enforce with the weight of an operator guardrail while
     # the MCP Servers page could not describe it at all.
-    if agent_class in ("__pack__", "__pack_override__", "__pack_weaken__", "__controls__", "__egress__", "__mcp__"):
+    if agent_class in _MANAGED_SCOPES:
         log.warning("nrvq.api.policy.reserved_scope", namespace=body.namespace, agent_class=agent_class,
                     code="NRVQ-API-7016")
         raise HTTPException(

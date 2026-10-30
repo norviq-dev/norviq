@@ -171,6 +171,16 @@ async def lifespan(app: FastAPI):
         log.info("nrvq.startup.warm_cache_starting", code="NRVQ-DB-DEBUG-5")
         await app.state.loader.warm_cache()
         log.info("nrvq.startup.warm_cache_done", code="NRVQ-DB-DEBUG-6")
+        # Saved baseline controls are a compiled artefact; re-render them with THIS release's compiler
+        # so a module from an earlier release (or earlier defaults) does not keep deciding. It never
+        # blocks startup; a module another compiler rendered cannot supersede the chart's baseline anyway.
+        try:
+            from norviq.api.routers.baseline_router import rematerialize_controls
+
+            await rematerialize_controls(app.state.loader)
+        except Exception as exc:  # noqa: BLE001 — advisory; never block startup
+            log.error("nrvq.startup.baseline_controls_rematerialize_failed", error=str(exc),
+                      code="NRVQ-API-7142")
 
     # HA: every API replica subscribes to the policy-mutation stream so a create/apply/delete on ANY replica
     # propagates to all of them within pub/sub latency (~ms) — without this, a peer replica keeps enforcing

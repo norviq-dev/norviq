@@ -24,7 +24,7 @@ from sqlalchemy.dialects.postgresql import insert
 from norviq.api.db.models import FleetBundleState
 from norviq.api.db.session import get_session
 from norviq.config import settings
-from norviq.fleet.bundle import BundleVerifyError, canonical_bytes, parse_rfc3339, verify_bundle
+from norviq.fleet.bundle import RESERVED_SCOPES, BundleVerifyError, canonical_bytes, parse_rfc3339, verify_bundle
 from norviq.fleet.oidc_cc import ClientCredentialsToken
 
 log = structlog.get_logger()
@@ -120,9 +120,23 @@ class FleetPolicyPuller:
             return {"applied": False, "reason": "not_newer"}
 
         # (5) APPLY — only now do we touch enforcement. A per-policy failure -> report failed, do NOT bump.
-        new_manifest = sorted(f"{p['namespace']}:{p['agent_class']}" for p in payload["policies"])
+        #
+        # A reserved scope is never applied, whatever the signature says. The hub refuses to author or
+        # bundle one, and this is the second check, because the consequence lands HERE: a bundle that
+        # wrote `__controls__` would replace this cluster's chart baseline (the saved controls supersede
+        # it), and one that wrote `__baseline__` would replace it outright. Skipped, not fatal, so one bad
+        # row cannot freeze every other policy at the last bundle; and left out of the manifest, so the
+        # reconcile below can never delete the cluster's own copy of that scope either.
+        policies = []
+        for p in payload["policies"]:
+            if p.get("agent_class") in RESERVED_SCOPES:
+                log.warning("nrvq.fleet.bundle_reserved_scope_skipped", namespace=p.get("namespace"),
+                            agent_class=p.get("agent_class"), version=version, code="NRVQ-FLT-15045")
+                continue
+            policies.append(p)
+        new_manifest = sorted(f"{p['namespace']}:{p['agent_class']}" for p in policies)
         try:
-            for p in payload["policies"]:
+            for p in policies:
                 await self._loader.create(p["namespace"], p["agent_class"], p["rego_source"],
                                           saved_by=f"fleet:bundle:{version}", priority=p.get("priority", 100),
                                           enforcement_mode=p.get("enforcement_mode", "block"))
@@ -130,6 +144,8 @@ class FleetPolicyPuller:
             # RETRACTED — delete it from the spoke so a push is reversible.
             for key in await self._dropped_keys(new_manifest):
                 ns, _, ac = key.partition(":")
+                if ac in RESERVED_SCOPES:
+                    continue  # a cluster-managed scope a pre-guard bundle once wrote; never fleet-deleted
                 await self._loader.delete(ns, ac)
                 log.info("nrvq.fleet.bundle_retracted", key=key, version=version, code="NRVQ-FLT-15028")
         except Exception as exc:
@@ -139,7 +155,7 @@ class FleetPolicyPuller:
 
         # (6) persist version + manifest ONLY after the full apply+reconcile succeeds (partial -> re-applies next cycle)
         await self._persist(version, hashlib.sha256(canonical_bytes(payload)).hexdigest(), new_manifest)
-        log.info("nrvq.fleet.bundle_applied", version=version, policies=len(payload["policies"]), code="NRVQ-FLT-15022")
+        log.info("nrvq.fleet.bundle_applied", version=version, policies=len(policies), code="NRVQ-FLT-15022")
         await self._report(version, "applied", version, "")
         return {"applied": True, "version": version}
 

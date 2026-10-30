@@ -130,6 +130,56 @@ describe("PolicyHierarchy", () => {
     expect(screen.getByTestId("policy-hierarchy-slot-guardrail")).toHaveAttribute("data-present", "0");
   });
 
+  // Saved baseline controls REPLACE the chart's namespace baseline, and /policies/effective reports the
+  // replaced one under `superseded`, not as a layer. The legend matched the ns-baseline slot on
+  // `__baseline__` rows only, so it read "○ namespace baseline" (not configured) while the table's
+  // controls row was labelled the namespace baseline.
+  it("a namespace baseline replaced by saved controls is shown as replaced, not as missing", async () => {
+    const STACK = [
+      { scope: "default:customer-support", label: "agent-class policy", priority: 100, overlay: false },
+      { scope: "default:__controls__", label: "namespace baseline (console control effects)", priority: 2, overlay: true },
+      { scope: "__cluster__:__baseline__", label: "cluster baseline (comprehensive)", priority: 900, overlay: true }
+    ];
+    const SUPERSEDED = [
+      { scope: "default:__baseline__", label: "namespace baseline", priority: 1, superseded_by: "default:__controls__" }
+    ];
+    server.use(
+      http.get("/api/v1/policies", () => HttpResponse.json([{ agent_class: "customer-support", target_type: "class" }])),
+      http.get("/api/v1/policies/effective", () =>
+        HttpResponse.json({ namespace: "default", agent_class: "customer-support", layers: STACK, superseded: SUPERSEDED, note: "" })),
+      http.get("/api/v1/settings", () => HttpResponse.json({ enforcement_mode: "block", apply_mode: "enforce" }))
+    );
+    render(<PolicyHierarchy namespace="default" />);
+    await waitFor(() => expect(screen.getAllByTestId("policy-hierarchy-row").length).toBe(STACK.length));
+    // the replaced layer is NOT a row in the stack the evaluator resolves...
+    expect(screen.getAllByTestId("policy-hierarchy-scope").map((n) => n.textContent)).not.toContain("default:__baseline__");
+    // ...it is said, with what replaced it...
+    const replaced = screen.getByTestId("policy-hierarchy-superseded-row");
+    expect(replaced).toHaveTextContent("default:__baseline__");
+    expect(replaced).toHaveTextContent("default:__controls__");
+    // ...and the legend no longer calls the namespace baseline missing.
+    const slot = screen.getByTestId("policy-hierarchy-slot-ns-baseline");
+    expect(slot).toHaveAttribute("data-present", "1");
+    expect(slot).toHaveAttribute("data-replaced-by", "default:__controls__");
+    expect(slot).toHaveTextContent(/replaced by saved controls/);
+  });
+
+  it("a superseded entry whose replacement is not in force is not taken on trust", async () => {
+    server.use(
+      http.get("/api/v1/policies", () => HttpResponse.json([{ agent_class: "customer-support", target_type: "class" }])),
+      http.get("/api/v1/policies/effective", () =>
+        HttpResponse.json({ namespace: "default", agent_class: "customer-support",
+          layers: [{ scope: "default:customer-support", label: "agent-class policy", priority: 100, overlay: false }],
+          superseded: [{ scope: "default:__baseline__", label: "namespace baseline", priority: 1, superseded_by: "default:__controls__" }],
+          note: "" })),
+      http.get("/api/v1/settings", () => HttpResponse.json({ enforcement_mode: "block", apply_mode: "enforce" }))
+    );
+    render(<PolicyHierarchy namespace="default" />);
+    await waitFor(() => expect(screen.getAllByTestId("policy-hierarchy-row").length).toBe(1));
+    expect(screen.queryByTestId("policy-hierarchy-superseded")).toBeNull();
+    expect(screen.getByTestId("policy-hierarchy-slot-ns-baseline")).toHaveAttribute("data-present", "0");
+  });
+
   it("baseline-only class shows just the base layers (no overlay rows)", async () => {
     handlers([{ scope: "__cluster__:__baseline__", label: "cluster baseline (comprehensive)", priority: 100, overlay: false }]);
     render(<PolicyHierarchy namespace="default" />);

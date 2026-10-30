@@ -482,9 +482,11 @@ From 0.2.6 the baselines are collected as **floors** (`_collect_candidates`): a 
 whatever the class policy says, and a baseline allow never undoes a class policy's block. To relax one
 baseline control, set its effect with `PUT /api/v1/baseline/controls` (the console's Baseline controls).
 Once saved, the namespace's control effects replace the chart's `<ns>:__baseline__` for every agent
-class there, each control doing what the console shows — provided the chart's baseline is the `strict`
-preset the console compiles (`_apply_controls_supersede`). With another preset or its own rego, both
-stay floors and the stricter wins; `__cluster__:__baseline__` is never replaced. For
+class there, each control doing what the console shows (a control nobody changed does what the preset
+does) — provided the chart's baseline is the `strict` preset the console compiles and the saved module
+is exactly this release's compile of it (`_apply_controls_supersede`; the API re-compiles saved
+controls at startup). With another preset or its own rego, both stay floors and the stricter wins;
+`__cluster__:__baseline__` is never replaced. For
 anything else that must only tighten, you still need an overlay, and no overlay is reachable from a CR
 — the CRD's `agentClass` pattern (`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`) forbids underscores. Which endpoint
 you use depends on which overlay:

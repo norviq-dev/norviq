@@ -91,8 +91,8 @@ _STALE_AUDIT_DEFAULT = re.compile(
 
 def test_docs_describe_the_baseline_posture_that_ships():
     """Rewritten for 0.2.6. This asserted the baseline shipped `audit` and carried a tripwire: when that
-    changed, re-read these pages and decide whether "fail-closed" had become true. It has not — four
-    controls ship at monitor and an outage still fails open — so the pages must stop describing the
+    changed, re-read these pages and decide whether "fail-closed" had become true. It has not — a
+    control only records and an outage still fails open — so the pages must stop describing the
     0.2.5 default, and must still not call the baseline fail-closed."""
     values = yaml.safe_load((_ROOT / "helm/norviq/values.yaml").read_text())
     mode = values["baselineClusterPolicy"]["enforcementMode"]

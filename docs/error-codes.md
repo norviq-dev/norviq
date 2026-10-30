@@ -129,6 +129,10 @@ Total unique codes: **408** (including `*-DEBUG-*` traces).
 | NRVQ-API-7135 | `nrvq.api.policy.priority_band_denied` — a write tried to claim a priority band it isn't allowed to | `norviq/api/routers/policies.py` |
 | NRVQ-API-7137 | `nrvq.api.settings.mirror_failed` — an admin saved per-namespace posture, the row committed and the console shows it applied, but the Redis mirror the evaluator hot path reads did not update. **Alert on this**: enforcement is running on the previous or global posture while the UI claims otherwise | `norviq/api/routers/settings_router.py` |
 | NRVQ-API-7138 | `nrvq.startup.ns_settings_warm_failed` — the boot warm of per-namespace posture failed, so *every* persisted per-ns posture is absent from Redis and the evaluator falls back to global config. Wider blast radius than 7137, same meaning: saved posture is not the posture being enforced | `norviq/api/main.py` |
+| NRVQ-API-7139 | `nrvq.api.baseline.rematerialized` — at startup, a namespace's saved baseline controls were re-compiled from their stored effects because the stored module differed from what this release compiles | `norviq/api/routers/baseline_router.py` |
+| NRVQ-API-7140 | `nrvq.api.baseline.rematerialize_failed` — re-compiling one namespace's saved baseline controls at startup failed; that namespace keeps its old module, which cannot replace the chart's baseline (NRVQ-ENG-2068) | `norviq/api/routers/baseline_router.py` |
+| NRVQ-API-7141 | `nrvq.api.baseline.rematerialize_skipped_foreign` — a `__controls__` policy the baseline controls API did not write (its name is not `baseline-controls:<preset>`) was left as it is | `norviq/api/routers/baseline_router.py` |
+| NRVQ-API-7142 | `nrvq.startup.baseline_controls_rematerialize_failed` — the startup re-compile of saved baseline controls failed as a whole (for example the database was unreachable); no namespace was re-compiled | `norviq/api/main.py` |
 
 ## WHK
 
@@ -276,6 +280,7 @@ Multi-cluster fleet. Spoke relay + hub fleet-api. Distinct prefix from `NRVQ-AUT
 | NRVQ-FLT-15026 | `nrvq.fleet.drilldown_residency_blocked` | `norviq/fleet/routers/fleet_policy.py` |
 | NRVQ-FLT-15043 | `nrvq.fleet.pull_failed` — a bundle pull failed; the fleet member keeps serving its last good bundle, so policy is stale rather than absent | `norviq/fleet_puller.py` |
 | NRVQ-FLT-15044 | `nrvq.fleet.puller_no_trust_root` — the puller has no trust root, so bundle signatures cannot be verified. **Alert on this**: it is the precondition for accepting an unsigned bundle | `norviq/fleet_puller.py` |
+| NRVQ-FLT-15045 | `nrvq.fleet.bundle_reserved_scope_skipped` — a signed bundle carried a cluster-managed scope (`__baseline__`, `__controls__`, `__pack__*`, `__egress__`, `__mcp__`) and the spoke refused to apply it. **Alert on this**: the hub refuses to author or bundle these, so one reaching a spoke means the hub is old, misconfigured or compromised | `norviq/fleet_puller.py` |
 
 ## DB
 
@@ -327,7 +332,7 @@ table stays unpartitioned for that range and retention pruning gets slower over 
 | NRVQ-ENG-2031 | `nrvq.engine.policy_unloaded` (evaluator unload on delete) | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2040..2050 | trust calculator/profile/history/cache codes | `norviq/engine/trust/*`, `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2067 | `nrvq.engine.trust.freeze_check_failed` — the trust-freeze check itself errored, so a frozen agent may be scored as if it were not frozen. Split off the 2040..2050 range because that range also carries routine INFO | `norviq/engine/trust/calculator.py` |
-| NRVQ-ENG-2068 | `nrvq.engine.baseline.controls_do_not_supersede` — a namespace's saved control effects do not settle every control of the chart's baseline (another preset, its own rego, a preset that changed since the controls were saved, or Off saved before 0.2.6), so the chart's baseline stays a floor and an Off or Monitor that is looser than it does not take effect. Re-save the controls; logged once per pair | `norviq/engine/evaluator.py` |
+| NRVQ-ENG-2068 | `nrvq.engine.baseline.controls_do_not_supersede` — a namespace's saved controls are not exactly what this release compiles from the chart's baseline (another preset, the chart's own rego, or a module an earlier release compiled and the startup re-render has not replaced), so the chart's baseline stays a floor and an Off or Monitor looser than it does not take effect. Check NRVQ-API-7140 / 7141; logged once per pair | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2069 | `nrvq.engine.baseline.supersede_check_failed` — comparing the saved controls with the chart's baseline raised; the chart's baseline is kept as a floor (fail closed) | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-DEBUG-* | OPA I/O and evaluator debug traces | `norviq/engine/evaluator.py` |
 

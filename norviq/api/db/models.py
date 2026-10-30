@@ -153,14 +153,14 @@ class NamespacePack(Base):
 class NamespaceBaselineControl(Base):
     """One baseline control's effect in a namespace: off | monitor | deny.
 
-    Only ROWS THAT DIFFER from the shipped default are stored. A namespace with no rows is running
-    every control at `monitor` — evaluating everything, dropping nothing — which is what a fresh
-    install should be, and it means enrolling a namespace costs no writes at all.
+    Only ROWS THAT DIFFER from the control's shipped default are stored. A namespace with no rows runs
+    every control at its default — what the chart's preset does with it (baseline.shipped_default) —
+    and enrolling a namespace costs no writes at all.
 
     Sparse storage also keeps the default LIVE rather than frozen at install time: if a later release
-    ships a new control, existing namespaces pick it up at its default instead of silently running
-    without it because their stored map predates it. Materialized into the namespace's
-    (namespace, '__baseline__') policy by norviq/api/baseline.py, exactly as packs are.
+    ships a new control or a new default, existing namespaces pick it up instead of running a stored
+    copy. Materialized into the namespace's (namespace, '__controls__') policy by
+    norviq/api/routers/baseline_router.py, on every save and again at API startup.
     """
 
     __tablename__ = "namespace_baseline_controls"

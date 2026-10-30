@@ -207,8 +207,9 @@ Working on Norviq itself, or a modified chart? Install from a clone instead — 
 `policyQuotaNamespaces` is the list of tenant namespaces that will run agents — it is **required**, not
 optional. The chart installs a `strict`-preset namespace baseline for each entry, so an empty list
 fails the install by design rather than shipping a cluster with no baseline. From 0.2.6 that baseline
-**enforces** (`baselineClusterPolicy.enforcementMode: block`): its 17 `deny` controls refuse the call,
-and its four `monitor` controls record without blocking. Through 0.2.5 it shipped in `audit`; set
+**enforces** (`baselineClusterPolicy.enforcementMode: block`): 20 of its 21 controls refuse the call
+(two MCP controls hold it for approval), and `scope_violation_dangerous_tool` records without blocking.
+Through 0.2.5 it shipped in `audit`; set
 `enforcementMode: audit` to keep that posture. It is not fail-closed as a whole: a namespace outside
 this list has no baseline, and an API outage still follows `webhook.injection.fallbackMode`, which ships
 `allow`. Add every agent namespace

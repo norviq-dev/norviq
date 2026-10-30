@@ -18,6 +18,21 @@ from datetime import datetime, timezone
 from jwt import PyJWTError as JWSError
 from jwt import api_jws as jws
 
+# Scopes a bundle may NEVER carry, checked by the hub when a policy is authored and when a bundle is
+# built, and again by the spoke before it applies one. Each is managed PER CLUSTER by its own path: the
+# chart's baseline by the webhook controller, `__pack__*` by the packs API, `__controls__` by the
+# baseline controls API, `__egress__` and `__mcp__` by their registries. Every one of them except
+# `__baseline__` is also refused by POST /policies (policies._MANAGED_SCOPES, pinned by a test).
+#
+# `__controls__` matters most: a cluster's saved controls REPLACE its chart baseline, so a fleet push to
+# that key could switch a spoke's baseline off. The hub reserved only __baseline__ and __pack__ and the
+# spoke filtered nothing; measured on the resolver, a strict module with every control off, applied at
+# that key beside a class policy that allows, took run_shell from block/deny_shell_execution to
+# allow/class_allow.
+RESERVED_SCOPES = frozenset({
+    "__baseline__", "__pack__", "__pack_override__", "__pack_weaken__", "__controls__", "__egress__", "__mcp__",
+})
+
 
 def rfc3339_z(dt: datetime) -> str:
     """One UTC formatter used everywhere (e.g. 2026-06-29T10:00:00Z) — NEVER mix `Z` and `+00:00`."""

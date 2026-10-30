@@ -28,8 +28,8 @@ def test_the_chart_describes_the_baseline_posture_it_ships():
 
     This asserted `audit` and carried a tripwire for the day that changed: re-read NOTES.txt and the
     template and decide whether "fail-closed" had become TRUE, rather than deleting the assertion. Re-read
-    and decided: it has not. Seventeen controls refuse the call, but four ship at `monitor` and only
-    record, and an API outage still follows fallbackMode, which ships `allow`. So the text must say the
+    and decided: it has not. Twenty controls enforce, but one (`scope_violation_dangerous_tool`) only
+    records, and an API outage still follows fallbackMode, which ships `allow`. So the text must say the
     baseline ENFORCES, name `audit` as the way back, and still not call it fail-closed.
     """
     values = yaml.safe_load((_ROOT / "helm/norviq/values.yaml").read_text())
@@ -47,5 +47,5 @@ def test_the_chart_describes_the_baseline_posture_it_ships():
                  if re.search(r"ships in audit|records non-compliance and does not block|defaults to `audit`", line)]
         assert not stale, f"{name} still describes the 0.2.5 audit default:\n  " + "\n  ".join(stale)
         hits = [line.strip() for line in text.splitlines() if "fail-closed" in line]
-        assert not hits, f"{name} calls the baseline 'fail-closed'; four controls monitor and outages fail open:\n  " + "\n  ".join(hits)
+        assert not hits, f"{name} calls the baseline 'fail-closed'; a control only records and outages fail open:\n  " + "\n  ".join(hits)
 

@@ -15,18 +15,21 @@ because they should be installed.
 **Upgrade impact — read before `helm upgrade`.**
 
 - **The namespace baseline now blocks.** `baselineClusterPolicy.enforcementMode` defaults to `block`
-  (it was `audit`). Its 17 `deny` controls refuse the call; its four `monitor` controls still only record.
-  Set `baselineClusterPolicy.enforcementMode=audit` to keep the 0.2.5 posture. Measured before the
-  change: 0 false positives over a 51-case benign corpus, with every control at deny.
+  (it was `audit`). 20 of its 21 controls refuse the call (two MCP controls hold it for approval
+  instead); `scope_violation_dangerous_tool` only records. The console's Baseline controls now default to
+  the same: they showed `strict_default_block`, `llm02_data_leakage` and `base64_decoded_threat` at
+  Monitor while the baseline blocked them. Set `baselineClusterPolicy.enforcementMode=audit` to keep the
+  0.2.5 posture. Measured before the change: 0 false positives over a 51-case benign corpus, with every
+  control at deny.
 - **A class policy no longer loosens the baseline.** The namespace and cluster baselines are floors: a
   baseline control's block applies even where a class policy allows. Through 0.2.5 any class policy
   outranked the baseline (stored at priority 1), so an enforcing baseline would have switched off for
   every class that had a policy. To relax one control, set its effect in the console's Baseline
   controls: once saved, a namespace's control effects replace the chart's baseline there, for every
-  agent class, and each control does what the console shows. That includes `strict_default_block`,
-  `llm02_data_leakage` and `base64_decoded_threat`, which the console shows at Monitor and the chart's
-  baseline blocks by default. A control set to Off before this release takes effect once the controls
-  are saved again. The cluster baseline is not replaced.
+  agent class, and each control does what the console shows; a control you did not change keeps doing
+  what the baseline did. Controls saved by an earlier release are recompiled from their stored settings
+  when the API starts, so they take effect without re-saving, and a control left at its old default
+  takes the new one (Monitor becomes Enforce for the three above). The cluster baseline is not replaced.
 - **Agents that install packages are refused.** `llm05_supply_chain` blocks `install_package`,
   `load_plugin`, `download_script` and `eval` by tool name, including installs from public PyPI. Set
   that control to `monitor`, or allow the tool in your own policy.
