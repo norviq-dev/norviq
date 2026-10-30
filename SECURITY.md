@@ -90,8 +90,10 @@ every run read "2 projects scanned". It is `setuptools` now. Before the scan, th
 every line of the export is in a form fossa-cli's requirements parser reads (it drops the lines it
 cannot parse without a warning) and that the packages that must ship are among them. After it, the
 workflow fails if any of the three graphs is missing from the scan summary. The optional extras are
-outside this scan by design; they are audited with `uv export --extra <name>` and the floors in
-`pyproject.toml`.
+outside this scan by design. The report-only `deps-audit` job in `.github/workflows/security.yml`
+exports each one (`uv export --extra <name>`) and runs pip-audit on it, ignoring only the ids in the
+table below, and `tests/test_deps_audit.py` fails when `pyproject.toml` declares an extra that job does
+not audit. The floors that close what it finds are in `pyproject.toml`.
 
 The Python graph is scoped by `[tool.uv] environments` to the interpreters this project claims (3.11 /
 3.12 — see `classifiers`; both images are `python:3.12-slim`). That is a security decision, not a
