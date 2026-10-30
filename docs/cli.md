@@ -325,7 +325,6 @@ norviq audit top-blocked -n chatbot-prod --range 1h
 
 # Which rule fired, per record — the table shows rule_id, but not the reason string.
 norviq -o json audit list -n chatbot-prod -d block --range 1h \
-  | grep -v '^[0-9-]\{10\} [0-9:]\{8\} \[' \
   | jq -r '.[] | "\(.timestamp) \(.tool_name) \(.rule_id) \(.reason)"'
 ```
 
@@ -471,7 +470,6 @@ clean one.
 
 ```bash
 norviq redteam run --namespace chatbot-prod --agent support-agent -o json \
-  | grep -v '^[0-9-]\{10\} [0-9:]\{8\} \[' \
   | jq -e '.summary.pass_rate >= 95' > /dev/null
 ```
 
