@@ -490,14 +490,19 @@ not validated by Click: an unrecognized value raises an uncaught `ValueError` fr
 `AttackCategory(category)` (`norviq/redteam/runner.py::_run_suite`) and you get a Python traceback
 and exit 1, not a usage message.
 
-Two behaviors worth knowing before you run this against a shared cluster. `RL-001` deliberately
-replays a single call `evaluator_rate_limit_per_window + 1` times — 61 requests at the default
-(`norviq/config.py::NorviqSettings.evaluator_rate_limit_per_window`,
-`norviq/redteam/simulator.py::_execute_attack`) — because the control it tests is the rate limiter,
-not a single evaluation. So a full run is 94 `POST /evaluate` calls at the defaults —
-33 attacks once each, plus RL-001's 61 — and each decision lands in the audit log tagged
+Two behaviors worth knowing before you run this against a shared cluster. Every attack is one
+`POST /evaluate`, `RL-001` included (`norviq/redteam/simulator.py::_execute_attack`), the same as the
+console's suite, so a full run is 34 calls. Each decision lands in the audit log tagged
 `framework: redteam`, which `audit list` will show you and `audit stats` will not (see
-[`norviq audit`](#norviq-audit--decision-history)).
+[`norviq audit`](#norviq-audit--decision-history)). And every call carries the same SPIFFE id,
+`spiffe://norviq/ns/<namespace>/sa/<agent>`, which is the key the engine's rate limiter counts
+(`norviq/engine/evaluator.py::OPAEvaluator._is_rate_limited`). Pointed at a real class, the suite
+shares that class's window with its live traffic. A block whose rule is the throttle
+(`rate_limit_exceeded`) or an engine fault (`evaluator_timeout`, `evaluator_error`, …) is reported
+as `FAIL` even when the attack expects a block, because no policy blocked it
+(`norviq/redteam/simulator.py::_build_success_result`, the same resolver the console's scorecard
+uses, `norviq/api/routers/system_health.py::non_policy_rule_for`). In `-o json`, `actual_rule` tells
+such a row apart from a plain policy miss.
 
 ```bash
 # What is in the catalog — no cluster needed.

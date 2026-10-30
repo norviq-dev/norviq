@@ -11,7 +11,10 @@ from dataclasses import asdict, dataclass
 import httpx
 import structlog
 
-from norviq.config import settings
+# Unused here since RL-001 stopped reading the limiter ceiling, and kept on purpose: this is the CLI's
+# only import of norviq.config, and importing it runs `_preload_env_files` (docs/cli.md, ".env
+# loading"). Dropping it would silently stop `norviq` reading the repository-root .env.
+import norviq.config  # noqa: F401
 from norviq.redteam.attacks import ATTACKS, AttackCategory, AttackDefinition, get_attack_by_id
 
 log = structlog.get_logger()
@@ -69,7 +72,7 @@ class AttackSimulator:
         start = time.perf_counter()
         payload = _request_payload(attack, target_agent, target_namespace)
         try:
-            data = await _execute_attack(self._client, self._api_url, payload, attack.category)
+            data = await _execute_attack(self._client, self._api_url, payload)
             return _build_success_result(attack, data, start)
         except Exception as exc:
             return _build_error_result(attack, start, exc)
@@ -118,13 +121,33 @@ def _request_payload(attack: AttackDefinition, target_agent: str, target_namespa
     }
 
 
+def _non_policy_rule(rule_id: str) -> str | None:
+    """The bare engine-fault or throttle rule a decision carries, or None when a policy decided it.
+
+    The console's verdict (`norviq/api/redteam_efficacy.py::_row_outcome`) asks the same resolver, so
+    the CLI and the scorecard cannot disagree about what a throttled or faulted block is. Imported
+    here and not at module top: redteam must not require the API package at import (precision.py
+    does the same). Measured: importing this module loads 6 norviq modules; the first call here
+    takes that to 65, FastAPI and SQLAlchemy included, in 0.6-0.95 s, once per process.
+    """
+    from norviq.api.routers.system_health import non_policy_rule_for
+
+    return non_policy_rule_for(rule_id)
+
+
 def _build_success_result(attack: AttackDefinition, data: dict, started: float) -> AttackResult:
     """Create attack result from successful response."""
     latency_ms = (time.perf_counter() - started) * 1000
     actual_decision, actual_rule = _extract_decision(data)
-    passed = actual_decision == attack.expected_decision
+    # A block no policy made is not a pass. `rate_limit_exceeded` fires only on a call the policy stack
+    # already ALLOWED, and a fail-closed `evaluator_timeout` is the engine failing, so either one met a
+    # block expectation by accident. Measured against the real engine with the read exemption off,
+    # where RL-001's old 61-call replay was counted: seven attacks the baseline does not block passed
+    # on `rate_limit_exceeded`, and the run read 32/34 against 27/34 real.
+    non_policy = _non_policy_rule(actual_rule)
+    passed = actual_decision == attack.expected_decision and non_policy is None
     if not passed:
-        log.warning("nrvq.redteam.attack_not_blocked", attack=attack.id, expected=attack.expected_decision, actual=actual_decision, code="NRVQ-RED-13001")
+        log.warning("nrvq.redteam.attack_not_blocked", attack=attack.id, expected=attack.expected_decision, actual=actual_decision, non_policy_rule=non_policy, code="NRVQ-RED-13001")
     elif actual_rule != attack.expected_rule:
         log.warning("nrvq.redteam.rule_mismatch", attack=attack.id, expected_rule=attack.expected_rule, actual_rule=actual_rule, code="NRVQ-RED-13001")
     return AttackResult(
@@ -142,15 +165,19 @@ def _build_success_result(attack: AttackDefinition, data: dict, started: float) 
     )
 
 
-async def _execute_attack(client: httpx.AsyncClient, api_url: str, payload: dict, category: AttackCategory) -> dict:
-    """Execute one attack, replaying rate-limit scenarios."""
-    attempts = settings.evaluator_rate_limit_per_window + 1 if category == AttackCategory.OWASP_LLM10 else 1
-    data: dict = {}
-    for _ in range(attempts):
-        response = await client.post(f"{api_url}/api/v1/evaluate", json=payload)
-        response.raise_for_status()
-        data = response.json()
-    return data
+async def _execute_attack(client: httpx.AsyncClient, api_url: str, payload: dict) -> dict:
+    """POST one attack once — RL-001 included, as the console's suite (`routers/redteam.py::run_suite`) does.
+
+    RL-001 used to be replayed `evaluator_rate_limit_per_window + 1` times. Its expectation is a
+    single call's `allow` (attacks.py), and every attack posts under the same SPIFFE id, which is
+    what the engine's limiter counts on. Under the shipped read exemption `search_kb` is never
+    counted, so the replay measured nothing; with the exemption off, the 61st call was throttled and
+    failed RL-001 because the limiter worked, and the identity's window stayed over its ceiling for
+    every attack after it.
+    """
+    response = await client.post(f"{api_url}/api/v1/evaluate", json=payload)
+    response.raise_for_status()
+    return response.json()
 
 
 def _extract_decision(data: dict) -> tuple[str, str]:
