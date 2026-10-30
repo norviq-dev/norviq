@@ -121,18 +121,18 @@ def _request_payload(attack: AttackDefinition, target_agent: str, target_namespa
     }
 
 
-def _non_policy_rule(rule_id: str) -> str | None:
-    """The bare engine-fault or throttle rule a decision carries, or None when a policy decided it.
+def _attack_passed(expected: str, actual: str, rule_id: str) -> bool:
+    """`norviq/api/redteam_efficacy.py::attack_passed`, the rule the console's rows and pass rate use.
 
-    The console's verdict (`norviq/api/redteam_efficacy.py::_row_outcome`) asks the same resolver, so
-    the CLI and the scorecard cannot disagree about what a throttled or faulted block is. Imported
-    here and not at module top: redteam must not require the API package at import (precision.py
-    does the same). Measured: importing this module loads 6 norviq modules; the first call here
-    takes that to 65, FastAPI and SQLAlchemy included, in 0.6-0.95 s, once per process.
+    One function for both runners, so the CLI and the console cannot disagree about whether a
+    throttled or faulted block passed. Imported here and not at module top: redteam must not require
+    the API package at import (precision.py does the same). Measured: importing this module loads 6
+    norviq modules; the first call here takes that to 67, FastAPI and SQLAlchemy included, in
+    0.6-0.95 s, once per process.
     """
-    from norviq.api.routers.system_health import non_policy_rule_for
+    from norviq.api.redteam_efficacy import attack_passed
 
-    return non_policy_rule_for(rule_id)
+    return attack_passed(expected, actual, rule_id)
 
 
 def _build_success_result(attack: AttackDefinition, data: dict, started: float) -> AttackResult:
@@ -144,10 +144,9 @@ def _build_success_result(attack: AttackDefinition, data: dict, started: float) 
     # block expectation by accident. Measured against the real engine with the read exemption off,
     # where RL-001's old 61-call replay was counted: seven attacks the baseline does not block passed
     # on `rate_limit_exceeded`, and the run read 32/34 against 27/34 real.
-    non_policy = _non_policy_rule(actual_rule)
-    passed = actual_decision == attack.expected_decision and non_policy is None
+    passed = _attack_passed(attack.expected_decision, actual_decision, actual_rule)
     if not passed:
-        log.warning("nrvq.redteam.attack_not_blocked", attack=attack.id, expected=attack.expected_decision, actual=actual_decision, non_policy_rule=non_policy, code="NRVQ-RED-13001")
+        log.warning("nrvq.redteam.attack_not_blocked", attack=attack.id, expected=attack.expected_decision, actual=actual_decision, rule=actual_rule, code="NRVQ-RED-13001")
     elif actual_rule != attack.expected_rule:
         log.warning("nrvq.redteam.rule_mismatch", attack=attack.id, expected_rule=attack.expected_rule, actual_rule=actual_rule, code="NRVQ-RED-13001")
     return AttackResult(

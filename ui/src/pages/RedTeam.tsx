@@ -499,7 +499,8 @@ const RedTeam = () => {
  *
  * The page used to decide "got through" itself, as `!passed && applicable !== false`, while the
  * scorecard above it counted `compute_efficacy`'s verdict. They disagreed in both directions. A
- * throttled or faulted block has `passed` true (actual block == expected block), so the table hid it
+ * throttled or faulted block had `passed` true (actual block == expected block; the server's
+ * `attack_passed` has since excluded it, and "Suite pass-rate" with it), so the table hid it
  * while the scorecard counted it as got-through — a kind run had 17 `block / rate_limit_exceeded`
  * red-team rows, and "Got through" read above zero over a filter that listed nothing. A monitored
  * detection has `passed` false, so the table painted it red while the scorecard counted it as

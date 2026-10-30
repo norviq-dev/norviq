@@ -499,10 +499,10 @@ console's suite, so a full run is 34 calls. Each decision lands in the audit log
 (`norviq/engine/evaluator.py::OPAEvaluator._is_rate_limited`). Pointed at a real class, the suite
 shares that class's window with its live traffic. A block whose rule is the throttle
 (`rate_limit_exceeded`) or an engine fault (`evaluator_timeout`, `evaluator_error`, …) is reported
-as `FAIL` even when the attack expects a block, because no policy blocked it
-(`norviq/redteam/simulator.py::_build_success_result`, the same resolver the console's scorecard
-uses, `norviq/api/routers/system_health.py::non_policy_rule_for`). In `-o json`, `actual_rule` tells
-such a row apart from a plain policy miss.
+as `FAIL` even when the attack expects a block, because no policy blocked it. The rule is
+`norviq/api/redteam_efficacy.py::attack_passed`, which the console's rows and its "Suite pass-rate"
+use too, so the two report the same passes. In `-o json`, `actual_rule` tells such a row apart from a
+plain policy miss.
 
 ```bash
 # What is in the catalog — no cluster needed.

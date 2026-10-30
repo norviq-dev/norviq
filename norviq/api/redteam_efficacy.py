@@ -183,13 +183,48 @@ def row_outcome(r: dict[str, Any]) -> str:
     return _row_outcome(r)
 
 
+def attack_passed(expected: Any, actual: Any, rule_id: Any) -> bool:
+    """`passed` on a result row, in the console and in `norviq redteam run`: the decision is the one the
+    attack expected AND a policy made it.
+
+    It was `actual == expected` alone, so a throttled or faulted block met a block expectation by
+    accident. The scorecard has counted those rows as got_through since v0.2.1 (`_row_outcome`), while
+    the same rows raised the console's "Suite pass-rate" and passed in the CLI. Against an evaluator
+    that throttles every call, a suite read 32/34 passed beside a scorecard of 0 caught. Same resolver
+    as `_row_outcome`, so the two cannot disagree about what a throttle is. A row that records no
+    expectation proves nothing, so it does not pass either.
+    """
+    return bool(expected) and actual == expected and non_policy_rule_for(str(rule_id or "")) is None
+
+
+def pass_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """total / passed / failed / pass_rate over result rows, counted by `attack_passed`.
+
+    The one formula for a run's pass figures: the suite builds its report with it, and the read
+    routes re-derive them with it whenever the rows are still stored.
+    """
+    total = len(results)
+    passed = sum(1 for r in results if attack_passed(r.get("expected"), r.get("actual"), r.get("rule_id")))
+    return {
+        "total": total,
+        "passed": passed,
+        "failed": total - passed,
+        "pass_rate": round(passed / total * 100, 1) if total else 0,
+    }
+
+
 def with_outcomes(results: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
-    """Copies of `results`, each annotated with its `row_outcome`, for the API to serve.
+    """Copies of `results`, each annotated with its `row_outcome` and its current `passed`, to serve.
 
     Computed on read and never persisted, so a run stored before this field existed gets it too, and
-    a stored row can never carry a verdict that disagrees with the current roll-up.
+    a stored row can never carry a verdict that disagrees with the current roll-up. `passed` is
+    re-derived for the same reason: a row written while it was `actual == expected` says a throttled
+    block passed, beside an `outcome` of got_through.
     """
-    return [{**r, "outcome": row_outcome(r)} for r in results or []]
+    return [
+        {**r, "passed": attack_passed(r.get("expected"), r.get("actual"), r.get("rule_id")), "outcome": row_outcome(r)}
+        for r in results or []
+    ]
 
 
 def _finalize(bucket: dict[str, Any]) -> dict[str, Any]:

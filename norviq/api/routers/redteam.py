@@ -18,7 +18,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from norviq.api.auth import get_current_user, require_admin
 from norviq.api.db.models import AgentRegistryEntry, RedTeamRun
 from norviq.api.db.session import get_session
-from norviq.api.redteam_efficacy import attack_mapping, catalog_entry, compute_efficacy, row_outcome, with_outcomes
+from norviq.api.redteam_efficacy import (
+    attack_mapping,
+    attack_passed,
+    catalog_entry,
+    compute_efficacy,
+    pass_summary,
+    row_outcome,
+    with_outcomes,
+)
 from norviq.api.synthetic import is_synthetic_identity
 from norviq.config import settings
 from norviq.redteam.attacks import ATTACKS, AttackCategory, get_attack_by_id
@@ -194,16 +202,14 @@ async def run_suite(
                         results.append(_result_row(attack, agent_class, target_namespace, decision.decision, decision.rule_id, decision.latency_ms, applicable))
                     except Exception as exc:
                         results.append(_error_row(attack, agent_class, target_namespace, str(exc)))
-            passed = sum(1 for item in results if item.get("passed"))
+            tally = pass_summary(results)  # a throttled or faulted block is not a pass (attack_passed)
+            passed = tally["passed"]
             efficacy = compute_efficacy(results)  # caught-vs-got-through roll-up (synthetic excluded)
             report = {
                 "run_id": run_id,
                 "namespace": target_namespace,
                 "targets": targets,
-                "total": len(results),
-                "passed": passed,
-                "failed": len(results) - passed,
-                "pass_rate": round(passed / len(results) * 100, 1) if results else 0,
+                **tally,
                 "results": results,
                 "efficacy": efficacy,
                 # WHAT WAS ACTUALLY MEASURED (F-014). A pass_rate is meaningless without it, and the
@@ -436,6 +442,18 @@ async def get_report(run_id: str, user: dict = Depends(get_current_user)) -> dic
     return _served(REPORTS[run_id])
 
 
+def _pass_figures(row: RedTeamRun) -> dict[str, Any]:
+    """A stored run's total / passed / failed / pass_rate, re-derived from its rows while it has them.
+
+    The stored columns of a run written while `passed` was `actual == expected` count its throttled
+    and faulted blocks as passes, and the newest run, the one "Suite pass-rate" shows, always keeps
+    its rows. A detail-pruned run has no rows to re-derive from, so it serves what it was written with.
+    """
+    if row.results is None:
+        return {"total": row.total, "passed": row.passed, "failed": row.failed, "pass_rate": row.pass_rate}
+    return pass_summary(row.results)
+
+
 def _run_summary(row: RedTeamRun) -> dict[str, Any]:
     """Lightweight run summary for the history list (no full result rows)."""
     eff = row.efficacy or {}
@@ -445,10 +463,7 @@ def _run_summary(row: RedTeamRun) -> dict[str, Any]:
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "namespace": row.namespace,
         "targets": row.targets,
-        "total": row.total,
-        "passed": row.passed,
-        "failed": row.failed,
-        "pass_rate": row.pass_rate,
+        **_pass_figures(row),
         "proven_blocking_pct": overall.get("proven_blocking_pct", 0.0),
         "caught": overall.get("caught", 0),
         "got_through": overall.get("got_through", 0),
@@ -474,10 +489,7 @@ def _run_to_dict(row: RedTeamRun) -> dict[str, Any]:
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "namespace": row.namespace,
         "targets": row.targets,
-        "total": row.total,
-        "passed": row.passed,
-        "failed": row.failed,
-        "pass_rate": row.pass_rate,
+        **_pass_figures(row),
         "results": with_outcomes(row.results),
         "detail_pruned": pruned,
         "efficacy": row.efficacy,
@@ -603,7 +615,7 @@ def _result_row(attack: Any, agent_class: str, namespace: str, actual: str, rule
         "expected": attack.expected_decision,
         "actual": actual,
         "rule_id": rule_id,
-        "passed": actual == attack.expected_decision,
+        "passed": attack_passed(attack.expected_decision, actual, rule_id),
         "applicable": applicable,
         "latency_ms": latency_ms,
         **_mapping_fields(attack),

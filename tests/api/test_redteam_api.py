@@ -226,10 +226,18 @@ def _sample_run():
 
     from norviq.api.db.models import RedTeamRun
 
+    # The rows its summary describes: 27 caught, and two allow-expected attacks that were throttled
+    # (non_enforcement, so not counted by the efficacy below, and not passes). This used to be ONE row,
+    # `{"attack_id": "PI-001", "passed": True}`, under a summary of 29. The served pass figures are
+    # derived from the rows now whenever a run has them, so the fixture has to be a run that can exist.
+    caught = [{"attack_id": f"A-{i:02d}", "expected": "block", "actual": "block", "rule_id": "deny_sql_injection",
+               "passed": True} for i in range(27)]
+    throttled = [{"attack_id": aid, "expected": "allow", "actual": "block", "rule_id": "rate_limit_exceeded",
+                  "passed": False} for aid in ("RL-001", "CE-002")]
     return RedTeamRun(
         id="run-abc", created_at=datetime(2026, 7, 6, tzinfo=timezone.utc), namespace="default",
         targets=["finance-agent"], total=29, passed=27, failed=2, pass_rate=93.1,
-        results=[{"attack_id": "PI-001", "passed": True}],
+        results=caught + throttled,
         efficacy={"overall": {"total": 27, "caught": 27, "got_through": 0, "proven_blocking_pct": 100.0},
                   "by_technique": [], "by_owasp": [], "non_enforcement": 2, "excluded_synthetic": 0},
         created_by="admin",
@@ -472,8 +480,11 @@ def test_a_throttled_suite_serves_the_got_through_rows_it_counted() -> None:
     assert rows and all("outcome" in r for r in rows)
     got_through = [r for r in rows if r["outcome"] == "got_through"]
     assert len(got_through) == body["efficacy"]["overall"]["got_through"] > 0
-    # ...and `passed` alone would have hidden every one of them, which is the flake.
-    assert all(r["passed"] for r in got_through)
+    # `passed` used to be True on every one of them (actual block == expected block), which is what
+    # let the table hide them and the "Suite pass-rate" count them. It agrees with the outcome now:
+    # nothing in a suite the limiter refused end to end passed.
+    assert not any(r["passed"] for r in got_through)
+    assert (body["passed"], body["pass_rate"]) == (0, 0.0)
 
     # The in-process fallbacks serve the same verdicts — the cached report itself stays raw. The
     # by-id route reads the in-process cache only when the DB has no such run, hence the empty session.
@@ -539,4 +550,83 @@ def test_a_single_attack_run_carries_its_outcome() -> None:
         "/api/v1/redteam/run?attack_id=PI-001&target_agent=finance-agent",
         headers={"Authorization": f"Bearer {_token()}"},
     ).json()
-    assert body["passed"] is True and body["outcome"] == "got_through"
+    # `passed` was True here, beside an outcome of got_through. A throttle met the block expectation
+    # by accident; it is not a pass, and the row no longer says two things.
+    assert body["passed"] is False and body["outcome"] == "got_through"
+
+
+# --- The suite pass-rate counts what the scorecard counts -----------------------------------------
+#
+# "Suite pass-rate" on the console is `pass_rate` from the API, and `passed` was `actual == expected`.
+# A throttled or faulted block met a block expectation, so it raised the pass rate while the scorecard
+# beside it counted the same row as got_through.
+
+class _MixedEvaluator:
+    """Real blocks for SQL-*, throttles for PI-*, engine timeouts for EA-*, allow for everything else."""
+
+    async def evaluate(self, event) -> PolicyDecision:
+        aid = event.session_id.removeprefix("redteam-")
+        if aid.startswith("SQL-"):
+            return PolicyDecision(decision="block", rule_id="deny_sql_injection", trust_score=0.5)
+        if aid.startswith("PI-"):
+            return PolicyDecision(decision="block", rule_id="rate_limit_exceeded", trust_score=0.5)
+        if aid.startswith("EA-"):
+            return PolicyDecision(decision="block", rule_id="evaluator_timeout", trust_score=0.5)
+        return PolicyDecision(decision="allow", rule_id="default_allow", trust_score=0.5)
+
+
+def test_suite_pass_rate_does_not_count_a_throttled_or_faulted_block() -> None:
+    app = create_app()
+    app.state.evaluator = _MixedEvaluator()
+    session = _FakeSession(["finance-agent"])
+
+    async def _override():
+        yield session
+
+    app.dependency_overrides[get_session] = _override
+    body = TestClient(app).post("/api/v1/redteam/suite", headers={"Authorization": f"Bearer {_token()}"}).json()
+
+    rows = body["results"]
+    passed = sorted(r["attack_id"] for r in rows if r["passed"])
+    # The three real blocks, and the two attacks that expect an allow and got one. Before: PI-001..003
+    # and EA-001..003 as well, 11/34 = 32.4% against a scorecard of 3 caught.
+    assert passed == ["CE-002", "RL-001", "SQL-001", "SQL-002", "SQL-003"]
+    assert (body["passed"], body["failed"], body["pass_rate"]) == (5, len(rows) - 5, round(5 / len(rows) * 100, 1))
+    assert not [r["attack_id"] for r in rows if r["passed"] and r["outcome"] == "got_through"]
+    assert body["efficacy"]["overall"]["caught"] == 3
+
+
+def test_a_run_stored_before_the_fix_serves_the_corrected_pass_rate() -> None:
+    """Computed on read, like `outcome`: rows written with the old `passed` serve the new one, and
+    the run's pass figures are derived from them. Only a detail-pruned run, which has no rows left,
+    keeps the numbers it was written with."""
+    from datetime import datetime, timezone
+
+    from norviq.api.db.models import RedTeamRun
+
+    def row(aid, expected, actual, rule_id):
+        return {"attack_id": aid, "agent_class": "finance-agent", "namespace": "default", "expected": expected,
+                "actual": actual, "rule_id": rule_id, "passed": actual == expected, "applicable": True,
+                "atlas_technique": "AML.T0048", "atlas_technique_name": "T"}
+
+    stored = [
+        row("SQL-001", "block", "block", "deny_sql_injection"),
+        row("PI-001", "block", "block", "rate_limit_exceeded"),
+        row("EA-001", "block", "block", "evaluator_timeout"),
+        row("CE-001", "block", "allow", "default_allow"),
+    ]
+    run = RedTeamRun(
+        id="run-before", created_at=datetime(2026, 7, 6, tzinfo=timezone.utc), namespace="default",
+        targets=["finance-agent"], total=4, passed=3, failed=1, pass_rate=75.0,
+        results=stored, efficacy={}, created_by="admin",
+    )
+    client = _results_client(run)
+    headers = {"Authorization": f"Bearer {_token()}"}
+    for path in ("/api/v1/redteam/results/latest", "/api/v1/redteam/results/run-before"):
+        body = client.get(path, headers=headers).json()
+        assert {r["attack_id"]: r["passed"] for r in body["results"]} == {
+            "SQL-001": True, "PI-001": False, "EA-001": False, "CE-001": False,
+        }, path
+        assert (body["total"], body["passed"], body["failed"], body["pass_rate"]) == (4, 1, 3, 25.0), path
+    summary = client.get("/api/v1/redteam/results", headers=headers).json()["runs"][0]
+    assert (summary["passed"], summary["failed"], summary["pass_rate"]) == (1, 3, 25.0)

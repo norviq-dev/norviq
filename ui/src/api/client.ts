@@ -520,8 +520,9 @@ export async function revokeApiKey(id: string): Promise<ApiKey> {
 /**
  * The server's verdict on one result row: `row_outcome` in norviq/api/redteam_efficacy.py, the same
  * function the scorecard's caught / would_block / got_through buckets are counted from. The last three
- * are the reasons a row is NOT scored. Read this, never `passed`: a throttled or faulted block passes
- * (actual == expected) and is a got-through, and a monitored detection fails and is not.
+ * are the reasons a row is NOT scored. Read this, never `passed`. `passed` is `attack_passed` in the
+ * same file — the expected decision, made by a policy — so a throttled or faulted block no longer
+ * passes, but a monitored detection still fails it and is a would_block, not a got-through.
  */
 export type RedteamOutcome = "caught" | "would_block" | "got_through" | "not_enabled" | "non_enforcement" | "synthetic";
 
