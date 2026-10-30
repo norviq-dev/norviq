@@ -184,8 +184,18 @@ async def test_timeout_returns_fail_closed_block(evaluator: OPAEvaluator, monkey
     assert decision.reason == "Evaluation timed out, fallback=block"
 
 
-async def test_cached_block_still_applies_post_decision(evaluator: OPAEvaluator) -> None:
-    """Cached block responses should still decrement trust for repeat attempts."""
+async def test_cached_block_still_applies_post_decision(evaluator: OPAEvaluator, monkeypatch) -> None:
+    """A cached block still runs the post-decision path for the repeat attempt.
+
+    The eval cache stores the policy OUTCOME, not its consequences: the repeat must still be recorded in
+    the agent's behavioural history (session velocity, tool novelty and the trust window all read it),
+    and it must never RAISE trust. What it must not do since 1a199c4 is cost trust a second time for the
+    same tool and the same parameters — the retry-loop fix counts one refusal once.
+
+    This used to assert `after.score < before.score`, i.e. the opposite of that rule. It passed only
+    because session_velocity's rolling-minute arithmetic happened to move the score, and under host load
+    it failed with before == after == 0.855 (measured in a full-suite run on a busy runner).
+    """
     suffix = _suffix()
     # tool_name must be exactly "execute_sql" so the deny_sql_injection rule matches.
     event = _event(suffix, "execute_sql", {"query": "DROP TABLE users"})
@@ -194,17 +204,32 @@ async def test_cached_block_still_applies_post_decision(evaluator: OPAEvaluator)
     first = await evaluator.evaluate(event)
     # _persist_behavior fire-and-forgets the trust write (asyncio.create_task, never awaited inline — see
     # norviq/engine/evaluator.py _queue_background) to keep it off the decision hot path. Drain the same
-    # task set evaluator.close() flushes on shutdown so `before` observes the settled post-eval trust
+    # task set evaluator.close() flushes on shutdown so `before` observes the settled post-eval state
     # instead of racing the background write.
     await asyncio.gather(*evaluator._audit_tasks, return_exceptions=True)
     before = await evaluator._cache.get_trust(spiffe_id)
+    history_before = await evaluator._history.get_history(spiffe_id)
+
+    async def _no_opa(*_: object, **__: object) -> dict:
+        raise AssertionError("the repeat must be a cache hit — OPA must not run")
+
+    monkeypatch.setattr(evaluator, "_evaluate_single", _no_opa)
+    monkeypatch.setattr(evaluator, "_evaluate_opa", _no_opa)
     second = await evaluator.evaluate(event.model_copy(update={"event_id": f"{event.event_id}-again"}))
     await asyncio.gather(*evaluator._audit_tasks, return_exceptions=True)
     after = await evaluator._cache.get_trust(spiffe_id)
+    history_after = await evaluator._history.get_history(spiffe_id)
+
     assert first.decision == "block"
     assert second.decision == "block"
     assert before is not None and after is not None
-    assert after.score < before.score
+    # The cached attempt was recorded: one more entry, a block of the same tool with the same parameters.
+    assert len(history_after) == len(history_before) + 1
+    newest = max(history_after, key=lambda e: e.get("timestamp_unix") or 0)
+    assert (newest["tool_name"], newest["decision"]) == ("execute_sql", "block")
+    assert newest["param_hash"] == evaluator._params_digest(event)
+    # A refused retry can never earn trust back.
+    assert after.score <= before.score
 
 
 async def test_load_policy_updates_policy_map(evaluator: OPAEvaluator) -> None:
