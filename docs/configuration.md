@@ -281,7 +281,7 @@ both Postgres and Redis, which is exactly the embedded shape.
 | `redis.port` | `6379` | |
 | `redis.enabled` / `redis.host` / `redis.existingSecret` | `true` / `""` / `""` | `false` = bring your own cache; then `host` (or `existingSecret`, holding the full URL under `existingSecretKey`, default `url`) is required. |
 | `redis.password` | `""` (generated) | Empty = the chart generates a strong password on first install and reuses it on upgrade (see "Datastore credentials are generated, not shipped"). Set a value to bring your own; required when `redis.ha.enabled`. |
-| `redis.storage` | `1Gi` | PVC size. |
+| `redis.storage` | `1Gi` | Size of the store's PersistentVolumeClaim (`norviq-redis-pvc`; under HA, one per RedisFailover pod). The store is persistent: the single instance keeps its data in the `valkey/` subdirectory, and the volume root holds whatever 0.2.5's Redis 7.4 wrote, left in place for `helm rollback`. |
 
 ## PostgreSQL (`postgresql.*`)
 

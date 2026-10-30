@@ -29,8 +29,26 @@ because they should be installed.
   `/api/v1/evaluate` takes. Nothing in the chart calls it.
 - **Local sidecar image names are refused unless you opt in.** `norviq/norviq-engine:*` is accepted
   only with `webhook.allowLocalSidecarImages=true`. Published images are unaffected.
-- **Default Redis is Valkey 8.1** (`valkey/valkey:8.1-alpine`, BSD-3-Clause, minor-pinned). It replaces
-  `redis:7-alpine`, which had moved to 7.4 and its RSALv2/SSPLv1 licence.
+- **Default Redis is Valkey 8.1, and an upgrade from 0.2.5's bundled Redis starts it with an empty
+  store.** `valkey/valkey:8.1-alpine` (BSD-3-Clause, minor-pinned) replaces `redis:7-alpine`, which had
+  moved to Redis 7.4 and its RSALv2/SSPLv1 licence. Redis 7.4 writes RDB format 12, which Valkey 8.1
+  cannot read. Pointed at 0.2.5's data on `norviq-redis-pvc`, it exits with `Can't handle RDB format
+  version 12` and `helm upgrade` times out. Valkey now keeps its data in a `valkey/` subdirectory of
+  that volume, so it starts empty. **That resets** trust history and behavioural profiles (agents are
+  re-learned from a neutral baseline), the logout denylist (a token logged out under 0.2.5 is accepted
+  again until it expires, at most `auth.sessionTtlSeconds`, default 1h), sessions, login-lockout and
+  rate-limit counters, and the policy and evaluation caches, which are rebuilt from Postgres.
+  **Everything in Postgres survives**: policies and their versions, the audit log, users and API keys,
+  namespace settings, and the agent freezes and trust caps recorded in `agent_registry`. Each API pod
+  writes those back into the store when it starts. Look for `NRVQ-API-7034` in an API pod's log after
+  the upgrade. `NRVQ-API-7035` means they were not restored, so restart the API. **Nothing is
+  deleted:** 0.2.5's dump stays at the root of the volume, and `helm rollback` to 0.2.5 finds it. A
+  later upgrade picks Valkey's data up from where it was at the rollback. Stores you run yourself
+  (`redis.enabled=false`) are unaffected.
+- **`redis.ha.enabled=true` is not covered by that.** The RedisFailover keeps Redis 7.4 dumps on its own
+  volumes (`norviq-redis-ha-data-*`), which the chart cannot redirect, and a Valkey replica cannot load
+  a full sync from a Redis 7.4 master. Keep `images.redis` on `redis:7.4-alpine` under HA until you
+  migrate it yourself.
 - **Third-party images are pinned by digest.** opa, valkey, postgres, nginx, busybox, curl and the CNPG
   operand render as `repo:tag@sha256:…` (`global.thirdPartyImageDigests`). With `global.imageRegistry`
   the digest is kept, so a mirror filled by `docker pull` + `docker push` (which changes the digest)
