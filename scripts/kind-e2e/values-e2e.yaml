@@ -18,6 +18,23 @@
 # `helm package` sweeps up every values-*.yaml in the chart directory, and a test rig's ceilings have
 # no business shipping to an operator.
 
+images:
+  # The rig BUILDS `norviq/norviq-engine:*` from the working tree and kind-loads it; this is what makes
+  # the cluster run that build. It lived only in 00-up.sh's --set flags, so CI's install kept the chart
+  # default `ghcr.io/norviq-dev/` and every kind-e2e run tested the PUBLISHED `-latest` images instead
+  # of the pull request's code (measured by rendering both installs: CI's produced
+  # ghcr.io/norviq-dev/norviq-engine:*-latest for all five). The third drift this file exists to stop.
+  #
+  # IfNotPresent on all five: values-dev sets Always, and Always defeats `kind load` entirely — the node
+  # goes to a registry and never sees the image just loaded. For `norviq/` that registry is Docker Hub's
+  # `norviq` namespace, which this project does not own, so Always would also pull a stranger's image.
+  registry: "norviq/"
+  api: {pullPolicy: IfNotPresent}
+  ui: {pullPolicy: IfNotPresent}
+  engine: {pullPolicy: IfNotPresent}
+  webhook: {pullPolicy: IfNotPresent}
+  bootstrap: {pullPolicy: IfNotPresent}
+
 webhook:
   # The rig builds `norviq/norviq-engine:*` and kind-loads it. Without this the webhook refuses that
   # name, falls back to the published GHCR sidecar (NRVQ-WHK-4062), and injection tests the wrong image.

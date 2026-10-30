@@ -134,6 +134,38 @@ def test_the_third_party_preload_pulls_on_the_node_while_the_chart_pins_digests(
     assert "crictl pull" in preload, "the preload no longer pulls through the node's CRI image store"
 
 
+def test_both_install_paths_run_the_images_the_rig_builds():
+    """CI's kind-e2e tested the PUBLISHED images, not the pull request's.
+
+    Both paths build `norviq/norviq-engine:*` and kind-load it, but only 00-up.sh passed
+    `images.registry=norviq/`; CI kept the chart default `ghcr.io/norviq-dev/`, so every kind-e2e run
+    exercised the published `-latest` images while the PR's build sat unused on the node (measured by
+    rendering both installs). The registry and IfNotPresent now live in values-e2e.yaml, and the
+    workflow asserts on the live cluster that the deployments run the local build.
+    """
+    rig = (yaml.safe_load(SHARED_VALUES.read_text()) or {}).get("images") or {}
+    assert rig.get("registry") == "norviq/", (
+        "values-e2e.yaml no longer points the chart at the images the rig builds; an install that keeps "
+        "the chart default runs the published ghcr.io images and tests nothing in the working tree"
+    )
+    for component in ("api", "ui", "engine", "webhook", "bootstrap"):
+        assert (rig.get(component) or {}).get("pullPolicy") == "IfNotPresent", (
+            f"images.{component}.pullPolicy must be IfNotPresent in values-e2e.yaml: Always skips the "
+            f"kind-loaded image and pulls norviq/norviq-engine from Docker Hub's unowned namespace"
+        )
+    for path in (WORKFLOW, LOCAL_UP):
+        assert "--set images.registry" not in path.read_text(), (
+            f"{path.relative_to(REPO)} sets the image registry itself; it belongs in values-e2e.yaml, "
+            f"or the two install paths can disagree about which images they test again"
+        )
+    steps = yaml.safe_load(_workflow_text())["jobs"]["kind-e2e"]["steps"]
+    verify = next((s["run"] for s in steps if s.get("name") == "Verify the cluster runs the locally built images"), "")
+    assert "norviq/norviq-engine:" in verify, (
+        "the workflow no longer checks that the deployments run the image it built, so a registry "
+        "regression would go back to testing the published images in silence"
+    )
+
+
 def test_every_script_a_workflow_runs_bare_is_executable():
     """A missing mode bit is a whole CI run, and this is the third time it has cost one.
 

@@ -146,17 +146,11 @@ QUOTA_NS="$(IFS=,; echo "${TENANT_NS[*]}")"
 
 # values-light: api replicas 1. The chart defaults to 2, and verb promotion does not propagate across
 # replicas, so a two-replica local cluster flaps in a way that looks like a product bug.
-# IfNotPresent: values-dev sets Always, which defeats `kind load` entirely — the node pulls from the
-# registry and never sees the image just loaded.
+# The image registry (`norviq/`) and IfNotPresent come from values-e2e.yaml, shared with CI — they
+# used to be --set flags here only, and CI's install, which never had them, tested the published images.
 helm --kube-context "kind-${CLUSTER}" upgrade --install norviq "${REPO_ROOT}/helm/norviq" \
   -n "$NS" \
   -f "${REPO_ROOT}/helm/norviq/values-light.yaml" \
-  --set images.registry="norviq/" \
-  --set images.api.pullPolicy=IfNotPresent \
-  --set images.ui.pullPolicy=IfNotPresent \
-  --set images.engine.pullPolicy=IfNotPresent \
-  --set images.webhook.pullPolicy=IfNotPresent \
-  --set images.bootstrap.pullPolicy=IfNotPresent \
   --set "policyQuotaNamespaces={${QUOTA_NS}}" \
   --set webhook.injection.enabled=true \
   -f "${REPO_ROOT}/scripts/kind-e2e/values-e2e.yaml" \

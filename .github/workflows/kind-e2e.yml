@@ -170,8 +170,11 @@ jobs:
               -f helm/norviq/values-light.yaml -f scripts/kind-e2e/values-e2e.yaml \
               --set policyQuotaNamespaces='{agents,analytics}' \
             | grep -oE 'image: *"?[^"]+"?' | sed 's/image: *//' | tr -d '"' \
-            | grep -v '^ghcr\.io/norviq-dev/' | sort -u
+            | grep -vE '^(ghcr\.io/norviq-dev/|norviq/norviq-engine:)' | sort -u
           )
+          # First-party images are excluded by BOTH spellings: values-e2e.yaml points the chart at the
+          # `norviq/` images this job builds and kind-loads, and those exist on no registry — pulling
+          # them would fail (or, from Docker Hub's unowned `norviq` namespace, pull a stranger's image).
           test "${#IMAGES[@]}" -gt 0   # a silent empty list would preload nothing and read as success
           mapfile -t NODES < <(kind get nodes --name norviq-local)
           test "${#NODES[@]}" -gt 0
@@ -211,12 +214,24 @@ jobs:
             -f helm/norviq/values-light.yaml \
             -f scripts/kind-e2e/values-e2e.yaml \
             --set policyQuotaNamespaces='{agents,analytics}' \
-            --set images.api.pullPolicy=IfNotPresent \
-            --set images.ui.pullPolicy=IfNotPresent \
-            --set images.engine.pullPolicy=IfNotPresent \
-            --set images.webhook.pullPolicy=IfNotPresent \
             --wait --timeout 10m
           kubectl -n norviq get pods
+
+      # PROVE THE CLUSTER RUNS THIS PULL REQUEST'S BUILD. The install used to keep the chart's default
+      # registry (ghcr.io/norviq-dev/), so every run tested the published `-latest` images while the
+      # images built above sat unused on the node — green or red, the result said nothing about the
+      # change under review. The registry now comes from values-e2e.yaml (shared with 00-up.sh); this
+      # step is what makes a regression of that loud instead of silent.
+      - name: Verify the cluster runs the locally built images
+        run: |
+          set -euo pipefail
+          for dep in norviq-api norviq-ui norviq-engine norviq-webhook; do
+            img="$(kubectl -n norviq get deploy "$dep" -o jsonpath='{.spec.template.spec.containers[0].image}')"
+            case "$img" in
+              norviq/norviq-engine:*) echo "ok  $dep -> $img" ;;
+              *) echo "::error::$dep runs $img, not the image this job built (norviq/norviq-engine:*)"; exit 1 ;;
+            esac
+          done
 
       - name: Mint an admin token
         run: |
