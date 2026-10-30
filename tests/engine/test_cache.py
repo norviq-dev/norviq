@@ -159,3 +159,37 @@ async def test_revoked_token_entry_expires(cache: RedisCache) -> None:
     assert await cache.is_token_revoked(token_hash) is True
     await asyncio.sleep(1.2)
     assert await cache.is_token_revoked(token_hash) is False
+
+
+async def test_the_revocation_repair_surface_round_trips(cache: RedisCache) -> None:
+    """The API rebuilds a wiped denylist through these calls. The marker must read absent after a loss,
+    the scan must return live entries with their TTLs and never the marker itself, and a reseed must
+    restore entries a plain `revoked:<hash>` reader (0.2.5, the engine) can see. A batch write of
+    entries that only one process knows must NOT set the marker: it vouches for those entries alone."""
+    from norviq.engine.cache import REVOCATION_SEED_MARKER
+
+    client = cache._client()
+    held, restored = f"deadbeef{_suffix()}", f"deadbeef{_suffix()}"
+    queued = f"deadbeef{_suffix()}"
+    try:
+        await client.delete(REVOCATION_SEED_MARKER)  # what a Redis that lost its data looks like
+        assert await cache.revocation_seed_marker_present() is False
+        await cache.revoke_token(held, ttl_s=300)
+        found = await cache.scan_revoked_tokens()
+        assert 0 < found[held] <= 300
+
+        await cache.revoke_tokens({queued: 90})
+        assert await cache.is_token_revoked(queued) is True
+        assert 0 < await client.ttl(f"revoked:{queued}") <= 90
+        assert await cache.revocation_seed_marker_present() is False
+
+        await cache.reseed_revoked_tokens({restored: 120})
+        assert await cache.revocation_seed_marker_present() is True
+        assert await cache.is_token_revoked(restored) is True
+        assert 0 < await client.ttl(f"revoked:{restored}") <= 120
+        assert await client.ttl(REVOCATION_SEED_MARKER) == -1  # no TTL: it lives exactly as long as the data
+        rescanned = await cache.scan_revoked_tokens()
+        assert restored in rescanned
+        assert not any("revocations_seeded" in k for k in rescanned)  # the marker is never an entry
+    finally:
+        await client.delete(f"revoked:{held}", f"revoked:{restored}", f"revoked:{queued}")

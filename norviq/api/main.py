@@ -21,6 +21,7 @@ from norviq.api.rate_limit import RateLimitMiddleware
 from norviq.api.siem import AuditForwarder
 from norviq.fleet_relay import FleetRelayForwarder
 from norviq.fleet_puller import FleetPolicyPuller
+from norviq.api import session_revocation
 from norviq.api.routers import attack_graph_compute, agents, audit, auth_login, baseline_router, cluster_info, compliance_view, coverage, deployments, evaluate, fleet_enroll, graph, graphs, health, intents, keys, mcp, me, mitre, packs, policies, redteam, search, settings_router, system_health, threats, tools, version
 from norviq.config import settings
 from norviq.logging_setup import configure_logging
@@ -131,6 +132,25 @@ async def lifespan(app: FastAPI):
     await _connect_with_backoff(
         app.state.cache.connect, "cache_connect", retry_code="NRVQ-REG-9035", fail_code="NRVQ-REG-9034"
     )
+    # LOGOUT HAS TO SURVIVE A REDIS LOSS. Revocations are persisted in Postgres, and this process
+    # loads every live one into its in-process mirror BEFORE it serves a request. Not an advisory warm
+    # like the ones further down: a process answering "not revoked" from an empty mirror, beside a Redis
+    # that came back empty, is exactly how a logged-out token came back to life. So a failed load is
+    # retried and then refuses startup — the posture create_tables() above already has for the same
+    # database — and the old pods keep serving until a new one can. Each attempt is bounded
+    # (session_revocation._LOAD_TIMEOUT_S), so a database that does not answer is retried, not
+    # waited on for asyncpg's 60s connect timeout per attempt. The same pass imports what only Redis
+    # holds (0.2.5's revocations, on the first boot) and repairs a wiped Redis for the readers that have
+    # nothing else (the engine's remote-caller path, a rolled-back 0.2.5 pod).
+    session_revocation.bind_store(get_session)
+    loaded = await _connect_with_backoff(
+        lambda: session_revocation.sync(app.state.cache),
+        "revocations_load",
+        retry_code="NRVQ-AUTH-14025",
+        fail_code="NRVQ-AUTH-14029",
+    )
+    log.info("nrvq.auth.revocations_synced", entries=loaded, startup=True, code="NRVQ-AUTH-14026")
+    app.state.revocation_sync_task = asyncio.create_task(session_revocation.sync_forever(app.state.cache))
     app.state.evaluator = OPAEvaluator(app.state.cache)
     if settings.opa_mode == "server":
         await app.state.evaluator.opa.start()
@@ -245,13 +265,18 @@ async def lifespan(app: FastAPI):
     await app.state.fleet_puller.start()  # pull+verify+apply signed bundles (no-op unless configured)
     log.info("nrvq.api.started", port=settings.api_port, code="NRVQ-API-7000")
     yield
-    sync_task = getattr(app.state, "policy_sync_task", None)
-    if sync_task is not None:
+    for task_name in ("policy_sync_task", "revocation_sync_task"):
+        sync_task = getattr(app.state, task_name, None)
+        if sync_task is None:
+            continue
         sync_task.cancel()
         try:
             await sync_task
         except (asyncio.CancelledError, Exception):  # noqa: BLE001 — shutdown best-effort
             pass
+    # Logouts this process could not get into Postgres: one last try, and an ERROR if any are left
+    # (NRVQ-AUTH-14031). Before close_db, which it needs.
+    await session_revocation.close()
     await app.state.fleet_puller.stop()
     await app.state.fleet_relay.stop()
     await app.state.siem_forwarder.stop()

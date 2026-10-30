@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import uuid
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -239,6 +239,29 @@ class User(Base):
     # clears it. Drives the forced change-password screen + the "default password in use" banner.
     must_change: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class RevokedToken(Base):
+    """A logged-out session token, durably: the record ``session_revocation`` rebuilds everything else from.
+
+    Logout used to live only in Redis and in each API process's memory, so a Redis that came back
+    without its data plus an API roll brought every logged-out token back to life for the rest of its
+    lifetime. Redis is still the shared cache and the in-process mirror still answers the hot path;
+    this table is what both are rebuilt from.
+
+    One row per denylist KEY, not per token: a JWT revoked by 0.2.6 writes its canonical key and the
+    0.2.5 raw-string key (see ``session_revocation._keys``), and a revocation imported from a 0.2.5
+    Redis is only known by the latter. ``expires_at`` is the token's own ``exp`` (clamped to the last
+    second of year 9999, which a CLI token with an unbounded --ttl can pass), so the table never holds
+    more than the still-live revoked tokens once the retention pruner has run.
+    """
+
+    __tablename__ = "revoked_tokens"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    # Stamped by the DATABASE clock, never an API pod's: the incremental sync reads "rows newer than
+    # the last pass", and comparing timestamps written by eight processes' clocks would skip rows.
+    revoked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
 class AssetGraph(Base):

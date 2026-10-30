@@ -22,6 +22,11 @@ log = structlog.get_logger()
 POLICY_EVENTS_CHANNEL = "norviq:policy_events"
 # Live audit fan-out across API workers/replicas — see publish_audit_record.
 AUDIT_RECORDS_CHANNEL = "norviq:audit_records"
+# Outside the `revoked:` prefix on purpose, so a SCAN of the denylist never mistakes it for an entry and
+# a 0.2.5 replica, which reads `revoked:<sha256>` only, can never collide with it.
+REVOCATION_SEED_MARKER = "norviq:revocations_seeded"
+# Commands per pipelined round trip when the API reads or rewrites the whole denylist.
+_REVOKED_BATCH = 1000
 
 
 def _hash_seg(segment: str) -> str:
@@ -563,6 +568,58 @@ class RedisCache:
     async def is_token_revoked(self, token_hash: str) -> bool:
         """Logout denylist: True if this token hash was revoked and has not yet expired."""
         return await self._client().get(f"revoked:{token_hash}") is not None
+
+    async def revocation_seed_marker_present(self) -> bool:
+        """False once Redis has lost its data since the API last rebuilt the denylist from Postgres.
+
+        The marker has no TTL, so it lives exactly as long as the dataset it vouches for: a Redis that
+        restarts without its RDB, fails over to an empty replica, or is flushed comes back without it.
+        One GET per process per sync pass — never on a request."""
+        return bool(await self._client().exists(REVOCATION_SEED_MARKER))
+
+    async def scan_revoked_tokens(self) -> dict[str, int]:
+        """Every live denylist entry as {token_hash: remaining_ttl_s}. Read once when an API process
+        boots and again after a data loss — never per request — so one SCAN of the keyspace is
+        affordable. What the entries are worth is the caller's call: they are imported as revocations.
+        The TTLs are read in pipelined batches: one round trip per key took 1.61s at 10.4k keys."""
+        client = self._client()
+        keys = [key async for key in client.scan_iter(match="revoked:*", count=1000)]
+        found: dict[str, int] = {}
+        for i in range(0, len(keys), _REVOKED_BATCH):
+            batch = keys[i : i + _REVOKED_BATCH]
+            async with client.pipeline(transaction=False) as pipe:
+                for key in batch:
+                    await pipe.ttl(key)
+                ttls = await pipe.execute()
+            for key, ttl in zip(batch, ttls):
+                if ttl and ttl > 0:  # -2: gone since the SCAN; -1: no TTL, which this module never writes
+                    found[key.removeprefix("revoked:")] = int(ttl)
+        return found
+
+    async def reseed_revoked_tokens(self, entries: dict[str, int]) -> None:
+        """Write {token_hash: ttl_s} back into the denylist and set the marker, in one pipelined round
+        trip. Redis is not the durable record any more, but the engine's remote-caller path and a
+        rolled-back 0.2.5 replica read nothing else, so a wiped Redis has to be put back for them."""
+        await self._write_revoked(entries, marker=True)
+
+    async def revoke_tokens(self, entries: dict[str, int]) -> None:
+        """Write {token_hash: ttl_s} into the denylist in one pipelined round trip WITHOUT the marker.
+        For the logouts one API process holds that Postgres does not have yet: they vouch for nothing
+        but themselves, and the marker means the whole denylist is present."""
+        await self._write_revoked(entries, marker=False)
+
+    async def _write_revoked(self, entries: dict[str, int], *, marker: bool) -> None:
+        """In batches, so a reseed of the whole denylist is not one unbounded pipeline; the marker goes
+        last, after every entry has been written, because it vouches for all of them."""
+        client = self._client()
+        items = list(entries.items())
+        for i in range(0, len(items), _REVOKED_BATCH):
+            async with client.pipeline(transaction=False) as pipe:
+                for token_hash, ttl_s in items[i : i + _REVOKED_BATCH]:
+                    await pipe.set(f"revoked:{token_hash}", "1", ex=max(1, int(ttl_s)))
+                await pipe.execute()
+        if marker:
+            await client.set(REVOCATION_SEED_MARKER, "1")
 
     async def set_ns_settings(self, namespace: str, fields: dict) -> None:
         """Mirror a namespace's RAW persisted settings override into Redis so the engine

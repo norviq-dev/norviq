@@ -190,11 +190,11 @@ not traverse the sidecar.
   compiler (`opa check`) against a locked-down capabilities file that strips dangerous builtins
   (`http.send`, `opa.runtime`, `net.*`, `io.*`, `rego.parse_module`, `trace`, `print`) — this is
   defense-in-depth *behind* the API-layer reject on forbidden Rego tokens, not the only gate.
-- **The database** — Postgres holds policies, audit records, and the agent registry; Redis holds
-  short-TTL evaluation cache, trust state, and rate-limit counters. Trust is always **recomputed
-  server-side from Redis on every call** — a caller-supplied `trust_score` in the request body is
-  explicitly discarded (`payload.model_dump(exclude={"trust_score"})`) so a client can never assert its
-  own trustworthiness.
+- **The database** — Postgres holds policies, audit records, the agent registry, and logout
+  revocations; Redis holds short-TTL evaluation cache, trust state, and rate-limit counters. Trust is
+  always **recomputed server-side from Redis on every call** — a caller-supplied `trust_score` in the
+  request body is explicitly discarded (`payload.model_dump(exclude={"trust_score"})`) so a client can
+  never assert its own trustworthiness.
 - **SPIFFE identity** — the trust root for *which agent this is*. In `workload-api` mode the sidecar
   fetches a real SVID from the SPIFFE Workload API and fails closed on any socket/SVID error (no
   fallback to an env-var identity). `mock` mode (env-var identity) exists for local dev/tests/attack
@@ -240,7 +240,15 @@ HS256-with-the-public-key forgery (alg-confusion):
   rather than picking one silently.
 
 Logged-out tokens are rejected server-side via a revocation check (a signature-valid but logged-out
-JWT is dead, not just client-discarded), and a token minted with `must_change=True` (the seeded
+JWT is dead, not just client-discarded). The revocation is recorded in Postgres (`revoked_tokens`)
+as well as Redis, and every API process loads every live row of that table into memory before it
+serves a request and keeps all of them (no cap; about 170 bytes per row), so a logout survives Redis
+losing its data and an API restart together — Redis is a cache for it, not the record. A logout writes
+the serving process's memory and Redis before Postgres, so the other replicas refuse the token at once
+even while Postgres is slow or unreachable. The Postgres write waits at most two seconds; one that does
+not land stays queued, is retried every ten seconds by that process's background pass, and is reported
+at ERROR if the process shuts down first. The request path never reads Postgres for this; see
+`norviq/api/session_revocation.py` for what each store being unavailable costs. A token minted with `must_change=True` (the seeded
 default admin, or any account after an admin-triggered reset) is locked to only the
 change-password/logout/`me` routes until the password is actually changed.
 

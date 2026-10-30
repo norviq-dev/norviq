@@ -224,6 +224,13 @@ OIDC / JWKS token validation. Distinct prefix from `NRVQ-SIEM-14xxx`.
 | NRVQ-AUTH-14018 | `nrvq.auth.must_change_blocked` (a must_change=true token — still on a default/reset password — was refused off the change-password/logout/me paths, 403) | `norviq/api/auth.py` |
 | NRVQ-AUTH-14019 | `nrvq.auth.identity_binding_denied` (a bound credential asserted a DIFFERENT `agent_class`/`spiffe_id` on /evaluate — 403; agent_class selects the enforced policy, spiffe_id keys trust + the freeze kill-switch) | `norviq/api/auth.py` |
 | NRVQ-AUTH-14020 | `nrvq.auth.identity_unbound_denied` (strict mode `auth_require_bound_agent_identity`: a non-admin credential carrying NO identity binding was refused — 403) | `norviq/api/auth.py` |
+| NRVQ-AUTH-14024 | `nrvq.auth.revocation_persist_failed` (ERROR: revocations could not be written to Postgres `revoked_tokens` — refused, or no answer within `timeout_s` seconds (`error=TimeoutError: ...`): 2 for a logout; for `source=redis_import`, entries a process imported from Redis, 30 on the process's first pass and 5 after. A logout's token is already refused everywhere — the mirror and Redis are written before Postgres is tried (unless a 14017 says the Redis write failed too) — and the logout still answers 200. The entries stay queued, without a cap; every sync pass retries them (14027 when they land) and rewrites them into Redis) | `norviq/api/session_revocation.py` |
+| NRVQ-AUTH-14025 | `nrvq.auth.revocation_sync_failed` (WARNING: a background sync pass could not read/write Postgres within 5s, `op=store`, with `unpersisted=<n>` queued keys still waiting — the mirror stands as of the last pass, peers' newer logouts still arrive through Redis — or could not write Redis, `op=reconcile_cache`). Also the retry line `nrvq.startup.revocations_load_retry` while startup waits for the store (each attempt bounded at 30s) | `norviq/api/session_revocation.py`, `norviq/api/main.py` |
+| NRVQ-AUTH-14026 | `nrvq.auth.revocations_synced` (INFO: `entries` = keys a pass added to this process's memory. At startup, `startup=true`: every live key in Postgres plus any imported from Redis. After that, only when non-zero: keys new to this process since the last pass — peers' logouts, or imports after a Redis loss — with `mirror=<n>`, the keys it now holds) | `norviq/api/main.py`, `norviq/api/session_revocation.py` |
+| NRVQ-AUTH-14027 | `nrvq.auth.revocations_persisted_late` (INFO: queued 14024 revocations have now landed in Postgres) | `norviq/api/session_revocation.py` |
+| NRVQ-AUTH-14028 | `nrvq.auth.revocation_cache_reseeded` (WARNING: Redis had lost the logout denylist — restart without its RDB, failover to an empty replica, flush, or the first 0.2.6 boot, since 0.2.5 never set the marker — and it was rebuilt from this process's memory. Logged by each process whose pass finds the marker missing, so processes starting or passing at about the same time each log it once; the rewrites are idempotent) | `norviq/api/session_revocation.py` |
+| NRVQ-AUTH-14029 | `nrvq.startup.revocations_load_failed` (ERROR: startup REFUSED — the durable revocation set could not be loaded after retries; a pod that served with an empty mirror could accept logged-out tokens) | `norviq/api/main.py` |
+| NRVQ-AUTH-14031 | `nrvq.auth.revocations_unpersisted_at_shutdown` (ERROR: an API process shut down with `entries=<n>` logouts Postgres never got, after one last try. They are in Redis, and the next API process to boot imports them into Postgres; until then a Redis data loss would drop them) | `norviq/api/session_revocation.py` |
 
 ## FLT
 
@@ -359,7 +366,7 @@ pod is up but its tool calls are all failing, or when a pod is stuck `NotReady`.
 | CLI | NRVQ-CLI-8000..8004 | `norviq/cli/*` |
 | SDK | NRVQ-SDK-1000, 1002, 1010..1013, 1020..1022, 1030..1032 (langchain), 1040..1044 (langgraph), 1050..1053 (crewai), 1060..1063 (autogen), 1070..1073 (semantic-kernel). 1043/1073 = output-DLP redaction (opt-in); 1044/1053/1063 = the `protect()` fail-closed-by-default warning on `allow_unwrapped=True`. | `norviq/sdk/*` |
 | IDT | NRVQ-IDT-10000..10006 | `norviq/engine/identity.py` |
-| AUTH | NRVQ-AUTH-14000..14007, 14010..14018 | `norviq/api/auth.py`, `norviq/api/jwks.py`, `norviq/api/routers/auth_login.py`, `norviq/api/main.py` |
+| AUTH | NRVQ-AUTH-14000..14007, 14010..14029, 14031 (14024..14029 and 14031: durable logout revocation) | `norviq/api/auth.py`, `norviq/api/jwks.py`, `norviq/api/routers/auth_login.py`, `norviq/api/main.py`, `norviq/api/session_revocation.py` |
 | FLT | NRVQ-FLT-15000..15005, 15009..15035, 15040..15042 | `norviq/fleet/*`, `norviq/fleet_relay.py`, `norviq/fleet_puller.py` |
 
 ## Full Code Index
@@ -433,7 +440,9 @@ NRVQ-SDC-3023, NRVQ-SDC-3024, NRVQ-SDC-3030, NRVQ-SDC-3031, NRVQ-SDC-3032, NRVQ-
 
 NRVQ-AUTH-14000, NRVQ-AUTH-14001, NRVQ-AUTH-14002, NRVQ-AUTH-14003, NRVQ-AUTH-14004, NRVQ-AUTH-14005,
 NRVQ-AUTH-14006, NRVQ-AUTH-14007, NRVQ-AUTH-14010, NRVQ-AUTH-14011, NRVQ-AUTH-14012, NRVQ-AUTH-14013,
-NRVQ-AUTH-14014, NRVQ-AUTH-14015, NRVQ-AUTH-14016, NRVQ-AUTH-14017, NRVQ-AUTH-14018, NRVQ-AUTH-14019, NRVQ-AUTH-14020
+NRVQ-AUTH-14014, NRVQ-AUTH-14015, NRVQ-AUTH-14016, NRVQ-AUTH-14017, NRVQ-AUTH-14018, NRVQ-AUTH-14019, NRVQ-AUTH-14020,
+NRVQ-AUTH-14024, NRVQ-AUTH-14025, NRVQ-AUTH-14026, NRVQ-AUTH-14027, NRVQ-AUTH-14028, NRVQ-AUTH-14029,
+NRVQ-AUTH-14031
 
 NRVQ-AUD-6000, NRVQ-AUD-6001, NRVQ-AUD-6002, NRVQ-AUD-6003, NRVQ-AUD-6004, NRVQ-AUD-6005, NRVQ-AUD-6006,
 NRVQ-AUD-6007, NRVQ-AUD-6008, NRVQ-AUD-6009, NRVQ-AUD-6010, NRVQ-AUD-6012, NRVQ-AUD-6013

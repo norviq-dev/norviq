@@ -171,7 +171,8 @@ _JUSTIFIED_SILENT_HANDLERS: dict[tuple[str, str], str] = {
         "falls through to the read-time byte counter, which DOES enforce the cap and log NRVQ-API-7050."
     ),
     ("api/main.py", "lifespan"): (
-        "Draining the cancelled policy-sync task on shutdown; the exception is the cancellation itself."
+        "Draining the cancelled policy-sync and revocation-sync tasks on shutdown; the exception is the "
+        "cancellation itself."
     ),
     ("api/main.py", "create_app.ws_audit"): (
         "WebSocketDisconnect is a client closing the audit stream — the ordinary end of the request. "
