@@ -78,9 +78,10 @@ dependencies = [
     "fastapi>=0.109",
     "uvicorn>=0.27",
     "websockets>=12",
-    # 2.14.0 floor: PYSEC-2026-4144 through -4152. The images install with pip, so this line, not
-    # uv.lock, decides which PyJWT ships.
-    "pyjwt[crypto]>=2.14.0",
+    # 2.15.0 floor: PYSEC-2026-4144 through -4152 (fixed in 2.14.0), and PYSEC-2026-4141 and -4183
+    # (fixed in 2.15.0). The images install with pip, so this line, not uv.lock, decides which PyJWT
+    # ships.
+    "pyjwt[crypto]>=2.15.0",
     # bcrypt DIRECTLY, not `passlib[bcrypt]`. `norviq/api/passwords.py` imports bcrypt and says in its
     # own docstring that passlib is deliberately not used — its CryptContext is broken against bcrypt
     # 5.x, which is the version resolved here. So passlib was installed into every shipped image and
