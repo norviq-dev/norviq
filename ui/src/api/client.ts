@@ -517,6 +517,14 @@ export async function revokeApiKey(id: string): Promise<ApiKey> {
   return apiSend<ApiKey>(`/api/v1/keys/${encodeURIComponent(id)}`, "DELETE");
 }
 
+/**
+ * The server's verdict on one result row: `row_outcome` in norviq/api/redteam_efficacy.py, the same
+ * function the scorecard's caught / would_block / got_through buckets are counted from. The last three
+ * are the reasons a row is NOT scored. Read this, never `passed`: a throttled or faulted block passes
+ * (actual == expected) and is a got-through, and a monitored detection fails and is not.
+ */
+export type RedteamOutcome = "caught" | "would_block" | "got_through" | "not_enabled" | "non_enforcement" | "synthetic";
+
 export type RedteamResult = {
   attack_id: string;
   attack_name: string;
@@ -529,10 +537,13 @@ export type RedteamResult = {
   passed: boolean;
   // false = a CONDITIONAL attack whose enforcing rule isn't loaded for this namespace — a sector pack,
   // or the opt-in MCP integration guardrail. Out of scope, NOT a real miss: excluded from
-  // proven-blocking and rendered as "not enabled here" rather than a red "got through". Anything
-  // reading this must go through `gotThrough()` in RedTeam.tsx; a bare `!passed` disagrees with both
-  // the badge and the scorecard.
+  // proven-blocking and rendered as "not enabled here" rather than a red "got through". The server
+  // folds this into `outcome` ("not_enabled"); anything reading a row goes through `outcomeOf()` in
+  // RedTeam.tsx.
   applicable?: boolean;
+  // Computed on read by the API, so rows of runs stored before the field existed carry it too. Optional
+  // only for an API older than the console.
+  outcome?: RedteamOutcome;
   latency_ms?: number;
   error?: string;
 };

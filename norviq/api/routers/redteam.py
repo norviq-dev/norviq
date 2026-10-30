@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from norviq.api.auth import get_current_user, require_admin
 from norviq.api.db.models import AgentRegistryEntry, RedTeamRun
 from norviq.api.db.session import get_session
-from norviq.api.redteam_efficacy import attack_mapping, catalog_entry, compute_efficacy
+from norviq.api.redteam_efficacy import attack_mapping, catalog_entry, compute_efficacy, row_outcome, with_outcomes
 from norviq.api.synthetic import is_synthetic_identity
 from norviq.config import settings
 from norviq.redteam.attacks import ATTACKS, AttackCategory, get_attack_by_id
@@ -121,7 +121,7 @@ async def run_attack(
     decision = await request.app.state.evaluator.evaluate(event)
     _emit_redteam_audit(request, event, decision)
     row = _result_row(attack, target_agent, target_namespace, decision.decision, decision.rule_id, decision.latency_ms)
-    return {**row, "trust_score": decision.trust_score}
+    return {**row, "outcome": row_outcome(row), "trust_score": decision.trust_score}
 
 
 @router.post("/redteam/suite")
@@ -247,7 +247,7 @@ async def run_suite(
     log.info("nrvq.redteam.suite_run", namespace=target_namespace, targets=targets,
              total=len(results), passed=passed, proven_blocking_pct=efficacy["overall"]["proven_blocking_pct"],
              code="NRVQ-RED-13006")
-    return report
+    return _served(report)
 
 
 def plan_retention(
@@ -422,7 +422,7 @@ async def get_result(
     if row is not None:
         return _run_to_dict(row)
     if run_id in REPORTS:
-        return REPORTS[run_id]
+        return _served(REPORTS[run_id])
     raise HTTPException(status_code=404, detail="Run not found")
 
 
@@ -433,7 +433,7 @@ async def get_report(run_id: str, user: dict = Depends(get_current_user)) -> dic
     require_admin(user)  # red-team is admin-only
     if run_id not in REPORTS:
         raise HTTPException(status_code=404, detail="Report not found")
-    return REPORTS[run_id]
+    return _served(REPORTS[run_id])
 
 
 def _run_summary(row: RedTeamRun) -> dict[str, Any]:
@@ -455,6 +455,15 @@ def _run_summary(row: RedTeamRun) -> dict[str, Any]:
     }
 
 
+def _served(report: dict[str, Any]) -> dict[str, Any]:
+    """A cached suite report as the API serves it: every result row carries its `outcome`.
+
+    The cached and persisted rows stay raw on purpose — the verdict is derived on the way out, by the
+    same `row_outcome` that built the report's efficacy, so the two cannot drift apart in storage.
+    """
+    return {**report, "results": with_outcomes(report.get("results"))}
+
+
 def _run_to_dict(row: RedTeamRun) -> dict[str, Any]:
     """Serialize a persisted RedTeamRun row to the same shape the suite endpoint returns. If the run's
     per-attack detail has been retention-pruned (``results IS NULL``), return an empty results list plus
@@ -469,7 +478,7 @@ def _run_to_dict(row: RedTeamRun) -> dict[str, Any]:
         "passed": row.passed,
         "failed": row.failed,
         "pass_rate": row.pass_rate,
-        "results": row.results or [],
+        "results": with_outcomes(row.results),
         "detail_pruned": pruned,
         "efficacy": row.efficacy,
     }

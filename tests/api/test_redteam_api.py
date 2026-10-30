@@ -438,3 +438,105 @@ def test_a_fallback_target_is_declared_as_such() -> None:
         headers={"Authorization": f"Bearer {_token()}"},
     ).json()
     assert body["scope"]["targets_are_fallback"] is True
+
+
+# --- Every served row carries the verdict the scorecard counted -----------------------------------
+#
+# The console filtered "got through" with its own `!passed && applicable !== false`, while the
+# scorecard above it counted `compute_efficacy`'s verdict. A throttled block passes (actual == expected)
+# and is a got-through, so a kind run with 17 `block / rate_limit_exceeded` red-team rows showed
+# "got through > 0" over a filter that listed none. The row now says what it was counted as.
+
+class _ThrottlingEvaluator:
+    """Every call refused by the rate limiter — what a suite driven hard enough sees."""
+
+    async def evaluate(self, event) -> PolicyDecision:
+        _ = event
+        return PolicyDecision(decision="block", rule_id="rate_limit_exceeded", trust_score=0.5)
+
+
+def test_a_throttled_suite_serves_the_got_through_rows_it_counted() -> None:
+    app = create_app()
+    app.state.evaluator = _ThrottlingEvaluator()
+    session = _FakeSession(["finance-agent"])
+
+    async def _override():
+        yield session
+
+    app.dependency_overrides[get_session] = _override
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {_token()}"}
+    body = client.post("/api/v1/redteam/suite", headers=headers).json()
+
+    rows = body["results"]
+    assert rows and all("outcome" in r for r in rows)
+    got_through = [r for r in rows if r["outcome"] == "got_through"]
+    assert len(got_through) == body["efficacy"]["overall"]["got_through"] > 0
+    # ...and `passed` alone would have hidden every one of them, which is the flake.
+    assert all(r["passed"] for r in got_through)
+
+    # The in-process fallbacks serve the same verdicts — the cached report itself stays raw. The
+    # by-id route reads the in-process cache only when the DB has no such run, hence the empty session.
+    for c, path in (
+        (client, f"/api/v1/redteam/report/{body['run_id']}"),
+        (_results_client(None), f"/api/v1/redteam/results/{body['run_id']}"),
+    ):
+        again = c.get(path, headers=headers).json()["results"]
+        assert [r["outcome"] for r in again] == [r["outcome"] for r in rows], path
+    from norviq.api.routers import redteam as rt
+    assert all("outcome" not in r for r in rt.REPORTS[body["run_id"]]["results"])
+
+
+def test_results_latest_annotates_rows_stored_before_the_field_existed() -> None:
+    """Computed on read: a durable run written without `outcome` on its rows gets one, and filtering
+    on it reproduces the stored efficacy exactly."""
+    from datetime import datetime, timezone
+
+    from norviq.api.db.models import RedTeamRun
+    from norviq.api.redteam_efficacy import compute_efficacy
+
+    def row(aid, cls, expected, actual, rule_id, applicable=True):
+        return {"attack_id": aid, "agent_class": cls, "namespace": "default", "expected": expected,
+                "actual": actual, "rule_id": rule_id, "passed": actual == expected, "applicable": applicable,
+                "atlas_technique": "AML.T0048", "atlas_technique_name": "T"}
+
+    stored = [
+        row("SQL-001", "finance-agent", "block", "block", "deny_sql_injection"),
+        row("PI-001", "finance-agent", "block", "block", "rate_limit_exceeded"),
+        row("PII-001", "finance-agent", "block", "audit", "pii_detection"),
+        row("EA-001", "finance-agent", "block", "allow", "default_allow"),
+        row("FIN-001", "finance-agent", "block", "allow", "default_allow", applicable=False),
+        row("RL-001", "finance-agent", "allow", "block", "rate_limit_exceeded"),
+        row("SH-001", "scorer", "block", "allow", "default_allow"),
+    ]
+    run = RedTeamRun(
+        id="run-legacy", created_at=datetime(2026, 7, 6, tzinfo=timezone.utc), namespace="default",
+        targets=["finance-agent"], total=len(stored), passed=2, failed=5, pass_rate=28.6,
+        results=stored, efficacy=compute_efficacy(stored), created_by="admin",
+    )
+    client = _results_client(run)
+    headers = {"Authorization": f"Bearer {_token()}"}
+    body = client.get("/api/v1/redteam/results/latest", headers=headers).json()
+
+    by_id = {r["attack_id"]: r["outcome"] for r in body["results"]}
+    assert by_id == {
+        "SQL-001": "caught", "PI-001": "got_through", "PII-001": "would_block", "EA-001": "got_through",
+        "FIN-001": "not_enabled", "RL-001": "non_enforcement", "SH-001": "synthetic",
+    }
+    overall = body["efficacy"]["overall"]
+    for outcome in ("caught", "would_block", "got_through"):
+        assert sum(1 for o in by_id.values() if o == outcome) == overall[outcome], outcome
+    # by-id serves the same rows the same way
+    again = client.get("/api/v1/redteam/results/run-legacy", headers=headers).json()
+    assert {r["attack_id"]: r["outcome"] for r in again["results"]} == by_id
+
+
+def test_a_single_attack_run_carries_its_outcome() -> None:
+    app = create_app()
+    app.state.evaluator = _ThrottlingEvaluator()
+    client = TestClient(app)
+    body = client.post(
+        "/api/v1/redteam/run?attack_id=PI-001&target_agent=finance-agent",
+        headers={"Authorization": f"Bearer {_token()}"},
+    ).json()
+    assert body["passed"] is True and body["outcome"] == "got_through"
