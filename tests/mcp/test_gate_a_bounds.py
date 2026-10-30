@@ -105,18 +105,39 @@ async def test_the_bare_string_branch_cannot_be_scaled_past_the_budget():
 
 # ── a per-item budget on a surface whose item COUNT the server picks ────────────────────────────
 
-async def test_tools_list_shares_one_budget_across_every_tool():
+async def test_tools_list_shares_one_budget_across_every_tool(monkeypatch):
     """`tools/list` gave each tool its own `_MAX_TOTAL_SCAN_CHARS`, so 500 tools x 16 KiB cost
     1703 ms — 1534 ms of it inside `scan_tool_definition`. It is the ORIGINAL Gate A surface and it
-    is re-driven by every `notifications/tools/list_changed` the server chooses to send."""
+    is re-driven by every `notifications/tools/list_changed` the server chooses to send.
+
+    The bound is asserted on what the scan READ, not only on how long it took. This used to be a single
+    `perf_counter() < 0.500`, and with the shared budget in place one listing costs ~410 ms of CPU on a
+    fast host (measured: wall 407-440 ms, CPU 406-438 ms) — under 20% headroom, so a loaded runner
+    failed it (534 ms) while the code was correct. The characters every scan consumed are exact and say
+    precisely what the fix guarantees; the time check stays as a coarse guard, in CPU time so a busy
+    host's scheduling is not charged to the code, at a bound the per-tool budget overshoots fourfold."""
+    import norviq.mcp.firewall as firewall_module
+
+    scanned: list[int] = []
+    real_scan = firewall_module.scan_tool_definition
+
+    def counting_scan(*args, **kwargs):
+        report = real_scan(*args, **kwargs)
+        scanned.append(report.scanned_chars)
+        return report
+
+    monkeypatch.setattr(firewall_module, "scan_tool_definition", counting_scan)
     fw = _firewall()
     await fw.on_client_message(_msg({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}))
     tools = [{"name": f"t{i}", "description": "A" * 16380} for i in range(500)]
     message = _msg({"jsonrpc": "2.0", "id": 2, "result": {"tools": tools}})
-    t0 = time.perf_counter()
+    t0 = time.process_time()
     await fw.on_server_message(message)
-    elapsed = time.perf_counter() - t0
-    assert elapsed < 0.500, f"one tools/list cost {elapsed * 1000:.0f} ms of scan"
+    cpu = time.process_time() - t0
+    assert len(scanned) == 500, "every tool must still go through the scanner"
+    assert sum(scanned) <= _LIST_SCAN_BUDGET, (
+        f"one tools/list scanned {sum(scanned)} chars against a shared budget of {_LIST_SCAN_BUDGET}")
+    assert cpu < 1.0, f"one tools/list cost {cpu * 1000:.0f} ms of CPU"
 
 
 def test_a_tool_whose_prose_outran_the_budget_is_not_reported_as_scanned():
