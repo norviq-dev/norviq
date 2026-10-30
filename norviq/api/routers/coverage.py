@@ -77,10 +77,15 @@ def _parse_agent_policy(agent_class: str, rego: str, priority: int, mode: str) -
     else:
         kind = "custom"
     allow_tools: list[str] = []
-    # Reads both empty forms — `{}` from 0.2.5 and earlier, the typed comprehension since.
-    names = parse_allow_names(rego)
-    if names is not None:
-        allow_tools = names
+    # False only for an `allow_names` written as an expression the parser cannot read: an empty
+    # `allow_tools` on an intent policy is rendered "denies every tool", which an unread hand-written
+    # comprehension does not support. `parse_allow_names` reads both empty forms exactly — `{}` from
+    # 0.2.5 and earlier, the typed comprehension since.
+    allow_tools_known = True
+    parsed_names = parse_allow_names(rego)
+    if parsed_names is not None:
+        allow_tools = list(parsed_names.names or ())
+        allow_tools_known = parsed_names.names is not None
     else:
         # An INTENT-compiled policy (norviq/engine/intent/compiler.py) has no `allow_names` set —
         # its scoping lives in per-rule predicates, and emitting a parallel set just to feed this
@@ -102,7 +107,8 @@ def _parse_agent_policy(agent_class: str, rego: str, priority: int, mode: str) -
     if lm:
         learned = [seg.strip() for seg in lm.group(1).split(",") if "=" in seg]
     return {
-        "cls": agent_class, "kind": kind, "allow_tools": allow_tools, "refinements": refinements,
+        "cls": agent_class, "kind": kind, "allow_tools": allow_tools, "allow_tools_known": allow_tools_known,
+        "refinements": refinements,
         "learned_verbs": learned, "priority": priority, "enforcement_mode": mode,
     }
 

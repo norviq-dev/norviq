@@ -36,6 +36,23 @@ describe("AgentClassCoverage", () => {
     expect(tip).toHaveTextContent(/10.*would-block/i);
   });
 
+  // An intent policy with an EMPTY allowlist denies every tool, and the card says so. An `allow_names`
+  // written by hand as an expression is not empty — the server could not read it — and claiming
+  // "denies every tool" for it is a statement nothing backs.
+  it("does not call an unreadable allowlist empty", () => {
+    const empty: AgentClassPolicy = { ...POLICY, allow_tools: [] };
+    const unread: AgentClassPolicy = { ...POLICY, allow_tools: [], allow_tools_known: false };
+    const { unmount } = render(<AgentClassCoverage policies={[empty]} namespaceMode="audit" />);
+    fireEvent.mouseEnter(screen.getByTestId("agent-class-cov-row"));
+    expect(screen.getByRole("tooltip")).toHaveTextContent(/denies every tool/);
+    unmount();
+    render(<AgentClassCoverage policies={[unread]} namespaceMode="audit" />);
+    fireEvent.mouseEnter(screen.getByTestId("agent-class-cov-row"));
+    const tip = screen.getByRole("tooltip");
+    expect(tip).not.toHaveTextContent(/denies every tool/);
+    expect(tip).toHaveTextContent(/not readable/);
+  });
+
   it("renders nothing when there are no agent-class policies", () => {
     const { container } = render(<AgentClassCoverage policies={[]} />);
     expect(container).toBeEmptyDOMElement();

@@ -943,6 +943,9 @@ export type AgentClassPolicy = {
   cls: string;
   kind: "intent" | "capability" | "custom";
   allow_tools: string[]; // the intended allowlist (empty for a pure-refinement or custom policy)
+  // false when `allow_names` is a hand-written expression the server cannot read: the names are
+  // unknown, and an empty allow_tools must then not be shown as "denies every tool". Absent = known.
+  allow_tools_known?: boolean;
   refinements: string[]; // enabled toggles: readonly | egress | scope | rate
   learned_verbs: string[]; // admin-promoted verbs baked in, "tool=verb"
   priority: number;

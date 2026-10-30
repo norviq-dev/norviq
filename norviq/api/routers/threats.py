@@ -634,8 +634,8 @@ async def _governing_policies(session: AsyncSession, namespaces: list[str] | Non
         # intent-compiled policy read as governing NOTHING (or, read the other way by callers that
         # treat an empty allow as unrestricted, as governing EVERYTHING). Both registers parse the same
         # marker or they disagree about what a policy covers.
-        names = parse_allow_names(rego)
-        if names is None:
+        parsed_names = parse_allow_names(rego)
+        if parsed_names is None:
             im = _INTENT_TOOLS_RE.search(rego or "")
             if im:
                 try:
@@ -659,9 +659,16 @@ async def _governing_policies(session: AsyncSession, namespaces: list[str] | Non
                         "name_scoped": bool(allow),
                     }
                     continue
-        if names is not None:
-            allow = {a.lower() for a in names}
-        out[str(r["agent_class"])] = {"kind": kind, "allow": allow, "readonly": "is_read " in rego}
+        entry = {"kind": kind, "allow": allow, "readonly": "is_read " in rego}
+        if parsed_names is not None:
+            if parsed_names.names is None:
+                # A hand-written expression: which tools it admits is unknown, so it is no evidence that
+                # an unlisted chokepoint is denied — the same reading as an intent that does not scope
+                # by tool name. Claiming the defence would be the wrong direction for this badge.
+                entry["name_scoped"] = False
+            else:
+                entry["allow"] = {a.lower() for a in parsed_names.names}
+        out[str(r["agent_class"])] = entry
     return out
 
 
