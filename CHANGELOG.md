@@ -54,11 +54,35 @@ because they should be installed.
   the digest is kept, so a mirror filled by `docker pull` + `docker push` (which changes the digest)
   fails with `manifest unknown`: re-copy with `crane copy` / `skopeo copy --all`, or set
   `global.thirdPartyImageDigests=null`. An overridden tag renders without a pin.
+- **The optional SDK extras need newer frameworks.** `norviq[crewai]` requires `crewai[litellm]>=1.15.29`
+  (was `>=1.0`) and `norviq[langgraph]` requires `langgraph>=1.2.14` (was `>=0.2`). `norviq[crewai]`,
+  `norviq[mcp]` and `norviq[frameworks]` require `mcp>=1.30.0,<2` (was `>=1.28.1,<2`), and
+  `norviq[frameworks]` takes the same crewai and langgraph floors (its crewai floor was `>=0.80`). An
+  install that also pins an older crewai, langgraph or mcp no longer resolves; pip reports the conflict.
+  The floors close CVE-2026-118667 (langgraph) and CVE-2026-59951, -116684, -116685 and -116686 (mcp);
+  the crewai floor follows from the mcp one, because crewai 1.15.6 through 1.15.28 pin `mcp~=1.28.1`.
+  `pip install norviq` and the images (`.[spiffe]`) are unaffected.
+
+**Building from source.** `webhook/go.mod` says `go 1.26.10` (was `1.26.0`): on go1.26.0, govulncheck
+reports 47 standard-library advisories, 29 of them reachable from the webhook. An older Go fetches
+1.26.10 by itself unless `GOTOOLCHAIN=local` is set, and then the build fails with
+`go.mod requires go >= 1.26.10`. The official `golang` images set it, so a local `docker build` of the
+webhook from a cached `golang:1.26-alpine` older than 1.26.10 needs `--pull`. `golang.org/x/net` moves
+to 0.62.0 (GO-2026-6860, GO-2026-6866).
 
 **Security.** Fixes in the engine's caller authentication, logout token revocation and the webhook's
 sidecar image trust; details in the advisories published with this release. Dependency floors for
 pyjwt, aiohttp, urllib3, anyio, multidict, certifi and opentelemetry; DOMPurify 3.4.17 in the console.
-Image builds now move `-latest` and version tags only after the scan and signature pass.
+Image builds now move `-latest` and version tags only after the scan and signature pass. The FOSSA
+dependency gate grades Python again: from 2026-08-19 `.fossa.yml` named the Python target `type: pip`,
+which is not a fossa-cli type, so no Python package was scanned and the gate passed on the console and
+the webhook alone. The target is `setuptools`, the scanned closure is the one the images install
+(`.[spiffe]`), and the job fails when a graph is missing from the scan summary or a line of the Python
+input is not in a form fossa-cli reads. The report-only dependency audit now covers every optional
+extra as well. In SECURITY.md's accepted exceptions, React Router GHSA-qwww-vcr4-c8h2 is removed (the
+pinned 7.18.2 is the first patched release), and chromadb CVE-2026-45830, -45831 and -45833 are added
+(no fixed release; reachable only through the optional `crewai` and `frameworks` extras, in no
+image).
 
 **Fixed.** `global.imageRegistry` relocates the busybox init image. An agent that retries one refused
 call no longer loses trust on every attempt. Two security booleans no longer fall back to off when an

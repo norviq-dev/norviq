@@ -108,8 +108,9 @@ spiffe = ["spiffe>=0.3"]
 # any of these in; pick the extra(s) matching the agent framework(s) you actually use.
 langchain = ["langchain-core>=0.2"]
 # 1.2.14 floor: CVE-2026-118667 (unencoded thread/assistant ids in the SDK's streaming client redirect
-# authenticated GETs) affects langgraph 1.2.3 up to 1.2.14 AND langgraph-sdk below 0.4.6; 1.2.14 is
-# also the first langgraph to require langgraph-sdk>=0.4.6, which closes the sdk's CVE-2026-104873 too.
+# authenticated GETs) affects langgraph >=1.2.3,<1.2.14 AND langgraph-sdk >=0.4.0,<0.4.6 (OSV
+# GHSA-3fx2-cqw9-xr3c: fixed in 1.2.14 and 0.4.6). 1.2.14 is also the first langgraph to require
+# langgraph-sdk>=0.4.6, which closes the sdk's CVE-2026-104873 too.
 # A direct dependency of this extra, so the floor lives here where pip honours it, like mcp's below.
 langgraph = ["langgraph>=1.2.14"]
 # `mcp` is crewai's own dependency. The floor is declared HERE, in the extra, and not only in

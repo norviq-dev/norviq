@@ -24,7 +24,7 @@ Norviq is a small polyglot monorepo:
 |-----------|--------------------|----------|
 | Enforcement engine + API | Python 3.11+, FastAPI, OPA/Rego | `norviq/` |
 | Console UI | React 18 + Vite, TypeScript | `ui/` |
-| Admission webhook | Go 1.26 | `webhook/` |
+| Admission webhook | Go 1.26.10+ | `webhook/` |
 | Deployment | Helm, Kubernetes CRDs | `helm/norviq` |
 | Policies | Rego | `comprehensive.rego`, `policies/` |
 | Tests | pytest, vitest, `go test` | `tests/`, `ui/src/**/*.test.tsx`, `webhook/` |
@@ -39,9 +39,19 @@ pip install -e ".[dev]"          # pytest, pytest-asyncio, httpx, ruff
 # Console UI (Node.js 20+)
 cd ui && npm ci
 
-# Go webhook (Go 1.26+)
+# Go webhook (Go 1.26.10+, the `go` line in webhook/go.mod)
 cd webhook && go build ./...
 ```
+
+The webhook needs **Go 1.26.10 or later**, not just any 1.26. `webhook/go.mod` says `go 1.26.10`
+because on go1.26.0 govulncheck reports 47 standard-library advisories, 29 of them reachable from the
+webhook binary, and 1.26.10 closes every one; CI installs exactly that version from the same line. An
+older `go` downloads 1.26.10 by itself when `GOTOOLCHAIN=auto`, the default. Where `GOTOOLCHAIN=local`
+is set (the official `golang` images set it, and a distribution's Go package may), the build stops with
+`go: go.mod requires go >= 1.26.10 (running go 1.26.9; GOTOOLCHAIN=local)`: upgrade Go, or run with
+`GOTOOLCHAIN=auto`. Image builds hit the same wall from a stale cache: if your local
+`golang:1.26-alpine` predates 1.26.10, `docker pull golang:1.26-alpine` (or `docker build --pull`)
+before building `webhook/Dockerfile`, including through `scripts/kind-e2e/00-up.sh`.
 
 You also need the **`opa`** binary on your `PATH` — a large part of the test suite shells out to it
 to evaluate real Rego (there is no stub evaluator).
