@@ -1432,7 +1432,13 @@ export function PolicyCatalog() {
     // "nothing happened". Scroll the loaded editor into view + flag a guidance banner (cleared on the
     // next Create/Cancel) so the next action — Create to apply — is unmistakable.
     setJustLoadedDraft(true);
-    setTimeout(() => editorPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 60);
+    // Guarded like the highlight scroll above: jsdom has no scrollIntoView, and this fires 60 ms later, so an
+    // unguarded call threw into whichever test was running then and vitest failed the run on some runs only.
+    setTimeout(() => {
+      if (typeof editorPanelRef.current?.scrollIntoView === "function") {
+        editorPanelRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    }, 60);
   };
 
   const clearIntentDraftParam = () => {

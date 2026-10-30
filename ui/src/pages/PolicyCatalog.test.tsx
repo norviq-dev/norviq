@@ -436,6 +436,44 @@ describe("PolicyCatalog (#3 / #4)", () => {
     expect(screen.getByText(/coverage 3\/5/i)).toBeInTheDocument();
   });
 
+  it("Review & apply scrolls the editor into view, and a DOM without scrollIntoView does not throw", async () => {
+    // The scroll runs from a 60 ms timer. Unguarded, jsdom's missing scrollIntoView threw from that timer into
+    // whatever test was running 60 ms later, and vitest failed the run on an unhandled error some of the time.
+    // Calling the captured timer callback directly makes both cases deterministic.
+    seedHandlers("class");
+    server.use(
+      http.get("/api/v1/threats/intent-drafts", () =>
+        HttpResponse.json({
+          drafts: [{ draft_id: "d-1", ns: "default", cls: "billing-agent", enabled: [], covered_count: 3, total: 5, created_at: "2026-07-03T12:00:00Z" }],
+          total: 1, returned: 1, offset: 0, limit: 15
+        })
+      ),
+      http.get("/api/v1/threats/intent-drafts/d-1", () =>
+        HttpResponse.json({ draft_id: "d-1", ns: "default", cls: "billing-agent", rego: "package norviq.intent.billing\ndefault allow = false\n", enabled: [], covered_count: 3, total: 5, enforcement: "draft" })
+      )
+    );
+    renderPage(["/?intent_draft=d-1"]);
+    await screen.findByTestId("intent-draft-rego");
+    const timers = vi.spyOn(window, "setTimeout");
+    try {
+      fireEvent.click(screen.getByRole("button", { name: /review & apply/i }));
+      await waitFor(() => expect(screen.getByTestId("monaco-editor")).toHaveTextContent("norviq.intent.billing"));
+      const scroll = timers.mock.calls.find(([, ms]) => ms === 60)?.[0] as (() => void) | undefined;
+      expect(scroll).toBeTypeOf("function");
+
+      expect("scrollIntoView" in HTMLElement.prototype).toBe(false); // jsdom, as in every run of this suite
+      expect(() => scroll!()).not.toThrow();
+
+      const scrollIntoView = vi.fn();
+      HTMLElement.prototype.scrollIntoView = scrollIntoView;
+      scroll!();
+      expect(scrollIntoView).toHaveBeenCalledWith({ behavior: "smooth", block: "start" });
+    } finally {
+      timers.mockRestore();
+      delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
+    }
+  });
+
   it("hides the intent-drafts section when there are no drafts (no empty noise)", async () => {
     seedHandlers("class");
     server.use(http.get("/api/v1/threats/intent-drafts", () => HttpResponse.json({ drafts: [], total: 0, returned: 0, offset: 0, limit: 15 })));
