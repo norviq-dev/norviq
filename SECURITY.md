@@ -82,8 +82,13 @@ therefore the FOSSA scan, but *not* a pip install. See the `cryptography` note b
 that distinction decides whether a shipped image is actually patched.
 
 FOSSA scans **three** dependency graphs, and it is worth being explicit about which, because auditing
-only one gives false confidence: Python (`pyproject.toml` + `uv.lock`), Node (`ui/package.json`), and Go
-(`webhook/go.mod`). `pip-audit` alone covers the first.
+only one gives false confidence: Python (the runtime closure, exported from `uv.lock` into
+`requirements-runtime.txt` by the workflow), Node (`ui/package.json`), and Go (`webhook/go.mod`).
+`pip-audit` alone covers the first. For ten weeks the CI job scanned only two: `.fossa.yml` named the
+Python target `type: pip`, which is not a fossa-cli type, so nothing matched and every run read
+"2 projects scanned". It is `setuptools` now, and the workflow fails if any of the three graphs is
+missing from the scan summary. The optional extras are outside this scan by design; they are audited
+with `uv export --extra <name>` and the floors in `pyproject.toml`.
 
 The Python graph is scoped by `[tool.uv] environments` to the interpreters this project claims (3.11 /
 3.12 — see `classifiers`; both images are `python:3.12-slim`). That is a security decision, not a

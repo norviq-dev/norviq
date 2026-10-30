@@ -63,6 +63,20 @@ jobs:
         with:
           api-key: ${{ secrets.FOSSA_API_KEY }}
           run-tests: false
+      # ASSERT every graph .fossa.yml names was actually analysed. Its Python target said `type: pip`,
+      # which is not a fossa-cli project type, so from 2026-08-19 each summary read "2 projects scanned"
+      # (npm, gomod) and the gate below passed without grading a single Python package. Zero findings
+      # from a target that matched nothing looks exactly like a clean scan. fossa-cli writes the same
+      # summary it prints, ANSI-stripped, to this file (src/App/Fossa/Analyze/ScanSummary.hs), one
+      # `* <type> project in "<path>": succeeded` line per analysed project.
+      - name: Assert FOSSA analysed the Python, npm and Go graphs
+        run: |
+          s=/tmp/fossa-analyze-scan-summary.txt
+          for t in setuptools npm gomod; do
+            grep -qE "\* ${t} project in .*: succeeded" "$s" \
+              || { echo "::error::FOSSA analysed no ${t} project; the gate would grade a partial graph"; cat "$s"; exit 1; }
+          done
+          echo "analysed: setuptools (runtime closure), npm (ui), gomod (webhook)"
       - name: Dump FOSSA issues + attribution (JSON) for triage
         if: always()
         run: |
