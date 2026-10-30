@@ -994,8 +994,14 @@ class OPAEvaluator:
         caller-controlled payload, which is strictly more freely chosen. Name-only means an unresolved
         name returns `unknown`, which is not `read`, so it is rate-limited. Fail toward throttling.
 
-        Net effect: strictly NARROWER than before. Every tool that was exempt and is genuinely a read
-        stays exempt; the ones that were exempt only because of how they were spelled no longer are.
+        Net effect: narrower than the prefix test alone. Every exempt tool now needs BOTH the prefix and
+        a `read` from the classifier, so the ones that were exempt only because of how they were spelled
+        no longer are. It is not frozen at the set exempt when this was written: it moves with the
+        classifier, in both directions. When BACKLOG 7.10 stopped `run` outranking the read it governs,
+        `get_run_status` and `list_run_logs` became exempt (they are reads, and had been throttled only
+        because `run` made them `delete`), while `get_run_command_output` stays throttled because a run
+        qualifier governing code keeps the exec reading. Pinned in both directions by
+        tests/engine/test_evaluator_l1l2.py.
         """
         if not settings.evaluator_rate_limit_read_exempt:
             return False
@@ -1215,7 +1221,26 @@ class OPAEvaluator:
     _SQL_TOOL_SUBSTRINGS = ("sql", "query", "report", "select")
 
     def _derived_input(self, event: ToolCallEvent) -> dict:
-        """Flattened/normalized views of the call, for policies that must not depend on param naming."""
+        """Flattened/normalized views of the call, for policies that must not depend on param naming.
+
+        MEMOISED PER EVENT. `_build_input` is called once per candidate policy (routers loop at
+        _evaluate_single) and again on the transient-error retry, and this function is pure in `event`,
+        so without a cache the whole derived view — the param walks and `classify_tool`, which now scans
+        every string in the payload for a write keyword (BACKLOG 7.10) — was recomputed N+ times for one
+        call. At the 256 KiB body cap that scan is tens of ms; N times it dominated the evaluation. The
+        result is cached on the event, which lives exactly as long as the evaluation; the event's fields
+        do not change under it, so the cache is always valid for the object it hangs on."""
+        cached = getattr(event, "_nrvq_derived_cache", None)
+        if cached is not None:
+            return cached
+        derived = self._compute_derived_input(event)
+        try:
+            event._nrvq_derived_cache = derived
+        except Exception:  # noqa: BLE001 — a model that refuses the attribute just recomputes; never fails the call
+            pass
+        return derived
+
+    def _compute_derived_input(self, event: ToolCallEvent) -> dict:
         values = [v for v in self._walk_values(event.tool_params) if isinstance(v, str)]
         paths, ambiguous_paths = self._walk_paths(event.tool_params)
         sql_like = self._sql_candidate(values)

@@ -1086,9 +1086,10 @@ blocks["strict_default_block"] { startswith(lower(input.tool_name), "erase_") }
 #
 # NOT keyed on `derived.verb`, and that is the point worth keeping. Keying the BLOCK on the classifier
 # looks obvious and is wrong: `classify_tool` takes the WORST verb over all name tokens, so it
-# over-classifies — `classify_tool("run_query")` and `classify_tool("execute_sql")` both return
+# over-classifies — `classify_tool("run_report")` and `classify_tool("execute_sql")` both return
 # `delete`. An arm blocking `verb == "delete"` therefore refuses ordinary read tools, which
-# tests/engine/test_capability.py::test_reads_are_not_swept_up_by_the_wider_lexicon caught immediately.
+# tests/engine/test_capability.py::test_reads_are_not_swept_up_by_the_wider_lexicon caught immediately
+# (on `run_query`, which no longer over-classifies since BACKLOG 7.10; `run_report` now carries it).
 # Over-classification is safe where it NARROWS (the rate-limit exemption asks for `read`, so a
 # mislabelled read is merely throttled) and unsafe where it BLOCKS. Different direction, different
 # rule.

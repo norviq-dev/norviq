@@ -161,40 +161,6 @@ async def _call(server: str, agent_class: str, tool: str, args: dict, call_log: 
             return bool(res.isError), _text(res), _rule_of(res), visible
 
 
-def _promote_verb(api: str, admin_token: str, namespace: str, tool: str, verb: str) -> bool:
-    """Promote a tool to a defined verb via the EXISTING classification-lifecycle endpoint.
-
-    Needed here because of a real, pre-existing classifier result that MCP makes very visible:
-    `classify_tool("run_query")` tokenises to {run, query}, `run` is in the lexicon as
-    delete/critical, and the classifier returns the WORST match — so the read-only query tool of
-    every Postgres MCP server classifies as DESTRUCTIVE. A policy that gates on
-    `input.derived.verb == "delete"` then blocks the one tool the class is supposed to use.
-
-    This function POSTs the promotion. It deliberately does NOT decide the claim — see the assertion
-    at the call site, which reads enforcement instead.
-
-    An earlier version of this docstring said the override "outranks the name classifier, and the very
-    next call is classified correctly everywhere". The code says the opposite, and says so explicitly:
-    `_derived_input` consults the promotion ONLY when `classify_tool` returns `unknown`, and when the
-    name resolves "the classifier wins outright, whichever direction the promotion points" — pinned by
-    tests/engine/test_promoted_verb_enforcement.py::
-    test_a_promotion_cannot_demote_a_classified_tool_in_any_direction. `classify_tool("run_query")`
-    resolves to `delete`, so promotion cannot correct THIS tool, and the claim that it can was prose
-    contradicting the module it described.
-    """
-    body = json.dumps({"ns": namespace, "tool_name": tool, "verb": verb,
-                       "evidence": {"source": "mcp-chatbot-scenario",
-                                    "note": "read-only query tool; 'run' token misclassifies it"}}).encode()
-    req = urllib.request.Request(f"{api}/api/v1/threats/tool-verbs/promote", data=body, method="POST",
-                                 headers={"Authorization": f"Bearer {admin_token}",
-                                          "Content-Type": "application/json"})
-    try:
-        _urlopen_http(req).read()
-        return True
-    except (urllib.error.URLError, urllib.error.HTTPError):
-        return False
-
-
 async def run(api: str, admin_token: str) -> list[Check]:
     checks: list[Check] = []
 
@@ -231,55 +197,43 @@ async def run(api: str, admin_token: str) -> list[Check]:
             "refused" if err else "EVALUATED", _executed(log, "postgres", "run_query"),
             err and not _executed(log, "postgres", "run_query"), rule))
 
-        # 1c — a pre-existing classifier result the MCP surface makes very visible. See _promote_verb.
-        # The POST is only half the claim. A remediation that returns 200 and never reaches the
-        # enforcement path is precisely the "reads as fixing it, fixes nothing" shape this product
-        # keeps finding in itself, so the claim is asserted BELOW, against what the evaluator did.
-        promoted = _promote_verb(api, admin_token, "agents", "run_query", "read")
-
         # 2 — the same server, a different class: allowed, and PII masked on the way back.
-        #
-        # Polled rather than called once because a promotion is not guaranteed to be effective on the
-        # next call: `warm_verb_overrides` re-seeds the evaluator's in-proc map on the worker that
-        # served the POST (api/main.py, routers/threats.py), and with no pub/sub the other uvicorn
-        # workers and replicas keep the stale map until they are re-seeded or restarted.
-        waited = 0.0
-        for attempt in range(12):
-            err, txt, rule, _ = await _call("postgres", "support-agent", "run_query",
-                                            {"sql": "select * from customers where id = 8812"}, log)
-            if not err:
-                break
-            await asyncio.sleep(2.0)
-            waited += 2.0
+        err, txt, rule, _ = await _call("postgres", "support-agent", "run_query",
+                                        {"sql": "select * from customers where id = 8812"}, log)
 
-        # The promotion claim, read off ENFORCEMENT rather than off the POST's status code.
+        # BACKLOG 7.10, read off ENFORCEMENT: which rule, if any, refused the call above.
         #
-        # MEASURED 2026-09-07, single replica and NRVQ_API_WORKERS=1, so neither replica skew nor
-        # worker skew is in play: the promotion does not reach `input.derived.verb` for this tool, and
-        # that is by design. `classify_tool("run_query")` resolves to `delete` (the `run` token is in
-        # the lexicon as delete/critical), and the evaluator consults a promotion ONLY when the name
-        # classifier returns `unknown` — when the name resolves the classifier wins outright, pinned by
-        # tests/engine/test_promoted_verb_enforcement.py::
-        # test_a_promotion_cannot_demote_a_classified_tool_in_any_direction.
+        # `support_no_destructive_verb` is `input.derived.verb == "delete"`, and `classify_tool`
+        # used to resolve `run_query` to `delete` — `run` ranked above the read it governs — so this
+        # rule refused the class's one sanctioned read on every call (measured 2026-09-07, single
+        # replica, NRVQ_API_WORKERS=1). The scenario then POSTed a verb promotion as the remediation
+        # and asserted that it reached enforcement; it never could, because a promotion is consulted
+        # only for a name the classifier does not resolve (pinned by tests/engine/
+        # test_promoted_verb_enforcement.py::test_a_promotion_cannot_demote_a_classified_tool_in_any_direction).
+        # The name now resolves to `read` on its own (capability/source_registry.py, `_RUN_QUALIFIERS`),
+        # so a promotion would have nothing to correct either, and asserting one would credit an admin
+        # action with a result the classifier produced. The claim is about the classifier, so the
+        # promotion step is gone and the check names the rule that would have fired.
         #
-        # So promotion is the wrong remediation for a MISCLASSIFIED NAME, and asserting `promoted`
-        # here reported a green for an admin action that changed nothing about enforcement. The
-        # remediation this tool actually needs is a policy that does not gate on the name classifier
-        # (`support_no_write_sql` already catches the writes precisely) or a lexicon fix.
-        reached_enforcement = promoted and rule != "support_no_destructive_verb"
-        if not promoted:
-            promo_observed = "promotion POST failed"
-        elif reached_enforcement:
-            promo_observed = "promotion reached enforcement"
+        # Judged only on a call that was DECIDED. A refusal that carries no rule — a transport failure,
+        # a 403, an engine fault — says nothing about which rule would have fired, and the first cut of
+        # this check (`rule != "support_no_destructive_verb"`) passed it: green on a call the policy
+        # never saw. A refusal by some OTHER rule still passes here, because the claim is only about
+        # the name classifier; the next check is the one that says the query actually ran.
+        if not err:
+            verdict, not_destructive = "not refused as destructive (allowed)", True
+        elif not rule:
+            verdict, not_destructive = "NOT EVALUATED — refused with no rule attributed", False
+        elif rule == "support_no_destructive_verb":
+            verdict, not_destructive = "REFUSED AS DESTRUCTIVE", False
         else:
-            promo_observed = "promoted, but the name classifier still wins"
+            verdict, not_destructive = f"not refused as destructive (refused by {rule})", True
         checks.append(Check(
-            "an admin can correct a misclassified tool through the existing promotion lifecycle",
-            "-", "postgres", "run_query", "the promoted verb reaches input.derived.verb",
-            promo_observed, False, reached_enforcement))
+            "the read-only query tool is not refused as destructive by its name",
+            "support-agent", "postgres", "run_query", "derived.verb is not delete",
+            verdict, _executed(log, "postgres", "run_query"), not_destructive, rule))
 
-        add(f"tier-2 support CAN query the customer replica (converged after {waited:.0f}s)",
-            "support-agent", "postgres",
+        add("tier-2 support CAN query the customer replica", "support-agent", "postgres",
             "run_query", "allowed", err, txt, rule, _executed(log, "postgres", "run_query"), False)
 
         # Masking can only be judged on a result that came back. When the call was REFUSED there is no
@@ -304,9 +258,11 @@ async def run(api: str, admin_token: str) -> list[Check]:
         add("arbitrary SQL is refused even on an approved server", "support-agent", "postgres",
             "execute_sql", "blocked", err, txt, rule, _executed(log, "postgres", "execute_sql"), True)
 
-        # ...and the same intent smuggled through the read tool.
+        # ...and the same intent smuggled through the read tool. The SAME statement, so the row reads
+        # as the write rule refusing a write: a DELETE here would be named by the destructive-verb rule,
+        # which sorts first, because the classifier now reads the statement a run qualifier carries.
         err, txt, rule, _ = await _call("postgres", "support-agent", "run_query",
-                                        {"sql": "DELETE FROM customers WHERE 1=1"}, log)
+                                        {"sql": "update accounts set balance = 0"}, log)
         add("a write statement in the read-only tool is refused", "support-agent", "postgres",
             "run_query", "blocked", err, txt, rule, False, True)
 

@@ -87,6 +87,13 @@ _OBSERVABILITY_METHODS = frozenset({"inc", "increment", "observe", "record_excep
 # Adding to this list is a deliberate, reviewable act — that is the point.
 # --------------------------------------------------------------------------------------------------
 _JUSTIFIED_SILENT_HANDLERS: dict[tuple[str, str], str] = {
+    ("engine/evaluator.py", "OPAEvaluator._derived_input"): (
+        "A CACHE write, not a decision. The derived view is pure in the event and is stored on it so the "
+        "per-candidate and retry calls of one evaluation reuse it; an event type that refuses the attribute "
+        "(a test double with __slots__, a future model) only gets it recomputed on the next call, with the "
+        "same result. ToolCallEvent accepts it. Logging would fire on every evaluation of such a type and "
+        "report nothing an operator could act on."
+    ),
     ("sidecar/http_fallback.py", "_is_loopback"): (
         "Speculative PARSING of the peer address, and the failure answer is the fail-CLOSED one: a peer "
         "that does not parse as an IP is treated as NOT loopback, so it must authenticate (or is refused) "

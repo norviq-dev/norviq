@@ -264,11 +264,24 @@ test_camel_case_rename_is_also_blocked {
 }
 
 # The arm must NOT be keyed on derived.verb. classify_tool takes the worst verb over all name tokens,
-# so run_query and execute_sql both classify as `delete`; a verb-keyed block refuses ordinary reads.
-# run_query carries no destructive TOKEN, so the token arm leaves it alone.
+# so run_report and execute_sql both classify as `delete`; a verb-keyed block refuses ordinary reads.
+# (run_query did too until BACKLOG 7.10 split the run qualifiers out; it stays here as the read the
+# arm was first written against, and run_report is added as the one that still over-classifies.)
+# Neither carries a destructive TOKEN, so the token arm leaves them alone.
+#
+# Each row carries the `derived.verb` the engine publishes for it, or the row guards nothing: `_norm`
+# adds no `derived`, so without it a `derived.verb == "delete"` block arm appended to strict.rego was
+# measured to pass this test 58/58. The verbs are what classify_tool returns for these exact calls,
+# and tests/engine/test_capability.py::test_the_strict_parity_rows_carry_the_verb_the_engine_publishes
+# fails if they stop being so.
 test_a_read_tool_the_classifier_over_classifies_is_not_blocked_by_the_token_arm {
     strict.decision == "allow" with input as _norm({
         "tool_name": "run_query", "tool_params": {"query": "select 1"},
+        "derived": {"verb": "read"},
+    })
+    strict.decision == "allow" with input as _norm({
+        "tool_name": "run_report", "tool_params": {"name": "monthly revenue summary"},
+        "derived": {"verb": "delete"},
     })
 }
 

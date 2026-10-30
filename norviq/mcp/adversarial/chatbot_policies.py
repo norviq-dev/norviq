@@ -121,18 +121,19 @@ blocks["support_no_destructive_verb"] {
   input.derived.verb == "delete"
 }
 
-# Write-shaped SQL smuggled through the read tool.
+# A write by this read-only class, whatever tool carries it. The one sanctioned write path is the
+# public-surface escalation below (create_issue / add_issue_comment), which is reviewed rather than
+# refused; every other write is blocked. Keyed on the engine's own verb so a rename cannot dodge it:
+# since BACKLOG 7.10 a run_/execute_ qualifier yields to `read` ONLY when the payload is positively a
+# read, so a write smuggled through run_query — or through a renamed query tool, or a run_ tool whose
+# name says nothing — carries derived.verb == "write" (a destructive statement carries "delete" and is
+# caught by support_no_destructive_verb above). A select stays read and is allowed.
 blocks["support_no_write_sql"] {
-  input.tool_name == "run_query"
-  sql := lower(input.tool_params_normalized.sql)
-  write_keyword(sql)
+  input.derived.verb == "write"
+  not _support_sanctioned_write
 }
-write_keyword(s) { contains(s, "insert ") }
-write_keyword(s) { contains(s, "update ") }
-write_keyword(s) { contains(s, "delete ") }
-write_keyword(s) { contains(s, "drop ") }
-write_keyword(s) { contains(s, "alter ") }
-write_keyword(s) { contains(s, "truncate ") }
+_support_sanctioned_write { input.tool_name == "create_issue" }
+_support_sanctioned_write { input.tool_name == "add_issue_comment" }
 
 # --- egress -------------------------------------------------------------------------------------
 # The composition risk: this class can read the customer replica AND send messages. The boundary is
@@ -183,7 +184,7 @@ escalates["support_review_public_write"] {
 reasons = {
   "support_no_arbitrary_sql": "arbitrary SQL execution is not an approved capability for this class",
   "support_no_destructive_verb": "destructive operations are not permitted",
-  "support_no_write_sql": "the read-only query tool was given a write statement",
+  "support_no_write_sql": "a write was attempted by a read-only class (e.g. a write statement through the query tool)",
   "support_no_external_egress": "message destination is outside the corporate domain",
   "support_no_sensitive_path": "filesystem access outside the runbook volume",
   "support_prompt_injection": "prompt-injection payload in tool arguments",

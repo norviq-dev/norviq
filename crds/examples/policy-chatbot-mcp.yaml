@@ -143,7 +143,11 @@ spec:
     }
 
     # Nothing this class does is destructive. `execute_sql` and `delete_record` both classify here,
-    # as does any renamed spelling of them.
+    # as does a renamed destruction verb (`remove_record`, `purge_rows`). A renamed QUERY tool is
+    # classified by what its payload proves: since BACKLOG 7.10, `execute_query` reports `read` only when
+    # the payload is positively a read, so a DROP or DELETE through it is `delete` (caught here), an
+    # UPDATE is `write` (caught by `chatbot_no_write` if you add one; here it falls to the register),
+    # and a select is `read`. Either way the register above never admitted `execute_query`.
     blocks["chatbot_destructive_verb"] {
         object.get(input.derived, "verb", "") == "delete"
     }

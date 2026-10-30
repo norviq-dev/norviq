@@ -27,6 +27,20 @@ def _derived(tool: str, params: dict) -> dict:
     return ev._derived_input(SimpleNamespace(tool_name=tool, tool_params=params))
 
 
+def test_derived_input_is_memoised_on_the_event_not_the_evaluator() -> None:
+    """`_build_input` runs `_derived_input` once per candidate policy and again on the retry, so the
+    result is cached — but ON THE EVENT, which lives exactly one evaluation, NOT on the evaluator, which
+    serves every call. Caching on the evaluator would hand the second call the first call's verb. One
+    evaluator, two events: each must get its own classification, and a repeat on the same event must be
+    the cached object."""
+    ev = OPAEvaluator.__new__(OPAEvaluator)
+    e1 = SimpleNamespace(tool_name="run_query", tool_params={"sql": "select * from orders"})
+    e2 = SimpleNamespace(tool_name="run_query", tool_params={"sql": "UPDATE users SET role='admin'"})
+    d1, d2 = ev._derived_input(e1), ev._derived_input(e2)
+    assert (d1["verb"], d2["verb"]) == ("read", "write"), "the second event got the first's cached verb"
+    assert ev._derived_input(e1) is d1, "the same event must return the cached object"
+
+
 # --- param_values: defeats param-name renaming ------------------------------------------------------
 
 

@@ -207,11 +207,18 @@ from there it reaches the transcript, the model provider, and any downstream too
 MCP traffic is ordinary traffic to the rest of the product, and that is the point:
 
 - **Policy Catalog** shows `chatbot-faq-bot` and `chatbot-support-agent` with live match counts.
-- **Threats → tool classification** shows `run_query` promoted to verb `read`. Worth knowing why:
-  Norviq's name classifier tokenises `run_query` to `{run, query}`, `run` is in the lexicon as
-  *delete/critical*, and the classifier returns the worst match — so the read-only query tool of
-  every Postgres MCP server classifies as destructive. The fix is the existing promotion lifecycle,
-  not a weaker policy. See "Findings" in the design note.
+- **Threats → tool classification** shows `run_query` as verb `read`, graded *critical* because it
+  runs what it is given. Worth knowing the history: it used to classify as `delete`, because `run`
+  is an execution token and outranked the `query` it governs, so a policy gating on
+  `derived.verb == "delete"` refused the read-only query tool of every Postgres MCP server. A verb
+  promotion could not fix that — a promotion only fills in a name the classifier cannot resolve —
+  so the classifier was fixed instead: `run`, `execute` and `invoke` now take the verb of the
+  operation they govern, and a name that says only that something runs (`run`, `run_report`,
+  `execute_sql`) is still `delete`/critical. Because `run_query` runs whatever it is handed, it reports
+  `read` only when the payload is *positively* a read — no statement/mutation keyword anywhere; a
+  `SELECT` is `read`, while an `UPDATE`/`GRANT` (even one obfuscated with comments, or a Cypher/GraphQL
+  write) is `write` and a `DROP`/`DELETE` is `delete`, and anything it cannot prove is a read fails
+  closed to `delete`. See "Findings" in the design note.
 - **Agents** shows tool-usage and trust history including the MCP calls.
 - **Compliance / MITRE / graphs** all still answer — verified by `tests/mcp/integration_sweep.py`,
   which reads 23 console surfaces before and after MCP traffic.
