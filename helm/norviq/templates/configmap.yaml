@@ -111,7 +111,7 @@ data:
   NRVQ_REDTEAM_SUMMARY_KEEP_DAYS: {{ $ret.redteamSummaryKeepDays | default 30 | quote }}
   NRVQ_REDTEAM_HISTORY_PAGE_SIZE: {{ $ret.redteamHistoryPageSize | default 20 | quote }}
   # --- Local username/password login (non-secret tunables; seed creds live in norviq-secrets). ---
-  NRVQ_AUTH_LOGIN_ENABLED: {{ .Values.auth.enabled | default true | quote }}
+  NRVQ_AUTH_LOGIN_ENABLED: {{ ternary "false" "true" (eq (toString .Values.auth.enabled) "false") | quote }}
   NRVQ_AUTH_SESSION_TTL_S: {{ .Values.auth.sessionTtlSeconds | default 3600 | quote }}
   NRVQ_AUTH_LOGIN_MAX_ATTEMPTS: {{ .Values.auth.loginMaxAttempts | default 5 | quote }}
   NRVQ_AUTH_LOGIN_WINDOW_S: {{ .Values.auth.loginWindowSeconds | default 300 | quote }}
@@ -127,7 +127,7 @@ data:
   NRVQ_OIDC_JWKS_URL: {{ .Values.oidc.jwksUrl | default "" | quote }}
   NRVQ_OIDC_GROUP_CLAIM: {{ .Values.oidc.groupClaim | default "groups" | quote }}
   NRVQ_OIDC_GROUP_MAPPINGS: {{ .Values.oidc.groupMappings | default dict | toJson | quote }}
-  NRVQ_LEGACY_HS256_ENABLED: {{ .Values.oidc.legacyHs256Enabled | default true | quote }}
+  NRVQ_LEGACY_HS256_ENABLED: {{ ternary "false" "true" (eq (toString .Values.oidc.legacyHs256Enabled) "false") | quote }}
   NRVQ_SPIFFE_MODE: {{ .Values.config.spiffeMode | default "mock" | quote }}
   NRVQ_SPIFFE_SOCKET: {{ .Values.config.spiffeSocket | default "/spiffe-workload-api/spire-agent.sock" | quote }}
   NRVQ_OTEL_ENDPOINT: {{ .Values.otel.endpoint | default "" | quote }}

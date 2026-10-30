@@ -62,6 +62,11 @@ because they should be installed.
   The floors close CVE-2026-118667 (langgraph) and CVE-2026-59951, -116684, -116685 and -116686 (mcp);
   the crewai floor follows from the mcp one, because crewai 1.15.6 through 1.15.28 pin `mcp~=1.28.1`.
   `pip install norviq` and the images (`.[spiffe]`) are unaffected.
+- **`auth.enabled: false` and `oidc.legacyHs256Enabled: false` now take effect.** Earlier charts rendered
+  both as `"true"`, so local password login and HS256 tokens stayed accepted (the fleet hub's ConfigMap
+  likewise). If you set either, make sure nothing still signs in with a local password or an HS256 token
+  before you upgrade. The fleet hub's `config.requireStrongSecret` also follows the spoke now: a nulled key
+  means on, not off.
 
 **Building from source.** `webhook/go.mod` says `go 1.26.10` (was `1.26.0`): on go1.26.0, govulncheck
 reports 47 standard-library advisories, 29 of them reachable from the webhook. An older Go fetches
@@ -70,8 +75,8 @@ reports 47 standard-library advisories, 29 of them reachable from the webhook. A
 webhook from a cached `golang:1.26-alpine` older than 1.26.10 needs `--pull`. `golang.org/x/net` moves
 to 0.62.0 (GO-2026-6860, GO-2026-6866).
 
-**Security.** Fixes in the engine's caller authentication, logout token revocation and the webhook's
-sidecar image trust; details in the advisories published with this release. Dependency floors for
+**Security.** Fixes in the engine's caller authentication, logout token revocation, the webhook's
+sidecar image trust and two chart authentication switches that could not be turned off; details in the advisories published with this release. Dependency floors for
 pyjwt, aiohttp, urllib3, anyio, multidict, certifi and opentelemetry; DOMPurify 3.4.17 in the console.
 Image builds now move `-latest` and version tags only after the scan and signature pass. The FOSSA
 dependency gate grades Python again: from 2026-08-19 `.fossa.yml` named the Python target `type: pip`,
