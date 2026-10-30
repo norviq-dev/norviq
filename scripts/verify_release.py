@@ -18,7 +18,8 @@ user receives:
 Checks are COLLECTED, not fatal: one run reports every failure it finds rather than stopping at the
 first, because finding one bug per release cycle is the loop this exists to break.
 
-    scripts/verify_release.py                 # full run, cluster deleted afterwards
+    scripts/verify_release.py                 # upgrade path from the newest published chart <= this one
+    scripts/verify_release.py --upgrade-from none   # fresh install instead, by explicit choice
     scripts/verify_release.py --keep          # leave the cluster up to poke at a failure
     scripts/verify_release.py --skip-create   # reuse a cluster from a previous --keep run
 """
@@ -34,7 +35,9 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -44,6 +47,8 @@ REPO = "ghcr.io/norviq-dev/norviq-engine"
 CHART_REPO = "ghcr.io/norviq-dev/charts/norviq"
 NS, TENANT = "norviq", "agents"
 POLICY = "nrvq-verify-guard"
+# The bundled single-instance store (templates/redis-statefulset.yaml), the same pod name in every release.
+STORE_POD, STORE_CONTAINER = "norviq-redis-0", "redis"
 # Only ever used against a throwaway kind cluster this script created and deletes.
 VERIFY_PASSWORD = "verify-release-not-a-real-secret-9137"
 
@@ -573,17 +578,102 @@ def _uninstall_and_assert_clean(ctx: str) -> None:
 # ---------------------------------------------------------------------------------------------
 # stage 2u — the operation every EXISTING user performs
 # ---------------------------------------------------------------------------------------------
-def previous_published_version(current: str) -> str:
-    """The highest released tag below `current`, from git.
+# `auto` used to read `git tag` and pick the highest tag that was not the candidate's own version. It
+# went wrong three ways, and the first one meant the upgrade path had never run in CI:
+#
+#   * CI's checkout is shallow and carries no tags, so the list was empty. On PR #122 (chart 0.2.5) the
+#     job logged "(no earlier release to upgrade from — running the fresh-install path)" and reported
+#     success. That is how the 0.2.5 -> 0.2.6 store crash (tests/helm/test_bundled_store_upgrade.py)
+#     reached a release candidate without CI ever running an upgrade.
+#   * "not equal" is not "older". It skipped the published 0.2.5 when the candidate was an unbumped
+#     0.2.5, which is still a real upgrade of a real artifact. It would also pick a NEWER tag for an
+#     older candidate and test a downgrade.
+#   * A tag is not a published chart. v0.1.0 and v0.2.0 shipped no chart at all (CHANGELOG.md).
+#
+# So the list now comes from the registry `install_published` pulls from. Only published releases
+# count, the candidate's own version included, and finding none is an error rather than a quiet switch
+# to the fresh-install path.
+_SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$")
 
-    Not from the registry: `helm` cannot list OCI tags, and the git tags are what the releases were
-    cut from, so they cannot disagree with what was published without something already being wrong.
+
+class UpgradeSourceError(RuntimeError):
+    """`--upgrade-from auto` could not name a published release. Never a reason to run the fresh path."""
+
+
+def _version_key(version: str) -> tuple[int, int, int, int] | None:
+    """(major, minor, patch, 1 for a release / 0 for a prerelease), or None for a non-SemVer tag.
+
+    The last field orders a prerelease below its release (0.2.6-rc.1 < 0.2.6), which is all the ordering
+    that is needed: prereleases are never picked as an upgrade source, only compared against as a candidate.
     """
-    res = run("git", "-C", str(ROOT), "tag", "--list", "v*", "--sort=-v:refname")
-    for tag in (ln.strip().lstrip("v") for ln in res.stdout.splitlines() if ln.strip()):
-        if tag != current:
-            return tag
-    return ""
+    m = _SEMVER.match(version.strip().removeprefix("v"))
+    if not m:
+        return None
+    return int(m[1]), int(m[2]), int(m[3]), 0 if m[4] else 1
+
+
+def select_upgrade_source(candidate: str, published: Iterable[str]) -> str:
+    """The newest published RELEASE that is <= `candidate`, or "" if there is none.
+
+    Equal counts. An unbumped candidate upgraded from the published artifact with the same number is still
+    an upgrade, and it is the one every existing user of that number performs. Prereleases are skipped
+    because nobody runs one as the cluster they upgrade from. Registry tags that are not versions
+    (cosign's `sha256-<digest>`, `artifacthub.io`) are ignored.
+    """
+    ceiling = _version_key(candidate)
+    if ceiling is None:
+        raise ValueError(f"candidate version {candidate!r} is not SemVer")
+    releases = [(key, tag) for tag in published
+                if (key := _version_key(tag)) is not None and key[3] == 1 and key <= ceiling]
+    return max(releases)[1] if releases else ""
+
+
+def published_chart_versions(repo: str = CHART_REPO) -> list[str]:
+    """Every tag of the published chart, read from the OCI registry (anonymous pull token).
+
+    `helm` has no command that lists OCI tags, but the registry API does, and it lists exactly what
+    `helm install oci://... --version X` can fetch.
+    """
+    host, _, path = repo.partition("/")
+    token_url = f"https://{host}/token?scope=repository:{path}:pull&service={host}"
+    with urllib.request.urlopen(token_url, timeout=30) as r:  # noqa: S310 — fixed https registry URL
+        token = json.loads(r.read().decode())["token"]
+    tags: list[str] = []
+    url = f"https://{host}/v2/{path}/tags/list?n=1000"
+    while url:
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(req, timeout=30) as r:  # noqa: S310 — fixed https registry URL
+            tags += json.loads(r.read().decode()).get("tags") or []
+            nxt = re.search(r'<([^>]+)>;\s*rel="next"', r.headers.get("Link", ""))
+        url = urllib.parse.urljoin(f"https://{host}", nxt.group(1)) if nxt else ""
+    return tags
+
+
+def resolve_upgrade_source(requested: str, candidate: str,
+                           list_published: Callable[[], list[str]] | None = None) -> str:
+    """Turn `--upgrade-from` into a version to install first, or "" for the fresh-install path.
+
+    Only an explicit `none` gives "". `auto` either names a published release or raises.
+    """
+    if requested == "none":
+        return ""
+    if requested != "auto":
+        return requested
+    try:
+        published = (list_published or published_chart_versions)()
+    except (urllib.error.URLError, OSError, ValueError, KeyError) as exc:
+        raise UpgradeSourceError(f"could not list the published chart versions at oci://{CHART_REPO}: {exc}") from exc
+    try:
+        source = select_upgrade_source(candidate, published)
+    except ValueError as exc:
+        raise UpgradeSourceError(str(exc)) from exc
+    if not source:
+        releases = sorted((t for t in published if (k := _version_key(t)) and k[3] == 1), key=_version_key)
+        raise UpgradeSourceError(
+            f"no published release <= {candidate} at oci://{CHART_REPO} "
+            f"(published releases: {', '.join(releases) or 'none'}). Nothing was upgraded, so nothing about "
+            f"the upgrade path is known. Pass --upgrade-from none to verify a fresh install deliberately.")
+    return source
 
 
 def install_published(ctx: str, version: str) -> bool:
@@ -603,6 +693,145 @@ def install_published(ctx: str, version: str) -> bool:
     ok = res.returncode == 0 and "STATUS: deployed" in res.stdout
     return check(f"install the previous release ({version}) from OCI", ok,
                  "" if ok else (res.stderr or res.stdout)[-400:])
+
+
+def _api_pods(ctx: str) -> list[str]:
+    """API pods that are not on their way out (a rollout lists the terminating ones too)."""
+    r = kubectl(ctx, "get", "pods", "-n", NS, "-l", "app.kubernetes.io/component=api", "-o", "json")
+    try:
+        items = json.loads(r.stdout).get("items") or []
+    except json.JSONDecodeError:
+        return []
+    return [p["metadata"]["name"] for p in items if not p["metadata"].get("deletionTimestamp")]
+
+
+def seed_bundled_store(ctx: str) -> bool:
+    """Write to the bundled store of the release being upgraded FROM, and get it onto the volume.
+
+    The upgrade path used to install N-1 and upgrade straight away, with nothing ever written to the
+    store, and that hid exactly the failure it needed to find. 0.2.5's Redis 7.4 leaves an RDB-12 dump on
+    norviq-redis-pvc, and 0.2.6's Valkey 8.1 exits on it (measured live on 2026-10-30; see
+    tests/helm/test_bundled_store_upgrade.py).
+
+    A login and a logout are the most ordinary writes a user makes, and the logout leaves a `revoked:`
+    entry in the store. SAVE then writes the dump that any install running for an hour with one change
+    already has (Redis's default `save 3600 1`), so the run does not depend on the shutdown save landing.
+    Keys and dump size are asserted, not assumed: a seed that silently wrote nothing would make every
+    store check after the upgrade pass for the wrong reason.
+    """
+    r = kubectl(ctx, "get", "secret", "norviq-secrets", "-n", NS,
+                "-o", "jsonpath={.data.NRVQ_AUTH_ADMIN_PASSWORD}")
+    pods = _api_pods(ctx)
+    if not r.stdout.strip() or not pods:
+        return check("seed the pre-upgrade store (login + logout)", False,
+                     "admin password secret not readable" if pods else "no API pod")
+    password = base64.b64decode(r.stdout.strip()).decode()
+    with _PortForward(ctx, pods[0], 18103) as pf:
+        try:
+            tok = _api(pf.port, "/api/v1/auth/login", body={"username": "admin", "password": password})
+            token = tok.get("access_token") or tok.get("token") or ""
+            # Allowed while the seeded admin is still `must_change`: logout validates the token itself.
+            _api(pf.port, "/api/v1/auth/logout", token, method="POST")
+        except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+            return check("seed the pre-upgrade store (login + logout)", False, str(exc))
+
+    # REDISCLI_AUTH, not `-a`: the password stays out of argv, as the StatefulSet itself is careful to do.
+    r = kubectl(ctx, "exec", STORE_POD, "-n", NS, "-c", STORE_CONTAINER, "--", "sh", "-c",
+                'export REDISCLI_AUTH="$REDIS_PASSWORD"; echo "keys=$(redis-cli DBSIZE)"; '
+                'echo "save=$(redis-cli SAVE)"; echo "rdb=$(wc -c < /data/dump.rdb)"')
+    got = dict(ln.split("=", 1) for ln in r.stdout.splitlines() if "=" in ln)
+    keys = int(got["keys"]) if got.get("keys", "").strip().isdigit() else 0
+    rdb = int(got["rdb"]) if got.get("rdb", "").strip().isdigit() else 0
+    return check("the pre-upgrade store holds data and has saved it to its volume",
+                 keys >= 1 and got.get("save", "").strip() == "OK" and rdb > 0,
+                 f"{keys} key(s), SAVE {got.get('save', '?').strip()}, dump.rdb {rdb} bytes"
+                 + ("" if r.returncode == 0 else f" — {r.stderr.strip()[-200:]}"))
+
+
+def _candidate_store_image(chart: Path) -> str:
+    out = run("helm", "template", "norviq", str(chart), "--set-json", f'policyQuotaNamespaces=["{TENANT}"]',
+              "--show-only", "templates/redis-statefulset.yaml").stdout
+    m = re.search(r'image:\s*"([^"]+)"', out)
+    return m.group(1) if m else ""
+
+
+def check_store_after_upgrade(ctx: str, chart: Path) -> None:
+    """The store's pod must run the candidate's image, be Ready, and STAY up.
+
+    Judged whether or not `helm upgrade` reported success. A store that exits on the old store's files is
+    what makes `--wait` time out, and the timeout alone does not say why. In the live 0.2.5 -> 0.2.6 run
+    the only line that did was in this pod's log: "Can't handle RDB format version 12".
+
+    Sampled twice, 15s apart. The container has no readiness probe, so it reads Ready the moment it starts,
+    and a server that exits while loading its dump is briefly Ready between restarts. restartCount is what
+    separates a running store from a crash-looping one.
+    """
+    want = _candidate_store_image(chart)
+
+    def sample() -> dict:
+        r = kubectl(ctx, "get", "pod", STORE_POD, "-n", NS, "-o", "json")
+        try:
+            pod = json.loads(r.stdout)
+        except json.JSONDecodeError:
+            return {"ready": False, "image": "", "restarts": -1}
+        cs = next((c for c in pod.get("status", {}).get("containerStatuses") or []
+                   if c.get("name") == STORE_CONTAINER), {})
+        image = next((c["image"] for c in pod["spec"]["containers"] if c["name"] == STORE_CONTAINER), "")
+        return {"ready": bool(cs.get("ready")), "image": image, "restarts": int(cs.get("restartCount", 0))}
+
+    def healthy(s: dict) -> bool:
+        return s["ready"] and s["image"] == want and s["restarts"] == 0
+
+    wait_until(lambda: healthy(sample()), 120, interval=3)
+    time.sleep(15)
+    first, second = sample(), sample()
+    ok = bool(want) and healthy(first) and healthy(second)
+    detail = f"{second['image'] or '?'} ready={second['ready']} restarts={second['restarts']}"
+    if not ok:
+        logs = kubectl(ctx, "logs", STORE_POD, "-n", NS, "-c", STORE_CONTAINER, "--previous", "--tail=4")
+        if logs.returncode != 0:
+            logs = kubectl(ctx, "logs", STORE_POD, "-n", NS, "-c", STORE_CONTAINER, "--tail=4")
+        detail += f" (want {want or 'an image from the candidate chart'}) — " + " | ".join(
+            ln.strip() for ln in logs.stdout.splitlines()[-4:])
+    check("the store's pod runs the candidate image, is Ready and has not restarted", ok, detail)
+
+
+def check_api_after_upgrade(ctx: str) -> None:
+    """Every API replica Ready on the upgraded release, and /readyz saying it reaches the store.
+
+    The API's readiness probe is /readyz, which pings the store, so a store that never came back holds
+    the rollout here. Reading the payload names the store as the cause instead of only "not ready".
+    """
+    status: dict = {}
+
+    def rolled_out() -> bool:
+        r = kubectl(ctx, "get", "deploy", "norviq-api", "-n", NS, "-o", "json")
+        try:
+            d = json.loads(r.stdout)
+        except json.JSONDecodeError:
+            return False
+        want, st = d["spec"].get("replicas", 1), d.get("status", {})
+        status.update(want=want, ready=st.get("readyReplicas", 0), updated=st.get("updatedReplicas", 0))
+        return want == status["ready"] == status["updated"]
+
+    rolled = wait_until(rolled_out, 180, interval=3)
+    payload: dict = {}
+    pods = _api_pods(ctx)
+    if pods:
+        with _PortForward(ctx, pods[0], 18104) as pf:
+            try:
+                payload = _api(pf.port, "/readyz")
+            except urllib.error.HTTPError as exc:  # 503 still carries the per-dependency payload
+                try:
+                    payload = json.loads(exc.read().decode())
+                except (json.JSONDecodeError, OSError):
+                    payload = {"status": f"HTTP {exc.code}"}
+            except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+                payload = {"status": f"unreachable: {exc}"}
+    check("the API is Ready after the upgrade and reaches the store",
+          rolled and payload.get("redis") is True,
+          f"{status.get('ready', 0)}/{status.get('want', '?')} ready, {status.get('updated', 0)} updated; "
+          f"/readyz {payload or 'not reached'}")
 
 
 def snapshot(ctx: str) -> dict[str, str]:
@@ -690,8 +919,9 @@ def main() -> int:
     ap.add_argument("--upgrade-from", default="auto", metavar="VERSION",
                     help="Verify the UPGRADE path instead of a fresh install: install this published "
                          "version from OCI, seed state, then upgrade to the candidate. 'auto' (the "
-                         "default) picks the highest released tag below the candidate; 'none' runs "
-                         "the fresh-install path only.")
+                         "default) picks the newest release published to the chart registry that is <= "
+                         "the candidate, equal included, and FAILS if there is none; 'none' runs the "
+                         "fresh-install path only.")
     ap.add_argument("--keep", action="store_true", help="leave the cluster up for debugging")
     ap.add_argument("--skip-create", action="store_true", help="reuse an existing cluster")
     args = ap.parse_args()
@@ -708,8 +938,18 @@ def main() -> int:
 
         version = chk.collect()["helm/norviq/Chart.yaml:version"]
 
+    # Resolved before any cluster exists: a run that cannot name what it upgrades from should fail in
+    # seconds, not after building a cluster to run a different test in.
+    try:
+        from_version = resolve_upgrade_source(args.upgrade_from, version)
+    except UpgradeSourceError as exc:
+        print(f"\nFAIL  --upgrade-from {args.upgrade_from}: {exc}", file=sys.stderr)
+        return 1
+
     ctx = f"kind-{args.cluster}"
-    print(f"\nverifying the RELEASE ARTIFACT for {version} in kind cluster {args.cluster}\n")
+    print(f"\nverifying the RELEASE ARTIFACT for {version} in kind cluster {args.cluster}")
+    print(f"path: upgrade from the published {from_version}\n" if from_version
+          else "path: fresh install (--upgrade-from none)\n")
 
     if not args.skip_create:
         run("kind", "delete", "cluster", "--name", args.cluster, timeout=300)
@@ -724,14 +964,6 @@ def main() -> int:
             chart = stamp(version, Path(td))
             check_stamped_shape(ctx, chart)
 
-            from_version = args.upgrade_from
-            if from_version == "auto":
-                from_version = previous_published_version(version)
-                if not from_version:
-                    print("  (no earlier release to upgrade from — running the fresh-install path)")
-            elif from_version == "none":
-                from_version = ""
-
             if from_version:
                 # The upgrade path REPLACES the fresh install rather than running after it: a release
                 # is installed fresh by new users and upgraded into by every existing one, and the
@@ -742,9 +974,14 @@ def main() -> int:
                 started = install_published(ctx, from_version)
                 if started:
                     create_tenant_policy(ctx)
+                    seed_bundled_store(ctx)
                     before = snapshot(ctx)
                     print(f"\nstage 2u — upgrade {from_version} -> {version}")
                     started = upgrade_to_candidate(ctx, chart, args.webhook_image)
+                    # Run whether or not the upgrade reported success: when it times out, these are
+                    # the checks that say which component did not come back, and why.
+                    check_store_after_upgrade(ctx, chart)
+                    check_api_after_upgrade(ctx)
                     if started:
                         check_upgrade_preserved(ctx, chart, before)
             else:

@@ -38,11 +38,17 @@ jobs:
     # deadlock only ever bit a FRESH install (the webhook's TLS secret already exists on an upgrade),
     # while a rotated password or a half-moved image tag can only show up on an UPGRADE. Running one
     # would have shipped the other.
+    #
+    # `auto` is the newest chart PUBLISHED to the registry that is <= the candidate, equal included,
+    # and the job FAILS when there is none. It used to read `git tag`, and this checkout is shallow and
+    # carries no tags, so on PR #122 the upgrade job ran the fresh-install path, logged "no earlier
+    # release to upgrade from" and went green. That is how a store that cannot start after
+    # 0.2.5 -> 0.2.6 got past this gate. Only the fresh row may pass `none`.
     strategy:
       fail-fast: false
       matrix:
         include:
-          - mode: upgrade   # install the previous release from OCI, then upgrade into the candidate
+          - mode: upgrade   # install a published release from OCI, write state, upgrade into the candidate
             from: auto
           - mode: fresh     # install the candidate on an empty cluster
             from: none

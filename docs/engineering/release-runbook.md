@@ -206,11 +206,13 @@ python3 scripts/check_release_versions.py "$VERSION"
 # 2. exercise the ARTIFACT, not the source. Throwaway kind cluster: stamps the chart by digest
 #    exactly as release.yml does, then installs, uses (sidecar injection + a real allow and block),
 #    and uninstalls it, checking nothing is stranded.
-#    Default is the UPGRADE path — install the previous release from OCI, seed a tenant policy, then
-#    upgrade in and assert the generated credentials and PVCs survived and nothing is still running a
-#    pre-upgrade image. That is what existing users do; a fresh install is what new ones do, and the
-#    two break differently, so run both. CI runs them as a matrix.
-python3 scripts/verify_release.py                      # upgrade path (auto-detects N-1)
+#    Default is the UPGRADE path — install the newest published release <= the chart version from
+#    OCI (equal included; it fails if there is none), seed a tenant policy and a login/logout into
+#    the bundled store, then upgrade in and assert the store and the API came back, the generated
+#    credentials and PVCs survived, and nothing is still running a pre-upgrade image. That is what
+#    existing users do; a fresh install is what new ones do, and the two break differently, so run
+#    both. CI runs them as a matrix.
+python3 scripts/verify_release.py                      # upgrade path (newest published <= the chart)
 python3 scripts/verify_release.py --upgrade-from none  # fresh install
 # or, both in parallel on a runner:
 gh workflow run verify-release.yml
