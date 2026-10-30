@@ -85,22 +85,56 @@ def _kept(result, key: str) -> list:
 
 # ── a budget that is decremented but never consulted is not a budget ────────────────────────────
 
-async def test_bare_string_listing_entries_spend_the_shared_budget():
+def _count_bare_string_scans(monkeypatch) -> list[int]:
+    """The characters each bare-string scan consumed, recorded around the real scanner."""
+    import norviq.mcp.firewall as firewall_module
+
+    scanned: list[int] = []
+    real_scan = firewall_module.scan_untrusted_content
+
+    def counting_scan(*args, **kwargs):
+        report = real_scan(*args, **kwargs)
+        scanned.append(report.scanned_chars)
+        return report
+
+    monkeypatch.setattr(firewall_module, "scan_untrusted_content", counting_scan)
+    return scanned
+
+
+async def test_bare_string_listing_entries_spend_the_shared_budget(monkeypatch):
     """The branch added so a bare string could not be forwarded unexamined scanned every entry at
     `_MAX_ITEM_TEXT`, subtracting from the shared budget without ever testing it. 500 entries of
     16 KiB cost 2088 ms through this gate — the same denial of service the budget exists to stop,
-    on a surface where the server picks the entry count."""
-    fw, result, elapsed = await _listing("prompts/list", "prompts", ["A" * 16380] * 500)
-    assert elapsed < 0.400, f"one listing cost {elapsed * 1000:.0f} ms of scan"
+    on a surface where the server picks the entry count.
+
+    Asserted on what the scan READ, like the tools/list test below and for the same reason: this was
+    a wall-clock `< 0.400` and failed at 529 ms on a host at load ~12 (a kind cluster, a browser suite
+    and two test runs beside it) while the code was correct. The time check stays as a coarse guard in
+    CPU time, at a bound the unbudgeted branch overshoots twofold."""
+    scanned = _count_bare_string_scans(monkeypatch)
+    t0 = time.process_time()
+    fw, result, _ = await _listing("prompts/list", "prompts", ["A" * 16380] * 500)
+    cpu = time.process_time() - t0
+    assert len(scanned) == 500, "every bare string must still go through the scanner"
+    assert sum(scanned) <= _LIST_SCAN_BUDGET, (
+        f"one listing scanned {sum(scanned)} chars against a shared budget of {_LIST_SCAN_BUDGET}")
+    assert cpu < 1.0, f"one listing cost {cpu * 1000:.0f} ms of CPU"
     # Withheld either way — the scan is for the operator's log, so stopping it costs no enforcement.
     assert _kept(result, "prompts") == []
 
 
-async def test_the_bare_string_branch_cannot_be_scaled_past_the_budget():
-    """Four times the payload must not be four times the work."""
-    _, _, small = await _listing("prompts/list", "prompts", ["A" * 16380] * 500)
-    _, _, large = await _listing("prompts/list", "prompts", ["A" * 16380] * 2000)
-    assert large < small * 2 + 0.100, f"{small * 1000:.0f} ms -> {large * 1000:.0f} ms is linear"
+async def test_the_bare_string_branch_cannot_be_scaled_past_the_budget(monkeypatch):
+    """Four times the payload must not be four times the work: it must be the same characters."""
+    scanned = _count_bare_string_scans(monkeypatch)
+    t0 = time.process_time()
+    await _listing("prompts/list", "prompts", ["A" * 16380] * 500)
+    small_cpu, small = time.process_time() - t0, sum(scanned)
+    scanned.clear()
+    t0 = time.process_time()
+    await _listing("prompts/list", "prompts", ["A" * 16380] * 2000)
+    large_cpu, large = time.process_time() - t0, sum(scanned)
+    assert large == small, f"{small} chars scanned for 500 entries, {large} for 2000"
+    assert large_cpu < small_cpu * 2 + 0.100, f"{small_cpu * 1000:.0f} ms -> {large_cpu * 1000:.0f} ms of CPU is linear"
 
 
 # ── a per-item budget on a surface whose item COUNT the server picks ────────────────────────────
