@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import pytest
 
+import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(_ROOT / "scripts"))
 
-from check_fossa_issues import UnrecognisedShape, gate, issues_from  # noqa: E402
+from check_fossa_issues import ACCEPTED, UnrecognisedShape, gate, issues_from  # noqa: E402
 
 VULN = {"type": "vulnerability", "revisionId": "pip+foo$1.0", "cve": "CVE-2099-0001"}
-EXCEPTED = {"type": "vulnerability", "revisionId": "pip+litellm$1.96.1", "cve": "CVE-2024-6825"}
+EXCEPTED = {"type": "vulnerability", "revisionId": "pip+litellm$1.100.4", "cve": "CVE-2024-6825"}
 
 
 def test_one_vulnerability_fails_the_gate():
@@ -50,3 +52,27 @@ def test_the_k8s_module_matches_are_excepted_because_they_are_spurious():
         code, msg = gate({"issues": [{"type": "vulnerability", "revisionId": "go+k8s.io/client-go$v0.37.0", "cve": cve}]})
         assert code == 0 and "accepted" in msg, cve
 
+
+
+_ADVISORY_ID = re.compile(r"CVE-\d{4}-\d{4,}|GHSA(?:-[0-9a-z]{4}){3}")
+
+
+def _security_md_exception_ids() -> set[str]:
+    """Every advisory id in the FIRST column of SECURITY.md's accepted-exceptions table."""
+    text = (_ROOT / "SECURITY.md").read_text()
+    section = text.split("## Accepted dependency exceptions", 1)[1].split("\n## ", 1)[0]
+    rows = [ln for ln in section.splitlines() if ln.startswith("|")]
+    return {i for ln in rows for i in _ADVISORY_ID.findall(ln.split("|")[1])}
+
+
+def test_the_security_md_table_and_the_allow_list_name_the_same_advisories():
+    """SECURITY.md and the gate's allow-list are documented as being in lockstep, and they have not
+    always been. The React Router row was once written into the table and never into the allow-list,
+    so the gate kept failing on a vulnerability the document had already accepted. The opposite
+    direction is worse: an id in the allow-list with no row in the table is an exception nobody wrote
+    a reason for."""
+    table = _security_md_exception_ids()
+    assert table, "no advisory ids found in SECURITY.md's exceptions table; the parser no longer fits it"
+    assert table == ACCEPTED, (
+        f"in SECURITY.md's table only: {sorted(table - ACCEPTED)}; in ACCEPTED only: {sorted(ACCEPTED - table)}"
+    )

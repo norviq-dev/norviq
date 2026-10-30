@@ -15,10 +15,17 @@ from __future__ import annotations
 import json
 import sys
 
-# Documented in SECURITY.md. Substring match over the whole issue blob, so either identifier form
+# Documented in SECURITY.md, whose table must name exactly these ids (tests/test_check_fossa_issues.py
+# holds the two together). Substring match over the whole issue blob, so either identifier form
 # matches wherever FOSSA puts it (cve field, title, or the advisory URL).
 ACCEPTED = frozenset({
-    "CVE-2024-6825", "CVE-2026-45829", "CVE-2026-26030", "CVE-2026-25592", "GHSA-qwww-vcr4-c8h2",
+    # Optional framework extras only, in no shipped image. chromadb has no fixed release for any of
+    # its four; semantic-kernel's fixes all need a pre-release azure-ai-agents.
+    "CVE-2026-45829", "CVE-2026-45830", "CVE-2026-45831", "CVE-2026-45833",
+    "CVE-2026-26030", "CVE-2026-25592",
+    # litellm: a spurious match, like the k8s ones below. The advisory (GHSA-53gh-p8jc-7rg8) covers
+    # 1.40.3.dev2 through 1.40.12 only; the lock is at 1.100.4.
+    "CVE-2024-6825",
     # The webhook's k8s.io modules. FOSSA matches these three against any v0.x version; the advisory
     # database says otherwise. CVE-2018-1002105 is against kubernetes/kubernetes < 1.12.3 (an
     # API-server aggregation bug, never a library one). CVE-2019-11250 is fixed in client-go 0.17.0,

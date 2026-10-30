@@ -71,7 +71,8 @@ extras, which closes CVE-2026-59950 — a WebSocket server transport that valida
 `Origin` — and CVE-2026-59951 / CVE-2026-116684 / -116685 / -116686. The other optional-extra floors
 added on 2026-10-30 (litellm, pillow, filelock, dnspython, oauthlib, langgraph, crewai) are listed with
 their CVEs in `pyproject.toml`).
-The allow-list in the gate is kept in lockstep with this table.
+The gate's allow-list — `ACCEPTED` in `scripts/check_fossa_issues.py` — names exactly the ids in this
+table's first column, and `tests/test_check_fossa_issues.py` fails the build when the two differ.
 
 Where a floor is declared is a decision, not a formality: `mcp` is a **direct** dependency of an extra
 we declare, so its floor lives in `[project.optional-dependencies]` where `pip install '.[crewai]'`
@@ -94,17 +95,12 @@ of it is installable by anyone, nothing builds or tests it, and yet the gate sco
 a dependency graph that ships nowhere is not extra rigour; it costs real attention and buys nothing.
 Widen the setting when 3.13/3.14 are supported for real — tested and in `classifiers` — not before.
 
-The first three entries below are **not in any shipped container image** — `Dockerfile.api` and
-`Dockerfile.engine` install `.[spiffe]` and nothing else, and `webhook/Dockerfile` is a Go binary on
-`distroless/static` with no Python at all — because they live exclusively in the **optional SDK
-framework-adapter extras** (`norviq[frameworks]` / `[crewai]` / `[semantic-kernel]`), which a deployment
-must explicitly opt into.
-
-The React Router entry is different and should not be read as one of those: it **is** in a shipped image,
-the console bundle built by `Dockerfile.ui`. It is carried because the vulnerable code path does not
-exist in this application, not because the dependency is absent. That is a weaker form of "not
-exploitable" than the other three, so it is scheduled for a real fix (see the note under the table)
-rather than treated as permanently accepted.
+The Python entries below (litellm, chromadb, semantic-kernel) are **not in any shipped container image**
+— `Dockerfile.api` and `Dockerfile.engine` install `.[spiffe]` and nothing else, and `webhook/Dockerfile`
+is a Go binary on `distroless/static` with no Python at all — because they live exclusively in the
+**optional SDK framework-adapter extras** (`norviq[frameworks]` / `[crewai]` / `[semantic-kernel]`),
+which a deployment must explicitly opt into. The k8s.io row is in a shipped binary, the webhook, and is
+carried because the matches are spurious, not because the code is absent.
 
 **`cryptography>=50.0.0`** is the other such floor, and unlike `werkzeug` it *is* in the shipped image —
 so it is declared in `[project] dependencies`, not in `[tool.uv] constraint-dependencies`. The images
@@ -126,53 +122,38 @@ take `.[spiffe]`, and `framework-compat.yml` installs one framework at a time.
 
 | CVE | Package (source) | Why unfixable-by-bump | Why not exploitable here |
 |-----|------------------|-----------------------|--------------------------|
-| CVE-2024-6825 | `litellm` (via `crewai[litellm]`) | Not closable by a bump — 1.96.1 is the newest release and publishes **no wheel for Python >= 3.11**, this project's floor, so `uv lock` refuses it and pins 1.96.0. | Reaches the tree only through the **optional** `norviq[crewai]` extra and is in **no shipped image** — `Dockerfile.api` / `Dockerfile.engine` install `.[spiffe]` only. Re-check when litellm ships a cp311 wheel above 1.96.1. |
-| CVE-2026-45829 | `chromadb` (via `crewai`) | No fixed release exists — the latest version is still affected. | It is a pre-auth RCE in the **ChromaDB HTTP server**; CrewAI uses chromadb as an **embedded client**, so the vulnerable server path is never started. |
-| CVE-2026-26030 | `semantic-kernel` | The fix (`>=1.39.4`) pulls a **pre-release** `azure-ai-agents` dependency, which we will not ship in a lockfile. | RCE is in the `InMemoryVectorStore` filter-lambda path, which the Norviq semantic-kernel adapter does not use. |
-| CVE-2026-25592 | `semantic-kernel` | This is a **.NET** CVE (fixed in .NET Core `1.71.0`); FOSSA maps it onto the pip package, where no release clears it. | The affected `[KernelFunction] DownloadFileAsync` helper exists only in the .NET SDK, not the Python package we depend on. |
-| GHSA-qwww-vcr4-c8h2 | `react-router` / `react-router-dom` (console UI) | Fixed only in **8.3.0**, which requires **React >= 19.2.7** and **Node >= 22.22.0** and drops `react-router-dom` entirely — a React 18→19 migration, not a bump. Downgrading is not an escape either: the only versions below the affected range (`>=7.12.0 <8.3.0`) are back inside the **7.17.0-and-below** range of the advisories this entry replaces. | The flaw is a CSRF bypass in **RSC mode**, letting an action execute before a 400 response. The console never enters RSC mode: [`ui/src/main.tsx`](ui/src/main.tsx) renders with `ReactDOM.createRoot` under a plain `BrowserRouter`, there is no server runtime, no `@vitejs/plugin-rsc`, no `unstable_RSC*` API in `ui/src`, and `Dockerfile.ui` builds a static bundle served by nginx. |
+| CVE-2024-6825 | `litellm` (via `crewai[litellm]`) | There is no bump to make. The advisory (GHSA-53gh-p8jc-7rg8) covers litellm **1.40.3.dev2 through 1.40.12**; the lock is at **1.100.4**. FOSSA matched it against 1.96.x, i.e. without that upper bound, so this is a spurious match carried like the k8s.io row. (The old reason here — "1.96.1 is the newest release and has no cp311 wheel" — went stale: 1.100.4 ships cp310-abi3 wheels. The bump to it closed litellm's real advisories on 1.96.0, CVE-2026-84377 and CVE-2026-114612.) | Outside the advisory's affected range. Also reachable only through the **optional** `norviq[crewai]` extra and in **no shipped image**. |
+| CVE-2026-45829, CVE-2026-45830, CVE-2026-45831, CVE-2026-45833 | `chromadb` (via `crewai`) | No fixed release exists — 1.5.9, the latest, is affected by all four. | All four are in the **ChromaDB HTTP server**: a pre-auth (45829) and an authenticated (45833) code injection through `trust_remote_code` on the collections endpoints, and two missing tenant checks in the server's authorization layer (45830; `SimpleRBACAuthorizationProvider` for 45831). CrewAI uses chromadb as an **embedded client**, so no server, endpoint or authorization provider is ever started. |
+| CVE-2026-26030 | `semantic-kernel` | The fix (`>=1.39.4`), like every release after the locked 1.36.0 up to the current 1.46.0, requires `azure-ai-agents>=1.2.0b3`. No stable `azure-ai-agents` 1.2 exists (1.1.0 is the newest stable, 1.2.0b6 the newest pre-release, checked 2026-10-30), and we will not ship a pre-release in a lockfile. | RCE is in the `InMemoryVectorStore` filter-lambda path. The Norviq semantic-kernel adapter imports nothing from `semantic_kernel` at all: it is an invocation filter that duck-types the context object. |
+| CVE-2026-25592 | `semantic-kernel` | The advisory describes the **.NET** SDK (fixed in `Microsoft.SemanticKernel.Plugins.Core` 1.71.0), but its PyPI record (GHSA-2ww3-72rp-wpp4) marks the pip package fixed in 1.39.3. That release needs the same pre-release `azure-ai-agents` as the row above. | The affected `SessionsPythonPlugin` `DownloadFileAsync` helper is .NET code; the Norviq adapter uses no semantic-kernel plugin of either language. |
 | CVE-2018-1002105, CVE-2019-11250, CVE-2020-8565 | `k8s.io/apimachinery`, `k8s.io/client-go` (admission webhook) | A bump cannot satisfy a match that has no upper bound. FOSSA flags these against any v0.x; the webhook pins **v0.37.0**, twenty minors past the latest fix (client-go 0.17.0 / 0.19.6). | The code has never had them. Per the advisory database, CVE-2018-1002105 is against `kubernetes/kubernetes` < 1.12.3 — an API-server aggregation bug, not a library; the other two are client-go credential-logging bugs fixed in 0.17.0 and 0.19.6. Spurious matches, reviewed each release like the rest. |
 
 These are reviewed each release; we will drop an exception and bump the moment upstream ships a fixed
 release reachable without a pre-release dependency.
 
-**React Router is a scheduled fix, not a permanent exception.** The other three entries are blocked on
-upstream; this one is blocked only on our own migration effort, which is a different kind of reason and
-should not be allowed to age quietly into "accepted". Two things would change the calculus immediately
-and should be treated as a trigger to prioritise the React 19 / router v8 migration:
-
-- the console gaining **any** server-side rendering, prerendering, or React Server Components step,
-  which would put the vulnerable path into the executed code — the reason for the exception disappears
-  the moment that changes, and it is the kind of change that arrives as a performance or SEO
-  improvement rather than as a security decision;
-- the project moving to React 19 for an unrelated reason, which removes the migration cost entirely.
-
-Until then the residual risk is bounded: the console is authenticated, served as static assets, and the
-advisory requires an RSC request flow that no code path here produces.
-
-> **This entry was rewritten when the router was upgraded 6.30.4 → 7.18.2**, which closed
-> CVE-2026-53668 / -53669 / -53666 (`GHSA-337j-9hxr-rhxg` and the two open-redirect advisories) —
-> those were the three the FOSSA gate was actually failing on, and 6.30.4 was the last 6.x, so there
-> was no patch on that line. The upgrade needed **no code changes**: the console uses only
-> `MemoryRouter`/`BrowserRouter`, `Routes`/`Route`, `Link`/`NavLink`, `Navigate`, `useNavigate`,
-> `useLocation` and `useSearchParams` — no data-router APIs, no loaders/actions, no `json()`/`defer()`,
-> and no splat routes for `v7_relativeSplatPath` to affect.
+> **The React Router row (`GHSA-qwww-vcr4-c8h2`) was removed on 2026-10-30, because 7.18.2 is no longer
+> inside it.** The row said the RSC-mode CSRF bypass was fixed only in 8.3.0 (a React 19 migration). The
+> advisory has since been revised to `>=7.12.0 <7.18.2`, which makes the pinned 7.18.2 the first
+> patched release (npm advisory feed, 2026-10-30). `npm audit --omit=dev` on `ui/` reports 0, and FOSSA's
+> 2026-10-27 scan of the console raised no vulnerability issue. An exception for a version the
+> advisory no longer covers only disarms the gate if the advisory is revised back.
 >
-> A NOTE ON WHY THE GATE WENT RED ANYWAY, because it cost time: the old React Router row was written
-> into this table but **never added to `ACCEPTED_CVES` in `.github/workflows/fossa.yml`**, so the gate
-> kept failing on a vulnerability this document had already accepted. The two are supposed to be in
-> lockstep and were not. The gate now matches **GHSA ids as well as CVE ids** — this advisory has no
-> CVE assigned, so a CVE-only matcher could never have accepted it.
+> One lesson from that row's history still holds. It was once written into this table but never into
+> the gate's allow-list, so the gate kept failing on a vulnerability this document had already accepted.
+> That is why the allow-list matches **GHSA ids as well as CVE ids** (that advisory had no CVE), and
+> why a test now holds the table and the allow-list to the same set.
 
-The three Python entries are also marked **Ignored** in the FOSSA project UI (reason: *vulnerable code
-not in execute path*, scoped to this project and the current dependency versions), so FOSSA's own
-"Security Analysis" check reflects this acceptance rather than a bare red. Because that ignore is
-version-scoped, a future bump of `chromadb` or `semantic-kernel` re-surfaces the CVE for review —
-matching the exit condition above.
+The Python entries were marked **Ignored** in the FOSSA project UI (reason: *vulnerable code not in
+execute path*, scoped to this project and the dependency versions of the time), so FOSSA's own "Security
+Analysis" check reflected this acceptance rather than a bare red. Because that ignore is version-scoped,
+a bump re-surfaces the CVE for review, and the 2026-10-30 relock does exactly that: chromadb moved
+1.1.1 → 1.5.9 and litellm 1.96.0 → 1.100.4, and the table now lists three chromadb CVEs
+(45830/45831/45833) it did not list before. A maintainer with FOSSA access has to re-review all of them
+in the UI.
 
 **`GHSA-337j-9hxr-rhxg` is not what the "Security Analysis" badge reports, and it is worth being precise
 about that, because assuming otherwise wasted real time.** `npm audit` and FOSSA do not draw from the
-same advisory database, so the same lockfile yields different findings. React Router shows up in
+same advisory database, so the same lockfile yields different findings. React Router showed up in
 `npm audit`; the FOSSA badge was reporting **`GHSA-mh99-v99m-4gvg` in `brace-expansion` 5.0.7** (HIGH,
 CVSS 7.5 — DoS via unbounded expansion), a transitive dependency of `minimatch`. That one had a patch
 fix and was simply bumped to 5.0.8, not accepted. Two lessons: reading one scanner's output tells you
