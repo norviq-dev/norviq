@@ -88,8 +88,8 @@ jobs:
           # Same retry/timeout reasoning as test.yml: an un-retried fetch from a third-party host turns a
           # transient blip into a job failure, and --retry-all-errors is needed to cover mid-transfer drops.
           curl -fL --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 15 --max-time 120 \
-            -o /usr/local/bin/opa https://openpolicyagent.org/downloads/v1.19.1/opa_linux_amd64_static
-          echo "c9f985ce0d345f5484006ade2c695ed9e3f308e4441139e46695c5c182ac0839  /usr/local/bin/opa" | sha256sum -c -
+            -o /usr/local/bin/opa https://openpolicyagent.org/downloads/v1.21.4/opa_linux_amd64_static
+          echo "2ab571f367f293bb19523b76f92f1945bbf245003392c7f392903f95c2b9b630  /usr/local/bin/opa" | sha256sum -c -
           chmod +x /usr/local/bin/opa
           opa version
       # ONE pip call, not two. As two steps this leg installed `.[dev]` first, which resolved

@@ -92,6 +92,22 @@ because they should be installed.
   volumes (`norviq-redis-ha-data-*`), which the chart cannot redirect, and a Valkey replica cannot load
   a full sync from a Redis 7.4 master. Keep `images.redis` on `redis:7.4-alpine` under HA until you
   migrate it yourself.
+- **OPA 1.21 rejects an empty collection literal that is read from.** OPA moves from 1.19.1 to 1.21.4
+  (see Security). Its type checker types a bare `{}`, `set()` or `[]` as having no members, so
+  `names[x]`, `names[_]`, `not names[x]` or `xs[_]` over one is a compile error, and so is comparing a
+  collection whose contents it knows with an empty literal (`limits == {}`). `count()` and `in` still
+  accept them. A policy that does not compile blocks every call it governs as `evaluator_error`.
+  **Norviq's own policies are handled.** The builder, composer, intent, capability, MCP-registry and
+  egress generators now write typed empty forms such as `{k: k | k := ""; false}` (same value, same kind).
+  Policies stored by 0.2.5 and earlier are compiled with the exact lines their generator wrote rewritten
+  the same way. The stored row is not changed, so `helm rollback` reads it as it was. `NRVQ-ENG-2070`
+  logs each one, once. **Hand-written Rego is not rewritten.** Check yours with the 1.21.4 binary and the
+  chart's capabilities file before upgrading:
+  `curl -fsSLo opa https://openpolicyagent.org/downloads/v1.21.4/opa_linux_amd64_static && chmod +x opa`,
+  then `./opa check --v0-compatible --capabilities=helm/norviq/files/opa-capabilities.json <policy>.rego`.
+  Replace a bare literal you read from with `count(x) == 0`, or with a comprehension that yields nothing
+  (`{s | s := ""; false}`). After the upgrade `NRVQ-ENG-2071` names any policy OPA still refuses (its
+  key and OPA's error).
 - **Third-party images are pinned by digest.** opa, valkey, postgres, nginx, busybox, curl and the CNPG
   operand render as `repo:tag@sha256:…` (`global.thirdPartyImageDigests`). With `global.imageRegistry`
   the digest is kept, so a mirror filled by `docker pull` + `docker push` (which changes the digest)
@@ -130,7 +146,9 @@ input is not in a form fossa-cli reads. The report-only dependency audit now cov
 extra as well. In SECURITY.md's accepted exceptions, React Router GHSA-qwww-vcr4-c8h2 is removed (the
 pinned 7.18.2 is the first patched release), and chromadb CVE-2026-45830, -45831 and -45833 are added
 (no fixed release; reachable only through the optional `crewai` and `frameworks` extras, in no
-image).
+image). OPA moves from 1.19.1 to 1.21.4 in the sidecar image, the api and engine images and CI: 1.19.1's
+static binary carries 9 fixable HIGH findings (Go stdlib, x/crypto, x/net, x/text, grpc) that fail the
+image scan, and every OPA release that clears them is 1.21.2 or later.
 
 **Fixed.** `global.imageRegistry` relocates the busybox init image. An agent that retries one refused
 call no longer loses trust on every attempt. Two security booleans no longer fall back to off when an

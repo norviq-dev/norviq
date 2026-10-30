@@ -64,6 +64,15 @@ static binary. The chart's `opa.image` and every CI checksum moved together — 
 that matters, because it is the binary that actually serves decisions; leaving it behind would have
 shipped the fix everywhere except where policy is evaluated.
 
+On 2026-10-30 it moved to **OPA 1.21.4**, for 9 fixable HIGH findings in the 1.19.1 static binary:
+four in its Go stdlib (1.26.6; fixed in 1.26.9 and 1.26.10), one each in x/crypto 0.53.0, x/net 0.56.0
+and x/text 0.40.0, and two in grpc 1.82.1. Trivy 0.69.3 with CI's flags reported them, so the next api
+and engine builds would have failed the gate. 1.21.4 is built with go1.27.3 against x/crypto 0.57.0, x/net
+0.60.0, x/text 0.42.0 and grpc 1.83.2, and scans with 0 HIGH/CRITICAL. The Dockerfiles verify the release
+binaries against OPA's published checksums. The sidecar image holds a separate build of the same commit, so
+its sha256 never matches theirs (that was true of 1.19.1 as well). It was checked with `go version -m`
+instead: the amd64 and arm64 images match the release binaries in everything but the build host.
+
 | Date | Tool | ID / finding | Where | Why baselined (not fixed now) | Exit condition |
 |------|------|--------------|-------|-------------------------------|----------------|
 | 2026-07, 2026-10 | FOSSA | `CVE-2026-45829`, `CVE-2026-45830`, `CVE-2026-45831`, `CVE-2026-45833` (chromadb); `CVE-2026-26030`, `CVE-2026-25592` (semantic-kernel); `CVE-2024-6825` (litellm, spurious) | `ACCEPTED` in `scripts/check_fossa_issues.py` **and** marked *Ignored* in the FOSSA project UI (reason: vulnerable code not in execute path; version-scoped) so the FOSSA GitHub App's "Security Analysis" check also passes | All live only in **optional** SDK framework-adapter extras (`norviq[frameworks]` / `[crewai]` / `[semantic-kernel]`), never in a shipped container image. chromadb has no fixed release; every semantic-kernel fix needs a pre-release `azure-ai-agents`; litellm 1.100.4 is outside CVE-2024-6825's affected range (1.40.3.dev2-1.40.12). Per-CVE reachability rationale is the table in [`SECURITY.md`](../../SECURITY.md#accepted-dependency-exceptions) — that table, this allow-list, and the FOSSA-UI ignore must stay in lockstep. The 2026-10-30 relock moved chromadb and litellm, so their version-scoped UI ignores need re-review. | Reviewed each release; drop the moment upstream ships a fixed release reachable without a pre-release dependency (and un-ignore in the FOSSA UI). |

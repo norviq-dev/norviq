@@ -37,7 +37,10 @@ global:
   # digest the same way and replace the entry: a bumped tag with no entry renders unpinned, and the
   # release gate (scripts/check_image_pins.py) refuses to publish it.
   thirdPartyImageDigests:
-    "openpolicyagent/opa:1.19.1-static": "sha256:32bf41d914b1505fea13303f60587cc57bdd2902262177585fb208f5dde76d32"
+    # opa — resolved 2026-10-30 from the registry API instead (no docker here): mirror.gcr.io and Docker
+    # Hub return the same index digest. The /opa in its amd64 and arm64 images is a separate build of the
+    # release binaries Dockerfile.api/engine verify: `go version -m` matches except for the build host.
+    "openpolicyagent/opa:1.21.4-static": "sha256:47f93480b09e24c220ae75f1e9133585ba6d698059951668d35e6a4fc32ebc82"
     "valkey/valkey:8.1-alpine": "sha256:2602ace2be6569bc2bbb06f873776516ab9089821525be34f4305c67eb9db02a"
     "postgres:16-alpine": "sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab"
     "nginx:1.27-alpine": "sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10"
@@ -739,12 +742,12 @@ otel:
 # queries it over HTTP; set config.opaMode=subprocess to roll back to the per-call `opa eval` fork.
 # Pinned (not `latest-static`) so the running OPA version stays matched to the one
 # scripts/gen-opa-capabilities.py generated helm/norviq/files/opa-capabilities.json from (verified real,
-# multi-arch amd64+arm64, via `docker manifest inspect openpolicyagent/opa:1.19.1-static`) — `latest-static`
-# could silently drift to a version with a different builtin set than what the engine-layer capabilities
-# check (norviq/engine/opa_client.py::_check_capabilities) validates against.
+# multi-arch amd64+arm64: the index for openpolicyagent/opa:1.21.4-static lists linux/amd64 and linux/arm64)
+# — `latest-static` could silently drift to a version with a different builtin set than what the
+# engine-layer capabilities check (norviq/engine/opa_client.py::_check_capabilities) validates against.
 opa:
   enabled: true
-  image: "openpolicyagent/opa:1.19.1-static"
+  image: "openpolicyagent/opa:1.21.4-static"
   port: 8181
   resources:
     requests:
