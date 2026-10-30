@@ -27,6 +27,7 @@ from norviq.api.auth import get_current_user, read_namespace
 from norviq.api.db.models import AuditLogEntry
 from norviq.api.db.session import get_session
 from norviq.engine.evaluator import WOULD_BLOCK_RULE_PREFIXES
+from norviq.engine.policy_loader import stored_priority
 from norviq.api.routers.mitre import _activity_by_rule
 from norviq.api.synthetic import is_synthetic_identity
 
@@ -178,7 +179,7 @@ async def _agent_class_policies(
     out = []
     for r in rows:
         summary = _parse_agent_policy(str(r["agent_class"]), str(r["rego_source"] or ""),
-                                      int(r["priority"] or 100), str(r["enforcement_mode"] or "block"))
+                                      stored_priority(r["priority"]), str(r["enforcement_mode"] or "block"))
         e = eff.get(str(r["agent_class"]), {})
         summary["observed"] = e.get("observed", 0)
         summary["blocked"] = e.get("blocked", 0)

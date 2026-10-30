@@ -26,6 +26,19 @@ _MAX_VERSIONS = int(getattr(settings, "policy_max_versions", 10))
 _REMEDIATION_SUFFIX = "__remediation__"
 
 
+def stored_priority(value: object) -> int:
+    """The priority a stored policy row carries, defaulting to 100 only when the column is NULL.
+
+    Every DB read path used to default the column with ``or 100``, which reads a stored 0 as 100. 0 is
+    a legal priority (the namespace band is 0-499), and ``_resolve_precedence`` lets the highest priority
+    win among enforcing layers, so a class policy saved at 0 below a namespace tier at 50 was outranked on
+    the replica that saved it and won everywhere that read it back: the embedded engine after every
+    reload, a peer replica after the sync event, any process after a restart. Both columns are
+    ``NOT NULL DEFAULT 100`` today, so the NULL branch only covers a row older than that default.
+    """
+    return 100 if value is None else int(value)
+
+
 @dataclass(slots=True)
 class PolicyVersion:
     """Policy snapshot at a specific version."""
@@ -570,7 +583,7 @@ class PolicyLoader:
             row = (await conn.execute(query, {"namespace": namespace, "agent_class": agent_class})).mappings().first()
         if not row:
             return None
-        entry = {"rego": str(row["rego_source"]), "priority": int(row["priority"] or 100),
+        entry = {"rego": str(row["rego_source"]), "priority": stored_priority(row["priority"]),
                  "enforcement_mode": str(row["enforcement_mode"] or "block")}
         self._policies = {**self._policies, key: entry}
         # C1/HA: this is the read path a PEER replica takes on an upsert event (apply_remote_event ->
@@ -636,7 +649,7 @@ class PolicyLoader:
             key = self._key(str(row["namespace"]), str(row["agent_class"]))
             if key in policies:
                 continue
-            entry = {"rego": str(row["rego_source"]), "priority": int(row["priority"] or 100),
+            entry = {"rego": str(row["rego_source"]), "priority": stored_priority(row["priority"]),
                      "enforcement_mode": str(row["enforcement_mode"] or "block")}
             policies[key] = entry
             # C1/HA: hydrate applied_at from the same DB rows on startup, so a restarted replica shows the
@@ -679,7 +692,7 @@ class PolicyLoader:
                 snapshot = PolicyVersion(
                     version=int(row["version"]),
                     rego_source=str(row["rego_source"]),
-                    priority=int(row["priority"] or 100),          # rollback fidelity across a restart
+                    priority=stored_priority(row["priority"]),          # rollback fidelity across a restart
                     enforcement_mode=str(row["enforcement_mode"] or "block"),
                     saved_by=str(row["saved_by"] or ""),
                     saved_at=row["saved_at"],
@@ -726,7 +739,7 @@ class PolicyLoader:
                 PolicyVersion(
                     version=int(row["version"]),
                     rego_source=str(row["rego_source"]),
-                    priority=int(row["priority"] or 100),
+                    priority=stored_priority(row["priority"]),
                     enforcement_mode=str(row["enforcement_mode"] or "block"),
                     saved_by=str(row["saved_by"] or ""),
                     saved_at=row["saved_at"],

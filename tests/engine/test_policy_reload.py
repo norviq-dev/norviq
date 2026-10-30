@@ -25,7 +25,9 @@ the engine's DECISION, not only by its in-memory dict.
 from __future__ import annotations
 
 import os
+import re
 import uuid
+from pathlib import Path
 
 import pytest
 from sqlalchemy import text
@@ -121,7 +123,13 @@ def _rego(namespace: str, body: str = "") -> str:
             f'reason = "reload probe"\n{body}')
 
 
-async def _decide(rig) -> tuple[str, str]:
+def _layer(namespace: str, name: str, default: str, rule: str) -> str:
+    """A one-rule policy with its own package, so several can be loaded side by side in one namespace."""
+    package = "p_" + namespace.replace("-", "_") + "_" + name
+    return f'package norviq.{package}\ndefault decision = "{default}"\nrule_id = "{rule}"\nreason = "layer probe"\n'
+
+
+async def _decide(rig, evaluator: OPAEvaluator | None = None) -> tuple[str, str]:
     event = ToolCallEvent(
         event_id=f"evt-{uuid.uuid4().hex[:8]}",
         tool_name="execute_sql",
@@ -133,7 +141,7 @@ async def _decide(rig) -> tuple[str, str]:
         ),
         session_id="sess-reload",
     )
-    decision = await rig["engine_eval"].evaluate(event)
+    decision = await (evaluator or rig["engine_eval"]).evaluate(event)
     return decision.decision, decision.rule_id
 
 
@@ -258,3 +266,80 @@ async def test_a_reload_that_cannot_reach_postgres_is_an_error_and_keeps_the_pre
     ]
     assert not [e for e in logs if e["event"] in ("nrvq.policy.reloaded", "nrvq.sidecar.policy_reloaded")]
     assert engine.get_entry(ns, cls) == before
+
+
+# --- Priority 0 -----------------------------------------------------------------------------------------
+# 0 is a legal priority (the namespace band is 0-499), and every DB read path wrote
+# `int(row["priority"] or 100)`, so a stored 0 came back as 100. The layer stack below makes that a
+# different DECISION: a class allow at 0 sits under a namespace-tier block at 50, so the tier wins on
+# the replica that saved it; read back at 100, the class allow outranks the tier and the call goes through.
+
+_TIER_BLOCK = "ns_tier_block"
+_CLASS_ALLOW = "class_allow"
+
+
+async def _save_a_priority_0_allow_under_a_namespace_tier(rig) -> None:
+    ns, cls, console = rig["ns"], rig["cls"], rig["console"]
+    await console.create(ns, f"namespace:{ns}", _layer(ns, "tier", "block", _TIER_BLOCK), saved_by="op", priority=50)
+    await console.create(ns, cls, _layer(ns, "cls", "allow", _CLASS_ALLOW), saved_by="op", priority=0)
+    assert console.get_entry(ns, cls)["priority"] == 0, "the saving replica holds 0; everything else must agree"
+
+
+async def test_a_priority_0_policy_is_reloaded_at_priority_0(rig) -> None:
+    """The embedded engine reloads every write through `load_from_db`, so it drifted from the saving
+    replica on every write, not only after a restart."""
+    ns, cls, engine = rig["ns"], rig["cls"], rig["engine"]
+    await _save_a_priority_0_allow_under_a_namespace_tier(rig)
+    for key in (f"{ns}:namespace:{ns}", f"{ns}:{cls}"):
+        await rig["proxy"]._on_policy_invalidated(key)
+
+    assert await _decide(rig) == ("block", _TIER_BLOCK)
+    assert engine.get_entry(ns, cls)["priority"] == 0
+    assert rig["engine_eval"]._policies[f"{ns}:{cls}"]["priority"] == 0
+
+
+async def test_a_cold_start_keeps_priority_0_in_the_entry_and_the_version_history(rig) -> None:
+    """`warm_cache` builds the entry and `_rehydrate_versions` the history a rollback restores from."""
+    ns, cls = rig["ns"], rig["cls"]
+    await _save_a_priority_0_allow_under_a_namespace_tier(rig)
+
+    cold_eval = OPAEvaluator(FakeCache())  # type: ignore[arg-type]
+    _healthy_trust(cold_eval)
+    cold = PolicyLoader(rig["cache"], cold_eval)
+    try:
+        await cold.warm_cache()
+        assert await _decide(rig, cold_eval) == ("block", _TIER_BLOCK)
+        assert cold.get_entry(ns, cls)["priority"] == 0
+        assert cold.get_versions(ns, cls)[-1].priority == 0
+    finally:
+        await cold_eval.close()
+        await cold.close()
+
+
+async def test_a_peer_replica_keeps_priority_0_after_the_sync_event(rig) -> None:
+    """`apply_remote_event` reads the entry through `load_from_db` and the history through
+    `_rehydrate_versions_for_key`."""
+    ns, cls = rig["ns"], rig["cls"]
+    await _save_a_priority_0_allow_under_a_namespace_tier(rig)
+
+    peer = PolicyLoader(rig["cache"], _ConsoleEvaluatorStub())  # type: ignore[arg-type]
+    try:
+        await peer.apply_remote_event("upsert", ns, cls)
+        assert peer.get_entry(ns, cls)["priority"] == 0
+        assert peer.get_versions(ns, cls)[-1].priority == 0
+    finally:
+        await peer.close()
+
+
+def test_no_read_path_treats_a_stored_priority_of_0_as_missing() -> None:
+    """Five copies of the idiom shipped. A `priority ... or <default>` reads 0 as absent; use
+    `stored_priority`, which defaults only on NULL."""
+    falsy_default = re.compile(r"""priority["']\]\s+or\b|get\(\s*["']priority["'][^)]*\)\s+or\b""")
+    repo = Path(__file__).resolve().parents[2]
+    offenders = [
+        f"{path.relative_to(repo)}:{number}: {line.strip()}"
+        for path in sorted((repo / "norviq").rglob("*.py"))
+        for number, line in enumerate(path.read_text().splitlines(), start=1)
+        if falsy_default.search(line)
+    ]
+    assert not offenders, "\n".join(offenders)
