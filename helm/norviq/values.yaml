@@ -48,6 +48,11 @@ global:
     "curlimages/curl:8.10.1": "sha256:d9b4541e214bcd85196d6e92e2753ac6d0ea699f0af5741f8c6cccbfcf00ef4b"
     # postgresql.ha.image — the CloudNativePG operand (PostgreSQL 16.15), rendered only with HA on.
     "ghcr.io/cloudnative-pg/postgresql:16": "sha256:34cd4159d07b3410a1b29da35072e2e927a0905e717a61afa3814624a2e8859a"
+    # redis.ha.image — the RedisFailover's redis (Redis 7.4.12), rendered only with HA on. Read as the
+    # Docker-Content-Digest of registry-1.docker.io/v2/library/redis/manifests/7.4-alpine (OCI index,
+    # 8 platforms incl. linux/amd64 and linux/arm64), and identical on mirror.gcr.io. `redis:7-alpine`,
+    # the tag 0.2.5 shipped, resolved to this same index on 2026-10-30.
+    "redis:7.4-alpine": "sha256:8da19c7399dca900c6822a1cf30f9d2285585e2c4b457ff4095b0f4500054d3f"
 
 policyQuotaNamespaces: []
 
@@ -635,6 +640,17 @@ redis:
     # current master and follows failover with no client changes. Failover-tested 2026-07-29: master
     # killed, replica promoted, the Service endpoint moved and the API recovered on its own.
     serviceName: norviq-redis-ha
+    # The RedisFailover's redis image, deliberately NOT images.redis. Through 0.2.5 both topologies ran
+    # images.redis (`redis:7-alpine`, by then Redis 7.4), and 0.2.6 moves images.redis to Valkey 8.1.
+    # Valkey 8.1 can neither load the RDB format 12 that Redis 7.4 left on the failover's volumes nor
+    # take a full sync from a Redis 7.4 master, and `helm upgrade --wait` does not watch the operator's
+    # pods. So the upgrade would report success while every pod the operator rolled failed to come
+    # back, losing redundancy one replica at a time. HA therefore stays on Redis 7.4 (RSALv2/SSPLv1,
+    # exactly what 0.2.5 ran). Moving it to Valkey is a separate, deliberate change: a renamed
+    # RedisFailover on fresh volumes. If you overrode images.redis for HA, set this instead. The
+    # sentinels are not covered by this value: the template sets no sentinel image, so they run the
+    # operator's own default.
+    image: "redis:7.4-alpine"
   resources:
     requests:
       cpu: 100m

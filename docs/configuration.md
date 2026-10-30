@@ -208,7 +208,7 @@ waits) run the full profile including `readOnlyRootFilesystem` and `runAsUser: 6
 | `images.engine/api/ui/webhook.repository` | `norviq-engine` | Same image, different tags per component (see below) — one multi-stage build produces all four. |
 | `images.*.tag` | `engine-latest` / `api-latest` / `ui-latest` / `webhook-latest` | Per-component tag within the shared `norviq-engine` repository. |
 | `images.*.pullPolicy` | `Always` | `values-prod.yaml` sets `IfNotPresent` for all four — appropriate once you're pinning immutable tags. |
-| `images.redis.repository`/`tag` | `valkey/valkey` / `8.1-alpine` | Bundled Redis-protocol store (Valkey, BSD-3-Clause; `redis://` clients unchanged). |
+| `images.redis.repository`/`tag` | `valkey/valkey` / `8.1-alpine` | Bundled single-instance Redis-protocol store (Valkey, BSD-3-Clause; `redis://` clients unchanged). Not the HA failover's image: that is `redis.ha.image`. |
 | `images.postgresql.repository`/`tag` | `postgres` / `16-alpine` | Bundled Postgres image. |
 | `global.imageRegistry` | `""` | Mirror host prepended to every third-party image (opa, valkey, postgres, the CNPG operand, the TLS-proxy nginx, the wait-for busybox, the `helm test` curl). Norviq's own images use `images.registry`. |
 | `global.thirdPartyImageDigests` | one entry per third-party image | The multi-arch index digest each third-party image renders with (`repo:tag@sha256:…`), keyed by the upstream ref. Keyed by ref so a digest only ever pins the tag it was resolved for: override a tag or `opa.image` and that image renders on your tag alone. The digest survives `global.imageRegistry`, so mirror with a digest-preserving copy (`crane copy`, `skopeo copy --all`, a pull-through cache); for a mirror that re-pushed the images (`docker pull` + `push`), set it to `null`. |
@@ -280,7 +280,7 @@ both Postgres and Redis, which is exactly the embedded shape.
 |---|---|---|
 | `redis.enabled` | `true` | Deploys the bundled single-replica Redis StatefulSet. |
 | `redis.replicas` | `1` | Single instance. |
-| `redis.ha.enabled` | `false` | **Gated, not live-validated on 1 node.** When true, renders a Spotahome `RedisFailover` (`databases.spotahome.com/v1`, Sentinel) instead of the single StatefulSet — requires that operator pre-installed. Swap `templates/redis-ha.yaml` + `redis.ha.serviceName` for a different Redis HA stack. `redis.ha.replicas` (`3`), `redis.ha.serviceName` (`norviq-redis-ha`). |
+| `redis.ha.enabled` | `false` | **Gated, not live-validated on 1 node.** When true, renders a Spotahome `RedisFailover` (`databases.spotahome.com/v1`, Sentinel) instead of the single StatefulSet — requires that operator pre-installed. Swap `templates/redis-ha.yaml` + `redis.ha.serviceName` for a different Redis HA stack. `redis.ha.replicas` (`3`), `redis.ha.serviceName` (`norviq-redis-ha`), `redis.ha.image` (`redis:7.4-alpine`: the Redis 7.4 that 0.2.5's failover ran, RSALv2/SSPLv1. Kept off Valkey on purpose, because Valkey 8.1 cannot load the failover's RDB-12 data or sync from its 7.4 master; moving HA to Valkey means a renamed failover on fresh volumes). |
 | `redis.resources` | `100m/128Mi` req, `300m/256Mi` limit | Per-pod CPU/memory. |
 | `redis.port` | `6379` | |
 | `redis.enabled` / `redis.host` / `redis.existingSecret` | `true` / `""` / `""` | `false` = bring your own cache; then `host` (or `existingSecret`, holding the full URL under `existingSecretKey`, default `url`) is required. |

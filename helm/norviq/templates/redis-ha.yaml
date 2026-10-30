@@ -25,7 +25,10 @@ spec:
     replicas: {{ .Values.redis.ha.replicas }}
   redis:
     replicas: {{ .Values.redis.ha.replicas }}
-    image: "{{ include "norviq.thirdPartyImage" (dict "root" $ "image" (printf "%s:%s" .Values.images.redis.repository (.Values.images.redis.tag | toString))) }}"
+    {{- /* redis.ha.image, NOT images.redis: images.redis moved to Valkey 8.1 in 0.2.6, and Valkey cannot
+           load the Redis 7.4 data on this failover's volumes or sync from its 7.4 master. The reason is in
+           values.yaml beside the value. tests/helm/test_bundled_store_upgrade.py checks the split. */}}
+    image: "{{ include "norviq.thirdPartyImage" (dict "root" $ "image" (.Values.redis.ha.image | default "redis:7.4-alpine")) }}"
     {{- /* Same as the postgres HA path: the sentinel cluster takes its password through customConfig,
            which cannot reference the chart-generated value, so HA requires an explicit credential. The
            default single-node redis auto-generates. */}}

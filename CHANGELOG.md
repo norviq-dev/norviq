@@ -88,10 +88,14 @@ because they should be installed.
   deleted:** 0.2.5's dump stays at the root of the volume, and `helm rollback` to 0.2.5 finds it. A
   later upgrade picks Valkey's data up from where it was at the rollback. Stores you run yourself
   (`redis.enabled=false`) are unaffected.
-- **`redis.ha.enabled=true` is not covered by that.** The RedisFailover keeps Redis 7.4 dumps on its own
-  volumes (`norviq-redis-ha-data-*`), which the chart cannot redirect, and a Valkey replica cannot load
-  a full sync from a Redis 7.4 master. Keep `images.redis` on `redis:7.4-alpine` under HA until you
-  migrate it yourself.
+- **HA (`redis.ha.enabled=true`, as in `values-prod.yaml`) stays on Redis 7.4.** The RedisFailover now
+  takes its own `redis.ha.image`, default `redis:7.4-alpine`, the same Redis 7.4 that 0.2.5's
+  `redis:7-alpine` ran, still under RSALv2/SSPLv1. Through 0.2.5 it took `images.redis`. Left on that,
+  this release would have rolled Valkey 8.1 into a running Redis 7.4 failover. Valkey loads neither the
+  RDB-12 dumps on the failover's volumes nor a full sync from its 7.4 master, and `helm --wait` does not
+  watch the operator's pods, so `helm upgrade` would have reported success while redundancy drained
+  away. Moving HA to Valkey is a separate, deliberate change: a renamed failover on fresh volumes. If you
+  overrode `images.redis` for HA, move that override to `redis.ha.image`.
 - **OPA 1.21 rejects an empty collection literal that is read from, and a few other forms 1.19
   accepted.** OPA moves from 1.19.1 to 1.21.4 (see Security). Its type checker types a bare `{}`,
   `set()` or `[]` as having no members, so `names[x]`, `names[_]`, `not names[x]` or `xs[_]` over one is a
@@ -117,8 +121,8 @@ because they should be installed.
   `{k: k | k := ""; false}`, `set()` as `{s | s := ""; false}`, `[]` as `[s | s := ""; false]`; and test
   emptiness with `count(x) == 0` rather than `x == {}`. After the upgrade `NRVQ-ENG-2071` names any policy
   OPA still refuses to compile (its key and OPA's error).
-- **Third-party images are pinned by digest.** opa, valkey, postgres, nginx, busybox, curl and the CNPG
-  operand render as `repo:tag@sha256:…` (`global.thirdPartyImageDigests`). With `global.imageRegistry`
+- **Third-party images are pinned by digest.** opa, valkey, postgres, nginx, busybox, curl, the CNPG
+  operand and the HA failover's redis render as `repo:tag@sha256:…` (`global.thirdPartyImageDigests`). With `global.imageRegistry`
   the digest is kept, so a mirror filled by `docker pull` + `docker push` (which changes the digest)
   fails with `manifest unknown`: re-copy with `crane copy` / `skopeo copy --all`, or set
   `global.thirdPartyImageDigests=null`. An overridden tag renders without a pin.

@@ -27,6 +27,13 @@ be the volume root.
 
 The fix does not delete or rewrite anything. Valkey works in its own subdirectory and starts empty, and
 0.2.5's dump stays at the root, where a `helm rollback` to 0.2.5 still finds it.
+
+The HA topology (redis.ha, which values-prod.yaml turns on) has the same problem without that way out.
+Its RedisFailover took images.redis too, so 0.2.6 would have rolled Valkey 8.1 into a running Redis 7.4
+failover. The new pods can load neither the RDB-12 dumps on their own volumes nor a full sync from the
+7.4 master. `helm --wait` does not watch the operator's pods, so the upgrade reports success while
+redundancy drains away. HA therefore keeps its own image, redis.ha.image, on the Redis 7.4 that 0.2.5
+ran, and the tests at the bottom hold the two topologies apart.
 """
 
 from __future__ import annotations
@@ -128,4 +135,64 @@ def test_valkey_runs_as_the_owner_of_the_directory_the_kubelet_creates() -> None
         f"with the volume root's mode, so it is not writable wherever that root is 0755 root:root and no "
         f"fsGroup applies, as on a freshly formatted block volume. Give the directory to that uid first, "
         f"for example with a root init container that runs `chown` on it, then update this test."
+    )
+
+
+# ---- HA: the RedisFailover stays on what 0.2.5 ran ----------------------------------------------
+
+PROD_VALUES = CHART / "values-prod.yaml"
+# Placeholders that satisfy the prod profile's strong-secret guards; nothing is installed.
+_PROD = ["-f", str(PROD_VALUES), "--set", "postgresql.password=x", "--set", "redis.password=x"]
+# The image 0.2.5's failover ran (`redis:7-alpine`, Redis 7.4) at the minor it had reached. RDB format 12
+# and the replication stream both stay readable for it.
+HA_REDIS_0_2_5 = "redis:7.4-alpine"
+
+
+def _docs(*extra: str) -> list[dict]:
+    res = subprocess.run(["helm", "template", "norviq", str(CHART), *BASE, *extra],
+                         capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr[-600:]
+    return [d for d in yaml.safe_load_all(res.stdout) if d]
+
+
+def _failover_image(docs: list[dict]) -> str:
+    failovers = [d for d in docs if d["kind"] == "RedisFailover"]
+    assert len(failovers) == 1, f"expected one RedisFailover, got {len(failovers)}"
+    return failovers[0]["spec"]["redis"]["image"]
+
+
+def _ref(image: str) -> str:
+    """The ref without its digest pin: `repo:tag@sha256:...` -> `repo:tag`."""
+    return image.split("@", 1)[0]
+
+
+def test_prod_failover_stays_on_redis_7_4_while_the_single_store_runs_valkey() -> None:
+    """values-prod.yaml renders the failover on Redis 7.4, and the default store on Valkey 8.1."""
+    prod = _docs(*_PROD)
+    assert not [d for d in prod if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "norviq-redis"], (
+        "the prod profile renders the single-instance store; this test assumes values-prod.yaml runs HA"
+    )
+    image = _failover_image(prod)
+    assert _ref(image) == HA_REDIS_0_2_5, (
+        f"the prod RedisFailover renders {image}. Every 0.2.5 prod install runs a Redis 7.4 failover with "
+        f"RDB-12 dumps on its volumes, and a pod on any other engine (Valkey 8.1 in particular) can load "
+        f"neither those dumps nor a full sync from the 7.4 master. `helm --wait` does not watch the "
+        f"operator's pods, so the upgrade reports success while redundancy drains. Moving HA off "
+        f"{HA_REDIS_0_2_5} is a deliberate migration (a renamed failover on fresh volumes), not a default."
+    )
+    assert "@sha256:" in image, f"the failover's image is not digest-pinned: {image}"
+
+    store = _redis_statefulset()
+    assert _ref(_store_container(store)["image"]).startswith("valkey/valkey:"), (
+        "the single-instance store no longer renders Valkey; this test's premise (the two topologies "
+        "differ) needs revisiting"
+    )
+
+
+def test_moving_images_redis_does_not_move_the_failover() -> None:
+    """The decoupling itself: images.redis drives the single store only."""
+    docs = _docs(*_PROD, "--set", "images.redis.repository=valkey/valkey", "--set", "images.redis.tag=9.0-alpine")
+    assert _ref(_failover_image(docs)) == HA_REDIS_0_2_5, (
+        "an images.redis override reached the RedisFailover. It must take redis.ha.image only, or the next "
+        "bump of the single store's engine rolls the failover onto it unannounced"
     )
