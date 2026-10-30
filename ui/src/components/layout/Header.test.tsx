@@ -333,6 +333,19 @@ describe("⌘K palette states what it knows", () => {
     fireEvent.change(input, { target: { value: text } });
   }
 
+  it("unmounting while a search is still debouncing leaves nothing to fire", async () => {
+    // The effect cleanup aborted in-flight requests but not a call still waiting out the 300ms debounce,
+    // so it fired after the header was gone and set state on an unmounted component — in a full run, after
+    // jsdom was torn down ("window is not defined"), which failed an otherwise green vitest run.
+    let searches = 0;
+    server.use(http.get("*/api/v1/search", () => { searches += 1; return HttpResponse.json({ tools: [], agents: [], policies: [] }); }));
+    const { unmount } = renderAt("/audit");
+    typeQuery("report");
+    unmount();
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    expect(searches).toBe(0);
+  });
+
   it("a FAILED search says so instead of 'No results'", async () => {
     server.use(http.get("*/api/v1/search", () => new HttpResponse("upstream down", { status: 500 })));
     renderAt("/audit");

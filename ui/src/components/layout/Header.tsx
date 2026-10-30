@@ -79,12 +79,21 @@ function trustLabel(agent: AgentResult): string {
   return typeof score === "number" && Number.isFinite(score) ? `trust ${score.toFixed(2)}` : "trust unknown";
 }
 
+// `cancel` exists for unmount. Without it the search effect's cleanup could abort an in-flight request
+// but not a call still waiting out its delay, so the timer fired after the header was gone and set state
+// on an unmounted component — in vitest, after jsdom had been torn down, which failed a whole otherwise
+// green run with "window is not defined" (Header.tsx, the empty-query branch of runSearch).
 function debounce<T extends (...args: string[]) => void>(fn: T, delay: number) {
   let timeout: ReturnType<typeof setTimeout> | null = null;
-  return (...args: Parameters<T>) => {
+  const debounced = (...args: Parameters<T>) => {
     if (timeout) clearTimeout(timeout);
     timeout = setTimeout(() => fn(...args), delay);
   };
+  debounced.cancel = () => {
+    if (timeout) clearTimeout(timeout);
+    timeout = null;
+  };
+  return debounced;
 }
 
 export function Header({
@@ -545,6 +554,7 @@ export function Header({
   useEffect(() => {
     debouncedSearch(searchText);
     return () => {
+      debouncedSearch.cancel(); // the next keystroke reschedules; an unmount must leave nothing pending
       searchAbortRef.current?.abort();
     };
   }, [debouncedSearch, searchText]);
