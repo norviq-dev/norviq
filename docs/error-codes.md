@@ -25,7 +25,7 @@ individually described.
 |---|---:|---|
 | API | 85 | `norviq/api/main.py`, `norviq/api/routers/*` |
 | WHK | 55 | `webhook/main.go`, `webhook/handler.go`, `webhook/controller.go`, `webhook/injector.go` |
-| ENG | 44 | `norviq/engine/evaluator.py`, `norviq/engine/trust/*`, `norviq/engine/opa_client.py` |
+| ENG | 46 | `norviq/engine/evaluator.py`, `norviq/engine/trust/*`, `norviq/engine/opa_client.py` |
 | DB | 42 | `norviq/api/db/session.py`, `norviq/engine/cache.py`, `norviq/api/main.py` |
 | FLT | 36 | `norviq/fleet/*`, `norviq/fleet_relay.py`, `norviq/fleet_puller.py` |
 | SDK | 29 | `norviq/sdk/*` |
@@ -41,7 +41,7 @@ individually described.
 | SIEM | 3 | `norviq/api/siem.py` |
 | UI | 1 | `ui/src/api/clusterGuard.ts` |
 
-Total unique codes: **408** (including `*-DEBUG-*` traces).
+Total unique codes: **410** (including `*-DEBUG-*` traces).
 
 ## API
 
@@ -334,6 +334,8 @@ table stays unpartitioned for that range and retention pruning gets slower over 
 | NRVQ-ENG-2067 | `nrvq.engine.trust.freeze_check_failed` — the trust-freeze check itself errored, so a frozen agent may be scored as if it were not frozen. Split off the 2040..2050 range because that range also carries routine INFO | `norviq/engine/trust/calculator.py` |
 | NRVQ-ENG-2068 | `nrvq.engine.baseline.controls_do_not_supersede` — a namespace's saved controls are not exactly what this release compiles from the chart's baseline (another preset, the chart's own rego, or a module an earlier release compiled and the startup re-render has not replaced), so the chart's baseline stays a floor and an Off or Monitor looser than it does not take effect. Check NRVQ-API-7140 / 7141; logged once per pair | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-2069 | `nrvq.engine.baseline.supersede_check_failed` — comparing the saved controls with the chart's baseline raised; the chart's baseline is kept as a floor (fail closed) | `norviq/engine/evaluator.py` |
+| NRVQ-ENG-2070 | `nrvq.opa.legacy_literals_upgraded` (INFO, once per policy key and stored source) — a policy stored by 0.2.5 or earlier holds a bare `{}`/`set()`/`[]`/`[][_]` that OPA 1.21 rejects, and the exact line its generator wrote was compiled as the typed empty form instead; `shapes` names which. The stored row is not modified. Regenerating the policy from its source (builder, intent, MCP registry) stores the current form | `norviq/engine/evaluator.py`, `norviq/engine/empty_literals.py` |
+| NRVQ-ENG-2071 | `nrvq.opa.module_rejected` (ERROR, once per policy key and stored source) — OPA refused to compile a policy: `key` is the policy key, `error` is OPA's own message. Every call that policy governs is blocked as `evaluator_error` until it is fixed; this is the line that says which policy and why | `norviq/engine/evaluator.py` |
 | NRVQ-ENG-DEBUG-* | OPA I/O and evaluator debug traces | `norviq/engine/evaluator.py` |
 
 ## UI
@@ -412,7 +414,8 @@ NRVQ-ENG-2001, NRVQ-ENG-2002, NRVQ-ENG-2003, NRVQ-ENG-2004, NRVQ-ENG-2005, NRVQ-
 NRVQ-ENG-2015, NRVQ-ENG-2020, NRVQ-ENG-2021, NRVQ-ENG-2030, NRVQ-ENG-2031, NRVQ-ENG-2040, NRVQ-ENG-2041,
 NRVQ-ENG-2042, NRVQ-ENG-2043, NRVQ-ENG-2044, NRVQ-ENG-2045, NRVQ-ENG-2046, NRVQ-ENG-2047, NRVQ-ENG-2048,
 NRVQ-ENG-2049, NRVQ-ENG-2050, NRVQ-ENG-2051, NRVQ-ENG-2052, NRVQ-ENG-2053, NRVQ-ENG-2054, NRVQ-ENG-2055,
-NRVQ-ENG-2056, NRVQ-ENG-2057, NRVQ-ENG-2058, NRVQ-ENG-2059, NRVQ-ENG-2060, NRVQ-ENG-DEBUG-ERR,
+NRVQ-ENG-2056, NRVQ-ENG-2057, NRVQ-ENG-2058, NRVQ-ENG-2059, NRVQ-ENG-2060, NRVQ-ENG-2070, NRVQ-ENG-2071,
+NRVQ-ENG-DEBUG-ERR,
 NRVQ-ENG-DEBUG-INPUT, NRVQ-ENG-DEBUG-OPA, NRVQ-ENG-DEBUG-OPA-IN, NRVQ-ENG-DEBUG-QUERY
 
 NRVQ-DB-DEBUG-1, NRVQ-DB-DEBUG-2, NRVQ-DB-DEBUG-2-ERR, NRVQ-DB-DEBUG-2A, NRVQ-DB-DEBUG-2B, NRVQ-DB-DEBUG-2C,

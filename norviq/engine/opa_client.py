@@ -45,6 +45,13 @@ _SANITIZE_RE = re.compile(r"[^A-Za-z0-9]+")
 _CAPABILITIES_PATH = Path(__file__).parent / "opa-capabilities.json"
 
 
+class OpaModuleRejected(RuntimeError):
+    """OPA — or the `opa check` gate in front of it — refused to COMPILE a module, as opposed to being
+    unreachable. The message carries OPA's own error text. A RuntimeError, so every fail-closed handler
+    treats it exactly as before; the type exists so a caller holding the policy key can name the policy
+    (evaluator: NRVQ-ENG-2071) instead of leaving only an `evaluator_error` decision behind."""
+
+
 async def _check_capabilities(rego_source: str, module_id: str) -> None:
     """Independently compile `rego_source` against the locked-down capabilities file via `opa check` (the
     REAL OPA compiler, not a regex) and raise if it references a builtin the capabilities file removed. A
@@ -65,7 +72,9 @@ async def _check_capabilities(rego_source: str, module_id: str) -> None:
             detail = (stderr or stdout).decode("utf-8", errors="replace").strip()[:300]
             log.error("nrvq.opa.capabilities_check_failed", module_id=module_id, detail=detail,
                       code="NRVQ-ENG-2055")
-            raise RuntimeError(f"rego_source failed the OPA capabilities check (forbidden builtin): {detail}")
+            # Not "(forbidden builtin)", which this said whatever OPA reported: `opa check` fails for any
+            # compile error, and a type error blamed on a forbidden builtin sends the reader the wrong way.
+            raise OpaModuleRejected(f"rego_source failed `opa check` against the shipped capabilities: {detail}")
 
 
 def sanitize_key(key: str) -> str:
@@ -197,7 +206,10 @@ class OpaClient:
         if resp.status_code >= 300:
             log.error("nrvq.opa.push_failed", module_id=module_id, status=resp.status_code,
                       body=resp.text[:300], code="NRVQ-ENG-2054")
-            raise RuntimeError(f"OPA policy push failed for {module_id}: {resp.status_code}")
+            # A 4xx is OPA refusing the module (400 = it does not compile); its body is the compiler's
+            # error, which the exception used to drop, so the evaluator's log said only "400".
+            exc_type = OpaModuleRejected if 400 <= resp.status_code < 500 else RuntimeError
+            raise exc_type(f"OPA policy push failed for {module_id}: {resp.status_code}: {resp.text[:300]}")
         log.info("nrvq.opa.policy_pushed", module_id=module_id, code="NRVQ-ENG-2053")
 
     async def delete_policy(self, module_id: str) -> None:

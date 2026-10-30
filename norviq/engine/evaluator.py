@@ -46,7 +46,8 @@ from norviq.engine.masking import (
 )
 from norviq.engine.graph.asset_graph import AssetGraphBuilder
 from norviq.engine.graph.store import GraphStore
-from norviq.engine.opa_client import OpaClient, managed_package, rewrite_package, sanitize_key
+from norviq.engine.empty_literals import upgrade_legacy
+from norviq.engine.opa_client import OpaClient, OpaModuleRejected, managed_package, rewrite_package, sanitize_key
 from norviq.telemetry.metrics import record_eval_phases, record_tool_call
 from norviq.telemetry.spans import create_tool_call_span, enrich_span
 from norviq.engine.trust import AgentHistoryStore, AgentProfileStore, TrustCalculator, TrustInput, TrustResult
@@ -68,6 +69,14 @@ _MODULE_WARM_TIMEOUT_S = 10.0
 # chart) pair of digests actually seen — normally one per namespace that has saved controls — so it is
 # bounded in bytes as well as in entries.
 _SUPERSEDE_MEMO_MAX = 1024
+# Bound on the (policy key, source digest) pairs remembered so NRVQ-ENG-2070/2071 fire once per module
+# rather than on every evaluation. Dry-run keys are caller-chosen, so the memo cannot be unbounded; when
+# full it is cleared, which costs at most one repeated line per module.
+_MAX_REPORTED_MODULES = 4096
+# OPA's compile-stage error codes (rego_parse_error, rego_type_error, rego_unsafe_var_error, ...), as
+# opposed to evaluation-time ones (eval_conflict_error, ...). Lets the fork path tell "this module does
+# not compile" from "this input broke evaluation", which the server path learns from the push.
+_OPA_COMPILE_ERROR = re.compile(r"\brego_[a-z_]+_error\b")
 
 # rule_id PREFIXES stamped when a would-block is SOFTENED to a logged `audit` decision — namespace
 # monitor mode and per-policy audit mode respectively. Exported (not inlined into the f-strings below)
@@ -466,6 +475,10 @@ class OPAEvaluator:
         # dry-run with arbitrary ns/class strings, so track dry-run keys in insertion order and LRU-evict past
         # a cap (delete the OPA module + drop the digest) — bounds server memory + _pushed against abuse.
         self._dryrun_keys: OrderedDict[str, None] = OrderedDict()
+        # Modules already named in the log: rewritten from an older release's empty literals (2070), and
+        # refused by OPA's compiler (2071). See `_opa_source` / `_report_rejected`.
+        self._upgrade_reported: set[tuple[str, str]] = set()
+        self._rejected_reported: set[tuple[str, str]] = set()
         self._audit_tasks: set[asyncio.Task[None]] = set()
         self._policies: dict[str, dict] = {}
         # Count PERSISTENT engine (OPA-eval) errors so evaluator_error is observable, not silent. This is
@@ -2129,7 +2142,60 @@ class OPAEvaluator:
             return self._no_policy_decision(key, namespace)
         if settings.opa_mode == "server":
             return await self._evaluate_opa_server(key, rego, opa_input)
-        return await self._evaluate_opa_subprocess(namespace, agent_class, opa_input, rego, package_name)
+        return await self._evaluate_opa_subprocess(
+            namespace, agent_class, opa_input, rego, package_name, key=key
+        )
+
+    @staticmethod
+    def _remember(memo: set[tuple[str, str]], item: tuple[str, str]) -> bool:
+        """Add `item` to a bounded once-per-module memo; True when it was not there yet."""
+        if item in memo:
+            return False
+        if len(memo) >= _MAX_REPORTED_MODULES:
+            memo.clear()
+        memo.add(item)
+        return True
+
+    def _opa_source(self, key: str, rego: str) -> str:
+        """The source OPA compiles for `key`: the stored rego, with the empty collection literals an older
+        release's generators wrote rewritten to forms OPA 1.21 accepts (`empty_literals.upgrade_legacy`).
+
+        Applied here — where a module enters OPA (server push, re-push, subprocess fork) — and nowhere
+        else, because every path that loads a stored policy ends here: warm_cache, load_from_db, a peer's
+        upsert event, the embedded engine's reload, a fleet push, a rollback to an old version and a
+        dry-run of pasted text alike. The loader's copy, which the policies API serves and whose builder
+        body hash the console checks for hand edits, and the Postgres row stay byte-identical, so a
+        rollback to 0.2.5 reads exactly what it wrote. The server path runs this only on a push (the
+        digest guard short-circuits before it), so the data plane never pays for the scan.
+        """
+        upgraded, shapes = upgrade_legacy(rego)
+        if shapes and self._remember(self._upgrade_reported, (key, hashlib.sha256(rego.encode("utf-8")).hexdigest())):
+            log.info(
+                "nrvq.opa.legacy_literals_upgraded", key=key, shapes=list(shapes), code="NRVQ-ENG-2070",
+                detail="stored by an older release; compiled with typed empty literals, stored row unchanged. "
+                       "Regenerating the policy from its source (builder, intent, MCP registry) stores the "
+                       "current form.",
+            )
+        return upgraded
+
+    def _report_rejected(self, key: str, rego: str, module_id: str, exc: Exception) -> None:
+        """Name a module OPA refused to compile — the policy key and OPA's own error — once per module.
+
+        Without it the only trace was `evaluator_error` on each call plus a log line keyed on the
+        sanitised module id, which an operator cannot map back to a policy without reading the code.
+        """
+        if self._remember(self._rejected_reported, (key, hashlib.sha256(rego.encode("utf-8")).hexdigest())):
+            log.error("nrvq.opa.module_rejected", key=key, module_id=module_id, error=str(exc)[:2000],
+                      code="NRVQ-ENG-2071")
+
+    async def _push_module(self, key: str, rego: str) -> None:
+        """Push `key`'s module into the OPA server — the one place a server-mode module is compiled."""
+        module_id = sanitize_key(key)
+        try:
+            await self.opa.push_policy(module_id, rewrite_package(self._opa_source(key, rego), managed_package(key)))
+        except OpaModuleRejected as exc:
+            self._report_rejected(key, rego, module_id, exc)
+            raise
 
     async def _track_dryrun_module(self, key: str) -> None:
         """LRU-bound the ephemeral dry-run OPA modules so an authenticated user can't grow the OPA server
@@ -2161,7 +2227,7 @@ class OPAEvaluator:
         digest = hashlib.sha256(rego.encode("utf-8")).hexdigest()
         if self._pushed.get(key) == digest:
             return
-        await self.opa.push_policy(sanitize_key(key), rewrite_package(rego, managed_package(key)))
+        await self._push_module(key, rego)
         self._pushed[key] = digest
         if key.startswith("dryrun:"):
             await self._track_dryrun_module(key)
@@ -2178,14 +2244,13 @@ class OPAEvaluator:
     async def _evaluate_opa_server(self, key: str, rego: str, opa_input: dict) -> dict:
         """Evaluate against the long-lived OPA server; push (or re-push) the module as needed."""
         package = managed_package(key)
-        module_id = sanitize_key(key)
         digest = hashlib.sha256(rego.encode("utf-8")).hexdigest()
         await self._ensure_module_pushed(key, rego)
         result = await self.opa.query(package, opa_input)
         if result is None:
             # OPA lost in-memory state (sidecar restart) — re-push this module once and retry.
             log.warning("nrvq.opa.module_missing", key=key, code="NRVQ-ENG-2057")
-            await self.opa.push_policy(module_id, rewrite_package(rego, package))
+            await self._push_module(key, rego)
             self._pushed[key] = digest
             result = await self.opa.query(package, opa_input)
         if not isinstance(result, dict):
@@ -2200,11 +2265,14 @@ class OPAEvaluator:
         }
 
     async def _evaluate_opa_subprocess(
-        self, namespace: str, agent_class: str, opa_input: dict, rego: str, package_name: str | None
+        self, namespace: str, agent_class: str, opa_input: dict, rego: str, package_name: str | None,
+        key: str | None = None,
     ) -> dict:
         """Evaluate Rego source via a per-call `opa eval` fork (rollback path)."""
         if package_name is None:
             package_name = self._extract_package_name(rego)
+        key = key or f"{namespace}:{agent_class}"
+        stored_rego, rego = rego, self._opa_source(key, rego)
         query = self._opa_query_for_package(package_name)
         log.debug(
             "nrvq.opa.query.resolved",
@@ -2258,7 +2326,14 @@ class OPAEvaluator:
                 )
 
         if proc.returncode != 0:
-            raise RuntimeError(f"opa eval failed: {stderr.decode('utf-8', errors='replace').strip()}")
+            # `--format=json` reports a compile error on STDOUT with an empty stderr, so the message this
+            # raised used to read just "opa eval failed: " and OPA's reason was lost.
+            detail = (stderr or stdout).decode("utf-8", errors="replace").strip()
+            if _OPA_COMPILE_ERROR.search(detail):
+                exc = OpaModuleRejected(f"opa eval failed: {detail[:2000]}")
+                self._report_rejected(key, stored_rego, sanitize_key(key), exc)
+                raise exc
+            raise RuntimeError(f"opa eval failed: {detail[:2000]}")
 
         parsed = json.loads(stdout.decode("utf-8"))
         value = self._extract_opa_value(parsed)
