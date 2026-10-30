@@ -180,14 +180,24 @@ class SidecarProxy:
             log.error("nrvq.sidecar.pubsub_failed", error=str(exc), code="NRVQ-SDC-3020")
 
     async def _on_policy_invalidated(self, key: str) -> None:
-        """Handle policy invalidation event."""
+        """Re-read one policy after a norviq:policy:invalidated event, and log what that actually did.
+
+        This logged `policy_reloaded` unconditionally, so a reload that found no row (and so unloaded the
+        policy) and a watcher with no loader to reload into both reported a successful reload.
+        """
         try:
             parts = key.split(":", 1)
             if len(parts) == 2:
                 namespace, agent_class = parts
-                if self._evaluator and hasattr(self._evaluator, "_loader") and self._evaluator._loader:
-                    await self._evaluator._loader._reload_policy(namespace, agent_class)
-                log.info("nrvq.sidecar.policy_reloaded", key=key, code="NRVQ-SDC-3021")
+                loader = getattr(self._evaluator, "_loader", None)
+                if loader is None:
+                    log.error("nrvq.sidecar.reload_failed", key=key,
+                              error="no policy loader is bound to the evaluator", code="NRVQ-SDC-3022")
+                    return
+                if await loader._reload_policy(namespace, agent_class) is None:
+                    log.info("nrvq.sidecar.policy_unloaded", key=key, code="NRVQ-SDC-3024")
+                else:
+                    log.info("nrvq.sidecar.policy_reloaded", key=key, code="NRVQ-SDC-3021")
         except Exception as exc:
             log.error("nrvq.sidecar.reload_failed", key=key, error=str(exc), code="NRVQ-SDC-3022")
 

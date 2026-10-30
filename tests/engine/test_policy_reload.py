@@ -464,3 +464,55 @@ async def test_a_delete_notice_that_meets_a_db_error_does_not_unload(
         ("nrvq.sidecar.reload_failed", "NRVQ-SDC-3022")
     ]
     assert not [e for e in mine if e["event"] in handled - {"nrvq.sidecar.reload_failed"}]
+
+
+# --- What the logs say ------------------------------------------------------------------------------------
+# The handler logged nrvq.sidecar.policy_reloaded after every reload that did not raise, including one that
+# found no row, and even when there was no loader to reload into. apply_remote_event did the same on the API
+# replicas: remote_reloaded for an upsert event whose row was already gone.
+
+
+async def test_the_sidecar_line_names_what_the_reload_did(rig) -> None:
+    ns, cls, console = rig["ns"], rig["cls"], rig["console"]
+    key = f"{ns}:{cls}"
+    await console.create(ns, cls, _rego(ns), saved_by="op")
+
+    with capture_logs() as reloaded:
+        await rig["proxy"]._on_policy_invalidated(key)
+    await console.delete(ns, cls)
+    with capture_logs() as unloaded:
+        await rig["proxy"]._on_policy_invalidated(key)
+
+    def sidecar(logs: list[dict]) -> list[tuple[str, str, str]]:
+        return [(e["event"], e["code"], e["log_level"]) for e in logs if e["event"].startswith("nrvq.sidecar.")]
+
+    assert sidecar(reloaded) == [("nrvq.sidecar.policy_reloaded", "NRVQ-SDC-3021", "info")]
+    assert sidecar(unloaded) == [("nrvq.sidecar.policy_unloaded", "NRVQ-SDC-3024", "info")]
+    assert rig["engine"].get_entry(ns, cls) is None
+
+
+async def test_a_watcher_with_no_loader_does_not_report_a_reload(tmp_path) -> None:
+    proxy = SidecarProxy(socket_path=str(tmp_path / "nrvq.sock"))  # no evaluator, so no loader
+    with capture_logs() as logs:
+        await proxy._on_policy_invalidated("payments:billing")
+    assert [(e["event"], e["code"], e["log_level"]) for e in logs] == [
+        ("nrvq.sidecar.reload_failed", "NRVQ-SDC-3022", "error")
+    ]
+
+
+async def test_a_peer_upsert_event_for_a_deleted_row_unloads_rather_than_reporting_a_reload(rig) -> None:
+    """A peer API replica gets the upsert event after the row is gone (deleted right after the save). It
+    used to keep the stale entry and log remote_reloaded."""
+    ns, cls, console = rig["ns"], rig["cls"], rig["console"]
+    peer, peer_eval = rig["engine"], rig["engine_eval"]  # a loader with a real evaluator, standing in for a replica
+    await console.create(ns, cls, _rego(ns), saved_by="op")
+    await peer.load_from_db(ns, cls)
+    await console.delete(ns, cls)
+
+    with capture_logs() as logs:
+        await peer.apply_remote_event("upsert", ns, cls)
+
+    assert peer.get_entry(ns, cls) is None
+    assert f"{ns}:{cls}" not in peer_eval._policies
+    policy = [(e["event"], e["code"]) for e in logs if e["event"].startswith("nrvq.policy.remote")]
+    assert policy == [("nrvq.policy.remote_unloaded", "NRVQ-REG-5016")]

@@ -30,7 +30,7 @@ individually described.
 | FLT | 36 | `norviq/fleet/*`, `norviq/fleet_relay.py`, `norviq/fleet_puller.py` |
 | SDK | 29 | `norviq/sdk/*` |
 | REG | 23 | `norviq/engine/policy_loader.py` |
-| SDC | 19 | `norviq/sidecar/*` |
+| SDC | 20 | `norviq/sidecar/*` |
 | AUTH | 17 | `norviq/api/auth.py`, `norviq/api/jwks.py`, `norviq/api/routers/auth_login.py` |
 | AUD | 13 | `norviq/engine/audit_emitter.py`, `norviq/api/audit_retention.py` |
 | GRP | 10 | `norviq/engine/graph/*` |
@@ -41,7 +41,7 @@ individually described.
 | SIEM | 3 | `norviq/api/siem.py` |
 | UI | 1 | `ui/src/api/clusterGuard.ts` |
 
-Total unique codes: **407** (including `*-DEBUG-*` traces).
+Total unique codes: **408** (including `*-DEBUG-*` traces).
 
 ## API
 
@@ -339,7 +339,7 @@ pod is up but its tool calls are all failing, or when a pod is stuck `NotReady`.
 | NRVQ-SDC-3006 | `nrvq.sidecar.socket_chmod_failed` (WARNING — the UDS permissions could not be tightened) | `norviq/sidecar/proxy.py` |
 | NRVQ-SDC-3010..3012 | `nrvq.sidecar.http.processed` / `http.decode_error` (bad or non-object JSON body) / `http.process_error` | `norviq/sidecar/http_fallback.py` |
 | **NRVQ-SDC-3013** | `nrvq.sidecar.readyz.opa_unreachable` — `/readyz` could not reach OPA over localhost, so it returns **not-ready**. Because the OPA sidecar binds `127.0.0.1` and carries no kubelet probes, this is the **only** signal that surfaces OPA health to the kubelet. Seeing it means the replica is being drained on purpose, not that the app crashed. | `norviq/sidecar/http_fallback.py` |
-| NRVQ-SDC-3020..3023 | `nrvq.sidecar.pubsub_failed` / `policy_reloaded` / `reload_failed` / `pubsub_watcher_started` | `norviq/sidecar/proxy.py` |
+| NRVQ-SDC-3020..3024 | `nrvq.sidecar.pubsub_failed` / `policy_reloaded` (a `norviq:policy:invalidated` event re-read the policy from Postgres) / `reload_failed` (ERROR: the re-read failed, or no policy loader is bound; the previous entry is kept) / `pubsub_watcher_started` / `policy_unloaded` (3024: the event named a policy with no row, so it was dropped, which is how a delete reaches the embedded engine) | `norviq/sidecar/proxy.py` |
 | NRVQ-SDC-3030 | `nrvq.sidecar.remote_evaluator.ready` (thin proxy wired to the central API) | `norviq/sidecar/remote_evaluator.py` |
 | NRVQ-SDC-3031 | `nrvq.sidecar.remote_evaluator.fail_closed` — the call to the central `/evaluate` failed, so the tool call was **blocked**. A burst of these is a control-plane reachability/auth problem (missing or rejected `NRVQ_API_TOKEN`), not a policy decision. | `norviq/sidecar/remote_evaluator.py` |
 | NRVQ-SDC-3032 | Two events, both about proxy mode: `nrvq.sidecar.mode.proxy` (startup, with the resolved `api_url`) and `nrvq.sidecar.remote_evaluator.mtls_enabled` (the injected client cert/CA were accepted and internal mTLS is active). Both are startup INFO. **`remote_evaluator.fail_open` was also on this code and is now `NRVQ-SDC-3036`** — a filter written for these two was silencing it | `norviq/sidecar/proxy.py`, `norviq/sidecar/remote_evaluator.py` |
@@ -350,7 +350,7 @@ pod is up but its tool calls are all failing, or when a pod is stuck `NotReady`.
 
 | Component | Codes | Source |
 |---|---|---|
-| REG | NRVQ-REG-5000..5008, 5010..5023 (5022 = `nrvq.policy.reloaded`, the embedded engine re-read a policy from Postgres after a `norviq:policy:invalidated` event, with the `enforcement_mode` it now enforces; **5023** = `nrvq.policy.reload_unloaded`, INFO — that event named a policy with no row, so the engine dropped it, as a cold start would; `delete()` publishes the event for this, and `was_loaded=false` means there was nothing to drop. A Postgres error is never read as a missing row: it surfaces as NRVQ-SDC-3022 and the entry is kept); plus NRVQ-REG-9034/9035 (Redis cache-connect backoff exhausted / retrying — see the DB note above) | `norviq/engine/policy_loader.py`, `norviq/api/main.py` |
+| REG | NRVQ-REG-5000..5008, 5010..5023 (5016 includes `nrvq.policy.remote_unloaded`, an API replica dropped a policy because a peer deleted it, or because an upsert event arrived for a row that was already gone (`operation=upsert`); 5022 = `nrvq.policy.reloaded`, the embedded engine re-read a policy from Postgres after a `norviq:policy:invalidated` event, with the `enforcement_mode` it now enforces; **5023** = `nrvq.policy.reload_unloaded`, INFO — that event named a policy with no row, so the engine dropped it, as a cold start would; `delete()` publishes the event for this, and `was_loaded=false` means there was nothing to drop. A Postgres error is never read as a missing row: it surfaces as NRVQ-SDC-3022 and the entry is kept); plus NRVQ-REG-9034/9035 (Redis cache-connect backoff exhausted / retrying — see the DB note above) | `norviq/engine/policy_loader.py`, `norviq/api/main.py` |
 | GRP | NRVQ-GRP-11000, 11001, 11010..11017 (11017 = `nrvq.engine.graph.restored`, the lazy snapshot restore that survives a pod restart) | `norviq/engine/graph/*`, `norviq/engine/evaluator.py` |
 | AUD | NRVQ-AUD-6000..6008 | `norviq/engine/audit_emitter.py`, `norviq/engine/evaluator.py` |
 | AUD (retention) | NRVQ-AUD-6009 (`nrvq.retention.started`), 6010 (`nrvq.retention.pruned`), 6012 (`nrvq.retention.prune_failed`), 6013 (`nrvq.retention.step_failed` — one table's prune isolated-failed) | `norviq/api/audit_retention.py` (unified background retention pruner) |
@@ -429,7 +429,7 @@ NRVQ-REG-5022, NRVQ-REG-5023, NRVQ-REG-9034, NRVQ-REG-9035
 
 NRVQ-SDC-3000, NRVQ-SDC-3001, NRVQ-SDC-3002, NRVQ-SDC-3003, NRVQ-SDC-3004, NRVQ-SDC-3005, NRVQ-SDC-3006,
 NRVQ-SDC-3010, NRVQ-SDC-3011, NRVQ-SDC-3012, NRVQ-SDC-3013, NRVQ-SDC-3020, NRVQ-SDC-3021, NRVQ-SDC-3022,
-NRVQ-SDC-3023, NRVQ-SDC-3030, NRVQ-SDC-3031, NRVQ-SDC-3032, NRVQ-SDC-3036, NRVQ-SDC-3033
+NRVQ-SDC-3023, NRVQ-SDC-3024, NRVQ-SDC-3030, NRVQ-SDC-3031, NRVQ-SDC-3032, NRVQ-SDC-3036, NRVQ-SDC-3033
 
 NRVQ-AUTH-14000, NRVQ-AUTH-14001, NRVQ-AUTH-14002, NRVQ-AUTH-14003, NRVQ-AUTH-14004, NRVQ-AUTH-14005,
 NRVQ-AUTH-14006, NRVQ-AUTH-14007, NRVQ-AUTH-14010, NRVQ-AUTH-14011, NRVQ-AUTH-14012, NRVQ-AUTH-14013,

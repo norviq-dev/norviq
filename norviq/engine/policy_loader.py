@@ -527,7 +527,14 @@ class PolicyLoader:
                 await self._unload_local(namespace, agent_class)
                 log.info("nrvq.policy.remote_unloaded", key=self._key(namespace, agent_class), code="NRVQ-REG-5016")
             else:  # upsert (create / apply)
-                await self.load_from_db(namespace, agent_class)  # reads the peer's authoritative DB row
+                if await self.load_from_db(namespace, agent_class) is None:  # reads the peer's authoritative row
+                    # No row: the policy was deleted after the peer's save, and its delete event is on the way.
+                    # This logged remote_reloaded anyway and kept the stale entry. Same rule as the embedded
+                    # engine's reload: no row, no entry. A DB error raises past this and never unloads.
+                    await self._unload_local(namespace, agent_class)
+                    log.info("nrvq.policy.remote_unloaded", key=self._key(namespace, agent_class),
+                             operation=operation, detail="upsert event for a policy with no row", code="NRVQ-REG-5016")
+                    return
                 # load_from_db only refreshes self._policies (current row) — it never touches
                 # self._versions. Without this, a peer's version-snapshot mode-patch (apply_to_target's
                 # history[-1].enforcement_mode = ...) only ever lands on the ORIGINATING replica, so a
@@ -819,7 +826,7 @@ class PolicyLoader:
         log.debug("nrvq.policy.eval_cache_cleared", namespace=namespace, agent_class=agent_class,
                   invalidated_scope=target, ns_wide=ns_wide, code="NRVQ-REG-5011")
 
-    async def _reload_policy(self, namespace: str, agent_class: str) -> None:
+    async def _reload_policy(self, namespace: str, agent_class: str) -> dict | None:
         """Re-read one policy after a ``norviq:policy:invalidated`` event — the embedded engine's only way
         of learning about a policy write or delete (``SidecarProxy._on_policy_invalidated``).
 
@@ -843,15 +850,19 @@ class PolicyLoader:
         API replicas use, and a deleted policy used to keep enforcing on it until a restart. A DB error is
         not a missing row: it propagates out of ``load_from_db`` before anything is touched, the caller logs
         it (NRVQ-SDC-3022), and the previous entry stays whole, neither half-updated nor unloaded.
+
+        Returns the reloaded entry, or None when the policy was unloaded, so the caller's log line says which
+        of the two happened.
         """
         key = self._key(namespace, agent_class)
         entry = await self.load_from_db(namespace, agent_class)
         if entry is None:
             was_loaded = await self._unload_local(namespace, agent_class)
             log.info("nrvq.policy.reload_unloaded", key=key, was_loaded=was_loaded, code="NRVQ-REG-5023")
-            return
+            return None
         log.info("nrvq.policy.reloaded", key=key, priority=entry["priority"],
                  enforcement_mode=entry["enforcement_mode"], code="NRVQ-REG-5022")
+        return entry
 
     @property
     def policy_count(self) -> int:
