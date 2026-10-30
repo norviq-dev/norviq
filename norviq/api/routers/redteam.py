@@ -29,9 +29,9 @@ from norviq.api.redteam_efficacy import (
 )
 from norviq.api.synthetic import is_synthetic_identity
 from norviq.config import settings
-from norviq.redteam.attacks import ATTACKS, AttackCategory, get_attack_by_id
+from norviq.redteam.attacks import ATTACKS, AttackCategory, attack_request, get_attack_by_id
 from norviq.redteam.vectors import vector_title
-from norviq.sdk.core.events import AgentIdentity, ToolCallEvent
+from norviq.sdk.core.events import ToolCallEvent
 
 log = structlog.get_logger()
 router = APIRouter()
@@ -520,30 +520,10 @@ def _emit_redteam_audit(request: Request, event: ToolCallEvent, decision: Any) -
 
 
 def _build_event(attack: Any, target_agent: str, target_namespace: str) -> ToolCallEvent:
-    """Build a tool-call event for one attack as a target identity. Each class gets its own SVID so it picks
-    up its own trust history; thread a chained-call `depth` param into the event's call_depth so chain-depth
-    rules can fire (the engine reads input.call_depth, not the tool param)."""
-    depth = attack.tool_params.get("depth")
-    return ToolCallEvent(
-        tool_name=attack.tool_name,
-        tool_params=attack.tool_params,
-        agent_identity=AgentIdentity(
-            spiffe_id=f"spiffe://norviq/ns/{target_namespace}/sa/{target_agent}",
-            namespace=target_namespace,
-            agent_class=target_agent,
-        ),
-        # Tag the decision source so the audit row is EXCLUDED from real-traffic counts by the same
-        # framework filter the Overview uses. Without this the row lands untagged and synthetic
-        # attack volume would inflate the operator's live metrics.
-        framework="redteam",
-        session_id=f"redteam-{attack.id}",
-        call_depth=int(depth) if isinstance(depth, (int, str)) and str(depth).isdigit() else 0,
-        # Gate-A context, published to rego as `input.mcp`. Empty for every non-MCP attack, which is
-        # the same document a plain SDK call presents, so nothing about the existing 29 changes.
-        # COPY it: `ATTACKS` is a module constant built once at import, and handing the same dict to
-        # every event in every run makes any future mutation an untraceable cross-run bug.
-        mcp=dict(getattr(attack, "mcp_context", None) or {}),
-    )
+    """Build a tool-call event for one attack as a target identity, from `attack_request`: the same fields
+    `norviq redteam run` posts to /api/v1/evaluate, so the two runners hand the engine the same call. The
+    CLI used to build its own body, without `call_depth` or `mcp`."""
+    return ToolCallEvent.model_validate(attack_request(attack, target_agent, target_namespace))
 
 
 def _mapping_fields(attack: Any) -> dict[str, Any]:

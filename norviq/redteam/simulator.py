@@ -15,7 +15,7 @@ import structlog
 # only import of norviq.config, and importing it runs `_preload_env_files` (docs/cli.md, ".env
 # loading"). Dropping it would silently stop `norviq` reading the repository-root .env.
 import norviq.config  # noqa: F401
-from norviq.redteam.attacks import ATTACKS, AttackCategory, AttackDefinition, get_attack_by_id
+from norviq.redteam.attacks import ATTACKS, AttackCategory, AttackDefinition, attack_request, get_attack_by_id
 
 log = structlog.get_logger()
 
@@ -101,24 +101,15 @@ class AttackSimulator:
 
 
 def _request_payload(attack: AttackDefinition, target_agent: str, target_namespace: str) -> dict:
-    """Build evaluate payload for one attack."""
-    return {
-        "tool_name": attack.tool_name,
-        "tool_params": attack.tool_params,
-        "agent_identity": {
-            "spiffe_id": f"spiffe://norviq/ns/{target_namespace}/sa/{target_agent}",
-            "namespace": target_namespace,
-            "agent_class": target_agent,
-        },
-        # EXPLICIT, not inherited. This payload used to omit `framework` and rely on
-        # EvaluateRequest defaulting it to "redteam" — which is what tagged these fabricated attacks
-        # as non-real everywhere (`audit_row_is_non_real`). That default is being removed, because it
-        # also silently tagged REAL operator traffic posted over raw HTTP. The suite that genuinely is
-        # synthetic now declares itself, the same way the console-driven runner already does.
-        "framework": "redteam",
-        "session_id": f"redteam-{attack.id}",
-        "trust_score": 0.3 if attack.category == AttackCategory.TRUST_MANIPULATION else 0.8,
-    }
+    """The /api/v1/evaluate body for one attack: `attack_request`, the fields the console's suite builds its
+    event from (`routers/redteam.py::_build_event`).
+
+    This used to be a second builder. It sent no `call_depth` and no `mcp`, so CE-001 was allowed here
+    and blocked by chain_depth_limit in the console, and MCP-01..03 never carried the Gate-A context
+    they forge. It sent a `trust_score` the console does not, and the route drops it unread
+    (`payload.model_dump(exclude={"trust_score"})`), so TM-001's 0.3 never reached the engine.
+    """
+    return attack_request(attack, target_agent, target_namespace)
 
 
 def _attack_passed(expected: str, actual: str, rule_id: str) -> bool:
